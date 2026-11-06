@@ -273,7 +273,8 @@ struct SlotView: View {
 
     /// The menu of makers, popped where the pointer is (a click's menu).
     private func popUpInstrumentMenu() {
-        InstrumentMenu.popUp(model: model, strip: strip, current: slot.plugin, openEditor: { openWindow(slot.id) })
+        InstrumentMenu.popUp(model: model, strip: strip, current: slot.plugin, openEditor: { openWindow(slot.id) },
+            openWindow: openWindow)
     }
 
     /// The slot dot (plan 7b Ruling 13).
@@ -349,7 +350,10 @@ struct LearnItem: View {
 /// without an editor to open), then the makers' submenus with the loaded
 /// plugin checked.
 @MainActor enum InstrumentMenu {
-    static func popUp(model: MixerModel, strip: StripRow, current: PluginRefRow?, openEditor: (() -> Void)?) {
+    static func popUp(
+        model: MixerModel, strip: StripRow, current: PluginRefRow?, openEditor: (() -> Void)?,
+        openWindow: (@MainActor (UInt64) -> Void)? = nil
+    ) {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let edit = InstrumentMenuAction { openEditor?() }.item("Open Editor", checked: false)
@@ -366,7 +370,10 @@ struct LearnItem: View {
             let sub = NSMenu(title: maker.vendor)
             for c in maker.choices {
                 sub.addItem(
-                    InstrumentMenuAction { [model, strip] in model.pickInstrument(c.plugin, on: strip) }
+                    InstrumentMenuAction { [model, strip] in
+                        // The new instrument's window opens at once.
+                        if let slot = model.pickInstrument(c.plugin, on: strip) { openWindow?(slot) }
+                    }
                         .item(c.plugin.name, checked: c.isCurrent))
             }
             let parent = NSMenuItem(title: maker.vendor, action: nil, keyEquivalent: "")
@@ -382,6 +389,7 @@ struct LearnItem: View {
 /// has no editor window yet).
 struct BuiltinSynthSlotView: View {
     @Environment(\.symbioticTheme) private var theme
+    @Environment(\.openPluginWindow) private var openWindow
     @Bindable var model: MixerModel
     let strip: StripRow
 
@@ -400,7 +408,7 @@ struct BuiltinSynthSlotView: View {
         .overlay(RoundedRectangle(cornerRadius: theme.radius.s).strokeBorder(theme.surface.separator.color))
         .contentShape(Rectangle())
         .help("Built-in Synth: click to choose a plugin instrument")
-        .onTapGesture { InstrumentMenu.popUp(model: model, strip: strip, current: nil, openEditor: nil) }
+        .onTapGesture { InstrumentMenu.popUp(model: model, strip: strip, current: nil, openEditor: nil, openWindow: openWindow) }
         .accessibilityLabel("Built-in Synth, instrument")
         .accessibilityHint("Opens the instrument menu to choose a plugin")
         .accessibilityAddTraits(.isButton)

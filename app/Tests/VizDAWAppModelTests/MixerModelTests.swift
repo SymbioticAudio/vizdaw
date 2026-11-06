@@ -183,6 +183,49 @@ import VizDAWCore
         #expect(m.document.alert == nil)
     }
 
+    @Test func replacingTheInstrumentRenamesTheStripAndTheLaneDestinationAtOnce() throws {
+        let f = mixerFake()
+        f.dests = [DestRow(id: 4, name: "Built-in Synth", plugin: nil)]
+        f.laneTable[3] = [lane(30, "Chords")]
+        f.laneTable[3]?[0].midiDest = 4
+        f.laneTable[3]?[0].destination = "Built-in Synth"
+        let doc = try DocumentModel(session: f)
+        let m = try MixerModel(document: doc)
+        doc.storeMixer = m
+        #expect(doc.lanes.first?.destination == "Built-in Synth")
+        let new = PluginRefRow(format: .clap, id: "u.pend", name: "Pendulate", vendor: "V", version: "1")
+        let slot = m.pickInstrument(new, on: m.strips[0])
+        // No refresh call: everything already shows the plugin's name.
+        let s = try #require(m.strips.first { $0.kind == .instrument(dest: 4) })
+        #expect(s.name == "Pendulate" && s.kindLabel == "Pendulate")
+        #expect(s.instrument?.plugin.name == "Pendulate")
+        #expect(slot == s.instrument?.id)
+        #expect(m.destinations.first?.name == "Pendulate")
+        #expect(doc.lanes.first?.destination == "Pendulate")
+        // A renamed destination keeps the user's name.
+        f.dests[0].name = "Lead"
+        f.laneTable[3]?[0].destination = "Lead"
+        _ = try m.document.session.snapshot()
+        let other = PluginRefRow(format: .clap, id: "u.other", name: "Other", vendor: "V", version: "1")
+        m.pickInstrument(other, onDestination: 4)
+        #expect(m.destinations.first?.name == "Lead")
+        #expect(doc.lanes.first?.destination == "Lead")
+    }
+
+    @Test func aPickReturnsTheNewSlotToOpenAndAFailureReturnsNone() throws {
+        let f = mixerFake()
+        f.dests = [DestRow(id: 4, name: "Built-in Synth", plugin: nil)]
+        let m = try model(f)
+        let new = PluginRefRow(format: .clap, id: "u.pend", name: "Pendulate", vendor: "V", version: "1")
+        #expect(m.pickInstrument(new, on: m.strips[0]) == 904)
+        // The same plugin again: no change, nothing to open.
+        #expect(m.pickInstrument(new, onDestination: 4) == nil)
+        f.mixerError = VizError.Model(message: "load failed")
+        let other = PluginRefRow(format: .clap, id: "u.other", name: "Other", vendor: "V", version: "1")
+        #expect(m.pickInstrument(other, onDestination: 4) == nil)
+        #expect(m.document.alert?.title == "Instrument Failed")
+    }
+
     @Test func pickingTheLoadedInstrumentOrOnANonInstrumentStripDoesNothing() throws {
         let f = mixerFake()
         let m = try model(f)
@@ -233,8 +276,8 @@ import VizDAWCore
         m.pickInstrument(new, onDestination: 7)
         m.pickInstrument(old, onDestination: 4)
         #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 7 u.diva", "destPlugin 4 u.old"])
-        #expect(m.instrumentPlugin(ofDestination: 7) == old)
-        #expect(m.instrumentPlugin(ofDestination: 4) == nil)
+        #expect(m.instrumentPlugin(ofDestination: 7) == new)
+        #expect(m.instrumentPlugin(ofDestination: 4) == old)
     }
 
     @Test func aFailingInstrumentPickAlerts() throws {

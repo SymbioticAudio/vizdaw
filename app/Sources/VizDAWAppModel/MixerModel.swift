@@ -425,25 +425,37 @@ public final class MixerModel {
 
     /// Replaces the instrument of `strip` (an instrument strip) with the
     /// plugin picked in its menu. The plugin already loaded is no change.
-    public func pickInstrument(_ plugin: PluginRefRow, on strip: StripRow) {
+    /// Returns the new instrument's slot (the window to open) when the
+    /// replace worked; nil for no change or a failure (the alert is up).
+    @discardableResult
+    public func pickInstrument(_ plugin: PluginRefRow, on strip: StripRow) -> UInt64? {
         switch strip.kind {
         case .instrument(let dest):
-            if let cur = strip.instrument?.plugin, cur.format == plugin.format, cur.id == plugin.id { return }
-            command("Instrument Failed") { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }
+            if let cur = strip.instrument?.plugin, cur.format == plugin.format, cur.id == plugin.id { return nil }
+            return replaceInstrument(plugin, onDestination: dest)
         case .builtinSynth:
-            guard let dest = instrumentDestination(for: strip) else { return }
-            pickInstrument(plugin, onDestination: dest)
+            guard let dest = instrumentDestination(for: strip) else { return nil }
+            return pickInstrument(plugin, onDestination: dest)
         default:
-            return
+            return nil
         }
     }
 
     /// Makes destination `dest` play `plugin` (every track using it plays
     /// the plugin). The plugin it already plays is no change; a destination
-    /// this model has not yet seen is the core's to refuse.
-    public func pickInstrument(_ plugin: PluginRefRow, onDestination dest: UInt64) {
-        if let cur = instrumentPlugin(ofDestination: dest), cur.format == plugin.format, cur.id == plugin.id { return }
-        command("Instrument Failed") { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }
+    /// this model has not yet seen is the core's to refuse. Returns the new
+    /// instrument's slot like `pickInstrument(_:on:)`.
+    @discardableResult
+    public func pickInstrument(_ plugin: PluginRefRow, onDestination dest: UInt64) -> UInt64? {
+        if let cur = instrumentPlugin(ofDestination: dest), cur.format == plugin.format, cur.id == plugin.id {
+            return nil
+        }
+        return replaceInstrument(plugin, onDestination: dest)
+    }
+
+    private func replaceInstrument(_ plugin: PluginRefRow, onDestination dest: UInt64) -> UInt64? {
+        guard command("Instrument Failed", { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }) else { return nil }
+        return snapshot.strips.first { $0.kind == .instrument(dest: dest) }?.instrument?.id
     }
 
     /// Empties the strip's EQ slot. An empty slot is no call: the core
@@ -751,13 +763,17 @@ public final class MixerModel {
         if kept != document.selectedStrips { document.selectedStrips = kept }
     }
 
-    private func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) {
+    @discardableResult
+    private func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) -> Bool {
+        var ok = true
         do {
             document.apply(try body(session))
         } catch {
             raise(AlertItem(error, title: title))
+            ok = false
         }
         refetch()
+        return ok
     }
 
     /// Refetches the mixer. `Busy` (a plugin editor is opening in a nested

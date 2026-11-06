@@ -353,8 +353,36 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = destinationsError { throw e }
         return dests
     }
+    /// Like the core: the destination plays `plugin`; unless renamed (still
+    /// named for what it played) it and its strip and lanes take the
+    /// plugin's name, and a built-in synth strip becomes its instrument strip.
     func setDestinationPlugin(dest: UInt64, plugin: PluginRefRow) throws -> DocSnapshot {
-        try mixerCall("destPlugin \(dest) \(plugin.id)")
+        let r = try mixerCall("destPlugin \(dest) \(plugin.id)")
+        guard let i = dests.firstIndex(where: { $0.id == dest }) else { return r }
+        let old = dests[i]
+        let follows = old.name == (old.plugin?.name ?? "Built-in Synth")
+        dests[i].plugin = plugin
+        if follows { dests[i].name = plugin.name }
+        let name = dests[i].name
+        let sIdx = mixerSnap.strips.firstIndex {
+            $0.kind == .instrument(dest: dest) || ($0.kind == .builtinSynth && old.plugin == nil && !old.external)
+        }
+        if let k = sIdx {
+            if follows { mixerSnap.strips[k].name = name }
+            mixerSnap.strips[k].kind = .instrument(dest: dest)
+            mixerSnap.strips[k].kindLabel = name
+            var slot = slotRow(900 + dest, plugin.name)
+            slot.plugin = plugin
+            mixerSnap.strips[k].instrument = slot
+        }
+        for (seq, rows) in laneTable {
+            laneTable[seq] = rows.map { l in
+                var l = l
+                if l.midiDest == dest { l.destination = name }
+                return l
+            }
+        }
+        return r
     }
 
     // MARK: Parameters
