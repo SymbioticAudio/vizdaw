@@ -465,7 +465,46 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             }
             menu.addItem(a.item(checked: lane.midiDest == d.id))
         }
+        if let replace = replaceInstrumentItem(lane: lane, destinations: dests) {
+            menu.addItem(.separator())
+            menu.addItem(replace)
+        }
         return menu
+    }
+
+    /// "Replace Instrument ▸": the plugin instruments by maker, for a lane
+    /// whose destination is an instrument (the built-in synth or a plugin);
+    /// the one it plays is checked. Picking one replaces the destination's
+    /// instrument, so every track using that destination plays it.
+    func replaceInstrumentItem(lane: LaneRow, destinations: [DestRow]) -> NSMenuItem? {
+        guard let catalog = document.instrumentCatalog,
+            let dest = destinations.first(where: { $0.id == lane.midiDest }), !dest.external
+        else { return nil }
+        let item = NSMenuItem(title: "Replace Instrument", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        sub.autoenablesItems = false
+        item.submenu = sub
+        item.isEnabled = document.mixer != nil
+        let makers = MixerModel.instrumentMenu(catalog(), current: dest.plugin)
+        if makers.isEmpty {
+            let none = NSMenuItem(title: "No Plugin Instruments", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            sub.addItem(none)
+        }
+        for maker in makers {
+            let makerItem = NSMenuItem(title: maker.vendor, action: nil, keyEquivalent: "")
+            let makerMenu = NSMenu(title: maker.vendor)
+            makerMenu.autoenablesItems = false
+            makerItem.submenu = makerMenu
+            for c in maker.choices {
+                let a = MenuAction(title: c.plugin.name) { [weak self] in
+                    self?.document.mixer?.pickInstrument(c.plugin, onDestination: dest.id)
+                }
+                makerMenu.addItem(a.item(checked: c.isCurrent))
+            }
+            sub.addItem(makerItem)
+        }
+        return item
     }
 
     /// The input picker (spec §6.9): "No Input", the device's channels by

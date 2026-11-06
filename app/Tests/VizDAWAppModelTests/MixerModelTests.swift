@@ -229,7 +229,6 @@ import VizDAWCore
         let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
         let before = f.calls.count
         m.pickInstrument(old, onDestination: 7)
-        m.pickInstrument(new, onDestination: 99)  // unknown destination
         #expect(f.calls.count == before)
         m.pickInstrument(new, onDestination: 7)
         m.pickInstrument(old, onDestination: 4)

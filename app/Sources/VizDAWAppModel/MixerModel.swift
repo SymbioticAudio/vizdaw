@@ -439,11 +439,10 @@ public final class MixerModel {
     }
 
     /// Makes destination `dest` play `plugin` (every track using it plays
-    /// the plugin). An unknown destination, or the plugin it already
-    /// plays, is no change.
+    /// the plugin). The plugin it already plays is no change; a destination
+    /// this model has not yet seen is the core's to refuse.
     public func pickInstrument(_ plugin: PluginRefRow, onDestination dest: UInt64) {
-        guard let d = destinations.first(where: { $0.id == dest }) else { return }
-        if let cur = d.plugin, cur.format == plugin.format, cur.id == plugin.id { return }
+        if let cur = instrumentPlugin(ofDestination: dest), cur.format == plugin.format, cur.id == plugin.id { return }
         command("Instrument Failed") { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }
     }
 
