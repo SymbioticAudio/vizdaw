@@ -58,6 +58,10 @@ struct ChannelStrips: View {
             ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
                 StripCells(model: model, strip: s, column: i)
             }
+            ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
+                StripPanelEdge(model: model, strip: s)
+                    .layoutValue(key: StripCellKey.self, value: StripCell(column: i, part: .panel))
+            }
         }
     }
 }
@@ -138,7 +142,6 @@ private struct StripPanel: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: theme.radius.m)
-        let selected = model.isSelected(strip.id)
         ZStack {
             shape.fill(theme.surface.raised.color.opacity(strip.soloMuted ? 0.5 : 1))
             if theme.relief.panelTop.fallbackComponents.alpha > 0 || theme.relief.panelBottom.fallbackComponents.alpha > 0 {
@@ -147,10 +150,25 @@ private struct StripPanel: View {
                         colors: [theme.relief.panelTop.color, theme.relief.panelBottom.color],
                         startPoint: .top, endPoint: .bottom))
             }
-            shape.strokeBorder(
-                selected ? theme.accent.accent.color : theme.surface.separator.color, lineWidth: selected ? 2 : 1)
         }
         .accessibilityHidden(true)
+    }
+}
+
+/// A strip's edge (the accent when selected), drawn after every row so a
+/// section band never paints over it.
+private struct StripPanelEdge: View {
+    let model: MixerModel
+    let strip: StripRow
+    @Environment(\.symbioticTheme) private var theme
+
+    var body: some View {
+        let selected = model.isSelected(strip.id)
+        RoundedRectangle(cornerRadius: theme.radius.m)
+            .strokeBorder(
+                selected ? theme.accent.accent.color : theme.surface.separator.color, lineWidth: selected ? 2 : 1)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
