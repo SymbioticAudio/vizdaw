@@ -297,6 +297,21 @@ public final class EditorModel {
 
     // MARK: Selection (Plan Ruling 19)
 
+    /// A click on track `lane`'s header: it becomes the selected track (the
+    /// one the Track menu, recording and the editors act on). With `extend`
+    /// (⇧ or ⌘) it joins the selection, or leaves it if it was in it; the
+    /// first selected stays the one the Track menu acts on. The time range
+    /// stays; selected events go, as their tracks may have.
+    public func selectTrack(seq: UInt64, lane: UInt64, extend: Bool) {
+        let ref = LaneKey(seq, lane).ref
+        var lanes = [ref]
+        if extend {
+            lanes = selection.lanes.filter { $0.seq == seq }
+            if let i = lanes.firstIndex(of: ref) { lanes.remove(at: i) } else { lanes.append(ref) }
+        }
+        setSelection(SelectionRow(timeRange: selection.timeRange, lanes: lanes, events: []))
+    }
+
     public func setSelection(_ s: SelectionRow) {
         let before = selection
         selection = s

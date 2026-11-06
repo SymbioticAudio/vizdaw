@@ -260,6 +260,24 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 31, drum: false)))
     }
 
+    /// A header click selects its track; ⇧ or ⌘ adds or removes one, and
+    /// the first selected stays the one the Track menu acts on.
+    @Test func aHeaderClickSelectsItsTrack() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        let (a, b) = (m.lanes[0].id, m.lanes[1].id)
+        m.editor.selectTrack(seq: 3, lane: b, extend: false)
+        #expect(m.selectedLane?.id == b)
+        #expect(h.selectedLanes == [b])
+        m.editor.selectTrack(seq: 3, lane: a, extend: false)
+        #expect(m.selectedLane?.id == a && h.selectedLanes == [a], "a plain click replaces it")
+        m.editor.selectTrack(seq: 3, lane: b, extend: true)
+        #expect(h.selectedLanes == [a, b] && m.selectedLane?.id == a)
+        m.editor.selectTrack(seq: 3, lane: a, extend: true)
+        #expect(h.selectedLanes == [b] && m.selectedLane?.id == b, "⇧ again removes it")
+    }
+
     @Test func aRenameEndsOnTheLaneItBeganOn() throws {
         let f = editorFake()
         let m = try DocumentModel(session: f)

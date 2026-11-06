@@ -116,6 +116,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         withObservationTracking {
             _ = document.lanes
             _ = editor.layout
+            // The selected tracks' highlight.
+            _ = editor.selection
             // The strip colours the bars take (owner G1 Q2), the mixer's
             // arrival, and the colour bars' preference.
             _ = document.mixerVersion
@@ -163,6 +165,12 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         }
     }
 
+    /// The selected sequence's selected tracks.
+    var selectedLanes: Set<UInt64> {
+        guard let seq = document.selectedSeq else { return [] }
+        return Set(editor.selection.lanes.filter { $0.seq == seq }.map(\.lane))
+    }
+
     /// Top of row `i` in this view (below a ruler-high spacer).
     func rowTop(_ i: Int) -> CGFloat {
         EditorCanvas.rulerHeight + CGFloat(i) * laneHeight - verticalOffset
@@ -173,9 +181,14 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         dirty.fill()
         let small = theme.font(theme.type.label)
         let inputs = document.inputs
+        let selected = selectedLanes
         for (i, lane) in document.lanes.enumerated() {
             let top = rowTop(i)
             guard top + laneHeight >= dirty.minY, top <= dirty.maxY else { continue }
+            if selected.contains(lane.id) {
+                theme.selectionFill.withAlphaComponent(0.22).setFill()
+                NSRect(x: 0, y: top, width: bounds.width, height: laneHeight).fill()
+            }
             for (control, r) in LaneHeaderLayout.controls(rowTop: top, theme: theme) {
                 switch control {
                 case .kind: kindIcon(AppIcon.track(lane.kind), in: r)
@@ -304,7 +317,18 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             return
         }
         let lane = lanes[i]
-        switch LaneHeaderLayout.control(at: p, rowTop: rowTop(i), theme: theme) {
+        let control = LaneHeaderLayout.control(at: p, rowTop: rowTop(i), theme: theme)
+        // A click on the name, the icon, empty space or a menu selects the
+        // track (⇧ or ⌘ adds or removes it); the toggles leave the selection.
+        switch control {
+        case .name, .kind, .input, .destination, nil:
+            let extend = !e.modifierFlags.intersection([.shift, .command]).isEmpty
+            if extend || !(e.clickCount >= 2 && control == .name) {
+                editor.selectTrack(seq: seq, lane: lane.id, extend: extend)
+            }
+        case .monitor, .mute, .solo, .arm: break
+        }
+        switch control {
         case .monitor: document.inputs.cycleMonitor(lane)
         case .input: inputMenu(seq: seq, lane: lane).popUp(positioning: nil, at: p, in: self)
         case .mute: flags(seq, lane.id, mute: !lane.mute)
@@ -558,13 +582,14 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             return []
         }
         let inputs = document.inputs
+        let selected = selectedLanes
         let items = document.lanes.enumerated().map { i, lane in
             let r = NSRect(x: 0, y: rowTop(i), width: bounds.width, height: laneHeight)
             let opening = inputs.opening && inputs.showsMeter(lane)
             let item = CanvasAccessibilityItem(
                 label: ArrangementA11y.kindName(lane.kind) + ", "
                     + ArrangementA11y.header(lane, returnOf: inputs.returnName(lane)) + (opening ? ", input opening" : ""),
-                frame: r, selected: false,
+                frame: r, selected: selected.contains(lane.id),
                 press: { [weak self] in self?.flags(seq, lane.id, mute: !lane.mute) })
             return (item: item, frame: r)
         }
