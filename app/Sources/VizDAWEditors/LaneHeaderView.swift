@@ -471,6 +471,18 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             }
             menu.addItem(a.item(checked: lane.midiDest == d.id))
         }
+        menu.addItem(.separator())
+        let open = document.openTrackInstrumentBrowser
+        let newPlugin = MenuAction(title: "New Plugin Instrument…") { [weak self] in
+            guard let self, let open = self.document.openTrackInstrumentBrowser,
+                let i = self.document.lanes.firstIndex(where: { $0.id == lane.id })
+            else { return }
+            let r = LaneHeaderLayout.controls(rowTop: self.rowTop(i), theme: self.theme)
+                .first(where: { $0.0 == .destination })?.1 ?? self.bounds
+            open(seq, lane.id, self, r)
+        }.item(checked: false)
+        newPlugin.isEnabled = open != nil
+        menu.addItem(newPlugin)
         return menu
     }
 

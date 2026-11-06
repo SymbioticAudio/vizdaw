@@ -345,9 +345,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         try mixerCall("addOutput \(dest) \(index) \(name)")
     }
     func addPluginInstrument(name: String, plugin: PluginRefRow) throws -> DocSnapshot {
-        try mixerCall("addInstrument \(name) \(plugin.id)")
+        let snap = try mixerCall("addInstrument \(name) \(plugin.id)")
+        if let d = addedDest { dests.append(d) }
+        return snap
     }
     var dests: [DestRow] = []
+    /// The destination `addPluginInstrument` creates, if any.
+    var addedDest: DestRow?
     var destinationsError: VizError?
     func destinations() throws -> [DestRow] {
         if let e = destinationsError { throw e }
