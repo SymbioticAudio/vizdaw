@@ -324,11 +324,6 @@ public final class DocumentModel {
     /// The header that installed `beginTrackRename`: only it clears it.
     @ObservationIgnored public weak var trackRenameOwner: AnyObject?
 
-    /// The plugin catalog's rows for the track header's "Replace
-    /// Instrument" menu: installed by the arrangement in a window, nil
-    /// while none shows (the item is then left out).
-    @ObservationIgnored public var instrumentCatalog: (@MainActor () -> [CatalogRowFfi])?
-
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()
     /// One list editor per slot, while that slot shows a list.

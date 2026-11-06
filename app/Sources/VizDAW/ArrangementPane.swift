@@ -40,8 +40,7 @@ struct ArrangementHost: NSViewRepresentable {
     let document: DocumentModel
 
     func makeNSView(context: Context) -> ArrangementContainer {
-        document.instrumentCatalog = { appPlugins.browser(.instrument) }
-        return ArrangementContainer(document: document)
+        ArrangementContainer(document: document)
     }
 
     func updateNSView(_ view: ArrangementContainer, context: Context) {

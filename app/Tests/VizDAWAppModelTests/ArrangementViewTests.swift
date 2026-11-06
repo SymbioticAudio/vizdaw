@@ -234,53 +234,6 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(m.editor.status == "no destinations")
     }
 
-    @Test func aTrackOnAnInstrumentOffersReplaceInstrumentByMaker() throws {
-        let f = editorFake()
-        let m = try DocumentModel(session: f)
-        let current = PluginRefRow(format: .clap, id: "u.a", name: "Alpha", vendor: "Acme", version: "1.0")
-        f.dests = [
-            DestRow(id: 5, name: "Built-in Synth", plugin: nil),
-            DestRow(id: 6, name: "Alpha", plugin: current),
-            DestRow(id: 7, name: "Juno", plugin: nil, external: true),
-        ]
-        let mixer = try MixerModel(document: m)
-        m.storeMixer = mixer
-        let h = LaneHeaderView(document: m)
-        var lane = m.lanes[1]
-        lane.midiDest = 6
-        // No catalog hook (no window): no item.
-        #expect(h.destinationMenu(seq: 3, lane: lane).items.map(\.title) == ["No Destination", "Built-in Synth", "Alpha", "Juno"])
-        m.instrumentCatalog = {
-            [
-                catalogRow("u.a", "Alpha", vendor: "Acme", kind: .instrument),
-                catalogRow("u.b", "Beta", vendor: "Acme", kind: .instrument),
-                catalogRow("u.fx", "Verb", vendor: "Acme", kind: .effect),
-                catalogRow("z.c", "Gamma", vendor: "Zed", kind: .instrument),
-            ]
-        }
-        let menu = h.destinationMenu(seq: 3, lane: lane)
-        let replace = try #require(menu.items.last)
-        #expect(replace.title == "Replace Instrument")
-        let makers = try #require(replace.submenu).items
-        #expect(makers.map(\.title) == ["Acme", "Zed"])
-        let acme = try #require(makers[0].submenu).items
-        #expect(acme.map(\.title) == ["Alpha", "Beta"])
-        #expect(acme.map(\.state) == [.on, .off], "the instrument it plays is checked")
-        let before = f.calls.count
-        _ = acme[0].target?.perform(acme[0].action)  // the one already loaded: no change
-        #expect(f.calls.count == before)
-        _ = acme[1].target?.perform(acme[1].action)
-        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 6 u.b"])
-        // The built-in synth's track: nothing checked. An external one: no item.
-        lane.midiDest = 5
-        let synth = try #require(h.destinationMenu(seq: 3, lane: lane).items.last?.submenu).items
-        #expect(synth.flatMap { $0.submenu?.items ?? [] }.allSatisfy { $0.state == .off })
-        lane.midiDest = 7
-        #expect(h.destinationMenu(seq: 3, lane: lane).items.last?.title == "Juno")
-        lane.midiDest = nil
-        #expect(h.destinationMenu(seq: 3, lane: lane).items.last?.title == "Juno")
-    }
-
     @Test func theLaneMenuHasNoDrumTrackItem() throws {
         let f = editorFake()
         let m = try DocumentModel(session: f)
