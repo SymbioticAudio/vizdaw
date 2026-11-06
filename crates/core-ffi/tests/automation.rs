@@ -50,8 +50,15 @@ fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
 }
 
 /// Paces gesture samples past the 10 ms sampler.
+/// Lets the renderer take what was sent: at least 12 ms and, while
+/// playing, until the position moved (a slow runner can go longer than
+/// 12 ms without a block, and two gesture values then land on one tick).
 fn pace(s: &Session) {
+    let t0 = tick(s);
     std::thread::sleep(Duration::from_millis(12));
+    if s.transport().unwrap().playing {
+        wait_until("the renderer to take a block", || tick(s) > t0);
+    }
     s.idle().unwrap();
 }
 
