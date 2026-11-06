@@ -707,7 +707,7 @@ pub fn debug_microphone_prompt_limit(limit: Option<Duration>) {
 /// up past its wait (final review m1; Ruling 14: only a grant opens the
 /// input). The next arm or input edit asks again (Ruling 15).
 pub const PROMPT_UNANSWERED: &str =
-    "audio input could not open: waiting for microphone permission; arm the lane again";
+    "audio input could not open: waiting for microphone permission; arm the track again";
 
 /// Offline input opens that fail before one works (test hook, Ruling 15).
 #[cfg(feature = "test-hooks")]

@@ -127,7 +127,7 @@ fn inputs_and_monitor_modes_are_lane_edits() {
     assert_eq!((row.input, row.monitor), (Some(midi), MonitorModeRow::Off));
     assert_eq!(
         s.snapshot().unwrap().undo_label.as_deref(),
-        Some("Set Lane Monitor")
+        Some("Set Track Monitor")
     );
     s.undo().unwrap();
     s.undo().unwrap();

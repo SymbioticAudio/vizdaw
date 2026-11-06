@@ -135,7 +135,10 @@ struct VizDAWApp: App {
             DocumentWindow(id: $id, store: appStore)
                 .themedRoot()
         }
-        .defaultSize(width: 980, height: 620)
+        // The size a new window opens at on a large screen, so the later
+        // fit to the screen (DocumentWindow, PaneGeometry.defaultDocumentFrame)
+        // shows no visible jump; a small screen is fitted down once.
+        .defaultSize(width: 1440, height: 900)
         .commands { AppCommands(store: appStore) }
         WindowGroup("Mixer", id: "mixer", for: UUID.self) { $id in
             MixerWindow(id: $id, store: appStore)

@@ -110,7 +110,7 @@ public enum ListColumn: String, CaseIterable, Sendable {
         case .end: "End"
         case .duration: "Length"
         case .kind: "Kind"
-        case .lane: "Lane"
+        case .lane: "Track"
         case .dest: "Destination"
         case .data1: "Data 1"
         case .data2: "Data 2"
@@ -337,7 +337,7 @@ public enum ListText {
             return r.lane.flatMap { c.laneNames[$0] } ?? ""
         case .dest:
             guard let e = r.event, r.kind.isMidi else { return "" }
-            return e.dest.map { c.destNames[$0] ?? "Destination \($0)" } ?? "Lane"
+            return e.dest.map { c.destNames[$0] ?? "Destination \($0)" } ?? "Track"
         case .data1:
             return data1(r, c)
         case .data2:

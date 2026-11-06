@@ -192,7 +192,10 @@ fn templates_make_one_undo_step() {
         Some("New Sequence from Template")
     );
     let plain = id_of(&snap, "Plain");
-    assert_eq!(s.lanes(plain).unwrap().len(), 1);
+    assert!(
+        s.lanes(plain).unwrap().is_empty(),
+        "no tracks, like a new project"
+    );
 
     let snap = s
         .new_sequence_from_template("Kit".into(), SequenceTemplate::DrumKit)

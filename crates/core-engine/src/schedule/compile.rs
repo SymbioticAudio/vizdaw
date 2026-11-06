@@ -487,7 +487,7 @@ fn warnings(r: &CompileReport) -> Vec<String> {
     }
     if r.audio_unrouted > 0 {
         w.push(format!(
-            "{} audio region(s) not played: their lane has no output path",
+            "{} audio region(s) not played: their track has no output path",
             r.audio_unrouted
         ));
     }

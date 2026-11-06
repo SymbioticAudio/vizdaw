@@ -33,6 +33,7 @@ public final class PianoRollContainer: NSView, ThemedView {
         canvas = PianoRollView(model: model)
         keyboard = PianoKeyboardView(model: model)
         super.init(frame: .zero)
+        clipsToBounds = true
         addSubview(keyboard)
         addSubview(canvas)
         keyboard.pitchAxis = canvas.pitchAxis

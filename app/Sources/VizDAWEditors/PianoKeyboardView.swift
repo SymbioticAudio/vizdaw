@@ -26,6 +26,7 @@ public final class PianoKeyboardView: NSView, ThemedView {
     public init(model: PianoRollModel) {
         self.model = model
         super.init(frame: .zero)
+        clipsToBounds = true
         wantsLayer = true
     }
 

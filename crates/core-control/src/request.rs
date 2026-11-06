@@ -193,6 +193,9 @@ pub enum Command {
         path: Option<PathBuf>,
         /// Pixels per point; absent: the window's backing scale.
         scale: Option<f64>,
+        /// Capture the window as the window server shows it (needs Screen
+        /// Recording access; never prompts) instead of drawing it in-app.
+        live: bool,
     },
     /// Creates the demo project in a new window.
     AppNewDemo {
@@ -335,7 +338,7 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
             })
         }
         "ui.screenshot" => {
-            p.only(&["window", "path", "scale"])?;
+            p.only(&["window", "path", "scale", "live"])?;
             let path = p.opt_path("path", "png")?;
             if let Some(dir) = path.as_ref().and_then(|p| p.parent()) {
                 if !dir.is_dir() {
@@ -348,6 +351,7 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 window: p.window()?,
                 path,
                 scale: p.opt_num("scale", 0.25, 4.0)?,
+                live: p.opt_bool("live")?.unwrap_or(false),
             })
         }
         "app.new_demo" => {

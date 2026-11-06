@@ -34,6 +34,7 @@ extension EditorModel {
     @discardableResult
     public func tearOff(_ kind: DetailEditorKind, shown seq: UInt64?) -> TornWindow? {
         guard let target = layout.detail?.target ?? detailTarget(shown: seq) else { return nil }
+        if kind == .drumGrid { prepareDrumGrid(target) }
         let w = TornWindow(
             id: UUID(),
             detail: DetailState(
@@ -53,6 +54,7 @@ extension EditorModel {
     public func tearOff(_ kind: DetailEditorKind, from id: UUID) -> TornWindow? {
         guard var detail = layout.windows.first(where: { $0.id == id })?.detail else { return nil }
         detail.kind = kind
+        if kind == .drumGrid { prepareDrumGrid(detail.target) }
         let w = TornWindow(id: UUID(), detail: detail, frame: nil)
         updateLayout {
             $0.windows.append(w)
@@ -71,8 +73,16 @@ extension EditorModel {
         updateLayout { $0.windows[i].frame = frame }
     }
 
+    /// Torn-off window `id` shows `target` (a drum grid prepares its lane first).
+    public func setWindowTarget(_ id: UUID, _ target: EditorTarget) {
+        guard let i = layout.windows.firstIndex(where: { $0.id == id }) else { return }
+        if layout.windows[i].detail.kind == .drumGrid { prepareDrumGrid(target) }
+        updateLayout { $0.windows[i].detail.target = target }
+    }
+
     public func setWindowKind(_ id: UUID, _ kind: DetailEditorKind) {
         guard let i = layout.windows.firstIndex(where: { $0.id == id }) else { return }
+        if kind == .drumGrid { prepareDrumGrid(layout.windows[i].detail.target) }
         updateLayout {
             $0.windows[i].detail.kind = kind
             $0.lastKind = kind
@@ -135,7 +145,7 @@ extension EditorModel {
     public func title(_ t: EditorTarget, sequences: [SeqRow]) -> String {
         let seqName = sequences.first { $0.id == t.seq }?.name ?? "Sequence"
         guard let laneID = t.lane else { return seqName }
-        let laneName = ((try? session.lanes(seq: t.seq)) ?? []).first { $0.id == laneID }?.name ?? "Lane"
+        let laneName = ((try? session.lanes(seq: t.seq)) ?? []).first { $0.id == laneID }?.name ?? "Track"
         guard case let .block(_, _, start, end) = t else { return "\(seqName) › \(laneName)" }
         let meter = info(t.seq)?.meter ?? []
         let first = MeterMath.bar(at: start, meter).number

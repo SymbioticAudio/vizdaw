@@ -64,6 +64,37 @@ extension DocumentModel {
         return "\(base) \(n)"
     }
 
+    /// What the status line says after a MIDI track is made with no
+    /// destination (plan tracks Ruling 4).
+    public static let noMidiDestinationYet =
+        "No external MIDI destination yet: choose one in the track's destination menu."
+
+    /// A new track of `kind` in `seq` (the shown sequence by default), below
+    /// `after` (by default the selection's first track; at the end when it
+    /// names none), as one undo step, then selected (plan tracks Ruling 4).
+    /// A MIDI track with no destination says so in the status line.
+    @discardableResult
+    public func newTrack(_ kind: TrackKindRow, seq: UInt64? = nil, after: UInt64? = nil) -> KeyOutcome {
+        guard let seq = seq ?? selectedSeq else { return .unavailable("Select a sequence first.") }
+        guard editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
+        let shown = seq == selectedSeq
+        let anchor = after ?? (shown ? selectedLane?.id : nil)
+        let before = Set(lanes.map(\.id))
+        do {
+            apply(try session.newTrack(seq: seq, kind: kind, after: anchor))
+        } catch VizError.Busy(let message) {
+            editor.status = message
+            return .busy(message)
+        } catch {
+            editor.report(error)
+            return .refused(editor.status ?? "The track was refused.")
+        }
+        guard shown, let made = lanes.first(where: { !before.contains($0.id) }) else { return .done }
+        editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneKey(seq, made.id).ref], events: []))
+        if kind == .midi, made.midiDest == nil { editor.status = Self.noMidiDestinationYet }
+        return .done
+    }
+
     /// A new sequence from `template` (one undo step), then selected.
     public func newSequence(_ template: SequenceTemplate) {
         let before = Set(snapshot.sequences.map(\.id))

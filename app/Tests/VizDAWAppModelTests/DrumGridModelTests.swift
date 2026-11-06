@@ -20,7 +20,11 @@ func drumRow(_ id: UInt64, _ name: String, _ note: UInt8, hits: [DrumHitRow] = [
 /// "Perc" (41: Clap 3).
 func drumFake() -> FakeSession {
     let f = editorFake()
-    f.laneTable[3] = [lane(30, "Groove"), lane(40, "Drums"), lane(41, "Perc")]
+    var drums = lane(40, "Drums")
+    drums.isDrum = true
+    var perc = lane(41, "Perc")
+    perc.isDrum = true
+    f.laneTable[3] = [lane(30, "Groove"), drums, perc, lane(42, "Vocals", kind: .audio)]
     f.snap.laneRevs += [LaneRev(seq: 3, lane: 40, rev: 4), LaneRev(seq: 3, lane: 41, rev: 5)]
     f.drumTable[3] = [
         DrumLaneRow(
@@ -44,6 +48,35 @@ func drumFake() -> FakeSession {
         m.editor.openDetail(target, kind: .drumGrid)
         f.calls = []
         return (f, m, m.drumGrid(.pane))
+    }
+
+    @Test func openingAMidiLaneGivesItADefaultLayout() throws {
+        let f = drumFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.lane(seq: 3, lane: 30), kind: .drumGrid)
+        #expect(f.edits == [.drum(edit: .markLane(seq: 3, lane: 30, drum: true))])
+        #expect(m.editor.layout.detail?.target == .lane(seq: 3, lane: 30))
+    }
+
+    @Test func aLaneWithALayoutKeepsItAndAnAudioLaneIsNotOffered() throws {
+        let f = drumFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.lane(seq: 3, lane: 40), kind: .drumGrid)
+        m.editor.openDetail(.block(seq: 3, lane: 41, start: 0, end: 100), kind: .drumGrid)
+        m.editor.openDetail(.lane(seq: 3, lane: 42), kind: .drumGrid)
+        m.editor.openDetail(.sequence(3), kind: .drumGrid)
+        #expect(f.edits.isEmpty)
+        #expect(m.editor.drumGridTracks(seq: 3).map(\.id) == [30, 40, 41])
+        #expect(m.drumGrid(.pane).tracks.map(\.name) == ["Groove", "Drums", "Perc"])
+    }
+
+    @Test func tornWindowsAndTheKindSwitchPrepareTheLaneToo() throws {
+        let f = drumFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.lane(seq: 3, lane: 30), kind: .list)
+        #expect(f.edits.isEmpty)
+        _ = m.editor.tearOff(.drumGrid, shown: 3)
+        #expect(f.edits == [.drum(edit: .markLane(seq: 3, lane: 30, drum: true))])
     }
 
     @Test func showsTheDrumLanesOfTheShownSequence() throws {

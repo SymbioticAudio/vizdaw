@@ -95,6 +95,14 @@ fn remove_reports_lane() {
     .unwrap();
     assert_eq!(a.report.removed, vec![AnyId::Lane(LaneId(0))]);
     assert!(lane_ids(&a.doc).is_empty());
+    assert_eq!(
+        Command::Lane(LaneCmd::Remove {
+            seq: SeqId(0),
+            lane: LaneId(0),
+        })
+        .name(),
+        "Delete Track"
+    );
 }
 
 #[test]
@@ -265,4 +273,278 @@ fn add_take_becomes_active_and_can_switch_back() {
         ),
         Err(ModelError::UnknownId(AnyId::Take(TakeId(5))))
     );
+}
+
+fn note(tick: i64) -> core_model::event::EventSpec {
+    use core_model::event::{EventBody, EventSpec};
+    EventSpec::new(
+        Tick(tick),
+        EventBody::Note {
+            pitch: 60,
+            velocity: 100,
+            release_velocity: 0,
+            duration: Tick(10),
+            attribute: None,
+            per_note: Default::default(),
+        },
+    )
+}
+
+fn auto_point(tick: i64) -> core_model::event::EventSpec {
+    use core_model::automation::AutomationTarget;
+    use core_model::event::{EventBody, EventSpec};
+    EventSpec::new(
+        Tick(tick),
+        EventBody::Automation {
+            target: AutomationTarget::VelocityScale(DestId(0)),
+            value: 0.5,
+        },
+    )
+}
+
+fn insert(d: &Document, lane: u64, events: Vec<core_model::event::EventSpec>) -> Document {
+    use core_model::command::EventCmd;
+    apply(
+        d,
+        &Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(lane),
+            events,
+        }),
+    )
+    .unwrap()
+    .doc
+}
+
+#[test]
+fn duplicate_lane_copies_and_indexes_events() {
+    use core_model::command::EventCmd;
+    // lane0 is "Lane 1"; add B after it, then give lane0 two takes.
+    let d = run(
+        &base(),
+        LaneCmd::Add {
+            seq: SeqId(0),
+            name: "B".into(),
+            index: None,
+        },
+    )
+    .unwrap();
+    let d = insert(&d, 0, vec![note(0), note(100)]);
+    let d = run(
+        &d,
+        LaneCmd::AddTake {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            name: "Take 2".into(),
+        },
+    )
+    .unwrap();
+    let d = insert(&d, 0, vec![note(5)]);
+    let d = run(
+        &d,
+        LaneCmd::SetFlags {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            mute: Some(true),
+            solo: None,
+            arm: Some(true),
+        },
+    )
+    .unwrap();
+    let before = d.clone();
+    let a = apply(
+        &d,
+        &Command::Lane(LaneCmd::Duplicate {
+            seq: SeqId(0),
+            lane: LaneId(0),
+        }),
+    )
+    .unwrap();
+    let d = a.doc;
+    let s = d.sequence(SeqId(0)).unwrap();
+    let names: Vec<_> = s.lanes.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["Track 1", "Track 1 copy", "B"]);
+    let (src, copy) = (&s.lanes[0], &s.lanes[1]);
+    assert!(!copy.arm);
+    assert!(copy.mute, "settings are copied");
+    assert_eq!(src.takes.len(), copy.takes.len());
+    let mut ids = std::collections::BTreeSet::new();
+    for (a, b) in src.takes.iter().zip(copy.takes.iter()) {
+        assert_eq!(a.events.len(), b.events.len());
+        assert_ne!(a.id, b.id);
+        assert!(ids.insert(format!("take{}", a.id.0)) && ids.insert(format!("take{}", b.id.0)));
+        for e in a.events.values().chain(b.events.values()) {
+            assert!(ids.insert(format!("ev{}", e.id.0)), "shared event id");
+        }
+    }
+    assert_ne!(src.id, copy.id);
+    assert_eq!(
+        copy.active().unwrap().name,
+        src.active().unwrap().name,
+        "the active take carries over"
+    );
+    // The original is untouched.
+    assert_eq!(before.sequence(SeqId(0)).unwrap().lanes[0], *src);
+    for id in [
+        AnyId::Lane(copy.id),
+        AnyId::Take(copy.takes[0].id),
+        AnyId::Take(copy.takes[1].id),
+        AnyId::Event(copy.takes[0].events.values().next().unwrap().id),
+    ] {
+        assert!(a.report.created.contains(&id), "{id:?}");
+    }
+    // The copy is indexed: its event moves.
+    let ev = copy.takes[0].events.values().next().unwrap().id;
+    apply(
+        &d,
+        &Command::Event(EventCmd::Move {
+            events: vec![ev],
+            delta: Tick(7),
+            to_lane: None,
+        }),
+    )
+    .unwrap();
+    assert!(validate(&d).is_empty());
+}
+
+#[test]
+fn duplicate_lane_skips_automation_points() {
+    let d = insert(
+        &base(),
+        0,
+        vec![
+            note(0),
+            note(50),
+            auto_point(0),
+            auto_point(60),
+            auto_point(120),
+        ],
+    );
+    let d = run(
+        &d,
+        LaneCmd::Duplicate {
+            seq: SeqId(0),
+            lane: LaneId(0),
+        },
+    )
+    .unwrap();
+    let s = d.sequence(SeqId(0)).unwrap();
+    let count = |l: &core_model::lane::Lane, auto: bool| {
+        l.takes
+            .iter()
+            .flat_map(|t| t.events.values())
+            .filter(|e| matches!(e.body, core_model::event::EventBody::Automation { .. }) == auto)
+            .count()
+    };
+    assert_eq!(
+        (count(&s.lanes[0], false), count(&s.lanes[0], true)),
+        (2, 3)
+    );
+    assert_eq!(
+        (count(&s.lanes[1], false), count(&s.lanes[1], true)),
+        (2, 0)
+    );
+}
+
+#[test]
+fn duplicate_lane_refuses_a_return_lane() {
+    use core_model::lane::{InputChannels, LaneInput};
+    let d = base();
+    // dest1: an external destination for the return to name.
+    let d = apply(
+        &d,
+        &Command::Routing(core_model::command::RoutingCmd::AddDestination {
+            name: "Hw".into(),
+            kind: DestKind::MidiEndpoint {
+                endpoint_ref: "hw".into(),
+                group: 0,
+                channel: 0,
+            },
+            default_patch: None,
+        }),
+    )
+    .unwrap()
+    .doc;
+    let ext = *d
+        .instruments()
+        .iter()
+        .find(|(_, x)| x.kind.is_external())
+        .unwrap()
+        .0;
+    let d = run(
+        &d,
+        LaneCmd::SetInput {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            input: Some(LaneInput::Audio {
+                channels: InputChannels::Mono(0),
+                return_of: Some(ext),
+            }),
+        },
+    )
+    .unwrap();
+    let err = run(
+        &d,
+        LaneCmd::Duplicate {
+            seq: SeqId(0),
+            lane: LaneId(0),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        ModelError::invalid(
+            "Duplicate Track does not copy a Track Synth return track: duplicate its MIDI track and run Track Synth again."
+        )
+        .to_string()
+    );
+    // Unknown ids are refused too.
+    assert!(
+        run(
+            &d,
+            LaneCmd::Duplicate {
+                seq: SeqId(0),
+                lane: LaneId(99)
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        run(
+            &d,
+            LaneCmd::Duplicate {
+                seq: SeqId(9),
+                lane: LaneId(0)
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn rename_refuses_a_blank_name() {
+    let rename = |name: &str| {
+        run(
+            &base(),
+            LaneCmd::Rename {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                name: name.into(),
+            },
+        )
+    };
+    for bad in [
+        "",
+        "   ",
+        "a\u{7}b",
+        "\t",
+        "a\u{200B}b",
+        "\u{FEFF}",
+        "x\u{2060}",
+        "\u{200D}",
+    ] {
+        assert!(rename(bad).is_err(), "{bad:?}");
+    }
+    let d = rename("  Bass ").unwrap();
+    assert_eq!(d.sequence(SeqId(0)).unwrap().lanes[0].name, "Bass");
 }

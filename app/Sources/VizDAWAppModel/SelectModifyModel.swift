@@ -49,7 +49,7 @@ public final class SelectModifyModel {
     @ObservationIgnored private var destCache: (version: UInt64, rows: [DestRow])?
 
     public static let nothingMessage = "Turn on Select or Modify first."
-    public static let noLanesMessage = "Select lanes to search first: drag in a ruler or select a block."
+    public static let noLanesMessage = "Select tracks to search first: drag in a ruler or select a block."
     public static let invalidMessage = "Fix the fields marked in red first."
     public static let notSelectedMessage = "The dragged notes could not be selected."
     public static let noNameMessage = "Name the template first."

@@ -138,14 +138,14 @@ impl DrumCmd {
     /// Stable command name.
     pub fn name(&self) -> &'static str {
         match self {
-            DrumCmd::MarkDrumLane { .. } => "Mark as Drum Lane",
+            DrumCmd::MarkDrumLane { .. } => "Mark as Drum Track",
             DrumCmd::AddRow { .. } => "Add Drum Row",
             DrumCmd::RenameRow { .. } => "Rename Drum Row",
             DrumCmd::SetRowShowVelocity { .. } => "Show Drum Row Velocity",
             DrumCmd::ReorderRow { .. } => "Reorder Drum Row",
             DrumCmd::RemoveRow { .. } => "Remove Drum Row",
-            DrumCmd::MoveRowToLane { .. } => "Move Drum Row to Lane",
-            DrumCmd::SplitRowToLane { .. } => "Split Drum Row to Lane",
+            DrumCmd::MoveRowToLane { .. } => "Move Drum Row to Track",
+            DrumCmd::SplitRowToLane { .. } => "Split Drum Row to Track",
             DrumCmd::Paint { .. } => "Paint Drum Hits",
         }
     }
@@ -155,7 +155,7 @@ fn layout_mut(d: &mut Document, seq: SeqId, lane: LaneId) -> Result<&mut DrumLay
     d.lane_mut(seq, lane)?
         .drum
         .as_mut()
-        .ok_or_else(|| ModelError::invalid(format!("{lane} is not a drum lane")))
+        .ok_or_else(|| ModelError::invalid(format!("track {} is not a drum track", lane.0)))
 }
 
 fn find_row(d: &Document, seq: SeqId, lane: LaneId, row: DrumRowId) -> Result<DrumRow> {

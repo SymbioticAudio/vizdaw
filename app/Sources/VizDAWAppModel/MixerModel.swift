@@ -376,6 +376,88 @@ public final class MixerModel {
         }
     }
 
+    /// One plugin in the instrument menu.
+    public struct InstrumentChoice: Equatable, Sendable {
+        public let plugin: PluginRefRow
+        /// It is the plugin loaded now.
+        public let isCurrent: Bool
+    }
+
+    /// One maker's submenu of the instrument menu.
+    public struct InstrumentMaker: Equatable, Sendable {
+        public let vendor: String
+        public let choices: [InstrumentChoice]
+    }
+
+    /// The instrument menu's makers: the enabled, usable instruments of
+    /// `rows` grouped by maker (by name, any case; "Other" last), plugins
+    /// by name, the one `current` marked.
+    public nonisolated static func instrumentMenu(
+        _ rows: [CatalogRowFfi], current: PluginRefRow?
+    ) -> [InstrumentMaker] {
+        let usable = rows.filter { $0.kind == .instrument && $0.enabled && $0.status == .ok }
+        return PluginBrowserModel.groups(usable, search: "").map { g in
+            InstrumentMaker(
+                vendor: g.vendor,
+                choices: g.plugins.map { p in
+                    InstrumentChoice(
+                        plugin: p, isCurrent: current.map { $0.format == p.format && $0.id == p.id } ?? false)
+                })
+        }
+    }
+
+    /// The destination an instrument strip plays: its own, or for the
+    /// built-in synth strip (one strip for every built-in synth) the first
+    /// built-in synth destination. `nil` for other strips.
+    public func instrumentDestination(for strip: StripRow) -> UInt64? {
+        switch strip.kind {
+        case .instrument(let dest): return dest
+        case .builtinSynth: return destinations.first { $0.plugin == nil && !$0.external }?.id
+        default: return nil
+        }
+    }
+
+    /// The plugin destination `dest` plays; `nil` for the built-in synth
+    /// (and an unknown destination).
+    public func instrumentPlugin(ofDestination dest: UInt64) -> PluginRefRow? {
+        destinations.first { $0.id == dest }?.plugin
+    }
+
+    /// Replaces the instrument of `strip` (an instrument strip) with the
+    /// plugin picked in its menu. The plugin already loaded is no change.
+    /// Returns the new instrument's slot (the window to open) when the
+    /// replace worked; nil for no change or a failure (the alert is up).
+    @discardableResult
+    public func pickInstrument(_ plugin: PluginRefRow, on strip: StripRow) -> UInt64? {
+        switch strip.kind {
+        case .instrument(let dest):
+            if let cur = strip.instrument?.plugin, cur.format == plugin.format, cur.id == plugin.id { return nil }
+            return replaceInstrument(plugin, onDestination: dest)
+        case .builtinSynth:
+            guard let dest = instrumentDestination(for: strip) else { return nil }
+            return pickInstrument(plugin, onDestination: dest)
+        default:
+            return nil
+        }
+    }
+
+    /// Makes destination `dest` play `plugin` (every track using it plays
+    /// the plugin). The plugin it already plays is no change; a destination
+    /// this model has not yet seen is the core's to refuse. Returns the new
+    /// instrument's slot like `pickInstrument(_:on:)`.
+    @discardableResult
+    public func pickInstrument(_ plugin: PluginRefRow, onDestination dest: UInt64) -> UInt64? {
+        if let cur = instrumentPlugin(ofDestination: dest), cur.format == plugin.format, cur.id == plugin.id {
+            return nil
+        }
+        return replaceInstrument(plugin, onDestination: dest)
+    }
+
+    private func replaceInstrument(_ plugin: PluginRefRow, onDestination dest: UInt64) -> UInt64? {
+        guard command("Instrument Failed", { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }) else { return nil }
+        return snapshot.strips.first { $0.kind == .instrument(dest: dest) }?.instrument?.id
+    }
+
     /// Empties the strip's EQ slot. An empty slot is no call: the core
     /// refuses it, which would show a spurious alert (B6 review).
     public func clearEq(_ s: StripRow) {
@@ -681,13 +763,17 @@ public final class MixerModel {
         if kept != document.selectedStrips { document.selectedStrips = kept }
     }
 
-    private func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) {
+    @discardableResult
+    private func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) -> Bool {
+        var ok = true
         do {
             document.apply(try body(session))
         } catch {
             raise(AlertItem(error, title: title))
+            ok = false
         }
         refetch()
+        return ok
     }
 
     /// Refetches the mixer. `Busy` (a plugin editor is opening in a nested

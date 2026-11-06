@@ -363,6 +363,13 @@ struct ResignWhenHidden: NSViewRepresentable {
     let hidden: Bool
 
     final class Marker: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+        }
+
+        required init?(coder: NSCoder) { nil }
+
         var layerHidden = false
         /// The layer's last shown rect, in window coordinates (a hidden
         /// bottom pane has zero size by the time it is asked).

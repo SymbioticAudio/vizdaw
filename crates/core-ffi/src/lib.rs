@@ -56,6 +56,7 @@ pub mod strip;
 pub mod surfaces;
 pub mod synth;
 pub mod templates;
+pub mod tracks;
 
 pub use audio::AudioSettingsRow;
 pub use automation::{
@@ -131,6 +132,7 @@ pub use strip::{
 };
 pub use synth::MeasureRow;
 pub use templates::SequenceTemplate;
+pub use tracks::TrackKindRow;
 
 /// The app is quitting: stops and drops the engine host so no plugin
 /// host is still rendering when thread-local destructors run at exit.

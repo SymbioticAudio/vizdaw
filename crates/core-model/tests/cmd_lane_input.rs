@@ -45,7 +45,7 @@ fn input_and_monitor_are_undoable_lane_edits() {
         return_of: None,
     };
     h.execute(&set_input(Some(audio.clone())), &f).unwrap();
-    assert_eq!(h.undo_label(), Some("Set Lane Input"));
+    assert_eq!(h.undo_label(), Some("Set Track Input"));
     h.execute(
         &Command::Lane(LaneCmd::SetMonitor {
             seq: SeqId(0),
@@ -55,7 +55,7 @@ fn input_and_monitor_are_undoable_lane_edits() {
         &f,
     )
     .unwrap();
-    assert_eq!(h.undo_label(), Some("Set Lane Monitor"));
+    assert_eq!(h.undo_label(), Some("Set Track Monitor"));
     assert_eq!(lane(h.doc()).input, Some(audio));
     assert_eq!(lane(h.doc()).monitor, MonitorMode::Input);
     h.undo().unwrap();

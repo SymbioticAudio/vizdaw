@@ -66,12 +66,8 @@ final class FakeControlHost: ControlHost {
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
         let id = try #require(s.newDemo())
         let m = try #require(s.model(id))
-        // No selected lane, no drum grid: unavailable, nothing sent.
-        #expect(failure(run(DrumCommands.markLane, s, id))?.code == .unavailable)
+        // No drum grid: unavailable, nothing sent.
         #expect(failure(run(DrumCommands.addRow, s, id))?.message == "Open a drum grid first.")
-        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 30)], events: []))
-        _ = run(DrumCommands.markLane, [ControlArg(name: "on", value: .flag(value: true))], s, id)
-        #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 30, drum: true)))
         m.editor.openDetail(.lane(seq: 3, lane: 40), kind: .drumGrid)
         _ = run(DrumCommands.addRow, s, id)
         #expect(f.edits.last == .drum(edit: .addRow(seq: 3, lane: 40, name: "Closed Hat", note: 42, dest: nil)))

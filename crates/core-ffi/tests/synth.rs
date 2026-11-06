@@ -827,7 +827,7 @@ fn measure_refuses_what_it_cannot_measure() {
     );
     model(
         s.measure_return(juno.0),
-        "no lane records the return of Juno",
+        "no track records the return of Juno",
     );
     model(s.measure_return(999), "unknown id dest999");
     assert!(!vizdaw_ffi::host::measuring());

@@ -181,7 +181,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &SequenceCmd, r: &mut Report) -> Resu
             let s = Sequence::new(
                 id,
                 name.clone(),
-                Vector::unit(Lane::new(lane, take, "Lane 1")),
+                Vector::unit(Lane::new(lane, take, "Track 1")),
             );
             d.put_sequence(s);
             r.created

@@ -25,6 +25,15 @@ final class DirtyFillingView: NSView {
     }
 }
 
+/// Fills a rectangle wider than itself, as `EditorCanvas`'s ruler does.
+final class OverfillingView: NSView {
+    var colour = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+    override func draw(_ dirtyRect: NSRect) {
+        colour.setFill()
+        dirtyRect.insetBy(dx: -20, dy: 0).fill()
+    }
+}
+
 @MainActor
 @Suite struct WindowSnapshotTests {
     /// The dominant channel at `x`, `y` (row 0 is the top): "r", "g", "b"
@@ -112,21 +121,52 @@ final class DirtyFillingView: NSView {
         #expect(pixel(png.data, 20, 38) == "b", "the right way up")
     }
 
-    @Test func aViewThatFillsWhatItIsAskedToDrawStaysInItsBounds() throws {
-        // Views do not clip to their bounds (macOS 14+), so `visibleRect`
-        // can reach past them; a ruler drawn last then painted over every
-        // sibling (the torn-off drum grid showed only its ruler).
+    @Test func aViewThatClipsStaysInItsBounds() throws {
+        // A view that clips to its bounds stays in them, so a ruler drawn
+        // last does not paint over its siblings (the torn-off drum grid
+        // showed only its ruler).
         let parent = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
         parent.wantsLayer = true
         let below = FilledView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
         below.wantsLayer = true
         let strip = DirtyFillingView(frame: NSRect(x: 0, y: 0, width: 40, height: 10))  // the bottom
         strip.wantsLayer = true
+        strip.clipsToBounds = true
         parent.addSubview(below)
         parent.addSubview(strip)
         let png = try #require(WindowSnapshot.png(of: parent, scale: 1))
         #expect(pixel(png.data, 20, 10) == "g", "the view under it shows")
         #expect(pixel(png.data, 20, 35) == "r", "the strip itself")
+    }
+
+    @Test func clipRectFollowsClippingAncestors() {
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        let middle = NSView(frame: NSRect(x: 10, y: 10, width: 50, height: 50))
+        let child = NSView(frame: NSRect(x: -30, y: 0, width: 200, height: 20))
+        root.addSubview(middle)
+        middle.addSubview(child)
+        #expect(WindowSnapshot.clipRect(of: child, in: root) == CGRect(x: 0, y: 10, width: 100, height: 20))
+        middle.clipsToBounds = true
+        #expect(WindowSnapshot.clipRect(of: child, in: root) == CGRect(x: 10, y: 10, width: 50, height: 20))
+    }
+
+    @Test func aSnapshotShowsPaintPastAnUnclippedFrame() throws {
+        let armColour = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+        func shot(clips: Bool) throws -> Data {
+            let container = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 40))
+            container.wantsLayer = true
+            let v = OverfillingView(frame: NSRect(x: 30, y: 0, width: 40, height: 40))
+            v.wantsLayer = true
+            v.colour = armColour
+            v.clipsToBounds = clips
+            container.addSubview(v)
+            return try #require(WindowSnapshot.png(of: container, scale: 1)).data
+        }
+        let open = try shot(clips: false)
+        #expect(pixel(open, 20, 20) == "r", "10 pt left of the frame: the paint shows")
+        let closed = try shot(clips: true)
+        #expect(pixel(closed, 20, 20) != "r", "clipped to its bounds")
+        #expect(pixel(closed, 50, 20) == "r")
     }
 
     @Test func aSelfDrawnViewInAScrollViewStaysInsideIt() throws {

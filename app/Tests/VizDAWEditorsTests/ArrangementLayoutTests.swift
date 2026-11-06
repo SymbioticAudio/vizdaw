@@ -132,8 +132,8 @@ private let b = LaneKey(3, 31)
                 == "Reference to Groove on Groove, bar 2, muted")
     }
 
-    @Test func headerControlsAreFoundByPosition() {
-        let controls = LaneHeaderLayout.controls(rowTop: 48)
+    @MainActor @Test func headerControlsAreFoundByPosition() {
+        let controls = LaneHeaderLayout.controls(rowTop: 48, theme: .classicLight)
         let mute = controls.first { $0.0 == .mute }!.1
         #expect(LaneHeaderLayout.control(at: CGPoint(x: mute.midX, y: mute.midY), rowTop: 48) == .mute)
         #expect(LaneHeaderLayout.control(at: CGPoint(x: 50, y: 48 + 30), rowTop: 48) == .destination)

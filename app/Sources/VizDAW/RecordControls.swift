@@ -25,7 +25,7 @@ struct RecordControls: View {
                 // a punch draft open reaches Record, which refuses and says
                 // why (fix round 2 N2).
                 enabled: record.buttonEnabled,
-                help: record.isRecording ? "Stop recording (R)" : "Record the armed lanes (R)",
+                help: record.isRecording ? "Stop recording (R)" : "Record the armed tracks (R)",
                 tint: record.isRecording ? theme.state.record.nsColor : nil
             ) { record.pressRecord() }
             .fixedSize()
@@ -53,7 +53,7 @@ struct RecordControls: View {
                 Text(t)
                     .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
-                    .help("Recording time left on the project's disk for the armed audio lanes")
+                    .help("Recording time left on the project's disk for the armed audio tracks")
             }
         }
     }
@@ -63,6 +63,13 @@ struct RecordControls: View {
 /// the user: clicks and VoiceOver pass through it.
 struct RecordButtonMarker: NSViewRepresentable {
     final class Marker: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+        }
+
+        required init?(coder: NSCoder) { nil }
+
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func isAccessibilityElement() -> Bool { false }
 
@@ -88,6 +95,13 @@ struct RecordPopoverAnchor: NSViewRepresentable {
     let shown: Bool
 
     final class Anchor: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+        }
+
+        required init?(coder: NSCoder) { nil }
+
         var controller: RecordPopoverController?
         var shown = false
         override func hitTest(_ point: NSPoint) -> NSView? { nil }

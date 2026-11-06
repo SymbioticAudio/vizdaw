@@ -50,21 +50,21 @@ struct PianoRollBar: View {
             .labelsHidden()
             .frame(width: 210)
             Toggle("Keyboard", isOn: setting(\.showKeyboard))
-            Menu("Lanes") {
+            Menu("Tracks") {
                 ForEach(model.sequenceLanes, id: \.id) { l in
                     Toggle(l.name, isOn: Binding(get: { model.isShown(l.id) }, set: { _ in model.toggleShown(l.id) }))
                         .disabled(l.id == model.target?.lane)
                 }
             }
             .frame(width: 80)
-            .help("Lanes shown in this piano roll")
+            .help("Tracks shown in this piano roll")
             Menu("Insert Into: \(editLaneName)") {
                 ForEach(model.shownLanes, id: \.self) { key in
-                    Button(model.row(key)?.name ?? "Lane") { model.chosenLane = key }
+                    Button(model.row(key)?.name ?? "Track") { model.chosenLane = key }
                 }
             }
             .frame(width: 190)
-            .help("The lane the pencil adds notes to")
+            .help("The track the pencil adds notes to")
             Toggle("Exact", isOn: $editor.exactMode)
                 .help("Exact mode: a drag opens Select and Modify with its amounts (⌃⌘E)")
             Toggle("Audio", isOn: setting(\.showRegions))

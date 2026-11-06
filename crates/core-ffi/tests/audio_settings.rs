@@ -323,7 +323,7 @@ fn stream_settings_wait_for_an_idle_engine() {
 }
 
 /// Ruling 11: Add Lane gives a new lane the default monitor mode in its
-/// one undo step "Add Lane"; Auto is a plain add.
+/// one undo step "Add Track"; Auto is a plain add.
 #[test]
 fn added_lanes_take_the_default_monitor_mode_in_one_step() {
     let _g = serial(None);
@@ -344,7 +344,7 @@ fn added_lanes_take_the_default_monitor_mode_in_one_step() {
     assert_eq!(lane(&s, seq, "New").monitor, MonitorModeRow::Off);
     assert_eq!(
         s.snapshot().unwrap().undo_label.as_deref(),
-        Some("Add Lane")
+        Some("Add Track")
     );
     s.undo().unwrap();
     assert_eq!(s.lanes(seq).unwrap().len(), before, "one step");

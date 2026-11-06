@@ -155,6 +155,8 @@ public final class DocumentStore {
     public var keyDocument: UUID? { keyWindow?.doc }
 
     public func focusDocument(_ doc: UUID, window: UUID) {
+        // A closing window can take key after its document went.
+        guard documents[doc] != nil else { return }
         keyWindow = (doc, window)
         recentKey.removeAll { $0 == doc }
         recentKey.insert(doc, at: 0)
@@ -163,6 +165,9 @@ public final class DocumentStore {
     /// Documents whose window was key, the most recent first (final review
     /// R2); a closed one is removed.
     private var recentKey: [UUID] = []
+
+    /// Documents closed this launch; their windows adopt no other.
+    private var closedIDs: Set<UUID> = []
 
     /// The front-most document window still open: the one key last.
     /// Settings › Keys "Learn MIDI" learns into it when no document window
@@ -296,6 +301,8 @@ public final class DocumentStore {
     /// fails). Covers fresh windows and stale restored or closed ids.
     public func documentForWindow(_ id: UUID?) -> UUID? {
         if let id, documents[id] != nil { return id }
+        // A window whose document was closed is closing: it adopts nothing.
+        if let id, closedIDs.contains(id) { return nil }
         return takePending() ?? newEmpty()
     }
 
@@ -323,6 +330,7 @@ public final class DocumentStore {
     /// A window closed: its document goes (a clean close: the crash
     /// marker is removed).
     public func close(_ id: UUID) {
+        closedIDs.insert(id)
         if tornFocus?.doc == id { tornFocus = nil }
         if panelFocus == id { panelFocus = nil }
         if keyWindow?.doc == id { keyWindow = nil }

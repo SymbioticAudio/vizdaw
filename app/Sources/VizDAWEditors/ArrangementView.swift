@@ -382,7 +382,8 @@ public final class ArrangementView: EditorCanvas {
     private func handle(_ effects: [ToolMachine<ArrangementHit>.Effect]) {
         for (i, fx) in effects.enumerated() {
             switch fx {
-            case let .click(hit, _, clicks, modifiers):
+            case let .click(hit, at, clicks, modifiers):
+                if editor.tool == .pencil, pencilClick(hit, at: at) { continue }
                 click(hit, clicks: clicks, modifiers: modifiers)
             case let .begin(.block(b), from, modifiers):
                 // The first move arrives with the begin: its row is the
@@ -427,6 +428,17 @@ public final class ArrangementView: EditorCanvas {
                 break
             }
         }
+    }
+
+    /// The pencil on a track opens its piano roll at the clicked bar.
+    private func pencilClick(_ hit: ArrangementHit, at p: CGPoint) -> Bool {
+        let key: LaneKey
+        switch hit {
+        case .block(let b): key = b.lane
+        case .empty(let lane?, _): key = lane
+        default: return false
+        }
+        return editor.pencilOpensPianoRoll(lane: key, at: axis.tick(atX: p.x))
     }
 
     private func click(_ hit: ArrangementHit, clicks: Int, modifiers: Modifiers) {

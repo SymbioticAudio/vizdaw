@@ -58,6 +58,10 @@ struct ChannelStrips: View {
             ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
                 StripCells(model: model, strip: s, column: i)
             }
+            ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
+                StripPanelEdge(model: model, strip: s)
+                    .layoutValue(key: StripCellKey.self, value: StripCell(column: i, part: .panel))
+            }
         }
     }
 }
@@ -89,6 +93,8 @@ private struct StripCells: View {
         row(.header) { StripHeader(model: model, strip: strip) }
         if let inst = strip.instrument {
             row(.instrument) { SlotView(model: model, strip: strip, slot: inst, index: nil) }
+        } else if strip.kind == .builtinSynth {
+            row(.instrument) { BuiltinSynthSlotView(model: model, strip: strip) }
         }
         if let lane = model.inputLane(for: strip) {
             row(.input) { StripInputView(inputs: model.document.inputs, lane: lane) }
@@ -136,7 +142,6 @@ private struct StripPanel: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: theme.radius.m)
-        let selected = model.isSelected(strip.id)
         ZStack {
             shape.fill(theme.surface.raised.color.opacity(strip.soloMuted ? 0.5 : 1))
             if theme.relief.panelTop.fallbackComponents.alpha > 0 || theme.relief.panelBottom.fallbackComponents.alpha > 0 {
@@ -145,10 +150,25 @@ private struct StripPanel: View {
                         colors: [theme.relief.panelTop.color, theme.relief.panelBottom.color],
                         startPoint: .top, endPoint: .bottom))
             }
-            shape.strokeBorder(
-                selected ? theme.accent.accent.color : theme.surface.separator.color, lineWidth: selected ? 2 : 1)
         }
         .accessibilityHidden(true)
+    }
+}
+
+/// A strip's edge (the accent when selected), drawn after every row so a
+/// section band never paints over it.
+private struct StripPanelEdge: View {
+    let model: MixerModel
+    let strip: StripRow
+    @Environment(\.symbioticTheme) private var theme
+
+    var body: some View {
+        let selected = model.isSelected(strip.id)
+        RoundedRectangle(cornerRadius: theme.radius.m)
+            .strokeBorder(
+                selected ? theme.accent.accent.color : theme.surface.separator.color, lineWidth: selected ? 2 : 1)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -811,7 +831,7 @@ struct StripButtons: View {
                 model.toggleArm(strip)
             }
             .disabled(!armable)
-            .help(armable ? "Record arm" : "Arm an audio lane in its header")
+            .help(armable ? "Record arm" : "Arm an audio track in its header")
             StripToggle(
                 letter: "I", on: (lane?.monitor ?? .off) != .off,
                 colour: StripPalette.monitor(lane?.monitor ?? .off, theme),
@@ -820,7 +840,7 @@ struct StripButtons: View {
                 model.cycleMonitor(strip)
             }
             .disabled(!armable)
-            .help(lane.map { LaneInputs.help($0.monitor) } ?? "Input monitoring is for audio lanes")
+            .help(lane.map { LaneInputs.help($0.monitor) } ?? "Input monitoring is for audio tracks")
         }
         .frame(maxWidth: .infinity)
         .help(strip.soloMuted ? "Silent: other strips are soloed" : "Mute / Solo")

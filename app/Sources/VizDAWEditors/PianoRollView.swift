@@ -31,6 +31,7 @@ public final class PianoRollView: EditorCanvas {
     /// The target the view last centred on: another one (a different
     /// block opened in this roll) centres and scrolls again.
     private var centeredOn: EditorTarget??
+    private var revealed: Int?
     private var tracking: NSTrackingArea?
 
     private enum Drag {
@@ -96,6 +97,7 @@ public final class PianoRollView: EditorCanvas {
             _ = editor.layout
             _ = editor.selection
             _ = editor.tool
+            _ = editor.pianoRollReveal
             _ = document?.playKey
             _ = model.chosenLane
         } onChange: { [weak self] in
@@ -120,6 +122,7 @@ public final class PianoRollView: EditorCanvas {
         let key = document?.playKey
         setPlaying(key?.playing == true && key?.seq == model.seq)
         if let c = centeredOn, c != model.target { needsLayout = true }
+        if let r = editor.pianoRollReveal, r.serial != revealed { needsLayout = true }
         reload()
     }
 
@@ -128,7 +131,19 @@ public final class PianoRollView: EditorCanvas {
     public override func layout() {
         super.layout()
         let target = model.target
-        guard centeredOn != .some(target), content.bounds.height > 0 else { return }
+        if centeredOn != .some(target), content.bounds.height > 0 { center(on: target) }
+        revealPencilBar()
+    }
+
+    /// A pencil click in Arrange put a bar at the left edge (with a small margin).
+    private func revealPencilBar() {
+        guard let r = editor.pianoRollReveal, r.target == model.target, r.serial != revealed else { return }
+        revealed = r.serial
+        axis = axis.scrolled(toTick: max(Double(r.tick) - 4 * axis.ticksPerPoint, 0))
+        onTimeAxis?(axis)
+    }
+
+    private func center(on target: EditorTarget?) {
         centeredOn = .some(target)
         let pitches = model.shownLanes.flatMap { model.notes($0) }.map(\.pitch)
         var middle: UInt8 = 60

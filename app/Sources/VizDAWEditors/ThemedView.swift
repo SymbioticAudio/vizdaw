@@ -46,6 +46,13 @@ public enum WindowTheming {
 /// it arrives in a window and whenever its theme changes, so a window made
 /// after the last theme change is styled at once (B4 review I1).
 public final class WindowThemeMarker: NSView {
+    public override init(frame: NSRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+    }
+
+    public required init?(coder: NSCoder) { nil }
+
     public var theme: Theme = ThemedViews.current {
         didSet { if theme != oldValue { styleWindow() } }
     }
@@ -57,8 +64,13 @@ public final class WindowThemeMarker: NSView {
 
     public override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    /// On the next turn of the run loop: styling a window while SwiftUI is
+    /// still building it (a Settings window's toolbar) left its title bar,
+    /// tabs and window buttons undrawn.
     private func styleWindow() {
-        guard let w = window else { return }
-        WindowTheming.style(w, theme)
+        DispatchQueue.main.async { [self] in
+            guard let w = window else { return }
+            WindowTheming.style(w, theme)
+        }
     }
 }

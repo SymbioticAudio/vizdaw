@@ -390,7 +390,7 @@ fn an_aborted_drag_in_a_group_keeps_the_redo_stack_before_it() {
     assert!(h.redo().is_err());
     h.end_group("Record").unwrap();
     assert_eq!(h.undo_depth(), 0, "nothing folded");
-    assert_eq!(h.redo_label(), Some("Rename Lane"));
+    assert_eq!(h.redo_label(), Some("Rename Track"));
     h.redo().unwrap();
     assert_eq!(h.doc().lane(SeqId(0), LaneId(0)).unwrap().name, "Before");
 }

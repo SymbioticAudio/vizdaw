@@ -361,3 +361,42 @@ fn changing_the_plugin_removes_its_extra_output_strips() {
     h.undo().unwrap();
     assert!(h.doc().mixer().strip(out).is_ok());
 }
+
+#[test]
+fn a_destination_named_for_its_plugin_follows_a_replacement_unless_renamed() {
+    // Named for the plugin it plays: the destination and strip follow.
+    let a = add(&Document::new(), "au:pad", DestKind::plugin("au:pad")).doc;
+    let b = run(
+        &a,
+        RoutingCmd::EditDestination {
+            dest: DestId(0),
+            kind: DestKind::plugin("au:other"),
+            default_patch: None,
+        },
+    );
+    assert_eq!(b.doc.instruments()[&DestId(0)].name, "au:other");
+    assert_eq!(
+        b.doc
+            .mixer()
+            .strip(
+                b.doc
+                    .mixer()
+                    .find_kind(StripKind::Instrument(DestId(0)))
+                    .unwrap()
+            )
+            .unwrap()
+            .name,
+        "au:other"
+    );
+    // A user-given name stays.
+    let c = add(&Document::new(), "Lead", DestKind::plugin("au:pad")).doc;
+    let d = run(
+        &c,
+        RoutingCmd::EditDestination {
+            dest: DestId(0),
+            kind: DestKind::plugin("au:other"),
+            default_patch: None,
+        },
+    );
+    assert_eq!(d.doc.instruments()[&DestId(0)].name, "Lead");
+}

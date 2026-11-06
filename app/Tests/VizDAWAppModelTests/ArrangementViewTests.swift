@@ -1,4 +1,5 @@
 import AppKit
+import SymbioticTokens
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -233,30 +234,39 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(m.editor.status == "no destinations")
     }
 
-    @Test func theLaneMenuMarksAndUnmarksADrumLane() throws {
+    @Test func theLaneMenuHasNoDrumTrackItem() throws {
         let f = editorFake()
         let m = try DocumentModel(session: f)
         let h = LaneHeaderView(document: m)
-        var lane = m.lanes[1]
+        let lane = m.lanes[1]
         let titles = h.laneMenu(seq: 3, lane: lane).items.filter { !$0.isSeparatorItem }.map(\.title)
         // Colour ▸ last (plan 7b Task B7; StripColourTests covers it).
-        #expect(titles == ["Drum Lane", "Track Synth…", "New MIDI Destination…", "Colour"])
-        #expect(!h.laneMenu(seq: 3, lane: lane).items[2].isEnabled, "Chords plays no external synth")
+        #expect(titles == ["Track Synth…", "New MIDI Destination…", "Colour"])
+        #expect(!h.laneMenu(seq: 3, lane: lane).items[0].isEnabled, "Chords plays no external synth")
         let saved = f.dests
         f.dests = saved + [DestRow(id: 7, name: "Juno", plugin: nil, external: true)]
         var juno = lane
         juno.midiDest = 7
-        #expect(h.laneMenu(seq: 3, lane: juno).items[2].isEnabled, "Juno is an external synth")
+        #expect(h.laneMenu(seq: 3, lane: juno).items[0].isEnabled, "Juno is an external synth")
         f.dests = saved
-        let item = try #require(h.laneMenu(seq: 3, lane: lane).items.first)
-        #expect(item.title == "Drum Lane" && item.state == .off)
-        _ = item.target?.perform(item.action)
-        #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 31, drum: true)))
-        lane.isDrum = true
-        let on = try #require(h.laneMenu(seq: 3, lane: lane).items.first)
-        #expect(on.state == .on)
-        _ = on.target?.perform(on.action)
-        #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 31, drum: false)))
+    }
+
+    /// A header click selects its track; ⇧ or ⌘ adds or removes one, and
+    /// the first selected stays the one the Track menu acts on.
+    @Test func aHeaderClickSelectsItsTrack() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        let (a, b) = (m.lanes[0].id, m.lanes[1].id)
+        m.editor.selectTrack(seq: 3, lane: b, extend: false)
+        #expect(m.selectedLane?.id == b)
+        #expect(h.selectedLanes == [b])
+        m.editor.selectTrack(seq: 3, lane: a, extend: false)
+        #expect(m.selectedLane?.id == a && h.selectedLanes == [a], "a plain click replaces it")
+        m.editor.selectTrack(seq: 3, lane: b, extend: true)
+        #expect(h.selectedLanes == [a, b] && m.selectedLane?.id == a)
+        m.editor.selectTrack(seq: 3, lane: a, extend: true)
+        #expect(h.selectedLanes == [b] && m.selectedLane?.id == b, "⇧ again removes it")
     }
 
     @Test func aRenameEndsOnTheLaneItBeganOn() throws {
@@ -309,5 +319,67 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         h.removeFromSuperview()
         #expect(m.editor.textEditors.isEmpty)
         #expect(m.transportKeysEnabled)
+    }
+}
+
+// MARK: What AppKit draws
+
+private final class Swatch: NSView {
+    var colour = NSColor.white
+    override func draw(_ dirtyRect: NSRect) {
+        colour.setFill()
+        bounds.fill()
+    }
+}
+
+extension ArrangementViewTests {
+    /// The sRGB components of the pixel at `x`, `y` (row 0 is the top).
+    private func rgb(_ rep: NSBitmapImageRep, _ x: Int, _ y: Int) throws -> [CGFloat] {
+        let c = try #require(rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+        return [c.redComponent, c.greenComponent, c.blueComponent]
+    }
+
+    /// What `colour` becomes as a pixel of a snapshot (colour management
+    /// shifts exact values): a swatch of it, snapshotted and decoded alike.
+    private func painted(_ colour: NSColor) throws -> [CGFloat] {
+        let swatch = Swatch(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
+        swatch.wantsLayer = true
+        swatch.colour = colour
+        let png = try #require(WindowSnapshot.png(of: swatch, scale: 1))
+        return try rgb(try #require(NSBitmapImageRep(data: png.data)), 2, 2)
+    }
+
+    private func near(_ a: [CGFloat], _ b: [CGFloat]) -> Bool {
+        zip(a, b).allSatisfy { abs($0 - $1) <= 2.0 / 255 }
+    }
+
+    @Test func theHeadersAndAddRowShowBesideTheCanvas() throws {
+        let f = demoFake()
+        f.laneTable[3] = [lane(30, "Groove")]
+        let m = try DocumentModel(session: f)
+        #expect(m.selectedSeq == 3 && m.lanes.count == 1)
+        let container = ArrangementContainer(document: m)
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 400), styleMask: [.borderless],
+            backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        w.contentView = container
+        container.frame = NSRect(x: 0, y: 0, width: 800, height: 400)
+        container.layoutSubtreeIfNeeded()
+        let png = try #require(WindowSnapshot.png(of: w, scale: 1))
+        let rep = try #require(NSBitmapImageRep(data: png.data))
+        let theme = container.theme
+        let canvas = try painted(theme.canvas)
+        let headerBackground = try painted(theme.rulerBackground)
+        let laneHeight = container.headers.laneHeight
+        let header = try rgb(rep, Int(LaneHeaderLayout.width / 2), Int(EditorCanvas.rulerHeight + laneHeight / 2))
+        #expect(!near(header, canvas), "the header column shows, the canvas does not paint over it: \(header)")
+        // The row's bottom edge is a separator line, which the ruler or
+        // the canvas would hide if they painted over the header.
+        let rule = try rgb(rep, 50, Int(EditorCanvas.rulerHeight + laneHeight) - 1)
+        #expect(!near(rule, headerBackground), "the lane row's separator line shows: \(rule)")
+        let addTop = Int(EditorCanvas.rulerHeight + laneHeight)
+        let add = try rgb(rep, 8, addTop + 4)
+        #expect(near(add, headerBackground), "the add row is the header background: \(add) vs \(headerBackground)")
     }
 }

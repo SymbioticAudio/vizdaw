@@ -323,12 +323,31 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             }
             let was = matches!(old.kind, DestKind::PluginInstrument { .. });
             let is = matches!(kind, DestKind::PluginInstrument { .. });
+            // The name follows the plugin unless the user renamed it: a
+            // destination still named for what it played (the plugin, or
+            // "Built-in Synth") takes the new plugin's name.
+            let default_name = match &old.kind {
+                DestKind::PluginInstrument { slot } => Some(slot.plugin.name.as_str()),
+                k if k.is_builtin_synth() => Some(crate::mixer::BUILTIN_SYNTH_STRIP),
+                _ => None,
+            };
+            let new_name = match &kind {
+                DestKind::PluginInstrument { slot }
+                    if default_name == Some(old.name.as_str()) && !slot.plugin.name.is_empty() =>
+                {
+                    Some(slot.plugin.name.clone())
+                }
+                _ => None,
+            };
             let x = d
                 .instruments_mut()
                 .get_mut(dest)
                 .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?;
             x.kind = kind;
             x.default_patch = *default_patch;
+            if let Some(n) = &new_name {
+                x.name = n.clone();
+            }
             // No longer external: nothing returns its audio, and it has no
             // return latency (spec §4.5, §4.5a; same undo step).
             if !x.kind.is_external() {
@@ -342,9 +361,15 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                     }
                 }
             }
+            if let Some(n) = &new_name {
+                strips::rename_kind(d, StripKind::Instrument(*dest), n);
+            }
             match (was, is) {
                 (true, false) => strips::remove_dest_strips(d, *dest, r),
-                (false, true) => strips::add_instrument_strip(d, *dest, &old.name, r),
+                (false, true) => {
+                    let name = new_name.as_deref().unwrap_or(&old.name);
+                    strips::add_instrument_strip(d, *dest, name, r)
+                }
                 _ => {}
             }
             strips::ensure_builtin(d, r);

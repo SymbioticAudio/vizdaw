@@ -27,7 +27,7 @@ The socket defaults to $VIZDAW_CONTROL. Results print as JSON on stdout.
   drag FROM TO [--steps N] [--mod ...]   FROM and TO: an element ID or X,Y
   key KEY [--mod ...]          one key: space, return, escape, left, a, 1, ...
   type TEXT                    type characters
-  screenshot [--out PATH] [--scale S]
+  screenshot [--out PATH] [--scale S] [--live]
   wait CONDITION [--tick N | --count N | --title T | --kind K] [--timeout-ms N]
                                playing | stopped | tick_at_least | documents_at_least |
                                window_titled | window_gone | detail_kind
@@ -314,6 +314,9 @@ pub fn parse(args: &[String], env_socket: Option<String>) -> Result<Plan, String
             }
             if let Some(s) = a.value("--scale")? {
                 set(&mut p, "scale", json!(float(&s, "--scale")?));
+            }
+            if a.flag("--live") {
+                set(&mut p, "live", json!(true));
             }
             ("ui.screenshot".to_string(), p)
         }

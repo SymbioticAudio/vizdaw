@@ -55,6 +55,7 @@ public final class AudioEditorCanvas: NSView, ThemedView {
     public init(document: DocumentModel) {
         self.document = document
         super.init(frame: .zero)
+        clipsToBounds = true
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
         observe()

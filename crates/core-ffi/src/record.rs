@@ -403,7 +403,7 @@ pub fn leftovers(f: &Finished, doc: &Document, pass: Option<&RecordPass>) -> Lef
             if written > 0 || failure.is_some() {
                 out.keep.push(a.path.clone());
                 out.problems.push(format!(
-                    "{}: the recording could not be placed: its lane was removed. It is kept and offered at the next open.",
+                    "{}: the recording could not be placed: its track was removed. It is kept and offered at the next open.",
                     a.name
                 ));
             }
@@ -484,7 +484,7 @@ pub fn channel_refusal(
         }
     }
     Some(format!(
-        "lane {name} records input {}, but the audio input has {inputs} channel(s)",
+        "track {name} records input {}, but the audio input has {inputs} channel(s)",
         u32::from(channels.first()) + 1
     ))
 }
@@ -894,7 +894,7 @@ pub fn next_pass(doc: &Document) -> u32 {
 }
 
 /// `name` as a file-name part: no path or control characters, no leading
-/// dot, at most 100 characters; "Lane" when nothing is left.
+/// dot, at most 100 characters; "Track" when nothing is left.
 pub fn file_safe(name: &str) -> String {
     let s: String = name
         .chars()
@@ -914,7 +914,7 @@ pub fn file_safe(name: &str) -> String {
         .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
         .trim_end()
         .to_string();
-    if s.is_empty() { "Lane".into() } else { s }
+    if s.is_empty() { "Track".into() } else { s }
 }
 
 /// `yyyy-mm-dd HHmmss` of `t` in UTC (plan 5c Ruling 14).
@@ -1373,7 +1373,7 @@ mod tests {
         assert_eq!(pass.media.len(), 1, "only A");
         let left = leftovers(&f, &doc, Some(&pass));
         assert_eq!(left.keep, vec![format!("{RECORDED_DIR}/B.caf")]);
-        assert!(left.problems[0].contains("its lane was removed"));
+        assert!(left.problems[0].contains("its track was removed"));
     }
 
     #[test]
@@ -1414,11 +1414,11 @@ mod tests {
         );
         assert_eq!(
             channel_refusal("Mic", InputChannels::Stereo(2), 3, &faults).as_deref(),
-            Some("lane Mic records input 3, but the audio input has 3 channel(s)")
+            Some("track Mic records input 3, but the audio input has 3 channel(s)")
         );
         assert_eq!(
             channel_refusal("Mic", InputChannels::Mono(0), 0, &[]).as_deref(),
-            Some("lane Mic records input 1, but the audio input has 0 channel(s)")
+            Some("track Mic records input 1, but the audio input has 0 channel(s)")
         );
     }
 
@@ -1435,7 +1435,7 @@ mod tests {
         // With channels open, too few is still a channel count.
         assert_eq!(
             channel_refusal("Mic", InputChannels::Stereo(2), 3, &faults).as_deref(),
-            Some("lane Mic records input 3, but the audio input has 3 channel(s)")
+            Some("track Mic records input 3, but the audio input has 3 channel(s)")
         );
         // A denial is the reason first: it is why the open failed.
         let denied = format!("{DENIED_PREFIX}. Allow it in System Settings.");
@@ -1463,11 +1463,11 @@ mod tests {
             "Media/Recorded/Mic 1971-01-01 000000 2.caf"
         );
         assert_eq!(file_safe("../a/b:c"), "-a-b-c");
-        assert_eq!(file_safe(" .. "), "Lane");
+        assert_eq!(file_safe(" .. "), "Track");
         // Final review M5: no leading dot is left, however they are mixed
         // with spaces.
         assert_eq!(file_safe(". .Vox"), "Vox");
         assert_eq!(file_safe(" . . .x. "), "x.");
-        assert_eq!(file_safe(". . "), "Lane");
+        assert_eq!(file_safe(". . "), "Track");
     }
 }

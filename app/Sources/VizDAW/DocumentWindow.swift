@@ -26,7 +26,9 @@ struct DocumentWindow: View {
             if let id, let model = store.model(id) {
                 DocumentView(model: model, docID: id)
                     .background(WindowTag(kind: .document, doc: id))
-                    .background(WindowFrameKeeper(model: model))
+                    // The document goes as its window closes: SwiftUI's
+                    // onDisappear does not always come for the last window.
+                    .background(WindowFrameKeeper(model: model, onClose: { store.close(id) }))
                     .focusedSceneValue(\.documentModel, model)
                     .focusedSceneValue(\.documentID, id)
                     .task(id: PollKey(key: activeState == .key, playing: model.isPlaying || model.record.isRecording)) {
@@ -97,9 +99,19 @@ struct KeyDoc: Equatable {
 /// move or resize (plan 7a Ruling 11), in `ui.json` with the panes.
 struct WindowFrameKeeper: NSViewRepresentable {
     let model: DocumentModel
+    /// Runs when the window will close.
+    var onClose: @MainActor @Sendable () -> Void = {}
 
     final class Keeper: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+        }
+
+        required init?(coder: NSCoder) { nil }
+
         var editor: EditorModel?
+        var onClose: @MainActor @Sendable () -> Void = {}
         private var applied = false
         private var observers: [NSObjectProtocol] = []
 
@@ -114,7 +126,13 @@ struct WindowFrameKeeper: NSViewRepresentable {
             // Swift 6.1: the closures capture only strong lets made here,
             // never the window or a weak self (plan 7a Global Constraints).
             let view = self
-            let saved = applied ? nil : editor.layout.views.frame
+            let close = onClose
+            observers.append(
+                NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { _ in
+                    MainActor.assumeIsolated { close() }
+                })
+            let first = !applied
+            let saved = first ? editor.layout.views.frame : nil
             applied = true
             for name in [NSWindow.didMoveNotification, NSWindow.didEndLiveResizeNotification] {
                 observers.append(
@@ -127,14 +145,32 @@ struct WindowFrameKeeper: NSViewRepresentable {
                         }
                     })
             }
-            guard let saved else { return }
+            guard let saved else {
+                // No saved frame: a new window opens at the default size,
+                // centred, on the screen it is on (owner, 2026-11-05). Only
+                // its first appearance: a later move into a window is not.
+                guard first else { return }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let w = view.window, let screen = w.screen ?? NSScreen.main else { return }
+                        w.setFrame(PaneGeometry.defaultDocumentFrame(visible: screen.visibleFrame), display: true)
+                    }
+                }
+                return
+            }
             // On the next turn, so SwiftUI's own restoration does not
             // overwrite it.
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let w = view.window,
-                        let r = PaneGeometry.sanitizedFrame(saved, screens: NSScreen.screens.map(\.frame))
-                    else { return }
+                    guard let w = view.window else { return }
+                    // A saved frame off every screen falls back to the
+                    // default size, as a window with none does.
+                    guard let r = PaneGeometry.sanitizedFrame(saved, screens: NSScreen.screens.map(\.frame)) else {
+                        if let screen = w.screen ?? NSScreen.main {
+                            w.setFrame(PaneGeometry.defaultDocumentFrame(visible: screen.visibleFrame), display: true)
+                        }
+                        return
+                    }
                     // `setFrame` does not keep the title bar on a screen;
                     // the screen it is on does (final review n1).
                     let screen = NSScreen.screens.first { $0.frame.intersects(r) }
@@ -152,6 +188,7 @@ struct WindowFrameKeeper: NSViewRepresentable {
     func makeNSView(context: Context) -> Keeper {
         let k = Keeper()
         k.editor = model.editor
+        k.onClose = onClose
         return k
     }
 

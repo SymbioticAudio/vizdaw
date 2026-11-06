@@ -1188,7 +1188,7 @@ fn a_take_whose_lane_was_removed_is_kept_and_reported() {
     assert!(
         problems
             .iter()
-            .any(|p| p.starts_with("Mic: ") && p.contains("its lane was removed")),
+            .any(|p| p.starts_with("Mic: ") && p.contains("its track was removed")),
         "{problems:?}"
     );
     s.save().unwrap();

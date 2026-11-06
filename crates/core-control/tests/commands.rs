@@ -42,7 +42,10 @@ fn every_command_validates_its_minimal_form() {
             json!({"from": {"x": 1, "y": 2}, "to": "0.1:00000000"}),
         ),
         ("ui.key", json!({"key": "space"})),
-        ("ui.screenshot", json!({"path": shot.to_str().unwrap()})),
+        (
+            "ui.screenshot",
+            json!({"path": shot.to_str().unwrap(), "live": false}),
+        ),
         ("app.new_demo", json!({})),
         ("app.open", json!({"path": "/tmp/a.vizdaw"})),
         ("app.quit", json!({})),
@@ -209,6 +212,25 @@ fn paths_are_absolute_and_screenshots_need_an_existing_folder() {
 }
 
 #[test]
+fn screenshot_live_is_a_bool() {
+    let live = |params: Value| match ok("ui.screenshot", params) {
+        Command::UiScreenshot { live, .. } => live,
+        other => panic!("{other:?}"),
+    };
+    assert!(live(json!({"live": true})));
+    assert!(!live(json!({"live": false})));
+    assert!(!live(json!({})));
+    assert_eq!(
+        err("ui.screenshot", json!({"live": "yes"})).0,
+        ErrorCode::InvalidParams
+    );
+    assert_eq!(
+        err("ui.screenshot", json!({"live": 1})).0,
+        ErrorCode::InvalidParams
+    );
+}
+
+#[test]
 fn waits_take_their_own_parameters_and_a_bounded_timeout() {
     assert_eq!(
         ok(
@@ -261,10 +283,9 @@ fn the_drum_menu_commands_are_registered() {
     assert_eq!(
         drum,
         vec![
-            ("drum.mark_lane", "Drum Lane", true),
             ("drum.add_row", "Add Drum Row", false),
             ("drum.show_velocity", "Show Velocity", true),
-            ("drum.split_row", "Split Row to Own Lane", false),
+            ("drum.split_row", "Split Row to Own Track", false),
             ("drum.remove_row", "Remove Drum Row", false),
             ("drum.timeline", "Timeline View", true),
         ]
@@ -318,7 +339,16 @@ fn rewind_and_fast_forward_have_their_keys() {
         assert!(c.menu_item && c.document && c.yields, "{id}");
     }
     let yielding: Vec<&str> = COMMANDS.iter().filter(|c| c.yields).map(|c| c.id).collect();
-    assert_eq!(yielding, ["transport.rewind", "transport.fast_forward"]);
+    assert_eq!(
+        yielding,
+        [
+            "transport.rewind",
+            "transport.fast_forward",
+            "track.new_audio",
+            "track.new_instrument",
+            "track.new_midi"
+        ]
+    );
 }
 
 /// Plan 7d hostile input: rewind and fast forward take no parameters, and
@@ -501,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        157,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward"
+        162,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1)"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1968,4 +1998,68 @@ fn ui_pane_names_the_audio_editor() {
     assert_eq!(c.shortcut, Some("⌘5"));
     assert_eq!(c.menu, "Editors");
     assert!(c.document);
+}
+
+/// Plan tracks Task 2 hostile input: the six `track.*` commands take
+/// non-negative integer ids and, for rename, a string; anything else is
+/// refused by the checker before it reaches the app.
+#[test]
+fn track_commands_refuse_hostile_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    let ids = [
+        "track.new_audio",
+        "track.new_instrument",
+        "track.new_midi",
+        "track.duplicate",
+        "track.delete",
+        "track.rename",
+    ];
+    for id in ids {
+        let c = registry::find(id).unwrap();
+        assert_eq!(c.menu, "Track", "{id}");
+        assert!(c.menu_item && c.document, "{id}");
+        for (params, word) in [
+            (json!({"seq": -1}), "seq"),
+            (json!({"seq": "x"}), "seq"),
+            (json!({"seq": 1.5}), "seq"),
+            (
+                serde_json::from_str::<Value>(r#"{"seq": 18446744073709551616}"#).unwrap(),
+                "seq",
+            ),
+            (json!({"after": -1}), "after"),
+            (json!({"bogus": 1}), "bogus"),
+            (json!("x"), ""),
+        ] {
+            let (code, message) = err("command.run", run(id, params.clone()));
+            assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+            assert!(message.contains(word), "{id} {params}: {message}");
+            assert!(!message.is_empty());
+        }
+    }
+    // The checker says the same thing for the same fault on every command.
+    let (_, a) = err("command.run", run("track.new_audio", json!({"seq": -1})));
+    let (_, b) = err("command.run", run("track.new_midi", json!({"seq": -1})));
+    assert_eq!(
+        a.trim_start_matches("track.new_audio"),
+        b.trim_start_matches("track.new_midi")
+    );
+    // A name is a string, and Rename Track is a dialog.
+    let (code, _) = err("command.run", run("track.rename", json!({"name": 3})));
+    assert_eq!(code, ErrorCode::InvalidParams);
+    let (code, message) = err("command.run", run("track.rename", json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Rename Track"), "{message}");
+    assert!(matches!(
+        ok("command.run", run("track.rename", json!({"name": "Bass"}))),
+        Command::CommandRun { .. }
+    ));
+    for id in &ids[..5] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, json!({}))),
+                Command::CommandRun { .. }
+            ),
+            "{id}"
+        );
+    }
 }

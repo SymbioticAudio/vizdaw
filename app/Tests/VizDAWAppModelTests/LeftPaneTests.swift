@@ -8,7 +8,7 @@ private func lane(_ id: UInt64, audioOut: UInt64? = nil, midiDest: UInt64? = nil
         id: id, name: "Lane \(id)", destination: nil, midiEventCount: 0, regionCount: 0,
         referenceCount: 0, mute: false, solo: false, looped: false, takeCount: 1,
         activeTake: "Take 1", isDrum: false, arm: arm, midiDest: midiDest, audioOut: audioOut,
-        input: nil, monitor: .auto)
+        input: nil, monitor: .auto, kind: .midi)
 }
 
 private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false, name: String = "Dest") -> DestRow {

@@ -36,7 +36,7 @@ Success: an agent with only a shell runs `vizctl launch`, creates the demo, play
 1. Purpose: agents can launch VizDAW, run README checklist steps, check state and attach screenshots without computer-use tools.
 2. Off by default: enabled only by the environment variable `VIZDAW_CONTROL=<socket path>` or a `--control <path>` launch flag. A Unix domain socket in a private directory with 0600 permissions; no network port.
 3. Protocol: JSON lines; request `{id, cmd, params}`, reply `{id, ok, result | error}`. Parsing, validation and dispatch types live in Rust; the Swift app executes UI commands on the main thread.
-4. Commands: `commands.list`; `command.run {id, params}` (menu commands by stable ID); `state.get {transport | document | editor | selection | windows}`; `ui.tree {window}` (accessibility tree with element IDs); `ui.click` / `ui.drag` / `ui.key {element or point, window}` (events into VizDAW's own windows, not system-wide events, no real cursor movement); `ui.screenshot {window}` → PNG rendered by the app (no Screen Recording permission; Core Animation content included); `app.new_demo`, `app.open {path}`, `app.quit`; `wait {condition, timeout}`.
+4. Commands: `commands.list`; `command.run {id, params}` (menu commands by stable ID); `state.get {transport | document | editor | selection | windows}`; `ui.tree {window}` (accessibility tree with element IDs); `ui.click` / `ui.drag` / `ui.key {element or point, window}` (events into VizDAW's own windows, not system-wide events, no real cursor movement); `ui.screenshot {window, live}` → PNG rendered by the app (no Screen Recording permission unless `live`; Core Animation content included); `app.new_demo`, `app.open {path}`, `app.quit`; `wait {condition, timeout}`.
 5. Rules: a programmatic call never opens a dialog (it takes the dialog's answers as parameters or fails with an error naming the dialog); Busy returns an error; malformed or hostile requests return errors and never crash the app.
 6. Tool: a small `vizctl` CLI (a Rust binary in the workspace). MCP later.
 7. Tests: property/fuzz tests of the parser and of every command's parameters; fuzz tests of loading damaged project files (a proptest harness in `cargo test`; cargo-fuzz targets optional); an end-to-end test that launches the built app with the channel, drives one README step and checks the results, robust on slow CI.
@@ -174,7 +174,7 @@ UTF-8 only; blank lines are skipped; a reply is one line. Requests on one connec
 
 **`ui.key {key | text, modifiers?, element?, window?}`** → `{window, events, x: 0, y: 0}`. `key` is one character or a named key (`return`, `enter`, `tab`, `space`, `delete`, `escape`, `forward_delete`, `home`, `end`, `page_up`, `page_down`, `left`, `right`, `up`, `down`, `f1`–`f11`); `text` types characters (no modifiers). Strokes carry the US-ANSI virtual key code and the characters `NSEvent` reports. `element` is clicked first to give it the keyboard. A stroke that is a registered menu shortcut (§6) runs that command on the window's document, as the menu would for the key window; when that command is unavailable (a text field has the keyboard), or the stroke is no shortcut, the key goes to the window's first responder (`NSWindow.sendEvent`). This works whether or not VizDAW is the active app.
 
-**`ui.screenshot {window?, path?, scale?}`** → `{window, path, width, height}`. `path`: an absolute `.png` path in an existing folder; absent: `screenshot-<n>.png` in the socket's private folder. `scale`: 0.25–4 pixels per point; absent: the window's backing scale. See §9.
+**`ui.screenshot {window?, path?, scale?, live?}`** → `{window, path, width, height}`. `path`: an absolute `.png` path in an existing folder; absent: `screenshot-<n>.png` in the socket's private folder. `scale`: 0.25–4 pixels per point; absent: the window's backing scale. `live`: a boolean, default false; true captures the window as the window server shows it. See §9.
 
 **`app.new_demo {audio?}`**, **`app.open {path, plugins?, restore_autosave?}`** → `{doc, window}` once the new window is on screen (≤ 30 s). `app.open` without `path` is `dialog_required` "Open".
 
@@ -220,6 +220,12 @@ The facts are gathered on the main thread every tick (the target document's tran
 | `modify.exact_mode` | Modify > Exact Mode | ⌃⌘E | `on` (absent toggles) |
 | `sequence.make_reference` | Sequence > Make Reference from Selection | ⌥⌘R | |
 | `sequence.back` | Sequence > Back to Parent Sequence | ⌘[ | |
+| `track.new_audio` | Track > New Audio Track | ⌥⌘A | `seq`, `after` (both optional) |
+| `track.new_instrument` | Track > New Instrument Track | ⌥⌘S | `seq`, `after` (both optional) |
+| `track.new_midi` | Track > New MIDI Track | ⌥⌘X | `seq`, `after` (both optional) |
+| `track.duplicate` | Track > Duplicate Track | | `seq`, `lane` (both optional) |
+| `track.delete` | Track > Delete Track | | `seq`, `lane` (both optional) |
+| `track.rename` | Track > Rename Track | | `seq`, `lane` (optional), `name` ("Rename Track", always) |
 | `transport.play_stop` | Transport > Play / Stop | Space | |
 | `transport.loop` | Transport > Loop | | `on` (absent toggles) |
 | `transport.return_to_start` | Transport > Return to Start | Return | |
@@ -248,7 +254,7 @@ The select-and-modify panel is a non-modal window, not a dialog: the `modify.*` 
 
 ## 9. Screenshots
 
-Rendered in-process, no Screen Recording permission:
+Rendered in-process, no Screen Recording permission (unless `live`, below):
 
 1. The window's frame view's layer tree is drawn into a bitmap with `CALayer.render(in:)`, which includes SwiftUI and Core Animation content (the editors' layers, the playhead).
 2. AppKit does not redraw an occluded window — one behind the agent's terminal, or on a locked or sleeping screen — so its layers can hold a stale picture. Every view whose class draws itself (`draw(_:)` into its layer) is therefore drawn again in place, front to back, with its own Core Animation sublayers (playhead, overlays) on top. The editors show what they hold now.
@@ -256,13 +262,17 @@ Rendered in-process, no Screen Recording permission:
 
 Known limits: content the window server composites alone (vibrancy materials such as the sidebar, Metal and video layers, out-of-process plugin views) renders flat or blank; SwiftUI-hosted AppKit controls that never drew while occluded may be missing; views redrawn in step 2 are painted over floating overlays in front of them (the sidebar). Screenshots are evidence for agents and reviewers, not pixel-exact golden images.
 
+`live: true` captures the window through ScreenCaptureKit (`SCScreenshotManager.captureImage` of an `SCContentFilter(desktopIndependentWindow:)`), which needs Screen Recording access even for the app's own windows. The app only checks it with `CGPreflightScreenCaptureAccess()`, which never prompts, and never requests it (the system may still show its own periodic "continue to allow" prompt on a capture, which is the OS's, not the app's): without access the call fails with "live screenshots need Screen Recording access for VizDAW (System Settings › Privacy & Security); omit `live` for the app-drawn picture". A window that is not on screen (occluded, minimised, on another Space) fails with "the window is not on screen; live screenshots need it visible". The answer has the same shape. Tests and the end-to-end run never pass `live`.
+
+The default picture models AppKit's clipping for views that do not clip (macOS 14+ default): each self-drawn view is drawn into the part of the window its clipping ancestors let show (`WindowSnapshot.clipRect`), so a view that paints past its frame shows as it does on screen.
+
 ## 10. `vizctl`
 
 ```
 vizctl [--socket PATH] [--timeout SECONDS] COMMAND [ARGS]      (socket default: $VIZDAW_CONTROL)
   launch [--app PATH] [--home DIR] [--demo] [--env K=V]...      ping · commands · run ID [PARAMS-JSON]
   state TARGET · tree [--depth N] · find TEXT · click ID | X Y [--right] [--count N] [--mod LIST]
-  drag FROM TO [--steps N] · key KEY [--mod LIST] · type TEXT · screenshot [--out PATH] [--scale S]
+  drag FROM TO [--steps N] · key KEY [--mod LIST] · type TEXT · screenshot [--out PATH] [--scale S] [--live]
   wait CONDITION [--tick N | --count N | --title T | --kind K] [--timeout-ms N]
   new-demo [--audio] · open PATH [--plugins …] [--restore-autosave true|false] · quit · call CMD [PARAMS-JSON]
   every command but launch takes --window N
