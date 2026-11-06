@@ -274,6 +274,28 @@ fn wait_for_label(app: &mut App, window: &Value, label: &str) -> Value {
     }
 }
 
+/// Types `text` into the element labelled `label`, finding it again when
+/// the view redrew between finding and typing (`no_element`): on a slow
+/// runner the strip can rebuild just after the tree was read.
+fn key_into_label(app: &mut App, window: &Value, label: &str, text: &str) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let id = wait_for_label(app, window, label);
+        let params = json!({"window": window, "element": id, "text": text});
+        let timeout = Duration::from_millis(WAIT_MS) + Duration::from_secs(60);
+        match app.client.call("ui.key", params.clone(), timeout) {
+            Ok(_) => return,
+            Err(e) if e.to_string().contains("no_element") && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => panic!(
+                "ui.key {params}: {e}\nVizDAW log:\n{}",
+                log_tail(&app.launched.log, 40)
+            ),
+        }
+    }
+}
+
 /// Polls `state.get document` until its undo label is `label`.
 fn wait_for_undo(app: &mut App, window: &Value, label: &str) {
     let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
@@ -2454,11 +2476,7 @@ fn themes_and_the_strip_over_the_channel() {
     }
 
     // 5. The level box: one call clicks it and types.
-    let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
-    app.call(
-        "ui.key",
-        json!({"window": window, "element": level, "text": "-4.2\n"}),
-    );
+    key_into_label(&mut app, &window, &format!("Level of {SYNTH}"), "-4.2\n");
     wait_for_state(&mut app, &window, "mixer", |m| {
         (strip_named(m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6
     });
