@@ -58,11 +58,16 @@ public struct TimeAxis: Equatable, Sendable {
         guard factor.isFinite, factor > 0 else { return self }
         let anchor = originTick + Double(x) * ticksPerPoint
         let tpp = Self.clampZoom(ticksPerPoint / factor)
-        return TimeAxis(ticksPerPoint: tpp, originTick: anchor - Double(x) * tpp)
+        return TimeAxis(ticksPerPoint: tpp, originTick: max(anchor - Double(x) * tpp, 0))
     }
 
+    /// Scrolled by the user: never left of bar 1 (tick 0). Following the
+    /// playhead (`scrolled(toTick:)`) may go there, as a count-in does.
     public func scrolled(byPoints dx: CGFloat) -> TimeAxis {
-        TimeAxis(ticksPerPoint: ticksPerPoint, originTick: originTick + Double(dx) * ticksPerPoint)
+        let to = originTick + Double(dx) * ticksPerPoint
+        guard !to.isNaN else { return TimeAxis(ticksPerPoint: ticksPerPoint, originTick: 0) }
+        // Right is free; left stops at 0, or where a count-in left it.
+        return TimeAxis(ticksPerPoint: ticksPerPoint, originTick: dx >= 0 ? to : max(to, min(originTick, 0)))
     }
 
     public func scrolled(toTick t: Double) -> TimeAxis {
