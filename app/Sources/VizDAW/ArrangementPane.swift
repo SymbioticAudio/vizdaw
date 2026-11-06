@@ -40,11 +40,7 @@ struct ArrangementHost: NSViewRepresentable {
     let document: DocumentModel
 
     func makeNSView(context: Context) -> ArrangementContainer {
-        document.openTrackInstrumentBrowser = { [weak document] seq, lane, anchor, rect in
-            guard let document else { return }
-            TrackInstrumentBrowser.show(document: document, seq: seq, lane: lane, anchor: anchor, rect: rect)
-        }
-        return ArrangementContainer(document: document)
+        ArrangementContainer(document: document)
     }
 
     func updateNSView(_ view: ArrangementContainer, context: Context) {
@@ -265,26 +261,5 @@ struct StatusLine: View {
                 if editor.status == s { editor.clearStatus() }
             }
         }
-    }
-}
-
-/// The instrument browser for a track's destination menu, in a popover at
-/// the header row; picking a plug-in adds the instrument and points the
-/// track at it, and closing the popover changes nothing.
-@MainActor enum TrackInstrumentBrowser {
-    private static var popover: NSPopover?
-
-    static func show(document: DocumentModel, seq: UInt64, lane: UInt64, anchor: NSView, rect: NSRect) {
-        popover?.close()
-        let p = NSPopover()
-        p.behavior = .transient
-        let browser = PluginBrowserModel(kind: .instrument) { appPlugins.browser(.instrument) }
-        p.contentViewController = NSHostingController(
-            rootView: PluginBrowserView(model: browser) { [weak p, weak document] plugin in
-                p?.close()
-                document?.addInstrument(plugin, toTrack: seq, lane: lane)
-            }.themedRoot())
-        popover = p
-        p.show(relativeTo: rect, of: anchor, preferredEdge: .maxY)
     }
 }

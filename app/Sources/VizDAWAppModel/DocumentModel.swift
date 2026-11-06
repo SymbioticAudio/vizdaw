@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Observation
 import VizDAWCore
@@ -324,30 +323,6 @@ public final class DocumentModel {
     @ObservationIgnored public var beginTrackRename: (@MainActor (UInt64, UInt64) -> Bool)?
     /// The header that installed `beginTrackRename`: only it clears it.
     @ObservationIgnored public weak var trackRenameOwner: AnyObject?
-
-    /// Opens the instrument plug-in browser for track (seq, lane), anchored
-    /// at `rect` of `anchor`: installed by the arrangement in a window, nil
-    /// while none shows (the destination menu's item is then disabled).
-    @ObservationIgnored public var openTrackInstrumentBrowser:
-        (@MainActor (_ seq: UInt64, _ lane: UInt64, _ anchor: NSView, _ rect: NSRect) -> Void)?
-
-    /// Adds a plug-in instrument for `plugin` and makes it the destination
-    /// of track (seq, lane): the new destination is the one the session
-    /// lists after the add and not before. A failure leaves the track's
-    /// destination as it was and raises "New Instrument Failed".
-    public func addInstrument(_ plugin: PluginRefRow, toTrack seq: UInt64, lane: UInt64) {
-        do {
-            let before = Set(try session.destinations().map(\.id))
-            let snap = try session.addPluginInstrument(name: plugin.name, plugin: plugin)
-            apply(snap)
-            let added = try session.destinations().first { !before.contains($0.id) }
-            if let added {
-                editor.edit(.lane(edit: .setDest(seq: seq, lane: lane, dest: added.id)))
-            }
-        } catch {
-            alert = AlertItem(error, title: "New Instrument Failed")
-        }
-    }
 
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()

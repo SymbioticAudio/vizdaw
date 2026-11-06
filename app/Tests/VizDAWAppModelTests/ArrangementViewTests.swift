@@ -221,7 +221,7 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         let h = LaneHeaderView(document: m)
         let lane = m.lanes[1]
         f.dests = [DestRow(id: 5, name: "Synth", plugin: nil)]
-        #expect(h.destinationMenu(seq: 3, lane: lane).items.map(\.title) == ["No Destination", "Synth", "", "New Plugin Instrument…"])
+        #expect(h.destinationMenu(seq: 3, lane: lane).items.map(\.title) == ["No Destination", "Synth"])
         f.destinationsError = .Busy(message: "busy")
         let busy = h.destinationMenu(seq: 3, lane: lane).items
         #expect(busy.map(\.title) == ["No Destination", "Destinations unavailable (busy)"])
@@ -232,43 +232,6 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(failed.map(\.title) == ["No Destination", "Destinations unavailable"])
         #expect(!failed[1].isEnabled)
         #expect(m.editor.status == "no destinations")
-    }
-
-    @Test func destinationMenuEndsWithNewPluginInstrument() throws {
-        let f = editorFake()
-        let m = try DocumentModel(session: f)
-        let h = LaneHeaderView(document: m)
-        let lane = m.lanes[1]
-        f.dests = [DestRow(id: 5, name: "Synth", plugin: nil)]
-        let off = h.destinationMenu(seq: 3, lane: lane).items
-        #expect(off.map(\.title) == ["No Destination", "Synth", "", "New Plugin Instrument…"])
-        #expect(off[2].isSeparatorItem)
-        #expect(!off[3].isEnabled, "no browser hook, no item")
-        m.openTrackInstrumentBrowser = { _, _, _, _ in }
-        #expect(h.destinationMenu(seq: 3, lane: lane).items[3].isEnabled)
-    }
-
-    @Test func pickingAPluginInstrumentForATrackSetsItsDestination() throws {
-        let f = editorFake()
-        let m = try DocumentModel(session: f)
-        f.dests = [DestRow(id: 5, name: "Synth", plugin: nil)]
-        f.addedDest = DestRow(id: 9, name: "Pad", plugin: nil)
-        let plugin = PluginRefRow(format: .clap, id: "p1", name: "Pad", vendor: "V", version: "1")
-        m.addInstrument(plugin, toTrack: 3, lane: m.lanes[1].id)
-        #expect(f.calls.contains("addInstrument Pad p1"))
-        #expect(f.edits.last == .lane(edit: .setDest(seq: 3, lane: m.lanes[1].id, dest: 9)))
-        #expect(m.alert == nil)
-    }
-
-    @Test func aFailingInstrumentAddLeavesTheDestinationAndAlerts() throws {
-        let f = editorFake()
-        let m = try DocumentModel(session: f)
-        f.addedDest = DestRow(id: 9, name: "Pad", plugin: nil)
-        f.mixerError = .Model(message: "no such plugin")
-        let plugin = PluginRefRow(format: .clap, id: "p1", name: "Pad", vendor: "V", version: "1")
-        m.addInstrument(plugin, toTrack: 3, lane: m.lanes[1].id)
-        #expect(f.edits.isEmpty)
-        #expect(m.alert?.title == "New Instrument Failed")
     }
 
     @Test func theLaneMenuHasNoDrumTrackItem() throws {
