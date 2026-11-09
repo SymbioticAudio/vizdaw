@@ -406,13 +406,23 @@ public final class MixerModel {
         }
     }
 
+    /// The built-in synth destination of the track the left pane shows,
+    /// so a pick on the shared Built-in Synth strip replaces that track's
+    /// instrument (nil: the first built-in synth destination).
+    public var synthFocus: UInt64?
+
     /// The destination an instrument strip plays: its own, or for the
-    /// built-in synth strip (one strip for every built-in synth) the first
-    /// built-in synth destination. `nil` for other strips.
+    /// built-in synth strip (one strip for every built-in synth) the
+    /// `synthFocus` one, else the first. `nil` for other strips.
     public func instrumentDestination(for strip: StripRow) -> UInt64? {
         switch strip.kind {
         case .instrument(let dest): return dest
-        case .builtinSynth: return destinations.first { $0.plugin == nil && !$0.external }?.id
+        case .builtinSynth:
+            // Every built-in synth destination shares one strip: the one
+            // the left pane shows (its track's) first, else the first.
+            let synths = destinations.filter { $0.plugin == nil && !$0.external }
+            if let f = synthFocus, synths.contains(where: { $0.id == f }) { return f }
+            return synths.first?.id
         default: return nil
         }
     }

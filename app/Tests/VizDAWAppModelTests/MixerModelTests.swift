@@ -237,6 +237,26 @@ import VizDAWCore
         #expect(f.calls.count == before)
     }
 
+    @Test func theSharedSynthStripReplacesTheFocusedTracksDestination() throws {
+        let f = mixerFake()
+        f.dests = [
+            DestRow(id: 4, name: "Built-in Synth", plugin: nil),
+            DestRow(id: 5, name: "Built-in Synth", plugin: nil),
+        ]
+        let m = try model(f)
+        let synth = try #require(m.strips.first { $0.kind == .builtinSynth })
+        let new = PluginRefRow(format: .clap, id: "u.pend", name: "Pendulate", vendor: "V", version: "1")
+        // The left pane shows the strip for the track playing destination 5.
+        m.synthFocus = 5
+        #expect(m.instrumentDestination(for: synth) == 5)
+        let before = f.calls.count
+        m.pickInstrument(new, on: synth)
+        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 5 u.pend"])
+        // A focus that is not a built-in synth destination is ignored.
+        m.synthFocus = 99
+        #expect(m.instrumentDestination(for: synth) == 4)
+    }
+
     @Test func theBuiltInSynthStripReplacesTheBuiltInSynthDestination() throws {
         let f = mixerFake()
         f.dests = [

@@ -100,6 +100,9 @@ struct LeftStripPane: View {
                         .padding(theme.spacing.s)
                         .frame(maxWidth: .infinity)
                 }
+                .onChange(of: model.focusLanes().first?.midiDest, initial: true) { _, d in
+                    mixer.synthFocus = d
+                }
             } else {
                 PaneNote(text: StripFocus.nothingMessage)
             }
