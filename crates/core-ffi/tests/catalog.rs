@@ -419,3 +419,26 @@ fn a_plugin_disabled_while_the_registry_is_busy_is_unloaded_on_the_next_idle() {
     );
     c.set_enabled(key("vizdaw.test.gain"), true).unwrap();
 }
+
+#[test]
+fn a_scan_that_cannot_save_says_so() {
+    let _g = serial();
+    let (d, clap) = plugins_dir();
+    let path = d.path().join("plugins.json");
+    let c = PluginCatalog::open(config(d.path(), &clap)).unwrap();
+    assert!(c.take_problem().unwrap().is_none());
+    c.scan(false).unwrap();
+    // While the scan runs (the hanger holds it for its whole timeout), a
+    // newer app writes the file: the scan's own save must refuse, and say so.
+    let newer = r#"{"version": 99, "entries": [], "disabled": []}"#;
+    std::fs::write(&path, newer).unwrap();
+    assert!(c.progress().unwrap().running, "the scan ended too early");
+    wait_scan(&c);
+    let p = c.take_problem().unwrap().unwrap_or_default();
+    assert!(p.starts_with("plugin settings not saved:"), "{p:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        newer,
+        "left untouched"
+    );
+}
