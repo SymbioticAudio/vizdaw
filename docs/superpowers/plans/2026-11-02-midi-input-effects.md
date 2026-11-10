@@ -1,10 +1,10 @@
 # VizDAW 5g-1 — MIDI Input Effects Implementation Plan
 
-> **Runs now (owner, 2026-11-03 and 2026-11-05):** after sub-project 7 and the Tracks plan, on branch `sp5g-input-fx` from main `a292d2c`. It stays in the 1.0 release. The 2026-11-05 pre-flight (`.superpowers/sdd/2026-11-02-midi-input-effects/preflight-2026-11-05.md`) is folded in (2026-11-09), and every Find excerpt below was re-anchored to `a292d2c`. The binding owner ruling holds throughout: a MIDI message a learn map takes stays out of the lanes, and only the learned target's automation is written (Ruling 2).
+> **Runs now (owner, 2026-11-03 and 2026-11-05):** after sub-project 7 and the Tracks plan, on branch `sp5g-input-fx` from main `a292d2c`. It stays in the 1.0 release. The 2026-11-05 pre-flight (`.superpowers/sdd/2026-11-02-midi-input-effects/preflight-2026-11-05.md`) is folded in (2026-11-09), and every Find excerpt below was re-anchored to `a292d2c`. The owner's 2026-11-09 ruling moves the chain's editor from the track header to the channel strip's MIDI FX section (Ruling 16, Task 9; `.superpowers/sdd/2026-11-02-midi-input-effects/task9-rewrite-2026-11-09.md`). The binding owner ruling holds throughout: a MIDI message a learn map takes stays out of the lanes, and only the learned target's automation is written (Ruling 2).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Each MIDI or instrument track gets a chain of up to 8 built-in input effects: Arpeggiator, Transpose, Velocity, Chord and Input Quantize. The chain runs on the real-time thread while the track is armed or monitoring its input. What it plays thru is exactly what is recorded, with Input Quantize applied to recorded note starts only. The chain is an undoable lane edit, edited from an FX button and popover on the track header and from `lane.set_input_fx` on the control channel.
+**Goal:** Each MIDI or instrument track gets a chain of up to 8 built-in input effects: Arpeggiator, Transpose, Velocity, Chord and Input Quantize. The chain runs on the real-time thread while the track is armed or monitoring its input. What it plays thru is exactly what is recorded, with Input Quantize applied to recorded note starts only. The chain is an undoable lane edit, edited from a MIDI FX section beneath Inserts on the channel strip and from `lane.set_input_fx` on the control channel.
 
 **Architecture:**
 - **`core-model`** gains `core_model::input_fx` (`InputFx`, `InputFxKind` and the effects' settings, with their checks), `Lane.input_fx` and `LaneCmd::SetInputFx`. The field is saved only when the chain is not empty; `file::VERSION` goes 4 → 5 with an identity migration (Ruling 18).
@@ -19,7 +19,7 @@
   - The lane's input spec now carries the chain.
 - **`core-control`, Swift, `vizctl`:**
   - The control channel gets `lane.set_input_fx` and `state.get document`'s `input_fx` per lane. `state.get input` reports the count of dropped notes.
-  - The app gets `InputFxModel`, the track header's FX button (lit in the theme's accent when the chain is active) and the effects popover.
+  - The app gets `InputFxModel` and the instrument strips' MIDI FX section beneath Inserts: up to 8 slots, each with a settings popover and a bypass. The section is lit in the theme's accent colour when the chain is active.
   - Also in this plan: the e2e "`midi.inject` held chord into a lane with an arpeggiator while recording", README 238–244, and the spec's §13 row brought up to date.
 
 **Tech Stack:** Rust 2024 (`core-model`, `core-engine`, `core-ffi` with UniFFI 0.32.2, `core-control`, `vizctl`), Swift 6 / SwiftPM (Swift Testing; CI builds with Swift 6.1 on `macos-15`), macOS 14+.
@@ -34,8 +34,8 @@
   - note-offs on a change or a bypass;
   - post-effect recording with Input Quantize on recorded starts only;
   - no chain for lanes that are not listening, and none on playback;
-  - the FX button and popover, one undo step per gesture;
-- §6.9's FX button on the track header (`LaneHeaderView`);
+  - the chain's editor (§6.8's FX button and popover), which the owner moved on 2026-11-09 into the channel strip's MIDI FX section; one undo step per gesture;
+- §6.9's FX button: the track header (`LaneHeaderView`) is left unchanged, and the section is in the strip instead (Ruling 16). Task 10 amends §6.8 and §6.9 to match;
 - §12.1's `lane.set_input_fx { lane, chain }` and `state.get`'s per-lane `input_fx`;
 - §12.3's MIDI input effects tests, the arpeggiator e2e, `rt-check` over the chain, and the manual checklist's "the arpeggiator against a real keyboard, synced and free-running";
 - spec Ruling 27.
@@ -171,16 +171,24 @@ Each ruling decides something the spec leaves open: what — why — cost if wro
     - `input_fx_from_json` refuses text over 64 KiB, but the channel already caps a text parameter at `MAX_STRING = 4096` bytes (`crates/core-control/src/params.rs`); a full 8-effect chain is about 1.6 KB, so the channel's cap is the one users meet.
     - Duplicate Track copies the chain (it clones the lane); Same Tracks as copies none, as it copies no input settings.
     - — One JSON shape everywhere, by serde. — A shape to migrate before release.
-15. **Undo and recording.** `LaneCmd::SetInputFx` is one undo step, "Set Input Effects"; a popover gesture (a slider drag, a stepper press, a drag to reorder, an add) is one call. Chain edits are allowed while recording: they do not change which tracks record, so 5d-1 Ruling 18's guard (`retries_input_cmd`) does not apply, and the change is heard at once (Ruling 5). While recording, the edit joins the take's Record step, as every edit made during a take does (`crates/core-ffi/tests/record.rs`, 5c): one Undo removes the take and the chain change together. — Spec §6.8, "one step per gesture"; changing the rate mid-take is a performance move. — One line in `retries_input_cmd`.
-16. **The FX button and popover.**
-    - `HeaderControl.fx` is an 18 × 18 toggle labelled "FX" at x 92 in the header's top row. Since the Tracks plan the row starts with the 16-pt kind icon at x 8 and the name at `nameX = 8 + 16 + theme.spacing.xs`; the name now ends at x 88 (it ended at 109), leaving the monitor button at x 113.
-    - Lit in the theme's accent (`theme.fxColour`, a new `EditorTheme` role `accent.accent.nsColor`) when the chain has an effect that is not bypassed; unlit as the other toggles. No colour literal: only the theme bridges name colours.
-    - Drawn and clickable on MIDI and instrument tracks only. An audio track's slot is blank and a click there does nothing, as its destination slot does; the model and the channel still accept a chain on such a lane (its kind follows its routing and can change), and it never runs there, since only MIDI inputs get routes.
-    - A click opens an `NSPopover` from the button, through a `@MainActor final class InputFxPopoverController: NSObject, NSPopoverDelegate` modelled on `RecordPopoverController` (`.transient`, `animates = false`), held strongly by the header; its `popoverDidClose` calls `document.inputFx.close()`. The content is a SwiftUI `InputFxPopover` the app installs through the hook `LaneHeaderView.fxPopoverContent`, since `VizDAWEditors` has no SwiftUI.
-    - A control-channel click (`ControlUI.isChannel`) opens the model on the track but no popover, and sets the status line to "Input Effects opens a popover: use lane.set_input_fx over the control channel." (as the "+ Add Track" row does).
-    - The track's context menu (`laneMenu`) gains "Input Effects…", which opens the same popover from the FX button's rect, so keyboard and VoiceOver users reach it. VoiceOver's header label (`ArrangementA11y.header`) gains ", input effects on" when lit.
-    - The popover shows the chain list (drag to reorder, a bypass checkbox and remove per row, an Add menu of the five kinds) and, under it, the selected effect's controls.
-    - — §6.9's FX button; AppKit in the header and SwiftUI in the app follow the layering; the accent is "active toggles" in the design tokens. — A layout change; a 60-pt name truncates long track names sooner.
+15. **Undo and recording.** `LaneCmd::SetInputFx` is one undo step, "Set Input Effects"; a gesture in the MIDI FX section or its settings popover (a slider drag, a stepper press, a drag to reorder, an add, a bypass) is one call. Chain edits are allowed while recording: they do not change which tracks record, so 5d-1 Ruling 18's guard (`retries_input_cmd`) does not apply, and the change is heard at once (Ruling 5). While recording, the edit joins the take's Record step, as every edit made during a take does (`crates/core-ffi/tests/record.rs`, 5c): one Undo removes the take and the chain change together. — Spec §6.8, "one step per gesture"; changing the rate mid-take is a performance move. — One line in `retries_input_cmd`.
+16. **The strip's MIDI FX section (owner ruling 2026-11-09, binding; it replaces the first draft's FX button and popover on the track header).**
+    - The track header is unchanged: no FX control, and the name field keeps its full width (it ends at x 109).
+    - The chain is edited in the channel strip. A "MIDI FX" section sits beneath Inserts (`StripRowKind.midiFx`, a shared row like the others) on instrument strips only: a plugin instrument's main strip and the shared Built-in Synth strip. Audio paths, buses, master and an instrument's extra outputs have no section.
+    - Its slots behave like insert slots, up to 8:
+      - a click on the empty "+" slot pops up a menu of the five effects;
+      - a click on a filled slot opens that effect's settings in a popover anchored to the slot;
+      - the slot's dot is its bypass toggle;
+      - a drag reorders the slots within the track's chain.
+      The heading lights in `theme.accent.accent` (the active-toggle colour) when `InputFxModel.isLit` holds for the track the section edits.
+    - **Which track (controller ruling).** One strip can serve several tracks: several tracks playing one instrument destination, or every track on the shared Built-in Synth strip. The section therefore follows the AudioPath input controls' precedent (5d-2 Ruling 4, `MixerModel.inputLane(for:)`):
+      - in the Mix view, the bottom pane and the mixer window, it edits the first armed track of the shown sequence that plays through the strip, else the first such track;
+      - in the left pane, it edits the focused track (`focusLanes().first`, the track that `synthFocus` and `StripFocus` follow).
+      - With no such track, the section shows its heading and a disabled "+".
+      `MixerModel.midiFxLane(for:in:)` holds the rule, so it is tested in `VizDAWAppModelTests`.
+    - **The channel.** With the channel on (`MediaModel.channelIsOn()`), a click on the empty slot or a filled slot opens no menu and no popover. It opens the editor on the track, selects the slot and sets the status line to "MIDI FX opens a menu or a popover: use lane.set_input_fx over the control channel." This follows the `channelOn:` pattern of `SynthSheets.beginTrackSynth` and the "+ Add Track" row's status. The bypass dot opens nothing, so the channel may press it. The section has no context menu, and no SwiftUI `Menu`, because those open on the press before code can check the channel.
+    - **Known gap.** A MIDI track that plays an external destination, or none, has no channel strip (`StripFocus` shows the inspector). Until the owner places it, such a track's chain is reachable only through `lane.set_input_fx`. The model and the channel still accept a chain on any lane, including an audio-kind one (a track's kind follows its routing and can change); the chain only runs on MIDI inputs.
+    - — The owner's placement; the controller's precedent for strips that serve several tracks; the channel rule. — A view to move, and one placement rule in `midiFxLane`.
 17. **Counters.** `Counters` gains `midi_fx_dropped`; `InputInfoRow` gains `midi_fx_dropped`, which `state.get input` reports as `"midi_fx_dropped"`. — §6.8's "counts it" needs a place to be read. — A field to move.
 18. **File format 5 (pre-flight I1, ledger ruling).** `core_model::file::VERSION` goes 4 → 5 with `migrate_v4_to_v5`, the identity ("lanes gain an optional `input_fx`"), following 7b Ruling 8: a pre-5g build then refuses a project with a chain with its `NewerFormat` message rather than an unknown-field Corrupt. `Lane.input_fx` stays `#[serde(default, skip_serializing_if = "Vector::is_empty")]`, so a version-4 project opens with empty chains and a project without chains differs from before only in its version. — The ledger's ruling, 7b's precedent. — None beyond one migration step.
 
@@ -202,8 +210,8 @@ Each ruling decides something the spec leaves open: what — why — cost if wro
 | `crates/core-ffi/src/passes.rs`, `tests/passes.rs` | 5 | recording `LiveMsg`, Input Quantize |
 | `crates/core-ffi/src/input_fx.rs`, `src/lib.rs`, `src/edit.rs`, `src/snapshot.rs`, `src/host.rs`, `src/live.rs`, `src/session.rs`, `tests/input_fx.rs`, `tests/record.rs`, `tests/learn.rs`, `tests/control.rs` | 6 | the FFI |
 | `crates/core-control/src/registry.rs`, `tests/commands.rs`, `crates/core-ffi/src/control.rs`, `tests/control.rs`, `app/Sources/VizDAWAppModel/InputFxCommands.swift`, `ControlCommands.swift`, `app/Tests/VizDAWAppModelTests/InputFxCommandsTests.swift` | 7 | the channel |
-| `app/Sources/VizDAWAppModel/InputFxModel.swift`, `DocumentModel.swift`, `app/Tests/VizDAWAppModelTests/InputFxModelTests.swift` | 8 | the popover's model |
-| `app/Sources/VizDAWEditors/ArrangementLayout.swift`, `LaneHeaderView.swift`, `EditorTheme.swift`, `InputFxPopoverController.swift`, `app/Sources/VizDAW/InputFxPopover.swift`, `VizDAWApp.swift`, `app/Tests/VizDAWAppModelTests/LaneHeaderInputTests.swift`, `app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift` | 9 | the FX button and popover |
+| `app/Sources/VizDAWAppModel/InputFxModel.swift`, `DocumentModel.swift`, `app/Tests/VizDAWAppModelTests/InputFxModelTests.swift` | 8 | the MIDI FX editor's model |
+| `app/Sources/VizDAWAppModel/InputFxModel.swift`, `MixerModel.swift`, `StripLayout.swift`, `app/Sources/VizDAW/ChannelStrip.swift`, `MixerView.swift`, `StripMidiFx.swift`, `InputFxSettings.swift`, `app/Tests/VizDAWAppModelTests/MidiFxSectionTests.swift` | 9 | the strip's MIDI FX section |
 | `crates/vizctl/tests/e2e.rs`, `app/README.md`, `docs/superpowers/specs/2026-10-18-recording-audio-design.md` | 10 | e2e, README 238–244, the spec row |
 
 ---
@@ -2664,7 +2672,7 @@ git log -1 --oneline && git show --stat HEAD
 
 ---
 
-### Task 8: `InputFxModel`, the popover's model
+### Task 8: `InputFxModel`, the MIDI FX editor's model
 
 **Files:**
 - Create: `app/Sources/VizDAWAppModel/InputFxModel.swift`, `app/Tests/VizDAWAppModelTests/InputFxModelTests.swift`
@@ -2680,7 +2688,7 @@ git log -1 --oneline && git show --stat HEAD
       /// Its document, as `LaneInputs` holds it (no retain cycle).
       @ObservationIgnored public weak var document: DocumentModel?
       public init(document: DocumentModel)
-      /// The lane whose chain the popover shows; nil when closed.
+      /// The lane whose chain the editor shows; nil when closed.
       public private(set) var lane: UInt64?
       /// The selected row.
       public var selected: Int?
@@ -2691,9 +2699,9 @@ git log -1 --oneline && git show --stat HEAD
       /// The open lane's chain, the draft shown in place of the selected row;
       /// `[]` when the lane is no longer in `document.lanes` (an Undo removed it).
       public var chain: [InputFxRow] { get }
-      /// The FX button exists on MIDI and instrument tracks, not audio ones (Ruling 16).
-      nonisolated public static func showsButton(_ lane: LaneRow) -> Bool
-      /// `showsButton`, and the chain has an effect that is not bypassed.
+      /// The strip's MIDI FX section edits MIDI and instrument tracks, not audio ones (Ruling 16).
+      nonisolated public static func showsSection(_ lane: LaneRow) -> Bool
+      /// `showsSection`, and the chain has an effect that is not bypassed.
       nonisolated public static func isLit(_ lane: LaneRow) -> Bool
       nonisolated public static func defaultKind(_ name: InputFxName) -> InputFxKindRow  // Ruling 14's defaults
       nonisolated public static func title(_ kind: InputFxKindRow) -> String  // "Arpeggiator", …, "Input Quantize"
@@ -2723,12 +2731,12 @@ import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
 
-/// The input effects popover's model (plan 5g-1 Task 8; spec §6.8 UI):
+/// The input effects editor's model (plan 5g-1 Task 8; spec §6.8 UI):
 /// add, remove, reorder, bypass and settings, each one undoable lane edit;
-/// a slider drag is one edit at its end; the FX button's lit state.
+/// a slider drag is one edit at its end; the strip's MIDI FX section lit state.
 @MainActor
 @Suite(.serialized) struct InputFxModelTests {
-    /// Song's Chords lane (31) with `chain`, the popover open on it.
+    /// Song's Chords lane (31) with `chain`, the editor open on it.
     func model(_ chain: [InputFxRow] = []) throws -> (DocumentModel, FakeSession) {
         let f = editorFake()
         f.laneTable[3]?[1].inputFx = chain
@@ -2801,20 +2809,20 @@ import VizDAWCore
         #expect(m.editor.status == "A chain holds one Input Quantize.")
     }
 
-    @Test func theButtonIsLitForAnActiveChain() {
+    @Test func theSectionIsLitForAnActiveChain() {
         var l = lane(31, "Chords")
         #expect(!InputFxModel.isLit(l))
         l.inputFx = [InputFxRow(kind: .transpose(semitones: 3), bypass: true)]
         #expect(!InputFxModel.isLit(l), "all bypassed")
         l.inputFx.append(InputFxRow(kind: .chord(intervals: [4, 7]), bypass: false))
         #expect(InputFxModel.isLit(l))
-        #expect(InputFxModel.showsButton(l))
+        #expect(InputFxModel.showsSection(l))
         var audio = lane(40, "Vox", kind: .audio)
         audio.inputFx = l.inputFx
-        #expect(!InputFxModel.showsButton(audio) && !InputFxModel.isLit(audio), "no FX on an audio track")
+        #expect(!InputFxModel.showsSection(audio) && !InputFxModel.isLit(audio), "no MIDI FX section on an audio track")
     }
 
-    /// Pre-flight I11: the popover's model follows the document. A lane an
+    /// Pre-flight I11: the editor's model follows the document. A lane an
     /// Undo removed shows no chain and takes no edit; another sequence
     /// closes it.
     @Test func theChainFollowsAnUndoneLaneAndClosesWithTheSequence() throws {
@@ -2869,103 +2877,285 @@ git log -1 --oneline && git show --stat HEAD
 
 ---
 
-### Task 9: The FX button and the effects popover
+### Task 9: The strip's MIDI FX section
+
+The owner's ruling (2026-11-09, binding): the chain is edited in the channel strip, in a "MIDI FX" section beneath Inserts, not from the track header. The header is not touched, so its name field keeps its full width (Ruling 16).
 
 **Files:**
-- Modify: `app/Sources/VizDAWEditors/ArrangementLayout.swift` (`HeaderControl.fx`, the layout, the VoiceOver label), `app/Sources/VizDAWEditors/LaneHeaderView.swift` (draw, click, the context-menu item, the popover hook), `app/Sources/VizDAWEditors/EditorTheme.swift` (`fxColour`), `app/Sources/VizDAW/VizDAWApp.swift` (installs the hook once)
-- Create: `app/Sources/VizDAWEditors/InputFxPopoverController.swift`, `app/Sources/VizDAW/InputFxPopover.swift`
-- Test: modify `app/Tests/VizDAWAppModelTests/LaneHeaderInputTests.swift`, `app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift`
+- Modify: `app/Sources/VizDAWAppModel/InputFxModel.swift` (the section's clicks, the settings slot, `chain(of:)`, drag and drop; `open` and `close` clear the settings slot), `app/Sources/VizDAWAppModel/MixerModel.swift` (`showsMidiFx`, `midiFxLane(for:in:)`), `app/Sources/VizDAWAppModel/StripLayout.swift` (`StripRowKind.midiFx`), `app/Sources/VizDAW/ChannelStrip.swift` (the row in `StripCells`; `StripHeading` gains `lit`; it and `StripAddFace` lose `private`; the doc line's row list), `app/Sources/VizDAW/MixerView.swift` (`InstrumentMenuAction` loses `private`; `MidiFxMenu` beside `InstrumentMenu`)
+- Create: `app/Sources/VizDAW/StripMidiFx.swift` (the section and its slots), `app/Sources/VizDAW/InputFxSettings.swift` (the settings popover's content)
+- Test: create `app/Tests/VizDAWAppModelTests/MidiFxSectionTests.swift`
+- Not touched: `LaneHeaderView.swift`, `ArrangementLayout.swift`, `EditorTheme.swift`, `VizDAWApp.swift`.
 
 **Interfaces:**
-- Consumes: `InputFxModel` (Task 8), `RecordPopoverController`'s pattern (`app/Sources/VizDAWEditors/RecordPopoverController.swift:30-49`), `ControlUI.isChannel`, `TrackCommands.addTrackOnChannel`'s pattern.
-- Produces:
-  - `HeaderControl.fx` (the enum at `ArrangementLayout.swift:198` gains the case; both `switch control` statements in `LaneHeaderView.mouseDown` and the one in `draw` get it, `.fx` joining the toggles that leave the selection).
-  - `LaneHeaderLayout.controls(rowTop:theme:)`: `.name` becomes `CGRect(x: nameX, y: y + 4, width: 88 - nameX, height: 18)` and `(.fx, CGRect(x: 92, y: y + 4, width: 18, height: 18))` follows it; its doc line says the name now ends at x 88 for the FX button, the monitor button staying at x 113 (Ruling 16).
-  - `var fxColour: NSColor { accent.accent.nsColor }` in `EditorTheme.swift` under the state roles (`armColour` … at :47).
-  - `@MainActor public static var fxPopoverContent: ((DocumentModel) -> NSViewController)?` on `LaneHeaderView`.
-  - `@MainActor public final class InputFxPopoverController: NSObject, NSPopoverDelegate` with `init(model: InputFxModel, content: NSViewController)` (`popover.behavior = .transient`, `animates = false`) and `popoverDidClose` → `model.close()`. The header keeps the open one in a strong `private var fxPopover: InputFxPopoverController?`.
-  - `func showFx(seq: UInt64, lane: LaneRow, from r: CGRect, channel: Bool)` on `LaneHeaderView`: `document.inputFx.open(lane: lane.id)`; then, on a channel click, `editor.status = LaneHeaderView.fxOnChannel` and nothing else; otherwise it makes the hook's controller and shows it from `r` when the header is in a window (no hook or no window, as in tests: the model only).
-  - `static let fxOnChannel = "Input Effects opens a popover: use lane.set_input_fx over the control channel."`
-  - `laneMenu(seq:lane:)` gains "Input Effects…" (before the colour item, enabled when `InputFxModel.showsButton(lane)`), which calls `showFx` from the row's FX rect.
-  - `ArrangementA11y.header(_:returnOf:)` appends ", input effects on" when `InputFxModel.isLit(lane)`, after the monitor part.
-  - `InputFxPopover: View` in the app (Ruling 16), shown as `NSHostingController(rootView: InputFxPopover(model: $0.inputFx).themedRoot())`:
-    - a `List` of the chain with `.onMove` → `move`, a bypass `Toggle` per row → `setBypass`, and a remove button → `remove`; an "Add" `Menu` of the five kinds;
-    - the selected effect's controls: Arpeggiator: mode `Picker`; rate `Picker`s (1/1…1/64; straight, dotted, triplet); octaves `Stepper` 1–4; gate `Slider` 5–200; velocity `Picker` As Played/Fixed with a `Stepper` 1–127; Latch `Toggle`. Transpose: `Stepper` −48…48. Velocity: scale `Slider` 0–400, offset `Slider` −127…127, min/max `Stepper`s, Fixed `Toggle` + `Stepper`. Chord: up to 6 interval `Stepper`s with add and remove. Input Quantize: grid `Picker` from `quantizeGrids`, strength `Slider` 0–100;
-    - sliders use `onEditingChanged` → `beginDraft`/`commitDraft`, with `setDraft` while they move; pickers, steppers and toggles call `update`;
-    - the theme and scan rules (7b, 7d): it reads `@Environment(\.symbioticTheme) private var theme` and takes spacing, radii, fonts and colours only from it (`theme.spacing.*`, `theme.radius.*`, `theme.type.*`, as `RecordControls.swift` does), never `.padding()` without a token, `spacing:` literals, `.font(.caption)`, `.bold()` or a colour literal; add and remove use `AppIcon.add` and `AppIcon.remove` through `AppIcon.image(size:)`, never `Image(systemName:)` or `systemImage:`; typed numbers, if any, use the design package's `NumberBox` as `ChannelStrip.swift:633` does (Return commits, leaving cancels), never a `TextField`; no `@State`: the selection and the draft live in `InputFxModel`.
+- Consumes: `InputFxModel` (Task 8: `open`, `close`, `selected`, `chain`, `showsSection`, `isLit`, `title`, `summary`, `defaultKind`, `quantizeGrids`, `add`, `remove`, `move`, `setBypass`, `update`, the draft calls). Also used: `StripFocus.strip(of:destinations:strips:)` (`PaneContent.swift`), `DocumentModel.focusLanes()`, `MixerModel.inputLane(for:)`'s rule (`MixerModel.swift:199-208`), `MediaModel.channelIsOn` and `SynthSheets.beginTrackSynth`'s `channelOn:` pattern (`SynthSheets.swift:77-82`), the inserts' slot look (`SlotView`, `MixerView.swift:220-262`), the inserts' popover binding (`StripInserts`, `ChannelStrip.swift:515-555`) and `InstrumentMenu.popUp` (`MixerView.swift:352-387`).
+- Produces, in `VizDAWAppModel`:
+  ```swift
+  // StripLayout.swift: the section's row, between the inserts and the sends.
+  public enum StripRowKind: Int, CaseIterable, Sendable {
+      case header, instrument, input, eq, inserts, midiFx, sends, output, pan
+  }
 
-- [ ] **Step 1: Write the failing tests.**
-   - In `ArrangementLayoutTests.headerControlsAreFoundByPosition` (`app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift:135`), add `#expect(LaneHeaderLayout.control(at: CGPoint(x: 100, y: 48 + 10), rowTop: 48) == .fx)` and `#expect(LaneHeaderLayout.control(at: CGPoint(x: 50, y: 48 + 10), rowTop: 48) == .name)`. `LaneHeaderInputTests.theControlsShareTheRowWithoutOverlapping` (:170) already covers the new rect.
-   - In `LaneHeaderInputTests.voiceOverSaysTheInputAndMonitoring` (:207), add the lit case: with `l.monitor = .auto` and `l.inputFx = [InputFxRow(kind: .chord(intervals: [4, 7]), bypass: false)]`, `#expect(ArrangementA11y.header(l) == "Vocal, no destination, armed, input In 1+2, input effects on")`.
-   - Append to `LaneHeaderInputTests`:
+  extension MixerModel {  // or in the class body
+      /// Whether `strip` has the MIDI FX section (Ruling 16): a plugin
+      /// instrument's main strip or the shared Built-in Synth strip; not an
+      /// instrument's extra output, an audio path, a bus or master.
+      public func showsMidiFx(_ strip: StripRow) -> Bool
+      /// The track `strip`'s MIDI FX section edits (Ruling 16); nil when
+      /// the strip has no section or no track plays through it. A track
+      /// plays through `strip` when `StripFocus.strip(of:)` names it and
+      /// `InputFxModel.showsSection` holds. The left pane (`.strip`): the
+      /// focused track (`document.focusLanes().first`) when it plays
+      /// through `strip`. Every other placement: of the shown sequence's
+      /// tracks that play through `strip`, the first armed one, else the
+      /// first (5d-2 Ruling 4, as `inputLane(for:)`).
+      public func midiFxLane(for strip: StripRow, in placement: MixerPlacement) -> LaneRow?
+  }
 
-```swift
-    @Test func theFxButtonIsLitByAnActiveChainAndOpensTheTracksChain() throws {
+  // InputFxModel.swift, in the class body:
+  /// Where a slot's settings popover shows: one at a time (Ruling 16).
+  public struct SettingsSlot: Equatable, Sendable {
+      public let placement: MixerPlacement
+      public let strip: UInt64
+      public let index: Int
+  }
+  /// The slot whose settings popover is shown; nil when none is.
+  public private(set) var settings: SettingsSlot?
+  public static let sectionOnChannel =
+      "MIDI FX opens a menu or a popover: use lane.set_input_fx over the control channel."
+  /// `lane`'s chain as its slots show it: `chain` (the draft in place) when
+  /// `lane` is the open one, else `lane.inputFx`.
+  public func chain(of lane: LaneRow) -> [InputFxRow]
+  /// A click on the empty slot. Opens the editor on `lane` when another
+  /// lane (or none) is open. Answers whether the caller may pop up the
+  /// effect menu: with the channel on it may not, and the status line is
+  /// `sectionOnChannel`.
+  public func clickEmpty(lane: UInt64, channelOn: Bool = MediaModel.channelIsOn()) -> Bool
+  /// A click on slot `i`: opens on `lane` as above and selects `i`. Then it
+  /// shows `i`'s settings in `placement`; with the channel on it sets the
+  /// status line instead.
+  public func clickSlot(
+      _ i: Int, lane: UInt64, strip: UInt64, in placement: MixerPlacement,
+      channelOn: Bool = MediaModel.channelIsOn())
+  public func showsSettings(strip: UInt64, index: Int, in placement: MixerPlacement) -> Bool
+  /// The popover closed. A draft still open is committed (one edit, as
+  /// `commitDraft`), and `settings` becomes nil. The editor stays open.
+  public func closeSettings()
+  /// The slot's bypass dot: opens on `lane` as above, then `setBypass(i, !bypass)`.
+  /// It is a plain toggle that opens nothing, so the channel may press it.
+  public func toggleBypass(_ i: Int, lane: UInt64)
+  /// A slot's drag payload: "midifx:<lane>:<index>".
+  nonisolated public static func dragText(lane: UInt64, index: Int) -> String
+  /// A payload dropped on slot `i` of `lane`. The dragged slot lands at `i`:
+  /// one `move(from: [from], to: from < i ? i + 1 : i)`. Refused (false,
+  /// no edit) for another lane's slot or a plugin slot's "slot:<id>".
+  public func drop(_ text: String, onto i: Int, lane: UInt64) -> Bool
+  ```
+  `open(lane:)` and `close()` also set `settings = nil`, so `DocumentModel.select(_:)` closing the editor (Task 8) closes the popover too.
+- Produces, in the app (`VizDAW`):
+  - In `StripCells.body`, after the inserts' row: `if model.showsMidiFx(strip) { row(.midiFx, band: .dark) { StripMidiFx(model: model, strip: strip) } }`. The row shares its height across strips as every row does (`StripGrid`), and a strip without the section leaves it empty.
+  - `StripHeading(text:lit:)`, where `lit` defaults to false. A lit heading is drawn in `theme.accent.accent.color`, the theme's active-toggle colour that the selected strip's edge also uses; unlit, in `theme.text.secondary.color` as now.
+  - `struct StripMidiFx: View`, created in `StripMidiFx.swift`. It reads `@Environment(\.mixerPlacement)` and `\.symbioticTheme`, and gets `let lane = model.midiFxLane(for: strip, in: placement)` and `let fx = model.document.inputFx`. Its layout is `StripInserts`'s: a `VStack(alignment: .leading, spacing: theme.spacing.xxs)` holding:
+    - `StripHeading(text: "MIDI FX", lit: lane.map(InputFxModel.isLit) ?? false)`;
+    - with a lane, one `MidiFxSlot` per row of `fx.chain(of: lane)`. Then, while the chain has fewer than 8 rows, the empty slot: a `Button` showing `StripAddFace(text: "+")`, whose action is `if fx.clickEmpty(lane: lane.id) { MidiFxMenu.popUp(fx) }`. Its help is "Add a MIDI effect" and its VoiceOver label "Add a MIDI effect to \(lane.name)";
+    - with no lane, the same face in a disabled button, with the help "No track in this sequence plays through this strip.";
+    - on the whole section, `.accessibilityElement(children: .contain)`, the label "MIDI FX of \(lane?.name ?? strip.name)" and the value "on" when lit, else "off".
+  - `struct MidiFxSlot: View`, in the same file, looks like `SlotView`: an `HStack(spacing: theme.spacing.xs)` on `theme.surface.inset` with a `theme.surface.separator` edge, `theme.radius.s` corners and `minHeight: 20`.
+    - The bypass dot is a `.plain` `Button` holding a 6 × 6 `Circle`, filled with `theme.state.play.color` when the effect is on and `theme.text.disabled.color` when bypassed. Its frame is `ControlMetrics.hitSize(.toggle)`, and its action is `fx.toggleBypass(i, lane: lane.id)`.
+    - `InputFxModel.title(kind)` in `theme.type.caption.font`, with `.strikethrough(bypass)`, then `InputFxModel.summary(kind)` in `theme.text.secondary.color`. Both use `.lineLimit(1)`.
+    - `.onTapGesture { fx.clickSlot(i, lane: lane.id, strip: strip.id, in: placement) }`.
+    - `.popover(isPresented: Binding(get: { fx.showsSettings(strip: strip.id, index: i, in: placement) }, set: { if !$0 { fx.closeSettings() } })) { InputFxSettings(model: fx) }`, presented as `StripInserts` presents its browser.
+    - `.draggable(InputFxModel.dragText(lane: lane.id, index: i))` and `.dropDestination(for: String.self) { items, _ in items.first.map { fx.drop($0, onto: i, lane: lane.id) } ?? false }`.
+    - For VoiceOver: `.accessibilityElement(children: .ignore)`, the label "\(title), \(summary)", the value "bypassed" or "on", `.isButton`, the hint "Opens its settings", and `.accessibilityAction(named: bypass ? "Turn On" : "Bypass") { fx.toggleBypass(i, lane: lane.id) }`.
+    - No `.contextMenu`: a right-click from the channel would open it. Bypass is on the dot, and Remove is in the popover.
+  - `@MainActor enum MidiFxMenu { static func popUp(_ fx: InputFxModel) }` in `MixerView.swift`. It is an `NSMenu` (`autoenablesItems = false`) with one item per `InputFxName.allCases`, titled `InputFxModel.title(InputFxModel.defaultKind(name))`, and each item calls `fx.add(name)`. It reuses `InstrumentMenuAction` and pops up at `NSEvent.mouseLocation`, as `InstrumentMenu.popUp` does. A SwiftUI `Menu` is not used: it opens on the press, before any code can apply the channel rule.
+  - `struct InputFxSettings: View` in `InputFxSettings.swift` shows the effect `fx.selected` of `fx.chain`, or nothing when that index is gone:
+    - a top row: the title in `theme.type.caption.font.weight(.semibold)`, a bypass `Toggle` (→ `setBypass`), and a Remove `.plain` button drawn with `AppIcon.remove` as `EqSlotView` draws `AppIcon.eq`. Remove calls `fx.remove(at: i)` and then `fx.closeSettings()`;
+    - then the effect's controls. Arpeggiator: a mode `Picker`; rate `Picker`s (1/1 to 1/64; straight, dotted or triplet); an octaves `Stepper` 1–4; a gate `Slider` 5–200; a velocity `Picker` (As Played or Fixed) with a `Stepper` 1–127; a Latch `Toggle`. Transpose: a `Stepper` −48…48. Velocity: a scale `Slider` 0–400, an offset `Slider` −127…127, min and max `Stepper`s, and a Fixed `Toggle` with a `Stepper`. Chord: up to 6 interval `Stepper`s with add and remove (`AppIcon.add`, `AppIcon.remove`). Input Quantize: a grid `Picker` from `quantizeGrids` and a strength `Slider` 0–100;
+    - sliders call `beginDraft` and `commitDraft` from `onEditingChanged`, and `setDraft` while they move. Pickers, steppers and toggles call `update`;
+    - the theme and scan rules (7b, 7d). It reads `@Environment(\.symbioticTheme) private var theme`, and every spacing, radius, font and colour comes from it (`theme.spacing.*`, `theme.radius.*`, `theme.type.*`, as `RecordControls.swift` does). So: no `.padding()` without a token, no `spacing:` literal, no `.font(.caption)`, no `.bold()`, no colour literal. Icons come only through `AppIcon`, never `Image(systemName:)` or `systemImage:`. Typed numbers, if any, use the design package's `NumberBox` as `ChannelStrip.swift:633` does, never a `TextField`. No `@State`: the selection and the draft live in `InputFxModel`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```bash
+cat > app/Tests/VizDAWAppModelTests/MidiFxSectionTests.swift <<'VIZDAW_EOF'
+import Foundation
+import Testing
+import VizDAWCore
+@testable import VizDAWAppModel
+
+/// The strip's MIDI FX section (plan 5g-1 Task 9, Ruling 16; owner
+/// 2026-11-09): which strips have it, which track it edits when one strip
+/// serves several, and that a control-channel click opens nothing.
+@MainActor
+@Suite(.serialized) struct MidiFxSectionTests {
+    let up12 = InputFxRow(kind: .transpose(semitones: 12), bypass: false)
+    let down5 = InputFxRow(kind: .transpose(semitones: -5), bypass: false)
+
+    /// Song (3): Keys A (30) and Keys B (31) play the built-in synth
+    /// (destination 4, strip 1); Piano (32) plays a plugin instrument
+    /// (destination 7, strip 5); Vocal (33) plays audio path 8 (strip 6).
+    /// Bus 1 is strip 2, Master strip 0.
+    func mixer(armB: Bool = false) throws -> (MixerModel, FakeSession) {
+        let f = mixerFake()
+        f.dests = [
+            DestRow(id: 4, name: "Built-in Synth", plugin: nil),
+            DestRow(
+                id: 7, name: "Piano",
+                plugin: PluginRefRow(format: .clap, id: "x.piano", name: "Piano", vendor: "V", version: "1")),
+        ]
+        f.mixerSnap.strips.insert(stripRow(5, "Piano", kind: .instrument(dest: 7)), at: 1)
+        f.mixerSnap.strips.insert(stripRow(6, "Vocal", kind: .audioPath(path: 8)), at: 2)
+        var a = lane(30, "Keys A")
+        a.midiDest = 4
+        var b = lane(31, "Keys B", kind: .instrument)
+        b.midiDest = 4
+        b.arm = armB
+        var p = lane(32, "Piano")
+        p.midiDest = 7
+        var v = lane(33, "Vocal", kind: .audio)
+        v.audioOut = 8
+        f.laneTable[3] = [a, b, p, v]
+        let m = try MixerModel(document: DocumentModel(session: f))
+        m.document.select(3)
+        return (m, f)
+    }
+
+    func strip(_ m: MixerModel, _ id: UInt64) throws -> StripRow {
+        try #require(m.snapshot.strips.first { $0.id == id })
+    }
+
+    @Test func aStripTwoTracksShareEditsTheArmedOneInTheMixView() throws {
+        let (m0, _) = try mixer()
+        #expect(m0.midiFxLane(for: try strip(m0, 1), in: .view)?.id == 30, "none armed: the first")
+        let (m, f) = try mixer(armB: true)
+        let synth = try strip(m, 1)
+        for p in [MixerPlacement.view, .pane, .window] {
+            #expect(m.midiFxLane(for: synth, in: p)?.id == 31, "\(p): the armed one")
+        }
+        #expect(m.midiFxLane(for: try strip(m, 5), in: .view)?.id == 32, "a plugin instrument's own track")
+        f.laneTable[3]?[1].inputFx = [up12]
+        f.snap.version += 1
+        m.document.refreshAfterJob()
+        let edited = try #require(m.midiFxLane(for: synth, in: .view))
+        #expect(InputFxModel.isLit(edited), "the section lights for the track it edits")
+    }
+
+    @Test func theLeftPaneEditsTheFocusedTrack() throws {
+        let (m, _) = try mixer(armB: true)
+        let synth = try strip(m, 1)
+        #expect(m.midiFxLane(for: synth, in: .strip)?.id == 31, "nothing selected: the armed track is followed")
+        m.document.editor.selectTrack(seq: 3, lane: 30, extend: false)
+        #expect(m.midiFxLane(for: synth, in: .strip)?.id == 30, "the selected track, though another is armed")
+        #expect(m.midiFxLane(for: synth, in: .view)?.id == 31, "the Mix view still edits the armed one")
+        m.document.editor.selectTrack(seq: 3, lane: 32, extend: false)
+        #expect(m.midiFxLane(for: synth, in: .strip) == nil, "the focused track plays another strip")
+        #expect(m.midiFxLane(for: try strip(m, 5), in: .strip)?.id == 32)
+    }
+
+    @Test func audioStripsAndBusesHaveNoSection() throws {
+        let (m, _) = try mixer()
+        for id: UInt64 in [6, 2, 0] {  // Vocal (an audio path), Bus 1, Master
+            let s = try strip(m, id)
+            #expect(!m.showsMidiFx(s), "\(s.name)")
+            #expect(m.midiFxLane(for: s, in: .view) == nil, "\(s.name)")
+            #expect(m.midiFxLane(for: s, in: .strip) == nil, "\(s.name)")
+        }
+        #expect(!m.showsMidiFx(stripRow(9, "Piano 2", kind: .instrumentOutput(dest: 7, index: 1))), "an extra output")
+        // An instrument strip that no track of the shown sequence plays:
+        // the section is there, with nothing to edit.
+        m.document.select(2)
+        let synth = try strip(m, 1)
+        #expect(m.showsMidiFx(synth))
+        #expect(m.midiFxLane(for: synth, in: .view) == nil)
+    }
+
+    /// Programmatic calls open nothing (Global Constraints): with the
+    /// channel on, a click on the empty slot or a filled one opens no menu
+    /// and no popover, and edits nothing.
+    @Test func aClickFromTheChannelOpensNothing() throws {
         let f = editorFake()
-        f.laneTable[3]?[1].inputFx = [InputFxRow(kind: .chord(intervals: [4, 7]), bypass: false)]
+        f.laneTable[3]?[1].inputFx = [up12]
         let m = try DocumentModel(session: f)
         m.select(3)
-        #expect(InputFxModel.isLit(m.lanes[1]))
-        final class Probe: NSViewController {
-            override func loadView() { view = NSView(frame: .init(x: 0, y: 0, width: 10, height: 10)) }
+        let fx = m.inputFx
+        let before = f.edits.count
+        #expect(!fx.clickEmpty(lane: 31, channelOn: true), "no effect menu")
+        #expect(m.editor.status == InputFxModel.sectionOnChannel)
+        #expect(fx.lane == 31)
+        fx.clickSlot(0, lane: 31, strip: 1, in: .view, channelOn: true)
+        #expect(fx.settings == nil, "no settings popover")
+        #expect(fx.selected == 0)
+        #expect(f.edits.count == before, "a click edits nothing")
+        // The bypass dot is a plain toggle: the channel may press it.
+        fx.toggleBypass(0, lane: 31)
+        #expect(f.edits.count == before + 1)
+        guard case .lane(edit: .setInputFx(seq: 3, lane: 31, let chain))? = f.edits.last else {
+            Issue.record("no chain edit: \(f.edits)")
+            return
         }
-        var made = 0
-        LaneHeaderView.fxPopoverContent = { _ in
-            made += 1
-            return Probe()
-        }
-        defer { LaneHeaderView.fxPopoverContent = nil }
-        let h = LaneHeaderView(document: m)
-        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1)).first { $0.0 == .fx }?.1)
-        let at = h.convert(NSPoint(x: r.midX, y: r.midY), to: nil)
-        let e = try #require(
-            NSEvent.mouseEvent(
-                with: .leftMouseDown, location: at, modifierFlags: [], timestamp: 0, windowNumber: 0,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
-        h.mouseDown(with: e)
-        #expect(m.inputFx.lane == 31)
-        #expect(made == 1, "the content is made even with no window to show it in")
-        #expect(m.editor.selection.lanes.isEmpty, "a toggle leaves the selection")
-        // The context menu reaches it too (keyboard and VoiceOver users).
-        m.inputFx.close()
-        let item = try #require(h.laneMenu(seq: 3, lane: m.lanes[1]).items.first { $0.title == "Input Effects…" })
-        #expect(item.isEnabled)
-        _ = item.target?.perform(item.action)
-        #expect(m.inputFx.lane == 31)
+        #expect(chain == [InputFxRow(kind: up12.kind, bypass: true)])
     }
 
-    @Test func aChannelClickOnFxOpensNoPopover() throws {
-        let (m, _, h) = try header(armed: false)
-        var made = 0
-        LaneHeaderView.fxPopoverContent = { _ in
-            made += 1
-            return NSViewController()
+    @Test func aUsersClickShowsTheSlotsSettingsWhereItWasClicked() throws {
+        let f = editorFake()
+        f.laneTable[3]?[1].inputFx = [up12, down5]
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        let fx = m.inputFx
+        #expect(fx.clickEmpty(lane: 31, channelOn: false), "the effect menu may open")
+        // Dragging a slot moves it within its own track's chain only.
+        #expect(InputFxModel.dragText(lane: 31, index: 1) == "midifx:31:1")
+        var before = f.edits.count
+        #expect(!fx.drop("midifx:30:1", onto: 0, lane: 31), "another track's slot")
+        #expect(!fx.drop("slot:5", onto: 0, lane: 31), "a plugin slot")
+        #expect(f.edits.count == before)
+        #expect(fx.drop("midifx:31:1", onto: 0, lane: 31))
+        guard case .lane(edit: .setInputFx(seq: 3, lane: 31, let moved))? = f.edits.last else {
+            Issue.record("no chain edit: \(f.edits)")
+            return
         }
-        defer { LaneHeaderView.fxPopoverContent = nil }
-        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1)).first { $0.0 == .fx }?.1)
-        h.showFx(seq: 3, lane: m.lanes[1], from: r, channel: true)
-        #expect(m.inputFx.lane == m.lanes[1].id)
-        #expect(made == 0)
-        #expect(m.editor.status == LaneHeaderView.fxOnChannel)
+        #expect(moved == [down5, up12])
+        // A click on a filled slot shows its settings in that placement only.
+        fx.clickSlot(0, lane: 31, strip: 1, in: .view, channelOn: false)
+        #expect(fx.settings == InputFxModel.SettingsSlot(placement: .view, strip: 1, index: 0))
+        #expect(fx.showsSettings(strip: 1, index: 0, in: .view))
+        #expect(!fx.showsSettings(strip: 1, index: 0, in: .strip), "one popover, where it was clicked")
+        // A slider's draft shows in the slot and is committed once when the popover closes.
+        before = f.edits.count
+        fx.beginDraft()
+        fx.setDraft(.transpose(semitones: -3))
+        #expect(fx.chain(of: m.lanes[1]).first?.kind == .transpose(semitones: -3), "the slot shows the draft")
+        #expect(fx.chain(of: m.lanes[0]).isEmpty, "another track shows its own chain")
+        fx.closeSettings()
+        #expect(fx.settings == nil)
+        #expect(f.edits.count == before + 1)
+        // Another sequence closes the popover with the editor.
+        fx.clickSlot(0, lane: 31, strip: 1, in: .view, channelOn: false)
+        m.select(2)
+        #expect(fx.settings == nil)
     }
+}
+VIZDAW_EOF
 ```
 
-   The click is synthesized as in `RecordUiCarryTests.theMeterHidesUnder46PointsAndTheMonitorClickCycles` (`RecordUiCarryTests.swift:70`); `header(armed:)` is the file's helper (:14).
+   `mixerFake()` and `editorFake()` both build on `demoFake()`: Song is sequence 3, and sequence 2 (Groove) has no track that plays an instrument. Lanes are refetched after a version bump with `refreshAfterJob()`, as `MixerModelTests.anAudioPathStripsInputIsItsLanes` does (`MixerModelTests.swift:38-61`). The fake records edits and does not apply them, so `drop` moves the committed `[up12, down5]`.
 
-- [ ] **Step 2: Run them to see them fail** with `scripts/swift.sh test`. Expected: FAIL to compile, because `.fx` is not found.
+- [ ] **Step 2: Run them to see them fail** with `scripts/swift.sh test`. Expected: FAIL to compile, because `midiFxLane` is not found.
 
-- [ ] **Step 3: Implement** the Interfaces:
-   - `draw`: `case .fx where InputFxModel.showsButton(lane): toggle("FX", on: InputFxModel.isLit(lane), color: theme.fxColour, in: r)`, and `case .fx: break` (an audio track's slot stays blank).
-   - `mouseDown`: `case .fx where InputFxModel.showsButton(lane): showFx(seq: seq, lane: lane, from: r, channel: ControlUI.isChannel(e))` with `r` the row's FX rect from `LaneHeaderLayout.controls`; `case .fx: break`.
-   - In `VizDAWApp.swift`, after `MediaModel.channelIsOn = { ControlChannel.active }` (:121), install `LaneHeaderView.fxPopoverContent = { NSHostingController(rootView: InputFxPopover(model: $0.inputFx).themedRoot()) }`.
+- [ ] **Step 3: Implement** the Interfaces, model first.
+   - `midiFxLane` reads `destinations` and `snapshot.strips` (the whole list, master included, as `StripFocus` takes it) and `document.lanes`.
+   - The click methods compare `self.lane` with `lane` before calling `open(lane:)`, so a second click on the same track keeps the selection and the draft.
+   - Then the views. `StripRowKind.midiFx`'s place in `allCases` sets the row's place in `StripGrid.tops`. `StripGridPlacementTests` loops over `allCases`, so it covers the new case.
+   - Update `ChannelStrip`'s doc line ("… the EQ slot, the inserts, the MIDI FX section on instrument strips, the sends …").
 
-- [ ] **Step 4: Run the tests and the gates:** `scripts/swift.sh build`, `scripts/swift.sh test` (the scans by name must pass: `ThemeScanTests.everyViewTakesItsSpacingFromTheTheme`, `noColourLiteralsOutsideTheThemeBridges`, `noCornerRadiusOrFontSizeLiterals`, `noSemanticFontsOrDiscardedWeights`; `AppIconTests.theAppUsesNoSystemSymbols`; `NameScanTests.noThirdPartyNamesInWhatTheAppShows` and `noLaneInWhatTheAppShows`), the no-brand build and `scripts/make-app.sh`. Do not launch the app: the owner checks the view from README 238–242. Expected: Swift +2 (and two extended tests).
+- [ ] **Step 4: Run the tests and the gates:** `scripts/swift.sh build`, `scripts/swift.sh test`, the no-brand build and `scripts/make-app.sh`. The scans must pass, by name: `ThemeScanTests.everyViewTakesItsSpacingFromTheTheme`, `noColourLiteralsOutsideTheThemeBridges`, `noCornerRadiusOrFontSizeLiterals`, `noSemanticFontsOrDiscardedWeights`; `AppIconTests.theAppUsesNoSystemSymbols`; `NameScanTests.noThirdPartyNamesInWhatTheAppShows` and `noLaneInWhatTheAppShows`. Do not launch the app: the owner checks the view from README 238 and 241–242. Expected: Swift +5.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/Sources/VizDAWEditors/ArrangementLayout.swift app/Sources/VizDAWEditors/LaneHeaderView.swift app/Sources/VizDAWEditors/EditorTheme.swift app/Sources/VizDAWEditors/InputFxPopoverController.swift app/Sources/VizDAW/InputFxPopover.swift app/Sources/VizDAW/VizDAWApp.swift app/Tests/VizDAWAppModelTests/LaneHeaderInputTests.swift app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift
-git commit -m "app: the track header's FX button and the input effects popover (plan 5g-1 Task 9)
+git add app/Sources/VizDAWAppModel/InputFxModel.swift app/Sources/VizDAWAppModel/MixerModel.swift app/Sources/VizDAWAppModel/StripLayout.swift app/Sources/VizDAW/ChannelStrip.swift app/Sources/VizDAW/MixerView.swift app/Sources/VizDAW/StripMidiFx.swift app/Sources/VizDAW/InputFxSettings.swift app/Tests/VizDAWAppModelTests/MidiFxSectionTests.swift
+git commit -m "app: the channel strip's MIDI FX section under Inserts, with per-slot settings and bypass (plan 5g-1 Task 9)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
@@ -2977,7 +3167,7 @@ git log -1 --oneline && git show --stat HEAD
 ### Task 10: The arpeggiator e2e, README 238–244, the spec's rows, the full gates
 
 **Files:**
-- Modify: `crates/vizctl/tests/e2e.rs`, `app/README.md`, `docs/superpowers/specs/2026-10-18-recording-audio-design.md` (§13's 5g rows)
+- Modify: `crates/vizctl/tests/e2e.rs`, `app/README.md`, `docs/superpowers/specs/2026-10-18-recording-audio-design.md` (§13's 5g rows; §6.8's UI line, §6.9's header list and §2's Swift row for Ruling 16)
 
 **Interfaces:**
 - Consumes: everything above; the e2e helpers `App::start_with`, `wait_for_record`, `wait_for_undo`, `lane_named`, `WAIT_MS`.
@@ -3070,13 +3260,18 @@ By ear and by eye; the chain is tested (`core-engine/tests/input_fx*.rs`),
 the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
 `arpeggiates_an_injected_chord_while_recording`.
 
-238. A MIDI or instrument track's header shows an "FX" button between its
-     name and the monitor button, unlit with an empty chain; an audio
-     track has none. Click it: a popover lists the chain (empty) with an
-     Add menu (Arpeggiator, Transpose, Velocity, Chord, Input Quantize).
-     Add a Transpose: the button lights in the theme's accent colour;
-     bypass it: unlit again. Check it in each theme. Right-click the
-     track: "Input Effects…" opens the same popover.
+238. Track headers are unchanged: no FX control, and the name field
+     keeps its full width. In the Mix view, a plugin instrument's strip
+     and the Built-in Synth strip show a "MIDI FX" section under Inserts,
+     its heading unlit while the chain is empty. Audio strips, buses and
+     master have no such section. Click its empty "+" slot: a menu lists
+     Arpeggiator, Transpose, Velocity, Chord and Input Quantize. Add a
+     Transpose: the heading lights in the theme's accent colour. Click
+     the slot's dot: it is bypassed and the heading is unlit again. Click
+     the slot: its settings open in a popover beside it. Check this in
+     each theme. Put two tracks on the Built-in Synth and arm one: the
+     Mix view's section edits the armed track. Select the other track:
+     the left pane's strip edits the selected one.
 239. A real keyboard on a MIDI track, armed: add an Arpeggiator (Up, 1/16).
      Stopped, hold a chord: it arpeggiates at once at the project tempo;
      change the tempo and it follows. Play with the click on: the notes
@@ -3087,25 +3282,26 @@ the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
 240. Latch: hold a chord and let go: it keeps playing; press a new chord
      with no key down: the pattern changes to it.
 241. Transpose +12 then Chord (+4 +7) near the top of the keyboard, then
-     drag Chord above Transpose: the top notes differ (notes past the
+     drag the Chord slot above the Transpose slot: the top notes differ (notes past the
      highest key are dropped, never folded).
-242. Hold a chord through the arpeggiator and bypass it, change its rate,
-     drag a velocity slider, arm another track, disarm this one: no note
-     hangs, and a latched arpeggio survives arming another track. Start a
+242. Hold a chord through the arpeggiator and bypass it (its slot's
+     dot), change its rate, drag a velocity slider, arm another track,
+     disarm this one: no note hangs, and a latched arpeggio survives arming another track. Start a
      MIDI Learn and press a key: the key is learned, and nothing plays or
      arpeggiates.
 243. Add Input Quantize (1/16, 100%) and record a loose phrase: thru is
      never delayed; the recorded notes start on the sixteenths and keep
      their lengths. At 50% they move half way.
-244. Each change in the popover is one Undo ("Set Input Effects"); a
-     slider drag is one step. A change made while recording is undone with
+244. Each change in the MIDI FX section or a settings popover is one
+     Undo ("Set Input Effects"); a slider drag is one step. A change made while recording is undone with
      the take. Save, close and reopen: the chain is there. Duplicate Track
      copies it.
 ```
 
-- [ ] **Step 3: Amend the spec's §13 rows** in `docs/superpowers/specs/2026-10-18-recording-audio-design.md` (the plan's writer commit amended them before; this brings them to the tree):
+- [ ] **Step 3: Amend the spec's §13 rows and its UI placement** in `docs/superpowers/specs/2026-10-18-recording-audio-design.md` (the plan's writer commit amended them before; this brings them to the tree):
    - the 5g-1 row: "surface ports skipped by every-source lanes" becomes "surface ports kept out of every lane (delivered by 5f-1 Ruling 17)"; "README 199–205 (189–195 in its plan, renumbered after 5f-4)" becomes "README 238–244"; "Needs 5f-4 (added before it, 2026-11-03)" gains "; runs after sub-project 7 and the Tracks plan";
-   - the 5g-2 row: "README 206–211 (196–201 in its plan, renumbered after 5f-4)" becomes "README 245–250".
+   - the 5g-2 row: "README 206–211 (196–201 in its plan, renumbered after 5f-4)" becomes "README 245–250";
+   - the owner's 2026-11-09 placement (Ruling 16). In §6.8, "**UI.** An "FX" button on the lane header (lit when the chain is non-empty and not all bypassed) opens a popover:" and its two sub-bullets become "**UI.** Instrument strips (a plugin instrument's and the Built-in Synth's) show a MIDI FX section beneath Inserts, lit when the chain is non-empty and not all bypassed: up to 8 slots; click an empty slot to add an effect, click a filled one for its parameters, and each slot has a bypass; drag to reorder. A strip several tracks play edits the shown sequence's armed track first, and the left pane's strip edits the focused track (owner, 2026-11-09)." In §6.9's lane-header list, delete "  - the FX button (§6.8);". In §2's Swift row, "input effects popover" becomes "the strip's MIDI FX section".
 
 - [ ] **Step 4: Run the full gates:**
    - `cargo fmt --all -- --check`, both clippies and `cargo clippy -p core-ffi --lib -- -D warnings`;
@@ -3118,14 +3314,14 @@ the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
 
    Expected, relative to the `a292d2c` baseline (Rust 2077 / 24 ignored, Swift 1286, e2e 20, registry 162):
    - Rust +9 (model), +14 + 14 + 8 (engine), +2 + 8 (FFI), +1 (control) = **+56**, so 2133 passed and 25 ignored (the new e2e is `#[ignore]`);
-   - Swift +2 + 6 + 2 = **+10**, so 1296;
+   - Swift +2 + 6 + 5 = **+13**, so 1299;
    - e2e 21; registry 163; README through 244; file `VERSION` 5.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/vizctl/tests/e2e.rs app/README.md docs/superpowers/specs/2026-10-18-recording-audio-design.md
-git commit -m "e2e: an injected chord through the arpeggiator records as the arpeggio; README 238-244; the spec's 5g rows (plan 5g-1 Task 10)
+git commit -m "e2e: an injected chord through the arpeggiator records as the arpeggio; README 238-244; the spec's 5g rows and the MIDI FX section's place (plan 5g-1 Task 10)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
@@ -3138,9 +3334,9 @@ git log -1 --oneline && git show --stat HEAD
 
 Rerun at the fold (2026-11-09, against `a292d2c`).
 
-1. **Spec coverage.** §4.5 → Task 1. §6.6 → Task 4. §6.8: model and effects → Tasks 1–3; real-time, sample-accurate, synced → Tasks 3–4; capacities counted → Tasks 2–4, 6; note-offs on change or bypass → Tasks 2, 4; recording post-effect with Input Quantize → Tasks 4–5; listening lanes only, never playback or bounce → Ruling 13, Task 4; UI → Tasks 8–9. §6.9 → Task 9. §12.1 → Task 7. §12.3: golden tests → Tasks 2–3; recording equals thru → Tasks 4–6; `rt-check` → Task 4 and CI; e2e → Task 10; manual arpeggiator check → README 239. The §13 row's surface-port clause is 5f-1's (Ruling 3). The owner's learn ruling → Ruling 2, pinned in Task 6. Format 5 → Ruling 18, Task 1. No gaps.
+1. **Spec coverage.** §4.5 → Task 1. §6.6 → Task 4. §6.8: model and effects → Tasks 1–3; real-time, sample-accurate, synced → Tasks 3–4; capacities counted → Tasks 2–4, 6; note-offs on change or bypass → Tasks 2, 4; recording post-effect with Input Quantize → Tasks 4–5; listening lanes only, never playback or bounce → Ruling 13, Task 4; UI → Tasks 8–9 (the strip's MIDI FX section, Ruling 16). §6.9's FX button → Task 9's section; Task 10 amends §6.8 and §6.9. §12.1 → Task 7. §12.3: golden tests → Tasks 2–3; recording equals thru → Tasks 4–6; `rt-check` → Task 4 and CI; e2e → Task 10; manual arpeggiator check → README 239. The §13 row's surface-port clause is 5f-1's (Ruling 3). The owner's learn ruling → Ruling 2, pinned in Task 6. Format 5 → Ruling 18, Task 1. No gaps.
 2. **Step scan.** Bodies are given only for `live_midi`, `emit_live` and the `SetInputs` carry (borrow and ordering rules), plus whole test files. One expectation may need the tree's block arithmetic, and its step says what to do: the latch test's last steps (Task 3).
-3. **Type consistency.** `InputFx`/`InputFxKind` (Task 1) feed `InputChain::new` (Task 2), `MidiInputSpec.fx` (Task 4) and `InputFxRow` (Task 6, `rate` flattened into `division` and `feel`). `LiveMsg`, `At`, `ChainClock`, `RecordQuantize` (Task 2) are used by Tasks 3–5; `take_visits` only by Task 2's test. `RecordedMidi { msg: LiveMsg, quantize }` (Task 4) is read by `passes` (Task 5) and `tests/passes.rs` (Task 4's stop-gap). `input_fx_json` (Task 6) is used by `control.rs` (Task 7). `InputFxModel.{showsButton, isLit, open, close, chain}` and `DocumentModel.inputFx` (Task 8) are used by Task 9. `MidiInputSpec` has no `skip_ports` anywhere.
+3. **Type consistency.** `InputFx`/`InputFxKind` (Task 1) feed `InputChain::new` (Task 2), `MidiInputSpec.fx` (Task 4) and `InputFxRow` (Task 6, `rate` flattened into `division` and `feel`). `LiveMsg`, `At`, `ChainClock`, `RecordQuantize` (Task 2) are used by Tasks 3–5; `take_visits` only by Task 2's test. `RecordedMidi { msg: LiveMsg, quantize }` (Task 4) is read by `passes` (Task 5) and `tests/passes.rs` (Task 4's stop-gap). `input_fx_json` (Task 6) is used by `control.rs` (Task 7). `InputFxModel.{showsSection, isLit, open, close, chain, selected, draft calls}` and `DocumentModel.inputFx` (Task 8) are used by Task 9, which adds the section's clicks, `settings`, `chain(of:)`, `drop` and `MixerModel.midiFxLane(for:in:)`. `MidiInputSpec` has no `skip_ports` anywhere.
 4. **Review Focus.** Each of the five lines names its tests, and each test is in its owning task.
 5. **Proportion.** About 3 000 lines, most of them golden test files; Global Constraints and Rulings were trimmed at the fold, and the house rules point to the contracts.
 
