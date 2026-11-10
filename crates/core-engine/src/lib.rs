@@ -27,6 +27,7 @@ pub mod fixtures;
 pub mod gesture;
 pub mod graph;
 pub mod input;
+pub mod input_fx;
 pub mod measure;
 pub mod midi1;
 pub mod notes;
