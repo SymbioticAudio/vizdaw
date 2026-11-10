@@ -55,7 +55,9 @@ enum StripColumn: Identifiable {
         switch self {
         case .audio(let s): "s\(s.id)"
         case .midi(let d): "d\(d.id)"
-        case .track(let l, _): "t\(l.id)"
+        // The destination too, so a change of it is a new view and the
+        // old one's drag is cancelled (final review m4).
+        case .track(let l, let d): "t\(l.id)-\(d.map { "\($0.id)" } ?? "none")"
         }
     }
 }
@@ -104,9 +106,22 @@ struct ChannelStrips: View {
                 }
             }
             ForEach(Array(columns.enumerated()), id: \.element.id) { i, c in
-                StripPanelEdge(selected: c.audio.map { model.isSelected($0.id) } ?? false)
+                StripPanelEdge(selected: selected(c))
                     .layoutValue(key: StripCellKey.self, value: StripCell(column: i, part: .panel))
             }
+        }
+    }
+}
+
+extension ChannelStrips {
+    /// An audio strip: clicked; a MIDI strip in the mixer: a focused track
+    /// plays it (Task 6 review M1). The left pane's own strip is never
+    /// marked, as an audio strip there is not by focus.
+    fileprivate func selected(_ c: StripColumn) -> Bool {
+        switch c {
+        case .audio(let s): model.isSelected(s.id)
+        case .midi(let d): model.isMidiSelected(d.id)
+        case .track: false
         }
     }
 }
@@ -302,7 +317,7 @@ private struct StripHeader: View {
             if appearancePreferences.colourBars {
                 RoundedRectangle(cornerRadius: theme.radius.s)
                     .fill(StripPalette.bar(strip, theme).color)
-                    .frame(height: 4)
+                    .frame(height: StripLayout.colourBarHeight)
                     .accessibilityHidden(true)
             }
             name
@@ -805,8 +820,8 @@ struct StripFaderSection: View {
                 // Level with the fader's well, which spans the cap's travel:
                 // from half the drawn cap (less 2) for `throw + 4` points.
                 StripMeter(level: model.meters[strip.id] ?? .silent)
-                    .frame(width: 14, height: throwLength + 4)
-                    .padding(.top, ControlMetrics.faderCap.height / 2 - 2)
+                    .frame(width: 14, height: throwLength + 2 * StripLayout.meterOverhang)
+                    .padding(.top, ControlMetrics.faderCap.height / 2 - StripLayout.meterOverhang)
                 Spacer(minLength: 0)
             }
         }

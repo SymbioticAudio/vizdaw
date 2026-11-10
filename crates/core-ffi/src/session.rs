@@ -1037,6 +1037,7 @@ impl Session {
         // Touches of what the edit removed end (plan 5e-1 M9).
         self.release_vanished(&mut inner);
         self.resync_plugin_automation(&mut inner, Some(&before));
+        self.send_mix_changes(&mut inner, &before);
         inner.snapshot()
     }
 
@@ -1179,6 +1180,7 @@ impl Session {
         self.mark(&mut inner);
         self.release_vanished(&mut inner);
         self.resync_plugin_automation(&mut inner, Some(&before));
+        self.send_mix_changes(&mut inner, &before);
         let snapshot = inner.snapshot()?;
         // An undone or redone arm, monitor or input edit claims as the
         // edit did (Task 8 review m6).
@@ -1279,6 +1281,21 @@ impl Session {
         if inner.recording.is_some() || inner.finishing {
             return true;
         }
+        match self.take_idle(&mut inner, seq) {
+            Ok(_) => {}
+            Err(VizError::Busy { message }) if message == host::INPUT_OPENING => {
+                inner.claim_owed = Some(seq);
+            }
+            Err(e) => inner.reload_fault = Some(format!("the engine could not be claimed: {e}")),
+        }
+        true
+    }
+
+    /// Claims an idle engine for `seq` through [`host::claim_idle`], from
+    /// this session's cursor when it belongs to `seq`; true when it was
+    /// taken (the engine then holds the position, so the cursor clears).
+    /// False when it is held already or busy elsewhere.
+    fn take_idle(&self, inner: &mut Inner, seq: SeqId) -> Result<bool, VizError> {
         let at = match (inner.cursor, inner.cursor_seq) {
             (Some(t), None) => t,
             (Some(t), Some(s)) if s == seq => t,
@@ -1290,18 +1307,82 @@ impl Session {
             host::claim_idle(self.id, inner.doc(), seq, at, looped, p)
         })
         .and_then(|r| r);
-        match r {
-            Ok(true) => {
-                inner.cursor = None;
-                inner.cursor_seq = Some(seq);
-            }
-            Ok(false) => {}
-            Err(VizError::Busy { message }) if message == host::INPUT_OPENING => {
-                inner.claim_owed = Some(seq);
-            }
-            Err(e) => inner.reload_fault = Some(format!("the engine could not be claimed: {e}")),
+        if r == Ok(true) {
+            inner.cursor = None;
+            inner.cursor_seq = Some(seq);
         }
-        true
+        r
+    }
+
+    /// Before a MIDI strip send (plan 5g-1b final review I2): when this
+    /// session does not hold the engine, claims the idle one for the
+    /// shown sequence (the one this session's cursor is in, else the
+    /// first that plays one of `dests`), as an arm does. Nothing during a
+    /// pass, after `close`, or when the engine is busy elsewhere; a failed
+    /// claim is never the caller's error.
+    fn claim_for_mix(&self, inner: &mut Inner, dests: &[DestId]) {
+        if inner.closed
+            || inner.recording.is_some()
+            || inner.finishing
+            || host::position(self.id).is_some()
+        {
+            return;
+        }
+        let plays = |s: &core_model::sequence::Sequence| {
+            s.lanes
+                .iter()
+                .any(|l| l.midi_dest.is_some_and(|d| dests.contains(&d)))
+        };
+        let seq = inner.cursor_seq.or_else(|| {
+            inner
+                .doc()
+                .sequences()
+                .iter()
+                .find(|(_, s)| plays(s))
+                .map(|(id, _)| *id)
+        });
+        if let Some(seq) = seq {
+            let _ = self.take_idle(inner, seq);
+        }
+    }
+
+    /// After an edit, undo or redo whose document went from `before` to
+    /// the current one (plan 5g-1b final review I1): sends each external
+    /// destination's volume (CC 7) and pan (CC 10) that is set and
+    /// changed, after [`Session::claim_for_mix`]. An unset value sends
+    /// nothing (Ruling 2); a destination the loaded sequence does not
+    /// play is not reached (its values go out when it plays). A failed
+    /// send leaves the edit.
+    fn send_mix_changes(&self, inner: &mut Inner, before: &Document) {
+        let mut due = Vec::new();
+        for (id, d) in inner.doc().instruments() {
+            if !d.kind.is_external() {
+                continue;
+            }
+            let old = before.instruments().get(id).map(|d| d.midi_mix);
+            let new = d.midi_mix;
+            for (cc, v, was) in [
+                (7, new.volume, old.and_then(|m| m.volume)),
+                (10, new.pan, old.and_then(|m| m.pan)),
+            ] {
+                if let Some(v) = v.filter(|v| Some(*v) != was) {
+                    due.push((*id, cc, v));
+                }
+            }
+        }
+        if due.is_empty() {
+            return;
+        }
+        let dests: Vec<DestId> = due.iter().map(|(d, _, _)| *d).collect();
+        self.claim_for_mix(inner, &dests);
+        for (dest, cc, v) in due {
+            let _ = host::send_now(
+                self.id,
+                inner.doc(),
+                dest,
+                core_engine::midi1::Midi1Msg::three(0xB0, cc, v),
+            );
+        }
     }
 
     /// `Busy` when one of `cmds` changes which lanes record (an arm or an
@@ -5788,10 +5869,10 @@ impl Session {
     }
 
     /// Sets external destination `dest`'s MIDI strip mix (plan 5g-1b), one
-    /// undo step "Set MIDI Mix", then sends the volume (CC 7) and pan
-    /// (CC 10) that are set to it if this session holds the engine; a
-    /// failed send leaves the edit. `Model` for another destination or a
-    /// value above 127.
+    /// undo step "Set MIDI Mix". The edit sends the volume (CC 7) and pan
+    /// (CC 10) that are set and changed, claiming an idle engine first
+    /// (`Session::send_mix_changes`); a failed send leaves the edit.
+    /// `Model` for another destination or a value above 127.
     pub fn set_midi_mix(&self, dest: u64, mix: MidiMixRow) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let mix = core_model::document::MidiMix {
@@ -5799,30 +5880,19 @@ impl Session {
                 pan: mix.pan,
                 mute: mix.mute,
             };
-            let snap = self.execute(Command::Routing(RoutingCmd::SetMidiMix {
+            self.execute(Command::Routing(RoutingCmd::SetMidiMix {
                 dest: DestId(dest),
                 mix,
-            }))?;
-            let inner = lock(&self.inner);
-            for (cc, v) in [(7, mix.volume), (10, mix.pan)] {
-                if let Some(v) = v {
-                    let _ = host::send_now(
-                        self.id,
-                        inner.doc(),
-                        DestId(dest),
-                        core_engine::midi1::Midi1Msg::three(0xB0, cc, v),
-                    );
-                }
-            }
-            Ok(snap)
+            }))
         })
     }
 
     /// Sends the volume and pan given to `dest` now without an edit (a
-    /// fader or pan drag). True when something was sent; false when there
-    /// was nothing to send or this session does not hold the engine or it
-    /// has no target for `dest`. `Model` for a destination that is not
-    /// external or a value above 127.
+    /// fader or pan drag), claiming an idle engine first as an edit does.
+    /// True when something was sent; false when there was nothing to send,
+    /// the engine is busy elsewhere or the loaded sequence does not play
+    /// `dest`. `Model` for a destination that is not external or a value
+    /// above 127.
     pub fn preview_midi_mix(
         &self,
         dest: u64,
@@ -5830,7 +5900,7 @@ impl Session {
         pan: Option<u8>,
     ) -> Result<bool, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let mut inner = lock(&self.inner);
             let dest = DestId(dest);
             let external = inner
                 .doc()
@@ -5845,6 +5915,10 @@ impl Session {
                     return Err(crate::events::bad(&format!("{what} is 0 to 127")));
                 }
             }
+            if volume.is_none() && pan.is_none() {
+                return Ok(false);
+            }
+            self.claim_for_mix(&mut inner, &[dest]);
             let mut sent = false;
             for (cc, v) in [(7, volume), (10, pan)] {
                 if let Some(v) = v {

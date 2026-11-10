@@ -132,6 +132,26 @@ private func ext(_ id: UInt64, _ name: String = "Juno", mix: MidiMixRow = MidiMi
         #expect(f.midiMixes[0].1 == MidiMixRow(volume: nil, pan: nil, mute: true))
     }
 
+    /// Final review m3: a cancelled drag sends the committed values back
+    /// once, so the synth and the strip agree; an unset one sends nothing.
+    @Test func aCancelledDragPutsTheSynthBack() throws {
+        let f = mixerFake()
+        f.dests = [ext(7, mix: MidiMixRow(volume: 50, pan: nil, mute: false)), ext(8)]
+        let m = try model(f)
+        m.midiDrag(7, volume: 30, pan: nil, now: 1)
+        m.midiCancel(7)
+        #expect(f.midiPreviews.count == 2)
+        #expect(f.midiPreviews.last?.0 == 7)
+        #expect(f.midiPreviews.last?.1 == 50)
+        #expect(f.midiPreviews.last?.2 == nil)
+        m.midiCancel(7)
+        #expect(f.midiPreviews.count == 2, "no draft: nothing to put back")
+        m.midiDrag(8, volume: 30, pan: nil, now: 1)
+        m.midiCancel(8)
+        #expect(f.midiPreviews.count == 3, "unset: the synth stays as it is")
+        #expect(f.midiMixes.isEmpty)
+    }
+
     @Test func aDragThatEndsWhereItBeganCommitsNothing() throws {
         let f = fake()
         f.dests = [ext(7, mix: MidiMixRow(volume: 50, pan: nil, mute: false))]
@@ -243,7 +263,7 @@ private func ext(_ id: UInt64, _ name: String = "Juno", mix: MidiMixRow = MidiMi
         #expect(MidiStripMath.kindLabel(channel: 0) == "MIDI \u{00B7} Ch 1")
         #expect(MidiStripMath.kindLabel(channel: 15) == "MIDI \u{00B7} Ch 16")
         #expect(MidiStripMath.kindLabel(channel: nil) == "MIDI")
-        #expect(MidiStripMath.noDestination == "No destination")
+        #expect(MidiStripMath.noDestination == "No Destination", "as the track header's menu")
         #expect(!MidiStripMath.volumeHint.lowercased().contains("lane"))
         #expect(!MidiStripMath.panHint.lowercased().contains("lane"))
     }
@@ -254,6 +274,24 @@ private func ext(_ id: UInt64, _ name: String = "Juno", mix: MidiMixRow = MidiMi
                 "a destination's strip keeps its key whichever track it edits")
         #expect(MixerModel.midiFxKey(dest: nil, lane: 30) != 30)
         #expect(MixerModel.midiFxKey(dest: nil, lane: 30) != MixerModel.midiFxKey(dest: 30, lane: 1))
+    }
+
+    /// Task 6 review M1: a MIDI strip in the mixer shows as selected when
+    /// the focused track (the selection, else the armed one) plays it.
+    @Test func aFocusedTrackSelectsItsMidiStrip() throws {
+        let f = fake()
+        var a = lane(30, "A")
+        a.midiDest = 7
+        f.laneTable[3] = [a]
+        let m = try model(f)
+        m.document.select(3)
+        #expect(!m.isMidiSelected(7), "nothing focused")
+        a.arm = true
+        f.laneTable[3] = [a]
+        f.snap.version += 1
+        m.document.refreshAfterJob()
+        #expect(m.isMidiSelected(7))
+        #expect(!m.isMidiSelected(8), "another destination")
     }
 
     @Test func armAndDestinationEditTheTrack() throws {

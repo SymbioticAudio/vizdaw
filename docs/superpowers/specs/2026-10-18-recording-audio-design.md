@@ -387,7 +387,9 @@ This is an explicit use case: printing an external synth into the project as aud
 - **Model.** A destination gains `midi_mix { volume, pan, mute }`. Volume and pan are each unset (nothing is sent; the synth keeps its own) or 0–127, and pan's centre is 64. Each change is an undoable destination edit (one step per gesture).
 - **What it sends.**
   - Volume is CC 7 and pan is CC 10, on the destination's channel.
-  - Each set value is sent when it changes, and again at the start of every playback of a sequence that plays the destination, after its default patch.
+  - Each set value is sent when it changes (an edit, an Undo or a Redo, and a fader or pan drag as it moves), and again at the start of every playback of a sequence that plays the destination, after its default patch.
+  - A change made while stopped first takes the idle engine for the shown sequence, as arming a track does, so it is heard at once. While another window plays or records, nothing is sent then. A destination the shown sequence doesn't play is reached once a sequence that plays it plays.
+  - An Undo back to unset sends nothing: the synth stays as it is.
   - Chase sends them when playback starts mid-song. A CC 7 or CC 10 recorded in a part plays as recorded and wins from then on, so the strip sets the starting level. Fader automation for MIDI strips comes later.
   - Mute stops the destination's notes, and notes already sounding end. Its controllers and other messages still play, so the synth's state stays right.
 - **The strip, top to bottom:**
@@ -397,7 +399,7 @@ This is an explicit use case: printing an external synth into the project as aud
   4. a fader with a 0–127 readout and a note-activity meter that shows velocity;
   5. Mute, and Record arm for the track.
 - **Left out:** input, EQ, inserts, sends, output, solo and the automation mode. None of them can work on audio that VizDAW never receives.
-- **No destination.** A MIDI track without a destination shows the strip in the left pane with "No destination". Its MIDI FX and arm work, but pan and the fader are off.
+- **No destination.** A MIDI track without a destination shows the strip in the left pane with "No Destination". Its MIDI FX and arm work, but pan and the fader are off.
 
 ### 6.9 Record UI
 - **Transport toolbar:**

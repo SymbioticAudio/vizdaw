@@ -54,8 +54,14 @@ public enum MidiStripMath {
         channel.map { "MIDI \u{00B7} Ch \(Int($0) + 1)" } ?? "MIDI"
     }
 
-    /// The left pane's header for a MIDI track without a destination (§6.8a).
-    public static let noDestination = "No destination"
+    /// The left pane's header for a MIDI track without a destination
+    /// (§6.8a), as the track header's menu writes it.
+    public static let noDestination = "No Destination"
+    /// How much an unset value (or a control that is off) is dimmed: the
+    /// opacity the strips' off controls use.
+    public static let dimmed = 0.45
+    /// The note-activity meter's width beside the fader.
+    public static let meterWidth: CGFloat = 6
     /// The status line after refused typed text.
     public static let volumeHint = "Type a volume from 0 to 127."
     public static let panHint = "Type a pan like L 24, C or R 10, or 0 to 127."
@@ -96,6 +102,13 @@ extension MixerModel {
             + all.filter { $0.kind == .bus }.map(MixerColumn.audio)
     }
 
+    /// Whether `dest`'s strip shows as selected in the mixer (Task 6
+    /// review M1): a focused track (`focusLanes`: the selection, else the
+    /// armed tracks) plays it.
+    public func isMidiSelected(_ dest: UInt64) -> Bool {
+        document.focusLanes().contains { $0.midiDest == dest }
+    }
+
     /// The mix `dest` shows: a drag's draft, else the committed one.
     public func midiMix(_ dest: UInt64) -> MidiMixRow? {
         midiDraft[dest] ?? destinations.first { $0.id == dest }?.midiMix
@@ -127,12 +140,16 @@ extension MixerModel {
     }
 
     /// The drag was abandoned (the gesture cancelled or the view went):
-    /// drops its draft without committing. The synth keeps the last
-    /// previewed values until the next commit or load.
+    /// drops its draft without committing, and sends the committed volume
+    /// and pan back once when they are set (final review m3), so the synth
+    /// matches the strip again; unset ones send nothing.
     public func midiCancel(_ dest: UInt64) {
         midiPreviewedAt[dest] = nil
         midiDraftBase[dest] = nil
-        midiDraft[dest] = nil
+        guard midiDraft.removeValue(forKey: dest) != nil, let c = committedMix(dest),
+            c.volume != nil || c.pan != nil
+        else { return }
+        _ = try? document.session.previewMidiMix(dest: dest, volume: c.volume, pan: c.pan)
     }
 
     func committedMix(_ dest: UInt64) -> MidiMixRow? {

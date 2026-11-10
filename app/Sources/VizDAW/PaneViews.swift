@@ -107,7 +107,7 @@ struct LeftStripPane: View {
                 PaneNote(text: StripFocus.nothingMessage)
             }
         case .midi(let dest, let id):
-            // A MIDI track's strip (§6.8a), "No destination" without one.
+            // A MIDI track's strip (§6.8a), "No Destination" without one.
             if let lane = model.lanes.first(where: { $0.id == id }) {
                 GeometryReader { g in
                     MidiChannelStrip(

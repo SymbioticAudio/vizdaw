@@ -2355,7 +2355,8 @@ the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
 ### MIDI strips (plan 5g-1b)
 
 By ear and by eye on an external synth; the sending is tested
-(`core-engine/tests/midi_strip.rs`, `rt_alloc_midi_strip.rs`), the model
+(`core-engine/tests/midi_strip.rs`, `rt_alloc_midi_strip.rs`, and through
+the session, Undo and Redo included, `core-ffi/tests/midi_strip.rs`), the model
 (`MidiStripTests`) and the e2e `midi_mix_reaches_state_get`.
 
 245. Put a MIDI track on an external synth and select it: the left pane
@@ -2365,12 +2366,20 @@ By ear and by eye on an external synth; the sending is tested
      any change the fader sits at 100 and pan at C, both dimmed. The
      Mixer shows one MIDI strip per external destination, used or not,
      after the instrument and audio strips and before the buses; its
-     header shows the name only, with no menu. Check this in each theme.
-246. Drag the fader, then the pan knob: the synth's level and pan follow
-     as you move, and the values stop being dimmed. Each drag is one
-     Undo ("Set MIDI Mix"), and Undo puts the synth back. Type "90" in
-     the volume box and "R 10" in the pan box: both take. "200" and
-     "L 70" are refused, and nothing changes.
+     header shows the name and the "MIDI · Ch n" line, with no menu.
+     Select the track: its synth's strip in the Mixer has the accent
+     edge. Check this in each theme.
+246. Open a saved project and, stopped and without arming, drag the
+     fader, then the pan knob: the synth's level and pan follow as you
+     move, and the values stop being dimmed. Each drag is one Undo ("Set
+     MIDI Mix"); Undo puts the synth back and Redo moves it again. Undo
+     back to the first change: the values dim again and the synth stays
+     as it is. Type "90" in the volume box and "R 10" in the pan box:
+     both take. "200" and "L 70" are refused, and nothing changes. A
+     Mixer strip for a synth no track of the shown sequence plays moves
+     and is saved, and the synth gets it once a sequence that plays it
+     plays. While another window plays, the strip still moves and the
+     synth gets it at the next Play.
 247. Stop, set the strip's level and pan, then Play from bar 1: the synth
      gets them right after the destination's patch. A part with its own
      volume moves (CC 7) still plays them, and from then on they win.
@@ -2378,11 +2387,12 @@ By ear and by eye on an external synth; the sending is tested
      the strip's.
 248. Hold a long note on the track and press M: the note ends at once.
      Controllers (a mod wheel or pitch bend in the part) still play while
-     muted; no note plays. Press M again: the next note plays.
+     muted; no note plays. Press M again: the next note plays. Press M,
+     then Undo: the next note plays too.
 249. Play: the meter beside the fader rises with each note sent, by its
      velocity (soft notes low, loud notes high), and falls between notes.
 250. Give a MIDI track no destination in the left pane's header menu: the
-     strip reads "No destination", and pan, the fader, the volume box and
+     strip reads "No Destination", and pan, the fader, the volume box and
      M are off, while MIDI FX and R still work. Pick the synth again in
      the same menu: the strip comes back. Save, close and reopen: the
      strip's level, pan and mute are as you left them.

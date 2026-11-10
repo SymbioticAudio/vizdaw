@@ -38,6 +38,12 @@ public enum StripLayout {
     /// 52-point hit frame overhangs it by 5 points at the ends of travel,
     /// which the 6-point `gap` absorbs (final review m1).
     public static let faderCap: CGFloat = 42
+    /// How far a meter beside the fader reaches past the cap's travel at
+    /// each end, so it lines up with the fader's well: it starts half the
+    /// drawn cap less this from the top and is `throw + 2 ×` this tall.
+    public static let meterOverhang: CGFloat = 2
+    /// The header's colour bar.
+    public static let colourBarHeight: CGFloat = 4
     /// The level box's hit frame (`ControlMetrics.hitSize(.numberBox)`).
     public static let levelBoxHeight: CGFloat = 24
     /// The M S R I row: 24-point toggles (`ControlMetrics.hitSize(.toggle)`).

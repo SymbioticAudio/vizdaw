@@ -63,9 +63,6 @@ struct MidiStripCells: View {
     }
 }
 
-/// How much an unset value (or a control that is off) is dimmed.
-private let midiDimmed = 0.45
-
 /// The colour bar, the destination's name (the left pane: its menu), and
 /// "MIDI · Ch n".
 private struct MidiStripHeader: View {
@@ -81,7 +78,7 @@ private struct MidiStripHeader: View {
             if appearancePreferences.colourBars {
                 RoundedRectangle(cornerRadius: theme.radius.s)
                     .fill(StripPalette.cap(.instrument, theme).color)
-                    .frame(height: 4)
+                    .frame(height: StripLayout.colourBarHeight)
                     .accessibilityHidden(true)
             }
             if menu, let lane {
@@ -153,7 +150,7 @@ private struct MidiStripPan: View {
                 .frame(
                     width: ControlMetrics.hitSize(.knob(.medium)).width,
                     height: ControlMetrics.hitSize(.knob(.medium)).height)
-                .opacity(pan == nil ? midiDimmed : 1)
+                .opacity(pan == nil ? MidiStripMath.dimmed : 1)
                 .help("Pan: double-click for the centre")
             NumberBox(
                 text: label, accessibilityLabel: "Pan of \(name)", palette: theme.readoutBox,
@@ -163,8 +160,8 @@ private struct MidiStripPan: View {
                     width: ControlMetrics.hitSize(.numberBox).width,
                     height: ControlMetrics.hitSize(.numberBox).height)
                 .readoutEdge(theme)
-                .opacity(pan == nil ? midiDimmed : 1)
-                .accessibilityIdentifier(ControlUI.numberBoxID)
+                .opacity(pan == nil ? MidiStripMath.dimmed : 1)
+                .accessibilityIdentifier(ControlUI.numberBoxID(named: "midi-pan"))
             Spacer(minLength: 0)
         }
         .disabled(dest == nil)
@@ -203,11 +200,11 @@ private struct MidiStripFader: View {
                     },
                     onEnd: { if let dest { model.midiRelease(dest) } },
                     onReset: { if let dest { model.setMidiVolume(dest, MidiStripMath.defaultVolume) } })
-                    .opacity(volume == nil ? midiDimmed : 1)
+                    .opacity(volume == nil ? MidiStripMath.dimmed : 1)
                     .help("Double-click: 100")
                 MidiActivityMeter(activity: dest.flatMap { model.midiActivity[$0] } ?? 0)
-                    .frame(width: 6, height: throwLength + 4)
-                    .padding(.top, ControlMetrics.faderCap.height / 2 - 2)
+                    .frame(width: MidiStripMath.meterWidth, height: throwLength + 2 * StripLayout.meterOverhang)
+                    .padding(.top, ControlMetrics.faderCap.height / 2 - StripLayout.meterOverhang)
                 Spacer(minLength: 0)
             }
         }
@@ -254,8 +251,8 @@ private struct MidiStripLevel: View {
                     width: ControlMetrics.hitSize(.numberBox).width,
                     height: ControlMetrics.hitSize(.numberBox).height)
                 .readoutEdge(theme)
-                .opacity(volume == nil ? midiDimmed : 1)
-                .accessibilityIdentifier(ControlUI.numberBoxID)
+                .opacity(volume == nil ? MidiStripMath.dimmed : 1)
+                .accessibilityIdentifier(ControlUI.numberBoxID(named: "midi-volume"))
                 .help("Type a volume from 0 to 127")
             Spacer(minLength: 0)
         }

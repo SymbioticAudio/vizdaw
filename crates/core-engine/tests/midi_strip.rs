@@ -234,16 +234,24 @@ fn a_recorded_cc7_wins_over_the_mix_mid_song() {
     assert!(cc7[1].0 >= 192_000, "{cc7:?}");
 }
 
-/// Ext A on channel 1 (long note, CC 1, bend, a later note) and Ext B on
-/// channel 2 (a note), both on the virtual source.
+/// Ext A on channel 1 (long note, CC 1, bend, a note at bar 2 and one at
+/// bar 4) and Ext B on channel 2 (a note), both on the virtual source.
 fn mute_doc(mute: bool) -> (Document, SeqId, DestId, DestId) {
     let mut b = Builder::new();
     let a = ext(&mut b, "A", 0, None);
     let other = ext(&mut b, "B", 1, None);
     let (seq, la) = b.sequence("S", "A", Some(a)).unwrap();
     let lb = b.lane(seq, "B", Some(other)).unwrap();
-    b.notes(seq, la, &[(0, 60, 0x8000, 4 * BAR), (BAR, 64, 0x8000, Q)])
-        .unwrap();
+    b.notes(
+        seq,
+        la,
+        &[
+            (0, 60, 0x8000, 4 * BAR),
+            (BAR, 64, 0x8000, Q),
+            (3 * BAR, 65, 0x8000, Q),
+        ],
+    )
+    .unwrap();
     b.event(
         seq,
         la,
@@ -293,6 +301,13 @@ fn muting_ends_sounding_notes_and_keeps_controllers() {
     let later = sent(&log);
     assert!(!later.iter().any(|b| b[..2] == [0x90, 64]), "{later:?}");
     assert!(later.iter().any(|b| b[..2] == [0x91, 74]), "{later:?}");
+
+    // Unmuting (an Undo of the mute is the same load): the next note, at
+    // bar 4, plays (final review I3).
+    e.load(&open, seq).unwrap();
+    blocks(&mut r, 200, 1024, &mut ns);
+    let unmuted = sent(&log);
+    assert!(unmuted.contains(&vec![0x90, 65, 64]), "{unmuted:?}");
 
     // The muted schedule has no notes on channel 1 but keeps its
     // controllers; channel 2 is untouched.
@@ -626,4 +641,27 @@ fn muting_ends_a_held_thru_note() {
     e.load(&muted, seq).unwrap();
     blocks(&mut r, 1, 256, &mut ns);
     assert!(sent(&log).contains(&vec![0x80, 50, 0]));
+    // While muted a played note is not heard; once unmuted it is (final
+    // review I3).
+    let key = |msg| {
+        assert!(e.midi_sender().send(MidiIn {
+            port: port_key("Keys"),
+            host_ns: ns,
+            msg,
+        }));
+    };
+    key(Midi1Msg::three(0x90, 51, 90));
+    key(Midi1Msg::three(0x80, 51, 0));
+    blocks(&mut r, 1, 256, &mut ns);
+    assert!(!sent(&log).iter().any(|b| b[0] == 0x90), "muted");
+    e.load(&open, seq).unwrap();
+    blocks(&mut r, 1, 256, &mut ns);
+    log.drain();
+    assert!(e.midi_sender().send(MidiIn {
+        port: port_key("Keys"),
+        host_ns: ns,
+        msg: Midi1Msg::three(0x90, 52, 100),
+    }));
+    blocks(&mut r, 1, 256, &mut ns);
+    assert_eq!(sent(&log), vec![vec![0x90, 52, 100]]);
 }
