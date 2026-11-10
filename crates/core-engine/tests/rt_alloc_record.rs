@@ -23,6 +23,7 @@ use core_model::command::{Command, LaneCmd, RoutingCmd};
 use core_model::event::Fade;
 use core_model::format::BitDepth;
 use core_model::ids::AnyId;
+use core_model::input_fx::{InputFx, InputFxKind};
 use core_model::lane::MonitorMode;
 use core_model::mixer::StripKind;
 
@@ -123,6 +124,7 @@ fn recording_never_allocates() {
             dest: Some(synth),
             thru: true,
             armed: true,
+            fx: vec![InputFx::new(InputFxKind::Transpose { semitones: 12 })],
         }],
         monitor: vec![MonitorRoute {
             lane: mic,

@@ -509,7 +509,8 @@ fn an_injection_nothing_takes_answers_false() {
 }
 
 /// Final review T8 m8: a waiting learn leaves note-offs to the lanes, so a
-/// note played thru while it waits does not hang.
+/// note played thru while it waits does not hang (plan 5g-1: the offs end
+/// notes the lane started).
 #[test]
 fn a_waiting_learn_lets_note_offs_through() {
     use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
@@ -544,6 +545,20 @@ fn a_waiting_learn_lets_note_offs_through() {
     s.play(seq).unwrap();
     wait_until("the engine", || s.transport().unwrap().playing);
     s.stop().unwrap();
+    // Ruling 6: a lane's output stage drops an off for a note it never
+    // started, so the lane starts both notes before the learn waits.
+    drain_offline_log();
+    debug_midi_from_source("Keys", 0, &[0x90, 60, 100]);
+    debug_midi_from_source("Keys", 0, &[0x90, 62, 100]);
+    let mut ons = Vec::new();
+    wait_until("the note-ons' thru", || {
+        ons.extend(drain_offline_log());
+        [60u8, 62].iter().all(|p| {
+            ons.iter().any(|(_, b): &(u64, Vec<u8>)| {
+                b.first().map(|s| s & 0xF0) == Some(0x90) && b.get(1) == Some(p)
+            })
+        })
+    });
     s.learn_target(synth_fader(&s)).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
     drain_offline_log();
@@ -552,9 +567,13 @@ fn a_waiting_learn_lets_note_offs_through() {
     let mut log = Vec::new();
     wait_until("the note-offs' thru", || {
         log.extend(drain_offline_log());
-        log.iter()
-            .any(|(_, b): &(u64, Vec<u8>)| b.get(1) == Some(&60))
-            && log.iter().any(|(_, b)| b.get(1) == Some(&62))
+        // `90 3e 00` plays thru as a note-off (Ruling 4).
+        let off = |p: u8| {
+            log.iter().any(|(_, b): &(u64, Vec<u8>)| {
+                b.first().map(|s| s & 0xF0) == Some(0x80) && b.get(1) == Some(&p)
+            })
+        };
+        off(60) && off(62)
     });
 }
 

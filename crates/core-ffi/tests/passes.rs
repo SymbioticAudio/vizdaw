@@ -6,6 +6,7 @@
 //! was played with replace clearing only the recorded range.
 
 use core_engine::fixtures::{Builder, Q};
+use core_engine::input_fx::LiveMsg;
 use core_engine::midi1::Midi1Msg;
 use core_engine::record::{Mark, RecordedMidi};
 use core_engine::schedule::TempoTable;
@@ -283,7 +284,12 @@ fn off(pitch: u8) -> Midi1Msg {
 }
 
 fn midi(lane: LaneId, run: i64, msg: Midi1Msg) -> RecordedMidi {
-    RecordedMidi { lane, run, msg }
+    RecordedMidi {
+        lane,
+        run,
+        msg: LiveMsg::from_midi1(msg),
+        quantize: None,
+    }
 }
 
 #[test]

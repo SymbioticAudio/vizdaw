@@ -76,6 +76,7 @@
 //!
 //! Control-side code: nothing here runs on the real-time thread.
 
+use core_engine::input_fx::LiveMsg;
 use core_engine::midi1::Midi1Msg;
 use core_engine::record::{Mark, RecordedMidi};
 use core_engine::schedule::TempoTable;
@@ -656,9 +657,15 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
             .midi
             .iter()
             .filter(|m| m.lane == *lane)
-            .map(|m| Heard {
-                u: m.run,
-                msg: m.msg,
+            .filter_map(|m| {
+                // Stop-gap until plan 5g-1 Task 5 turns `LiveMsg`s into
+                // events: back to MIDI 1.0 as before (channel messages
+                // keep their channel; notes have none, so channel 0).
+                let msg = match m.msg {
+                    LiveMsg::Channel(c) => c,
+                    other => other.to_midi1(0)?,
+                };
+                Some(Heard { u: m.run, msg })
             })
             .collect();
         let mut events = midi_events(&heard, &pieces, &c.range, &tempo);

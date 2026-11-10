@@ -115,19 +115,6 @@ pub(crate) fn midi_queue() -> (MidiSender, Consumer<MidiIn>) {
     )
 }
 
-/// A lane's MIDI input effect chain (spec §6.8, D26h). Plan 5g fills it
-/// with the built-in effects; until then it passes every message through
-/// unchanged, so thru and record hear the input as played.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InputChain;
-
-impl InputChain {
-    /// Runs `msg` through the chain, handing every output to `out`. // RT
-    pub fn process(&mut self, msg: Midi1Msg, out: &mut impl FnMut(Midi1Msg)) {
-        out(msg);
-    }
-}
-
 /// What a MIDI lane listens to, before targets are resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidiInputSpec {
@@ -146,6 +133,8 @@ pub struct MidiInputSpec {
     pub thru: bool,
     /// The lane is armed: it records while a tap rolls.
     pub armed: bool,
+    /// The lane's input effect chain (spec §6.8; plan 5g-1).
+    pub fx: Vec<core_model::input_fx::InputFx>,
 }
 
 /// One audio lane's monitoring (spec §6.6).
@@ -198,8 +187,8 @@ pub struct MidiRoute {
     pub targets: [Option<TargetIdx>; 2],
     /// The channel thru plays on (the destination's).
     pub dest_channel: u8,
-    /// The lane's input chain.
-    pub chain: InputChain,
+    /// The lane's input chain (plan 5g-1).
+    pub chain: crate::input_fx::InputChain,
 }
 
 impl MidiRoute {
@@ -207,6 +196,21 @@ impl MidiRoute {
     pub fn matches(&self, ev: &MidiIn) -> bool {
         let ch = ev.msg.bytes[0] & 0x0F;
         self.spec.port.is_none_or(|p| p == ev.port) && self.spec.channel.is_none_or(|c| c == ch)
+    }
+
+    /// Whether this new route takes over `old`'s chain state (plan 5g-1
+    /// Ruling 5): the same lane, source, channel, destination, thru,
+    /// targets and chain; the arm may differ. // RT
+    pub fn carries(&self, old: &MidiRoute) -> bool {
+        let (a, b) = (&self.spec, &old.spec);
+        a.lane == b.lane
+            && a.port == b.port
+            && a.channel == b.channel
+            && a.dest == b.dest
+            && a.thru == b.thru
+            && self.targets == old.targets
+            && self.dest_channel == old.dest_channel
+            && self.chain == old.chain
     }
 }
 

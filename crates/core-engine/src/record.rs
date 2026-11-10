@@ -14,7 +14,7 @@
 //! final review I1), so the real-time side does no mapping at all. // RT
 //! where marked
 
-use crate::midi1::Midi1Msg;
+use crate::input_fx::{LiveMsg, RecordQuantize};
 use core_media::record::{RingReader, RingWriter, input_ring};
 use core_model::ids::LaneId;
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -54,8 +54,10 @@ pub struct RecordedMidi {
     pub lane: LaneId,
     /// The output run frame (negative: before the transport rolled).
     pub run: i64,
-    /// The message (after the lane's input chain).
-    pub msg: Midi1Msg,
+    /// The message (after the lane's input chain; plan 5g-1 Ruling 11).
+    pub msg: LiveMsg,
+    /// The chain's Input Quantize when it was played (Ruling 12).
+    pub quantize: Option<RecordQuantize>,
 }
 
 /// Where the control side reads a tap's marks.
@@ -505,11 +507,23 @@ impl RecordTap {
     /// Records an armed lane's message heard at block offset `offset`
     /// (negative: before the block), unless it was heard before the last
     /// resume after a stop. // RT
-    pub fn midi(&mut self, lane: LaneId, offset: i64, msg: Midi1Msg) {
+    pub fn midi(
+        &mut self,
+        lane: LaneId,
+        offset: i64,
+        msg: LiveMsg,
+        quantize: Option<RecordQuantize>,
+    ) {
         let Some(run) = self.clock.stamp_run(offset) else {
             return;
         };
-        if self.midi.push(RecordedMidi { lane, run, msg }).is_err() {
+        let m = RecordedMidi {
+            lane,
+            run,
+            msg,
+            quantize,
+        };
+        if self.midi.push(m).is_err() {
             self.status.lost_midi.fetch_add(1, Ordering::Relaxed);
         }
     }

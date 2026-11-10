@@ -6,7 +6,7 @@ use crate::gesture::GestureTap;
 use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::regions::InputCopy;
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
-use crate::input::{InputRoutes, MIDI_IN_PER_BLOCK, MidiIn, on_channel};
+use crate::input::{InputRoutes, MIDI_IN_PER_BLOCK, MidiIn};
 use crate::measure::MeasureTap;
 use crate::midi1::Midi1Msg;
 use crate::notes::ActiveNotes;
@@ -101,6 +101,9 @@ impl Faults {
 pub struct Counters {
     /// MIDI messages dropped because an output queue was full.
     pub midi_dropped: u64,
+    /// Notes the input effect chains dropped for capacity (plan 5g-1
+    /// Ruling 7).
+    pub midi_fx_dropped: u64,
     /// Blocks in which a schedule or graph swap was deferred.
     pub swaps_deferred: u64,
     /// Blocks rendered as silence because they were too large.
@@ -169,6 +172,7 @@ pub struct Shared {
     faults: AtomicU32,
     ended: AtomicBool,
     midi_dropped: AtomicU64,
+    midi_fx_dropped: AtomicU64,
     /// Gestures dropped by the renderer (a touch with no free live entry).
     gestures_dropped: AtomicU64,
     swaps_deferred: AtomicU64,
@@ -209,6 +213,7 @@ impl Default for Shared {
             faults: AtomicU32::new(0),
             ended: AtomicBool::new(false),
             midi_dropped: AtomicU64::new(0),
+            midi_fx_dropped: AtomicU64::new(0),
             gestures_dropped: AtomicU64::new(0),
             swaps_deferred: AtomicU64::new(0),
             graphs_applied: AtomicU64::new(0),
@@ -286,6 +291,7 @@ impl Shared {
     pub fn counters(&self) -> Counters {
         Counters {
             midi_dropped: self.midi_dropped.load(Ordering::Relaxed),
+            midi_fx_dropped: self.midi_fx_dropped.load(Ordering::Relaxed),
             swaps_deferred: self.swaps_deferred.load(Ordering::Relaxed),
             xruns: self.xruns.load(Ordering::Relaxed),
             deadline_misses: self.deadline_misses.load(Ordering::Relaxed),
@@ -406,6 +412,14 @@ impl Shared {
     pub fn count_busy_block(&self) {
         self.raise(Faults::XRUN);
         self.busy_blocks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts `n` notes the input effect chains dropped (plan 5g-1
+    /// Ruling 7). // RT
+    pub(crate) fn count_fx_dropped(&self, n: u64) {
+        if n > 0 {
+            self.midi_fx_dropped.fetch_add(n, Ordering::Relaxed);
+        }
     }
 
     /// Counts a gesture the live table refused (plan 5e-1 Ruling 6). // RT
@@ -585,6 +599,8 @@ pub struct Renderer {
     /// Notes sounding through thru (boxed: the renderer moves between
     /// threads by value).
     thru: Box<ActiveNotes>,
+    /// Input-chain outputs waiting to leave in order (boxed, as `thru`).
+    live_out: Box<LiveOut>,
     /// This block's input, for monitoring.
     input_copy: Box<InputCopy>,
     /// A return-latency measurement (spec §6.7), while one is installed.
@@ -881,6 +897,7 @@ impl Renderer {
             live: Box::new(crate::gesture::LiveTable::new()),
             inputs: None,
             thru: Box::default(),
+            live_out: Box::new(LiveOut::new()),
             input_copy: Box::new(InputCopy::new(0, 0)),
             measure: None,
             roll_floor: 0,
@@ -1109,7 +1126,7 @@ impl Renderer {
                 _ => t.stop(0, self.transport.pos),
             }
         }
-        self.live_midi();
+        self.live_midi(frames);
         self.live_gestures();
         self.measure_sends();
         let monitored = self.copy_monitored(input, frames);
@@ -1865,9 +1882,12 @@ impl Renderer {
                     }
                 }
             }
-            EngineCmd::SetInputs(new) => {
-                // Notes thru started end: a lane disarmed or re-routed
-                // must not leave one hanging.
+            EngineCmd::SetInputs(mut new) => {
+                // Chains whose lane and settings did not change keep
+                // their state; the others end their notes first (plan
+                // 5g-1 Ruling 5). A carried route's old box keeps the new
+                // route's fresh state and is freed with the rest of the
+                // old routes on the retire thread.
                 let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
                 let mut o = Out {
                     sinks: &mut self.sinks,
@@ -1877,7 +1897,40 @@ impl Renderer {
                     late_ns,
                     base: 0,
                 };
-                release_all(&mut self.thru, &mut o, 0);
+                // Carried targets as bits (Ruling 5).
+                const _: () = assert!(MAX_TARGETS <= 64);
+                let mut kept: u64 = 0;
+                let thru = &mut *self.thru;
+                let mut tap = self.tap.as_deref_mut();
+                if let Some(old) = self.inputs.as_deref_mut() {
+                    for r in old.midi.iter_mut() {
+                        if let Some(n) = new.midi.iter_mut().find(|n| n.carries(r)) {
+                            n.chain.carry_from(&mut r.chain);
+                            for t in n.targets.iter().flatten() {
+                                kept |= 1u64.checked_shl(u32::from(t.0)).unwrap_or(0);
+                            }
+                        } else {
+                            let d = LiveDest::of(r);
+                            r.chain.flush(crate::input_fx::At::NOW, &mut |at, m| {
+                                emit_live(&d, at, m, &mut o, thru, &mut tap)
+                            });
+                            o.shared.count_fx_dropped(r.chain.take_dropped());
+                        }
+                    }
+                }
+                // Notes thru started end, except on carried routes'
+                // targets: a lane disarmed or re-routed must not leave
+                // one hanging.
+                for t in 0..MAX_TARGETS {
+                    let bit = u32::try_from(t)
+                        .ok()
+                        .and_then(|t| 1u64.checked_shl(t))
+                        .unwrap_or(0);
+                    if kept & bit == 0 {
+                        let target = TargetIdx(t as u8);
+                        thru.release(target, |m| o.send(target, 0, m.as_slice()));
+                    }
+                }
                 if let Some(old) = self.inputs.replace(new) {
                     if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Inputs(old))
                     {
@@ -2010,23 +2063,42 @@ impl Renderer {
         true
     }
 
-    /// Takes the queued MIDI input: each message a lane listens to goes
-    /// through its input chain to thru (its destination, now) and, while a
-    /// tap rolls and the lane is armed, to the recorder, stamped at the
-    /// run frame heard when it arrived (spec §6.3, §6.6). // RT
-    fn live_midi(&mut self) {
+    /// Takes the queued MIDI input and runs every listening lane's input
+    /// chain (spec §6.6, §6.8; plan 5g-1 Ruling 13): input goes through
+    /// the chain, then every chain ticks (arpeggiator steps, gate ends).
+    /// Each output plays thru at its block offset and, while a tap rolls
+    /// and the lane is armed, is recorded: input at the run frame heard
+    /// when it arrived, generated notes where they play (Ruling 11).
+    /// Outputs leave in block-offset order across every lane and
+    /// arpeggiator (Task 3 review M4; [`LiveOut`]). // RT
+    fn live_midi(&mut self, frames: u32) {
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let sr = self.cfg.sample_rate;
         let block_ns = self.block_ns;
+        let info = self.block_info();
+        let lead = i64::try_from(self.latency).unwrap_or(0);
+        let transport = self
+            .schedule
+            .as_deref()
+            .filter(|_| info.playing)
+            .map(|s| (&s.tempo, info.frame));
+        let clock = crate::input_fx::ChainClock {
+            frames,
+            sample_rate: sr,
+            bpm: info.tempo_bpm,
+            transport,
+            record_lead: lead,
+        };
         let mut o = Out {
             sinks: &mut self.sinks,
             shared: &self.shared,
             block_ns,
-            ns_per_frame: 0.0,
+            ns_per_frame: 1e9 / sr.max(1.0),
             late_ns,
             base: 0,
         };
-        let thru = &mut self.thru;
+        let thru = &mut *self.thru;
+        let live = &mut *self.live_out;
         let mut tap = self.tap.as_deref_mut();
         let mut routes = self.inputs.as_deref_mut();
         for _ in 0..MIDI_IN_PER_BLOCK {
@@ -2046,23 +2118,27 @@ impl Renderer {
                 if !r.matches(&ev) {
                     continue;
                 }
-                let (spec, targets, ch) = (&r.spec, r.targets, r.dest_channel);
-                r.chain.process(ev.msg, &mut |m| {
-                    if spec.thru {
-                        let m = on_channel(m, ch);
-                        for t in targets.iter().flatten() {
-                            o.send(*t, 0, m.as_slice());
-                            thru.observe(*t, m.as_slice());
-                        }
-                    }
-                    if spec.armed {
-                        if let Some(t) = tap.as_deref_mut() {
-                            t.midi(spec.lane, offset, m);
-                        }
-                    }
+                let msg = crate::input_fx::LiveMsg::from_midi1(ev.msg);
+                let at = crate::input_fx::At {
+                    block: 0,
+                    record: offset,
+                };
+                let d = LiveDest::of(r);
+                r.chain.process(msg, at, &mut |at, m| {
+                    live.push(d, at, m, &mut o, thru, &mut tap)
                 });
             }
         }
+        if let Some(routes) = routes {
+            for r in routes.midi.iter_mut() {
+                let d = LiveDest::of(r);
+                r.chain.tick(&clock, &mut |at, m| {
+                    live.push(d, at, m, &mut o, thru, &mut tap)
+                });
+                o.shared.count_fx_dropped(r.chain.take_dropped());
+            }
+        }
+        live.drain(&mut o, thru, &mut tap);
     }
 
     /// Sends what a measurement has due (spec §6.7) at block offset 0,
@@ -2423,6 +2499,137 @@ fn send_param(
     match graph.and_then(|g| g.insert_mut(id)) {
         Some(node) => node.automate(frame, param, v),
         None => true,
+    }
+}
+
+/// Where one route's input-chain outputs go (plan 5g-1 Ruling 11): the
+/// route's facts the renderer needs, copied out so outputs can wait in
+/// [`LiveOut`] while the chain is borrowed. // RT
+#[derive(Debug, Clone, Copy)]
+struct LiveDest {
+    lane: core_model::ids::LaneId,
+    thru: bool,
+    armed: bool,
+    targets: [Option<TargetIdx>; 2],
+    channel: u8,
+    quantize: Option<crate::input_fx::RecordQuantize>,
+}
+
+impl LiveDest {
+    /// `r`'s destination and its chain's Input Quantize. // RT
+    fn of(r: &crate::input::MidiRoute) -> LiveDest {
+        LiveDest {
+            lane: r.spec.lane,
+            thru: r.spec.thru,
+            armed: r.spec.armed,
+            targets: r.targets,
+            channel: r.dest_channel,
+            quantize: r.chain.quantize(),
+        }
+    }
+}
+
+/// Input-chain outputs waiting for the end of [`Renderer::live_midi`].
+const LIVE_OUT_CAPACITY: usize = 256;
+
+/// One waiting output.
+#[derive(Debug, Clone, Copy)]
+struct LivePending {
+    dest: LiveDest,
+    at: crate::input_fx::At,
+    msg: crate::input_fx::LiveMsg,
+}
+
+/// A block's input-chain outputs, put in block-offset order before they
+/// leave (Task 3 review M4): each arpeggiator's steps are in order, but a
+/// second arpeggiator in a chain, or another lane, starts again from the
+/// block's start, and instrument sinks may apply queued events in arrival
+/// order. A stable insertion sort in place: no allocation. When full, the
+/// waiting outputs leave sorted and collection goes on (at most
+/// [`LIVE_OUT_CAPACITY`] outputs out of order with each other).
+#[derive(Debug)]
+struct LiveOut {
+    items: [Option<LivePending>; LIVE_OUT_CAPACITY],
+    len: usize,
+}
+
+impl LiveOut {
+    /// Allocated by the renderer's constructor (control thread).
+    fn new() -> LiveOut {
+        LiveOut {
+            items: [None; LIVE_OUT_CAPACITY],
+            len: 0,
+        }
+    }
+
+    /// Queues one output, draining first when full. // RT
+    fn push(
+        &mut self,
+        dest: LiveDest,
+        at: crate::input_fx::At,
+        msg: crate::input_fx::LiveMsg,
+        o: &mut Out<'_>,
+        thru: &mut ActiveNotes,
+        tap: &mut Option<&mut RecordTap>,
+    ) {
+        if self.len >= LIVE_OUT_CAPACITY {
+            self.drain(o, thru, tap);
+        }
+        if let Some(slot) = self.items.get_mut(self.len) {
+            *slot = Some(LivePending { dest, at, msg });
+            self.len += 1;
+        }
+    }
+
+    /// Sends every waiting output in block-offset order (stable). // RT
+    fn drain(&mut self, o: &mut Out<'_>, thru: &mut ActiveNotes, tap: &mut Option<&mut RecordTap>) {
+        let items = self.items.get_mut(..self.len).unwrap_or(&mut []);
+        let key = |p: &Option<LivePending>| p.map_or(u32::MAX, |p| p.at.block);
+        for i in 1..items.len() {
+            let mut j = i;
+            while j > 0 {
+                let (Some(a), Some(b)) = (items.get(j - 1), items.get(j)) else {
+                    break;
+                };
+                if key(a) <= key(b) {
+                    break;
+                }
+                items.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        for p in items.iter_mut() {
+            if let Some(p) = p.take() {
+                emit_live(&p.dest, p.at, p.msg, o, thru, tap);
+            }
+        }
+        self.len = 0;
+    }
+}
+
+/// One input-chain output: thru on the route's targets and channel at
+/// its block offset, and to the tap when the lane is armed (plan 5g-1
+/// Ruling 11). // RT
+fn emit_live(
+    d: &LiveDest,
+    at: crate::input_fx::At,
+    m: crate::input_fx::LiveMsg,
+    o: &mut Out<'_>,
+    thru: &mut ActiveNotes,
+    tap: &mut Option<&mut RecordTap>,
+) {
+    if d.thru {
+        if let Some(msg) = m.to_midi1(d.channel) {
+            for t in d.targets.iter().flatten() {
+                o.send(*t, at.block, msg.as_slice());
+                thru.observe(*t, msg.as_slice());
+            }
+        }
+    }
+    if d.armed {
+        if let Some(t) = tap.as_deref_mut() {
+            t.midi(d.lane, at.record, m, d.quantize);
+        }
     }
 }
 

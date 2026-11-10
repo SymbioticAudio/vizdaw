@@ -793,6 +793,8 @@ pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
                 dest: l.midi_dest,
                 thru: l.monitor != MonitorMode::Off,
                 armed: l.arm,
+                // Stop-gap: plan 5g-1 Task 6 passes the lane's chain.
+                fx: Vec::new(),
             }),
             Some(LaneInput::Audio { channels, .. })
                 if software && l.monitor != MonitorMode::Off =>

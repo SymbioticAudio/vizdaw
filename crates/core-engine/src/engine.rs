@@ -580,7 +580,7 @@ impl Engine {
                     spec: m.clone(),
                     targets,
                     dest_channel,
-                    chain: crate::input::InputChain,
+                    chain: crate::input_fx::InputChain::new(&m.fx),
                 });
             }
             // The synths lanes record the return of (spec §6.7): interned
