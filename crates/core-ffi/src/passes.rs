@@ -76,7 +76,7 @@
 //!
 //! Control-side code: nothing here runs on the real-time thread.
 
-use core_engine::input_fx::LiveMsg;
+use core_engine::input_fx::{Expr, LiveMsg, RecordQuantize};
 use core_engine::midi1::Midi1Msg;
 use core_engine::record::{Mark, RecordedMidi};
 use core_engine::schedule::TempoTable;
@@ -400,11 +400,15 @@ fn body_of(msg: Midi1Msg) -> Option<EventBody> {
 #[derive(Debug, Clone, Copy)]
 struct Heard {
     u: i64,
-    msg: Midi1Msg,
+    msg: LiveMsg,
+    /// The chain's Input Quantize when it was played (note starts only).
+    quantize: Option<RecordQuantize>,
 }
 
 /// A lane's MIDI per pass: events placed on the timeline, notes paired
-/// with their offs (cut at the pass window's end).
+/// with their offs (cut at the pass window's end). `heard` must be in
+/// heard-run order. A note's channel is its destination's, so notes pair
+/// by pitch alone.
 fn midi_events(
     heard: &[Heard],
     pieces: &[Piece],
@@ -424,30 +428,33 @@ fn midi_events(
         if t < t0 || t >= t1 {
             continue;
         }
-        let [s, pitch, vel] = h.msg.bytes;
-        let body = match s & 0xF0 {
-            0x90 if vel > 0 => {
-                let ch = s & 0x0F;
-                // The off: the next note-off of this pitch and channel in
-                // the same pass; else the window's end.
-                let off = heard.iter().skip(i + 1).find(|o| {
-                    let [os, op, ov] = o.msg.bytes;
-                    os & 0x0F == ch
-                        && op == pitch
-                        && (os & 0xF0 == 0x80 || (os & 0xF0 == 0x90 && ov == 0))
-                });
+        let mut start = tick(t);
+        let body = match h.msg {
+            LiveMsg::NoteOn {
+                pitch, velocity, ..
+            } => {
+                // The off: the next note-off of this pitch in the same
+                // pass; else the window's end.
+                let off = heard
+                    .iter()
+                    .skip(i + 1)
+                    .find(|o| matches!(o.msg, LiveMsg::NoteOff { pitch: op, .. } if op == pitch));
                 let (end, release) = match off.and_then(|o| piece_of(pieces, o.u).map(|q| (o, q))) {
                     Some((o, q)) if q.pass == p.pass => (
                         place(q, o.u).min(t1),
-                        crate::input::upscale_velocity(o.msg.bytes[2]),
+                        match o.msg {
+                            LiveMsg::NoteOff { velocity, .. } => velocity,
+                            _ => 0,
+                        },
                     ),
                     _ => (t1, 0),
                 };
-                let mut b = EventBody::note(
-                    pitch & 0x7F,
-                    crate::input::upscale_velocity(vel),
-                    Tick((tick(end).0 - tick(t).0).max(0)),
-                );
+                // The length is the unquantized one (Ruling 12).
+                let duration = Tick((tick(end).0 - start.0).max(0));
+                if let Some(q) = h.quantize {
+                    start = q.spec().apply(start);
+                }
+                let mut b = EventBody::note(pitch & 0x7F, velocity, duration);
                 if let EventBody::Note {
                     release_velocity, ..
                 } = &mut b
@@ -456,15 +463,29 @@ fn midi_events(
                 }
                 b
             }
-            0x80 | 0x90 => continue,
-            _ => match body_of(h.msg) {
+            LiveMsg::NoteOff { .. } => continue,
+            LiveMsg::PerNote {
+                pitch,
+                expr: Expr::Pressure,
+                value,
+            } => EventBody::PolyPressure {
+                pitch: pitch & 0x7F,
+                value,
+            },
+            // Plan 5g-2 attaches per-note bend and timbre to their note.
+            LiveMsg::PerNote { .. } => continue,
+            LiveMsg::Channel(m) => match body_of(m) {
                 Some(b) => b,
                 None => continue,
             },
         };
         out.entry(p.pass)
             .or_default()
-            .push(EventSpec::new(tick(t), body));
+            .push(EventSpec::new(start, body));
+    }
+    // Quantized starts may cross; the events end up in position order.
+    for events in out.values_mut() {
+        events.sort_by_key(|e| e.tick);
     }
     out
 }
@@ -653,21 +674,19 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         }
     }
     for lane in c.midi_lanes {
-        let heard: Vec<Heard> = c
+        let mut heard: Vec<Heard> = c
             .midi
             .iter()
             .filter(|m| m.lane == *lane)
-            .filter_map(|m| {
-                // Stop-gap until plan 5g-1 Task 5 turns `LiveMsg`s into
-                // events: back to MIDI 1.0 as before (channel messages
-                // keep their channel; notes have none, so channel 0).
-                let msg = match m.msg {
-                    LiveMsg::Channel(c) => c,
-                    other => other.to_midi1(0)?,
-                };
-                Some(Heard { u: m.run, msg })
+            .map(|m| Heard {
+                u: m.run,
+                msg: m.msg,
+                quantize: m.quantize,
             })
             .collect();
+        // Arrivals follow block offset, not position (Task 4 review M6):
+        // stable by heard run, so a pitch's off pairs with its own on.
+        heard.sort_by_key(|h| h.u);
         let mut events = midi_events(&heard, &pieces, &c.range, &tempo);
         events.retain(|p, _| kept.contains(p));
         if takes_from_passes {

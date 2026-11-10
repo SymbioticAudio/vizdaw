@@ -6,7 +6,7 @@
 //! was played with replace clearing only the recorded range.
 
 use core_engine::fixtures::{Builder, Q};
-use core_engine::input_fx::LiveMsg;
+use core_engine::input_fx::{LiveMsg, RecordQuantize};
 use core_engine::midi1::Midi1Msg;
 use core_engine::record::{Mark, RecordedMidi};
 use core_engine::schedule::TempoTable;
@@ -997,4 +997,128 @@ fn a_rise_after_a_fall_lands_gap_messages_at_its_start() {
     assert_eq!(ticks, vec![4 * Q]);
     let got = active_frames(&p, d.mic, &d);
     assert_no_overlap(&got);
+}
+
+fn midi_q(lane: LaneId, run: i64, msg: Midi1Msg, grid: i64, strength: u8) -> RecordedMidi {
+    RecordedMidi {
+        lane,
+        run,
+        msg: LiveMsg::from_midi1(msg),
+        quantize: Some(RecordQuantize { grid, strength }),
+    }
+}
+
+/// `(tick, duration)` of the notes of `pitches` in the pass's active
+/// content of `lane`.
+fn note_spans(p: &RecordPass, lane: LaneId, pitches: &[u8]) -> Vec<(i64, i64)> {
+    p.lanes
+        .iter()
+        .filter(|l| l.lane == lane)
+        .flat_map(|l| l.active.events.iter())
+        .filter_map(|e| match &e.body {
+            EventBody::Note {
+                pitch, duration, ..
+            } if pitches.contains(pitch) => Some((e.tick.0, duration.0)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Plan 5g-1 Ruling 12: Input Quantize moves recorded starts toward the
+/// grid by its strength and keeps each note's length; controllers stay.
+#[test]
+fn input_quantize_moves_recorded_starts_and_keeps_lengths() {
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let r = |beats: f64| (beats * BEAT as f64) as i64;
+    let g = Q / 4;
+    c.midi = vec![
+        midi_q(d.keys, r(0.3), on(60, 100), g, 100),
+        midi_q(d.keys, r(0.8), off(60), g, 100),
+        midi_q(d.keys, r(1.1), on(62, 100), g, 50),
+        midi_q(d.keys, r(1.6), off(62), g, 50),
+        midi(d.keys, r(2.1), Midi1Msg::three(0xB0, 1, 64)),
+    ];
+    let p = c.run().unwrap();
+    assert_eq!(
+        note_spans(&p, d.keys, &[60, 62]),
+        vec![(Q / 4, Q / 2), (Q + Q / 20, Q / 2)]
+    );
+    let cc: Vec<i64> = p
+        .lanes
+        .iter()
+        .filter(|l| l.lane == d.keys)
+        .flat_map(|l| l.active.events.iter())
+        .filter(|e| matches!(e.body, EventBody::Cc { .. }))
+        .map(|e| e.tick.0)
+        .collect();
+    assert_eq!(cc, vec![Q * 21 / 10]);
+}
+
+/// Poly pressure records as poly pressure (MIDI 2.0 per-note pressure;
+/// plan 5g-1 Ruling 4).
+#[test]
+fn poly_pressure_records_as_poly_pressure() {
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![midi(d.keys, 12_000, Midi1Msg::three(0xA0, 60, 64))];
+    let p = c.run().unwrap();
+    let got: Vec<(i64, u8, u32)> = p
+        .lanes
+        .iter()
+        .filter(|l| l.lane == d.keys)
+        .flat_map(|l| l.active.events.iter())
+        .filter_map(|e| match e.body {
+            EventBody::PolyPressure { pitch, value } => Some((e.tick.0, pitch, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, vec![(Q / 2, 60, 0x8000_0000)]);
+}
+
+/// Task 4 review M7: a note played on any channel records as the same
+/// note (events carry no channel of their own; a note's channel is its
+/// destination's), paired with its off.
+#[test]
+fn a_note_played_on_channel_n_records_like_any_other() {
+    let d = doc(None);
+    let spans = |ch: u8| {
+        let mut c = Case::new(&d, 0);
+        c.midi_lanes = vec![d.keys];
+        c.midi = vec![
+            midi(d.keys, 0, Midi1Msg::three(0x90 | ch, 60, 100)),
+            midi(d.keys, BEAT as i64, Midi1Msg::three(0x80 | ch, 60, 64)),
+        ];
+        let p = c.run().unwrap();
+        let l = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+        let g: Vec<Option<(u8, u8)>> = l.active.events.iter().map(|e| e.group_channel).collect();
+        (note_spans(&p, d.keys, &[60]), g)
+    };
+    let (s0, g0) = spans(0);
+    let (s5, g5) = spans(5);
+    assert_eq!(s5, vec![(0, Q)]);
+    assert_eq!((s5, g5), (s0, g0));
+}
+
+/// Task 4 review M6: the recorder's arrivals follow block offset, not
+/// position; the recorded events end up ordered by position and notes
+/// still pair with their own off.
+#[test]
+fn recorded_events_are_ordered_by_position_whatever_the_arrival_order() {
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let r = |beats: f64| (beats * BEAT as f64) as i64;
+    c.midi = vec![
+        midi(d.keys, r(1.0), Midi1Msg::three(0xB0, 1, 64)),
+        midi(d.keys, r(0.5), off(60)),
+        midi(d.keys, r(0.0), on(60, 100)),
+    ];
+    let p = c.run().unwrap();
+    let l = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    let ticks: Vec<i64> = l.active.events.iter().map(|e| e.tick.0).collect();
+    assert_eq!(ticks, vec![0, Q]);
+    assert_eq!(note_spans(&p, d.keys, &[60]), vec![(0, Q / 2)]);
 }
