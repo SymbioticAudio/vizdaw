@@ -2337,17 +2337,17 @@ the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
 240. Latch: hold a chord and let go: it keeps playing; press a new chord
      with no key down: the pattern changes to it.
 241. Transpose +12 then Chord (+4 +7) near the top of the keyboard, then
-     drag the Chord slot above the Transpose slot: the top notes differ (notes past the
-     highest key are dropped, never folded).
+     drag the Chord slot above the Transpose slot: the top notes differ
+     (notes past the highest key are dropped, never folded).
 242. Hold a chord through the arpeggiator and bypass it (its slot's
      dot), change its rate, drag a velocity slider, arm another track,
-     disarm this one: no note hangs, and a latched arpeggio survives arming another track. Start a
-     MIDI Learn and press a key: the key is learned, and nothing plays or
-     arpeggiates.
+     disarm this one: no note hangs, and a latched arpeggio survives
+     arming another track. Start a MIDI Learn and press a key: the key is
+     learned, and nothing plays or arpeggiates.
 243. Add Input Quantize (1/16, 100%) and record a loose phrase: thru is
      never delayed; the recorded notes start on the sixteenths and keep
      their lengths. At 50% they move half way.
 244. Each change in the MIDI FX section or a settings popover is one
-     Undo ("Set Input Effects"); a slider drag is one step. A change made while recording is undone with
-     the take. Save, close and reopen: the chain is there. Duplicate Track
-     copies it.
+     Undo ("Set Input Effects"); a slider drag is one step. A change made
+     while recording is undone with the take. Save, close and reopen: the
+     chain is there. Duplicate Track copies it.
