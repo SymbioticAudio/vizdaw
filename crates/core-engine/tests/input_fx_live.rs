@@ -323,3 +323,177 @@ fn live_outputs_leave_in_frame_order() {
         "out of order: {runs:?}"
     );
 }
+
+/// What [`RunNode`] saw: each message with its frame, and every message
+/// whose offset was not inside the render call that followed it.
+#[derive(Default)]
+struct RunSeen {
+    msgs: Vec<(u64, Vec<u8>)>,
+    outside: Vec<(u32, u32)>,
+}
+
+/// An instrument that checks `InstrumentNode::midi`'s promise: an offset
+/// within the next `render` call.
+struct RunNode {
+    seen: std::sync::Arc<std::sync::Mutex<RunSeen>>,
+    queued: Vec<u32>,
+    rendered: u64,
+}
+
+impl core_engine::backend::InstrumentNode for RunNode {
+    fn midi(&mut self, offset: u32, msg: &[u8]) {
+        if let Ok(mut s) = self.seen.lock() {
+            s.msgs
+                .push((self.rendered + u64::from(offset), msg.to_vec()));
+        }
+        if self.queued.len() < self.queued.capacity() {
+            self.queued.push(offset);
+        }
+    }
+    fn render(&mut self, frames: u32, out: &mut core_engine::backend::StereoBuf) {
+        out.clear(frames);
+        if let Ok(mut s) = self.seen.lock() {
+            for o in self.queued.iter().filter(|o| **o >= frames) {
+                s.outside.push((*o, frames));
+            }
+        }
+        self.queued.clear();
+        self.rendered += u64::from(frames);
+    }
+    fn reset(&mut self) {}
+}
+
+struct RunFactory(std::sync::Arc<std::sync::Mutex<RunSeen>>);
+
+impl core_engine::engine::SinkFactory for RunFactory {
+    fn ports(&self) -> Vec<core_engine::backend::MidiPortInfo> {
+        vec![]
+    }
+    fn make(
+        &mut self,
+        _: core_engine::schedule::TargetIdx,
+        _: &core_engine::schedule::TargetKind,
+        _: f64,
+        _: u32,
+    ) -> Result<core_engine::render::Sink, core_engine::BackendError> {
+        Ok(core_engine::render::Sink::Instrument(Box::new(RunNode {
+            seen: self.0.clone(),
+            queued: Vec::with_capacity(4096),
+            rendered: 0,
+        })))
+    }
+}
+
+/// Review I1: automation cuts blocks into runs, and an arpeggiator step
+/// reaches the instrument in the run that holds it, at its frame.
+#[test]
+fn arp_steps_reach_the_run_that_holds_them() {
+    use core_model::automation::AutomationTarget;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::mixer::StripKind;
+    let mut d = doc();
+    let mut b = core_engine::fixtures::Builder::from_doc(d.doc.clone());
+    let strip = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let auto = b.lane(d.seq, "Auto", None).unwrap();
+    // A fader point every 64 ticks (100 frames at 120 BPM).
+    let events = (0..(8 * Q / 64))
+        .map(|k| {
+            EventSpec::new(
+                Tick(k * 64),
+                EventBody::Automation {
+                    target: AutomationTarget::StripFader(strip),
+                    value: (k % 10) as f64 / 10.0,
+                },
+            )
+        })
+        .collect();
+    b.events(d.seq, auto, events).unwrap();
+    d.doc = b.finish();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(RunSeen::default()));
+    let (mut engine, renderer) =
+        Engine::new(EngineConfig::new(SR), Box::new(RunFactory(seen.clone()))).unwrap();
+    engine.set_inputs(InputSpec {
+        midi: vec![spec(&d, d.keys, "Keys", vec![arp(|_| {})], false)],
+        monitor: vec![],
+    });
+    engine.load(&d.doc, d.seq).unwrap();
+    let mut be = OfflineBackend::new(SR, 512).with_input(FakeInput::Signals);
+    be.start(renderer).unwrap();
+    engine.play().unwrap();
+    be.run_frames(512);
+    send(&engine, "Keys", [0x90, 60, 100]);
+    let runs = engine.counters().runs;
+    be.run_frames(12_800);
+    assert!(
+        engine.counters().runs - runs > 2 * 12_800 / 512,
+        "automation cut the blocks into runs"
+    );
+    let s = seen.lock().unwrap();
+    assert!(
+        s.outside.is_empty(),
+        "offsets past their render call: {:?}",
+        s.outside
+    );
+    let steps: Vec<u64> = s
+        .msgs
+        .iter()
+        .filter(|(_, m)| m.len() == 3 && m[0] & 0xF0 == 0x90 && m[1] == 60 && m[2] > 0)
+        .map(|(f, _)| *f)
+        .collect();
+    assert_eq!(steps, vec![6000, 12_000]);
+}
+
+/// Review M2: a route that goes away releases its pedal even where a
+/// carried route keeps the target (both lanes play the synth).
+#[test]
+fn a_dropped_routes_pedal_is_released_on_a_kept_target() {
+    let d = doc();
+    let keys = spec(&d, d.keys, "Keys", vec![arp(|a| a.latch = true)], false);
+    let pads = spec(&d, d.pads, "Pads", vec![], false);
+    let (mut engine, mut b, log) = start(&d, vec![keys.clone(), pads]);
+    b.run_frames(512);
+    send(&engine, "Pads", [0xB0, 64, 127]);
+    b.run_frames(256);
+    log.drain();
+    engine.set_inputs(InputSpec {
+        midi: vec![keys],
+        monitor: vec![],
+    });
+    engine.load(&d.doc, d.seq).unwrap();
+    b.run_frames(256);
+    let got: Vec<Vec<u8>> = log.drain().iter().map(|r| r.bytes().to_vec()).collect();
+    assert!(got.contains(&vec![0xB3, 64, 0]), "{got:?}");
+}
+
+/// Review M4: an armed lane's recorded messages carry its Input Quantize
+/// (Ruling 12).
+#[test]
+fn recorded_input_carries_the_chains_quantize() {
+    use core_engine::input_fx::RecordQuantize;
+    let d = doc();
+    let fx = vec![InputFx::new(InputFxKind::InputQuantize {
+        grid: Tick(Q / 4),
+        strength: 100,
+    })];
+    let (mut engine, mut b, _log) = start(&d, vec![spec(&d, d.keys, "Keys", fx, true)]);
+    let mut h = engine
+        .start_recording(&RecordRequest {
+            channels: vec![],
+            range: None,
+            ring_frames: 4800,
+        })
+        .unwrap();
+    engine.play().unwrap();
+    b.run_frames(256);
+    send(&engine, "Keys", [0x90, 60, 100]);
+    b.run_frames(256);
+    let m = h.midi.pop().unwrap();
+    assert_eq!(
+        m.quantize,
+        Some(RecordQuantize {
+            grid: Q / 4,
+            strength: 100
+        })
+    );
+    assert!(matches!(m.msg, LiveMsg::NoteOn { pitch: 60, .. }));
+}

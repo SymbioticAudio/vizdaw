@@ -1196,6 +1196,8 @@ impl Renderer {
                                 }
                                 let off = offset
                                     + u32::try_from(e.frame.saturating_sub(from)).unwrap_or(0);
+                                // Live thru up to here first (review I1).
+                                self.live_out.send_until(&mut o, off.saturating_add(1));
                                 let bytes = s.bytes(&e.msg);
                                 o.send(e.target, off, bytes);
                                 self.notes.observe(e.target, bytes);
@@ -1242,6 +1244,8 @@ impl Renderer {
                 }
                 at += step.frames();
             }
+            // The run's remaining live thru (Task 4 review I1).
+            self.live_out.send_until(&mut o, end);
             let lost = self.render_graph(out, offset, run, info, regions, deadline);
             if regions.playing {
                 self.since_start = self.since_start.saturating_add(u64::from(run));
@@ -1254,6 +1258,18 @@ impl Renderer {
                 missed = true;
                 break;
             }
+        }
+        {
+            // Live thru of skipped runs reaches the next render call.
+            let mut o = Out {
+                sinks: &mut self.sinks,
+                shared: &self.shared,
+                block_ns: time.host_time_ns,
+                ns_per_frame,
+                late_ns,
+                base: offset,
+            };
+            self.live_out.finish(&mut o);
         }
         if missed && offset < frames {
             // Plan 4d Ruling 10 as built (P11): the run that missed its
@@ -1914,6 +1930,15 @@ impl Renderer {
                             r.chain.flush(crate::input_fx::At::NOW, &mut |at, m| {
                                 emit_live(&d, at, m, &mut o, thru, &mut tap)
                             });
+                            // Its pedal too, on a target a carried route
+                            // keeps (review M2).
+                            if d.thru {
+                                for t in d.targets.iter().flatten() {
+                                    thru.release_pedal(*t, d.channel, |m| {
+                                        o.send(*t, 0, m.as_slice())
+                                    });
+                                }
+                            }
                             o.shared.count_fx_dropped(r.chain.take_dropped());
                         }
                     }
@@ -2066,11 +2091,12 @@ impl Renderer {
     /// Takes the queued MIDI input and runs every listening lane's input
     /// chain (spec §6.6, §6.8; plan 5g-1 Ruling 13): input goes through
     /// the chain, then every chain ticks (arpeggiator steps, gate ends).
-    /// Each output plays thru at its block offset and, while a tap rolls
-    /// and the lane is armed, is recorded: input at the run frame heard
-    /// when it arrived, generated notes where they play (Ruling 11).
-    /// Outputs leave in block-offset order across every lane and
-    /// arpeggiator (Task 3 review M4; [`LiveOut`]). // RT
+    /// While a tap rolls and the lane is armed, each output is recorded:
+    /// input at the run frame heard when it arrived, generated notes where
+    /// they play (Ruling 11). Its thru waits in [`LiveOut`] for the run
+    /// loop, which sends it in the run that holds its block offset (Task 4
+    /// review I1). Outputs go in block-offset order across every lane and
+    /// arpeggiator (Task 3 review M4). // RT
     fn live_midi(&mut self, frames: u32) {
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let sr = self.cfg.sample_rate;
@@ -2138,7 +2164,7 @@ impl Renderer {
                 o.shared.count_fx_dropped(r.chain.take_dropped());
             }
         }
-        live.drain(&mut o, thru, &mut tap);
+        live.settle(&mut o, thru, &mut tap);
     }
 
     /// Sends what a measurement has due (spec §6.7) at block offset 0,
@@ -2531,6 +2557,9 @@ impl LiveDest {
 
 /// Input-chain outputs waiting for the end of [`Renderer::live_midi`].
 const LIVE_OUT_CAPACITY: usize = 256;
+/// Thru messages waiting for the run that holds them (two targets per
+/// output at most).
+const LIVE_SEND_CAPACITY: usize = 2 * LIVE_OUT_CAPACITY;
 
 /// One waiting output.
 #[derive(Debug, Clone, Copy)]
@@ -2540,17 +2569,31 @@ struct LivePending {
     msg: crate::input_fx::LiveMsg,
 }
 
-/// A block's input-chain outputs, put in block-offset order before they
-/// leave (Task 3 review M4): each arpeggiator's steps are in order, but a
+/// One waiting thru message: target, block offset, bytes.
+type LiveSend = (TargetIdx, u32, Midi1Msg);
+
+/// A block's input-chain outputs (Task 3 review M4, Task 4 review I1).
+///
+/// [`Renderer::live_midi`] collects every output of the block, puts them
+/// in block-offset order (each arpeggiator's steps are in order, but a
 /// second arpeggiator in a chain, or another lane, starts again from the
-/// block's start, and instrument sinks may apply queued events in arrival
-/// order. A stable insertion sort in place: no allocation. When full, the
-/// waiting outputs leave sorted and collection goes on (at most
-/// [`LIVE_OUT_CAPACITY`] outputs out of order with each other).
+/// block's start) with a stable insertion sort in place, and hands them to
+/// the recorder. Their thru messages wait in offset order until the run
+/// loop sends each in the run that holds it, before the playback events
+/// at or after its offset, so an instrument hears it inside the render
+/// call it belongs to, in frame order with playback. No allocation.
+///
+/// When the outputs fill, the waiting ones are settled and collection goes
+/// on; when the thru messages fill, the rest go out at once (both are past
+/// [`LIVE_OUT_CAPACITY`] outputs in a block: out of order, never lost).
 #[derive(Debug)]
 struct LiveOut {
     items: [Option<LivePending>; LIVE_OUT_CAPACITY],
     len: usize,
+    sends: [Option<LiveSend>; LIVE_SEND_CAPACITY],
+    sends_len: usize,
+    /// The first thru message not yet sent.
+    sent: usize,
 }
 
 impl LiveOut {
@@ -2559,10 +2602,13 @@ impl LiveOut {
         LiveOut {
             items: [None; LIVE_OUT_CAPACITY],
             len: 0,
+            sends: [None; LIVE_SEND_CAPACITY],
+            sends_len: 0,
+            sent: 0,
         }
     }
 
-    /// Queues one output, draining first when full. // RT
+    /// Queues one output, settling first when full. // RT
     fn push(
         &mut self,
         dest: LiveDest,
@@ -2573,7 +2619,7 @@ impl LiveOut {
         tap: &mut Option<&mut RecordTap>,
     ) {
         if self.len >= LIVE_OUT_CAPACITY {
-            self.drain(o, thru, tap);
+            self.settle(o, thru, tap);
         }
         if let Some(slot) = self.items.get_mut(self.len) {
             *slot = Some(LivePending { dest, at, msg });
@@ -2581,8 +2627,14 @@ impl LiveOut {
         }
     }
 
-    /// Sends every waiting output in block-offset order (stable). // RT
-    fn drain(&mut self, o: &mut Out<'_>, thru: &mut ActiveNotes, tap: &mut Option<&mut RecordTap>) {
+    /// Puts the waiting outputs in block-offset order (stable), records
+    /// them, and queues their thru messages for the run loop. // RT
+    fn settle(
+        &mut self,
+        o: &mut Out<'_>,
+        thru: &mut ActiveNotes,
+        tap: &mut Option<&mut RecordTap>,
+    ) {
         let items = self.items.get_mut(..self.len).unwrap_or(&mut []);
         let key = |p: &Option<LivePending>| p.map_or(u32::MAX, |p| p.at.block);
         for i in 1..items.len() {
@@ -2599,11 +2651,54 @@ impl LiveOut {
             }
         }
         for p in items.iter_mut() {
-            if let Some(p) = p.take() {
-                emit_live(&p.dest, p.at, p.msg, o, thru, tap);
+            let Some(p) = p.take() else {
+                continue;
+            };
+            let d = &p.dest;
+            if d.thru {
+                if let Some(msg) = p.msg.to_midi1(d.channel) {
+                    for t in d.targets.iter().flatten() {
+                        thru.observe(*t, msg.as_slice());
+                        match self.sends.get_mut(self.sends_len) {
+                            Some(slot) => {
+                                *slot = Some((*t, p.at.block, msg));
+                                self.sends_len += 1;
+                            }
+                            None => o.send(*t, p.at.block, msg.as_slice()),
+                        }
+                    }
+                }
+            }
+            if d.armed {
+                if let Some(t) = tap.as_deref_mut() {
+                    t.midi(d.lane, p.at.record, p.msg, d.quantize);
+                }
             }
         }
         self.len = 0;
+    }
+
+    /// Sends the waiting thru messages at block offsets before `limit`
+    /// through `o` (the current run's). // RT
+    fn send_until(&mut self, o: &mut Out<'_>, limit: u32) {
+        while self.sent < self.sends_len {
+            let Some(Some((t, off, msg))) = self.sends.get(self.sent).copied() else {
+                break;
+            };
+            if off >= limit {
+                break;
+            }
+            o.send(t, off, msg.as_slice());
+            self.sent += 1;
+        }
+    }
+
+    /// Sends whatever still waits (the block's later runs were skipped)
+    /// and empties the queue. // RT
+    fn finish(&mut self, o: &mut Out<'_>) {
+        self.send_until(o, u32::MAX);
+        self.sends_len = 0;
+        self.sent = 0;
     }
 }
 
