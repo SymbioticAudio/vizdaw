@@ -172,7 +172,7 @@ fn the_command_refuses_nine_effects_and_an_unknown_lane() {
     let chords = lane(&s, seq, "Chords").id;
     let nine = format!(
         "[{}]",
-        vec![r#"{"kind": {"transpose": {"semitones": 1}}}"#; 9].join(",")
+        [r#"{"kind": {"transpose": {"semitones": 1}}}"#; 9].join(",")
     );
     let chain = input_fx_from_json(nine).unwrap();
     assert_eq!(chain.len(), 9);
