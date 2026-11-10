@@ -1122,3 +1122,101 @@ fn recorded_events_are_ordered_by_position_whatever_the_arrival_order() {
     assert_eq!(ticks, vec![0, Q]);
     assert_eq!(note_spans(&p, d.keys, &[60]), vec![(0, Q / 2)]);
 }
+
+/// Final review I2: in loop recording, a note played in the last half
+/// grid of a pass (an early downbeat) quantizes onto the loop end, which
+/// never plays while the loop cycles: it wraps back by the loop length to
+/// the loop start, and its length runs on over the wrap to its off.
+#[test]
+fn an_early_downbeat_in_a_loop_pass_lands_at_the_loop_start() {
+    let d = doc(None);
+    let len = 2 * BEAT;
+    let mut c = Case::new(&d, 0);
+    c.looped = true;
+    c.end_run = 2 * len;
+    c.range = RecordRange {
+        start: 0,
+        end: Some(len),
+    };
+    c.marks = vec![mark(0, 0, false), mark(len, 0, true)];
+    c.midi_lanes = vec![d.keys];
+    let g = Q / 4;
+    let len = len as i64;
+    // 1000 frames before the wrap (a 1/16 is 6000), held 6000 past it.
+    c.midi = vec![
+        midi_q(d.keys, len - 1000, on(60, 100), g, 100),
+        midi_q(d.keys, len + 6000, off(60), g, 100),
+        midi_q(d.keys, len + 12_000, on(64, 100), g, 100),
+        midi_q(d.keys, len + 18_000, off(64), g, 100),
+    ];
+    let ticks = |frames: i64| frames * Q / BEAT as i64;
+    let notes = |e: &[core_model::event::EventSpec]| -> Vec<(i64, u8, i64)> {
+        e.iter()
+            .filter_map(|e| match &e.body {
+                EventBody::Note {
+                    pitch, duration, ..
+                } => Some((e.tick.0, *pitch, duration.0)),
+                _ => None,
+            })
+            .collect()
+    };
+    let p = c.run().unwrap();
+    let l = &p.lanes[0];
+    assert_eq!(l.takes.len(), 2);
+    assert_eq!(
+        notes(&l.takes[0].1.events),
+        vec![(0, 60, ticks(7000))],
+        "pass 0's downbeat at the loop start, its heard length kept"
+    );
+    assert_eq!(notes(&l.takes[1].1.events), vec![(Q / 2, 64, Q / 4)]);
+    // Merged into the active take, it is the loop's first note.
+    c.takes = false;
+    let p = c.run().unwrap();
+    assert_eq!(
+        notes(&p.lanes[0].active.events),
+        vec![(0, 60, ticks(7000)), (Q / 2, 64, Q / 4)]
+    );
+}
+
+/// Final review I2: without a loop, a note played just before punch-out
+/// whose start quantizes onto the punch-out stays inside the replaced
+/// range, and its end does not pass the punch-out; one just after an
+/// off-grid punch-in that quantizes before it starts at the punch-in.
+#[test]
+fn a_quantized_start_stays_inside_the_punch_range() {
+    let d = doc(None);
+    // Punch [1/2 beat + 1000, 2 beats): off the 1/16 grid at the start.
+    let pin = BEAT / 2 + 1000;
+    let pout = 2 * BEAT;
+    let mut c = Case::new(&d, 0);
+    c.range = RecordRange {
+        start: pin,
+        end: Some(pout),
+    };
+    c.midi_lanes = vec![d.keys];
+    let g = Q / 4;
+    let (pin, pout) = (pin as i64, pout as i64);
+    c.midi = vec![
+        // 500 frames after punch-in: snaps back to 1/2 beat, before it.
+        midi_q(d.keys, pin + 500, on(62, 100), g, 100),
+        midi_q(d.keys, pin + 6500, off(62), g, 100),
+        // 1000 frames before punch-out, held past it: snaps onto it.
+        midi_q(d.keys, pout - 1000, on(60, 100), g, 100),
+        midi_q(d.keys, pout + 3000, off(60), g, 100),
+    ];
+    let ticks = |frames: i64| frames * Q / BEAT as i64;
+    let p = c.run().unwrap();
+    let l = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    let (lo, hi) = (Tick(ticks(pin)), Tick(2 * Q));
+    assert_eq!(l.clear, vec![(lo, hi)]);
+    let spans = note_spans(&p, d.keys, &[60, 62]);
+    assert_eq!(spans.len(), 2, "{spans:?}");
+    for (at, dur) in &spans {
+        assert!(
+            *at >= lo.0 && at + dur <= hi.0 && *dur >= 1,
+            "inside the replaced range {lo:?}..{hi:?}: {spans:?}"
+        );
+    }
+    assert_eq!(spans[0], (lo.0, ticks(6000)), "62 starts at the punch-in");
+    assert_eq!(spans[1].0, hi.0 - 1, "60 starts on the last tick in range");
+}

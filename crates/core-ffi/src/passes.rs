@@ -341,6 +341,11 @@ pub(crate) fn pass_window(pieces: &[Piece], pass: usize) -> Option<(i64, i64)> {
     Some((place(first, first.from), place(last, last.end)))
 }
 
+/// A frame as a signed frame (saturating).
+fn to_i64(f: u64) -> i64 {
+    i64::try_from(f).unwrap_or(i64::MAX)
+}
+
 /// The timeline `[t0, t1)` piece `p` played, inside the range.
 fn window(p: &Piece, range: &RecordRange) -> Option<(i64, i64)> {
     range.clip(p.at(p.run), p.at(p.end))
@@ -409,10 +414,18 @@ struct Heard {
 /// with their offs (cut at the pass window's end). `heard` must be in
 /// heard-run order. A note's channel is its destination's, so notes pair
 /// by pitch alone.
+///
+/// A quantized start stays in its piece's window (final review I2). When
+/// `looped` and the piece runs to the loop end, a start quantized onto or
+/// past it (an early downbeat) wraps back by the loop length to the loop
+/// start, and its length runs on to its off in the next pass. Otherwise
+/// it is clamped into the window (punch range), and its end does not pass
+/// the window's end.
 fn midi_events(
     heard: &[Heard],
     pieces: &[Piece],
     range: &RecordRange,
+    looped: bool,
     tempo: &TempoTable,
 ) -> BTreeMap<usize, Vec<EventSpec>> {
     let mut out: BTreeMap<usize, Vec<EventSpec>> = BTreeMap::new();
@@ -438,10 +451,35 @@ fn midi_events(
                 let off = heard
                     .iter()
                     .skip(i + 1)
-                    .find(|o| matches!(o.msg, LiveMsg::NoteOff { pitch: op, .. } if op == pitch));
-                let (end, release) = match off.and_then(|o| piece_of(pieces, o.u).map(|q| (o, q))) {
-                    Some((o, q)) if q.pass == p.pass => (
+                    .find(|o| matches!(o.msg, LiveMsg::NoteOff { pitch: op, .. } if op == pitch))
+                    .and_then(|o| piece_of(pieces, o.u).map(|q| (o, q)));
+                let quantized = h.quantize.map(|q| q.spec().apply(start));
+                // The loop start an early downbeat wraps to: this piece
+                // played up to the loop end, where the next pass began.
+                let wrap_to = quantized
+                    .filter(|q| looped && q.0 >= tick(t1).0)
+                    .filter(|_| {
+                        range
+                            .end
+                            .is_some_and(|e| (p.at(p.end) - to_i64(e)).abs() <= 1)
+                    })
+                    .map(|_| {
+                        pieces
+                            .iter()
+                            .find(|n| n.pass == p.pass + 1 && n.end > n.from)
+                            .map_or(to_i64(range.start), |n| place(n, n.from))
+                    });
+                let (end, release) = match (off, wrap_to) {
+                    (Some((o, q)), _) if q.pass == p.pass => (
                         place(q, o.u).min(t1),
+                        match o.msg {
+                            LiveMsg::NoteOff { velocity, .. } => velocity,
+                            _ => 0,
+                        },
+                    ),
+                    // Held over the wrap: it sounds on to its off.
+                    (Some((o, q)), Some(from)) if q.pass == p.pass + 1 => (
+                        t1 + (place(q, o.u) - from).clamp(0, (t1 - from).max(0)),
                         match o.msg {
                             LiveMsg::NoteOff { velocity, .. } => velocity,
                             _ => 0,
@@ -450,9 +488,16 @@ fn midi_events(
                     _ => (t1, 0),
                 };
                 // The length is the unquantized one (Ruling 12).
-                let duration = Tick((tick(end).0 - start.0).max(0));
-                if let Some(q) = h.quantize {
-                    start = q.spec().apply(start);
+                let mut duration = Tick((tick(end).0 - start.0).max(0));
+                if let Some(q) = quantized {
+                    let (lo, hi) = (tick(t0).0, tick(t1).0);
+                    let moved = match wrap_to {
+                        Some(w) => q.0 - (hi - tick(w).0),
+                        None => q.0,
+                    };
+                    start = Tick(moved.clamp(lo, (hi - 1).max(lo)));
+                    // Its end stays in the window.
+                    duration = Tick(duration.0.min(hi - start.0).max(1));
                 }
                 let mut b = EventBody::note(pitch & 0x7F, velocity, duration);
                 if let EventBody::Note {
@@ -687,7 +732,7 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         // Arrivals follow block offset, not position (Task 4 review M6):
         // stable by heard run, so a pitch's off pairs with its own on.
         heard.sort_by_key(|h| h.u);
-        let mut events = midi_events(&heard, &pieces, &c.range, &tempo);
+        let mut events = midi_events(&heard, &pieces, &c.range, c.looped, &tempo);
         events.retain(|p, _| kept.contains(p));
         if takes_from_passes {
             // Only notes count as content (re-review 2 m5): a controller
