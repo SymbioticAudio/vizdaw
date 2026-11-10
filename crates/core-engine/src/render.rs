@@ -1222,6 +1222,9 @@ impl Renderer {
                             now.saturating_sub(self.seg_mark),
                         );
                         self.seg_mark = now;
+                        // Live thru before the wrap goes first (frame
+                        // order; fix round 2).
+                        self.live_out.send_until(&mut o, offset);
                         release_all(&mut self.notes, &mut o, offset);
                         if let Some(s) = self.schedule.as_deref() {
                             reset_controllers(s, &mut o, offset);
@@ -1238,6 +1241,8 @@ impl Renderer {
                         if let Some(t) = self.gestures.as_deref_mut() {
                             t.stop(offset, self.transport.pos);
                         }
+                        // Live thru before the end goes first (fix round 2).
+                        self.live_out.send_until(&mut o, offset);
                         release_all(&mut self.notes, &mut o, offset);
                     }
                     Step::Idle { .. } => {}

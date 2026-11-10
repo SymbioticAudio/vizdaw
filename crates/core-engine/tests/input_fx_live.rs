@@ -330,6 +330,9 @@ fn live_outputs_leave_in_frame_order() {
 struct RunSeen {
     msgs: Vec<(u64, Vec<u8>)>,
     outside: Vec<(u32, u32)>,
+    /// `(earlier offset, later offset)` pairs that arrived in reverse
+    /// within one render call.
+    reversed: Vec<(u32, u32)>,
 }
 
 /// An instrument that checks `InstrumentNode::midi`'s promise: an offset
@@ -345,6 +348,11 @@ impl core_engine::backend::InstrumentNode for RunNode {
         if let Ok(mut s) = self.seen.lock() {
             s.msgs
                 .push((self.rendered + u64::from(offset), msg.to_vec()));
+        }
+        if let (Some(&last), Ok(mut s)) = (self.queued.last(), self.seen.lock()) {
+            if offset < last {
+                s.reversed.push((last, offset));
+            }
         }
         if self.queued.len() < self.queued.capacity() {
             self.queued.push(offset);
@@ -496,4 +504,82 @@ fn recorded_input_carries_the_chains_quantize() {
         })
     );
     assert!(matches!(m.msg, LiveMsg::NoteOn { pitch: 60, .. }));
+}
+
+/// Fix round 2: at a loop wrap mid-block, live thru before the wrap
+/// reaches the instrument before the wrap's releases (frame order), and no
+/// note is left sounding.
+#[test]
+fn live_thru_before_a_wrap_goes_before_its_releases() {
+    use core_model::input_fx::{Feel, NoteValue};
+    let mut bld = Builder::new();
+    let synth = bld.dest("Synth", "builtin:synth", 3).unwrap();
+    let (seq, keys) = bld.sequence("Bar", "Keys", Some(synth)).unwrap();
+    let pads = bld.lane(seq, "Pads", Some(synth)).unwrap();
+    // Sounding when the loop wraps at frame 3800: the wrap releases it.
+    bld.notes(seq, pads, &[(0, 30, 0x8000, 4 * Q)]).unwrap();
+    let d = Doc {
+        doc: bld.finish(),
+        seq,
+        keys,
+        pads,
+        synth,
+    };
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(RunSeen::default()));
+    let (mut engine, renderer) =
+        Engine::new(EngineConfig::new(SR), Box::new(RunFactory(seen.clone()))).unwrap();
+    // 1/64 triplets (1000 frames), gate 50 %: a note-off at 3500, in the
+    // block 3072..4096 before its wrap at 3800.
+    let fx = vec![arp(|a| {
+        a.rate = NoteValue {
+            division: 64,
+            feel: Feel::Triplet,
+        };
+        a.latch = true;
+    })];
+    engine.set_inputs(InputSpec {
+        midi: vec![spec(&d, d.keys, "Keys", fx, false)],
+        monitor: vec![],
+    });
+    engine.load(&d.doc, d.seq).unwrap();
+    engine.set_loop_range(Some((0, 3800))).unwrap();
+    let mut be = OfflineBackend::new(SR, 1024).with_input(FakeInput::Signals);
+    be.start(renderer).unwrap();
+    be.run_frames(1024);
+    send(&engine, "Keys", [0x90, 60, 100]);
+    engine.play().unwrap();
+    // The transport rolls at device frame 1024: the fourth block holds
+    // the wrap.
+    be.run_frames(4 * 1024);
+    engine.stop().unwrap();
+    engine.set_inputs(InputSpec {
+        midi: vec![],
+        monitor: vec![],
+    });
+    engine.load(&d.doc, d.seq).unwrap();
+    be.run_frames(2048);
+    let s = seen.lock().unwrap();
+    assert!(
+        s.msgs.iter().any(|(_, m)| m == &vec![0x83, 30, 0]),
+        "the wrap released the playback note: {:?}",
+        s.msgs
+    );
+    assert!(
+        s.reversed.is_empty(),
+        "arrived out of frame order: {:?}",
+        s.reversed
+    );
+    let mut sounding = std::collections::BTreeSet::new();
+    for (_, m) in &s.msgs {
+        match (m.first().map(|b| b & 0xF0), m.get(1), m.get(2)) {
+            (Some(0x90), Some(&p), Some(&v)) if v > 0 => {
+                sounding.insert(p);
+            }
+            (Some(0x80 | 0x90), Some(&p), _) => {
+                sounding.remove(&p);
+            }
+            _ => {}
+        }
+    }
+    assert!(sounding.is_empty(), "left sounding: {sounding:?}");
 }
