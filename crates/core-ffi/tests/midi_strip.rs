@@ -7,7 +7,7 @@ use core_model::ids::DestId;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use vizdaw_ffi::host::{drain_offline_log, force_offline, reset_host};
+use vizdaw_ffi::host::{drain_offline_log, force_offline, holder, reset_host};
 use vizdaw_ffi::{MidiLevelRow, MidiMixRow, Session};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -329,5 +329,30 @@ fn an_undo_of_a_mute_lets_the_next_note_play() {
         "the next note plays after Undo"
     );
     s.stop().unwrap();
+    reset_host();
+}
+
+/// Re-review N1: with "Song" (on A) shown and "Pads" (on B) not, a change
+/// to B claims nothing (no engine is loaded with a sequence not shown);
+/// a change to A claims for Song and reaches the synth.
+#[test]
+fn only_the_shown_sequence_is_claimed_and_only_when_it_plays_the_destination() {
+    let _g = serial();
+    let mut b = Builder::new();
+    let a: DestId = b.dest("A", "virtual:out", 2).unwrap();
+    let pads: DestId = b.dest("B", "virtual:out", 5).unwrap();
+    let (song, la) = b.sequence("Song", "L", Some(a)).unwrap();
+    b.notes(song, la, &[(0, 60, 100 << 9, Q)]).unwrap();
+    let (other, lb) = b.sequence("Pads", "L", Some(pads)).unwrap();
+    b.notes(other, lb, &[(0, 60, 100 << 9, Q)]).unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    s.set_midi_mix(pads.0, vol(Some(55))).unwrap();
+    assert!(!s.preview_midi_mix(pads.0, Some(56), None).unwrap());
+    assert_eq!(holder(), None, "no engine claimed for a sequence not shown");
+    s.set_midi_mix(a.0, vol(Some(70))).unwrap();
+    assert!(holder().is_some(), "claimed for the shown sequence");
+    sleep(Duration::from_millis(150));
+    let log = drain_offline_log();
+    assert!(log.iter().any(|(_, b)| b == &vec![0xB2, 7, 70]), "{log:?}");
     reset_host();
 }

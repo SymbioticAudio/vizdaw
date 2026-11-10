@@ -388,7 +388,7 @@ This is an explicit use case: printing an external synth into the project as aud
 - **What it sends.**
   - Volume is CC 7 and pan is CC 10, on the destination's channel.
   - Each set value is sent when it changes (an edit, an Undo or a Redo, and a fader or pan drag as it moves), and again at the start of every playback of a sequence that plays the destination, after its default patch.
-  - A change made while stopped first takes the idle engine for the shown sequence, as arming a track does, so it is heard at once. While another window plays or records, nothing is sent then. A destination the shown sequence doesn't play is reached once a sequence that plays it plays.
+  - A change made while stopped to a destination the shown sequence plays first takes the idle engine for that sequence, as arming a track does, so it is heard at once; no other sequence is ever loaded for it. While another window plays or records, nothing is sent then. A destination the shown sequence doesn't play is reached once a sequence that plays it plays.
   - An Undo back to unset sends nothing: the synth stays as it is.
   - Chase sends them when playback starts mid-song. A CC 7 or CC 10 recorded in a part plays as recorded and wins from then on, so the strip sets the starting level. Fader automation for MIDI strips comes later.
   - Mute stops the destination's notes, and notes already sounding end. Its controllers and other messages still play, so the synth's state stays right.

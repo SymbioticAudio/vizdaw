@@ -1316,8 +1316,10 @@ impl Session {
 
     /// Before a MIDI strip send (plan 5g-1b final review I2): when this
     /// session does not hold the engine, claims the idle one for the
-    /// shown sequence (the one this session's cursor is in, else the
-    /// first that plays one of `dests`), as an arm does. Nothing during a
+    /// shown sequence (`Inner::selected_seq`, as Locate uses), as an arm
+    /// does, and only when that sequence plays one of `dests` (re-review
+    /// N1, N2): an edit never loads a sequence that is not shown, nor takes
+    /// another window's idle engine to send nothing. Nothing during a
     /// pass, after `close`, or when the engine is busy elsewhere; a failed
     /// claim is never the caller's error.
     fn claim_for_mix(&self, inner: &mut Inner, dests: &[DestId]) {
@@ -1328,20 +1330,15 @@ impl Session {
         {
             return;
         }
-        let plays = |s: &core_model::sequence::Sequence| {
+        let Some(seq) = inner.selected_seq() else {
+            return;
+        };
+        let plays = inner.doc().sequence(seq).is_ok_and(|s| {
             s.lanes
                 .iter()
                 .any(|l| l.midi_dest.is_some_and(|d| dests.contains(&d)))
-        };
-        let seq = inner.cursor_seq.or_else(|| {
-            inner
-                .doc()
-                .sequences()
-                .iter()
-                .find(|(_, s)| plays(s))
-                .map(|(id, _)| *id)
         });
-        if let Some(seq) = seq {
+        if plays {
             let _ = self.take_idle(inner, seq);
         }
     }
