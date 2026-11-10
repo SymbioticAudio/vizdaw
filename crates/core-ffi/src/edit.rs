@@ -464,6 +464,15 @@ pub enum LaneEdit {
         /// The mode.
         monitor: MonitorModeRow,
     },
+    /// Set the lane's MIDI input effect chain (plan 5g-1).
+    SetInputFx {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// The chain, first effect first.
+        chain: Vec<crate::input_fx::InputFxRow>,
+    },
 }
 
 /// The sequence whose engine claim `cmd` asks for (plan 5d-1 Ruling 16):
@@ -1077,6 +1086,11 @@ fn lane_cmd(e: &LaneEdit) -> LaneCmd {
             seq: SeqId(*seq),
             lane: LaneId(*lane),
             input: input.as_ref().map(Into::into),
+        },
+        LaneEdit::SetInputFx { seq, lane, chain } => LaneCmd::SetInputFx {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            chain: chain.iter().map(Into::into).collect(),
         },
         LaneEdit::SetMonitor { seq, lane, monitor } => LaneCmd::SetMonitor {
             seq: SeqId(*seq),

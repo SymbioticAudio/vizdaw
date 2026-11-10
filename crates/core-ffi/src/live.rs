@@ -51,6 +51,10 @@ pub struct InputInfoRow {
     /// milliseconds.
     #[uniffi(default)]
     pub sample_rate: f64,
+    /// Notes the lanes' input effect chains dropped at a capacity (plan
+    /// 5g-1 Ruling 17).
+    #[uniffi(default)]
+    pub midi_fx_dropped: u64,
 }
 
 /// The channel messages in `bytes`, one after another (running status,

@@ -694,3 +694,86 @@ fn midi_injected_for_an_unfocused_projects_map_drives_it() {
     b.idle().unwrap();
     assert!(b.automation_state().unwrap().touched.contains(&t));
 }
+
+/// Plan 5g-1 Ruling 2 (the owner's rule): what a learn takes never reaches
+/// an input chain. A waiting learn takes a note-on but not its note-off:
+/// the chain hears only the orphan off, which its merge drops, so the
+/// arpeggiator never holds the note. After the learn, a note plays.
+#[test]
+fn a_learned_message_never_reaches_an_input_chain() {
+    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+    use vizdaw_ffi::input_fx::{ArpModeRow, FeelRow, InputFxKindRow, InputFxRow};
+    use vizdaw_ffi::{EditCommand, LaneEdit, LaneInputRow};
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let seq = song(&s);
+    let chords = s
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Chords")
+        .unwrap()
+        .id;
+    let edit = |e: LaneEdit| s.edit(EditCommand::Lane { edit: e }, None).unwrap();
+    edit(LaneEdit::SetInput {
+        seq,
+        lane: chords,
+        input: Some(LaneInputRow::Midi {
+            port: None,
+            channel: None,
+        }),
+    });
+    let row = |kind| InputFxRow {
+        kind,
+        bypass: false,
+    };
+    let arp = InputFxKindRow::Arpeggiator {
+        mode: ArpModeRow::Up,
+        division: 16,
+        feel: FeelRow::Straight,
+        octaves: 1,
+        gate: 50,
+        velocity: None,
+        latch: false,
+    };
+    edit(LaneEdit::SetInputFx {
+        seq,
+        lane: chords,
+        chain: vec![
+            row(InputFxKindRow::Chord {
+                intervals: vec![4, 7],
+            }),
+            row(arp),
+        ],
+    });
+    edit(LaneEdit::SetFlags {
+        seq,
+        lane: chords,
+        mute: None,
+        solo: None,
+        arm: Some(true),
+    });
+    s.play(seq).unwrap();
+    wait_until("the engine", || s.transport().unwrap().playing);
+    s.stop().unwrap();
+    s.learn_target(synth_fader(&s)).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    drain_offline_log();
+    debug_midi_from_source("Keys", 0, &[0x90, 60, 100]);
+    debug_midi_from_source("Keys", 0, &[0x80, 60, 0]);
+    cancel_learn();
+    debug_midi_from_source("Keys", 0, &[0x90, 62, 100]);
+    let is_note = |b: &Vec<u8>| b.first().is_some_and(|x| matches!(x & 0xF0, 0x80 | 0x90));
+    let mut log = Vec::new();
+    wait_until("the free-running arpeggio's first step", || {
+        log.extend(drain_offline_log());
+        log.iter()
+            .any(|(_, b): &(u64, Vec<u8>)| is_note(b) && b.get(1) == Some(&62))
+    });
+    assert!(
+        !log.iter()
+            .any(|(_, b)| is_note(b) && b.get(1).is_some_and(|p| [60, 64, 67].contains(p))),
+        "the taken note-on reached the chain: {log:?}"
+    );
+}

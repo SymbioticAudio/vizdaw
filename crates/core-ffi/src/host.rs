@@ -793,8 +793,9 @@ pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
                 dest: l.midi_dest,
                 thru: l.monitor != MonitorMode::Off,
                 armed: l.arm,
-                // Stop-gap: plan 5g-1 Task 6 passes the lane's chain.
-                fx: Vec::new(),
+                // Only listening lanes reach here (the `continue` above):
+                // no chain for the others, none on playback (spec §6.8).
+                fx: l.input_fx.iter().cloned().collect(),
             }),
             Some(LaneInput::Audio { channels, .. })
                 if software && l.monitor != MonitorMode::Off =>
@@ -3631,6 +3632,15 @@ pub fn input_levels(owner: u64) -> Vec<f32> {
                 .input_peaks(usize::try_from(h.inputs.channels).unwrap_or(0))
         })
         .unwrap_or_default()
+}
+
+/// `owner`'s engine counters (plan 5g-1 Ruling 17: `midi_fx_dropped`),
+/// when it holds the engine.
+pub fn counters(owner: u64) -> Option<core_engine::render::Counters> {
+    lock_host()
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.counters())
 }
 
 /// Whether `owner`'s host has (or, offline, would have) its input open

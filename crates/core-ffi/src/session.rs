@@ -7772,6 +7772,7 @@ impl Session {
                     buffer_frames: i.buffer_frames,
                     opening: host::input_opening(self.id),
                     sample_rate: host::device(self.id).map_or(0.0, |(_, r)| r),
+                    midi_fx_dropped: host::counters(self.id).map_or(0, |c| c.midi_fx_dropped),
                 },
                 None => crate::live::InputInfoRow {
                     device: String::new(),
@@ -7783,6 +7784,7 @@ impl Session {
                     round_trip_frames: 0,
                     opening: false,
                     sample_rate: 0.0,
+                    midi_fx_dropped: 0,
                 },
             })
         })

@@ -534,6 +534,7 @@ fn record_and_input_results_as_json() {
             round_trip_frames: 2048,
             opening: false,
             sample_rate: 48_000.0,
+            midi_fx_dropped: 0,
         },
         levels: vec![0.25, 1.0, 0.0],
     });
