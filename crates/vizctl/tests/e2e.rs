@@ -3500,3 +3500,83 @@ fn arpeggiates_an_injected_chord_while_recording() {
     }
     app.quit();
 }
+
+/// Plan 5g-1b Task 4: `destination.set_midi_mix` over the channel; the mix
+/// shows in `state.get document`'s destinations, an absent key keeps its
+/// value and a null volume or pan unsets it. Offline: nothing is sent.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn midi_mix_reaches_state_get() {
+    use core_control::ErrorCode;
+    // The fake synth is a MIDI port to add a destination for, with no hardware.
+    let mut app = App::start_with(&[("VIZDAW_FAKE_SYNTH", "25")]);
+    let made = app.call("command.run", json!({"id": "file.new"}));
+    let w = made["window"].clone();
+    wait_for_label(&mut app, &w, "Track Headers");
+    app.call(
+        "command.run",
+        json!({"id": "destination.add_midi", "params": {"name": "Rack", "port": "Fake Synth", "channel": 3}, "window": w}),
+    );
+    let dest = |app: &mut App| -> Value {
+        let doc = app.call("state.get", json!({"target": "document", "window": w}));
+        doc["destinations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == "Rack")
+            .cloned()
+            .unwrap_or_else(|| panic!("no Rack destination: {doc}"))
+    };
+    let d = dest(&mut app);
+    let id = d["id"].clone();
+    assert_eq!(d["external"], true, "{d}");
+    assert_eq!(
+        (&d["midi_volume"], &d["midi_pan"], &d["midi_mute"]),
+        (&Value::Null, &Value::Null, &json!(false)),
+        "{d}"
+    );
+    let set = |app: &mut App, params: Value| {
+        let mut p = params;
+        p["dest"] = id.clone();
+        app.call(
+            "command.run",
+            json!({"id": "destination.set_midi_mix", "params": p, "window": w}),
+        );
+    };
+    set(&mut app, json!({"volume": 90, "mute": true}));
+    let d = dest(&mut app);
+    assert_eq!(
+        (&d["midi_volume"], &d["midi_pan"], &d["midi_mute"]),
+        (&json!(90), &Value::Null, &json!(true)),
+        "{d}"
+    );
+    // Absent keeps volume and mute; null unsets.
+    set(&mut app, json!({"pan": 20}));
+    let d = dest(&mut app);
+    assert_eq!(
+        (&d["midi_volume"], &d["midi_pan"], &d["midi_mute"]),
+        (&json!(90), &json!(20), &json!(true)),
+        "{d}"
+    );
+    set(&mut app, json!({"volume": null, "mute": false}));
+    let d = dest(&mut app);
+    assert_eq!(
+        (&d["midi_volume"], &d["midi_pan"], &d["midi_mute"]),
+        (&Value::Null, &json!(20), &json!(false)),
+        "{d}"
+    );
+    // Hostile values are refused and change nothing.
+    for params in [
+        json!({"dest": id, "volume": 128}),
+        json!({"dest": id, "pan": "20"}),
+        json!({"dest": id}),
+        json!({"dest": 1_000_000, "volume": 1}),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "destination.set_midi_mix", "params": params, "window": w}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}");
+    }
+    assert_eq!(dest(&mut app)["midi_pan"], 20);
+}

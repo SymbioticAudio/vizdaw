@@ -955,7 +955,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var midiPreviews: [(UInt64, UInt8?, UInt8?)] = []
 
     func setMidiMix(dest: UInt64, mix: MidiMixRow) throws -> DocSnapshot {
+        if let e = synthError { throw e }
         midiMixes.append((dest, mix))
+        if let i = dests.firstIndex(where: { $0.id == dest }) { dests[i].midiMix = mix }
         return commandResult()
     }
 

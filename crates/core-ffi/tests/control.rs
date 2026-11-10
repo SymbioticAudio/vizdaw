@@ -80,6 +80,7 @@ fn a_state_call_round_trips_as_typed_rows() {
         snapshot,
         selected_seq: None,
         lanes: vec![],
+        destinations: vec![],
         alert: Some(AlertRow {
             title: "Play Failed".into(),
             message: "no device".into(),
@@ -631,6 +632,7 @@ fn lanes_show_takes_input_and_monitor() {
         snapshot,
         selected_seq: Some(seq),
         lanes,
+        destinations: vec![],
         alert: None,
     });
     let l = v["lanes"].as_array().unwrap();
@@ -676,12 +678,60 @@ fn document_state_lanes_carry_kind() {
         snapshot: session.snapshot().unwrap(),
         selected_seq: Some(seq),
         lanes: session.lanes(seq).unwrap(),
+        destinations: vec![],
         alert: None,
     });
     let l = v["lanes"].as_array().unwrap();
     assert_eq!(l[0]["kind"], json!("audio"));
     assert_eq!(l[1]["kind"], json!("instrument"));
     assert_eq!(l[2]["kind"], json!("midi"));
+}
+
+/// Plan 5g-1b Task 4: `state.get document` lists the destinations with
+/// their MIDI mix (null when a controller value is unset).
+#[test]
+fn document_state_reports_the_midi_mix_per_destination() {
+    use vizdaw_ffi::{DestRow, MidiMixRow};
+    let session = Session::new_empty().unwrap();
+    let row = |id, external, mix| DestRow {
+        id,
+        name: format!("D{id}"),
+        plugin: None,
+        external,
+        return_latency_ms: 12.5,
+        midi_mix: mix,
+        channel: None,
+    };
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot: session.snapshot().unwrap(),
+        selected_seq: None,
+        lanes: vec![],
+        destinations: vec![
+            row(
+                4,
+                true,
+                MidiMixRow {
+                    volume: Some(90),
+                    pan: None,
+                    mute: true,
+                },
+            ),
+            row(5, false, MidiMixRow::default()),
+        ],
+        alert: None,
+    });
+    let d = v["destinations"].as_array().unwrap();
+    assert_eq!(d.len(), 2);
+    assert_eq!(d[0]["id"], json!(4));
+    assert_eq!(d[0]["external"], json!(true));
+    assert_eq!(d[0]["return_latency_ms"], json!(12.5));
+    assert_eq!(d[0]["midi_volume"], json!(90));
+    assert_eq!(d[0]["midi_pan"], Value::Null);
+    assert_eq!(d[0]["midi_mute"], json!(true));
+    assert_eq!(d[1]["midi_volume"], Value::Null);
+    assert_eq!(d[1]["midi_mute"], json!(false));
 }
 
 /// Plan 5d-1 Task 12 (Ruling 26): `state.get transport` says whether a

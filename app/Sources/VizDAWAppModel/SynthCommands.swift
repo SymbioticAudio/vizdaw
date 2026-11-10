@@ -18,13 +18,36 @@ import VizDAWCore
 /// open edit, an edit opened while Measure ran with the value it measured)
 /// is `busy` with its message unchanged; any other refusal (no lane
 /// records the return, no signal, the measurement timed out or stopped)
-/// is `failed`. Nothing here opens a dialog.
+/// is `failed`. `destination.set_midi_mix` (plan 5g-1b) takes `volume`/`pan`
+/// as integers 0 to 127 or null (the channel sends null as the text
+/// `none`: unset) and `mute` as a flag; an absent key keeps the current
+/// value. Nothing here opens a dialog.
 @MainActor
 public enum SynthCommands {
     public static let trackSynth = "lane.track_synth"
     public static let setReturnLatency = "destination.set_return_latency"
     public static let measureReturn = "destination.measure_return"
-    public static let ids: Set<String> = [trackSynth, setReturnLatency, measureReturn]
+    /// A MIDI destination's strip mix (plan 5g-1b Task 4).
+    public static let setMidiMix = "destination.set_midi_mix"
+    public static let ids: Set<String> = [trackSynth, setReturnLatency, setMidiMix, measureReturn]
+
+    /// What the channel sends for a null volume or pan: unset.
+    static let unsetText = "none"
+
+    /// `args`' `name` as a MIDI controller value: `.absent` when the key is
+    /// not given, `.value(nil)` for null (unset), else an integer 0 to 127;
+    /// nil for any other value (the wrong type, or out of range).
+    enum Controller { case absent, value(UInt8?) }
+    static func controller(_ args: [ControlArg], _ name: String) -> Controller? {
+        let given = args.filter { $0.name == name }
+        guard let a = given.first else { return .absent }
+        guard given.count == 1 else { return nil }
+        switch a.value {
+        case .int(let v): return (0...127).contains(v) ? .value(UInt8(v)) : nil
+        case .text(let t): return t == unsetText ? .value(nil) : nil
+        case .flag: return nil
+        }
+    }
 
     /// The largest return latency (spec §4.5a: 0–500 ms).
     public static let maxReturnLatencyMs: Float = 500
@@ -134,6 +157,33 @@ public enum SynthCommands {
                 m.apply(try m.session.setReturnLatency(dest: dest, ms: ms))
             } catch {
                 return .failed(.thrown(error, "Set Return Latency Failed"))
+            }
+        case setMidiMix:
+            let usage = "destination.set_midi_mix: `dest` names an external MIDI destination; `volume` and `pan` are 0 to 127 or null, `mute` is true or false; give at least one"
+            guard let dest = Self.id(args, "dest"), let volume = controller(args, "volume"),
+                let pan = controller(args, "pan")
+            else { return .failed(.of(.invalidParams, usage)) }
+            var mute: Bool?
+            if let a = args.first(where: { $0.name == "mute" }) {
+                guard case .flag(let v) = a.value else { return .failed(.of(.invalidParams, usage)) }
+                mute = v
+            }
+            if case .absent = volume, case .absent = pan, mute == nil {
+                return .failed(.of(.invalidParams, usage))
+            }
+            // Absent keeps what is set; the list is the same one the check reads.
+            guard let all = try? m.session.destinations() else {
+                return .failed(.of(.failed, "Set MIDI Mix Failed: the destinations cannot be read"))
+            }
+            guard let row = all.first(where: { $0.external && $0.id == dest }) else { return notExternal(id, dest) }
+            var mix = row.midiMix
+            if case .value(let v) = volume { mix.volume = v }
+            if case .value(let v) = pan { mix.pan = v }
+            if let mute { mix.mute = mute }
+            do {
+                m.apply(try m.session.setMidiMix(dest: dest, mix: mix))
+            } catch {
+                return .failed(.thrown(error, "Set MIDI Mix Failed"))
             }
         case measureReturn:
             guard let dest = Self.id(args, "dest") else {

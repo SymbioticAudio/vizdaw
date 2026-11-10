@@ -718,6 +718,7 @@ public enum ControlStates {
             return .document(
                 doc: doc, path: (try? m.session.path()) ?? nil, snapshot: m.snapshot,
                 selectedSeq: m.selectedSeq, lanes: m.lanes,
+                destinations: (try? m.session.destinations()) ?? [],
                 alert: m.alert.map { AlertRow(title: $0.title, message: $0.message) })
         case .editor:
             let e = m.editor

@@ -728,6 +728,8 @@ pub enum ControlResult {
         selected_seq: Option<u64>,
         /// That sequence's lanes.
         lanes: Vec<LaneRow>,
+        /// The destinations, with their return latency and MIDI mix.
+        destinations: Vec<crate::mixer::DestRow>,
         /// The alert its window would show.
         alert: Option<AlertRow>,
     },
@@ -1419,6 +1421,7 @@ pub fn result_json(r: &ControlResult) -> Value {
             snapshot: s,
             selected_seq,
             lanes,
+            destinations,
             alert,
         } => json!({
             "doc": doc, "title": s.title, "path": path, "dirty": s.dirty, "version": s.version,
@@ -1440,6 +1443,13 @@ pub fn result_json(r: &ControlResult) -> Value {
                     crate::tracks::TrackKindRow::Instrument => "instrument",
                     crate::tracks::TrackKindRow::Midi => "midi",
                 },
+            })).collect::<Vec<_>>(),
+            "destinations": destinations.iter().map(|d| json!({
+                "id": d.id, "name": d.name, "external": d.external,
+                // Thousandths: an f32 printed as f64 would show its rounding.
+                "return_latency_ms": (f64::from(d.return_latency_ms) * 1000.0).round() / 1000.0,
+                "midi_volume": d.midi_mix.volume, "midi_pan": d.midi_mix.pan,
+                "midi_mute": d.midi_mix.mute,
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
             "alert": alert.as_ref().map(alert_json),
