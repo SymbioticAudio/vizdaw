@@ -4,12 +4,14 @@ import VizDAWCore
 /// `lane.set_input_fx` (plan 5g-1 Task 7; spec §12.1): replaces a track's
 /// MIDI input effect chain from JSON, as one undoable lane edit.
 ///
-/// Errors: `seq` or `lane` that is not an id, a missing `chain`, or a chain
-/// the core's `inputFxFromJson` refuses (malformed, a wrong type, an unknown
-/// effect, a value out of range, too many effects) is `invalid_params` and
-/// never reaches the session. The session's refusal (an unknown track, a
-/// track that takes no MIDI) is `failed`; its `Busy` is `busy`. An open
-/// editor drag is `unavailable`. Nothing here opens a dialog or a window.
+/// Errors: `seq` or `lane` that is not an id, a missing `chain`, or text
+/// `inputFxFromJson` cannot parse (malformed JSON, a wrong type, an unknown
+/// effect, a number outside its field's type) is `invalid_params` and never
+/// reaches the session. A chain that parses but breaks the model's rules
+/// (a value out of range, more than 8 effects, two Input Quantize effects)
+/// or names an unknown track reaches the session and is `failed` with the
+/// core's message; its `Busy` is `busy`. An open editor drag is
+/// `unavailable`. Nothing here opens a dialog or a window.
 @MainActor
 public enum InputFxCommands {
     public static let setInputFx = "lane.set_input_fx"

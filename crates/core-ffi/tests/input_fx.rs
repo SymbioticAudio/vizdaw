@@ -160,6 +160,38 @@ fn hostile_chains_are_refused_by_the_model() {
     s.close().unwrap();
 }
 
+/// `lane.set_input_fx` end to end through the real parse and a real
+/// session (plan 5g-1 Task 7 fix round 1): nine effects and an unknown
+/// lane parse (or not) and are refused as errors, never a success or a
+/// panic, and change nothing.
+#[test]
+fn the_command_refuses_nine_effects_and_an_unknown_lane() {
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    let seq = song(&s);
+    let chords = lane(&s, seq, "Chords").id;
+    let nine = format!(
+        "[{}]",
+        vec![r#"{"kind": {"transpose": {"semitones": 1}}}"#; 9].join(",")
+    );
+    let chain = input_fx_from_json(nine).unwrap();
+    assert_eq!(chain.len(), 9);
+    let r = set(&s, seq, chords, chain);
+    assert!(matches!(r, Err(VizError::Model { .. })), "{r:?}");
+    let one = input_fx_from_json(r#"[{"kind": {"transpose": {"semitones": 1}}}]"#.into()).unwrap();
+    for (sq, ln) in [
+        (seq, u64::MAX),
+        (seq, 999_999),
+        (u64::MAX, chords),
+        (999_999, chords),
+    ] {
+        let r = set(&s, sq, ln, one.clone());
+        assert!(r.is_err(), "{sq}/{ln}: {r:?}");
+    }
+    assert!(lane(&s, seq, "Chords").input_fx.is_empty());
+    s.close().unwrap();
+}
+
 #[test]
 fn chain_json_round_trips() {
     let chain = vec![
