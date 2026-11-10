@@ -1,11 +1,12 @@
 //! MIDI strips never allocate on the render path (plan 5g-1b Task 2): an
 //! external destination with a mix plays notes (each counted as activity)
-//! while `send_now` sends controllers, through a mute, an unmute, a stop
+//! while `send_now` sends controllers and live thru plays, through a mute, an unmute, a stop
 //! and a new play.
 
 use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
+use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, port_key};
 use core_engine::midi1::Midi1Msg;
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::rt_check::{self, CountingAlloc};
@@ -68,7 +69,21 @@ fn midi_strips_never_allocate() {
     let sinks = OfflineSinks::new(1 << 20);
     let log = sinks.log();
     let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    // Thru plays on it too (and drops notes while it is muted).
+    engine.set_inputs(InputSpec {
+        midi: vec![MidiInputSpec {
+            lane,
+            port: Some(port_key("Keys")),
+            channel: None,
+            dest: Some(ext),
+            thru: true,
+            armed: false,
+            fx: Vec::new(),
+        }],
+        monitor: vec![],
+    });
     engine.load(&open, seq).unwrap();
+    let midi = engine.midi_sender();
     let mut b = OfflineBackend::new(48_000.0, 512);
     b.start(renderer).unwrap();
     b.reserve(4096);
@@ -80,6 +95,15 @@ fn midi_strips_never_allocate() {
         if i % 50 == 0 {
             log.drain();
             peaks += engine.take_midi_activity(&open).len();
+        }
+        if i % 5 == 0 {
+            let on = i % 10 == 0;
+            let msg = Midi1Msg::three(if on { 0x90 } else { 0x80 }, 60 + (i % 12) as u8, 99);
+            midi.send(MidiIn {
+                port: port_key("Keys"),
+                host_ns: 0,
+                msg,
+            });
         }
         if i % 7 == 0 {
             let v = (i % 128) as u8;

@@ -149,6 +149,7 @@ pub fn compile(
     let mut regions = Vec::new();
     let mut routes: BTreeMap<DestId, Routes> = BTreeMap::new();
     let mut used: BTreeMap<DestId, ()> = BTreeMap::new();
+    let mut mutes: BTreeMap<DestId, bool> = BTreeMap::new();
     let mut pending: Vec<Pending> = Vec::new();
     let mut arena: Vec<u8> = Vec::new();
     let mut used_channels = [0u16; MAX_TARGETS];
@@ -277,10 +278,11 @@ pub fn compile(
         let off = frame(end).max(on.saturating_add(1));
         // A muted external destination plays no notes, but its controllers
         // still play (plan 5g-1b Ruling 3).
-        let muted = doc
-            .instruments()
-            .get(&dest)
-            .is_some_and(|d| d.kind.is_external() && d.midi_mix.mute);
+        let muted = *mutes.entry(dest).or_insert_with(|| {
+            doc.instruments()
+                .get(&dest)
+                .is_some_and(|d| d.kind.is_external() && d.midi_mix.mute)
+        });
         let mut played = false;
         let mut silenced = false;
         for out in t.msgs() {

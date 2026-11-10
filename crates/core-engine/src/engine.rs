@@ -175,6 +175,10 @@ pub struct Engine {
     cmds: Producer<EngineCmd>,
     shared: Arc<Shared>,
     targets: TargetTable,
+    /// Per destination, the loaded targets it plays on, resolved at each
+    /// load so `send_now` and `take_midi_activity` never list ports (plan
+    /// 5g-1b).
+    dest_targets: BTreeMap<DestId, Vec<TargetIdx>>,
     factory: Box<dyn SinkFactory>,
     inserts: Box<dyn InsertFactory>,
     tempo: Option<TempoTable>,
@@ -360,6 +364,7 @@ impl Engine {
             cmds: cmd_tx,
             shared,
             targets: TargetTable::new(),
+            dest_targets: BTreeMap::new(),
             factory,
             inserts: Box::new(NoInserts),
             tempo: None,
@@ -580,6 +585,7 @@ impl Engine {
                     spec: m.clone(),
                     targets,
                     dest_channel,
+                    mute_notes: d.is_some_and(|d| d.kind.is_external() && d.midi_mix.mute),
                     chain: crate::input_fx::InputChain::new(&m.fx),
                 });
             }
@@ -609,6 +615,16 @@ impl Engine {
                 return Err(e);
             }
         };
+        // Every destination's loaded targets, from this load's port list.
+        self.dest_targets = doc
+            .instruments()
+            .iter()
+            .filter_map(|(id, d)| {
+                let kinds = kinds_for(&d.kind, opts.route, &opts.ports).ok()?;
+                let t: Vec<TargetIdx> = kinds.iter().filter_map(|k| self.targets.find(k)).collect();
+                (!t.is_empty()).then_some((*id, t))
+            })
+            .collect();
         for (i, sink) in new_sinks {
             if let Some(info) = self.sinks.get_mut(usize::from(i.0)) {
                 *info = SinkInfo {
@@ -731,6 +747,9 @@ impl Engine {
             self.release_unpublished = true;
             self.push(EngineCmd::RemoveSink(i))?;
             self.targets.release(i);
+            for t in self.dest_targets.values_mut() {
+                t.retain(|t| *t != i);
+            }
             if let Some(info) = self.sinks.get_mut(usize::from(i.0)) {
                 *info = SinkInfo::default();
             }
@@ -996,43 +1015,46 @@ impl Engine {
             DestKind::MidiEndpoint { channel, .. } => channel & 0x0F,
             DestKind::PluginInstrument { .. } => 0,
         };
-        let Ok(kinds) = kinds_for(&d.kind, self.cfg.route, &self.factory.ports()) else {
+        let Some(targets) = self.dest_targets.get(&dest).filter(|t| !t.is_empty()) else {
             return Ok(false);
         };
-        let msg = Midi1Msg {
-            len: msg.len,
-            bytes: [(status & 0xF0) | channel, d1 & 0x7F, d2 & 0x7F],
+        let status = (status & 0xF0) | channel;
+        // The length the status has, not the caller's.
+        let msg = match status & 0xF0 {
+            0xC0 | 0xD0 => Midi1Msg::two(status, d1 & 0x7F),
+            _ => Midi1Msg::three(status, d1 & 0x7F, d2 & 0x7F),
         };
-        let mut sent = false;
-        for k in &kinds {
-            if let Some(t) = self.targets.find(k) {
-                self.push(EngineCmd::Audition(t, msg))?;
-                sent = true;
-            }
+        for t in targets.clone() {
+            self.push(EngineCmd::Audition(t, msg))?;
         }
-        Ok(sent)
+        Ok(true)
     }
 
     /// Per external destination with a loaded target, the highest note-on
-    /// velocity the renderer sent to it since the last call, read and
-    /// cleared (a MIDI strip's activity meter, plan 5g-1b). Destinations at
-    /// 0 are left out. Destinations sharing a target (one port, several
-    /// channels) each report that target's peak.
+    /// velocity the renderer sent to it on its channel since the last
+    /// call, read and cleared (a MIDI strip's activity meter, plan 5g-1b).
+    /// Destinations at 0 are left out.
     pub fn take_midi_activity(&self, doc: &Document) -> Vec<(DestId, u8)> {
-        let peaks = self.shared.take_midi_activity();
-        let ports = self.factory.ports();
         let mut out = Vec::new();
-        for (id, d) in doc.instruments() {
-            if !d.kind.is_external() {
-                continue;
-            }
-            let Ok(kinds) = kinds_for(&d.kind, self.cfg.route, &ports) else {
+        // Read each (target, channel) once: destinations sharing one
+        // see the same peak.
+        let mut read: BTreeMap<(TargetIdx, u8), u8> = BTreeMap::new();
+        for (id, targets) in &self.dest_targets {
+            let Some(DestKind::MidiEndpoint { channel, .. }) = doc
+                .instruments()
+                .get(id)
+                .map(|d| &d.kind)
+                .filter(|k| k.is_external())
+            else {
                 continue;
             };
-            let v = kinds
+            let v = targets
                 .iter()
-                .filter_map(|k| self.targets.find(k))
-                .filter_map(|t| peaks.get(usize::from(t.0)).copied())
+                .map(|t| {
+                    *read
+                        .entry((*t, channel & 0x0F))
+                        .or_insert_with(|| self.shared.take_note_activity(*t, *channel))
+                })
                 .max()
                 .unwrap_or(0);
             if v > 0 {

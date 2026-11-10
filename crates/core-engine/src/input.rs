@@ -187,6 +187,9 @@ pub struct MidiRoute {
     pub targets: [Option<TargetIdx>; 2],
     /// The channel thru plays on (the destination's).
     pub dest_channel: u8,
+    /// The destination is a muted external one: thru drops its note-ons
+    /// and note-offs (plan 5g-1b); recording is unaffected.
+    pub mute_notes: bool,
     /// The lane's input chain (plan 5g-1).
     pub chain: crate::input_fx::InputChain,
 }
@@ -200,7 +203,7 @@ impl MidiRoute {
 
     /// Whether this new route takes over `old`'s chain state (plan 5g-1
     /// Ruling 5): the same lane, source, channel, destination, thru,
-    /// targets and chain; the arm may differ. // RT
+    /// mute, targets and chain; the arm may differ. // RT
     pub fn carries(&self, old: &MidiRoute) -> bool {
         let (a, b) = (&self.spec, &old.spec);
         a.lane == b.lane
@@ -210,6 +213,7 @@ impl MidiRoute {
             && a.thru == b.thru
             && self.targets == old.targets
             && self.dest_channel == old.dest_channel
+            && self.mute_notes == old.mute_notes
             && self.chain == old.chain
     }
 }

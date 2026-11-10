@@ -3,18 +3,26 @@
 //! drops its notes, `send_now` reaches its target on its channel, and the
 //! note-ons sent to it are reported as activity.
 
-use core_engine::backend::BlockTime;
+use core_engine::BackendError;
+use core_engine::backend::{BlockTime, MidiOut, MidiPortInfo};
+use core_engine::engine::SinkFactory;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{BAR, Builder, Q, cc32};
+use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, port_key};
 use core_engine::midi1::Midi1Msg;
 use core_engine::offline::{EventLog, OfflineSinks};
+use core_engine::record::RecordRequest;
 use core_engine::render::Renderer;
+use core_engine::render::Sink;
+use core_engine::schedule::TargetIdx;
 use core_engine::schedule::{CompileOptions, Schedule, TargetKind, TargetTable, WireMsg, compile};
 use core_model::command::{Command, RoutingCmd};
 use core_model::document::{DestKind, Document, MidiMix, Patch};
 use core_model::event::EventBody;
 use core_model::ids::{DestId, SeqId};
 use core_model::time::Tick;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 fn compile_all(doc: &Document, seq: SeqId) -> Schedule {
     let mut table = TargetTable::new();
@@ -280,6 +288,11 @@ fn muting_ends_sounding_notes_and_keeps_controllers() {
     blocks(&mut r, 1, 1024, &mut ns);
     let after = sent(&log);
     assert!(after.iter().any(|b| b[..2] == [0x80, 60]), "{after:?}");
+    // Past bar 2: A's later note does not play, B's does.
+    blocks(&mut r, 100, 1024, &mut ns);
+    let later = sent(&log);
+    assert!(!later.iter().any(|b| b[..2] == [0x90, 64]), "{later:?}");
+    assert!(later.iter().any(|b| b[..2] == [0x91, 74]), "{later:?}");
 
     // The muted schedule has no notes on channel 1 but keeps its
     // controllers; channel 2 is untouched.
@@ -355,4 +368,262 @@ fn activity_reports_the_peak_velocity_once() {
     blocks(&mut r, 40, 1024, &mut ns);
     assert_eq!(e.take_midi_activity(&doc), vec![(d, 100)]);
     assert_eq!(e.take_midi_activity(&doc), vec![]);
+}
+
+#[test]
+fn a_mid_song_start_chases_the_mix() {
+    let mut b = Builder::new();
+    let d = ext(&mut b, "Ext", 0, None);
+    set_mix(
+        &mut b,
+        d,
+        MidiMix {
+            volume: Some(90),
+            pan: Some(20),
+            mute: false,
+        },
+    );
+    let (seq, lane) = b.sequence("S", "L", Some(d)).unwrap();
+    b.notes(seq, lane, &[(0, 60, 0x8000, Q), (7 * BAR, 62, 0x8000, Q)])
+        .unwrap();
+    let doc = b.finish();
+    let (mut e, mut r, log) = engine(&doc, seq);
+    let mut ns = 0;
+    e.locate_tick(Tick(4 * BAR)).unwrap();
+    e.play().unwrap();
+    blocks(&mut r, 4, 1024, &mut ns);
+    let seen = sent(&log);
+    assert_eq!(volumes(&seen), vec![90]);
+    let pans: Vec<u8> = seen
+        .iter()
+        .filter(|b| b.len() == 3 && b[0] == 0xB0 && b[1] == 10)
+        .map(|b| b[2])
+        .collect();
+    assert_eq!(pans, vec![20]);
+}
+
+#[test]
+fn send_now_sends_the_length_the_status_has() {
+    let mut b = Builder::new();
+    let d = ext(&mut b, "Ext", 2, None);
+    let (seq, lane) = b.sequence("S", "L", Some(d)).unwrap();
+    b.notes(seq, lane, &[(0, 60, 0x8000, Q)]).unwrap();
+    let doc = b.finish();
+    let (mut e, mut r, log) = engine(&doc, seq);
+    let mut ns = 0;
+    blocks(&mut r, 1, 256, &mut ns);
+    log.drain();
+    let long_program = Midi1Msg {
+        len: 3,
+        bytes: [0xC0, 5, 0],
+    };
+    let short_cc = Midi1Msg {
+        len: 1,
+        bytes: [0xB0, 7, 9],
+    };
+    assert!(e.send_now(&doc, d, long_program).unwrap());
+    assert!(e.send_now(&doc, d, short_cc).unwrap());
+    blocks(&mut r, 1, 256, &mut ns);
+    assert_eq!(sent(&log), vec![vec![0xC2, 5], vec![0xB2, 7, 9]]);
+}
+
+#[test]
+fn activity_is_per_channel_on_a_shared_port() {
+    let mut b = Builder::new();
+    let one = ext(&mut b, "One", 0, None);
+    let two = ext(&mut b, "Two", 1, None);
+    let (seq, lane) = b.sequence("S", "One", Some(one)).unwrap();
+    let other = b.lane(seq, "Two", Some(two)).unwrap();
+    b.notes(seq, lane, &[(0, 60, 80 << 9, Q)]).unwrap();
+    // Two's lane has only a controller: its target is loaded, no note.
+    b.event(
+        seq,
+        other,
+        0,
+        EventBody::Cc {
+            index: 1,
+            value: cc32(3),
+        },
+    )
+    .unwrap();
+    let doc = b.finish();
+    let (mut e, mut r, _log) = engine(&doc, seq);
+    let mut ns = 0;
+    e.play().unwrap();
+    blocks(&mut r, 4, 1024, &mut ns);
+    assert_eq!(e.take_midi_activity(&doc), vec![(one, 80)]);
+}
+
+#[test]
+fn live_thru_to_a_muted_destination_drops_notes_and_still_records() {
+    let mut b = Builder::new();
+    let d = ext(&mut b, "Ext", 2, None);
+    let (seq, lane) = b.sequence("S", "Keys", Some(d)).unwrap();
+    b.notes(seq, lane, &[(4 * BAR, 40, 0x8000, Q)]).unwrap();
+    set_mix(
+        &mut b,
+        d,
+        MidiMix {
+            mute: true,
+            ..MidiMix::default()
+        },
+    );
+    let doc = b.finish();
+    let sinks = OfflineSinks::new(1 << 16);
+    let log = sinks.log();
+    let (mut e, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    e.set_inputs(InputSpec {
+        midi: vec![MidiInputSpec {
+            lane,
+            port: Some(port_key("Keys")),
+            channel: None,
+            dest: Some(d),
+            thru: true,
+            armed: true,
+            fx: Vec::new(),
+        }],
+        monitor: vec![],
+    });
+    e.load(&doc, seq).unwrap();
+    let mut h = e
+        .start_recording(&RecordRequest {
+            channels: vec![],
+            range: None,
+            ring_frames: 4800,
+        })
+        .unwrap();
+    e.play().unwrap();
+    let mut ns = 0;
+    blocks(&mut r, 2, 256, &mut ns);
+    log.drain();
+    for msg in [
+        Midi1Msg::three(0x90, 60, 100),
+        Midi1Msg::three(0xB0, 1, 7),
+        Midi1Msg::three(0x80, 60, 0),
+    ] {
+        assert!(e.midi_sender().send(MidiIn {
+            port: port_key("Keys"),
+            host_ns: 0,
+            msg,
+        }));
+    }
+    blocks(&mut r, 2, 256, &mut ns);
+    assert_eq!(sent(&log), vec![vec![0xB2, 1, 7]], "only the controller");
+    let mut recorded = 0;
+    while h.midi.pop().is_ok() {
+        recorded += 1;
+    }
+    assert_eq!(recorded, 3, "the notes are still recorded");
+}
+
+type PortSeen = Arc<Mutex<Vec<Vec<u8>>>>;
+
+/// MIDI sinks on ports listed from `ports`, counting the listings.
+#[derive(Clone, Default)]
+struct Ports {
+    ports: Arc<Mutex<Vec<MidiPortInfo>>>,
+    listed: Arc<AtomicUsize>,
+    seen: PortSeen,
+}
+
+struct PortOut(PortSeen);
+
+impl MidiOut for PortOut {
+    fn send(&mut self, _host_time_ns: u64, msg: &[u8]) -> bool {
+        self.0.lock().unwrap().push(msg.to_vec());
+        true
+    }
+}
+
+impl SinkFactory for Ports {
+    fn ports(&self) -> Vec<MidiPortInfo> {
+        self.listed.fetch_add(1, Ordering::Relaxed);
+        self.ports.lock().unwrap().clone()
+    }
+    fn make(
+        &mut self,
+        _target: TargetIdx,
+        _kind: &TargetKind,
+        _sr: f64,
+        _max: u32,
+    ) -> Result<Sink, BackendError> {
+        Ok(Sink::Midi(Box::new(PortOut(self.seen.clone()))))
+    }
+}
+
+#[test]
+fn send_now_and_activity_use_the_loaded_targets_not_the_port_list() {
+    let mut b = Builder::new();
+    let d = ext_on(&mut b, "Synth Port", 2);
+    let (seq, lane) = b.sequence("S", "L", Some(d)).unwrap();
+    b.notes(seq, lane, &[(0, 60, 90 << 9, Q)]).unwrap();
+    let doc = b.finish();
+    let f = Ports::default();
+    f.ports.lock().unwrap().push(MidiPortInfo {
+        name: "Synth Port".into(),
+        unique_id: None,
+    });
+    let (mut e, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
+    e.load(&doc, seq).unwrap();
+    // The port goes away after the load: its sink is still loaded.
+    f.ports.lock().unwrap().clear();
+    let listed = f.listed.load(Ordering::Relaxed);
+    let mut ns = 0;
+    e.play().unwrap();
+    blocks(&mut r, 2, 1024, &mut ns);
+    assert!(e.send_now(&doc, d, Midi1Msg::three(0xB0, 7, 33)).unwrap());
+    assert!(e.audition(&doc, d, 70, 0x8000, true).unwrap());
+    blocks(&mut r, 1, 1024, &mut ns);
+    assert_eq!(e.take_midi_activity(&doc), vec![(d, 90)]);
+    assert_eq!(f.listed.load(Ordering::Relaxed), listed, "no port listing");
+    let seen = f.seen.lock().unwrap().clone();
+    assert!(seen.contains(&vec![0xB2, 7, 33]), "{seen:?}");
+    assert!(seen.contains(&vec![0x92, 70, 64]), "{seen:?}");
+}
+
+fn ext_on(b: &mut Builder, port: &str, channel: u8) -> DestId {
+    b.dest_kind(
+        "Ext",
+        DestKind::MidiEndpoint {
+            endpoint_ref: port.into(),
+            group: 0,
+            channel,
+        },
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn muting_ends_a_held_thru_note() {
+    let (open, seq, a, _) = mute_doc(false);
+    let (muted, _, _, _) = mute_doc(true);
+    let lane = open.sequence(seq).unwrap().lanes[0].id;
+    let sinks = OfflineSinks::new(1 << 16);
+    let log = sinks.log();
+    let (mut e, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    e.set_inputs(InputSpec {
+        midi: vec![MidiInputSpec {
+            lane,
+            port: Some(port_key("Keys")),
+            channel: None,
+            dest: Some(a),
+            thru: true,
+            armed: false,
+            fx: Vec::new(),
+        }],
+        monitor: vec![],
+    });
+    e.load(&open, seq).unwrap();
+    let mut ns = 0;
+    assert!(e.midi_sender().send(MidiIn {
+        port: port_key("Keys"),
+        host_ns: 0,
+        msg: Midi1Msg::three(0x90, 50, 100),
+    }));
+    blocks(&mut r, 1, 256, &mut ns);
+    assert_eq!(sent(&log), vec![vec![0x90, 50, 100]]);
+    e.load(&muted, seq).unwrap();
+    blocks(&mut r, 1, 256, &mut ns);
+    assert!(sent(&log).contains(&vec![0x80, 50, 0]));
 }

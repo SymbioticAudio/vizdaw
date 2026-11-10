@@ -191,9 +191,10 @@ pub struct Shared {
     /// Per device input channel, the peak since the last read (`f32` bits;
     /// plan 5d-1 Ruling 27).
     input_peaks: Box<[AtomicU32]>,
-    /// Per target, the highest note-on velocity sent to a MIDI sink since
-    /// the last read (a MIDI strip's activity, plan 5g-1b).
-    midi_activity: [AtomicU8; MAX_TARGETS],
+    /// Per target and channel, the highest note-on velocity sent to a
+    /// MIDI sink since the last read (a MIDI strip's activity, plan
+    /// 5g-1b).
+    midi_activity: [[AtomicU8; 16]; MAX_TARGETS],
 }
 
 /// The peak of the first `n` samples of `ch`; a non-finite sample counts
@@ -233,7 +234,7 @@ impl Default for Shared {
             input_peaks: (0..crate::backend::MAX_INPUT_CHANNELS)
                 .map(|_| AtomicU32::new(0))
                 .collect(),
-            midi_activity: std::array::from_fn(|_| AtomicU8::new(0)),
+            midi_activity: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU8::new(0))),
         }
     }
 }
@@ -338,21 +339,25 @@ impl Shared {
             .collect()
     }
 
-    /// Raises target `t`'s note activity to `velocity`. // RT
-    pub fn note_activity(&self, t: TargetIdx, velocity: u8) {
-        if let Some(cell) = self.midi_activity.get(usize::from(t.0)) {
+    /// Raises the note activity of target `t`, channel `channel` to
+    /// `velocity`. // RT
+    pub fn note_activity(&self, t: TargetIdx, channel: u8, velocity: u8) {
+        if let Some(cell) = self
+            .midi_activity
+            .get(usize::from(t.0))
+            .and_then(|c| c.get(usize::from(channel & 0x0F)))
+        {
             cell.fetch_max(velocity, Ordering::Relaxed);
         }
     }
 
-    /// Every target's highest note-on velocity since the last read,
-    /// cleared.
-    pub fn take_midi_activity(&self) -> [u8; MAX_TARGETS] {
-        std::array::from_fn(|t| {
-            self.midi_activity
-                .get(t)
-                .map_or(0, |c| c.swap(0, Ordering::Relaxed))
-        })
+    /// The highest note-on velocity sent to target `t` on `channel` since
+    /// the last read, cleared.
+    pub fn take_note_activity(&self, t: TargetIdx, channel: u8) -> u8 {
+        self.midi_activity
+            .get(usize::from(t.0))
+            .and_then(|c| c.get(usize::from(channel & 0x0F)))
+            .map_or(0, |c| c.swap(0, Ordering::Relaxed))
     }
 
     /// Records that `instance` was bypassed for faults. The board is an
@@ -828,7 +833,7 @@ impl Out<'_> {
                     && *v > 0
                 {
                     // RT: a note-on reached the synth.
-                    self.shared.note_activity(target, *v);
+                    self.shared.note_activity(target, status & 0x0F, *v);
                 }
             }
             _ => {}
@@ -2574,6 +2579,7 @@ struct LiveDest {
     armed: bool,
     targets: [Option<TargetIdx>; 2],
     channel: u8,
+    mute_notes: bool,
     quantize: Option<crate::input_fx::RecordQuantize>,
 }
 
@@ -2586,8 +2592,16 @@ impl LiveDest {
             armed: r.spec.armed,
             targets: r.targets,
             channel: r.dest_channel,
+            mute_notes: r.mute_notes,
             quantize: r.chain.quantize(),
         }
+    }
+
+    /// `m` as thru plays it on this destination's channel: `None` for a
+    /// muted destination's note-ons and note-offs (plan 5g-1b). // RT
+    fn thru_msg(&self, m: crate::input_fx::LiveMsg) -> Option<Midi1Msg> {
+        m.to_midi1(self.channel)
+            .filter(|msg| !(self.mute_notes && matches!(msg.bytes[0] & 0xF0, 0x80 | 0x90)))
     }
 }
 
@@ -2692,7 +2706,7 @@ impl LiveOut {
             };
             let d = &p.dest;
             if d.thru {
-                if let Some(msg) = p.msg.to_midi1(d.channel) {
+                if let Some(msg) = d.thru_msg(p.msg) {
                     for t in d.targets.iter().flatten() {
                         thru.observe(*t, msg.as_slice());
                         match self.sends.get_mut(self.sends_len) {
@@ -2750,7 +2764,7 @@ fn emit_live(
     tap: &mut Option<&mut RecordTap>,
 ) {
     if d.thru {
-        if let Some(msg) = m.to_midi1(d.channel) {
+        if let Some(msg) = d.thru_msg(m) {
             for t in d.targets.iter().flatten() {
                 o.send(*t, at.block, msg.as_slice());
                 thru.observe(*t, msg.as_slice());
