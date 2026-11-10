@@ -1,10 +1,10 @@
 use core_model::ModelError;
-use core_model::command::{Command, EventCmd, SequenceCmd, SettingsCmd, apply};
+use core_model::command::{Command, EventCmd, RoutingCmd, SequenceCmd, SettingsCmd, apply};
 use core_model::document::{DestKind, Document, MediaOrigin};
 use core_model::event::{EventBody, EventSpec};
 use core_model::file::{
     FORMAT, Migration, VERSION, autosave, from_json, list_autosaves, load, migrate_v1_to_v2,
-    migrate_v2_to_v3, migrate_v3_to_v4, run_migrations, save, to_json,
+    migrate_v2_to_v3, migrate_v3_to_v4, migrate_v5_to_v6, run_migrations, save, to_json,
 };
 use core_model::format::{AudioFormat, BitDepth};
 use core_model::history::Timestamp;
@@ -646,4 +646,72 @@ fn a_strip_colour_round_trips_and_none_is_not_written() {
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["document"]["mixer"]["strips"][0]["colour"], "red");
     assert_eq!(from_json(&text).unwrap(), d);
+}
+
+/// Plan 5g-1b: a version-5 project migrates to version 6 unchanged (a
+/// destination without a MIDI mix has the default one).
+#[test]
+fn version_5_projects_migrate_to_version_6() {
+    assert_eq!(VERSION, 6);
+    let d = small_doc();
+    let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    v["version"] = json!(5);
+    let back = from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(back, d);
+    assert!(
+        to_json(&back)
+            .unwrap()
+            .contains(&format!("\"version\": {VERSION}"))
+    );
+    assert_eq!(migrate_v5_to_v6(v.clone()).unwrap(), v);
+}
+
+/// Plan 5g-1b: a MIDI mix out of range, or on a destination that is not
+/// external, fails to load as Corrupt, naming the field.
+#[test]
+fn a_damaged_midi_mix_is_corrupt() {
+    let add = |d: &Document, name: &str, kind: DestKind| {
+        apply(
+            d,
+            &Command::Routing(RoutingCmd::AddDestination {
+                name: name.into(),
+                kind,
+                default_patch: None,
+            }),
+        )
+        .unwrap()
+        .doc
+    };
+    let d = add(
+        &Document::new(),
+        "Juno",
+        DestKind::MidiEndpoint {
+            endpoint_ref: "Juno".into(),
+            group: 0,
+            channel: 0,
+        },
+    );
+    let d = add(&d, "Pad", DestKind::plugin("au:pad"));
+    let v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    let problems = |v: &Value| match from_json(&v.to_string()) {
+        Err(ModelError::Corrupt { problems }) => problems,
+        other => panic!("expected Corrupt, got {other:?}"),
+    };
+    let dests = |v: &mut Value| v["document"]["instruments"].as_array().is_some();
+    assert!(dests(&mut v.clone()), "instruments is an array");
+
+    let mut juno = v.clone();
+    juno["document"]["instruments"][0]["midi_mix"] = json!({"volume": 200});
+    assert!(problems(&juno).iter().any(|p| p.contains("midi_volume")));
+    let mut juno = v.clone();
+    juno["document"]["instruments"][0]["midi_mix"] = json!({"pan": 200});
+    assert!(problems(&juno).iter().any(|p| p.contains("midi_pan")));
+
+    let mut pad = v.clone();
+    pad["document"]["instruments"][1]["midi_mix"] = json!({"volume": 200});
+    assert!(problems(&pad).iter().any(|p| p.contains("midi_mix")));
+    // An in-range mix on the external destination loads.
+    let mut ok = v.clone();
+    ok["document"]["instruments"][0]["midi_mix"] = json!({"volume": 90, "mute": true});
+    assert!(from_json(&ok.to_string()).is_ok());
 }

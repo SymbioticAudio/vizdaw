@@ -265,6 +265,32 @@ pub fn validate(doc: &Document) -> Vec<String> {
             let ok = patch.program <= 127 && patch.bank.is_none_or(|(m, l)| m <= 127 && l <= 127);
             push(need(ok, "default_patch", patch.program), &d.id.to_string());
         }
+        let mix = d.midi_mix;
+        push(
+            need(
+                mix.volume.is_none_or(|v| v <= 127),
+                "midi_volume",
+                mix.volume.unwrap_or(0),
+            ),
+            &d.id.to_string(),
+        );
+        push(
+            need(
+                mix.pan.is_none_or(|p| p <= 127),
+                "midi_pan",
+                mix.pan.unwrap_or(0),
+            ),
+            &d.id.to_string(),
+        );
+        // Only an external destination has a MIDI mix.
+        push(
+            need(
+                mix.is_default() || d.kind.is_external(),
+                "midi_mix on a destination that is not external",
+                d.id,
+            ),
+            &d.id.to_string(),
+        );
         let ms = d.return_latency_ms;
         push(
             need(

@@ -20,6 +20,7 @@ fn base() -> Document {
             kind: DestKind::plugin("p"),
             default_patch: None,
             return_latency_ms: 0.0,
+            midi_mix: Default::default(),
         }],
         outputs: vec![],
         media: vec![],

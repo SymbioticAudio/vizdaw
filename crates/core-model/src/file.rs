@@ -1,6 +1,6 @@
 //! The `.vizdaw` package: `project.json`, `Media/` and `Autosave/`.
 //!
-//! `project.json` is `{ "format": "vizdaw-project", "version": 5,
+//! `project.json` is `{ "format": "vizdaw-project", "version": 6,
 //! "document": { … } }`. Loading migrates older versions step by step,
 //! refuses newer ones, rejects unknown fields and runs every integrity
 //! check. Saving writes a temporary file, syncs it, renames it over the old
@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
 /// The version this build writes.
-pub const VERSION: u64 = 5;
+pub const VERSION: u64 = 6;
 /// The oldest version this build can migrate from.
 pub const FIRST_VERSION: u64 = 1;
 /// The project file name inside a package.
@@ -42,6 +42,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migrate_v2_to_v3,
     migrate_v3_to_v4,
     migrate_v4_to_v5,
+    migrate_v5_to_v6,
 ];
 
 /// The project rate a migrated project gets (5a Ruling 2): the most
@@ -66,6 +67,14 @@ fn fade_frames(tempo: &TempoMap, start: i64, ticks: i64, rate: f64) -> u64 {
     let e = tempo.tick_to_seconds(Tick(start.saturating_add(ticks.max(0))));
     // Float-to-int `as` saturates (and maps NaN to 0).
     ((e - s) * rate).round().max(0.0) as u64
+}
+
+/// Version 5 → 6 (plan 5g-1b): destinations gain an optional `midi_mix`,
+/// and a destination without one has the default mix, so the document is
+/// unchanged. The bump makes an older build refuse a version-6 project with
+/// its `NewerFormat` message rather than an unknown-field error.
+pub fn migrate_v5_to_v6(v: Value) -> Result<Value> {
+    Ok(v)
 }
 
 /// Version 4 → 5 (plan 5g-1 Ruling 18): lanes gain an optional `input_fx`,

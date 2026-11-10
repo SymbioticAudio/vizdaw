@@ -68,6 +68,41 @@ pub struct Destination {
     /// Ruling 1).
     #[serde(default, skip_serializing_if = "is_zero_ms")]
     pub return_latency_ms: f32,
+    /// An external MIDI destination's mix (plan 5g-1b; spec §6.8a): the
+    /// volume, pan and mute its MIDI strip sends as controller messages.
+    /// Absent in files when default.
+    #[serde(default, skip_serializing_if = "MidiMix::is_default")]
+    pub midi_mix: MidiMix,
+}
+
+/// The pan value that is centre (MIDI CC 10).
+pub const MIDI_CENTRE: u8 = 64;
+
+/// A MIDI strip's mix (plan 5g-1b): volume and pan are controller values
+/// (0–127) or `None` while never set, so nothing is sent for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MidiMix {
+    /// Volume (CC 7), 0–127; `None` until set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<u8>,
+    /// Pan (CC 10), 0–127 with [`MIDI_CENTRE`] in the middle; `None` until set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan: Option<u8>,
+    /// Mute.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mute: bool,
+}
+
+impl MidiMix {
+    /// True when nothing is set.
+    pub fn is_default(&self) -> bool {
+        *self == MidiMix::default()
+    }
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// The largest return latency a destination may have (spec §4.5a).
