@@ -92,7 +92,7 @@ public final class MixerModel {
     /// Slots safe mode keeps off.
     public private(set) var held: Set<UInt64> = []
     /// The instrument list (lanes play through these).
-    public private(set) var destinations: [DestRow] = []
+    public internal(set) var destinations: [DestRow] = []
     /// The strip whose name is being edited.
     public private(set) var renamingStrip: UInt64?
     /// Where the rename field shows (the button that began it sets it).
@@ -116,6 +116,8 @@ public final class MixerModel {
     /// The values a MIDI strip drag has previewed and not yet committed.
     public internal(set) var midiDraft: [UInt64: MidiMixRow] = [:]
     /// When each destination's drag last previewed, in the caller's seconds.
+    /// The committed mix each draft started from.
+    @ObservationIgnored var midiDraftBase: [UInt64: MidiMixRow] = [:]
     @ObservationIgnored var midiPreviewedAt: [UInt64: Double] = [:]
 
     /// Where a plugin picked in the browser goes.
@@ -857,6 +859,7 @@ public final class MixerModel {
             snapshot = snap
             held = heldNow
             destinations = dests
+            pruneMidiDrafts()
             fetches += 1
             forgetGone(snap)
         } catch {

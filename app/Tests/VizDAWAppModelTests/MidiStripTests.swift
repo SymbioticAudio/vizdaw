@@ -90,6 +90,58 @@ private func ext(_ id: UInt64, _ name: String = "Juno", mix: MidiMixRow = MidiMi
         #expect(f.midiMixes.count == 3)
     }
 
+    @Test func anUndoDuringADraftDropsTheDraft() throws {
+        let f = fake()
+        let m = try model(f)
+        m.midiDrag(7, volume: 30, pan: nil, now: 1)
+        #expect(m.midiMix(7)?.volume == 30)
+        f.dests[0].midiMix = MidiMixRow(volume: 80, pan: nil, mute: false)
+        f.snap.version += 1
+        m.document.refreshAfterJob()
+        m.refreshIfNeeded()
+        #expect(m.midiMix(7)?.volume == 80)
+        m.toggleMidiMute(7)
+        #expect(f.midiMixes.last?.1 == MidiMixRow(volume: 80, pan: nil, mute: true))
+        m.midiRelease(7)
+        #expect(f.midiMixes.count == 1, "the dropped draft does not commit")
+    }
+
+    @Test func aGoneDestinationDropsItsDraft() throws {
+        let f = fake()
+        let m = try model(f)
+        m.midiDrag(7, volume: 30, pan: nil, now: 1)
+        f.dests = []
+        f.snap.version += 1
+        m.document.refreshAfterJob()
+        m.refreshIfNeeded()
+        #expect(m.midiDraft.isEmpty)
+        m.midiRelease(7)
+        #expect(f.midiMixes.isEmpty)
+        #expect(m.document.alert == nil)
+    }
+
+    @Test func aCancelledDragCommitsNothing() throws {
+        let f = fake()
+        let m = try model(f)
+        m.midiDrag(7, volume: 30, pan: nil, now: 1)
+        m.midiCancel(7)
+        #expect(m.midiMix(7)?.volume == nil)
+        m.midiRelease(7)
+        m.toggleMidiMute(7)
+        #expect(f.midiMixes.count == 1)
+        #expect(f.midiMixes[0].1 == MidiMixRow(volume: nil, pan: nil, mute: true))
+    }
+
+    @Test func aDragThatEndsWhereItBeganCommitsNothing() throws {
+        let f = fake()
+        f.dests = [ext(7, mix: MidiMixRow(volume: 50, pan: nil, mute: false))]
+        let m = try model(f)
+        m.midiDrag(7, volume: nil, pan: nil, now: 1)
+        m.midiDrag(7, volume: 50, pan: nil, now: 2)
+        m.midiRelease(7)
+        #expect(f.midiMixes.isEmpty)
+    }
+
     @Test func aFailedCommitRaisesAnAlert() throws {
         let f = fake()
         let m = try model(f)

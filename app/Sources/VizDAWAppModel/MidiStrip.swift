@@ -18,14 +18,14 @@ public enum MidiStripMath {
     }
 
     /// A whole number 0...127.
-    public static func parseVolume(_ s: String) -> UInt8? { number(s.trimmingCharacters(in: .whitespaces)) }
+    public static func parseVolume(_ s: String) -> UInt8? { number(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
 
     /// "C", "L n" (1...64), "R n" (1...63) or a plain 0...127.
     public static func parsePan(_ s: String) -> UInt8? {
-        let t = s.trimmingCharacters(in: .whitespaces).uppercased()
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         if t == "C" { return panCentre }
         if let side = t.first, side == "L" || side == "R" {
-            guard let n = number(t.dropFirst().trimmingCharacters(in: .whitespaces)) else { return nil }
+            guard let n = number(t.dropFirst().trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
             if side == "L" { return (1...64).contains(n) ? panCentre - n : nil }
             return (1...63).contains(n) ? panCentre + n : nil
         }
@@ -86,7 +86,8 @@ extension MixerModel {
     /// at most once per 20 ms; `nil` leaves that control as it was. `now` is
     /// seconds from any monotonic clock.
     public func midiDrag(_ dest: UInt64, volume: UInt8?, pan: UInt8?, now: Double) {
-        guard var mix = midiMix(dest) else { return }
+        guard volume != nil || pan != nil, var mix = midiMix(dest) else { return }
+        if midiDraft[dest] == nil { midiDraftBase[dest] = committedMix(dest) }
         if let volume { mix.volume = min(volume, 127) }
         if let pan { mix.pan = min(pan, 127) }
         midiDraft[dest] = mix
@@ -99,24 +100,59 @@ extension MixerModel {
     /// The drag ended: commits what it last moved to, once.
     public func midiRelease(_ dest: UInt64) {
         midiPreviewedAt[dest] = nil
+        midiDraftBase[dest] = nil
         guard let mix = midiDraft.removeValue(forKey: dest) else { return }
+        // A drag that ended where it began is not an undo step.
+        guard mix != committedMix(dest) else { return }
         commitMidiMix(dest, mix)
     }
 
+    /// The drag was abandoned (the gesture cancelled or the view went):
+    /// drops its draft without committing. The synth keeps the last
+    /// previewed values until the next commit or load.
+    public func midiCancel(_ dest: UInt64) {
+        midiPreviewedAt[dest] = nil
+        midiDraftBase[dest] = nil
+        midiDraft[dest] = nil
+    }
+
+    func committedMix(_ dest: UInt64) -> MidiMixRow? {
+        destinations.first { $0.id == dest }?.midiMix
+    }
+
+    /// Drops the drafts of destinations that went or whose committed mix
+    /// changed under them (undo, reopen, the control channel).
+    func pruneMidiDrafts() {
+        for dest in Array(midiDraft.keys) where committedMix(dest) != midiDraftBase[dest]
+            || destinations.first(where: { $0.id == dest })?.external != true {
+            midiCancel(dest)
+        }
+    }
+
+    /// Re-reads the destinations so a commit builds on what the document
+    /// holds now, not on a refetch a busy plugin editor skipped.
+    private func freshMix(_ dest: UInt64) -> MidiMixRow? {
+        if let d = try? document.session.destinations() {
+            destinations = d
+            pruneMidiDrafts()
+        }
+        return midiMix(dest)
+    }
+
     public func setMidiVolume(_ dest: UInt64, _ v: UInt8) {
-        guard var mix = midiMix(dest) else { return }
+        guard var mix = freshMix(dest) else { return }
         mix.volume = min(v, 127)
         commitMidiMix(dest, mix)
     }
 
     public func setMidiPan(_ dest: UInt64, _ p: UInt8) {
-        guard var mix = midiMix(dest) else { return }
+        guard var mix = freshMix(dest) else { return }
         mix.pan = min(p, 127)
         commitMidiMix(dest, mix)
     }
 
     public func toggleMidiMute(_ dest: UInt64) {
-        guard var mix = midiMix(dest) else { return }
+        guard var mix = freshMix(dest) else { return }
         mix.mute.toggle()
         commitMidiMix(dest, mix)
     }
@@ -124,14 +160,14 @@ extension MixerModel {
     /// Commits typed text; false (nothing sent) when it does not parse.
     @discardableResult
     public func typeMidiVolume(_ dest: UInt64, _ text: String) -> Bool {
-        guard let v = MidiStripMath.parseVolume(text), midiMix(dest) != nil else { return false }
+        guard let v = MidiStripMath.parseVolume(text), committedMix(dest) != nil else { return false }
         setMidiVolume(dest, v)
         return true
     }
 
     @discardableResult
     public func typeMidiPan(_ dest: UInt64, _ text: String) -> Bool {
-        guard let p = MidiStripMath.parsePan(text), midiMix(dest) != nil else { return false }
+        guard let p = MidiStripMath.parsePan(text), committedMix(dest) != nil else { return false }
         setMidiPan(dest, p)
         return true
     }
