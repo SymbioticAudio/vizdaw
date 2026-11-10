@@ -194,6 +194,27 @@ private func ext(_ id: UInt64, _ name: String = "Juno", mix: MidiMixRow = MidiMi
         #expect(!ids.contains("s0"), "master is excluded")
     }
 
+    @Test func columnsKeepAnInterleavedDocumentOrder() throws {
+        let f = mixerFake()
+        f.mixerSnap = MixerSnapshot(
+            version: f.snap.version,
+            strips: [
+                stripRow(1, "Synth", kind: .builtinSynth),
+                stripRow(2, "Bus 1"),
+                stripRow(3, "Audio 2", kind: .audioPath(path: 5)),
+                stripRow(0, "Master", kind: .master),
+            ],
+            buses: [BusRow(id: 2, name: "Bus 1")])
+        f.dests = [ext(7)]
+        let m = try model(f)
+        #expect(m.columns.map(\.id) == ["s1", "d7", "s2", "s3"])
+        f.mixerSnap = MixerSnapshot(
+            version: f.snap.version, strips: [stripRow(1, "Synth", kind: .builtinSynth), stripRow(0, "Master", kind: .master)],
+            buses: [])
+        let n = try model(f)
+        #expect(n.columns.map(\.id) == ["s1", "d7"], "no bus: MIDI strips go last")
+    }
+
     @Test func aMidiTrackFocusesItsMidiStrip() {
         func lane(_ dest: UInt64?, kind: TrackKindRow) -> LaneRow {
             var l = FakeLane.make(9, kind: kind)

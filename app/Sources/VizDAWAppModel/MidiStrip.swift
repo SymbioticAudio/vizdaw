@@ -92,14 +92,16 @@ extension MixerModel {
     /// Least time between two previews of one drag (Ruling 6).
     public static let midiPreviewInterval: Double = 0.020
 
-    /// The columns, left to right (Ruling 7): the strips before the buses,
-    /// then every external destination's MIDI strip, then the buses.
-    /// Master is not one, as with `strips`.
+    /// The columns, left to right (Ruling 7, final review m1): the strips
+    /// in the document's order, with every external destination's MIDI
+    /// strip inserted before the first bus (at the end when there is
+    /// none), so an interleaved order such as [Audio 1, Bus 1, Audio 2]
+    /// keeps its places. Master is not one, as with `strips`.
     public var columns: [MixerColumn] {
-        let all = strips
-        return all.filter { $0.kind != .bus }.map(MixerColumn.audio)
-            + destinations.filter(\.external).map(MixerColumn.midi)
-            + all.filter { $0.kind == .bus }.map(MixerColumn.audio)
+        var out = strips.map(MixerColumn.audio)
+        let at = strips.firstIndex { $0.kind == .bus } ?? out.count
+        out.insert(contentsOf: destinations.filter(\.external).map(MixerColumn.midi), at: at)
+        return out
     }
 
     /// Whether `dest`'s strip shows as selected in the mixer (Task 6
