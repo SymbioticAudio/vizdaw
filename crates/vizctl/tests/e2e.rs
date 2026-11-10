@@ -3380,3 +3380,123 @@ fn loop_wraps_at_the_end() {
     assert_eq!(t["playing"], true, "the loop ended at the end: {t}");
     app.quit();
 }
+
+/// Spec §12.3's "`midi.inject` held chord into a lane with an arpeggiator
+/// while recording: check the recorded notes are the arpeggio" (plan 5g-1;
+/// README 239): a C major chord held for a bar into "Keys" with an Up
+/// arpeggiator at 1/16 records as C, E, G repeating, each on a sixteenth
+/// and half a sixteenth long. Offline device, no MIDI port.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn arpeggiates_an_injected_chord_while_recording() {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, SequenceCmd};
+    use core_model::event::EventBody;
+    use core_model::input_fx::{Arp, InputFx, InputFxKind};
+    use core_model::lane::LaneInput;
+    use core_model::sequence::SeqLength;
+    use core_model::time::Tick;
+    let mut app = App::start_with(&[]);
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("Arp", "Keys", Some(synth)).unwrap();
+    for c in [
+        LaneCmd::SetInput {
+            seq,
+            lane: keys,
+            input: Some(LaneInput::Midi {
+                port: Some("Keys".into()),
+                channel: None,
+            }),
+        },
+        LaneCmd::SetInputFx {
+            seq,
+            lane: keys,
+            chain: vec![InputFx::new(InputFxKind::Arpeggiator(Arp::default()))],
+        },
+        LaneCmd::SetFlags {
+            seq,
+            lane: keys,
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        },
+    ] {
+        b.run(Command::Lane(c)).unwrap();
+    }
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(8 * Q)),
+    }))
+    .unwrap();
+    let path = app.launched.home.join("Arp.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let lane = lane_named(&mut app, &w, "Keys");
+    assert_eq!(
+        lane["input_fx"][0]["kind"]["arpeggiator"]["rate"]["division"], 16,
+        "{lane}"
+    );
+    assert_eq!(lane["arm"], true, "{lane}");
+    app.call(
+        "command.run",
+        json!({"id": "record.set", "params": {"replace": true, "loop": false, "pre_roll": 0, "count_in": 0}, "window": w}),
+    );
+    app.call(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    wait_for_record(&mut app, &w, |r| {
+        r["recording"] == true && r["frames"].as_u64() >= Some(24_000)
+    });
+    app.call(
+        "command.run",
+        json!({"id": "midi.inject", "params": {"port": "Keys", "bytes": "90 3c 64 90 40 64 90 43 64"}, "window": w}),
+    );
+    wait_for_record(&mut app, &w, |r| r["frames"].as_u64() >= Some(24_000 * 5));
+    app.call(
+        "command.run",
+        json!({"id": "midi.inject", "params": {"port": "Keys", "bytes": "80 3c 00 80 40 00 80 43 00"}, "window": w}),
+    );
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    let input = app.call("state.get", json!({"target": "input", "window": w}));
+    assert_eq!(input["midi_fx_dropped"], 0, "{input}");
+    app.call("command.run", json!({"id": "file.save", "window": w}));
+    let doc = core_model::file::load(&path).unwrap();
+    let l = doc
+        .sequence(seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .find(|l| l.id == keys)
+        .unwrap();
+    let notes: Vec<(i64, u8, i64)> = l
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match &e.body {
+            EventBody::Note {
+                pitch, duration, ..
+            } => Some((e.tick.0, *pitch, duration.0)),
+            _ => None,
+        })
+        .collect();
+    assert!(notes.len() >= 12, "about a bar of sixteenths: {notes:?}");
+    let first = [60u8, 64, 67]
+        .iter()
+        .position(|p| *p == notes[0].1)
+        .expect("a chord note");
+    for (k, (tick, pitch, duration)) in notes.iter().enumerate() {
+        assert_eq!(*pitch, [60, 64, 67][(first + k) % 3], "{notes:?}");
+        let off = tick % (Q / 4);
+        assert!(
+            off.min(Q / 4 - off) <= 2,
+            "{tick} is off the sixteenths: {notes:?}"
+        );
+        assert!((duration - Q / 8).abs() <= 2, "{duration}: {notes:?}");
+    }
+    app.quit();
+}

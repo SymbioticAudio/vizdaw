@@ -2308,3 +2308,46 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
      status lines or alerts says "lane" (a rare "unknown id" refusal still
      prints an id such as lane5). An old project's "Lane 1" keeps
      its name.
+
+### MIDI input effects (plan 5g-1)
+
+By ear and by eye; the chain is tested (`core-engine/tests/input_fx*.rs`),
+the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
+`arpeggiates_an_injected_chord_while_recording`.
+
+238. Track headers are unchanged: no FX control, and the name field
+     keeps its full width. In the Mix view, a plugin instrument's strip
+     and the Built-in Synth strip show a "MIDI FX" section under Inserts,
+     its heading unlit while the chain is empty. Audio strips, buses and
+     master have no such section. Click its empty "+" slot: a menu lists
+     Arpeggiator, Transpose, Velocity, Chord and Input Quantize. Add a
+     Transpose: the heading lights in the theme's accent colour. Click
+     the slot's dot: it is bypassed and the heading is unlit again. Click
+     the slot: its settings open in a popover beside it. Check this in
+     each theme. Put two tracks on the Built-in Synth and arm one: the
+     Mix view's section edits the armed track. Select the other track:
+     the left pane's strip edits the selected one.
+239. A real keyboard on a MIDI track, armed: add an Arpeggiator (Up, 1/16).
+     Stopped, hold a chord: it arpeggiates at once at the project tempo;
+     change the tempo and it follows. Play with the click on: the notes
+     fall on the sixteenths, and a chord pressed between steps waits for
+     the next one. Hold ⏪ or ⏩ and loop a bar while holding: no burst of
+     notes and no gap. Try each mode, 2–4 octaves, a triplet and a dotted
+     rate.
+240. Latch: hold a chord and let go: it keeps playing; press a new chord
+     with no key down: the pattern changes to it.
+241. Transpose +12 then Chord (+4 +7) near the top of the keyboard, then
+     drag the Chord slot above the Transpose slot: the top notes differ (notes past the
+     highest key are dropped, never folded).
+242. Hold a chord through the arpeggiator and bypass it (its slot's
+     dot), change its rate, drag a velocity slider, arm another track,
+     disarm this one: no note hangs, and a latched arpeggio survives arming another track. Start a
+     MIDI Learn and press a key: the key is learned, and nothing plays or
+     arpeggiates.
+243. Add Input Quantize (1/16, 100%) and record a loose phrase: thru is
+     never delayed; the recorded notes start on the sixteenths and keep
+     their lengths. At 50% they move half way.
+244. Each change in the MIDI FX section or a settings popover is one
+     Undo ("Set Input Effects"); a slider drag is one step. A change made while recording is undone with
+     the take. Save, close and reopen: the chain is there. Duplicate Track
+     copies it.
