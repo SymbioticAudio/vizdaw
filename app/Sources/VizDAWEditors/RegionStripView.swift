@@ -31,6 +31,7 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
     public init(model: PianoRollModel) {
         self.model = model
         super.init(frame: .zero)
+        clipsToBounds = true
         wantsLayer = true
         registerForDraggedTypes([.fileURL])
         observe()
@@ -368,7 +369,7 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
                 // Preflight M8: gain and offline, as in the arrangement.
                 let label = RegionA11y.label(
                     item.row, name: media?.row(item.row.media)?.name ?? "audio",
-                    laneName: model.row(item.lane)?.name ?? "a lane", meter: meter,
+                    laneName: model.row(item.lane)?.name ?? "a track", meter: meter,
                     offline: media?.offline(item.row.media) != nil)
                 items.append(
                     (CanvasAccessibilityItem(

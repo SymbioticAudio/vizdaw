@@ -274,6 +274,35 @@ fn wait_for_label(app: &mut App, window: &Value, label: &str) -> Value {
     }
 }
 
+/// Types `text` into the element labelled `label`, finding it again when
+/// the view redrew between finding and typing (`no_element`): on a slow
+/// runner the strip can rebuild just after the tree was read.
+fn key_into_label(app: &mut App, window: &Value, label: &str, text: &str) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let id = wait_for_label(app, window, label);
+        let params = json!({"window": window, "element": id, "text": text});
+        let timeout = Duration::from_millis(WAIT_MS) + Duration::from_secs(60);
+        match app.client.call("ui.key", params.clone(), timeout) {
+            Ok(_) => return,
+            Err(e) if e.to_string().contains("no_element") && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => {
+                // Where the element is and how big the window is: an
+                // element whose centre is outside the window is "gone".
+                let tree = app.call("ui.tree", json!({"window": window}));
+                let node = find_node(&tree["nodes"], label);
+                let windows = app.call("state.get", json!({"target": "windows"}));
+                panic!(
+                    "ui.key {params}: {e}\nnode: {node:?}\nwindows: {windows}\nVizDAW log:\n{}",
+                    log_tail(&app.launched.log, 40)
+                )
+            }
+        }
+    }
+}
+
 /// Polls `state.get document` until its undo label is `label`.
 fn wait_for_undo(app: &mut App, window: &Value, label: &str) {
     let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
@@ -2408,7 +2437,11 @@ fn themes_and_the_strip_over_the_channel() {
     assert_eq!(numbers(&w2), numbers(&w0), "no window opened or closed");
 
     // 3b. Nothing is selected: the left pane says so and shows no strip.
-    wait_for_label(&mut app, &window, "Select a lane to see its channel strip.");
+    wait_for_label(
+        &mut app,
+        &window,
+        "Select a track to see its channel strip.",
+    );
     let tree = app.call("ui.tree", json!({"window": window}));
     assert!(
         labelled_like(&tree["nodes"], "Level of ", "").is_none(),
@@ -2450,11 +2483,7 @@ fn themes_and_the_strip_over_the_channel() {
     }
 
     // 5. The level box: one call clicks it and types.
-    let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
-    app.call(
-        "ui.key",
-        json!({"window": window, "element": level, "text": "-4.2\n"}),
-    );
+    key_into_label(&mut app, &window, &format!("Level of {SYNTH}"), "-4.2\n");
     wait_for_state(&mut app, &window, "mixer", |m| {
         (strip_named(m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6
     });
@@ -3110,5 +3139,244 @@ fn transport_jumps_readouts_and_fields_over_the_channel() {
     );
     assert_eq!(tick(&mut app), 4 * BAR);
     no_alert(&mut app);
+    app.quit();
+}
+
+/// One pixel of a 24- or 32-bit uncompressed BMP, as [r, g, b]. Rows are
+/// stored bottom-up and padded to four bytes (Ruling 8).
+fn bmp_pixel(path: &std::path::Path, x: u32, y: u32) -> [u8; 3] {
+    let b = std::fs::read(path).unwrap();
+    assert_eq!(&b[..2], b"BM", "a BMP");
+    let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let offset = u32_at(10) as usize;
+    let width = u32_at(18);
+    let height = i32::from_le_bytes(b[22..26].try_into().unwrap());
+    let bits = u16::from_le_bytes(b[28..30].try_into().unwrap());
+    assert!(bits == 24 || bits == 32, "{bits}-bit BMP");
+    // 0 is plain; 3 is "bitfields", which sips writes for 32 bits with
+    // the usual B, G, R, A byte order.
+    assert!(matches!(u32_at(30), 0 | 3), "compression {}", u32_at(30));
+    let (w, h) = (width, height.unsigned_abs());
+    assert!(x < w && y < h, "pixel {x},{y} is outside {w}x{h}");
+    let row = if height > 0 { h - 1 - y } else { y } as usize;
+    let stride = (w as usize * (bits as usize / 8)).div_ceil(4) * 4;
+    let at = offset + row * stride + x as usize * (bits as usize / 8);
+    [b[at + 2], b[at + 1], b[at]]
+}
+
+/// `ui.screenshot {}` of the window as a BMP (`sips`, a system tool).
+/// Returns the BMP's path and the pixels per point.
+fn window_bmp(app: &mut App, window: &Value, name: &str) -> (PathBuf, f64) {
+    let png = app.launched.home.join(format!("{name}.png"));
+    let bmp = app.launched.home.join(format!("{name}.bmp"));
+    let r = app.call("ui.screenshot", json!({"window": window, "path": png}));
+    let windows = app.call("state.get", json!({"target": "windows"}));
+    let win = windows["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["number"] == *window)
+        .unwrap_or_else(|| panic!("no window in {windows}"))
+        .clone();
+    let scale = r["width"].as_f64().unwrap() / win["frame"]["width"].as_f64().unwrap();
+    let out = std::process::Command::new("sips")
+        .args(["-s", "format", "bmp"])
+        .arg(&png)
+        .arg("--out")
+        .arg(&bmp)
+        .output()
+        .expect("sips");
+    assert!(out.status.success(), "sips: {out:?}");
+    (bmp, scale)
+}
+
+/// The tracks of `state.get document`, as (kind, name).
+fn track_list(app: &mut App, window: &Value) -> Vec<(String, String)> {
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    doc["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["kind"].as_str().unwrap_or("?").to_string(),
+                l["name"].as_str().unwrap_or("?").to_string(),
+            )
+        })
+        .collect()
+}
+
+/// README steps 233–237 through the channel (plan tracks): a new project
+/// opens with "Sequence 1" and no tracks; the header column and the Add
+/// Track row are painted (checked on the screenshot's pixels, Ruling 8);
+/// the three New Track commands, Undo, Duplicate, hostile parameters; a
+/// channel click on Add Track opens no menu and blocks nothing.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn new_project_tracks_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let made = app.call("command.run", json!({"id": "file.new"}));
+    let window = made["window"].clone();
+    wait_for_label(&mut app, &window, "Track Headers");
+
+    // The start state: Sequence 1, selected, no tracks, and the add row.
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    let seqs = doc["sequences"].as_array().unwrap();
+    assert_eq!(seqs.len(), 1, "{doc}");
+    assert_eq!(seqs[0]["name"], "Sequence 1", "{doc}");
+    assert_eq!(doc["selected_seq"], seqs[0]["id"], "{doc}");
+    assert!(track_list(&mut app, &window).is_empty(), "{doc}");
+    let add = wait_for_node(&mut app, &window, "Add Track");
+    // A channel click on Add Track opens no menu: the status says what to
+    // run instead, and the app answers at once. Here, before any track, so
+    // the row is in view in a small window (a CI runner's 980×620).
+    app.call("ui.click", json!({"window": window, "element": add["id"]}));
+    let editor = wait_for_state(&mut app, &window, "editor", |e| {
+        e["status"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Add Track opens a menu"))
+    });
+    assert_eq!(
+        editor["status"],
+        "Add Track opens a menu: use track.new_audio, track.new_instrument or track.new_midi over the control channel."
+    );
+    let t = Instant::now();
+    app.call("state.get", json!({"target": "document", "window": window}));
+    assert!(
+        t.elapsed() < Duration::from_secs(2),
+        "no modal menu holds the main thread"
+    );
+
+    // Paint, not accessibility frames: the header column differs from the
+    // canvas, and so does the Add Track row.
+    let tree = app.call("ui.tree", json!({"window": window}));
+    let headers = find_node(&tree["nodes"], "Track Headers").expect("the headers");
+    let f = |n: &Value, k: &str| n["frame"][k].as_f64().unwrap();
+    let (bmp, s) = window_bmp(&mut app, &window, "start");
+    let px = |x: f64, y: f64| bmp_pixel(&bmp, (x * s) as u32, (y * s) as u32);
+    let y = f(&headers, "y") + 22.0 + 40.0; // below the ruler, inside the first row
+    let header = px(f(&headers, "x") + f(&headers, "width") / 2.0, y);
+    let canvas = px(f(&headers, "x") + f(&headers, "width") + 40.0, y);
+    assert_ne!(
+        header, canvas,
+        "the header column is painted unlike the canvas"
+    );
+    let add_px = px(f(&add, "x") + f(&add, "width") / 2.0, f(&add, "y") + 30.0);
+    assert_ne!(
+        add_px, canvas,
+        "the Add Track row is painted unlike the canvas"
+    );
+
+    // The three kinds, below one another.
+    for id in ["track.new_audio", "track.new_instrument", "track.new_midi"] {
+        app.call("command.run", json!({"id": id, "window": window}));
+    }
+    let tracks = track_list(&mut app, &window);
+    let kinds: Vec<&str> = tracks.iter().map(|t| t.0.as_str()).collect();
+    assert_eq!(kinds, ["audio", "instrument", "midi"], "{tracks:?}");
+    let mut first_label = String::new();
+    for prefix in [
+        "Audio track, Audio 1",
+        "Instrument track, Inst 1",
+        "MIDI track, MIDI 1",
+    ] {
+        let (_, label) = wait_for_label_like(&mut app, &window, prefix, "");
+        if first_label.is_empty() {
+            first_label = label;
+        }
+    }
+    let tree = app.call("ui.tree", json!({"window": window}));
+    let first_row = find_node(&tree["nodes"], &first_label).expect("the first row");
+    // A header row's separator line shows on the screenshot.
+    let (bmp, s) = window_bmp(&mut app, &window, "three");
+    let px = |x: f64, y: f64| bmp_pixel(&bmp, (x * s) as u32, (y * s) as u32);
+    let x = f(&headers, "x") + f(&headers, "width") - 8.0;
+    // The first row's bottom edge, from its own frame (not a fixed height).
+    let row_bottom = f(&first_row, "y") + f(&first_row, "height");
+    let body = px(x, row_bottom - 4.0);
+    let line = (-1..=1)
+        .map(|d| px(x, row_bottom + d as f64 * 0.5))
+        .any(|p| p != body);
+    assert!(line, "the first row's separator line is painted ({body:?})");
+
+    // Undo removes the last one; Duplicate copies the first.
+    app.call("command.run", json!({"id": "edit.undo", "window": window}));
+    let tracks = track_list(&mut app, &window);
+    assert_eq!(tracks.len(), 2, "{tracks:?}");
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    let first = doc["lanes"][0]["id"].clone();
+    app.call(
+        "command.run",
+        json!({"id": "track.duplicate", "params": {"lane": first}, "window": window}),
+    );
+    let tracks = track_list(&mut app, &window);
+    assert_eq!(tracks.len(), 3, "{tracks:?}");
+    assert_eq!(tracks[1].1, "Audio 1 copy", "{tracks:?}");
+
+    // Hostile parameters change nothing.
+    let before = track_list(&mut app, &window);
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "track.new_audio", "params": {"seq": -1}, "window": window}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert_eq!(track_list(&mut app, &window), before);
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "track.new_audio", "params": {"seq": 999_999}, "window": window}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e}");
+    assert_eq!(track_list(&mut app, &window), before);
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "track.rename", "window": window}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e}");
+    assert_eq!(track_list(&mut app, &window), before);
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "track.rename", "params": {"name": "   "}, "window": window}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e}");
+    assert_eq!(track_list(&mut app, &window), before);
+
+    // `live` is a boolean; the test never asks for a live capture.
+    let e = app.call_err("ui.screenshot", json!({"window": window, "live": "yes"}));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    app.quit();
+}
+
+/// The Loop command: with Loop on, playing past the end of the sequence
+/// wraps to bar 1 instead of stopping.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn loop_wraps_at_the_end() {
+    let mut app = App::start();
+    let opened = app.call("app.new_demo", json!({}));
+    let window = opened["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "window": window, "params": params}),
+        )
+    };
+    let button = wait_for_label(&mut app, &window, "Loop");
+    app.call("ui.click", json!({"window": window, "element": button}));
+    for _ in 0..11 {
+        run(&mut app, "transport.fast_forward", json!({}));
+    }
+    run(&mut app, "transport.play", json!({}));
+    app.wait(&window, json!({"condition": "playing"}));
+    std::thread::sleep(Duration::from_millis(5000));
+    let t = app.call(
+        "state.get",
+        json!({"target": "transport", "window": window}),
+    );
+    assert_eq!(t["playing"], true, "the loop ended at the end: {t}");
     app.quit();
 }

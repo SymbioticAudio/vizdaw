@@ -63,7 +63,7 @@ public enum BlockRuleSetting: Codable, Hashable, Sendable {
         switch self {
         case .silenceGap(let beats): "Silence of \(beats) Beat\(beats == 1 ? "" : "s")"
         case .fixedBars(let n): "\(n) Bar\(n == 1 ? "" : "s")"
-        case .wholeLane: "Whole Lane"
+        case .wholeLane: "Whole Track"
         }
     }
 }

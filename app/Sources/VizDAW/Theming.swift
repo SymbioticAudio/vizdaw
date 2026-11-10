@@ -20,7 +20,10 @@ struct ThemedRoot: ViewModifier {
             .foregroundStyle(t.text.primary.color, t.text.secondary.color, t.text.disabled.color)
             .tint(t.accent.accent.color)
             .background(WindowStyler(theme: t))
-            .background(t.surface.window.color)
+            // Not under the title bar: a Settings window's toolbar (its tabs)
+            // and window buttons sit there, and a colour drawn under it
+            // covered them. The window's own background is the theme's.
+            .background(t.surface.window.color, ignoresSafeAreaEdges: [])
     }
 }
 

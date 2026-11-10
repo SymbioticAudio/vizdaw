@@ -43,7 +43,7 @@ temporary support folder and never scans.
 ## Editors (plan 4a)
 
 - The document window shows the arrangement (the selected sequence's
-  lanes and their blocks) over the bottom pane's editor (plan 7a: Left,
+  tracks and their blocks) over the bottom pane's editor (plan 7a: Left,
   Bottom and Right Pane, see steps 199-206). The piano roll (plan 4b),
   list (4c), Strip Chart (4d), drum grid (4e) and audio editor (7c) are
   all built.
@@ -51,9 +51,9 @@ temporary support folder and never scans.
   Cmd-5 the audio editor;
   Option-Cmd-1 to Option-Cmd-4 open one in its own window.
 - Blocks follow the arrangement bar's rule (silence gap, fixed bars,
-  whole lane);
+  whole track);
   a reference is always its own purple block named after its sequence.
-  Drag moves, Option-drag copies, dragging onto another lane merges; G
+  Drag moves, Option-drag copies, dragging onto another track merges; G
   toggles snap; Escape cancels a drag; a drag in the ruler selects a time
   range, a click there locates.
 - Keys follow the key bindings (plan 4f): every command, menu item or
@@ -184,12 +184,12 @@ VoiceOver or real devices.
 2. File > Create Demo Project. A second window opens; the sidebar shows
    Song under "Top-level" and Beat (1) and Groove (2) under "Used as
    reference".
-3. Song is selected; the arrangement shows the lanes Groove and Chords. Press
+3. Song is selected; the arrangement shows the tracks Groove and Chords. Press
    Space: the demo sounds through the speakers, the position display
    advances (the Bar readout reads bar.beat.unit, the Time readout m:ss.fff), the tempo slows over the last two
    bars, and playback stops by itself at the end.
-4. Press Space again and, while it plays, click M in the Chords lane header: the
-   chords drop out within a moment. Edit > Undo Set Lane Mute/Solo/Arm
+4. Press Space again and, while it plays, click M in the Chords track header: the
+   chords drop out within a moment. Edit > Undo Set Track Mute/Solo/Arm
    brings them back.
 5. Double-click Beat in the sidebar, type `Kit`, press Return; the title
    gains " — Edited". Typing a space in the name field types a space and
@@ -266,7 +266,7 @@ multi-output drum instrument).
 Use the demo project (File > Create Demo Project; its window is titled
 "Untitled" until saved) unless a step says otherwise.
 
-21. Song shows two lane rows. Groove holds two purple "Groove" reference
+21. Song shows two track rows. Groove holds two purple "Groove" reference
     blocks (bars 1-4 and 5-8); Chords one blue block with small note dashes
     (bars 1-12). The ruler numbers bars 1, 2, 3...; with Cmd-scroll or a
     pinch the view zooms around the pointer and the bar labels thin out
@@ -276,7 +276,7 @@ Use the demo project (File > Create Demo Project; its window is titled
     edge the view jumps one page. Turn Follow off: the view stays put.
     Stop: the playhead stays where playback stopped.
 23. Ruler: drag in the ruler from bar 2 to bar 4 with any tool chosen: the
-    range is shaded (snapped to beats) in the ruler and across both lanes.
+    range is shaded (snapped to beats) in the ruler and across both tracks.
     Click in the ruler: the Bar and Time readouts and the Position field jump there.
 24. Drag feel: press on the second Groove block and move 2 points: nothing
     moves. Drag it one bar right: it follows the pointer (and, while
@@ -286,26 +286,28 @@ Use the demo project (File > Create Demo Project; its window is titled
     (G) it moves freely.
 25. Option-drag the Chords block one bar right: a copy appears and the
     original stays (Undo Copy Block). Drag the Chords block down onto the
-    Groove row: its events join that lane (Undo restores). Drag a block to
+    Groove row: its events join that track (Undo restores). Drag a block to
     the right edge and hold: the view scrolls and the block keeps following.
-26. Lane headers: M, S and R toggle mute, solo and record arm (mute is
+26. Track headers: M, S and R toggle mute, solo and record arm (mute is
     audible while playing); the destination menu lists the instruments;
-    double-click a lane name, type, Return renames it; "+ Add Lane" adds
-    "Lane 3". Light drawing: Light > On draws outlines only; Automatic
+    double-click a track name, type, Return renames it; "+ Add Track" opens
+    a menu of New Audio Track, New Instrument Track and New MIDI Track, and
+    the new track is named "Audio 1", "Inst 1" or "MIDI 1" (the number
+    counts up per kind). Light drawing: Light > On draws outlines only; Automatic
     draws filled blocks for the demo (fewer than 1 500 visible).
-27. Blocks menu > 1 Bar: Chords splits into twelve blocks; Whole Lane joins
+27. Blocks menu > 1 Bar: Chords splits into twelve blocks; Whole Track joins
     them.
 28. Sidebar: Groove shows 2 and Beat 1 (uses). Drag Groove above Beat: the
     order sticks after Save and reopen. Context menu > Comment... shows the
     comment under the name; Keyboard Slot... with Option and "a" shows
     Option-A. Duplicate adds "Groove copy". "+" > New from Template > Drum
-    Kit adds and selects "Sequence 1" with a drum lane "Drums"; Same Lanes
-    as Song copies Song's lanes and tempo without events. Delete... on Beat
+    Kit adds and selects "Sequence 1" with a drum track "Drums"; Same Tracks
+    as Song copies Song's tracks and tempo without events. Delete... on Beat
     asks first (it is in use) and removes Groove's references to it; Undo
     brings both back.
 29. Make a reference: drag in the ruler over bars 1-4, Sequence > Make
     Reference from Selection (Option-Cmd-R): Song gains a new sequence in
-    the sidebar and the selected range of every lane becomes one purple
+    the sidebar and the selected range of every track becomes one purple
     block. Undo restores the events. A right-click on the Chords block >
     Make Reference does the same for that block.
 30. Open a reference: double-click a Groove block: the arrangement shows
@@ -321,7 +323,7 @@ Use the demo project (File > Create Demo Project; its window is titled
     piano roll (see plan 4b); Cmd-2 switches to List; Option-Cmd-1 opens a
     "Piano Roll — Untitled" window. Option-Cmd-2 also opens a List window.
     Select Beat in the sidebar, open a window on it, then Delete... Beat:
-    the window closes (so does one whose lane disappears, for example
+    the window closes (so does one whose track disappears, for example
     through Undo). Move and resize one, Save As `~/Desktop/editors.vizdaw`,
     close the project and reopen it: the window comes back (now titled "...
     — editors") at the same place; the arrangement keeps its block rule,
@@ -333,15 +335,15 @@ Use the demo project (File > Create Demo Project; its window is titled
     Undo reverts it in one step.
 34. Typing never plays: with a project open and stopped, press Space in
     each of these and check that a space is typed and playback does not
-    start: the lane name field (double-click a lane name), the sidebar
+    start: the track name field (double-click a track name), the sidebar
     rename field, the Comment... editor, the Keyboard Slot... key field,
     and the Parameters... sheet (focus the Repeats stepper, press Space).
-    Return in the lane name field commits the name and does not jump to
+    Return in the track name field commits the name and does not jump to
     the start.
 35. VoiceOver (Cmd-F5): the arrangement is a group "Arrangement"; moving
     through it reads blocks such as "Block on Chords, bars 1 to 12, 40
     events" and "Reference to Groove on Groove, bars 1 to 4"; VO-Space on a
-    block selects it. The lane headers read "Chords, Built-in Piano"; the
+    block selects it. The track headers read "Instrument track, Chords, Built-in Piano"; the
     arrangement bar's controls (tool, Snap, Blocks, Light, Follow, zoom)
     are labelled.
 
@@ -353,11 +355,11 @@ note shows "Notes sound once the audio engine runs: press Play once." once,
 so press Space twice (play, stop) before the sound steps.
 
 36. Double-click the Chords block: the bottom pane shows the piano roll with
-    its bar (Arrow/Pencil/Eraser, Keyboard, Lanes, Insert Into, Audio,
+    its bar (Arrow/Pencil/Eraser, Keyboard, Tracks, Insert Into, Audio,
     Expression, row-height and zoom buttons), a keyboard on the left with
     its C keys labelled (C4, C5), the ruler, and one three-note chord per
-    bar in orange (Chords is Song's second lane, after Groove; lane colours
-    follow the lane's position) with black-key rows shaded and a line under
+    bar in orange (Chords is Song's second track, after Groove; track colours
+    follow the track's position) with black-key rows shaded and a line under
     every C. The Keyboard toggle hides the keys (the column stays). Taller
     Rows / Shorter Rows (hover help) and the zoom buttons change the rows
     and the zoom; Cmd-scroll zooms around the pointer; scrolling moves both
@@ -387,15 +389,15 @@ so press Space twice (play, stop) before the sound steps.
     paints any length. Eraser: a click deletes a note; dragging across
     notes deletes each one crossed, with one undo step "Undo Erase Notes".
     Select notes and press Delete: they go (one undo step).
-41. Several lanes: double-click a Groove block (it opens Groove), then
-    double-click its Bass block. Lanes > Drums adds the Drums lane. It has
+41. Several tracks: double-click a Groove block (it opens Groove), then
+    double-click its Bass block. Tracks > Drums adds the Drums track. It has
     no notes of its own (it only references Beat), so use Insert Into >
     Drums and the pencil to add a few notes: they are drawn in blue (Drums
-    is Groove's first lane) and the Bass notes (orange, its second) are
-    drawn fainter while Drums is the active lane. Press a Bass note: "Insert
+    is Groove's first track) and the Bass notes (orange, its second) are
+    drawn fainter while Drums is the active track. Press a Bass note: "Insert
     Into" switches back to Bass and the Bass notes are drawn on top.
-    Overlapping notes of the two lanes: the click picks the one drawn on
-    top. Lanes > Drums again hides it (the target's own lane, Bass, cannot
+    Overlapping notes of the two tracks: the click picks the one drawn on
+    top. Tracks > Drums again hides it (the target's own track, Bass, cannot
     be hidden).
 42. Playing: Transport > Loop on, Space; drag a chord note up and hold it
     while the loop restarts: the dragged note keeps sounding until you
@@ -411,7 +413,7 @@ so press Space twice (play, stop) before the sound steps.
     project's window and they move to it. Press and hold a keyboard key in
     a torn window and close it with Cmd-W: no note keeps sounding.
 44. Audio: File > Create Demo Project with Audio; press Cmd-1 with nothing
-    selected: the piano roll shows Song with the Chords and Loop lanes. Under
+    selected: the piano roll shows Song with the Chords and Loop tracks. Under
     the notes the strip "Audio 1-2" holds two teal regions labelled Loop at
     bars 1 and 5 (silent until sub-project 5). M and S toggle mute and solo
     of the "Audio 1-2" mixer strip (Window > Mixer shows the same, and a
@@ -434,7 +436,7 @@ so press Space twice (play, stop) before the sound steps.
     major). Turn following off, Root D, Scale Dorian: steps follow D
     Dorian. Quit and relaunch: the settings are kept (not in a `vizctl`
     home or with `VIZDAW_SUPPORT_DIR` set: preferences then stay in
-    memory). In a lane name field
+    memory). In a track name field
     and the Comment... editor Option-arrows move the text cursor, not notes.
 47. Busy: with an AU v3 instrument whose editor opens slowly (plan 3c
     steps), start opening it and at once drag a piano-roll note and
@@ -446,11 +448,11 @@ so press Space twice (play, stop) before the sound steps.
     The keyboard reads "Keyboard", the strip "Audio Regions" with "Mute
     Audio 1-2" and "Solo Audio 1-2", its regions "Region on Loop, Audio
     1-2", the pane "Expression: Per-Note Pitch Bend".
-49. Layout: change Keyboard, row height and zoom, show an extra lane, Save,
+49. Layout: change Keyboard, row height and zoom, show an extra track, Save,
     close and reopen: the piano roll and its torn windows come back the
     same.
 50. Typing never plays (again): with a project open and stopped, press Space
-    in the text fields added or reused by 4b (the lane name field, the
+    in the text fields added or reused by 4b (the track name field, the
     Comment... editor, the Settings window fields) and check a space is
     typed and playback does not start; Space in the piano roll itself still
     plays and stops.
@@ -459,7 +461,7 @@ so press Space twice (play, stop) before the sound steps.
 
 Use the demo project (File > Create Demo Project; its window is titled
 "Untitled" until saved) unless a step says otherwise. In the demo, Song's
-Chords lane holds 36 notes (three per bar, bars 1-12, velocity 56), a
+Chords track holds 36 notes (three per bar, bars 1-12, velocity 56), a
 Program and a Controller 7 = 100 event at 1.1.0 and two Pitch Bend events in
 bar 12 (the block has 40 events); Song's tempo map is 120 BPM at 1.1.0, a
 120 ramp at 11.1.0 and 90 at 13.1.0. The status line is the strip under the
@@ -467,8 +469,8 @@ editors (and at the bottom of the panel).
 
 51. List: double-click the Chords block and press Cmd-2: the bottom pane
     shows an "Event List" table with the columns Position, Length, Kind,
-    Destination, Data 1, Data 2 and Mute (a Lane column appears only when
-    the list covers more than one lane) and "40 rows" in its bar. The first
+    Destination, Data 1, Data 2 and Mute (a Track column appears only when
+    the list covers more than one track) and "40 rows" in its bar. The first
     rows at 1.1.0 are Program (Data 1 0), Controller (7, 100) and three
     "Note" rows (pitch name such as C4 in Data 1, velocity 56 in Data 2).
     Click a row, then use Up and Down: the cursor moves; the selected rows
@@ -521,7 +523,7 @@ editors (and at the bottom of the panel).
 57. Filters: Show lists every kind (Note, Controller, ... Marker) and the
     destinations Built-in Piano, Built-in Bass and Built-in Drums. Turn off
     Controller: the Controller row disappears and the row count drops; turn
-    off Built-in Piano (the Chords lane's destination): every row
+    off Built-in Piano (the Chords track's destination): every row
     disappears; Show Everything restores them. Option-Cmd-2 opens a second
     list window on the same block: it shows everything (the filter is per
     list). In the first list turn off Controller and choose Apply to All
@@ -532,7 +534,7 @@ editors (and at the bottom of the panel).
 58. Whole sequence: click Song in the sidebar, click empty arrangement
     space (nothing selected) and press Cmd-2: at 1.1.0 the list shows a
     Tempo row (Data 1 120.00, Data 2 jump) and a Meter and Key row (4/4, C
-    major), then every lane's rows with a Lane column (Groove, Chords);
+    major), then every track's rows with a Track column (Groove, Chords);
     Tempo rows for 11.1.0 (120.00, ramp) and 13.1.0 (90.00, jump) follow in
     position order. Select a note row in bar 3 and choose Insert > Marker
     (the menu now also offers Tempo, Meter and Marker): "Marker 1" appears
@@ -588,7 +590,7 @@ editors (and at the bottom of the panel).
     "Refine the Selection", change the Pitch comparison to "is" (C4 to C4)
     and Apply: only the C4 notes stay selected. Set Result to "Replace the
     Selection", click empty arrangement space (nothing selected) and
-    Apply: the status says "Select lanes to search first: drag in a ruler
+    Apply: the status says "Select tracks to search first: drag in a ruler
     or select a block." Set Result to "Refine the Selection" and Apply
     again with nothing selected: that message does not appear (Refine skips
     the check). The minus button removes a condition; Match "Any Condition"
@@ -631,10 +633,10 @@ editors (and at the bottom of the panel).
     Option); a rubber band opens Select by Rule with Kind, Position and
     Pitch conditions (Shift-band: Result "Add to the Selection"). Drag a
     Chords block one bar right in the arrangement: Move opens with "by" 4.0;
-    Option-drag it one bar right in its own lane: Move opens with "by" 4.0
+    Option-drag it one bar right in its own track: Move opens with "by" 4.0
     and "To a Copy" chosen, and Apply leaves the original and adds the copy
-    as one undo step. An Option-drag of a block into another lane copies at
-    once, as usual. Region drags (Audio project), a drag into another lane,
+    as one undo step. An Option-drag of a block into another track copies at
+    once, as usual. Region drags (Audio project), a drag into another track,
     pencil clicks, the eraser and expression strokes still apply as usual.
     Escape during a drag opens nothing and leaves no undo step. Turn Exact
     Mode off: drags apply again.
@@ -691,7 +693,7 @@ says otherwise. "The level" means what you hear and the master meter.
     under the drag; in the velocity row the status says "Erase works on
     controller, program and automation rows." and nothing changes. Escape
     during any drag leaves no undo step.
-73. Automation: add a lane "Auto" to Song (lane header menu), select it,
+73. Automation: add a track "Auto" to Song (track header menu), select it,
     press Cmd-3; on the row title choose Automation > Built-in Synth >
     Fader · Built-in Synth; draw a straight line from bar 1 at the bottom to
     bar 5 at about two thirds up. Play from bar 1: the chords fade in
@@ -702,7 +704,7 @@ says otherwise. "The level" means what you hear and the master meter.
     stopped; start an auditioned note (piano keyboard) to hear it. Move the
     mixer's Built-in Synth fader: the level follows the fader. Play again
     from bar 1: automation takes over at once. While playing, moving the
-    fader does not hold (automation wins). Delete the Auto lane's points and
+    fader does not hold (automation wins). Delete the Auto track's points and
     play: the fader's own value plays.
     With an insert whose parameter is automated, bypass it during playback
     and un-bypass it: the parameter jumps to where the automation is now,
@@ -734,9 +736,9 @@ says otherwise. "The level" means what you hear and the master meter.
     step); Modify Again repeats it. With Exact Mode on (Ctrl-Cmd-E) a Strip
     Chart drag previews, goes back on release, and opens the panel with the
     same line and a Position condition; Apply then makes it. The Kind
-    condition's menu offers "Automation". With several lanes selected,
-    Modify acts on every selected lane even though the chart shows only the
-    shown lane.
+    condition's menu offers "Automation". With several tracks selected,
+    Modify acts on every selected track even though the chart shows only the
+    shown track.
 79. Scale time: in the piano roll select two chords and Command-drag the end
     of the last selected note one beat right: both chords stretch around the
     first one's start ("Scale Time", one undo step); with Exact Mode on the
@@ -789,9 +791,9 @@ Run these from a shell in the repository, with `V=target/debug/vizctl`.
 ### Drum grid (plan 4e)
 
 Use the demo project. To reach Beat, double-click Song's first Groove
-block, then Groove's Beat block; its lane "Drums" is a drum lane with
-rows Kick, Snare and Closed Hat. Groove's own Drums lane is a plain lane
-that references Beat, not a drum lane. Snap stays on (quarters) unless a
+block, then Groove's Beat block; its track "Drums" is a drum track with
+rows Kick, Snare and Closed Hat. Groove's own Drums track is a plain track
+that references Beat, not a drum track. Snap stays on (quarters) unless a
 step says otherwise.
 
 87. Open: click Beat's block and press Cmd-4. The bottom pane shows
@@ -819,25 +821,25 @@ step says otherwise.
 90. Erase tool: choose Erase; a drag erases every hit it crosses; a click
     on an empty cell does nothing and adds no undo step.
 91. Velocity lane: right-click Snare's header > Show Velocity: the row
-    grows a lane with a bar per hit. Painting in that row sets each new
+    grows a track with a bar per hit. Painting in that row sets each new
     hit's velocity from the pointer's height (top 127, bottom 1); a run
     dragged up and down gives each hit the velocity where the pointer
     passed it, and the bars and the cells' brightness show it. Vel in the
     bar sets new hits in rows whose velocity lane is hidden.
 92. Rows: + adds "Open Hat" (A#2) and selects it. Double-click a row name
     to rename it. Drag a row header up or down to reorder; onto another
-    drum lane to move it there; below the last lane ("Drop a row here to
-    give it a lane of its own") to give it a new lane named after it,
+    drum track to move it there; below the last track ("Drop a row here to
+    give it a track of its own") to give it a new track named after it,
     its notes going along. Escape during a row-header drag cancels it:
     nothing moves and no undo step is added. The header menu's Split Row
-    to Own Lane does the same as the last drop; Remove Row deletes the
+    to Own Track does the same as the last drop; Remove Row deletes the
     row and its notes. Each is one undo step, and the arrangement shows
-    the new lane.
-93. Drum lanes: in Song, right-click the Chords lane header > Drum Lane:
-    Chords becomes a drum lane with a row per pitch, and Cmd-4 on Song
-    shows it; Drum Lane again makes it a normal lane (its notes stay).
-    Drum > Drum Lane does the same for the selected lane (click its
-    block first). A sequence without drum lanes shows "No Drum Lanes".
+    the new track.
+93. Drum tracks: in Song, right-click the Chords track header > Drum Track:
+    Chords becomes a drum track with a row per pitch, and Cmd-4 on Song
+    shows it; Drum Track again makes it a normal track (its notes stay).
+    Drum > Drum Track does the same for the selected track (click its
+    block first). A sequence without drum tracks shows "No Drum Tracks".
 94. Play quantize and nudge: play Beat (Space) and choose "Drums: Off" >
     1/8 Swing 66%: the hats' offbeats play late (a shuffle) while the
     list editor still shows them on the grid. Nudge Later a few times:
@@ -847,12 +849,12 @@ step says otherwise.
 95. Clean starts: play Song from the middle of a beat (click in the
     ruler): the first drum hits heard are the ones after the position,
     never the rest of a hit that began earlier. Play Beat, then mute and
-    unmute Beat's Drums lane while it plays (unmute mid-bar): the drums
-    come back at their next hit; the same with solo. (Groove's Drums lane
-    is a plain lane referencing Beat, not a drum lane, so test the mute
+    unmute Beat's Drums track while it plays (unmute mid-bar): the drums
+    come back at their next hit; the same with solo. (Groove's Drums track
+    is a plain track referencing Beat, not a drum track, so test the mute
     on Beat itself.)
 96. Windows and the Drum menu: Option-Cmd-4 opens the grid in its own
-    window; Drum > Add Drum Row, Show Velocity, Split Row to Own Lane and
+    window; Drum > Add Drum Row, Show Velocity, Split Row to Own Track and
     Remove Drum Row act on the grid you last clicked in (its selected
     row), Drum > Timeline View switches every grid. Save, close and
     reopen: the bar's settings and the window come back.
@@ -860,7 +862,7 @@ step says otherwise.
     "Kick, bar 1 beat 1, on, velocity 96" or "Snare, bar 1 beat 1 tick
     3840, off"; the headers are a group "Drum Rows" reading "Kick, C2,
     Drums, Built-in Drums". Every row header shows its destination; one
-    inherited from the lane is dimmed, one set on the row itself is
+    inherited from the track is dimmed, one set on the row itself is
     drawn at full strength. The "Drums" header band reads "Drums ·
     Built-in Drums"; a row with a destination of its own shows it after
     its name.
@@ -885,7 +887,7 @@ preferences). Keys are the defaults unless a step changes them.
     sequence is selected) and Scrub (K, always dimmed), Return to Start
     (Return), Rewind and Fast Forward (Shift-comma, Shift-period; plan 7d),
     Previous and Next Marker (comma, period), Loop (L), Overdub (O), Punch (I), the Go
-    to ... Field items (P, E, U) and Arm Previous/Next Lane
+    to ... Field items (P, E, U) and Arm Previous/Next Track
     (Option-Shift-Up/Down). The Step menu lists Step Entry (T) and the
     note values 1/1 to 1/32 (1-6), Dotted (.), Triplet (/), Tie (=), Rest
     (0) and Delete Last Step (Delete, shown as ⌫ in the menu); Editors >
@@ -926,9 +928,9 @@ preferences). Keys are the defaults unless a step changes them.
     bar 5; Option-Shift-2 clears it, and 2 then does nothing (`$V run
     locator.go_2` answers `unavailable`: "Locator 2 is not set."). Locators
     are saved with the project.
-103. Record arm: Option-Shift-Down arms Song's first lane (the header's
-    arm button lights), again moves the arm to the next lane (one lane
-    armed), Option-Shift-Up moves it back; past the last lane the status
+103. Record arm: Option-Shift-Down arms Song's first track (the header's
+    arm button lights), again moves the arm to the next track (one track
+    armed), Option-Shift-Up moves it back; past the last track the status
     line says there is none. Each move is one undo step "Move Record Arm".
 104. Step entry: select Chords' block, stop, put the playhead on bar 2
     and press T: the transport bar above the arrangement shows "Step Entry
@@ -942,7 +944,7 @@ preferences). Keys are the defaults unless a step changes them.
     Clicking in the ruler moves where the next step goes. Number keys
     choose values only while step entry is on; T turns it off and 0–9
     are locators again. Step entry ends with a status line the moment
-    the shown sequence changes (select another sequence) or its lane is
+    the shown sequence changes (select another sequence) or its track is
     deleted: the step bar goes, Step > Step Entry is unchecked, 2 jumps
     to locator 2 and one T starts step entry in the shown sequence.
     While playing, step keys only say "Stop playing to enter steps." in
@@ -991,18 +993,18 @@ a WAV, an AIFF, an MP3 or AAC, and one at 44.1 kHz.
      and 16-bit and press Create. The next File > New offers 44.1 kHz /
      16-bit. File > Project Settings… shows "Format: 44.1 kHz, 16-bit.
      The project has no audio files yet."
-110. Import Audio: open the demo, select a lane, put the playhead on bar
+110. Import Audio: open the demo, select a track, put the playhead on bar
      3 and choose File > Import Audio… (⇧⌘I) with one stereo WAV. A bar
      shows "Importing audio…" with progress and a Cancel button, then the
-     region sits on that lane at bar 3. Undo removes it (one step,
-     "Import Audio"). Import two files at once: each gets a new lane
+     region sits on that track at bar 3. Undo removes it (one step,
+     "Import Audio"). Import two files at once: each gets a new track
      "Audio n". A text file renamed `.wav` in the batch is listed by a
      bar (Dismiss clears it) and the others import; imported alone, it
      raises an "Import Failed" alert.
 111. It plays: Play from bar 1. The region sounds through the output path
      strip "Audio 1" (use the plain Create Demo Project) in the mixer; its fader, pan, mute and solo work; the
      region's sound starts at its bar exactly (record the output or
-     listen against the click of a MIDI lane).
+     listen against the click of a MIDI track).
 112. Loops and locates: loop bars 3–4 over a long region: the loop wraps
      with no gap or click beyond the region's own audio at the seam.
      Click in the ruler in the middle of a region while playing: the
@@ -1045,7 +1047,7 @@ a WAV, an AIFF, an MP3 or AAC, and one at 44.1 kHz.
 Use a throwaway home (`vizctl launch`), a few audio files of your own
 (one long, one stereo WAV), and the Finder.
 
-118. Waveforms: open the demo and Import Audio… a stereo WAV onto a lane.
+118. Waveforms: open the demo and Import Audio… a stereo WAV onto a track.
      Within a second its region in the arrangement shows the waveform of
      both channels. Zoom in until single samples show (the waveform may
      look blocky for a moment, then sharp) and out until the whole song
@@ -1067,11 +1069,11 @@ Use a throwaway home (`vizctl launch`), a few audio files of your own
      fades there; Remove Fades clears them. With nothing selected the
      items are disabled; with the playhead outside the region the status
      line says "the cursor is not inside a selected audio region".
-122. Drag-in: drag a WAV from the Finder onto a lane at bar 3: a bar
+122. Drag-in: drag a WAV from the Finder onto a track at bar 3: a bar
      "Importing audio…", then a region at bar 3 (snapped to the grid).
-     Drop two files below the last lane: two new lanes "Audio n". Drop a
+     Drop two files below the last track: two new tracks "Audio n". Drop a
      file on the Piano Roll's region strip: it lands on that region's
-     lane. A text file renamed `.wav` among them is listed in a Problems
+     track. A text file renamed `.wav` among them is listed in a Problems
      bar.
 123. Media Pool: Window > Media Pool lists Name, Duration, Channels,
      Origin, Uses, Used and Offline. Select Unused selects items no
@@ -1113,7 +1115,7 @@ Use a throwaway home (`vizctl launch`), a few audio files of your own
 128. Look and access: switch macOS between Light and Dark appearance:
      regions, waveforms, handles and the offline hatching follow the
      system colours. With VoiceOver, regions read "Region <name> on
-     <lane>, bar n, gain …"; the Relink sheet's buttons read "Locate
+     <track>, bar n, gain …"; the Relink sheet's buttons read "Locate
      <name>", "Search Folder…" and "Leave Offline".
 
 ### Recording (plan 5c)
@@ -1121,14 +1123,14 @@ Use a throwaway home (`vizctl launch`), a few audio files of your own
 These steps use real hardware, so they are by eye: an audio interface
 with a microphone or a line source, a MIDI keyboard, and a loopback
 cable (an output wired back to an input). Use a throwaway home
-(`vizctl launch`) for the channel steps. The lane headers' input
+(`vizctl launch`) for the channel steps. The track headers' input
 pickers, monitor buttons and meters, the transport bar's Record button and
 Settings › Audio (steps 144–159) do what the channel commands below do;
 the channel steps stay as they are.
 
 129. Microphone permission: macOS keeps the permission per app bundle,
      not per home, so a fresh home does not ask again. To re-test, run
-     `tccutil reset Microphone org.vizdaw.VizDAW` first. Set a lane's
+     `tccutil reset Microphone org.vizdaw.VizDAW` first. Set a track's
      input to audio channel 1 (`$V run lane.set_input '{"seq": 1,
      "lane": 2, "kind": "audio", "channel": 1}'`), arm it and press
      Play or Record: macOS asks for the microphone once ("VizDAW records
@@ -1141,16 +1143,16 @@ the channel steps stay as they are.
      `$V state input` shows the channels, their names and nonzero
      latencies.
 130. Record and monitor: with the interface as output and input, arm
-     an audio lane (monitor Auto): stopped, you hear the input through
-     the lane's strip; play without recording: you hear playback only;
+     an audio track (monitor Auto): stopped, you hear the input through
+     the track's strip; play without recording: you hear playback only;
      press R: you hear the input while recording, the transport rolls,
-     and Stop (or R again) leaves one region on the lane and one undo
-     step "Record". The media pool lists "<lane> <date> <time>"
+     and Stop (or R again) leaves one region on the track and one undo
+     step "Record". The media pool lists "<track> <date> <time>"
      (Recorded, the project's rate and depth). Set the monitor to Input
      (`$V run lane.set_monitor '{"seq": 1, "lane": 2, "mode":
      "input"}'`): always heard; Off: never.
 131. Loopback calibration: wire output 1 to input 1, put a region with
-     a sharp click on one lane and record input 1 on another with its
+     a sharp click on one track and record input 1 on another with its
      monitor Off. Zoom into the recorded region: its click starts within
      2 samples of the original's.
      - The trim correction: if the click is off, the interface
@@ -1171,7 +1173,7 @@ the channel steps stay as they are.
 132. Separate input device: in Settings › Audio choose another device
      for input, e.g. the built-in microphone while playing through the
      interface (back to "Same as output" afterwards). A new device takes
-     effect at once, even with a lane armed; while recording or
+     effect at once, even with a track armed; while recording or
      measuring, once that stops, so the next recording uses it (5d-2
      final review I1: choose the device mid-pass, stop, record again and
      listen: the new take is from the new device). Recording works,
@@ -1184,9 +1186,9 @@ the channel steps stay as they are.
      is built. With a device locked to another rate, the transport
      faults say "audio input could not open: … did not change to the
      project's 48000 Hz", and playback goes on without input.
-133. MIDI keyboard: set a lane's input to MIDI from your keyboard
+133. MIDI keyboard: set a track's input to MIDI from your keyboard
      (`"kind": "midi", "port": "<its name>"`), arm it: what you play
-     sounds on the lane's instrument at once (thru), stopped or
+     sounds on the track's instrument at once (thru), stopped or
      playing. Record a phrase: the notes land where you played them
      against what you heard, not a buffer late. Overdub (transport >
      Overdub) merges a second pass; Replace with Punch on clears only
@@ -1194,13 +1196,13 @@ the channel steps stay as they are.
      monitors as VizDAW's audio, its clicks and VizDAW's line up by ear.
 134. Loop passes: turn Loop on and record over a short sequence for
      three passes; after the first pass run `$V run record.keep_pass`,
-     after the second `$V run record.discard_pass`, then Stop: the lane
+     after the second `$V run record.discard_pass`, then Stop: the track
      has two new takes ("Take 2", "Take 3"), the last plays, and one
      Undo removes both.
 135. Crash recovery: record a few seconds into a saved project, then
      kill VizDAW (`kill -9`). Reopen the project: the document window
      comes to the front with the "Recovered Recordings" alert on it,
-     offering the file; Import into New Lanes adds a lane with it at
+     offering the file; Import into New Tracks adds a track with it at
      bar 1 (one undo step "Recover Recordings"); repeat and choose Move
      to Trash: the file is in the Finder's Trash; choose Later: it is
      offered again next time and Save never trashes it. Repeat with a
@@ -1217,20 +1219,20 @@ the channel steps stay as they are.
      holds what was recorded. A full disk stops the same way ("the disk
      is almost full"); below 1 GB a warning shows first.
 137. Channel: `$V state record` while recording shows `recording`, the
-     `pass`, `frames` and each lane's file; `$V state input` names the
+     `pass`, `frames` and each track's file; `$V state input` names the
      device's input channels and latencies; `$V run midi.inject
-     '{"port": "Keys", "bytes": "90 3c 64"}'` plays into lanes listening
+     '{"port": "Keys", "bytes": "90 3c 64"}'` plays into tracks listening
      to "Keys"; malformed bytes are `invalid_params`. The e2e test
      `records_audio_loop_takes_and_midi` runs steps 130, 134 and 137
      against the offline device's fake input
      (`VIZDAW_AUDIO=offline VIZDAW_AUDIO_INPUT=fake`), which opens no
      hardware and asks for no permission.
-138. Input only while needed: with no lane armed or monitoring Input,
-     the menu bar's microphone indicator is off; arming an audio lane
+138. Input only while needed: with no track armed or monitoring Input,
+     the menu bar's microphone indicator is off; arming an audio track
      (and pressing Play or Record) turns it on, disarming turns it off.
 139. Known hardware-only gaps (plan 5c Task 11; watch for them, file
      them if seen):
-     - Arming an audio lane while playing restarts the device mid-play
+     - Arming an audio track while playing restarts the device mid-play
        to open input: expect a short glitch. That is by design (input
        opens only when needed); anything worse is a bug.
      - If reopening the device for input fails and even the output-only
@@ -1242,27 +1244,27 @@ the channel steps stay as they are.
 
 ### Synth tracking (plan 5c-2)
 
-These steps run through the channel; the lane menu's Track Synth… and
+These steps run through the channel; the track menu's Track Synth… and
 New MIDI Destination… sheets do the same by hand (steps 155–156). Make
 the hardware synth's destination with New MIDI Destination… (or `$V run
 destination.add_midi '{"name": "Juno", "port": "<its MIDI port>"}'`).
-The IDs below come from `$V state document` (lanes) and the project's
+The IDs below come from `$V state document` (tracks) and the project's
 instrument list.
 
-140. Track Synth: on a MIDI lane playing the synth's destination, `$V run
-     lane.track_synth '{"seq": 1, "lane": 1, "channel": 3}'`: a lane
+140. Track Synth: on a MIDI track playing the synth's destination, `$V run
+     lane.track_synth '{"seq": 1, "lane": 1, "channel": 3}'`: a track
      "<synth> audio" appears just below, records input 3, is armed, and
-     `$V state document` shows its input's `return_of`; the MIDI lane is
+     `$V state document` shows its input's `return_of`; the MIDI track is
      disarmed (so a Replace pass never clears its part); one undo step
-     "Track Synth". Again with `"stereo": true`: the same lane now
-     records inputs 3–4. With `"arm_midi": true` the MIDI lane is armed
+     "Track Synth". Again with `"stereo": true`: the same track now
+     records inputs 3–4. With `"arm_midi": true` the MIDI track is armed
      too; with `"mute_after": true` the next recording also mutes the MIDI
-     lane, inside its "Record" step. It works while playing, but with an
-     edit open it is `busy`. Setting the audio lane's input again with
+     track, inside its "Record" step. It works while playing, but with an
+     edit open it is `busy`. Setting the audio track's input again with
      `lane.set_input` and no `return_of` unlinks it from the synth.
 141. Measure: with the synth's output wired to input 3 and the transport
      stopped, `$V run destination.measure_return '{"dest": <id>}'` plays
-     five middle Cs half a second apart (you hear them through the lane's
+     five middle Cs half a second apart (you hear them through the track's
      strip) and answers `return_latency_ms` (a few milliseconds for most
      hardware) and `onsets` 5; one undo step "Set Return Latency". Pull the
      cable and measure again: "No signal on the synth's return input", and
@@ -1274,15 +1276,15 @@ instrument list.
      the next note fails rather than reading 0 ms; type its latency
      instead (`$V run destination.set_return_latency '{"dest": <id>,
      "ms": "6.5"}'`).
-     After a Measure, the lane's plugin inserts come back on their own
+     After a Measure, the track's plugin inserts come back on their own
      within a moment (the engine may restart once); the playhead does not
      move.
 142. Track: Record (`transport.record`) to the end: the part plays the
-     synth and the audio lane records it in one pass, one "Undo Record".
+     synth and the audio track records it in one pass, one "Undo Record".
      Zoom in on a note's attack in the recorded region and on the MIDI
      note above it: they start within a millisecond. By ear: mute the MIDI
-     lane and play: the printed synth sits in time with the rest. A loop
-     pass with the MIDI lane armed makes matching MIDI and audio takes.
+     track and play: the printed synth sits in time with the rest. A loop
+     pass with the MIDI track armed makes matching MIDI and audio takes.
      The e2e test `tracks_the_fake_synth` runs 140–142 against the offline
      device's fake synth (`VIZDAW_AUDIO=offline VIZDAW_FAKE_SYNTH=25`),
      which opens no hardware and asks for no permission. The fake synth's
@@ -1309,20 +1311,20 @@ drives these views; their models are tested (`RecordOptionsTests`,
 `LaneInputsTests`, `AudioReadoutsTests`, `SynthSheetsTests`,
 `GrowingTakeTests`) and the e2e `arms_meters_counts_in_and_draws_the_take`
 checks the same behaviour through the channel. Steps that record
-(144, 145, 149, 153, 154) record over lanes: use a throwaway project or
+(144, 145, 149, 153, 154) record over tracks: use a throwaway project or
 a copy, not one you care about.
 
 144. Record button and popover: the transport bar shows a Record button (a
      circle) and a chevron after Loop. R and the button both record; the
      button turns red while recording and stops on the next press. A
-     refusal (no lane armed with an input, step entry on) shows in the
+     refusal (no track armed with an input, step entry on) shows in the
      status line. The chevron's popover holds Replace/Overdub, Punch with
      its In and Out fields, Loop, Count-in (off to 4 bars), Pre-roll (off
      to 8 bars) and Passes as takes. Type `3` in Punch In and press
      Return: the punch starts at bar 3, as the transport bar's field
      shows; typing R or Space in the field types it (no transport key
-     fires). With Overdub chosen and an audio lane armed, the popover says
-     "Audio overdub replaces what it overlaps: record into another lane or
+     fires). With Overdub chosen and an audio track armed, the popover says
+     "Audio overdub replaces what it overlaps: record into another track or
      take to layer." While recording the popover's controls are dimmed.
 145. Count-in: set Count-in to 1 bar and press Record: four clicks (the
      first higher) play while the transport bar shows "Count-in" and the
@@ -1331,55 +1333,56 @@ a copy, not one you care about.
      restarts during the count-in (another device chosen, a sample-rate
      change), the rest of the count-in is skipped and recording starts at
      once (known; backlog).
-146. Time left and loop counters: with one stereo audio lane armed, the
+146. Time left and loop counters: with one stereo audio track armed, the
      transport bar shows the recording time left (for 48 kHz / 24-bit stereo,
      about one hour per 1 GB free beyond the last 100 MB); arming a second
-     stereo lane halves it; with only MIDI lanes armed it is gone. Loop
+     stereo track halves it; with only MIDI tracks armed it is gone. Loop
      record: the transport bar counts "Pass 2", then "Pass 3 · 1 kept" after
      Keep Pass.
-147. Lane header: each lane has a monitor button (A, I or –) left of M:
-     clicking cycles Auto → Input → Off, one undo step "Set Lane Monitor"
+147. Track header: each track has a monitor button (A, I or –) left of M:
+     clicking cycles Auto → Input → Off, one undo step "Set Track Monitor"
      each. The second line splits into the destination and the input
-     picker: an audio lane's picker lists "No Input", each device channel
-     by its name ("In 1 (Mic)") and the pairs ("In 1+2"); a MIDI lane's
+     picker: an audio track's picker lists "No Input", each device channel
+     by its name ("In 1 (Mic)") and the pairs ("In 1+2"); a MIDI track's
      lists All MIDI Inputs and each keyboard, then Any Channel and
-     channels 1–16. On a new project, before any Play or arm, the audio
+     channels 1–16. On a new project (it has no tracks: add one with
+     Track › New Audio Track), before any Play or arm, the audio
      picker already lists every channel of the chosen input device by
      name, and no microphone prompt appears (5d-2 final review I4); a
-     mono input lists In 1 alone. The lane's input is checked; choosing
-     another is one undo step "Set Lane Input". While a lane is armed or
+     mono input lists In 1 alone. The track's input is checked; choosing
+     another is one undo step "Set Track Input". While a track is armed or
      monitors Input,
      a thin meter runs under its controls; a full-scale peak (or a
      clipped sample in a 16/24-bit recording) lights the red mark at its
      end for two seconds. While the input is opening (the first arm may
      show macOS's microphone prompt), the meter track is yellow and the
-     status line says so. A lane made by Track Synth shows
+     status line says so. A track made by Track Synth shows
      "⇠ <synth> · In 3", cut in the middle when it is long so the
      channel stays visible.
 148. Mixer: each AudioPath strip shows the same input picker and monitor
-     button above its inserts, for the shown sequence's lane that plays
+     button above its inserts, for the shown sequence's track that plays
      through it (the armed one if several). Changing either in the mixer
-     changes the lane header at once, and the reverse.
+     changes the track header at once, and the reverse.
 149. Monitoring latency (plan 5d-1, Review Focus 1): put a plugin that
      reports latency (a look-ahead limiter, a linear-phase EQ) on the
-     master strip; monitor a lane on Input and clap into the microphone:
+     master strip; monitor a track on Input and clap into the microphone:
      you hear it with no more delay than with the plugin bypassed (the
      round trip Settings › Audio shows). Play: the playback stays in time
      with the click, through a loop wrap, at the end of the song and after
      a locate, and nothing from before the play point is heard. Move the
-     plugin onto the monitored lane's own strip: now its latency adds to
-     what you hear, as it should. While recording, the lane's old take is
+     plugin onto the monitored track's own strip: now its latency adds to
+     what you hear, as it should. While recording, the track's old take is
      silent inside the record range when its input is heard (Auto or
      Input), and plays outside it.
 150. Arm before Play (plan 5d-1 Ruling 16): open a project and, without
-     pressing Play, arm an audio lane on Auto: its input is heard at once
-     and its meter moves. Arm a MIDI lane: the keyboard plays thru at
+     pressing Play, arm an audio track on Auto: its input is heard at once
+     and its meter moves. Arm a MIDI track: the keyboard plays thru at
      once. Plug in a second keyboard, disarm and arm again: it plays too.
      With another window playing, arming here changes nothing there
      (that window keeps playing; this one is heard at its next Play).
 151. Settings › Audio: Input device lists "Same as output" and every
      input device; a chosen device that is unplugged shows "(not
-     connected)". A new device takes effect at once, even with a lane
+     connected)". A new device takes effect at once, even with a track
      armed (the meter and monitoring move to it); while recording or
      measuring, once that stops, so the next recording uses it (the
      caption says so). Software Monitoring off: a
@@ -1399,8 +1402,9 @@ a copy, not one you care about.
 152. Settings › Recording: the sample rate and bit depth are what File >
      New offers first. Count-in, Pre-roll and Passes as takes are what
      the next opened document's popover starts with (open documents keep
-     theirs). Monitoring for new lanes set to Input: "+ Add Lane" makes a
-     lane showing I, and one Undo removes the lane. The low-disk
+     theirs). Monitoring for new tracks set to Input: "+ Add Track" makes a
+     track of any kind (audio, instrument, MIDI) showing I, and one Undo
+     removes the track (the setting applies to every new track). The low-disk
      thresholds read "Recording warns below 1 GB … and stops below 100
      MB."
 153. Save while recording (plan 5d-1 Ruling 19): in a saved project,
@@ -1413,46 +1417,46 @@ a copy, not one you care about.
      to use Save As: the take is being written into this project." and
      opens no panel; so does ⌘S in an untitled project.
 154. The growing take: while recording, a red region grows on every
-     armed audio lane from the record range's start, drawing its
+     armed audio track from the record range's start, drawing its
      waveform as it goes; at Stop the finished region replaces it in the
      same place (after a Locate during the pass it may shift). With Punch
      on, it starts at Punch In and stops growing at Punch Out while the
      transport plays on.
-155. Track Synth sheet (spec §6.7): right-click a MIDI lane that plays an
+155. Track Synth sheet (spec §6.7): right-click a MIDI track that plays an
      external MIDI destination: Track Synth… is enabled (dimmed on other
-     lanes). The sheet sets the return input (In 3, or In 3+4 with
-     Stereo), Also record the MIDI lane, and Mute the MIDI lane after
+     tracks). The sheet sets the return input (In 3, or In 3+4 with
+     Stereo), Also record the MIDI track, and Mute the MIDI track after
      recording; Track Synth adds "<synth> audio" below as step 140 does
      (one undo step) and the sheet stays open. Measure: a spinner shows,
      the five notes play, and the window stays responsive (except that
      the first Measure may pause it for up to 3 s while the input
      opens): meters move, menus open, until "Return latency … ms (5 of 5
-     notes heard)." Done closes it. After a Measure, the lane's plugin
+     notes heard)." Done closes it. After a Measure, the track's plugin
      inserts come back on their own within a moment (the engine may
      restart once); the playhead does not move.
-156. New MIDI Destination…: right-click a lane: the sheet's MIDI port
+156. New MIDI Destination…: right-click a track: the sheet's MIDI port
      lists the system's MIDI destinations; Add makes the destination and
-     points the lane at it (two undo steps, "Add Destination" and "Set
-     Lane Destination"); the lane's destination now names it and Track
+     points the track at it (two undo steps, "Add Destination" and "Set
+     Track Destination"); the track's destination now names it and Track
      Synth… is enabled for it. With no MIDI destination connected, Add is
      dimmed.
 157. Under the control channel (`vizctl launch`), choosing Track Synth…
-     or New MIDI Destination… from a lane menu opens no sheet: the status
+     or New MIDI Destination… from a track menu opens no sheet: the status
      line names `lane.track_synth` or `destination.add_midi`. `$V run
      destination.measure_return '{"dest": <id>}'` answers after the
      measurement while other calls (`$V state transport`) keep answering
      meanwhile.
-158. VoiceOver: a lane header reads like "Vocal, no destination, armed,
+158. VoiceOver: a track header reads like "Vocal, no destination, armed,
      input In 1+2, monitoring input"; the transport bar's buttons read "Record"
      (or "Stop Recording") and "Record Options"; a mixer strip's monitor
      button reads its mode.
 159. Microphone prompt left up (plan 5d-1 final review m1): on a Mac where
      VizDAW has never asked (reset it with `tccutil reset Microphone
-     org.vizdaw.VizDAW`, as in step 129), arm an audio lane and leave
+     org.vizdaw.VizDAW`, as in step 129), arm an audio track and leave
      macOS's prompt unanswered for more than 2 minutes. The input does
      NOT open (the meter stays yellow, then empty), and the fault popover
      says "audio input could not open: waiting for microphone permission;
-     arm the lane again". Answer Allow, arm again: it opens.
+     arm the track again". Answer Allow, arm again: it opens.
 
 ### Automation recording, the engine (plan 5e-1)
 
@@ -1467,12 +1471,12 @@ The e2e `touch_writes_a_fader_over_the_channel` runs step 160.
      "touch", "value": "0.4"}'`, a few `"phase": "value"` calls, then
      `"release"`; the fader is heard at 0.4 at once and glides back over a
      quarter of a second after the release. Stop: Edit > Undo reads "Undo
-     Write Automation"; a lane "Built-in Synth Fader" was added at the end
+     Write Automation"; a track "Built-in Synth Fader" was added at the end
      of Song; the Strip Chart on it shows the move and a ramp back. One
-     Undo removes the lane. A Locate (or Play) while writing lands what
+     Undo removes the track. A Locate (or Play) while writing lands what
      was written so far as its own Write Automation step.
 161. Write and Latch: set the strip to `write` and play a few bars without
-     touching anything, Stop: lanes for its fader, pan and mute hold their
+     touching anything, Stop: tracks for its fader, pan and mute hold their
      values from the play point to Stop, and `$V state automation` shows
      the strip on `latch` (Settings › Automation's After Write, plan 5e-2);
      one Undo puts both back. On `latch`, touch and release the pan: it
@@ -1485,7 +1489,7 @@ The e2e `touch_writes_a_fader_over_the_channel` runs step 160.
 163. Plugin windows (manual checklist "plugin-window automation"; a real
      AU and a real CLAP plugin): put a plugin on the Built-in Synth strip,
      set the strip to Touch, play, and move a knob in the plugin's own
-     window: the move is written into a lane named "Built-in Synth
+     window: the move is written into a track named "Built-in Synth
      <parameter>", and there is no "Change Plugin Parameter" step under
      it. A plugin that reports no gesture start or end (some older AUs)
      writes from its first value to half a second after its last. In
@@ -1510,17 +1514,17 @@ The e2e `touch_writes_a_fader_over_the_channel` runs step 160.
         until Stop; Trim moves the existing automation by the offset you
         ride, relative, without a jump when you grab. Stop each pass: one
         "Write Automation" step. With the strip's automation lane muted
-        (or another lane soloed), the pass writes into a lane that plays
-        (a new one when none plays) and the muted lane keeps its points.
+        (or another track soloed), the pass writes into a track that plays
+        (a new one when none plays) and the muted track keeps its points.
      b. Plugin-window rides: in an AU's own window and in a CLAP's own
         window, ride a parameter in Touch while playing; it is written to
-        a lane named for the strip and the parameter, with no "Change
+        a track named for the strip and the parameter, with no "Change
         Plugin Parameter" step.
      c. Undo of a pass: after each pass, Edit > Undo removes the whole
-        pass in one step (lanes and points), Redo puts it back.
+        pass in one step (tracks and points), Redo puts it back.
      d. Save and reopen: save a project with a plugin parameter that has a
-        static value (set in Read) and a written lane; reopen it: the
-        static value is kept, and the lane plays back as written.
+        static value (set in Read) and a written track; reopen it: the
+        static value is kept, and the track plays back as written.
 
 ### Automation recording, the UI (plan 5e-2)
 
@@ -1563,19 +1567,19 @@ channel.
      165a's mouse half. On Touch, play and move the Built-in Synth
      fader: you hear it at once; let go: it glides back over a quarter of
      a second. Drag a fader slowly while playing: no zipper noise (note it
-     if there is). Stop: "Undo Write Automation"; the lane "Built-in Synth
+     if there is). Stop: "Undo Write Automation"; the track "Built-in Synth
      Fader" appears at the end of the sequence and the Strip Chart opens on
      its fader row, even if you edited the Strip Chart's rows before.
-     While playing, the Strip Chart on that lane draws the move in red as
+     While playing, the Strip Chart on that track draws the move in red as
      you make it. While looping, the next cycle plays what was just
-     written, and one Undo removes the whole looped pass. A new lane made
-     while another lane is soloed is not soloed (the status line says so).
+     written, and one Undo removes the whole looped pass. A new track made
+     while another track is soloed is not soloed (the status line says so).
      Play again and grab the fader while its new automation moves it: the
      sound does not jump (the write starts at the heard value); the
      fader's knob shows the static value until you move it (showing the
      heard value is a backlog row). Latch: the fader holds where you let
      go until Stop. Write: play without touching: at Stop the strip's
-     fader, pan and mute lanes hold their values from the play point, and
+     fader, pan and mute tracks hold their values from the play point, and
      the strip's popup reads Latch (Settings › Automation's After Write).
      Trim on a strip with a fader ramp: moving the fader up 3 dB raises the
      whole ramp under it by 3 dB, keeping its shape.
@@ -1585,19 +1589,19 @@ channel.
      strips play their automation again and nothing is written; uncheck it.
 170. Settings › Automation: After Write (Off, Read, Touch, Latch, Trim),
      Return time (0–2000 ms; at 0 the fader jumps back), Thinning (High
-     writes fewer points: compare a lane's points in the List editor), and
+     writes fewer points: compare a track's points in the List editor), and
      "Write plugin parameters only when touched", on and dimmed, and the
      line "Changes apply from the next Play.": change After Write during a
      Write pass, and the strip takes the old setting at that Stop. Quit
      and relaunch: kept.
 171. Plugin windows: a plugin without its own editor shows sliders; on
-     Touch, playing, dragging one writes a lane "Built-in Synth <parameter>"
+     Touch, playing, dragging one writes a track "Built-in Synth <parameter>"
      (no "Change Plugin Parameter" step); stopped, a drag is one "Change
      Plugin Parameter" step.
-172. Settings › Audio: with Settings open, arm an audio lane: within a
+172. Settings › Audio: with Settings open, arm an audio track: within a
      second the round-trip readout shows the device's latencies (5d-2 T7
-     Minor 2). Turn Software Monitoring off: an Input-monitored lane's
-     meter goes at once. Hover the lane header's monitor button (A, I or
+     Minor 2). Turn Software Monitoring off: an Input-monitored track's
+     meter goes at once. Hover the track header's monitor button (A, I or
      –): its tooltip explains the mode. ⌘S in an untitled project while
      recording says "Stop recording to save this new project: its take is
      being written into it."
@@ -1613,8 +1617,8 @@ By eye and by hand; the protocols are tested byte by byte
      XT-compatible and HUI-compatible; the port pickers list your MIDI
      ports. A unit with no ports plugged in shows "Disconnected"; plug
      it in: within 2 s it shows "Connected" and its display fills. A
-     lane's input picker now shows the unit's port as "(used by a
-     surface)". Record-arm a MIDI lane on All MIDI Inputs and touch a
+     track's input picker now shows the unit's port as "(used by a
+     surface)". Record-arm a MIDI track on All MIDI Inputs and touch a
      fader or press Play on the unit: nothing is recorded, played thru or
      step-entered. Surface buttons keep working while you type in a text
      field, except Go to Position, Edit In and Punch, which wait.
@@ -1627,10 +1631,10 @@ By eye and by hand; the protocols are tested byte by byte
      MIDI Learn Maps… lists the map; untick Pick-up and the fader jumps
      to the knob at once. A 14-bit fader learns as "CC n/n+32" and moves
      smoothly; an endless encoder learns as Relative (no Pick-up box);
-     the mode picker changes one. With a MIDI lane armed on that
+     the mode picker changes one. With a MIDI track armed on that
      keyboard, the learned knob is not recorded, played thru or
      step-entered; the keys and other knobs are. Learned messages stay
-     out of the lanes, and only the learned target's automation is
+     out of the tracks, and only the learned target's automation is
      written.
 175. A real MCU-compatible unit, if one is available (manual checklist
      "a real MCU or HUI unit"): faders move by motor to the mixer's
@@ -1698,25 +1702,25 @@ and the e2e `bounces_the_demo_and_checks_the_file`.
      (or import them back): every file starts at the same sample, a mute
      written at a bar line cuts the Mix exactly there, and the muted
      track's stem file plays on through it (files ignore mute and solo).
-182. Add to project: the bounce appears on a new lane "Mix" at the range
+182. Add to project: the bounce appears on a new track "Mix" at the range
      start, in the media pool as Bounced; one Undo removes it. With Add to
      project on, the sheet shows "Also write the files": on (the default),
      it asks for a destination and writes the files as well; off, it asks
      for none and only adds to the project. Mute one track, solo nothing,
-     and bounce Stems with Add to project: the muted track's new lane is
+     and bounce Stems with Add to project: the muted track's new track is
      silent and the others sound (bounce in place is as heard, while the
      files written beside it ignore mute and solo); with a mute written
-     at a bar line, its lane cuts there, as the mix does. Route a track
-     into a bus and mute the bus: the track's bounced-in-place lane is
+     at a bar line, its track cuts there, as the mix does. Route a track
+     into a bus and mute the bus: the track's bounced-in-place track is
      silent too, as heard. In a 16- or 24-bit project, push a track hot
      and bounce its stem with Add to project: the Problems banner names
      it ("<track> (added to the project): <n> samples clipped"). With the
      real audio device (not the offline mode the tests use), put the
-     built-in synth on a lane and bounce the Mix with Add to project:
-     the new lane sounds like the synth did, by ear (the bounce renders
+     built-in synth on a track and bounce the Mix with Add to project:
+     the new track sounds like the synth did, by ear (the bounce renders
      it through the system synth, a path no test exercises).
-183. A project with a lane playing a hardware synth: the sheet says
-     "1 lane plays external MIDI and will be silent. Track it as audio
+183. A project with a track playing a hardware synth: the sheet says
+     "1 track plays external MIDI and will be silent. Track it as audio
      first: Track Synth…", and the synth is silent in the file.
 184. Cancel a long bounce: no file and no ".partial" is left next to
      where it was going. Bounce the mix over an existing file: the save
@@ -1790,10 +1794,10 @@ you should see; report anything else, and every value step 198 asks for.
         protocol version …; VizDAW needs version 4 (keyboard firmware
         2.0 or later)". After updating the firmware and plugging it back
         in, the row says "Connected" and the orange line is gone.
-190. Arm a MIDI lane on All MIDI Inputs and play the keys: the notes
+190. Arm a MIDI track on All MIDI Inputs and play the keys: the notes
      record and play thru. Turn a knob and press Play on the keyboard:
      the knob moves a fader and the transport starts, and neither the
-     knob nor the button is recorded or played thru. The lane's input
+     knob nor the button is recorded or played thru. The track's input
      picker shows the DAW port as "(used by a surface)" and the Main port
      as a normal input.
 191. Transport: Play starts (pressing it again while playing does
@@ -1856,7 +1860,7 @@ you should see; report anything else, and every value step 198 asks for.
      while stepping presets: no automation lane appears for the plug-in's
      parameters. Repeat with a JUCE-built AU you own: Undo is unchanged
      and no automation lane appears, even while writing; report any
-     flicker of the Undo label or a lane while stepping. Save, close and
+     flicker of the Undo label or a track while stepping. Save, close and
      reopen the project: the last preset's sound and parameter values are
      back; an automated parameter keeps its own static value, as it does
      after picking a preset in the plug-in's own window. A CLAP plug-in's
@@ -1913,7 +1917,7 @@ the detail pane is the bottom pane's editor.
      more, and the step-entry summary, shown only while step entry is on,
      sits in front of them or above them; plan 7d), the
      left pane (Channel Strip) running the full height, which says
-     "Select a lane to see its channel strip." until a lane is selected
+     "Select a track to see its channel strip." until a track is selected
      or armed, the arrangement in the centre and the "No Editor Open"
      pane below it. The right pane is hidden.
 200. Scroll the arrangement to bar 9 and zoom in once. Press ⌃2: the
@@ -1941,15 +1945,15 @@ the detail pane is the bottom pane's editor.
      when you let go. With the right pane shown, shrink the window as far
      as it goes (700×450): the panes shrink to their smallest and the
      arrangement keeps a usable area; nothing hides at this size. Grow it again: the panes go back to their sizes.
-203. Click the Chords lane header and play Song: the left pane shows the
+203. Click the Chords track header and play Song: the left pane shows the
      Built-in Synth's strip. Move its fader: the mixer (⌥⌘M) and the Mix
      view (⌃2) show the same level, and the meters fall at the same speed
      in all three. Press ⌃1. With the mixer window open, click the left
      strip's insert "+": the browser opens on the left strip only, not in
-     the mixer window. Right-click the Chords lane, choose New MIDI
+     the mixer window. Right-click the Chords track, choose New MIDI
      Destination… (any port, such as the IAC Driver; with none listed,
      turn on the IAC Driver in Audio MIDI Setup) and Add, which points the
-     lane at it (step 156): the left pane shows the Inspector, naming that
+     track at it (step 156): the left pane shows the Inspector, naming that
      destination. Undo twice: Chords plays Built-in Piano again and the
      strip comes back.
 204. Open each pane's picker: the left lists Channel Strip, Sequences and
@@ -1959,11 +1963,11 @@ the detail pane is the bottom pane's editor.
      Media Pool, Plug-ins and Markers. Choose each one: each shows its
      view, and nothing opens a dialog. Press ⌘1: the bottom pane
      shows the piano roll on the selection; ⌥⌘1 still opens it in a window.
-205. In the right pane, Plug-ins: with the Chords lane selected, choose an
+205. In the right pane, Plug-ins: with the Chords track selected, choose an
      effect: it appears as the last insert on the left strip and in the
      mixer; double-click its slot: its window opens floating. Markers:
      click a row: the position moves there. Controllers: the Strip Chart
-     shows the selected lane's controller. Press ⌃2 and ⌃⌘→ (Plug-ins),
+     shows the selected track's controller. Press ⌃2 and ⌃⌘→ (Plug-ins),
      click the Built-in Synth strip's name to select it, choose an effect:
      it appears as that strip's last insert.
 206. Window > Mixer opens the mixer in its own window with its own
@@ -2004,19 +2008,19 @@ Checked by hand; the rules are tested (`AppearanceTests`, `AppIconTests`,
 210. Right-click the Built-in Synth's name and open Colour ▸: it lists
      None and eight swatches, and each swatch's dot shows its own colour,
      not one grey. Choose Blue: its colour bar turns blue in the Mix view,
-     the bottom pane's mixer, the mixer window and (select a lane that
-     plays through the Built-in Synth) the left strip; the lanes that play
+     the bottom pane's mixer, the mixer window and (select a track that
+     plays through the Built-in Synth) the left strip; the tracks that play
      through it and their regions turn blue too, and its fader cap keeps
      the instrument colour. Undo: the bar shows the instrument colour
      again. Redo, save, close and reopen: the bar is still blue.
-211. Right-click a lane header in the arrangement and open Colour ▸: None
+211. Right-click a track header in the arrangement and open Colour ▸: None
      and the same eight swatches, each dot in its own colour. Choose
-     Green: that lane's header bar and regions, every other lane on the
+     Green: that track's header bar and regions, every other track on the
      same strip, and the strip's bar in the mixer turn green; the fader
      cap keeps its kind's colour (channel, instrument, aux return, bus or
      master). Choose None: they show the kind's colour again. Then
      Settings › Appearance › Show channel colour bars off: the strips'
-     and lane headers' colour bars go, in all four places, and the
+     and track headers' colour bars go, in all four places, and the
      regions keep their colour. Turn it back on: the bars return.
 212. Click the Built-in Synth's level box, type `-4.2` and press Return:
      the fader moves down and the box reads "−4.2 dB"; Edit shows "Undo
@@ -2258,9 +2262,9 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
 230. Settings › Surfaces › Add: the keyboard entry reads "Host-integration
      keyboard (DAW mode)" with plain wording and no product names. A
      keyboard added before still connects and drives the mixer.
-231. Set a lane's height to 46, 47 and 48 pt: its meter stays clear of the
-     separator below it at each height. Give two lanes the same input path:
-     the strip's input picker shows "Vox: In 1" for the shared lane. Record
+231. Set a track's height to 46, 47 and 48 pt: its meter stays clear of the
+     separator below it at each height. Give two tracks the same input path:
+     the strip's input picker shows "Vox: In 1" for the shared track. Record
      across a tempo change: the growing waveform lines up with the region
      drawn at Stop.
 232. Import a 44.1 kHz file into a 48 kHz project and set a fade: the
@@ -2268,3 +2272,39 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
      high: its gain band can still be dragged. Drag a pane divider and let
      go outside it: the cursor goes back to the arrow. Start renaming a
      strip in the bottom pane's mixer, then press ⌘1: the rename is kept.
+
+### Tracks (plan tracks)
+
+233. Make a new project. Arrange shows "Sequence 1", the bar, the empty
+     track headers and "+ Add Track". Nothing grey covers them, and the
+     ruler starts at 1. The window opens large: 1440 × 900 pt, or 90% of
+     the screen if that is smaller (a saved window keeps its own size).
+     Scroll and zoom the arrangement, and open the piano roll, drum grid
+     and strip chart: no editor paints outside its frame. Click into each
+     transport field and into a list cell: each focus ring shows whole, and
+     the list's rows are a little taller than before. If you have granted
+     Screen Recording, `vizctl screenshot --live` matches what you see (a
+     rebuilt app needs the grant again); without it, it says how to grant
+     it and asks nothing.
+234. Track › New Audio Track (⌥⌘A), New Instrument Track (⌥⌘S) and New
+     MIDI Track (⌥⌘X): each adds a track below the selected one, with its
+     kind's icon and routing (an audio track's header shows "→" and its
+     output). The tracks are named Audio 1, Inst 1 and MIDI 1. Edit › Undo
+     removes each in one step. Play the instrument track: the built-in
+     synth sounds. The MIDI track with no external destination says so in
+     the status line.
+235. Duplicate Track copies the notes but not the automation; on a Track
+     Synth return track it says why it cannot. Rename Track opens the
+     header's field; an empty name is refused. Delete the last track: the
+     "+ Add Track" row stays, and its click offers the three kinds.
+236. The Mix view's Add Track beside Add Bus offers the same three kinds.
+     A strip appears when the track brings a new output or the first
+     built-in synth; a second track on the same output or synth shares its
+     strip. At the default window size every strip of a small project fits.
+237. Delete every sequence: "No Sequence" shows a New Sequence button,
+     which makes and selects one with no tracks, like a new project's
+     "Sequence 1" (the sidebar's "+" › Empty does the same; one Undo
+     removes it; Drum Kit and Same Tracks still make their tracks). Nowhere in the menus, headers, Settings,
+     status lines or alerts says "lane" (a rare "unknown id" refusal still
+     prints an id such as lane5). An old project's "Lane 1" keeps
+     its name.

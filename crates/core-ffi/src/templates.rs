@@ -42,7 +42,7 @@ fn lane_of(r: &Report) -> Result<LaneId, VizError> {
             AnyId::Lane(l) => Some(*l),
             _ => None,
         })
-        .ok_or_else(|| bad("no lane was created"))
+        .ok_or_else(|| bad("no track was created"))
 }
 
 fn drum_row_of(r: &Report) -> Result<core_model::ids::DrumRowId, VizError> {
@@ -116,20 +116,20 @@ pub fn build(
                 offset: src.start_offset,
             }))?;
             for (i, l) in src.lanes.iter().enumerate() {
+                // A source name Rename would refuse (an old file's blank
+                // name) becomes "Track N".
+                let name = core_model::lane::valid_name(&l.name)
+                    .map_or_else(|| format!("Track {}", i + 1), str::to_string);
                 let lane = if i == 0 {
                     first
                 } else {
                     lane_of(&run(Command::Lane(LaneCmd::Add {
                         seq,
-                        name: l.name.clone(),
+                        name: name.clone(),
                         index: None,
                     }))?)?
                 };
-                run(Command::Lane(LaneCmd::Rename {
-                    seq,
-                    lane,
-                    name: l.name.clone(),
-                }))?;
+                run(Command::Lane(LaneCmd::Rename { seq, lane, name }))?;
                 run(Command::Lane(LaneCmd::SetDest {
                     seq,
                     lane,
@@ -174,6 +174,11 @@ pub fn build(
                     }
                 }
             }
+        }
+        (SequenceTemplate::Empty, _) => {
+            // Like a new project's "Sequence 1": no tracks. Inside the same
+            // transaction, so it stays one undo step.
+            run(Command::Lane(LaneCmd::Remove { seq, lane: first }))?;
         }
         _ => {}
     }

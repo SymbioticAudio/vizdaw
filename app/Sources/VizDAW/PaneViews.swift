@@ -25,6 +25,24 @@ extension ContentUnavailableView where Label == SwiftUI.Label<Text, Image>, Acti
     }
 }
 
+/// The same, with an action under the description (the "No Sequence"
+/// state's New Sequence button); the plain initializer above needs
+/// `Actions == EmptyView`.
+extension ContentUnavailableView where Label == SwiftUI.Label<Text, Image>, Description == Text {
+    @MainActor init(
+        _ title: String, icon: AppIcon, description: Description, @ViewBuilder action: () -> Actions
+    ) {
+        let label = icon.label(title, size: placeholderIcon)
+        self.init {
+            label
+        } description: {
+            description
+        } actions: {
+            action()
+        }
+    }
+}
+
 /// What re-runs a 30 Hz poll (the document window's, the left strip's, the
 /// Mix view's and the bottom pane's mixer): its window turning key, or the
 /// document starting or stopping play or record (plan 7a Ruling 8, Task 8
@@ -81,6 +99,9 @@ struct LeftStripPane: View {
                     ChannelStrip(model: mixer, strip: strip, height: max(g.size.height - 16, 0))
                         .padding(theme.spacing.s)
                         .frame(maxWidth: .infinity)
+                }
+                .onChange(of: model.focusLanes().first?.midiDest, initial: true) { _, d in
+                    mixer.synthFocus = d
                 }
             } else {
                 PaneNote(text: StripFocus.nothingMessage)
@@ -175,7 +196,7 @@ struct ControllersPane: View {
         if chart.state != nil {
             StripChartEditor(model: chart)
         } else {
-            PaneNote(text: "Select a lane to see its controllers.")
+            PaneNote(text: "Select a track to see its controllers.")
         }
     }
 }

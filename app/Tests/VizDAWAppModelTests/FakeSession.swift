@@ -353,8 +353,36 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = destinationsError { throw e }
         return dests
     }
+    /// Like the core: the destination plays `plugin`; unless renamed (still
+    /// named for what it played) it and its strip and lanes take the
+    /// plugin's name, and a built-in synth strip becomes its instrument strip.
     func setDestinationPlugin(dest: UInt64, plugin: PluginRefRow) throws -> DocSnapshot {
-        try mixerCall("destPlugin \(dest) \(plugin.id)")
+        let r = try mixerCall("destPlugin \(dest) \(plugin.id)")
+        guard let i = dests.firstIndex(where: { $0.id == dest }) else { return r }
+        let old = dests[i]
+        let follows = old.name == (old.plugin?.name ?? "Built-in Synth")
+        dests[i].plugin = plugin
+        if follows { dests[i].name = plugin.name }
+        let name = dests[i].name
+        let sIdx = mixerSnap.strips.firstIndex {
+            $0.kind == .instrument(dest: dest) || ($0.kind == .builtinSynth && old.plugin == nil && !old.external)
+        }
+        if let k = sIdx {
+            if follows { mixerSnap.strips[k].name = name }
+            mixerSnap.strips[k].kind = .instrument(dest: dest)
+            mixerSnap.strips[k].kindLabel = name
+            var slot = slotRow(900 + dest, plugin.name)
+            slot.plugin = plugin
+            mixerSnap.strips[k].instrument = slot
+        }
+        for (seq, rows) in laneTable {
+            laneTable[seq] = rows.map { l in
+                var l = l
+                if l.midiDest == dest { l.destination = name }
+                return l
+            }
+        }
+        return r
     }
 
     // MARK: Parameters
@@ -851,6 +879,42 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
+    var newTracks: [(seq: UInt64, kind: TrackKindRow, after: UInt64?)] = []
+    var duplicated: [(seq: UInt64, lane: UInt64)] = []
+    /// What `duplicateTrack` refuses with (the core's refusal of a return track).
+    var duplicateError: VizError?
+    /// A new track: a row with the given kind appended (below `after`
+    /// when it names a row), `midiDest == nil` for MIDI.
+    func newTrack(seq: UInt64, kind: TrackKindRow, after: UInt64?) throws -> DocSnapshot {
+        newTracks.append((seq, kind, after))
+        guard var rows = laneTable[seq] else {
+            throw VizError.Model(message: "unknown id seq\(seq)")
+        }
+        let prefix = kind == .audio ? "Audio" : kind == .instrument ? "Inst" : "MIDI"
+        var row = lane((rows.map(\.id).max() ?? 0) + 1, "\(prefix) \(rows.count + 1)")
+        row.kind = kind
+        row.midiDest = kind == .instrument ? 1 : nil
+        let at = after.flatMap { a in rows.firstIndex { $0.id == a } }.map { $0 + 1 } ?? rows.count
+        rows.insert(row, at: at)
+        laneTable[seq] = rows
+        return commandResult()
+    }
+
+    func duplicateTrack(seq: UInt64, lane id: UInt64) throws -> DocSnapshot {
+        if let e = duplicateError { throw e }
+        duplicated.append((seq, id))
+        guard var rows = laneTable[seq], let i = rows.firstIndex(where: { $0.id == id }) else {
+            throw VizError.Model(message: "unknown id lane\(id)")
+        }
+        var copy = rows[i]
+        copy.id = (rows.map(\.id).max() ?? 0) + 1
+        copy.name += " copy"
+        copy.arm = false
+        rows.insert(copy, at: i + 1)
+        laneTable[seq] = rows
+        return commandResult()
+    }
+
     var layout: String?
     func uiLayout() throws -> String? { layout }
     func setUiLayout(json: String) throws { layout = json }
@@ -1017,12 +1081,12 @@ func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqR
         laneCount: 1, comment: "", keyboardSlot: nil)
 }
 
-func lane(_ id: UInt64, _ name: String, mute: Bool = false) -> LaneRow {
+func lane(_ id: UInt64, _ name: String, mute: Bool = false, kind: TrackKindRow = .midi) -> LaneRow {
     LaneRow(
         id: id, name: name, destination: nil, midiEventCount: 0, regionCount: 0,
         referenceCount: 0, mute: mute, solo: false, looped: false, takeCount: 1,
         activeTake: "Take 1", isDrum: false, arm: false, midiDest: nil, audioOut: nil, input: nil,
-        monitor: .auto)
+        monitor: .auto, kind: kind)
 }
 
 /// Song (top-level) using Groove, which uses Beat.

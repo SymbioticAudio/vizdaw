@@ -139,6 +139,16 @@ struct MixerBar: View {
                 .fixedSize()
             AppKitButton("Add Bus", help: "Add a bus") { model.addBus() }
                 .fixedSize()
+            Menu("Add Track") {
+                Button("New Audio Track") { TrackCommands.performFromMenu(TrackCommands.newAudio, model.document) }
+                Button("New Instrument Track") {
+                    TrackCommands.performFromMenu(TrackCommands.newInstrument, model.document)
+                }
+                Button("New MIDI Track") { TrackCommands.performFromMenu(TrackCommands.newMidi, model.document) }
+            }
+            .fixedSize()
+            .disabled(model.document.selectedSeq == nil)
+            .help(model.document.selectedSeq == nil ? "Select a sequence first" : "Add a track")
             Menu("Instruments") {
                 Button("New Plugin Instrument…") { model.openBrowser(.instrument, in: placement) }
                 Divider()
@@ -245,8 +255,26 @@ struct SlotView: View {
         .contentShape(Rectangle())
         .help(reason ?? "\(slot.plugin.name) (\(slot.plugin.vendor))")
         .onTapGesture(count: 2) { openWindow(slot.id) }
+        // After the double tap's, so a double click opens the window only:
+        // SwiftUI holds the single tap back until the double has failed.
+        .onTapGesture { if opensInstrumentMenu { popUpInstrumentMenu() } }
         .contextMenu { menu }
         .modifier(Reorder(model: model, strip: strip, slot: slot, index: index))
+        .accessibilityLabel(opensInstrumentMenu ? "\(slot.plugin.name), instrument" : slot.plugin.name)
+        .accessibilityHint(opensInstrumentMenu ? "Opens the instrument menu to choose another plugin" : "")
+        .accessibilityAddTraits(opensInstrumentMenu ? .isButton : [])
+    }
+
+    /// A click on an instrument strip's own slot picks its plugin.
+    private var opensInstrumentMenu: Bool {
+        if case .instrument = strip.kind { return index == nil }
+        return false
+    }
+
+    /// The menu of makers, popped where the pointer is (a click's menu).
+    private func popUpInstrumentMenu() {
+        InstrumentMenu.popUp(model: model, strip: strip, current: slot.plugin, openEditor: { openWindow(slot.id) },
+            openWindow: openWindow)
     }
 
     /// The slot dot (plan 7b Ruling 13).
@@ -316,4 +344,91 @@ struct LearnItem: View {
     var body: some View {
         Button("MIDI Learn") { model.document.learn.learn(target) }
     }
+}
+
+/// The instrument menu of a strip's instrument row: Open Editor (disabled
+/// without an editor to open), then the makers' submenus with the loaded
+/// plugin checked.
+@MainActor enum InstrumentMenu {
+    static func popUp(
+        model: MixerModel, strip: StripRow, current: PluginRefRow?, openEditor: (() -> Void)?,
+        openWindow: (@MainActor (UInt64) -> Void)? = nil
+    ) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let edit = InstrumentMenuAction { openEditor?() }.item("Open Editor", checked: false)
+        edit.isEnabled = openEditor != nil
+        menu.addItem(edit)
+        menu.addItem(.separator())
+        let makers = MixerModel.instrumentMenu(appPlugins.browser(.instrument), current: current)
+        if makers.isEmpty {
+            let none = NSMenuItem(title: "No Plugin Instruments", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        }
+        for maker in makers {
+            let sub = NSMenu(title: maker.vendor)
+            for c in maker.choices {
+                sub.addItem(
+                    InstrumentMenuAction { [model, strip] in
+                        // The new instrument's window opens at once.
+                        if let slot = model.pickInstrument(c.plugin, on: strip) { openWindow?(slot) }
+                    }
+                        .item(c.plugin.name, checked: c.isCurrent))
+            }
+            let parent = NSMenuItem(title: maker.vendor, action: nil, keyEquivalent: "")
+            parent.submenu = sub
+            menu.addItem(parent)
+        }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+}
+
+/// The instrument row of a built-in synth strip: "Built-in Synth" where a
+/// plugin's slot would be; a click opens the instrument menu (the synth
+/// has no editor window yet).
+struct BuiltinSynthSlotView: View {
+    @Environment(\.symbioticTheme) private var theme
+    @Environment(\.openPluginWindow) private var openWindow
+    @Bindable var model: MixerModel
+    let strip: StripRow
+
+    var body: some View {
+        HStack(spacing: theme.spacing.xs) {
+            Circle().fill(theme.state.play.color).frame(width: 6, height: 6)
+            Text("Built-in Synth")
+                .font(theme.type.caption.font)
+                .lineLimit(1)
+                .foregroundStyle(theme.text.primary.color)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, theme.spacing.xs)
+        .frame(maxWidth: .infinity, minHeight: 20)
+        .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.surface.inset.color))
+        .overlay(RoundedRectangle(cornerRadius: theme.radius.s).strokeBorder(theme.surface.separator.color))
+        .contentShape(Rectangle())
+        .help("Built-in Synth: click to choose a plugin instrument")
+        .onTapGesture { InstrumentMenu.popUp(model: model, strip: strip, current: nil, openEditor: nil, openWindow: openWindow) }
+        .accessibilityLabel("Built-in Synth, instrument")
+        .accessibilityHint("Opens the instrument menu to choose a plugin")
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// A menu item that runs a closure; the item keeps it alive.
+@MainActor
+private final class InstrumentMenuAction: NSObject {
+    let run: @MainActor () -> Void
+
+    init(_ run: @escaping @MainActor () -> Void) { self.run = run }
+
+    func item(_ title: String, checked: Bool) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: #selector(fire), keyEquivalent: "")
+        i.target = self
+        i.representedObject = self
+        i.state = checked ? .on : .off
+        return i
+    }
+
+    @objc func fire() { run() }
 }

@@ -672,6 +672,30 @@ impl Session {
     }
 }
 
+/// A new project's document (plan tracks Ruling 3): `doc` with the
+/// sequence "Sequence 1" and none of its tracks, made without a history
+/// step, so there is nothing to undo and the project is not dirty.
+fn starting_document(doc: Document) -> Result<Document, VizError> {
+    let made = core_model::command::apply(
+        &doc,
+        &Command::Sequence(SequenceCmd::New {
+            name: "Sequence 1".into(),
+        }),
+    )?;
+    let lane_id = made.report.created.iter().find_map(|id| match id {
+        core_model::ids::AnyId::Lane(l) => Some(*l),
+        _ => None,
+    });
+    let seq = made.report.created.iter().find_map(|id| match id {
+        core_model::ids::AnyId::Seq(s) => Some(*s),
+        _ => None,
+    });
+    let (Some(seq), Some(lane)) = (seq, lane_id) else {
+        return Err(crate::events::bad("the first sequence was not made"));
+    };
+    Ok(core_model::command::apply(&made.doc, &Command::Lane(LaneCmd::Remove { seq, lane }))?.doc)
+}
+
 /// Saving and autosaving one at a time (the package's blob pruning reads
 /// the autosaves; 3a: the FFI serializes them).
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
@@ -957,7 +981,7 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         let mut inner = lock(&self.inner);
         let h = &mut inner.history;
-        h.begin("Add Lane")?;
+        h.begin("Add Track")?;
         let made = h.execute(&cmd, filter).and_then(|r| {
             let lane = r
                 .created
@@ -966,7 +990,7 @@ impl Session {
                     core_model::ids::AnyId::Lane(l) => Some(*l),
                     _ => None,
                 })
-                .ok_or_else(|| core_model::error::ModelError::invalid("no lane was added"))?;
+                .ok_or_else(|| core_model::error::ModelError::invalid("no track was added"))?;
             h.execute(
                 &Command::Lane(LaneCmd::SetMonitor { seq, lane, monitor }),
                 filter,
@@ -1326,7 +1350,7 @@ impl Session {
     /// An untitled, empty document.
     #[uniffi::constructor]
     pub fn new_empty() -> Result<Arc<Session>, VizError> {
-        ffi_guard(|| Session::with(Document::new(), None, false))
+        ffi_guard(|| Session::with(starting_document(Document::new())?, None, false))
     }
 
     /// An untitled copy of the demo project.
@@ -1365,7 +1389,7 @@ impl Session {
                 )?
                 .doc;
             }
-            Session::with(doc, None, false)
+            Session::with(starting_document(doc)?, None, false)
         })
     }
 
@@ -1692,9 +1716,9 @@ impl Session {
             let ids: Vec<u64> = s.lanes.iter().map(|l| l.id.0).collect();
             let m = core_editor::transport::arm_move(&armed, forward).ok_or_else(|| {
                 crate::events::bad(if forward {
-                    "there is no lane after the armed one"
+                    "there is no track after the armed one"
                 } else {
-                    "there is no lane before the armed one"
+                    "there is no track before the armed one"
                 })
             })?;
             Ok((ids, m))
@@ -3679,6 +3703,76 @@ impl Session {
         })
     }
 
+    /// A new track of `kind` in sequence `seq`, below track `after` (an
+    /// unknown or absent `after`: at the end), as one undo step named "New
+    /// Audio Track", "New Instrument Track" or "New MIDI Track" (plan
+    /// tracks Ruling 4). It may add the built-in synth destination or the
+    /// first audio output path in the same step. `Model` for an unknown
+    /// sequence; `Busy` while an edit is open or recording.
+    pub fn new_track(
+        &self,
+        seq: u64,
+        kind: crate::tracks::TrackKindRow,
+        after: Option<u64>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let monitor = crate::audio::default_monitor();
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(edit_open_busy());
+            }
+            records_busy(&inner)?;
+            let seq = crate::snapshot::seq_id(inner.doc(), seq)?;
+            let index = crate::tracks::index_below(inner.doc(), seq, after);
+            inner.history.begin(crate::tracks::new_track_label(kind))?;
+            match crate::tracks::build_track(&mut inner.history, seq, kind, index, monitor) {
+                Ok(_) => inner.history.commit()?,
+                Err(e) => {
+                    inner.history.abort()?;
+                    return Err(e);
+                }
+            }
+            inner.version += 1;
+            host::clear_input_failure_of(self.id);
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+
+    /// Duplicates track `lane` of sequence `seq` just below it (plan
+    /// tracks Ruling 4), as one undo step "Duplicate Track". `Model` for an
+    /// unknown id or a Track Synth return track; `Busy` while an edit is
+    /// open or recording.
+    pub fn duplicate_track(&self, seq: u64, lane: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(edit_open_busy());
+            }
+            records_busy(&inner)?;
+            inner.history.begin("Duplicate Track")?;
+            let r = inner.history.execute(
+                &Command::Lane(LaneCmd::Duplicate {
+                    seq: SeqId(seq),
+                    lane: LaneId(lane),
+                }),
+                &ViewFilter::default(),
+            );
+            match r {
+                Ok(_) => inner.history.commit()?,
+                Err(e) => {
+                    inner.history.abort()?;
+                    return Err(e.into());
+                }
+            }
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+
     /// The editor layout saved with the project (JSON), if any.
     pub fn ui_layout(&self) -> Result<Option<String>, VizError> {
         ffi_guard(|| {
@@ -4068,7 +4162,7 @@ fn apply_import_as(
                             _ => None,
                         })
                         .ok_or_else(|| VizError::Internal {
-                            message: "no lane created".into(),
+                            message: "no track created".into(),
                         })?
                 }
             };
@@ -4516,7 +4610,7 @@ fn edit_open_busy() -> VizError {
 }
 
 /// Why an arm or input change waits for Stop (plan 5d-1 Ruling 18).
-pub const RECORDING_LANES: &str = "Stop recording to change which lanes record.";
+pub const RECORDING_LANES: &str = "Stop recording to change which tracks record.";
 
 /// `Busy` [`RECORDING_LANES`] while `inner` records, finishes a pass or
 /// waits to apply one.
@@ -4746,7 +4840,7 @@ impl Session {
                 .ok_or_else(|| crate::events::bad("nothing is recording"))?;
             r.waveform(LaneId(lane), from_file_frame, to_file_frame, columns)
                 .ok_or_else(|| {
-                    crate::events::bad(&format!("lane {lane} records no audio in this pass"))
+                    crate::events::bad(&format!("track {lane} records no audio in this pass"))
                 })
         })
     }
@@ -4969,7 +5063,7 @@ fn recover_into_lanes(
                     _ => None,
                 })
                 .ok_or_else(|| VizError::Internal {
-                    message: "no lane created".into(),
+                    message: "no track created".into(),
                 })?;
             h.execute(
                 &Command::Audio(AudioCmd::Insert {
@@ -5078,7 +5172,9 @@ impl Session {
             }
         }
         if audio.is_empty() && midi_lanes.is_empty() {
-            return Err(crate::events::bad("arm a lane that has an input to record"));
+            return Err(crate::events::bad(
+                "arm a track that has an input to record",
+            ));
         }
         let root = inner.root(self.id);
         if !audio.is_empty() {
@@ -5430,7 +5526,7 @@ impl Session {
                         });
                         if let Err(e) = inner.history.execute(&mute, &ViewFilter::default()) {
                             inner.news.problems.push(format!(
-                                "The MIDI lane could not be muted after recording ({e})."
+                                "The MIDI track could not be muted after recording ({e})."
                             ));
                         }
                     }
@@ -5608,7 +5704,7 @@ impl Session {
                 let Some((seq, _, name, channels)) = crate::synth::return_lane(inner.doc(), dest)
                 else {
                     return Err(crate::events::bad(&format!(
-                        "no lane records the return of {}: set one up with Track Synth first",
+                        "no track records the return of {}: set one up with Track Synth first",
                         d.name
                     )));
                 };

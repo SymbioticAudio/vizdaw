@@ -25,7 +25,10 @@ struct ArrangementPane: View {
             if model.selectedSeq == nil {
                 ContentUnavailableView(
                     "No Sequence", icon: .list,
-                    description: Text("Choose File > Create Demo Project to try VizDAW."))
+                    description: Text("Add a sequence to arrange tracks in.")
+                ) {
+                    Button("New Sequence") { model.newSequence(.empty) }
+                }
             } else {
                 ArrangementHost(document: model)
             }
@@ -146,8 +149,9 @@ struct TransportBar: View {
                     .fixedSize()
             }
             TransportReadoutsHost(document: model)
+            // No fixed height: the host reports its own (`fittingHeight`),
+            // which holds the fields and their focus-ring room.
             TransportFieldsHost(document: model)
-                .frame(height: 22)
         }
     }
 }
@@ -231,7 +235,7 @@ struct TransportFieldsHost: NSViewRepresentable {
         // Asked for no width, it reports its least (the bar's flow keeps it
         // at least this wide).
         let w = proposal.width.flatMap { $0.isFinite ? max($0, nsView.minimumWidth) : nil } ?? fit
-        return CGSize(width: w, height: 22)
+        return CGSize(width: w, height: nsView.fittingHeight)
     }
 }
 

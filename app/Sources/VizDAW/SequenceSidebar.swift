@@ -62,7 +62,7 @@ struct TemplateItems: View {
             Button("Drum Kit") { model.newSequence(.drumKit) }
             Divider()
             ForEach(model.snapshot.sequences) { s in
-                Button("Same Lanes as \(s.name)") { model.newSequence(.sameLanesAs(seq: s.id)) }
+                Button("Same Tracks as \(s.name)") { model.newSequence(.sameLanesAs(seq: s.id)) }
             }
         }
     }

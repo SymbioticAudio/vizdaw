@@ -36,8 +36,139 @@ import VizDAWCore
             f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: .audio(first: 0, stereo: true, returnOf: nil))))
     }
 
+    /// A header in a window, with the track `lane` of Song selected.
+    func shown(select lane: UInt64? = nil) throws -> (DocumentModel, FakeSession, LaneHeaderView, NSWindow) {
+        let (m, f, h) = try header()
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered,
+            defer: false)
+        w.isReleasedWhenClosed = false
+        h.frame = NSRect(x: 0, y: 0, width: LaneHeaderLayout.width, height: 300)
+        w.contentView?.addSubview(h)
+        if let lane {
+            m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneKey(3, lane).ref], events: []))
+        }
+        return (m, f, h, w)
+    }
+
+    /// Rename Track from the menu or a key reaches the header on screen
+    /// (plan tracks Ruling 5, I11); with none showing it says where to go.
+    @Test func renameTrackGoesThroughTheHeader() throws {
+        let (m, f, h, w) = try shown(select: 31)
+        defer { w.close() }
+        #expect(m.beginTrackRename != nil, "the header installed it")
+        #expect(TrackCommands.perform(TrackCommands.rename, m) == .done)
+        let field = try #require(h.renaming?.field)
+        #expect(field.stringValue == "Chords")
+        #expect((w.firstResponder as? NSTextView)?.delegate === field, "the rename field has the keyboard")
+        h.cancelRename()
+        // Leaving the window clears it: nothing to rename in.
+        h.removeFromSuperview()
+        #expect(m.beginTrackRename == nil)
+        #expect(
+            TrackCommands.perform(TrackCommands.rename, m) == .unavailable("Show Arrange to rename a track."))
+        // The channel names the track and sends the rename.
+        let named = TrackCommands.run(
+            TrackCommands.rename, args: [ControlArg(name: "name", value: .text(value: "Bass"))], doc: UUID(), m)
+        if case .failed = named { Issue.record("\(named)") }
+        #expect(f.edits.last == .lane(edit: .rename(seq: 3, lane: 31, name: "Bass")))
+    }
+
+    /// Ruling 6: each header names its kind first, and the kind icon sits
+    /// before the name at the label's size.
+    @Test func theHeaderShowsEachTracksKind() throws {
+        let f = editorFake()
+        var audio = lane(40, "A", kind: .audio)
+        audio.audioOut = 7
+        audio.audioOutName = "Audio 1"
+        f.laneTable[3] = [audio, lane(41, "B", kind: .instrument), lane(42, "C", kind: .midi)]
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        let labels = (h.accessibilityChildren() ?? []).compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
+        #expect(labels.count == 4)
+        #expect(labels[0].hasPrefix("Audio track, A, output Audio 1"))
+        #expect(!labels[0].contains("no destination"))
+        #expect(labels[1].hasPrefix("Instrument track, B, "))
+        #expect(labels[2].hasPrefix("MIDI track, C, "))
+        #expect(labels[3] == "Add Track")
+        for theme in [Theme.classicLight, .studioDark, .console] {
+            let controls = LaneHeaderLayout.controls(rowTop: 100, theme: theme)
+            let kind = try #require(controls.first { $0.0 == .kind }?.1)
+            let name = try #require(controls.first { $0.0 == .name }?.1)
+            let monitor = try #require(controls.first { $0.0 == .monitor }?.1)
+            #expect(kind.width == LaneHeaderLayout.kindSide && kind.height == 16, "\(theme.id)")
+            #expect(name.width == 81, "\(theme.id)")
+            #expect(kind.minX == 8)
+            #expect(name.minX == kind.maxX + theme.spacing.xs, "\(theme.id)")
+            #expect(kind.midY == name.midY)
+            #expect(monitor.minX == 113 && name.maxX <= monitor.minX)
+        }
+    }
+
+    /// Ruling 5: a click the channel sends opens no menu (it would track
+    /// modally); the status line names the commands to use.
+    @Test func aChannelClickOnAddTrackOpensNoMenu() throws {
+        let (m, f, h) = try header()
+        h.frame = NSRect(x: 0, y: 0, width: LaneHeaderLayout.width, height: 300)
+        let at = CGPoint(x: 20, y: h.rowTop(m.lanes.count) + 10)
+        let calls = f.calls.count
+        let e = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: h.convert(at, to: nil), modifierFlags: [], timestamp: 1,
+                windowNumber: 0, context: nil, eventNumber: ControlUI.channelEventBase + 1, clickCount: 1,
+                pressure: 1))
+        #expect(ControlUI.isChannel(e))
+        h.mouseDown(with: e)
+        #expect(
+            m.editor.status
+                == "Add Track opens a menu: use track.new_audio, track.new_instrument or track.new_midi over the control channel."
+        )
+        #expect(f.calls.count == calls && f.newTracks.isEmpty && f.edits.isEmpty)
+        #expect(h.addTrackMenu().items.map(\.title) == ["New Audio Track", "New Instrument Track", "New MIDI Track"])
+    }
+
+    /// An audio track's header names its output with no menu: a click on it
+    /// sends nothing, and never sets a MIDI destination on the track.
+    @Test func anAudioHeaderShowsItsOutputAndItsClickDoesNothing() throws {
+        let f = editorFake()
+        var audio = lane(40, "A", kind: .audio)
+        audio.audioOut = 7
+        audio.audioOutName = "Audio 1"
+        f.laneTable[3] = [audio]
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        h.frame = NSRect(x: 0, y: 0, width: LaneHeaderLayout.width, height: 300)
+        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(0), theme: h.theme).first { $0.0 == .destination }?.1)
+        let e = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: h.convert(CGPoint(x: r.midX, y: r.midY), to: nil), modifierFlags: [],
+                timestamp: 1, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+        let calls = f.calls.count
+        h.mouseDown(with: e)  // would pop up the destination menu, which tracks modally
+        #expect(f.calls.count == calls && f.edits.isEmpty)
+        #expect(ArrangementA11y.header(audio) == "A, output Audio 1")
+        audio.audioOutName = nil
+        #expect(ArrangementA11y.header(audio) == "A, output none")
+    }
+
+    /// Duplicate selects the copy, and a second header leaves the first's
+    /// rename hook alone.
+    @Test func duplicateSelectsTheCopyAndASecondHeaderKeepsTheHook() throws {
+        let (m, _, h, w) = try shown(select: 31)
+        defer { w.close() }
+        #expect(TrackCommands.perform(TrackCommands.duplicate, m) == .done)
+        #expect(m.selectedLane?.name == "Chords copy")
+        let second = LaneHeaderView(document: m)
+        w.contentView?.addSubview(second)
+        #expect(m.trackRenameOwner === second)
+        h.removeFromSuperview()
+        #expect(m.beginTrackRename != nil, "the first header leaving does not clear the second's hook")
+        second.removeFromSuperview()
+        #expect(m.beginTrackRename == nil)
+    }
+
     @Test func theControlsShareTheRowWithoutOverlapping() {
-        let controls = LaneHeaderLayout.controls(rowTop: 0)
+        let controls = LaneHeaderLayout.controls(rowTop: 0, theme: .classicLight)
         for (i, a) in controls.enumerated() {
             for b in controls.dropFirst(i + 1) {
                 #expect(!a.1.intersects(b.1), "\(a.0) and \(b.0)")

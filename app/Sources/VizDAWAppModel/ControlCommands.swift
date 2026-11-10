@@ -224,7 +224,7 @@ public enum ControlCommands {
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
-            .union(ViewCommands.ids).union(AppearanceCommands.ids)
+            .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -407,7 +407,7 @@ public enum ControlCommands {
         case "lane.set_input", "lane.set_monitor":
             guard let seq = args.int("seq").flatMap({ UInt64(exactly: $0) }),
                 let lane = args.int("lane").flatMap({ UInt64(exactly: $0) })
-            else { return .failed(.of(.invalidParams, "\(id): `seq` and `lane` name the lane")) }
+            else { return .failed(.of(.invalidParams, "\(id): `seq` and `lane` name the track")) }
             guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
             let edit: LaneEdit
             if id == "lane.set_input" {
@@ -453,6 +453,8 @@ public enum ControlCommands {
             if let f = failure(ViewCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where SynthCommands.ids.contains(id):
             return SynthCommands.run(id, args: args, doc: docID, m)
+        case _ where TrackCommands.ids.contains(id):
+            return TrackCommands.run(id, args: args, doc: docID, m)
         case _ where AutomationCommands.ids.contains(id):
             return AutomationCommands.run(id, args: args, doc: docID, m)
         case AudioCommands.addMidi:

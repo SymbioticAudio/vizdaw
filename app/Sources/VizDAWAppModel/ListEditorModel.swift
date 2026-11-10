@@ -209,7 +209,7 @@ public final class ListEditorModel {
         let tick = insertTick()
         let lane = t.lane.map { LaneKey(t.seq, $0) } ?? cursorRow?.lane ?? lanes.first
         guard let cmd = ListInsert.command(k, tick: tick, lane: lane, seq: t.seq, info: editor.info(t.seq)) else {
-            editor.status = k == .meter ? "There is already a meter change at the next barline." : "There is no lane to insert into."
+            editor.status = k == .meter ? "There is already a meter change at the next barline." : "There is no track to insert into."
             return
         }
         let before = Set(rows.compactMap(\.event).map(\.id))

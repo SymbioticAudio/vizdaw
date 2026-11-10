@@ -295,9 +295,11 @@ impl PluginCatalog {
                 if outcome.is_err() {
                     *lock(&problem) = Some("plugin scan failed unexpectedly".into());
                 }
-                // A file the app cannot read is never overwritten (the
-                // problem shows on the next action).
-                let _ = with(|c| c.save(&path));
+                // A file the app cannot read is never overwritten; why the
+                // save failed shows with the next refresh, not silently.
+                if let Err(e) = with(|c| c.save(&path)) {
+                    *lock(&problem) = Some(format!("plugin settings not saved: {e}"));
+                }
                 // Results first, then "not running": a poll that sees the
                 // scan ended also sees (and applies) everything it recorded.
                 recorded.fetch_add(1, Ordering::Release);

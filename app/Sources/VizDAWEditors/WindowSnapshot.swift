@@ -3,7 +3,8 @@ import ObjectiveC
 import QuartzCore
 
 /// A window as a PNG, rendered by the app itself (control spec §9), with
-/// no Screen Recording permission:
+/// no Screen Recording permission (`ui.screenshot`'s opt-in `live` capture
+/// is another path, in the control channel, and needs it):
 ///
 /// 1. the window's layer tree is drawn with `CALayer.render(in:)`, which
 ///    brings in SwiftUI and Core Animation content;
@@ -93,21 +94,47 @@ public enum WindowSnapshot {
         walk(root)
     }
 
+    /// What the clipping ancestors of `v` let show of `root`, in `root`'s
+    /// coordinates: the root's bounds cut by each ancestor's bounds where
+    /// that ancestor clips (`clipsToBounds`, or an `NSClipView`).
+    static func ancestorClip(of v: NSView, in root: NSView) -> CGRect {
+        var rect = root.bounds
+        var a = v.superview
+        while let ancestor = a, ancestor !== root {
+            if ancestor.clipsToBounds || ancestor is NSClipView {
+                rect = rect.intersection(ancestor.convert(ancestor.bounds, to: root))
+            }
+            a = ancestor.superview
+        }
+        return rect
+    }
+
+    /// The part of `root`, in `root`'s coordinates, that `v` is asked to
+    /// draw: its own bounds cut by `root` and by each clipping ancestor.
+    /// A view that does not clip can paint past it (see `redraw`); this
+    /// models AppKit, it is not a window-server capture.
+    public static func clipRect(of v: NSView, in root: NSView) -> CGRect {
+        ancestorClip(of: v, in: root).intersection(v.convert(v.bounds, to: root))
+    }
+
     /// Draws `s` where it is in `root` (bottom-left based context).
     static func redraw(_ s: NSView, root: NSView, ctx: CGContext) {
-        // Only what ancestors (scroll views) let show, within its own
-        // bounds: views do not clip to bounds by default (macOS 14+), so
-        // `visibleRect` can reach past them, and a view that fills its
-        // dirty rect (the ruler) would paint over its siblings.
-        let visible = s.visibleRect.intersection(s.bounds)
-        guard !visible.isEmpty else { return }
+        // A view that clips is asked to draw `clipRect` and stays in it.
+        // One that does not (the macOS 14+ default) is asked for, and
+        // paints anywhere in, what its clipping ancestors let show: a ruler
+        // that fills its dirty rect then paints over its siblings, as it
+        // does on screen.
+        let asked = clipRect(of: s, in: root)
+        guard !asked.isNull, !asked.isEmpty else { return }
+        let reach = s.clipsToBounds || s is NSClipView ? asked : ancestorClip(of: s, in: root)
+        let visible = s.convert(reach, from: root)
         func inContext(_ r: CGRect) -> CGRect {
             root.isFlipped ? CGRect(x: r.minX, y: root.bounds.height - r.maxY, width: r.width, height: r.height) : r
         }
         let rect = inContext(s.convert(s.bounds, to: root))
         ctx.saveGState()
         defer { ctx.restoreGState() }
-        ctx.clip(to: inContext(s.convert(visible, to: root)))
+        ctx.clip(to: inContext(reach))
         ctx.translateBy(x: rect.minX, y: rect.minY)
         if s.isFlipped {
             ctx.translateBy(x: 0, y: rect.height)

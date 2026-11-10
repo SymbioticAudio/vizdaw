@@ -117,13 +117,41 @@ public enum ControlUI {
             return x.isFinite && y.isFinite ? CGPoint(x: x, y: y) : nil
         case .element(let ref):
             guard let e = found(ref, in: window) else { return nil }
-            let f = windowRect(e.frame, in: window)
+            var f = windowRect(e.frame, in: window)
             guard f.minX.isFinite, f.minY.isFinite, f.width.isFinite, f.height.isFinite,
                 f.width > 0, f.height > 0
             else { return nil }
+            // Scrolled away (a strip's level box below a short window):
+            // scroll it into view first, as a user would.
+            if !contentRect(of: window).contains(CGPoint(x: f.midX, y: f.midY)), reveal(f, in: window),
+                let again = found(ref, in: window)
+            {
+                f = windowRect(again.frame, in: window)
+            }
             let c = CGPoint(x: f.midX, y: f.midY)
             return contentRect(of: window).contains(c) ? c : nil
         }
+    }
+
+    /// Scrolls the scroll view whose document holds `f` (window points,
+    /// top-left origin) so `f` shows; false when no scroll view holds it.
+    static func reveal(_ f: CGRect, in window: NSWindow) -> Bool {
+        guard let root = window.contentView?.superview ?? window.contentView else { return false }
+        let base = CGRect(x: f.minX, y: window.frame.height - f.maxY, width: f.width, height: f.height)
+        var stack: [NSView] = [root]
+        var scrolled = false
+        while let v = stack.popLast() {
+            if let sv = v as? NSScrollView, let doc = sv.documentView {
+                let r = doc.convert(base, from: nil)
+                let mid = CGPoint(x: r.midX, y: r.midY)
+                if doc.bounds.contains(mid) && !doc.visibleRect.contains(mid) {
+                    scrolled = doc.scrollToVisible(r) || scrolled
+                }
+            }
+            stack.append(contentsOf: v.subviews)
+        }
+        if scrolled { window.contentView?.layoutSubtreeIfNeeded() }
+        return scrolled
     }
 
     // MARK: Events

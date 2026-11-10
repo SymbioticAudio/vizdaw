@@ -19,6 +19,7 @@ public final class ListTable: NSTableView, ThemedView {
 
     public override init(frame: NSRect) {
         super.init(frame: frame)
+        clipsToBounds = true
         backgroundColor = theme.canvas
     }
 
@@ -88,6 +89,13 @@ final class ListCellField: NSTextField, ThemedView {
 /// A list row in the theme: the canvas, every other row shaded, and the
 /// selection in the theme's selection colour with its cells' text on it.
 final class ListRowView: NSTableRowView, ThemedView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
     public var theme: Theme = ThemedViews.current {
         didSet { themeDidChange(from: oldValue) }
     }
@@ -131,7 +139,10 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
     public var theme: Theme = ThemedViews.current {
-        didSet { themeDidChange(from: oldValue) }
+        didSet {
+            themeDidChange(from: oldValue)
+            table.intercellSpacing = NSSize(width: 2 * FocusRing.inset(xs: theme.spacing.xs), height: 2 * FocusRing.inset(xs: theme.spacing.xs))
+        }
     }
 
     /// The text-editing owner while a cell is edited (Plan 4c Ruling 21);
@@ -156,6 +167,7 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
         self.model = model
         context = model.context
         super.init(frame: .zero)
+        clipsToBounds = true
         table.owner = self
         table.dataSource = self
         table.delegate = self
@@ -163,6 +175,9 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
         // Every other row is shaded by its `ListRowView`, in the theme.
         table.usesAlternatingRowBackgroundColors = false
         table.rowHeight = 18
+        // Each cell sits `spacing.xs` inside its row (half of this on each
+        // side), so a cell's focus ring lies inside the row, which clips.
+        table.intercellSpacing = NSSize(width: 2 * FocusRing.inset(xs: theme.spacing.xs), height: 2 * FocusRing.inset(xs: theme.spacing.xs))
         table.style = .plain
         table.target = self
         table.doubleAction = #selector(doubleClicked)

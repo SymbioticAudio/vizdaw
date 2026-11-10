@@ -108,7 +108,7 @@ public enum SynthCommands {
         switch id {
         case trackSynth:
             guard let seq = Self.id(args, "seq"), let lane = Self.id(args, "lane") else {
-                return .failed(.of(.invalidParams, "lane.track_synth: `seq` and `lane` name the MIDI lane"))
+                return .failed(.of(.invalidParams, "lane.track_synth: `seq` and `lane` name the MIDI track"))
             }
             let channel = args.int("channel") ?? 1
             guard (1...256).contains(channel) else {

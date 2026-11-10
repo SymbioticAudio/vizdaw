@@ -139,7 +139,16 @@ fn build(depth: BitDepthRow, saved: bool) -> Project {
         None,
     )
     .unwrap();
-    let seq = s.snapshot().unwrap().sequences[0].id;
+    // A new project opens with "Sequence 1" (plan tracks Ruling 3): the
+    // test's sequence is the one it made.
+    let seq = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|q| q.name == "Song")
+        .unwrap()
+        .id;
     let lane = s.lanes(seq).unwrap()[0].id;
     let src = dir.path().join("tone.caf");
     let mut w = CafWriter::create(&src, 48_000, 2, BitDepth::Float32, WriteMode::Normal).unwrap();

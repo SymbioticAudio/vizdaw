@@ -533,7 +533,7 @@ fn tempo_line(
     let seqs: BTreeSet<SeqId> = lanes.iter().map(|(s, _)| *s).collect();
     if seqs.is_empty() {
         return Err(ModelError::invalid(
-            "select a lane of the sequence whose tempo to change",
+            "select a track of the sequence whose tempo to change",
         ));
     }
     if line.from.0 < 0 {
@@ -761,7 +761,7 @@ fn draw_series(
     r: &mut Report,
 ) -> Result<Vec<EventId>> {
     if lanes.is_empty() {
-        return Err(ModelError::invalid("select a lane to draw in"));
+        return Err(ModelError::invalid("select a track to draw in"));
     }
     let mut created = Vec::new();
     for (seq, lane) in lanes.iter().copied() {

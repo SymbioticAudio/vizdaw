@@ -49,6 +49,7 @@ after the first release).
   bottom pane.
 - ⌘5 opens the audio editor for the selected audio region.
 - Window > Mixer opens the mixer in a window of its own.
+- Track menu: new audio, instrument and MIDI tracks, duplicate, delete and rename.
 - Change any key in Settings › Keys.
 
 ## Themes

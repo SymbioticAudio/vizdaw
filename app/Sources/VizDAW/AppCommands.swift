@@ -188,6 +188,15 @@ struct AppCommands: Commands {
                 .keyboardShortcut(KeyMenu.shortcut("sequence.back"))
                 .disabled(doc?.editor.navigation.isEmpty ?? true)
         }
+        CommandMenu("Track") {
+            trackItem(TrackCommands.newAudio)
+            trackItem(TrackCommands.newInstrument)
+            trackItem(TrackCommands.newMidi)
+            Divider()
+            trackItem(TrackCommands.duplicate)
+            trackItem(TrackCommands.delete)
+            trackItem(TrackCommands.rename)
+        }
         CommandMenu("Region") {
             Button(keyBindings.row(RegionCommands.normalize)?.title ?? "Normalize…") { if let doc { normalize(doc) } }
                 .keyboardShortcut(KeyMenu.shortcut(RegionCommands.normalize))
@@ -211,11 +220,9 @@ struct AppCommands: Commands {
             .disabled(doc.map { !RegionCommands.enabled(RegionCommands.reloadExternal, $0) } ?? true)
         }
         CommandMenu("Drum") {
-            drumToggle("Drum Lane", DrumCommands.markLane)
-            Divider()
             drumItem("Add Drum Row", DrumCommands.addRow)
             drumToggle("Show Velocity", DrumCommands.showVelocity)
-            drumItem("Split Row to Own Lane", DrumCommands.splitRow)
+            drumItem("Split Row to Own Track", DrumCommands.splitRow)
             drumItem("Remove Drum Row", DrumCommands.removeRow)
             Divider()
             drumToggle("Timeline View", DrumCommands.timeline)
@@ -279,6 +286,15 @@ struct AppCommands: Commands {
         Button(keyBindings.row(id)?.title ?? id) { if let doc { report(kind.run(id, on: nil, doc), doc) } }
             .keyboardShortcut(KeyMenu.shortcut(id))
             .disabled(doc.map { !kind.enabled(id, $0) } ?? true)
+    }
+
+    /// A Track menu item (plan tracks Ruling 5): its title and key from the
+    /// bindings; New needs a sequence, the others a track too; what it
+    /// cannot do shows in the status line.
+    private func trackItem(_ id: String) -> some View {
+        Button(keyBindings.row(id)?.title ?? id) { if let doc { TrackCommands.performFromMenu(id, doc) } }
+            .keyboardShortcut(KeyMenu.shortcut(id))
+            .disabled(doc.map { !TrackCommands.enabled(id, $0) } ?? true)
     }
 
     /// A toggle menu item (its check mark from the command's state).

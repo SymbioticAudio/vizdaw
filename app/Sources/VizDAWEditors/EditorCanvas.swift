@@ -17,6 +17,7 @@ public final class CanvasLayerView: NSView, ThemedView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        clipsToBounds = true
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
     }
@@ -169,6 +170,7 @@ open class EditorCanvas: NSView, ThemedView {
 
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        clipsToBounds = true
         setUp()
     }
 

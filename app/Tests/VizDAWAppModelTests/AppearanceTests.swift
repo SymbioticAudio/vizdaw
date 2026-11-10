@@ -141,8 +141,10 @@ import VizDAWEditors
 
     /// Review I1: a window takes the theme's styling as soon as a themed
     /// root is in it, and again whenever the theme changes, however late it
-    /// was made.
-    @Test func aWindowTakesTheThemeWhenItsRootArrives() throws {
+    /// was made. The marker styles on the next turn of the main queue (a
+    /// Settings window styled while it was built lost its title bar).
+    @Test func aWindowTakesTheThemeWhenItsRootArrives() async throws {
+        func nextTurn() async { await withCheckedContinuation { c in DispatchQueue.main.async { c.resume() } } }
         let w = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered,
             defer: true)
@@ -151,6 +153,7 @@ import VizDAWEditors
         marker.theme = .console
         #expect(w.appearance == nil)
         try #require(w.contentView).addSubview(marker)
+        await nextTurn()
         func rgba(_ c: NSColor?) -> [CGFloat] {
             guard let c = c?.usingColorSpace(.sRGB) else { return [] }
             return [c.redComponent, c.greenComponent, c.blueComponent, c.alphaComponent]
@@ -158,6 +161,7 @@ import VizDAWEditors
         #expect(w.appearance?.name == .darkAqua)
         #expect(rgba(w.backgroundColor) == rgba(Theme.console.surface.window.nsColor))
         marker.theme = .flat
+        await nextTurn()
         #expect(w.appearance?.name == .aqua)
         #expect(rgba(w.backgroundColor) == rgba(Theme.flat.surface.window.nsColor))
         // The styling itself, as ThemeWindows uses it.

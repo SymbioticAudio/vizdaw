@@ -124,7 +124,7 @@ private func paint(_ ticks: [Int64], velocity: UInt16 = 100 << 9, row: UInt64 = 
         #expect(!m.editor.textEditing)
         #expect(
             h.rowMenu(DrumPress(lane: 0, row: 1)).items.map(\.title)
-                == ["Rename…", "Show Velocity", "", "Split Row to Own Lane", "Remove Row"])
+                == ["Rename…", "Show Velocity", "", "Split Row to Own Track", "Remove Row"])
         let rows = (h.accessibilityChildren() as? [NSAccessibilityElement])?.compactMap { $0.accessibilityLabel() }
         #expect(rows == ["Kick, C2, Drums, Kit", "Snare, D2, Drums, Kit", "Clap, D#2, Perc, Kit"])
     }

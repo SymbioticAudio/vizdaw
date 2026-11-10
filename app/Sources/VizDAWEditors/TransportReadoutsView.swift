@@ -20,6 +20,7 @@ public final class TransportReadoutsView: NSView, ThemedView {
         init(_ box: TransportReadouts.Box) {
             self.box = box
             super.init(frame: .zero)
+            clipsToBounds = true
             for f in [title, value] {
                 f.maximumNumberOfLines = 1
                 f.cell?.usesSingleLineMode = true
@@ -64,6 +65,7 @@ public final class TransportReadoutsView: NSView, ThemedView {
     public init(document: DocumentModel) {
         self.document = document
         super.init(frame: .zero)
+        clipsToBounds = true
         for b in TransportReadouts.Box.allCases {
             let v = BoxView(b)
             boxes[b] = v

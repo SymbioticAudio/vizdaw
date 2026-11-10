@@ -32,6 +32,7 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
     public init(model: DrumGridModel) {
         self.model = model
         super.init(frame: .zero)
+        clipsToBounds = true
         wantsLayer = true
         observe()
     }
@@ -227,7 +228,7 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
             MenuAction(title: "Show Velocity") { [weak self] in self?.model.showVelocity(!shown) }.item(checked: shown))
         menu.addItem(.separator())
         menu.addItem(
-            MenuAction(title: "Split Row to Own Lane") { [weak self] in self?.model.splitSelectedRow() }.item(
+            MenuAction(title: "Split Row to Own Track") { [weak self] in self?.model.splitSelectedRow() }.item(
                 checked: false))
         menu.addItem(
             MenuAction(title: "Remove Row") { [weak self] in self?.model.removeSelectedRow() }.item(checked: false))
@@ -340,6 +341,7 @@ public final class DrumGridContainer: NSView, ThemedView {
         canvas = DrumGridView(model: model)
         headers = DrumRowHeaderView(model: model)
         super.init(frame: .zero)
+        clipsToBounds = true
         addSubview(headers)
         addSubview(canvas)
         canvas.onVerticalScroll = { [weak self] y in self?.headers.verticalOffset = y }

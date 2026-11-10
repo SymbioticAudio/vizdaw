@@ -322,11 +322,24 @@ import VizDAWCore
         let queued = s.newDemo()
         s.enqueue(queued)
         #expect(s.documentForWindow(stale) == queued)
+        let fresh = try #require(s.documentForWindow(UUID()))
+        #expect(s.model(fresh) != nil)
+    }
+
+    /// A window's document closed this launch: the window is closing (its
+    /// willClose closed it), so it adopts nothing and makes no document;
+    /// nor does it take key on the way out.
+    @Test func aWindowWhoseDocumentClosedAdoptsNothing() throws {
+        let s = store()
         let closed = try #require(s.newDemo())
         s.close(closed)
-        let fresh = try #require(s.documentForWindow(closed))
-        #expect(fresh != closed)
-        #expect(s.model(fresh) != nil)
+        #expect(s.documentForWindow(closed) == nil)
+        #expect(s.documents.isEmpty)
+        s.focusDocument(closed, window: UUID())
+        #expect(s.keyDocument == nil)
+        #expect(s.frontDocument == nil)
+        s.close(closed)  // the late onDisappear: harmless
+        #expect(s.documents.isEmpty)
     }
 
     @Test func takeAlertClearsTheStoreAlert() {

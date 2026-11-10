@@ -101,7 +101,7 @@ public enum ListEdit {
             return on == e.mute ? .unchanged : .edit(.event(edit: .setMute(events: [e.id], mute: on)), tick: e.tick)
         case .dest:
             let dest: UInt64?
-            if t.isEmpty || t == "-" || t == "—" || t.lowercased() == "lane" {
+            if t.isEmpty || t == "-" || t == "—" || ["lane", "track"].contains(t.lowercased()) {
                 dest = nil
             } else if let id = c.destNames.first(where: { $0.value.caseInsensitiveCompare(t) == .orderedSame })?.key {
                 dest = id

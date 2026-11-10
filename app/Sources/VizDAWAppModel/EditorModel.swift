@@ -22,6 +22,9 @@ public final class EditorModel {
     public private(set) var selection = SelectionRow(timeRange: nil, lanes: [], events: [])
     public private(set) var layout = EditorLayout()
     public var tool: Tool = .arrow
+    /// The bar a pencil click in Arrange asked a piano roll to scroll to.
+    public internal(set) var pianoRollReveal: PianoRollReveal?
+    @ObservationIgnored var revealSerial = 0
     /// The last failure of a user action (spec §5: non-modal).
     public var status: String?
     /// Sequences left by opening a reference; Back returns to the last.
@@ -146,7 +149,7 @@ public final class EditorModel {
         let alive = Set(s.laneRevs.map { LaneKey($0.seq, $0.lane) })
         guard !g.lanes.isSubset(of: alive) else { return }
         cancelGesture()
-        status = "The lane was removed; the drag was cancelled."
+        status = "The track was removed; the drag was cancelled."
     }
 
     // MARK: Reads
@@ -297,6 +300,21 @@ public final class EditorModel {
 
     // MARK: Selection (Plan Ruling 19)
 
+    /// A click on track `lane`'s header: it becomes the selected track (the
+    /// one the Track menu, recording and the editors act on). With `extend`
+    /// (⇧ or ⌘) it joins the selection, or leaves it if it was in it; the
+    /// first selected stays the one the Track menu acts on. The time range
+    /// stays; selected events go, as their tracks may have.
+    public func selectTrack(seq: UInt64, lane: UInt64, extend: Bool) {
+        let ref = LaneKey(seq, lane).ref
+        var lanes = [ref]
+        if extend {
+            lanes = selection.lanes.filter { $0.seq == seq }
+            if let i = lanes.firstIndex(of: ref) { lanes.remove(at: i) } else { lanes.append(ref) }
+        }
+        setSelection(SelectionRow(timeRange: selection.timeRange, lanes: lanes, events: []))
+    }
+
     public func setSelection(_ s: SelectionRow) {
         let before = selection
         selection = s
@@ -392,6 +410,8 @@ public final class EditorModel {
     /// target is the same. The bottom pane of `main` (the current view) shows it.
     public func openDetail(_ target: EditorTarget, kind: DetailEditorKind? = nil, in main: MainView? = nil) {
         if layout.views[main ?? layout.views.main].bottom.view != .editor { paneEditsEnder?() }
+        if (kind ?? layout.lastKind) == .drumGrid { prepareDrumGrid(target) }
+        pianoRollReveal = nil
         updateLayout { l in
             let m = main ?? l.views.main
             l.views[m].bottom.shown = true

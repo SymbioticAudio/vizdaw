@@ -30,10 +30,22 @@ import Testing
         #expect(far.originTick == Double(TimeAxis.limit))
         #expect(far.tick(atX: .greatestFiniteMagnitude) == TimeAxis.limit)
         let back = TimeAxis().scrolled(byPoints: -1e30)
-        #expect(back.tick(atX: 0) == -TimeAxis.limit)
+        #expect(back.tick(atX: 0) == 0, "never left of bar 1")
         #expect(TimeAxis.clampTick(.nan) == 0)
         #expect(TimeAxis().x(Int64.max).isFinite)
         #expect(TimeAxis().scrolled(toTick: .infinity).originTick == Double(TimeAxis.limit))
+    }
+
+    /// Owner, 2026-11-05: the user never scrolls or zooms left of bar 1;
+    /// a count-in's view (left of it) only moves right.
+    @Test func scrollAndZoomStopAtBarOne() {
+        let a = TimeAxis(ticksPerPoint: 10, originTick: 500)
+        #expect(a.scrolled(byPoints: -100).originTick == 0)
+        #expect(a.zoomed(by: 0.01, aroundX: 400).originTick == 0)
+        let countIn = a.scrolled(toTick: -3_840)
+        #expect(countIn.originTick == -3_840, "following a count-in")
+        #expect(countIn.scrolled(byPoints: -10).originTick == -3_840)
+        #expect(countIn.scrolled(byPoints: 10).originTick == -3_740)
     }
 
     @Test func visibleRangeWithNaNWidthDoesNotTrap() {

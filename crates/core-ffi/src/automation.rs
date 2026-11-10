@@ -1402,7 +1402,7 @@ pub(crate) fn silent_new_lanes(
         }
         for l in a.lanes.iter().filter(|l| !l.solo && new.contains(&l.id)) {
             out.push(format!(
-                "The new automation lane \"{}\" is silent while another lane is soloed; it plays once the solo is cleared.",
+                "The new automation lane \"{}\" is silent while another track is soloed; it plays once the solo is cleared.",
                 l.name
             ));
         }

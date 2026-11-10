@@ -402,6 +402,9 @@ pub enum ControlRequest {
         path: String,
         /// Pixels per point (None: the window's).
         scale: Option<f64>,
+        /// Capture the window as the window server shows it (needs Screen
+        /// Recording access) instead of drawing it in-app.
+        live: bool,
     },
     /// `app.new_demo`.
     NewDemo {
@@ -1030,6 +1033,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
             window,
             path,
             scale,
+            live,
         } => ControlRequest::Screenshot {
             window: window_row(window),
             path: path
@@ -1037,6 +1041,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 .to_string_lossy()
                 .into_owned(),
             scale,
+            live,
         },
         Command::AppNewDemo { audio } => ControlRequest::NewDemo { audio },
         Command::AppOpen { path, answers } => ControlRequest::Open {
@@ -1428,6 +1433,11 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "takes": l.take_count, "active_take": l.active_take,
                 "input": l.input.as_ref().map(lane_input_json),
                 "monitor": monitor_name(l.monitor),
+                "kind": match l.kind {
+                    crate::tracks::TrackKindRow::Audio => "audio",
+                    crate::tracks::TrackKindRow::Instrument => "instrument",
+                    crate::tracks::TrackKindRow::Midi => "midi",
+                },
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
             "alert": alert.as_ref().map(alert_json),

@@ -17,7 +17,7 @@ struct TrackSynthSheet: View {
         if let d = sheets.trackSynth {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
                 Text("Track \(d.synthName)").font(theme.type.title.font)
-                Text("Records \(d.synthName)'s audio return into a lane below this one, armed and monitored, in the same pass as its MIDI.")
+                Text("Records \(d.synthName)'s audio return into a track below this one, armed and monitored, in the same pass as its MIDI.")
                     .font(theme.type.body.font)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -27,8 +27,8 @@ struct TrackSynthSheet: View {
                         "Return input: \(channelText(d))", value: draft(\.channel),
                         in: 1...max(d.stereo ? channels - 1 : channels, 1))
                     Toggle("Stereo (two channels)", isOn: draft(\.stereo))
-                    Toggle("Also record the MIDI lane", isOn: draft(\.armMidi))
-                    Toggle("Mute the MIDI lane after recording", isOn: draft(\.muteAfter))
+                    Toggle("Also record the MIDI track", isOn: draft(\.armMidi))
+                    Toggle("Mute the MIDI track after recording", isOn: draft(\.muteAfter))
                 }
                 .disabled(d.tracked)
                 HStack {

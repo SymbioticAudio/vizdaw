@@ -578,3 +578,33 @@ fn a_device_change_keeps_play_selections_end() {
     let st = t(&s);
     assert!(st.tick >= BAR && st.tick <= BAR + 3 * PPQ, "{}", st.tick);
 }
+
+#[test]
+fn loop_wraps_in_a_new_project() {
+    let _g = serial();
+    let s = Session::new_empty().unwrap();
+    let seq = s.snapshot().unwrap().sequences[0].id;
+    s.set_loop(true).unwrap();
+    s.play(seq).unwrap();
+    // One empty bar lasts 2 s at 120 bpm; the loop keeps it playing.
+    assert!(wait_for(&s, |st| st.playing));
+    ms(2600);
+    let st = t(&s);
+    assert!(st.playing, "the loop ended: {st:?}");
+    assert!(st.tick < BAR, "{}", st.tick);
+}
+
+#[test]
+fn loop_wraps_with_an_audio_track() {
+    let _g = serial();
+    let s = Session::new_demo_audio().unwrap();
+    let song = s.snapshot().unwrap().sequences[0].id;
+    let len = s.snapshot().unwrap().sequences[0].length_ticks;
+    s.set_loop(true).unwrap();
+    s.locate(len - PPQ / 4).unwrap();
+    s.play(song).unwrap();
+    ms(500);
+    let st = t(&s);
+    assert!(st.playing, "{st:?}");
+    assert!(st.tick < len - PPQ, "did not wrap: {}", st.tick);
+}

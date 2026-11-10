@@ -47,7 +47,7 @@ struct AutomationSettingsView: View {
                 .foregroundStyle(.secondary)
             Toggle("Write plugin parameters only when touched", isOn: .constant(true))
                 .disabled(true)
-            Text("Always on: writing every parameter of every plugin would bury the lanes.")
+            Text("Always on: writing every parameter of every plugin would bury the tracks.")
                 .font(theme.type.caption.font)
                 .foregroundStyle(.secondary)
             // Read when a pass starts (5e-1 Ruling 19; final review m7).

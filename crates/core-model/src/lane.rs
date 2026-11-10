@@ -106,6 +106,16 @@ pub fn check_port_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= MAX_PORT_NAME && !name.chars().any(char::is_control)
 }
 
+/// The one rule for a track name: trimmed, it is not empty and holds no
+/// control or zero-width characters (U+200B to U+200D, U+2060, U+FEFF).
+/// Returns the trimmed name when it keeps the rule.
+pub fn valid_name(name: &str) -> Option<&str> {
+    let n = name.trim();
+    let bad =
+        |c: char| c.is_control() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}');
+    (!n.is_empty() && !n.chars().any(bad)).then_some(n)
+}
+
 /// The device input channels an audio lane records (spec §4.5), 0-based.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

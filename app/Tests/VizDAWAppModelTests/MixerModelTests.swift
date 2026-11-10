@@ -142,6 +142,173 @@ import VizDAWCore
         #expect(MixerModel.BrowserTarget.insert(strip: 1).wantsInstrument == false)
     }
 
+    @Test func theInstrumentMenuGroupsByMakerAndMarksTheCurrentPlugin() throws {
+        let rows = [
+            catalogRow("b.2", "Zeta", vendor: "beta", kind: .instrument),
+            catalogRow("a.1", "Mono", vendor: "Alpha", kind: .instrument),
+            catalogRow("b.1", "alpha", vendor: "beta", kind: .instrument),
+            catalogRow("n.1", "Loose", vendor: "", kind: .instrument),
+        ]
+        let current = rows[2].plugin
+        let menu = MixerModel.instrumentMenu(rows, current: current)
+        #expect(menu.map(\.vendor) == ["Alpha", "beta", "Other"])
+        #expect(menu[1].choices.map(\.plugin.name) == ["alpha", "Zeta"])
+        #expect(menu.flatMap(\.choices).filter(\.isCurrent).map(\.plugin.id) == ["b.1"])
+        #expect(MixerModel.instrumentMenu(rows, current: nil).flatMap(\.choices).allSatisfy { !$0.isCurrent })
+    }
+
+    @Test func theInstrumentMenuLeavesOutEffectsAndDisabledPlugins() throws {
+        let rows = [
+            catalogRow("e", "Verb", vendor: "A", kind: .effect),
+            catalogRow("d", "Off", vendor: "A", kind: .instrument, status: .disabled),
+            catalogRow("m", "Gone", vendor: "A", kind: .instrument, status: .missing),
+            catalogRow("k", "Keys", vendor: "A", kind: .instrument),
+        ]
+        let menu = MixerModel.instrumentMenu(rows, current: nil)
+        #expect(menu.map(\.vendor) == ["A"])
+        #expect(menu[0].choices.map(\.plugin.id) == ["k"])
+        #expect(MixerModel.instrumentMenu([], current: nil).isEmpty)
+        #expect(MixerModel.instrumentMenu([rows[0]], current: nil).isEmpty)
+    }
+
+    @Test func pickingAnInstrumentReplacesItInThatDestination() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        var strip = stripRow(5, "Keys", kind: .instrument(dest: 7))
+        strip.instrument = slotRow(50, "Old")
+        let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
+        let before = f.calls.count
+        m.pickInstrument(new, on: strip)
+        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 7 u.diva"])
+        #expect(m.document.alert == nil)
+    }
+
+    @Test func replacingTheInstrumentRenamesTheStripAndTheLaneDestinationAtOnce() throws {
+        let f = mixerFake()
+        f.dests = [DestRow(id: 4, name: "Built-in Synth", plugin: nil)]
+        f.laneTable[3] = [lane(30, "Chords")]
+        f.laneTable[3]?[0].midiDest = 4
+        f.laneTable[3]?[0].destination = "Built-in Synth"
+        let doc = try DocumentModel(session: f)
+        let m = try MixerModel(document: doc)
+        doc.storeMixer = m
+        #expect(doc.lanes.first?.destination == "Built-in Synth")
+        let new = PluginRefRow(format: .clap, id: "u.pend", name: "Pendulate", vendor: "V", version: "1")
+        let slot = m.pickInstrument(new, on: m.strips[0])
+        // No refresh call: everything already shows the plugin's name.
+        let s = try #require(m.strips.first { $0.kind == .instrument(dest: 4) })
+        #expect(s.name == "Pendulate" && s.kindLabel == "Pendulate")
+        #expect(s.instrument?.plugin.name == "Pendulate")
+        #expect(slot == s.instrument?.id)
+        #expect(m.destinations.first?.name == "Pendulate")
+        #expect(doc.lanes.first?.destination == "Pendulate")
+        // A renamed destination keeps the user's name.
+        f.dests[0].name = "Lead"
+        f.laneTable[3]?[0].destination = "Lead"
+        _ = try m.document.session.snapshot()
+        let other = PluginRefRow(format: .clap, id: "u.other", name: "Other", vendor: "V", version: "1")
+        m.pickInstrument(other, onDestination: 4)
+        #expect(m.destinations.first?.name == "Lead")
+        #expect(doc.lanes.first?.destination == "Lead")
+    }
+
+    @Test func aPickReturnsTheNewSlotToOpenAndAFailureReturnsNone() throws {
+        let f = mixerFake()
+        f.dests = [DestRow(id: 4, name: "Built-in Synth", plugin: nil)]
+        let m = try model(f)
+        let new = PluginRefRow(format: .clap, id: "u.pend", name: "Pendulate", vendor: "V", version: "1")
+        #expect(m.pickInstrument(new, on: m.strips[0]) == 904)
+        // The same plugin again: no change, nothing to open.
+        #expect(m.pickInstrument(new, onDestination: 4) == nil)
+        f.mixerError = VizError.Model(message: "load failed")
+        let other = PluginRefRow(format: .clap, id: "u.other", name: "Other", vendor: "V", version: "1")
+        #expect(m.pickInstrument(other, onDestination: 4) == nil)
+        #expect(m.document.alert?.title == "Instrument Failed")
+    }
+
+    @Test func pickingTheLoadedInstrumentOrOnANonInstrumentStripDoesNothing() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        var strip = stripRow(5, "Keys", kind: .instrument(dest: 7))
+        strip.instrument = slotRow(50, "Old")
+        let before = f.calls.count
+        m.pickInstrument(strip.instrument!.plugin, on: strip)
+        m.pickInstrument(strip.instrument!.plugin, on: stripRow(6, "Bus", kind: .bus))
+        #expect(f.calls.count == before)
+    }
+
+    @Test func theSharedSynthStripReplacesTheFocusedTracksDestination() throws {
+        let f = mixerFake()
+        f.dests = [
+            DestRow(id: 4, name: "Built-in Synth", plugin: nil),
+            DestRow(id: 5, name: "Built-in Synth", plugin: nil),
+        ]
+        let m = try model(f)
+        let synth = try #require(m.strips.first { $0.kind == .builtinSynth })
+        let new = PluginRefRow(format: .clap, id: "u.pend", name: "Pendulate", vendor: "V", version: "1")
+        // The left pane shows the strip for the track playing destination 5.
+        m.synthFocus = 5
+        #expect(m.instrumentDestination(for: synth) == 5)
+        let before = f.calls.count
+        m.pickInstrument(new, on: synth)
+        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 5 u.pend"])
+        // A focus that is not a built-in synth destination is ignored.
+        m.synthFocus = 99
+        #expect(m.instrumentDestination(for: synth) == 4)
+    }
+
+    @Test func theBuiltInSynthStripReplacesTheBuiltInSynthDestination() throws {
+        let f = mixerFake()
+        f.dests = [
+            DestRow(id: 3, name: "Juno", plugin: nil, external: true),
+            DestRow(id: 4, name: "Built-in Synth", plugin: nil),
+            DestRow(id: 9, name: "Other", plugin: nil),
+        ]
+        let m = try model(f)
+        let strip = stripRow(5, "Synth", kind: .builtinSynth)
+        #expect(m.instrumentDestination(for: strip) == 4)
+        let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
+        let before = f.calls.count
+        m.pickInstrument(new, on: strip)
+        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 4 u.diva"])
+    }
+
+    @Test func aBuiltInSynthStripWithNoSynthDestinationOrOtherKindsDoNothing() throws {
+        let f = mixerFake()
+        f.dests = [DestRow(id: 3, name: "Juno", plugin: nil, external: true)]
+        let m = try model(f)
+        let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
+        let before = f.calls.count
+        m.pickInstrument(new, on: stripRow(5, "Synth", kind: .builtinSynth))
+        #expect(m.instrumentDestination(for: stripRow(6, "Bus", kind: .bus)) == nil)
+        #expect(f.calls.count == before)
+    }
+
+    @Test func aDestinationsInstrumentIsReplacedUnlessItIsTheLoadedOne() throws {
+        let f = mixerFake()
+        let old = PluginRefRow(format: .clap, id: "u.old", name: "Old", vendor: "V", version: "1")
+        f.dests = [DestRow(id: 7, name: "Old", plugin: old), DestRow(id: 4, name: "Built-in Synth", plugin: nil)]
+        let m = try model(f)
+        let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
+        let before = f.calls.count
+        m.pickInstrument(old, onDestination: 7)
+        #expect(f.calls.count == before)
+        m.pickInstrument(new, onDestination: 7)
+        m.pickInstrument(old, onDestination: 4)
+        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 7 u.diva", "destPlugin 4 u.old"])
+        #expect(m.instrumentPlugin(ofDestination: 7) == new)
+        #expect(m.instrumentPlugin(ofDestination: 4) == old)
+    }
+
+    @Test func aFailingInstrumentPickAlerts() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        f.mixerError = .Model(message: "no such plugin")
+        let strip = stripRow(5, "Keys", kind: .instrument(dest: 7))
+        m.pickInstrument(PluginRefRow(format: .clap, id: "x", name: "X", vendor: "V", version: "1"), on: strip)
+        #expect(m.document.alert?.title == "Instrument Failed")
+    }
+
     @Test func renamingAndErrors() throws {
         let f = mixerFake()
         let m = try model(f)
