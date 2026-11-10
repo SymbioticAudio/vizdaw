@@ -695,19 +695,14 @@ fn midi_injected_for_an_unfocused_projects_map_drives_it() {
     assert!(b.automation_state().unwrap().touched.contains(&t));
 }
 
-/// Plan 5g-1 Ruling 2 (the owner's rule): what a learn takes never reaches
-/// an input chain. A waiting learn takes a note-on but not its note-off:
-/// the chain hears only the orphan off, which its merge drops, so the
-/// arpeggiator never holds the note. After the learn, a note plays.
-#[test]
-fn a_learned_message_never_reaches_an_input_chain() {
-    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+/// Chords listening to every MIDI input through Chord (+4, +7) and a
+/// free-running 1/16 Up arpeggiator, armed, the engine running stopped.
+/// A held note-on that reached the chain would step at once (arp.rs
+/// `next_free_running`): its pitch, +4 and +7 would go out thru.
+fn chords_with_an_arpeggiator(s: &Session) {
     use vizdaw_ffi::input_fx::{ArpModeRow, FeelRow, InputFxKindRow, InputFxRow};
     use vizdaw_ffi::{EditCommand, LaneEdit, LaneInputRow};
-    let _g = serial();
-    let s = Session::new_demo().unwrap();
-    s.focus_surfaces().unwrap();
-    let seq = song(&s);
+    let seq = song(s);
     let chords = s
         .lanes(seq)
         .unwrap()
@@ -757,16 +752,22 @@ fn a_learned_message_never_reaches_an_input_chain() {
     s.play(seq).unwrap();
     wait_until("the engine", || s.transport().unwrap().playing);
     s.stop().unwrap();
-    s.learn_target(synth_fader(&s)).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    drain_offline_log();
-    debug_midi_from_source("Keys", 0, &[0x90, 60, 100]);
-    debug_midi_from_source("Keys", 0, &[0x80, 60, 0]);
-    cancel_learn();
+    wait_until("the stop", || !s.transport().unwrap().playing);
+}
+
+/// After a held note-on 60 that something took: a later note-on 62 (no
+/// learn, no map) steps the arpeggio, which proves the chain runs; by
+/// then a held 60 would have stepped too. Nothing of 60, 64 or 67 went
+/// out, and nothing was recorded (the transport is stopped, the lane
+/// armed: a note that reached the lane would only be heard).
+fn assert_60_never_reached_the_chain() {
+    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+    // Two 1/16 steps at the demo's tempo: a held 60 steps at once.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut log = drain_offline_log();
     debug_midi_from_source("Keys", 0, &[0x90, 62, 100]);
     let is_note = |b: &Vec<u8>| b.first().is_some_and(|x| matches!(x & 0xF0, 0x80 | 0x90));
-    let mut log = Vec::new();
-    wait_until("the free-running arpeggio's first step", || {
+    wait_until("the free-running arpeggio's step on 62", || {
         log.extend(drain_offline_log());
         log.iter()
             .any(|(_, b): &(u64, Vec<u8>)| is_note(b) && b.get(1) == Some(&62))
@@ -776,4 +777,67 @@ fn a_learned_message_never_reaches_an_input_chain() {
             .any(|(_, b)| is_note(b) && b.get(1).is_some_and(|p| [60, 64, 67].contains(p))),
         "the taken note-on reached the chain: {log:?}"
     );
+}
+
+/// Plan 5g-1 Ruling 2 (the owner's rule), a waiting learn: the note-on it
+/// takes, sent alone and held, never reaches the input chain, from the
+/// CoreMIDI source path or from injection.
+#[test]
+fn a_note_on_a_waiting_learn_takes_never_reaches_an_input_chain() {
+    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    chords_with_an_arpeggiator(&s);
+    s.learn_target(synth_fader(&s)).unwrap();
+    s.idle().unwrap();
+    assert!(learn_state().waiting.is_some());
+    drain_offline_log();
+    debug_midi_from_source("Keys", 0, &[0x90, 60, 100]);
+    assert!(
+        s.inject_midi("Keys".into(), vec![0x90, 60, 100]).unwrap(),
+        "the learn takes the injected note-on"
+    );
+    debug_advance(301);
+    s.idle().unwrap();
+    assert!(learn_state().waiting.is_none(), "the learn finished");
+    let maps = s.learn_maps().unwrap();
+    assert_eq!(maps.len(), 1, "the learn made its map: {maps:?}");
+    assert!(maps[0].text.starts_with("Keys"), "{}", maps[0].text);
+    assert_60_never_reached_the_chain();
+}
+
+/// Plan 5g-1 Ruling 2 (the owner's rule), a finished map: a note-on the
+/// learned map takes, sent alone and held, drives the map's target and
+/// never reaches the input chain, from either path.
+#[test]
+fn a_note_on_a_learned_map_takes_never_reaches_an_input_chain() {
+    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let t = synth_fader(&s);
+    s.learn_target(t).unwrap();
+    assert!(s.inject_midi("Keys".into(), vec![0x90, 60, 100]).unwrap());
+    debug_advance(301);
+    s.idle().unwrap();
+    let source = s.learn_maps().unwrap()[0].source.clone();
+    s.set_learn_pickup(source, false).unwrap();
+    debug_advance(501);
+    s.idle().unwrap();
+    chords_with_an_arpeggiator(&s);
+    assert!(learn_state().waiting.is_none());
+    s.idle().unwrap();
+    drain_offline_log();
+    debug_midi_from_source("Keys", 0, &[0x90, 60, 100]);
+    assert!(
+        s.inject_midi("Keys".into(), vec![0x90, 60, 100]).unwrap(),
+        "the map takes the injected note-on"
+    );
+    s.idle().unwrap();
+    assert!(
+        s.automation_state().unwrap().touched.contains(&t),
+        "the map drove its target"
+    );
+    assert_60_never_reached_the_chain();
 }
