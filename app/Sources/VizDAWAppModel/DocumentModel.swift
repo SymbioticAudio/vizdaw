@@ -128,6 +128,7 @@ public final class DocumentModel {
     @ObservationIgnored private var bounceModel: BounceModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
+    @ObservationIgnored private var inputFxModel: InputFxModel?
     @ObservationIgnored private var synthModel: SynthSheets?
     @ObservationIgnored private var externalModel: ExternalEditModel?
     /// How this document opens and watches edit copies (plan 5f-3): the
@@ -150,6 +151,14 @@ public final class DocumentModel {
         if let m = inputsModel { return m }
         let m = LaneInputs(document: self)
         inputsModel = m
+        return m
+    }
+
+    /// The input effects editor's model (plan 5g-1), made once.
+    public var inputFx: InputFxModel {
+        if let m = inputFxModel { return m }
+        let m = InputFxModel(document: self)
+        inputFxModel = m
         return m
     }
 
@@ -488,6 +497,7 @@ public final class DocumentModel {
     public func select(_ seq: UInt64?) {
         guard seq != selectedSeq else { return }
         selectedSeq = seq
+        inputFxModel?.close()
         refreshLanes()
         stepEntry.checkTarget()
     }
