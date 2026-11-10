@@ -358,6 +358,7 @@ pub fn validate(doc: &Document) -> Vec<String> {
             if let Some(i) = &l.input {
                 push(i.check(), &lctx);
             }
+            push(crate::input_fx::check_chain(&l.input_fx), &lctx);
             // Plan 5c-2 Ruling 3: a synth's return names a destination.
             if let Some(dest) = l.input.as_ref().and_then(LaneInput::return_of) {
                 match doc.instruments().get(&dest) {

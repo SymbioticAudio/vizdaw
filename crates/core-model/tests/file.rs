@@ -602,7 +602,7 @@ fn an_eq_slot_round_trips_and_an_empty_one_is_not_written() {
 /// colour) and saves as version 4.
 #[test]
 fn version_3_projects_migrate_to_version_4() {
-    assert_eq!(VERSION, 4);
+    const { assert!(VERSION >= 4) };
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(3);
@@ -614,7 +614,11 @@ fn version_3_projects_migrate_to_version_4() {
             .all(|s| s.eq.is_none() && s.colour.is_none())
     );
     assert_eq!(back, d);
-    assert!(to_json(&back).unwrap().contains("\"version\": 4"));
+    assert!(
+        to_json(&back)
+            .unwrap()
+            .contains(&format!("\"version\": {VERSION}"))
+    );
     // The step itself is the identity.
     assert_eq!(migrate_v3_to_v4(v.clone()).unwrap(), v);
 }

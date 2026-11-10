@@ -1,6 +1,6 @@
 //! The `.vizdaw` package: `project.json`, `Media/` and `Autosave/`.
 //!
-//! `project.json` is `{ "format": "vizdaw-project", "version": 4,
+//! `project.json` is `{ "format": "vizdaw-project", "version": 5,
 //! "document": { … } }`. Loading migrates older versions step by step,
 //! refuses newer ones, rejects unknown fields and runs every integrity
 //! check. Saving writes a temporary file, syncs it, renames it over the old
@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
 /// The version this build writes.
-pub const VERSION: u64 = 4;
+pub const VERSION: u64 = 5;
 /// The oldest version this build can migrate from.
 pub const FIRST_VERSION: u64 = 1;
 /// The project file name inside a package.
@@ -37,7 +37,12 @@ pub const PROJECT_FILE: &str = "project.json";
 pub type Migration = fn(Value) -> Result<Value>;
 
 /// Migrations indexed by `from - FIRST_VERSION`.
-pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4];
+pub const MIGRATIONS: &[Migration] = &[
+    migrate_v1_to_v2,
+    migrate_v2_to_v3,
+    migrate_v3_to_v4,
+    migrate_v4_to_v5,
+];
 
 /// The project rate a migrated project gets (5a Ruling 2): the most
 /// common media rate (the first item's on a tie), or 48 kHz when there is
@@ -61,6 +66,14 @@ fn fade_frames(tempo: &TempoMap, start: i64, ticks: i64, rate: f64) -> u64 {
     let e = tempo.tick_to_seconds(Tick(start.saturating_add(ticks.max(0))));
     // Float-to-int `as` saturates (and maps NaN to 0).
     ((e - s) * rate).round().max(0.0) as u64
+}
+
+/// Version 4 → 5 (plan 5g-1 Ruling 18): lanes gain an optional `input_fx`,
+/// and a lane without one has an empty chain, so the document is unchanged.
+/// The bump makes an older build refuse a version-5 project with its
+/// `NewerFormat` message rather than an unknown-field error.
+pub fn migrate_v4_to_v5(v: Value) -> Result<Value> {
+    Ok(v)
 }
 
 /// Version 3 → 4 (plan 7b Ruling 8): strips gain an optional EQ slot and

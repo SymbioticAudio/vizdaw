@@ -147,6 +147,16 @@ pub enum LaneCmd {
         /// The input (checked by [`LaneInput::check`]) or none.
         input: Option<LaneInput>,
     },
+    /// Set the lane's MIDI input effect chain (spec §6.8; plan 5g-1),
+    /// checked by [`crate::input_fx::check_chain`].
+    SetInputFx {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// The chain, first effect first.
+        chain: Vec<crate::input_fx::InputFx>,
+    },
     /// Set when the lane's input is heard (spec §6.6).
     SetMonitor {
         /// Sequence.
@@ -196,6 +206,7 @@ impl LaneCmd {
             LaneCmd::SetActiveTake { .. } => "Set Active Take",
             LaneCmd::SetInput { .. } => "Set Track Input",
             LaneCmd::SetMonitor { .. } => "Set Track Monitor",
+            LaneCmd::SetInputFx { .. } => "Set Input Effects",
             LaneCmd::TrackSynth { .. } => "Track Synth",
         }
     }
@@ -329,6 +340,10 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
         }
         LaneCmd::SetMonitor { seq, lane, monitor } => {
             d.lane_mut(*seq, *lane)?.monitor = *monitor;
+        }
+        LaneCmd::SetInputFx { seq, lane, chain } => {
+            crate::input_fx::check_chain(chain)?;
+            d.lane_mut(*seq, *lane)?.input_fx = chain.iter().cloned().collect();
         }
         LaneCmd::TrackSynth {
             seq,

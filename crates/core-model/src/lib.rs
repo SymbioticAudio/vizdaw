@@ -24,6 +24,7 @@ pub mod file;
 pub mod format;
 pub mod history;
 pub mod ids;
+pub mod input_fx;
 pub mod lane;
 pub mod learn;
 pub mod meter;

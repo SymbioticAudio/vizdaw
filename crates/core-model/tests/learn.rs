@@ -205,8 +205,9 @@ fn learn_maps_round_trip_and_are_absent_when_empty() {
     let back: core_model::document::Settings = serde_json::from_str(&json).unwrap();
     assert_eq!(back.learn, vec![m.clone()]);
     // Learn maps need no format bump of their own; version 4 is plan 7b's
-    // EQ slot and strip colour (Ruling 8).
-    assert_eq!(core_model::file::VERSION, 4);
+    // EQ slot and strip colour (Ruling 8); version 5 is plan 5g-1's input
+    // effects (Ruling 18).
+    assert_eq!(core_model::file::VERSION, 5);
     let bare = serde_json::to_string(&m)
         .unwrap()
         .replace(",\"pickup\":true", "");
