@@ -86,7 +86,7 @@ public enum StripLayout {
 
 /// The rows of a strip's part above the fader, top to bottom.
 public enum StripRowKind: Int, CaseIterable, Sendable {
-    case header, instrument, input, eq, inserts, sends, output, pan
+    case header, instrument, input, eq, inserts, midiFx, sends, output, pan
 }
 
 /// One mixer's shared rows (fix round 1): each row is as tall as the

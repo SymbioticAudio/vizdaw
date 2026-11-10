@@ -207,6 +207,40 @@ public final class MixerModel {
         return document.inputLane(path: path)
     }
 
+    /// Whether `strip` has the MIDI FX section (Ruling 16): a plugin
+    /// instrument's main strip or the shared Built-in Synth strip; not an
+    /// instrument's extra output, an audio path, a bus or master.
+    public func showsMidiFx(_ strip: StripRow) -> Bool {
+        switch strip.kind {
+        case .instrument, .builtinSynth: true
+        default: false
+        }
+    }
+
+    /// The track `strip`'s MIDI FX section edits (Ruling 16); nil when
+    /// the strip has no section or no track plays through it. A track
+    /// plays through `strip` when `StripFocus.strip(of:)` names it and
+    /// `InputFxModel.showsSection` holds. The left pane (`.strip`): the
+    /// focused track (`document.focusLanes().first`) when it plays
+    /// through `strip`. Every other placement: of the shown sequence's
+    /// tracks that play through `strip`, the first armed one, else the
+    /// first (5d-2 Ruling 4, as `inputLane(for:)`).
+    public func midiFxLane(for strip: StripRow, in placement: MixerPlacement) -> LaneRow? {
+        guard showsMidiFx(strip) else { return nil }
+        let all = snapshot.strips
+        let dests = destinations
+        func plays(_ lane: LaneRow) -> Bool {
+            InputFxModel.showsSection(lane)
+                && StripFocus.strip(of: lane, destinations: dests, strips: all) == strip.id
+        }
+        if placement == .strip {
+            guard let focused = document.focusLanes().first, plays(focused) else { return nil }
+            return focused
+        }
+        let through = document.lanes.filter(plays)
+        return through.first(where: \.arm) ?? through.first
+    }
+
     public func stripName(_ id: UInt64) -> String {
         snapshot.strips.first { $0.id == id }?.name ?? "Strip \(id)"
     }

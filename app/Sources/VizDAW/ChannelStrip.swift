@@ -9,8 +9,8 @@ import VizDAWEditors
 /// One channel strip (plan 7b Ruling 14), 120 points wide, in every
 /// placement: the left pane, the bottom pane's mixer, the Mix view and the
 /// mixer window. Top to bottom: the colour bar and name, the instrument
-/// slot and input, the EQ slot, the inserts, the sends, the output, the
-/// pan, the fader with its scale and meter, the level, M S R I and the
+/// slot and input, the EQ slot, the inserts, the MIDI FX section on
+/// instrument strips, the sends, the output, the pan, the fader with its scale and meter, the level, M S R I and the
 /// automation mode. `height` is the placement's: the fader's throw takes
 /// what the rest leaves (`StripLayout.split`), from 160 to 480, and when
 /// even 160 does not fit the strip is taller than `height` and scrolls
@@ -101,6 +101,9 @@ private struct StripCells: View {
         }
         row(.eq, band: .dark) { EqSlotView(model: model, strip: strip) }
         row(.inserts, band: .dark) { StripInserts(model: model, strip: strip) }
+        if model.showsMidiFx(strip) {
+            row(.midiFx, band: .dark) { StripMidiFx(model: model, strip: strip) }
+        }
         if strip.kind != .master {
             if !strip.sends.isEmpty || !model.targets(for: strip).isEmpty {
                 row(.sends, band: .light) { SendKnobRow(model: model, strip: strip) }
@@ -213,15 +216,18 @@ private enum StripPadding {
 
 // MARK: - Above the fader
 
-/// A section's small heading ("INSERTS", "SENDS").
-private struct StripHeading: View {
+/// A section's small heading ("INSERTS", "SENDS", "MIDI FX"). A lit
+/// heading (an active MIDI FX chain) is drawn in the theme's active-toggle
+/// colour, which the selected strip's edge also uses.
+struct StripHeading: View {
     let text: String
+    var lit: Bool = false
     @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
         Text(theme.stripHeading(text))
             .font(theme.type.caption.font.weight(.semibold))
-            .foregroundStyle(theme.text.secondary.color)
+            .foregroundStyle(lit ? theme.accent.accent.color : theme.text.secondary.color)
             .lineLimit(1)
             .accessibilityHidden(true)
     }
@@ -388,7 +394,7 @@ private struct StripMenu<Content: View>: View {
 }
 
 /// A small button drawn as a dashed inset box ("EQ ＋", the inserts' "+").
-private struct StripAddFace: View {
+struct StripAddFace: View {
     let text: String
     @Environment(\.symbioticTheme) private var theme
 

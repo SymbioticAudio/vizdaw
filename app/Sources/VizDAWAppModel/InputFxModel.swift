@@ -30,18 +30,121 @@ public enum InputFxName: String, CaseIterable, Sendable {
     /// The most effects one chain holds.
     static let maxEffects = 8
 
-    /// Shows `lane`'s chain with nothing selected.
+    /// Shows `lane`'s chain with nothing selected (and no settings popover).
     public func open(lane: UInt64) {
         self.lane = lane
         selected = nil
         draft = nil
+        settings = nil
     }
 
-    /// Closes the editor, dropping any draft.
+    /// Closes the editor, dropping any draft (and the settings popover).
     public func close() {
         lane = nil
         selected = nil
         draft = nil
+        settings = nil
+    }
+
+    // MARK: The strip's MIDI FX section (Ruling 16)
+
+    /// Where a slot's settings popover shows: one at a time (Ruling 16).
+    public struct SettingsSlot: Equatable, Sendable {
+        public let placement: MixerPlacement
+        public let strip: UInt64
+        public let index: Int
+
+        public init(placement: MixerPlacement, strip: UInt64, index: Int) {
+            self.placement = placement
+            self.strip = strip
+            self.index = index
+        }
+    }
+
+    /// The slot whose settings popover is shown; nil when none is.
+    public private(set) var settings: SettingsSlot?
+
+    public static let sectionOnChannel =
+        "MIDI FX opens a menu or a popover: use lane.set_input_fx over the control channel."
+
+    /// `lane`'s chain as its slots show it: `chain` (the draft in place) when
+    /// `lane` is the open one, else `lane.inputFx`.
+    public func chain(of lane: LaneRow) -> [InputFxRow] {
+        lane.id == self.lane ? chain : lane.inputFx
+    }
+
+    /// Opens the editor on `lane` unless it is already the open one, so a
+    /// second click on the same track keeps the selection and the draft.
+    private func focus(_ lane: UInt64) {
+        if self.lane != lane { open(lane: lane) }
+    }
+
+    /// A click on the empty slot. Opens the editor on `lane` when another
+    /// lane (or none) is open. Answers whether the caller may pop up the
+    /// effect menu: with the channel on it may not, and the status line is
+    /// `sectionOnChannel`.
+    public func clickEmpty(lane: UInt64, channelOn: Bool = MediaModel.channelIsOn()) -> Bool {
+        focus(lane)
+        guard !channelOn else {
+            document?.editor.status = Self.sectionOnChannel
+            return false
+        }
+        return true
+    }
+
+    /// A click on slot `i`: opens on `lane` as above and selects `i`. Then it
+    /// shows `i`'s settings in `placement`; with the channel on it sets the
+    /// status line instead.
+    public func clickSlot(
+        _ i: Int, lane: UInt64, strip: UInt64, in placement: MixerPlacement,
+        channelOn: Bool = MediaModel.channelIsOn()
+    ) {
+        focus(lane)
+        selected = i
+        if channelOn {
+            document?.editor.status = Self.sectionOnChannel
+        } else {
+            settings = SettingsSlot(placement: placement, strip: strip, index: i)
+        }
+    }
+
+    public func showsSettings(strip: UInt64, index: Int, in placement: MixerPlacement) -> Bool {
+        settings == SettingsSlot(placement: placement, strip: strip, index: index)
+    }
+
+    /// The popover closed. A draft still open is committed (one edit, as
+    /// `commitDraft`), and `settings` becomes nil. The editor stays open.
+    public func closeSettings() {
+        commitDraft()
+        settings = nil
+    }
+
+    /// The slot's bypass dot: opens on `lane` as above, then `setBypass(i, !bypass)`.
+    /// It is a plain toggle that opens nothing, so the channel may press it.
+    public func toggleBypass(_ i: Int, lane: UInt64) {
+        focus(lane)
+        guard let row = committed[safe: i] else { return }
+        setBypass(i, !row.bypass)
+    }
+
+    /// A slot's drag payload: "midifx:<lane>:<index>".
+    nonisolated public static func dragText(lane: UInt64, index: Int) -> String {
+        "midifx:\(lane):\(index)"
+    }
+
+    /// A payload dropped on slot `i` of `lane`. The dragged slot lands at `i`:
+    /// one `move(from: [from], to: from < i ? i + 1 : i)`. Refused (false,
+    /// no edit) for another lane's slot or a plugin slot's "slot:<id>".
+    public func drop(_ text: String, onto i: Int, lane: UInt64) -> Bool {
+        let parts = text.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "midifx", let from = UInt64(parts[1]), from == lane,
+            let index = Int(parts[2])
+        else { return false }
+        focus(lane)
+        let rows = committed
+        guard rows.indices.contains(index), rows.indices.contains(i), index != i else { return false }
+        move(from: [index], to: index < i ? i + 1 : i)
+        return true
     }
 
     private var laneRow: LaneRow? {
@@ -113,7 +216,8 @@ public enum InputFxName: String, CaseIterable, Sendable {
         quantizeGrids.first { $0.ticks == ticks }?.title ?? "\(ticks) ticks"
     }
 
-    nonisolated private static func modeTitle(_ mode: ArpModeRow) -> String {
+    /// An arpeggiator mode's name ("Up", "Up/Down", "As Played"...).
+    nonisolated public static func modeTitle(_ mode: ArpModeRow) -> String {
         switch mode {
         case .up: "Up"
         case .down: "Down"
