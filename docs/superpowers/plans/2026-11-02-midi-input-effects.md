@@ -1,358 +1,210 @@
 # VizDAW 5g-1 — MIDI Input Effects Implementation Plan
 
-> **Deferred (owner, 2026-11-03):** this plan runs right after sub-project 7 (UI polish), not in sub-project 5. It stays in the 1.0 release. Before it runs it gets a fresh pre-flight against the tree as it stands then. For 5g-1 the binding owner ruling also applies: a learned message is kept out of the lanes.
+> **Runs now (owner, 2026-11-03 and 2026-11-05):** after sub-project 7 and the Tracks plan, on branch `sp5g-input-fx` from main `a292d2c`. It stays in the 1.0 release. The 2026-11-05 pre-flight (`.superpowers/sdd/2026-11-02-midi-input-effects/preflight-2026-11-05.md`) is folded in (2026-11-09), and every Find excerpt below was re-anchored to `a292d2c`. The binding owner ruling holds throughout: a MIDI message a learn map takes stays out of the lanes, and only the learned target's automation is written (Ruling 2).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Each MIDI lane gets a chain of up to 8 built-in input effects: Arpeggiator, Transpose, Velocity, Chord and Input Quantize. The chain runs on the real-time thread while the lane is armed or monitoring its input. What it plays thru is exactly what is recorded, with Input Quantize applied to recorded note starts only. The chain is an undoable lane edit, edited from an FX button and popover on the lane header and from `lane.set_input_fx` on the control channel.
+**Goal:** Each MIDI or instrument track gets a chain of up to 8 built-in input effects: Arpeggiator, Transpose, Velocity, Chord and Input Quantize. The chain runs on the real-time thread while the track is armed or monitoring its input. What it plays thru is exactly what is recorded, with Input Quantize applied to recorded note starts only. The chain is an undoable lane edit, edited from an FX button and popover on the track header and from `lane.set_input_fx` on the control channel.
 
 **Architecture:**
-- **`core-model`** gains `core_model::input_fx` (`InputFx`, `InputFxKind` and the effects' settings, with their checks), `Lane.input_fx` and `LaneCmd::SetInputFx`. The field is saved only when the chain is not empty, so `file::VERSION` stays 3.
+- **`core-model`** gains `core_model::input_fx` (`InputFx`, `InputFxKind` and the effects' settings, with their checks), `Lane.input_fx` and `LaneCmd::SetInputFx`. The field is saved only when the chain is not empty; `file::VERSION` goes 4 → 5 with an identity migration (Ruling 18).
 - **`core-engine`** gains `core_engine::input_fx`, which holds:
   - `LiveMsg`, the live input event. It is MIDI 2.0-shaped: notes with 16-bit velocity, per-note messages addressed by pitch, and channel messages. Plan 5g-2's MPE decoding and encoding use the same type.
-  - `InputChain`: the stages, the arpeggiator, an output stage that merges duplicate pitches, a fan-out cap and counters. It has no allocation, no lock and no I/O.
+  - `InputChain`: the stages, the arpeggiator, an output stage that merges duplicate pitches, a fan-out cap that also bounds the work done, and counters. It has no allocation, no lock and no I/O.
 
   The renderer feeds every listening lane's chain from the MIDI input queue and ticks it once per block, so arpeggiator steps land on their sample. A changed chain sends its note-offs first. An unchanged chain keeps its state across route changes. The record tap now carries `LiveMsg` and the chain's Input Quantize.
 - **`core-ffi`**:
   - `passes` turns recorded `LiveMsg`s into events and applies Input Quantize to note starts.
-  - The FFI gains `InputFxRow` and its kinds, `LaneEdit::SetInputFx`, `LaneRow.input_fx`, and `input_fx_from_json`.
-  - The lane's input spec now carries the chain. "All MIDI Inputs" lanes now skip the ports that 5f-1's control surfaces use.
+  - The FFI gains `InputFxRow` and its kinds, `LaneEdit::SetInputFx`, `LaneRow.input_fx`, `InputInfoRow.midi_fx_dropped` and `input_fx_from_json`.
+  - The lane's input spec now carries the chain.
 - **`core-control`, Swift, `vizctl`:**
   - The control channel gets `lane.set_input_fx` and `state.get document`'s `input_fx` per lane. `state.get input` reports the count of dropped notes.
-  - The app gets `InputFxModel`, the lane header's FX button (lit when the chain is active) and the effects popover.
-  - Also in this plan: the e2e "`midi.inject` held chord into a lane with an arpeggiator while recording", README 189–195, and two backlog rows.
+  - The app gets `InputFxModel`, the track header's FX button (lit in the theme's accent when the chain is active) and the effects popover.
+  - Also in this plan: the e2e "`midi.inject` held chord into a lane with an arpeggiator while recording", README 238–244, and the spec's §13 row brought up to date.
 
-**Tech Stack:** Rust 2024 (`core-model`, `core-engine`, `core-ffi` with UniFFI 0.32.2, `core-control`, `vizctl`), Swift 6 / SwiftPM (Swift Testing), macOS 14+.
+**Tech Stack:** Rust 2024 (`core-model`, `core-engine`, `core-ffi` with UniFFI 0.32.2, `core-control`, `vizctl`), Swift 6 / SwiftPM (Swift Testing; CI builds with Swift 6.1 on `macos-15`), macOS 14+.
 
-**Spec:** `docs/superpowers/specs/2026-10-18-recording-audio-design.md`, §13 row "5g-1 — MIDI input effects". This row and "5g-2 — MPE input and output" replace the former 5g row; the split is Ruling 1 of this plan, and the writer's commit amends §13. This plan delivers:
+**Spec:** `docs/superpowers/specs/2026-10-18-recording-audio-design.md`, §13 row "5g-1 — MIDI input effects". This row and "5g-2 — MPE input and output" replace the former 5g row (Ruling 1). This plan delivers:
 - §4.5's `input_fx`: at most 8 slots, empty by default, an undoable lane edit;
 - §6.6's "Thru and record both pass through the lane's MIDI input effect chain";
-- §6.8 in full:
-  - the model;
-  - the five built-in effects with every listed setting;
+- §6.8 in full (read it there; its values are used verbatim in Rulings 7–14 and Task 1's ranges):
+  - the model and the five built-in effects with every listed setting;
   - the chain on the real-time thread per armed or Input-monitored lane, sample-accurate and synced;
   - fixed-capacity state (32 held, 128 sounding) with overflow counted;
   - note-offs on a change or a bypass;
   - post-effect recording with Input Quantize on recorded starts only;
   - no chain for lanes that are not listening, and none on playback;
   - the FX button and popover, one undo step per gesture;
-- §6.9's FX button on `LaneHeaderView`;
+- §6.9's FX button on the track header (`LaneHeaderView`);
 - §12.1's `lane.set_input_fx { lane, chain }` and `state.get`'s per-lane `input_fx`;
 - §12.3's MIDI input effects tests, the arpeggiator e2e, `rt-check` over the chain, and the manual checklist's "the arpeggiator against a real keyboard, synced and free-running";
 - spec Ruling 27.
 
+The §13 row's "surface ports skipped by every-source lanes" is already delivered by 5f-1 Ruling 17 (a surface's input port is taken whole before the engine queue; pinned by `crates/core-ffi/tests/surfaces.rs::surface_ports_and_learned_controls_stay_out_of_the_lanes`), so this plan adds nothing for it (Ruling 3). Task 10 amends the row to say so and to give the README numbers.
+
 Plan 5g-2 (`docs/superpowers/plans/2026-11-02-mpe.md`) runs after this one and builds on `LiveMsg`.
 
-Read the whole spec (its §3 rules bind here) and the 5f plans' Interfaces blocks that this plan touches:
-- 5f-1's `crate::surfaces::surface_list()` and its `inject_midi` change (`docs/superpowers/plans/2026-11-02-control-surfaces.md`, Tasks 7–8);
-- 5f-2's `pub mod bounce;` in `core-engine/src/lib.rs`.
+Read the whole spec (its §3 rules bind here), 5f-1's Ruling 17 (`docs/superpowers/plans/2026-11-02-control-surfaces.md`: `crate::surfaces::takes`, called by `host::midi_from_source`, `Session::inject_midi` and `input.rs` before anything reaches the engine) and the Tracks plan's Ruling 7 (`docs/superpowers/plans/2026-11-05-tracks.md`: what the app shows says "track", never "lane").
 
-5g runs after 5f-3. Every Find excerpt below matches `f3291d0` exactly once unless the step says it is 5f's text. If 5f moved an excerpt, make the same change to the current text and say so in the report.
+Every Find excerpt below matches `a292d2c` exactly once, or the file an earlier task of this plan left (the step says which).
 
 ## Global Constraints
 
-- **Shell setup.**
-  - Every shell command runs after `export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools`. Every bash block below starts with that line and `cd /Users/lattawb/workspace/vizdaw`.
-  - A `git commit` without `DEVELOPER_DIR` fails silently: check every commit with `git log -1 --oneline` and `git show --stat HEAD`.
-- **Swift only through the scripts, from the repo root.**
-  - The scripts: `scripts/build-ffi.sh` (after any Rust change that touches the FFI, before Swift), `scripts/swift.sh build`, `scripts/swift.sh test` and `scripts/make-app.sh`.
-  - Never call `swift`, `xcodebuild` or `xcrun` directly.
-- **Branch and commits.**
-  - Work on branch `sp5-audio`, at the end of plan 5f-3. Never switch branches, never push.
-  - Commit at the end of every task, adding only the files the task lists, by path (never `git add -A`). No manifest changes, so `Cargo.lock` never changes.
-  - Never commit `.superpowers/`, `.DS_Store` or generated files.
-  - End every commit message with these two attribution lines. Use the `Co-Authored-By` line naming the model you actually are:
-    ```
-    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-    Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P
-    ```
-- **Clean room.**
-  - Never read or copy anything from `~/workspace/SVP/research`, the Studio Vision binary or any Studio Vision material.
-  - No Opcode, Apple Logic, Ableton, Steinberg, Midas or Soundcraft assets, names, artwork or branding anywhere.
-  - Effect behaviour comes from this spec and from public MIDI specifications only.
+Every task's requirements include these. The implementer and reviewer contracts in `.superpowers/sdd/2026-11-02-midi-input-effects/` hold the rest of the house rules (shell, commits, waits).
+
+- **Shell.** Every command runs after `export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools` and `cd /Users/lattawb/workspace/vizdaw`. Swift only through `scripts/build-ffi.sh` (after any FFI change), `scripts/swift.sh build|test` and `scripts/make-app.sh`; never `swift`, `xcodebuild` or `xcrun` directly.
+- **Branch and commits.** Branch `sp5g-input-fx`; never switch branches, never push. Commit at the end of every task by explicit paths (never `git add -A`), never `.superpowers/`, `.DS_Store` or generated files (`app/Sources/VizDAWCore/vizdaw_ffi.swift`, `app/Sources/vizdaw_ffiFFI/include/`, `target/ffi/`, `dist/`). No manifest changes, so `Cargo.lock` never changes. Each task gives its message line and path list; every message ends with:
+  ```
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+  Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P
+  ```
+  Then check with `git log -1 --oneline && git show --stat HEAD` (a commit without `DEVELOPER_DIR` fails silently).
+- **Clean room and names.** Never read `~/workspace/SVP/research` or any Studio Vision material. No Opcode, Logic, Apple, Midas, Soundcraft, NI, Microsoft, Ableton or Steinberg names in UI or repo text (the scans `NameScanTests.noThirdPartyNamesInWhatTheAppShows` and `core-control/tests/names.rs` enforce the app's half). Effect behaviour comes from the spec and public MIDI specifications only.
+- **Track, not lane.** Text the app shows (labels, menus, status lines, alerts, help, README steps) says "track"; code identifiers, command ids (`lane.set_input_fx`), JSON keys and the file format keep `lane`. Enforced by `NameScanTests.noLaneInWhatTheAppShows`, `core-ffi/tests/wording.rs` and `core-control/tests/names.rs`.
+- **Never run `auval`**, in any form.
 - **No GUI tools, no real devices.**
-  - Never use GUI, computer-use or accessibility-automation tools. Views are checked by the owner by eye from README steps 189–195.
-  - Launch VizDAW only through the e2e (Task 10) with `VIZDAW_AUDIO=offline`. At the end of a task that launched it, `pgrep -lf MacOS/VizDAW` prints nothing and `ls -d /tmp/vze*` prints nothing new.
-  - **Tests never open real MIDI ports or devices, never open real audio input and never trigger the microphone prompt.**
-    - MIDI reaches the engine through `MidiSender` (core-engine tests), `Session::inject_midi` (core-ffi tests) and `midi.inject` (e2e). No CoreMIDI client is created.
-    - Every `core-ffi` test that plays or records calls `vizdaw_ffi::host::force_offline()` first, through its file's `serial` helper, and chooses its fake input with `host::set_fake_input`.
-  - Never touch the real `~/Library/Application Support/VizDAW`, the real preferences, the real Trash or any device. Tests use temp folders and `Session::debug_set_trash_dir`. Swift tests pass `MemoryDefaults()`, and the e2e runs in its throwaway home.
-- **Test waits.**
-  - Every `core-ffi` integration test that waits for the transport, a pass or the engine polls with a deadline from `common::wait_limit()`, never with a fixed sleep for the result. (`common::wait_limit()` is in `crates/core-ffi/tests/common/mod.rs` and reads `VIZDAW_TEST_WAIT_SECS`.)
-  - The core-engine tests drive time with `OfflineBackend::run_frames` and the chain tests with an explicit `ChainClock`. Neither sleeps.
-- **Crates and dependencies.**
-  - Rust stable, edition 2024, license GPL-3.0-only.
-  - No new crate and no new dependency. The arpeggiator's Random mode uses a 32-bit xorshift written in the module (Ruling 9), not a crate.
-- **Lints.** Every crate keeps `#![deny(missing_docs)]` and `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic))]`. New non-test code uses `.get()`, iterators and `checked_*`/`saturating_*`, never indexing or unwraps.
-- **Platform-neutral cores.** `core-model`, `core-engine`, `core-media` and `core-control` stay free of OS APIs.
-- **Linux CI.**
-  - CI runs `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on `ubuntu-latest`.
-  - Nothing in this plan is macOS-only: the chain, the passes and the FFI rows are platform-neutral, and every test here runs on Linux.
-  - Every task that changes Rust checks `cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu --target-dir target/linux-check -- -D warnings`.
-- **TDD.** Every new test is run and seen to fail (RED) before the code that makes it pass.
+  - Never use GUI, computer-use or accessibility-automation tools. The owner checks the views by eye from README 238–244.
+  - Launch VizDAW only through the e2e (Task 10) with `VIZDAW_AUDIO=offline`; afterwards `pgrep -lf MacOS/VizDAW` prints nothing and `ls -d /tmp/vze*` prints nothing new.
+  - Tests never open real MIDI ports, real audio input or devices, and never trigger the microphone prompt. MIDI reaches the engine through `MidiSender` (core-engine), `Session::inject_midi` or `host::debug_midi_from_source` (core-ffi) and `midi.inject` (e2e). Every core-ffi test that plays or records calls `host::force_offline()` through its file's `serial` helper.
+  - Tests never touch the real `~/Library/Application Support/VizDAW`, preferences, Trash or devices: temp folders, `Session::debug_set_trash_dir`, `MemoryDefaults()`, the e2e's throwaway home.
+- **Programmatic calls open nothing.** Control-channel commands and control-channel clicks never open dialogs, menus, popovers or plugin windows (Ruling 16).
+- **Hostile input.** Every new control command gets hostile-input tests at every layer (Task 7 and Review Focus 5).
+- **FFI safety.** No panic crosses the FFI: every new export returns `Result<_, VizError>` inside `ffi_guard` (`catch_unwind`); `input_fx_from_json` is one. `input_fx_json` is a plain `pub fn` used by `control.rs`, not exported.
+- **UniFFI changes** (Task 6): enums `InputFxKindRow`, `ArpModeRow`, `FeelRow`; record `InputFxRow`; variant `LaneEdit::SetInputFx`; fields `LaneRow.input_fx` and `InputInfoRow.midi_fx_dropped` (both `#[uniffi(default)]`); free function `input_fx_from_json`. No new `Session` method.
+- **Swift.** Generated bindings compile in Swift 5 mode; `VizDAWAppModel`, `VizDAWEditors`, `VizDAW` and the tests in Swift 6 mode with no new warnings, on CI's Swift 6.1 too:
+  - no `@State` or `@FocusState` anywhere in this plan's code (the Command Line Tools build cannot expand them, and package code — `VizDAWAppModel`, `VizDAWEditors` — never uses them): view state lives in `InputFxModel`;
+  - never capture `[weak self]` or a non-Sendable value inside `MainActor.assumeIsolated`; bind a strong `let` (or `nonisolated(unsafe) let`) first, as `DocumentWindow.swift` does;
+  - colours, spacing, radii and fonts come from the theme only (Ruling 16, Task 9).
+- **Lints.** Every crate keeps `#![deny(missing_docs)]` and `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic))]`: `.get()`, iterators, `checked_*`/`saturating_*`. Rust stable, edition 2024, GPL-3.0-only; no new crate or dependency (Random uses an in-module xorshift, Ruling 9). `core-model`, `core-engine` and `core-control` stay free of OS APIs, and everything here runs on Linux.
+- **TDD.** Every new test is run and seen to fail before the code that makes it pass.
 - **Real-time rules (spec §3).**
-  - The chain runs on the real-time thread. No allocation, free, lock or I/O happens there.
-  - Everything new on that thread is marked `// RT`:
-    - `InputChain::{process, tick, flush, carry_from, quantize, take_dropped}`, the stages, the arpeggiator and the merge;
-    - `LiveMsg`'s conversions;
-    - the renderer's `live_midi`, `emit_live` and the `SetInputs` carry;
-    - `RecordTap::midi`.
+  - The chain runs on the real-time thread: no allocation, free, lock or I/O there. Everything new on that thread is marked `// RT`: `InputChain::{process, tick, flush, carry_from, quantize, take_dropped}`, the stages, the arpeggiator, the merge, `LiveMsg`'s conversions, the renderer's `live_midi`, `emit_live` and the `SetInputs` carry, and `RecordTap::midi`.
   - `InputChain::new` allocates the chain's one `Box<ChainState>` on the control thread, inside `Engine::load`. Retired routes are freed on the retire thread as now.
-  - Recursion through the stages is bounded by `MAX_INPUT_FX`. Fan-out is bounded by `MAX_FANOUT` per input event (Ruling 7).
-  - **rt-check gates** run in Tasks 4 and 10:
-    - `cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings`;
-    - `cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures --test rt_alloc_input_fx` (the last is new in Task 4).
+  - Work is bounded: recursion by `MAX_INPUT_FX`, outputs *and stage visits* by `MAX_FANOUT` per input event or step (Ruling 7), arpeggiator steps by one per grid line per block with no catch-up (Ruling 10).
+  - **rt-check gate** (Tasks 4 and 10, and CI from Task 4): `cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings` and `cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures --test rt_alloc_bounce --test rt_alloc_input_fx`.
 - **Media is write-once.** Nothing here writes media.
-- **File compatibility.**
-  - `core_model::file::VERSION` stays 3. `Lane.input_fx` is `#[serde(default, skip_serializing_if = "Vector::is_empty")]`, so a project with no chains saves byte for byte as before, and older projects open with empty chains.
-  - Builds before 5g-1 name a project with a chain Corrupt (`deny_unknown_fields`). This is the pattern 5f-1 Ruling 6 recorded; Task 10 adds the backlog row.
-- **FFI safety.**
-  - No panic crosses the FFI. Every new exported function or method returns `Result<_, VizError>` and runs inside `ffi_guard`; `input_fx_from_json` is one of them.
-  - The only infallible new export is `input_fx_to_json`. It is a plain `pub fn` used by `control.rs`, not exported to Swift.
-- **UniFFI changes** (Task 6):
-  - New enums: `InputFxKindRow`, `ArpModeRow`, `FeelRow`.
-  - New record: `InputFxRow`.
-  - New variant: `LaneEdit::SetInputFx`.
-  - New fields: `LaneRow.input_fx` (`#[uniffi(default)]`) and `InputInfoRow.midi_fx_dropped` (`#[uniffi(default)]`).
-  - New free function: `input_fx_from_json`.
-  - No new `Session` method, so `FakeSession` gains nothing for the FFI.
-- **Swift.**
-  - Generated bindings compile in Swift 5 mode. `VizDAWAppModel`, `VizDAWEditors`, `VizDAW` and the tests compile in Swift 6 mode with no new warnings.
-  - No SwiftUI `@State`/`@FocusState` for model data, only for view-local presentation flags. The popover's draft lives in `InputFxModel`.
-- **Control channel** (control spec §6, §7).
-  - Programmatic calls never open dialogs.
-  - Every command is in `core_control::registry::COMMANDS` and handled by `ControlCommands.run`. The Swift test `everyRegisteredMenuCommandHasAHandler` compares them.
-  - The registry count test moves from its value at the end of 5f-3 (written there as 146) to that value + 1 in Task 7.
-  - Hostile-input tests are added at every layer:
-    - `input_fx_commands_check_their_params` (core-control);
-    - `inputFxCommandsCheckTheirArguments` (app);
-    - `hostile_chains_are_refused_and_change_nothing` (model);
-    - `hostile_chain_json_is_refused` (FFI).
-- **Generated files** are never committed: `app/Sources/VizDAWCore/vizdaw_ffi.swift`, `app/Sources/vizdaw_ffiFFI/include/`, `target/ffi/`, `dist/`.
 - **Each task ends green.**
-  - Always: `cargo fmt --all` then `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the Linux clippy, and `cargo test` for the crates the task touches (the whole workspace in Tasks 4, 6 and 10).
+  - Always: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the Linux clippy (`cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu --target-dir target/linux-check -- -D warnings`; CI runs `ubuntu-latest` too, so this plan keeps it although the house rules defer Linux), and `cargo test` for the crates the task touches (the whole workspace in Tasks 1, 4, 6 and 10).
   - Tasks 6–10 also run `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`.
+  - Task 9 also runs the no-brand build (`VIZDAW_NO_BRAND=1 scripts/swift.sh build --scratch-path <a fresh temp dir>`, CI's "App builds without the branded glyphs").
   - Task 10 also runs `scripts/make-app.sh` and the e2e: `VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1`.
-  - Known flaky tests: the `damaged_files` proptest, the MIDI listener tests (`platform-macos/tests/midi.rs`, the reconnect test), `core-ffi` catalog tests under parallel load, and the latency e2e timing. Re-run once before investigating, and say so in the report.
-  - Baseline: the counts plan 5f-3's last task measured. Its writer estimated registry 146, e2e 13 and README through 188. The counts before 5f were Rust 1632 / 14 ignored, Swift 899, e2e 10 and registry 138.
-  - Each task's last step gives the counts it adds. Report the measured counts; a slip in the writer's arithmetic is not a failure.
-- **How code is given.**
-  - New test files are written whole (`cat > … <<'VIZDAW_EOF'`). For new implementation files, the step gives the public items with their doc lines, and the algorithm where the signature and the tests leave a choice.
-  - Changes to existing files are **Find / Replace** excerpts, applied in order with the Edit tool. Each Find occurs exactly once in its file at `f3291d0`, or in the file an earlier task of this plan left (the step says which).
-  - If an excerpt does not match, make the same change to the current text. If a name differs from the tree, use the tree's name and say so in the report.
-- **Spec values used verbatim:**
-  - "an ordered chain of up to 8 `InputFx { kind: InputFxKind, bypass: bool }`";
-  - Arpeggiator:
-    - "mode Up, Down, Up-Down, Down-Up, As Played, Random or Chord";
-    - "rate as a note value from 1/1 to 1/64, straight, dotted or triplet";
-    - "octaves 1–4";
-    - "gate 5–200 %";
-    - "velocity As Played or Fixed (1–127)";
-    - "Latch (held notes keep playing after release until new notes arrive)";
-    - "Sync: to transport bars and beats while playing, and free-running at the project's current tempo when stopped";
-  - "Transpose: ±48 semitones";
-  - "Velocity: scale (0–400 %), offset (±127), clamp minimum and maximum, or Fixed";
-  - "Chord: adds up to 6 notes at given semitone intervals (±48) to each note";
-  - "Input Quantize: grid (the shared snap values) and strength (0–100 %). It moves note starts *only in what is recorded*. Live thru is never delayed";
-  - "up to 32 held notes and 128 sounding notes. Overflow drops the newest note and counts it";
-  - "A changed or bypassed effect first sends note-offs for every note it is sounding, so no note hangs";
-  - "The recorder receives exactly what thru sent to the destination, with Input Quantize then applied to note starts";
-  - "Lanes without an armed or monitored state do not run their chain. Playback of recorded events never passes through input effects";
-  - "An "FX" button on the lane header (lit when the chain is non-empty and not all bypassed) opens a popover: the chain list: add, remove, drag to reorder, bypass; the selected effect's parameters. Settings are undoable lane edits (one step per gesture)".
+  - Known flaky: the `damaged_files` proptest, the MIDI listener tests (`platform-macos/tests/midi.rs`), `core-ffi` catalog tests under parallel load, the latency e2e timing. Re-run once before investigating, and say so in the report.
+  - **Baseline at `a292d2c` (measured 2026-11-09):** Rust 2077 passed / 24 ignored (`cargo test --workspace`), Swift 1286, e2e 20, registry 162, README through 237, file `VERSION` 4. Each task's last step gives the counts it adds; report the measured counts (a slip in the writer's arithmetic is not a failure).
+- **How code is given.** New test files are written whole. New implementation files get their public items with doc lines, and the algorithm where the signature and the tests leave a choice. Changes to existing files are **Find / Replace** excerpts applied in order with the Edit tool; if one does not match, make the same change to the current text and say so in the report.
 
 ## Review Focus
 
 These are the five failure modes a user is most likely to hit that the spec implies but does not spell out, most likely first. Each is pinned by named tests in its task.
 
-1. **A chain that changes while notes sound.** Examples: the user bypasses the arpeggiator mid-phrase, drags a velocity slider while holding a chord, arms a second lane while a latched arpeggio plays, or disarms the lane with keys down.
-   - Expected:
-     - every note the changed chain was sounding ends once, both in thru and in the recording;
-     - a chain whose lane and settings did not change keeps playing (the latched arpeggio goes on);
-     - a note-off for a note the new chain never started is dropped, not sent.
-   - Pinned by `flush_ends_every_sounding_note_once` (Task 2), and by `a_changed_chain_ends_its_notes_and_a_kept_one_plays_on` and `bypassing_while_held_leaves_no_note_hanging` (Task 4).
-2. **Notes pushed out of range or onto each other.** Examples: Transpose +24 on the top octave, Chord intervals that land on a held key, two chord notes on one pitch.
-   - Expected:
-     - a pitch outside 0–127 is dropped, never folded onto 127;
-     - a pitch that two sources reach sounds once and ends only when the last of them ends;
-     - chain order matters exactly where a drop applies.
+1. **A chain that changes while notes sound, or hears half a note.** Examples: the user bypasses the arpeggiator mid-phrase, drags a velocity slider while holding a chord, arms a second track while a latched arpeggio plays, disarms with keys down, or starts a MIDI learn (which takes a note-on but not its note-off) mid-phrase.
+   - Expected: every note the changed chain was sounding ends once, in thru and in the recording; an unchanged chain keeps playing; a note-off for a note the chain never started is dropped; a message a learn takes never reaches a chain.
+   - Pinned by `flush_ends_every_sounding_note_once` (Task 2); `a_changed_chain_ends_its_notes_and_a_kept_one_plays_on` and `bypassing_while_held_leaves_no_note_hanging` (Task 4); `a_learned_message_never_reaches_an_input_chain` (Task 6).
+2. **Notes pushed out of range or onto each other.** Examples: Transpose +24 on the top octave, Chord intervals that land on a held key, two chord notes on one pitch, many sources on one pitch.
+   - Expected: a pitch outside 0–127 is dropped, never folded; a pitch two sources reach sounds once and ends only when the last ends; chain order matters exactly where a drop applies.
    - Pinned by `out_of_range_pitches_are_dropped_not_folded`, `a_pitch_two_sources_reach_sounds_once_and_ends_once` and `chain_order_matters_where_a_drop_applies` (Task 2).
-3. **Arpeggiator timing at the edges.** Examples: a chord pressed in the middle of a step while playing, a stopped transport at another tempo, a locate, a gate over 100 % on a single held note, a triplet rate.
-   - Expected:
-     - synced steps sit on the grid counted from tick 0, the first at the next step;
-     - free-running starts at once and follows the project tempo at the play position;
-     - a long gate ends the note before it is played again;
-     - a locate moves the grid with the transport.
-   - Pinned by `a_synced_arp_waits_for_the_next_step`, `free_running_starts_at_once_at_the_project_tempo`, `a_long_gate_on_one_note_ends_before_it_retriggers`, `a_locate_moves_the_synced_grid` and `rates_include_dotted_and_triplet` (Task 3), and by `arp_steps_follow_the_beat_while_playing` (Task 4).
-4. **Too many notes.** Examples: a forearm on the keyboard (33 keys) into the arpeggiator, or eight 6-note chords chained.
-   - Expected: the newest note past a capacity is dropped and counted; it reaches `state.get input`'s `midi_fx_dropped`. The real-time thread stays bounded, and nothing panics.
-   - Pinned by `the_33rd_held_note_is_dropped_and_counted` (Task 3), `fan_out_is_capped_and_counted` (Task 2), `overflow_reaches_the_counters` (Task 4) and `midi_fx_dropped_is_reported` (Task 6).
-5. **A hostile or damaged chain.** Examples: 9 effects, octaves 5, gate 4 %, a sixth-plus-one chord interval, an interval of 0, two Input Quantize effects, a grid that is not a snap value, malformed JSON on the channel, a damaged project file.
+3. **Arpeggiator timing at the edges.** Examples: a chord pressed mid-step while playing, a stopped transport at another tempo, a locate, a held rewind or fast-forward (7d's winds are repeated jumps), a loop wrap, a gate over 100 % on one note, a triplet rate.
+   - Expected: synced steps sit on the grid counted from tick 0, the first at the next step; a jump re-anchors with no burst and no silence; free-running starts at once at the project tempo; a long gate ends the note before it plays again.
+   - Pinned by `a_synced_arp_waits_for_the_next_step`, `free_running_starts_at_once_at_the_project_tempo`, `a_long_gate_on_one_note_ends_before_it_retriggers`, `a_locate_moves_the_synced_grid`, `a_jump_while_held_neither_bursts_nor_stalls` and `rates_include_dotted_and_triplet` (Task 3); `arp_steps_follow_the_beat_while_playing` (Task 4).
+4. **Too many notes.** Examples: a forearm on the keyboard (33 keys) into the arpeggiator, eight 6-note chords chained.
+   - Expected: the newest note past a capacity is dropped and counted, and reaches `state.get input`'s `midi_fx_dropped`; the real-time thread does bounded work (no millions of dropped leaves per key), and nothing panics.
+   - Pinned by `the_33rd_held_note_is_dropped_and_counted` (Task 3), `fan_out_is_capped_and_counted` and `eight_chained_chords_stop_at_the_cap` (Task 2), `overflow_reaches_the_counters` (Task 4) and `midi_fx_dropped_is_reported` (Task 6).
+5. **A hostile or damaged chain.** Examples: 9 effects, octaves 5, gate 4 %, a seventh chord interval, an interval of 0, two Input Quantize effects, a grid that is not a snap value, malformed or huge JSON on the channel, a damaged project file.
    - Expected: each is refused with a range or invalid error (a file is Corrupt, naming the field), and nothing changes.
    - Pinned by `hostile_chains_are_refused_and_change_nothing` and `a_damaged_chain_in_a_file_is_refused` (Task 1), `hostile_chain_json_is_refused` (Task 6), `input_fx_commands_check_their_params` and `inputFxCommandsCheckTheirArguments` (Task 7).
 
 ## Plan Rulings
 
-Each ruling decides something the spec leaves open, in the format "what — why — cost if wrong".
+Each ruling decides something the spec leaves open: what — why — cost if wrong. Numbers are kept stable (3 is withdrawn) because tests and doc lines cite them.
 
-1. **Ruling (the split): the former §13 row "5g — MIDI input effects and MPE" becomes two plans, run in this order:**
-   - **5g-1**, this plan: input effects, engine and UI.
-   - **5g-2**, MPE input and output (`docs/superpowers/plans/2026-11-02-mpe.md`).
+1. **The split.** The former §13 row "5g — MIDI input effects and MPE" is two plans, in this order: **5g-1** (this plan: input effects, engine and UI) and **5g-2** (MPE input and output, `docs/superpowers/plans/2026-11-02-mpe.md`), which builds on `LiveMsg` and the chain's place in the renderer. — As one plan 5g would be about 19 tasks; each half has its own golden tests, e2e and README steps, and MPE also changes the schedule compiler, the recorder's per-note data and destinations. — One more plan header and final review.
+2. **The MIDI input path's order (owner ruling, binding; supersedes this plan's first draft).**
+   1. Raw MIDI 1.0 bytes from CoreMIDI or `midi.inject` reach `crate::surfaces::takes` first (5f-1 Ruling 17: `host::midi_from_source`, `Session::inject_midi`, and note input in `input.rs`). What it takes — a surface's whole input port, a learnable message (CC, bend, note-on) while a learn waits, and every learned map's messages — never reaches the engine queue, so it never reaches a chain, thru, the recorder, step entry or note input. A learned control writes only its target's automation (5f-1). The rest is queued.
+   2. In the renderer, per listening lane, the message is matched (port and channel), then decoded: `LiveMsg::from_midi1` here, MPE in 5g-2.
+   3. Then the input effect chain runs, then the output stage merges duplicate pitches (Ruling 6).
+   4. Then the output plays thru (encoded as MPE for MPE destinations in 5g-2), and the recorder gets the same messages with the chain's Input Quantize.
 
-   5g-2 builds on 5g-1's `LiveMsg` and the chain's place in the renderer. The writer's commit amends spec §13 with both rows.
-   - Why:
-     - as one plan, 5g would be about 19 tasks;
-     - the effects and MPE are each testable alone, and each has its own golden tests, e2e and README steps;
-     - MPE also changes the schedule compiler, the recorder's per-note data and destinations, which the effects never touch.
-   - Cost if wrong: one more plan header and final review.
-2. **Ruling (the MIDI input path's order).** A message from a source travels in this order:
-   1. Raw MIDI 1.0 bytes from CoreMIDI or `midi.inject` go to the engine's MIDI queue (`host::midi_from_source`, `Session::inject_midi`). At the same time they go to 5f-1's surfaces and MIDI learn (`crate::surfaces::input`), which see them raw: before MPE decoding and before input effects.
-   2. In the renderer, per listening lane, the message is first matched (port, channel, and since this plan not one of a surface's ports). Then it is decoded: MPE in plan 5g-2, `LiveMsg::from_midi1` here.
-   3. Then the input effect chain runs.
-   4. Then the output stage merges duplicate pitches.
-   5. Then the message plays thru (encoded as MPE for MPE destinations in 5g-2), and the recorder gets the same messages with the chain's Input Quantize.
-
-   Learn and learned maps do not consume what they hear. A learned knob's CC also reaches a lane listening on that port; a backlog row records this (Task 10).
-   - Why:
-     - learn maps name what the controller sent (a port, a channel, a CC; spec §4.8), so learn must see raw bytes;
-     - MPE settings belong to a lane's input (5g-2), so decoding is per lane;
-     - Transpose and Chord must move a note's per-note expression with it, so the chain works on decoded per-note events;
-     - consuming a learned message would mean a learn-map lookup on CoreMIDI's input thread before the engine queue. That is a new lock-free structure for a case the spec does not ask for.
-   - Cost if wrong: a learned CC may also play into an armed lane on the same port. The workaround is to give that lane a named port or channel; the backlog row tracks consuming.
-3. **Ruling (surface ports): a lane whose input is "All MIDI Inputs" does not listen to the input ports of the control surfaces in Settings › Surfaces.** `MidiInputSpec` gains `skip_ports: Vec<u32>`, filled by `host::input_spec` from `crate::surfaces::surface_list()` (5f-1 Task 7). A lane naming a surface's port still hears it.
-   - Why: an armed omni lane would otherwise arpeggiate MCU fader pitch bends and HUI pings. A surface is not an instrument.
-   - Cost if wrong: a surface added while such a lane listens is skipped only from the next load (an edit, a Play or an arm).
-4. **Ruling (`LiveMsg`): the chain works on MIDI 2.0-shaped events, not MIDI 1.0 bytes.**
-   - `NoteOn { pitch, velocity: u16, expr: NoteExpr }`, `NoteOff { pitch, velocity: u16 }` and `PerNote { pitch, expr: Expr, value: u32 }`, where `Expr` is `Bend`, `Pressure` or `Timbre`, and `Channel(Midi1Msg)` for everything else.
-   - `from_midi1` maps note-on with velocity > 0 to `NoteOn`, with the velocity up-scaled by the MIDI 2.0 min-center-max rule (the same as `vizdaw_ffi::input::upscale_velocity`). Note-off, and note-on with velocity 0, map to `NoteOff`. Poly pressure maps to `PerNote { Pressure }` (up-scaled to 32 bits). Every other channel message maps to `Channel`.
-   - `to_midi1(ch)` is the inverse, using `midi1`'s down-scaling. `PerNote { Bend | Timbre }` has no MIDI 1.0 form on a non-MPE destination: it answers `None`. (5g-2 counts these drops.)
-   - A note-on with velocity 0 now plays thru as a note-off (`8n`), not `9n … 00`.
-   - Why: MIDI 2.0 throughout (parent spec §1, §5). Transpose and Chord map one pitch field. 5g-2 decodes MPE into the same type.
-   - Cost if wrong: one enum to widen.
-5. **Ruling (a chain change): any change to a lane's chain replaces the whole chain, and the old one first sends note-offs for every note it sounds.** A change is to its order, a setting, a bypass, adding or removing.
+   A learn takes a note-on but not its note-off (`surfaces::learnable`), so a chain can hear an orphan note-off; Ruling 6's merge drops it, and an arpeggiator never holds the note. — Spec §4.8 and the owner's ruling; learn maps name raw controller messages, and MPE settings belong to a lane's input, so decoding is per lane after consumption. — None: consumption already exists and is pinned by 5f-1's `a_learned_cc_is_neither_recorded_nor_played_thru` and `a_learned_cc_writes_its_targets_automation_in_touch` (`crates/core-ffi/tests/learn.rs`); Task 6 adds the chain's half.
+3. **Withdrawn (fold, pre-flight I2).** The first draft's `MidiInputSpec.skip_ports` duplicated 5f-1 Ruling 17, which already keeps every surface port out of every lane before the queue (and the app's input picker hides them through `LaneInputs.claimedPorts`). Nothing in this plan skips ports.
+4. **`LiveMsg`: the chain works on MIDI 2.0-shaped events, not MIDI 1.0 bytes.**
+   - `NoteOn { pitch, velocity: u16, expr: NoteExpr }`, `NoteOff { pitch, velocity: u16 }`, `PerNote { pitch, expr: Expr, value: u32 }` (`Expr` is `Bend`, `Pressure` or `Timbre`) and `Channel(Midi1Msg)` for everything else.
+   - `from_midi1` maps note-on with velocity > 0 to `NoteOn`, up-scaled by the MIDI 2.0 min-center-max rule (as `vizdaw_ffi::input::upscale_velocity`); note-off and note-on with velocity 0 to `NoteOff`; poly pressure to `PerNote { Pressure }` (up-scaled to 32 bits); every other channel message to `Channel`.
+   - `to_midi1(ch)` is the inverse, using `midi1`'s down-scaling. `PerNote { Bend | Timbre }` has no MIDI 1.0 form: `None` (5g-2 counts these drops).
+   - A note-on with velocity 0 now plays thru as a note-off (`8n pp 00`), not `9n pp 00`. No existing test expects `9n pp 00` thru (checked at `a292d2c`: `crates/core-engine/tests/live_input.rs`, `crates/core-ffi/tests/live_input.rs`, `learn.rs`, `input.rs`); `learn.rs::a_waiting_learn_lets_note_offs_through` reads only the pitch.
+   - — MIDI 2.0 throughout (parent spec §1, §5); Transpose and Chord map one pitch field; 5g-2 decodes MPE into the same type. — One enum to widen.
+5. **A chain change replaces the whole chain, and the old one first sends note-offs for every note it sounds.** A change is to its order, a setting, a bypass, adding or removing.
    - Every route change publishes new routes. A new route whose lane, port, channel, destination, thru flag, targets, destination channel and chain settings all equal an old route's takes over the old chain's state (`InputChain::carry_from`, a swap; no allocation). The arm flag may differ. The latch, the held keys, the step and the sounding notes go on.
    - Every other old route is flushed (`InputChain::flush`) to its old targets and to the recorder.
-   - The renderer's blanket "release every thru note" on `SetInputs` now spares the targets of carried routes.
-   - Why:
-     - the spec's "A changed or bypassed effect first sends note-offs for every note it is sounding";
-     - one rule for every change is simpler and safer than per-effect diffs;
-     - carrying keeps a latched arpeggio alive when another lane is armed, which every route change (arming, monitoring, any lane input) would otherwise cut.
-   - Cost if wrong: a velocity tweak while a chord is held ends that chord; the player presses again.
-6. **Ruling (the output stage): the chain's last stage counts note-ons per output pitch.**
-   - A note-on for a pitch already sounding is swallowed. A note-off only goes out when the count reaches 0.
-   - A note-off for a pitch the chain is not sounding is dropped.
-   - This applies to an empty chain too, so an omni lane receiving one pitch from two channels sounds it once.
-   - Why: chords and transposes make duplicate pitches; a destination on one channel cannot tell them apart, and a second note-on followed by one note-off hangs some synths.
-   - Cost if wrong: two quick hits on one pitch from two sources sound as one long note.
-7. **Ruling (capacities).**
+   - The renderer's blanket "release every thru note" on `SetInputs` now spares the targets of carried routes. The carried-target set is a `u64` bit mask, so `render.rs` gains `const _: () = assert!(MAX_TARGETS <= 64);` beside it.
+   - — The spec's "A changed or bypassed effect first sends note-offs"; one rule for every change; carrying keeps a latched arpeggio alive when another track is armed. — A velocity tweak while a chord is held ends that chord; the player presses again.
+6. **The output stage counts note-ons per output pitch.**
+   - A note-on for a pitch already sounding is swallowed; a note-off goes out only when the count reaches 0; a note-off for a pitch the chain is not sounding is dropped. This applies to an empty chain too, so an omni lane hearing one pitch from two channels sounds it once.
+   - Counts are `u8` with `saturating_add`/`saturating_sub`: a pitch reached 255 times or more ends on the last off counted.
+   - Existing tests that send a note-off with no note-on before it and expect thru change: `crates/core-ffi/tests/learn.rs::a_waiting_learn_lets_note_offs_through` injects `90 3c 64` and `90 3e 64` before `learn_target`, so its offs end notes the lane did start (Task 6). Any other the compiler or a run names gets the same treatment, reported.
+   - — Chords and transposes make duplicate pitches; a destination on one channel cannot tell them apart, and a second note-on then one note-off hangs some synths. — Two quick hits on one pitch from two sources sound as one long note.
+7. **Capacities and bounded work.**
    - Each arpeggiator holds at most `MAX_HELD = 32` notes and sounds at most `MAX_SOUNDING = 128`.
-   - One input event, or one arpeggiator step, yields at most `MAX_FANOUT = 128` outputs through the rest of the chain.
-   - The newest note past a capacity is dropped and counted (`InputChain::take_dropped`, summed into `Counters.midi_fx_dropped`). A dropped note-on's later note-off is dropped too.
-   - The other effects (Transpose, Velocity, Chord, Input Quantize) are stateless: they recompute a note-off from their fixed settings, so they need no note table.
-   - Why: the spec's capacities. The fan-out cap bounds eight chained 6-note chords (7^8 notes) on the real-time thread.
-   - Cost if wrong: a cap to raise.
-8. **Ruling (pitch range): a note moved outside 0–127, together with its note-off and its per-note messages, is dropped, never clamped or folded.**
-   - Transpose then Chord therefore differs from Chord then Transpose near the ends of the range. This is spec §12.3's "chain order matters … where clamps apply". The Velocity clamps are the other case.
-   - Why: folding stacks unrelated notes on 0 or 127.
-   - Cost if wrong: a pitch near the edge disappears instead of sounding an octave off.
-9. **Ruling (arpeggiator patterns), with held notes `h` (sorted by pitch, or in press order for As Played) and octaves `o`:**
-   - The pattern `P` is `h` played in each of `o` octaves, lowest first (pitches over 127 dropped):
-     - **Up** is `P`. **Down** is `P` reversed.
-     - **Up-Down** is `P` then `P` reversed without its ends (C E G E, …). **Down-Up** is its mirror.
-     - **As Played** is `P` in press order, octave by octave.
-     - **Random** draws `P[x % len]` each step from a 32-bit xorshift (`x ^= x << 13; x ^= x >> 17; x ^= x << 5`) seeded `0x2545_F491` when the chain is made.
-     - **Chord** plays all of `P` at each step.
-   - The step index survives added or released notes. It restarts at 0 when the held set empties.
-   - Why: public, conventional arpeggiator behaviour. The ends are not repeated so Up-Down has no doubled top or bottom note. The seed makes Random testable.
-   - Cost if wrong: one function per mode.
-10. **Ruling (arpeggiator time).**
-    - **Rate.** A note value is `4 × PPQ / division` ticks, with division 1, 2, 4, 8, 16, 32 or 64. Dotted multiplies by 3/2, triplet by 2/3. At PPQ 15 360 every rate is a whole number of ticks; the shortest is 1/64 triplet, 640 ticks.
-    - **Synced (transport playing).** Steps fall on the multiples of the step counted from tick 0. Their frames come from the schedule's `TempoTable::tick_to_frame`, so tempo changes and ramps are followed. The first step after a press is the next step at or after it: a chord pressed mid-step waits for the next step.
-    - **Free-running (stopped, including a count-in).** The first step plays at once. Following steps come every `step × 60 × rate ÷ (bpm × PPQ)` frames, with the bpm the schedule's at the play position (120 without a schedule).
-    - **Gate.** The note-off comes `gate %` of the step after its note-on. When the same pitch is due again while it still sounds (gate ≥ 100 %), its note-off is sent first, on the same frame.
-    - **Latch.** While latched, releasing keys keeps the held set. The first key pressed when no key is down starts a new set.
+   - One input event, or one arpeggiator step, sends at most `MAX_FANOUT = 128` messages into the merge (the leaves of the stage recursion; the merge may then swallow duplicates). The budget also bounds work: `run` returns at once when the budget is 0, and a stage stops its loop over outputs when it is spent, so eight chained 6-note chords visit at most `MAX_INPUT_FX × 7 × MAX_FANOUT` stages per event, not 7^8 leaves. A note-off fans out along the same leaves as its note-on, so every note the cap let start also ends.
+   - `dropped` counts one per input event or step that the cap truncated (note-offs included), plus each note dropped for `MAX_HELD` or `MAX_SOUNDING` (`InputChain::take_dropped`, summed into `Counters.midi_fx_dropped`). A dropped note-on's later note-off is dropped too (Ruling 6).
+   - Transpose, Velocity, Chord and Input Quantize are stateless: they recompute a note-off from their fixed settings.
+   - — The spec's capacities; the render thread must not spend a block on dropped leaves. — A cap to raise.
+8. **Pitch range: a note moved outside 0–127, with its note-off and its per-note messages, is dropped, never clamped or folded.** Transpose then Chord therefore differs from Chord then Transpose near the ends (spec §12.3's "chain order matters … where clamps apply"); the Velocity clamps are the other case. — Folding stacks unrelated notes on 0 or 127. — A pitch near the edge disappears instead of sounding an octave off.
+9. **Arpeggiator patterns**, with held notes `h` (sorted by pitch, or in press order for As Played) and octaves `o`:
+   - The pattern `P` is `h` played in each of `o` octaves, lowest first (pitches over 127 dropped). **Up** is `P`; **Down** is `P` reversed; **Up-Down** is `P` then `P` reversed without its ends (C E G E, …); **Down-Up** is its mirror; **As Played** is `P` in press order, octave by octave; **Random** draws `P[x % len]` each step from a 32-bit xorshift (`x ^= x << 13; x ^= x >> 17; x ^= x << 5`) seeded `0x2545_F491` when the chain is made; **Chord** plays all of `P` at each step.
+   - The step index survives added or released notes and restarts at 0 when the held set empties. Per-note messages of held notes are dropped; channel messages pass at once.
+   - — Conventional public arpeggiator behaviour; no doubled ends; a testable seed. — One function per mode.
+10. **Arpeggiator time.**
+    - **Rate.** A note value is `4 × PPQ / division` ticks, division 1, 2, 4, 8, 16, 32 or 64; dotted × 3/2, triplet × 2/3. At PPQ 15 360 every rate is whole ticks; the shortest is 1/64 triplet, 640 ticks.
+    - **Synced (transport playing).** Steps fall on the multiples of the step counted from tick 0; their frames come from the schedule's `TempoTable::tick_to_frame`, so tempo changes and ramps are followed. Each block, the next synced step is the first grid multiple at or after the block's first tick (`frame_to_tick(transport.1)`): steps before the block are never played. A discontinuity — a locate, a wind (7d's held rewind and fast-forward are repeated jumps), a loop wrap — therefore re-anchors with no catch-up burst and no silence. A chord pressed mid-step waits for the next step.
+    - **Free-running (stopped, including a count-in, which leaves the transport stopped).** The first step plays at once; then one every `step × 60 × rate ÷ (bpm × PPQ)` frames, at the schedule's bpm at the play position (120 without a schedule). When Play starts mid-hold the next step moves to the grid; when the transport stops mid-hold, free-running goes on one step after the last step played, or at once if that is already past.
+    - **Frames.** Steps are placed in render frames (`transport.pos`, the block's position); generated outputs reach the recorder at their block offset plus `record_lead` (Ruling 11), so the latency is taken off exactly once.
+    - **Gate.** The note-off comes `gate %` of the step after its note-on. When a pitch is due again while it still sounds (gate ≥ 100 %), its note-off goes first, on the same frame.
+    - **Latch.** While latched, releasing keys keeps the held set; the first key pressed when none is down starts a new set.
     - **Velocity.** As Played uses each held note's velocity; Fixed uses `up7(v)`.
-    - **Clock reads.** The arpeggiator reads the clock once per block: a loop wrap inside a block moves the steps after the wrap by up to one block.
-    - Why: spec §6.8's Sync; the grid counted from tick 0 matches play quantize (4e Ruling 10). Integer ticks with the tempo table give sample-exact steps, which the golden tests need.
-    - Cost if wrong: a whole-note rate in an odd meter drifts from the barline (the grid is counted in quarter notes, not bars), and a step right after a loop wrap is late by at most one block.
-11. **Ruling (what the recorder hears).** The recorder receives each output as `RecordTap::midi(lane, offset, msg, quantize)`:
-    - **Input-driven output** keeps the input's offset: the run frame heard when it arrived (spec §6.3).
-    - **Generated output** (arpeggiator steps and gate ends) gets its block offset plus the graph latency (`ChainClock.record_lead`). It is then placed on the timeline frame it was rendered at, which is where it sounds against the playback.
-
-    `RecordedMidi` gains `msg: LiveMsg` (replacing `Midi1Msg`) and `quantize: Option<RecordQuantize>`, the chain's Input Quantize when the message was produced.
-    - Why: "the recorder receives exactly what thru sent". A generated note is not late input, so the latency compensation that places input must not move it.
-    - Cost if wrong: arpeggiated recordings sit one graph latency early; the e2e checks they are on the grid.
-12. **Ruling (Input Quantize).**
-    - A chain holds at most one Input Quantize (refused otherwise).
-    - Its place in the chain does not matter: it never changes thru, and it applies to the chain's recorded output.
-    - The grid is one of the shared snap values from 1/2 to 1/32, straight, dotted or triplet: 15 values (`core_model::input_fx::input_quantize_grids`). Snap's "Bar" is excluded because its length follows the meter. The grid is counted from tick 0, as `QuantizeSpec::apply` counts it.
-    - `passes` moves each recorded note's start by `QuantizeSpec::grid(grid, strength).apply` and keeps its length; its per-note offsets move with it. Controllers never move.
-    - Why: "Input Quantize then applied to note starts". Keeping the length keeps a quantized phrase's articulation.
-    - Cost if wrong: a note's end moves with its start, up to half a grid.
-13. **Ruling (where the chain runs).** The chain runs in `Renderer::live_midi`, once per block, before the graph renders:
-    1. queued input through `process`;
-    2. then `tick` for every route, so arpeggiators step and end gates with no input;
-    3. then thru, at the output's block offset, with `Out.ns_per_frame` set from the rate so external MIDI is timed inside the block (it was 0, since every thru went out at offset 0).
-
-    A lane's route exists only while it is armed or monitored Input (unchanged, `host::input_spec`). Playback never meets the chain.
-    - Why: §6.8's "sample-accurate and synced".
-    - Cost if wrong: a step to a plugin instrument in a block that automation splits into runs may land one run late. The offline log and MIDI destinations are exact.
-14. **Ruling (the model's shapes).**
-    - `InputFxKind` is externally tagged, snake_case: `{"arpeggiator": {...}}`, `{"transpose": {"semitones": 12}}`, `{"velocity": {...}}`, `{"chord": {"intervals": [4, 7]}}`, `{"input_quantize": {"grid": 3840, "strength": 100}}`.
-    - `InputFx` is `{"kind": …, "bypass": true}`, with `bypass` absent when false.
-    - The same JSON is `lane.set_input_fx`'s `chain` parameter and `state.get document`'s per-lane `input_fx`.
-    - Defaults:
-      - Arpeggiator: Up, 1/16 straight, 1 octave, gate 50 %, velocity As Played, Latch off;
-      - Transpose: +12;
-      - Velocity: scale 100 %, offset 0, min 1, max 127, not Fixed;
-      - Chord: [4, 7];
-      - Input Quantize: 1/16 at 100 %.
-    - Chord intervals must be distinct and not 0, at most 6, each ±48.
-    - Velocity's offset is in 7-bit steps, `min ≤ max`, both 1–127. The result is computed on 16 bits: `clamp(v × scale ÷ 100 + offset × 512, up7(min), up7(max))`, or `up7(fixed)`.
-    - Why: one JSON shape everywhere, read and written by serde.
-    - Cost if wrong: a JSON shape to migrate before release.
-15. **Ruling (undo and recording).**
-    - `LaneCmd::SetInputFx` is one undo step named "Set Input Effects".
-    - A popover gesture (a slider drag, a stepper press, a drag to reorder, an add) is one call.
-    - Chain edits are allowed while recording. They do not change which lanes record, so 5d-1 Ruling 18's guard does not apply. The change is heard at once (Ruling 5).
-    - Why: spec §6.8, "one step per gesture"; changing the arpeggiator rate mid-take is a performance move.
-    - Cost if wrong: one line in `retries_input_cmd`.
-16. **Ruling (the FX button and popover).**
-    - `HeaderControl.fx` is an 18 × 18 toggle labelled "FX", at x 92 in the header's top row; the name field narrows from 101 to 80 points. It is lit (system purple) when the chain has an effect that is not bypassed.
-    - A click opens an `NSPopover` from the button. Its content is a SwiftUI `InputFxPopover` that the app installs through the hook `LaneHeaderView.fxPopoverContent`, since `VizDAWEditors` has no SwiftUI.
-    - The popover shows:
-      - the chain list, with drag to reorder, a bypass checkbox and remove per row, and an Add menu of the five kinds;
-      - under it, the selected effect's controls.
-    - Why: §6.9's FX button. Keeping AppKit in the header and SwiftUI in the app follows the existing layering.
-    - Cost if wrong: a layout change.
-17. **Ruling (counters).**
-    - `Counters` gains `midi_fx_dropped`.
-    - `InputInfoRow` gains `midi_fx_dropped`, and `state.get input` reports it as `"midi_fx_dropped"`.
-    - Why: §6.8's "counts it" needs a place to be read; `state.get input` is the live-input report.
-    - Cost if wrong: a field to move.
+    - — Spec §6.8's Sync; the tick-0 grid matches play quantize (4e Ruling 10); integer ticks with the tempo table are sample-exact. — A whole-note rate in an odd meter drifts from the barline (the grid is in quarter notes, not bars).
+11. **What the recorder hears.** Each output reaches `RecordTap::midi(lane, offset, msg, quantize)`: input-driven output keeps the input's offset (the run frame heard when it arrived, spec §6.3); generated output (steps, gate ends) gets its block offset plus the graph latency (`ChainClock.record_lead`), placing it where it sounds against playback. `RecordedMidi` gains `msg: LiveMsg` (replacing `Midi1Msg`) and `quantize: Option<RecordQuantize>`. Thru and the recorder get the same post-merge, post-cap messages; they differ only where thru cannot play (Monitor Off records but plays nothing; `to_midi1` answering `None` drops on thru only; an unroutable destination still records). — "The recorder receives exactly what thru sent"; a generated note is not late input. — Arpeggiated recordings one graph latency early; the e2e checks the grid.
+12. **Input Quantize.** At most one per chain (refused otherwise); its place does not matter: it never changes thru and applies to the chain's recorded output. The grid is a shared snap value from 1/2 to 1/32, straight, dotted or triplet: 15 values (`input_quantize_grids`); Snap's "Bar" is excluded. The grid is counted from tick 0 as `QuantizeSpec::apply` counts it: these are the snap *values*, not the editor's bar-relative placement (`app/Sources/VizDAWAppModel/Snap.swift`), so in 3/4 a 1/2 grid differs from Snap's. `passes` moves each recorded note's start by `QuantizeSpec::grid(grid, strength).apply` and keeps its length; controllers never move. — "Input Quantize then applied to note starts"; the length keeps the articulation. — A note's end moves with its start, up to half a grid.
+13. **Where the chain runs.** In `Renderer::live_midi`, once per block, before the graph renders: queued input through `process`; then `tick` for every route (steps and gate ends with no input); then thru at the output's block offset, with `Out.ns_per_frame` set from the rate so external MIDI is timed inside the block (it was 0). A lane's route exists only while it is armed or monitored Input (`host::input_spec`, unchanged). Playback never meets the chain, and neither does a bounce: `core_engine::bounce` builds no input routes (spec §6.8, "Playback … never passes through input effects"). Step entry and note input hear the raw input after `surfaces::takes` (`crates/core-ffi/src/input.rs`), not the chain's output: never wire the chain into them. — §6.8's "sample-accurate and synced". — A step to a plugin instrument in a block that automation splits into runs may land one run late.
+14. **The model's shapes.**
+    - `InputFxKind` is externally tagged, snake_case: `{"arpeggiator": {...}}`, `{"transpose": {"semitones": 12}}`, `{"velocity": {...}}`, `{"chord": {"intervals": [4, 7]}}`, `{"input_quantize": {"grid": 3840, "strength": 100}}`. `InputFx` is `{"kind": …, "bypass": true}`, `bypass` absent when false. The same JSON is `lane.set_input_fx`'s `chain` and `state.get document`'s per-lane `input_fx`.
+    - Defaults: Arpeggiator Up, 1/16 straight, 1 octave, gate 50 %, velocity As Played, Latch off; Transpose +12; Velocity scale 100 %, offset 0, min 1, max 127, not Fixed; Chord [4, 7]; Input Quantize 1/16 at 100 %.
+    - Chord intervals are distinct, not 0, at most 6, each ±48. Velocity's offset is in 7-bit steps, `min ≤ max`, both 1–127; the result is computed on 16 bits: `clamp(v × scale ÷ 100 + offset × 512, up7(min), up7(max))`, or `up7(fixed)`.
+    - `input_fx_from_json` refuses text over 64 KiB, but the channel already caps a text parameter at `MAX_STRING = 4096` bytes (`crates/core-control/src/params.rs`); a full 8-effect chain is about 1.6 KB, so the channel's cap is the one users meet.
+    - Duplicate Track copies the chain (it clones the lane); Same Tracks as copies none, as it copies no input settings.
+    - — One JSON shape everywhere, by serde. — A shape to migrate before release.
+15. **Undo and recording.** `LaneCmd::SetInputFx` is one undo step, "Set Input Effects"; a popover gesture (a slider drag, a stepper press, a drag to reorder, an add) is one call. Chain edits are allowed while recording: they do not change which tracks record, so 5d-1 Ruling 18's guard (`retries_input_cmd`) does not apply, and the change is heard at once (Ruling 5). While recording, the edit joins the take's Record step, as every edit made during a take does (`crates/core-ffi/tests/record.rs`, 5c): one Undo removes the take and the chain change together. — Spec §6.8, "one step per gesture"; changing the rate mid-take is a performance move. — One line in `retries_input_cmd`.
+16. **The FX button and popover.**
+    - `HeaderControl.fx` is an 18 × 18 toggle labelled "FX" at x 92 in the header's top row. Since the Tracks plan the row starts with the 16-pt kind icon at x 8 and the name at `nameX = 8 + 16 + theme.spacing.xs`; the name now ends at x 88 (it ended at 109), leaving the monitor button at x 113.
+    - Lit in the theme's accent (`theme.fxColour`, a new `EditorTheme` role `accent.accent.nsColor`) when the chain has an effect that is not bypassed; unlit as the other toggles. No colour literal: only the theme bridges name colours.
+    - Drawn and clickable on MIDI and instrument tracks only. An audio track's slot is blank and a click there does nothing, as its destination slot does; the model and the channel still accept a chain on such a lane (its kind follows its routing and can change), and it never runs there, since only MIDI inputs get routes.
+    - A click opens an `NSPopover` from the button, through a `@MainActor final class InputFxPopoverController: NSObject, NSPopoverDelegate` modelled on `RecordPopoverController` (`.transient`, `animates = false`), held strongly by the header; its `popoverDidClose` calls `document.inputFx.close()`. The content is a SwiftUI `InputFxPopover` the app installs through the hook `LaneHeaderView.fxPopoverContent`, since `VizDAWEditors` has no SwiftUI.
+    - A control-channel click (`ControlUI.isChannel`) opens the model on the track but no popover, and sets the status line to "Input Effects opens a popover: use lane.set_input_fx over the control channel." (as the "+ Add Track" row does).
+    - The track's context menu (`laneMenu`) gains "Input Effects…", which opens the same popover from the FX button's rect, so keyboard and VoiceOver users reach it. VoiceOver's header label (`ArrangementA11y.header`) gains ", input effects on" when lit.
+    - The popover shows the chain list (drag to reorder, a bypass checkbox and remove per row, an Add menu of the five kinds) and, under it, the selected effect's controls.
+    - — §6.9's FX button; AppKit in the header and SwiftUI in the app follow the layering; the accent is "active toggles" in the design tokens. — A layout change; a 60-pt name truncates long track names sooner.
+17. **Counters.** `Counters` gains `midi_fx_dropped`; `InputInfoRow` gains `midi_fx_dropped`, which `state.get input` reports as `"midi_fx_dropped"`. — §6.8's "counts it" needs a place to be read. — A field to move.
+18. **File format 5 (pre-flight I1, ledger ruling).** `core_model::file::VERSION` goes 4 → 5 with `migrate_v4_to_v5`, the identity ("lanes gain an optional `input_fx`"), following 7b Ruling 8: a pre-5g build then refuses a project with a chain with its `NewerFormat` message rather than an unknown-field Corrupt. `Lane.input_fx` stays `#[serde(default, skip_serializing_if = "Vector::is_empty")]`, so a version-4 project opens with empty chains and a project without chains differs from before only in its version. — The ledger's ruling, 7b's precedent. — None beyond one migration step.
 
 ## Carried items
 
-- No carry from 5f names input effects.
-- The 5c hook `core_engine::input::InputChain` (an empty pass-through) is replaced by `core_engine::input_fx::InputChain` in Task 4.
-- 5c's `MidiRoute.chain` stays the field's name.
-- `docs/feature-backlog.md` gains two rows in Task 10:
-  - "Learned controls are not consumed" (Ruling 2);
-  - "A pre-5g build names a project with input effects Corrupt".
+- No carry from 5f, SP7 or Tracks names input effects. 5f-1's consumption (Ruling 2) is relied on, not changed.
+- The 5c hook `core_engine::input::InputChain` (an empty pass-through) is replaced by `core_engine::input_fx::InputChain` in Task 4; 5c's `MidiRoute.chain` keeps its name.
+- `docs/feature-backlog.md` gains no rows: the first draft's two (learned controls not consumed; a pre-5g build calling a chain Corrupt) are void under Rulings 2 and 18.
+- Task 10 amends spec §13's 5g-1 row (README 238–244; the surface-port clause delivered by 5f-1) and 5g-2's README numbers (245–250).
 
 ## File map
 
 | File | Task | Role |
 |---|---|---|
-| `crates/core-model/src/input_fx.rs`, `src/lane.rs`, `src/command/lane.rs`, `src/rules.rs`, `src/lib.rs`, `tests/input_fx.rs` | 1 | the model |
-| `crates/core-engine/src/input_fx/mod.rs`, `src/lib.rs`, `tests/input_fx.rs` | 2 | `LiveMsg`, the chain, the stateless effects, the merge |
-| `crates/core-engine/src/input_fx/arp.rs`, `tests/input_fx_arp.rs` | 3 | the arpeggiator |
-| `crates/core-engine/src/input.rs`, `src/engine.rs`, `src/render.rs`, `src/record.rs`, `tests/input_fx_live.rs`, `tests/rt_alloc_input_fx.rs`, `tests/live_input.rs`, `tests/record_tap.rs`, `tests/rt_alloc_record.rs` | 4 | the chain in the renderer and the recorder |
+| `crates/core-model/src/input_fx.rs`, `src/lane.rs`, `src/command/lane.rs`, `src/rules.rs`, `src/lib.rs`, `src/file.rs`, `tests/input_fx.rs`, `tests/file.rs`, `tests/learn.rs`, `fixtures/demo.vizdaw/project.json` | 1 | the model, format 5 |
+| `crates/core-engine/src/input_fx/mod.rs`, `src/input_fx/arp.rs` (stub), `src/lib.rs`, `tests/input_fx.rs` | 2 | `LiveMsg`, the chain, the stateless effects, the merge, the cap |
+| `crates/core-engine/src/input_fx/arp.rs`, `src/input_fx/mod.rs`, `tests/input_fx_arp.rs` | 3 | the arpeggiator |
+| `crates/core-engine/src/input.rs`, `src/engine.rs`, `src/render.rs`, `src/record.rs`, `tests/input_fx_live.rs`, `tests/rt_alloc_input_fx.rs`, `tests/live_input.rs`, `tests/record_tap.rs`, `tests/rt_alloc_record.rs`; `crates/core-ffi/src/host.rs`, `src/passes.rs`, `tests/passes.rs` (stop-gaps); `.github/workflows/ci.yml` | 4 | the chain in the renderer and the recorder |
 | `crates/core-ffi/src/passes.rs`, `tests/passes.rs` | 5 | recording `LiveMsg`, Input Quantize |
-| `crates/core-ffi/src/input_fx.rs`, `src/lib.rs`, `src/edit.rs`, `src/snapshot.rs`, `src/host.rs`, `src/live.rs`, `src/session.rs`, `tests/input_fx.rs`, `tests/record.rs` | 6 | the FFI |
+| `crates/core-ffi/src/input_fx.rs`, `src/lib.rs`, `src/edit.rs`, `src/snapshot.rs`, `src/host.rs`, `src/live.rs`, `src/session.rs`, `tests/input_fx.rs`, `tests/record.rs`, `tests/learn.rs`, `tests/control.rs` | 6 | the FFI |
 | `crates/core-control/src/registry.rs`, `tests/commands.rs`, `crates/core-ffi/src/control.rs`, `tests/control.rs`, `app/Sources/VizDAWAppModel/InputFxCommands.swift`, `ControlCommands.swift`, `app/Tests/VizDAWAppModelTests/InputFxCommandsTests.swift` | 7 | the channel |
 | `app/Sources/VizDAWAppModel/InputFxModel.swift`, `DocumentModel.swift`, `app/Tests/VizDAWAppModelTests/InputFxModelTests.swift` | 8 | the popover's model |
-| `app/Sources/VizDAWEditors/ArrangementLayout.swift`, `LaneHeaderView.swift`, `app/Sources/VizDAW/InputFxPopover.swift`, `DocumentWindow.swift`, `app/Tests/VizDAWAppModelTests/LaneHeaderInputTests.swift`, `app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift` | 9 | the FX button and popover |
-| `crates/vizctl/tests/e2e.rs`, `app/README.md`, `docs/feature-backlog.md` | 10 | e2e, README 189–195, backlog |
+| `app/Sources/VizDAWEditors/ArrangementLayout.swift`, `LaneHeaderView.swift`, `EditorTheme.swift`, `InputFxPopoverController.swift`, `app/Sources/VizDAW/InputFxPopover.swift`, `VizDAWApp.swift`, `app/Tests/VizDAWAppModelTests/LaneHeaderInputTests.swift`, `app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift` | 9 | the FX button and popover |
+| `crates/vizctl/tests/e2e.rs`, `app/README.md`, `docs/superpowers/specs/2026-10-18-recording-audio-design.md` | 10 | e2e, README 238–244, the spec row |
 
 ---
 
@@ -360,7 +212,8 @@ Each ruling decides something the spec leaves open, in the format "what — why 
 
 **Files:**
 - Create: `crates/core-model/src/input_fx.rs`
-- Modify: `crates/core-model/src/lib.rs`, `crates/core-model/src/lane.rs`, `crates/core-model/src/command/lane.rs`, `crates/core-model/src/rules.rs`
+- Modify: `crates/core-model/src/lib.rs`, `crates/core-model/src/lane.rs`, `crates/core-model/src/command/lane.rs`, `crates/core-model/src/rules.rs`, `crates/core-model/src/file.rs` (format 5, Ruling 18)
+- Modify (existing version pins): `crates/core-model/tests/file.rs`, `crates/core-model/tests/learn.rs`; regenerate `fixtures/demo.vizdaw/project.json`
 - Test: create `crates/core-model/tests/input_fx.rs`
 
 **Interfaces:**
@@ -428,12 +281,11 @@ Each ruling decides something the spec leaves open, in the format "what — why 
   - `Lane.input_fx: im::Vector<InputFx>`, with `#[serde(default, skip_serializing_if = "Vector::is_empty")]`, empty in `Lane::new`.
   - `LaneCmd::SetInputFx { seq: SeqId, lane: LaneId, chain: Vec<InputFx> }`, named "Set Input Effects". It runs `check_chain` and replaces the lane's chain.
   - `rules.rs` checks every lane's chain when a file loads, so a damaged chain makes the file Corrupt with the field named.
+  - `core_model::file::VERSION == 5`, and `pub fn migrate_v4_to_v5(v: Value) -> Result<Value>` (the identity), last in `MIGRATIONS`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 cat > crates/core-model/tests/input_fx.rs <<'VIZDAW_EOF'
 //! MIDI input effects in the model (plan 5g-1 Task 1; sub-project 5 spec
 //! §4.5, §6.8; Rulings 12, 14, 15): a lane's chain of up to 8 effects is
@@ -442,7 +294,7 @@ cat > crates/core-model/tests/input_fx.rs <<'VIZDAW_EOF'
 use core_model::ModelError;
 use core_model::command::{Command, LaneCmd, SequenceCmd, apply};
 use core_model::document::Document;
-use core_model::file::{VERSION, from_json, to_json};
+use core_model::file::{VERSION, from_json, migrate_v4_to_v5, to_json};
 use core_model::history::History;
 use core_model::ids::{LaneId, SeqId};
 use core_model::input_fx::{
@@ -611,7 +463,48 @@ fn files_write_a_chain_only_when_set_and_read_it_back() {
         ])
     );
     assert_eq!(from_json(&text).unwrap(), d2);
-    assert_eq!(VERSION, 3);
+    assert_eq!(VERSION, 5);
+}
+
+/// Ruling 18: a version-4 project opens with empty chains; the step is the
+/// identity.
+#[test]
+fn a_version_4_project_opens_with_empty_chains() {
+    let d = doc();
+    let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    assert_eq!(v["version"], json!(5));
+    v["version"] = json!(4);
+    let back = from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(back, d);
+    assert!(back.lane(SeqId(0), LaneId(0)).unwrap().input_fx.is_empty());
+    assert!(to_json(&back).unwrap().contains("\"version\": 5"));
+    assert_eq!(migrate_v4_to_v5(v.clone()).unwrap(), v);
+}
+
+/// Ruling 18: a version-5 file with a chain reads back in this build, and
+/// a newer version is refused by its number, not as Corrupt.
+#[test]
+fn a_version_5_file_with_a_chain_reads_back_and_a_newer_one_names_its_version() {
+    let d = apply(&doc(), &set(vec![transpose(7)])).unwrap().doc;
+    let text = to_json(&d).unwrap();
+    assert!(text.contains("\"version\": 5"));
+    assert_eq!(from_json(&text).unwrap(), d);
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    v["version"] = json!(6);
+    assert!(matches!(
+        from_json(&serde_json::to_string(&v).unwrap()),
+        Err(ModelError::NewerFormat { found: 6 })
+    ));
+}
+
+/// Ruling 14: Duplicate Track clones the lane, chain included.
+#[test]
+fn duplicate_track_copies_the_chain() {
+    let d = apply(&doc(), &set(vec![transpose(7)])).unwrap().doc;
+    let d = apply(&d, &Command::Lane(LaneCmd::Duplicate { seq: SeqId(0), lane: LaneId(0) })).unwrap().doc;
+    let lanes = &d.sequence(SeqId(0)).unwrap().lanes;
+    assert_eq!(lanes.len(), 2);
+    assert_eq!(lanes[1].input_fx, lanes[0].input_fx);
 }
 
 #[test]
@@ -709,11 +602,11 @@ VIZDAW_EOF
 
    Find:
    ```rust
-               LaneCmd::SetMonitor { .. } => "Set Lane Monitor",
+               LaneCmd::SetMonitor { .. } => "Set Track Monitor",
    ```
    Replace:
    ```rust
-               LaneCmd::SetMonitor { .. } => "Set Lane Monitor",
+               LaneCmd::SetMonitor { .. } => "Set Track Monitor",
                LaneCmd::SetInputFx { .. } => "Set Input Effects",
    ```
 
@@ -750,17 +643,21 @@ VIZDAW_EOF
                push(crate::input_fx::check_chain(&l.input_fx), &lctx);
    ```
 
-   Any `match` over `LaneCmd` elsewhere in the workspace that does not compile gets the new arm. These are `edit.rs`'s `retries_input_cmd`, which uses `matches!` and so needs nothing, and any exhaustive match the compiler names. Chain edits never retry the input (Ruling 15).
+   Any `match` over `LaneCmd` elsewhere in the workspace that does not compile gets the new arm (`edit.rs`'s `retries_input_cmd` uses `matches!` and needs nothing; chain edits never retry the input, Ruling 15).
 
-- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p core-model`, both clippies and `cargo fmt --all -- --check`. Expected: core-model +6.
+   **Format 5 (Ruling 18)**, following 7b's `migrate_v3_to_v4`:
+   - `crates/core-model/src/file.rs`: `VERSION` 4 → 5; the module doc's `"version": 4` → 5; add `pub fn migrate_v4_to_v5(v: Value) -> Result<Value> { Ok(v) }` above `migrate_v3_to_v4`, documented "Version 4 → 5 (plan 5g-1 Ruling 18): lanes gain an optional `input_fx`, and a lane without one has an empty chain, so the document is unchanged. The bump makes an older build refuse a version-5 project with its `NewerFormat` message rather than an unknown-field error."; `MIGRATIONS` ends `migrate_v3_to_v4, migrate_v4_to_v5]`.
+   - `crates/core-model/tests/file.rs::version_3_projects_migrate_to_version_4`: `assert_eq!(VERSION, 4);` becomes `assert!(VERSION >= 4);`, and `.contains("\"version\": 4")` becomes `.contains(&format!("\"version\": {VERSION}"))`.
+   - `crates/core-model/tests/learn.rs:209`: `assert_eq!(core_model::file::VERSION, 4);` becomes 5, its comment gaining "; version 5 is plan 5g-1's input effects (Ruling 18)".
+   - Regenerate the demo fixture: `cargo run -p vizdaw-play -- --write-demo fixtures/demo.vizdaw`. `git diff --stat fixtures/` shows only `project.json` (its `"version": 5`), and `cargo test -p vizdaw-play` passes (`checked_in_demo_matches_a_fresh_build`).
+
+- [ ] **Step 4: Run the tests and the gates.** Run `cargo test --workspace` (the version pins live in several crates' fixtures), both clippies and `cargo fmt --all -- --check`. Expected: core-model +9.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
-git add crates/core-model/src/input_fx.rs crates/core-model/src/lib.rs crates/core-model/src/lane.rs crates/core-model/src/command/lane.rs crates/core-model/src/rules.rs crates/core-model/tests/input_fx.rs
-git commit -m "core-model: MIDI input effect chains on lanes, one undoable edit (plan 5g-1 Task 1)
+git add crates/core-model/src/input_fx.rs crates/core-model/src/lib.rs crates/core-model/src/lane.rs crates/core-model/src/command/lane.rs crates/core-model/src/rules.rs crates/core-model/src/file.rs crates/core-model/tests/input_fx.rs crates/core-model/tests/file.rs crates/core-model/tests/learn.rs fixtures/demo.vizdaw/project.json
+git commit -m "core-model: MIDI input effect chains on lanes, one undoable edit; file format 5 (plan 5g-1 Task 1)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
@@ -843,8 +740,11 @@ git log -1 --oneline && git show --stat HEAD
       pub fn carry_from(&mut self, old: &mut InputChain);
       /// The first Input Quantize that is not bypassed. // RT
       pub fn quantize(&self) -> Option<RecordQuantize>;
-      /// Notes dropped for capacity since the last call. // RT
+      /// Notes dropped for capacity since the last call (Ruling 7). // RT
       pub fn take_dropped(&mut self) -> u64;
+      /// Stage calls since the last call: the work bound's probe (Ruling 7). // RT
+      #[doc(hidden)]
+      pub fn take_visits(&mut self) -> u64;
   }
   impl Default for InputChain   // the empty chain
   impl Clone for InputChain     // config cloned, fresh state (control thread)
@@ -853,21 +753,19 @@ git log -1 --oneline && git show --stat HEAD
   impl std::fmt::Debug for InputChain // config only
   ```
 - Algorithm (the stages, which no signature determines):
-  - `InputChain::new` builds one `Stage` per non-bypassed effect except Input Quantize: `Transpose(i8)`, `Velocity(VelocityFx)`, `Chord([i8; 6], u8)` or `Arp(Box<ArpState>)`. It also builds the merge (`[u8; 128]` counts), a chain-local frame counter and the dropped counter.
+  - `InputChain::new` builds one `Stage` per non-bypassed effect except Input Quantize: `Transpose(i8)`, `Velocity(VelocityFx)`, `Chord([i8; 6], u8)` or `Arp(Box<ArpState>)`. It also builds the merge (`[u8; 128]` counts, `saturating_add`/`saturating_sub`, Ruling 6), a chain-local frame counter, and the dropped and visit counters.
   - `process` runs `run(stages, msg, at)`. A stage maps the message and calls `run(rest, …)` once per output:
     - Transpose maps `pitch()` by `with_pitch`; Chord emits the original, then each interval;
     - a pitch outside 0–127 is dropped (Ruling 8);
     - Velocity changes `NoteOn` velocities only (Ruling 14).
 
-    At the end of the stages, the merge applies Ruling 6, then calls `out`. Every call to `out` takes one from a budget of `MAX_FANOUT`; past it, outputs are dropped and counted.
+    Every `run` call adds one visit. At the end of the stages a message is a leaf: it takes one from a budget of `MAX_FANOUT`, and the merge applies Ruling 6, then calls `out`. When a leaf finds the budget at 0, the event is truncated: `dropped` gains 1 (once per event), and from then on `run` returns at once and every stage's loop over its outputs breaks (Ruling 7).
   - `tick(clock)` gives each Arp stage `i` the clock and an emitter that runs `run(stages[i+1..], …)`. Each step gets a fresh fan-out budget. After the stages, the frame counter advances by `clock.frames`.
   - `PerNote` messages pass Transpose and Chord like notes and pass Velocity unchanged. `Channel` messages pass every stage unchanged.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 cat > crates/core-engine/tests/input_fx.rs <<'VIZDAW_EOF'
 //! The input effect chain's stateless effects and its output stage (plan
 //! 5g-1 Task 2; spec §6.8, §12.3; Rulings 4–8, 12).
@@ -1034,6 +932,11 @@ fn a_pitch_two_sources_reach_sounds_once_and_ends_once() {
     );
     // An off for a note the chain never started is dropped (Ruling 6).
     assert!(feed(&mut c, &[off_(50)]).is_empty());
+    // Counts saturate at 255: many hits end on the last off counted.
+    let mut c = InputChain::default();
+    let mut many = vec![on_(60, 100); 300];
+    many.extend(vec![off_(60); 300]);
+    assert_eq!(feed(&mut c, &many), vec!["on 60 v100", "off 60"]);
 }
 
 #[test]
@@ -1059,8 +962,23 @@ fn fan_out_is_capped_and_counted() {
     let mut c = chain(vec![six.clone(), six.clone(), six.clone(), six]);
     let got = feed(&mut c, &[on_(30, 100)]);
     assert!(got.len() <= MAX_FANOUT, "{}", got.len());
-    assert!(c.take_dropped() > 0);
+    assert_eq!(c.take_dropped(), 1, "one truncated event");
     assert_eq!(c.take_dropped(), 0, "taken once");
+}
+
+/// Ruling 7: the cap bounds the work, not only the outputs. 7^8 leaves are
+/// never visited; the note-off ends exactly the notes the cap let start.
+#[test]
+fn eight_chained_chords_stop_at_the_cap() {
+    let mut c = chain(vec![chord(&[1, 2, 3, 4, 5, 6]); 8]);
+    let got = feed(&mut c, &[on_(30, 100)]);
+    assert!(!got.is_empty() && got.len() <= MAX_FANOUT, "{}", got.len());
+    assert_eq!(c.take_dropped(), 1);
+    let visits = c.take_visits();
+    assert!(visits <= (8 * 7 * MAX_FANOUT) as u64, "{visits} stage visits");
+    let offs = feed(&mut c, &[off_(30)]);
+    assert_eq!(offs.len(), got.len(), "every note it started ends: {offs:?}");
+    assert!(offs.iter().all(|t| t.starts_with("off ")));
 }
 
 #[test]
@@ -1106,13 +1024,11 @@ VIZDAW_EOF
    pub mod input_fx;
    ```
 
-- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p core-engine --test input_fx`, both clippies and fmt. Expected: core-engine +13.
+- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p core-engine --test input_fx`, both clippies and fmt. Expected: core-engine +14.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 git add crates/core-engine/src/input_fx/mod.rs crates/core-engine/src/input_fx/arp.rs crates/core-engine/src/lib.rs crates/core-engine/tests/input_fx.rs
 git commit -m "core-engine: live MIDI events and the input effect chain: transpose, velocity, chord, merge (plan 5g-1 Task 2)
 
@@ -1150,14 +1066,12 @@ git log -1 --oneline && git show --stat HEAD
   - `input` forwards `Channel` messages through `emit` at once and drops `PerNote` messages for held notes (Ruling 9's arpeggiator drops per-note expression).
   - A `NoteOn` past 32 held is dropped and counted.
   - `tick` merges pending gate ends and steps in time order. At equal offsets, offs go before ons.
-  - Steps follow Rulings 9 and 10. Synced step frames come from `tick_to_frame(k × step)` against `transport.1`. Free-running steps come from the step's frames at `clock.bpm`.
+  - Steps follow Rulings 9 and 10. Synced steps are not stored: each block plays the grid lines `k × step` whose `tick_to_frame` falls in `[transport.1, transport.1 + frames)`, so a jump re-anchors with no catch-up (Ruling 10). Free-running steps come from the step's frames at `clock.bpm`, kept as the next free-running frame on the chain's counter.
   - Generated outputs carry `At { block: k, record: k as i64 + clock.record_lead }`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 cat > crates/core-engine/tests/input_fx_arp.rs <<'VIZDAW_EOF'
 //! Arpeggiator golden tests (plan 5g-1 Task 3; spec §6.8, §12.3;
 //! Rulings 9–11): every mode, rates with dotted and triplet, octaves,
@@ -1316,6 +1230,22 @@ fn a_locate_moves_the_synced_grid() {
     assert_eq!(o, vec![(2000, 60), (8000, 60)]);
 }
 
+/// Ruling 10: a locate, a wind or a loop wrap while keys are held
+/// re-anchors the grid: no burst of missed steps, no silence.
+#[test]
+fn a_jump_while_held_neither_bursts_nor_stalls() {
+    let frames = |o: Vec<(u64, u8)>| o.into_iter().map(|(f, _)| f).collect::<Vec<_>>();
+    let mut c = arp(|_| {});
+    let o = ons(&run(&mut c, &press(0, &[60, 64]), 23_000, true, 0));
+    assert_eq!(frames(o), vec![0, 6000, 12_000, 18_000]);
+    // Back to schedule frame 5000: the next sixteenth is 1000 frames in.
+    let back = ons(&run(&mut c, &[], 12_000, true, 5000));
+    assert_eq!(frames(back), vec![1000, 7000]);
+    // Forward 50 steps and a half: nothing at offset 0, then the grid.
+    let fwd = ons(&run(&mut c, &[], 12_000, true, 50 * 6000 + 3000));
+    assert_eq!(frames(fwd), vec![3000, 9000]);
+}
+
 #[test]
 fn free_running_starts_at_once_at_the_project_tempo() {
     let mut c = arp(|_| {});
@@ -1401,13 +1331,11 @@ VIZDAW_EOF
 
 - [ ] **Step 3: Implement `ArpState`** with the Interfaces above. Then wire the Arp stage in `mod.rs`: `process` → `input`, `tick` → `tick`, `flush` → `flush`, and `carry_from` swaps its box. The latch test's expected pitches: the steps at 0, 6000, 12 000, 18 000 and 24 000 play 60, 64, 60, 64, 60. 67 is pressed at 24 100 with no key down, so it starts a new set, and its first step is the next one. The steps at 30 000, 36 000 and 42 000 (the last block runs to 42 240) play 67 three times. If the tree's block arithmetic gives one step more or fewer at the end, check the script against Ruling 10 and correct the expectation, and say so in the report.
 
-- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p core-engine --test input_fx --test input_fx_arp`, both clippies and fmt. Expected: core-engine +13.
+- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p core-engine --test input_fx --test input_fx_arp`, both clippies and fmt. Expected: core-engine +14.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 git add crates/core-engine/src/input_fx/arp.rs crates/core-engine/src/input_fx/mod.rs crates/core-engine/tests/input_fx_arp.rs
 git commit -m "core-engine: the arpeggiator, synced and free-running (plan 5g-1 Task 3)
 
@@ -1423,14 +1351,15 @@ git log -1 --oneline && git show --stat HEAD
 **Files:**
 - Modify: `crates/core-engine/src/input.rs`, `crates/core-engine/src/engine.rs`, `crates/core-engine/src/render.rs`, `crates/core-engine/src/record.rs`
 - Modify (existing tests): `crates/core-engine/tests/live_input.rs`, `tests/record_tap.rs`, `tests/rt_alloc_record.rs`
+- Modify (stop-gaps so the workspace builds): `crates/core-ffi/src/host.rs`, `crates/core-ffi/src/passes.rs`, `crates/core-ffi/tests/passes.rs`
+- Modify: `.github/workflows/ci.yml` (the rt-check step runs the new test)
 - Test: create `crates/core-engine/tests/input_fx_live.rs` and `crates/core-engine/tests/rt_alloc_input_fx.rs`
 
 **Interfaces:**
 - Consumes: Tasks 2–3's `InputChain`, `ChainClock`, `At`, `LiveMsg`, `RecordQuantize`.
 - Produces:
-  - `MidiInputSpec` gains `pub fx: Vec<core_model::input_fx::InputFx>` (the lane's chain) and `pub skip_ports: Vec<u32>` (Ruling 3).
-  - `MidiRoute.chain: core_engine::input_fx::InputChain`. The old `core_engine::input::InputChain` is removed.
-  - `MidiRoute::matches` skips `skip_ports` when `spec.port` is `None`.
+  - `MidiInputSpec` gains `pub fx: Vec<core_model::input_fx::InputFx>` (the lane's chain).
+  - `MidiRoute.chain: core_engine::input_fx::InputChain`. The old `core_engine::input::InputChain` is removed. `MidiRoute::matches` is unchanged (Ruling 3).
   - `pub fn carries(&self, old: &MidiRoute) -> bool` (Ruling 5).
   - `RecordedMidi { lane, run, msg: LiveMsg, quantize: Option<RecordQuantize> }`.
   - `RecordTap::midi(&mut self, lane: LaneId, offset: i64, msg: LiveMsg, quantize: Option<RecordQuantize>)` — `// RT`.
@@ -1440,12 +1369,10 @@ git log -1 --oneline && git show --stat HEAD
 - [ ] **Step 1: Write the failing tests**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 cat > crates/core-engine/tests/input_fx_live.rs <<'VIZDAW_EOF'
 //! The input effect chain in the renderer (plan 5g-1 Task 4; spec §6.6,
-//! §6.8, §12.3; Rulings 2, 3, 5, 10, 11, 13): thru plays the chain's
-//! output, arpeggiator steps land on their frames stopped and playing,
+//! §6.8, §12.3; Rulings 5, 10–13): thru plays the chain's output at once
+//! (Input Quantize never delays it), arpeggiator steps land on their frames stopped and playing,
 //! the recorder hears what thru played, a changed chain ends its notes
 //! while an unchanged one plays on, and overflow is counted. Offline
 //! backend and sinks only.
@@ -1461,6 +1388,7 @@ use core_engine::record::RecordRequest;
 use core_model::document::Document;
 use core_model::ids::{DestId, LaneId, SeqId};
 use core_model::input_fx::{Arp, ArpMode, InputFx, InputFxKind};
+use core_model::time::Tick;
 
 const SR: f64 = 48_000.0;
 
@@ -1492,7 +1420,6 @@ fn spec(d: &Doc, lane: LaneId, port: &str, fx: Vec<InputFx>, armed: bool) -> Mid
         thru: true,
         armed,
         fx,
-        skip_ports: Vec::new(),
     }
 }
 
@@ -1533,7 +1460,10 @@ fn ons(log: &EventLog) -> Vec<(u64, u8)> {
 #[test]
 fn thru_plays_the_chains_output() {
     let d = doc();
-    let fx = vec![InputFx::new(InputFxKind::Transpose { semitones: 12 })];
+    let fx = vec![
+        InputFx::new(InputFxKind::Transpose { semitones: 12 }),
+        InputFx::new(InputFxKind::InputQuantize { grid: Tick(Q / 4), strength: 100 }),
+    ];
     let (engine, mut b, log) = start(&d, vec![spec(&d, d.keys, "Keys", fx, false)]);
     b.run_frames(512);
     log.drain();
@@ -1642,21 +1572,6 @@ fn bypassing_while_held_leaves_no_note_hanging() {
 }
 
 #[test]
-fn surface_ports_are_skipped_by_every_source_lanes() {
-    let d = doc();
-    let mut s = spec(&d, d.keys, "Keys", vec![], false);
-    s.port = None;
-    s.skip_ports = vec![port_key("MCU In")];
-    let (engine, mut b, log) = start(&d, vec![s]);
-    b.run_frames(256);
-    log.drain();
-    send(&engine, "MCU In", [0x90, 0x5E, 0x7F]);
-    send(&engine, "Keys", [0x90, 61, 100]);
-    b.run_frames(256);
-    assert_eq!(ons(&log), vec![(256, 61)]);
-}
-
-#[test]
 fn overflow_reaches_the_counters() {
     let d = doc();
     let (engine, mut b, _log) = start(&d, vec![spec(&d, d.keys, "Keys", vec![arp(|_| {})], false)]);
@@ -1722,7 +1637,7 @@ fn the_input_chain_never_allocates() {
     };
     let lane = |lane, port: &str, fx| MidiInputSpec {
         lane, port: Some(port_key(port)), channel: None, dest: Some(synth),
-        thru: true, armed: true, fx, skip_ports: Vec::new(),
+        thru: true, armed: true, fx,
     };
     let sinks = OfflineSinks::new(1 << 20).with_tone();
     let log = sinks.log();
@@ -1774,7 +1689,6 @@ fn the_input_chain_never_allocates() {
 }
 ```
 
-If `OfflineBackend::reserve` or `Builder::notes`' tuple differs in the tree, follow `rt_alloc_record.rs`'s current calls and say so in the report.
 
 - [ ] **Step 2: Run them to see them fail** with `cargo test -p core-engine --test input_fx_live` and `cargo test -p core-engine --features rt-check --test rt_alloc_input_fx`. Expected: FAIL to compile, because `MidiInputSpec` has no `fx`.
 
@@ -1812,9 +1726,6 @@ If `OfflineBackend::reserve` or `Builder::notes`' tuple differs in the tree, fol
        pub armed: bool,
        /// The lane's input effect chain (spec §6.8; plan 5g-1).
        pub fx: Vec<core_model::input_fx::InputFx>,
-       /// Sources an every-source lane does not hear: control surfaces'
-       /// input ports (plan 5g-1 Ruling 3).
-       pub skip_ports: Vec<u32>,
    }
    ```
 
@@ -1831,20 +1742,8 @@ If `OfflineBackend::reserve` or `Builder::notes`' tuple differs in the tree, fol
    }
    ```
 
-   Find:
+   In `impl MidiRoute`, after `matches`, add:
    ```rust
-           self.spec.port.is_none_or(|p| p == ev.port) && self.spec.channel.is_none_or(|c| c == ch)
-       }
-   ```
-   Replace:
-   ```rust
-           let port = match self.spec.port {
-               Some(p) => p == ev.port,
-               None => !self.spec.skip_ports.contains(&ev.port),
-           };
-           port && self.spec.channel.is_none_or(|c| c == ch)
-       }
-
        /// Whether this new route takes over `old`'s chain state (plan 5g-1
        /// Ruling 5): the same lane, source, channel, destination, thru,
        /// targets and chain; the arm may differ. // RT
@@ -2004,6 +1903,8 @@ If `OfflineBackend::reserve` or `Builder::notes`' tuple differs in the tree, fol
                        late_ns,
                        base: 0,
                    };
+                   // Carried targets as bits (Ruling 5).
+                   const _: () = assert!(MAX_TARGETS <= 64);
                    let mut kept: u64 = 0;
                    let mut tap = self.tap.as_deref_mut();
                    if let Some(old) = self.inputs.as_deref_mut() {
@@ -2045,25 +1946,24 @@ If `OfflineBackend::reserve` or `Builder::notes`' tuple differs in the tree, fol
    If the borrow checker refuses `&mut self.thru` inside the closure while `o` borrows `self.sinks`, split the borrows as `live_midi` does (`let thru = &mut self.thru;` before the loop). Fix `use` lines, removing `on_channel` and `Midi1Msg` if they are unused.
 
    Update the existing tests:
-   - The 7 `MidiInputSpec { … }` literals (6 in `tests/live_input.rs`, 1 in `tests/rt_alloc_record.rs`) gain `fx: Vec::new(), skip_ports: Vec::new(),`.
+   - Every `MidiInputSpec { … }` literal the compiler names gains `fx: Vec::new(),` (at `a292d2c`: five in `tests/live_input.rs`, at :72, :204, :389, :593 and :658). The one in `tests/rt_alloc_record.rs` (:119) gains `fx: vec![InputFx::new(InputFxKind::Transpose { semitones: 12 })],` instead (importing `core_model::input_fx::{InputFx, InputFxKind}`), so the record tap's allocation test runs `LiveMsg` through a real chain.
    - In `tests/live_input.rs`:
      - `m.msg.bytes[1]` (twice) becomes `m.msg.pitch().unwrap_or(0)`;
      - `assert_eq!(got[0].msg, note(true, 60));` becomes `assert_eq!(got[0].msg, LiveMsg::from_midi1(note(true, 60)));`, importing `core_engine::input_fx::LiveMsg`.
    - In `tests/record_tap.rs`, `t.midi(lane, k, msg(n))` becomes `t.midi(lane, k, LiveMsg::from_midi1(msg(n)), None)`, and `m.msg.bytes[1]` becomes `m.msg.pitch().unwrap_or(0)`.
-   - A live-input test that expected `9n pp 00` thru for a velocity-0 note-on now expects `8n pp 00` (Ruling 4). Say which, if any, in the report.
+   - No existing test expects `9n pp 00` thru for a velocity-0 note-on (Ruling 4); if a run shows one, it now expects `8n pp 00`, reported.
+   - In `.github/workflows/ci.yml`, the "Real-time allocation tests (rt-check)" step's command ends `--test rt_alloc_bounce --test rt_alloc_input_fx`.
 
 - [ ] **Step 4: Run the tests and the gates.**
    - Run `cargo test --workspace`, both clippies and fmt.
-   - Run the rt-check gates: `cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings` and `cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures --test rt_alloc_input_fx`.
-   - `core-ffi` will not compile yet where it builds `MidiInputSpec` or reads `RecordedMidi.msg`. Add `fx: Vec::new(), skip_ports: Vec::new()` in `host::input_spec` (Task 6 fills them). Tasks 5–6 also change `passes.rs`; until Task 5 it maps `m.msg` with a temporary `match` that keeps the old behaviour. Note in the report that Task 5 replaces that `match`.
-   - Expected: core-engine +9.
+   - Run the rt-check gate (Global Constraints), `rt_alloc_bounce` and `rt_alloc_input_fx` included.
+   - `core-ffi` will not compile yet where it builds `MidiInputSpec` or `RecordedMidi`. Stop-gaps, each replaced later: `fx: Vec::new()` in `host::input_spec` (Task 6 fills it); in `src/passes.rs`, a temporary `match` on `m.msg` that keeps the old behaviour (Task 5 replaces it); in `tests/passes.rs`, `fn midi` (:285) builds `RecordedMidi { lane, run, msg: LiveMsg::from_midi1(msg), quantize: None }`, importing `core_engine::input_fx::LiveMsg` (its only literal).
+   - Expected: core-engine +8.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
-git add crates/core-engine/src/input.rs crates/core-engine/src/engine.rs crates/core-engine/src/render.rs crates/core-engine/src/record.rs crates/core-engine/tests/input_fx_live.rs crates/core-engine/tests/rt_alloc_input_fx.rs crates/core-engine/tests/live_input.rs crates/core-engine/tests/record_tap.rs crates/core-engine/tests/rt_alloc_record.rs crates/core-ffi/src/host.rs crates/core-ffi/src/passes.rs
+git add crates/core-engine/src/input.rs crates/core-engine/src/engine.rs crates/core-engine/src/render.rs crates/core-engine/src/record.rs crates/core-engine/tests/input_fx_live.rs crates/core-engine/tests/rt_alloc_input_fx.rs crates/core-engine/tests/live_input.rs crates/core-engine/tests/record_tap.rs crates/core-engine/tests/rt_alloc_record.rs crates/core-ffi/src/host.rs crates/core-ffi/src/passes.rs crates/core-ffi/tests/passes.rs .github/workflows/ci.yml
 git commit -m "core-engine: input effect chains run in the renderer, feed thru and the recorder, carry across route changes (plan 5g-1 Task 4)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -2091,9 +1991,7 @@ git log -1 --oneline && git show --stat HEAD
   - Controllers never move.
 
 - [ ] **Step 1: Write the failing tests.**
-   - In `crates/core-ffi/tests/passes.rs`, import `core_engine::input_fx::{LiveMsg, RecordQuantize}`.
-   - Change `fn midi(…)` to build `RecordedMidi { lane, run, msg: LiveMsg::from_midi1(msg), quantize: None }`, and the file's other `RecordedMidi { … }` literal the same way.
-   - Then append:
+   - In `crates/core-ffi/tests/passes.rs` (whose `fn midi` Task 4 already changed), widen the import to `core_engine::input_fx::{LiveMsg, RecordQuantize}`, then append:
 
 ```rust
 fn midi_q(lane: LaneId, run: i64, msg: Midi1Msg, grid: i64, strength: u8) -> RecordedMidi {
@@ -2160,19 +2058,15 @@ fn poly_pressure_records_as_poly_pressure() {
 }
 ```
 
-   If `Case::new(&d, 0)`'s default `end_run` (4 beats) or the file's `on`/`off` helpers differ, use the file's names and say so in the report.
-
-- [ ] **Step 2: Run them to see them fail** with `cargo test -p vizdaw-ffi --test passes`. Expected: the two new tests FAIL: the quantize is ignored, and poly pressure through Task 4's temporary `match` records as nothing.
+- [ ] **Step 2: Run them to see them fail** with `cargo test -p core-ffi --test passes`. Expected: the two new tests FAIL: the quantize is ignored, and poly pressure through Task 4's temporary `match` records as nothing.
 
 - [ ] **Step 3: Implement** the Interfaces in `passes.rs`. The note body's velocity and release velocity are the `LiveMsg`'s 16-bit values; there is no up-scaling, since `from_midi1` already up-scaled them. Remove Task 4's temporary `match`.
 
-- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p vizdaw-ffi --test passes --test record`, both clippies and fmt. The existing MIDI pass tests still pass, with the same velocities. Expected: core-ffi +2.
+- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p core-ffi --test passes --test record`, both clippies and fmt. The existing MIDI pass tests still pass, with the same velocities. Expected: core-ffi +2.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 git add crates/core-ffi/src/passes.rs crates/core-ffi/tests/passes.rs
 git commit -m "core-ffi: passes record the chain's live events; Input Quantize moves recorded starts only (plan 5g-1 Task 5)
 
@@ -2188,10 +2082,10 @@ git log -1 --oneline && git show --stat HEAD
 **Files:**
 - Create: `crates/core-ffi/src/input_fx.rs`
 - Modify: `crates/core-ffi/src/lib.rs` (`pub mod input_fx;` and re-exports as the crate does for its other rows), `crates/core-ffi/src/edit.rs` (`LaneEdit::SetInputFx`, `lane_cmd`), `crates/core-ffi/src/snapshot.rs` (`LaneRow.input_fx`), `crates/core-ffi/src/host.rs` (`input_spec`, `pub fn counters(owner: u64) -> Option<core_engine::render::Counters>`), `crates/core-ffi/src/live.rs` (`InputInfoRow.midi_fx_dropped`), `crates/core-ffi/src/session.rs` (`input_info` fills it)
-- Test: create `crates/core-ffi/tests/input_fx.rs`; modify `crates/core-ffi/tests/record.rs`
+- Test: create `crates/core-ffi/tests/input_fx.rs`; modify `crates/core-ffi/tests/record.rs`, `crates/core-ffi/tests/learn.rs`, `crates/core-ffi/tests/control.rs` (its `InputInfoRow` literal only)
 
 **Interfaces:**
-- Consumes: Task 1's model, Task 4's `MidiInputSpec.fx`/`skip_ports` and `Counters.midi_fx_dropped`, 5f-1's `crate::surfaces::surface_list() -> Vec<SurfaceRow>` (its `input` port names).
+- Consumes: Task 1's model, Task 4's `MidiInputSpec.fx` and `Counters.midi_fx_dropped`; 5f-1's consumption (`crate::surfaces::takes`, unchanged).
 - Produces (`vizdaw_ffi::input_fx`):
   ```rust
   #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)] pub enum ArpModeRow { Up, Down, UpDown, DownUp, AsPlayed, Random, Chord }
@@ -2214,13 +2108,11 @@ git log -1 --oneline && git show --stat HEAD
   - `LaneEdit::SetInputFx { seq: u64, lane: u64, chain: Vec<InputFxRow> }` maps to `LaneCmd::SetInputFx`.
   - `LaneRow.input_fx: Vec<InputFxRow>` is `#[uniffi(default)]`.
   - `InputInfoRow.midi_fx_dropped: u64` is `#[uniffi(default)]`, from `host::counters(id)`.
-  - `host::input_spec` fills `fx: l.input_fx.iter().cloned().collect()` and `skip_ports`, the `port_key`s of `crate::surfaces::surface_list()`'s `input` names (Ruling 3).
+  - `host::input_spec` fills `fx: l.input_fx.iter().cloned().collect()`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 cat > crates/core-ffi/tests/input_fx.rs <<'VIZDAW_EOF'
 //! Input effects through a session (plan 5g-1 Task 6; spec §6.8, §12.1):
 //! the chain is one undoable lane edit shown in the lane rows; the
@@ -2440,9 +2332,90 @@ fn an_arpeggiated_chord_is_recorded_as_thru_played_it() {
 }
 ```
 
-   If `EventRow`'s duration field has another name in the tree (for example `length`), use it and say so in the report.
+   Append to the same file (Ruling 15):
 
-- [ ] **Step 2: Run them to see them fail** with `cargo test -p vizdaw-ffi --test input_fx --test record`. Expected: FAIL to compile, because `vizdaw_ffi::input_fx` is not found.
+```rust
+/// Plan 5g-1 Ruling 15: a chain edit made while recording joins the
+/// take's Record step, as every edit made during a take does.
+#[test]
+fn a_chain_edit_while_recording_joins_the_record_step() {
+    use vizdaw_ffi::input_fx::{InputFxKindRow, InputFxRow};
+    use vizdaw_ffi::{EditCommand, LaneEdit};
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(2, true, false);
+    let s = untitled(&g, d.doc.clone());
+    let before = s.lanes(d.seq.0).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick >= Q);
+    assert!(s.inject_midi("Keys".into(), vec![0x90, 60, 100]).unwrap());
+    let chain = vec![InputFxRow { kind: InputFxKindRow::Transpose { semitones: 12 }, bypass: false }];
+    s.edit(EditCommand::Lane { edit: LaneEdit::SetInputFx { seq: d.seq.0, lane: d.keys.0, chain } }, None)
+        .unwrap();
+    assert!(s.inject_midi("Keys".into(), vec![0x80, 60, 0]).unwrap());
+    wait_until("beat 2", || s.transport().unwrap().tick >= 2 * Q);
+    s.stop().unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Record"));
+    s.undo().unwrap();
+    assert_eq!(s.lanes(d.seq.0).unwrap(), before, "one Undo removes the take and the chain");
+    s.close().unwrap();
+}
+```
+
+   Then, in `crates/core-ffi/tests/learn.rs` (it has `serial`, `song`, `synth_fader`, `wait_until` and imports `cancel_learn`), append Ruling 2's chain half:
+
+```rust
+/// Plan 5g-1 Ruling 2 (the owner's rule): what a learn takes never reaches
+/// an input chain. A waiting learn takes a note-on but not its note-off:
+/// the chain hears only the orphan off, which its merge drops, so the
+/// arpeggiator never holds the note. After the learn, a note plays.
+#[test]
+fn a_learned_message_never_reaches_an_input_chain() {
+    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+    use vizdaw_ffi::input_fx::{ArpModeRow, FeelRow, InputFxKindRow, InputFxRow};
+    use vizdaw_ffi::{EditCommand, LaneEdit, LaneInputRow};
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let seq = song(&s);
+    let chords = s.lanes(seq).unwrap().into_iter().find(|l| l.name == "Chords").unwrap().id;
+    let edit = |e: LaneEdit| s.edit(EditCommand::Lane { edit: e }, None).unwrap();
+    edit(LaneEdit::SetInput { seq, lane: chords, input: Some(LaneInputRow::Midi { port: None, channel: None }) });
+    let row = |kind| InputFxRow { kind, bypass: false };
+    let arp = InputFxKindRow::Arpeggiator {
+        mode: ArpModeRow::Up, division: 16, feel: FeelRow::Straight, octaves: 1, gate: 50, velocity: None, latch: false,
+    };
+    edit(LaneEdit::SetInputFx {
+        seq,
+        lane: chords,
+        chain: vec![row(InputFxKindRow::Chord { intervals: vec![4, 7] }), row(arp)],
+    });
+    edit(LaneEdit::SetFlags { seq, lane: chords, mute: None, solo: None, arm: Some(true) });
+    s.play(seq).unwrap();
+    wait_until("the engine", || s.transport().unwrap().playing);
+    s.stop().unwrap();
+    s.learn_target(synth_fader(&s)).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    drain_offline_log();
+    debug_midi_from_source("Keys", 0, &[0x90, 60, 100]);
+    debug_midi_from_source("Keys", 0, &[0x80, 60, 0]);
+    cancel_learn();
+    debug_midi_from_source("Keys", 0, &[0x90, 62, 100]);
+    let is_note = |b: &Vec<u8>| b.first().is_some_and(|x| matches!(x & 0xF0, 0x80 | 0x90));
+    let mut log = Vec::new();
+    wait_until("the free-running arpeggio's first step", || {
+        log.extend(drain_offline_log());
+        log.iter().any(|(_, b): &(u64, Vec<u8>)| is_note(b) && b.get(1) == Some(&62))
+    });
+    assert!(
+        !log.iter().any(|(_, b)| is_note(b) && b.get(1).is_some_and(|p| [60, 64, 67].contains(p))),
+        "the taken note-on reached the chain: {log:?}"
+    );
+}
+```
+
+   And change `a_waiting_learn_lets_note_offs_through` (Ruling 6: a chain drops an off it never started): before its `s.learn_target(…)`, inject `debug_midi_from_source("Keys", 0, &[0x90, 60, 100])` and `&[0x90, 62, 100]`, then `wait_until` their thru is in `drain_offline_log()`; its closing `wait_until` then looks for note-off statuses (`b[0] & 0xF0 == 0x80`, which `90 3e 00` now plays as, Ruling 4) on 60 and 62. Its doc line gains "(plan 5g-1: the offs end notes the lane started)".
+
+- [ ] **Step 2: Run them to see them fail** with `cargo test -p core-ffi --test input_fx --test record --test learn`. Expected: FAIL to compile, because `vizdaw_ffi::input_fx` is not found.
 
 - [ ] **Step 3: Implement.**
    - **`input_fx.rs`:** implement the Interfaces. `input_fx_from_json` refuses text over 65 536 bytes. It parses `Vec<core_model::input_fx::InputFx>` with serde and converts it to rows; a serde error becomes `VizError::Model { message }`. The range checks happen at the edit (the model), so the JSON reader stays a parser.
@@ -2477,14 +2450,14 @@ fn an_arpeggiated_chord_is_recorded_as_thru_played_it() {
 
      Find:
      ```rust
-         /// When its input is heard (plan 5c).
-         pub monitor: crate::edit::MonitorModeRow,
+         #[uniffi(default)]
+         pub audio_out_name: Option<String>,
      }
      ```
      Replace:
      ```rust
-         /// When its input is heard (plan 5c).
-         pub monitor: crate::edit::MonitorModeRow,
+         #[uniffi(default)]
+         pub audio_out_name: Option<String>,
          /// Its MIDI input effect chain (plan 5g-1).
          #[uniffi(default)]
          pub input_fx: Vec<crate::input_fx::InputFxRow>,
@@ -2493,29 +2466,25 @@ fn an_arpeggiated_chord_is_recorded_as_thru_played_it() {
 
      Find:
      ```rust
-                 monitor: l.monitor.into(),
-             }
+                     .and_then(|o| doc.outputs().get(&o).map(|p| p.name.clone())),
      ```
      Replace:
      ```rust
-                 monitor: l.monitor.into(),
+                     .and_then(|o| doc.outputs().get(&o).map(|p| p.name.clone())),
                  input_fx: l.input_fx.iter().map(Into::into).collect(),
-             }
      ```
-   - **`host.rs` `input_spec`:** the `MidiInputSpec { … armed: l.arm, }` push gains `fx: l.input_fx.iter().cloned().collect(), skip_ports: skip.clone(),`. Compute `skip` once before the loop as `crate::surfaces::surface_list().iter().map(|s| port_key(&s.input)).collect::<Vec<u32>>()`. `host::counters(owner)` follows `input_levels(owner)`: the owner's engine `counters()`, or `None`.
-   - **`live.rs` and `session.rs`:** `InputInfoRow` gains `#[uniffi(default)] pub midi_fx_dropped: u64`. Both branches of `Session::input_info` fill it: `host::counters(self.id).map_or(0, |c| c.midi_fx_dropped)`, or 0. Other `InputInfoRow { … }` literals gain `midi_fx_dropped: 0`.
+   - **`host.rs` `input_spec`** (:789): Task 4's `fx: Vec::new()` becomes `fx: l.input_fx.iter().cloned().collect()`. `pub fn counters(owner: u64) -> Option<core_engine::render::Counters>` follows `input_levels(owner)` (:3623): the owner's engine `counters()`, or `None`.
+   - **`live.rs` and `session.rs`:** `InputInfoRow` gains `#[uniffi(default)] pub midi_fx_dropped: u64` after `sample_rate`. Both branches of `Session::input_info` (`session.rs:7765` and `:7776`) fill it: `host::counters(self.id).map_or(0, |c| c.midi_fx_dropped)`, and 0. `tests/control.rs:527`'s literal gains `midi_fx_dropped: 0` (Rust has no `#[uniffi(default)]`); Task 7 extends that file further.
 
 - [ ] **Step 4: Run the tests and the gates.**
    - Run `cargo test --workspace`, both clippies, `cargo clippy -p core-ffi --lib -- -D warnings` and fmt.
    - Then run `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. Swift compiles unchanged: the new fields have defaults, and no Swift `switch` over `LaneEdit` is exhaustive without `default`. If one is, add the case and say so.
-   - Expected: core-ffi +6.
+   - Expected: core-ffi +8.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
-git add crates/core-ffi/src/input_fx.rs crates/core-ffi/src/lib.rs crates/core-ffi/src/edit.rs crates/core-ffi/src/snapshot.rs crates/core-ffi/src/host.rs crates/core-ffi/src/live.rs crates/core-ffi/src/session.rs crates/core-ffi/tests/input_fx.rs crates/core-ffi/tests/record.rs
+git add crates/core-ffi/src/input_fx.rs crates/core-ffi/src/lib.rs crates/core-ffi/src/edit.rs crates/core-ffi/src/snapshot.rs crates/core-ffi/src/host.rs crates/core-ffi/src/live.rs crates/core-ffi/src/session.rs crates/core-ffi/tests/input_fx.rs crates/core-ffi/tests/record.rs crates/core-ffi/tests/learn.rs crates/core-ffi/tests/control.rs
 git commit -m "core-ffi: input effect rows, the lane edit, the chain in the engine's input spec, the dropped-note count (plan 5g-1 Task 6)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -2534,8 +2503,8 @@ git log -1 --oneline && git show --stat HEAD
 **Interfaces:**
 - Consumes: `input_fx_from_json`, `input_fx_json`, `LaneEdit.setInputFx`, `InputInfoRow.midiFxDropped` (Task 6).
 - Produces:
-  - Registry `lane.set_input_fx` (group "Lane", title "Set Input Effects", no key) with params:
-    - `seq` and `lane` (`id_param`);
+  - Registry `lane.set_input_fx` (group "Track", title "Set Input Effects", no key; the other `lane.*` commands' group since the Tracks plan) with params:
+    - `id_param("seq", "The track's sequence.")` and `id_param("lane", "The track.")`, as `SET_INPUT_PARAMS` spells them (`core-control/tests/names.rs` refuses "lane" in help text);
     - `chain`: `ParamKind::Text`, required, help "The effect chain as JSON, first effect first: [{\"kind\": {\"transpose\": {\"semitones\": 12}}}, …]; [] clears it.".
   - `state.get document`'s lane objects gain `"input_fx": input_fx_json(&l.input_fx)`; `state.get input` gains `"midi_fx_dropped"`.
   - Swift `InputFxCommands`:
@@ -2552,7 +2521,7 @@ git log -1 --oneline && git show --stat HEAD
 
 - [ ] **Step 1: Write the failing tests.**
    - In `crates/core-control/tests/commands.rs`:
-     - the registry count assertion moves to its end-of-5f-3 value + 1, with the message gaining "; 5g-1 adds lane.set_input_fx";
+     - the registry count assertion (`tests/commands.rs:533`) moves from 162 to 163, its message gaining "; 5g-1 adds lane.set_input_fx";
      - add:
 
 ```rust
@@ -2587,7 +2556,9 @@ fn input_fx_commands_check_their_params() {
 }
 ```
 
-   - In `crates/core-ffi/tests/control.rs`, extend the test that builds a `ControlResult::Document` result (line 621 at `f3291d0`): its first lane gets `input_fx: vec![InputFxRow { kind: InputFxKindRow::Transpose { semitones: 12 }, bypass: false }]`, and the test asserts `v["lanes"][0]["input_fx"] == json!([{"kind": {"transpose": {"semitones": 12}}}])`. The `ControlResult::InputState` result test asserts `"midi_fx_dropped"` is present. If the file has no `InputState` test, add `input_state_reports_midi_fx_dropped`, building one with `midi_fx_dropped: 3` and asserting `v["midi_fx_dropped"] == 3`.
+   - In `crates/core-ffi/tests/control.rs`:
+     - `lanes_show_takes_input_and_monitor` (:597): `lanes[0]` also gets `input_fx: vec![InputFxRow { kind: InputFxKindRow::Transpose { semitones: 12 }, bypass: false }]`, and the test asserts `l[0]["input_fx"] == json!([{"kind": {"transpose": {"semitones": 12}}}])` and `l[1]["input_fx"] == json!([])`;
+     - `record_and_input_results_as_json` (:474): the `InputInfoRow` literal's `midi_fx_dropped: 0` (Task 6) becomes 3, and the test asserts `i["midi_fx_dropped"] == json!(3)`.
    - Create `app/Tests/VizDAWAppModelTests/InputFxCommandsTests.swift`:
 
 ```swift
@@ -2654,14 +2625,14 @@ import VizDAWCore
 }
 ```
 
-   If `FakeSession` names its edit log or error injection differently (`edits`, `editError`), use its names and say so. If it has no edit-error injection, add `var editError: VizError?`, thrown by `edit(cmd:filter:)` when set.
+   `FakeSession.edits` and `editError` (`FakeSession.swift:818-819`), `demoFake()` and `DocumentStore(makeEmpty:makeDemo:open:)` are the tree's, as `AutomationCommandsTests` uses them.
 
-- [ ] **Step 2: Run them to see them fail.** Run `cargo test -p core-control --test commands` and `cargo test -p vizdaw-ffi --test control`; then `scripts/build-ffi.sh` and `scripts/swift.sh test`. Expected: FAIL. The ID is unknown, there are no JSON keys, and `InputFxCommands` is not found.
+- [ ] **Step 2: Run them to see them fail.** Run `cargo test -p core-control --test commands` and `cargo test -p core-ffi --test control`; then `scripts/build-ffi.sh` and `scripts/swift.sh test`. Expected: FAIL. The ID is unknown, there are no JSON keys, and `InputFxCommands` is not found.
 
 - [ ] **Step 3: Implement.**
-   - **The registry:** a `SET_INPUT_FX_PARAMS` constant beside `SET_INPUT_PARAMS`, and a `CommandSpec` after `lane.set_monitor`'s with `key_only(cmd("lane.set_input_fx", "Lane", "Set Input Effects", None, true))`.
+   - **The registry:** a `SET_INPUT_FX_PARAMS` constant beside `SET_INPUT_PARAMS`, and a `CommandSpec` after `lane.set_monitor`'s with `key_only(cmd("lane.set_input_fx", "Track", "Set Input Effects", None, true))`.
    - **`control.rs`:** the two JSON keys.
-   - **`InputFxCommands.swift`:** the interface above. `ids` joins `ControlCommands.handled` (`.union(InputFxCommands.ids)`, appended to the chain 5f left). Dispatch in `run`, beside SynthCommands:
+   - **`InputFxCommands.swift`:** the interface above. `ids` joins `ControlCommands.handled`: its last line `.union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids)` gains `.union(InputFxCommands.ids)`. Dispatch in `run`, beside SynthCommands:
 
      Find:
      ```swift
@@ -2678,13 +2649,11 @@ import VizDAWCore
 
      The chain is parsed with `try inputFxFromJson(text:)`, and the edit applied with `m.apply(try m.session.edit(cmd: .lane(edit: .setInputFx(…)), filter: nil))`.
 
-- [ ] **Step 4: Run the tests and the gates.** Run the Rust tests for `core-control` and `core-ffi`, both clippies, `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. `everyRegisteredMenuCommandHasAHandler` passes. Expected: core-control +1, core-ffi +0 or +1, Swift +2, registry +1.
+- [ ] **Step 4: Run the tests and the gates.** Run the Rust tests for `core-control` and `core-ffi`, both clippies, `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. `everyRegisteredMenuCommandHasAHandler` passes. Expected: core-control +1, core-ffi +0 (two tests extended), Swift +2, registry 163.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 git add crates/core-control/src/registry.rs crates/core-control/tests/commands.rs crates/core-ffi/src/control.rs crates/core-ffi/tests/control.rs app/Sources/VizDAWAppModel/InputFxCommands.swift app/Sources/VizDAWAppModel/ControlCommands.swift app/Tests/VizDAWAppModelTests/InputFxCommandsTests.swift
 git commit -m "control: lane.set_input_fx, input_fx in state.get document, midi_fx_dropped in state.get input (plan 5g-1 Task 7)
 
@@ -2708,6 +2677,9 @@ git log -1 --oneline && git show --stat HEAD
   /// The five kinds, in the Add menu's order.
   public enum InputFxName: String, CaseIterable, Sendable { case arpeggiator, transpose, velocity, chord, inputQuantize }
   @Observable @MainActor public final class InputFxModel {
+      /// Its document, as `LaneInputs` holds it (no retain cycle).
+      @ObservationIgnored public weak var document: DocumentModel?
+      public init(document: DocumentModel)
       /// The lane whose chain the popover shows; nil when closed.
       public private(set) var lane: UInt64?
       /// The selected row.
@@ -2716,9 +2688,13 @@ git log -1 --oneline && git show --stat HEAD
       public private(set) var draft: InputFxKindRow?
       public func open(lane: UInt64)
       public func close()
-      /// The open lane's chain, the draft shown in place of the selected row.
+      /// The open lane's chain, the draft shown in place of the selected row;
+      /// `[]` when the lane is no longer in `document.lanes` (an Undo removed it).
       public var chain: [InputFxRow] { get }
-      nonisolated public static func isLit(_ lane: LaneRow) -> Bool   // non-empty and not all bypassed
+      /// The FX button exists on MIDI and instrument tracks, not audio ones (Ruling 16).
+      nonisolated public static func showsButton(_ lane: LaneRow) -> Bool
+      /// `showsButton`, and the chain has an effect that is not bypassed.
+      nonisolated public static func isLit(_ lane: LaneRow) -> Bool
       nonisolated public static func defaultKind(_ name: InputFxName) -> InputFxKindRow  // Ruling 14's defaults
       nonisolated public static func title(_ kind: InputFxKindRow) -> String  // "Arpeggiator", …, "Input Quantize"
       nonisolated public static func summary(_ kind: InputFxKindRow) -> String // "Up 1/16 · 1 oct · 50%", "+12", "×120% +0", "+4 +7", "1/16 · 100%"
@@ -2734,14 +2710,13 @@ git log -1 --oneline && git show --stat HEAD
       public func commitDraft()                     // released: one edit if it changed
   }
   ```
-  - Every edit is `document.editor.edit(.lane(edit: .setInputFx(seq:lane:chain:)))` on the selected sequence. A refusal leaves the status line set by `EditorModel`.
+  - Every edit is `document.editor.edit(.lane(edit: .setInputFx(seq:lane:chain:)))` on the selected sequence. A refusal leaves the status line set by `EditorModel`. With the lane gone, an edit sends nothing.
+  - `DocumentModel.select(_:)` calls `inputFx.close()` when the sequence changes (only if the model was made: `inputFxModel?.close()`).
   - The status texts are "A chain holds at most 8 effects." and "A chain holds one Input Quantize."
 
 - [ ] **Step 1: Write the failing tests**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 cat > app/Tests/VizDAWAppModelTests/InputFxModelTests.swift <<'VIZDAW_EOF'
 import Foundation
 import Testing
@@ -2833,6 +2808,29 @@ import VizDAWCore
         #expect(!InputFxModel.isLit(l), "all bypassed")
         l.inputFx.append(InputFxRow(kind: .chord(intervals: [4, 7]), bypass: false))
         #expect(InputFxModel.isLit(l))
+        #expect(InputFxModel.showsButton(l))
+        var audio = lane(40, "Vox", kind: .audio)
+        audio.inputFx = l.inputFx
+        #expect(!InputFxModel.showsButton(audio) && !InputFxModel.isLit(audio), "no FX on an audio track")
+    }
+
+    /// Pre-flight I11: the popover's model follows the document. A lane an
+    /// Undo removed shows no chain and takes no edit; another sequence
+    /// closes it.
+    @Test func theChainFollowsAnUndoneLaneAndClosesWithTheSequence() throws {
+        let (m, f) = try model([up12])
+        #expect(m.inputFx.chain == [up12])
+        f.laneTable[3]?.removeAll { $0.id == 31 }
+        var s = f.snap
+        s.version += 1
+        m.apply(s)
+        #expect(m.inputFx.chain.isEmpty)
+        let before = f.edits.count
+        m.inputFx.add(.transpose)
+        #expect(f.edits.count == before)
+        let (m2, _) = try model([up12])
+        m2.select(2)
+        #expect(m2.inputFx.lane == nil)
     }
 
     @Test func titlesSummariesAndGrids() {
@@ -2854,15 +2852,13 @@ VIZDAW_EOF
 
 - [ ] **Step 2: Run them to see them fail** with `scripts/swift.sh test`. Expected: FAIL to compile, because `InputFxModel` is not found.
 
-- [ ] **Step 3: Implement** `InputFxModel` and `DocumentModel.inputFx` (the `inputs` pattern: an `@ObservationIgnored private var inputFxModel: InputFxModel?`). `summary` follows the test's spellings: the minus sign is U+2212, and the octave word is "oct".
+- [ ] **Step 3: Implement** `InputFxModel` and `DocumentModel.inputFx` (the `inputs` pattern, `DocumentModel.swift:130,149-154`: an `@ObservationIgnored private var inputFxModel: InputFxModel?` made lazily with `InputFxModel(document: self)`), and the `close()` in `select`. `summary` follows the test's spellings: the minus sign is U+2212, and the octave word is "oct". No `@State`; nothing here touches AppKit.
 
-- [ ] **Step 4: Run the tests and the gates** with `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: Swift +5.
+- [ ] **Step 4: Run the tests and the gates** with `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: Swift +6.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
 git add app/Sources/VizDAWAppModel/InputFxModel.swift app/Sources/VizDAWAppModel/DocumentModel.swift app/Tests/VizDAWAppModelTests/InputFxModelTests.swift
 git commit -m "app: the input effects model: add, remove, reorder, bypass, settings, one edit per gesture (plan 5g-1 Task 8)
 
@@ -2876,35 +2872,35 @@ git log -1 --oneline && git show --stat HEAD
 ### Task 9: The FX button and the effects popover
 
 **Files:**
-- Modify: `app/Sources/VizDAWEditors/ArrangementLayout.swift` (`HeaderControl.fx`, the layout), `app/Sources/VizDAWEditors/LaneHeaderView.swift` (draw, click, the popover hook), `app/Sources/VizDAW/DocumentWindow.swift` (installs the hook once)
-- Create: `app/Sources/VizDAW/InputFxPopover.swift`
+- Modify: `app/Sources/VizDAWEditors/ArrangementLayout.swift` (`HeaderControl.fx`, the layout, the VoiceOver label), `app/Sources/VizDAWEditors/LaneHeaderView.swift` (draw, click, the context-menu item, the popover hook), `app/Sources/VizDAWEditors/EditorTheme.swift` (`fxColour`), `app/Sources/VizDAW/VizDAWApp.swift` (installs the hook once)
+- Create: `app/Sources/VizDAWEditors/InputFxPopoverController.swift`, `app/Sources/VizDAW/InputFxPopover.swift`
 - Test: modify `app/Tests/VizDAWAppModelTests/LaneHeaderInputTests.swift`, `app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift`
 
 **Interfaces:**
-- Consumes: `InputFxModel` (Task 8).
+- Consumes: `InputFxModel` (Task 8), `RecordPopoverController`'s pattern (`app/Sources/VizDAWEditors/RecordPopoverController.swift:30-49`), `ControlUI.isChannel`, `TrackCommands.addTrackOnChannel`'s pattern.
 - Produces:
-  - `HeaderControl.fx`;
-  - `LaneHeaderLayout.controls` with `(.name, CGRect(x: 8, y: y + 4, width: 80, height: 18))` and `(.fx, CGRect(x: 92, y: y + 4, width: 18, height: 18))`;
-  - `@MainActor public static var fxPopoverContent: ((DocumentModel) -> NSViewController)?` on `LaneHeaderView`;
-  - `func showFx(seq: UInt64, lane: LaneRow, from r: CGRect)`, which calls `document.inputFx.open(lane:)`, makes the hook's controller, and shows it in an `NSPopover` (behaviour `.transient`) when the header is in a window. Its delegate's `popoverDidClose` calls `document.inputFx.close()`. Without a hook, or with no window (tests), it opens the model only.
-  - `InputFxPopover: View`, a SwiftUI view of an `InputFxModel` (Ruling 16):
-    - a `List` of the chain with `.onMove` → `move`, a bypass `Toggle` per row → `setBypass`, and a remove button → `remove`;
-    - an "Add" `Menu` of the five kinds;
-    - the selected effect's controls:
-      - Arpeggiator: mode `Picker`; rate `Picker`s (1/1…1/64; straight, dotted, triplet); octaves `Stepper` 1–4; gate `Slider` 5–200; velocity `Picker` As Played/Fixed with a `Stepper` 1–127; Latch `Toggle`;
-      - Transpose: `Stepper` −48…48;
-      - Velocity: scale `Slider` 0–400, offset `Slider` −127…127, min/max `Stepper`s, Fixed `Toggle` + `Stepper`;
-      - Chord: up to 6 interval `Stepper`s with add and remove;
-      - Input Quantize: grid `Picker` from `quantizeGrids`, strength `Slider` 0–100.
-
-    Sliders use `onEditingChanged` → `beginDraft`/`commitDraft`, with `setDraft` while they move. Pickers, steppers and toggles call `update`.
+  - `HeaderControl.fx` (the enum at `ArrangementLayout.swift:198` gains the case; both `switch control` statements in `LaneHeaderView.mouseDown` and the one in `draw` get it, `.fx` joining the toggles that leave the selection).
+  - `LaneHeaderLayout.controls(rowTop:theme:)`: `.name` becomes `CGRect(x: nameX, y: y + 4, width: 88 - nameX, height: 18)` and `(.fx, CGRect(x: 92, y: y + 4, width: 18, height: 18))` follows it; its doc line says the name now ends at x 88 for the FX button, the monitor button staying at x 113 (Ruling 16).
+  - `var fxColour: NSColor { accent.accent.nsColor }` in `EditorTheme.swift` under the state roles (`armColour` … at :47).
+  - `@MainActor public static var fxPopoverContent: ((DocumentModel) -> NSViewController)?` on `LaneHeaderView`.
+  - `@MainActor public final class InputFxPopoverController: NSObject, NSPopoverDelegate` with `init(model: InputFxModel, content: NSViewController)` (`popover.behavior = .transient`, `animates = false`) and `popoverDidClose` → `model.close()`. The header keeps the open one in a strong `private var fxPopover: InputFxPopoverController?`.
+  - `func showFx(seq: UInt64, lane: LaneRow, from r: CGRect, channel: Bool)` on `LaneHeaderView`: `document.inputFx.open(lane: lane.id)`; then, on a channel click, `editor.status = LaneHeaderView.fxOnChannel` and nothing else; otherwise it makes the hook's controller and shows it from `r` when the header is in a window (no hook or no window, as in tests: the model only).
+  - `static let fxOnChannel = "Input Effects opens a popover: use lane.set_input_fx over the control channel."`
+  - `laneMenu(seq:lane:)` gains "Input Effects…" (before the colour item, enabled when `InputFxModel.showsButton(lane)`), which calls `showFx` from the row's FX rect.
+  - `ArrangementA11y.header(_:returnOf:)` appends ", input effects on" when `InputFxModel.isLit(lane)`, after the monitor part.
+  - `InputFxPopover: View` in the app (Ruling 16), shown as `NSHostingController(rootView: InputFxPopover(model: $0.inputFx).themedRoot())`:
+    - a `List` of the chain with `.onMove` → `move`, a bypass `Toggle` per row → `setBypass`, and a remove button → `remove`; an "Add" `Menu` of the five kinds;
+    - the selected effect's controls: Arpeggiator: mode `Picker`; rate `Picker`s (1/1…1/64; straight, dotted, triplet); octaves `Stepper` 1–4; gate `Slider` 5–200; velocity `Picker` As Played/Fixed with a `Stepper` 1–127; Latch `Toggle`. Transpose: `Stepper` −48…48. Velocity: scale `Slider` 0–400, offset `Slider` −127…127, min/max `Stepper`s, Fixed `Toggle` + `Stepper`. Chord: up to 6 interval `Stepper`s with add and remove. Input Quantize: grid `Picker` from `quantizeGrids`, strength `Slider` 0–100;
+    - sliders use `onEditingChanged` → `beginDraft`/`commitDraft`, with `setDraft` while they move; pickers, steppers and toggles call `update`;
+    - the theme and scan rules (7b, 7d): it reads `@Environment(\.symbioticTheme) private var theme` and takes spacing, radii, fonts and colours only from it (`theme.spacing.*`, `theme.radius.*`, `theme.type.*`, as `RecordControls.swift` does), never `.padding()` without a token, `spacing:` literals, `.font(.caption)`, `.bold()` or a colour literal; add and remove use `AppIcon.add` and `AppIcon.remove` through `AppIcon.image(size:)`, never `Image(systemName:)` or `systemImage:`; typed numbers, if any, use the design package's `NumberBox` as `ChannelStrip.swift:633` does (Return commits, leaving cancels), never a `TextField`; no `@State`: the selection and the draft live in `InputFxModel`.
 
 - [ ] **Step 1: Write the failing tests.**
-   - In `ArrangementLayoutTests.headerControlsAreFoundByPosition`, add `#expect(LaneHeaderLayout.control(at: CGPoint(x: 100, y: 48 + 10), rowTop: 48) == .fx)` and `#expect(LaneHeaderLayout.control(at: CGPoint(x: 50, y: 48 + 10), rowTop: 48) == .name)`. `theControlsShareTheRowWithoutOverlapping` already covers the new rect.
+   - In `ArrangementLayoutTests.headerControlsAreFoundByPosition` (`app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift:135`), add `#expect(LaneHeaderLayout.control(at: CGPoint(x: 100, y: 48 + 10), rowTop: 48) == .fx)` and `#expect(LaneHeaderLayout.control(at: CGPoint(x: 50, y: 48 + 10), rowTop: 48) == .name)`. `LaneHeaderInputTests.theControlsShareTheRowWithoutOverlapping` (:170) already covers the new rect.
+   - In `LaneHeaderInputTests.voiceOverSaysTheInputAndMonitoring` (:207), add the lit case: with `l.monitor = .auto` and `l.inputFx = [InputFxRow(kind: .chord(intervals: [4, 7]), bypass: false)]`, `#expect(ArrangementA11y.header(l) == "Vocal, no destination, armed, input In 1+2, input effects on")`.
    - Append to `LaneHeaderInputTests`:
 
 ```swift
-    @Test func theFxButtonIsLitByAnActiveChainAndOpensTheLanesChain() throws {
+    @Test func theFxButtonIsLitByAnActiveChainAndOpensTheTracksChain() throws {
         let f = editorFake()
         f.laneTable[3]?[1].inputFx = [InputFxRow(kind: .chord(intervals: [4, 7]), bypass: false)]
         let m = try DocumentModel(session: f)
@@ -2929,28 +2925,47 @@ git log -1 --oneline && git show --stat HEAD
         h.mouseDown(with: e)
         #expect(m.inputFx.lane == 31)
         #expect(made == 1, "the content is made even with no window to show it in")
+        #expect(m.editor.selection.lanes.isEmpty, "a toggle leaves the selection")
+        // The context menu reaches it too (keyboard and VoiceOver users).
+        m.inputFx.close()
+        let item = try #require(h.laneMenu(seq: 3, lane: m.lanes[1]).items.first { $0.title == "Input Effects…" })
+        #expect(item.isEnabled)
+        _ = item.target?.perform(item.action)
+        #expect(m.inputFx.lane == 31)
+    }
+
+    @Test func aChannelClickOnFxOpensNoPopover() throws {
+        let (m, _, h) = try header(armed: false)
+        var made = 0
+        LaneHeaderView.fxPopoverContent = { _ in
+            made += 1
+            return NSViewController()
+        }
+        defer { LaneHeaderView.fxPopoverContent = nil }
+        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1)).first { $0.0 == .fx }?.1)
+        h.showFx(seq: 3, lane: m.lanes[1], from: r, channel: true)
+        #expect(m.inputFx.lane == m.lanes[1].id)
+        #expect(made == 0)
+        #expect(m.editor.status == LaneHeaderView.fxOnChannel)
     }
 ```
 
-   The click is synthesized as in `RecordUiCarryTests.theMeterHidesUnder46PointsAndTheMonitorClickCycles`.
+   The click is synthesized as in `RecordUiCarryTests.theMeterHidesUnder46PointsAndTheMonitorClickCycles` (`RecordUiCarryTests.swift:70`); `header(armed:)` is the file's helper (:14).
 
 - [ ] **Step 2: Run them to see them fail** with `scripts/swift.sh test`. Expected: FAIL to compile, because `.fx` is not found.
 
-- [ ] **Step 3: Implement.**
-   - In `LaneHeaderView.draw`, `case .fx: toggle("FX", on: InputFxModel.isLit(lane), color: .systemPurple, in: r)`.
-   - In `mouseDown`, `case .fx: showFx(seq: seq, lane: lane, from: r)`, where `r` is the button's rect from `LaneHeaderLayout.controls`.
-   - VoiceOver: `ArrangementA11y.header` adds ", input effects on" when lit. If that string is pinned by a test, extend the test with the lit case.
-   - In `DocumentWindow.swift`, where the window's editors are set up once, install `LaneHeaderView.fxPopoverContent = { NSHostingController(rootView: InputFxPopover(model: $0.inputFx)) }`.
+- [ ] **Step 3: Implement** the Interfaces:
+   - `draw`: `case .fx where InputFxModel.showsButton(lane): toggle("FX", on: InputFxModel.isLit(lane), color: theme.fxColour, in: r)`, and `case .fx: break` (an audio track's slot stays blank).
+   - `mouseDown`: `case .fx where InputFxModel.showsButton(lane): showFx(seq: seq, lane: lane, from: r, channel: ControlUI.isChannel(e))` with `r` the row's FX rect from `LaneHeaderLayout.controls`; `case .fx: break`.
+   - In `VizDAWApp.swift`, after `MediaModel.channelIsOn = { ControlChannel.active }` (:121), install `LaneHeaderView.fxPopoverContent = { NSHostingController(rootView: InputFxPopover(model: $0.inputFx).themedRoot()) }`.
 
-- [ ] **Step 4: Run the tests and the gates** with `scripts/swift.sh build`, `scripts/swift.sh test` and `scripts/make-app.sh`. Do not launch the app: the owner checks the view from README 189–193. Expected: Swift +1 (and the extended layout test).
+- [ ] **Step 4: Run the tests and the gates:** `scripts/swift.sh build`, `scripts/swift.sh test` (the scans by name must pass: `ThemeScanTests.everyViewTakesItsSpacingFromTheTheme`, `noColourLiteralsOutsideTheThemeBridges`, `noCornerRadiusOrFontSizeLiterals`, `noSemanticFontsOrDiscardedWeights`; `AppIconTests.theAppUsesNoSystemSymbols`; `NameScanTests.noThirdPartyNamesInWhatTheAppShows` and `noLaneInWhatTheAppShows`), the no-brand build and `scripts/make-app.sh`. Do not launch the app: the owner checks the view from README 238–242. Expected: Swift +2 (and two extended tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
-git add app/Sources/VizDAWEditors/ArrangementLayout.swift app/Sources/VizDAWEditors/LaneHeaderView.swift app/Sources/VizDAW/InputFxPopover.swift app/Sources/VizDAW/DocumentWindow.swift app/Tests/VizDAWAppModelTests/LaneHeaderInputTests.swift app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift
-git commit -m "app: the lane header's FX button and the input effects popover (plan 5g-1 Task 9)
+git add app/Sources/VizDAWEditors/ArrangementLayout.swift app/Sources/VizDAWEditors/LaneHeaderView.swift app/Sources/VizDAWEditors/EditorTheme.swift app/Sources/VizDAWEditors/InputFxPopoverController.swift app/Sources/VizDAW/InputFxPopover.swift app/Sources/VizDAW/VizDAWApp.swift app/Tests/VizDAWAppModelTests/LaneHeaderInputTests.swift app/Tests/VizDAWEditorsTests/ArrangementLayoutTests.swift
+git commit -m "app: the track header's FX button and the input effects popover (plan 5g-1 Task 9)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
@@ -2959,10 +2974,10 @@ git log -1 --oneline && git show --stat HEAD
 
 ---
 
-### Task 10: The arpeggiator e2e, README 189–195, the backlog rows, the full gates
+### Task 10: The arpeggiator e2e, README 238–244, the spec's rows, the full gates
 
 **Files:**
-- Modify: `crates/vizctl/tests/e2e.rs`, `app/README.md`, `docs/feature-backlog.md`
+- Modify: `crates/vizctl/tests/e2e.rs`, `app/README.md`, `docs/superpowers/specs/2026-10-18-recording-audio-design.md` (§13's 5g rows)
 
 **Interfaces:**
 - Consumes: everything above; the e2e helpers `App::start_with`, `wait_for_record`, `wait_for_undo`, `lane_named`, `WAIT_MS`.
@@ -2972,7 +2987,7 @@ git log -1 --oneline && git show --stat HEAD
 ```rust
 /// Spec §12.3's "`midi.inject` held chord into a lane with an arpeggiator
 /// while recording: check the recorded notes are the arpeggio" (plan 5g-1;
-/// README 190): a C major chord held for a bar into "Keys" with an Up
+/// README 239): a C major chord held for a bar into "Keys" with an Up
 /// arpeggiator at 1/16 records as C, E, G repeating, each on a sixteenth
 /// and half a sixteenth long. Offline device, no MIDI port.
 #[test]
@@ -2992,6 +3007,7 @@ fn arpeggiates_an_injected_chord_while_recording() {
     for c in [
         LaneCmd::SetInput { seq, lane: keys, input: Some(LaneInput::Midi { port: Some("Keys".into()), channel: None }) },
         LaneCmd::SetInputFx { seq, lane: keys, chain: vec![InputFx::new(InputFxKind::Arpeggiator(Arp::default()))] },
+        LaneCmd::SetFlags { seq, lane: keys, mute: None, solo: None, arm: Some(true) },
     ] {
         b.run(Command::Lane(c)).unwrap();
     }
@@ -3002,8 +3018,7 @@ fn arpeggiates_an_injected_chord_while_recording() {
     app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
     let lane = lane_named(&mut app, &w, "Keys");
     assert_eq!(lane["input_fx"][0]["kind"]["arpeggiator"]["rate"]["division"], 16, "{lane}");
-    app.call("command.run", json!({"id": "transport.arm_previous", "window": w}));
-    assert_eq!(lane_named(&mut app, &w, "Keys")["arm"], true);
+    assert_eq!(lane["arm"], true, "{lane}");
     app.call(
         "command.run",
         json!({"id": "record.set", "params": {"replace": true, "loop": false, "pre_roll": 0, "count_in": 0}, "window": w}),
@@ -3044,9 +3059,9 @@ fn arpeggiates_an_injected_chord_while_recording() {
 }
 ```
 
-   If `record.set`'s count-in parameter has another name, follow `RECORD_SET_PARAMS`. If the recorded lane keeps old events, filter the notes to those after the press, and say so.
+   `record.set`'s `replace`, `loop`, `pre_roll` and `count_in` are `RECORD_SET_PARAMS`' names at `a292d2c`; the lane starts empty, so every recorded note is the arpeggio's.
 
-- [ ] **Step 2: Write README 189–195** at the end of `app/README.md`:
+- [ ] **Step 2: Write README 238–244** at the end of `app/README.md`, after "### Tracks (plan tracks)" (whose last step is 237):
 
 ```markdown
 ### MIDI input effects (plan 5g-1)
@@ -3055,57 +3070,62 @@ By ear and by eye; the chain is tested (`core-engine/tests/input_fx*.rs`),
 the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
 `arpeggiates_an_injected_chord_while_recording`.
 
-189. The lane header shows an "FX" button left of the monitor button: grey
-     with an empty chain. Click it: a popover lists the chain (empty) with
-     an Add menu (Arpeggiator, Transpose, Velocity, Chord, Input Quantize).
-     Add a Transpose: the button lights purple; bypass it: grey again.
-190. A real keyboard on a MIDI lane, armed: add an Arpeggiator (Up, 1/16).
+238. A MIDI or instrument track's header shows an "FX" button between its
+     name and the monitor button, unlit with an empty chain; an audio
+     track has none. Click it: a popover lists the chain (empty) with an
+     Add menu (Arpeggiator, Transpose, Velocity, Chord, Input Quantize).
+     Add a Transpose: the button lights in the theme's accent colour;
+     bypass it: unlit again. Check it in each theme. Right-click the
+     track: "Input Effects…" opens the same popover.
+239. A real keyboard on a MIDI track, armed: add an Arpeggiator (Up, 1/16).
      Stopped, hold a chord: it arpeggiates at once at the project tempo;
      change the tempo and it follows. Play with the click on: the notes
      fall on the sixteenths, and a chord pressed between steps waits for
-     the next one. Try each mode, 2–4 octaves, a triplet and a dotted rate.
-191. Latch: hold a chord and let go: it keeps playing; press a new chord
+     the next one. Hold ⏪ or ⏩ and loop a bar while holding: no burst of
+     notes and no gap. Try each mode, 2–4 octaves, a triplet and a dotted
+     rate.
+240. Latch: hold a chord and let go: it keeps playing; press a new chord
      with no key down: the pattern changes to it.
-192. Transpose +12 then Chord (+4 +7) near the top of the keyboard, then
+241. Transpose +12 then Chord (+4 +7) near the top of the keyboard, then
      drag Chord above Transpose: the top notes differ (notes past the
      highest key are dropped, never folded).
-193. Hold a chord through the arpeggiator and bypass it, change its rate,
-     drag a velocity slider, arm another lane, disarm this one: no note
-     hangs, and a latched arpeggio survives arming another lane.
-194. Add Input Quantize (1/16, 100%) and record a loose phrase: thru is
+242. Hold a chord through the arpeggiator and bypass it, change its rate,
+     drag a velocity slider, arm another track, disarm this one: no note
+     hangs, and a latched arpeggio survives arming another track. Start a
+     MIDI Learn and press a key: the key is learned, and nothing plays or
+     arpeggiates.
+243. Add Input Quantize (1/16, 100%) and record a loose phrase: thru is
      never delayed; the recorded notes start on the sixteenths and keep
      their lengths. At 50% they move half way.
-195. Each change in the popover is one Undo ("Set Input Effects"); a
-     slider drag is one step. Save, close and reopen: the chain is there.
+244. Each change in the popover is one Undo ("Set Input Effects"); a
+     slider drag is one step. A change made while recording is undone with
+     the take. Save, close and reopen: the chain is there. Duplicate Track
+     copies it.
 ```
 
-- [ ] **Step 3: Add the backlog rows** to `docs/feature-backlog.md`, in its table format:
-   - "Learned controls are not consumed: a CC learned to a fader also plays into an armed lane on that port (plan 5g-1 Ruling 2)."
-   - "A build before 5g names a project with input effects Corrupt (`deny_unknown_fields`); decide on a reader that skips unknown lane fields before release."
+- [ ] **Step 3: Amend the spec's §13 rows** in `docs/superpowers/specs/2026-10-18-recording-audio-design.md` (the plan's writer commit amended them before; this brings them to the tree):
+   - the 5g-1 row: "surface ports skipped by every-source lanes" becomes "surface ports kept out of every lane (delivered by 5f-1 Ruling 17)"; "README 199–205 (189–195 in its plan, renumbered after 5f-4)" becomes "README 238–244"; "Needs 5f-4 (added before it, 2026-11-03)" gains "; runs after sub-project 7 and the Tracks plan";
+   - the 5g-2 row: "README 206–211 (196–201 in its plan, renumbered after 5f-4)" becomes "README 245–250".
 
 - [ ] **Step 4: Run the full gates:**
    - `cargo fmt --all -- --check`, both clippies and `cargo clippy -p core-ffi --lib -- -D warnings`;
    - `cargo test --workspace`;
-   - the rt-check gates (with `--test rt_alloc_input_fx`);
-   - `scripts/build-ffi.sh`, `scripts/swift.sh build`, `scripts/swift.sh test` and `scripts/make-app.sh`;
+   - the rt-check gate (Global Constraints);
+   - `scripts/build-ffi.sh`, `scripts/swift.sh build`, `scripts/swift.sh test`, the no-brand build and `scripts/make-app.sh`;
    - the e2e: `VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1`.
 
    Then `pgrep -lf MacOS/VizDAW` prints nothing, and `ls -d /tmp/vze*` prints nothing new.
 
-   Expected, relative to the end of 5f-3:
-   - Rust +6 (model), +13 + 13 + 9 (engine), +2 + 6 (FFI), +1 (control) = **+50**;
-   - Swift +8;
-   - e2e +1;
-   - registry +1;
-   - README through 195.
+   Expected, relative to the `a292d2c` baseline (Rust 2077 / 24 ignored, Swift 1286, e2e 20, registry 162):
+   - Rust +9 (model), +14 + 14 + 8 (engine), +2 + 8 (FFI), +1 (control) = **+56**, so 2133 passed and 25 ignored (the new e2e is `#[ignore]`);
+   - Swift +2 + 6 + 2 = **+10**, so 1296;
+   - e2e 21; registry 163; README through 244; file `VERSION` 5.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
-cd /Users/lattawb/workspace/vizdaw
-git add crates/vizctl/tests/e2e.rs app/README.md docs/feature-backlog.md
-git commit -m "e2e: an injected chord through the arpeggiator records as the arpeggio; README 189-195; backlog rows (plan 5g-1 Task 10)
+git add crates/vizctl/tests/e2e.rs app/README.md docs/superpowers/specs/2026-10-18-recording-audio-design.md
+git commit -m "e2e: an injected chord through the arpeggiator records as the arpeggio; README 238-244; the spec's 5g rows (plan 5g-1 Task 10)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
@@ -3116,49 +3136,14 @@ git log -1 --oneline && git show --stat HEAD
 
 ## Self-Review
 
-1. **Spec coverage.**
-   - §4.5 `input_fx` (≤ 8, empty default, `LaneCmd`): Task 1.
-   - §6.6 "Thru and record both pass through the lane's MIDI input effect chain": Task 4.
-   - §6.8:
-     - the model: Task 1;
-     - the five effects with every setting: Tasks 1–3;
-     - real-time, sample-accurate, synced: Tasks 3–4;
-     - the lock-free queue, already timestamped: unchanged since 5c, used in Task 4;
-     - 32 held / 128 sounding, counted: Tasks 3–4 and 6;
-     - note-offs on a change or bypass: Tasks 2 and 4;
-     - recording post-effect with Input Quantize: Tasks 4–5;
-     - no chain unless armed or monitored, none on playback: Ruling 13 and Task 4 (routes exist only for listening lanes, as before);
-     - UI: Tasks 8–9.
-   - §6.9's FX button: Task 9.
-   - §12.1 `lane.set_input_fx` and `state.get` per-lane `input_fx`: Task 7.
-   - §12.3:
-     - golden tests per mode, rate (triplets) and octaves, synced and free-running: Task 3;
-     - Latch, transpose, velocity, chord and clamps: Tasks 2–3;
-     - chain order: Task 2;
-     - bypass and changes send note-offs: Tasks 2 and 4;
-     - capacity overflow counted: Tasks 2–4;
-     - recording equals thru, quantize on recorded starts only: Tasks 4–6;
-     - `rt-check`: Task 4;
-     - the e2e: Task 10;
-     - the manual "arpeggiator against a real keyboard, synced and free-running": README 190.
-   - Spec Ruling 27: all of the above.
-   - MPE is plan 5g-2's (Ruling 1).
-   - No gaps.
-2. **Step scan.**
-   - Every code step names its file, its signature and the spec values. Bodies are given only where no signature determines them: `live_midi`, `emit_live` and the carry in `SetInputs`, because of the borrow and ordering rules.
-   - The arpeggiator's patterns and timing are Rulings 9–10 and the golden tests.
-   - Two expectations may need the tree's arithmetic, and each step says what to do: the latch test's last steps (Task 3), and the frame the transport rolls at (Task 4).
-3. **Type consistency.**
-   - `InputFx`/`InputFxKind` (Task 1) feed `InputChain::new` (Task 2), `MidiInputSpec.fx` (Task 4) and `InputFxRow` (Task 6).
-   - `LiveMsg`, `At`, `ChainClock` and `RecordQuantize` (Task 2) are used by Tasks 3–5.
-   - `RecordedMidi { msg: LiveMsg, quantize }` (Task 4) is read by `passes` (Task 5).
-   - `InputFxKindRow`'s fields match `InputFxKind`'s, with `rate` flattened into `division` and `feel`.
-   - `InputFxModel.defaultKind` mirrors Ruling 14.
+Rerun at the fold (2026-11-09, against `a292d2c`).
+
+1. **Spec coverage.** §4.5 → Task 1. §6.6 → Task 4. §6.8: model and effects → Tasks 1–3; real-time, sample-accurate, synced → Tasks 3–4; capacities counted → Tasks 2–4, 6; note-offs on change or bypass → Tasks 2, 4; recording post-effect with Input Quantize → Tasks 4–5; listening lanes only, never playback or bounce → Ruling 13, Task 4; UI → Tasks 8–9. §6.9 → Task 9. §12.1 → Task 7. §12.3: golden tests → Tasks 2–3; recording equals thru → Tasks 4–6; `rt-check` → Task 4 and CI; e2e → Task 10; manual arpeggiator check → README 239. The §13 row's surface-port clause is 5f-1's (Ruling 3). The owner's learn ruling → Ruling 2, pinned in Task 6. Format 5 → Ruling 18, Task 1. No gaps.
+2. **Step scan.** Bodies are given only for `live_midi`, `emit_live` and the `SetInputs` carry (borrow and ordering rules), plus whole test files. One expectation may need the tree's block arithmetic, and its step says what to do: the latch test's last steps (Task 3).
+3. **Type consistency.** `InputFx`/`InputFxKind` (Task 1) feed `InputChain::new` (Task 2), `MidiInputSpec.fx` (Task 4) and `InputFxRow` (Task 6, `rate` flattened into `division` and `feel`). `LiveMsg`, `At`, `ChainClock`, `RecordQuantize` (Task 2) are used by Tasks 3–5; `take_visits` only by Task 2's test. `RecordedMidi { msg: LiveMsg, quantize }` (Task 4) is read by `passes` (Task 5) and `tests/passes.rs` (Task 4's stop-gap). `input_fx_json` (Task 6) is used by `control.rs` (Task 7). `InputFxModel.{showsButton, isLit, open, close, chain}` and `DocumentModel.inputFx` (Task 8) are used by Task 9. `MidiInputSpec` has no `skip_ports` anywhere.
 4. **Review Focus.** Each of the five lines names its tests, and each test is in its owning task.
-5. **Proportion.** Spec §6.8 is about 30 lines, and this plan is long because its tests are the effects' golden behaviour. Implementation bodies are left to the implementer except the three renderer functions.
+5. **Proportion.** About 3 000 lines, most of them golden test files; Global Constraints and Rulings were trimmed at the fold, and the house rules point to the contracts.
 
 ## Execution handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-11-02-midi-input-effects.md`. The controller runs it subagent-driven under the standing authorization (spec §13), after 5f-3 and before 5g-2.
-- Tasks 2–4 build on each other's `LiveMsg` and `InputChain`, and Task 4 changes the renderer's real-time path: a fresh reviewer per task should replay Review Focus 1 and 3 there.
-- The final review should run the rt-check gates itself.
+The controller runs this plan subagent-driven under the standing authorization (spec §13), on `sp5g-input-fx`, before 5g-2. Tasks 2–4 build on each other's `LiveMsg` and `InputChain`, and Task 4 changes the renderer's real-time path: a fresh reviewer per task should replay Review Focus 1, 3 and 4 there. The final review runs the rt-check gate itself. Before dispatch, refresh `implementer-contract.md`'s "verified at" line to `a292d2c`.
