@@ -383,7 +383,7 @@ impl Stage {
                 }
                 None => outs.push(msg),
             },
-            // Task 3 gives the arpeggiator its notes; until then it passes.
+            // `run` gives the arpeggiator its input (it needs the clock).
             Stage::Arp(_) | Stage::Empty => outs.push(msg),
         }
     }
@@ -399,6 +399,10 @@ struct Cx<'a> {
     truncated: bool,
     /// `run` calls.
     visits: u64,
+    /// The block's first frame on the chain's counter.
+    now: u64,
+    /// Notes the arpeggiators dropped for `MAX_HELD`.
+    held_dropped: u64,
     /// The output stage's per-pitch note-on counts (Ruling 6).
     counts: &'a mut [u8; 128],
     out: &'a mut dyn FnMut(At, LiveMsg),
@@ -455,7 +459,12 @@ fn run(stages: &mut [Stage], msg: LiveMsg, at: At, cx: &mut Cx<'_>) {
     }
     cx.work -= 1;
     let mut outs = Outs::new();
-    stage.map(msg, &mut outs);
+    match stage {
+        Stage::Arp(arp) => arp.input(msg, at, cx.now, &mut cx.held_dropped, &mut |_, m| {
+            outs.push(m)
+        }),
+        other => other.map(msg, &mut outs),
+    }
     for m in outs.as_slice() {
         if cx.truncated {
             break;
@@ -476,23 +485,87 @@ struct ChainState {
     visits: u64,
 }
 
-impl ChainState {
-    /// Runs one input event or step with a fresh budget. // RT
-    fn run_event(&mut self, from: usize, msg: LiveMsg, at: At, out: &mut dyn FnMut(At, LiveMsg)) {
-        let stages = self.stages.get_mut(from..self.len).unwrap_or(&mut []);
-        let mut cx = Cx {
-            budget: MAX_FANOUT,
-            work: MAX_WORK,
-            truncated: false,
-            visits: 0,
-            counts: &mut self.counts,
-            out,
-        };
-        run(stages, msg, at, &mut cx);
-        if cx.truncated {
-            self.dropped = self.dropped.saturating_add(1);
+/// Runs messages through `stages` and the merge, one budget per event
+/// (Ruling 7). An arpeggiator's tick output is grouped into events as it
+/// arrives: a run of messages at one block offset that are all note-ons
+/// (a step) or all note-offs (gate ends, and a step's retriggered notes)
+/// is one event. The arpeggiator sends a step's retrigger offs before all
+/// of its ons, so a step's ons are one event. No buffer: each message runs
+/// as it is emitted.
+struct Events<'a> {
+    stages: &'a mut [Stage],
+    cx: Cx<'a>,
+    /// The open event's offset and kind (note-on or not).
+    open: Option<(At, bool)>,
+    /// Events the cap truncated.
+    truncated: u64,
+}
+
+impl<'a> Events<'a> {
+    fn new(
+        stages: &'a mut [Stage],
+        counts: &'a mut [u8; 128],
+        now: u64,
+        out: &'a mut dyn FnMut(At, LiveMsg),
+    ) -> Events<'a> {
+        Events {
+            stages,
+            cx: Cx {
+                budget: MAX_FANOUT,
+                work: MAX_WORK,
+                truncated: false,
+                visits: 0,
+                counts,
+                out,
+                now,
+                held_dropped: 0,
+            },
+            open: None,
+            truncated: 0,
         }
-        self.visits = self.visits.saturating_add(cx.visits);
+    }
+
+    /// Runs `msg` as part of the open event, opening a new one when its
+    /// offset or kind differs. // RT
+    fn push(&mut self, at: At, msg: LiveMsg) {
+        let key = (at, matches!(msg, LiveMsg::NoteOn { .. }));
+        if self.open != Some(key) {
+            self.close();
+            self.open = Some(key);
+        }
+        run(self.stages, msg, at, &mut self.cx);
+    }
+
+    /// Ends the open event: counts a truncation and renews the budget.
+    /// // RT
+    fn close(&mut self) {
+        if self.cx.truncated {
+            self.truncated = self.truncated.saturating_add(1);
+        }
+        self.cx.budget = MAX_FANOUT;
+        self.cx.work = MAX_WORK;
+        self.cx.truncated = false;
+    }
+
+    /// Closes the open event; returns `(dropped, visits)`. // RT
+    fn finish(mut self) -> (u64, u64) {
+        self.close();
+        (
+            self.truncated.saturating_add(self.cx.held_dropped),
+            self.cx.visits,
+        )
+    }
+}
+
+impl ChainState {
+    /// Runs one input event with a fresh budget. // RT
+    fn run_event(&mut self, msg: LiveMsg, at: At, out: &mut dyn FnMut(At, LiveMsg)) {
+        let stages = self.stages.get_mut(..self.len).unwrap_or(&mut []);
+        let mut events = Events::new(stages, &mut self.counts, self.frame, out);
+        run(events.stages, msg, at, &mut events.cx);
+        let (dropped, visits) = events.finish();
+        self.dropped = self.dropped.saturating_add(dropped);
+        self.visits = self.visits.saturating_add(visits);
     }
 }
 
@@ -550,20 +623,31 @@ impl InputChain {
 
     /// Runs one input message through the chain. // RT
     pub fn process(&mut self, msg: LiveMsg, at: At, out: &mut dyn FnMut(At, LiveMsg)) {
-        self.state.run_event(0, msg, at, out);
+        self.state.run_event(msg, at, out);
     }
 
     /// Advances the chain's generators over one block (Ruling 10). // RT
     pub fn tick(&mut self, clock: &ChainClock<'_>, out: &mut dyn FnMut(At, LiveMsg)) {
         let st = &mut *self.state;
         let now = st.frame;
-        for i in 0..st.len {
-            if let Some(Stage::Arp(arp)) = st.stages.get_mut(i) {
-                // Task 3: the arpeggiator at stage `i` plays its steps for
-                // this block at `now`, each through
-                // `st.run_event(i + 1, …)` with a fresh budget.
-                let _ = (arp, clock, now, &out);
-            }
+        let stages = st.stages.get_mut(..st.len).unwrap_or(&mut []);
+        for i in 0..stages.len() {
+            // The arpeggiator at `i` and the stages after it are disjoint
+            // borrows, so its output runs downstream as it is emitted.
+            let Some((head, rest)) = stages.split_at_mut_checked(i + 1) else {
+                break;
+            };
+            let Some(Stage::Arp(arp)) = head.last_mut() else {
+                continue;
+            };
+            let mut events = Events::new(rest, &mut st.counts, now, out);
+            arp.tick(clock, now, &mut |at, m| events.push(at, m));
+            let (dropped, visits) = events.finish();
+            st.dropped = st
+                .dropped
+                .saturating_add(dropped)
+                .saturating_add(arp.take_dropped());
+            st.visits = st.visits.saturating_add(visits);
         }
         st.frame = st.frame.wrapping_add(u64::from(clock.frames));
     }
@@ -571,6 +655,14 @@ impl InputChain {
     /// Note-offs at `at` for every note the chain sounds (ascending pitch),
     /// then forgets held and latched notes. // RT
     pub fn flush(&mut self, at: At, out: &mut dyn FnMut(At, LiveMsg)) {
+        // Every note an arpeggiator sounds reached the merge's counts (or
+        // was dropped downstream), so the sweep below ends it; the
+        // arpeggiators' own offs are not needed.
+        for stage in self.state.stages.iter_mut() {
+            if let Stage::Arp(arp) = stage {
+                arp.flush(at, &mut |_, _| {});
+            }
+        }
         for (pitch, c) in (0u8..=127).zip(self.state.counts.iter_mut()) {
             if *c > 0 {
                 *c = 0;
