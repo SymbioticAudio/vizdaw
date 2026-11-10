@@ -64,10 +64,10 @@ private let regionLabels: Set<String> = ["Region", "Gain", "Fade In", "Fade Out"
         #expect(StripFocus.strip(selected: [lane(1, midiDest: 2)], armed: [], destinations: [dest(2)],
                                  strips: [strip(13, .builtinSynth)]) == .strip(13))
     }
-    @Test func anExternalMidiLaneShowsTheInspector() {
+    @Test func anExternalMidiLaneShowsItsMidiStrip() {
         #expect(StripFocus.strip(selected: [lane(1, midiDest: 3)], armed: [], destinations: [dest(3, external: true)],
-                                 strips: [strip(13, .builtinSynth)]) == .inspector)
-        #expect(StripFocus.strip(selected: [lane(1)], armed: [], destinations: [], strips: []) == .inspector)
+                                 strips: [strip(13, .builtinSynth)]) == .midi(dest: 3, lane: 1))
+        #expect(StripFocus.strip(selected: [lane(1)], armed: [], destinations: [], strips: []) == .midi(dest: nil, lane: 1))
     }
     @Test func twoLanesOnOnePathShowOneStrip() {
         #expect(StripFocus.strip(selected: [lane(1, audioOut: 7), lane(2, audioOut: 7)], armed: [], destinations: [],

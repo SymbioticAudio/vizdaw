@@ -106,7 +106,8 @@ struct LeftStripPane: View {
             } else {
                 PaneNote(text: StripFocus.nothingMessage)
             }
-        case .inspector:
+        case .inspector, .midi:
+            // Placeholder: Task 6 gives `.midi` its own strip.
             InspectorPane(model: model, docID: docID)
         case .nothing:
             PaneNote(text: StripFocus.nothingMessage)

@@ -111,6 +111,12 @@ public final class MixerModel {
     }
     /// Times the mixer was fetched (tests check refetch rules).
     public private(set) var fetches = 0
+    /// Each MIDI destination's note activity, 0...1, falling (see `pollLevels`).
+    public internal(set) var midiActivity: [UInt64: Double] = [:]
+    /// The values a MIDI strip drag has previewed and not yet committed.
+    public internal(set) var midiDraft: [UInt64: MidiMixRow] = [:]
+    /// When each destination's drag last previewed, in the caller's seconds.
+    @ObservationIgnored var midiPreviewedAt: [UInt64: Double] = [:]
 
     /// Where a plugin picked in the browser goes.
     public enum BrowserTarget: Equatable, Sendable {
@@ -229,10 +235,22 @@ public final class MixerModel {
         guard showsMidiFx(strip) else { return nil }
         let all = snapshot.strips
         let dests = destinations
-        func plays(_ lane: LaneRow) -> Bool {
+        return playingLane(in: placement) { lane in
             InputFxModel.showsSection(lane)
                 && StripFocus.strip(of: lane, destinations: dests, strips: all) == strip.id
         }
+    }
+
+    /// The track a MIDI strip's arm and MIDI FX act on (plan 5g-1b Ruling
+    /// 9): the same rule as `midiFxLane`, for the tracks that play `dest`.
+    public func midiLane(for dest: UInt64, in placement: MixerPlacement) -> LaneRow? {
+        playingLane(in: placement) { InputFxModel.showsSection($0) && $0.midiDest == dest }
+    }
+
+    /// The left pane (`.strip`): the focused track when it `plays`. Every
+    /// other placement: of the shown sequence's tracks that play, the first
+    /// armed one, else the first.
+    private func playingLane(in placement: MixerPlacement, where plays: (LaneRow) -> Bool) -> LaneRow? {
         if placement == .strip {
             guard let focused = document.focusLanes().first, plays(focused) else { return nil }
             return focused
@@ -316,6 +334,14 @@ public final class MixerModel {
         dspPeak = l.dspPeak
         latencyFrames = l.latencyFrames
         faulted = Set(l.faulted)
+        var activity: [UInt64: Double] = [:]
+        for (dest, old) in midiActivity where old * Double(MixerMath.meterDecay) >= 0.005 {
+            activity[dest] = old * Double(MixerMath.meterDecay)
+        }
+        for m in l.midi {
+            activity[m.dest] = max(activity[m.dest] ?? 0, Double(min(m.velocity, 127)) / 127)
+        }
+        if activity != midiActivity { midiActivity = activity }
     }
 
     // MARK: Intents
@@ -808,7 +834,7 @@ public final class MixerModel {
     }
 
     @discardableResult
-    private func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) -> Bool {
+    func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) -> Bool {
         var ok = true
         do {
             document.apply(try body(session))
