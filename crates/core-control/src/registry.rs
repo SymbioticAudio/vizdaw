@@ -614,6 +614,17 @@ const RECOVER_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "Import the recordings a crash left onto new tracks, or move them to the Trash.",
 }];
 
+const SET_INPUT_FX_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The track's sequence."),
+    id_param("lane", "The track."),
+    ParamSpec {
+        name: "chain",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The effect chain as JSON, first effect first: [{\"kind\": {\"transpose\": {\"semitones\": 12}}}, …]; [] clears it.",
+    },
+];
+
 const SET_INPUT_PARAMS: &[ParamSpec] = &[
     id_param("seq", "The track's sequence."),
     id_param("lane", "The track."),
@@ -1449,6 +1460,16 @@ pub const COMMANDS: &[CommandSpec] = &[
             "lane.set_monitor",
             "Track",
             "Set Track Monitor",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: SET_INPUT_FX_PARAMS,
+        ..key_only(cmd(
+            "lane.set_input_fx",
+            "Track",
+            "Set Input Effects",
             None,
             true,
         ))

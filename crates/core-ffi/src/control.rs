@@ -1397,6 +1397,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "opening": info.opening,
                 "levels": levels.iter().map(|l| (f64::from(*l) * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
                 "latency_trim": a.latency_trim,
+                "midi_fx_dropped": info.midi_fx_dropped,
             })
         }
         ControlResult::Project { doc, info } => json!({
@@ -1433,6 +1434,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "takes": l.take_count, "active_take": l.active_take,
                 "input": l.input.as_ref().map(lane_input_json),
                 "monitor": monitor_name(l.monitor),
+                "input_fx": crate::input_fx::input_fx_json(&l.input_fx),
                 "kind": match l.kind {
                     crate::tracks::TrackKindRow::Audio => "audio",
                     crate::tracks::TrackKindRow::Instrument => "instrument",

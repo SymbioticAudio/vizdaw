@@ -534,11 +534,12 @@ fn record_and_input_results_as_json() {
             round_trip_frames: 2048,
             opening: false,
             sample_rate: 48_000.0,
-            midi_fx_dropped: 0,
+            midi_fx_dropped: 3,
         },
         levels: vec![0.25, 1.0, 0.0],
     });
     assert_eq!(i["channels"], json!(3));
+    assert_eq!(i["midi_fx_dropped"], json!(3));
     assert_eq!(i["input_latency"], json!(512));
     // Plan 5d-1 Ruling 26: the settings, the round trip and the meters.
     assert_eq!(i["device_buffer_frames"], json!(512));
@@ -615,6 +616,10 @@ fn lanes_show_takes_input_and_monitor() {
         return_of: None,
     });
     lanes[0].monitor = MonitorModeRow::Input;
+    lanes[0].input_fx = vec![vizdaw_ffi::InputFxRow {
+        kind: vizdaw_ffi::InputFxKindRow::Transpose { semitones: 12 },
+        bypass: false,
+    }];
     lanes[1].input = Some(LaneInputRow::Midi {
         port: Some("Keys".into()),
         channel: Some(15),
@@ -638,6 +643,11 @@ fn lanes_show_takes_input_and_monitor() {
         l[3]["input"],
         json!({"kind": "audio", "channel": 1, "stereo": false, "return_of": null})
     );
+    assert_eq!(
+        l[0]["input_fx"],
+        json!([{"kind": {"transpose": {"semitones": 12}}}])
+    );
+    assert_eq!(l[1]["input_fx"], json!([]));
     assert_eq!(l[0]["monitor"], json!("input"));
     assert_eq!(
         l[1]["input"],
