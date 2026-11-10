@@ -68,6 +68,25 @@ import VizDAWCore
         #expect(f.edits.count == before + 1, "an unchanged drag edits nothing")
     }
 
+    /// Final review m1 (Task 9 m1): a VoiceOver increment or a keyboard
+    /// arrow changes a slider without a drag; each such change is one edit.
+    @Test func aSliderChangeWithoutADragIsOneEditEach() throws {
+        let (m, f) = try model([InputFxRow(kind: InputFxModel.defaultKind(.velocity), bypass: false)])
+        let fx = m.inputFx
+        fx.selected = 0
+        let before = f.edits.count
+        fx.setDraft(.velocity(scale: 110, offset: 0, min: 1, max: 127, fixed: nil))
+        #expect(f.edits.count == before + 1, "the change is kept, not snapped back")
+        #expect(last(f)?[0].kind == .velocity(scale: 110, offset: 0, min: 1, max: 127, fixed: nil))
+        #expect(fx.draft == nil, "no draft is left behind")
+        fx.setDraft(.velocity(scale: 120, offset: 0, min: 1, max: 127, fixed: nil))
+        #expect(f.edits.count == before + 2, "one edit per change")
+        #expect(last(f)?[0].kind == .velocity(scale: 120, offset: 0, min: 1, max: 127, fixed: nil))
+        fx.selected = nil
+        fx.setDraft(.velocity(scale: 130, offset: 0, min: 1, max: 127, fixed: nil))
+        #expect(f.edits.count == before + 2, "nothing selected: no edit")
+    }
+
     @Test func theChainIsBounded() throws {
         var (m, f) = try model(Array(repeating: up12, count: 8))
         var before = f.edits.count

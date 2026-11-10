@@ -317,9 +317,14 @@ public enum InputFxName: String, CaseIterable, Sendable {
         draft = row.kind
     }
 
-    /// While the slider moves: the draft changes, no edit.
+    /// While the slider moves: the draft changes, no edit. A change with
+    /// no drag in progress (a VoiceOver increment, a keyboard arrow) is
+    /// one edit of the selected row.
     public func setDraft(_ kind: InputFxKindRow) {
-        guard draft != nil else { return }
+        guard draft != nil else {
+            if let i = selected { update(i, kind) }
+            return
+        }
         draft = kind
     }
 
