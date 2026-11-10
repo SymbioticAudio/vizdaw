@@ -275,8 +275,19 @@ pub fn compile(
         let on = frame(r.tick);
         // A note-off never sorts at or before its note-on (ruling O20).
         let off = frame(end).max(on.saturating_add(1));
+        // A muted external destination plays no notes, but its controllers
+        // still play (plan 5g-1b Ruling 3).
+        let muted = doc
+            .instruments()
+            .get(&dest)
+            .is_some_and(|d| d.kind.is_external() && d.midi_mix.mute);
         let mut played = false;
+        let mut silenced = false;
         for out in t.msgs() {
+            if muted && is_note(&out.msg) {
+                silenced = true;
+                continue;
+            }
             let f = if out.when == When::End { off } else { on };
             for target in &targets {
                 pending.push(Pending {
@@ -320,18 +331,21 @@ pub fn compile(
         }
         if played {
             report.events += 1;
+        }
+        if played || silenced {
+            // A muted destination is still in use: its patch and mix go out.
             used.insert(dest, ());
         }
     }
 
-    // Default patches of the destinations that play, at frame 0, before
+    // Default patches of the destinations that play, then an external
+    // destination's mix (CC 7, CC 10; plan 5g-1b), at frame 0, before
     // every event on that frame of the same class.
     for dest in used.keys() {
         let Some(d) = doc.instruments().get(dest) else {
             continue;
         };
-        let (Some(patch), DestKind::MidiEndpoint { channel, .. }) = (d.default_patch, &d.kind)
-        else {
+        let DestKind::MidiEndpoint { channel, .. } = &d.kind else {
             continue;
         };
         let Some(Ok(targets)) = routes.get(dest) else {
@@ -339,11 +353,21 @@ pub fn compile(
         };
         let ch = channel & 0x0F;
         let mut msgs: Vec<Midi1Msg> = Vec::new();
-        if let Some((msb, lsb)) = patch.bank {
-            msgs.push(Midi1Msg::three(0xB0 | ch, 0, msb & 0x7F));
-            msgs.push(Midi1Msg::three(0xB0 | ch, 32, lsb & 0x7F));
+        if let Some(patch) = d.default_patch {
+            if let Some((msb, lsb)) = patch.bank {
+                msgs.push(Midi1Msg::three(0xB0 | ch, 0, msb & 0x7F));
+                msgs.push(Midi1Msg::three(0xB0 | ch, 32, lsb & 0x7F));
+            }
+            msgs.push(Midi1Msg::two(0xC0 | ch, patch.program & 0x7F));
         }
-        msgs.push(Midi1Msg::two(0xC0 | ch, patch.program & 0x7F));
+        if d.kind.is_external() {
+            if let Some(v) = d.midi_mix.volume {
+                msgs.push(Midi1Msg::three(0xB0 | ch, 7, v & 0x7F));
+            }
+            if let Some(p) = d.midi_mix.pan {
+                msgs.push(Midi1Msg::three(0xB0 | ch, 10, p & 0x7F));
+            }
+        }
         for msg in msgs {
             for target in targets {
                 pending.push(Pending {
@@ -421,6 +445,11 @@ fn scale_velocity(body: &EventBody, points: &[(Tick, f64)], tick: Tick) -> Optio
         *velocity = v;
     }
     Some(b)
+}
+
+/// A MIDI 1.0 note-on or note-off.
+fn is_note(msg: &Midi1Msg) -> bool {
+    matches!(msg.bytes[0] & 0xF0, 0x80 | 0x90)
 }
 
 fn mark(used: &mut [u16; MAX_TARGETS], target: TargetIdx, channel: u8) {

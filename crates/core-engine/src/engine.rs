@@ -963,6 +963,32 @@ impl Engine {
         velocity: u16,
         on: bool,
     ) -> Result<bool, EngineError> {
+        let pitch = pitch & 0x7F;
+        let msg = if on {
+            Midi1Msg::three(0x90, pitch, note_on_velocity(velocity))
+        } else {
+            Midi1Msg::three(0x80, pitch, release_velocity(velocity))
+        };
+        self.send_now(doc, dest, msg)
+    }
+
+    /// Sends the channel message `msg` straight to the targets `dest`
+    /// plays on, without touching the document (a MIDI strip's change,
+    /// plan 5g-1b; editor audition). The status byte's channel nibble
+    /// becomes the destination's channel (0 for a plugin) and the data
+    /// bytes are kept to 7 bits. Returns false when `msg` is not a channel
+    /// message, `dest` is unknown or this engine has none of its targets
+    /// (the loaded sequence does not use them).
+    pub fn send_now(
+        &mut self,
+        doc: &Document,
+        dest: DestId,
+        msg: Midi1Msg,
+    ) -> Result<bool, EngineError> {
+        let [status, d1, d2] = msg.bytes;
+        if !(0x80..0xF0).contains(&status) {
+            return Ok(false);
+        }
         let Some(d) = doc.instruments().get(&dest) else {
             return Ok(false);
         };
@@ -973,11 +999,9 @@ impl Engine {
         let Ok(kinds) = kinds_for(&d.kind, self.cfg.route, &self.factory.ports()) else {
             return Ok(false);
         };
-        let pitch = pitch & 0x7F;
-        let msg = if on {
-            Midi1Msg::three(0x90 | channel, pitch, note_on_velocity(velocity))
-        } else {
-            Midi1Msg::three(0x80 | channel, pitch, release_velocity(velocity))
+        let msg = Midi1Msg {
+            len: msg.len,
+            bytes: [(status & 0xF0) | channel, d1 & 0x7F, d2 & 0x7F],
         };
         let mut sent = false;
         for k in &kinds {
@@ -987,6 +1011,35 @@ impl Engine {
             }
         }
         Ok(sent)
+    }
+
+    /// Per external destination with a loaded target, the highest note-on
+    /// velocity the renderer sent to it since the last call, read and
+    /// cleared (a MIDI strip's activity meter, plan 5g-1b). Destinations at
+    /// 0 are left out. Destinations sharing a target (one port, several
+    /// channels) each report that target's peak.
+    pub fn take_midi_activity(&self, doc: &Document) -> Vec<(DestId, u8)> {
+        let peaks = self.shared.take_midi_activity();
+        let ports = self.factory.ports();
+        let mut out = Vec::new();
+        for (id, d) in doc.instruments() {
+            if !d.kind.is_external() {
+                continue;
+            }
+            let Ok(kinds) = kinds_for(&d.kind, self.cfg.route, &ports) else {
+                continue;
+            };
+            let v = kinds
+                .iter()
+                .filter_map(|k| self.targets.find(k))
+                .filter_map(|t| peaks.get(usize::from(t.0)).copied())
+                .max()
+                .unwrap_or(0);
+            if v > 0 {
+                out.push((*id, v));
+            }
+        }
+        out
     }
 
     /// Tells the streamer the loop the transport plays: none during Play

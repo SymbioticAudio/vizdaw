@@ -191,6 +191,9 @@ pub struct Shared {
     /// Per device input channel, the peak since the last read (`f32` bits;
     /// plan 5d-1 Ruling 27).
     input_peaks: Box<[AtomicU32]>,
+    /// Per target, the highest note-on velocity sent to a MIDI sink since
+    /// the last read (a MIDI strip's activity, plan 5g-1b).
+    midi_activity: [AtomicU8; MAX_TARGETS],
 }
 
 /// The peak of the first `n` samples of `ch`; a non-finite sample counts
@@ -230,6 +233,7 @@ impl Default for Shared {
             input_peaks: (0..crate::backend::MAX_INPUT_CHANNELS)
                 .map(|_| AtomicU32::new(0))
                 .collect(),
+            midi_activity: std::array::from_fn(|_| AtomicU8::new(0)),
         }
     }
 }
@@ -332,6 +336,23 @@ impl Shared {
             .take(channels)
             .map(|c| f32::from_bits(c.swap(0, Ordering::Relaxed)))
             .collect()
+    }
+
+    /// Raises target `t`'s note activity to `velocity`. // RT
+    pub fn note_activity(&self, t: TargetIdx, velocity: u8) {
+        if let Some(cell) = self.midi_activity.get(usize::from(t.0)) {
+            cell.fetch_max(velocity, Ordering::Relaxed);
+        }
+    }
+
+    /// Every target's highest note-on velocity since the last read,
+    /// cleared.
+    pub fn take_midi_activity(&self) -> [u8; MAX_TARGETS] {
+        std::array::from_fn(|t| {
+            self.midi_activity
+                .get(t)
+                .map_or(0, |c| c.swap(0, Ordering::Relaxed))
+        })
     }
 
     /// Records that `instance` was bypassed for faults. The board is an
@@ -802,6 +823,12 @@ impl Out<'_> {
                 if !out.send(at.max(0) as u64, bytes) {
                     self.shared.raise(Faults::MIDI_DROPPED);
                     self.shared.midi_dropped.fetch_add(1, Ordering::Relaxed);
+                } else if let [status, _, v, ..] = bytes
+                    && status & 0xF0 == 0x90
+                    && *v > 0
+                {
+                    // RT: a note-on reached the synth.
+                    self.shared.note_activity(target, *v);
                 }
             }
             _ => {}
@@ -1872,7 +1899,11 @@ impl Renderer {
                     base: 0,
                 };
                 o.send(target, 0, msg.as_slice());
-                self.audition.observe(target, msg.as_slice());
+                // `send_now` sends controllers too: only notes are tracked
+                // for release.
+                if matches!(msg.bytes[0] & 0xF0, 0x80 | 0x90) {
+                    self.audition.observe(target, msg.as_slice());
+                }
             }
             EngineCmd::Record(mut new) => {
                 // The latency the graph has now, whatever it was when the
