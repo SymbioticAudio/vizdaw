@@ -7,19 +7,28 @@ import VizDAWCore
 
 /// The channel strip's MIDI FX section beneath Inserts (plan 5g-1 Task 9,
 /// Ruling 16): the input effect chain of the track the strip edits
-/// (`MixerModel.midiFxLane(for:in:)`), one slot per effect, then "+" while
+/// (`lane`: `MixerModel.midiFxLane(for:in:)` on an instrument strip,
+/// `midiLane(for:in:)` on a MIDI strip), one slot per effect, then "+" while
 /// the chain holds fewer than 8. The heading lights while the chain has an
 /// effect that is on. A click on "+" pops up the effect menu, a click on a
 /// slot its settings; with the control channel on neither opens (the
 /// model sets the status line instead).
 struct StripMidiFx: View {
     @Bindable var model: MixerModel
-    let strip: StripRow
-    @Environment(\.mixerPlacement) private var placement
+    /// The track the section edits; nil disables it.
+    let lane: LaneRow?
+    /// Where a slot's settings show (`InputFxModel.SettingsSlot.strip`):
+    /// the strip's ID, or `MixerModel.midiFxKey(dest:lane:)`.
+    let key: UInt64
+    /// The strip's name, for VoiceOver when no track is edited.
+    let name: String
+    /// The disabled "+"'s help.
+    let emptyHelp: String
     @Environment(\.symbioticTheme) private var theme
 
+    static let noTrackThroughStrip = "No track in this sequence plays through this strip."
+
     var body: some View {
-        let lane = model.midiFxLane(for: strip, in: placement)
         let fx = model.document.inputFx
         let lit = lane.map(InputFxModel.isLit) ?? false
         VStack(alignment: .leading, spacing: theme.spacing.xxs) {
@@ -27,7 +36,7 @@ struct StripMidiFx: View {
             if let lane {
                 let rows = fx.chain(of: lane)
                 ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
-                    MidiFxSlot(fx: fx, lane: lane, strip: strip, index: i, row: row)
+                    MidiFxSlot(fx: fx, lane: lane, key: key, index: i, row: row)
                 }
                 if rows.count < 8 {
                     Button {
@@ -46,12 +55,12 @@ struct StripMidiFx: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(true)
-                .help("No track in this sequence plays through this strip.")
+                .help(emptyHelp)
                 .accessibilityLabel("Add a MIDI effect")
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("MIDI FX of \(lane?.name ?? strip.name)")
+        .accessibilityLabel("MIDI FX of \(lane?.name ?? name)")
         .accessibilityValue(lit ? "on" : "off")
     }
 }
@@ -64,7 +73,7 @@ struct StripMidiFx: View {
 struct MidiFxSlot: View {
     let fx: InputFxModel
     let lane: LaneRow
-    let strip: StripRow
+    let key: UInt64
     let index: Int
     let row: InputFxRow
     @Environment(\.mixerPlacement) private var placement
@@ -106,14 +115,14 @@ struct MidiFxSlot: View {
         .overlay(RoundedRectangle(cornerRadius: theme.radius.s).strokeBorder(theme.surface.separator.color))
         .contentShape(Rectangle())
         .help("\(title), \(summary)")
-        .onTapGesture { fx.clickSlot(i, lane: lane.id, strip: strip.id, in: placement) }
+        .onTapGesture { fx.clickSlot(i, lane: lane.id, strip: key, in: placement) }
         .popover(
             isPresented: Binding(
-                get: { fx.showsSettings(strip: strip.id, index: i, in: placement) },
+                get: { fx.showsSettings(strip: key, index: i, in: placement) },
                 set: { shown in
                     // Only this slot's popover closing clears the settings:
                     // a click on another slot has already moved them there.
-                    if !shown, fx.showsSettings(strip: strip.id, index: i, in: placement) { fx.closeSettings() }
+                    if !shown, fx.showsSettings(strip: key, index: i, in: placement) { fx.closeSettings() }
                 })
         ) {
             InputFxSettings(model: fx)

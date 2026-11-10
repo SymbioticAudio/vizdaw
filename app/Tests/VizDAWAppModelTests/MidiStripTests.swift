@@ -230,6 +230,47 @@ private func ext(_ id: UInt64, _ name: String = "Juno", mix: MidiMixRow = MidiMi
         m.pollLevels()
         #expect(abs((m.midiActivity[7] ?? 0) - 64.0 / 127) < 1e-6)
     }
+
+    // MARK: What the views ask (Task 6)
+
+    @Test func faderScaleAndLabelsAreTheCcValues() {
+        #expect(MidiStripMath.faderMarks.map(\.label) == ["127", "100", "64", "32", "0"])
+        let positions: [Double] = [127, 100, 64, 32, 0].map { $0 / 127 }
+        #expect(MidiStripMath.faderMarks.map(\.position) == positions)
+        #expect(MidiStripMath.panPosition(nil) == 64.0 / 127, "an unset pan sits at the centre")
+        #expect(MidiStripMath.panPosition(0) == 0)
+        #expect(MidiStripMath.panPosition(127) == 1)
+        #expect(MidiStripMath.kindLabel(channel: 0) == "MIDI \u{00B7} Ch 1")
+        #expect(MidiStripMath.kindLabel(channel: 15) == "MIDI \u{00B7} Ch 16")
+        #expect(MidiStripMath.kindLabel(channel: nil) == "MIDI")
+        #expect(MidiStripMath.noDestination == "No destination")
+        #expect(!MidiStripMath.volumeHint.lowercased().contains("lane"))
+        #expect(!MidiStripMath.panHint.lowercased().contains("lane"))
+    }
+
+    @Test func midiFxKeyNeverMeetsAStripID() {
+        #expect(MixerModel.midiFxKey(dest: 7, lane: 30) != 7)
+        #expect(MixerModel.midiFxKey(dest: 7, lane: 30) == MixerModel.midiFxKey(dest: 7, lane: 31),
+                "a destination's strip keeps its key whichever track it edits")
+        #expect(MixerModel.midiFxKey(dest: nil, lane: 30) != 30)
+        #expect(MixerModel.midiFxKey(dest: nil, lane: 30) != MixerModel.midiFxKey(dest: 30, lane: 1))
+    }
+
+    @Test func armAndDestinationEditTheTrack() throws {
+        let f = fake()
+        var a = lane(30, "A")
+        a.midiDest = 7
+        f.laneTable[3] = [a]
+        let m = try model(f)
+        m.document.select(3)
+        m.toggleMidiArm(a)
+        #expect(f.edits.last == .lane(edit: .setFlags(seq: 3, lane: 30, mute: nil, solo: nil, arm: true)))
+        m.setMidiDest(a, nil)
+        #expect(f.edits.last == .lane(edit: .setDest(seq: 3, lane: 30, dest: nil)))
+        let n = f.edits.count
+        m.setMidiDest(a, 7)
+        #expect(f.edits.count == n, "the destination it has: no edit")
+    }
 }
 
 private enum FakeLane {

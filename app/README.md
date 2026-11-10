@@ -2351,3 +2351,38 @@ the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
      Undo ("Set Input Effects"); a slider drag is one step. A change made
      while recording is undone with the take. Save, close and reopen: the
      chain is there. Duplicate Track copies it.
+
+### MIDI strips (plan 5g-1b)
+
+By ear and by eye on an external synth; the sending is tested
+(`core-engine/tests/midi_strip.rs`, `rt_alloc_midi_strip.rs`), the model
+(`MidiStripTests`) and the e2e `midi_mix_reaches_state_get`.
+
+245. Put a MIDI track on an external synth and select it: the left pane
+     shows its MIDI strip: the destination's name, MIDI FX, pan, a fader
+     scaled 0–127 with a thin meter, the volume box, and M and R. No
+     input, EQ, inserts, sends, output, solo or automation mode. Before
+     any change the fader sits at 100 and pan at C, both dimmed. The
+     Mixer shows one MIDI strip per external destination, used or not,
+     after the instrument and audio strips and before the buses; its
+     header shows the name only, with no menu. Check this in each theme.
+246. Drag the fader, then the pan knob: the synth's level and pan follow
+     as you move, and the values stop being dimmed. Each drag is one
+     Undo ("Set MIDI Mix"), and Undo puts the synth back. Type "90" in
+     the volume box and "R 10" in the pan box: both take. "200" and
+     "L 70" are refused, and nothing changes.
+247. Stop, set the strip's level and pan, then Play from bar 1: the synth
+     gets them right after the destination's patch. A part with its own
+     volume moves (CC 7) still plays them, and from then on they win.
+     Start mid-song after such a move: the recorded value is sent, not
+     the strip's.
+248. Hold a long note on the track and press M: the note ends at once.
+     Controllers (a mod wheel or pitch bend in the part) still play while
+     muted; no note plays. Press M again: the next note plays.
+249. Play: the meter beside the fader rises with each note sent, by its
+     velocity (soft notes low, loud notes high), and falls between notes.
+250. Give a MIDI track no destination in the left pane's header menu: the
+     strip reads "No destination", and pan, the fader, the volume box and
+     M are off, while MIDI FX and R still work. Pick the synth again in
+     the same menu: the strip comes back. Save, close and reopen: the
+     strip's level, pan and mute are as you left them.

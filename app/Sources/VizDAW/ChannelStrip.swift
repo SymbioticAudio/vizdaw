@@ -24,7 +24,7 @@ struct ChannelStrip: View {
     @Environment(\.mixerPlacement) private var placement
 
     var body: some View {
-        let one = ChannelStrips(model: model, strips: [strip], dividerBefore: nil, height: height)
+        let one = ChannelStrips(model: model, columns: [.audio(strip)], dividerBefore: nil, height: height)
         if placement == .strip {
             // The left pane's own scrolling (Ruling 14): it scrolls only when
             // the content is taller than the pane, which `split` decides.
@@ -35,34 +35,86 @@ struct ChannelStrip: View {
     }
 }
 
+/// One column of the strips' grid: an audio strip, the mixer's MIDI strip
+/// of a destination (its name only, Ruling 8), or the left pane's MIDI
+/// strip of a track (a destination menu; `dest` nil for none).
+enum StripColumn: Identifiable {
+    case audio(StripRow)
+    case midi(DestRow)
+    case track(LaneRow, dest: DestRow?)
+
+    init(_ c: MixerColumn) {
+        switch c {
+        case .audio(let s): self = .audio(s)
+        case .midi(let d): self = .midi(d)
+        }
+    }
+
+    /// As `MixerColumn.id`; a track's column is "t" + its ID.
+    var id: String {
+        switch self {
+        case .audio(let s): "s\(s.id)"
+        case .midi(let d): "d\(d.id)"
+        case .track(let l, _): "t\(l.id)"
+        }
+    }
+}
+
 /// A mixer's strips side by side, sharing their rows (fix round 1): each
 /// row above the fader is as tall as the tallest strip's, and a strip
-/// without it (no input, no sends) keeps the space empty, so every fader,
-/// level box and button row lines up (`StripGrid`). `dividerBefore` puts a
-/// divider before that strip (master).
+/// without it (no input, no sends; a MIDI strip's missing rows) keeps the
+/// space empty, so every fader, level box and button row lines up
+/// (`StripGrid`). `dividerBefore` puts a divider before that column (master).
 struct ChannelStrips: View {
     @Bindable var model: MixerModel
-    let strips: [StripRow]
+    let columns: [StripColumn]
     let dividerBefore: Int?
     let height: CGFloat
+    @Environment(\.mixerPlacement) private var placement
+
+    init(model: MixerModel, columns: [MixerColumn], dividerBefore: Int?, height: CGFloat) {
+        self.init(model: model, stripColumns: columns.map(StripColumn.init), dividerBefore: dividerBefore, height: height)
+    }
+
+    init(model: MixerModel, stripColumns: [StripColumn], dividerBefore: Int?, height: CGFloat) {
+        self.model = model
+        self.columns = stripColumns
+        self.dividerBefore = dividerBefore
+        self.height = height
+    }
 
     var body: some View {
-        StripGridLayout(height: height, columns: strips.count, dividerBefore: dividerBefore) {
-            ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
-                StripPanel(model: model, strip: s)
+        StripGridLayout(height: height, columns: columns.count, dividerBefore: dividerBefore) {
+            ForEach(Array(columns.enumerated()), id: \.element.id) { i, c in
+                StripPanel(dimmed: c.audio?.soloMuted == true)
                     .layoutValue(key: StripCellKey.self, value: StripCell(column: i, part: .panel))
             }
             if dividerBefore != nil {
                 StripDivider().layoutValue(key: StripCellKey.self, value: StripCell(column: 0, part: .divider))
             }
-            ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
-                StripCells(model: model, strip: s, column: i)
+            ForEach(Array(columns.enumerated()), id: \.element.id) { i, c in
+                switch c {
+                case .audio(let s):
+                    StripCells(model: model, strip: s, column: i)
+                case .midi(let d):
+                    MidiStripCells(
+                        model: model, dest: d, lane: model.midiLane(for: d.id, in: placement), menu: false, column: i)
+                case .track(let lane, let d):
+                    MidiStripCells(model: model, dest: d, lane: lane, menu: true, column: i)
+                }
             }
-            ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
-                StripPanelEdge(model: model, strip: s)
+            ForEach(Array(columns.enumerated()), id: \.element.id) { i, c in
+                StripPanelEdge(selected: c.audio.map { model.isSelected($0.id) } ?? false)
                     .layoutValue(key: StripCellKey.self, value: StripCell(column: i, part: .panel))
             }
         }
+    }
+}
+
+extension StripColumn {
+    fileprivate var audio: StripRow? {
+        if case .audio(let s) = self { return s }
+        return nil
     }
 }
 
@@ -79,7 +131,7 @@ private struct StripDivider: View {
 /// its height: the layout measures it).
 typealias StripCell = StripGrid.Cell
 
-private struct StripCellKey: LayoutValueKey {
+struct StripCellKey: LayoutValueKey {
     static let defaultValue = StripCell(column: 0, part: .panel)
 }
 
@@ -88,6 +140,7 @@ private struct StripCells: View {
     @Bindable var model: MixerModel
     let strip: StripRow
     let column: Int
+    @Environment(\.mixerPlacement) private var placement
 
     var body: some View {
         row(.header) { StripHeader(model: model, strip: strip) }
@@ -102,7 +155,11 @@ private struct StripCells: View {
         row(.eq, band: .dark) { EqSlotView(model: model, strip: strip) }
         row(.inserts, band: .dark) { StripInserts(model: model, strip: strip) }
         if model.showsMidiFx(strip) {
-            row(.midiFx, band: .dark) { StripMidiFx(model: model, strip: strip) }
+            row(.midiFx, band: .dark) {
+                StripMidiFx(
+                    model: model, lane: model.midiFxLane(for: strip, in: placement), key: strip.id,
+                    name: strip.name, emptyHelp: StripMidiFx.noTrackThroughStrip)
+            }
         }
         if strip.kind != .master {
             if !strip.sends.isEmpty || !model.targets(for: strip).isEmpty {
@@ -130,7 +187,8 @@ private struct StripCells: View {
 }
 
 extension View {
-    fileprivate func cell(_ column: Int, _ part: StripGrid.Part) -> some View {
+    /// Tags a grid child with its column and part.
+    func cell(_ column: Int, _ part: StripGrid.Part) -> some View {
         layoutValue(key: StripCellKey.self, value: StripCell(column: column, part: part))
     }
 }
@@ -139,14 +197,13 @@ extension View {
 /// theme's relief gradient over it when the theme has one (Console), and
 /// its edge (the accent when selected).
 private struct StripPanel: View {
-    let model: MixerModel
-    let strip: StripRow
+    let dimmed: Bool
     @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: theme.radius.m)
         ZStack {
-            shape.fill(theme.surface.raised.color.opacity(strip.soloMuted ? 0.5 : 1))
+            shape.fill(theme.surface.raised.color.opacity(dimmed ? 0.5 : 1))
             if theme.relief.panelTop.fallbackComponents.alpha > 0 || theme.relief.panelBottom.fallbackComponents.alpha > 0 {
                 shape.fill(
                     LinearGradient(
@@ -161,12 +218,10 @@ private struct StripPanel: View {
 /// A strip's edge (the accent when selected), drawn after every row so a
 /// section band never paints over it.
 private struct StripPanelEdge: View {
-    let model: MixerModel
-    let strip: StripRow
+    let selected: Bool
     @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
-        let selected = model.isSelected(strip.id)
         RoundedRectangle(cornerRadius: theme.radius.m)
             .strokeBorder(
                 selected ? theme.accent.accent.color : theme.surface.separator.color, lineWidth: selected ? 2 : 1)
@@ -180,7 +235,7 @@ private struct StripPanelEdge: View {
 /// the strips share their rows and every fader, level box and button row
 /// lines up. Every strip is `StripLayout.contentHeight` tall: `height`
 /// when it fits, taller (scrolling) when it does not.
-private struct StripGridLayout: Layout {
+struct StripGridLayout: Layout {
     let height: CGFloat
     let columns: Int
     let dividerBefore: Int?
@@ -342,7 +397,7 @@ private struct StripColourMenu: View {
 
 /// A strip menu's face: a small inset box with the text (and an optional
 /// coloured dot) and a down mark.
-private struct StripMenuFace: View {
+struct StripMenuFace: View {
     let text: String
     var dot: Color?
     var centred = false
@@ -374,7 +429,7 @@ private struct StripMenuFace: View {
 }
 
 /// A menu drawn as a `StripMenuFace`.
-private struct StripMenu<Content: View>: View {
+struct StripMenu<Content: View>: View {
     let text: String
     var dot: Color?
     var centred = false
@@ -854,7 +909,7 @@ struct StripButtons: View {
 }
 
 /// One of M S R I: 24 by 24, lit in its state's colour.
-private struct StripToggle: View {
+struct StripToggle: View {
     let letter: String
     let on: Bool
     let colour: ThemeColor
@@ -970,7 +1025,7 @@ private struct StripBand: ViewModifier {
 
 extension View {
     /// The readout's edge around a number box (`StripPalette.numberBox`).
-    fileprivate func readoutEdge(_ t: Theme) -> some View {
+    func readoutEdge(_ t: Theme) -> some View {
         overlay(
             RoundedRectangle(cornerRadius: t.radius.s)
                 .strokeBorder(StripPalette.numberBox(t).edge.color.opacity(0.35))
@@ -978,5 +1033,5 @@ extension View {
                 .allowsHitTesting(false))
     }
 
-    fileprivate func stripBand(_ shade: StripBandShade?) -> some View { modifier(StripBand(shade: shade)) }
+    func stripBand(_ shade: StripBandShade?) -> some View { modifier(StripBand(shade: shade)) }
 }

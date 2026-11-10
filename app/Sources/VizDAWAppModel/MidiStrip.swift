@@ -41,6 +41,25 @@ public enum MidiStripMath {
         return UInt8((min(max(p, 0), 1) * 127).rounded())
     }
 
+    /// The fader's 0...127 scale (Ruling 5: linear in the CC value).
+    public static let faderMarks: [ScaleMark] = [127, 100, 64, 32, 0].map {
+        ScaleMark(position: Double($0) / 127, label: "\($0)")
+    }
+
+    /// The pan knob's position 0...1 (an unset pan sits at the centre).
+    public static func panPosition(_ p: UInt8?) -> Double { Double(p ?? panCentre) / 127 }
+
+    /// The strip's kind line: "MIDI · Ch 1" (the channel is 0...15).
+    public static func kindLabel(channel: UInt8?) -> String {
+        channel.map { "MIDI \u{00B7} Ch \(Int($0) + 1)" } ?? "MIDI"
+    }
+
+    /// The left pane's header for a MIDI track without a destination (§6.8a).
+    public static let noDestination = "No destination"
+    /// The status line after refused typed text.
+    public static let volumeHint = "Type a volume from 0 to 127."
+    public static let panHint = "Type a pan like L 24, C or R 10, or 0 to 127."
+
     private static func number(_ t: String) -> UInt8? {
         guard !t.isEmpty, t.utf8.count <= 3, t.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
               let n = UInt8(t), n <= 127 else { return nil }
@@ -170,6 +189,27 @@ extension MixerModel {
         guard let p = MidiStripMath.parsePan(text), committedMix(dest) != nil else { return false }
         setMidiPan(dest, p)
         return true
+    }
+
+    /// The key a MIDI strip's MIDI FX settings popover shows under
+    /// (`InputFxModel.SettingsSlot.strip`): the destination, else the track,
+    /// with the top bit set so it never meets an audio strip's ID.
+    public static func midiFxKey(dest: UInt64?, lane: UInt64) -> UInt64 {
+        dest.map { $0 | (1 << 63) } ?? (lane | (3 << 62))
+    }
+
+    /// The strip's R: toggles `lane`'s arm (one undo step), as the track
+    /// header does.
+    public func toggleMidiArm(_ lane: LaneRow) {
+        guard let seq = document.selectedSeq else { return }
+        _ = document.editor.edit(.lane(edit: .setFlags(seq: seq, lane: lane.id, mute: nil, solo: nil, arm: !lane.arm)))
+    }
+
+    /// The left pane's destination menu (Ruling 8): sets `lane`'s
+    /// destination, as the track header's menu does; nil is none.
+    public func setMidiDest(_ lane: LaneRow, _ dest: UInt64?) {
+        guard let seq = document.selectedSeq, lane.midiDest != dest else { return }
+        _ = document.editor.edit(.lane(edit: .setDest(seq: seq, lane: lane.id, dest: dest)))
     }
 
     private func commitMidiMix(_ dest: UInt64, _ mix: MidiMixRow) {

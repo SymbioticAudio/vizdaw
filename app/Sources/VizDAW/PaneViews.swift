@@ -106,8 +106,20 @@ struct LeftStripPane: View {
             } else {
                 PaneNote(text: StripFocus.nothingMessage)
             }
-        case .inspector, .midi:
-            // Placeholder: Task 6 gives `.midi` its own strip.
+        case .midi(let dest, let id):
+            // A MIDI track's strip (§6.8a), "No destination" without one.
+            if let lane = model.lanes.first(where: { $0.id == id }) {
+                GeometryReader { g in
+                    MidiChannelStrip(
+                        model: mixer, lane: lane, dest: dest.flatMap { d in mixer.destinations.first { $0.id == d } },
+                        height: max(g.size.height - 16, 0))
+                        .padding(theme.spacing.s)
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                PaneNote(text: StripFocus.nothingMessage)
+            }
+        case .inspector:
             InspectorPane(model: model, docID: docID)
         case .nothing:
             PaneNote(text: StripFocus.nothingMessage)

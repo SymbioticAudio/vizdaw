@@ -112,9 +112,11 @@ struct MixerView: View {
             let height = max(g.size.height - 2 * theme.spacing.s, 0)
             ScrollView([.horizontal, .vertical]) {
                 // One grid, so the strips share their rows (fix round 1).
+                // MIDI strips between the strips and the buses (Ruling 7).
+                let columns = model.columns
                 ChannelStrips(
-                    model: model, strips: model.strips + (model.master.map { [$0] } ?? []),
-                    dividerBefore: model.master == nil ? nil : model.strips.count, height: height)
+                    model: model, columns: columns + (model.master.map { [.audio($0)] } ?? []),
+                    dividerBefore: model.master == nil ? nil : columns.count, height: height)
                 .padding(theme.spacing.s)
                 .frame(minWidth: g.size.width, minHeight: g.size.height, alignment: .topLeading)
             }
