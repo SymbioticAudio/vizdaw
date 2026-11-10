@@ -20,7 +20,10 @@ public enum InputFxName: String, CaseIterable, Sendable {
     /// The lane whose chain the input effects editor shows; nil when closed.
     public private(set) var lane: UInt64?
     /// The selected row.
-    public var selected: Int?
+    public var selected: Int? {
+        // A draft belongs to the row it was grabbed on.
+        didSet { if selected != oldValue { draft = nil } }
+    }
     /// The selected effect while a slider drags (committed at its end).
     public private(set) var draft: InputFxKindRow?
 
@@ -149,7 +152,7 @@ public enum InputFxName: String, CaseIterable, Sendable {
     /// effects, and a second Input Quantize: the status line says why.
     public func add(_ name: InputFxName) {
         guard let document, laneRow != nil else { return }
-        let rows = chain
+        let rows = committed
         if rows.count >= Self.maxEffects {
             document.editor.status = "A chain holds at most 8 effects."
             return

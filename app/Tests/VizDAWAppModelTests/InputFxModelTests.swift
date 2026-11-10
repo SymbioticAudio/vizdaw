@@ -8,7 +8,7 @@ import VizDAWCore
 /// a slider drag is one edit at its end; the strip's MIDI FX section lit state.
 @MainActor
 @Suite(.serialized) struct InputFxModelTests {
-    /// Song's Chords lane (31) with `chain`, the popover open on it.
+    /// Song's Chords lane (31) with `chain`, the editor open on it.
     func model(_ chain: [InputFxRow] = []) throws -> (DocumentModel, FakeSession) {
         let f = editorFake()
         f.laneTable[3]?[1].inputFx = chain
@@ -123,5 +123,31 @@ import VizDAWCore
         #expect(InputFxModel.quantizeGrids.contains { $0.title == "1/16" && $0.ticks == 3840 })
         #expect(InputFxModel.quantizeGrids.contains { $0.title == "1/8T" && $0.ticks == 5120 })
         #expect(InputFxModel.quantizeGrids.contains { $0.title == "1/4." && $0.ticks == 23_040 })
+    }
+
+    /// An Undo that removes the selected sequence moves the selection and
+    /// closes the editor (review I1), as choosing another sequence does.
+    @Test func anUndoneSequenceClosesTheEditor() throws {
+        let (m, f) = try model([up12])
+        #expect(m.inputFx.lane == 31)
+        f.snap.sequences.removeAll { $0.id == 3 }
+        var s = f.snap
+        s.version += 1
+        m.apply(s)
+        #expect(m.selectedSeq != 3)
+        #expect(m.inputFx.lane == nil)
+    }
+
+    @Test func aDraftBelongsToItsRow() throws {
+        let (m, f) = try model([up12, arp])
+        m.inputFx.selected = 0
+        m.inputFx.beginDraft()
+        m.inputFx.setDraft(.transpose(semitones: 5))
+        let before = f.edits.count
+        m.inputFx.selected = 1
+        #expect(m.inputFx.draft == nil)
+        #expect(m.inputFx.chain == [up12, arp])
+        m.inputFx.commitDraft()
+        #expect(f.edits.count == before)
     }
 }

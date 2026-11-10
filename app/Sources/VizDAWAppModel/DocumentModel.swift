@@ -43,7 +43,11 @@ public final class DocumentModel {
         mixerAsked = now
         return provider()
     }
-    public private(set) var selectedSeq: UInt64?
+    public private(set) var selectedSeq: UInt64? {
+        // Any change of sequence (a choice, or an Undo that removed it)
+        // closes the input effects editor (plan 5g-1 Task 8).
+        didSet { if selectedSeq != oldValue { inputFxModel?.close() } }
+    }
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState
     /// Playing, which sequence, and the tick while stopped; set only when
@@ -497,7 +501,6 @@ public final class DocumentModel {
     public func select(_ seq: UInt64?) {
         guard seq != selectedSeq else { return }
         selectedSeq = seq
-        inputFxModel?.close()
         refreshLanes()
         stepEntry.checkTarget()
     }
