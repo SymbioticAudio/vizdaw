@@ -204,6 +204,37 @@ pub struct DestRow {
     /// Its return latency in ms (spec §4.5a).
     #[uniffi(default)]
     pub return_latency_ms: f32,
+    /// Its MIDI strip's mix (plan 5g-1b); the default for any other.
+    #[uniffi(default)]
+    pub midi_mix: MidiMixRow,
+    /// The 0-15 channel of a MIDI endpoint, else `None`.
+    #[uniffi(default)]
+    pub channel: Option<u8>,
+}
+
+/// An external destination's MIDI strip mix (plan 5g-1b): controller
+/// values (0-127; `None` sends nothing) and mute.
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct MidiMixRow {
+    /// Volume (CC 7), 0-127.
+    #[uniffi(default)]
+    pub volume: Option<u8>,
+    /// Pan (CC 10), 0-127; 64 is the centre.
+    #[uniffi(default)]
+    pub pan: Option<u8>,
+    /// Mute.
+    #[uniffi(default)]
+    pub mute: bool,
+}
+
+/// A destination's note activity since the last read: the highest note-on
+/// velocity (1-127) sent on its channel.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MidiLevelRow {
+    /// Destination ID.
+    pub dest: u64,
+    /// Peak note-on velocity.
+    pub velocity: u8,
 }
 
 /// A bus, for output and send menus.
@@ -252,6 +283,9 @@ pub struct MixerLevels {
     /// Instances bypassed for faults (NaN output, errors), sticky until
     /// the engine is rebuilt.
     pub faulted: Vec<u64>,
+    /// MIDI note activity per external destination (plan 5g-1b).
+    #[uniffi(default)]
+    pub midi: Vec<MidiLevelRow>,
 }
 
 impl MixerLevels {
@@ -263,6 +297,7 @@ impl MixerLevels {
             dsp_peak: 0.0,
             latency_frames: 0,
             faulted: Vec::new(),
+            midi: Vec::new(),
         }
     }
 }

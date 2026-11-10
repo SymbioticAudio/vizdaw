@@ -108,8 +108,8 @@ pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
 pub use live::InputInfoRow;
 pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
 pub use mixer::{
-    BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripColourRow, StripKindRow,
-    StripRow, SwatchRow,
+    BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow,
+    StripColourRow, StripKindRow, StripRow, SwatchRow,
 };
 pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,

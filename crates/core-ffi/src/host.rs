@@ -2903,6 +2903,32 @@ pub fn audition(
     }
 }
 
+/// Sends `msg` now to `dest`'s target through `owner`'s engine (a MIDI
+/// strip's preview or change); false when `owner` does not hold the engine
+/// or it has no target for `dest`.
+pub fn send_now(
+    owner: u64,
+    doc: &Document,
+    dest: DestId,
+    msg: core_engine::midi1::Midi1Msg,
+) -> Result<bool, VizError> {
+    let mut slot = lock_host();
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => Ok(h.engine.send_now(doc, dest, msg)?),
+        _ => Ok(false),
+    }
+}
+
+/// `owner`'s engine's note activity per external destination since the
+/// last call, read and cleared; empty when it does not hold the engine.
+pub fn midi_activity(owner: u64, doc: &Document) -> Vec<(DestId, u8)> {
+    let slot = lock_host();
+    match slot.as_ref() {
+        Some(h) if h.owner == owner => h.engine.take_midi_activity(doc),
+        _ => Vec::new(),
+    }
+}
+
 /// After an edit: starts loading the plugins `doc` gained (and drops the
 /// ones it lost), then recompiles if `owner` holds the engine and no
 /// plugin is loading (otherwise `service` loads once they are in).
@@ -3290,7 +3316,7 @@ pub fn factory_owner() -> Option<u64> {
 
 /// `owner`'s meters, DSP load, latency and fault-bypassed instances, or
 /// `None` when it does not hold the engine.
-pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
+pub fn levels(owner: u64, doc: &Document) -> Option<crate::mixer::MixerLevels> {
     let mut slot = lock_host();
     let h = slot.as_mut().filter(|h| h.owner == owner)?;
     h.faulted
@@ -3311,6 +3337,15 @@ pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
         dsp_peak: load.peak,
         latency_frames: h.engine.latency_frames(),
         faulted: h.faulted.iter().copied().collect(),
+        midi: h
+            .engine
+            .take_midi_activity(doc)
+            .into_iter()
+            .map(|(d, velocity)| crate::mixer::MidiLevelRow {
+                dest: d.0,
+                velocity,
+            })
+            .collect(),
     })
 }
 

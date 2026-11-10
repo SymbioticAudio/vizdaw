@@ -11,7 +11,7 @@ use crate::error::VizError;
 use crate::events::{AutomationTargetRow, automation_target_of, automation_target_row};
 use crate::guard::{ffi_guard, lock};
 use crate::host;
-use crate::mixer::{self, DestRow, MixerLevels, MixerSnapshot};
+use crate::mixer::{self, DestRow, MidiMixRow, MixerLevels, MixerSnapshot};
 use crate::plugins;
 use crate::recovery;
 use crate::snapshot::{
@@ -2507,6 +2507,15 @@ impl Session {
                     },
                     external: d.kind.is_external(),
                     return_latency_ms: d.return_latency_ms,
+                    midi_mix: MidiMixRow {
+                        volume: d.midi_mix.volume,
+                        pan: d.midi_mix.pan,
+                        mute: d.midi_mix.mute,
+                    },
+                    channel: match &d.kind {
+                        DestKind::MidiEndpoint { channel, .. } => Some(*channel),
+                        DestKind::PluginInstrument { .. } => None,
+                    },
                 })
                 .collect())
         })
@@ -5775,6 +5784,79 @@ impl Session {
                 onsets: m.onsets,
                 snapshot,
             })
+        })
+    }
+
+    /// Sets external destination `dest`'s MIDI strip mix (plan 5g-1b), one
+    /// undo step "Set MIDI Mix", then sends the volume (CC 7) and pan
+    /// (CC 10) that are set to it if this session holds the engine; a
+    /// failed send leaves the edit. `Model` for another destination or a
+    /// value above 127.
+    pub fn set_midi_mix(&self, dest: u64, mix: MidiMixRow) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mix = core_model::document::MidiMix {
+                volume: mix.volume,
+                pan: mix.pan,
+                mute: mix.mute,
+            };
+            let snap = self.execute(Command::Routing(RoutingCmd::SetMidiMix {
+                dest: DestId(dest),
+                mix,
+            }))?;
+            let inner = lock(&self.inner);
+            for (cc, v) in [(7, mix.volume), (10, mix.pan)] {
+                if let Some(v) = v {
+                    let _ = host::send_now(
+                        self.id,
+                        inner.doc(),
+                        DestId(dest),
+                        core_engine::midi1::Midi1Msg::three(0xB0, cc, v),
+                    );
+                }
+            }
+            Ok(snap)
+        })
+    }
+
+    /// Sends the volume and pan given to `dest` now without an edit (a
+    /// fader or pan drag). True when something was sent; false when there
+    /// was nothing to send or this session does not hold the engine or it
+    /// has no target for `dest`. `Model` for a destination that is not
+    /// external or a value above 127.
+    pub fn preview_midi_mix(
+        &self,
+        dest: u64,
+        volume: Option<u8>,
+        pan: Option<u8>,
+    ) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let dest = DestId(dest);
+            let external = inner
+                .doc()
+                .instruments()
+                .get(&dest)
+                .is_some_and(|d| d.kind.is_external());
+            if !external {
+                return Err(crate::events::bad("only a MIDI destination has a mix"));
+            }
+            for (what, v) in [("midi_volume", volume), ("midi_pan", pan)] {
+                if v.is_some_and(|v| v > 127) {
+                    return Err(crate::events::bad(&format!("{what} is 0 to 127")));
+                }
+            }
+            let mut sent = false;
+            for (cc, v) in [(7, volume), (10, pan)] {
+                if let Some(v) = v {
+                    sent |= host::send_now(
+                        self.id,
+                        inner.doc(),
+                        dest,
+                        core_engine::midi1::Midi1Msg::three(0xB0, cc, v),
+                    )?;
+                }
+            }
+            Ok(sent)
         })
     }
 
@@ -9381,7 +9463,7 @@ impl Session {
     /// Folds one take of the engine's read-and-clear peaks into both meter
     /// holds (Ruling 13, pre-flight I4).
     fn take_meters(&self, inner: &mut Inner) {
-        if let Some(l) = host::levels(self.id) {
+        if let Some(l) = host::levels(self.id, inner.doc()) {
             inner.meters.fold(l, Instant::now());
         }
     }

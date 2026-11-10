@@ -949,6 +949,21 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
+    /// Every `setMidiMix` call.
+    var midiMixes: [(UInt64, MidiMixRow)] = []
+    /// Every `previewMidiMix` call.
+    var midiPreviews: [(UInt64, UInt8?, UInt8?)] = []
+
+    func setMidiMix(dest: UInt64, mix: MidiMixRow) throws -> DocSnapshot {
+        midiMixes.append((dest, mix))
+        return commandResult()
+    }
+
+    func previewMidiMix(dest: UInt64, volume: UInt8?, pan: UInt8?) throws -> Bool {
+        midiPreviews.append((dest, volume, pan))
+        return true
+    }
+
     func setReturnLatency(dest: UInt64, ms: Float) throws -> DocSnapshot {
         if let e = synthError {
             synthError = nil
