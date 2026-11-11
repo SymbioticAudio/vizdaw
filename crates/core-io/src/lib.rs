@@ -15,6 +15,7 @@
 pub mod limits;
 pub mod read;
 pub mod report;
+pub mod smf;
 pub mod text;
 pub mod write;
 

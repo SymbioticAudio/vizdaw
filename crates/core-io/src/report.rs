@@ -145,7 +145,7 @@ impl Report {
 }
 
 /// `n` with thousands separated by a space.
-fn group(n: u64) -> String {
+pub(crate) fn group(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
