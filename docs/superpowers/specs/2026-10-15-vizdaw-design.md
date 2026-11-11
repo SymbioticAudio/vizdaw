@@ -252,10 +252,13 @@ vizdaw/
 5. **Audio tracks:** recording, regions, fades, disk streaming.
 6. **Import:** SMF and MIDI Clip File, then OMF, then AAF.
 7. **UI polish:** the full modern Mac UX pass.
+8. **Producer copilot:** a local MCP server over the control channel so an AI assistant can drive a running VizDAW as a producer's copilot (production tasks, automation, MIDI tidying, explaining the session), every edit undoable as one named step, with MCP Apps views. Not AI composition. See the backlog row "Producer copilot over MCP".
 
 **Order (owner, 2026-10-28):** sub-project 7 (UI polish) runs right after 5, before 6 (Import); a working UI matters more than import. The numbers stay as they are, since plans and notes already say "SP7" for the UI pass. Standard MIDI File import and export (and the MIDI Clip File) stay in the launch release. OMF and AAF import may move to after launch.
 
 **Order (owner, 2026-11-03):** plans 5g-1 (MIDI input effects) and 5g-2 (MPE) move out of sub-project 5 to run right after sub-project 7, so the owner can start using the app sooner. Both stay in the 1.0 release. Sub-project 5 ends with plan 5f-4 and merges to main then.
+
+**Order (owner, 2026-11-11):** sub-project 8 (producer copilot) is in the 1.0 release. It runs right after 5g-2 and before 6 (Import), since it builds on the control channel that already exists.
 
 ## 12. Testing
 
