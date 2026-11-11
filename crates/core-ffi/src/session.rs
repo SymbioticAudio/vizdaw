@@ -210,9 +210,9 @@ pub(crate) struct Inner {
     /// waits for them.
     edits_writing: u32,
     /// MPE settings controllers' MCMs gave lanes (plan 5g-2 Ruling 4), the
-    /// last per lane of the sequence they played in, waiting to be
-    /// written back once no recording or edit is open.
-    mpe_owed: std::collections::BTreeMap<(SeqId, LaneId), Option<core_model::mpe::MpeConfig>>,
+    /// last per lane, waiting to be written back once no recording or edit
+    /// is open; a user's own setting of the lane drops its entry.
+    mpe_owed: std::collections::BTreeMap<LaneId, Option<core_model::mpe::MpeConfig>>,
     /// The next bounce cancels itself once its progress reaches this
     /// (test hook).
     #[cfg(feature = "test-hooks")]
@@ -1031,6 +1031,11 @@ impl Session {
         let before = inner.doc().clone();
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
+        // The user's own MPE setting wins over a controller's MCM still
+        // waiting to be written back (plan 5g-2 Task 6 review m1).
+        if let Command::Lane(LaneCmd::SetMpe { lane, .. }) = &cmd {
+            inner.mpe_owed.remove(lane);
+        }
         // An arm or input change that went through lets a failed input
         // open be tried again, in the engine this session holds (plan
         // 5d-1 Ruling 15; Task 7 review m6), before the reload applies it.
@@ -1355,20 +1360,48 @@ impl Session {
     /// nothing (Ruling 2); a destination the loaded sequence does not
     /// play is not reached (its values go out when it plays). A failed
     /// send leaves the edit.
+    ///
+    /// An external destination whose MPE output changed (plan 5g-2 Task 6
+    /// review m4): turned off, or moved to the other zone, the old zone
+    /// is turned off (an MCM with no members on its manager channel);
+    /// turned on or changed, its configuration goes out, then its set
+    /// volume and pan on the new manager channel.
     fn send_mix_changes(&self, inner: &mut Inner, before: &Document) {
-        let mut due = Vec::new();
+        use core_engine::midi1::Midi1Msg;
+        // `true`: on the channel the message names; `false`: on the
+        // destination's channel (an MPE destination's manager).
+        let mut due: Vec<(DestId, Midi1Msg, bool)> = Vec::new();
         for (id, d) in inner.doc().instruments() {
             if !d.kind.is_external() {
                 continue;
             }
-            let old = before.instruments().get(id).map(|d| d.midi_mix);
-            let new = d.midi_mix;
+            let old = before.instruments().get(id);
+            let (was_mpe, mpe) = (old.and_then(|o| o.mpe), d.mpe);
+            let mix_was = old.map(|o| o.midi_mix);
+            let mix = d.midi_mix;
+            let mpe_changed = was_mpe != mpe;
+            if mpe_changed
+                && let Some(o) = was_mpe
+                && mpe.is_none_or(|n| n.manager() != o.manager())
+            {
+                let off = core_model::mpe::MpeConfig { members: 0, ..o };
+                // The MCM alone: the member bend range is left as is.
+                for m in core_engine::mpe::configuration(&off).into_iter().take(5) {
+                    due.push((*id, m, true));
+                }
+            }
+            let on = mpe.filter(|_| mpe_changed);
+            if let Some(n) = on {
+                for m in core_engine::mpe::configuration(&n) {
+                    due.push((*id, m, true));
+                }
+            }
             for (cc, v, was) in [
-                (7, new.volume, old.and_then(|m| m.volume)),
-                (10, new.pan, old.and_then(|m| m.pan)),
+                (7, mix.volume, mix_was.and_then(|m| m.volume)),
+                (10, mix.pan, mix_was.and_then(|m| m.pan)),
             ] {
-                if let Some(v) = v.filter(|v| Some(*v) != was) {
-                    due.push((*id, cc, v));
+                if let Some(v) = v.filter(|v| on.is_some() || Some(*v) != was) {
+                    due.push((*id, Midi1Msg::three(0xB0, cc, v), false));
                 }
             }
         }
@@ -1377,13 +1410,12 @@ impl Session {
         }
         let dests: Vec<DestId> = due.iter().map(|(d, _, _)| *d).collect();
         self.claim_for_mix(inner, &dests);
-        for (dest, cc, v) in due {
-            let _ = host::send_now(
-                self.id,
-                inner.doc(),
-                dest,
-                core_engine::midi1::Midi1Msg::three(0xB0, cc, v),
-            );
+        for (dest, msg, as_named) in due {
+            let _ = if as_named {
+                host::send_now_on(self.id, dest, msg)
+            } else {
+                host::send_now(self.id, inner.doc(), dest, msg)
+            };
         }
     }
 
@@ -7767,13 +7799,8 @@ impl Session {
     /// reports wait while a recording runs, finishes or has a pass to
     /// land, and while an edit, transaction or group is open.
     fn apply_mpe_reports(&self, inner: &mut Inner) {
-        let reports = host::take_mpe_reports(self.id);
-        if !reports.is_empty()
-            && let Some((seq, _)) = host::position(self.id)
-        {
-            for (lane, cfg) in reports {
-                inner.mpe_owed.insert((seq, lane), cfg);
-            }
+        for (lane, cfg) in host::take_mpe_reports(self.id) {
+            inner.mpe_owed.insert(lane, cfg);
         }
         if inner.mpe_owed.is_empty()
             || inner.recording.is_some()
@@ -7785,16 +7812,18 @@ impl Session {
         {
             return;
         }
-        for ((seq, lane), mpe) in std::mem::take(&mut inner.mpe_owed) {
-            let differs = inner
-                .doc()
-                .sequence(seq)
-                .ok()
-                .and_then(|s| s.lanes.iter().find(|l| l.id == lane))
-                .is_some_and(|l| l.mpe != mpe);
-            if !differs {
+        let mut wrote = false;
+        for (lane, mpe) in std::mem::take(&mut inner.mpe_owed) {
+            // Lane IDs are unique in the document: the lane's sequence, if
+            // its setting differs.
+            let Some(seq) = inner.doc().sequences().iter().find_map(|(id, s)| {
+                s.lanes
+                    .iter()
+                    .any(|l| l.id == lane && l.mpe != mpe)
+                    .then_some(*id)
+            }) else {
                 continue;
-            }
+            };
             let cmd = Command::Lane(LaneCmd::SetMpe { seq, lane, mpe });
             if let Err(e) = inner.history.execute(&cmd, &ViewFilter::default()) {
                 inner.news.problems.push(format!(
@@ -7804,7 +7833,11 @@ impl Session {
             }
             inner.version += 1;
             inner.news.doc_changed = true;
-            inner.reload_host(self.id);
+            wrote = true;
+        }
+        if wrote {
+            // One reload for every lane written: `idle` runs it next.
+            inner.reload_owed = true;
             self.mark(inner);
         }
     }

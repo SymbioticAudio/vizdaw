@@ -2934,6 +2934,21 @@ pub fn send_now(
     }
 }
 
+/// Sends `msg` now to `dest`'s target through `owner`'s engine on the
+/// channel `msg` names (an MPE configuration, plan 5g-2); false when
+/// `owner` does not hold the engine or it has no target for `dest`.
+pub fn send_now_on(
+    owner: u64,
+    dest: DestId,
+    msg: core_engine::midi1::Midi1Msg,
+) -> Result<bool, VizError> {
+    let mut slot = lock_host();
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => Ok(h.engine.send_now_on(dest, msg)?),
+        _ => Ok(false),
+    }
+}
+
 /// `owner`'s engine's note activity per external destination since the
 /// last call, read and cleared; empty when it does not hold the engine.
 pub fn midi_activity(owner: u64, doc: &Document) -> Vec<(DestId, u8)> {

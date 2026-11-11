@@ -1033,10 +1033,21 @@ impl Engine {
             (None, DestKind::MidiEndpoint { channel, .. }) => channel & 0x0F,
             (None, DestKind::PluginInstrument { .. }) => 0,
         };
+        self.send_now_on(dest, Midi1Msg::three((status & 0xF0) | channel, d1, d2))
+    }
+
+    /// Sends channel message `msg` now to `dest`'s targets on the channel
+    /// `msg` names (an MPE destination's configuration, which reaches its
+    /// member channels too, plan 5g-2); false when `msg` is not a channel
+    /// message or `dest` has no loaded target.
+    pub fn send_now_on(&mut self, dest: DestId, msg: Midi1Msg) -> Result<bool, EngineError> {
+        let [status, d1, d2] = msg.bytes;
+        if !(0x80..0xF0).contains(&status) {
+            return Ok(false);
+        }
         let Some(targets) = self.dest_targets.get(&dest).filter(|t| !t.is_empty()) else {
             return Ok(false);
         };
-        let status = (status & 0xF0) | channel;
         // The length the status has, not the caller's.
         let msg = match status & 0xF0 {
             0xC0 | 0xD0 => Midi1Msg::two(status, d1 & 0x7F),
