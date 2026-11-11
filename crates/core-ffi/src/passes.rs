@@ -76,13 +76,13 @@
 //!
 //! Control-side code: nothing here runs on the real-time thread.
 
-use core_engine::input_fx::{Expr, LiveMsg, RecordQuantize};
+use core_engine::input_fx::{CENTER, Expr, LiveMsg, RecordQuantize};
 use core_engine::midi1::Midi1Msg;
 use core_engine::record::{Mark, RecordedMidi};
 use core_engine::schedule::TempoTable;
 use core_model::command::{LaneRecord, RecordPass, RecordedContent, RecordedMedia, RecordedRegion};
 use core_model::document::Document;
-use core_model::event::{EventBody, EventSpec};
+use core_model::event::{EventBody, EventSpec, PerNoteCtl, PerNoteKind};
 use core_model::ids::{LaneId, SeqId};
 use core_model::time::{PPQ, Tick};
 use std::collections::BTreeMap;
@@ -429,6 +429,9 @@ fn midi_events(
     tempo: &TempoTable,
 ) -> BTreeMap<usize, Vec<EventSpec>> {
     let mut out: BTreeMap<usize, Vec<EventSpec>> = BTreeMap::new();
+    // Each placed note: where its event sits in `out` and its played
+    // (unquantized) start, for per-note offsets.
+    let mut notes: BTreeMap<usize, (usize, usize, Tick)> = BTreeMap::new();
     let tick = |f: i64| tempo.frame_to_tick(u64::try_from(f.max(0)).unwrap_or(0));
     for (i, h) in heard.iter().enumerate() {
         let Some(p) = piece_of(pieces, h.u) else {
@@ -441,10 +444,14 @@ fn midi_events(
         if t < t0 || t >= t1 {
             continue;
         }
-        let mut start = tick(t);
+        let played = tick(t);
+        let mut start = played;
+        let mut pressure_at_start = None;
         let body = match h.msg {
             LiveMsg::NoteOn {
-                pitch, velocity, ..
+                pitch,
+                velocity,
+                expr,
             } => {
                 // The off: the next note-off of this pitch in the same
                 // pass; else the window's end.
@@ -506,6 +513,24 @@ fn midi_events(
                 {
                     *release_velocity = release;
                 }
+                if let EventBody::Note { per_note, .. } = &mut b {
+                    // The note's expression at its start (offset 0).
+                    for (kind, value) in [
+                        (PerNoteKind::PitchBend, expr.bend),
+                        (PerNoteKind::Registered(74), expr.timbre),
+                    ] {
+                        if value != CENTER {
+                            per_note.push_back(PerNoteCtl {
+                                kind,
+                                offset: Tick(0),
+                                value,
+                            });
+                        }
+                    }
+                }
+                if expr.pressure != 0 {
+                    pressure_at_start = Some((pitch & 0x7F, expr.pressure));
+                }
                 b
             }
             LiveMsg::NoteOff { .. } => continue,
@@ -517,18 +542,63 @@ fn midi_events(
                 pitch: pitch & 0x7F,
                 value,
             },
-            // Plan 5g-2 attaches per-note bend and timbre to their note.
-            LiveMsg::PerNote { .. } => continue,
+            // Per-note bend and timbre join the note they belong to:
+            // the latest note-on of the pitch before them, in the same
+            // pass, whose off comes after them. With none, they drop.
+            LiveMsg::PerNote { pitch, expr, value } => {
+                let kind = match expr {
+                    Expr::Bend => PerNoteKind::PitchBend,
+                    _ => PerNoteKind::Registered(74),
+                };
+                let owner = heard
+                    .iter()
+                    .take(i)
+                    .rposition(
+                        |o| matches!(o.msg, LiveMsg::NoteOn { pitch: op, .. } if op == pitch),
+                    )
+                    .filter(|&j| {
+                        !heard.iter().take(i).skip(j + 1).any(
+                            |o| matches!(o.msg, LiveMsg::NoteOff { pitch: op, .. } if op == pitch),
+                        )
+                    });
+                if let Some(&(pass, at, played_start)) = owner.and_then(|j| notes.get(&j))
+                    && pass == p.pass
+                    && let Some(EventBody::Note {
+                        per_note, duration, ..
+                    }) = out
+                        .get_mut(&pass)
+                        .and_then(|v| v.get_mut(at))
+                        .map(|e| &mut e.body)
+                {
+                    // From the played start, whatever Input Quantize did.
+                    let offset = (played.0 - played_start.0).clamp(0, (duration.0 - 1).max(0));
+                    per_note.push_back(PerNoteCtl {
+                        kind,
+                        offset: Tick(offset),
+                        value,
+                    });
+                }
+                continue;
+            }
             LiveMsg::Channel(m) => match body_of(m) {
                 Some(b) => b,
                 None => continue,
             },
         };
-        out.entry(p.pass)
-            .or_default()
-            .push(EventSpec::new(start, body));
+        let events = out.entry(p.pass).or_default();
+        if matches!(body, EventBody::Note { .. }) {
+            notes.insert(i, (p.pass, events.len(), played));
+        }
+        events.push(EventSpec::new(start, body));
+        if let (Some((pitch, value)), LiveMsg::NoteOn { .. }) = (pressure_at_start, h.msg) {
+            events.push(EventSpec::new(
+                start,
+                EventBody::PolyPressure { pitch, value },
+            ));
+        }
     }
     // Quantized starts may cross; the events end up in position order.
+    // (Sorting happens after every per-note control found its note.)
     for events in out.values_mut() {
         events.sort_by_key(|e| e.tick);
     }

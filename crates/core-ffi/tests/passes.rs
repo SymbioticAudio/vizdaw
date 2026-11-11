@@ -1220,3 +1220,286 @@ fn a_quantized_start_stays_inside_the_punch_range() {
     assert_eq!(spans[0], (lo.0, ticks(6000)), "62 starts at the punch-in");
     assert_eq!(spans[1].0, hi.0 - 1, "60 starts on the last tick in range");
 }
+
+/// Plan 5g-2 Ruling 6: per-note bend and timbre join their note (at its
+/// start and later offsets); pressure is poly pressure.
+#[test]
+fn per_note_expression_records_with_its_note() {
+    use core_engine::input_fx::{CENTER, Expr, NoteExpr};
+    use core_model::event::PerNoteKind;
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let live = |run: i64, msg: LiveMsg| RecordedMidi {
+        lane: d.keys,
+        run,
+        msg,
+        quantize: None,
+    };
+    c.midi = vec![
+        live(
+            0,
+            LiveMsg::NoteOn {
+                pitch: 60,
+                velocity: 0xC924,
+                expr: NoteExpr {
+                    bend: 0xA000_0000,
+                    pressure: 0x4000_0000,
+                    timbre: CENTER,
+                },
+            },
+        ),
+        live(
+            12_000,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Bend,
+                value: 0x9000_0000,
+            },
+        ),
+        live(
+            18_000,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Timbre,
+                value: 7,
+            },
+        ),
+        live(
+            20_000,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Pressure,
+                value: 0x6000_0000,
+            },
+        ),
+        live(
+            24_000,
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0,
+            },
+        ),
+        live(
+            30_000,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Bend,
+                value: 1,
+            },
+        ),
+    ];
+    let p = c.run().unwrap();
+    let events: Vec<_> = p
+        .lanes
+        .iter()
+        .filter(|l| l.lane == d.keys)
+        .flat_map(|l| l.active.events.iter())
+        .collect();
+    let n = events
+        .iter()
+        .find(|e| matches!(e.body, EventBody::Note { pitch: 60, .. }))
+        .unwrap();
+    let EventBody::Note {
+        per_note, duration, ..
+    } = &n.body
+    else {
+        unreachable!()
+    };
+    assert_eq!(n.tick.0, 0);
+    assert_eq!(duration.0, Q);
+    let got: Vec<(PerNoteKind, i64, u32)> = per_note
+        .iter()
+        .map(|x| (x.kind, x.offset.0, x.value))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (PerNoteKind::PitchBend, 0, 0xA000_0000),
+            (PerNoteKind::PitchBend, Q / 2, 0x9000_0000),
+            (PerNoteKind::Registered(74), Q * 3 / 4, 7),
+        ],
+        "the bend after the note ended is dropped"
+    );
+    let pressure: Vec<(i64, u32)> = events
+        .iter()
+        .filter_map(|e| match e.body {
+            EventBody::PolyPressure { pitch: 60, value } => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pressure, vec![(0, 0x4000_0000), (Q * 5 / 6, 0x6000_0000)]);
+}
+
+/// P10: a per-note offset is measured from the played start, also when
+/// Input Quantize moved the note later; one sent between the played and
+/// the moved start is kept.
+#[test]
+fn per_note_offsets_count_from_the_played_start_when_quantized() {
+    use core_engine::input_fx::{CENTER, Expr, NoteExpr};
+    use core_model::event::PerNoteKind;
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let on = LiveMsg::NoteOn {
+        pitch: 60,
+        velocity: 0xC924,
+        expr: NoteExpr {
+            bend: CENTER,
+            pressure: 0,
+            timbre: CENTER,
+        },
+    };
+    let q = Some(RecordQuantize {
+        grid: Q / 2,
+        strength: 100,
+    });
+    let live = |run: i64, msg: LiveMsg, quantize| RecordedMidi {
+        lane: d.keys,
+        run,
+        msg,
+        quantize,
+    };
+    // Played at frame 7 200 (tick 4 608), moved to tick Q / 2.
+    c.midi = vec![
+        live(7_200, on, q),
+        live(
+            7_800,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Bend,
+                value: 5,
+            },
+            None,
+        ),
+        live(
+            10_200,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Bend,
+                value: 6,
+            },
+            None,
+        ),
+        live(
+            24_000,
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0,
+            },
+            None,
+        ),
+    ];
+    let p = c.run().unwrap();
+    let n = p
+        .lanes
+        .iter()
+        .flat_map(|l| l.active.events.iter())
+        .find(|e| matches!(e.body, EventBody::Note { pitch: 60, .. }))
+        .unwrap();
+    assert_eq!(n.tick.0, Q / 2, "the start moved");
+    let EventBody::Note { per_note, .. } = &n.body else {
+        unreachable!()
+    };
+    let got: Vec<(PerNoteKind, i64, u32)> = per_note
+        .iter()
+        .map(|x| (x.kind, x.offset.0, x.value))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (PerNoteKind::PitchBend, 384, 5),
+            (PerNoteKind::PitchBend, Q / 8, 6)
+        ]
+    );
+}
+
+/// Spec §13 5g's round trip (plan 5g-2): MPE bytes from a controller,
+/// decoded, recorded, played back to an MPE destination give the same
+/// bytes (the configuration message aside).
+#[test]
+fn mpe_round_trips_through_a_recording() {
+    use core_engine::backend::AudioBackend;
+    use core_engine::engine::{Engine, EngineConfig};
+    use core_engine::mpe::MpeDecoder;
+    use core_engine::offline::{OfflineBackend, OfflineSinks};
+    use core_model::command::{Command, RoutingCmd};
+    use core_model::mpe::MpeConfig;
+    let phrase: Vec<(i64, [u8; 3])> = vec![
+        (0, [0xE1, 0x00, 0x50]),
+        (0, [0xB1, 74, 0x30]),
+        (0, [0xD1, 0x20, 0]),
+        (0, [0x91, 60, 100]),
+        (6000, [0xE1, 0x10, 0x60]),
+        (9000, [0xD1, 0x40, 0]),
+        (12_000, [0xB1, 74, 0x7F]),
+        (24_000, [0x81, 60, 0]),
+        (30_000, [0xE2, 0x00, 0x40]),
+        (30_000, [0xB2, 74, 0x40]),
+        (30_000, [0xD2, 0x00, 0]),
+        (30_000, [0x92, 64, 100]),
+        (42_000, [0x82, 64, 0]),
+    ];
+    let d = doc(None);
+    let mut dec = MpeDecoder::new(MpeConfig::default());
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    for (run, b) in &phrase {
+        let msg = if b[0] & 0xF0 == 0xD0 {
+            Midi1Msg::two(b[0], b[1])
+        } else {
+            Midi1Msg::three(b[0], b[1], b[2])
+        };
+        dec.decode(msg, &mut |m| {
+            c.midi.push(RecordedMidi {
+                lane: d.keys,
+                run: *run,
+                msg: m,
+                quantize: None,
+            })
+        });
+    }
+    let pass = c.run().unwrap();
+    let synth = *d.doc.instruments().keys().next().unwrap();
+    let doc = core_model::command::apply(&d.doc, &Command::Record(pass))
+        .unwrap()
+        .doc;
+    let doc = core_model::command::apply(
+        &doc,
+        &Command::Routing(RoutingCmd::SetMpe {
+            dest: synth,
+            mpe: Some(MpeConfig::default()),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let sinks = OfflineSinks::new(100_000);
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    engine.load(&doc, d.seq).unwrap();
+    let mut be = OfflineBackend::new(48_000.0, 256);
+    be.start(renderer).unwrap();
+    engine.play().unwrap();
+    be.run_frames(48_000);
+    let got: Vec<(u64, Vec<u8>)> = log
+        .drain()
+        .into_iter()
+        .map(|r| (r.frame, r.bytes().to_vec()))
+        .filter(|(_, b)| !(b[0] & 0xF0 == 0xB0 && [101, 100, 6, 38].contains(&b[1])))
+        .filter(|(_, b)| ![40u8, 41].contains(&b[1]) || b[0] & 0xE0 != 0x80)
+        .collect();
+    let want: Vec<(u64, Vec<u8>)> = phrase
+        .iter()
+        .map(|(f, b)| {
+            (
+                *f as u64,
+                if b[0] & 0xF0 == 0xD0 {
+                    vec![b[0], b[1]]
+                } else {
+                    b.to_vec()
+                },
+            )
+        })
+        .collect();
+    assert_eq!(got, want);
+}
