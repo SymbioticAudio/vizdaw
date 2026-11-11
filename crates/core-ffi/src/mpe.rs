@@ -25,6 +25,21 @@ pub struct MpeRow {
     pub bend_range: u8,
 }
 
+/// The setting as `state.get` shows it: null, or `{"zone": "lower",
+/// "members": 15, "bend_range": 48}`.
+pub fn mpe_json(mpe: Option<MpeRow>) -> serde_json::Value {
+    mpe.map_or(serde_json::Value::Null, |m| {
+        serde_json::json!({
+            "zone": match m.zone {
+                MpeZoneRow::Lower => "lower",
+                MpeZoneRow::Upper => "upper",
+            },
+            "members": m.members,
+            "bend_range": m.bend_range,
+        })
+    })
+}
+
 impl From<MpeConfig> for MpeRow {
     fn from(c: MpeConfig) -> Self {
         MpeRow {

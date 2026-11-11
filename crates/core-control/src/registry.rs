@@ -636,6 +636,44 @@ const SET_INPUT_FX_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `zone`, `members` and `bend_range` of `lane.set_mpe` and
+/// `destination.set_mpe` (plan 5g-2 Task 7).
+const MPE_ZONE_PARAM: ParamSpec = ParamSpec {
+    name: "zone",
+    kind: ParamKind::Choice(&["off", "lower", "upper"]),
+    required: true,
+    help: "Which end of the channels the MPE zone sits at (lower: manager on channel 1; upper: manager on channel 16), or off for no MPE.",
+};
+const MPE_MEMBERS_PARAM: ParamSpec = ParamSpec {
+    name: "members",
+    kind: ParamKind::Int { min: 1, max: 15 },
+    required: false,
+    help: "Member channels, 1 to 15 (default 15). Not with zone off.",
+};
+const MPE_BEND_PARAM: ParamSpec = ParamSpec {
+    name: "bend_range",
+    kind: ParamKind::Int { min: 1, max: 96 },
+    required: false,
+    help: "Member pitch-bend range in semitones, 1 to 96 (default 48). Not with zone off.",
+};
+
+/// `lane.set_mpe`.
+const SET_MPE_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The track's sequence."),
+    id_param("lane", "The track."),
+    MPE_ZONE_PARAM,
+    MPE_MEMBERS_PARAM,
+    MPE_BEND_PARAM,
+];
+
+/// `destination.set_mpe`.
+const DEST_MPE_PARAMS: &[ParamSpec] = &[
+    id_param("dest", "The external MIDI destination."),
+    MPE_ZONE_PARAM,
+    MPE_MEMBERS_PARAM,
+    MPE_BEND_PARAM,
+];
+
 const SET_INPUT_PARAMS: &[ParamSpec] = &[
     id_param("seq", "The track's sequence."),
     id_param("lane", "The track."),
@@ -1509,6 +1547,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        params: SET_MPE_PARAMS,
+        ..key_only(cmd("lane.set_mpe", "Track", "Set Track MPE", None, true))
+    },
+    CommandSpec {
         params: INJECT_PARAMS,
         ..key_only(cmd("midi.inject", "MIDI", "Inject MIDI", None, true))
     },
@@ -1532,6 +1574,16 @@ pub const COMMANDS: &[CommandSpec] = &[
             "destination.set_midi_mix",
             "Destination",
             "Set MIDI Mix",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: DEST_MPE_PARAMS,
+        ..key_only(cmd(
+            "destination.set_mpe",
+            "Destination",
+            "Set Destination MPE",
             None,
             true,
         ))

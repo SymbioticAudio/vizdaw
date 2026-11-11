@@ -536,13 +536,15 @@ fn record_and_input_results_as_json() {
             opening: false,
             sample_rate: 48_000.0,
             midi_fx_dropped: 3,
-            per_note_dropped: 0,
-            mpe_stolen: 0,
+            per_note_dropped: 5,
+            mpe_stolen: 2,
         },
         levels: vec![0.25, 1.0, 0.0],
     });
     assert_eq!(i["channels"], json!(3));
     assert_eq!(i["midi_fx_dropped"], json!(3));
+    assert_eq!(i["per_note_dropped"], json!(5));
+    assert_eq!(i["mpe_stolen"], json!(2));
     assert_eq!(i["input_latency"], json!(512));
     // Plan 5d-1 Ruling 26: the settings, the round trip and the meters.
     assert_eq!(i["device_buffer_frames"], json!(512));
@@ -1170,5 +1172,52 @@ fn screenshot_requests_carry_live() {
             Some(ControlRequest::Screenshot { live: got, .. }) => assert_eq!(got, live),
             other => panic!("{other:?}"),
         }
+    }
+}
+
+/// Plan 5g-2 Task 7: `state.get document` shows a track's and a
+/// destination's MPE setting, null when there is none.
+#[test]
+fn document_state_reports_mpe_per_track_and_destination() {
+    use vizdaw_ffi::mpe::{MpeRow, MpeZoneRow};
+    use vizdaw_ffi::{DestRow, MidiMixRow};
+    let session = Session::new_demo().unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let seq = snapshot.sequences[0].id;
+    let one = session.lanes(seq).unwrap().remove(0);
+    let mut lanes = vec![one.clone(), one];
+    let setting = MpeRow {
+        zone: MpeZoneRow::Upper,
+        members: 7,
+        bend_range: 24,
+    };
+    lanes[0].mpe = Some(setting);
+    lanes[1].mpe = None;
+    let dest = |id, mpe| DestRow {
+        id,
+        name: "Synth".into(),
+        plugin: None,
+        external: true,
+        return_latency_ms: 0.0,
+        midi_mix: MidiMixRow::default(),
+        channel: Some(0),
+        mpe,
+    };
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot,
+        selected_seq: Some(seq),
+        lanes,
+        destinations: vec![dest(4, Some(setting)), dest(5, None)],
+        alert: None,
+    });
+    let want = json!({"zone": "upper", "members": 7, "bend_range": 24});
+    assert_eq!(v["lanes"][0]["mpe"], want);
+    assert_eq!(v["lanes"][1]["mpe"], Value::Null);
+    assert_eq!(v["destinations"][0]["mpe"], want);
+    assert_eq!(v["destinations"][1]["mpe"], Value::Null);
+    for k in ["midi_volume", "midi_pan", "midi_mute"] {
+        assert!(v["destinations"][0].get(k).is_some(), "{k}");
     }
 }

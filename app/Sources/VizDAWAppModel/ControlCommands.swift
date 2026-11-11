@@ -225,6 +225,7 @@ public enum ControlCommands {
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(InputFxCommands.ids)
+            .union(MpeCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -455,6 +456,8 @@ public enum ControlCommands {
             return SynthCommands.run(id, args: args, doc: docID, m)
         case _ where InputFxCommands.ids.contains(id):
             return InputFxCommands.run(id, args: args, doc: docID, m)
+        case _ where MpeCommands.ids.contains(id):
+            return MpeCommands.run(id, args: args, doc: docID, m)
         case _ where TrackCommands.ids.contains(id):
             return TrackCommands.run(id, args: args, doc: docID, m)
         case _ where AutomationCommands.ids.contains(id):

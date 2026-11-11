@@ -1400,6 +1400,8 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "levels": levels.iter().map(|l| (f64::from(*l) * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
                 "latency_trim": a.latency_trim,
                 "midi_fx_dropped": info.midi_fx_dropped,
+                "per_note_dropped": info.per_note_dropped,
+                "mpe_stolen": info.mpe_stolen,
             })
         }
         ControlResult::Project { doc, info } => json!({
@@ -1438,6 +1440,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "input": l.input.as_ref().map(lane_input_json),
                 "monitor": monitor_name(l.monitor),
                 "input_fx": crate::input_fx::input_fx_json(&l.input_fx),
+                "mpe": crate::mpe::mpe_json(l.mpe),
                 "kind": match l.kind {
                     crate::tracks::TrackKindRow::Audio => "audio",
                     crate::tracks::TrackKindRow::Instrument => "instrument",
@@ -1450,6 +1453,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "return_latency_ms": (f64::from(d.return_latency_ms) * 1000.0).round() / 1000.0,
                 "midi_volume": d.midi_mix.volume, "midi_pan": d.midi_mix.pan,
                 "midi_mute": d.midi_mix.mute,
+                "mpe": crate::mpe::mpe_json(d.mpe),
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
             "alert": alert.as_ref().map(alert_json),
