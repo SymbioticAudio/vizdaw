@@ -149,15 +149,23 @@ fn info_field_name(i: usize) -> &'static str {
     }
 }
 
+/// A character a song-info field may not hold: a control character other
+/// than newline and tab, or a bidirectional override or isolate (U+202A to
+/// U+202E, U+2066 to U+2069), which could disguise text in exported files.
+fn bad_info_char(c: char) -> bool {
+    (c.is_control() && c != '\n' && c != '\t')
+        || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Checks song info: each set field is at most [`MAX_INFO_BYTES`] bytes and
-/// has no control character other than newline and tab. Serves both
+/// has no control character other than newline and tab and no bidi
+/// override or isolate. Serves both
 /// `SettingsCmd::SetInfo` and [`validate`].
 pub fn check_info(info: &SongInfo) -> Result<()> {
     for (i, f) in info.fields().into_iter().enumerate() {
         if let Some(t) = f {
             need(
-                t.len() <= MAX_INFO_BYTES
-                    && !t.chars().any(|c| c.is_control() && c != '\n' && c != '\t'),
+                t.len() <= MAX_INFO_BYTES && !t.chars().any(bad_info_char),
                 info_field_name(i),
                 t.len(),
             )?;
@@ -379,7 +387,10 @@ pub fn validate(doc: &Document) -> Vec<String> {
     );
     push(check_info(&doc.settings().info), "settings");
     if let Some(id) = &doc.settings().project_id {
-        push(need(check_project_id(id), "project_id", id), "settings");
+        push(
+            need(check_project_id(id), "project_id", id.len()),
+            "settings",
+        );
     }
     for m in doc.media().values() {
         if m.id.0 >= c.media {

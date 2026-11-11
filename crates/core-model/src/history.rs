@@ -229,7 +229,7 @@ impl History {
     }
 
     fn trim(&mut self) {
-        if self.txn.is_some() {
+        if self.txn.is_some() || self.group.is_some() {
             return;
         }
         let depth =

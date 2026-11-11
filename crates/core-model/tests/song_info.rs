@@ -5,7 +5,7 @@ use core_model::ModelError;
 use core_model::command::{AudioCmd, Command, MediaCmd, SequenceCmd, SettingsCmd, apply};
 use core_model::document::{Document, MAX_INFO_BYTES, SongInfo};
 use core_model::event::{EventBody, Fade};
-use core_model::file::to_json;
+use core_model::file::{from_json, to_json};
 use core_model::history::History;
 use core_model::ids::{EventId, LaneId, MediaId, SeqId};
 use core_model::selection::ViewFilter;
@@ -263,4 +263,161 @@ fn an_empty_song_info_and_unnamed_region_write_nothing() {
     regions(&v, &mut found);
     assert_eq!(found.len(), 1, "one region is written");
     assert!(found[0].get("name").is_none());
+}
+
+fn title_of(h: &History) -> Option<String> {
+    h.doc().settings().info.title.clone()
+}
+
+fn edit(h: &mut History, t: &str) {
+    h.execute(&set_info(titled(t)), &ViewFilter::default())
+        .unwrap();
+}
+
+#[test]
+fn a_malformed_project_id_is_refused() {
+    let mut h = History::new(Document::new());
+    for bad in [
+        "xyz",
+        "",
+        "0A1B2C3D-0000-4000-8000-00000000000A",
+        "0a1b2c3d_0000_4000_8000_00000000000a",
+        "0a1b2c3d-0000-4000-8000-00000000000g",
+        "0a1b2c3d00000-4000-8000-00000000000a",
+        "0a1b2c3d-0000-4000-8000-00000000000a0",
+    ] {
+        assert!(h.stamp_project_id(bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(h.doc().settings().project_id, None);
+}
+
+#[test]
+fn stamping_changes_no_undo_step() {
+    const ID: &str = "0a1b2c3d-0000-4000-8000-00000000000a";
+    let mut h = History::new(Document::new());
+    edit(&mut h, "One");
+    edit(&mut h, "Two");
+    h.undo().unwrap();
+    let (depth, undo, redo) = (
+        h.undo_depth(),
+        h.undo_label().map(str::to_owned),
+        h.redo_label().map(str::to_owned),
+    );
+    h.stamp_project_id(ID).unwrap();
+    assert_eq!(h.undo_depth(), depth);
+    assert_eq!(h.undo_label().map(str::to_owned), undo);
+    assert_eq!(h.redo_label().map(str::to_owned), redo);
+    assert_eq!(title_of(&h).as_deref(), Some("One"));
+    h.redo().unwrap();
+    assert_eq!(title_of(&h).as_deref(), Some("Two"));
+    assert_eq!(h.doc().settings().project_id.as_deref(), Some(ID));
+}
+
+#[test]
+fn stamping_inside_a_group_reaches_the_saved_redo_stack() {
+    const ID: &str = "0a1b2c3d-0000-4000-8000-00000000000a";
+    let mut h = History::new(Document::new());
+    edit(&mut h, "One");
+    edit(&mut h, "Two");
+    h.undo().unwrap();
+    h.begin_group().unwrap();
+    h.stamp_project_id(ID).unwrap();
+    assert_eq!(h.doc().settings().project_id.as_deref(), Some(ID));
+    // A group that made no step brings back the redo stack it found, stamped.
+    h.end_group("Record").unwrap();
+    h.redo().unwrap();
+    assert_eq!(title_of(&h).as_deref(), Some("Two"));
+    assert_eq!(h.doc().settings().project_id.as_deref(), Some(ID));
+    h.undo().unwrap();
+    h.undo().unwrap();
+    assert_eq!(h.doc().settings().project_id.as_deref(), Some(ID));
+}
+
+/// A group open at the history depth limit keeps its bounds: the limit is
+/// applied when it ends, and the collapsed step undoes and redoes whole.
+#[test]
+fn a_group_at_the_depth_limit_collapses_correctly() {
+    let mut h = History::new(Document::new());
+    h.execute(
+        &Command::Settings(SettingsCmd::SetHistoryDepth { depth: 2 }),
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    edit(&mut h, "A");
+    edit(&mut h, "B");
+    assert_eq!(h.undo_depth(), 2);
+    h.begin_group().unwrap();
+    for t in ["C", "D", "E"] {
+        edit(&mut h, t);
+    }
+    h.end_group("Record").unwrap();
+    assert_eq!(h.undo_depth(), 2);
+    assert_eq!(h.undo_label(), Some("Record"));
+    assert_eq!(title_of(&h).as_deref(), Some("E"));
+    h.undo().unwrap();
+    assert_eq!(title_of(&h).as_deref(), Some("B"));
+    h.undo().unwrap();
+    assert_eq!(title_of(&h).as_deref(), Some("A"));
+    assert!(h.undo().is_err());
+    h.redo().unwrap();
+    h.redo().unwrap();
+    assert_eq!(title_of(&h).as_deref(), Some("E"));
+}
+
+#[test]
+fn song_info_sizes_count_bytes_and_files_are_checked() {
+    // 1366 three-byte characters are 4098 bytes: over the cap.
+    let wide = "\u{20AC}".repeat(MAX_INFO_BYTES / 3 + 1);
+    assert!(wide.len() > MAX_INFO_BYTES && wide.chars().count() < MAX_INFO_BYTES);
+    out_of_range(run(&Document::new(), set_info(titled(&wide))), "info.title");
+    // 1365 of them are 4095 bytes: accepted.
+    let ok = "\u{20AC}".repeat(MAX_INFO_BYTES / 3);
+    assert!(run(&Document::new(), set_info(titled(&ok))).is_ok());
+    // Bidi overrides and isolates are refused; ordinary text is not.
+    for c in ['\u{202E}', '\u{202A}', '\u{2066}', '\u{2069}'] {
+        out_of_range(
+            run(&Document::new(), set_info(titled(&format!("a{c}b")))),
+            "info.title",
+        );
+    }
+    // An oversize field in a file is Corrupt, naming the field.
+    let mut v: Value = serde_json::from_str(&to_json(&Document::new()).unwrap()).unwrap();
+    v["document"]["settings"]["info"] = serde_json::json!({ "title": wide });
+    match from_json(&v.to_string()) {
+        Err(ModelError::Corrupt { problems }) => {
+            assert!(problems.iter().any(|p| p.contains("info.title")));
+            assert!(
+                problems.iter().all(|p| p.len() < 200),
+                "no echo of the text"
+            );
+        }
+        other => panic!("expected Corrupt, got {:?}", other.map(|_| ())),
+    }
+    // A hostile project ID is named by length, not echoed.
+    v["document"]["settings"]["info"] = serde_json::json!({});
+    v["document"]["settings"]["project_id"] = serde_json::json!("z".repeat(10_000));
+    match from_json(&v.to_string()) {
+        Err(ModelError::Corrupt { problems }) => {
+            assert!(problems.iter().any(|p| p.contains("project_id")));
+            assert!(problems.iter().all(|p| p.len() < 200));
+        }
+        other => panic!("expected Corrupt, got {:?}", other.map(|_| ())),
+    }
+}
+
+#[test]
+fn info_project_id_and_region_names_survive_save_and_load() {
+    let d = doc();
+    let d = run(&d, set_name(EventId(0), Some("Lead vox"))).unwrap();
+    let info = SongInfo {
+        title: Some("Song".into()),
+        artist: Some("Ünï Cödé \u{1F3B5}".into()),
+        comment: Some("line 1\nline 2\ttabbed".into()),
+        ..SongInfo::default()
+    };
+    let d = run(&d, set_info(info)).unwrap();
+    let d = d.with_project_id("0a1b2c3d-0000-4000-8000-00000000000a");
+    let back = from_json(&to_json(&d).unwrap()).unwrap();
+    assert_eq!(back, d);
+    assert_eq!(region_name(&back, EventId(0)).as_deref(), Some("Lead vox"));
 }
