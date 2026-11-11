@@ -157,6 +157,16 @@ pub enum LaneCmd {
         /// The chain, first effect first.
         chain: Vec<crate::input_fx::InputFx>,
     },
+    /// Set the lane's MPE input decoding (plan 5g-2), checked by
+    /// [`crate::mpe::MpeConfig::check`].
+    SetMpe {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// The zone, or none for off.
+        mpe: Option<crate::mpe::MpeConfig>,
+    },
     /// Set when the lane's input is heard (spec §6.6).
     SetMonitor {
         /// Sequence.
@@ -207,6 +217,7 @@ impl LaneCmd {
             LaneCmd::SetInput { .. } => "Set Track Input",
             LaneCmd::SetMonitor { .. } => "Set Track Monitor",
             LaneCmd::SetInputFx { .. } => "Set Input Effects",
+            LaneCmd::SetMpe { .. } => "Set Track MPE",
             LaneCmd::TrackSynth { .. } => "Track Synth",
         }
     }
@@ -344,6 +355,12 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
         LaneCmd::SetInputFx { seq, lane, chain } => {
             crate::input_fx::check_chain(chain)?;
             d.lane_mut(*seq, *lane)?.input_fx = chain.iter().cloned().collect();
+        }
+        LaneCmd::SetMpe { seq, lane, mpe } => {
+            if let Some(m) = mpe {
+                m.check()?;
+            }
+            d.lane_mut(*seq, *lane)?.mpe = *mpe;
         }
         LaneCmd::TrackSynth {
             seq,

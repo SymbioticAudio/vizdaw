@@ -265,6 +265,9 @@ pub fn validate(doc: &Document) -> Vec<String> {
             let ok = patch.program <= 127 && patch.bank.is_none_or(|(m, l)| m <= 127 && l <= 127);
             push(need(ok, "default_patch", patch.program), &d.id.to_string());
         }
+        if let Some(m) = &d.mpe {
+            push(m.check(), &d.id.to_string());
+        }
         let mix = d.midi_mix;
         push(
             need(
@@ -385,6 +388,9 @@ pub fn validate(doc: &Document) -> Vec<String> {
                 push(i.check(), &lctx);
             }
             push(crate::input_fx::check_chain(&l.input_fx), &lctx);
+            if let Some(m) = &l.mpe {
+                push(m.check(), &lctx);
+            }
             // Plan 5c-2 Ruling 3: a synth's return names a destination.
             if let Some(dest) = l.input.as_ref().and_then(LaneInput::return_of) {
                 match doc.instruments().get(&dest) {

@@ -4,7 +4,8 @@ use core_model::document::{DestKind, Document, MediaOrigin};
 use core_model::event::{EventBody, EventSpec};
 use core_model::file::{
     FORMAT, Migration, VERSION, autosave, from_json, list_autosaves, load, migrate_v1_to_v2,
-    migrate_v2_to_v3, migrate_v3_to_v4, migrate_v5_to_v6, run_migrations, save, to_json,
+    migrate_v2_to_v3, migrate_v3_to_v4, migrate_v5_to_v6, migrate_v6_to_v7, run_migrations, save,
+    to_json,
 };
 use core_model::format::{AudioFormat, BitDepth};
 use core_model::history::Timestamp;
@@ -652,7 +653,7 @@ fn a_strip_colour_round_trips_and_none_is_not_written() {
 /// destination without a MIDI mix has the default one).
 #[test]
 fn version_5_projects_migrate_to_version_6() {
-    assert_eq!(VERSION, 6);
+    assert_eq!(VERSION, 7);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(5);
@@ -664,6 +665,24 @@ fn version_5_projects_migrate_to_version_6() {
             .contains(&format!("\"version\": {VERSION}"))
     );
     assert_eq!(migrate_v5_to_v6(v.clone()).unwrap(), v);
+}
+
+/// Plan 5g-2 (P3): a version-6 project migrates to version 7 unchanged (a
+/// lane or destination without MPE has none).
+#[test]
+fn version_6_projects_migrate_to_version_7() {
+    assert_eq!(VERSION, 7);
+    let d = small_doc();
+    let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    v["version"] = json!(6);
+    let back = from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(back, d);
+    assert!(
+        to_json(&back)
+            .unwrap()
+            .contains(&format!("\"version\": {VERSION}"))
+    );
+    assert_eq!(migrate_v6_to_v7(v.clone()).unwrap(), v);
 }
 
 /// Plan 5g-1b: a MIDI mix out of range, or on a destination that is not

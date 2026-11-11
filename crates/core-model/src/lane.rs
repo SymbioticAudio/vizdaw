@@ -57,6 +57,10 @@ pub struct Lane {
     /// 5g-1).
     #[serde(default, skip_serializing_if = "Vector::is_empty")]
     pub input_fx: Vector<crate::input_fx::InputFx>,
+    /// MPE decoding of the lane's MIDI input (plan 5g-2 Rulings 2-4);
+    /// absent in files when off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpe: Option<crate::mpe::MpeConfig>,
 }
 
 impl Lane {
@@ -81,6 +85,7 @@ impl Lane {
             input: None,
             monitor: MonitorMode::Auto,
             input_fx: Vector::new(),
+            mpe: None,
         }
     }
 

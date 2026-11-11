@@ -31,6 +31,7 @@ pub mod meter;
 pub mod mixer;
 pub mod mixer_rules;
 pub mod modify;
+pub mod mpe;
 pub mod query;
 pub mod rule;
 pub mod rules;

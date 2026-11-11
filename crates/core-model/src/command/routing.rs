@@ -75,6 +75,14 @@ pub enum RoutingCmd {
         /// Replacement (required when in use).
         replacement: Option<OutputPathId>,
     },
+    /// Set a destination's MPE output (plan 5g-2), checked by
+    /// [`crate::mpe::MpeConfig::check`].
+    SetMpe {
+        /// Target.
+        dest: DestId,
+        /// The zone, or none for off.
+        mpe: Option<crate::mpe::MpeConfig>,
+    },
     /// Set an external destination's return latency (spec §4.5a).
     SetReturnLatency {
         /// Target (an external MIDI destination).
@@ -104,6 +112,7 @@ impl RoutingCmd {
             RoutingCmd::EditOutput { .. } => "Edit Output",
             RoutingCmd::RemoveOutput { .. } => "Remove Output",
             RoutingCmd::SetReturnLatency { .. } => "Set Return Latency",
+            RoutingCmd::SetMpe { .. } => "Set Destination MPE",
             RoutingCmd::SetMidiMix { .. } => "Set MIDI Mix",
         }
     }
@@ -283,6 +292,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                     default_patch: *default_patch,
                     return_latency_ms: 0.0,
                     midi_mix: MidiMix::default(),
+                    mpe: None,
                 },
             );
             if plugin {
@@ -429,6 +439,15 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             d.outputs_mut().remove(output);
             r.removed.push(AnyId::Output(*output));
             strips::remove_kind(d, StripKind::AudioPath(*output), r);
+        }
+        RoutingCmd::SetMpe { dest, mpe } => {
+            if let Some(m) = mpe {
+                m.check()?;
+            }
+            d.instruments_mut()
+                .get_mut(dest)
+                .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?
+                .mpe = *mpe;
         }
         RoutingCmd::SetReturnLatency { dest, ms } => {
             check_external(d, *dest)?;

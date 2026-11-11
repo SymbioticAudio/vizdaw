@@ -73,6 +73,10 @@ pub struct Destination {
     /// Absent in files when default.
     #[serde(default, skip_serializing_if = "MidiMix::is_default")]
     pub midi_mix: MidiMix,
+    /// MPE output (plan 5g-2 Ruling 7): notes rotate across this zone's
+    /// member channels. Absent in files when off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpe: Option<crate::mpe::MpeConfig>,
 }
 
 /// The pan value that is centre (MIDI CC 10).
