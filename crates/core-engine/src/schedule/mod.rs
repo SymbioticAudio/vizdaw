@@ -62,6 +62,10 @@ pub struct Schedule {
     pub used_channels: [u16; MAX_TARGETS],
     /// Controller state to chase after a locate, swap or wrap.
     pub chase: ChaseIndex,
+    /// Each MPE destination's configuration, resent when a chased run
+    /// starts past frame 0 (plan 5g-2 P8). The same entries are also at
+    /// frame 0 of `entries`.
+    pub preamble: Box<[Entry]>,
     /// Automation lanes (4d).
     pub automation: Automation,
     /// Audio regions per output path (5a).

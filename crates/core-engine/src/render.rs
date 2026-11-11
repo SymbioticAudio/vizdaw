@@ -1261,6 +1261,16 @@ impl Renderer {
                     Step::Play { from, to, offset } => {
                         if let Some(s) = self.schedule.as_deref() {
                             if std::mem::take(&mut self.chase_pending) {
+                                // A run past frame 0 skips the MPE
+                                // configuration there: resend it first
+                                // (plan 5g-2 P8). // RT
+                                if from > 0 {
+                                    for e in s.preamble.iter() {
+                                        let bytes = s.bytes(&e.msg);
+                                        o.send(e.target, offset, bytes);
+                                        self.notes.observe(e.target, bytes);
+                                    }
+                                }
                                 s.chase
                                     .state_before(from, |t, m| o.send(t, offset, m.as_slice()));
                             }
