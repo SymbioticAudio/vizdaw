@@ -432,8 +432,20 @@ fn midi_events(
     // Each placed note: where its event sits in `out` and its played
     // (unquantized) start, for per-note offsets.
     let mut notes: BTreeMap<usize, (usize, usize, Tick)> = BTreeMap::new();
+    // Pitch -> the heard index of its latest note-on not yet ended by an
+    // off (placed or not), for per-note controls to find their note.
+    let mut open: BTreeMap<u8, usize> = BTreeMap::new();
     let tick = |f: i64| tempo.frame_to_tick(u64::try_from(f.max(0)).unwrap_or(0));
     for (i, h) in heard.iter().enumerate() {
+        match h.msg {
+            LiveMsg::NoteOn { pitch, .. } => {
+                open.insert(pitch, i);
+            }
+            LiveMsg::NoteOff { pitch, .. } => {
+                open.remove(&pitch);
+            }
+            _ => {}
+        }
         let Some(p) = piece_of(pieces, h.u) else {
             continue;
         };
@@ -528,6 +540,9 @@ fn midi_events(
                         }
                     }
                 }
+                // The start pressure goes at the final start (after Input
+                // Quantize); per-note offsets still count from the played
+                // start.
                 if expr.pressure != 0 {
                     pressure_at_start = Some((pitch & 0x7F, expr.pressure));
                 }
@@ -548,19 +563,10 @@ fn midi_events(
             LiveMsg::PerNote { pitch, expr, value } => {
                 let kind = match expr {
                     Expr::Bend => PerNoteKind::PitchBend,
-                    _ => PerNoteKind::Registered(74),
+                    Expr::Timbre => PerNoteKind::Registered(74),
+                    Expr::Pressure => continue,
                 };
-                let owner = heard
-                    .iter()
-                    .take(i)
-                    .rposition(
-                        |o| matches!(o.msg, LiveMsg::NoteOn { pitch: op, .. } if op == pitch),
-                    )
-                    .filter(|&j| {
-                        !heard.iter().take(i).skip(j + 1).any(
-                            |o| matches!(o.msg, LiveMsg::NoteOff { pitch: op, .. } if op == pitch),
-                        )
-                    });
+                let owner = open.get(&pitch).copied();
                 if let Some(&(pass, at, played_start)) = owner.and_then(|j| notes.get(&j))
                     && pass == p.pass
                     && let Some(EventBody::Note {

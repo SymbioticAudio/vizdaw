@@ -1503,3 +1503,164 @@ fn mpe_round_trips_through_a_recording() {
         .collect();
     assert_eq!(got, want);
 }
+
+/// A note's start tick and its `(kind, offset, value)` per-note controls.
+type PerNotesOfNote = (i64, Vec<(core_model::event::PerNoteKind, i64, u32)>);
+
+/// The `(kind, offset, value)` of every per-note control of every note of
+/// `pitch` in `events`, one list per note.
+fn per_notes_of(events: &[core_model::event::EventSpec], pitch: u8) -> Vec<PerNotesOfNote> {
+    events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::Note {
+                pitch: p, per_note, ..
+            } if *p == pitch => Some((
+                e.tick.0,
+                per_note
+                    .iter()
+                    .map(|x| (x.kind, x.offset.0, x.value))
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn bend(lane: LaneId, run: i64, pitch: u8, value: u32) -> RecordedMidi {
+    use core_engine::input_fx::Expr;
+    RecordedMidi {
+        lane,
+        run,
+        msg: LiveMsg::PerNote {
+            pitch,
+            expr: Expr::Bend,
+            value,
+        },
+        quantize: None,
+    }
+}
+
+fn note_on(lane: LaneId, run: i64, pitch: u8) -> RecordedMidi {
+    midi(lane, run, on(pitch, 100))
+}
+
+fn note_off(lane: LaneId, run: i64, pitch: u8) -> RecordedMidi {
+    midi(lane, run, off(pitch))
+}
+
+/// A per-note control joins the latest note of its pitch; one after that
+/// note's off, or with no note at all, is dropped.
+#[test]
+fn per_note_controls_join_the_latest_note_of_their_pitch() {
+    use core_model::event::PerNoteKind::PitchBend;
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![
+        bend(d.keys, 0, 62, 9), // no note yet
+        note_on(d.keys, 1000, 60),
+        bend(d.keys, 2000, 60, 1),
+        note_on(d.keys, 6000, 60), // retrigger without an off
+        bend(d.keys, 7500, 60, 2),
+        note_off(d.keys, 12_000, 60),
+        bend(d.keys, 13_000, 60, 3), // after the off
+    ];
+    let p = c.run().unwrap();
+    let ev = &p
+        .lanes
+        .iter()
+        .find(|l| l.lane == d.keys)
+        .unwrap()
+        .active
+        .events;
+    let t = |f: i64| f * Q / BEAT as i64;
+    assert_eq!(
+        per_notes_of(ev, 60),
+        vec![
+            (t(1000), vec![(PitchBend, t(1000), 1)]),
+            (t(6000), vec![(PitchBend, t(1500), 2)]),
+        ]
+    );
+    assert!(per_notes_of(ev, 62).is_empty());
+}
+
+/// A per-note control outside the punch range is dropped, and so is one
+/// whose note started before the punch-in.
+#[test]
+fn per_note_controls_outside_the_punch_range_drop() {
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    c.range = RecordRange {
+        start: 10_000,
+        end: Some(30_000),
+    };
+    c.midi = vec![
+        note_on(d.keys, 2000, 60),
+        bend(d.keys, 4000, 60, 1),
+        bend(d.keys, 12_000, 60, 2), // note began before the punch-in
+        note_on(d.keys, 14_000, 64),
+        bend(d.keys, 16_000, 64, 3),
+        bend(d.keys, 32_000, 64, 4), // after the punch-out
+        note_off(d.keys, 34_000, 64),
+    ];
+    let p = c.run().unwrap();
+    let ev = &p
+        .lanes
+        .iter()
+        .find(|l| l.lane == d.keys)
+        .unwrap()
+        .active
+        .events;
+    let t = |f: i64| f * Q / BEAT as i64;
+    assert!(per_notes_of(ev, 60).is_empty());
+    assert_eq!(
+        per_notes_of(ev, 64),
+        vec![(
+            t(14_000),
+            vec![(core_model::event::PerNoteKind::PitchBend, t(2000), 3)]
+        )]
+    );
+}
+
+/// A note quantized onto the loop start keeps the per-notes heard before
+/// the wrap (offset from its played start); those heard after the wrap,
+/// in the next pass, are dropped, never attached to another note.
+#[test]
+fn a_note_held_across_a_loop_wrap_keeps_only_its_own_passs_controls() {
+    use core_model::event::PerNoteKind::PitchBend;
+    let d = doc(None);
+    let len = 2 * BEAT;
+    let mut c = Case::new(&d, 0);
+    c.looped = true;
+    c.end_run = 2 * len;
+    c.range = RecordRange {
+        start: 0,
+        end: Some(len),
+    };
+    c.marks = vec![mark(0, 0, false), mark(len, 0, true)];
+    c.midi_lanes = vec![d.keys];
+    let len = len as i64;
+    let g = Q / 4;
+    let mut start = midi_q(d.keys, len - 1000, on(60, 100), g, 100);
+    start.quantize = Some(RecordQuantize {
+        grid: g,
+        strength: 100,
+    });
+    c.midi = vec![
+        start,
+        bend(d.keys, len - 500, 60, 1),
+        bend(d.keys, len + 3000, 60, 2),
+        midi_q(d.keys, len + 6000, off(60), g, 100),
+    ];
+    let p = c.run().unwrap();
+    let l = &p.lanes[0];
+    assert_eq!(l.takes.len(), 2);
+    let t = |f: i64| f * Q / BEAT as i64;
+    assert_eq!(
+        per_notes_of(&l.takes[0].1.events, 60),
+        vec![(0, vec![(PitchBend, t(500), 1)])]
+    );
+    assert!(per_notes_of(&l.takes[1].1.events, 60).is_empty());
+}
