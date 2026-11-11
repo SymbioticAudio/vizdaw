@@ -876,14 +876,19 @@ impl Out<'_> {
     }
 }
 
+/// Bit `i` of a 64-bit mask; 0 past 63. // RT
+fn bit(i: usize) -> u64 {
+    u32::try_from(i)
+        .ok()
+        .and_then(|i| 1u64.checked_shl(i))
+        .unwrap_or(0)
+}
+
 /// Tells every instrument sink not in `except` (a target bitmask) that
 /// `frames` frames passed unrendered. // RT
 fn skip_sinks(sinks: &mut SinkTable, frames: u64, except: u64) {
     for (t, s) in sinks.iter_mut().enumerate() {
-        let bit = u32::try_from(t)
-            .ok()
-            .and_then(|t| 1u64.checked_shl(t))
-            .unwrap_or(0);
+        let bit = bit(t);
         if except & bit != 0 {
             continue;
         }
@@ -1994,8 +1999,9 @@ impl Renderer {
                 // Carried targets as bits (Ruling 5).
                 const _: () = assert!(MAX_TARGETS <= 64);
                 let mut kept: u64 = 0;
-                // Carried new routes as bits; past 64 a route counts as
-                // not carried (it only resends its MPE configuration).
+                // Carried new routes as bits. Each takes over one old
+                // route at most (a second match flushes); past 64 a
+                // route is never carried (its notes end, none hang).
                 let mut carried: u64 = 0;
                 let thru = &mut *self.thru;
                 let mut tap = self.tap.as_deref_mut();
@@ -2006,7 +2012,9 @@ impl Renderer {
                         ..
                     } = old;
                     for (i, r) in old_midi.iter_mut().enumerate() {
-                        let found = new.midi.iter().position(|n| n.carries(r));
+                        let found = new.midi.iter().enumerate().position(|(j, n)| {
+                            bit(j) != 0 && carried & bit(j) == 0 && n.carries(r)
+                        });
                         if let Some((j, n)) = found.and_then(|j| Some((j, new.midi.get_mut(j)?))) {
                             n.chain.carry_from(&mut r.chain);
                             // The decoder's channel state and the encoder's
@@ -2019,12 +2027,9 @@ impl Renderer {
                             {
                                 std::mem::swap(a, b);
                             }
-                            carried |= u32::try_from(j)
-                                .ok()
-                                .and_then(|j| 1u64.checked_shl(j))
-                                .unwrap_or(0);
+                            carried |= bit(j);
                             for t in n.targets.iter().flatten() {
-                                kept |= 1u64.checked_shl(u32::from(t.0)).unwrap_or(0);
+                                kept |= bit(usize::from(t.0));
                             }
                         } else {
                             let d = LiveDest::of(r, i);
@@ -2058,11 +2063,7 @@ impl Renderer {
                 // targets: a lane disarmed or re-routed must not leave
                 // one hanging.
                 for t in 0..MAX_TARGETS {
-                    let bit = u32::try_from(t)
-                        .ok()
-                        .and_then(|t| 1u64.checked_shl(t))
-                        .unwrap_or(0);
-                    if kept & bit == 0 {
+                    if kept & bit(t) == 0 {
                         let target = TargetIdx(t as u8);
                         thru.release(target, |m| o.send(target, 0, m.as_slice()));
                     }
@@ -2070,11 +2071,7 @@ impl Renderer {
                 // A new MPE thru route configures its synth (plan 5g-2
                 // Ruling 7); a carried one already did.
                 for (j, n) in new.midi.iter().enumerate() {
-                    let bit = u32::try_from(j)
-                        .ok()
-                        .and_then(|j| 1u64.checked_shl(j))
-                        .unwrap_or(0);
-                    if !n.spec.thru || carried & bit != 0 {
+                    if !n.spec.thru || carried & bit(j) != 0 {
                         continue;
                     }
                     if let Some(Some(enc)) = new.encoders.get(j) {
@@ -2830,7 +2827,10 @@ impl LiveOut {
                 continue;
             };
             let d = &p.dest;
-            if d.thru && !d.mpe {
+            // Counted only where it would have played: a routable,
+            // unmuted plain destination.
+            let plays = d.thru && !d.mute_notes && d.targets.iter().any(Option::is_some);
+            if plays && !d.mpe {
                 if let crate::input_fx::LiveMsg::PerNote {
                     expr: crate::input_fx::Expr::Bend | crate::input_fx::Expr::Timbre,
                     ..

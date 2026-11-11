@@ -373,3 +373,199 @@ fn send_now_uses_the_mpe_manager_channel() {
     b.run_frames(256);
     assert_eq!(bytes(&log), vec![vec![0xB2, 7, 90]]);
 }
+
+// Fix round 1 (Task 3 review): route changes end what they no longer hear.
+
+/// Every logged message, RPN traffic included.
+fn all(log: &EventLog) -> Vec<Vec<u8>> {
+    log.drain().iter().map(|r| r.bytes().to_vec()).collect()
+}
+
+fn offs(got: &[Vec<u8>], status: u8, pitch: u8) -> usize {
+    got.iter()
+        .filter(|b| b[0] == status && b[1] == pitch)
+        .count()
+}
+
+#[test]
+fn a_zone_off_write_back_with_a_channel_filter_ends_held_notes() {
+    let (d, seq, keys, synth) = doc(false);
+    let (mut engine, mut b, log) = start(&d, seq, spec(keys, synth, vec![]));
+    b.run_frames(256);
+    send(&engine, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 0]]);
+    b.run_frames(256);
+    assert_eq!(engine.take_mpe_reports(), vec![(keys, None)]);
+    log.drain();
+    // Zoned off, the lane hears every channel.
+    send(&engine, &[[0x95, 60, 100]]);
+    b.run_frames(256);
+    assert_eq!(bytes(&log), vec![vec![0x93, 60, 100]]);
+    // The write-back: no MPE, but the stale channel filter (0) narrows.
+    let mut s = spec(keys, synth, vec![]);
+    s.mpe = None;
+    engine.set_inputs(InputSpec {
+        midi: vec![s],
+        monitor: vec![],
+    });
+    engine.load(&d, seq).unwrap();
+    b.run_frames(256);
+    send(&engine, &[[0x85, 60, 0]]);
+    b.run_frames(256);
+    let got = all(&log);
+    assert_eq!(offs(&got, 0x83, 60), 1, "the held note ended: {got:?}");
+}
+
+#[test]
+fn two_old_routes_carried_into_one_both_end_their_notes() {
+    let (d, seq, keys, synth) = doc(true);
+    let s = spec(keys, synth, vec![]);
+    let (mut engine, mut b, log) = start(&d, seq, s.clone());
+    engine.set_inputs(InputSpec {
+        midi: vec![s.clone(), s.clone()],
+        monitor: vec![],
+    });
+    engine.load(&d, seq).unwrap();
+    b.run_frames(256);
+    log.drain();
+    send(&engine, &[[0x91, 60, 100]]);
+    b.run_frames(256);
+    let got = all(&log);
+    assert_eq!(offs(&got, 0x91, 60), 2, "each route plays it: {got:?}");
+    engine.set_inputs(InputSpec {
+        midi: vec![s],
+        monitor: vec![],
+    });
+    engine.load(&d, seq).unwrap();
+    b.run_frames(256);
+    send(&engine, &[[0x81, 60, 0]]);
+    b.run_frames(256);
+    let got = all(&log);
+    assert_eq!(offs(&got, 0x81, 60), 2, "both copies end: {got:?}");
+}
+
+#[test]
+fn a_new_mpe_output_ends_old_member_notes_before_configuring() {
+    let (d, seq, keys, synth) = doc(true);
+    let (mut engine, mut b, log) = start(&d, seq, spec(keys, synth, vec![]));
+    b.run_frames(256);
+    send(&engine, &[[0x91, 60, 100]]);
+    b.run_frames(256);
+    log.drain();
+    let mut upper = Builder::from_doc(d.clone());
+    upper
+        .run(Command::Routing(RoutingCmd::SetMpe {
+            dest: synth,
+            mpe: Some(UPPER3),
+        }))
+        .unwrap();
+    let upper = upper.finish();
+    engine.load(&upper, seq).unwrap();
+    b.run_frames(256);
+    let got = all(&log);
+    let off = got.iter().position(|b| b == &vec![0x81, 60, 0]);
+    let mcm = got.iter().position(|b| b == &vec![0xBF, 100, 6]);
+    assert!(
+        off.is_some() && mcm.is_some() && off < mcm,
+        "the note ends, then the MCM: {got:?}"
+    );
+}
+
+#[test]
+fn muting_an_mpe_destination_ends_a_held_note() {
+    let (open, seq, keys, dest) = ext_doc(false);
+    let (muted, ..) = ext_doc(true);
+    let (mut engine, mut b, log) = start(&open, seq, spec(keys, dest, vec![]));
+    b.run_frames(256);
+    log.drain();
+    send(&engine, &[[0x91, 60, 100]]);
+    b.run_frames(256);
+    assert_eq!(offs(&all(&log), 0x9E, 60), 1);
+    engine.load(&muted, seq).unwrap();
+    b.run_frames(256);
+    send(&engine, &[[0x81, 60, 0], [0x92, 62, 100]]);
+    b.run_frames(256);
+    let got = all(&log);
+    assert_eq!(
+        offs(&got, 0x8E, 60),
+        1,
+        "ended once, on its member channel: {got:?}"
+    );
+    assert!(!got.iter().any(|b| b[0] & 0xF0 == 0x90), "muted: {got:?}");
+    // Unmuted again: nothing was left sounding to end.
+    engine.load(&open, seq).unwrap();
+    b.run_frames(256);
+    let got = all(&log);
+    assert!(!got.iter().any(|b| b[0] & 0xF0 == 0x80), "{got:?}");
+}
+
+#[test]
+fn a_chain_change_ends_chord_notes_on_their_member_channels() {
+    let (d, seq, keys, synth) = doc(true);
+    let chord = |i: Vec<i8>| vec![InputFx::new(InputFxKind::Chord { intervals: i })];
+    let (mut engine, mut b, log) = start(&d, seq, spec(keys, synth, chord(vec![4, 7])));
+    b.run_frames(256);
+    log.drain();
+    send(&engine, &[[0x91, 60, 100]]);
+    b.run_frames(256);
+    let ons: Vec<Vec<u8>> = all(&log)
+        .into_iter()
+        .filter(|b| b[0] & 0xF0 == 0x90)
+        .collect();
+    assert_eq!(
+        ons,
+        vec![
+            vec![0x91, 60, 100],
+            vec![0x92, 64, 100],
+            vec![0x93, 67, 100]
+        ]
+    );
+    engine.set_inputs(InputSpec {
+        midi: vec![spec(keys, synth, chord(vec![3, 7]))],
+        monitor: vec![],
+    });
+    engine.load(&d, seq).unwrap();
+    b.run_frames(256);
+    let mut got: Vec<Vec<u8>> = all(&log)
+        .into_iter()
+        .filter(|b| b[0] & 0xF0 == 0x80)
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![vec![0x81, 60, 0], vec![0x82, 64, 0], vec![0x83, 67, 0]],
+        "no manager-channel off"
+    );
+}
+
+#[test]
+fn a_muted_plain_destination_counts_no_dropped_per_note_data() {
+    let mut b = Builder::new();
+    let dest = ext(&mut b, "Ext", 2);
+    let (seq, keys) = b.sequence("Bar", "Keys", Some(dest)).unwrap();
+    b.run(Command::Routing(RoutingCmd::SetMidiMix {
+        dest,
+        mix: MidiMix {
+            mute: true,
+            ..MidiMix::default()
+        },
+    }))
+    .unwrap();
+    let d = b.finish();
+    let (engine, mut b, _log) = start(&d, seq, spec(keys, dest, vec![]));
+    b.run_frames(256);
+    send(
+        &engine,
+        &[
+            [0x91, 60, 100],
+            [0xE1, 0x10, 0x60],
+            [0xB1, 74, 9],
+            [0x81, 60, 0],
+        ],
+    );
+    b.run_frames(256);
+    assert_eq!(
+        engine.counters().per_note_dropped,
+        0,
+        "nothing would have played"
+    );
+}

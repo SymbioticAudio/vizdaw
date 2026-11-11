@@ -221,11 +221,13 @@ impl MidiRoute {
     /// mute, targets, chain and MPE output; the arm may differ. With MPE
     /// input on both, the new setting must be the old decoder's live one
     /// (an MCM's write-back carries; plan 5g-2 Ruling 4); a new route
-    /// without MPE input carries an old one an MCM turned off. // RT
+    /// without MPE input and with every channel carries an old one an
+    /// MCM turned off (which takes every channel too), so a narrower
+    /// filter flushes instead of leaving notes it no longer hears. // RT
     pub fn carries(&self, old: &MidiRoute) -> bool {
         let decoders = match (&self.decoder, &old.decoder) {
             (Some(n), Some(o)) => o.config() == Some(n.initial()),
-            (None, Some(o)) => o.config().is_none(),
+            (None, Some(o)) => o.config().is_none() && self.spec.channel.is_none(),
             (Some(_), None) => false,
             (None, None) => true,
         };
