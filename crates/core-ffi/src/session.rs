@@ -11,7 +11,7 @@ use crate::error::VizError;
 use crate::events::{AutomationTargetRow, automation_target_of, automation_target_row};
 use crate::guard::{ffi_guard, lock};
 use crate::host;
-use crate::mixer::{self, DestRow, MixerLevels, MixerSnapshot};
+use crate::mixer::{self, DestRow, MidiMixRow, MixerLevels, MixerSnapshot};
 use crate::plugins;
 use crate::recovery;
 use crate::snapshot::{
@@ -209,6 +209,14 @@ pub(crate) struct Inner {
     /// Copies being written without the lock (pre-flight M4): retention
     /// waits for them.
     edits_writing: u32,
+    /// MPE settings controllers' MCMs gave lanes (plan 5g-2 Ruling 4), the
+    /// last per lane, waiting to be written back once no recording or edit
+    /// is open; a user's own setting of the lane drops its entry.
+    mpe_owed: std::collections::BTreeMap<LaneId, Option<core_model::mpe::MpeConfig>>,
+    /// Destinations' mix and MPE configuration batches a full engine
+    /// command ring refused, oldest first: `idle` sends them again
+    /// (final review m4).
+    mix_owed: Vec<(DestId, Vec<core_engine::midi1::Midi1Msg>)>,
     /// The next bounce cancels itself once its progress reaches this
     /// (test hook).
     #[cfg(feature = "test-hooks")]
@@ -324,6 +332,8 @@ impl Inner {
             bounce_results: Default::default(),
             edits: Default::default(),
             edits_writing: 0,
+            mpe_owed: Default::default(),
+            mix_owed: Vec::new(),
             #[cfg(feature = "test-hooks")]
             bounce_cancel_at: None,
             #[cfg(feature = "test-hooks")]
@@ -1026,6 +1036,15 @@ impl Session {
         let before = inner.doc().clone();
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
+        // The user's own MPE setting wins over a controller's MCM still
+        // waiting to be written back (plan 5g-2 Task 6 review m1), also
+        // one still in the engine's ring (final review m2).
+        if let Command::Lane(LaneCmd::SetMpe { lane, .. }) = &cmd {
+            for (l, cfg) in host::take_mpe_reports(self.id) {
+                inner.mpe_owed.insert(l, cfg);
+            }
+            inner.mpe_owed.remove(lane);
+        }
         // An arm or input change that went through lets a failed input
         // open be tried again, in the engine this session holds (plan
         // 5d-1 Ruling 15; Task 7 review m6), before the reload applies it.
@@ -1037,6 +1056,7 @@ impl Session {
         // Touches of what the edit removed end (plan 5e-1 M9).
         self.release_vanished(&mut inner);
         self.resync_plugin_automation(&mut inner, Some(&before));
+        self.send_mix_changes(&mut inner, &before);
         inner.snapshot()
     }
 
@@ -1179,6 +1199,7 @@ impl Session {
         self.mark(&mut inner);
         self.release_vanished(&mut inner);
         self.resync_plugin_automation(&mut inner, Some(&before));
+        self.send_mix_changes(&mut inner, &before);
         let snapshot = inner.snapshot()?;
         // An undone or redone arm, monitor or input edit claims as the
         // edit did (Task 8 review m6).
@@ -1279,6 +1300,21 @@ impl Session {
         if inner.recording.is_some() || inner.finishing {
             return true;
         }
+        match self.take_idle(&mut inner, seq) {
+            Ok(_) => {}
+            Err(VizError::Busy { message }) if message == host::INPUT_OPENING => {
+                inner.claim_owed = Some(seq);
+            }
+            Err(e) => inner.reload_fault = Some(format!("the engine could not be claimed: {e}")),
+        }
+        true
+    }
+
+    /// Claims an idle engine for `seq` through [`host::claim_idle`], from
+    /// this session's cursor when it belongs to `seq`; true when it was
+    /// taken (the engine then holds the position, so the cursor clears).
+    /// False when it is held already or busy elsewhere.
+    fn take_idle(&self, inner: &mut Inner, seq: SeqId) -> Result<bool, VizError> {
         let at = match (inner.cursor, inner.cursor_seq) {
             (Some(t), None) => t,
             (Some(t), Some(s)) if s == seq => t,
@@ -1290,18 +1326,121 @@ impl Session {
             host::claim_idle(self.id, inner.doc(), seq, at, looped, p)
         })
         .and_then(|r| r);
-        match r {
-            Ok(true) => {
-                inner.cursor = None;
-                inner.cursor_seq = Some(seq);
-            }
-            Ok(false) => {}
-            Err(VizError::Busy { message }) if message == host::INPUT_OPENING => {
-                inner.claim_owed = Some(seq);
-            }
-            Err(e) => inner.reload_fault = Some(format!("the engine could not be claimed: {e}")),
+        if r == Ok(true) {
+            inner.cursor = None;
+            inner.cursor_seq = Some(seq);
         }
-        true
+        r
+    }
+
+    /// Before a MIDI strip send (plan 5g-1b final review I2): when this
+    /// session does not hold the engine, claims the idle one for the
+    /// shown sequence (`Inner::selected_seq`, as Locate uses), as an arm
+    /// does, and only when that sequence plays one of `dests` (re-review
+    /// N1, N2): an edit never loads a sequence that is not shown, nor takes
+    /// another window's idle engine to send nothing. Nothing during a
+    /// pass, after `close`, or when the engine is busy elsewhere; a failed
+    /// claim is never the caller's error.
+    fn claim_for_mix(&self, inner: &mut Inner, dests: &[DestId]) {
+        if inner.closed
+            || inner.recording.is_some()
+            || inner.finishing
+            || host::position(self.id).is_some()
+        {
+            return;
+        }
+        let Some(seq) = inner.selected_seq() else {
+            return;
+        };
+        let plays = inner.doc().sequence(seq).is_ok_and(|s| {
+            s.lanes
+                .iter()
+                .any(|l| l.midi_dest.is_some_and(|d| dests.contains(&d)))
+        });
+        if plays {
+            let _ = self.take_idle(inner, seq);
+        }
+    }
+
+    /// After an edit, undo or redo whose document went from `before` to
+    /// the current one (plan 5g-1b final review I1): sends each external
+    /// destination's volume (CC 7) and pan (CC 10) that is set and
+    /// changed, after [`Session::claim_for_mix`]. An unset value sends
+    /// nothing (Ruling 2); a destination the loaded sequence does not
+    /// play is not reached (its values go out when it plays). A failed
+    /// send leaves the edit; a full command ring delays a destination's
+    /// batch whole to the next `idle` (final review m4).
+    ///
+    /// An external destination whose MPE output changed (plan 5g-2 Task 6
+    /// review m4): turned off, or moved to the other zone, the old zone
+    /// is turned off (an MCM with no members on its manager channel);
+    /// turned on or changed, its configuration goes out, then its set
+    /// volume and pan on the new manager channel.
+    fn send_mix_changes(&self, inner: &mut Inner, before: &Document) {
+        use core_engine::midi1::Midi1Msg;
+        // Per destination, its messages on the channels they name (an MPE
+        // destination's mix on its manager).
+        let mut due: Vec<(DestId, Vec<Midi1Msg>)> = Vec::new();
+        for (id, d) in inner.doc().instruments() {
+            let DestKind::MidiEndpoint { channel, .. } = &d.kind else {
+                continue;
+            };
+            if !d.kind.is_external() {
+                continue;
+            }
+            let mix_channel = d.mpe.map_or(channel & 0x0F, |m| m.manager());
+            let mut msgs = Vec::new();
+            let old = before.instruments().get(id);
+            let (was_mpe, mpe) = (old.and_then(|o| o.mpe), d.mpe);
+            let mix_was = old.map(|o| o.midi_mix);
+            let mix = d.midi_mix;
+            let mpe_changed = was_mpe != mpe;
+            if mpe_changed
+                && let Some(o) = was_mpe
+                && mpe.is_none_or(|n| n.manager() != o.manager())
+            {
+                let off = core_model::mpe::MpeConfig { members: 0, ..o };
+                // The MCM alone: the member bend range is left as is.
+                msgs.extend(core_engine::mpe::configuration(&off).into_iter().take(5));
+            }
+            let on = mpe.filter(|_| mpe_changed);
+            if let Some(n) = on {
+                msgs.extend(core_engine::mpe::configuration(&n));
+            }
+            for (cc, v, was) in [
+                (7, mix.volume, mix_was.and_then(|m| m.volume)),
+                (10, mix.pan, mix_was.and_then(|m| m.pan)),
+            ] {
+                if let Some(v) = v.filter(|v| on.is_some() || Some(*v) != was) {
+                    msgs.push(Midi1Msg::three(0xB0 | mix_channel, cc, v));
+                }
+            }
+            if !msgs.is_empty() {
+                due.push((*id, msgs));
+            }
+        }
+        if due.is_empty() {
+            return;
+        }
+        let dests: Vec<DestId> = due.iter().map(|(d, _)| *d).collect();
+        self.claim_for_mix(inner, &dests);
+        inner.mix_owed.extend(due);
+        Self::send_owed_mix(self.id, inner);
+    }
+
+    /// Sends the destinations' owed batches from
+    /// [`Session::send_mix_changes`], oldest first, each whole or not at
+    /// all (final review m4): one the engine's full command ring refuses
+    /// waits, with every later one, for the next `idle`. A destination the
+    /// engine does not play (or an engine this session no longer holds)
+    /// drops its batch, as before.
+    fn send_owed_mix(id: u64, inner: &mut Inner) {
+        while let Some((dest, msgs)) = inner.mix_owed.first() {
+            if host::send_all_now_on(id, *dest, msgs).is_err() {
+                return;
+            }
+            inner.mix_owed.remove(0);
+        }
     }
 
     /// `Busy` when one of `cmds` changes which lanes record (an arm or an
@@ -1990,6 +2129,8 @@ impl Session {
             let mut inner = lock(&self.inner);
             self.apply_pending_pass(&mut inner);
             self.apply_pending_automation(&mut inner);
+            self.apply_mpe_reports(&mut inner);
+            Self::send_owed_mix(self.id, &mut inner);
             // A save at Stop the busy registry put off (Task 9 review M4).
             self.save_after_pass_now(&mut inner);
             // A setting a load publishes changed (plan 5d-1 Ruling 12).
@@ -2507,6 +2648,16 @@ impl Session {
                     },
                     external: d.kind.is_external(),
                     return_latency_ms: d.return_latency_ms,
+                    midi_mix: MidiMixRow {
+                        volume: d.midi_mix.volume,
+                        pan: d.midi_mix.pan,
+                        mute: d.midi_mix.mute,
+                    },
+                    channel: match &d.kind {
+                        DestKind::MidiEndpoint { channel, .. } => Some(*channel),
+                        DestKind::PluginInstrument { .. } => None,
+                    },
+                    mpe: d.mpe.map(Into::into),
                 })
                 .collect())
         })
@@ -5778,6 +5929,89 @@ impl Session {
         })
     }
 
+    /// Sets external destination `dest`'s MIDI strip mix (plan 5g-1b), one
+    /// undo step "Set MIDI Mix". The edit sends the volume (CC 7) and pan
+    /// (CC 10) that are set and changed, claiming an idle engine first
+    /// (`Session::send_mix_changes`); a failed send leaves the edit.
+    /// `Model` for another destination or a value above 127.
+    pub fn set_midi_mix(&self, dest: u64, mix: MidiMixRow) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mix = core_model::document::MidiMix {
+                volume: mix.volume,
+                pan: mix.pan,
+                mute: mix.mute,
+            };
+            self.execute(Command::Routing(RoutingCmd::SetMidiMix {
+                dest: DestId(dest),
+                mix,
+            }))
+        })
+    }
+
+    /// Sends the volume and pan given to `dest` now without an edit (a
+    /// fader or pan drag), claiming an idle engine first as an edit does.
+    /// True when something was sent; false when there was nothing to send,
+    /// the engine is busy elsewhere or the loaded sequence does not play
+    /// `dest`. `Model` for a destination that is not external or a value
+    /// above 127.
+    pub fn preview_midi_mix(
+        &self,
+        dest: u64,
+        volume: Option<u8>,
+        pan: Option<u8>,
+    ) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let dest = DestId(dest);
+            let external = inner
+                .doc()
+                .instruments()
+                .get(&dest)
+                .is_some_and(|d| d.kind.is_external());
+            if !external {
+                return Err(crate::events::bad("only a MIDI destination has a mix"));
+            }
+            for (what, v) in [("midi_volume", volume), ("midi_pan", pan)] {
+                if v.is_some_and(|v| v > 127) {
+                    return Err(crate::events::bad(&format!("{what} is 0 to 127")));
+                }
+            }
+            if volume.is_none() && pan.is_none() {
+                return Ok(false);
+            }
+            self.claim_for_mix(&mut inner, &[dest]);
+            let mut sent = false;
+            for (cc, v) in [(7, volume), (10, pan)] {
+                if let Some(v) = v {
+                    sent |= host::send_now(
+                        self.id,
+                        inner.doc(),
+                        dest,
+                        core_engine::midi1::Midi1Msg::three(0xB0, cc, v),
+                    )?;
+                }
+            }
+            Ok(sent)
+        })
+    }
+
+    /// MPE output for destination `dest` (plan 5g-2 Ruling 7), one undo
+    /// step "Set Destination MPE"; `None` turns it off. `Model` for an
+    /// unknown destination or a setting out of range (members 1–15, bend
+    /// range 1–96).
+    pub fn set_destination_mpe(
+        &self,
+        dest: u64,
+        mpe: Option<crate::mpe::MpeRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Routing(RoutingCmd::SetMpe {
+                dest: DestId(dest),
+                mpe: mpe.map(Into::into),
+            }))
+        })
+    }
+
     /// Sets external destination `dest`'s return latency to `ms` (spec
     /// §4.5a: 0–500), one undo step "Set Return Latency". `Model` for
     /// another destination or a value out of range.
@@ -7584,6 +7818,57 @@ impl Session {
         }
     }
 
+    /// Writes the MPE settings controllers' MCMs gave lanes back into the
+    /// document (plan 5g-2 Ruling 4; a zone turned off is `None`), each
+    /// lane whose setting differs as one undo step "Set Track MPE". The
+    /// reports wait while a recording runs, finishes or has a pass to
+    /// land, and while an edit, transaction or group is open. The step is
+    /// the controller's, not an input change: it takes no view filter and
+    /// skips `retries_input_cmd` and the claim handling on purpose.
+    fn apply_mpe_reports(&self, inner: &mut Inner) {
+        for (lane, cfg) in host::take_mpe_reports(self.id) {
+            inner.mpe_owed.insert(lane, cfg);
+        }
+        if inner.mpe_owed.is_empty()
+            || inner.recording.is_some()
+            || inner.finishing
+            || inner.pending_pass.is_some()
+            || inner.static_edit.is_some()
+            || inner.history.in_transaction()
+            || inner.history.in_group()
+        {
+            return;
+        }
+        let mut wrote = false;
+        for (lane, mpe) in std::mem::take(&mut inner.mpe_owed) {
+            // Lane IDs are unique in the document: the lane's sequence, if
+            // its setting differs.
+            let Some(seq) = inner.doc().sequences().iter().find_map(|(id, s)| {
+                s.lanes
+                    .iter()
+                    .any(|l| l.id == lane && l.mpe != mpe)
+                    .then_some(*id)
+            }) else {
+                continue;
+            };
+            let cmd = Command::Lane(LaneCmd::SetMpe { seq, lane, mpe });
+            if let Err(e) = inner.history.execute(&cmd, &ViewFilter::default()) {
+                inner.news.problems.push(format!(
+                    "The track's MPE setting could not be updated ({e})."
+                ));
+                continue;
+            }
+            inner.version += 1;
+            inner.news.doc_changed = true;
+            wrote = true;
+        }
+        if wrote {
+            // One reload for every lane written: `idle` runs it next.
+            inner.reload_owed = true;
+            self.mark(inner);
+        }
+    }
+
     /// Lands one pass's writes (see [`Session::apply_pending_automation`];
     /// plan 5e-1 Task 12): inside a recording's group as part of its step;
     /// else into `step` while that step is still the present (one Undo
@@ -7761,6 +8046,7 @@ impl Session {
     /// (nothing before its first Play or Record).
     pub fn input_info(&self) -> Result<crate::live::InputInfoRow, VizError> {
         ffi_guard(|| {
+            let counters = host::counters(self.id);
             Ok(match host::input_info(self.id) {
                 Some((device, i)) => crate::live::InputInfoRow {
                     device,
@@ -7772,6 +8058,9 @@ impl Session {
                     buffer_frames: i.buffer_frames,
                     opening: host::input_opening(self.id),
                     sample_rate: host::device(self.id).map_or(0.0, |(_, r)| r),
+                    midi_fx_dropped: counters.map_or(0, |c| c.midi_fx_dropped),
+                    per_note_dropped: counters.map_or(0, |c| c.per_note_dropped),
+                    mpe_stolen: counters.map_or(0, |c| c.mpe_stolen),
                 },
                 None => crate::live::InputInfoRow {
                     device: String::new(),
@@ -7783,6 +8072,9 @@ impl Session {
                     round_trip_frames: 0,
                     opening: false,
                     sample_rate: 0.0,
+                    midi_fx_dropped: 0,
+                    per_note_dropped: 0,
+                    mpe_stolen: 0,
                 },
             })
         })
@@ -9379,7 +9671,7 @@ impl Session {
     /// Folds one take of the engine's read-and-clear peaks into both meter
     /// holds (Ruling 13, pre-flight I4).
     fn take_meters(&self, inner: &mut Inner) {
-        if let Some(l) = host::levels(self.id) {
+        if let Some(l) = host::levels(self.id, inner.doc()) {
             inner.meters.fold(l, Instant::now());
         }
     }

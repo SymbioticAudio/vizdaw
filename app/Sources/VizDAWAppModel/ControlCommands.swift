@@ -224,7 +224,8 @@ public enum ControlCommands {
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
-            .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids)
+            .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(InputFxCommands.ids)
+            .union(MpeCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -453,6 +454,10 @@ public enum ControlCommands {
             if let f = failure(ViewCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where SynthCommands.ids.contains(id):
             return SynthCommands.run(id, args: args, doc: docID, m)
+        case _ where InputFxCommands.ids.contains(id):
+            return InputFxCommands.run(id, args: args, doc: docID, m)
+        case _ where MpeCommands.ids.contains(id):
+            return MpeCommands.run(id, args: args, doc: docID, m)
         case _ where TrackCommands.ids.contains(id):
             return TrackCommands.run(id, args: args, doc: docID, m)
         case _ where AutomationCommands.ids.contains(id):
@@ -716,6 +721,7 @@ public enum ControlStates {
             return .document(
                 doc: doc, path: (try? m.session.path()) ?? nil, snapshot: m.snapshot,
                 selectedSeq: m.selectedSeq, lanes: m.lanes,
+                destinations: (try? m.session.destinations()) ?? [],
                 alert: m.alert.map { AlertRow(title: $0.title, message: $0.message) })
         case .editor:
             let e = m.editor

@@ -61,7 +61,7 @@ Out of scope:
 ```
 Swift  VizDAWEditors   RegionStripView/ArrangementView: waveforms, fade/gain handles · LaneHeaderView: input, monitor, meter · MediaPoolView
 Swift  VizDAWAppModel  RecordModel · MediaModel · AutomationModeModel · SurfaceSettings · BounceModel · ExternalEditorWatcher
-Swift  VizDAW          New Project sheet, Project Settings, record transport UI, Track Synth sheet, input effects popover, Settings › Audio/Recording/Surfaces, Bounce sheet, Media pool window
+Swift  VizDAW          New Project sheet, Project Settings, record transport UI, Track Synth sheet, the strip's MIDI FX section, Settings › Audio/Recording/Surfaces, Bounce sheet, Media pool window
 FFI    core-ffi        import · media pool · overview · record · monitor · automation gestures · surfaces · bounce
 Rust   core-media      CAF read/write · MediaImporter trait · Streamer (disk thread) · RecordWriter · overviews   (new, platform-neutral)
 Rust   core-surface    MIDI learn · Mackie Control · HUI protocol state machines                                   (new, platform-neutral)
@@ -309,13 +309,13 @@ At Stop (or at the auto-stop in §6.2):
 - On open, `Media/Recorded/` files that no media item references and whose `info` chunk says `vizdaw-recording` are offered in the existing recovery sheet ("Recovered recordings: import into a new lane / move to Trash").
 
 ### 6.6 Monitoring and MIDI thru
-The model follows Logic Pro: software monitoring through the strip, a per-lane Input Monitoring button, and an I/O buffer size that sets the latency (Ruling 33).
+The model is a conventional DAW's: software monitoring through the strip, a per-lane Input Monitoring button, and an I/O buffer size that sets the latency (Ruling 33).
 
 - **Software Monitoring** (Settings › Audio, default on). When off, VizDAW never plays an input back: the user listens through the interface's direct monitoring. Recording and MIDI thru are unaffected.
 - **Audio monitoring.** With Software Monitoring on, an armed or `Input`-monitored lane's input feeds its AudioPath strip through the `RegionSource` node's input mix (the node exists for every AudioPath strip that has segments or a monitored input). When an input is monitored, the strip's inserts process it like playback.
 - **Latency of a monitored input.** It is the device round trip at the current I/O buffer size plus the latency of the plugins on the input's own path, and nothing more. Delay compensation for playback works by reading regions ahead, which a live input cannot do. So a monitored input is never delayed to wait for the rest of the mix; the latent paths are compensated by playing the regions early. The recorded audio is still placed by §6.3's latency compensation.
 - **I/O Buffer Size** (Settings › Audio): 32, 64, 128, 256, 512 or 1024 frames, default 128, with a readout of the resulting round-trip latency in ms. A change reopens the device and is refused while recording.
-- **Deferred:** Logic's Low Latency Mode (bypass plugins over a latency limit on a monitored path while recording) is in the feature backlog.
+- **Deferred:** a Low Latency Mode (bypass plugins over a latency limit on a monitored path while recording) is in the feature backlog.
 - **The modes** (the lane's Input Monitoring button):
   - **Auto**: the input is heard when the lane is armed and either the transport is stopped, or it is recording and the play position is inside the record range. Outside the range, playback is heard. This is auto-input.
   - **Input**: always the input.
@@ -378,11 +378,28 @@ This is an explicit use case: printing an external synth into the project as aud
   - The raw input is not kept.
   - To record the raw performance, bypass the chain.
 - **Lanes without an armed or monitored state** do not run their chain. Playback of recorded events never passes through input effects.
-- **UI.** An "FX" button on the lane header (lit when the chain is non-empty and not all bypassed) opens a popover:
-  - the chain list: add, remove, drag to reorder, bypass;
-  - the selected effect's parameters.
+- **UI.** Instrument strips (a plugin instrument's and the Built-in Synth's) show a MIDI FX section beneath Inserts, lit when the chain is non-empty and not all bypassed: up to 8 slots; click an empty slot to add an effect, click a filled one for its parameters, and each slot has a bypass; drag to reorder. A strip several tracks play edits the shown sequence's armed track first, and the left pane's strip edits the focused track (owner, 2026-11-09).
 
   Settings are undoable lane edits (one step per gesture).
+
+### 6.8a MIDI strips (owner, 2026-11-10)
+- **What.** Each external MIDI destination (a port and channel) gets a simplified channel strip. A MIDI track playing it shows that strip in the left pane; the mixer shows one per destination.
+- **Model.** A destination gains `midi_mix { volume, pan, mute }`. Volume and pan are each unset (nothing is sent; the synth keeps its own) or 0–127, and pan's centre is 64. Each change is an undoable destination edit (one step per gesture).
+- **What it sends.**
+  - Volume is CC 7 and pan is CC 10, on the destination's channel. For a destination with MPE output (§13 5g-2) they, like its default patch, go on the zone's manager channel instead, so they reach every rotated note.
+  - Each set value is sent when it changes (an edit, an Undo or a Redo, and a fader or pan drag as it moves), and again at the start of every playback of a sequence that plays the destination, after its default patch.
+  - A change made while stopped to a destination the shown sequence plays first takes the idle engine for that sequence, as arming a track does, so it is heard at once; no other sequence is ever loaded for it. While another window plays or records, nothing is sent then. A destination the shown sequence doesn't play is reached once a sequence that plays it plays.
+  - An Undo back to unset sends nothing: the synth stays as it is.
+  - Chase sends them when playback starts mid-song. A CC 7 or CC 10 recorded in a part plays as recorded and wins from then on, so the strip sets the starting level. Fader automation for MIDI strips comes later.
+  - Mute stops the destination's notes, and notes already sounding end. Its controllers and other messages still play, so the synth's state stays right.
+- **The strip, top to bottom:**
+  1. the name;
+  2. the MIDI FX section (§6.8);
+  3. pan (L 64 … C … R 63);
+  4. a fader with a 0–127 readout and a note-activity meter that shows velocity;
+  5. Mute, and Record arm for the track.
+- **Left out:** input, EQ, inserts, sends, output, solo and the automation mode. None of them can work on audio that VizDAW never receives.
+- **No destination.** A MIDI track without a destination shows the strip in the left pane with "No Destination". Its MIDI FX and arm work, but pan and the fader are off.
 
 ### 6.9 Record UI
 - **Transport toolbar:**
@@ -395,7 +412,6 @@ This is an explicit use case: printing an external synth into the project as aud
   - an input picker (audio channels by the device's channel names, or a MIDI port and channel);
   - a monitor button that cycles A / I / –;
   - a thin input meter while the lane is armed or monitoring, with a clip mark;
-  - the FX button (§6.8);
   - for a `return_of` lane, a small link badge naming the synth.
 - **Mixer (`MixerView`).** AudioPath strips show the same input picker and monitor button above the inserts.
 - **Settings › Audio:**
@@ -760,8 +776,8 @@ Plans run one after another by subagent-driven development under the standing au
 | **5f-2 — Bounce and export** | Offline bounce (`core_engine::bounce`: a separate engine and renderer, the streamer synchronous, mix and stems aligned by arrival, the −96 dBFS tail and its cap); plugin copies in offline mode (CLAP `render`, AU `OfflineRender`), external MIDI silent with the warning; WAV/AIFF/CAF at 16/24-bit (TPDF dither) or float, any rate 8–384 kHz (`core_media::export`); Add to project as one undo step; progress, cancel, no partial file; the Bounce sheet and Settings › Audio tail limit; `file.bounce`; the bounce e2e; README 180–184. Split from the former 5f row by plan 5f-1 Ruling 1. Needs 5e-2 (independent of 5f-1). |
 | **5f-3 — External sample editor** | `AudioCmd::SetSource`; the region-span WAV copy in `Media/Edits/`, kept until the project closes; the `DispatchSource` watcher with the 1 s stable rule; the External Edit import relinking that region alone as one undo step; Reload External Edit; Settings › Editing chooser; `region.open_external` (stub editor on CI) and `region.reload_external`; the e2e; README 185–188. Split from the former 5f row by plan 5f-1 Ruling 1. Needs 5f-2 (its WAV writer and import generalisation). |
 | **5f-4 — Kontrol S-Series MK3** | (Added by the owner, 2026-11-03.) §8.4: `core-surface::kontrol` (the version-4 handshake, identity and goodbye, transport, Count-in and Automation toggling the record count-in and Suspend Automation, the keyboard's tempo control and Tap changing VizDAW's tempo (one undo step per gesture, refused while recording), an 8-track mixer with banking and navigation, tempo, track colours by kind, meters, Plug-in mode with VizDAW's own parameter pages for any plug-in, preset previous/next) with byte-level golden tests on Linux; the `kontrol_mk3` kind in `core-ffi::surfaces` (its own bank of 8, DAW-port matching with `kontrol_ports`, goodbye on removal and quit, problem lines shown per row in Settings; `surfaces.json` keeping entries of unknown kinds (controller ruling K-0); the `Session::set_surface_count_in` export, meters counted, the plug-in page per document); `PluginInstance::presets`/`load_preset` with AU factory presets; Settings › Surfaces with the DAW port picked and the trademark notice; `surface.add type kontrol_mk3`; the Kontrol e2e; README 189–198 (hardware steps as action → result). Needs 5f-3; runs before 5g-1, whose README numbers move up by 10. |
-| **5g-1 — MIDI input effects** | `InputFx` model and `LaneCmd::SetInputFx` (§4.5, §6.8); `LiveMsg`, the MIDI 2.0-shaped live event, and the real-time chain in the renderer (arpeggiator synced and free-running, transpose, velocity, chord, input quantize; 32 held / 128 sounding with overflow counted; a changed chain ends its notes, an unchanged one carries across route changes) feeding thru and the recorder; Input Quantize on recorded starts only; surface ports skipped by every-source lanes; the FX button and popover; `lane.set_input_fx`, `state.get` per-lane `input_fx`; golden tests, `rt-check` over the chain, the arpeggiator e2e; README 199–205 (189–195 in its plan, renumbered after 5f-4). Until this plan lands, the chain is empty and thru/record pass input unchanged. Split from the former 5g row by plan 5g-1 Ruling 1. Needs 5f-4 (added before it, 2026-11-03). |
-| **5g-2 — MPE input and output** | (Added by the owner, 2026-10-20.) MPE input: a per-lane MPE setting (`Lane.mpe`: lower/upper zone, member-channel range, per-note pitch-bend range; also set from the MPE Configuration Message, written back as an undo step) turns channel-per-note MIDI 1.0 from an MPE controller into per-note events (note, per-note pitch bend, pressure, CC74 timbre as per-note controllers) before the input effects, thru and recording; MPE output: a per-destination MPE setting (`Destination.mpe`) rotates notes across member channels, live and in the schedule (so bounce too), so per-note expression survives the MIDI 1.0 down-conversion to external synths and MIDI 1.0 plugins (instead of being dropped and counted); MPE settings in the lane header's input and destination menus and on the control channel (`lane.set_mpe`, `destination.set_mpe`, `state.get`); golden and round-trip tests (MPE in → per-note events → MPE out), `rt-check`, the MPE e2e; README 206–211 (196–201 in its plan, renumbered after 5f-4). Split from the former 5g row by plan 5g-1 Ruling 1. Needs 5g-1. |
+| **5g-1 — MIDI input effects** | `InputFx` model and `LaneCmd::SetInputFx` (§4.5, §6.8); `LiveMsg`, the MIDI 2.0-shaped live event, and the real-time chain in the renderer (arpeggiator synced and free-running, transpose, velocity, chord, input quantize; 32 held / 128 sounding with overflow counted; a changed chain ends its notes, an unchanged one carries across route changes) feeding thru and the recorder; Input Quantize on recorded starts only; surface ports kept out of every lane (delivered by 5f-1 Ruling 17); the strip's MIDI FX section; `lane.set_input_fx`, `state.get` per-lane `input_fx`; golden tests, `rt-check` over the chain, the arpeggiator e2e; README 238–244. Until this plan lands, the chain is empty and thru/record pass input unchanged. Split from the former 5g row by plan 5g-1 Ruling 1. Needs 5f-4 (added before it, 2026-11-03); runs after sub-project 7 and the Tracks plan. |
+| **5g-2 — MPE input and output** | (Added by the owner, 2026-10-20.) MPE input: a per-lane MPE setting (`Lane.mpe`: lower/upper zone, member-channel range, per-note pitch-bend range; also set from the MPE Configuration Message, written back as an undo step) turns channel-per-note MIDI 1.0 from an MPE controller into per-note events (note, per-note pitch bend, pressure, CC74 timbre as per-note controllers) before the input effects, thru and recording; MPE output: a per-destination MPE setting (`Destination.mpe`) rotates notes across member channels, live and in the schedule (so bounce too), so per-note expression survives the MIDI 1.0 down-conversion to external synths and MIDI 1.0 plugins (instead of being dropped and counted); MPE settings in the lane header's input and destination menus and on the control channel (`lane.set_mpe`, `destination.set_mpe`, `state.get`); golden and round-trip tests (MPE in → per-note events → MPE out), `rt-check`, the MPE e2e; README 251–256. Split from the former 5g row by plan 5g-1 Ruling 1. Needs 5g-1. |
 
 ## 14. Rulings made while writing this spec
 
@@ -797,4 +813,4 @@ Plans run one after another by subagent-driven development under the standing au
 30. **16-bit media and bounces get TPDF dither. 24-bit is rounded without dither.** Integer formats clip at full scale and count the clipped samples.
 31. **Synth return latency is per destination, in milliseconds**, so it is rate-independent. Measure uses 5 pings, onsets above −40 dBFS and the median, minus the HAL's reported round trip.
 32. **The external editor's WAV is written in the project format**, and its return is converted back into it.
-33. *(Owner decision, 2026-10-26.)* **Monitoring works like Logic Pro.** A Software Monitoring switch, a per-lane Input Monitoring button (Auto / Input / Off), and an I/O Buffer Size setting that sets the latency. Playback delay compensation reads regions ahead, so a monitored input is never delayed beyond the round trip and its own plugins. Low Latency Mode is deferred to the feature backlog.
+33. *(Owner decision, 2026-10-26.)* **Monitoring works like a conventional DAW's software monitoring.** A Software Monitoring switch, a per-lane Input Monitoring button (Auto / Input / Off), and an I/O Buffer Size setting that sets the latency. Playback delay compensation reads regions ahead, so a monitored input is never delayed beyond the round trip and its own plugins. Low Latency Mode is deferred to the feature backlog.

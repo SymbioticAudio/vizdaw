@@ -262,6 +262,24 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: CGFloat.nan, y: 20)))
     }
 
+    /// Task 6 review M5: a number box with its own identifier (a MIDI
+    /// strip's pan and volume) still counts as one; a look-alike does not.
+    @Test func aNamedNumberBoxMayStartEditing() {
+        typealias T = ControlUI.EditTarget
+        let pan = ControlUI.numberBoxID(named: "midi-pan")
+        let volume = ControlUI.numberBoxID(named: "midi-volume")
+        #expect(pan != volume)
+        #expect(pan != ControlUI.numberBoxID)
+        let targets = [
+            T(frame: CGRect(x: 0, y: 0, width: 56, height: 24), role: "AXButton", identifier: pan),
+            T(frame: CGRect(x: 100, y: 0, width: 56, height: 24), role: "AXButton", identifier: volume),
+            T(frame: CGRect(x: 200, y: 0, width: 56, height: 24), role: "AXButton", identifier: ControlUI.numberBoxID + "x"),
+        ]
+        #expect(ControlUI.mayEdit(targets, at: CGPoint(x: 10, y: 10)))
+        #expect(ControlUI.mayEdit(targets, at: CGPoint(x: 110, y: 10)))
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: 210, y: 10)))
+    }
+
     /// The marker reaches the channel's walk on a real SwiftUI element.
     @Test func aMarkedSwiftUIViewIsANumberBoxToTheChannel() {
         let w = NSWindow(

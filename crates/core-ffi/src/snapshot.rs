@@ -108,6 +108,12 @@ pub struct LaneRow {
     /// it); `None` with no output path.
     #[uniffi(default)]
     pub audio_out_name: Option<String>,
+    /// Its MIDI input effect chain (plan 5g-1).
+    #[uniffi(default)]
+    pub input_fx: Vec<crate::input_fx::InputFxRow>,
+    /// Its MPE input decoding (plan 5g-2 Ruling 3), `None` when off.
+    #[uniffi(default)]
+    pub mpe: Option<crate::mpe::MpeRow>,
 }
 
 /// What the transport is doing.
@@ -224,6 +230,8 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                 audio_out_name: l
                     .audio_out
                     .and_then(|o| doc.outputs().get(&o).map(|p| p.name.clone())),
+                input_fx: l.input_fx.iter().map(Into::into).collect(),
+                mpe: l.mpe.map(Into::into),
             })
         })
         .collect()

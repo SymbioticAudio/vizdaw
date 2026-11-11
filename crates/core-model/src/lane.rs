@@ -51,6 +51,16 @@ pub struct Lane {
     /// files.
     #[serde(default, skip_serializing_if = "MonitorMode::is_auto")]
     pub monitor: MonitorMode,
+    /// The MIDI input effect chain (spec §4.5, §6.8): at most
+    /// [`crate::input_fx::MAX_INPUT_FX`] effects, run on live input while
+    /// the lane is armed or monitoring. Absent in files when empty (plan
+    /// 5g-1).
+    #[serde(default, skip_serializing_if = "Vector::is_empty")]
+    pub input_fx: Vector<crate::input_fx::InputFx>,
+    /// MPE decoding of the lane's MIDI input (plan 5g-2 Rulings 2-4);
+    /// absent in files when off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpe: Option<crate::mpe::MpeConfig>,
 }
 
 impl Lane {
@@ -74,6 +84,8 @@ impl Lane {
             active_take: take,
             input: None,
             monitor: MonitorMode::Auto,
+            input_fx: Vector::new(),
+            mpe: None,
         }
     }
 

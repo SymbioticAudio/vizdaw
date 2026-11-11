@@ -7,6 +7,9 @@ import VizDAWCore
 public enum StripFocus {
     public enum Result: Equatable {
         case strip(UInt64)
+        /// A MIDI track's strip: `dest` is its external destination (nil
+        /// when it has none), `lane` the focused track.
+        case midi(dest: UInt64?, lane: UInt64)
         case inspector
         case nothing
     }
@@ -33,8 +36,11 @@ public enum StripFocus {
         selected: [LaneRow], armed: [LaneRow], destinations: [DestRow], strips: [StripRow]
     ) -> Result {
         guard let first = selected.first ?? armed.first else { return .nothing }
-        guard let id = strip(of: first, destinations: destinations, strips: strips) else { return .inspector }
-        return .strip(id)
+        if let id = strip(of: first, destinations: destinations, strips: strips) { return .strip(id) }
+        guard first.kind == .midi else { return .inspector }
+        guard let d = first.midiDest else { return .midi(dest: nil, lane: first.id) }
+        let external = destinations.first { $0.id == d }?.external ?? false
+        return external ? .midi(dest: d, lane: first.id) : .inspector
     }
 }
 
@@ -145,7 +151,7 @@ public enum Inspector {
             out += [
                 InspectorRow(label: "Name", value: lane.name),
                 InspectorRow(label: "Plays", value: plays),
-                InspectorRow(label: "Input", value: LaneInputs.title(lane.input)),
+                InspectorRow(label: "Input", value: LaneInputs.title(lane: lane)),
                 InspectorRow(label: "Monitor", value: LaneInputs.label(lane.monitor)),
                 InspectorRow(label: "Takes", value: "\(lane.takeCount)"),
                 InspectorRow(label: "Armed", value: lane.arm ? "Yes" : "No"),

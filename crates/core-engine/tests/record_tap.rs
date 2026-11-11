@@ -9,6 +9,7 @@
 use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
+use core_engine::input_fx::LiveMsg;
 use core_engine::offline::{FakeInput, OfflineBackend, OfflineSinks, fake_signal};
 use core_engine::record::{Mark, RecordHandles, RecordRequest};
 use core_model::document::Document;
@@ -408,25 +409,25 @@ fn midi_from_before_a_resume_is_dropped() {
     let msg = |p: u8| Midi1Msg::three(0x90, p, 100);
     t.begin_block(1000, 0);
     // Late in the first block: before it, still kept (pre-roll style).
-    t.midi(lane, -20, msg(60));
-    t.midi(lane, 10, msg(61));
+    t.midi(lane, -20, LiveMsg::from_midi1(msg(60)), None);
+    t.midi(lane, 10, LiveMsg::from_midi1(msg(61)), None);
     t.end_block(&input, 256, true);
     t.stop(100, 1356);
-    t.midi(lane, 50, msg(62));
+    t.midi(lane, 50, LiveMsg::from_midi1(msg(62)), None);
     t.end_block(&input, 256, true);
     // Resumed at run 356.
     t.begin_block(1356, 0);
-    t.midi(lane, -30, msg(63));
-    t.midi(lane, 0, msg(64));
-    t.midi(lane, 5, msg(65));
+    t.midi(lane, -30, LiveMsg::from_midi1(msg(63)), None);
+    t.midi(lane, 0, LiveMsg::from_midi1(msg(64)), None);
+    t.midi(lane, 5, LiveMsg::from_midi1(msg(65)), None);
     t.end_block(&input, 256, true);
     // A later block's late message reaching back before the resume.
     t.begin_block(1612, 0);
-    t.midi(lane, -300, msg(66));
-    t.midi(lane, -10, msg(67));
+    t.midi(lane, -300, LiveMsg::from_midi1(msg(66)), None);
+    t.midi(lane, -10, LiveMsg::from_midi1(msg(67)), None);
     let mut got = Vec::new();
     while let Ok(m) = h.midi.pop() {
-        got.push((m.run, m.msg.bytes[1]));
+        got.push((m.run, m.msg.pitch().unwrap_or(0)));
     }
     assert_eq!(
         got,

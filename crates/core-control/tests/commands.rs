@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        162,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1)"
+        166,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1153,6 +1153,11 @@ fn synth_commands_check_their_params() {
         ),
         ("destination.measure_return", json!({ "dest": 4 })),
         (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "volume": 90, "pan": null, "mute": true }),
+        ),
+        ("destination.set_midi_mix", json!({ "dest": 4, "pan": 0 })),
+        (
             "lane.set_input",
             json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 3, "return_of": 4 }),
         ),
@@ -1245,6 +1250,73 @@ fn synth_commands_check_their_params() {
             "destination.set_return_latency",
             json!({ "dest": 4, "ms": "12", "junk": "x".repeat(100_000) }),
         ),
+        ("destination.set_midi_mix", json!({ "volume": 90 })),
+        ("destination.set_midi_mix", json!({ "dest": 4 })),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "volume": 128 }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "volume": -1 }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "volume": 1.5 }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "volume": "90" }),
+        ),
+        ("destination.set_midi_mix", json!({ "dest": 4, "pan": 128 })),
+        ("destination.set_midi_mix", json!({ "dest": 4, "pan": -1 })),
+        ("destination.set_midi_mix", json!({ "dest": 4, "pan": 1.5 })),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "pan": "none" }),
+        ),
+        ("destination.set_midi_mix", json!({ "dest": 4, "pan": [1] })),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "mute": "yes" }),
+        ),
+        ("destination.set_midi_mix", json!({ "dest": 4, "mute": 1 })),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "volume": 1, "wait": true }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "volume": "x".repeat(100_000) }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "mute": "x".repeat(100_000) }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4, "volume": 1, "junk": "x".repeat(100_000) }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": -4, "volume": 1 }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": "Juno", "volume": 1 }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": 4.5, "volume": 1 }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": u64::MAX, "volume": 1 }),
+        ),
+        (
+            "destination.set_midi_mix",
+            json!({ "dest": null, "volume": 1 }),
+        ),
         (
             "destination.measure_return",
             json!({ "dest": 4, "junk": "x".repeat(100_000) }),
@@ -1282,6 +1354,7 @@ fn synth_commands_check_their_params() {
         "lane.track_synth",
         "destination.set_return_latency",
         "destination.measure_return",
+        "destination.set_midi_mix",
     ] {
         assert!(!spec(id).menu_item && spec(id).document, "{id}");
         assert!(spec(id).dialogs.is_empty(), "{id} opens no dialog");
@@ -1294,6 +1367,42 @@ fn synth_commands_check_their_params() {
         .find(|p| p.name == "return_of")
         .unwrap();
     assert!(return_of.help.contains("unlink"), "{}", return_of.help);
+}
+
+/// `destination.set_midi_mix` (plan 5g-1b Task 4): volume and pan are
+/// JSON integers 0-127, or null for "unset" (which reaches the app as the
+/// text `none`, since a bare null counts as absent everywhere else); an
+/// absent key keeps the current value.
+#[test]
+fn midi_mix_params_are_checked() {
+    let spec = registry::find("destination.set_midi_mix").expect("registered");
+    assert!(spec.document && !spec.menu_item && spec.dialogs.is_empty());
+    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
+    assert_eq!(names, ["dest", "volume", "pan", "mute"]);
+    let args = |params: Value| match ok(
+        "command.run",
+        json!({ "id": "destination.set_midi_mix", "params": params }),
+    ) {
+        Command::CommandRun { args, .. } => args,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        args(json!({ "dest": 4, "volume": 90, "pan": null, "mute": false })),
+        [
+            ("dest".to_string(), ArgValue::Int(4)),
+            ("volume".to_string(), ArgValue::Int(90)),
+            ("pan".to_string(), ArgValue::Text("none".into())),
+            ("mute".to_string(), ArgValue::Flag(false)),
+        ]
+    );
+    assert_eq!(
+        args(json!({ "dest": 4, "mute": true })),
+        [
+            ("dest".to_string(), ArgValue::Int(4)),
+            ("mute".to_string(), ArgValue::Flag(true)),
+        ]
+    );
+    assert_eq!(args(json!({ "dest": 4, "volume": 0, "pan": 127 })).len(), 3);
 }
 
 #[test]
@@ -2061,5 +2170,118 @@ fn track_commands_refuse_hostile_params() {
             ),
             "{id}"
         );
+    }
+}
+
+#[test]
+fn input_fx_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for params in [
+        json!({ "seq": 1, "lane": 2, "chain": "[]" }),
+        json!({ "seq": 1, "lane": 2, "chain": "[{\"kind\": {\"transpose\": {\"semitones\": 12}}}]" }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run("lane.set_input_fx", params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{params}"
+        );
+    }
+    for params in [
+        json!({}),
+        json!({ "seq": 1, "lane": 2 }),
+        json!({ "lane": 2, "chain": "[]" }),
+        json!({ "seq": 1, "chain": "[]" }),
+        json!({ "seq": 1, "lane": 2, "chain": [] }),
+        json!({ "seq": 1, "lane": 2, "chain": 12 }),
+        json!({ "seq": 1, "lane": 2, "chain": null }),
+        json!({ "seq": -1, "lane": 2, "chain": "[]" }),
+        json!({ "seq": 1, "lane": "Keys", "chain": "[]" }),
+        json!({ "seq": 1, "lane": 2, "chain": "x".repeat(100_000) }),
+        json!({ "seq": 1, "lane": 2, "chain": "[]", "junk": 1 }),
+    ] {
+        let (code, _) = err("command.run", run("lane.set_input_fx", params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}");
+    }
+}
+
+#[test]
+fn mpe_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "lower" }),
+        ),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "upper", "members": 15, "bend_range": 96 }),
+        ),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "off" }),
+        ),
+        (
+            "destination.set_mpe",
+            json!({ "dest": 4, "zone": "lower", "members": 1, "bend_range": 1 }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("lane.set_mpe", json!({ "seq": 1, "lane": 2 })),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "middle" }),
+        ),
+        ("lane.set_mpe", json!({ "seq": 1, "lane": 2, "zone": 1 })),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "lower", "members": 0 }),
+        ),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "lower", "members": 16 }),
+        ),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "lower", "bend_range": 0 }),
+        ),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "lower", "bend_range": 97 }),
+        ),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "lower", "members": "7" }),
+        ),
+        ("lane.set_mpe", json!({ "lane": 2, "zone": "lower" })),
+        (
+            "lane.set_mpe",
+            json!({ "seq": 1, "lane": 2, "zone": "lower", "junk": "x".repeat(100_000) }),
+        ),
+        ("destination.set_mpe", json!({ "zone": "lower" })),
+        (
+            "destination.set_mpe",
+            json!({ "dest": -4, "zone": "lower" }),
+        ),
+        (
+            "destination.set_mpe",
+            json!({ "dest": "Synth", "zone": "lower" }),
+        ),
+        (
+            "destination.set_mpe",
+            json!({ "dest": 4, "zone": "lower", "members": 1.5 }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
     }
 }

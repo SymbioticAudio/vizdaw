@@ -43,7 +43,11 @@ public final class DocumentModel {
         mixerAsked = now
         return provider()
     }
-    public private(set) var selectedSeq: UInt64?
+    public private(set) var selectedSeq: UInt64? {
+        // Any change of sequence (a choice, or an Undo that removed it)
+        // closes the input effects editor (plan 5g-1 Task 8).
+        didSet { if selectedSeq != oldValue { inputFxModel?.close() } }
+    }
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState
     /// Playing, which sequence, and the tick while stopped; set only when
@@ -128,6 +132,7 @@ public final class DocumentModel {
     @ObservationIgnored private var bounceModel: BounceModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
+    @ObservationIgnored private var inputFxModel: InputFxModel?
     @ObservationIgnored private var synthModel: SynthSheets?
     @ObservationIgnored private var externalModel: ExternalEditModel?
     /// How this document opens and watches edit copies (plan 5f-3): the
@@ -150,6 +155,14 @@ public final class DocumentModel {
         if let m = inputsModel { return m }
         let m = LaneInputs(document: self)
         inputsModel = m
+        return m
+    }
+
+    /// The input effects editor's model (plan 5g-1), made once.
+    public var inputFx: InputFxModel {
+        if let m = inputFxModel { return m }
+        let m = InputFxModel(document: self)
+        inputFxModel = m
         return m
     }
 

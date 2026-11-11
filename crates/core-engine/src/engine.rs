@@ -24,6 +24,7 @@ use core_media::stream::{DiskMode, MediaFile, StreamConfig, StreamWaiter, Stream
 use core_model::document::{DestKind, Document};
 use core_model::ids::{DestId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
+use core_model::mpe::MpeConfig;
 use core_model::time::Tick;
 use rtrb::{Producer, RingBuffer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -175,6 +176,14 @@ pub struct Engine {
     cmds: Producer<EngineCmd>,
     shared: Arc<Shared>,
     targets: TargetTable,
+    /// Per destination, the loaded targets it plays on, resolved at each
+    /// load so `send_now` and `take_midi_activity` never list ports (plan
+    /// 5g-1b).
+    dest_targets: BTreeMap<DestId, Vec<TargetIdx>>,
+    /// The external MPE destinations of the last load: endpoint, group
+    /// and setting (final review m3: one removed or moved to another
+    /// endpoint turns its old device's zone off).
+    mpe_dests: BTreeMap<DestId, (String, u8, core_model::mpe::MpeConfig)>,
     factory: Box<dyn SinkFactory>,
     inserts: Box<dyn InsertFactory>,
     tempo: Option<TempoTable>,
@@ -251,6 +260,8 @@ pub struct Engine {
     /// The destinations whose return a lane records (spec §6.7): interned
     /// at every load, so a measurement can play them (plan 5c-2 Ruling 10).
     return_dests: Vec<DestId>,
+    /// MCM reports from the renderer (plan 5g-2 Ruling 4).
+    mpe_reports: rtrb::Consumer<(LaneId, Option<MpeConfig>)>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -297,6 +308,7 @@ impl Engine {
     ) -> Result<(Engine, Renderer), EngineError> {
         let (cmd_tx, cmd_rx) = RingBuffer::<EngineCmd>::new(CMD_CAPACITY);
         let (retire_tx, mut retire_rx) = RingBuffer::<Retired>::new(RETIRE_CAPACITY);
+        let (mpe_tx, mpe_rx) = RingBuffer::new(crate::render::MPE_REPORT_CAPACITY);
         let shared = Arc::new(Shared::default());
         let collector_stop = Arc::new(AtomicBool::new(false));
         let collector_paused = Arc::new(AtomicBool::new(false));
@@ -354,12 +366,15 @@ impl Engine {
             reader,
             midi_rx,
             gesture_rx,
+            mpe_tx,
         );
         let engine = Engine {
             cfg,
             cmds: cmd_tx,
             shared,
             targets: TargetTable::new(),
+            dest_targets: BTreeMap::new(),
+            mpe_dests: BTreeMap::new(),
             factory,
             inserts: Box::new(NoInserts),
             tempo: None,
@@ -395,6 +410,7 @@ impl Engine {
             automation_suspended: false,
             inputs_sent: crate::input::InputRoutes::default(),
             return_dests: Vec::new(),
+            mpe_reports: mpe_rx,
         };
         Ok((engine, renderer))
     }
@@ -472,10 +488,32 @@ impl Engine {
     /// Compiles `seq` and the mixer graph and sends them (and sinks for new
     /// targets) to the renderer. Call again after every committed edit.
     pub fn load(&mut self, doc: &Document, seq: SeqId) -> Result<CompileReport, EngineError> {
+        // The zones of external MPE destinations that left their device
+        // (removed, or moved to another endpoint): turned off after that
+        // device's notes end (final review m3). A destination whose MPE
+        // setting changed in place is the session's (plan 5g-2 T6-a).
+        let mut leaving: Vec<(TargetIdx, core_model::mpe::MpeConfig)> = Vec::new();
+        for (id, (endpoint, group, cfg)) in &self.mpe_dests {
+            let stays = doc.instruments().get(id).is_some_and(|d| {
+                matches!(&d.kind, DestKind::MidiEndpoint { endpoint_ref, group: g, .. }
+                    if endpoint_ref == endpoint && g == group)
+            });
+            if stays {
+                continue;
+            }
+            for t in self.dest_targets.get(id).into_iter().flatten() {
+                if !leaving
+                    .iter()
+                    .any(|(u, c)| u == t && c.manager() == cfg.manager())
+                {
+                    leaving.push((*t, *cfg));
+                }
+            }
+        }
         // Room for removing and adding every possible sink plus the graph,
-        // the schedule and the loop, so no push below can fail after
-        // targets were interned.
-        if self.cmds.slots() < 2 * MAX_TARGETS + 4 {
+        // the schedule, the loop and those zone-offs, so no push below can
+        // fail after targets were interned.
+        if self.cmds.slots() < 2 * MAX_TARGETS + 4 + 5 * leaving.len() {
             return Err(EngineError::Busy);
         }
         let opts = CompileOptions {
@@ -496,7 +534,7 @@ impl Engine {
         if !self.release_unpublished {
             self.targets.recycle();
         }
-        self.release_stale_targets(doc, max, &opts.ports)?;
+        self.release_stale_targets(doc, max, &opts.ports, &mut leaving)?;
         let mut new_sinks: Vec<(TargetIdx, Sink)> = Vec::new();
         let targets = &mut self.targets;
         let factory = &mut self.factory;
@@ -572,15 +610,20 @@ impl Engine {
                         }
                     };
                 }
-                let dest_channel = match d.map(|d| &d.kind) {
-                    Some(DestKind::MidiEndpoint { channel, .. }) => channel & 0x0F,
+                let mpe_out = d.and_then(|d| d.mpe);
+                let dest_channel = match (mpe_out, d.map(|d| &d.kind)) {
+                    (Some(cfg), _) => cfg.manager(),
+                    (None, Some(DestKind::MidiEndpoint { channel, .. })) => channel & 0x0F,
                     _ => 0,
                 };
                 midi_routes.push(crate::input::MidiRoute {
                     spec: m.clone(),
                     targets,
                     dest_channel,
-                    chain: crate::input::InputChain,
+                    mute_notes: d.is_some_and(|d| d.kind.is_external() && d.midi_mix.mute),
+                    chain: crate::input_fx::InputChain::new(&m.fx),
+                    decoder: m.mpe.map(crate::mpe::MpeDecoder::new),
+                    mpe_out,
                 });
             }
             // The synths lanes record the return of (spec §6.7): interned
@@ -609,6 +652,16 @@ impl Engine {
                 return Err(e);
             }
         };
+        // Every destination's loaded targets, from this load's port list.
+        self.dest_targets = doc
+            .instruments()
+            .iter()
+            .filter_map(|(id, d)| {
+                let kinds = kinds_for(&d.kind, opts.route, &opts.ports).ok()?;
+                let t: Vec<TargetIdx> = kinds.iter().filter_map(|k| self.targets.find(k)).collect();
+                (!t.is_empty()).then_some((*id, t))
+            })
+            .collect();
         for (i, sink) in new_sinks {
             if let Some(info) = self.sinks.get_mut(usize::from(i.0)) {
                 *info = SinkInfo {
@@ -664,14 +717,52 @@ impl Engine {
             .take(crate::input::MAX_MONITOR_ROUTES)
             .copied()
             .collect();
+        // One encoder slot per route, built here (plan 5g-2 P6).
+        let encoders = midi_routes
+            .iter()
+            .map(|r| r.mpe_out.map(crate::mpe::MpeEncoder::new))
+            .collect();
         let routes = crate::input::InputRoutes {
             midi: midi_routes.into_boxed_slice(),
+            encoders,
             monitor,
         };
         if routes != self.inputs_sent {
             self.inputs_sent = routes.clone();
             self.push(EngineCmd::SetInputs(Box::new(routes)))?;
         }
+        // A device that stays loaded: its zone goes off after the swap
+        // and the new routes ended its notes, unless an MPE destination of
+        // `doc` still uses that zone there.
+        for (t, cfg) in leaving {
+            let reused = doc.instruments().iter().any(|(id, d)| {
+                d.kind.is_external()
+                    && d.mpe.is_some_and(|n| n.manager() == cfg.manager())
+                    && self.dest_targets.get(id).is_some_and(|ts| ts.contains(&t))
+            });
+            if reused {
+                continue;
+            }
+            let off = core_model::mpe::MpeConfig { members: 0, ..cfg };
+            for m in crate::mpe::configuration(&off).into_iter().take(5) {
+                self.push(EngineCmd::Audition(t, m))?;
+            }
+        }
+        self.mpe_dests = doc
+            .instruments()
+            .iter()
+            .filter_map(|(id, d)| match (&d.kind, d.mpe) {
+                (
+                    DestKind::MidiEndpoint {
+                        endpoint_ref,
+                        group,
+                        ..
+                    },
+                    Some(cfg),
+                ) if d.kind.is_external() => Some((*id, (endpoint_ref.clone(), *group, cfg))),
+                _ => None,
+            })
+            .collect();
         if self.default_loop {
             // The length may have changed; the mapped old range would not
             // follow it.
@@ -694,6 +785,7 @@ impl Engine {
         doc: &Document,
         max: u32,
         ports: &[MidiPortInfo],
+        leaving: &mut Vec<(TargetIdx, core_model::mpe::MpeConfig)>,
     ) -> Result<(), EngineError> {
         // The MIDI destinations the document still names (plan 5d-1
         // Ruling 23; 5c-2 final review finding 6).
@@ -729,8 +821,21 @@ impl Engine {
             .collect();
         for i in stale {
             self.release_unpublished = true;
-            self.push(EngineCmd::RemoveSink(i))?;
+            // The zones leaving this device go off with it, after its
+            // notes (final review m3).
+            let mut zones_off = [None; 2];
+            for (slot, (_, cfg)) in zones_off
+                .iter_mut()
+                .zip(leaving.iter().filter(|(t, _)| *t == i))
+            {
+                *slot = Some(*cfg);
+            }
+            leaving.retain(|(t, _)| *t != i);
+            self.push(EngineCmd::RemoveSink(i, zones_off))?;
             self.targets.release(i);
+            for t in self.dest_targets.values_mut() {
+                t.retain(|t| *t != i);
+            }
             if let Some(info) = self.sinks.get_mut(usize::from(i.0)) {
                 *info = SinkInfo::default();
             }
@@ -963,30 +1068,136 @@ impl Engine {
         velocity: u16,
         on: bool,
     ) -> Result<bool, EngineError> {
+        let pitch = pitch & 0x7F;
+        let msg = if on {
+            Midi1Msg::three(0x90, pitch, note_on_velocity(velocity))
+        } else {
+            Midi1Msg::three(0x80, pitch, release_velocity(velocity))
+        };
+        self.send_now(doc, dest, msg)
+    }
+
+    /// Sends the channel message `msg` straight to the targets `dest`
+    /// plays on, without touching the document (a MIDI strip's change,
+    /// plan 5g-1b; editor audition). The status byte's channel nibble
+    /// becomes the destination's channel (0 for a plugin) and the data
+    /// bytes are kept to 7 bits. Returns false when `msg` is not a channel
+    /// message, `dest` is unknown or this engine has none of its targets
+    /// (the loaded sequence does not use them).
+    pub fn send_now(
+        &mut self,
+        doc: &Document,
+        dest: DestId,
+        msg: Midi1Msg,
+    ) -> Result<bool, EngineError> {
+        let [status, d1, d2] = msg.bytes;
+        if !(0x80..0xF0).contains(&status) {
+            return Ok(false);
+        }
         let Some(d) = doc.instruments().get(&dest) else {
             return Ok(false);
         };
-        let channel = match &d.kind {
-            DestKind::MidiEndpoint { channel, .. } => channel & 0x0F,
-            DestKind::PluginInstrument { .. } => 0,
+        let channel = match (d.mpe, &d.kind) {
+            // An MPE destination's channel-wide traffic (plan 5g-2 P1).
+            (Some(cfg), _) => cfg.manager(),
+            (None, DestKind::MidiEndpoint { channel, .. }) => channel & 0x0F,
+            (None, DestKind::PluginInstrument { .. }) => 0,
         };
-        let Ok(kinds) = kinds_for(&d.kind, self.cfg.route, &self.factory.ports()) else {
+        self.send_now_on(dest, Midi1Msg::three((status & 0xF0) | channel, d1, d2))
+    }
+
+    /// Sends channel message `msg` now to `dest`'s targets on the channel
+    /// `msg` names (an MPE destination's configuration, which reaches its
+    /// member channels too, plan 5g-2); false when `msg` is not a channel
+    /// message or `dest` has no loaded target.
+    pub fn send_now_on(&mut self, dest: DestId, msg: Midi1Msg) -> Result<bool, EngineError> {
+        let [status, d1, d2] = msg.bytes;
+        if !(0x80..0xF0).contains(&status) {
+            return Ok(false);
+        }
+        let Some(targets) = self.dest_targets.get(&dest).filter(|t| !t.is_empty()) else {
             return Ok(false);
         };
-        let pitch = pitch & 0x7F;
-        let msg = if on {
-            Midi1Msg::three(0x90 | channel, pitch, note_on_velocity(velocity))
-        } else {
-            Midi1Msg::three(0x80 | channel, pitch, release_velocity(velocity))
+        // The length the status has, not the caller's.
+        let msg = match status & 0xF0 {
+            0xC0 | 0xD0 => Midi1Msg::two(status, d1 & 0x7F),
+            _ => Midi1Msg::three(status, d1 & 0x7F, d2 & 0x7F),
         };
-        let mut sent = false;
-        for k in &kinds {
-            if let Some(t) = self.targets.find(k) {
-                self.push(EngineCmd::Audition(t, msg))?;
-                sent = true;
+        for t in targets.clone() {
+            self.push(EngineCmd::Audition(t, msg))?;
+        }
+        Ok(true)
+    }
+
+    /// Sends every channel message of `msgs` now to `dest`'s targets on
+    /// the channels they name, all of them or none (final review m4: an
+    /// MPE configuration is never cut short by a full command ring).
+    /// `Busy` when the ring has no room for all; false when `dest` has no
+    /// loaded target. Messages that are not channel messages are skipped.
+    pub fn send_all_now_on(
+        &mut self,
+        dest: DestId,
+        msgs: &[Midi1Msg],
+    ) -> Result<bool, EngineError> {
+        let Some(targets) = self.dest_targets.get(&dest).filter(|t| !t.is_empty()) else {
+            return Ok(false);
+        };
+        let channel = |m: &&Midi1Msg| {
+            let [status, ..] = m.bytes;
+            (0x80..0xF0).contains(&status)
+        };
+        let need = msgs
+            .iter()
+            .filter(channel)
+            .count()
+            .saturating_mul(targets.len());
+        if self.cmds.slots() < need {
+            return Err(EngineError::Busy);
+        }
+        for m in msgs.iter().filter(channel) {
+            self.send_now_on(dest, *m)?;
+        }
+        Ok(true)
+    }
+
+    /// Per external destination with a loaded target, the highest note-on
+    /// velocity the renderer sent to it on its channel since the last
+    /// call, read and cleared (a MIDI strip's activity meter, plan 5g-1b).
+    /// Destinations at 0 are left out. An MPE destination's channels are
+    /// its zone's manager and members (plan 5g-2 P4).
+    pub fn take_midi_activity(&self, doc: &Document) -> Vec<(DestId, u8)> {
+        let mut out = Vec::new();
+        // Read each (target, channel) once: destinations sharing one
+        // see the same peak.
+        let mut read: BTreeMap<(TargetIdx, u8), u8> = BTreeMap::new();
+        for (id, targets) in &self.dest_targets {
+            let Some(d) = doc.instruments().get(id).filter(|d| d.kind.is_external()) else {
+                continue;
+            };
+            let DestKind::MidiEndpoint { channel, .. } = &d.kind else {
+                continue;
+            };
+            let mpe = d.mpe;
+            let first = mpe.map_or(channel & 0x0F, |c| c.manager());
+            let members = mpe
+                .into_iter()
+                .flat_map(|c| (0..c.members).filter_map(move |k| c.member(k)));
+            let channels: Vec<u8> = std::iter::once(first).chain(members).collect();
+            let v = targets
+                .iter()
+                .flat_map(|t| channels.iter().map(move |c| (*t, *c)))
+                .map(|(t, c)| {
+                    *read
+                        .entry((t, c))
+                        .or_insert_with(|| self.shared.take_note_activity(t, c))
+                })
+                .max()
+                .unwrap_or(0);
+            if v > 0 {
+                out.push((*id, v));
             }
         }
-        Ok(sent)
+        out
     }
 
     /// Tells the streamer the loop the transport plays: none during Play
@@ -1213,6 +1424,17 @@ impl Engine {
     /// Current counters.
     pub fn counters(&self) -> Counters {
         self.shared.counters()
+    }
+
+    /// The MPE settings MCMs gave lanes since the last call, oldest first
+    /// (plan 5g-2 Ruling 4): `None` is a zone an MCM turned off. A report
+    /// the full ring dropped comes again with the next MCM.
+    pub fn take_mpe_reports(&mut self) -> Vec<(LaneId, Option<MpeConfig>)> {
+        let mut out = Vec::new();
+        while let Ok(r) = self.mpe_reports.pop() {
+            out.push(r);
+        }
+        out
     }
 
     /// True once after playback reached the end and the tail finished.

@@ -2503,3 +2503,100 @@ fn a_request_past_the_written_end_leaves_silent_columns() {
     s.stop().unwrap();
     s.close().unwrap();
 }
+
+/// Plan 5g-1 (spec §6.8, §12.3): a chord held into an armed lane with an
+/// arpeggiator while recording is recorded as the arpeggio: what thru
+/// played, on the sixteenths, each a half step long.
+#[test]
+fn an_arpeggiated_chord_is_recorded_as_thru_played_it() {
+    use core_model::input_fx::{Arp, InputFx, InputFxKind};
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(2, true, false);
+    let mut b = Builder::from_doc(d.doc.clone());
+    b.run(Command::Lane(LaneCmd::SetInputFx {
+        seq: d.seq,
+        lane: d.keys,
+        chain: vec![InputFx::new(InputFxKind::Arpeggiator(Arp::default()))],
+    }))
+    .unwrap();
+    let s = untitled(&g, b.finish());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick >= Q);
+    for p in [60u8, 64, 67] {
+        assert!(s.inject_midi("Keys".into(), vec![0x90, p, 100]).unwrap());
+    }
+    wait_until("beat 3", || s.transport().unwrap().tick >= 3 * Q);
+    for p in [60u8, 64, 67] {
+        assert!(s.inject_midi("Keys".into(), vec![0x80, p, 0]).unwrap());
+    }
+    wait_until("beat 4", || s.transport().unwrap().tick >= 4 * Q);
+    s.stop().unwrap();
+    let got: Vec<(i64, u8)> = notes(&s, d.seq.0, d.keys.0)
+        .into_iter()
+        .filter(|(t, p)| *t >= Q && [60, 64, 67].contains(p))
+        .collect();
+    assert!(got.len() >= 6, "{got:?}");
+    let first = [60u8, 64, 67].iter().position(|p| *p == got[0].1).unwrap();
+    for (k, (tick, pitch)) in got.iter().enumerate() {
+        assert_eq!(*pitch, [60, 64, 67][(first + k) % 3], "{got:?}");
+        let off = tick % (Q / 4);
+        assert!(
+            off.min(Q / 4 - off) <= 2,
+            "{tick} is not on a sixteenth: {got:?}"
+        );
+    }
+    let durations: Vec<i64> = s
+        .lane_events(d.seq.0, d.keys.0)
+        .unwrap()
+        .events
+        .iter()
+        .filter(|e| e.tick >= Q && [60, 64, 67].contains(&e.pitch))
+        .map(|e| e.duration)
+        .collect();
+    assert!(
+        durations.iter().all(|t| (t - Q / 8).abs() <= 2),
+        "{durations:?}"
+    );
+    s.close().unwrap();
+}
+
+/// Plan 5g-1 Ruling 15: a chain edit made while recording joins the
+/// take's Record step, as every edit made during a take does.
+#[test]
+fn a_chain_edit_while_recording_joins_the_record_step() {
+    use vizdaw_ffi::input_fx::{InputFxKindRow, InputFxRow};
+    use vizdaw_ffi::{EditCommand, LaneEdit};
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(2, true, false);
+    let s = untitled(&g, d.doc.clone());
+    let before = s.lanes(d.seq.0).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick >= Q);
+    assert!(s.inject_midi("Keys".into(), vec![0x90, 60, 100]).unwrap());
+    let chain = vec![InputFxRow {
+        kind: InputFxKindRow::Transpose { semitones: 12 },
+        bypass: false,
+    }];
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetInputFx {
+                seq: d.seq.0,
+                lane: d.keys.0,
+                chain,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    assert!(s.inject_midi("Keys".into(), vec![0x80, 60, 0]).unwrap());
+    wait_until("beat 2", || s.transport().unwrap().tick >= 2 * Q);
+    s.stop().unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Record"));
+    s.undo().unwrap();
+    assert_eq!(
+        s.lanes(d.seq.0).unwrap(),
+        before,
+        "one Undo removes the take and the chain"
+    );
+    s.close().unwrap();
+}

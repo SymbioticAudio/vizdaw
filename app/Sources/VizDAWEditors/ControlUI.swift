@@ -339,6 +339,18 @@ public enum ControlUI {
     /// value too (final review m3). It changes no label.
     public static let numberBoxID = "vizdaw.number-box"
 
+    /// A number box's own identifier, `numberBoxID` + "." + `name`, so two
+    /// boxes of one strip can be told apart (5g-1b Task 6 review M5);
+    /// `mayEdit` counts it as a number box.
+    public static func numberBoxID(named name: String) -> String { numberBoxID + "." + name }
+
+    /// Whether `identifier` marks a number box (`numberBoxID`, or one made
+    /// by `numberBoxID(named:)`).
+    static func isNumberBox(_ identifier: String?) -> Bool {
+        guard let identifier else { return false }
+        return identifier == numberBoxID || identifier.hasPrefix(numberBoxID + ".")
+    }
+
     /// One element under a click, as `mayEdit` reads it.
     struct EditTarget {
         var frame: CGRect
@@ -355,7 +367,7 @@ public enum ControlUI {
         let under = targets.filter { $0.frame.contains(p) }
         guard let hit = under.min(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
         else { return false }
-        return hit.role == "AXTextField" || hit.identifier == numberBoxID
+        return hit.role == "AXTextField" || isNumberBox(hit.identifier)
     }
 
     /// `mayEdit` on `window`'s elements as they are now (before the click).

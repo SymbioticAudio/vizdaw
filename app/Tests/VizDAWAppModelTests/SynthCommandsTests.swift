@@ -138,6 +138,55 @@ import VizDAWCore
                 .code == .failed)
     }
 
+    /// Plan 5g-1b Task 4: `destination.set_midi_mix`. Volume and pan are
+    /// integers 0-127 or the text `none` (the channel's null: unset); an
+    /// absent key keeps what is set.
+    @Test func setMidiMixChecksItsArguments() throws {
+        let (s, id, m, f) = try demo()
+        let d: (String, ControlValue) = ("dest", .int(value: 7))
+        let cases: [[(String, ControlValue)]] = [
+            [("volume", .int(value: 90))], [("dest", .text(value: "Juno")), ("volume", .int(value: 90))],
+            [("dest", .int(value: -7)), ("volume", .int(value: 90))],
+            // The built-in synth and an unknown destination are not external.
+            [("dest", .int(value: 1)), ("volume", .int(value: 90))],
+            [("dest", .int(value: 99)), ("volume", .int(value: 90))],
+            [d, ("volume", .int(value: 128))], [d, ("volume", .int(value: -1))],
+            [d, ("volume", .int(value: Int64.max))], [d, ("pan", .int(value: 128))],
+            // Text other than `none`, and the wrong type altogether.
+            [d, ("volume", .text(value: "90"))], [d, ("volume", .text(value: "1e2"))], [d, ("pan", .text(value: ""))],
+            [d, ("pan", .text(value: "None"))], [d, ("volume", .flag(value: true))],
+            [d, ("mute", .text(value: "yes"))], [d, ("mute", .int(value: 1))], [d],
+            [d, ("volume", .text(value: String(repeating: "x", count: 10_000)))],
+            [d, ("mute", .text(value: String(repeating: "x", count: 10_000)))],
+        ]
+        for args in cases {
+            #expect(failure(run("destination.set_midi_mix", args, m, s, id))?.code == .invalidParams, "\(args)")
+        }
+        #expect(f.midiMixes.isEmpty)
+        #expect(f.dests[1].midiMix == MidiMixRow())
+        f.synthError = .Model(message: "MIDI mix out of range")
+        #expect(failure(run("destination.set_midi_mix", [d, ("mute", .flag(value: true))], m, s, id))?.code == .failed)
+    }
+
+    @Test func setMidiMixSetsAndKeepsAbsentValues() throws {
+        let (s, id, m, f) = try demo()
+        func mix() -> MidiMixRow { f.dests[1].midiMix }
+        func set(_ args: [(String, ControlValue)]) {
+            #expect(failure(run("destination.set_midi_mix", [("dest", .int(value: 7))] + args, m, s, id)) == nil)
+        }
+        set([("volume", .int(value: 90))])
+        #expect(mix() == MidiMixRow(volume: 90, pan: nil, mute: false))
+        set([("pan", .int(value: 20))])
+        #expect(mix() == MidiMixRow(volume: 90, pan: 20, mute: false))
+        set([("mute", .flag(value: true))])
+        #expect(mix() == MidiMixRow(volume: 90, pan: 20, mute: true))
+        set([("volume", .text(value: "none"))])
+        #expect(mix() == MidiMixRow(volume: nil, pan: 20, mute: true))
+        set([("pan", .int(value: 0)), ("volume", .int(value: 127)), ("mute", .flag(value: false))])
+        #expect(mix() == MidiMixRow(volume: 127, pan: 0, mute: false))
+        #expect(f.midiMixes.count == 5 && f.midiMixes.allSatisfy { $0.0 == 7 })
+    }
+
     /// Task 8 review M1: the step is applied when Measure ends, even when
     /// nobody is left to answer.
     @Test func aMeasureNobodyWaitsForStillAppliesItsStep() async throws {

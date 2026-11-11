@@ -34,12 +34,14 @@ pub mod format;
 pub mod guard;
 pub mod host;
 pub mod input;
+pub mod input_fx;
 pub mod jobs;
 pub mod keys;
 pub mod live;
 pub mod media;
 pub mod mixer;
 pub mod modify;
+pub mod mpe;
 pub mod overviews;
 pub mod passes;
 pub mod plugins;
@@ -101,18 +103,20 @@ pub use external::{ExternalEditRow, ExternalEditStateRow};
 pub use format::{BitDepthRow, ProjectFormatRow, ProjectInfoRow, format_label, project_rates};
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
+pub use input_fx::{ArpModeRow, FeelRow, InputFxKindRow, InputFxRow, input_fx_from_json};
 pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
 pub use live::InputInfoRow;
 pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
 pub use mixer::{
-    BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripColourRow, StripKindRow,
-    StripRow, SwatchRow,
+    BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow,
+    StripColourRow, StripKindRow, StripRow, SwatchRow,
 };
 pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,
     NoteMapEntry, RuleRow, SelectModeRow, SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
 };
+pub use mpe::{MpeRow, MpeZoneRow};
 pub use overviews::{OverviewRows, OverviewStateRow};
 pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latency_trim};
 pub use recovery::RecoveryInfo;

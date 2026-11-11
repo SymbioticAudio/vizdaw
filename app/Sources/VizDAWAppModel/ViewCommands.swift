@@ -153,6 +153,7 @@ public enum ViewCommands {
         } else if left.view == .strip {
             switch rule {
             case .strip: shows = "strip"
+            case .midi: shows = "midi"
             case .inspector: shows = "inspector"
             case .nothing: shows = "nothing"
             }

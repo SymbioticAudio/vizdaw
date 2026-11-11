@@ -59,6 +59,8 @@ fn base() -> Document {
                 kind: DestKind::plugin("p"),
                 default_patch: None,
                 return_latency_ms: 0.0,
+                midi_mix: Default::default(),
+                mpe: None,
             },
             Destination {
                 id: DestId(1),
@@ -70,6 +72,8 @@ fn base() -> Document {
                 },
                 default_patch: None,
                 return_latency_ms: 0.0,
+                midi_mix: Default::default(),
+                mpe: None,
             },
         ],
         outputs: vec![],

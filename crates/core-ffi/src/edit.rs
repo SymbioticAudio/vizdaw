@@ -464,6 +464,25 @@ pub enum LaneEdit {
         /// The mode.
         monitor: MonitorModeRow,
     },
+    /// Set the lane's MIDI input effect chain (plan 5g-1).
+    SetInputFx {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// The chain, first effect first.
+        chain: Vec<crate::input_fx::InputFxRow>,
+    },
+    /// Set the lane's MPE input decoding (plan 5g-2 Ruling 3), one undo
+    /// step "Set Track MPE"; `None` turns it off.
+    SetMpe {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// The zone, or none for off.
+        mpe: Option<crate::mpe::MpeRow>,
+    },
 }
 
 /// The sequence whose engine claim `cmd` asks for (plan 5d-1 Ruling 16):
@@ -1077,6 +1096,16 @@ fn lane_cmd(e: &LaneEdit) -> LaneCmd {
             seq: SeqId(*seq),
             lane: LaneId(*lane),
             input: input.as_ref().map(Into::into),
+        },
+        LaneEdit::SetInputFx { seq, lane, chain } => LaneCmd::SetInputFx {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            chain: chain.iter().map(Into::into).collect(),
+        },
+        LaneEdit::SetMpe { seq, lane, mpe } => LaneCmd::SetMpe {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            mpe: mpe.map(Into::into),
         },
         LaneEdit::SetMonitor { seq, lane, monitor } => LaneCmd::SetMonitor {
             seq: SeqId(*seq),

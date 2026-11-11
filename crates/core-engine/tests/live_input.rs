@@ -10,6 +10,7 @@ use core_engine::fixtures::{Builder, Q};
 use core_engine::input::{
     InputSpec, MidiIn, MidiInputSpec, MonitorRoute, channel_message, port_key,
 };
+use core_engine::input_fx::LiveMsg;
 use core_engine::midi1::Midi1Msg;
 use core_engine::offline::{EventLog, FakeInput, OfflineBackend, OfflineSinks};
 use core_engine::record::{RecordRequest, RecordedMidi};
@@ -76,6 +77,8 @@ fn keys_spec(d: &Doc, thru: bool, armed: bool) -> MidiInputSpec {
         dest: Some(d.synth),
         thru,
         armed,
+        fx: Vec::new(),
+        mpe: None,
     }
 }
 
@@ -208,6 +211,8 @@ fn a_released_targets_thru_note_ends_once() {
             dest: Some(synth),
             thru: true,
             armed: true,
+            fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     };
@@ -276,7 +281,7 @@ fn armed_lanes_record_at_the_run_heard_when_the_message_arrived() {
     }
     let runs: Vec<(u64, i64, u8)> = got
         .iter()
-        .map(|m| (m.lane.0, m.run, m.msg.bytes[1]))
+        .map(|m| (m.lane.0, m.run, m.msg.pitch().unwrap_or(0)))
         .collect();
     assert_eq!(
         runs,
@@ -288,7 +293,7 @@ fn armed_lanes_record_at_the_run_heard_when_the_message_arrived() {
     );
     // Recorded as played (the chain is empty until plan 5g), not on the
     // destination's channel.
-    assert_eq!(got[0].msg, note(true, 60));
+    assert_eq!(got[0].msg, LiveMsg::from_midi1(note(true, 60)));
     assert_eq!(h.status.lost_midi(), 0);
 }
 
@@ -393,6 +398,8 @@ fn external_midi_is_scheduled_at_the_audible_time() {
             dest: Some(other),
             thru: true,
             armed: false,
+            fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     });
@@ -461,7 +468,7 @@ fn after_a_stop_only_messages_heard_before_it_are_recorded() {
     assert!(thru.contains(&vec![0x93, 62, 100]), "{thru:?}");
     let mut got = Vec::new();
     while let Ok(m) = h.midi.pop() {
-        got.push((m.run, m.msg.bytes[1]));
+        got.push((m.run, m.msg.pitch().unwrap_or(0)));
     }
     assert_eq!(got, vec![(1000, 60)]);
 }
@@ -597,6 +604,8 @@ fn a_thru_destination_that_cannot_play_is_reported() {
             dest,
             thru: true,
             armed: true,
+            fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     };
@@ -662,6 +671,8 @@ fn thru_past_the_target_limit_is_reported() {
             dest: Some(over),
             thru: true,
             armed: true,
+            fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     });

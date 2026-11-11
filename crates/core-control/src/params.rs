@@ -112,6 +112,20 @@ impl<'a> Params<'a> {
         }
     }
 
+    /// An optional integer in `min..=max` whose null is a value:
+    /// `Some(None)` for a null, `None` for an absent key.
+    pub fn opt_int_or_null(
+        &self,
+        name: &str,
+        min: i64,
+        max: i64,
+    ) -> Result<Option<Option<i64>>, ControlError> {
+        match self.map.get(name) {
+            Some(Value::Null) => Ok(Some(None)),
+            _ => Ok(self.opt_int(name, min, max)?.map(Some)),
+        }
+    }
+
     /// A required integer in `min..=max`.
     pub fn int(&self, name: &str, min: i64, max: i64) -> Result<i64, ControlError> {
         self.opt_int(name, min, max)?

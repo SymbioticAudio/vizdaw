@@ -6,6 +6,7 @@
 //! was played with replace clearing only the recorded range.
 
 use core_engine::fixtures::{Builder, Q};
+use core_engine::input_fx::{LiveMsg, RecordQuantize};
 use core_engine::midi1::Midi1Msg;
 use core_engine::record::{Mark, RecordedMidi};
 use core_engine::schedule::TempoTable;
@@ -283,7 +284,12 @@ fn off(pitch: u8) -> Midi1Msg {
 }
 
 fn midi(lane: LaneId, run: i64, msg: Midi1Msg) -> RecordedMidi {
-    RecordedMidi { lane, run, msg }
+    RecordedMidi {
+        lane,
+        run,
+        msg: LiveMsg::from_midi1(msg),
+        quantize: None,
+    }
 }
 
 #[test]
@@ -991,4 +997,804 @@ fn a_rise_after_a_fall_lands_gap_messages_at_its_start() {
     assert_eq!(ticks, vec![4 * Q]);
     let got = active_frames(&p, d.mic, &d);
     assert_no_overlap(&got);
+}
+
+fn midi_q(lane: LaneId, run: i64, msg: Midi1Msg, grid: i64, strength: u8) -> RecordedMidi {
+    RecordedMidi {
+        lane,
+        run,
+        msg: LiveMsg::from_midi1(msg),
+        quantize: Some(RecordQuantize { grid, strength }),
+    }
+}
+
+/// `(tick, duration)` of the notes of `pitches` in the pass's active
+/// content of `lane`.
+fn note_spans(p: &RecordPass, lane: LaneId, pitches: &[u8]) -> Vec<(i64, i64)> {
+    p.lanes
+        .iter()
+        .filter(|l| l.lane == lane)
+        .flat_map(|l| l.active.events.iter())
+        .filter_map(|e| match &e.body {
+            EventBody::Note {
+                pitch, duration, ..
+            } if pitches.contains(pitch) => Some((e.tick.0, duration.0)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Plan 5g-1 Ruling 12: Input Quantize moves recorded starts toward the
+/// grid by its strength and keeps each note's length; controllers stay.
+#[test]
+fn input_quantize_moves_recorded_starts_and_keeps_lengths() {
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let r = |beats: f64| (beats * BEAT as f64) as i64;
+    let g = Q / 4;
+    c.midi = vec![
+        midi_q(d.keys, r(0.3), on(60, 100), g, 100),
+        midi_q(d.keys, r(0.8), off(60), g, 100),
+        midi_q(d.keys, r(1.1), on(62, 100), g, 50),
+        midi_q(d.keys, r(1.6), off(62), g, 50),
+        midi(d.keys, r(2.1), Midi1Msg::three(0xB0, 1, 64)),
+    ];
+    let p = c.run().unwrap();
+    assert_eq!(
+        note_spans(&p, d.keys, &[60, 62]),
+        vec![(Q / 4, Q / 2), (Q + Q / 20, Q / 2)]
+    );
+    let cc: Vec<i64> = p
+        .lanes
+        .iter()
+        .filter(|l| l.lane == d.keys)
+        .flat_map(|l| l.active.events.iter())
+        .filter(|e| matches!(e.body, EventBody::Cc { .. }))
+        .map(|e| e.tick.0)
+        .collect();
+    assert_eq!(cc, vec![Q * 21 / 10]);
+}
+
+/// Poly pressure records as poly pressure (MIDI 2.0 per-note pressure;
+/// plan 5g-1 Ruling 4).
+#[test]
+fn poly_pressure_records_as_poly_pressure() {
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![midi(d.keys, 12_000, Midi1Msg::three(0xA0, 60, 64))];
+    let p = c.run().unwrap();
+    let got: Vec<(i64, u8, u32)> = p
+        .lanes
+        .iter()
+        .filter(|l| l.lane == d.keys)
+        .flat_map(|l| l.active.events.iter())
+        .filter_map(|e| match e.body {
+            EventBody::PolyPressure { pitch, value } => Some((e.tick.0, pitch, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, vec![(Q / 2, 60, 0x8000_0000)]);
+}
+
+/// Task 4 review M7: a note played on any channel records as the same
+/// note (events carry no channel of their own; a note's channel is its
+/// destination's), paired with its off.
+#[test]
+fn a_note_played_on_channel_n_records_like_any_other() {
+    let d = doc(None);
+    let spans = |ch: u8| {
+        let mut c = Case::new(&d, 0);
+        c.midi_lanes = vec![d.keys];
+        c.midi = vec![
+            midi(d.keys, 0, Midi1Msg::three(0x90 | ch, 60, 100)),
+            midi(d.keys, BEAT as i64, Midi1Msg::three(0x80 | ch, 60, 64)),
+        ];
+        let p = c.run().unwrap();
+        let l = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+        let g: Vec<Option<(u8, u8)>> = l.active.events.iter().map(|e| e.group_channel).collect();
+        (note_spans(&p, d.keys, &[60]), g)
+    };
+    let (s0, g0) = spans(0);
+    let (s5, g5) = spans(5);
+    assert_eq!(s5, vec![(0, Q)]);
+    assert_eq!((s5, g5), (s0, g0));
+}
+
+/// Task 4 review M6: the recorder's arrivals follow block offset, not
+/// position; the recorded events end up ordered by position and notes
+/// still pair with their own off.
+#[test]
+fn recorded_events_are_ordered_by_position_whatever_the_arrival_order() {
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let r = |beats: f64| (beats * BEAT as f64) as i64;
+    c.midi = vec![
+        midi(d.keys, r(1.0), Midi1Msg::three(0xB0, 1, 64)),
+        midi(d.keys, r(0.5), off(60)),
+        midi(d.keys, r(0.0), on(60, 100)),
+    ];
+    let p = c.run().unwrap();
+    let l = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    let ticks: Vec<i64> = l.active.events.iter().map(|e| e.tick.0).collect();
+    assert_eq!(ticks, vec![0, Q]);
+    assert_eq!(note_spans(&p, d.keys, &[60]), vec![(0, Q / 2)]);
+}
+
+/// Final review I2: in loop recording, a note played in the last half
+/// grid of a pass (an early downbeat) quantizes onto the loop end, which
+/// never plays while the loop cycles: it wraps back by the loop length to
+/// the loop start, and its length runs on over the wrap to its off.
+#[test]
+fn an_early_downbeat_in_a_loop_pass_lands_at_the_loop_start() {
+    let d = doc(None);
+    let len = 2 * BEAT;
+    let mut c = Case::new(&d, 0);
+    c.looped = true;
+    c.end_run = 2 * len;
+    c.range = RecordRange {
+        start: 0,
+        end: Some(len),
+    };
+    c.marks = vec![mark(0, 0, false), mark(len, 0, true)];
+    c.midi_lanes = vec![d.keys];
+    let g = Q / 4;
+    let len = len as i64;
+    // 1000 frames before the wrap (a 1/16 is 6000), held 6000 past it.
+    c.midi = vec![
+        midi_q(d.keys, len - 1000, on(60, 100), g, 100),
+        midi_q(d.keys, len + 6000, off(60), g, 100),
+        midi_q(d.keys, len + 12_000, on(64, 100), g, 100),
+        midi_q(d.keys, len + 18_000, off(64), g, 100),
+    ];
+    let ticks = |frames: i64| frames * Q / BEAT as i64;
+    let notes = |e: &[core_model::event::EventSpec]| -> Vec<(i64, u8, i64)> {
+        e.iter()
+            .filter_map(|e| match &e.body {
+                EventBody::Note {
+                    pitch, duration, ..
+                } => Some((e.tick.0, *pitch, duration.0)),
+                _ => None,
+            })
+            .collect()
+    };
+    let p = c.run().unwrap();
+    let l = &p.lanes[0];
+    assert_eq!(l.takes.len(), 2);
+    assert_eq!(
+        notes(&l.takes[0].1.events),
+        vec![(0, 60, ticks(7000))],
+        "pass 0's downbeat at the loop start, its heard length kept"
+    );
+    assert_eq!(notes(&l.takes[1].1.events), vec![(Q / 2, 64, Q / 4)]);
+    // Merged into the active take, it is the loop's first note.
+    c.takes = false;
+    let p = c.run().unwrap();
+    assert_eq!(
+        notes(&p.lanes[0].active.events),
+        vec![(0, 60, ticks(7000)), (Q / 2, 64, Q / 4)]
+    );
+}
+
+/// Final review I2: without a loop, a note played just before punch-out
+/// whose start quantizes onto the punch-out stays inside the replaced
+/// range, and its end does not pass the punch-out; one just after an
+/// off-grid punch-in that quantizes before it starts at the punch-in.
+#[test]
+fn a_quantized_start_stays_inside_the_punch_range() {
+    let d = doc(None);
+    // Punch [1/2 beat + 1000, 2 beats): off the 1/16 grid at the start.
+    let pin = BEAT / 2 + 1000;
+    let pout = 2 * BEAT;
+    let mut c = Case::new(&d, 0);
+    c.range = RecordRange {
+        start: pin,
+        end: Some(pout),
+    };
+    c.midi_lanes = vec![d.keys];
+    let g = Q / 4;
+    let (pin, pout) = (pin as i64, pout as i64);
+    c.midi = vec![
+        // 500 frames after punch-in: snaps back to 1/2 beat, before it.
+        midi_q(d.keys, pin + 500, on(62, 100), g, 100),
+        midi_q(d.keys, pin + 6500, off(62), g, 100),
+        // 1000 frames before punch-out, held past it: snaps onto it.
+        midi_q(d.keys, pout - 1000, on(60, 100), g, 100),
+        midi_q(d.keys, pout + 3000, off(60), g, 100),
+    ];
+    let ticks = |frames: i64| frames * Q / BEAT as i64;
+    let p = c.run().unwrap();
+    let l = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    let (lo, hi) = (Tick(ticks(pin)), Tick(2 * Q));
+    assert_eq!(l.clear, vec![(lo, hi)]);
+    let spans = note_spans(&p, d.keys, &[60, 62]);
+    assert_eq!(spans.len(), 2, "{spans:?}");
+    for (at, dur) in &spans {
+        assert!(
+            *at >= lo.0 && at + dur <= hi.0 && *dur >= 1,
+            "inside the replaced range {lo:?}..{hi:?}: {spans:?}"
+        );
+    }
+    assert_eq!(spans[0], (lo.0, ticks(6000)), "62 starts at the punch-in");
+    assert_eq!(spans[1].0, hi.0 - 1, "60 starts on the last tick in range");
+}
+
+/// Plan 5g-2 Ruling 6: per-note bend and timbre join their note (at its
+/// start and later offsets); pressure is poly pressure.
+#[test]
+fn per_note_expression_records_with_its_note() {
+    use core_engine::input_fx::{CENTER, Expr, NoteExpr};
+    use core_model::event::PerNoteKind;
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let live = |run: i64, msg: LiveMsg| RecordedMidi {
+        lane: d.keys,
+        run,
+        msg,
+        quantize: None,
+    };
+    c.midi = vec![
+        live(
+            0,
+            LiveMsg::NoteOn {
+                pitch: 60,
+                velocity: 0xC924,
+                expr: NoteExpr {
+                    bend: 0xA000_0000,
+                    pressure: 0x4000_0000,
+                    timbre: CENTER,
+                },
+            },
+        ),
+        live(
+            12_000,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Bend,
+                value: 0x9000_0000,
+            },
+        ),
+        live(
+            18_000,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Timbre,
+                value: 7,
+            },
+        ),
+        live(
+            20_000,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Pressure,
+                value: 0x6000_0000,
+            },
+        ),
+        live(
+            24_000,
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0,
+            },
+        ),
+        live(
+            30_000,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Bend,
+                value: 1,
+            },
+        ),
+    ];
+    let p = c.run().unwrap();
+    let events: Vec<_> = p
+        .lanes
+        .iter()
+        .filter(|l| l.lane == d.keys)
+        .flat_map(|l| l.active.events.iter())
+        .collect();
+    let n = events
+        .iter()
+        .find(|e| matches!(e.body, EventBody::Note { pitch: 60, .. }))
+        .unwrap();
+    let EventBody::Note {
+        per_note, duration, ..
+    } = &n.body
+    else {
+        unreachable!()
+    };
+    assert_eq!(n.tick.0, 0);
+    assert_eq!(duration.0, Q);
+    let got: Vec<(PerNoteKind, i64, u32)> = per_note
+        .iter()
+        .map(|x| (x.kind, x.offset.0, x.value))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (PerNoteKind::PitchBend, 0, 0xA000_0000),
+            (PerNoteKind::PitchBend, Q / 2, 0x9000_0000),
+            (PerNoteKind::Registered(74), Q * 3 / 4, 7),
+        ],
+        "the bend after the note ended is dropped"
+    );
+    let pressure: Vec<(i64, u32)> = events
+        .iter()
+        .filter_map(|e| match e.body {
+            EventBody::PolyPressure { pitch: 60, value } => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pressure, vec![(0, 0x4000_0000), (Q * 5 / 6, 0x6000_0000)]);
+}
+
+/// P10: a per-note offset is measured from the played start, also when
+/// Input Quantize moved the note later; one sent between the played and
+/// the moved start is kept.
+#[test]
+fn per_note_offsets_count_from_the_played_start_when_quantized() {
+    use core_engine::input_fx::{CENTER, Expr, NoteExpr};
+    use core_model::event::PerNoteKind;
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let on = LiveMsg::NoteOn {
+        pitch: 60,
+        velocity: 0xC924,
+        expr: NoteExpr {
+            bend: CENTER,
+            pressure: 0,
+            timbre: CENTER,
+        },
+    };
+    let q = Some(RecordQuantize {
+        grid: Q / 2,
+        strength: 100,
+    });
+    let live = |run: i64, msg: LiveMsg, quantize| RecordedMidi {
+        lane: d.keys,
+        run,
+        msg,
+        quantize,
+    };
+    // Played at frame 7 200 (tick 4 608), moved to tick Q / 2.
+    c.midi = vec![
+        live(7_200, on, q),
+        live(
+            7_800,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Bend,
+                value: 5,
+            },
+            None,
+        ),
+        live(
+            10_200,
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Bend,
+                value: 6,
+            },
+            None,
+        ),
+        live(
+            24_000,
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0,
+            },
+            None,
+        ),
+    ];
+    let p = c.run().unwrap();
+    let n = p
+        .lanes
+        .iter()
+        .flat_map(|l| l.active.events.iter())
+        .find(|e| matches!(e.body, EventBody::Note { pitch: 60, .. }))
+        .unwrap();
+    assert_eq!(n.tick.0, Q / 2, "the start moved");
+    let EventBody::Note { per_note, .. } = &n.body else {
+        unreachable!()
+    };
+    let got: Vec<(PerNoteKind, i64, u32)> = per_note
+        .iter()
+        .map(|x| (x.kind, x.offset.0, x.value))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (PerNoteKind::PitchBend, 384, 5),
+            (PerNoteKind::PitchBend, Q / 8, 6)
+        ]
+    );
+}
+
+/// Final review m5: pressure played after the note-on but before the
+/// start Input Quantize moved later becomes the note's starting pressure
+/// (the latest such value), so it plays on the note's member channel and
+/// never before the note (on the manager channel).
+#[test]
+fn pressure_before_a_quantized_start_becomes_the_starting_pressure() {
+    use core_engine::input_fx::{CENTER, Expr, NoteExpr};
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let on = LiveMsg::NoteOn {
+        pitch: 60,
+        velocity: 0xC924,
+        expr: NoteExpr {
+            bend: CENTER,
+            pressure: 10,
+            timbre: CENTER,
+        },
+    };
+    let q = Some(RecordQuantize {
+        grid: Q / 2,
+        strength: 100,
+    });
+    let live = |run: i64, msg: LiveMsg, quantize| RecordedMidi {
+        lane: d.keys,
+        run,
+        msg,
+        quantize,
+    };
+    let pressure = |value| LiveMsg::PerNote {
+        pitch: 60,
+        expr: Expr::Pressure,
+        value,
+    };
+    // Played at frame 7 200, moved to tick Q / 2 (frame 12 000).
+    c.midi = vec![
+        live(7_200, on, q),
+        live(7_300, pressure(15), None),
+        live(7_350, pressure(20), None),
+        live(13_000, pressure(30), None),
+        live(
+            24_000,
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0,
+            },
+            None,
+        ),
+    ];
+    let p = c.run().unwrap();
+    let events: Vec<_> = p
+        .lanes
+        .iter()
+        .flat_map(|l| l.active.events.iter())
+        .collect();
+    let n = events
+        .iter()
+        .find(|e| matches!(e.body, EventBody::Note { pitch: 60, .. }))
+        .unwrap();
+    assert_eq!(n.tick.0, Q / 2, "the start moved");
+    let got: Vec<(i64, u32)> = events
+        .iter()
+        .filter_map(|e| match e.body {
+            EventBody::PolyPressure { pitch: 60, value } => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(
+        got[0],
+        (Q / 2, 20),
+        "the latest early pressure starts the note"
+    );
+    assert!(got[1].0 > Q / 2 && got[1].1 == 30, "{got:?}");
+}
+
+/// Final review m5 with no pressure at the note-on: the early values
+/// still give one starting pressure, the latest.
+#[test]
+fn early_pressure_without_a_start_pressure_gives_one() {
+    use core_engine::input_fx::{CENTER, Expr, NoteExpr};
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let on = LiveMsg::NoteOn {
+        pitch: 60,
+        velocity: 0xC924,
+        expr: NoteExpr {
+            bend: CENTER,
+            pressure: 0,
+            timbre: CENTER,
+        },
+    };
+    let q = Some(RecordQuantize {
+        grid: Q / 2,
+        strength: 100,
+    });
+    let live = |run: i64, msg: LiveMsg, quantize| RecordedMidi {
+        lane: d.keys,
+        run,
+        msg,
+        quantize,
+    };
+    let pressure = |value| LiveMsg::PerNote {
+        pitch: 60,
+        expr: Expr::Pressure,
+        value,
+    };
+    c.midi = vec![
+        live(7_200, on, q),
+        live(7_300, pressure(15), None),
+        live(7_350, pressure(20), None),
+        live(
+            24_000,
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0,
+            },
+            None,
+        ),
+    ];
+    let p = c.run().unwrap();
+    let got: Vec<(i64, u32)> = p
+        .lanes
+        .iter()
+        .flat_map(|l| l.active.events.iter())
+        .filter_map(|e| match e.body {
+            EventBody::PolyPressure { pitch: 60, value } => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, vec![(Q / 2, 20)]);
+}
+
+/// Spec §13 5g's round trip (plan 5g-2): MPE bytes from a controller,
+/// decoded, recorded, played back to an MPE destination give the same
+/// bytes (the configuration message aside).
+#[test]
+fn mpe_round_trips_through_a_recording() {
+    use core_engine::backend::AudioBackend;
+    use core_engine::engine::{Engine, EngineConfig};
+    use core_engine::mpe::MpeDecoder;
+    use core_engine::offline::{OfflineBackend, OfflineSinks};
+    use core_model::command::{Command, RoutingCmd};
+    use core_model::mpe::MpeConfig;
+    let phrase: Vec<(i64, [u8; 3])> = vec![
+        (0, [0xE1, 0x00, 0x50]),
+        (0, [0xB1, 74, 0x30]),
+        (0, [0xD1, 0x20, 0]),
+        (0, [0x91, 60, 100]),
+        (6000, [0xE1, 0x10, 0x60]),
+        (9000, [0xD1, 0x40, 0]),
+        (12_000, [0xB1, 74, 0x7F]),
+        (24_000, [0x81, 60, 0]),
+        (30_000, [0xE2, 0x00, 0x40]),
+        (30_000, [0xB2, 74, 0x40]),
+        (30_000, [0xD2, 0x00, 0]),
+        (30_000, [0x92, 64, 100]),
+        (42_000, [0x82, 64, 0]),
+    ];
+    let d = doc(None);
+    let mut dec = MpeDecoder::new(MpeConfig::default());
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    for (run, b) in &phrase {
+        let msg = if b[0] & 0xF0 == 0xD0 {
+            Midi1Msg::two(b[0], b[1])
+        } else {
+            Midi1Msg::three(b[0], b[1], b[2])
+        };
+        dec.decode(msg, &mut |m| {
+            c.midi.push(RecordedMidi {
+                lane: d.keys,
+                run: *run,
+                msg: m,
+                quantize: None,
+            })
+        });
+    }
+    let pass = c.run().unwrap();
+    let synth = *d.doc.instruments().keys().next().unwrap();
+    let doc = core_model::command::apply(&d.doc, &Command::Record(pass))
+        .unwrap()
+        .doc;
+    let doc = core_model::command::apply(
+        &doc,
+        &Command::Routing(RoutingCmd::SetMpe {
+            dest: synth,
+            mpe: Some(MpeConfig::default()),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let sinks = OfflineSinks::new(100_000);
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    engine.load(&doc, d.seq).unwrap();
+    let mut be = OfflineBackend::new(48_000.0, 256);
+    be.start(renderer).unwrap();
+    engine.play().unwrap();
+    be.run_frames(48_000);
+    let got: Vec<(u64, Vec<u8>)> = log
+        .drain()
+        .into_iter()
+        .map(|r| (r.frame, r.bytes().to_vec()))
+        .filter(|(_, b)| !(b[0] & 0xF0 == 0xB0 && [101, 100, 6, 38].contains(&b[1])))
+        .filter(|(_, b)| ![40u8, 41].contains(&b[1]) || b[0] & 0xE0 != 0x80)
+        .collect();
+    let want: Vec<(u64, Vec<u8>)> = phrase
+        .iter()
+        .map(|(f, b)| {
+            (
+                *f as u64,
+                if b[0] & 0xF0 == 0xD0 {
+                    vec![b[0], b[1]]
+                } else {
+                    b.to_vec()
+                },
+            )
+        })
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// A note's start tick and its `(kind, offset, value)` per-note controls.
+type PerNotesOfNote = (i64, Vec<(core_model::event::PerNoteKind, i64, u32)>);
+
+/// The `(kind, offset, value)` of every per-note control of every note of
+/// `pitch` in `events`, one list per note.
+fn per_notes_of(events: &[core_model::event::EventSpec], pitch: u8) -> Vec<PerNotesOfNote> {
+    events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::Note {
+                pitch: p, per_note, ..
+            } if *p == pitch => Some((
+                e.tick.0,
+                per_note
+                    .iter()
+                    .map(|x| (x.kind, x.offset.0, x.value))
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn bend(lane: LaneId, run: i64, pitch: u8, value: u32) -> RecordedMidi {
+    use core_engine::input_fx::Expr;
+    RecordedMidi {
+        lane,
+        run,
+        msg: LiveMsg::PerNote {
+            pitch,
+            expr: Expr::Bend,
+            value,
+        },
+        quantize: None,
+    }
+}
+
+fn note_on(lane: LaneId, run: i64, pitch: u8) -> RecordedMidi {
+    midi(lane, run, on(pitch, 100))
+}
+
+fn note_off(lane: LaneId, run: i64, pitch: u8) -> RecordedMidi {
+    midi(lane, run, off(pitch))
+}
+
+/// A per-note control joins the latest note of its pitch; one after that
+/// note's off, or with no note at all, is dropped.
+#[test]
+fn per_note_controls_join_the_latest_note_of_their_pitch() {
+    use core_model::event::PerNoteKind::PitchBend;
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![
+        bend(d.keys, 0, 62, 9), // no note yet
+        note_on(d.keys, 1000, 60),
+        bend(d.keys, 2000, 60, 1),
+        note_on(d.keys, 6000, 60), // retrigger without an off
+        bend(d.keys, 7500, 60, 2),
+        note_off(d.keys, 12_000, 60),
+        bend(d.keys, 13_000, 60, 3), // after the off
+    ];
+    let p = c.run().unwrap();
+    let ev = &p
+        .lanes
+        .iter()
+        .find(|l| l.lane == d.keys)
+        .unwrap()
+        .active
+        .events;
+    let t = |f: i64| f * Q / BEAT as i64;
+    assert_eq!(
+        per_notes_of(ev, 60),
+        vec![
+            (t(1000), vec![(PitchBend, t(1000), 1)]),
+            (t(6000), vec![(PitchBend, t(1500), 2)]),
+        ]
+    );
+    assert!(per_notes_of(ev, 62).is_empty());
+}
+
+/// A per-note control outside the punch range is dropped, and so is one
+/// whose note started before the punch-in.
+#[test]
+fn per_note_controls_outside_the_punch_range_drop() {
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    c.range = RecordRange {
+        start: 10_000,
+        end: Some(30_000),
+    };
+    c.midi = vec![
+        note_on(d.keys, 2000, 60),
+        bend(d.keys, 4000, 60, 1),
+        bend(d.keys, 12_000, 60, 2), // note began before the punch-in
+        note_on(d.keys, 14_000, 64),
+        bend(d.keys, 16_000, 64, 3),
+        bend(d.keys, 32_000, 64, 4), // after the punch-out
+        note_off(d.keys, 34_000, 64),
+    ];
+    let p = c.run().unwrap();
+    let ev = &p
+        .lanes
+        .iter()
+        .find(|l| l.lane == d.keys)
+        .unwrap()
+        .active
+        .events;
+    let t = |f: i64| f * Q / BEAT as i64;
+    assert!(per_notes_of(ev, 60).is_empty());
+    assert_eq!(
+        per_notes_of(ev, 64),
+        vec![(
+            t(14_000),
+            vec![(core_model::event::PerNoteKind::PitchBend, t(2000), 3)]
+        )]
+    );
+}
+
+/// A note quantized onto the loop start keeps the per-notes heard before
+/// the wrap (offset from its played start); those heard after the wrap,
+/// in the next pass, are dropped, never attached to another note.
+#[test]
+fn a_note_held_across_a_loop_wrap_keeps_only_its_own_passs_controls() {
+    use core_model::event::PerNoteKind::PitchBend;
+    let d = doc(None);
+    let len = 2 * BEAT;
+    let mut c = Case::new(&d, 0);
+    c.looped = true;
+    c.end_run = 2 * len;
+    c.range = RecordRange {
+        start: 0,
+        end: Some(len),
+    };
+    c.marks = vec![mark(0, 0, false), mark(len, 0, true)];
+    c.midi_lanes = vec![d.keys];
+    let len = len as i64;
+    let g = Q / 4;
+    let mut start = midi_q(d.keys, len - 1000, on(60, 100), g, 100);
+    start.quantize = Some(RecordQuantize {
+        grid: g,
+        strength: 100,
+    });
+    c.midi = vec![
+        start,
+        bend(d.keys, len - 500, 60, 1),
+        bend(d.keys, len + 3000, 60, 2),
+        midi_q(d.keys, len + 6000, off(60), g, 100),
+    ];
+    let p = c.run().unwrap();
+    let l = &p.lanes[0];
+    assert_eq!(l.takes.len(), 2);
+    let t = |f: i64| f * Q / BEAT as i64;
+    assert_eq!(
+        per_notes_of(&l.takes[0].1.events, 60),
+        vec![(0, vec![(PitchBend, t(500), 1)])]
+    );
+    assert!(per_notes_of(&l.takes[1].1.events, 60).is_empty());
 }

@@ -71,6 +71,19 @@ impl ActiveNotes {
         *sus = 0;
     }
 
+    /// Calls `send` with CC 64 = 0 when `target` holds the pedal on
+    /// channel `ch`, then forgets it. // RT
+    pub fn release_pedal(&mut self, target: TargetIdx, ch: u8, mut send: impl FnMut(Midi1Msg)) {
+        let ch = ch & 0x0F;
+        let Some(sus) = self.sustain.get_mut(usize::from(target.0)) else {
+            return;
+        };
+        if *sus & (1 << ch) != 0 {
+            *sus &= !(1 << ch);
+            send(Midi1Msg::three(0xB0 | ch, 64, 0));
+        }
+    }
+
     /// True when any note of any target sounds.
     pub fn any(&self) -> bool {
         self.on.iter().flatten().any(|b| *b != 0) || self.sustain.iter().any(|s| *s != 0)

@@ -92,7 +92,7 @@ public final class MixerModel {
     /// Slots safe mode keeps off.
     public private(set) var held: Set<UInt64> = []
     /// The instrument list (lanes play through these).
-    public private(set) var destinations: [DestRow] = []
+    public internal(set) var destinations: [DestRow] = []
     /// The strip whose name is being edited.
     public private(set) var renamingStrip: UInt64?
     /// Where the rename field shows (the button that began it sets it).
@@ -111,6 +111,14 @@ public final class MixerModel {
     }
     /// Times the mixer was fetched (tests check refetch rules).
     public private(set) var fetches = 0
+    /// Each MIDI destination's note activity, 0...1, falling (see `pollLevels`).
+    public internal(set) var midiActivity: [UInt64: Double] = [:]
+    /// The values a MIDI strip drag has previewed and not yet committed.
+    public internal(set) var midiDraft: [UInt64: MidiMixRow] = [:]
+    /// When each destination's drag last previewed, in the caller's seconds.
+    /// The committed mix each draft started from.
+    @ObservationIgnored var midiDraftBase: [UInt64: MidiMixRow] = [:]
+    @ObservationIgnored var midiPreviewedAt: [UInt64: Double] = [:]
 
     /// Where a plugin picked in the browser goes.
     public enum BrowserTarget: Equatable, Sendable {
@@ -207,6 +215,52 @@ public final class MixerModel {
         return document.inputLane(path: path)
     }
 
+    /// Whether `strip` has the MIDI FX section (Ruling 16): a plugin
+    /// instrument's main strip or the shared Built-in Synth strip; not an
+    /// instrument's extra output, an audio path, a bus or master.
+    public func showsMidiFx(_ strip: StripRow) -> Bool {
+        switch strip.kind {
+        case .instrument, .builtinSynth: true
+        default: false
+        }
+    }
+
+    /// The track `strip`'s MIDI FX section edits (Ruling 16); nil when
+    /// the strip has no section or no track plays through it. A track
+    /// plays through `strip` when `StripFocus.strip(of:)` names it and
+    /// `InputFxModel.showsSection` holds. The left pane (`.strip`): the
+    /// focused track (`document.focusLanes().first`) when it plays
+    /// through `strip`. Every other placement: of the shown sequence's
+    /// tracks that play through `strip`, the first armed one, else the
+    /// first (5d-2 Ruling 4, as `inputLane(for:)`).
+    public func midiFxLane(for strip: StripRow, in placement: MixerPlacement) -> LaneRow? {
+        guard showsMidiFx(strip) else { return nil }
+        let all = snapshot.strips
+        let dests = destinations
+        return playingLane(in: placement) { lane in
+            InputFxModel.showsSection(lane)
+                && StripFocus.strip(of: lane, destinations: dests, strips: all) == strip.id
+        }
+    }
+
+    /// The track a MIDI strip's arm and MIDI FX act on (plan 5g-1b Ruling
+    /// 9): the same rule as `midiFxLane`, for the tracks that play `dest`.
+    public func midiLane(for dest: UInt64, in placement: MixerPlacement) -> LaneRow? {
+        playingLane(in: placement) { InputFxModel.showsSection($0) && $0.midiDest == dest }
+    }
+
+    /// The left pane (`.strip`): the focused track when it `plays`. Every
+    /// other placement: of the shown sequence's tracks that play, the first
+    /// armed one, else the first.
+    private func playingLane(in placement: MixerPlacement, where plays: (LaneRow) -> Bool) -> LaneRow? {
+        if placement == .strip {
+            guard let focused = document.focusLanes().first, plays(focused) else { return nil }
+            return focused
+        }
+        let through = document.lanes.filter(plays)
+        return through.first(where: \.arm) ?? through.first
+    }
+
     public func stripName(_ id: UInt64) -> String {
         snapshot.strips.first { $0.id == id }?.name ?? "Strip \(id)"
     }
@@ -282,6 +336,14 @@ public final class MixerModel {
         dspPeak = l.dspPeak
         latencyFrames = l.latencyFrames
         faulted = Set(l.faulted)
+        var activity: [UInt64: Double] = [:]
+        for (dest, old) in midiActivity where old * Double(MixerMath.meterDecay) >= 0.005 {
+            activity[dest] = old * Double(MixerMath.meterDecay)
+        }
+        for m in l.midi {
+            activity[m.dest] = max(activity[m.dest] ?? 0, Double(min(m.velocity, 127)) / 127)
+        }
+        if activity != midiActivity { midiActivity = activity }
     }
 
     // MARK: Intents
@@ -774,7 +836,7 @@ public final class MixerModel {
     }
 
     @discardableResult
-    private func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) -> Bool {
+    func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) -> Bool {
         var ok = true
         do {
             document.apply(try body(session))
@@ -797,6 +859,7 @@ public final class MixerModel {
             snapshot = snap
             held = heldNow
             destinations = dests
+            pruneMidiDrafts()
             fetches += 1
             forgetGone(snap)
         } catch {

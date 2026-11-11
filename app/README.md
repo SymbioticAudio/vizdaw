@@ -2308,3 +2308,128 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
      status lines or alerts says "lane" (a rare "unknown id" refusal still
      prints an id such as lane5). An old project's "Lane 1" keeps
      its name.
+
+### MIDI input effects (plan 5g-1)
+
+By ear and by eye; the chain is tested (`core-engine/tests/input_fx*.rs`),
+the recording (`core-ffi/tests/passes.rs`, `record.rs`) and the e2e
+`arpeggiates_an_injected_chord_while_recording`.
+
+238. Track headers are unchanged: no FX control, and the name field
+     keeps its full width. In the Mix view, a plugin instrument's strip
+     and the Built-in Synth strip show a "MIDI FX" section under Inserts,
+     its heading unlit while the chain is empty. Audio strips, buses and
+     master have no such section. Click its empty "+" slot: a menu lists
+     Arpeggiator, Transpose, Velocity, Chord and Input Quantize. Add a
+     Transpose: the heading lights in the theme's accent colour. Click
+     the slot's dot: it is bypassed and the heading is unlit again. Click
+     the slot: its settings open in a popover beside it. Check this in
+     each theme. Put two tracks on the Built-in Synth and arm one: the
+     Mix view's section edits the armed track. Select the other track:
+     the left pane's strip edits the selected one.
+239. A real keyboard on a MIDI track, armed: add an Arpeggiator (Up, 1/16).
+     Stopped, hold a chord: it arpeggiates at once at the project tempo;
+     change the tempo and it follows. Play with the click on: the notes
+     fall on the sixteenths, and a chord pressed between steps waits for
+     the next one. Hold ⏪ or ⏩ and loop a bar while holding: no burst of
+     notes and no gap. Try each mode, 2–4 octaves, a triplet and a dotted
+     rate.
+240. Latch: hold a chord and let go: it keeps playing; press a new chord
+     with no key down: the pattern changes to it.
+241. Transpose +12 then Chord (+4 +7) near the top of the keyboard, then
+     drag the Chord slot above the Transpose slot: the top notes differ
+     (notes past the highest key are dropped, never folded).
+242. Hold a chord through the arpeggiator and bypass it (its slot's
+     dot), change its rate, drag a velocity slider, arm another track,
+     disarm this one: no note hangs, and a latched arpeggio survives
+     arming another track. Start a MIDI Learn and press a key: the key is
+     learned, and nothing plays or arpeggiates.
+243. Add Input Quantize (1/16, 100%) and record a loose phrase: thru is
+     never delayed; the recorded notes start on the sixteenths and keep
+     their lengths. At 50% they move half way.
+244. Each change in the MIDI FX section or a settings popover is one
+     Undo ("Set Input Effects"); a slider drag is one step. A change made
+     while recording is undone with the take. Save, close and reopen: the
+     chain is there. Duplicate Track copies it.
+
+### MIDI strips (plan 5g-1b)
+
+By ear and by eye on an external synth; the sending is tested
+(`core-engine/tests/midi_strip.rs`, `rt_alloc_midi_strip.rs`, and through
+the session, Undo and Redo included, `core-ffi/tests/midi_strip.rs`), the model
+(`MidiStripTests`) and the e2e `midi_mix_reaches_state_get`.
+
+245. Put a MIDI track on an external synth and select it: the left pane
+     shows its MIDI strip: the destination's name, MIDI FX, pan, a fader
+     scaled 0–127 with a thin meter, the volume box, and M and R. No
+     input, EQ, inserts, sends, output, solo or automation mode. Before
+     any change the fader sits at 100 and pan at C, both dimmed. The
+     Mixer shows one MIDI strip per external destination, used or not,
+     after the instrument and audio strips and before the buses; its
+     header shows the name and the "MIDI · Ch n" line, with no menu.
+     Select the track: its synth's strip in the Mixer has the accent
+     edge. Check this in each theme.
+246. Open a saved project and, stopped and without arming, drag the
+     fader, then the pan knob: the synth's level and pan follow as you
+     move, and the values stop being dimmed. Each drag is one Undo ("Set
+     MIDI Mix"); Undo puts the synth back and Redo moves it again. Undo
+     back to the first change: the values dim again and the synth stays
+     as it is. Type "90" in the volume box and "R 10" in the pan box:
+     both take. "200" and "L 70" are refused, and nothing changes. A
+     Mixer strip for a synth no track of the shown sequence plays moves
+     and is saved, and the synth gets it once a sequence that plays it
+     plays. While another window plays, the strip still moves and the
+     synth gets it at the next Play.
+247. Stop, set the strip's level and pan, then Play from bar 1: the synth
+     gets them right after the destination's patch. A part with its own
+     volume moves (CC 7) still plays them, and from then on they win.
+     Start mid-song after such a move: the recorded value is sent, not
+     the strip's.
+248. Hold a long note on the track and press M: the note ends at once.
+     Controllers (a mod wheel or pitch bend in the part) still play while
+     muted; no note plays. Press M again: the next note plays. Press M,
+     then Undo: the next note plays too.
+249. Play: the meter beside the fader rises with each note sent, by its
+     velocity (soft notes low, loud notes high), and falls between notes.
+250. Give a MIDI track no destination in the left pane's header menu: the
+     strip reads "No Destination", and pan, the fader, the volume box and
+     M are off, while MIDI FX and R still work. Pick the synth again in
+     the same menu: the strip comes back. Save, close and reopen: the
+     strip's level, pan and mute are as you left them.
+
+### MPE input and output (plan 5g-2)
+
+By ear and by eye; the codec is tested (`core-engine/tests/mpe*.rs`), the
+recording and round trip (`core-ffi/tests/passes.rs`), the session
+(`core-ffi/tests/mpe.rs`) and the e2e `records_mpe_as_per_note_expression`.
+
+251. A MIDI track's input menu has an "MPE Input" section: choose Lower
+     Zone; "Member Channels" and "Pitch Bend Range" sections appear, and
+     the input shows "Port · MPE" (no channel) in the track header, the
+     strip's input picker and the inspector. Each choice is one Undo
+     ("Set Track MPE").
+252. With an MPE controller (if one is available) on that track, armed,
+     and an MPE synth or plugin as its destination with "MPE Output" on
+     (in the destination menu): play, slide, press and move along the
+     keys: each note bends, swells and brightens on its own, thru and in
+     the recording. Open the note in the piano roll: its per-note bend
+     and timbre are there; pressure is in the poly pressure row. For an
+     external synth, its MIDI strip reads "MIDI · MPE Lower" (or Upper),
+     the meter moves with every note, and the fader and pan reach every
+     note. A MIDI-learn map on the controller's pitch bend or CC 74 takes
+     those messages first: the track then gets no bend or timbre from it.
+253. Play the recording back to the MPE synth: it sounds as played, also
+     when you start mid-song (the synth is told its MPE zone again). Play
+     it to a plain synth: the notes play with poly pressure, and the
+     report says how many per-note controllers were dropped. Mute the
+     MPE synth's strip: no notes play; controllers still do.
+254. Plug the controller in (or send its MPE configuration) while the
+     track is set to 15 members: if the controller says 7, the track's
+     setting changes to 7 as one Undo step; during a recording it changes
+     after Stop.
+255. Hold more notes than the destination's member channels: the oldest
+     note ends to make room, nothing hangs, and `state.get input`'s
+     `mpe_stolen` counts it.
+256. With an arpeggiator or a transpose on the MPE track: transposed notes
+     keep their own bends; arpeggiated notes play without per-note
+     expression (by design).

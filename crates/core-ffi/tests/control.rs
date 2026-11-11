@@ -80,6 +80,7 @@ fn a_state_call_round_trips_as_typed_rows() {
         snapshot,
         selected_seq: None,
         lanes: vec![],
+        destinations: vec![],
         alert: Some(AlertRow {
             title: "Play Failed".into(),
             message: "no device".into(),
@@ -534,10 +535,16 @@ fn record_and_input_results_as_json() {
             round_trip_frames: 2048,
             opening: false,
             sample_rate: 48_000.0,
+            midi_fx_dropped: 3,
+            per_note_dropped: 5,
+            mpe_stolen: 2,
         },
         levels: vec![0.25, 1.0, 0.0],
     });
     assert_eq!(i["channels"], json!(3));
+    assert_eq!(i["midi_fx_dropped"], json!(3));
+    assert_eq!(i["per_note_dropped"], json!(5));
+    assert_eq!(i["mpe_stolen"], json!(2));
     assert_eq!(i["input_latency"], json!(512));
     // Plan 5d-1 Ruling 26: the settings, the round trip and the meters.
     assert_eq!(i["device_buffer_frames"], json!(512));
@@ -614,6 +621,10 @@ fn lanes_show_takes_input_and_monitor() {
         return_of: None,
     });
     lanes[0].monitor = MonitorModeRow::Input;
+    lanes[0].input_fx = vec![vizdaw_ffi::InputFxRow {
+        kind: vizdaw_ffi::InputFxKindRow::Transpose { semitones: 12 },
+        bypass: false,
+    }];
     lanes[1].input = Some(LaneInputRow::Midi {
         port: Some("Keys".into()),
         channel: Some(15),
@@ -625,6 +636,7 @@ fn lanes_show_takes_input_and_monitor() {
         snapshot,
         selected_seq: Some(seq),
         lanes,
+        destinations: vec![],
         alert: None,
     });
     let l = v["lanes"].as_array().unwrap();
@@ -637,6 +649,11 @@ fn lanes_show_takes_input_and_monitor() {
         l[3]["input"],
         json!({"kind": "audio", "channel": 1, "stereo": false, "return_of": null})
     );
+    assert_eq!(
+        l[0]["input_fx"],
+        json!([{"kind": {"transpose": {"semitones": 12}}}])
+    );
+    assert_eq!(l[1]["input_fx"], json!([]));
     assert_eq!(l[0]["monitor"], json!("input"));
     assert_eq!(
         l[1]["input"],
@@ -665,12 +682,61 @@ fn document_state_lanes_carry_kind() {
         snapshot: session.snapshot().unwrap(),
         selected_seq: Some(seq),
         lanes: session.lanes(seq).unwrap(),
+        destinations: vec![],
         alert: None,
     });
     let l = v["lanes"].as_array().unwrap();
     assert_eq!(l[0]["kind"], json!("audio"));
     assert_eq!(l[1]["kind"], json!("instrument"));
     assert_eq!(l[2]["kind"], json!("midi"));
+}
+
+/// Plan 5g-1b Task 4: `state.get document` lists the destinations with
+/// their MIDI mix (null when a controller value is unset).
+#[test]
+fn document_state_reports_the_midi_mix_per_destination() {
+    use vizdaw_ffi::{DestRow, MidiMixRow};
+    let session = Session::new_empty().unwrap();
+    let row = |id, external, mix| DestRow {
+        id,
+        name: format!("D{id}"),
+        plugin: None,
+        external,
+        return_latency_ms: 12.5,
+        midi_mix: mix,
+        channel: None,
+        mpe: None,
+    };
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot: session.snapshot().unwrap(),
+        selected_seq: None,
+        lanes: vec![],
+        destinations: vec![
+            row(
+                4,
+                true,
+                MidiMixRow {
+                    volume: Some(90),
+                    pan: None,
+                    mute: true,
+                },
+            ),
+            row(5, false, MidiMixRow::default()),
+        ],
+        alert: None,
+    });
+    let d = v["destinations"].as_array().unwrap();
+    assert_eq!(d.len(), 2);
+    assert_eq!(d[0]["id"], json!(4));
+    assert_eq!(d[0]["external"], json!(true));
+    assert_eq!(d[0]["return_latency_ms"], json!(12.5));
+    assert_eq!(d[0]["midi_volume"], json!(90));
+    assert_eq!(d[0]["midi_pan"], Value::Null);
+    assert_eq!(d[0]["midi_mute"], json!(true));
+    assert_eq!(d[1]["midi_volume"], Value::Null);
+    assert_eq!(d[1]["midi_mute"], json!(false));
 }
 
 /// Plan 5d-1 Task 12 (Ruling 26): `state.get transport` says whether a
@@ -1106,5 +1172,52 @@ fn screenshot_requests_carry_live() {
             Some(ControlRequest::Screenshot { live: got, .. }) => assert_eq!(got, live),
             other => panic!("{other:?}"),
         }
+    }
+}
+
+/// Plan 5g-2 Task 7: `state.get document` shows a track's and a
+/// destination's MPE setting, null when there is none.
+#[test]
+fn document_state_reports_mpe_per_track_and_destination() {
+    use vizdaw_ffi::mpe::{MpeRow, MpeZoneRow};
+    use vizdaw_ffi::{DestRow, MidiMixRow};
+    let session = Session::new_demo().unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let seq = snapshot.sequences[0].id;
+    let one = session.lanes(seq).unwrap().remove(0);
+    let mut lanes = vec![one.clone(), one];
+    let setting = MpeRow {
+        zone: MpeZoneRow::Upper,
+        members: 7,
+        bend_range: 24,
+    };
+    lanes[0].mpe = Some(setting);
+    lanes[1].mpe = None;
+    let dest = |id, mpe| DestRow {
+        id,
+        name: "Synth".into(),
+        plugin: None,
+        external: true,
+        return_latency_ms: 0.0,
+        midi_mix: MidiMixRow::default(),
+        channel: Some(0),
+        mpe,
+    };
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot,
+        selected_seq: Some(seq),
+        lanes,
+        destinations: vec![dest(4, Some(setting)), dest(5, None)],
+        alert: None,
+    });
+    let want = json!({"zone": "upper", "members": 7, "bend_range": 24});
+    assert_eq!(v["lanes"][0]["mpe"], want);
+    assert_eq!(v["lanes"][1]["mpe"], Value::Null);
+    assert_eq!(v["destinations"][0]["mpe"], want);
+    assert_eq!(v["destinations"][1]["mpe"], Value::Null);
+    for k in ["midi_volume", "midi_pan", "midi_mute"] {
+        assert!(v["destinations"][0].get(k).is_some(), "{k}");
     }
 }

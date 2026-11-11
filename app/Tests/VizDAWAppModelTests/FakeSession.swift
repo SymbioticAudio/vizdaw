@@ -823,6 +823,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         edits.append(cmd)
         editFilters.append(filter)
         calls.append("edit")
+        if case .lane(.setMpe(let seq, let lane, let mpe)) = cmd,
+            let i = laneTable[seq]?.firstIndex(where: { $0.id == lane })
+        {
+            laneTable[seq]?[i].mpe = mpe
+        }
         return commandResult()
     }
 
@@ -947,6 +952,33 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         }
         trackSynthCalls.append((seq, lane, first, stereo, armMidi, muteAfter))
         return commandResult()
+    }
+
+    /// Every `setMidiMix` call.
+    var midiMixes: [(UInt64, MidiMixRow)] = []
+    /// Every `previewMidiMix` call.
+    var midiPreviews: [(UInt64, UInt8?, UInt8?)] = []
+
+    func setMidiMix(dest: UInt64, mix: MidiMixRow) throws -> DocSnapshot {
+        if let e = synthError { throw e }
+        midiMixes.append((dest, mix))
+        if let i = dests.firstIndex(where: { $0.id == dest }) { dests[i].midiMix = mix }
+        return commandResult()
+    }
+
+    /// Every `setDestinationMpe` call.
+    var mpeCalls: [(UInt64, MpeRow?)] = []
+
+    func setDestinationMpe(dest: UInt64, mpe: MpeRow?) throws -> DocSnapshot {
+        if let e = synthError { throw e }
+        mpeCalls.append((dest, mpe))
+        if let i = dests.firstIndex(where: { $0.id == dest }) { dests[i].mpe = mpe }
+        return commandResult()
+    }
+
+    func previewMidiMix(dest: UInt64, volume: UInt8?, pan: UInt8?) throws -> Bool {
+        midiPreviews.append((dest, volume, pan))
+        return true
     }
 
     func setReturnLatency(dest: UInt64, ms: Float) throws -> DocSnapshot {

@@ -2386,6 +2386,12 @@ impl MeterHolds {
                 held.dsp_load = take.dsp_load;
                 held.latency_frames = take.latency_frames;
                 held.faulted = take.faulted;
+                for m in take.midi {
+                    match held.midi.iter_mut().find(|h| h.dest == m.dest) {
+                        Some(h) => h.velocity = h.velocity.max(m.velocity),
+                        None => held.midi.push(m),
+                    }
+                }
             }
         }
     }

@@ -793,6 +793,11 @@ pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
                 dest: l.midi_dest,
                 thru: l.monitor != MonitorMode::Off,
                 armed: l.arm,
+                // Only listening lanes reach here (the `continue` above):
+                // no chain for the others, none on playback (spec §6.8).
+                fx: l.input_fx.iter().cloned().collect(),
+                // The lane's MPE input (plan 5g-2 Ruling 3).
+                mpe: l.mpe,
             }),
             Some(LaneInput::Audio { channels, .. })
                 if software && l.monitor != MonitorMode::Off =>
@@ -878,6 +883,19 @@ pub fn take_stream_errors(owner: u64) -> Vec<(core_model::ids::MediaId, String)>
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.take_stream_errors())
+        .unwrap_or_default()
+}
+
+/// The MPE settings MCMs gave `owner`'s lanes since the last call, oldest
+/// first (plan 5g-2 Ruling 4; `None`: a zone an MCM turned off); empty
+/// unless it holds the engine.
+pub fn take_mpe_reports(
+    owner: u64,
+) -> Vec<(core_model::ids::LaneId, Option<core_model::mpe::MpeConfig>)> {
+    lock_host()
+        .as_mut()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.take_mpe_reports())
         .unwrap_or_default()
 }
 
@@ -2900,6 +2918,63 @@ pub fn audition(
     }
 }
 
+/// Sends `msg` now to `dest`'s target through `owner`'s engine (a MIDI
+/// strip's preview or change); false when `owner` does not hold the engine
+/// or it has no target for `dest`.
+pub fn send_now(
+    owner: u64,
+    doc: &Document,
+    dest: DestId,
+    msg: core_engine::midi1::Midi1Msg,
+) -> Result<bool, VizError> {
+    let mut slot = lock_host();
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => Ok(h.engine.send_now(doc, dest, msg)?),
+        _ => Ok(false),
+    }
+}
+
+/// Sends `msg` now to `dest`'s target through `owner`'s engine on the
+/// channel `msg` names (an MPE configuration, plan 5g-2); false when
+/// `owner` does not hold the engine or it has no target for `dest`.
+pub fn send_now_on(
+    owner: u64,
+    dest: DestId,
+    msg: core_engine::midi1::Midi1Msg,
+) -> Result<bool, VizError> {
+    let mut slot = lock_host();
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => Ok(h.engine.send_now_on(dest, msg)?),
+        _ => Ok(false),
+    }
+}
+
+/// Sends every message of `msgs` now to `dest`'s targets through
+/// `owner`'s engine on the channels they name, all or none (final review
+/// m4); an error when its command ring has no room for all, false when
+/// `owner` does not hold the engine or it has no target for `dest`.
+pub fn send_all_now_on(
+    owner: u64,
+    dest: DestId,
+    msgs: &[core_engine::midi1::Midi1Msg],
+) -> Result<bool, VizError> {
+    let mut slot = lock_host();
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => Ok(h.engine.send_all_now_on(dest, msgs)?),
+        _ => Ok(false),
+    }
+}
+
+/// `owner`'s engine's note activity per external destination since the
+/// last call, read and cleared; empty when it does not hold the engine.
+pub fn midi_activity(owner: u64, doc: &Document) -> Vec<(DestId, u8)> {
+    let slot = lock_host();
+    match slot.as_ref() {
+        Some(h) if h.owner == owner => h.engine.take_midi_activity(doc),
+        _ => Vec::new(),
+    }
+}
+
 /// After an edit: starts loading the plugins `doc` gained (and drops the
 /// ones it lost), then recompiles if `owner` holds the engine and no
 /// plugin is loading (otherwise `service` loads once they are in).
@@ -3287,7 +3362,7 @@ pub fn factory_owner() -> Option<u64> {
 
 /// `owner`'s meters, DSP load, latency and fault-bypassed instances, or
 /// `None` when it does not hold the engine.
-pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
+pub fn levels(owner: u64, doc: &Document) -> Option<crate::mixer::MixerLevels> {
     let mut slot = lock_host();
     let h = slot.as_mut().filter(|h| h.owner == owner)?;
     h.faulted
@@ -3308,6 +3383,15 @@ pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
         dsp_peak: load.peak,
         latency_frames: h.engine.latency_frames(),
         faulted: h.faulted.iter().copied().collect(),
+        midi: h
+            .engine
+            .take_midi_activity(doc)
+            .into_iter()
+            .map(|(d, velocity)| crate::mixer::MidiLevelRow {
+                dest: d.0,
+                velocity,
+            })
+            .collect(),
     })
 }
 
@@ -3629,6 +3713,15 @@ pub fn input_levels(owner: u64) -> Vec<f32> {
                 .input_peaks(usize::try_from(h.inputs.channels).unwrap_or(0))
         })
         .unwrap_or_default()
+}
+
+/// `owner`'s engine counters (plan 5g-1 Ruling 17: `midi_fx_dropped`),
+/// when it holds the engine.
+pub fn counters(owner: u64) -> Option<core_engine::render::Counters> {
+    lock_host()
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.counters())
 }
 
 /// Whether `owner`'s host has (or, offline, would have) its input open

@@ -27,6 +27,14 @@ pub enum ParamKind {
         /// Largest.
         max: i64,
     },
+    /// An integer in `min..=max`, or null: null is a value (it reaches the
+    /// app as the text [`NULL_TEXT`]), not an absent key.
+    IntOrNull {
+        /// Smallest.
+        min: i64,
+        /// Largest.
+        max: i64,
+    },
     /// An absolute path with any extension.
     File,
     /// One of `values`, or `prefix` followed by 1 to [`MAX_SLUG`] lowercase
@@ -131,6 +139,9 @@ pub struct CommandSpec {
     /// commands whose defaults came after users had keys files.
     pub yields: bool,
 }
+
+/// What a null [`ParamKind::IntOrNull`] value reaches the app as.
+pub const NULL_TEXT: &str = "none";
 
 /// A validated `command.run` argument.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -614,6 +625,58 @@ const RECOVER_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "Import the recordings a crash left onto new tracks, or move them to the Trash.",
 }];
 
+const SET_INPUT_FX_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The track's sequence."),
+    id_param("lane", "The track."),
+    ParamSpec {
+        name: "chain",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The effect chain as JSON, first effect first: [{\"kind\": {\"transpose\": {\"semitones\": 12}}}, …]; [] clears it.",
+    },
+];
+
+/// `zone`, `members` and `bend_range` of `lane.set_mpe` and
+/// `destination.set_mpe` (plan 5g-2 Task 7).
+const MPE_ZONE_PARAM: ParamSpec = ParamSpec {
+    name: "zone",
+    kind: ParamKind::Choice(&["off", "lower", "upper"]),
+    required: true,
+    help: "Which end of the channels the MPE zone sits at (lower: manager on channel 1; upper: manager on channel 16), or off for no MPE.",
+};
+const MPE_MEMBERS_PARAM: ParamSpec = ParamSpec {
+    name: "members",
+    kind: ParamKind::Int { min: 1, max: 15 },
+    required: false,
+    help: "Member channels, 1 to 15 (default 15). Not with zone off.",
+};
+const MPE_BEND_PARAM: ParamSpec = ParamSpec {
+    name: "bend_range",
+    kind: ParamKind::Int { min: 1, max: 96 },
+    required: false,
+    help: "Member pitch-bend range in semitones, 1 to 96 (default 48). Not with zone off.",
+};
+
+/// `lane.set_mpe`.
+const SET_MPE_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The track's sequence."),
+    id_param("lane", "The track."),
+    MPE_ZONE_PARAM,
+    MPE_MEMBERS_PARAM,
+    MPE_BEND_PARAM,
+];
+
+/// `destination.set_mpe`.
+const DEST_MPE_PARAMS: &[ParamSpec] = &[
+    id_param(
+        "dest",
+        "The destination (an external MIDI endpoint or a plugin instrument).",
+    ),
+    MPE_ZONE_PARAM,
+    MPE_MEMBERS_PARAM,
+    MPE_BEND_PARAM,
+];
+
 const SET_INPUT_PARAMS: &[ParamSpec] = &[
     id_param("seq", "The track's sequence."),
     id_param("lane", "The track."),
@@ -696,6 +759,29 @@ const RETURN_LATENCY_PARAMS: &[ParamSpec] = &[
         kind: ParamKind::Text,
         required: true,
         help: "Its return latency in milliseconds, 0 to 500, as text (\"12.5\").",
+    },
+];
+
+/// `destination.set_midi_mix` (plan 5g-1b Task 4).
+const MIDI_MIX_PARAMS: &[ParamSpec] = &[
+    id_param("dest", "The external MIDI destination."),
+    ParamSpec {
+        name: "volume",
+        kind: ParamKind::IntOrNull { min: 0, max: 127 },
+        required: false,
+        help: "Volume (CC 7), 0 to 127, or null to send none. Absent keeps it.",
+    },
+    ParamSpec {
+        name: "pan",
+        kind: ParamKind::IntOrNull { min: 0, max: 127 },
+        required: false,
+        help: "Pan (CC 10), 0 to 127 (64 is the centre), or null to send none. Absent keeps it.",
+    },
+    ParamSpec {
+        name: "mute",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Mute the destination's notes. Absent keeps it. At least one of volume, pan and mute is required.",
     },
 ];
 
@@ -1454,6 +1540,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        params: SET_INPUT_FX_PARAMS,
+        ..key_only(cmd(
+            "lane.set_input_fx",
+            "Track",
+            "Set Input Effects",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: SET_MPE_PARAMS,
+        ..key_only(cmd("lane.set_mpe", "Track", "Set Track MPE", None, true))
+    },
+    CommandSpec {
         params: INJECT_PARAMS,
         ..key_only(cmd("midi.inject", "MIDI", "Inject MIDI", None, true))
     },
@@ -1467,6 +1567,26 @@ pub const COMMANDS: &[CommandSpec] = &[
             "destination.set_return_latency",
             "Destination",
             "Set Return Latency",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: MIDI_MIX_PARAMS,
+        ..key_only(cmd(
+            "destination.set_midi_mix",
+            "Destination",
+            "Set MIDI Mix",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: DEST_MPE_PARAMS,
+        ..key_only(cmd(
+            "destination.set_mpe",
+            "Destination",
+            "Set Destination MPE",
             None,
             true,
         ))
@@ -1714,6 +1834,12 @@ pub fn validate_args(
                 .map(|path| ArgValue::Text(path.to_string_lossy().into_owned())),
             ParamKind::Flag => p.opt_bool(s.name)?.map(ArgValue::Flag),
             ParamKind::Int { min, max } => p.opt_int(s.name, min, max)?.map(ArgValue::Int),
+            ParamKind::IntOrNull { min, max } => {
+                p.opt_int_or_null(s.name, min, max)?.map(|v| match v {
+                    Some(i) => ArgValue::Int(i),
+                    None => ArgValue::Text(NULL_TEXT.to_string()),
+                })
+            }
             ParamKind::File => p
                 .opt_file(s.name)?
                 .map(|path| ArgValue::Text(path.to_string_lossy().into_owned())),
@@ -1750,6 +1876,13 @@ pub fn validate_args(
             None if s.required => return Err(p.error(format!("missing `{}`", s.name))),
             None => {}
         }
+    }
+    if spec.id == "destination.set_midi_mix"
+        && !["volume", "pan", "mute"]
+            .iter()
+            .any(|k| out.iter().any(|(n, _)| n == k))
+    {
+        return Err(p.error("give at least one of `volume`, `pan` and `mute`"));
     }
     for d in spec.dialogs.iter().filter(|d| d.always) {
         if !d.answered_by.iter().any(|a| p.has(a)) {
@@ -1817,6 +1950,9 @@ fn kind_json(k: ParamKind) -> Value {
         ParamKind::Flag => json!({"type": "bool"}),
         ParamKind::Choice(values) => json!({"type": "choice", "values": values}),
         ParamKind::Int { min, max } => json!({"type": "int", "min": min, "max": max}),
+        ParamKind::IntOrNull { min, max } => {
+            json!({"type": "int_or_null", "min": min, "max": max})
+        }
         ParamKind::File => json!({"type": "path"}),
         ParamKind::ChoiceOrPrefixed { values, prefix } => {
             json!({"type": "choice", "values": values, "or_prefixed": prefix})

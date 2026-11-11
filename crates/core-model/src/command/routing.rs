@@ -3,7 +3,9 @@
 //! given.
 
 use super::{Report, strips};
-use crate::document::{DestKind, Destination, Document, MAX_RETURN_LATENCY_MS, OutputPath, Patch};
+use crate::document::{
+    DestKind, Destination, Document, MAX_RETURN_LATENCY_MS, MidiMix, OutputPath, Patch,
+};
 use crate::error::{ModelError, Result};
 use crate::ids::{AnyId, DestId, LaneId, OutputPathId, SeqId};
 use crate::lane::LaneInput;
@@ -73,12 +75,27 @@ pub enum RoutingCmd {
         /// Replacement (required when in use).
         replacement: Option<OutputPathId>,
     },
+    /// Set a destination's MPE output (plan 5g-2), checked by
+    /// [`crate::mpe::MpeConfig::check`].
+    SetMpe {
+        /// Target.
+        dest: DestId,
+        /// The zone, or none for off.
+        mpe: Option<crate::mpe::MpeConfig>,
+    },
     /// Set an external destination's return latency (spec §4.5a).
     SetReturnLatency {
         /// Target (an external MIDI destination).
         dest: DestId,
         /// Milliseconds, 0–[`MAX_RETURN_LATENCY_MS`].
         ms: f32,
+    },
+    /// Set an external destination's MIDI mix (plan 5g-1b; spec §6.8a).
+    SetMidiMix {
+        /// Target (an external MIDI destination).
+        dest: DestId,
+        /// The mix; volume and pan each 0–127.
+        mix: MidiMix,
     },
 }
 
@@ -95,6 +112,8 @@ impl RoutingCmd {
             RoutingCmd::EditOutput { .. } => "Edit Output",
             RoutingCmd::RemoveOutput { .. } => "Remove Output",
             RoutingCmd::SetReturnLatency { .. } => "Set Return Latency",
+            RoutingCmd::SetMpe { .. } => "Set Destination MPE",
+            RoutingCmd::SetMidiMix { .. } => "Set MIDI Mix",
         }
     }
 }
@@ -272,6 +291,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                     kind,
                     default_patch: *default_patch,
                     return_latency_ms: 0.0,
+                    midi_mix: MidiMix::default(),
+                    mpe: None,
                 },
             );
             if plugin {
@@ -419,6 +440,15 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             r.removed.push(AnyId::Output(*output));
             strips::remove_kind(d, StripKind::AudioPath(*output), r);
         }
+        RoutingCmd::SetMpe { dest, mpe } => {
+            if let Some(m) = mpe {
+                m.check()?;
+            }
+            d.instruments_mut()
+                .get_mut(dest)
+                .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?
+                .mpe = *mpe;
+        }
         RoutingCmd::SetReturnLatency { dest, ms } => {
             check_external(d, *dest)?;
             if !ms.is_finite() || !(0.0..=MAX_RETURN_LATENCY_MS).contains(ms) {
@@ -428,6 +458,19 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                 .get_mut(dest)
                 .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?
                 .return_latency_ms = *ms;
+        }
+        RoutingCmd::SetMidiMix { dest, mix } => {
+            check_external(d, *dest)?;
+            if let Some(v) = mix.volume.filter(|v| *v > 127) {
+                return Err(ModelError::range("midi_volume", v));
+            }
+            if let Some(p) = mix.pan.filter(|p| *p > 127) {
+                return Err(ModelError::range("midi_pan", p));
+            }
+            d.instruments_mut()
+                .get_mut(dest)
+                .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?
+                .midi_mix = *mix;
         }
     }
     Ok(())

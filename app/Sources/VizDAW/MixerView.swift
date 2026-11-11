@@ -112,9 +112,11 @@ struct MixerView: View {
             let height = max(g.size.height - 2 * theme.spacing.s, 0)
             ScrollView([.horizontal, .vertical]) {
                 // One grid, so the strips share their rows (fix round 1).
+                // MIDI strips between the strips and the buses (Ruling 7).
+                let columns = model.columns
                 ChannelStrips(
-                    model: model, strips: model.strips + (model.master.map { [$0] } ?? []),
-                    dividerBefore: model.master == nil ? nil : model.strips.count, height: height)
+                    model: model, columns: columns + (model.master.map { [.audio($0)] } ?? []),
+                    dividerBefore: model.master == nil ? nil : columns.count, height: height)
                 .padding(theme.spacing.s)
                 .frame(minWidth: g.size.width, minHeight: g.size.height, alignment: .topLeading)
             }
@@ -384,6 +386,23 @@ struct LearnItem: View {
     }
 }
 
+/// The MIDI FX section's effect menu (plan 5g-1 Task 9): one item per
+/// input effect, each adding its default to the open track's chain. An
+/// `NSMenu` popped up by code, not a SwiftUI `Menu` (which opens on the
+/// press, before the channel rule can be applied).
+@MainActor enum MidiFxMenu {
+    static func popUp(_ fx: InputFxModel) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for name in InputFxName.allCases {
+            menu.addItem(
+                InstrumentMenuAction { [fx] in fx.add(name) }
+                    .item(InputFxModel.title(InputFxModel.defaultKind(name)), checked: false))
+        }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+}
+
 /// The instrument row of a built-in synth strip: "Built-in Synth" where a
 /// plugin's slot would be; a click opens the instrument menu (the synth
 /// has no editor window yet).
@@ -417,7 +436,7 @@ struct BuiltinSynthSlotView: View {
 
 /// A menu item that runs a closure; the item keeps it alive.
 @MainActor
-private final class InstrumentMenuAction: NSObject {
+final class InstrumentMenuAction: NSObject {
     let run: @MainActor () -> Void
 
     init(_ run: @escaping @MainActor () -> Void) { self.run = run }

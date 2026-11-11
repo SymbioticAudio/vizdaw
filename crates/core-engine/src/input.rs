@@ -115,19 +115,6 @@ pub(crate) fn midi_queue() -> (MidiSender, Consumer<MidiIn>) {
     )
 }
 
-/// A lane's MIDI input effect chain (spec §6.8, D26h). Plan 5g fills it
-/// with the built-in effects; until then it passes every message through
-/// unchanged, so thru and record hear the input as played.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InputChain;
-
-impl InputChain {
-    /// Runs `msg` through the chain, handing every output to `out`. // RT
-    pub fn process(&mut self, msg: Midi1Msg, out: &mut impl FnMut(Midi1Msg)) {
-        out(msg);
-    }
-}
-
 /// What a MIDI lane listens to, before targets are resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidiInputSpec {
@@ -146,6 +133,11 @@ pub struct MidiInputSpec {
     pub thru: bool,
     /// The lane is armed: it records while a tap rolls.
     pub armed: bool,
+    /// The lane's input effect chain (spec §6.8; plan 5g-1).
+    pub fx: Vec<core_model::input_fx::InputFx>,
+    /// The lane's MPE input (plan 5g-2): its zone's channels are decoded
+    /// into per-note messages before the chain, and `channel` is ignored.
+    pub mpe: Option<core_model::mpe::MpeConfig>,
 }
 
 /// One audio lane's monitoring (spec §6.6).
@@ -196,17 +188,63 @@ pub struct MidiRoute {
     /// The targets thru plays on (two for a built-in synth routed both
     /// ways).
     pub targets: [Option<TargetIdx>; 2],
-    /// The channel thru plays on (the destination's).
+    /// The channel thru plays on: the destination's, or its MPE zone's
+    /// manager channel (plan 5g-2 P1).
     pub dest_channel: u8,
-    /// The lane's input chain.
-    pub chain: InputChain,
+    /// The destination is a muted external one: thru drops its note-ons
+    /// and note-offs (plan 5g-1b); recording is unaffected.
+    pub mute_notes: bool,
+    /// The lane's input chain (plan 5g-1).
+    pub chain: crate::input_fx::InputChain,
+    /// The lane's MPE decoder (plan 5g-2), from `spec.mpe`.
+    pub decoder: Option<crate::mpe::MpeDecoder>,
+    /// The destination's MPE output (plan 5g-2): thru goes through the
+    /// route's encoder in [`InputRoutes::encoders`].
+    pub mpe_out: Option<core_model::mpe::MpeConfig>,
 }
 
 impl MidiRoute {
-    /// Whether `ev` is for this lane. // RT
+    /// Whether `ev` is for this lane: with MPE input, a channel of the
+    /// decoder's zone (the lane's channel is ignored; plan 5g-2 Ruling 2).
+    /// // RT
     pub fn matches(&self, ev: &MidiIn) -> bool {
         let ch = ev.msg.bytes[0] & 0x0F;
-        self.spec.port.is_none_or(|p| p == ev.port) && self.spec.channel.is_none_or(|c| c == ch)
+        self.spec.port.is_none_or(|p| p == ev.port)
+            && match &self.decoder {
+                Some(d) => d.accepts(ch),
+                None => self.spec.channel.is_none_or(|c| c == ch),
+            }
+    }
+
+    /// Whether this new route takes over `old`'s chain state (plan 5g-1
+    /// Ruling 5): the same lane, source, channel, destination, thru,
+    /// mute, targets, chain and MPE output; the arm may differ. With MPE
+    /// input on both, the new setting must be the old decoder's live one
+    /// (an MCM's write-back carries; plan 5g-2 Ruling 4) or its stored one
+    /// unchanged (a reload before the write-back keeps the MCM's live
+    /// setting; final review m1); a new route
+    /// without MPE input and with every channel carries an old one an
+    /// MCM turned off (which takes every channel too), so a narrower
+    /// filter flushes instead of leaving notes it no longer hears. // RT
+    pub fn carries(&self, old: &MidiRoute) -> bool {
+        let decoders = match (&self.decoder, &old.decoder) {
+            (Some(n), Some(o)) => o.config() == Some(n.initial()) || o.initial() == n.initial(),
+            (None, Some(o)) => o.config().is_none() && self.spec.channel.is_none(),
+            (Some(_), None) => false,
+            (None, None) => true,
+        };
+        let (a, b) = (&self.spec, &old.spec);
+        a.lane == b.lane
+            && a.port == b.port
+            && a.channel == b.channel
+            && a.dest == b.dest
+            && a.thru == b.thru
+            && self.targets == old.targets
+            && self.dest_channel == old.dest_channel
+            && self.mute_notes == old.mute_notes
+            && self.chain == old.chain
+            && self.mpe_out == old.mpe_out
+            && decoders
     }
 }
 
@@ -215,6 +253,10 @@ impl MidiRoute {
 pub struct InputRoutes {
     /// MIDI lanes.
     pub midi: Box<[MidiRoute]>,
+    /// Per `midi` route, its MPE output's encoder (plan 5g-2 P6): built
+    /// on the control thread at each load, moved into the next routes when
+    /// the route is carried.
+    pub encoders: Box<[Option<crate::mpe::MpeEncoder>]>,
     /// Monitored audio lanes.
     pub monitor: Box<[MonitorRoute]>,
 }
