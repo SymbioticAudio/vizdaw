@@ -2,21 +2,20 @@
 //! sort.
 
 use super::automation::{AutoDest, Automation, MAX_AUTO_LANES};
+use super::mpe::{Collect, MpeItem, MpeNotes, encode};
 use super::targets::{BuiltinRoute, TargetIdx, TargetKind, kinds_for};
 use super::tempo::TempoTable;
 use super::{ChaseIndex, Entry, MAX_TARGETS, Schedule, WireMsg};
 use crate::backend::MidiPortInfo;
 use crate::error::EngineError;
-use crate::input_fx::{Expr, LiveMsg, NoteExpr};
 use crate::midi1::{Class, Midi1Msg, When, translate};
-use crate::mpe::{MpeEncoder, configuration};
+use crate::mpe::configuration;
 use core_model::automation::{
     AutomationMode, AutomationTarget, strip_of, target_exists, velocity_scale_percent,
 };
 use core_model::document::{DestKind, Document, SlotOwner};
-use core_model::event::{EventBody, PerNoteKind};
+use core_model::event::EventBody;
 use core_model::ids::{DestId, MediaId, PluginInstanceId, SeqId};
-use core_model::mpe::MpeConfig;
 use core_model::query::{PathStep, flatten, seq_length};
 use core_model::selection::ViewFilter;
 use core_model::time::Tick;
@@ -120,47 +119,12 @@ type Routes = Result<Vec<TargetIdx>, String>;
 pub type Resolver<'a> =
     dyn FnMut(&TargetKind) -> Result<Result<TargetIdx, String>, EngineError> + 'a;
 
-struct Pending {
-    frame: u64,
-    class: Class,
-    group: u8,
-    order: u64,
-    entry: Entry,
-}
-
-/// One collected event of an MPE destination, encoded after the main loop
-/// (plan 5g-2 Ruling 10).
-struct MpeItem {
-    frame: u64,
-    class: Class,
-    order: u64,
-    msg: LiveMsg,
-}
-
-/// An MPE destination's notes by `(destination, pitch)`, as `(start, end)`
-/// ticks, and the poly pressure at each note's start, which becomes that
-/// note's starting pressure (Ruling 10).
-#[derive(Default)]
-struct MpeNotes {
-    spans: BTreeMap<(DestId, u8), Vec<(Tick, Tick)>>,
-    start_pressure: BTreeMap<(DestId, u8, Tick), u32>,
-}
-
-impl MpeNotes {
-    fn starts_at(&self, dest: DestId, pitch: u8, tick: Tick) -> bool {
-        self.spans
-            .get(&(dest, pitch))
-            .is_some_and(|v| v.iter().any(|&(s, _)| s == tick))
-    }
-
-    /// The start of a note of `pitch` sounding at `tick` (after its start).
-    fn inside(&self, dest: DestId, pitch: u8, tick: Tick) -> Option<Tick> {
-        self.spans
-            .get(&(dest, pitch))?
-            .iter()
-            .find(|&&(s, e)| s < tick && tick < e)
-            .map(|&(s, _)| s)
-    }
+pub(super) struct Pending {
+    pub(super) frame: u64,
+    pub(super) class: Class,
+    pub(super) group: u8,
+    pub(super) order: u64,
+    pub(super) entry: Entry,
 }
 
 /// Compiles sequence `seq` of `doc` into a schedule.
@@ -261,27 +225,7 @@ pub fn compile(
     // MPE destinations (Ruling 10): where their notes are, so poly
     // pressure inside a note becomes per-note pressure.
     let mpe_of = |dest: DestId| doc.instruments().get(&dest).and_then(|d| d.mpe);
-    let mut mpe_notes = MpeNotes::default();
-    for r in &flat {
-        let Some(dest) = r.dest.filter(|d| mpe_of(*d).is_some()) else {
-            continue;
-        };
-        match &r.body {
-            EventBody::Note {
-                pitch, duration, ..
-            } => mpe_notes
-                .spans
-                .entry((dest, pitch & 0x7F))
-                .or_default()
-                .push((r.tick, r.tick + *duration)),
-            EventBody::PolyPressure { pitch, value } => {
-                mpe_notes
-                    .start_pressure
-                    .insert((dest, pitch & 0x7F, r.tick), *value);
-            }
-            _ => {}
-        }
-    }
+    let mpe_notes = MpeNotes::scan(&flat, |d| mpe_of(d).is_some());
     let mut mpe_events: BTreeMap<DestId, Vec<MpeItem>> = BTreeMap::new();
 
     for r in flat {
@@ -438,51 +382,19 @@ pub fn compile(
 
     // Each MPE destination's events through one encoder (Ruling 10), onto
     // its targets in the encoder's order.
-    for (dest, mut items) in mpe_events {
+    for (dest, items) in mpe_events {
         let (Some(cfg), Some(Ok(targets))) = (mpe_of(dest), routes.get(&dest)) else {
             continue;
         };
-        items.sort_by_key(|i| (i.frame, i.class, i.order));
-        let mut enc = MpeEncoder::new(cfg);
-        let mut out: Vec<Midi1Msg> = Vec::new();
-        for item in items {
-            out.clear();
-            enc.encode(item.msg, &mut |m| out.push(m));
-            for m in &out {
-                // Channel messages keep their class (bank select sorts
-                // with its program change); the encoder's own output
-                // sorts by its status.
-                let class = match item.msg {
-                    LiveMsg::Channel(_) => item.class,
-                    _ => Class::of(m.bytes[0]),
-                };
-                for target in targets {
-                    pending.push(Pending {
-                        frame: item.frame,
-                        class,
-                        group: 1,
-                        order,
-                        entry: Entry {
-                            frame: item.frame,
-                            target: *target,
-                            msg: WireMsg::Midi1(*m),
-                        },
-                    });
-                    order += 1;
-                }
-            }
-        }
-        report.mpe_stolen = report
-            .mpe_stolen
-            .saturating_add(usize::try_from(enc.take_stolen()).unwrap_or(usize::MAX));
-        // The zone's channels are in use: controller resets cover them.
-        let channels =
-            std::iter::once(cfg.manager()).chain((0..cfg.members).filter_map(|k| cfg.member(k)));
-        for ch in channels {
-            for target in targets {
-                mark(&mut used_channels, *target, ch);
-            }
-        }
+        let stolen = encode(
+            cfg,
+            items,
+            targets,
+            &mut pending,
+            &mut order,
+            &mut used_channels,
+        );
+        report.mpe_stolen = report.mpe_stolen.saturating_add(stolen);
     }
 
     // At frame 0, before every event on that frame of the same class: an
@@ -621,152 +533,6 @@ fn scale_velocity(body: &EventBody, points: &[(Tick, f64)], tick: Tick) -> Optio
     Some(b)
 }
 
-/// Collects one event of an MPE destination (Ruling 10) as [`MpeItem`]s,
-/// applying its mute (P2): notes and per-note messages of a muted
-/// destination are silenced; channel messages still play.
-struct Collect<'a, F: Fn(Tick) -> u64> {
-    dest: DestId,
-    cfg: MpeConfig,
-    muted: bool,
-    tick: Tick,
-    frame: &'a F,
-    notes: &'a MpeNotes,
-    items: &'a mut Vec<MpeItem>,
-    order: &'a mut u64,
-    report: &'a mut CompileReport,
-    played: bool,
-    silenced: bool,
-}
-
-impl<F: Fn(Tick) -> u64> Collect<'_, F> {
-    fn push(&mut self, frame: u64, class: Class, msg: LiveMsg) {
-        if self.muted && !matches!(msg, LiveMsg::Channel(_)) {
-            self.silenced = true;
-            return;
-        }
-        self.items.push(MpeItem {
-            frame,
-            class,
-            order: *self.order,
-            msg,
-        });
-        *self.order += 1;
-        self.played = true;
-    }
-
-    /// A per-note message at `tick` of a note that starts at frame `on`:
-    /// one landing on the note-on's frame sorts after it.
-    fn per_note(&mut self, tick: Tick, on: u64, pitch: u8, expr: Expr, value: u32) {
-        let f = (self.frame)(tick);
-        let class = if f <= on {
-            Class::NoteOn
-        } else {
-            Class::Control
-        };
-        self.push(f.max(on), class, LiveMsg::PerNote { pitch, expr, value });
-    }
-
-    fn collect(&mut self, body: &EventBody) {
-        let on = (self.frame)(self.tick);
-        match body {
-            EventBody::Note {
-                pitch,
-                velocity,
-                release_velocity,
-                duration,
-                attribute,
-                per_note,
-            } => {
-                let pitch = pitch & 0x7F;
-                let end = self.tick + *duration;
-                // A note-off never sorts at or before its note-on (O20).
-                let off = (self.frame)(end).max(on.saturating_add(1));
-                self.report.dropped_note_attributes += usize::from(attribute.is_some());
-                let mut expr = NoteExpr::default();
-                if let Some(p) = self
-                    .notes
-                    .start_pressure
-                    .get(&(self.dest, pitch, self.tick))
-                {
-                    expr.pressure = *p;
-                }
-                let mut later: Vec<(Tick, Expr, u32)> = Vec::new();
-                for pn in per_note {
-                    let kind = match pn.kind {
-                        PerNoteKind::PitchBend => Expr::Bend,
-                        PerNoteKind::Registered(74) => Expr::Timbre,
-                        _ => {
-                            self.report.dropped_per_note += 1;
-                            continue;
-                        }
-                    };
-                    if pn.offset == Tick::ZERO {
-                        match kind {
-                            Expr::Bend => expr.bend = pn.value,
-                            _ => expr.timbre = pn.value,
-                        }
-                    } else if pn.offset > Tick::ZERO && pn.offset < *duration {
-                        later.push((self.tick + pn.offset, kind, pn.value));
-                    } else {
-                        self.report.dropped_per_note += 1;
-                    }
-                }
-                self.push(
-                    on,
-                    Class::NoteOn,
-                    LiveMsg::NoteOn {
-                        pitch,
-                        velocity: (*velocity).max(1),
-                        expr,
-                    },
-                );
-                for (t, kind, value) in later {
-                    self.per_note(t, on, pitch, kind, value);
-                }
-                self.push(
-                    off,
-                    Class::NoteOff,
-                    LiveMsg::NoteOff {
-                        pitch,
-                        velocity: *release_velocity,
-                    },
-                );
-            }
-            EventBody::PolyPressure { pitch, .. }
-                if self.notes.starts_at(self.dest, pitch & 0x7F, self.tick) =>
-            {
-                // The note's starting pressure, sent with the note.
-                if self.muted {
-                    self.silenced = true;
-                } else {
-                    self.played = true;
-                }
-            }
-            EventBody::PolyPressure { pitch, value } => {
-                let pitch = pitch & 0x7F;
-                match self.notes.inside(self.dest, pitch, self.tick) {
-                    Some(start) => {
-                        let start = (self.frame)(start);
-                        self.per_note(self.tick, start, pitch, Expr::Pressure, *value);
-                    }
-                    None => self.channel(body, on),
-                }
-            }
-            _ => self.channel(body, on),
-        }
-    }
-
-    /// Any other event, translated onto the manager channel. SysEx is
-    /// scheduled by the caller.
-    fn channel(&mut self, body: &EventBody, on: u64) {
-        let t = translate(body, self.cfg.manager());
-        self.report.dropped_sysex8 += usize::from(t.drops.sysex8);
-        for o in t.msgs() {
-            self.push(on, o.class, LiveMsg::Channel(o.msg));
-        }
-    }
-}
-
 /// Stores `data` in the arena and schedules it at `frame` on `targets`.
 fn push_sysex(
     pending: &mut Vec<Pending>,
@@ -802,7 +568,7 @@ fn is_note(msg: &Midi1Msg) -> bool {
     matches!(msg.bytes[0] & 0xF0, 0x80 | 0x90)
 }
 
-fn mark(used: &mut [u16; MAX_TARGETS], target: TargetIdx, channel: u8) {
+pub(super) fn mark(used: &mut [u16; MAX_TARGETS], target: TargetIdx, channel: u8) {
     if let Some(m) = used.get_mut(usize::from(target.0)) {
         *m |= 1 << (channel & 0x0F);
     }

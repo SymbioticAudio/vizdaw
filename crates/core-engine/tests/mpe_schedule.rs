@@ -470,3 +470,164 @@ fn a_mid_song_play_sends_the_mpe_configuration() {
     assert_eq!(count(&from_start, &[0xB0, 100, 6]), 1, "{from_start:?}");
     assert_eq!(count(&from_start, &[0xB0, 6, 15]), 1, "{from_start:?}");
 }
+
+#[test]
+fn a_plugin_mpe_destination_gets_its_configuration_and_patch_on_the_manager_channel() {
+    let mut b = Builder::new();
+    let patch = Patch {
+        program: 5,
+        bank: Some((1, 2)),
+    };
+    let d = b
+        .dest_kind("Synth", DestKind::plugin("synth"), Some(patch))
+        .unwrap();
+    b.run(Command::Routing(RoutingCmd::SetMpe {
+        dest: d,
+        mpe: Some(UPPER3),
+    }))
+    .unwrap();
+    let (seq, lane) = b.sequence("S", "L", Some(d)).unwrap();
+    b.run(Command::Event(EventCmd::Insert {
+        seq,
+        lane,
+        events: vec![note(0, 60, Q, vec![])],
+    }))
+    .unwrap();
+    let (s, _) = compile_all(&b.finish(), seq);
+    let got = entries(&s);
+    let mut want: Vec<(u64, Vec<u8>)> =
+        upper3_configuration().into_iter().map(|b| (0, b)).collect();
+    want.extend([
+        (0, vec![0xBF, 0, 1]),
+        (0, vec![0xBF, 32, 2]),
+        (0, vec![0xCF, 5]),
+        (0, vec![0xEE, 0x00, 0x40]),
+        (0, vec![0xBE, 74, 0x40]),
+        (0, vec![0xDE, 0x00]),
+        (0, vec![0x9E, 60, 100]),
+        (24_000, vec![0x8E, 60, 0]),
+    ]);
+    assert_eq!(
+        got, want,
+        "configuration, then patch, no mix: a plugin is not external"
+    );
+}
+
+/// An MPE part on the built-in synth (Lower zone of 15) with a note at
+/// `Q` held to `5 * Q`, started; returns the engine, backend and log.
+fn held_part() -> (
+    Engine,
+    OfflineBackend,
+    core_engine::offline::EventLog,
+    core_model::document::Document,
+    SeqId,
+) {
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("Bar", "Keys", Some(synth)).unwrap();
+    b.run(Command::Routing(RoutingCmd::SetMpe {
+        dest: synth,
+        mpe: Some(MpeConfig::default()),
+    }))
+    .unwrap();
+    let events = vec![note(Q, 60, 4 * Q, vec![]), note(8 * Q, 64, Q, vec![])];
+    b.run(Command::Event(EventCmd::Insert {
+        seq,
+        lane: keys,
+        events,
+    }))
+    .unwrap();
+    let doc = b.finish();
+    let sinks = OfflineSinks::new(100_000);
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(EngineConfig::new(SR), Box::new(sinks)).unwrap();
+    engine.load(&doc, seq).unwrap();
+    let mut be = OfflineBackend::new(SR, 256);
+    be.start(renderer).unwrap();
+    (engine, be, log, doc, seq)
+}
+
+/// Per member channel 1-15, note-ons minus note-offs: 0 when nothing hangs.
+fn sounding(got: &[(u64, Vec<u8>)]) -> i64 {
+    got.iter()
+        .filter(|(_, b)| (1..16).contains(&(b[0] & 0x0F)))
+        .map(|(_, b)| match b[0] & 0xF0 {
+            0x90 => 1,
+            0x80 => -1,
+            _ => 0,
+        })
+        .sum()
+}
+
+#[test]
+fn a_wrap_to_a_loop_start_past_0_resends_the_configuration_and_releases_member_notes() {
+    let (mut engine, mut be, log, _, _) = held_part();
+    engine.set_loop_range(Some((24_000, 72_000))).unwrap();
+    engine.play().unwrap();
+    be.run_frames(72_000 + 24_000);
+    let got: Log = log
+        .drain()
+        .into_iter()
+        .map(|r| (r.frame, r.bytes().to_vec()))
+        .collect();
+    assert_eq!(
+        count(&got, &[0xB0, 100, 6]),
+        2,
+        "frame 0, then the wrap: {got:?}"
+    );
+    let wrap: Vec<&Vec<u8>> = got
+        .iter()
+        .filter(|(f, _)| *f == 72_000)
+        .map(|(_, b)| b)
+        .collect();
+    let off = wrap
+        .iter()
+        .position(|b| **b == [0x81, 60, 0])
+        .expect("the held note ends at the wrap");
+    let mcm = wrap
+        .iter()
+        .position(|b| **b == [0xB0, 100, 6])
+        .expect("the configuration at the wrap");
+    let on = wrap
+        .iter()
+        .position(|b| b[0] == 0x91 || b[0] == 0x92)
+        .expect("the note restarts");
+    assert!(off < mcm && mcm < on, "{wrap:?}");
+    engine.stop().unwrap();
+    be.run_frames(1024);
+    let got: Log = got
+        .into_iter()
+        .chain(
+            log.drain()
+                .into_iter()
+                .map(|r| (r.frame, r.bytes().to_vec())),
+        )
+        .collect();
+    assert_eq!(sounding(&got), 0, "nothing hangs: {got:?}");
+}
+
+#[test]
+fn a_mid_play_swap_resends_the_configuration_and_releases_member_notes() {
+    let (mut engine, mut be, log, doc, seq) = held_part();
+    engine.play().unwrap();
+    be.run_frames(48_000);
+    engine.load(&doc, seq).unwrap();
+    be.run_frames(24_000);
+    let got: Log = log
+        .drain()
+        .into_iter()
+        .map(|r| (r.frame, r.bytes().to_vec()))
+        .collect();
+    assert_eq!(
+        count(&got, &[0xB0, 100, 6]),
+        2,
+        "frame 0, then the swap: {got:?}"
+    );
+    let mcm2 = got.iter().rposition(|(_, b)| *b == [0xB0, 100, 6]).unwrap();
+    let off = got
+        .iter()
+        .position(|(_, b)| *b == [0x81, 60, 0])
+        .expect("the held note ends at the swap");
+    assert!(off < mcm2, "{got:?}");
+    assert_eq!(sounding(&got), 0, "nothing hangs: {got:?}");
+}

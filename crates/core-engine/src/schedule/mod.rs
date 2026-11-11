@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod automation;
 pub mod compile;
+mod mpe;
 pub mod targets;
 pub mod tempo;
 
