@@ -2,7 +2,7 @@ import Foundation
 import VizDAWCore
 
 /// `lane.set_mpe` and `destination.set_mpe` (plan 5g-2 Task 7): a track's
-/// MPE input or an external destination's MPE output, as one zone.
+/// MPE input or a destination's MPE output, as one zone.
 ///
 /// Errors: ids that are not ids, a missing or unknown `zone`, `members`
 /// outside 1 to 15, `bend_range` outside 1 to 96, or either given with
@@ -43,7 +43,7 @@ public enum MpeCommands {
         let usage: String
         switch id {
         case setLane: usage = "lane.set_mpe: `seq` and `lane` name the track"
-        case setDestination: usage = "destination.set_mpe: `dest` names an external MIDI destination"
+        case setDestination: usage = "destination.set_mpe: `dest` names a destination"
         default: return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }
         let tail = "; `zone` is off, lower or upper, `members` 1 to 15 and `bend_range` 1 to 96 (neither with off)"

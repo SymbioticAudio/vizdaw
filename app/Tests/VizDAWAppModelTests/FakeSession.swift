@@ -823,6 +823,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         edits.append(cmd)
         editFilters.append(filter)
         calls.append("edit")
+        if case .lane(.setMpe(let seq, let lane, let mpe)) = cmd,
+            let i = laneTable[seq]?.firstIndex(where: { $0.id == lane })
+        {
+            laneTable[seq]?[i].mpe = mpe
+        }
         return commandResult()
     }
 

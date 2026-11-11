@@ -668,7 +668,7 @@ const SET_MPE_PARAMS: &[ParamSpec] = &[
 
 /// `destination.set_mpe`.
 const DEST_MPE_PARAMS: &[ParamSpec] = &[
-    id_param("dest", "The external MIDI destination."),
+    id_param("dest", "The destination (an external MIDI endpoint or a plugin instrument)."),
     MPE_ZONE_PARAM,
     MPE_MEMBERS_PARAM,
     MPE_BEND_PARAM,

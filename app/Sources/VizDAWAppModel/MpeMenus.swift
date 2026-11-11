@@ -3,9 +3,13 @@ import VizDAWCore
 
 /// One entry of an MPE menu section; `mpe` nil is Off.
 public struct MpeChoice: Equatable, Sendable {
+    /// What a choice changes; the rest of the setting stays as it is when
+    /// the choice is made.
+    public enum Part: Equatable, Sendable { case zone, members, bendRange }
     public let title: String
     public let mpe: MpeRow?
     public let checked: Bool
+    public var part: Part = .zone
 }
 
 /// A titled section of the track header's MPE menus.
@@ -47,25 +51,45 @@ public enum MpeMenus {
             out.append(MpeSection(title: "Member Channels", choices: (1...15).map { n in
                 MpeChoice(
                     title: "\(n)", mpe: MpeRow(zone: current.zone, members: UInt8(n), bendRange: current.bendRange),
-                    checked: current.members == UInt8(n))
+                    checked: current.members == UInt8(n), part: .members)
             }))
             out.append(MpeSection(title: "Pitch Bend Range", choices: bendRanges.map { r in
                 MpeChoice(
                     title: "\(r)", mpe: MpeRow(zone: current.zone, members: current.members, bendRange: r),
-                    checked: current.bendRange == r)
+                    checked: current.bendRange == r, part: .bendRange)
             }))
         }
         return out
     }
 
-    /// Sets the track's MPE input (one undo step).
-    public static func chooseInput(_ c: MpeChoice, lane: LaneRow, _ m: DocumentModel) {
-        guard let seq = m.selectedSeq, c.mpe != lane.mpe else { return }
-        m.editor.edit(.lane(edit: .setMpe(seq: seq, lane: lane.id, mpe: c.mpe)))
+    /// The setting `c` asks for on top of `current` (as it is now, not as
+    /// the menu was built): nil when there is nothing to change.
+    private static func resolved(_ c: MpeChoice, over current: MpeRow?) -> MpeRow?? {
+        let next: MpeRow?
+        switch (c.part, c.mpe, current) {
+        case (_, nil, _): next = nil
+        case (.zone, let new?, let cur?): next = MpeRow(zone: new.zone, members: cur.members, bendRange: cur.bendRange)
+        case (.zone, let new?, nil): next = new
+        case (.members, let new?, let cur?): next = MpeRow(zone: cur.zone, members: new.members, bendRange: cur.bendRange)
+        case (.bendRange, let new?, let cur?): next = MpeRow(zone: cur.zone, members: cur.members, bendRange: new.bendRange)
+        case (.members, _, nil), (.bendRange, _, nil): return nil
+        }
+        return next == current ? nil : .some(next)
     }
 
-    /// Sets destination `dest`'s MPE output (one undo step).
+    /// Sets the track's MPE input (one undo step), from the track's setting
+    /// now; `seq` is the sequence the menu was built for.
+    public static func chooseInput(_ c: MpeChoice, seq: UInt64, lane: UInt64, _ m: DocumentModel) {
+        guard let row = m.lanes.first(where: { $0.id == lane }), let next = resolved(c, over: row.mpe) else { return }
+        m.editor.edit(.lane(edit: .setMpe(seq: seq, lane: lane, mpe: next)))
+    }
+
+    /// Sets destination `dest`'s MPE output (one undo step), from its
+    /// setting now.
     public static func chooseOutput(_ c: MpeChoice, dest: UInt64, _ m: DocumentModel) {
-        m.editor.change { try m.session.setDestinationMpe(dest: dest, mpe: c.mpe) }
+        guard let row = (try? m.session.destinations())?.first(where: { $0.id == dest }),
+            let next = resolved(c, over: row.mpe)
+        else { return }
+        m.editor.change { try m.session.setDestinationMpe(dest: dest, mpe: next) }
     }
 }

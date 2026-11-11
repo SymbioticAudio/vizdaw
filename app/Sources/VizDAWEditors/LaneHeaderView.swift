@@ -495,7 +495,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             }
         }
         addMpe(MpeMenus.input(lane), to: menu) { [document] c in
-            MpeMenus.chooseInput(c, lane: lane, document)
+            MpeMenus.chooseInput(c, seq: seq, lane: lane.id, document)
         }
         return menu
     }
