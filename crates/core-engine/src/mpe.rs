@@ -5,7 +5,7 @@
 
 use crate::input_fx::{CENTER, Expr, LiveMsg, NoteExpr, up7, up32};
 use crate::midi1::{Midi1Msg, note_on_velocity, release_velocity, value7};
-use core_model::mpe::{MAX_BEND_RANGE, MAX_MEMBERS, MpeConfig};
+use core_model::mpe::{DEFAULT_BEND_RANGE, MAX_BEND_RANGE, MAX_MEMBERS, MpeConfig};
 
 /// Semitones of VizDAW's full-scale per-note pitch bend (Ruling 5).
 const SCALE_SEMITONES: i64 = 48;
@@ -142,11 +142,24 @@ impl MpeDecoder {
 
     /// Decodes one channel message. // RT
     pub fn decode(&mut self, msg: Midi1Msg, out: &mut dyn FnMut(LiveMsg)) {
+        let [status, d1, d2] = msg.bytes;
         let Some(cfg) = self.live else {
+            // Off: plain MIDI, except an MCM on the zone's manager channel,
+            // which can turn the zone back on.
+            let (ch, d1) = (status & 0x0F, d1 & 0x7F);
+            let is_rpn = status & 0xF0 == 0xB0
+                && msg.len >= 3
+                && ch == self.initial.manager()
+                && matches!(d1, 101 | 100 | 99 | 98 | 6 | 38);
+            if is_rpn {
+                self.rpn_byte(ch, d1, d2 & 0x7F, self.initial, out);
+                if !matches!(d1, 99 | 98) {
+                    return;
+                }
+            }
             out(LiveMsg::from_midi1(msg));
             return;
         };
-        let [status, d1, d2] = msg.bytes;
         if !(0x80..0xF0).contains(&status) {
             out(LiveMsg::from_midi1(msg));
             return;
@@ -158,7 +171,7 @@ impl MpeDecoder {
         let (d1, d2) = (d1 & 0x7F, d2 & 0x7F);
         let kind = status & 0xF0;
         if kind == 0xB0 && msg.len >= 3 && matches!(d1, 101 | 100 | 99 | 98 | 6 | 38) {
-            self.rpn_byte(ch, d1, d2, cfg);
+            self.rpn_byte(ch, d1, d2, cfg, out);
             // The RPN bytes are consumed; an NRPN select passes as a channel message.
             if !matches!(d1, 99 | 98) {
                 return;
@@ -205,41 +218,66 @@ impl MpeDecoder {
     }
 
     /// RPN selection (CC 101/100; NRPN CC 99/98 deselects) and data entry
-    /// (CC 6) on channel `ch`.
-    fn rpn_byte(&mut self, ch: u8, cc: u8, v: u8, cfg: MpeConfig) {
+    /// (CC 6) on channel `ch`. `cfg` is the setting a change builds on.
+    fn rpn_byte(&mut self, ch: u8, cc: u8, v: u8, cfg: MpeConfig, out: &mut dyn FnMut(LiveMsg)) {
         let Some(chan) = self.chans.get_mut(usize::from(ch)) else {
             return;
         };
+        let rpn = chan.rpn;
         match cc {
             101 => chan.rpn.0 = v,
             100 => chan.rpn.1 = v,
             99 | 98 => chan.rpn = (127, 127),
-            6 => {
-                let mut next = cfg;
-                match chan.rpn {
-                    (0, 6) if ch == cfg.manager() => {
-                        if v == 0 {
-                            self.set_live(None);
-                            return;
-                        }
-                        next.members = v.min(MAX_MEMBERS);
-                    }
-                    (0, 0) if ch != cfg.manager() && v > 0 => {
-                        next.bend_range = v.min(MAX_BEND_RANGE);
-                    }
-                    _ => return,
+            6 => match rpn {
+                // An MCM also resets the members' bend range to the MPE default.
+                (0, 6) if ch == cfg.manager() => {
+                    let next = (v > 0).then_some(MpeConfig {
+                        members: v.min(MAX_MEMBERS),
+                        bend_range: DEFAULT_BEND_RANGE,
+                        ..cfg
+                    });
+                    self.set_live(next, out);
                 }
-                self.set_live(Some(next));
-            }
+                (0, 0) if ch != cfg.manager() && v > 0 => {
+                    let next = MpeConfig {
+                        bend_range: v.min(MAX_BEND_RANGE),
+                        ..cfg
+                    };
+                    self.set_live(Some(next), out);
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
 
-    fn set_live(&mut self, next: Option<MpeConfig>) {
-        if self.live != next {
-            self.live = next;
-            self.changed = true;
+    /// Applies a new setting. Channels that leave the zone end their notes
+    /// and forget their state.
+    fn set_live(&mut self, next: Option<MpeConfig>, out: &mut dyn FnMut(LiveMsg)) {
+        if self.live == next {
+            return;
         }
+        for ch in 0..16u8 {
+            let was = self.live.is_some_and(|c| c.is_member(ch));
+            let is = next.is_some_and(|c| c.is_member(ch));
+            if was && !is {
+                if let Some(chan) = self.chans.get_mut(usize::from(ch)) {
+                    end_all(chan.sounding, out);
+                    *chan = Chan::NEW;
+                }
+            }
+        }
+        self.live = next;
+        self.changed = true;
+    }
+}
+
+/// Ends every pitch in `sounding`. // RT
+fn end_all(mut sounding: u128, out: &mut dyn FnMut(LiveMsg)) {
+    while sounding != 0 {
+        let pitch = sounding.trailing_zeros() as u8;
+        sounding &= sounding - 1;
+        out(LiveMsg::NoteOff { pitch, velocity: 0 });
     }
 }
 
@@ -352,7 +390,7 @@ impl MpeEncoder {
     }
 
     fn next_stamp(&mut self) -> u64 {
-        self.stamp += 1;
+        self.stamp = self.stamp.saturating_add(1);
         self.stamp
     }
 
@@ -388,7 +426,7 @@ impl MpeEncoder {
         let (pitch, _) = self.slot(oldest).note?;
         out(Midi1Msg::three(0x80 | oldest, pitch, 0));
         self.free(pitch, oldest);
-        self.stolen += 1;
+        self.stolen = self.stolen.saturating_add(1);
         Some(oldest)
     }
 

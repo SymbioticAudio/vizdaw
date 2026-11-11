@@ -61,7 +61,7 @@ fn bends_scale_by_range_and_clamp_at_48() {
     assert_eq!(bend_out(CENTER, 2), 8192);
     assert_eq!(bend_out(0, 48), 0);
     assert_eq!(bend_out(u32::MAX, 24), 16383, "past the range clamps");
-    for range in [1u8, 2, 12, 24, 48] {
+    for range in 1u8..=48 {
         for v in (0..=16383u16).step_by(7).chain([16383]) {
             assert_eq!(
                 bend_out(bend_in(v, range), range),
@@ -411,4 +411,163 @@ fn the_oldest_note_is_stolen_and_counted() {
     e.flush(&mut |b| flushed.push(b.as_slice().to_vec()));
     assert_eq!(flushed.len(), 2);
     assert!(flushed.contains(&vec![0x81, 67, 0]) && flushed.contains(&vec![0x82, 64, 0]));
+}
+
+#[test]
+fn a_shrinking_mcm_ends_the_notes_it_drops() {
+    let mut d = MpeDecoder::new(lower(15));
+    decode(
+        &mut d,
+        &[
+            [0x99, 60, 100],
+            [0x92, 64, 100],
+            [0xE9, 0, 0x60],
+            [0xB9, 101, 0],
+        ],
+    );
+    let out = decode(&mut d, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 7]]);
+    assert_eq!(
+        out,
+        vec![LiveMsg::NoteOff {
+            pitch: 60,
+            velocity: 0
+        }],
+        "only channel 10 left the zone"
+    );
+    assert!(!d.accepts(9) && d.accepts(2));
+    // Its state is gone: after rejoining, the first note starts from defaults.
+    decode(&mut d, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 15]]);
+    assert_eq!(
+        decode(&mut d, &[[0x99, 62, 90]]),
+        vec![on(62, 90, CENTER, 0, CENTER)]
+    );
+    // Turning the zone off ends every member note too.
+    let out = decode(&mut d, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 0]]);
+    let mut pitches: Vec<u8> = out.iter().filter_map(|x| x.pitch()).collect();
+    pitches.sort();
+    assert_eq!(pitches, vec![62, 64]);
+    assert!(out.iter().all(|x| matches!(x, LiveMsg::NoteOff { .. })));
+}
+
+#[test]
+fn an_mcm_can_turn_the_zone_back_on() {
+    let mut d = MpeDecoder::new(MpeConfig {
+        zone: MpeZone::Lower,
+        members: 15,
+        bend_range: 24,
+    });
+    decode(&mut d, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 0]]);
+    assert_eq!(d.take_changed(), Some(None));
+    // Off: a manager-channel controller is plain MIDI, the RPN bytes are consumed.
+    assert_eq!(
+        decode(&mut d, &[[0xB0, 64, 127]]),
+        vec![LiveMsg::Channel(Midi1Msg::three(0xB0, 64, 127))]
+    );
+    assert!(decode(&mut d, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 4]]).is_empty());
+    assert_eq!(
+        d.config(),
+        Some(MpeConfig {
+            zone: MpeZone::Lower,
+            members: 4,
+            bend_range: 48
+        })
+    );
+    assert_eq!(d.take_changed(), Some(Some(d.config().unwrap())));
+    assert!(d.accepts(4) && !d.accepts(5));
+    // A controller on another channel while off is never an MCM.
+    let mut off = MpeDecoder::new(lower(15));
+    decode(&mut off, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 0]]);
+    assert_eq!(
+        decode(&mut off, &[[0xB5, 6, 3]]),
+        vec![LiveMsg::Channel(Midi1Msg::three(0xB5, 6, 3))]
+    );
+    assert_eq!(off.config(), None);
+}
+
+#[test]
+fn an_mcm_resets_the_member_bend_range_to_48() {
+    let mut d = MpeDecoder::new(MpeConfig {
+        zone: MpeZone::Lower,
+        members: 15,
+        bend_range: 24,
+    });
+    decode(&mut d, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 15]]);
+    assert_eq!(d.config().map(|c| c.bend_range), Some(48));
+    // A later RPN 0 sets it again.
+    decode(&mut d, &[[0xB1, 101, 0], [0xB1, 100, 0], [0xB1, 6, 12]]);
+    assert_eq!(d.config().map(|c| c.bend_range), Some(12));
+}
+
+#[test]
+fn the_upper_zone_decodes_on_channels_16_down() {
+    let up = MpeConfig {
+        zone: MpeZone::Upper,
+        members: 7,
+        bend_range: 48,
+    };
+    let mut d = MpeDecoder::new(up);
+    let out = decode(
+        &mut d,
+        &[
+            [0xEE, 0, 0x50],
+            [0x9E, 60, 100],
+            [0xBE, 74, 0x10],
+            [0x8E, 60, 0],
+        ],
+    );
+    assert_eq!(
+        out,
+        vec![
+            on(60, 100, bend_in(0x50 << 7, 48), 0, CENTER),
+            LiveMsg::PerNote {
+                pitch: 60,
+                expr: Expr::Timbre,
+                value: up32(0x10, 7)
+            },
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0
+            },
+        ]
+    );
+    // Manager 16 is plain; the lower manager is not this zone's.
+    assert_eq!(
+        decode(&mut d, &[[0xBF, 64, 127]]),
+        vec![LiveMsg::Channel(Midi1Msg::three(0xBF, 64, 127))]
+    );
+    assert!(decode(&mut d, &[[0x90, 60, 100]]).is_empty());
+    // An MCM on channel 16 resizes it; a lower-zone MCM on channel 1 is ignored.
+    assert!(decode(&mut d, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 3]]).is_empty());
+    decode(&mut d, &[[0xBF, 101, 0], [0xBF, 100, 6], [0xBF, 6, 3]]);
+    assert_eq!(d.config().map(|c| c.members), Some(3));
+    assert!(d.accepts(12) && !d.accepts(11));
+}
+
+#[test]
+fn mcm_and_range_values_clamp() {
+    let mut d = MpeDecoder::new(lower(3));
+    decode(&mut d, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 127]]);
+    assert_eq!(d.config().map(|c| c.members), Some(15));
+    decode(&mut d, &[[0xB1, 101, 0], [0xB1, 100, 0], [0xB1, 6, 127]]);
+    assert_eq!(d.config().map(|c| c.bend_range), Some(96));
+}
+
+#[test]
+fn the_same_pitch_twice_ends_the_first() {
+    let mut e = MpeEncoder::new(lower(3));
+    encode(&mut e, &[LiveMsg::on(60, 100)]);
+    let got = encode(&mut e, &[LiveMsg::on(60, 100)]);
+    assert_eq!(
+        got[0],
+        vec![0x81, 60, 0],
+        "the first ends before the second starts"
+    );
+    assert_eq!(
+        got.last().unwrap(),
+        &vec![0x92, 60, 100],
+        "on the channel released longest ago"
+    );
+    assert_eq!(encode(&mut e, &[LiveMsg::off(60)]), vec![vec![0x82, 60, 0]]);
+    assert!(encode(&mut e, &[LiveMsg::off(60)]).is_empty());
+    assert_eq!(e.take_stolen(), 0);
 }
