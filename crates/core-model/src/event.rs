@@ -174,6 +174,11 @@ pub enum EventBody {
         fade_in: Fade,
         /// Fade out.
         fade_out: Fade,
+        /// Display name (plan 6a): trimmed, 1..=[`MAX_INFO_BYTES`](crate::document::MAX_INFO_BYTES)
+        /// bytes, no control or zero-width characters. Absent in files when
+        /// unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// An automation point: drives `target` to `value` from here (editors
     /// spec §4d); values between points ramp unless the target is stepped.

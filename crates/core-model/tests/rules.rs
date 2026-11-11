@@ -133,7 +133,8 @@ fn event_range_checks() {
         length: 200,
         gain_db: 0.0,
         fade_in: Default::default(),
-        fade_out: Default::default()
+        fade_out: Default::default(),
+        name: None,
     }));
     assert!(bad(EventBody::AudioRegion {
         media: MediaId(0),
@@ -141,7 +142,8 @@ fn event_range_checks() {
         length: 10,
         gain_db: f32::NAN,
         fade_in: Default::default(),
-        fade_out: Default::default()
+        fade_out: Default::default(),
+        name: None,
     }));
     let mut spec = EventSpec::new(Tick(0), EventBody::note(60, 1, Tick(1)));
     spec.group_channel = Some((0, 16));

@@ -134,6 +134,7 @@ fn every_kind() -> (Document, SeqId, LaneId) {
                     length_frames: 6_000,
                     shape: FadeShape::SCurve,
                 },
+                name: None,
             },
         ),
         EventSpec::new(
@@ -442,6 +443,7 @@ fn the_other_variants_round_trip_too() {
                 length_frames: 24_000,
                 shape: FadeShape::Exponential,
             },
+            name: None,
         },
     ));
     b.events(seq, lane, specs).unwrap();

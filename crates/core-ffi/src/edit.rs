@@ -767,6 +767,13 @@ pub enum AudioEdit {
         /// Split position.
         at: i64,
     },
+    /// Rename a region (`None` or empty clears the name).
+    SetName {
+        /// The region.
+        event: u64,
+        /// The new name.
+        name: Option<String>,
+    },
     /// Set gain.
     SetGain {
         /// The region.
@@ -1258,6 +1265,10 @@ fn audio_cmd(e: &AudioEdit) -> AudioCmd {
         AudioEdit::Split { event, at } => AudioCmd::Split {
             event: EventId(*event),
             at: Tick(*at),
+        },
+        AudioEdit::SetName { event, name } => AudioCmd::SetName {
+            event: EventId(*event),
+            name: name.clone(),
         },
         AudioEdit::SetGain { event, gain_db } => AudioCmd::SetGain {
             event: EventId(*event),

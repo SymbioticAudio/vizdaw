@@ -264,7 +264,7 @@ fn files_write_mpe_only_when_set() {
         ),
         other => panic!("{other:?}"),
     }
-    assert_eq!(VERSION, 7);
+    assert_eq!(VERSION, 8);
     // A stray key inside "mpe" is refused (deny_unknown_fields).
     let stray = text.replace("\"members\": 7", "\"members\": 7, \"channels\": 3");
     assert_ne!(stray, text, "the test edits the saved text");

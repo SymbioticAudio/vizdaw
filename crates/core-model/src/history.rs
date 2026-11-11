@@ -229,7 +229,7 @@ impl History {
     }
 
     fn trim(&mut self) {
-        if self.txn.is_some() || self.group.is_some() {
+        if self.txn.is_some() {
             return;
         }
         let depth =
@@ -348,6 +348,36 @@ impl History {
             },
             filter,
         )
+    }
+
+    /// Gives the project ID `id` to the present and to every undo and redo
+    /// version that has none (plan 6a), so undoing past the stamp keeps it.
+    /// It changes no undo step and does nothing when the present already
+    /// has an ID. Refused for a malformed ID and inside a transaction.
+    pub fn stamp_project_id(&mut self, id: &str) -> Result<()> {
+        if !crate::document::check_project_id(id) {
+            return Err(ModelError::invalid(
+                "a project ID is 36 lowercase hex characters",
+            ));
+        }
+        if self.txn.is_some() {
+            return Err(ModelError::invalid(
+                "the project ID cannot be stamped inside a transaction",
+            ));
+        }
+        if self.present.doc.settings().project_id.is_some() {
+            return Ok(());
+        }
+        let stamp = |v: &mut Version| {
+            v.doc = std::mem::take(&mut v.doc).with_project_id(id);
+        };
+        stamp(&mut self.present);
+        self.past.iter_mut().for_each(stamp);
+        self.future.iter_mut().for_each(stamp);
+        if let Some(g) = self.group.as_mut() {
+            g.base_future.iter_mut().for_each(stamp);
+        }
+        Ok(())
     }
 
     /// Steps back one version. Inside a transaction, only the transaction's

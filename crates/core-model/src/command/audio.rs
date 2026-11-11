@@ -51,6 +51,16 @@ pub enum AudioCmd {
         /// Split position.
         at: Tick,
     },
+    /// Rename a region (plan 6a): the name is trimmed and must pass
+    /// [`valid_name`](crate::lane::valid_name) and fit
+    /// [`MAX_INFO_BYTES`](crate::document::MAX_INFO_BYTES); `None` or an
+    /// empty name clears it.
+    SetName {
+        /// The region.
+        event: EventId,
+        /// The new name.
+        name: Option<String>,
+    },
     /// Set gain.
     SetGain {
         /// The region.
@@ -123,6 +133,7 @@ impl AudioCmd {
             AudioCmd::Insert { .. } => "Insert Audio Region",
             AudioCmd::Trim { .. } => "Trim Region",
             AudioCmd::Split { .. } => "Split Region",
+            AudioCmd::SetName { .. } => "Rename Region",
             AudioCmd::SetGain { .. } => "Set Region Gain",
             AudioCmd::SetFades { .. } => "Set Region Fades",
             AudioCmd::Normalize { .. } => "Normalize",
@@ -207,6 +218,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                     gain_db: *gain_db,
                     fade_in: *fade_in,
                     fade_out: *fade_out,
+                    name: None,
                 },
             );
             insert_specs(d, *seq, *lane, &[spec], r)?;
@@ -247,6 +259,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 gain_db,
                 fade_in,
                 fade_out,
+                name,
             } = ev.body.clone()
             else {
                 return Ok(());
@@ -265,6 +278,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 gain_db,
                 fade_in,
                 fade_out: Fade::default(),
+                name: name.clone(),
             };
             clamp_fades(&mut a);
             store(d, a)?;
@@ -282,6 +296,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                     gain_db,
                     fade_in: Fade::default(),
                     fade_out,
+                    name,
                 },
             };
             clamp_fades(&mut b);
@@ -289,6 +304,18 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
             let loc = d.locate(*event)?;
             d.insert_event(loc.seq, loc.lane, Some(loc.take), b)?;
             r.created.push(AnyId::Event(id));
+        }
+        AudioCmd::SetName { event, name } => {
+            let (mut ev, _, _) = region(d, *event)?;
+            let name = name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned);
+            if let EventBody::AudioRegion { name: n, .. } = &mut ev.body {
+                *n = name;
+            }
+            store(d, ev)?;
         }
         AudioCmd::SetGain { event, gain_db } => {
             let (mut ev, _, _) = region(d, *event)?;

@@ -540,6 +540,7 @@ pub fn demo_audio_document() -> Result<Document> {
                 gain_db: 0.0,
                 fade_in: Fade::default(),
                 fade_out: Fade::default(),
+                name: None,
             },
         )?;
     }

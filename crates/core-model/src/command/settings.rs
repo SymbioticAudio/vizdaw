@@ -3,7 +3,7 @@
 use super::Report;
 use super::media::{MediaSwap, swap_media};
 use crate::automation::AutomationTarget;
-use crate::document::Document;
+use crate::document::{Document, SongInfo};
 use crate::error::{ModelError, Result};
 use crate::format::AudioFormat;
 use crate::learn::{self, LearnMap, LearnSource};
@@ -56,6 +56,14 @@ pub enum SettingsCmd {
         /// Every map to this target.
         target: Option<AutomationTarget>,
     },
+    /// Replace the song info (plan 6a). Each field is trimmed (empty
+    /// becomes unset), at most
+    /// [`MAX_INFO_BYTES`](crate::document::MAX_INFO_BYTES) bytes and free of
+    /// control characters other than newline and tab.
+    SetInfo {
+        /// The new song info.
+        info: SongInfo,
+    },
 }
 
 impl SettingsCmd {
@@ -68,6 +76,7 @@ impl SettingsCmd {
             SettingsCmd::SetFormat { .. } => "Change Project Format",
             SettingsCmd::SetLearn { .. } => "MIDI Learn",
             SettingsCmd::RemoveLearn { .. } => "Remove MIDI Learn",
+            SettingsCmd::SetInfo { .. } => "Set Song Info",
         }
     }
 }
@@ -103,6 +112,18 @@ pub(crate) fn apply(d: &mut Document, cmd: &SettingsCmd, _r: &mut Report) -> Res
     if let SettingsCmd::RemoveLearn { source, target } = cmd {
         return learn::remove(d, source.as_ref(), *target);
     }
+    if let SettingsCmd::SetInfo { info } = cmd {
+        let mut info = info.clone();
+        for f in info.fields_mut() {
+            *f = f
+                .take()
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty());
+        }
+        crate::rules::check_info(&info)?;
+        d.settings_mut().info = info;
+        return Ok(());
+    }
     let s = d.settings_mut();
     match cmd {
         SettingsCmd::SetTemplate { name, template } => match template {
@@ -128,7 +149,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &SettingsCmd, _r: &mut Report) -> Res
         // Handled above.
         SettingsCmd::SetFormat { .. }
         | SettingsCmd::SetLearn { .. }
-        | SettingsCmd::RemoveLearn { .. } => {}
+        | SettingsCmd::RemoveLearn { .. }
+        | SettingsCmd::SetInfo { .. } => {}
     }
     Ok(())
 }

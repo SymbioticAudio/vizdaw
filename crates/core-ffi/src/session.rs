@@ -8230,6 +8230,7 @@ impl Session {
                 gain_db,
                 fade_in,
                 fade_out,
+                ..
             } = ev.body
             else {
                 return Err(crate::events::bad(&format!(
@@ -8325,6 +8326,7 @@ impl Session {
                     gain_db,
                     fade_in,
                     fade_out,
+                    ..
                 } = ev.body
                 else {
                     return Err(crate::events::bad(&format!(

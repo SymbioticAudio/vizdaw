@@ -35,6 +35,117 @@ pub struct Settings {
     /// spec §4.8; plan 5f-1 Ruling 6). Absent in files when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub learn: Vec<crate::learn::LearnMap>,
+    /// Song info (plan 6a; format version 8). Absent in files when empty.
+    #[serde(default, skip_serializing_if = "SongInfo::is_empty")]
+    pub info: SongInfo,
+    /// The project's stable ID (plan 6a): 36 characters of lowercase hex
+    /// in 8-4-4-4-12 groups, stamped when the project is first saved.
+    /// Absent in files until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// The longest song-info field, and the longest region name, in bytes.
+pub const MAX_INFO_BYTES: usize = 4096;
+
+/// Whether `s` is a project ID: 36 characters, lowercase hex in 8-4-4-4-12
+/// groups.
+pub fn check_project_id(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
+}
+
+/// Song info: the descriptive fields a MIDI or music file can carry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SongInfo {
+    /// Title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Artist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    /// Album.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    /// Original artist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_artist: Option<String>,
+    /// Composer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composer: Option<String>,
+    /// Songwriter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub songwriter: Option<String>,
+    /// Producer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
+    /// Arranger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arranger: Option<String>,
+    /// Year.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<String>,
+    /// Genre.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre: Option<String>,
+    /// Copyright.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copyright: Option<String>,
+    /// Website.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// Free-form comment (may span lines).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+impl SongInfo {
+    /// The 13 fields in declaration order.
+    pub fn fields(&self) -> [&Option<String>; 13] {
+        [
+            &self.title,
+            &self.artist,
+            &self.album,
+            &self.original_artist,
+            &self.composer,
+            &self.songwriter,
+            &self.producer,
+            &self.arranger,
+            &self.year,
+            &self.genre,
+            &self.copyright,
+            &self.website,
+            &self.comment,
+        ]
+    }
+
+    /// The 13 fields in declaration order, mutably.
+    pub fn fields_mut(&mut self) -> [&mut Option<String>; 13] {
+        [
+            &mut self.title,
+            &mut self.artist,
+            &mut self.album,
+            &mut self.original_artist,
+            &mut self.composer,
+            &mut self.songwriter,
+            &mut self.producer,
+            &mut self.arranger,
+            &mut self.year,
+            &mut self.genre,
+            &mut self.copyright,
+            &mut self.website,
+            &mut self.comment,
+        ]
+    }
+
+    /// Whether every field is unset.
+    pub fn is_empty(&self) -> bool {
+        self.fields().iter().all(|f| f.is_none())
+    }
 }
 
 impl Default for Settings {
@@ -45,6 +156,8 @@ impl Default for Settings {
             templates: OrdMap::new(),
             format: AudioFormat::DEFAULT,
             learn: Vec::new(),
+            info: SongInfo::default(),
+            project_id: None,
         }
     }
 }
@@ -539,6 +652,17 @@ impl Document {
                 })
             })
         })
+    }
+}
+
+impl Document {
+    /// This document with project ID `id`, unchanged when it already has
+    /// one (plan 6a: the ID is stamped once and never replaced).
+    pub fn with_project_id(mut self, id: &str) -> Document {
+        if self.settings.project_id.is_none() {
+            self.settings.project_id = Some(id.to_owned());
+        }
+        self
     }
 }
 

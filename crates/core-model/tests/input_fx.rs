@@ -259,7 +259,7 @@ fn files_write_a_chain_only_when_set_and_read_it_back() {
         ])
     );
     assert_eq!(from_json(&text).unwrap(), d2);
-    assert_eq!(VERSION, 7);
+    assert_eq!(VERSION, 8);
 }
 
 /// Ruling 18: a version-4 project opens with empty chains; the step is the
@@ -268,12 +268,12 @@ fn files_write_a_chain_only_when_set_and_read_it_back() {
 fn a_version_4_project_opens_with_empty_chains() {
     let d = doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
-    assert_eq!(v["version"], json!(7));
+    assert_eq!(v["version"], json!(8));
     v["version"] = json!(4);
     let back = from_json(&serde_json::to_string(&v).unwrap()).unwrap();
     assert_eq!(back, d);
     assert!(back.lane(SeqId(0), LaneId(0)).unwrap().input_fx.is_empty());
-    assert!(to_json(&back).unwrap().contains("\"version\": 7"));
+    assert!(to_json(&back).unwrap().contains("\"version\": 8"));
     assert_eq!(migrate_v4_to_v5(v.clone()).unwrap(), v);
 }
 
@@ -283,13 +283,13 @@ fn a_version_4_project_opens_with_empty_chains() {
 fn a_version_5_file_with_a_chain_reads_back_and_a_newer_one_names_its_version() {
     let d = apply(&doc(), &set(vec![transpose(7)])).unwrap().doc;
     let text = to_json(&d).unwrap();
-    assert!(text.contains("\"version\": 7"));
+    assert!(text.contains("\"version\": 8"));
     assert_eq!(from_json(&text).unwrap(), d);
     let mut v: Value = serde_json::from_str(&text).unwrap();
-    v["version"] = json!(8);
+    v["version"] = json!(9);
     assert!(matches!(
         from_json(&serde_json::to_string(&v).unwrap()),
-        Err(ModelError::NewerFormat { found: 8 })
+        Err(ModelError::NewerFormat { found: 9 })
     ));
 }
 

@@ -64,6 +64,7 @@ fn bodies() -> Vec<EventBody> {
                 length_frames: 100,
                 shape: FadeShape::EqualPower,
             },
+            name: None,
         },
     ]
 }

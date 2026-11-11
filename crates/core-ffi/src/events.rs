@@ -306,6 +306,9 @@ pub struct EventRow {
     /// value on the 32-bit scale, Plan 4d Ruling 25).
     #[uniffi(default = None)]
     pub automation: Option<AutomationRow>,
+    /// A region's name (plan 6a; `None`: unnamed).
+    #[uniffi(default = None)]
+    pub region_name: Option<String>,
 }
 
 const NO_FADE: FadeRow = FadeRow {
@@ -347,6 +350,7 @@ impl EventRow {
             data: Vec::new(),
             eight_bit: false,
             automation: None,
+            region_name: None,
         }
     }
 }
@@ -645,7 +649,9 @@ pub fn row(
             gain_db,
             fade_in,
             fade_out,
+            name,
         } => {
+            r.region_name = name.clone();
             r.media = Some(media.0);
             r.source_offset = *source_offset;
             r.frames = *length;
@@ -729,6 +735,7 @@ pub fn spec(row: &EventRow) -> Result<EventSpec, VizError> {
             gain_db: row.gain_db,
             fade_in: fade_of(&row.fade_in),
             fade_out: fade_of(&row.fade_out),
+            name: row.region_name.clone(),
         },
         EventKindRow::Automation => {
             let a = row

@@ -197,6 +197,7 @@ pub(crate) fn build(
             gain_db,
             fade_in,
             fade_out,
+            ..
         } = r.body
         else {
             continue;
