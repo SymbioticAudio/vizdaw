@@ -1,6 +1,6 @@
 //! Partial-file writes: a temp file beside the destination, then a rename.
 
-use crate::IoError;
+use crate::{IoError, io_err};
 use core_media::export::{display_name, partial_path};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ pub fn write_partial(dest: &Path, bytes: &[u8], replace: bool) -> Result<Pending
                 display_name(&partial)
             )));
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(io_err(dest, "written", &e)),
     };
     // From here the partial is ours: the guard removes it on any failure.
     let pending = PendingFile {
@@ -47,8 +47,9 @@ pub fn write_partial(dest: &Path, bytes: &[u8], replace: bool) -> Result<Pending
         replace,
         committed: false,
     };
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| io_err(dest, "written", &e))?;
     Ok(pending)
 }
 
@@ -64,6 +65,11 @@ impl PendingFile {
         match r {
             Ok(()) => {
                 self.committed = true;
+                // The copy fallback of `rename_excl` can succeed with the
+                // source still there: never leave a partial that would block
+                // the next export of this name.
+                let _ = std::fs::remove_file(&self.partial);
+                sync_parent(&self.dest);
                 Ok(std::mem::take(&mut self.dest))
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -72,7 +78,7 @@ impl PendingFile {
                     display_name(&self.dest)
                 )))
             }
-            Err(e) => Err(e.into()),
+            Err(e) => Err(io_err(&self.dest, "written", &e)),
         }
     }
 }
@@ -82,5 +88,12 @@ impl Drop for PendingFile {
         if !self.committed {
             let _ = std::fs::remove_file(&self.partial);
         }
+    }
+}
+
+/// Syncs `p`'s folder, so a rename in it is on the disk (best effort).
+fn sync_parent(p: &Path) {
+    if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
     }
 }

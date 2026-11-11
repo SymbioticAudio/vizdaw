@@ -5,16 +5,22 @@ use crate::limits::MAX_DETAILS;
 /// How an item affected the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
+    /// The result differs from the input.
     Changed,
+    /// Something in the input is not in the result.
     LeftOut,
+    /// Worth knowing; nothing was lost.
     Note,
 }
 
 /// One kind of thing that happened, with how often and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
+    /// How it affected the result.
     pub kind: ItemKind,
+    /// What it is, in a sentence fragment.
     pub what: String,
+    /// How many times it happened.
     pub count: u64,
     /// The first [`MAX_DETAILS`] places it happened.
     pub details: Vec<String>,
@@ -23,18 +29,29 @@ pub struct Item {
 /// What the result holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Summary {
+    /// Tracks in the result.
     pub tracks: u64,
+    /// Regions in the result.
     pub regions: u64,
+    /// Notes in the result.
     pub notes: u64,
+    /// Markers in the result.
     pub markers: u64,
+    /// Automation points in the result.
     pub automation_points: u64,
+    /// Plug-ins in the result.
     pub plugins: u64,
+    /// Whether a tempo map is in the result.
     pub tempo_map: bool,
 }
 
+/// What happened, for the dialog after an import or export. Counts
+/// saturate rather than wrap: they are for display, not for sizes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
+    /// What the result holds.
     pub summary: Summary,
+    /// What was changed, left out or noted.
     pub items: Vec<Item>,
 }
 
@@ -42,12 +59,12 @@ impl Report {
     /// Counts one occurrence of `what` under `kind`, keeping `detail` while
     /// the item has fewer than [`MAX_DETAILS`].
     pub fn add(&mut self, kind: ItemKind, what: &str, detail: Option<String>) {
-        let i = match self
+        let item = match self
             .items
             .iter()
             .position(|i| i.kind == kind && i.what == what)
         {
-            Some(i) => i,
+            Some(i) => self.items.get_mut(i),
             None => {
                 self.items.push(Item {
                     kind,
@@ -55,10 +72,10 @@ impl Report {
                     count: 0,
                     details: Vec::new(),
                 });
-                self.items.len() - 1
+                self.items.last_mut()
             }
         };
-        let item = &mut self.items[i];
+        let Some(item) = item else { return };
         item.count = item.count.saturating_add(1);
         if let Some(d) = detail
             && item.details.len() < MAX_DETAILS
@@ -77,7 +94,7 @@ impl Report {
         s.automation_points = s.automation_points.saturating_add(o.automation_points);
         s.plugins = s.plugins.saturating_add(o.plugins);
         s.tempo_map |= o.tempo_map;
-        for it in other.items {
+        for mut it in other.items {
             match self
                 .items
                 .iter_mut()
@@ -85,10 +102,13 @@ impl Report {
             {
                 Some(mine) => {
                     mine.count = mine.count.saturating_add(it.count);
-                    let room = MAX_DETAILS - mine.details.len();
+                    let room = MAX_DETAILS.saturating_sub(mine.details.len());
                     mine.details.extend(it.details.into_iter().take(room));
                 }
-                None => self.items.push(it),
+                None => {
+                    it.details.truncate(MAX_DETAILS);
+                    self.items.push(it);
+                }
             }
         }
     }
@@ -116,10 +136,10 @@ impl Report {
         .into_iter()
         .flatten()
         .collect();
-        match parts.len() {
-            0 => format!("{verb} nothing"),
-            1 => format!("{verb} {}", parts[0]),
-            n => format!("{verb} {} and {}", parts[..n - 1].join(", "), parts[n - 1]),
+        match parts.split_last() {
+            None => format!("{verb} nothing"),
+            Some((only, [])) => format!("{verb} {only}"),
+            Some((last, rest)) => format!("{verb} {} and {last}", rest.join(", ")),
         }
     }
 }

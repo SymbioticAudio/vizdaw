@@ -18,9 +18,13 @@ pub const MAX_DETAILS: usize = 50;
 /// The limits a reader applies; tests lower them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
+    /// Most events in one file, all tracks together.
     pub max_events: usize,
+    /// Largest system-exclusive message, in bytes.
     pub max_sysex_bytes: usize,
+    /// Most MTrk chunks read.
     pub max_tracks: usize,
+    /// Longest single text, in bytes.
     pub max_text_bytes: usize,
 }
 

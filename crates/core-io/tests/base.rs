@@ -4,6 +4,7 @@ use core_io::read::read_regular;
 use core_io::report::{ItemKind, Report};
 use core_io::text::sanitize;
 use core_io::write::write_partial;
+use proptest::prelude::*;
 use std::time::{Duration, Instant};
 
 fn refused_fast(r: Result<Vec<u8>, IoError>, what: &str, t: Instant) {
@@ -18,8 +19,7 @@ fn refused_fast(r: Result<Vec<u8>, IoError>, what: &str, t: Instant) {
 fn read_regular_refuses_non_files() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path();
-    let t = Instant::now();
-    refused_fast(read_regular(p, 100), "directory", t);
+    refused_fast(read_regular(p, 100), "directory", Instant::now());
 
     let fifo = p.join("fifo");
     match std::process::Command::new("mkfifo").arg(&fifo).status() {
@@ -174,4 +174,173 @@ fn report_groups_and_caps_details() {
     assert_eq!(m.items.len(), 2);
     assert_eq!((m.items[0].kind, m.items[0].count), (ItemKind::Note, 2));
     assert_eq!(m.items[1].count, 120);
+}
+
+#[test]
+fn limits_are_the_spec_values() {
+    use core_io::limits::*;
+    assert_eq!(MAX_MIDI_FILE_BYTES, 67_108_864);
+    assert_eq!(
+        (MAX_VLQ_BYTES, MAX_EVENTS, MAX_SYSEX_BYTES),
+        (4, 10_000_000, 1_048_576)
+    );
+    assert_eq!(
+        (MAX_TRACKS, MAX_TEXT_BYTES, MAX_DETAILS),
+        (4096, 65_536, 50)
+    );
+    assert_eq!(
+        Limits::default(),
+        Limits {
+            max_events: 10_000_000,
+            max_sysex_bytes: 1_048_576,
+            max_tracks: 4096,
+            max_text_bytes: 65_536
+        }
+    );
+}
+
+#[test]
+fn details_cap_at_the_edges() {
+    for (n, kept) in [(50, 50), (51, 50)] {
+        let mut r = Report::default();
+        for k in 0..n {
+            r.add(ItemKind::Changed, "x", Some(k.to_string()));
+        }
+        assert_eq!(
+            (r.items[0].count, r.items[0].details.len()),
+            (n as u64, kept)
+        );
+    }
+}
+
+#[test]
+fn merge_caps_details_of_new_and_existing_items() {
+    let fill = |what: &str, n: usize| {
+        let mut r = Report::default();
+        for k in 0..n {
+            r.add(ItemKind::LeftOut, what, Some(k.to_string()));
+        }
+        r
+    };
+    let mut a = fill("same", 40);
+    a.merge(fill("same", 40));
+    assert_eq!((a.items[0].count, a.items[0].details.len()), (80, 50));
+    // An item that is new to `a` arrives over the cap (public fields).
+    let mut big = fill("new", 10);
+    big.items[0].details = (0..70).map(|k| k.to_string()).collect();
+    a.merge(big);
+    assert_eq!(a.items[1].details.len(), 50);
+    // An over-full item on our side does not underflow.
+    a.items[0].details = (0..70).map(|k| k.to_string()).collect();
+    a.merge(fill("same", 5));
+    assert_eq!(a.items[0].details.len(), 70);
+}
+
+#[test]
+fn summary_line_covers_every_count() {
+    let mut r = Report::default();
+    r.summary.regions = 2;
+    r.summary.automation_points = 1_000_000;
+    r.summary.plugins = 1;
+    assert_eq!(
+        r.summary_line("Exported"),
+        "Exported 2 regions, 1 000 000 automation points and 1 plug-in"
+    );
+    r.summary.plugins = 3;
+    r.summary.regions = 1;
+    r.summary.automation_points = 1;
+    assert_eq!(
+        r.summary_line("Exported"),
+        "Exported 1 region, 1 automation point and 3 plug-ins"
+    );
+    for (n, text) in [
+        (999, "999 notes"),
+        (1000, "1 000 notes"),
+        (1_234_567, "1 234 567 notes"),
+    ] {
+        let mut r = Report::default();
+        r.summary.notes = n;
+        assert_eq!(r.summary_line("Read"), format!("Read {text}"));
+    }
+}
+
+#[test]
+fn sanitize_strips_bidi_and_tabs() {
+    let l = Limits::default();
+    assert_eq!(
+        sanitize("a\u{202E}b\u{2066}c\u{2069}d\u{202A}".as_bytes(), &l),
+        ("abcd".to_string(), false)
+    );
+    assert_eq!(sanitize(b"a\tb\r\nc", &l), ("ab\nc".to_string(), false));
+}
+
+#[test]
+fn sanitize_hostile_input_is_bounded() {
+    let l = Limits::default();
+    let t = Instant::now();
+    let (s, cut) = sanitize(&vec![0xFFu8; 8 * 1024 * 1024], &l);
+    assert!(cut && s.len() <= l.max_text_bytes);
+    assert!(t.elapsed() < Duration::from_secs(2));
+}
+
+fn bad(c: char) -> bool {
+    (c.is_control() && c != '\n') || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+proptest! {
+    #[test]
+    fn sanitize_properties(bytes in proptest::collection::vec(any::<u8>(), 0..300), max in 0usize..40) {
+        let l = Limits { max_text_bytes: max, ..Limits::default() };
+        let (out, cut) = sanitize(&bytes, &l);
+        prop_assert!(out.len() <= max);
+        prop_assert!(!out.chars().any(bad));
+        let full = sanitize(&bytes, &Limits { max_text_bytes: usize::MAX, ..Limits::default() });
+        prop_assert!(!full.1);
+        prop_assert_eq!(cut, full.0.len() > max);
+        prop_assert!(full.0.starts_with(&out));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_destinations() {
+    let d = tempfile::tempdir().unwrap();
+    let target = d.path().join("target.mid");
+    std::fs::write(&target, b"old").unwrap();
+    let link = d.path().join("link.mid");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    // Replace swaps the link itself and leaves what it pointed at.
+    write_partial(&link, b"new", true)
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert_eq!(std::fs::read(&link).unwrap(), b"new");
+    assert!(
+        !std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"old");
+    // A dangling link counts as taken without replace.
+    let dangling = d.path().join("dangling.mid");
+    std::os::unix::fs::symlink(d.path().join("nowhere"), &dangling).unwrap();
+    let e = write_partial(&dangling, b"x", false).unwrap_err();
+    assert!(
+        matches!(&e, IoError::Refused(m) if m.contains("exists")),
+        "{e:?}"
+    );
+    assert!(!d.path().join(".dangling.mid.partial").exists());
+}
+
+#[test]
+fn io_errors_name_the_file() {
+    let d = tempfile::tempdir().unwrap();
+    let e = read_regular(&d.path().join("gone.mid"), 10).unwrap_err();
+    assert!(
+        matches!(&e, IoError::Io(m) if m.contains("gone.mid")),
+        "{e:?}"
+    );
+    let e = write_partial(&d.path().join("no/such/dir/x.mid"), b"", false).unwrap_err();
+    assert!(matches!(&e, IoError::Io(m) if m.contains("x.mid")), "{e:?}");
 }
