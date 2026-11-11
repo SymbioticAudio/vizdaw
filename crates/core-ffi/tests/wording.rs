@@ -257,6 +257,7 @@ fn no_refusal_or_undo_text_says_lane() {
         "core-model",
         "core-control",
         "core-engine",
+        "core-io",
         "platform-macos",
     ] {
         rust_files(&root.join(d).join("src"), &mut files);

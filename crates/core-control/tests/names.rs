@@ -166,7 +166,7 @@ fn no_refusal_text_names_a_third_party_product() {
     literal_check();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
-    for d in ["core-ffi/src", "core-surface/src"] {
+    for d in ["core-ffi/src", "core-surface/src", "core-io/src"] {
         rust_files(&root.join(d), &mut files);
     }
     assert!(files.len() > 20, "the source directories were found");

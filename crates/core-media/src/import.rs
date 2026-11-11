@@ -197,7 +197,7 @@ fn no_hard_links(e: &std::io::Error) -> bool {
 /// Moves `from` to `to`, failing with `AlreadyExists` (and changing
 /// nothing) if `to` exists. macOS: `renamex_np(RENAME_EXCL)`.
 #[cfg(target_os = "macos")]
-pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| {
         std::ffi::CString::new(p.as_os_str().as_bytes())
@@ -221,7 +221,7 @@ pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
 /// mid-copy can leave a short file under `to`). Once `to` holds the whole
 /// file the move has succeeded, even if the source cannot be removed.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         use std::os::unix::ffi::OsStrExt;

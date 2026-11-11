@@ -477,6 +477,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-io"
+version = "0.1.0"
+dependencies = [
+ "core-engine",
+ "core-media",
+ "core-model",
+ "im",
+ "proptest",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "core-media"
 version = "0.1.0"
 dependencies = [

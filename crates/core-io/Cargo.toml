@@ -1,0 +1,17 @@
+[package]
+name = "core-io"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+core-engine = { path = "../core-engine" }
+core-media = { path = "../core-media" }
+core-model = { path = "../core-model" }
+im = { version = "15", features = ["serde"] }
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
