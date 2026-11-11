@@ -2396,3 +2396,40 @@ the session, Undo and Redo included, `core-ffi/tests/midi_strip.rs`), the model
      M are off, while MIDI FX and R still work. Pick the synth again in
      the same menu: the strip comes back. Save, close and reopen: the
      strip's level, pan and mute are as you left them.
+
+### MPE input and output (plan 5g-2)
+
+By ear and by eye; the codec is tested (`core-engine/tests/mpe*.rs`), the
+recording and round trip (`core-ffi/tests/passes.rs`), the session
+(`core-ffi/tests/mpe.rs`) and the e2e `records_mpe_as_per_note_expression`.
+
+251. A MIDI track's input menu has an "MPE Input" section: choose Lower
+     Zone; "Member Channels" and "Pitch Bend Range" sections appear, and
+     the input shows "Port · MPE" (no channel) in the track header, the
+     strip's input picker and the inspector. Each choice is one Undo
+     ("Set Track MPE").
+252. With an MPE controller (if one is available) on that track, armed,
+     and an MPE synth or plugin as its destination with "MPE Output" on
+     (in the destination menu): play, slide, press and move along the
+     keys: each note bends, swells and brightens on its own, thru and in
+     the recording. Open the note in the piano roll: its per-note bend
+     and timbre are there; pressure is in the poly pressure row. For an
+     external synth, its MIDI strip reads "MIDI · MPE Lower" (or Upper),
+     the meter moves with every note, and the fader and pan reach every
+     note. A MIDI-learn map on the controller's pitch bend or CC 74 takes
+     those messages first: the track then gets no bend or timbre from it.
+253. Play the recording back to the MPE synth: it sounds as played, also
+     when you start mid-song (the synth is told its MPE zone again). Play
+     it to a plain synth: the notes play with poly pressure, and the
+     report says how many per-note controllers were dropped. Mute the
+     MPE synth's strip: no notes play; controllers still do.
+254. Plug the controller in (or send its MPE configuration) while the
+     track is set to 15 members: if the controller says 7, the track's
+     setting changes to 7 as one Undo step; during a recording it changes
+     after Stop.
+255. Hold more notes than the destination's member channels: the oldest
+     note ends to make room, nothing hangs, and `state.get input`'s
+     `mpe_stolen` counts it.
+256. With an arpeggiator or a transpose on the MPE track: transposed notes
+     keep their own bends; arpeggiated notes play without per-note
+     expression (by design).

@@ -3580,3 +3580,138 @@ fn midi_mix_reaches_state_get() {
     }
     assert_eq!(dest(&mut app)["midi_pan"], 20);
 }
+
+/// Plan 5g-2 (spec §13 5g-2, README 252): MPE injected into an armed MPE
+/// track while recording lands as notes with per-note bend and timbre and
+/// poly pressure; the lane and destination settings show in
+/// `state.get document`; nothing was dropped. Offline device, no port.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn records_mpe_as_per_note_expression() {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, SequenceCmd};
+    use core_model::event::{EventBody, PerNoteKind};
+    use core_model::lane::LaneInput;
+    use core_model::sequence::SeqLength;
+    use core_model::time::Tick;
+    let mut app = App::start_with(&[]);
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("MPE", "Keys", Some(synth)).unwrap();
+    b.run(Command::Lane(LaneCmd::SetInput {
+        seq,
+        lane: keys,
+        input: Some(LaneInput::Midi {
+            port: Some("MPE Keys".into()),
+            channel: None,
+        }),
+    }))
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(8 * Q)),
+    }))
+    .unwrap();
+    let path = app.launched.home.join("Mpe.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    app.call("command.run", json!({"id": "lane.set_mpe", "params": {"seq": seq.0, "lane": keys.0, "zone": "lower"}, "window": w}));
+    app.call("command.run", json!({"id": "destination.set_mpe", "params": {"dest": synth.0, "zone": "lower"}, "window": w}));
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(
+        lane_named(&mut app, &w, "Keys")["mpe"],
+        json!({"zone": "lower", "members": 15, "bend_range": 48})
+    );
+    let dest = doc["destinations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "Synth")
+        .cloned();
+    assert_eq!(
+        dest.clone().map(|d| d["mpe"]["zone"].clone()),
+        Some(json!("lower")),
+        "{doc}"
+    );
+    assert!(
+        dest.is_some_and(|d| d.get("midi_volume").is_some()),
+        "5g-1b's keys stay: {doc}"
+    );
+    app.call(
+        "command.run",
+        json!({"id": "transport.arm_previous", "window": w}),
+    );
+    app.call("command.run", json!({"id": "record.set", "params": {"replace": true, "loop": false, "pre_roll": 0, "count_in": 0}, "window": w}));
+    app.call(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    wait_for_record(&mut app, &w, |r| {
+        r["recording"] == true && r["frames"].as_u64() >= Some(24_000)
+    });
+    let inject = |app: &mut App, hex: &str| {
+        app.call(
+            "command.run",
+            json!({"id": "midi.inject", "params": {"port": "MPE Keys", "bytes": hex}, "window": w}),
+        );
+    };
+    inject(&mut app, "e1 00 50 b1 4a 30 d1 20 91 3c 64");
+    wait_for_record(&mut app, &w, |r| r["frames"].as_u64() >= Some(48_000));
+    inject(&mut app, "e1 10 60 d1 40 b1 4a 7f");
+    wait_for_record(&mut app, &w, |r| r["frames"].as_u64() >= Some(72_000));
+    inject(&mut app, "81 3c 00");
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    let input = app.call("state.get", json!({"target": "input", "window": w}));
+    assert_eq!(
+        (
+            input["per_note_dropped"].clone(),
+            input["mpe_stolen"].clone()
+        ),
+        (json!(0), json!(0)),
+        "{input}"
+    );
+    app.call("command.run", json!({"id": "file.save", "window": w}));
+    let doc = core_model::file::load(&path).unwrap();
+    let l = doc
+        .sequence(seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .find(|l| l.id == keys)
+        .unwrap();
+    let events: Vec<_> = l.active().unwrap().events.values().cloned().collect();
+    let n = events
+        .iter()
+        .find(|e| matches!(e.body, EventBody::Note { pitch: 60, .. }))
+        .expect("the note");
+    let EventBody::Note { per_note, .. } = &n.body else {
+        unreachable!()
+    };
+    let kinds: Vec<PerNoteKind> = per_note.iter().map(|p| p.kind).collect();
+    assert!(
+        kinds.contains(&PerNoteKind::PitchBend) && kinds.contains(&PerNoteKind::Registered(74)),
+        "{per_note:?}"
+    );
+    assert!(
+        per_note
+            .iter()
+            .any(|p| p.kind == PerNoteKind::PitchBend && p.offset.0 == 0),
+        "the start bend"
+    );
+    assert!(
+        per_note
+            .iter()
+            .any(|p| p.kind == PerNoteKind::PitchBend && p.offset.0 > 0),
+        "the later bend"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.body, EventBody::PolyPressure { pitch: 60, .. })),
+        "pressure"
+    );
+    assert_eq!(l.mpe.map(|m| m.members), Some(15));
+    app.quit();
+}
