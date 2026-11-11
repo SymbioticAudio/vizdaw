@@ -2949,6 +2949,22 @@ pub fn send_now_on(
     }
 }
 
+/// Sends every message of `msgs` now to `dest`'s targets through
+/// `owner`'s engine on the channels they name, all or none (final review
+/// m4); an error when its command ring has no room for all, false when
+/// `owner` does not hold the engine or it has no target for `dest`.
+pub fn send_all_now_on(
+    owner: u64,
+    dest: DestId,
+    msgs: &[core_engine::midi1::Midi1Msg],
+) -> Result<bool, VizError> {
+    let mut slot = lock_host();
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => Ok(h.engine.send_all_now_on(dest, msgs)?),
+        _ => Ok(false),
+    }
+}
+
 /// `owner`'s engine's note activity per external destination since the
 /// last call, read and cleared; empty when it does not hold the engine.
 pub fn midi_activity(owner: u64, doc: &Document) -> Vec<(DestId, u8)> {

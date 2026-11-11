@@ -213,6 +213,10 @@ pub(crate) struct Inner {
     /// last per lane, waiting to be written back once no recording or edit
     /// is open; a user's own setting of the lane drops its entry.
     mpe_owed: std::collections::BTreeMap<LaneId, Option<core_model::mpe::MpeConfig>>,
+    /// Destinations' mix and MPE configuration batches a full engine
+    /// command ring refused, oldest first: `idle` sends them again
+    /// (final review m4).
+    mix_owed: Vec<(DestId, Vec<core_engine::midi1::Midi1Msg>)>,
     /// The next bounce cancels itself once its progress reaches this
     /// (test hook).
     #[cfg(feature = "test-hooks")]
@@ -329,6 +333,7 @@ impl Inner {
             edits: Default::default(),
             edits_writing: 0,
             mpe_owed: Default::default(),
+            mix_owed: Vec::new(),
             #[cfg(feature = "test-hooks")]
             bounce_cancel_at: None,
             #[cfg(feature = "test-hooks")]
@@ -1032,8 +1037,12 @@ impl Session {
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
         // The user's own MPE setting wins over a controller's MCM still
-        // waiting to be written back (plan 5g-2 Task 6 review m1).
+        // waiting to be written back (plan 5g-2 Task 6 review m1), also
+        // one still in the engine's ring (final review m2).
         if let Command::Lane(LaneCmd::SetMpe { lane, .. }) = &cmd {
+            for (l, cfg) in host::take_mpe_reports(self.id) {
+                inner.mpe_owed.insert(l, cfg);
+            }
             inner.mpe_owed.remove(lane);
         }
         // An arm or input change that went through lets a failed input
@@ -1359,7 +1368,8 @@ impl Session {
     /// changed, after [`Session::claim_for_mix`]. An unset value sends
     /// nothing (Ruling 2); a destination the loaded sequence does not
     /// play is not reached (its values go out when it plays). A failed
-    /// send leaves the edit.
+    /// send leaves the edit; a full command ring delays a destination's
+    /// batch whole to the next `idle` (final review m4).
     ///
     /// An external destination whose MPE output changed (plan 5g-2 Task 6
     /// review m4): turned off, or moved to the other zone, the old zone
@@ -1368,13 +1378,18 @@ impl Session {
     /// volume and pan on the new manager channel.
     fn send_mix_changes(&self, inner: &mut Inner, before: &Document) {
         use core_engine::midi1::Midi1Msg;
-        // `true`: on the channel the message names; `false`: on the
-        // destination's channel (an MPE destination's manager).
-        let mut due: Vec<(DestId, Midi1Msg, bool)> = Vec::new();
+        // Per destination, its messages on the channels they name (an MPE
+        // destination's mix on its manager).
+        let mut due: Vec<(DestId, Vec<Midi1Msg>)> = Vec::new();
         for (id, d) in inner.doc().instruments() {
+            let DestKind::MidiEndpoint { channel, .. } = &d.kind else {
+                continue;
+            };
             if !d.kind.is_external() {
                 continue;
             }
+            let mix_channel = d.mpe.map_or(channel & 0x0F, |m| m.manager());
+            let mut msgs = Vec::new();
             let old = before.instruments().get(id);
             let (was_mpe, mpe) = (old.and_then(|o| o.mpe), d.mpe);
             let mix_was = old.map(|o| o.midi_mix);
@@ -1386,36 +1401,45 @@ impl Session {
             {
                 let off = core_model::mpe::MpeConfig { members: 0, ..o };
                 // The MCM alone: the member bend range is left as is.
-                for m in core_engine::mpe::configuration(&off).into_iter().take(5) {
-                    due.push((*id, m, true));
-                }
+                msgs.extend(core_engine::mpe::configuration(&off).into_iter().take(5));
             }
             let on = mpe.filter(|_| mpe_changed);
             if let Some(n) = on {
-                for m in core_engine::mpe::configuration(&n) {
-                    due.push((*id, m, true));
-                }
+                msgs.extend(core_engine::mpe::configuration(&n));
             }
             for (cc, v, was) in [
                 (7, mix.volume, mix_was.and_then(|m| m.volume)),
                 (10, mix.pan, mix_was.and_then(|m| m.pan)),
             ] {
                 if let Some(v) = v.filter(|v| on.is_some() || Some(*v) != was) {
-                    due.push((*id, Midi1Msg::three(0xB0, cc, v), false));
+                    msgs.push(Midi1Msg::three(0xB0 | mix_channel, cc, v));
                 }
+            }
+            if !msgs.is_empty() {
+                due.push((*id, msgs));
             }
         }
         if due.is_empty() {
             return;
         }
-        let dests: Vec<DestId> = due.iter().map(|(d, _, _)| *d).collect();
+        let dests: Vec<DestId> = due.iter().map(|(d, _)| *d).collect();
         self.claim_for_mix(inner, &dests);
-        for (dest, msg, as_named) in due {
-            let _ = if as_named {
-                host::send_now_on(self.id, dest, msg)
-            } else {
-                host::send_now(self.id, inner.doc(), dest, msg)
-            };
+        inner.mix_owed.extend(due);
+        Self::send_owed_mix(self.id, inner);
+    }
+
+    /// Sends the destinations' owed batches from
+    /// [`Session::send_mix_changes`], oldest first, each whole or not at
+    /// all (final review m4): one the engine's full command ring refuses
+    /// waits, with every later one, for the next `idle`. A destination the
+    /// engine does not play (or an engine this session no longer holds)
+    /// drops its batch, as before.
+    fn send_owed_mix(id: u64, inner: &mut Inner) {
+        while let Some((dest, msgs)) = inner.mix_owed.first() {
+            if host::send_all_now_on(id, *dest, msgs).is_err() {
+                return;
+            }
+            inner.mix_owed.remove(0);
         }
     }
 
@@ -2106,6 +2130,7 @@ impl Session {
             self.apply_pending_pass(&mut inner);
             self.apply_pending_automation(&mut inner);
             self.apply_mpe_reports(&mut inner);
+            Self::send_owed_mix(self.id, &mut inner);
             // A save at Stop the busy registry put off (Task 9 review M4).
             self.save_after_pass_now(&mut inner);
             // A setting a load publishes changed (plan 5d-1 Ruling 12).
@@ -7797,7 +7822,9 @@ impl Session {
     /// document (plan 5g-2 Ruling 4; a zone turned off is `None`), each
     /// lane whose setting differs as one undo step "Set Track MPE". The
     /// reports wait while a recording runs, finishes or has a pass to
-    /// land, and while an edit, transaction or group is open.
+    /// land, and while an edit, transaction or group is open. The step is
+    /// the controller's, not an input change: it takes no view filter and
+    /// skips `retries_input_cmd` and the claim handling on purpose.
     fn apply_mpe_reports(&self, inner: &mut Inner) {
         for (lane, cfg) in host::take_mpe_reports(self.id) {
             inner.mpe_owed.insert(lane, cfg);

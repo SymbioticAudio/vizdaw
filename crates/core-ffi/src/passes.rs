@@ -553,10 +553,32 @@ fn midi_events(
                 pitch,
                 expr: Expr::Pressure,
                 value,
-            } => EventBody::PolyPressure {
-                pitch: pitch & 0x7F,
-                value,
-            },
+            } => {
+                let pitch = pitch & 0x7F;
+                // Played after its note-on but before the start Input
+                // Quantize moved later: the note's starting pressure (the
+                // latest such value), so it plays on the note's member
+                // channel, not before the note (final review m5).
+                let owner = open.get(&pitch).and_then(|j| notes.get(j)).copied();
+                if let Some((pass, at, _)) = owner
+                    && pass == p.pass
+                    && let Some(events) = out.get_mut(&pass)
+                    && let Some(note_start) = events.get(at).map(|e| e.tick)
+                    && played < note_start
+                {
+                    let body = EventBody::PolyPressure { pitch, value };
+                    let start_pressure = events.iter_mut().find(|e| {
+                        e.tick == note_start
+                            && matches!(e.body, EventBody::PolyPressure { pitch: q, .. } if q == pitch)
+                    });
+                    match start_pressure {
+                        Some(e) => e.body = body,
+                        None => events.push(EventSpec::new(note_start, body)),
+                    }
+                    continue;
+                }
+                EventBody::PolyPressure { pitch, value }
+            }
             // Per-note bend and timbre join the note they belong to:
             // the latest note-on of the pitch before them, in the same
             // pass, whose off comes after them. With none, they drop.

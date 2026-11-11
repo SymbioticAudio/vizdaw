@@ -420,6 +420,44 @@ fn a_hand_set_mpe_during_a_recording_beats_the_waiting_mcm() {
     s.close().unwrap();
 }
 
+/// Final review m2: an MCM report still in the engine's ring (no idle has
+/// drained it yet) does not override a setting the user chose after it.
+#[test]
+fn a_hand_set_mpe_beats_an_undrained_mcm_report() {
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    let (seq, lane) = mpe_lane(&s);
+    assert!(
+        s.inject_midi(
+            "MPE Keys".into(),
+            vec![0xB0, 101, 0, 0xB0, 100, 6, 0xB0, 6, 7]
+        )
+        .unwrap()
+    );
+    // The renderer takes the MCM and reports it; no idle runs meanwhile.
+    std::thread::sleep(Duration::from_millis(200));
+    let mine = MpeRow {
+        zone: MpeZoneRow::Upper,
+        members: 3,
+        bend_range: 24,
+    };
+    lane_edit(
+        &s,
+        LaneEdit::SetMpe {
+            seq,
+            lane,
+            mpe: Some(mine),
+        },
+    )
+    .unwrap();
+    for _ in 0..20 {
+        s.idle().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(chords(&s, seq).mpe, Some(mine), "the user's choice stays");
+    s.close().unwrap();
+}
+
 /// An external destination on channel 3 with a set mix, played by a lane
 /// of the shown sequence (as `midi_strip.rs`).
 fn mix_project() -> (std::sync::Arc<Session>, u64) {

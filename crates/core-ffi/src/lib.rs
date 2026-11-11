@@ -116,6 +116,7 @@ pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,
     NoteMapEntry, RuleRow, SelectModeRow, SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
 };
+pub use mpe::{MpeRow, MpeZoneRow};
 pub use overviews::{OverviewRows, OverviewStateRow};
 pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latency_trim};
 pub use recovery::RecoveryInfo;

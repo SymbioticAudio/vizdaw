@@ -1414,6 +1414,140 @@ fn per_note_offsets_count_from_the_played_start_when_quantized() {
     );
 }
 
+/// Final review m5: pressure played after the note-on but before the
+/// start Input Quantize moved later becomes the note's starting pressure
+/// (the latest such value), so it plays on the note's member channel and
+/// never before the note (on the manager channel).
+#[test]
+fn pressure_before_a_quantized_start_becomes_the_starting_pressure() {
+    use core_engine::input_fx::{CENTER, Expr, NoteExpr};
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let on = LiveMsg::NoteOn {
+        pitch: 60,
+        velocity: 0xC924,
+        expr: NoteExpr {
+            bend: CENTER,
+            pressure: 10,
+            timbre: CENTER,
+        },
+    };
+    let q = Some(RecordQuantize {
+        grid: Q / 2,
+        strength: 100,
+    });
+    let live = |run: i64, msg: LiveMsg, quantize| RecordedMidi {
+        lane: d.keys,
+        run,
+        msg,
+        quantize,
+    };
+    let pressure = |value| LiveMsg::PerNote {
+        pitch: 60,
+        expr: Expr::Pressure,
+        value,
+    };
+    // Played at frame 7 200, moved to tick Q / 2 (frame 12 000).
+    c.midi = vec![
+        live(7_200, on, q),
+        live(7_300, pressure(15), None),
+        live(7_350, pressure(20), None),
+        live(13_000, pressure(30), None),
+        live(
+            24_000,
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0,
+            },
+            None,
+        ),
+    ];
+    let p = c.run().unwrap();
+    let events: Vec<_> = p
+        .lanes
+        .iter()
+        .flat_map(|l| l.active.events.iter())
+        .collect();
+    let n = events
+        .iter()
+        .find(|e| matches!(e.body, EventBody::Note { pitch: 60, .. }))
+        .unwrap();
+    assert_eq!(n.tick.0, Q / 2, "the start moved");
+    let got: Vec<(i64, u32)> = events
+        .iter()
+        .filter_map(|e| match e.body {
+            EventBody::PolyPressure { pitch: 60, value } => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(
+        got[0],
+        (Q / 2, 20),
+        "the latest early pressure starts the note"
+    );
+    assert!(got[1].0 > Q / 2 && got[1].1 == 30, "{got:?}");
+}
+
+/// Final review m5 with no pressure at the note-on: the early values
+/// still give one starting pressure, the latest.
+#[test]
+fn early_pressure_without_a_start_pressure_gives_one() {
+    use core_engine::input_fx::{CENTER, Expr, NoteExpr};
+    let d = doc(None);
+    let mut c = Case::new(&d, 0);
+    c.midi_lanes = vec![d.keys];
+    let on = LiveMsg::NoteOn {
+        pitch: 60,
+        velocity: 0xC924,
+        expr: NoteExpr {
+            bend: CENTER,
+            pressure: 0,
+            timbre: CENTER,
+        },
+    };
+    let q = Some(RecordQuantize {
+        grid: Q / 2,
+        strength: 100,
+    });
+    let live = |run: i64, msg: LiveMsg, quantize| RecordedMidi {
+        lane: d.keys,
+        run,
+        msg,
+        quantize,
+    };
+    let pressure = |value| LiveMsg::PerNote {
+        pitch: 60,
+        expr: Expr::Pressure,
+        value,
+    };
+    c.midi = vec![
+        live(7_200, on, q),
+        live(7_300, pressure(15), None),
+        live(7_350, pressure(20), None),
+        live(
+            24_000,
+            LiveMsg::NoteOff {
+                pitch: 60,
+                velocity: 0,
+            },
+            None,
+        ),
+    ];
+    let p = c.run().unwrap();
+    let got: Vec<(i64, u32)> = p
+        .lanes
+        .iter()
+        .flat_map(|l| l.active.events.iter())
+        .filter_map(|e| match e.body {
+            EventBody::PolyPressure { pitch: 60, value } => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, vec![(Q / 2, 20)]);
+}
+
 /// Spec §13 5g's round trip (plan 5g-2): MPE bytes from a controller,
 /// decoded, recorded, played back to an MPE destination give the same
 /// bytes (the configuration message aside).

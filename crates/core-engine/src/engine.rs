@@ -180,6 +180,10 @@ pub struct Engine {
     /// load so `send_now` and `take_midi_activity` never list ports (plan
     /// 5g-1b).
     dest_targets: BTreeMap<DestId, Vec<TargetIdx>>,
+    /// The external MPE destinations of the last load: endpoint, group
+    /// and setting (final review m3: one removed or moved to another
+    /// endpoint turns its old device's zone off).
+    mpe_dests: BTreeMap<DestId, (String, u8, core_model::mpe::MpeConfig)>,
     factory: Box<dyn SinkFactory>,
     inserts: Box<dyn InsertFactory>,
     tempo: Option<TempoTable>,
@@ -370,6 +374,7 @@ impl Engine {
             shared,
             targets: TargetTable::new(),
             dest_targets: BTreeMap::new(),
+            mpe_dests: BTreeMap::new(),
             factory,
             inserts: Box::new(NoInserts),
             tempo: None,
@@ -483,10 +488,32 @@ impl Engine {
     /// Compiles `seq` and the mixer graph and sends them (and sinks for new
     /// targets) to the renderer. Call again after every committed edit.
     pub fn load(&mut self, doc: &Document, seq: SeqId) -> Result<CompileReport, EngineError> {
+        // The zones of external MPE destinations that left their device
+        // (removed, or moved to another endpoint): turned off after that
+        // device's notes end (final review m3). A destination whose MPE
+        // setting changed in place is the session's (plan 5g-2 T6-a).
+        let mut leaving: Vec<(TargetIdx, core_model::mpe::MpeConfig)> = Vec::new();
+        for (id, (endpoint, group, cfg)) in &self.mpe_dests {
+            let stays = doc.instruments().get(id).is_some_and(|d| {
+                matches!(&d.kind, DestKind::MidiEndpoint { endpoint_ref, group: g, .. }
+                    if endpoint_ref == endpoint && g == group)
+            });
+            if stays {
+                continue;
+            }
+            for t in self.dest_targets.get(id).into_iter().flatten() {
+                if !leaving
+                    .iter()
+                    .any(|(u, c)| u == t && c.manager() == cfg.manager())
+                {
+                    leaving.push((*t, *cfg));
+                }
+            }
+        }
         // Room for removing and adding every possible sink plus the graph,
-        // the schedule and the loop, so no push below can fail after
-        // targets were interned.
-        if self.cmds.slots() < 2 * MAX_TARGETS + 4 {
+        // the schedule, the loop and those zone-offs, so no push below can
+        // fail after targets were interned.
+        if self.cmds.slots() < 2 * MAX_TARGETS + 4 + 5 * leaving.len() {
             return Err(EngineError::Busy);
         }
         let opts = CompileOptions {
@@ -507,7 +534,7 @@ impl Engine {
         if !self.release_unpublished {
             self.targets.recycle();
         }
-        self.release_stale_targets(doc, max, &opts.ports)?;
+        self.release_stale_targets(doc, max, &opts.ports, &mut leaving)?;
         let mut new_sinks: Vec<(TargetIdx, Sink)> = Vec::new();
         let targets = &mut self.targets;
         let factory = &mut self.factory;
@@ -704,6 +731,38 @@ impl Engine {
             self.inputs_sent = routes.clone();
             self.push(EngineCmd::SetInputs(Box::new(routes)))?;
         }
+        // A device that stays loaded: its zone goes off after the swap
+        // and the new routes ended its notes, unless an MPE destination of
+        // `doc` still uses that zone there.
+        for (t, cfg) in leaving {
+            let reused = doc.instruments().iter().any(|(id, d)| {
+                d.kind.is_external()
+                    && d.mpe.is_some_and(|n| n.manager() == cfg.manager())
+                    && self.dest_targets.get(id).is_some_and(|ts| ts.contains(&t))
+            });
+            if reused {
+                continue;
+            }
+            let off = core_model::mpe::MpeConfig { members: 0, ..cfg };
+            for m in crate::mpe::configuration(&off).into_iter().take(5) {
+                self.push(EngineCmd::Audition(t, m))?;
+            }
+        }
+        self.mpe_dests = doc
+            .instruments()
+            .iter()
+            .filter_map(|(id, d)| match (&d.kind, d.mpe) {
+                (
+                    DestKind::MidiEndpoint {
+                        endpoint_ref,
+                        group,
+                        ..
+                    },
+                    Some(cfg),
+                ) if d.kind.is_external() => Some((*id, (endpoint_ref.clone(), *group, cfg))),
+                _ => None,
+            })
+            .collect();
         if self.default_loop {
             // The length may have changed; the mapped old range would not
             // follow it.
@@ -726,6 +785,7 @@ impl Engine {
         doc: &Document,
         max: u32,
         ports: &[MidiPortInfo],
+        leaving: &mut Vec<(TargetIdx, core_model::mpe::MpeConfig)>,
     ) -> Result<(), EngineError> {
         // The MIDI destinations the document still names (plan 5d-1
         // Ruling 23; 5c-2 final review finding 6).
@@ -761,7 +821,17 @@ impl Engine {
             .collect();
         for i in stale {
             self.release_unpublished = true;
-            self.push(EngineCmd::RemoveSink(i))?;
+            // The zones leaving this device go off with it, after its
+            // notes (final review m3).
+            let mut zones_off = [None; 2];
+            for (slot, (_, cfg)) in zones_off
+                .iter_mut()
+                .zip(leaving.iter().filter(|(t, _)| *t == i))
+            {
+                *slot = Some(*cfg);
+            }
+            leaving.retain(|(t, _)| *t != i);
+            self.push(EngineCmd::RemoveSink(i, zones_off))?;
             self.targets.release(i);
             for t in self.dest_targets.values_mut() {
                 t.retain(|t| *t != i);
@@ -1055,6 +1125,37 @@ impl Engine {
         };
         for t in targets.clone() {
             self.push(EngineCmd::Audition(t, msg))?;
+        }
+        Ok(true)
+    }
+
+    /// Sends every channel message of `msgs` now to `dest`'s targets on
+    /// the channels they name, all of them or none (final review m4: an
+    /// MPE configuration is never cut short by a full command ring).
+    /// `Busy` when the ring has no room for all; false when `dest` has no
+    /// loaded target. Messages that are not channel messages are skipped.
+    pub fn send_all_now_on(
+        &mut self,
+        dest: DestId,
+        msgs: &[Midi1Msg],
+    ) -> Result<bool, EngineError> {
+        let Some(targets) = self.dest_targets.get(&dest).filter(|t| !t.is_empty()) else {
+            return Ok(false);
+        };
+        let channel = |m: &&Midi1Msg| {
+            let [status, ..] = m.bytes;
+            (0x80..0xF0).contains(&status)
+        };
+        let need = msgs
+            .iter()
+            .filter(channel)
+            .count()
+            .saturating_mul(targets.len());
+        if self.cmds.slots() < need {
+            return Err(EngineError::Busy);
+        }
+        for m in msgs.iter().filter(channel) {
+            self.send_now_on(dest, *m)?;
         }
         Ok(true)
     }

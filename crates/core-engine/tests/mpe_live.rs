@@ -569,3 +569,331 @@ fn a_muted_plain_destination_counts_no_dropped_per_note_data() {
         "nothing would have played"
     );
 }
+
+/// Final review m1: a reload between an MCM and its write-back (another
+/// track's input changing) keeps the stored setting, so the route is carried
+/// with the decoder's live setting: a held note keeps its later bend,
+/// nothing is cut, and the MCM's zone still holds.
+#[test]
+fn an_unrelated_reload_before_the_write_back_carries_the_mcm() {
+    let (d, seq, keys, synth, pads) = {
+        let mut b = Builder::new();
+        let synth = b.dest("Synth", "builtin:synth", 3).unwrap();
+        let (seq, keys) = b.sequence("Bar", "Keys", Some(synth)).unwrap();
+        let pads = b.lane(seq, "Pads", Some(synth)).unwrap();
+        b.run(Command::Routing(RoutingCmd::SetMpe {
+            dest: synth,
+            mpe: Some(MpeConfig::default()),
+        }))
+        .unwrap();
+        (b.finish(), seq, keys, synth, pads)
+    };
+    let (mut engine, mut b, log) = start(&d, seq, spec(keys, synth, vec![]));
+    b.run_frames(256);
+    send(&engine, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 7]]);
+    b.run_frames(256);
+    assert_eq!(engine.take_mpe_reports().len(), 1);
+    send(&engine, &[[0x91, 62, 100]]);
+    b.run_frames(256);
+    log.drain();
+    // The reload: another track starts listening; this track's stored
+    // setting is unchanged (its write-back is still owed).
+    let other = MidiInputSpec {
+        lane: pads,
+        port: Some(port_key("Other Keys")),
+        channel: None,
+        dest: Some(synth),
+        thru: false,
+        armed: false,
+        fx: vec![],
+        mpe: None,
+    };
+    engine.set_inputs(InputSpec {
+        midi: vec![spec(keys, synth, vec![]), other],
+        monitor: vec![],
+    });
+    engine.load(&d, seq).unwrap();
+    b.run_frames(256);
+    send(&engine, &[[0xE1, 0x00, 0x50]]);
+    b.run_frames(256);
+    let got = all(&log);
+    assert!(
+        !got.iter().any(|b| b[0] & 0xF0 == 0x80),
+        "the held note was not cut: {got:?}"
+    );
+    assert!(
+        !got.iter().any(|b| b == &vec![0xB0, 100, 6]),
+        "no MCM resent: {got:?}"
+    );
+    assert!(
+        got.contains(&vec![0xE1, 0x00, 0x50]),
+        "the held note kept its later bend: {got:?}"
+    );
+    // The MCM's seven members still hold: channel 9 is not one.
+    send(&engine, &[[0x99, 60, 100]]);
+    b.run_frames(256);
+    assert!(bytes(&log).is_empty());
+}
+
+/// Final review m1 with Ruling T3-a: a zone-off MCM, an unrelated reload
+/// (carried, the lane still hears every channel), then the write-back with
+/// a channel filter: the held note still ends, none hangs.
+#[test]
+fn a_zone_off_carried_across_a_reload_still_ends_at_the_write_back() {
+    let mut bld = Builder::new();
+    let synth = bld.dest("Synth", "builtin:synth", 3).unwrap();
+    let (seq, keys) = bld.sequence("Bar", "Keys", Some(synth)).unwrap();
+    let pads = bld.lane(seq, "Pads", Some(synth)).unwrap();
+    let d = bld.finish();
+    let other = MidiInputSpec {
+        lane: pads,
+        port: Some(port_key("Other Keys")),
+        channel: None,
+        dest: Some(synth),
+        thru: false,
+        armed: false,
+        fx: vec![],
+        mpe: None,
+    };
+    let (mut engine, mut b, log) = start(&d, seq, spec(keys, synth, vec![]));
+    b.run_frames(256);
+    send(&engine, &[[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 0]]);
+    b.run_frames(256);
+    assert_eq!(engine.take_mpe_reports(), vec![(keys, None)]);
+    send(&engine, &[[0x95, 60, 100]]);
+    b.run_frames(256);
+    log.drain();
+    engine.set_inputs(InputSpec {
+        midi: vec![spec(keys, synth, vec![]), other.clone()],
+        monitor: vec![],
+    });
+    engine.load(&d, seq).unwrap();
+    b.run_frames(256);
+    let got = all(&log);
+    assert_eq!(offs(&got, 0x83, 60), 0, "carried, not cut: {got:?}");
+    let mut s = spec(keys, synth, vec![]);
+    s.mpe = None;
+    engine.set_inputs(InputSpec {
+        midi: vec![s, other],
+        monitor: vec![],
+    });
+    engine.load(&d, seq).unwrap();
+    b.run_frames(256);
+    send(&engine, &[[0x85, 60, 0]]);
+    b.run_frames(256);
+    let got = all(&log);
+    assert_eq!(offs(&got, 0x83, 60), 1, "the held note ended: {got:?}");
+}
+
+// Final review m3: an external MPE destination removed, or moved to
+// another endpoint, turns its old device's zone off after that device's
+// notes end. Fake ports "Synth A" and "Synth B".
+
+fn port_dest(b: &mut Builder, name: &str, port: &str, channel: u8) -> DestId {
+    b.dest_kind(
+        name,
+        DestKind::MidiEndpoint {
+            endpoint_ref: port.into(),
+            group: 0,
+            channel,
+        },
+        None,
+    )
+    .unwrap()
+}
+
+/// Dest "A" (MPE, Lower 15) on "Synth A" and plain dest "P" on `p_port`;
+/// lane "Keys" plays a long note to A. Playing, the note sounding; returns
+/// the engine, backend, log, the note's target, A and P.
+fn playing_on_a(
+    p_port: &str,
+) -> (
+    Engine,
+    OfflineBackend,
+    EventLog,
+    core_engine::schedule::TargetIdx,
+    Builder,
+    SeqId,
+    DestId,
+    DestId,
+) {
+    let mut b = Builder::new();
+    let a = port_dest(&mut b, "A", "Synth A", 0);
+    let p = port_dest(&mut b, "P", p_port, 4);
+    let (seq, keys) = b.sequence("Bar", "Keys", Some(a)).unwrap();
+    b.notes(seq, keys, &[(0, 60, 0x8000, 64 * Q)]).unwrap();
+    b.run(Command::Routing(RoutingCmd::SetMpe {
+        dest: a,
+        mpe: Some(MpeConfig::default()),
+    }))
+    .unwrap();
+    let info = |name: &str| core_engine::backend::MidiPortInfo {
+        name: name.into(),
+        unique_id: None,
+    };
+    let sinks = OfflineSinks::new(100_000).with_ports(vec![info("Synth A"), info("Synth B")]);
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(EngineConfig::new(SR), Box::new(sinks)).unwrap();
+    engine.load(b.doc(), seq).unwrap();
+    let mut be = OfflineBackend::new(SR, 256);
+    be.start(renderer).unwrap();
+    engine.play().unwrap();
+    be.run_frames(4096);
+    let on = log
+        .drain()
+        .into_iter()
+        .find(|r| r.bytes()[0] & 0xF0 == 0x90)
+        .expect("the note started");
+    (engine, be, log, on.target, b, seq, a, p)
+}
+
+/// The zone-off MCM on Lower's manager channel.
+const LOWER_OFF: [[u8; 3]; 5] = [
+    [0xB0, 101, 0],
+    [0xB0, 100, 6],
+    [0xB0, 6, 0],
+    [0xB0, 101, 127],
+    [0xB0, 100, 127],
+];
+
+/// What `t` got after the edit, and whether its note ended before the
+/// zone-off MCM.
+fn after_edit(
+    engine: &mut Engine,
+    be: &mut OfflineBackend,
+    log: &EventLog,
+    t: core_engine::schedule::TargetIdx,
+    doc: &Document,
+    seq: SeqId,
+) -> Vec<Vec<u8>> {
+    engine.load(doc, seq).unwrap();
+    be.run_frames(4096);
+    log.drain()
+        .into_iter()
+        .filter(|r| r.target == t)
+        .map(|r| r.bytes().to_vec())
+        .collect()
+}
+
+fn zone_off_after_note_off(got: &[Vec<u8>]) {
+    let off = got
+        .iter()
+        .position(|b| b[0] & 0xF0 == 0x80 && b[1] == 60)
+        .unwrap_or_else(|| panic!("the note ended: {got:?}"));
+    let mcm = got
+        .windows(5)
+        .position(|w| w.iter().zip(LOWER_OFF).all(|(a, b)| a.as_slice() == b))
+        .unwrap_or_else(|| panic!("the zone went off: {got:?}"));
+    assert!(off < mcm, "notes end first: {got:?}");
+    assert_eq!(
+        got.iter().filter(|b| b.as_slice() == [0xB0, 6, 0]).count(),
+        1,
+        "one zone-off: {got:?}"
+    );
+}
+
+#[test]
+fn moving_an_mpe_destination_to_another_port_turns_the_old_zone_off() {
+    let (mut engine, mut be, log, t, mut b, seq, a, _) = playing_on_a("Synth B");
+    b.run(Command::Routing(RoutingCmd::EditDestination {
+        dest: a,
+        kind: DestKind::MidiEndpoint {
+            endpoint_ref: "Synth B".into(),
+            group: 0,
+            channel: 0,
+        },
+        default_patch: None,
+    }))
+    .unwrap();
+    let got = after_edit(&mut engine, &mut be, &log, t, b.doc(), seq);
+    zone_off_after_note_off(&got);
+}
+
+#[test]
+fn removing_an_mpe_destination_turns_its_zone_off_on_a_port_that_stays() {
+    // P stays on "Synth A": the device's sink is kept.
+    let (mut engine, mut be, log, t, mut b, seq, a, p) = playing_on_a("Synth A");
+    b.run(Command::Routing(RoutingCmd::RemoveDestination {
+        dest: a,
+        replacement: Some(p),
+    }))
+    .unwrap();
+    let got = after_edit(&mut engine, &mut be, &log, t, b.doc(), seq);
+    zone_off_after_note_off(&got);
+}
+
+#[test]
+fn removing_an_mpe_destination_turns_its_zone_off_on_a_port_that_goes() {
+    let (mut engine, mut be, log, t, mut b, seq, a, p) = playing_on_a("Synth B");
+    b.run(Command::Routing(RoutingCmd::RemoveDestination {
+        dest: a,
+        replacement: Some(p),
+    }))
+    .unwrap();
+    let got = after_edit(&mut engine, &mut be, &log, t, b.doc(), seq);
+    zone_off_after_note_off(&got);
+}
+
+#[test]
+fn a_channel_edit_on_the_same_port_sends_no_zone_off() {
+    let (mut engine, mut be, log, t, mut b, seq, a, _) = playing_on_a("Synth B");
+    b.run(Command::Routing(RoutingCmd::EditDestination {
+        dest: a,
+        kind: DestKind::MidiEndpoint {
+            endpoint_ref: "Synth A".into(),
+            group: 0,
+            channel: 5,
+        },
+        default_patch: None,
+    }))
+    .unwrap();
+    let got = after_edit(&mut engine, &mut be, &log, t, b.doc(), seq);
+    assert!(
+        !got.iter().any(|b| b.as_slice() == [0xB0, 6, 0]),
+        "no zone-off: {got:?}"
+    );
+}
+
+/// Final review m4: a batch goes out whole or not at all. With room for
+/// five commands, an eleven-message configuration is refused and takes
+/// none of them.
+#[test]
+fn a_configuration_is_sent_whole_or_not_at_all() {
+    let (d, seq, _, dest) = ext_doc(false);
+    let sinks = OfflineSinks::new(100_000);
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(EngineConfig::new(SR), Box::new(sinks)).unwrap();
+    engine.load(&d, seq).unwrap();
+    let mut be = OfflineBackend::new(SR, 256);
+    be.start(renderer).unwrap();
+    be.run_frames(256);
+    log.drain();
+    let one = Midi1Msg::three(0xB2, 7, 1);
+    // Fill the ring (no block runs meanwhile), counting its room.
+    let mut room = 0;
+    while engine.send_now_on(dest, one).unwrap_or(false) {
+        room += 1;
+    }
+    be.run_frames(256);
+    log.drain();
+    for _ in 0..room - 5 {
+        assert!(engine.send_now_on(dest, one).unwrap());
+    }
+    let config = core_engine::mpe::configuration(&UPPER3);
+    assert!(engine.send_all_now_on(dest, &config).is_err());
+    for _ in 0..5 {
+        assert!(engine.send_now_on(dest, one).unwrap(), "nothing was taken");
+    }
+    assert!(engine.send_now_on(dest, one).is_err());
+    be.run_frames(256);
+    assert!(
+        log.drain().iter().all(|r| r.bytes() == [0xB2, 7, 1]),
+        "no part of the configuration went out"
+    );
+    // With room, all of it.
+    assert!(engine.send_all_now_on(dest, &config).unwrap());
+    be.run_frames(256);
+    let got: Vec<Vec<u8>> = log.drain().iter().map(|r| r.bytes().to_vec()).collect();
+    let want: Vec<Vec<u8>> = config.iter().map(|m| m.as_slice().to_vec()).collect();
+    assert_eq!(got, want);
+}

@@ -157,14 +157,17 @@ fn hostile_mpe_settings_are_refused() {
             "{bad:?}"
         );
         assert!(
-            apply(
-                &d,
-                &Command::Routing(RoutingCmd::SetMpe {
-                    dest: dst,
-                    mpe: Some(bad)
-                })
-            )
-            .is_err()
+            matches!(
+                apply(
+                    &d,
+                    &Command::Routing(RoutingCmd::SetMpe {
+                        dest: dst,
+                        mpe: Some(bad)
+                    })
+                ),
+                Err(ModelError::OutOfRange { .. })
+            ),
+            "{bad:?}"
         );
     }
     assert!(
@@ -262,6 +265,11 @@ fn files_write_mpe_only_when_set() {
         other => panic!("{other:?}"),
     }
     assert_eq!(VERSION, 7);
+    // A stray key inside "mpe" is refused (deny_unknown_fields).
+    let stray = text.replace("\"members\": 7", "\"members\": 7, \"channels\": 3");
+    assert_ne!(stray, text, "the test edits the saved text");
+    let e = from_json(&stray).unwrap_err();
+    assert!(format!("{e:?}").contains("channels"), "{e:?}");
 }
 
 #[test]

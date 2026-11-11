@@ -530,9 +530,11 @@ pub enum EngineCmd {
     /// after its `RemoveSink` and every schedule and graph naming it).
     AddSink(TargetIdx, Sink),
     /// Remove a released target's sink, ending the notes still sounding
-    /// on it first (plan 5d-1 Ruling 23); it goes back through the retire
-    /// ring (a plugin instrument is deactivated off the audio thread).
-    RemoveSink(TargetIdx),
+    /// on it first (plan 5d-1 Ruling 23), then turning off the MPE zones
+    /// of destinations that left it (final review m3); it goes back
+    /// through the retire ring (a plugin instrument is deactivated off the
+    /// audio thread).
+    RemoveSink(TargetIdx, [Option<core_model::mpe::MpeConfig>; 2]),
     /// Send a note on or off to a target now (editor audition). Tracked
     /// apart from played notes: Stop, Locate and removing the target
     /// release it; a schedule swap (every edit recompiles), a loop wrap and
@@ -1736,7 +1738,7 @@ impl Renderer {
                     self.schedule.is_some() && self.retire.slots() == 0
                 }
                 Ok(EngineCmd::SetGraph(_)) => self.graph.is_some() && self.retire.slots() == 0,
-                Ok(EngineCmd::RemoveSink(_)) => self.retire.slots() == 0,
+                Ok(EngineCmd::RemoveSink(..)) => self.retire.slots() == 0,
                 Ok(EngineCmd::Record(_)) => self.tap.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::Gestures(_)) => self.gestures.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::SetInputs(_)) => self.inputs.is_some() && self.retire.slots() == 0,
@@ -1917,7 +1919,7 @@ impl Renderer {
                 // across (m1): it is what was heard.
                 self.transport.loop_range = range;
             }
-            EngineCmd::RemoveSink(idx) => {
+            EngineCmd::RemoveSink(idx, zones_off) => {
                 // End its sounding notes (played, auditioned, played thru)
                 // before the sink goes, as Stop does: an external synth
                 // would hold them forever (plan 5d-1 Ruling 23; Task 11
@@ -1934,6 +1936,14 @@ impl Renderer {
                 self.notes.release(idx, |m| o.send(idx, 0, m.as_slice()));
                 self.audition.release(idx, |m| o.send(idx, 0, m.as_slice()));
                 self.thru.release(idx, |m| o.send(idx, 0, m.as_slice()));
+                // After the notes: the MCM alone, so the device leaves MPE
+                // mode (final review m3).
+                for cfg in zones_off.iter().flatten() {
+                    let off = core_model::mpe::MpeConfig { members: 0, ..*cfg };
+                    for m in crate::mpe::configuration(&off).iter().take(5) {
+                        o.send(idx, 0, m.as_slice());
+                    }
+                }
                 let taken = self
                     .sinks
                     .get_mut(usize::from(idx.0))
