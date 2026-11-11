@@ -258,7 +258,7 @@ vizdaw/
 
 **Order (owner, 2026-11-03):** plans 5g-1 (MIDI input effects) and 5g-2 (MPE) move out of sub-project 5 to run right after sub-project 7, so the owner can start using the app sooner. Both stay in the 1.0 release. Sub-project 5 ends with plan 5f-4 and merges to main then.
 
-**Order (owner, 2026-11-11):** sub-project 8 (producer copilot) is in the 1.0 release. It runs right after 5g-2 and before 6 (Import), since it builds on the control channel that already exists.
+**Order (owner, 2026-11-11):** sub-project 8 (producer copilot) is in the 1.0 release. Sub-project 6 (Import and export) runs next, after 5g-2, and sub-project 8 follows it (owner, 2026-11-11: "let's do 6 next, then 8"). Sub-project 6 owns project format versions 8 and 9.
 
 ## 12. Testing
 
