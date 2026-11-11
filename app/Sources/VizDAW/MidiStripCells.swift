@@ -101,7 +101,7 @@ private struct MidiStripHeader: View {
                     .frame(maxWidth: .infinity)
                     .help(name)
             }
-            Text(theme.stripLabel(MidiStripMath.kindLabel(channel: dest?.channel)))
+            Text(theme.stripLabel(MidiStripMath.kindLabel(channel: dest?.channel, mpe: dest?.mpe)))
                 .font(theme.type.caption.font)
                 .foregroundStyle(theme.text.secondary.color)
                 .lineLimit(1)

@@ -49,9 +49,11 @@ public enum MidiStripMath {
     /// The pan knob's position 0...1 (an unset pan sits at the centre).
     public static func panPosition(_ p: UInt8?) -> Double { Double(p ?? panCentre) / 127 }
 
-    /// The strip's kind line: "MIDI · Ch 1" (the channel is 0...15).
-    public static func kindLabel(channel: UInt8?) -> String {
-        channel.map { "MIDI \u{00B7} Ch \(Int($0) + 1)" } ?? "MIDI"
+    /// The strip's kind line: "MIDI · Ch 1" (the channel is 0...15), or
+    /// "MIDI · MPE Lower" / "MIDI · MPE Upper" for an MPE destination.
+    public static func kindLabel(channel: UInt8?, mpe: MpeRow? = nil) -> String {
+        if let mpe { return "MIDI \u{00B7} MPE " + (mpe.zone == .lower ? "Lower" : "Upper") }
+        return channel.map { "MIDI \u{00B7} Ch \(Int($0) + 1)" } ?? "MIDI"
     }
 
     /// The left pane's header for a MIDI track without a destination

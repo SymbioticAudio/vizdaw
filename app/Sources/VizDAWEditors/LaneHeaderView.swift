@@ -216,7 +216,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                         in: r, withAttributes: oneLine(small, .byTruncatingTail))
                 case .input:
                     let badge = inputs.badge(lane).map { $0 + " · " } ?? ""
-                    NSString(string: "▾ " + badge + LaneInputs.title(lane.input)).draw(
+                    NSString(string: "▾ " + badge + LaneInputs.title(lane: lane)).draw(
                         in: r, withAttributes: oneLine(small, .byTruncatingMiddle))
                 }
             }
@@ -465,6 +465,12 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             }
             menu.addItem(a.item(checked: lane.midiDest == d.id))
         }
+        if let d = dests.first(where: { $0.id == lane.midiDest }), d.external {
+            addMpe(MpeMenus.output(d), to: menu) { [weak self] c in
+                guard let self else { return }
+                MpeMenus.chooseOutput(c, dest: d.id, self.document)
+            }
+        }
         return menu
     }
 
@@ -488,7 +494,24 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                 menu.addItem(a.item(checked: choice.input == lane.input))
             }
         }
+        addMpe(MpeMenus.input(lane), to: menu) { [document] c in
+            MpeMenus.chooseInput(c, lane: lane, document)
+        }
         return menu
+    }
+
+    /// Appends MPE sections as titled, separated groups of checked items.
+    private func addMpe(_ sections: [MpeSection], to menu: NSMenu, choose: @escaping @MainActor (MpeChoice) -> Void) {
+        for section in sections {
+            menu.addItem(.separator())
+            let title = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            title.isEnabled = false
+            menu.addItem(title)
+            for c in section.choices {
+                let a = MenuAction(title: c.title) { choose(c) }
+                menu.addItem(a.item(checked: c.checked))
+            }
+        }
     }
 
     func beginRename(_ lane: LaneRow, seq: UInt64, row i: Int) {

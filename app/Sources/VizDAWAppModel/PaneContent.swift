@@ -151,7 +151,7 @@ public enum Inspector {
             out += [
                 InspectorRow(label: "Name", value: lane.name),
                 InspectorRow(label: "Plays", value: plays),
-                InspectorRow(label: "Input", value: LaneInputs.title(lane.input)),
+                InspectorRow(label: "Input", value: LaneInputs.title(lane: lane)),
                 InspectorRow(label: "Monitor", value: LaneInputs.label(lane.monitor)),
                 InspectorRow(label: "Takes", value: "\(lane.takeCount)"),
                 InspectorRow(label: "Armed", value: lane.arm ? "Yes" : "No"),

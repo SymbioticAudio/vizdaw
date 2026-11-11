@@ -148,11 +148,20 @@ public final class LaneInputs {
         }
     }
 
+    /// What every place that titles a track's input shows: "Port · MPE" for
+    /// a MIDI input with MPE on (the channel dropped), else `title(input)`.
+    nonisolated public static func title(lane: LaneRow) -> String {
+        if case .midi(let port, _) = lane.input, lane.mpe != nil {
+            return "\(port ?? "All MIDI") \u{00B7} MPE"
+        }
+        return title(lane.input)
+    }
+
     /// What the strip's input picker shows: the input alone, or led by the
     /// lane's name when another lane plays through the same path (the strip
     /// is shared, so it says whose input this is).
     public func pickerTitle(_ lane: LaneRow, sharesPath: Bool) -> String {
-        sharesPath ? "\(lane.name): \(Self.title(lane.input))" : Self.title(lane.input)
+        sharesPath ? "\(lane.name): \(Self.title(lane: lane))" : Self.title(lane: lane)
     }
 
     /// `pickerTitle` with `sharesPath` read from the shown lanes.

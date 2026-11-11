@@ -289,6 +289,13 @@ private func ext(_ id: UInt64, _ name: String = "Juno", mix: MidiMixRow = MidiMi
         #expect(!MidiStripMath.panHint.lowercased().contains("lane"))
     }
 
+    @Test func anMpeDestinationsKindLineNamesItsZone() {
+        #expect(MidiStripMath.kindLabel(channel: 2, mpe: MpeRow(zone: .lower, members: 15, bendRange: 48)) == "MIDI \u{00B7} MPE Lower")
+        #expect(MidiStripMath.kindLabel(channel: 2, mpe: MpeRow(zone: .upper, members: 3, bendRange: 24)) == "MIDI \u{00B7} MPE Upper")
+        #expect(MidiStripMath.kindLabel(channel: 2, mpe: nil) == "MIDI \u{00B7} Ch 3")
+        #expect(MidiStripMath.kindLabel(channel: nil, mpe: MpeRow(zone: .lower, members: 1, bendRange: 2)) == "MIDI \u{00B7} MPE Lower")
+    }
+
     @Test func midiFxKeyNeverMeetsAStripID() {
         #expect(MixerModel.midiFxKey(dest: 7, lane: 30) != 7)
         #expect(MixerModel.midiFxKey(dest: 7, lane: 30) == MixerModel.midiFxKey(dest: 7, lane: 31),

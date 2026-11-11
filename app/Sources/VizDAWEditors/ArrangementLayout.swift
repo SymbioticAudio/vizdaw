@@ -181,7 +181,7 @@ public enum ArrangementA11y {
         if lane.mute { parts.append("muted") }
         if lane.solo { parts.append("soloed") }
         if lane.arm { parts.append("armed") }
-        if lane.input != nil { parts.append("input " + LaneInputs.title(lane.input)) }
+        if lane.input != nil { parts.append("input " + LaneInputs.title(lane: lane)) }
         if let r = returnOf { parts.append("recording the return of " + r) }
         switch lane.monitor {
         case .auto: break
