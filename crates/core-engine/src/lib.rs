@@ -30,6 +30,7 @@ pub mod input;
 pub mod input_fx;
 pub mod measure;
 pub mod midi1;
+pub mod mpe;
 pub mod notes;
 pub mod offline;
 pub mod pool;
