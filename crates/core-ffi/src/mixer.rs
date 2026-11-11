@@ -210,6 +210,9 @@ pub struct DestRow {
     /// The 0-15 channel of a MIDI endpoint, else `None`.
     #[uniffi(default)]
     pub channel: Option<u8>,
+    /// Its MPE output (plan 5g-2 Ruling 7), `None` when off.
+    #[uniffi(default)]
+    pub mpe: Option<crate::mpe::MpeRow>,
 }
 
 /// An external destination's MIDI strip mix (plan 5g-1b): controller

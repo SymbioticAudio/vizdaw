@@ -41,6 +41,7 @@ pub mod live;
 pub mod media;
 pub mod mixer;
 pub mod modify;
+pub mod mpe;
 pub mod overviews;
 pub mod passes;
 pub mod plugins;

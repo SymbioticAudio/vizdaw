@@ -796,8 +796,8 @@ pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
                 // Only listening lanes reach here (the `continue` above):
                 // no chain for the others, none on playback (spec §6.8).
                 fx: l.input_fx.iter().cloned().collect(),
-                // The lane's MPE input (plan 5g-2): Task 6 fills it.
-                mpe: None,
+                // The lane's MPE input (plan 5g-2 Ruling 3).
+                mpe: l.mpe,
             }),
             Some(LaneInput::Audio { channels, .. })
                 if software && l.monitor != MonitorMode::Off =>
@@ -883,6 +883,19 @@ pub fn take_stream_errors(owner: u64) -> Vec<(core_model::ids::MediaId, String)>
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.take_stream_errors())
+        .unwrap_or_default()
+}
+
+/// The MPE settings MCMs gave `owner`'s lanes since the last call, oldest
+/// first (plan 5g-2 Ruling 4; `None`: a zone an MCM turned off); empty
+/// unless it holds the engine.
+pub fn take_mpe_reports(
+    owner: u64,
+) -> Vec<(core_model::ids::LaneId, Option<core_model::mpe::MpeConfig>)> {
+    lock_host()
+        .as_mut()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.take_mpe_reports())
         .unwrap_or_default()
 }
 

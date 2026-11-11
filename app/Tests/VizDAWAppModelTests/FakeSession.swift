@@ -961,6 +961,16 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
+    /// Every `setDestinationMpe` call.
+    var mpeCalls: [(UInt64, MpeRow?)] = []
+
+    func setDestinationMpe(dest: UInt64, mpe: MpeRow?) throws -> DocSnapshot {
+        if let e = synthError { throw e }
+        mpeCalls.append((dest, mpe))
+        if let i = dests.firstIndex(where: { $0.id == dest }) { dests[i].mpe = mpe }
+        return commandResult()
+    }
+
     func previewMidiMix(dest: UInt64, volume: UInt8?, pan: UInt8?) throws -> Bool {
         midiPreviews.append((dest, volume, pan))
         return true

@@ -209,6 +209,10 @@ pub(crate) struct Inner {
     /// Copies being written without the lock (pre-flight M4): retention
     /// waits for them.
     edits_writing: u32,
+    /// MPE settings controllers' MCMs gave lanes (plan 5g-2 Ruling 4), the
+    /// last per lane of the sequence they played in, waiting to be
+    /// written back once no recording or edit is open.
+    mpe_owed: std::collections::BTreeMap<(SeqId, LaneId), Option<core_model::mpe::MpeConfig>>,
     /// The next bounce cancels itself once its progress reaches this
     /// (test hook).
     #[cfg(feature = "test-hooks")]
@@ -324,6 +328,7 @@ impl Inner {
             bounce_results: Default::default(),
             edits: Default::default(),
             edits_writing: 0,
+            mpe_owed: Default::default(),
             #[cfg(feature = "test-hooks")]
             bounce_cancel_at: None,
             #[cfg(feature = "test-hooks")]
@@ -2068,6 +2073,7 @@ impl Session {
             let mut inner = lock(&self.inner);
             self.apply_pending_pass(&mut inner);
             self.apply_pending_automation(&mut inner);
+            self.apply_mpe_reports(&mut inner);
             // A save at Stop the busy registry put off (Task 9 review M4).
             self.save_after_pass_now(&mut inner);
             // A setting a load publishes changed (plan 5d-1 Ruling 12).
@@ -2594,6 +2600,7 @@ impl Session {
                         DestKind::MidiEndpoint { channel, .. } => Some(*channel),
                         DestKind::PluginInstrument { .. } => None,
                     },
+                    mpe: d.mpe.map(Into::into),
                 })
                 .collect())
         })
@@ -5931,6 +5938,23 @@ impl Session {
         })
     }
 
+    /// MPE output for destination `dest` (plan 5g-2 Ruling 7), one undo
+    /// step "Set Destination MPE"; `None` turns it off. `Model` for an
+    /// unknown destination or a setting out of range (members 1–15, bend
+    /// range 1–96).
+    pub fn set_destination_mpe(
+        &self,
+        dest: u64,
+        mpe: Option<crate::mpe::MpeRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Routing(RoutingCmd::SetMpe {
+                dest: DestId(dest),
+                mpe: mpe.map(Into::into),
+            }))
+        })
+    }
+
     /// Sets external destination `dest`'s return latency to `ms` (spec
     /// §4.5a: 0–500), one undo step "Set Return Latency". `Model` for
     /// another destination or a value out of range.
@@ -7737,6 +7761,54 @@ impl Session {
         }
     }
 
+    /// Writes the MPE settings controllers' MCMs gave lanes back into the
+    /// document (plan 5g-2 Ruling 4; a zone turned off is `None`), each
+    /// lane whose setting differs as one undo step "Set Track MPE". The
+    /// reports wait while a recording runs, finishes or has a pass to
+    /// land, and while an edit, transaction or group is open.
+    fn apply_mpe_reports(&self, inner: &mut Inner) {
+        let reports = host::take_mpe_reports(self.id);
+        if !reports.is_empty()
+            && let Some((seq, _)) = host::position(self.id)
+        {
+            for (lane, cfg) in reports {
+                inner.mpe_owed.insert((seq, lane), cfg);
+            }
+        }
+        if inner.mpe_owed.is_empty()
+            || inner.recording.is_some()
+            || inner.finishing
+            || inner.pending_pass.is_some()
+            || inner.static_edit.is_some()
+            || inner.history.in_transaction()
+            || inner.history.in_group()
+        {
+            return;
+        }
+        for ((seq, lane), mpe) in std::mem::take(&mut inner.mpe_owed) {
+            let differs = inner
+                .doc()
+                .sequence(seq)
+                .ok()
+                .and_then(|s| s.lanes.iter().find(|l| l.id == lane))
+                .is_some_and(|l| l.mpe != mpe);
+            if !differs {
+                continue;
+            }
+            let cmd = Command::Lane(LaneCmd::SetMpe { seq, lane, mpe });
+            if let Err(e) = inner.history.execute(&cmd, &ViewFilter::default()) {
+                inner.news.problems.push(format!(
+                    "The track's MPE setting could not be updated ({e})."
+                ));
+                continue;
+            }
+            inner.version += 1;
+            inner.news.doc_changed = true;
+            inner.reload_host(self.id);
+            self.mark(inner);
+        }
+    }
+
     /// Lands one pass's writes (see [`Session::apply_pending_automation`];
     /// plan 5e-1 Task 12): inside a recording's group as part of its step;
     /// else into `step` while that step is still the present (one Undo
@@ -7914,6 +7986,7 @@ impl Session {
     /// (nothing before its first Play or Record).
     pub fn input_info(&self) -> Result<crate::live::InputInfoRow, VizError> {
         ffi_guard(|| {
+            let counters = host::counters(self.id);
             Ok(match host::input_info(self.id) {
                 Some((device, i)) => crate::live::InputInfoRow {
                     device,
@@ -7925,7 +7998,9 @@ impl Session {
                     buffer_frames: i.buffer_frames,
                     opening: host::input_opening(self.id),
                     sample_rate: host::device(self.id).map_or(0.0, |(_, r)| r),
-                    midi_fx_dropped: host::counters(self.id).map_or(0, |c| c.midi_fx_dropped),
+                    midi_fx_dropped: counters.map_or(0, |c| c.midi_fx_dropped),
+                    per_note_dropped: counters.map_or(0, |c| c.per_note_dropped),
+                    mpe_stolen: counters.map_or(0, |c| c.mpe_stolen),
                 },
                 None => crate::live::InputInfoRow {
                     device: String::new(),
@@ -7938,6 +8013,8 @@ impl Session {
                     opening: false,
                     sample_rate: 0.0,
                     midi_fx_dropped: 0,
+                    per_note_dropped: 0,
+                    mpe_stolen: 0,
                 },
             })
         })

@@ -55,6 +55,14 @@ pub struct InputInfoRow {
     /// 5g-1 Ruling 17).
     #[uniffi(default)]
     pub midi_fx_dropped: u64,
+    /// Per-note pitch bend and timbre live thru dropped on destinations
+    /// without MPE output (plan 5g-2 Ruling 9).
+    #[uniffi(default)]
+    pub per_note_dropped: u64,
+    /// Notes live thru's MPE output stole a member channel from (plan
+    /// 5g-2 Ruling 7).
+    #[uniffi(default)]
+    pub mpe_stolen: u64,
 }
 
 /// The channel messages in `bytes`, one after another (running status,

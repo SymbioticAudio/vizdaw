@@ -536,6 +536,8 @@ fn record_and_input_results_as_json() {
             opening: false,
             sample_rate: 48_000.0,
             midi_fx_dropped: 3,
+            per_note_dropped: 0,
+            mpe_stolen: 0,
         },
         levels: vec![0.25, 1.0, 0.0],
     });
@@ -701,6 +703,7 @@ fn document_state_reports_the_midi_mix_per_destination() {
         return_latency_ms: 12.5,
         midi_mix: mix,
         channel: None,
+        mpe: None,
     };
     let v = result_json(&ControlResult::Document {
         doc: "D".into(),
