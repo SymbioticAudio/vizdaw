@@ -54,6 +54,7 @@ fn spec(d: &Doc, lane: LaneId, port: &str, fx: Vec<InputFx>, armed: bool) -> Mid
         thru: true,
         armed,
         fx,
+        mpe: None,
     }
 }
 

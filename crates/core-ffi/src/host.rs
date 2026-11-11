@@ -796,6 +796,8 @@ pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
                 // Only listening lanes reach here (the `continue` above):
                 // no chain for the others, none on playback (spec §6.8).
                 fx: l.input_fx.iter().cloned().collect(),
+                // The lane's MPE input (plan 5g-2): Task 6 fills it.
+                mpe: None,
             }),
             Some(LaneInput::Audio { channels, .. })
                 if software && l.monitor != MonitorMode::Off =>

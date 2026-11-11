@@ -125,6 +125,7 @@ fn recording_never_allocates() {
             thru: true,
             armed: true,
             fx: vec![InputFx::new(InputFxKind::Transpose { semitones: 12 })],
+            mpe: None,
         }],
         monitor: vec![MonitorRoute {
             lane: mic,

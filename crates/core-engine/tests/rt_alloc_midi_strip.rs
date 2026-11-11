@@ -79,6 +79,7 @@ fn midi_strips_never_allocate() {
             thru: true,
             armed: false,
             fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     });

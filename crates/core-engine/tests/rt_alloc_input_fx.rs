@@ -65,6 +65,7 @@ fn the_input_chain_never_allocates() {
         thru: true,
         armed: true,
         fx,
+        mpe: None,
     };
     let sinks = OfflineSinks::new(1 << 20).with_tone();
     let log = sinks.log();

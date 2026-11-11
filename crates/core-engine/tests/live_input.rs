@@ -78,6 +78,7 @@ fn keys_spec(d: &Doc, thru: bool, armed: bool) -> MidiInputSpec {
         thru,
         armed,
         fx: Vec::new(),
+        mpe: None,
     }
 }
 
@@ -211,6 +212,7 @@ fn a_released_targets_thru_note_ends_once() {
             thru: true,
             armed: true,
             fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     };
@@ -397,6 +399,7 @@ fn external_midi_is_scheduled_at_the_audible_time() {
             thru: true,
             armed: false,
             fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     });
@@ -602,6 +605,7 @@ fn a_thru_destination_that_cannot_play_is_reported() {
             thru: true,
             armed: true,
             fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     };
@@ -668,6 +672,7 @@ fn thru_past_the_target_limit_is_reported() {
             thru: true,
             armed: true,
             fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     });

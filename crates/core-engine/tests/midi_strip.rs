@@ -496,6 +496,7 @@ fn live_thru_to_a_muted_destination_drops_notes_and_still_records() {
             thru: true,
             armed: true,
             fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     });
@@ -626,6 +627,7 @@ fn muting_ends_a_held_thru_note() {
             thru: true,
             armed: false,
             fx: Vec::new(),
+            mpe: None,
         }],
         monitor: vec![],
     });

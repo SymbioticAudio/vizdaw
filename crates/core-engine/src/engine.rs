@@ -24,6 +24,7 @@ use core_media::stream::{DiskMode, MediaFile, StreamConfig, StreamWaiter, Stream
 use core_model::document::{DestKind, Document};
 use core_model::ids::{DestId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
+use core_model::mpe::MpeConfig;
 use core_model::time::Tick;
 use rtrb::{Producer, RingBuffer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -255,6 +256,8 @@ pub struct Engine {
     /// The destinations whose return a lane records (spec §6.7): interned
     /// at every load, so a measurement can play them (plan 5c-2 Ruling 10).
     return_dests: Vec<DestId>,
+    /// MCM reports from the renderer (plan 5g-2 Ruling 4).
+    mpe_reports: rtrb::Consumer<(LaneId, Option<MpeConfig>)>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -301,6 +304,7 @@ impl Engine {
     ) -> Result<(Engine, Renderer), EngineError> {
         let (cmd_tx, cmd_rx) = RingBuffer::<EngineCmd>::new(CMD_CAPACITY);
         let (retire_tx, mut retire_rx) = RingBuffer::<Retired>::new(RETIRE_CAPACITY);
+        let (mpe_tx, mpe_rx) = RingBuffer::new(crate::render::MPE_REPORT_CAPACITY);
         let shared = Arc::new(Shared::default());
         let collector_stop = Arc::new(AtomicBool::new(false));
         let collector_paused = Arc::new(AtomicBool::new(false));
@@ -358,6 +362,7 @@ impl Engine {
             reader,
             midi_rx,
             gesture_rx,
+            mpe_tx,
         );
         let engine = Engine {
             cfg,
@@ -400,6 +405,7 @@ impl Engine {
             automation_suspended: false,
             inputs_sent: crate::input::InputRoutes::default(),
             return_dests: Vec::new(),
+            mpe_reports: mpe_rx,
         };
         Ok((engine, renderer))
     }
@@ -577,8 +583,10 @@ impl Engine {
                         }
                     };
                 }
-                let dest_channel = match d.map(|d| &d.kind) {
-                    Some(DestKind::MidiEndpoint { channel, .. }) => channel & 0x0F,
+                let mpe_out = d.and_then(|d| d.mpe);
+                let dest_channel = match (mpe_out, d.map(|d| &d.kind)) {
+                    (Some(cfg), _) => cfg.manager(),
+                    (None, Some(DestKind::MidiEndpoint { channel, .. })) => channel & 0x0F,
                     _ => 0,
                 };
                 midi_routes.push(crate::input::MidiRoute {
@@ -587,6 +595,8 @@ impl Engine {
                     dest_channel,
                     mute_notes: d.is_some_and(|d| d.kind.is_external() && d.midi_mix.mute),
                     chain: crate::input_fx::InputChain::new(&m.fx),
+                    decoder: m.mpe.map(crate::mpe::MpeDecoder::new),
+                    mpe_out,
                 });
             }
             // The synths lanes record the return of (spec §6.7): interned
@@ -680,8 +690,14 @@ impl Engine {
             .take(crate::input::MAX_MONITOR_ROUTES)
             .copied()
             .collect();
+        // One encoder slot per route, built here (plan 5g-2 P6).
+        let encoders = midi_routes
+            .iter()
+            .map(|r| r.mpe_out.map(crate::mpe::MpeEncoder::new))
+            .collect();
         let routes = crate::input::InputRoutes {
             midi: midi_routes.into_boxed_slice(),
+            encoders,
             monitor,
         };
         if routes != self.inputs_sent {
@@ -1011,9 +1027,11 @@ impl Engine {
         let Some(d) = doc.instruments().get(&dest) else {
             return Ok(false);
         };
-        let channel = match &d.kind {
-            DestKind::MidiEndpoint { channel, .. } => channel & 0x0F,
-            DestKind::PluginInstrument { .. } => 0,
+        let channel = match (d.mpe, &d.kind) {
+            // An MPE destination's channel-wide traffic (plan 5g-2 P1).
+            (Some(cfg), _) => cfg.manager(),
+            (None, DestKind::MidiEndpoint { channel, .. }) => channel & 0x0F,
+            (None, DestKind::PluginInstrument { .. }) => 0,
         };
         let Some(targets) = self.dest_targets.get(&dest).filter(|t| !t.is_empty()) else {
             return Ok(false);
@@ -1033,27 +1051,33 @@ impl Engine {
     /// Per external destination with a loaded target, the highest note-on
     /// velocity the renderer sent to it on its channel since the last
     /// call, read and cleared (a MIDI strip's activity meter, plan 5g-1b).
-    /// Destinations at 0 are left out.
+    /// Destinations at 0 are left out. An MPE destination's channels are
+    /// its zone's manager and members (plan 5g-2 P4).
     pub fn take_midi_activity(&self, doc: &Document) -> Vec<(DestId, u8)> {
         let mut out = Vec::new();
         // Read each (target, channel) once: destinations sharing one
         // see the same peak.
         let mut read: BTreeMap<(TargetIdx, u8), u8> = BTreeMap::new();
         for (id, targets) in &self.dest_targets {
-            let Some(DestKind::MidiEndpoint { channel, .. }) = doc
-                .instruments()
-                .get(id)
-                .map(|d| &d.kind)
-                .filter(|k| k.is_external())
-            else {
+            let Some(d) = doc.instruments().get(id).filter(|d| d.kind.is_external()) else {
                 continue;
             };
+            let DestKind::MidiEndpoint { channel, .. } = &d.kind else {
+                continue;
+            };
+            let mpe = d.mpe;
+            let first = mpe.map_or(channel & 0x0F, |c| c.manager());
+            let members = mpe
+                .into_iter()
+                .flat_map(|c| (0..c.members).filter_map(move |k| c.member(k)));
+            let channels: Vec<u8> = std::iter::once(first).chain(members).collect();
             let v = targets
                 .iter()
-                .map(|t| {
+                .flat_map(|t| channels.iter().map(move |c| (*t, *c)))
+                .map(|(t, c)| {
                     *read
-                        .entry((*t, channel & 0x0F))
-                        .or_insert_with(|| self.shared.take_note_activity(*t, *channel))
+                        .entry((t, c))
+                        .or_insert_with(|| self.shared.take_note_activity(t, c))
                 })
                 .max()
                 .unwrap_or(0);
@@ -1288,6 +1312,17 @@ impl Engine {
     /// Current counters.
     pub fn counters(&self) -> Counters {
         self.shared.counters()
+    }
+
+    /// The MPE settings MCMs gave lanes since the last call, oldest first
+    /// (plan 5g-2 Ruling 4): `None` is a zone an MCM turned off. A report
+    /// the full ring dropped comes again with the next MCM.
+    pub fn take_mpe_reports(&mut self) -> Vec<(LaneId, Option<MpeConfig>)> {
+        let mut out = Vec::new();
+        while let Ok(r) = self.mpe_reports.pop() {
+            out.push(r);
+        }
+        out
     }
 
     /// True once after playback reached the end and the tail finished.

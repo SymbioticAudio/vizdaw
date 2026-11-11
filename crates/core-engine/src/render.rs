@@ -9,6 +9,7 @@ use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
 use crate::input::{InputRoutes, MIDI_IN_PER_BLOCK, MidiIn};
 use crate::measure::MeasureTap;
 use crate::midi1::Midi1Msg;
+use crate::mpe::MpeEncoder;
 use crate::notes::ActiveNotes;
 use crate::pool::PoolShared;
 use crate::record::RecordTap;
@@ -104,6 +105,12 @@ pub struct Counters {
     /// Notes the input effect chains dropped for capacity (plan 5g-1
     /// Ruling 7).
     pub midi_fx_dropped: u64,
+    /// Per-note pitch bend and timbre live thru dropped on a destination
+    /// without MPE output (plan 5g-2 Ruling 9).
+    pub per_note_dropped: u64,
+    /// Notes live thru's MPE encoders stole a member channel from (plan
+    /// 5g-2 Ruling 7).
+    pub mpe_stolen: u64,
     /// Blocks in which a schedule or graph swap was deferred.
     pub swaps_deferred: u64,
     /// Blocks rendered as silence because they were too large.
@@ -173,6 +180,8 @@ pub struct Shared {
     ended: AtomicBool,
     midi_dropped: AtomicU64,
     midi_fx_dropped: AtomicU64,
+    per_note_dropped: AtomicU64,
+    mpe_stolen: AtomicU64,
     /// Gestures dropped by the renderer (a touch with no free live entry).
     gestures_dropped: AtomicU64,
     swaps_deferred: AtomicU64,
@@ -218,6 +227,8 @@ impl Default for Shared {
             ended: AtomicBool::new(false),
             midi_dropped: AtomicU64::new(0),
             midi_fx_dropped: AtomicU64::new(0),
+            per_note_dropped: AtomicU64::new(0),
+            mpe_stolen: AtomicU64::new(0),
             gestures_dropped: AtomicU64::new(0),
             swaps_deferred: AtomicU64::new(0),
             graphs_applied: AtomicU64::new(0),
@@ -297,6 +308,8 @@ impl Shared {
         Counters {
             midi_dropped: self.midi_dropped.load(Ordering::Relaxed),
             midi_fx_dropped: self.midi_fx_dropped.load(Ordering::Relaxed),
+            per_note_dropped: self.per_note_dropped.load(Ordering::Relaxed),
+            mpe_stolen: self.mpe_stolen.load(Ordering::Relaxed),
             swaps_deferred: self.swaps_deferred.load(Ordering::Relaxed),
             xruns: self.xruns.load(Ordering::Relaxed),
             deadline_misses: self.deadline_misses.load(Ordering::Relaxed),
@@ -448,6 +461,19 @@ impl Shared {
         }
     }
 
+    /// Counts a per-note bend or timbre thru dropped on a destination
+    /// without MPE output (plan 5g-2 Ruling 9). // RT
+    pub(crate) fn count_per_note_dropped(&self) {
+        self.per_note_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts `n` notes an MPE encoder stole (plan 5g-2 Ruling 7). // RT
+    pub(crate) fn count_mpe_stolen(&self, n: u64) {
+        if n > 0 {
+            self.mpe_stolen.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+
     /// Counts a gesture the live table refused (plan 5e-1 Ruling 6). // RT
     pub(crate) fn count_gesture_drop(&self) {
         self.gestures_dropped.fetch_add(1, Ordering::Relaxed);
@@ -554,6 +580,13 @@ pub const CMD_CAPACITY: usize = 256;
 /// How long after Play or Locate a miss counts as a late start (spec
 /// §5.5: the transport waits this long for the disk at most).
 pub const LATE_SECONDS: f64 = 0.25;
+/// Capacity of the MCM report ring (plan 5g-2): a full ring drops the
+/// report; the next MCM reports again.
+pub(crate) const MPE_REPORT_CAPACITY: usize = 64;
+
+/// One MCM report: the lane and its new live setting.
+type MpeReport = (core_model::ids::LaneId, Option<core_model::mpe::MpeConfig>);
+
 /// Capacity of the retire ring: room for a schedule, a graph and a
 /// removed sink per target (3a Plan Ruling 30; 3b Plan Ruling 4).
 pub const RETIRE_CAPACITY: usize = 64;
@@ -613,6 +646,8 @@ pub struct Renderer {
     gestures: Option<Box<GestureTap>>,
     /// MIDI from sources (spec §6.6).
     midi_in: Consumer<MidiIn>,
+    /// MCM reports to the control side (plan 5g-2 Ruling 4).
+    mpe_reports: Producer<MpeReport>,
     /// Gestures from the control side (spec §7.1; plan 5e-1 Ruling 6).
     /// Commands applied so far (see `live_gestures`).
     cmds_applied: u64,
@@ -899,6 +934,7 @@ impl Renderer {
         reader: core_media::stream::StreamReader,
         midi_in: Consumer<MidiIn>,
         gesture_in: Consumer<crate::gesture::Queued>,
+        mpe_reports: Producer<MpeReport>,
     ) -> Renderer {
         let mut r = Renderer {
             cfg,
@@ -924,6 +960,7 @@ impl Renderer {
             tap: None,
             gestures: None,
             midi_in,
+            mpe_reports,
             gesture_in,
             cmds_applied: 0,
             live: Box::new(crate::gesture::LiveTable::new()),
@@ -1957,20 +1994,53 @@ impl Renderer {
                 // Carried targets as bits (Ruling 5).
                 const _: () = assert!(MAX_TARGETS <= 64);
                 let mut kept: u64 = 0;
+                // Carried new routes as bits; past 64 a route counts as
+                // not carried (it only resends its MPE configuration).
+                let mut carried: u64 = 0;
                 let thru = &mut *self.thru;
                 let mut tap = self.tap.as_deref_mut();
                 if let Some(old) = self.inputs.as_deref_mut() {
-                    for r in old.midi.iter_mut() {
-                        if let Some(n) = new.midi.iter_mut().find(|n| n.carries(r)) {
+                    let InputRoutes {
+                        midi: old_midi,
+                        encoders: old_encoders,
+                        ..
+                    } = old;
+                    for (i, r) in old_midi.iter_mut().enumerate() {
+                        let found = new.midi.iter().position(|n| n.carries(r));
+                        if let Some((j, n)) = found.and_then(|j| Some((j, new.midi.get_mut(j)?))) {
                             n.chain.carry_from(&mut r.chain);
+                            // The decoder's channel state and the encoder's
+                            // member channels go on (plan 5g-2 P6).
+                            if let (Some(a), Some(b)) = (n.decoder.as_mut(), r.decoder.as_mut()) {
+                                std::mem::swap(a, b);
+                            }
+                            if let (Some(a), Some(b)) =
+                                (new.encoders.get_mut(j), old_encoders.get_mut(i))
+                            {
+                                std::mem::swap(a, b);
+                            }
+                            carried |= u32::try_from(j)
+                                .ok()
+                                .and_then(|j| 1u64.checked_shl(j))
+                                .unwrap_or(0);
                             for t in n.targets.iter().flatten() {
                                 kept |= 1u64.checked_shl(u32::from(t.0)).unwrap_or(0);
                             }
                         } else {
-                            let d = LiveDest::of(r);
+                            let d = LiveDest::of(r, i);
                             r.chain.flush(crate::input_fx::At::NOW, &mut |at, m| {
                                 emit_live(&d, at, m, &mut o, thru, &mut tap)
                             });
+                            // An MPE destination's notes end on their
+                            // member channels.
+                            if let Some(Some(enc)) = old_encoders.get_mut(i) {
+                                enc.flush(&mut |m| {
+                                    for t in d.targets.iter().flatten() {
+                                        o.send(*t, 0, m.as_slice());
+                                        thru.observe(*t, m.as_slice());
+                                    }
+                                });
+                            }
                             // Its pedal too, on a target a carried route
                             // keeps (review M2).
                             if d.thru {
@@ -1995,6 +2065,24 @@ impl Renderer {
                     if kept & bit == 0 {
                         let target = TargetIdx(t as u8);
                         thru.release(target, |m| o.send(target, 0, m.as_slice()));
+                    }
+                }
+                // A new MPE thru route configures its synth (plan 5g-2
+                // Ruling 7); a carried one already did.
+                for (j, n) in new.midi.iter().enumerate() {
+                    let bit = u32::try_from(j)
+                        .ok()
+                        .and_then(|j| 1u64.checked_shl(j))
+                        .unwrap_or(0);
+                    if !n.spec.thru || carried & bit != 0 {
+                        continue;
+                    }
+                    if let Some(Some(enc)) = new.encoders.get(j) {
+                        for m in crate::mpe::configuration(&enc.config()) {
+                            for t in n.targets.iter().flatten() {
+                                o.send(*t, 0, m.as_slice());
+                            }
+                        }
                     }
                 }
                 if let Some(old) = self.inputs.replace(new) {
@@ -2167,12 +2255,13 @@ impl Renderer {
         let thru = &mut *self.thru;
         let live = &mut *self.live_out;
         let mut tap = self.tap.as_deref_mut();
+        let reports = &mut self.mpe_reports;
         let mut routes = self.inputs.as_deref_mut();
         for _ in 0..MIDI_IN_PER_BLOCK {
             let Ok(ev) = self.midi_in.pop() else {
                 break;
             };
-            let Some(routes) = routes.as_deref_mut() else {
+            let Some(InputRoutes { midi, encoders, .. }) = routes.as_deref_mut() else {
                 continue;
             };
             let offset = if ev.host_ns == 0 {
@@ -2181,31 +2270,52 @@ impl Renderer {
                 let ns = i128::from(ev.host_ns) - i128::from(block_ns);
                 (ns as f64 * sr / 1e9).round() as i64
             };
-            for r in routes.midi.iter_mut() {
+            for (i, r) in midi.iter_mut().enumerate() {
                 if !r.matches(&ev) {
                     continue;
                 }
-                let msg = crate::input_fx::LiveMsg::from_midi1(ev.msg);
                 let at = crate::input_fx::At {
                     block: 0,
                     record: offset,
                 };
-                let d = LiveDest::of(r);
-                r.chain.process(msg, at, &mut |at, m| {
-                    live.push(d, at, m, &mut o, thru, &mut tap)
-                });
+                let d = LiveDest::of(r, i);
+                let crate::input::MidiRoute {
+                    spec,
+                    chain,
+                    decoder,
+                    ..
+                } = r;
+                let mut emit = |at, m| live.push(d, at, m, &mut o, thru, &mut tap, encoders);
+                match decoder {
+                    // MPE input is decoded before the chain (plan 5g-2
+                    // Ruling 1).
+                    Some(dec) => {
+                        dec.decode(ev.msg, &mut |m| chain.process(m, at, &mut emit));
+                        if let Some(c) = dec.take_changed() {
+                            // A full ring drops it; the next MCM reports.
+                            let _ = reports.push((spec.lane, c));
+                        }
+                    }
+                    None => {
+                        chain.process(crate::input_fx::LiveMsg::from_midi1(ev.msg), at, &mut emit)
+                    }
+                }
             }
         }
-        if let Some(routes) = routes {
-            for r in routes.midi.iter_mut() {
-                let d = LiveDest::of(r);
-                r.chain.tick(&clock, &mut |at, m| {
-                    live.push(d, at, m, &mut o, thru, &mut tap)
-                });
-                o.shared.count_fx_dropped(r.chain.take_dropped());
+        let encoders: &mut [Option<MpeEncoder>] = match routes {
+            Some(InputRoutes { midi, encoders, .. }) => {
+                for (i, r) in midi.iter_mut().enumerate() {
+                    let d = LiveDest::of(r, i);
+                    r.chain.tick(&clock, &mut |at, m| {
+                        live.push(d, at, m, &mut o, thru, &mut tap, encoders)
+                    });
+                    o.shared.count_fx_dropped(r.chain.take_dropped());
+                }
+                encoders
             }
-        }
-        live.settle(&mut o, thru, &mut tap);
+            None => &mut [],
+        };
+        live.settle(&mut o, thru, &mut tap, encoders);
     }
 
     /// Sends what a measurement has due (spec §6.7) at block offset 0,
@@ -2581,11 +2691,17 @@ struct LiveDest {
     channel: u8,
     mute_notes: bool,
     quantize: Option<crate::input_fx::RecordQuantize>,
+    /// The route's index in [`InputRoutes::midi`] (its encoder's slot).
+    route: u16,
+    /// The destination has MPE output: thru goes through the route's
+    /// encoder (plan 5g-2 P6).
+    mpe: bool,
 }
 
 impl LiveDest {
-    /// `r`'s destination and its chain's Input Quantize. // RT
-    fn of(r: &crate::input::MidiRoute) -> LiveDest {
+    /// `r`'s destination and its chain's Input Quantize; `r` is route
+    /// `route`. // RT
+    fn of(r: &crate::input::MidiRoute, route: usize) -> LiveDest {
         LiveDest {
             lane: r.spec.lane,
             thru: r.spec.thru,
@@ -2594,6 +2710,8 @@ impl LiveDest {
             channel: r.dest_channel,
             mute_notes: r.mute_notes,
             quantize: r.chain.quantize(),
+            route: u16::try_from(route).unwrap_or(u16::MAX),
+            mpe: r.mpe_out.is_some(),
         }
     }
 
@@ -2659,6 +2777,8 @@ impl LiveOut {
     }
 
     /// Queues one output, settling first when full. // RT
+    // One argument per part of the renderer `settle` reaches.
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         dest: LiveDest,
@@ -2667,9 +2787,10 @@ impl LiveOut {
         o: &mut Out<'_>,
         thru: &mut ActiveNotes,
         tap: &mut Option<&mut RecordTap>,
+        encoders: &mut [Option<MpeEncoder>],
     ) {
         if self.len >= LIVE_OUT_CAPACITY {
-            self.settle(o, thru, tap);
+            self.settle(o, thru, tap, encoders);
         }
         if let Some(slot) = self.items.get_mut(self.len) {
             *slot = Some(LivePending { dest, at, msg });
@@ -2678,12 +2799,16 @@ impl LiveOut {
     }
 
     /// Puts the waiting outputs in block-offset order (stable), records
-    /// them, and queues their thru messages for the run loop. // RT
+    /// them, and queues their thru messages for the run loop. An MPE
+    /// destination's thru goes through its route's encoder in that order,
+    /// after the mute (plan 5g-2 P2, P6); a plain one's per-note bend and
+    /// timbre are dropped and counted (Ruling 9). // RT
     fn settle(
         &mut self,
         o: &mut Out<'_>,
         thru: &mut ActiveNotes,
         tap: &mut Option<&mut RecordTap>,
+        encoders: &mut [Option<MpeEncoder>],
     ) {
         let items = self.items.get_mut(..self.len).unwrap_or(&mut []);
         let key = |p: &Option<LivePending>| p.map_or(u32::MAX, |p| p.at.block);
@@ -2705,18 +2830,39 @@ impl LiveOut {
                 continue;
             };
             let d = &p.dest;
-            if d.thru {
-                if let Some(msg) = d.thru_msg(p.msg) {
-                    for t in d.targets.iter().flatten() {
-                        thru.observe(*t, msg.as_slice());
-                        match self.sends.get_mut(self.sends_len) {
-                            Some(slot) => {
-                                *slot = Some((*t, p.at.block, msg));
-                                self.sends_len += 1;
-                            }
-                            None => o.send(*t, p.at.block, msg.as_slice()),
+            if d.thru && !d.mpe {
+                if let crate::input_fx::LiveMsg::PerNote {
+                    expr: crate::input_fx::Expr::Bend | crate::input_fx::Expr::Timbre,
+                    ..
+                } = p.msg
+                {
+                    o.shared.count_per_note_dropped();
+                }
+            }
+            let (sends, sends_len) = (&mut self.sends, &mut self.sends_len);
+            let mut queue = |msg: Midi1Msg| {
+                for t in d.targets.iter().flatten() {
+                    thru.observe(*t, msg.as_slice());
+                    match sends.get_mut(*sends_len) {
+                        Some(slot) => {
+                            *slot = Some((*t, p.at.block, msg));
+                            *sends_len += 1;
                         }
+                        None => o.send(*t, p.at.block, msg.as_slice()),
                     }
+                }
+            };
+            if d.thru && d.mpe {
+                let muted = d.mute_notes && !matches!(p.msg, crate::input_fx::LiveMsg::Channel(_));
+                if let Some(Some(enc)) = encoders.get_mut(usize::from(d.route)) {
+                    if !muted {
+                        enc.encode(p.msg, &mut queue);
+                    }
+                    o.shared.count_mpe_stolen(enc.take_stolen());
+                }
+            } else if d.thru {
+                if let Some(msg) = d.thru_msg(p.msg) {
+                    queue(msg);
                 }
             }
             if d.armed {
@@ -2754,7 +2900,8 @@ impl LiveOut {
 
 /// One input-chain output: thru on the route's targets and channel at
 /// its block offset, and to the tap when the lane is armed (plan 5g-1
-/// Ruling 11). // RT
+/// Ruling 11). An MPE destination's thru is left to its encoder's flush
+/// (plan 5g-2). // RT
 fn emit_live(
     d: &LiveDest,
     at: crate::input_fx::At,
@@ -2763,7 +2910,7 @@ fn emit_live(
     thru: &mut ActiveNotes,
     tap: &mut Option<&mut RecordTap>,
 ) {
-    if d.thru {
+    if d.thru && !d.mpe {
         if let Some(msg) = d.thru_msg(m) {
             for t in d.targets.iter().flatten() {
                 o.send(*t, at.block, msg.as_slice());
