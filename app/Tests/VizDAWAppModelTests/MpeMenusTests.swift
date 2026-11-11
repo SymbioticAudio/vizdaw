@@ -44,6 +44,12 @@ import VizDAWCore
         #expect(s[0].choices.map(\.title) == ["Off", "Lower Zone", "Upper Zone"])
     }
 
+    @Test func aPluginDestinationGetsTheOutputSectionToo() {
+        let d = DestRow(id: 5, name: "Pad", plugin: nil, external: false, returnLatencyMs: 0, mpe: full)
+        let s = MpeMenus.output(d)
+        #expect(s.map(\.title) == ["MPE Output: Pad", "Member Channels", "Pitch Bend Range"])
+    }
+
     @Test func choicesAreOneEditEach() throws {
         let f = editorFake()
         f.laneTable[3]?[1].input = .midi(port: "MPE Keys", channel: nil)

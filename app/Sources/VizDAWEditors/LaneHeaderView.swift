@@ -465,7 +465,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             }
             menu.addItem(a.item(checked: lane.midiDest == d.id))
         }
-        if let d = dests.first(where: { $0.id == lane.midiDest }), d.external {
+        if let d = dests.first(where: { $0.id == lane.midiDest }) {
             addMpe(MpeMenus.output(d), to: menu) { [weak self] c in
                 guard let self else { return }
                 MpeMenus.chooseOutput(c, dest: d.id, self.document)
