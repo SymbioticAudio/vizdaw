@@ -224,7 +224,10 @@ fn a_compressed_size_past_the_directory_is_refused() {
         let e = zip.find("project.xml").unwrap();
         zip.read(e, 64 * MIB, Some(200), &cancel)
     });
-    assert_eq!(refusal(r), damaged("two entries share their data"));
+    assert_eq!(
+        refusal(r),
+        damaged("project.xml runs past the end of its data")
+    );
 }
 
 fn many(n: usize) -> Vec<RawEntry> {
@@ -480,6 +483,21 @@ fn extract_is_bounded_and_cleans_up() {
     // And a read stops the same way.
     let stop = AtomicBool::new(false);
     assert_eq!(zip.read(&e, 64 * MIB, None, &stop), Err(IoError::Cancelled));
+
+    // A copy that cannot be removed after a failure is reported, naming
+    // the file left behind.
+    zip.debug_cancel_at_chunk(Some(1));
+    zip.debug_fail_removal(true);
+    let left = dir.path().join("left.wav");
+    let stop = AtomicBool::new(false);
+    match zip.extract(&e, &left, &stop) {
+        Err(IoError::Io(why)) => {
+            assert!(why.starts_with("left.wav was left behind"), "{why}");
+            assert!(why.contains("could not be removed"), "{why}");
+        }
+        other => panic!("expected the leftover to be reported, got {other:?}"),
+    }
+    assert!(std::fs::metadata(&left).unwrap().len() > 0);
 
     // A writer cancelled mid-entry stops.
     let set = AtomicBool::new(true);

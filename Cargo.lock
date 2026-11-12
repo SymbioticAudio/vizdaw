@@ -488,6 +488,7 @@ name = "core-io"
 version = "0.1.0"
 dependencies = [
  "core-engine",
+ "core-io",
  "core-media",
  "core-model",
  "flate2",

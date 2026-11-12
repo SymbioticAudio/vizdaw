@@ -56,7 +56,16 @@ pub struct EntryInfo {
 pub struct ZipReader {
     archive: rawzip::ZipArchive<rawzip::FileReader>,
     entries: Vec<EntryInfo>,
+    #[cfg(feature = "test-hooks")]
+    hooks: Hooks,
+}
+
+/// Test hooks (`test-hooks` feature only).
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Default)]
+struct Hooks {
     cancel_at_chunk: Option<u64>,
+    fail_removal: bool,
 }
 
 impl std::fmt::Debug for ZipReader {
@@ -208,34 +217,59 @@ impl ZipReader {
         // inputs, so no entry's data may reach into or past it: a packed
         // size larger than the bytes really there would make the ratio
         // check meaningless.
-        let mut spans = Vec::with_capacity(entries.len().saturating_add(1));
-        spans.push((archive.directory_offset(), u64::MAX));
+        // Each span is (start, end, entry); the directory's has no entry.
+        let mut spans: Vec<(u64, u64, Option<&EntryInfo>)> =
+            Vec::with_capacity(entries.len().saturating_add(1));
+        spans.push((archive.directory_offset(), u64::MAX, None));
         for (e, start) in entries.iter().zip(headers) {
             let found = archive
                 .get_entry(e.way)
                 .map_err(|_| damaged(format!("{} can't be found", shown(&e.name))))?;
-            spans.push((start, found.compressed_data_range().1));
+            spans.push((start, found.compressed_data_range().1, Some(e)));
         }
-        spans.sort_unstable();
-        if spans.windows(2).any(|w| match w {
-            [(_, end), (next, _)] => next < end,
-            _ => false,
-        }) {
-            return Err(damaged("two entries share their data"));
+        spans.sort_unstable_by_key(|&(start, end, _)| (start, end));
+        for w in spans.windows(2) {
+            if let [(_, end, a), (next, _, b)] = w
+                && next < end
+            {
+                return Err(match (a, b) {
+                    (Some(e), None) | (None, Some(e)) => {
+                        damaged(format!("{} runs past the end of its data", shown(&e.name)))
+                    }
+                    _ => damaged("two entries share their data"),
+                });
+            }
         }
         Ok(ZipReader {
             archive,
             entries,
-            cancel_at_chunk: None,
+            #[cfg(feature = "test-hooks")]
+            hooks: Hooks::default(),
         })
     }
 
     /// Test hook: once `chunk` chunks (1-based) of an entry have gone to
     /// their destination, sets the caller's cancel flag, as a user's cancel
     /// arriving at that moment would. `None` turns it off.
-    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
     pub fn debug_cancel_at_chunk(&mut self, chunk: Option<u64>) {
-        self.cancel_at_chunk = chunk;
+        self.hooks.cancel_at_chunk = chunk;
+    }
+
+    /// Test hook: with `fail`, removing a failed extract's copy reports an
+    /// error and leaves the copy where it is.
+    #[cfg(feature = "test-hooks")]
+    pub fn debug_fail_removal(&mut self, fail: bool) {
+        self.hooks.fail_removal = fail;
+    }
+
+    /// Removes a failed extract's copy (or, under the hook, fails to).
+    fn remove_copy(&self, to: &Path) -> std::io::Result<()> {
+        #[cfg(feature = "test-hooks")]
+        if self.hooks.fail_removal {
+            return Err(std::io::Error::other("removal failed (test hook)"));
+        }
+        std::fs::remove_file(to)
     }
 
     /// The package's file entries, in directory order.
@@ -305,7 +339,7 @@ impl ZipReader {
             });
         if let Err(why) = r {
             drop(file);
-            return match std::fs::remove_file(to) {
+            return match self.remove_copy(to) {
                 Ok(()) => Err(why),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(why),
                 Err(err) => Err(IoError::Io(format!(
@@ -353,6 +387,7 @@ impl ZipReader {
         let mut buf = vec![0u8; CHUNK];
         let mut count: u64 = 0;
         let mut crc = rawzip::Crc32::new();
+        #[cfg(feature = "test-hooks")]
         let mut chunks: u64 = 0;
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -382,9 +417,12 @@ impl ZipReader {
             }
             crc.update(chunk);
             sink(chunk)?;
-            chunks = chunks.saturating_add(1);
-            if self.cancel_at_chunk == Some(chunks) {
-                cancel.store(true, Ordering::Relaxed);
+            #[cfg(feature = "test-hooks")]
+            {
+                chunks = chunks.saturating_add(1);
+                if self.hooks.cancel_at_chunk == Some(chunks) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
             }
         }
         if count < e.size {

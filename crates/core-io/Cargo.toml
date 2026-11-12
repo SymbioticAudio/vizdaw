@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Debug hooks for tests (`ZipReader::debug_*`); never in a shipping build.
+test-hooks = []
+
 [dependencies]
 core-engine = { path = "../core-engine" }
 core-media = { path = "../core-media" }
@@ -19,5 +23,6 @@ thiserror = "2"
 
 [dev-dependencies]
 core-engine = { path = "../core-engine", features = ["fixtures"] }
+core-io = { path = ".", features = ["test-hooks"] }
 proptest = "1"
 tempfile = "3"
