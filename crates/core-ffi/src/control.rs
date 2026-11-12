@@ -1493,6 +1493,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "mpe": crate::mpe::mpe_json(d.mpe),
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
+            "edit_notes": s.edit_notes,
             "alert": alert.as_ref().map(alert_json),
         }),
         ControlResult::Editor { doc, editor: e } => json!({

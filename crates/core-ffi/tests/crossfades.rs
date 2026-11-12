@@ -368,41 +368,167 @@ fn edit_warnings_reach_the_snapshot() {
         assert!(w[0].contains("track"), "{w:?}");
     };
     // The edit made the crossfade: nothing to say.
-    assert!(make().warnings.is_empty());
+    assert!(make().edit_notes.is_empty());
     // Move: past A's end.
     let snap = fx.s.edit(move_b(&fx, 2 * BAR), None).unwrap();
-    check(&snap.warnings);
-    assert!(fx.s.snapshot().unwrap().warnings.is_empty());
-    assert!(fx.s.undo().unwrap().warnings.is_empty());
-    assert!(fx.s.redo().unwrap().warnings.is_empty());
+    check(&snap.edit_notes);
+    assert!(fx.s.snapshot().unwrap().edit_notes.is_empty());
+    assert!(fx.s.undo().unwrap().edit_notes.is_empty());
+    assert!(fx.s.redo().unwrap().edit_notes.is_empty());
     fx.s.undo().unwrap();
     assert!(row(&fx, fx.b).crossfade);
     // edit_all.
     let snap =
         fx.s.edit_all("Move".into(), vec![move_b(&fx, 2 * BAR)], None)
             .unwrap();
-    check(&snap.warnings);
-    assert!(fx.s.snapshot().unwrap().warnings.is_empty());
+    check(&snap.edit_notes);
+    assert!(fx.s.snapshot().unwrap().edit_notes.is_empty());
     fx.s.undo().unwrap();
     assert!(row(&fx, fx.b).crossfade);
     // A gesture: the last step's warning arrives with the end.
     fx.s.begin_edit("Move".into()).unwrap();
     let step = fx.s.edit_gesture(move_b(&fx, 2 * BAR), None).unwrap();
-    check(&step.warnings);
+    check(&step.edit_notes);
     let end = fx.s.end_edit().unwrap();
-    check(&end.warnings);
-    assert!(fx.s.snapshot().unwrap().warnings.is_empty());
+    check(&end.edit_notes);
+    assert!(fx.s.snapshot().unwrap().edit_notes.is_empty());
     fx.s.undo().unwrap();
     // A gesture that goes back to a harmless place has none.
     fx.s.begin_edit("Move".into()).unwrap();
     fx.s.edit_gesture(move_b(&fx, 2 * BAR), None).unwrap();
     fx.s.edit_gesture(move_b(&fx, 0), None).unwrap();
-    assert!(fx.s.end_edit().unwrap().warnings.is_empty());
+    assert!(fx.s.end_edit().unwrap().edit_notes.is_empty());
     // An aborted gesture says nothing.
     fx.s.begin_edit("Move".into()).unwrap();
     fx.s.edit_gesture(move_b(&fx, 2 * BAR), None).unwrap();
-    assert!(fx.s.abort_edit().unwrap().warnings.is_empty());
+    assert!(fx.s.abort_edit().unwrap().edit_notes.is_empty());
     assert!(row(&fx, fx.b).crossfade);
+}
+
+/// Edit notes are one-shot and apart from the standing warnings: a document
+/// with an unresolved reference keeps its warning in every snapshot and the
+/// notes only in the edit's.
+#[test]
+fn edit_notes_stay_apart_from_standing_warnings() {
+    let _g = serial();
+    let fx = fixture();
+    // A note in a lane with no destination is unresolved.
+    let l0 = fx.s.lanes(fx.seq).unwrap()[0].id;
+    let note =
+        fx.s.lane_events(fx.seq, l0)
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|e| e.id == fx.note)
+            .unwrap();
+    fx.s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::Add {
+                seq: fx.seq,
+                name: "Loose".into(),
+                index: None,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let loose = fx.s.lanes(fx.seq).unwrap().last().unwrap().id;
+    let snap =
+        fx.s.edit(
+            EditCommand::Event {
+                edit: EventEdit::Insert {
+                    seq: fx.seq,
+                    lane: loose,
+                    events: vec![note],
+                },
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(snap.warnings.len(), 1, "{:?}", snap.warnings);
+    assert!(snap.warnings[0].contains("reference"));
+    assert!(snap.edit_notes.is_empty());
+    fx.s.edit(xfade(fx.b, frames(4_800), FadeShapeRow::Linear), None)
+        .unwrap();
+    let snap = fx.s.edit(move_b(&fx, 2 * BAR), None).unwrap();
+    assert_eq!(snap.warnings.len(), 1, "{:?}", snap.warnings);
+    assert!(snap.warnings[0].contains("reference"));
+    assert_eq!(snap.edit_notes.len(), 1, "{:?}", snap.edit_notes);
+    assert!(snap.edit_notes[0].starts_with("Crossfade removed"));
+    let after = fx.s.snapshot().unwrap();
+    assert_eq!(after.warnings, snap.warnings);
+    assert!(after.edit_notes.is_empty());
+}
+
+/// Removing media that deletes a crossfade's partner says so.
+#[test]
+fn removing_the_partners_media_says_so() {
+    let _g = serial();
+    let fx = fixture();
+    let two = fx._dir.path().join("two.caf");
+    caf(&two, 96_000);
+    let id =
+        fx.s.import_audio(vec![two.display().to_string()], None)
+            .unwrap();
+    assert_eq!(wait(&fx.s, id).state, JobStateRow::Done);
+    let other =
+        fx.s.media()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .find(|m| *m != fx.media)
+            .unwrap();
+    // A third region on the other media, starting inside A.
+    fx.s.edit(
+        EditCommand::Audio {
+            edit: AudioEdit::Insert {
+                seq: fx.seq,
+                lane: fx.lane,
+                tick: Q / 2,
+                media: other,
+                source_offset: 0,
+                length: 48_000,
+                gain_db: 0.0,
+                fade_in: no_fade(),
+                fade_out: no_fade(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let c = regions(&fx.s, fx.seq, fx.lane)
+        .into_iter()
+        .find(|r| r.id != fx.a && r.id != fx.b)
+        .unwrap()
+        .id;
+    fx.s.edit(xfade(c, frames(2_400), FadeShapeRow::Linear), None)
+        .unwrap();
+    assert!(row(&fx, c).crossfade);
+    let snap = fx.s.remove_media(fx.media).unwrap();
+    assert!(
+        snap.edit_notes
+            .iter()
+            .any(|n| n.starts_with("Crossfade removed")),
+        "{:?}",
+        snap.edit_notes
+    );
+    assert!(!row(&fx, c).crossfade);
+    assert!(fx.s.snapshot().unwrap().edit_notes.is_empty());
+}
+
+/// A region nested in an earlier one: the earlier region is silent under it
+/// after the fade and plays again once it ends.
+#[test]
+fn a_nested_region_hands_the_earlier_one_its_gain_back() {
+    let _g = serial();
+    // A: frames 0..120 000; B: 24 000..72 000.
+    let fx = fixture_with(120_000, Q);
+    fx.s.edit(xfade(fx.b, frames(4_800), FadeShapeRow::Linear), None)
+        .unwrap();
+    let under = fx.s.region_envelope(fx.a, 30_000, 60_000, 3).unwrap();
+    assert_eq!(under, vec![0.0; 3]);
+    let after = fx.s.region_envelope(fx.a, 80_000, 100_000, 2).unwrap();
+    assert_eq!(after, vec![1.0, 1.0]);
 }
 
 #[test]
@@ -527,4 +653,13 @@ fn a_convert_that_shortens_a_crossfade_says_so() {
         "{:?}",
         job.problems
     );
+    // The notes live in the job row alone: no later snapshot repeats them.
+    assert!(fx.s.end_edit().unwrap().edit_notes.is_empty());
+    assert!(
+        fx.s.edit_all("Nothing".into(), vec![], None)
+            .unwrap()
+            .edit_notes
+            .is_empty()
+    );
+    assert!(fx.s.snapshot().unwrap().edit_notes.is_empty());
 }

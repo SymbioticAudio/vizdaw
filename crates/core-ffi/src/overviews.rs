@@ -673,6 +673,9 @@ pub fn peak_of(ov: &Overview) -> f32 {
 pub struct Xfade {
     /// The region frame where the later region starts.
     pub from: u64,
+    /// The region frame where the later region ends: after it the earlier
+    /// region plays again (a later region inside it).
+    pub until: u64,
     /// The later region's fade in.
     pub fade: Fade,
 }
@@ -717,25 +720,39 @@ pub fn crossfades_over(doc: &Document, event: EventId) -> Vec<Xfade> {
         ((seq.tempo.tick_to_seconds(t) - base) * rate).round() as i64
     };
     let start = frame_of(ev.tick);
-    let mut out: Vec<Xfade> = core_model::crossfade::overlaps(doc, loc.seq, take)
-        .into_iter()
-        .filter(|(_, o)| o.with == event)
-        .filter_map(|(id, _)| {
-            let later = take.events.values().find(|e| e.id == id)?;
+    // Only flagged regions that start after this one can have it as their
+    // partner; each is asked for its own overlap (a sweep up to it), not the
+    // whole take's.
+    let mut out: Vec<Xfade> = take
+        .events
+        .values()
+        .filter(|e| e.id != event && e.tick > ev.tick)
+        .filter_map(|later| {
             let EventBody::AudioRegion {
                 crossfade: true,
                 fade_in,
+                length,
                 ..
             } = &later.body
             else {
                 return None;
             };
+            if fade_in.length_frames == 0 {
+                return None;
+            }
+            let o = core_model::crossfade::overlap(doc, later.id)
+                .ok()
+                .flatten()?;
+            if o.with != event {
+                return None;
+            }
+            let from = frame_of(later.tick).abs_diff(start);
             Some(Xfade {
-                from: frame_of(later.tick).abs_diff(start),
+                from,
+                until: from.saturating_add(*length),
                 fade: *fade_in,
             })
         })
-        .filter(|x| x.fade.length_frames > 0)
         .collect();
     out.sort_by_key(|x| x.from);
     out
@@ -758,8 +775,11 @@ pub fn fade_gain(r: u64, length: u64, fade_in: Fade, fade_out: Fade, xfades: &[X
     if fo > 0 && left <= fo {
         g *= fade_curve(fade_out.shape, left as f32 / fo as f32);
     }
-    // The latest-starting later region at or before `r` is the one playing.
-    if let Some(x) = xfades.iter().rev().find(|x| x.from <= r) {
+    // Of the crossfading later regions covering `r`, the latest-starting one
+    // plays over this region (the engine's winner windows); where none
+    // covers `r` this region is at its own gain. A later region that is not
+    // a crossfade is not in `xfades`, unlike in the engine.
+    if let Some(x) = xfades.iter().rev().find(|x| x.from <= r && r < x.until) {
         let t = ((r - x.from) as f32 / x.fade.length_frames as f32).min(1.0);
         g *= fade_curve(x.fade.shape, 1.0 - t);
     }

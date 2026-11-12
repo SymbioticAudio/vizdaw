@@ -216,9 +216,9 @@ pub(crate) struct Inner {
     /// is open; a user's own setting of the lane drops its entry.
     mpe_owed: std::collections::BTreeMap<LaneId, Option<core_model::mpe::MpeConfig>>,
     /// The model's notes (a crossfade shortened or dropped) from the edit
-    /// steps of the open edit, or from a finished conversion, waiting for
-    /// the snapshot `end_edit` returns (plan 6c pre-flight F1). Every other
-    /// snapshot carries only its own command's notes.
+    /// steps of the open edit, waiting for the snapshot `end_edit` returns
+    /// (plan 6c pre-flight F1). Every other snapshot carries only its own
+    /// command's notes; a conversion's notes live in its job row.
     last_warnings: Vec<String>,
     /// Destinations' mix and MPE configuration batches a full engine
     /// command ring refused, oldest first: `idle` sends them again
@@ -643,7 +643,7 @@ impl Inner {
         self.snapshot_with(Vec::new())
     }
 
-    /// [`Inner::snapshot`] whose `warnings` also carry `notes` (the model's
+    /// [`Inner::snapshot`] whose `edit_notes` are `notes` (the model's
     /// report lines of the edit that made it).
     fn snapshot_with(&mut self, notes: Vec<String>) -> Result<DocSnapshot, VizError> {
         self.revs.update(self.history.doc());
@@ -656,8 +656,27 @@ impl Inner {
             undo_label: self.history.undo_label().map(str::to_string),
             redo_label: self.history.redo_label().map(str::to_string),
             sequences: seq_rows(doc)?,
-            warnings: warnings(doc).into_iter().chain(notes).collect(),
+            warnings: warnings(doc),
+            edit_notes: notes,
         })
+    }
+}
+
+/// Adds `new` lines to `notes`, one per region: a later line about the same
+/// region replaces the earlier one (the last step decides what is said).
+fn merge_notes(notes: &mut Vec<String>, new: Vec<String>) {
+    // "Crossfade on region 'x' …" / "Crossfade removed: region 'x' …".
+    fn key(line: &str) -> &str {
+        line.find("region '")
+            .and_then(|i| {
+                let from = i + "region '".len();
+                line.get(from..)?.find("' ").map(|j| &line[..from + j])
+            })
+            .unwrap_or(line)
+    }
+    for line in new {
+        notes.retain(|n| key(n) != key(&line));
+        notes.push(line);
     }
 }
 
@@ -2411,6 +2430,10 @@ impl Session {
     pub fn end_edit(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
+            // No edit open: nothing was said since the last one closed.
+            if inner.edit_label.is_none() {
+                inner.last_warnings.clear();
+            }
             // The static gestures' shared edit is theirs to close (plan
             // 5e-1 Ruling 14).
             if inner.history.in_transaction() && inner.static_edit.is_none() {
@@ -3565,6 +3588,7 @@ impl Session {
                 let mut inner = lock(&self.inner);
                 inner.history.begin(label.clone())?;
                 inner.edit_label = Some(label.clone());
+                inner.last_warnings.clear();
             }
             // A panic inside a command must not leave the transaction open:
             // `ffi_guard` alone would report it but keep `edit_label` set.
@@ -3573,7 +3597,10 @@ impl Session {
                 for (step, c) in core.into_iter().enumerate() {
                     edit_all_hook(&label, step);
                     self.execute_with(c, &filter)?;
-                    notes.append(&mut lock(&self.inner).last_warnings);
+                    merge_notes(
+                        &mut notes,
+                        std::mem::take(&mut lock(&self.inner).last_warnings),
+                    );
                 }
                 Ok::<(), VizError>(())
             }));
@@ -3603,7 +3630,6 @@ impl Session {
             inner.version += 1;
             self.commit_held(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
-            notes.append(&mut inner.last_warnings);
             let snapshot = inner.snapshot_with(notes)?;
             drop(inner);
             if let Some(seq) = cmds.iter().find_map(crate::edit::claims_engine) {
@@ -4653,7 +4679,9 @@ fn apply_relink(
             sample_rate: f.file.sample_rate,
         });
         match inner.history.execute(&cmd, &ViewFilter::default()) {
-            Ok(_) => {
+            Ok(report) => {
+                // A new rate or length can shorten or drop a crossfade.
+                problems.extend(report.warnings);
                 inner.changed.remove(&m);
                 done.push(m.0);
             }
@@ -4840,10 +4868,8 @@ fn apply_convert(
     match inner.history.execute(&cmd, &ViewFilter::default()) {
         Ok(report) => {
             // The rescale may shorten or drop a crossfade: the user hears of
-            // it in the job's problems and in the snapshot the next closed
-            // edit returns (plan 6c pre-flight F1).
-            problems.extend(report.warnings.iter().cloned());
-            inner.last_warnings.extend(report.warnings);
+            // it in the job's problems (plan 6c pre-flight F1).
+            problems.extend(report.warnings);
             Ok((
                 files
                     .iter()
@@ -9775,32 +9801,38 @@ impl Session {
             let users = core_model::command::media::regions_using(inner.doc(), id);
             let filter = ViewFilter::default();
             inner.history.begin("Remove Media")?;
-            let run = (|| -> Result<(), VizError> {
+            let run = (|| -> Result<Vec<String>, VizError> {
+                let mut notes = Vec::new();
                 if !users.is_empty() {
-                    inner
+                    let r = inner
                         .history
                         .execute(&Command::Event(EventCmd::Delete { events: users }), &filter)?;
+                    merge_notes(&mut notes, r.warnings);
                 }
-                inner.history.execute(
+                let r = inner.history.execute(
                     &Command::Media(MediaCmd::Remove {
                         media: id,
                         replacement: None,
                     }),
                     &filter,
                 )?;
-                Ok(())
+                merge_notes(&mut notes, r.warnings);
+                Ok(notes)
             })();
-            match run {
-                Ok(()) => inner.history.commit()?,
+            let notes = match run {
+                Ok(notes) => {
+                    inner.history.commit()?;
+                    notes
+                }
                 Err(e) => {
                     inner.history.abort()?;
                     return Err(e);
                 }
-            }
+            };
             inner.version += 1;
             inner.reload_host(self.id);
             self.mark(&mut inner);
-            inner.snapshot()
+            inner.snapshot_with(notes)
         })
     }
 
@@ -10582,17 +10614,28 @@ impl Session {
         let filter = ViewFilter::default();
         // Only the same keyboard's gesture is amended (final review T7 m5).
         let amended = match (new_step, unit, inner.surfaces.tempo_step) {
-            (false, Some(u), Some((from, serial))) if from == u => {
-                matches!(inner.history.amend(&cmd, &filter, serial), Ok(Some(_)))
+            (false, Some(u), Some((from, serial))) => {
+                if from == u {
+                    inner.history.amend(&cmd, &filter, serial).ok().flatten()
+                } else {
+                    None
+                }
             }
-            _ => false,
+            _ => None,
         };
-        if !amended {
-            if inner.history.execute(&cmd, &filter).is_err() {
-                return false;
+        // A tempo change moves overlaps in frames: what settle did to a
+        // crossfade reaches the next `idle` as a problem.
+        let report = match amended {
+            Some(r) => r,
+            None => {
+                let Ok(r) = inner.history.execute(&cmd, &filter) else {
+                    return false;
+                };
+                inner.surfaces.tempo_step = unit.map(|u| (u, inner.history.present_serial()));
+                r
             }
-            inner.surfaces.tempo_step = unit.map(|u| (u, inner.history.present_serial()));
-        }
+        };
+        inner.news.problems.extend(report.warnings);
         inner.version += 1;
         inner.news.doc_changed = true;
         inner.reload_host(self.id);
