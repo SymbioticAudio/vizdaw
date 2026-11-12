@@ -71,6 +71,7 @@ fn opts(seq: SeqId) -> ExportOptions {
         seq,
         region_gain: RegionGain::Apply,
         clips: ClipRule::WholeTrack,
+        left_out: Default::default(),
     }
 }
 
@@ -765,7 +766,9 @@ fn vizdaw_only_state_is_listed() {
     assert_eq!(detail(SEQUENCE_COMMENTS), vec!["Song".to_string()]);
     assert_eq!(detail(EARLY_MARKERS), vec!["Count-in".to_string()]);
     // The same lines from the dry run.
-    let dry = check(&doc, &opts(seq), &NoPlist, &AtomicBool::new(false)).unwrap();
+    let dry = check(&doc, &opts(seq), &NoPlist, &AtomicBool::new(false))
+        .unwrap()
+        .report;
     assert_eq!(dry.items, x.report.items);
 
     let f = structure_fixture();
@@ -964,10 +967,14 @@ fn the_dry_run_uses_the_export_codec() {
     let f = structure_fixture();
     let delay = "Settings of plug-in 'Delay'";
     let x = run(&f.doc, f.seq);
-    let dry = check(&f.doc, &opts(f.seq), &FakePlist, &AtomicBool::new(false)).unwrap();
+    let dry = check(&f.doc, &opts(f.seq), &FakePlist, &AtomicBool::new(false))
+        .unwrap()
+        .report;
     assert_eq!(dry.items, x.report.items);
     assert_eq!(count(&dry, ItemKind::LeftOut, delay), 0);
-    let dry = check(&f.doc, &opts(f.seq), &NoPlist, &AtomicBool::new(false)).unwrap();
+    let dry = check(&f.doc, &opts(f.seq), &NoPlist, &AtomicBool::new(false))
+        .unwrap()
+        .report;
     assert_eq!(count(&dry, ItemKind::LeftOut, delay), 1);
 }
 

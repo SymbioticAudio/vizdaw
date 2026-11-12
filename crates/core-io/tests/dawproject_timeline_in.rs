@@ -1538,6 +1538,7 @@ fn exported_fills_and_channels_come_back() {
             seq,
             region_gain: RegionGain::Apply,
             clips: ClipRule::SilenceGap(Tick(4 * Q)),
+            left_out: Default::default(),
         },
         &ExportEnv {
             plist: &NoPlist,

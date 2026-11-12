@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use vizdaw_ffi::dawproject::{CAPTURE_FAILS_HOOK, OFFLINE_AUDIO, TOO_LONG_FOR_WAV, not_captured};
 use vizdaw_ffi::host::{force_offline, reset_host};
 use vizdaw_ffi::{
     BlockRule, DawprojectExportRequestRow, JobKindRow, JobRow, JobStateRow, RecordSpecRow,
@@ -134,6 +135,9 @@ fn project_with(extra: impl FnOnce(&mut Builder, SeqId, MediaId, StripId)) -> Pr
     write_caf(&pkg.join("Media/stereo.caf"), 2);
     let s = Session::open(text(&pkg)).unwrap();
     s.debug_set_trash_dir(Some(text(&dir.path().join("Trash"))));
+    // The hooks that stay set start off in every test.
+    s.debug_free_bytes(None).unwrap();
+    s.debug_dawproject_capture_fails(false).unwrap();
     let out = dir.path().join("out");
     std::fs::create_dir(&out).unwrap();
     let p = Project {
@@ -296,6 +300,85 @@ fn items(r: &ReportRow, kind: ReportKindRow, what: &str) -> u64 {
 
 fn names(z: &ZipReader) -> Vec<String> {
     z.entries().iter().map(|e| e.name.clone()).collect()
+}
+
+/// Every file `project.xml` names (`path="…"`) is an entry of the package.
+fn references_resolve(z: &ZipReader) -> Vec<String> {
+    let xml = String::from_utf8(entry(z, "project.xml")).unwrap();
+    let all = names(z);
+    let paths: Vec<String> = xml
+        .split("path=\"")
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap().to_owned())
+        .collect();
+    for p in &paths {
+        assert!(all.contains(p), "project.xml names {p}, not in {all:?}");
+    }
+    paths
+}
+
+/// The audio files `project.xml` names, each once, after checking every
+/// file it names is in the package.
+fn audio_refs(z: &ZipReader) -> Vec<String> {
+    let mut v: Vec<String> = references_resolve(z)
+        .into_iter()
+        .filter(|p| p.starts_with("audio/"))
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The "Huge" track's media item: mono, with more frames than a 24-bit WAV
+/// holds (its file is never made: the model's length is what counts).
+const HUGE_FRAMES: u64 = 1 << 31;
+
+fn add_huge(b: &mut Builder, seq: SeqId) {
+    let lane = b.lane(seq, "Huge", None).unwrap();
+    let m = b.media("Media/huge.caf", HUGE_FRAMES, 1).unwrap();
+    b.region(
+        seq,
+        lane,
+        0,
+        m,
+        0,
+        FRAMES,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+}
+
+/// The media item's name in the session.
+fn media_name(s: &Session, path: &str) -> String {
+    s.media()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.path == path)
+        .unwrap_or_else(|| panic!("no media {path}"))
+        .name
+}
+
+/// Removes `Media/mono.caf` and has the session notice it.
+fn take_mono_offline(p: &Project) {
+    std::fs::remove_file(p.pkg.join("Media/mono.caf")).unwrap();
+    p.s.recheck_media().unwrap();
+    assert!(
+        p.s.media()
+            .unwrap()
+            .iter()
+            .any(|m| m.path == "Media/mono.caf" && m.offline.is_some()),
+        "mono.caf is offline"
+    );
+}
+
+fn details(r: &ReportRow, kind: ReportKindRow, what: &str) -> Vec<String> {
+    r.items
+        .iter()
+        .filter(|i| i.kind == kind && i.what == what)
+        .flat_map(|i| i.details.clone())
+        .collect()
 }
 
 fn no_partial(dir: &Path) {
@@ -851,6 +934,7 @@ fn check_matches_the_job() {
         .unwrap();
         b.insert(mono_path, plugin("vizdaw.test.nope", "Gone"))
             .unwrap();
+        add_huge(b, seq);
     });
     idle_until(&p.s, |s| {
         s.plugin_slots()
@@ -858,6 +942,7 @@ fn check_matches_the_job() {
             .iter()
             .any(|r| matches!(r.status, SlotStatus::Placeholder { .. }))
     });
+    take_mono_offline(&p);
     let dest = p.out.join("x.dawproject");
     let r = DawprojectExportRequestRow {
         region_gain: RegionGainRow::LeaveOut,
@@ -877,6 +962,17 @@ fn check_matches_the_job() {
     let j = export(&p.s, r);
     let job = j.report.unwrap();
     assert!(!check.items.is_empty());
+    // Offline and over-long audio are among the lines.
+    assert_eq!(
+        items(&job, ReportKindRow::LeftOut, OFFLINE_AUDIO),
+        1,
+        "{job:?}"
+    );
+    assert_eq!(
+        items(&job, ReportKindRow::LeftOut, TOO_LONG_FOR_WAV),
+        1,
+        "{job:?}"
+    );
     assert_eq!(check.items, job.items);
     assert_eq!(check.summary, job.summary);
     // The check ignores the path.
@@ -893,6 +989,108 @@ fn check_matches_the_job() {
         p.s.dawproject_name(999),
         Err(VizError::Model { .. })
     ));
+}
+
+/// Offline media is Left out by name with no entry, `project.xml` names
+/// no file the package lacks, and the job is Done.
+#[test]
+fn offline_audio_is_left_out() {
+    let _g = serial();
+    let p = project();
+    let name = media_name(&p.s, "Media/mono.caf");
+    let dest = p.out.join("full.dawproject");
+    let full = export(&p.s, req(p.seq, &dest)).report.unwrap();
+    assert!(full.summary.contains("2 audio files"), "{full:?}");
+    take_mono_offline(&p);
+    let dest = p.out.join("x.dawproject");
+    let j = export(&p.s, req(p.seq, &dest));
+    let r = j.report.unwrap();
+    assert_eq!(items(&r, ReportKindRow::LeftOut, OFFLINE_AUDIO), 1, "{r:?}");
+    assert_eq!(
+        details(&r, ReportKindRow::LeftOut, OFFLINE_AUDIO),
+        vec![name]
+    );
+    assert!(r.summary.contains("1 audio file"), "{r:?}");
+    assert!(!r.summary.contains("2 audio files"), "{r:?}");
+    let z = package(&dest);
+    let audio: Vec<String> = names(&z)
+        .into_iter()
+        .filter(|n| n.starts_with("audio/"))
+        .collect();
+    assert_eq!(audio, ["audio/001.wav"], "only the stereo copy");
+    let (ch, _, _, _) = read_wav(&entry(&z, "audio/001.wav"));
+    assert_eq!(ch, 2, "the entry left is the stereo media's");
+    assert_eq!(audio_refs(&z), ["audio/001.wav"]);
+    no_partial(&p.out);
+}
+
+/// S9: a media item too long for a WAV at the project depth is Left out by
+/// name with no entry and no reference (the model's length decides, so no
+/// huge file is made).
+#[test]
+fn audio_too_long_for_a_wav_is_left_out() {
+    let _g = serial();
+    let p = project_with(|b, seq, _, _| add_huge(b, seq));
+    let name = media_name(&p.s, "Media/huge.caf");
+    let dest = p.out.join("x.dawproject");
+    let j = export(&p.s, req(p.seq, &dest));
+    let r = j.report.unwrap();
+    assert_eq!(
+        items(&r, ReportKindRow::LeftOut, TOO_LONG_FOR_WAV),
+        1,
+        "{r:?}"
+    );
+    assert_eq!(
+        details(&r, ReportKindRow::LeftOut, TOO_LONG_FOR_WAV),
+        vec![name]
+    );
+    assert_eq!(
+        items(&r, ReportKindRow::LeftOut, OFFLINE_AUDIO),
+        0,
+        "listed once, as too long: {r:?}"
+    );
+    assert!(r.summary.contains("2 audio files"), "{r:?}");
+    let z = package(&dest);
+    let audio: Vec<String> = names(&z)
+        .into_iter()
+        .filter(|n| n.starts_with("audio/"))
+        .collect();
+    assert_eq!(audio, ["audio/001.wav", "audio/002.wav"]);
+    assert_eq!(audio_refs(&z), ["audio/001.wav", "audio/002.wav"]);
+    no_partial(&p.out);
+}
+
+/// A running plug-in whose capture fails writes its saved settings, with
+/// the Note naming the error.
+#[test]
+fn a_failed_capture_writes_the_saved_settings() {
+    let _g = serial();
+    let p = project();
+    // A first export captures the gain's settings into the project.
+    let first = export(&p.s, req(p.seq, &p.out.join("a.dawproject")));
+    let first = first.report.unwrap();
+    let saved = entry(
+        &package(&p.out.join("a.dawproject")),
+        "plugins/001.clap-preset",
+    );
+    p.s.debug_dawproject_capture_fails(true).unwrap();
+    let check = p.s.export_dawproject_check(req(p.seq, &p.out)).unwrap();
+    let dest = p.out.join("b.dawproject");
+    let r = export(&p.s, req(p.seq, &dest)).report.unwrap();
+    p.s.debug_dawproject_capture_fails(false).unwrap();
+    let line = not_captured("Test Gain");
+    assert_eq!(items(&r, ReportKindRow::Note, &line), 1, "{r:?}");
+    assert_eq!(
+        details(&r, ReportKindRow::Note, &line),
+        vec![CAPTURE_FAILS_HOOK.to_string()]
+    );
+    assert_eq!(items(&first, ReportKindRow::Note, &line), 0, "{first:?}");
+    assert_eq!(check.items, r.items, "the check lists it too");
+    assert_eq!(
+        entry(&package(&dest), "plugins/001.clap-preset"),
+        saved,
+        "the saved settings were written"
+    );
 }
 
 /// Hostile requests are `Model`, never `Internal`, and write nothing.
@@ -912,6 +1110,9 @@ fn hostile_requests() {
     std::os::unix::fs::symlink(&lp, &lp).unwrap();
     let folder = p.out.join("dir.dawproject");
     std::fs::create_dir(&folder).unwrap();
+    // A device with the right extension: a link to /dev/zero.
+    let device = p.out.join("zero.dawproject");
+    std::os::unix::fs::symlink("/dev/zero", &device).unwrap();
     let before = listing(&p.out);
     let long = format!("/{}.dawproject", "a/".repeat(2100));
     let paths: Vec<(String, &str)> = vec![
@@ -948,15 +1149,27 @@ fn hostile_requests() {
     let r =
         p.s.export_dawproject_check(req(999, &p.out.join("x.dawproject")));
     assert!(matches!(r, Err(VizError::Model { .. })), "{r:?}");
-    let r = p.s.export_dawproject(DawprojectExportRequestRow {
-        replace: true,
-        ..req(p.seq, Path::new("/dev/zero.dawproject"))
-    });
-    assert!(!matches!(r, Err(VizError::Internal { .. })), "{r:?}");
-    if let Ok(id) = r {
-        let j = wait_job(&p.s, id);
-        assert_ne!(j.state, JobStateRow::Done, "{j:?}");
+    // The device case itself: with `replace` the name is taken but is not
+    // a file, so the device rule (not the extension or the taken name)
+    // refuses it, for the device link and for the FIFO.
+    for (path, what) in [(&device, "a link to /dev/zero"), (&fifo, "a FIFO")] {
+        let r = p.s.export_dawproject(DawprojectExportRequestRow {
+            replace: true,
+            ..req(p.seq, path)
+        });
+        match r {
+            Err(VizError::Model { message }) => assert!(
+                message.ends_with("is not a file; choose another name"),
+                "{what}: {message}"
+            ),
+            other => panic!("{what}: {other:?}"),
+        }
     }
+    assert_eq!(
+        std::fs::read_link(&device).unwrap(),
+        Path::new("/dev/zero"),
+        "the link is left as it was"
+    );
     assert_eq!(listing(&p.out), before, "nothing written");
     assert!(snapshots(&p.pkg).is_empty());
 }

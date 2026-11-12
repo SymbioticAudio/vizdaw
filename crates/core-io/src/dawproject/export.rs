@@ -72,8 +72,13 @@ pub enum ClipRule {
     WholeTrack,
 }
 
+/// Media whose audio the export writes no file for, each with the `what`
+/// of its Left out line (the detail is the media item's name). Only the
+/// caller knows which media is offline (plan 6d Task 9, S9).
+pub type LeftOutAudio = BTreeMap<MediaId, String>;
+
 /// What to export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportOptions {
     /// The sequence.
     pub seq: SeqId,
@@ -81,6 +86,10 @@ pub struct ExportOptions {
     pub region_gain: RegionGain,
     /// How notes are grouped into clips.
     pub clips: ClipRule,
+    /// Media written without audio: its regions become clips with no
+    /// content, so `project.xml` names no entry the package lacks; each
+    /// item used gets its Left out line once, and no [`AudioFile`].
+    pub left_out: LeftOutAudio,
 }
 
 /// What the export needs from outside the document.
@@ -128,6 +137,20 @@ pub struct DpExport {
     pub states: Vec<(String, Vec<u8>)>,
     /// What changed, was left out or is worth knowing.
     pub report: Report,
+    /// The plug-in slots written as devices, each once (copies of a shared
+    /// instrument included): the caller adds the lines only it can know
+    /// ([`not_loaded`], [`plugin_settings`]) for these.
+    pub slots: BTreeSet<PluginInstanceId>,
+}
+
+/// A dry run's report and the plug-in slots it would write as devices
+/// (as [`DpExport::slots`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DpCheck {
+    /// What the export would report.
+    pub report: Report,
+    /// The plug-in slots the export would write as devices.
+    pub slots: BTreeSet<PluginInstanceId>,
 }
 
 /// Sequence `o.seq` of `doc` as a DAWproject's files. Looks at `cancel`
@@ -149,6 +172,7 @@ pub fn export(
     } = built;
     let project_xml = write_project_reporting(&project, &mut report);
     drop(project);
+    let slots = device_slots(&layout);
     stop(cancel)?;
     let metadata_xml = write_metadata(&metadata(doc, env.export_id));
     let projection = record::project(&layout, cancel)?;
@@ -192,23 +216,28 @@ pub fn export(
         audio,
         states,
         report,
+        slots,
     })
 }
 
-/// The report `export` gives, without the record (the dry run). It takes
-/// the same `plist` codec as the export, so the AU settings lines are the
-/// export's: pass [`NoPlist`](super::plugins::NoPlist) only where the export
-/// would use it too.
+/// The report `export` gives and its device slots, without the record
+/// (the dry run). It takes the same `plist` codec as the export, so the AU
+/// settings lines are the export's: pass
+/// [`NoPlist`](super::plugins::NoPlist) only where the export would use it
+/// too.
 pub fn check(
     doc: &Document,
     o: &ExportOptions,
     plist: &dyn PlistCodec,
     cancel: &AtomicBool,
-) -> Result<Report, IoError> {
+) -> Result<DpCheck, IoError> {
     let mut built = build(doc, o, plist, env!("CARGO_PKG_VERSION"), cancel)?;
     write_project_reporting(&built.project, &mut built.report);
     stop(cancel)?;
-    Ok(built.report)
+    Ok(DpCheck {
+        slots: device_slots(&built.layout),
+        report: built.report,
+    })
 }
 
 /// "<Song>.dawproject": `safe_part` of the title, else the sequence's name, reserving 11 bytes.
@@ -224,20 +253,12 @@ pub fn file_name(doc: &Document, seq: SeqId) -> Result<String, IoError> {
     Ok(format!("{}{SUFFIX}", safe_part(title, SUFFIX.len())))
 }
 
-/// The plug-in slots an export of `seq` writes as devices, each once
-/// (copies of a shared instrument included). Only the caller knows which
-/// slots are not loaded; it adds their lines ([`not_loaded`],
-/// [`plugin_settings`]) for these (plan 6d Task 9).
-pub fn exported_slots(
-    doc: &Document,
-    seq: SeqId,
-    cancel: &AtomicBool,
-) -> Result<BTreeSet<PluginInstanceId>, IoError> {
-    let l = layout(doc, seq, &mut Report::default(), cancel)?;
-    Ok(l.chans
+/// The plug-in slots `l` writes as devices, each once.
+fn device_slots(l: &Layout<'_>) -> BTreeSet<PluginInstanceId> {
+    l.chans
         .iter()
         .flat_map(|c| c.slots().into_iter().map(|(s, _, _)| s.id))
-        .collect())
+        .collect()
 }
 
 /// The package's extension, with its dot.
@@ -1521,6 +1542,7 @@ fn build<'a>(
         &layout,
         o.clips,
         o.region_gain,
+        &o.left_out,
         &mut ctx.report,
         &mut Ticker::new(cancel),
     )?;

@@ -248,6 +248,10 @@ pub(crate) struct Inner {
     /// The free bytes DAWproject exports assume (test hook).
     #[cfg(feature = "test-hooks")]
     dawproject_free: Option<u64>,
+    /// DAWproject exports and checks treat every running slot's capture as
+    /// failed (test hook).
+    #[cfg(feature = "test-hooks")]
+    dawproject_capture_fails: bool,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -370,6 +374,8 @@ impl Inner {
             dawproject_cancel_at: None,
             #[cfg(feature = "test-hooks")]
             dawproject_free: None,
+            #[cfg(feature = "test-hooks")]
+            dawproject_capture_fails: false,
         }
     }
 
@@ -452,6 +458,13 @@ impl Inner {
             .into_keys()
             .map(|p| p.to_lowercase())
             .collect()
+    }
+
+    /// The media a DAWproject export or check writes no audio for (offline
+    /// or too long for a WAV), as of the last media refresh.
+    fn dawproject_left_out(&self) -> core_io::dawproject::export::LeftOutAudio {
+        let offline = self.offline.keys().copied().collect();
+        crate::dawproject::left_out_audio(self.doc(), &offline)
     }
 
     /// `Busy` while a Format, Convert, Relink, Bounce or External Edit job
@@ -955,6 +968,13 @@ impl Session {
             .collect();
         for (id, e) in failed {
             out.insert(id, Some(e.to_string()));
+        }
+        #[cfg(feature = "test-hooks")]
+        if inner.dawproject_capture_fails {
+            for id in live {
+                out.entry(id)
+                    .or_insert_with(|| Some(crate::dawproject::CAPTURE_FAILS_HOOK.to_owned()));
+            }
         }
         Ok(out)
     }
@@ -3205,10 +3225,21 @@ impl Session {
     }
 
     /// DAWproject exports assume `bytes` free at their destination (None:
-    /// the disk's).
+    /// the disk's). It stays set until changed.
     pub fn debug_free_bytes(&self, bytes: Option<u64>) -> Result<(), VizError> {
         ffi_guard(|| {
             lock(&self.inner).dawproject_free = bytes;
+            Ok(())
+        })
+    }
+
+    /// DAWproject exports and checks treat every running plug-in's capture
+    /// as failed (`true`; the error is
+    /// [`CAPTURE_FAILS_HOOK`](crate::dawproject::CAPTURE_FAILS_HOOK)), or
+    /// capture as usual (`false`). It stays set until changed.
+    pub fn debug_dawproject_capture_fails(&self, on: bool) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).dawproject_capture_fails = on;
             Ok(())
         })
     }
@@ -9347,9 +9378,10 @@ impl Session {
             let mut inner = lock(&self.inner);
             self.interchange_idle(&mut inner)?;
             inner.media_jobs_idle()?;
-            let opts = crate::dawproject::options(inner.doc(), &req)?;
+            let mut opts = crate::dawproject::options(inner.doc(), &req)?;
             let dest = crate::dawproject::dest(&req.path, req.replace, &self.export_roots(&inner))?;
             inner.refresh_media(self.id, false);
+            opts.left_out = inner.dawproject_left_out();
             let uncaptured = self.capture_for_export(&mut inner)?;
             let project_id = match inner.doc().settings().project_id.clone() {
                 Some(id) => id,
@@ -9378,7 +9410,6 @@ impl Session {
                 export_id: crate::project_id::fresh(),
                 exported_at,
                 uncaptured,
-                offline: inner.offline.keys().copied().collect(),
                 cancel_at,
                 free,
             };
@@ -9392,7 +9423,15 @@ impl Session {
     /// What `export_dawproject` would report for `req`, checked as it
     /// checks it (`Busy` and the path aside): the plug-ins are captured
     /// here, the report is made off the session lock. Nothing is written
-    /// and no project ID is stamped.
+    /// and no project ID is stamped. Offline and over-long audio get the
+    /// job's lines (the same classification).
+    ///
+    /// On the plug-in host's thread every call captures each running
+    /// plug-in's state into the history, as an export does; off it (the
+    /// app's detached check) nothing is captured and the last look at the
+    /// slots is used. A caller on the host's thread (Task 11's control
+    /// channel) should run it off that thread, or accept a capture per
+    /// call.
     pub fn export_dawproject_check(
         &self,
         req: crate::dawproject::DawprojectExportRequestRow,
@@ -9400,8 +9439,9 @@ impl Session {
         ffi_guard(|| {
             let (doc, opts, uncaptured, will_capture) = {
                 let mut inner = lock(&self.inner);
-                let opts = crate::dawproject::options(inner.doc(), &req)?;
+                let mut opts = crate::dawproject::options(inner.doc(), &req)?;
                 inner.refresh_media(self.id, false);
+                opts.left_out = inner.dawproject_left_out();
                 let here = plugins::with(self.id, |p| p.is_some())?;
                 let uncaptured = self.capture_for_export(&mut inner)?;
                 // Off the host's thread the job captures what runs now.

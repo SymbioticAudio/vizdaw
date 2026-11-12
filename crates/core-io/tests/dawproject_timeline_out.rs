@@ -56,6 +56,7 @@ fn opts(seq: SeqId, clips: ClipRule, region_gain: RegionGain) -> ExportOptions {
         seq,
         region_gain,
         clips,
+        left_out: Default::default(),
     }
 }
 
@@ -999,6 +1000,55 @@ fn region_gain_entries() {
         })
         .collect();
     assert_eq!(files, vec!["audio/001.wav", "audio/001.wav"]);
+}
+
+/// S9 (plan 6d Task 9): media the caller leaves out gets no entry, one
+/// Left out line with its name, and clips with no content, so
+/// `project.xml` names no file the package lacks and still passes the
+/// schema.
+#[test]
+fn left_out_media_is_written_without_audio() {
+    let f = timeline_fixture();
+    let media = f
+        .doc
+        .media()
+        .keys()
+        .next()
+        .copied()
+        .expect("one media item");
+    let with_audio = run(&f.doc, f.seq);
+    assert!(with_audio.project_xml.contains("audio/001.wav"));
+    let regions = clips(&read_back(&with_audio), &format!("t{}", f.drums.0)).len();
+    for gain in [RegionGain::Apply, RegionGain::LeaveOut] {
+        let mut o = opts(f.seq, GAP, gain);
+        o.left_out.insert(media, "Gone audio".to_owned());
+        let x = run_opts(&f.doc, o);
+        assert!(x.audio.is_empty(), "{:?}", x.audio);
+        assert_eq!(x.report.summary.audio_files, 0);
+        let it = item(&x.report, ItemKind::LeftOut, "Gone audio");
+        assert_eq!((it.count, it.details.clone()), (1, vec!["a".to_string()]));
+        assert_eq!(
+            count(&x.report, ItemKind::LeftOut, REGION_GAIN),
+            0,
+            "no gain to leave out without the audio"
+        );
+        assert!(!x.project_xml.contains("audio/"), "{}", x.project_xml);
+        assert!(!x.project_xml.contains("<Audio"), "{}", x.project_xml);
+        validates(&x);
+        let p = read_back(&x);
+        let cs = clips(&p, &format!("t{}", f.drums.0));
+        assert_eq!(cs.len(), regions, "every region is still a clip");
+        for c in cs {
+            assert!(c.content.is_none(), "{c:?}");
+            assert_eq!((c.play_start, c.play_stop), (None, None));
+        }
+        // The dry run lists it too.
+        let mut o = opts(f.seq, GAP, gain);
+        o.left_out.insert(media, "Gone audio".to_owned());
+        let dry = check(&f.doc, &o, &NoPlist, &AtomicBool::new(false)).unwrap();
+        assert_eq!(dry.report, x.report);
+        assert_eq!(dry.slots, x.slots);
+    }
 }
 
 #[test]

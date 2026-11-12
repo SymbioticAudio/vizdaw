@@ -12,7 +12,7 @@ use crate::interchange::{file_dest, io_error};
 use crate::jobs::Work;
 use core_io::IoError;
 use core_io::dawproject::export::{
-    self as dp, AudioFile, ClipRule, DpExport, ExportEnv, ExportOptions, RegionGain,
+    self as dp, AudioFile, ClipRule, DpExport, ExportEnv, ExportOptions, LeftOutAudio, RegionGain,
 };
 use core_io::dawproject::plugins::PlistCodec;
 use core_io::dawproject::record::{KEEP_SNAPSHOTS, SNAPSHOT_DIR};
@@ -62,9 +62,10 @@ pub struct DawprojectExportRequestRow {
 /// The refusal for a destination with another extension.
 pub const NOT_DAWPROJECT_NAME: &str = "Choose a name ending in .dawproject.";
 /// Left out: a media copy whose WAV would pass 4 GiB (S9), by name; its
-/// clips are written without audio.
+/// clips are written with no audio (see [`left_out_audio`]).
 pub const TOO_LONG_FOR_WAV: &str = "Audio too long for a WAV file";
-/// Left out: offline media, by name; its clips are written without audio.
+/// Left out: offline media, by name; its clips are written with no audio
+/// (see [`left_out_audio`]).
 pub const OFFLINE_AUDIO: &str = "Offline audio";
 
 /// The free-space failure: the job needs `bytes`.
@@ -85,6 +86,10 @@ pub fn snapshot_not_kept(why: &str) -> String {
 pub fn not_captured(name: &str) -> String {
     format!("Plug-in '{name}' did not give its current settings; its saved settings were written")
 }
+
+/// The capture error the `debug_dawproject_capture_fails` test hook gives.
+#[cfg(feature = "test-hooks")]
+pub const CAPTURE_FAILS_HOOK: &str = "the test hook failed this capture";
 
 /// The detail of a Left out settings line for a slot with nothing stored.
 const NOTHING_STORED: &str = "it is not running here and has no saved settings";
@@ -131,7 +136,9 @@ const MAX_NAME_BYTES: usize = 255;
 /// The longest path the export writes, in bytes (as `bounce` allows).
 const MAX_PATH_BYTES: usize = 4096;
 
-/// The export options of `req` in `doc` (its path is not looked at).
+/// The export options of `req` in `doc` (its path is not looked at), with
+/// nothing left out yet: the caller sets `left_out` with
+/// [`left_out_audio`] once the media is refreshed.
 pub(crate) fn options(
     doc: &Document,
     req: &DawprojectExportRequestRow,
@@ -146,6 +153,7 @@ pub(crate) fn options(
             RegionGainRow::LeaveOut => RegionGain::LeaveOut,
         },
         clips: clip_rule(req.blocks),
+        left_out: LeftOutAudio::new(),
     })
 }
 
@@ -256,23 +264,19 @@ fn take_one(r: &mut Report, kind: ItemKind, what: &str) -> bool {
 }
 
 /// The lines only the session knows (spec §11; plan 6d Task 4's
-/// `not_loaded`): an exported slot that was not captured writes its saved
-/// settings with a Note; with none saved, its settings are Left out. A
-/// slot in `will_capture` (a check on a thread without the plug-in host:
-/// the job captures it) has no "no saved settings" line.
+/// `not_loaded`) for the `exported` slots (the export's device slots): an
+/// exported slot that was not captured writes its saved settings with a
+/// Note; with none saved, its settings are Left out. A slot in
+/// `will_capture` (a check on a thread without the plug-in host: the job
+/// captures it) has no "no saved settings" line.
 pub(crate) fn plugin_lines(
     doc: &Document,
-    seq: SeqId,
+    exported: &BTreeSet<PluginInstanceId>,
     uncaptured: &Uncaptured,
     will_capture: &BTreeSet<PluginInstanceId>,
     report: &mut Report,
-    cancel: &AtomicBool,
-) -> Result<(), IoError> {
-    if uncaptured.is_empty() && will_capture.is_empty() {
-        return Ok(());
-    }
-    let exported = dp::exported_slots(doc, seq, cancel)?;
-    for id in will_capture.intersection(&exported) {
+) {
+    for id in will_capture.intersection(exported) {
         if let Some(slot) = doc.plugin_slot(*id)
             && slot.state.is_none()
         {
@@ -312,12 +316,11 @@ pub(crate) fn plugin_lines(
             report.add(ItemKind::LeftOut, &dp::plugin_settings(name), Some(detail));
         }
     }
-    Ok(())
 }
 
-/// What the export job would report for `opts` (nothing is written; the
-/// audio entries are not looked at, so offline and over-long media are not
-/// listed here).
+/// What the export job would report for `opts` (nothing is written). The
+/// left-out audio is `opts.left_out`, as in the job, so offline and
+/// over-long media get the job's lines.
 pub(crate) fn check(
     doc: &Document,
     opts: &ExportOptions,
@@ -325,16 +328,9 @@ pub(crate) fn check(
     will_capture: &BTreeSet<PluginInstanceId>,
 ) -> Result<Report, VizError> {
     let cancel = AtomicBool::new(false);
-    let mut report = dp::check(doc, opts, plist(), &cancel).map_err(io_error)?;
-    plugin_lines(
-        doc,
-        opts.seq,
-        uncaptured,
-        will_capture,
-        &mut report,
-        &cancel,
-    )
-    .map_err(io_error)?;
+    let dp::DpCheck { mut report, slots } =
+        dp::check(doc, opts, plist(), &cancel).map_err(io_error)?;
+    plugin_lines(doc, &slots, uncaptured, will_capture, &mut report);
     Ok(report)
 }
 
@@ -361,8 +357,6 @@ pub(crate) struct ExportJob {
     pub exported_at: u64,
     /// The slots that were not captured.
     pub uncaptured: Uncaptured,
-    /// The offline media.
-    pub offline: BTreeSet<MediaId>,
     /// The stage after which it cancels itself (test hook).
     pub cancel_at: Option<u32>,
     /// The free bytes to assume (test hook; `None`: the disk's).
@@ -407,39 +401,27 @@ fn too_long(data: u64, depth: BitDepth) -> bool {
     data > max
 }
 
-/// The audio entries that are written, and the left-out lines for the rest
-/// (offline media; S9: a WAV past 4 GiB). Their clips stay in
-/// `project.xml`, written without audio.
-fn audio_to_write(
-    doc: &Document,
-    audio: Vec<AudioFile>,
-    offline: &BTreeSet<MediaId>,
-    report: &mut Report,
-) -> Vec<AudioFile> {
+/// The media an export writes no audio for, with its Left out line (the
+/// one classification the check and the job share): media whose WAV at
+/// the project depth would pass 4 GiB ([`TOO_LONG_FOR_WAV`], S9), offline
+/// or not (relinking would not make it fit), then offline media
+/// ([`OFFLINE_AUDIO`]). core-io writes their clips with no content, so
+/// `project.xml` names no entry the package lacks.
+pub(crate) fn left_out_audio(doc: &Document, offline: &BTreeSet<MediaId>) -> LeftOutAudio {
     let depth = doc.settings().format.depth;
-    let mut out = Vec::with_capacity(audio.len());
-    for a in audio {
-        let Some(m) = doc.media().get(&a.media) else {
-            report.add(ItemKind::LeftOut, OFFLINE_AUDIO, Some(a.name.clone()));
-            report.summary.audio_files = report.summary.audio_files.saturating_sub(1);
-            continue;
-        };
-        let what = if offline.contains(&a.media) {
-            Some(OFFLINE_AUDIO)
-        } else if too_long(data_bytes(m.length_frames, m.channels, depth), depth) {
-            Some(TOO_LONG_FOR_WAV)
-        } else {
-            None
-        };
-        match what {
-            Some(w) => {
-                report.add(ItemKind::LeftOut, w, Some(a.name.clone()));
-                report.summary.audio_files = report.summary.audio_files.saturating_sub(1);
-            }
-            None => out.push(a),
-        }
-    }
-    out
+    doc.media()
+        .iter()
+        .filter_map(|(id, m)| {
+            let what = if too_long(data_bytes(m.length_frames, m.channels, depth), depth) {
+                TOO_LONG_FOR_WAV
+            } else if offline.contains(id) {
+                OFFLINE_AUDIO
+            } else {
+                return None;
+            };
+            Some((*id, what.to_owned()))
+        })
+        .collect()
 }
 
 /// The bytes the job needs: the WAVs at the project depth plus the XML
@@ -612,7 +594,8 @@ fn keep_snapshot(root: &Path, export_id: &str, json: &str) -> Result<(), String>
     .map_err(|e| e.to_string())
 }
 
-/// The job's body: `Ok(None)` when cancelled.
+/// The job's body: the report, or how it stopped (`Stop::Cancelled` when
+/// cancelled).
 fn body(job: &ExportJob, progress: &AtomicU32, cancel: &AtomicBool) -> Result<Report, Stop> {
     let stage = |n: u32| {
         if job.cancel_at == Some(n) {
@@ -631,12 +614,11 @@ fn body(job: &ExportJob, progress: &AtomicU32, cancel: &AtomicBool) -> Result<Re
     let mut x = dp::export(&job.doc, &job.opts, &env, cancel)?;
     plugin_lines(
         &job.doc,
-        job.opts.seq,
+        &x.slots,
         &job.uncaptured,
         &BTreeSet::new(),
         &mut x.report,
-        cancel,
-    )?;
+    );
     stage(1);
     if cancelled() {
         return Err(Stop::Cancelled);
@@ -644,7 +626,6 @@ fn body(job: &ExportJob, progress: &AtomicU32, cancel: &AtomicBool) -> Result<Re
     progress.store(0.2f32.to_bits(), Ordering::Relaxed);
     // 2. The free space.
     let audio = std::mem::take(&mut x.audio);
-    let audio = audio_to_write(&job.doc, audio, &job.offline, &mut x.report);
     let need = needed_bytes(&job.doc, &x, &audio);
     let folder = job.dest.parent().unwrap_or(&job.dest);
     let free = job.free.or_else(|| crate::record::free_bytes(folder));
@@ -834,6 +815,27 @@ mod tests {
             data_bytes(u64::MAX, 2, BitDepth::Float32),
             BitDepth::Float32
         ));
+    }
+
+    #[test]
+    fn left_out_audio_lists_too_long_then_offline() {
+        let mut b = core_engine::fixtures::Builder::new();
+        let mut add = |path: &str, frames: u64| b.media(path, frames, 2).unwrap();
+        let fine = add("Media/a.caf", 48_000);
+        let gone = add("Media/b.caf", 48_000);
+        let huge = add("Media/c.caf", u64::from(u32::MAX));
+        let both = add("Media/d.caf", u64::from(u32::MAX));
+        let doc = b.finish();
+        let got = left_out_audio(&doc, &BTreeSet::from([gone, both]));
+        assert_eq!(
+            got,
+            BTreeMap::from([
+                (gone, OFFLINE_AUDIO.to_owned()),
+                (huge, TOO_LONG_FOR_WAV.to_owned()),
+                (both, TOO_LONG_FOR_WAV.to_owned()),
+            ])
+        );
+        assert!(!got.contains_key(&fine));
     }
 
     #[test]

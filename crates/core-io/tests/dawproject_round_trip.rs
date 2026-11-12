@@ -68,6 +68,7 @@ fn options(seq: SeqId, region_gain: RegionGain) -> ExportOptions {
         seq,
         region_gain,
         clips: ClipRule::SilenceGap(Tick(4 * Q)),
+        left_out: Default::default(),
     }
 }
 

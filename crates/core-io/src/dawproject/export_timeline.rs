@@ -16,7 +16,7 @@
 //! clip they are beats from the clip's start, inside a note from the note's
 //! start (Ruling 12); inside an audio clip seconds of the media.
 
-use super::export::{AudioFile, ClipRule, Layout, Part, RegionGain, Ticker};
+use super::export::{AudioFile, ClipRule, Layout, LeftOutAudio, Part, RegionGain, Ticker};
 use super::schema::*;
 use super::units::{TagKind, beats, linear_gain, tag};
 use crate::IoError;
@@ -94,6 +94,7 @@ pub(super) fn arrange(
     l: &Layout<'_>,
     rule: ClipRule,
     gain: RegionGain,
+    left_out: &LeftOutAudio,
     report: &mut Report,
     ticker: &mut Ticker<'_>,
 ) -> Result<Arranged, IoError> {
@@ -101,6 +102,8 @@ pub(super) fn arrange(
         l,
         rule,
         gain,
+        left_out,
+        listed_media: BTreeSet::new(),
         report,
         ticker,
         entries: BTreeMap::new(),
@@ -323,6 +326,9 @@ struct Arr<'l, 'a, 'r, 't, 'c> {
     l: &'l Layout<'a>,
     rule: ClipRule,
     gain: RegionGain,
+    /// Media written without audio (S9), and those already listed.
+    left_out: &'l LeftOutAudio,
+    listed_media: BTreeSet<MediaId>,
     report: &'r mut Report,
     ticker: &'t mut Ticker<'c>,
     /// Audio entries by (media, applied gain's bits).
@@ -924,7 +930,16 @@ impl Arr<'_, '_, '_, '_, '_> {
             if !top {
                 self.report.add(ItemKind::Changed, NESTED_AUDIO, None);
             }
+            // Media written without audio: listed once, its clips empty.
+            let left_out = self.left_out.get(media);
+            if let Some(what) = left_out
+                && self.listed_media.insert(*media)
+            {
+                self.report
+                    .add(ItemKind::LeftOut, what, Some(m.name.clone()));
+            }
             let applied = match self.gain {
+                _ if left_out.is_some() => 0.0,
                 RegionGain::Apply => *gain_db,
                 RegionGain::LeaveOut => {
                     if *gain_db != 0.0 {
@@ -939,7 +954,10 @@ impl Arr<'_, '_, '_, '_, '_> {
                     self.report.add(ItemKind::Changed, FADE_SHAPES, None);
                 }
             }
-            let entry = self.entry(*media, applied, &m.name);
+            let entry = match left_out {
+                Some(_) => None,
+                None => Some(self.entry(*media, applied, &m.name)),
+            };
             let rate = f64::from(m.sample_rate.max(1));
             let secs = r.seconds;
             let end_secs = secs + *length as f64 / rate;
@@ -956,9 +974,11 @@ impl Arr<'_, '_, '_, '_, '_> {
                 },
                 time: self.rel(r.tick.0),
                 duration: Some(beats(Tick(duration))),
-                content_time_unit: Some(DpTimeUnit::Seconds),
-                play_start: Some(*source_offset as f64 / rate),
-                play_stop: Some(source_offset.saturating_add(*length) as f64 / rate),
+                content_time_unit: entry.is_some().then_some(DpTimeUnit::Seconds),
+                play_start: entry.is_some().then(|| *source_offset as f64 / rate),
+                play_stop: entry
+                    .is_some()
+                    .then(|| source_offset.saturating_add(*length) as f64 / rate),
                 loop_start: None,
                 loop_end: None,
                 fade_time_unit: None,
@@ -966,24 +986,26 @@ impl Arr<'_, '_, '_, '_, '_> {
                 fade_out: None,
                 enable: muted.then_some(false),
                 reference: None,
-                content: Some(Box::new(DpTimeline::Audio(DpAudio {
-                    head: DpHead {
-                        named: DpNamed {
-                            name: Some(m.name.clone()),
-                            ..DpNamed::default()
+                content: entry.map(|entry| {
+                    Box::new(DpTimeline::Audio(DpAudio {
+                        head: DpHead {
+                            named: DpNamed {
+                                name: Some(m.name.clone()),
+                                ..DpNamed::default()
+                            },
+                            time_unit: Some(DpTimeUnit::Seconds),
+                            track: None,
                         },
-                        time_unit: Some(DpTimeUnit::Seconds),
-                        track: None,
-                    },
-                    duration: m.length_frames as f64 / rate,
-                    channels: i32::from(m.channels),
-                    sample_rate: i32::try_from(m.sample_rate).unwrap_or(i32::MAX),
-                    algorithm: None,
-                    file: DpFileRef {
-                        path: entry,
-                        external: false,
-                    },
-                }))),
+                        duration: m.length_frames as f64 / rate,
+                        channels: i32::from(m.channels),
+                        sample_rate: i32::try_from(m.sample_rate).unwrap_or(i32::MAX),
+                        algorithm: None,
+                        file: DpFileRef {
+                            path: entry,
+                            external: false,
+                        },
+                    }))
+                }),
             };
             out.push(Region {
                 r,
