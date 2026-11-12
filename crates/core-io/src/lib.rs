@@ -13,7 +13,9 @@
 )]
 
 pub mod clip;
+pub mod gm;
 pub mod limits;
+pub mod midi_in;
 pub mod read;
 pub mod report;
 pub mod smf;
