@@ -150,6 +150,14 @@ enum ControlChannel {
             case .ok(let status):
                 m.refreshAfterJob()
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
+                if j.kind == .importMidi || j.kind == .exportMidi {
+                    _ = try? server.reply(
+                        token: token,
+                        result: .interchange(
+                            command: command, doc: doc.uuidString, window: window,
+                            undoLabel: m.snapshot.undoLabel, report: j.report, written: j.written))
+                    return true
+                }
                 _ = try? server.reply(
                     token: token,
                     result: .ran(

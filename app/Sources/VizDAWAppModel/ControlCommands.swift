@@ -44,6 +44,11 @@ public enum ControlJobs {
             if j.kind == .bounce {
                 return .ok(status: BounceCommands.status(bounce ?? BounceResultRow(files: [], media: []), problems: j.problems))
             }
+            // A MIDI import or export reports in its summary; what it
+            // created is not media (plan 6a Task 8).
+            if j.kind == .importMidi || j.kind == .exportMidi {
+                return .ok(status: j.report?.summary)
+            }
             if j.kind != .format, j.created.isEmpty, !j.problems.isEmpty {
                 return .failed(j.problems.joined(separator: "; "))
             }
@@ -51,7 +56,7 @@ public enum ControlJobs {
         case .failed, .cancelled:
             // A bounce that failed after some renames names what is on disk
             // (plan 5f-2 Ruling 12: renamed files stay).
-            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : []
+            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : j.kind == .exportMidi ? j.written : []
             let tail = written.isEmpty ? [] : ["already written: " + written.joined(separator: ", ")]
             return .failed(([j.message ?? "the job was cancelled"] + j.problems + tail).joined(separator: "; "))
         }
@@ -225,7 +230,7 @@ public enum ControlCommands {
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(InputFxCommands.ids)
-            .union(MpeCommands.ids)
+            .union(MpeCommands.ids).union(InterchangeCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -348,6 +353,8 @@ public enum ControlCommands {
                     return .failed(.thrown(error, "Bounce Failed"))
                 }
             }
+        case _ where InterchangeCommands.ids.contains(id):
+            return InterchangeCommands.run(id, args: args, docID, m, store: store)
         case "window.mixer":
             host.showMixer(docID)
         case "window.media_pool":

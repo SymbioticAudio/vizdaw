@@ -484,6 +484,183 @@ const BOUNCE_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `file.import_midi` (plan 6a Task 8): the Open dialog and the import options.
+const IMPORT_MIDI_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The MIDI file (SMF or MIDI Clip File; answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "new_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Import into a new, empty project instead of this one (default false).",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "lane",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Drop onto this track (default: new tracks at the end).",
+    },
+    ParamSpec {
+        name: "tick",
+        kind: ParamKind::Int {
+            min: -(1 << 40),
+            max: 1 << 40,
+        },
+        required: false,
+        help: "Where the file's start goes (negative is 0; default 0).",
+    },
+    ParamSpec {
+        name: "channel_map",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Where each channel plays: JSON [{\"group\":0,\"channel\":9,\"dest\":3}]; dest null makes a new built-in synth. A pair not listed takes its suggestion.",
+    },
+    ParamSpec {
+        name: "split_channels",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Split tracks by channel (default: type 0 files only).",
+    },
+    ParamSpec {
+        name: "mpe",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Decode every track as MPE (default false).",
+    },
+    ParamSpec {
+        name: "use_tempo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Use the file's tempo and meter (default false; always into a sequence without events).",
+    },
+];
+
+/// `file.export_midi` (plan 6a Task 8): a Standard MIDI File.
+const EXPORT_MIDI_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("mid"),
+        required: false,
+        help: "The .mid file to write (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "type",
+        kind: ParamKind::Choice(&["0", "1"]),
+        required: false,
+        help: "0 (one track) or 1 (default).",
+    },
+    ParamSpec {
+        name: "ppq",
+        kind: ParamKind::Choice(&["480", "960", "15360"]),
+        required: false,
+        help: "Ticks per quarter note: 480, 960 (default) or 15360.",
+    },
+    ParamSpec {
+        name: "lanes",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Track IDs, comma-separated (default: every track; see state.get sequence).",
+    },
+    ParamSpec {
+        name: "mpe",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write per-note expression as MPE (default false).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
+/// `file.export_midi_clip` (plan 6a Task 8): MIDI Clip Files, one per track.
+const EXPORT_MIDI_CLIP_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "A file for one track, an existing folder for several (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "lanes",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Track IDs, comma-separated (default: every track; see state.get sequence).",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: 1 << 40,
+        },
+        required: false,
+        help: "The range's first tick for every track (needs `end`; default: the pickup's start).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: 1 << 40,
+        },
+        required: false,
+        help: "The range's end tick, exclusive (default: the sequence's end).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
 /// A media item by ID (plan 5b).
 const MEDIA_ID: ParamSpec = ParamSpec {
     name: "media",
@@ -1059,6 +1236,51 @@ pub const COMMANDS: &[CommandSpec] = &[
             answered_by: &["path", "add_to_project"],
         }],
         ..cmd("file.bounce", "File", "Bounce…", None, true)
+    },
+    CommandSpec {
+        params: IMPORT_MIDI_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.import_midi", "File", "Import MIDI File…", None, true)
+    },
+    CommandSpec {
+        params: EXPORT_MIDI_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_midi", "File", "MIDI File…", None, true)
+    },
+    CommandSpec {
+        params: EXPORT_MIDI_CLIP_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd(
+            "file.export_midi_clip",
+            "File",
+            "MIDI Clip File…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        ..cmd(
+            "file.interchange_report",
+            "File",
+            "Last Import or Export Report…",
+            None,
+            true,
+        )
     },
     CommandSpec {
         menu_item: false,

@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        166,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe"
+        170,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1743,6 +1743,185 @@ fn bounce_commands_check_their_params() {
     let (code, message) = err("command.run", run(json!({})));
     assert_eq!(code, ErrorCode::DialogRequired);
     assert!(message.contains("Bounce"), "{message}");
+}
+
+/// Plan 6a Task 8: the MIDI import and export commands check their
+/// parameters; the exports' "Save" dialogs are not `always` (F2): a missing
+/// path passes here and the app answers it, so `dry_run` needs none.
+#[test]
+fn interchange_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    let good_runs = [
+        ("file.import_midi", json!({ "path": "/tmp/a.mid" })),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "new_project": true, "seq": 1, "lane": 2, "tick": -(1i64 << 40),
+                    "channel_map": "[{\"group\":0,\"channel\":9,\"dest\":null}]",
+                    "split_channels": false, "mpe": true, "use_tempo": true }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.midi2", "tick": 1i64 << 40 }),
+        ),
+        ("file.export_midi", json!({ "path": "/tmp/a.mid" })),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "replace": true, "seq": 1, "type": "0", "ppq": "15360",
+                    "lanes": "1,2", "mpe": true, "dry_run": true }),
+        ),
+        ("file.export_midi", json!({ "dry_run": true })),
+        ("file.export_midi", json!({})),
+        ("file.export_midi_clip", json!({ "path": "/tmp/a.midi2" })),
+        ("file.export_midi_clip", json!({ "dry_run": true })),
+        ("file.export_midi_clip", json!({})),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/dir", "replace": true, "seq": 1, "lanes": "1", "start": 0, "end": 1i64 << 40 }),
+        ),
+        ("file.interchange_report", json!({})),
+    ];
+    for (id, params) in good_runs {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    let bad_runs = [
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "ppq": "0" }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "ppq": "70000" }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "ppq": 960 }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "type": "2" }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "type": 1 }),
+        ),
+        ("file.export_midi", json!({ "path": "relative.mid" })),
+        ("file.export_midi", json!({ "path": "/tmp/a.midi" })),
+        ("file.export_midi", json!({ "path": "/tmp/a.wav" })),
+        ("file.export_midi", json!({ "path": "/tmp/a\u{0}.mid" })),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "lanes": ["1"] }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "dry_run": "yes" }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "start": 0 }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "extra": 1 }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "seq": -1 }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "tick": 1i64 << 41 }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "tick": -(1i64 << 41) }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "lane": -1 }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "lane": i64::MAX }),
+        ),
+        ("file.import_midi", json!({ "path": "relative.mid" })),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "extra": true }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "dry_run": true }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "mpe": "yes" }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "channel_map": 7 }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "channel_map": "x".repeat(10_000) }),
+        ),
+        ("file.export_midi_clip", json!({ "path": "relative.midi2" })),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/a.midi2", "start": -1 }),
+        ),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/a.midi2", "end": (1i64 << 40) + 1 }),
+        ),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/a.midi2", "ppq": "960" }),
+        ),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/a.midi2", "extra": 1 }),
+        ),
+        ("file.interchange_report", json!({ "path": "/tmp/a.mid" })),
+    ];
+    for (id, params) in bad_runs {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let (code, message) = err("command.run", run("file.import_midi", json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Open"), "{message}");
+    for id in ["file.export_midi", "file.export_midi_clip"] {
+        let spec = registry::find(id).expect(id);
+        assert_eq!(spec.dialogs.len(), 1, "{id}");
+        let d = &spec.dialogs[0];
+        assert!(
+            d.name == "Save" && !d.always && d.answered_by == ["path"],
+            "{id}"
+        );
+        assert_eq!(d.when, "no path and no dry_run", "{id}");
+    }
+    for id in [
+        "file.import_midi",
+        "file.export_midi",
+        "file.export_midi_clip",
+        "file.interchange_report",
+    ] {
+        let spec = registry::find(id).expect(id);
+        assert!(spec.document && spec.menu == "File", "{id}");
+    }
+    assert!(
+        registry::find("file.interchange_report")
+            .unwrap()
+            .params
+            .is_empty()
+    );
 }
 
 /// Plan 5f-3 (Ruling 5): `region.open_external` takes an optional
