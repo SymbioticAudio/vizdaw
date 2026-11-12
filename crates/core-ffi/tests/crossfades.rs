@@ -694,6 +694,17 @@ fn notes_are_keyed_by_region_not_by_name() {
             .unwrap();
     assert_eq!(snap.edit_notes.len(), 2, "{:?}", snap.edit_notes);
     fx.s.undo().unwrap();
+    // Both pairs dropped in one command step: still one line each.
+    let both = EditCommand::Event {
+        edit: EventEdit::Move {
+            events: vec![fx.b, d],
+            delta: 2 * BAR,
+            to_lane: None,
+        },
+    };
+    let snap = fx.s.edit(both, None).unwrap();
+    assert_eq!(snap.edit_notes.len(), 2, "{:?}", snap.edit_notes);
+    fx.s.undo().unwrap();
     // A shorten, then a drop of the same region: the drop alone is said.
     let snap =
         fx.s.edit_all(

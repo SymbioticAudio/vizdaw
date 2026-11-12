@@ -668,11 +668,16 @@ type Note = (Option<core_model::ids::EventId>, String);
 
 /// The report's warning lines as notes.
 fn notes_of(r: core_model::command::Report) -> Vec<Note> {
-    let settled = r.settled;
+    // Each settled entry is used once, so two same-named regions that both
+    // lose their crossfade in one step keep their own ids.
+    let mut settled = r.settled;
     r.warnings
         .into_iter()
         .map(|line| {
-            let id = settled.iter().find(|(_, l)| *l == line).map(|(id, _)| *id);
+            let id = settled
+                .iter()
+                .position(|(_, l)| *l == line)
+                .map(|i| settled.remove(i).0);
             (id, line)
         })
         .collect()
