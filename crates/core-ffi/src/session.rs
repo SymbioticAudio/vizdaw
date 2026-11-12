@@ -858,17 +858,17 @@ impl Session {
     /// Saves to `path`: plugin states captured first (`Busy`, with
     /// nothing written, when a plugin call is on the stack).
     ///
-    /// A document without a project ID gets one first, in every version of
-    /// the history; not inside an open edit, where the next save stamps it
-    /// (plan 6a Ruling 16, F23). Save As keeps it (Ruling T1-a).
+    /// A document without a project ID is written with a fresh one, which
+    /// every version of the history then takes once the file is written (a
+    /// failed save leaves none behind, final review M6); not inside an open
+    /// edit, where the next save stamps it (plan 6a Ruling 16, F23). Save
+    /// As keeps it (Ruling T1-a).
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
         let captured = self.capture_all(inner)?;
         // After the capture: a `Busy` capture leaves the document as it was.
-        if inner.doc().settings().project_id.is_none() && !inner.history.in_transaction() {
-            inner
-                .history
-                .stamp_project_id(&crate::project_id::fresh())?;
-        }
+        let stamp = (inner.doc().settings().project_id.is_none()
+            && !inner.history.in_transaction())
+        .then(crate::project_id::fresh);
         let _g = lock(&SAVE_LOCK);
         let mut refs = inner.history.referenced_media_anywhere();
         // Recordings kept for the recovery offer go with the project
@@ -878,7 +878,13 @@ impl Session {
         }
         crate::media::copy_media(&refs, &inner.root(self.id), path)?;
         crate::overviews::copy_cache(&refs, &inner.root(self.id), path);
-        file::save(inner.doc(), path)?;
+        match &stamp {
+            Some(id) => file::save(&inner.doc().clone().with_project_id(id), path)?,
+            None => file::save(inner.doc(), path)?,
+        }
+        if let Some(id) = &stamp {
+            inner.history.stamp_project_id(id)?;
+        }
         write_windows(path, &inner.windows, inner.editor_layout.as_ref());
         inner.write_kept(path);
         // Reads `project.json` and the autosaves under the save lock
@@ -4282,6 +4288,10 @@ fn apply_midi_import(
         let mut scratch = History::new(inner.doc().clone());
         run(&mut scratch, &mut report)?;
         inner.history = History::new(scratch.doc().clone());
+        // Serials of the replaced history's steps name nothing now (final
+        // review M8): a later step must not try to amend into them.
+        inner.last_step = None;
+        inner.surfaces.tempo_step = None;
     } else {
         run(&mut inner.history, &mut report)?;
     }
@@ -8984,6 +8994,23 @@ impl Session {
                 (inner.doc().clone(), plan)
             };
             crate::interchange::clip_check(&doc, &plan)
+        })
+    }
+
+    /// The files `export_midi_clip` would write for `req` (`path`: the file
+    /// for one track, the folder for several) and which of them already
+    /// exist, a link counting even when it dangles, as the export sees
+    /// them: the app asks about those before passing `replace`. Nothing is
+    /// written; the folder is looked at off the session lock. `Model` for
+    /// an unknown sequence or track, no tracks, an empty, relative or
+    /// otherwise refused path, or (several tracks) a path that is a file.
+    pub fn export_midi_clip_names(
+        &self,
+        req: crate::interchange::ClipExportRequestRow,
+    ) -> Result<crate::interchange::ClipNamesRow, VizError> {
+        ffi_guard(|| {
+            let plan = crate::interchange::clip_plan(lock(&self.inner).doc(), &req)?;
+            crate::interchange::clip_names(&plan, &req)
         })
     }
 

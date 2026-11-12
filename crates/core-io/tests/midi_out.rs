@@ -5,7 +5,7 @@ use core_engine::midi1::Midi1Msg;
 use core_engine::mpe::{bend_out, configuration};
 use core_io::IoError;
 use core_io::clip::{self, ClipEvent};
-use core_io::midi_out::{ClipOptions, SmfOptions, to_clip, to_smf};
+use core_io::midi_out::{ClipOptions, SmfOptions, to_clip, to_clip_until, to_smf, to_smf_until};
 use core_io::report::{ItemKind, Report};
 use core_io::smf::{self, SmfEvent, SmfFile};
 use core_io::ump::{self, Decoded};
@@ -28,6 +28,7 @@ use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::Tick;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const Q: i64 = 15_360;
 const BAR: i64 = 4 * Q;
@@ -1435,4 +1436,87 @@ fn a_short_first_bar_is_noted() {
     // A real pickup, or a longer first bar, says nothing.
     d.meter(&[(0, 5, 4, 0), (BAR + Q, 4, 4, 0)]);
     lacks(&d.smf(960).1, "may read it as a pickup");
+}
+
+/// Final review M1: a track on several groups becomes several MIDI tracks,
+/// and the report says so (type 1 only; type 0 has its own line).
+#[test]
+fn a_group_split_is_reported() {
+    let mut d = Doc::new("Song");
+    let dest = d.builtin(0);
+    let bass = d.track("Bass", Some(dest));
+    let mut high = note(Q, 62, up7(100), Q);
+    high.group_channel = Some((2, 0));
+    d.put(bass, vec![note(0, 60, up7(100), Q), high]);
+    let (_, r) = d.smf(960);
+    assert_eq!(has(&r, ItemKind::Note, "one MIDI track per group"), 1);
+    let item = r
+        .items
+        .iter()
+        .find(|i| i.what.contains("per group"))
+        .unwrap();
+    assert_eq!(item.details, vec!["Bass: 2 tracks".to_string()]);
+    let (_, r0) = d.smf_with(960, true, false);
+    lacks(&r0, "one MIDI track per group");
+    let (s, _) = small_doc();
+    lacks(&s.smf(960).1, "one MIDI track per group");
+}
+
+/// Final review M2: a destination's patch and mix are written as events
+/// at the start of its track, which a re-import reads as track events.
+#[test]
+fn a_destinations_patch_and_mix_as_events_are_reported() {
+    let (d, bass, _) = golden_doc();
+    let (_, r) = d.smf(960);
+    assert_eq!(
+        has(&r, ItemKind::Note, "patch and mix written as events"),
+        1
+    );
+    let item = r
+        .items
+        .iter()
+        .find(|i| i.what.contains("patch and mix"))
+        .unwrap();
+    assert_eq!(item.details, vec!["Bass Synth".to_string()]);
+    let (_, rc) = clip_of(&d, bass, None);
+    assert_eq!(
+        has(&rc, ItemKind::Note, "patch and mix written as events"),
+        1
+    );
+    // A built-in synth without a patch writes none.
+    let (s, small) = small_doc();
+    lacks(&s.smf(960).1, "patch and mix");
+    lacks(&clip_of(&s, small, None).1, "patch and mix");
+}
+
+/// Final review M3: a set cancel flag stops a render.
+#[test]
+fn a_render_stops_when_cancelled() {
+    let (d, bass, _) = golden_doc();
+    let yes = AtomicBool::new(true);
+    let o = SmfOptions {
+        seq: d.seq,
+        lanes: vec![],
+        type0: false,
+        ppq: 960,
+        mpe: false,
+    };
+    assert!(matches!(
+        to_smf_until(&d.doc, &o, &yes),
+        Err(IoError::Cancelled)
+    ));
+    assert!(to_smf_until(&d.doc, &o, &AtomicBool::new(false)).is_ok());
+    let c = ClipOptions {
+        seq: d.seq,
+        lane: bass,
+        range: None,
+    };
+    assert!(matches!(
+        to_clip_until(&d.doc, &c, &yes),
+        Err(IoError::Cancelled)
+    ));
+    assert_eq!(
+        to_clip_until(&d.doc, &c, &AtomicBool::new(false)).unwrap(),
+        to_clip(&d.doc, &c).unwrap()
+    );
 }

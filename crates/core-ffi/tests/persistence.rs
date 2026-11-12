@@ -186,3 +186,25 @@ fn save_stamps_a_project_id_and_save_as_keeps_it() {
     assert!(project_id(&d).is_some_and(|i| core_model::document::check_project_id(&i)));
     s.close().unwrap();
 }
+
+/// Final review M6: a save that fails leaves no fresh project ID behind,
+/// so an untouched document does not read Edited; the next save stamps.
+#[test]
+fn a_failed_save_stamps_no_project_id() {
+    vizdaw_ffi::host::force_offline();
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("file");
+    fs::write(&blocker, "x").unwrap();
+    let s = Session::new_empty().unwrap();
+    assert!(!s.snapshot().unwrap().dirty);
+    let e = s
+        .save_as(blocker.join("p.vizdaw").to_string_lossy().into_owned())
+        .unwrap_err();
+    assert!(matches!(e, VizError::Io { .. }), "{e:?}");
+    assert!(!s.snapshot().unwrap().dirty, "still reads unedited");
+    let a = dir.path().join("a.vizdaw");
+    s.save_as(a.to_string_lossy().into_owned()).unwrap();
+    assert!(project_id(&a).is_some_and(|i| core_model::document::check_project_id(&i)));
+    assert!(!s.snapshot().unwrap().dirty);
+    s.close().unwrap();
+}

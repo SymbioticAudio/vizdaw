@@ -107,9 +107,9 @@ pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
 pub use input_fx::{ArpModeRow, FeelRow, InputFxKindRow, InputFxRow, input_fx_from_json};
 pub use interchange::{
-    ChannelMapRow, ChannelUseRow, ClipExportRequestRow, MidiFileInfoRow, MidiFileKindRow,
-    MidiImportRequestRow, ReportItemRow, ReportKindRow, ReportRow, SmfExportRequestRow,
-    SongInfoRow,
+    ChannelMapRow, ChannelUseRow, ClipExportRequestRow, ClipNamesRow, MidiFileInfoRow,
+    MidiFileKindRow, MidiImportRequestRow, ReportItemRow, ReportKindRow, ReportRow,
+    SmfExportRequestRow, SongInfoRow,
 };
 pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};

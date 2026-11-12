@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use vizdaw_ffi::control::result_json;
 use vizdaw_ffi::host::{force_offline, reset_host};
 use vizdaw_ffi::{
-    ChannelMapRow, ClipExportRequestRow, ControlResult, JobKindRow, JobRow, JobStateRow,
-    MidiFileKindRow, MidiImportRequestRow, RecordSpecRow, ReportRow, Session, SmfExportRequestRow,
-    SongInfoRow, VizError,
+    ChannelMapRow, ClipExportRequestRow, ClipNamesRow, ControlResult, JobKindRow, JobRow,
+    JobStateRow, MidiFileKindRow, MidiImportRequestRow, RecordSpecRow, ReportRow, Session,
+    SmfExportRequestRow, SongInfoRow, VizError,
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -991,4 +991,71 @@ fn interchange_results_answer_as_json() {
     assert!(none["report"].is_null());
     assert_eq!(none["window"], 3);
     assert_eq!(none["undo"], "Import MIDI File");
+}
+
+/// Final review I3: the core names a clip export's files and says which
+/// are taken, a link counting even when it dangles (as the export sees
+/// it); nothing is written.
+#[test]
+fn clip_names_come_from_the_core() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Builder::new();
+    let (seq, one) = b.sequence("S", "Gro/ove", None).unwrap();
+    let two = b.lane(seq, "Ch:ords", None).unwrap();
+    let three = b.lane(seq, "Bass", None).unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    let all = vec![three.0, one.0, two.0];
+    let names = |lanes: Vec<u64>, p: &Path| -> ClipNamesRow {
+        s.export_midi_clip_names(clip_req(seq.0, lanes, text(p)))
+            .unwrap()
+    };
+    let r = names(all.clone(), dir.path());
+    let want = ["01 Gro-ove.midi2", "02 Ch-ords.midi2", "03 Bass.midi2"];
+    assert_eq!(r.names, want, "in the sequence's track order");
+    assert!(r.taken.is_empty());
+    // A file, and a dangling link, take their names.
+    std::fs::write(dir.path().join(want[2]), b"mine").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join(want[0])).unwrap();
+    let r = names(all.clone(), dir.path());
+    assert_eq!(r.taken, vec![want[0], want[2]]);
+    // The names agree with the export's own refusal.
+    match s.export_midi_clip(clip_req(seq.0, all.clone(), text(dir.path()))) {
+        Err(VizError::Model { message }) => assert!(message.contains(want[0]), "{message}"),
+        other => panic!("{other:?}"),
+    }
+    // One track: the file's own name.
+    let f = dir.path().join("x.midi2");
+    let r = names(vec![one.0], &f);
+    assert_eq!((r.names, r.taken.len()), (vec!["x.midi2".to_string()], 0));
+    std::fs::write(&f, b"x").unwrap();
+    assert_eq!(names(vec![one.0], &f).taken, vec!["x.midi2"]);
+    // A folder not there yet: nothing taken.
+    let r = names(all.clone(), &dir.path().join("new"));
+    assert_eq!((r.names.len(), r.taken.len()), (3, 0));
+    // Hostile requests: Model, nothing written.
+    let before = std::fs::read_dir(dir.path()).unwrap().count();
+    let long = format!("/{}", "x".repeat(4_999));
+    let nul = format!("{}/n\0l", dir.path().display());
+    for (lanes, path) in [
+        (all.clone(), String::new()),
+        (all.clone(), "relative".into()),
+        (all.clone(), long),
+        (all.clone(), nul),
+        (all.clone(), text(&f)),
+        (vec![], text(dir.path())),
+        (vec![999], text(dir.path())),
+        (vec![one.0, one.0], text(dir.path())),
+        (vec![one.0], "/".into()),
+    ] {
+        let r = s.export_midi_clip_names(clip_req(seq.0, lanes.clone(), path.clone()));
+        assert!(
+            matches!(r, Err(VizError::Model { .. })),
+            "{lanes:?} {path:?}: {r:?}"
+        );
+    }
+    let r = s.export_midi_clip_names(clip_req(9_999, all, text(dir.path())));
+    assert!(matches!(r, Err(VizError::Model { .. })), "{r:?}");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+    s.close().unwrap();
 }

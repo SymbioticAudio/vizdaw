@@ -587,18 +587,31 @@ pub(crate) fn clip_dests(
 
 // ---- checks (the sheet's dry run) ----
 
-/// The bytes and report of a Standard MIDI File export.
-fn render_smf(doc: &Document, opts: &SmfOptions) -> Result<(Vec<Vec<u8>>, Report), IoError> {
-    let (file, report) = midi_out::to_smf(doc, opts)?;
+/// The bytes and report of a Standard MIDI File export; `Cancelled` once
+/// `cancel` is set.
+fn render_smf(
+    doc: &Document,
+    opts: &SmfOptions,
+    cancel: &AtomicBool,
+) -> Result<(Vec<Vec<u8>>, Report), IoError> {
+    let (file, report) = midi_out::to_smf_until(doc, opts, cancel)?;
     Ok((vec![core_io::smf::write(&file)?], report))
 }
 
-/// The bytes of each clip file and their merged report.
-fn render_clips(doc: &Document, opts: &[ClipOptions]) -> Result<(Vec<Vec<u8>>, Report), IoError> {
+/// The bytes of each clip file and their merged report; `Cancelled` once
+/// `cancel` is set (looked at between files and inside each render).
+fn render_clips(
+    doc: &Document,
+    opts: &[ClipOptions],
+    cancel: &AtomicBool,
+) -> Result<(Vec<Vec<u8>>, Report), IoError> {
     let mut report = Report::default();
     let mut files = Vec::with_capacity(opts.len());
     for o in opts {
-        let (clip, r) = midi_out::to_clip(doc, o)?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(IoError::Cancelled);
+        }
+        let (clip, r) = midi_out::to_clip_until(doc, o, cancel)?;
         files.push(core_io::clip::write(&clip));
         report.merge(r);
     }
@@ -607,14 +620,65 @@ fn render_clips(doc: &Document, opts: &[ClipOptions]) -> Result<(Vec<Vec<u8>>, R
 
 /// What a Standard MIDI File export of `opts` would report.
 pub(crate) fn smf_check(doc: &Document, opts: &SmfOptions) -> Result<ReportRow, VizError> {
-    let (_, report) = render_smf(doc, opts).map_err(io_error)?;
+    let (_, report) = render_smf(doc, opts, &AtomicBool::new(false)).map_err(io_error)?;
     Ok(report_row(&report, "Exported"))
 }
 
 /// What a clip export of `plan` would report.
 pub(crate) fn clip_check(doc: &Document, plan: &ClipPlan) -> Result<ReportRow, VizError> {
-    let (_, report) = render_clips(doc, &plan.opts).map_err(io_error)?;
+    let (_, report) = render_clips(doc, &plan.opts, &AtomicBool::new(false)).map_err(io_error)?;
     Ok(report_row(&report, "Exported"))
+}
+
+/// The files a clip export would write and which of them are taken.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ClipNamesRow {
+    /// The file names, in the order they are written: `NN <track>.midi2`
+    /// in the folder for several tracks, the file's own name for one.
+    pub names: Vec<String>,
+    /// Those of `names` already there (a link counts, even a dangling one).
+    pub taken: Vec<String>,
+}
+
+/// The names `plan` writes for `req` and which are taken (looked at with
+/// `symlink_metadata`, as the export does). Refuses a path the export
+/// would refuse as text, and for several tracks a path that is not a
+/// folder.
+pub(crate) fn clip_names(
+    plan: &ClipPlan,
+    req: &ClipExportRequestRow,
+) -> Result<ClipNamesRow, VizError> {
+    let path = export_path(&req.path)?;
+    let files: Vec<(String, PathBuf)> = if plan.names.len() == 1 {
+        let name = path
+            .file_name()
+            .ok_or_else(|| model(format!("{}: choose a file", req.path)))?
+            .to_string_lossy()
+            .into_owned();
+        vec![(name, path.clone())]
+    } else {
+        if std::fs::symlink_metadata(&path).is_ok() && !path.is_dir() {
+            return Err(model(format!("{} is not a folder", req.path)));
+        }
+        plan.names
+            .iter()
+            .enumerate()
+            .map(|(k, n)| {
+                let name = clip_name(k, n);
+                let f = path.join(&name);
+                (name, f)
+            })
+            .collect()
+    };
+    let taken = files
+        .iter()
+        .filter(|(_, f)| std::fs::symlink_metadata(f).is_ok())
+        .map(|(n, _)| n.clone())
+        .collect();
+    Ok(ClipNamesRow {
+        names: files.into_iter().map(|(n, _)| n).collect(),
+        taken,
+    })
 }
 
 // ---- jobs ----
@@ -689,7 +753,7 @@ fn write_all(
 /// An export job: renders on the document as it was when the job started,
 /// then writes `dests` in order, all inside `catch_unwind`.
 fn export_job(
-    render: impl FnOnce() -> Result<(Vec<Vec<u8>>, Report), IoError> + Send + 'static,
+    render: impl FnOnce(&AtomicBool) -> Result<(Vec<Vec<u8>>, Report), IoError> + Send + 'static,
     dests: Vec<PathBuf>,
     replace: bool,
 ) -> impl FnOnce(&AtomicU32, &AtomicBool) -> Work + Send + 'static {
@@ -698,7 +762,11 @@ fn export_job(
             return Work::Cancelled;
         }
         let ran = catch_unwind(AssertUnwindSafe(|| {
-            let (bytes, report) = render().map_err(|e| (e.to_string(), Vec::new()))?;
+            let (bytes, report) = match render(cancel) {
+                Ok(r) => r,
+                Err(IoError::Cancelled) => return Ok(None),
+                Err(e) => return Err((e.to_string(), Vec::new())),
+            };
             progress.store(0.5f32.to_bits(), Ordering::Relaxed);
             let written = write_all(dests.into_iter().zip(bytes).collect(), replace, cancel)?;
             Ok(written.map(|w| (w, report)))
@@ -721,7 +789,7 @@ pub(crate) fn smf_job(
     dest: PathBuf,
     replace: bool,
 ) -> impl FnOnce(&AtomicU32, &AtomicBool) -> Work + Send + 'static {
-    export_job(move || render_smf(&doc, &opts), vec![dest], replace)
+    export_job(move |c| render_smf(&doc, &opts, c), vec![dest], replace)
 }
 
 /// The MIDI Clip File export job.
@@ -731,7 +799,7 @@ pub(crate) fn clip_job(
     dests: Vec<PathBuf>,
     replace: bool,
 ) -> impl FnOnce(&AtomicU32, &AtomicBool) -> Work + Send + 'static {
-    export_job(move || render_clips(&doc, &plan.opts), dests, replace)
+    export_job(move |c| render_clips(&doc, &plan.opts, c), dests, replace)
 }
 
 #[cfg(test)]
@@ -751,6 +819,53 @@ mod tests {
         assert_eq!(done, vec![first.display().to_string()]);
         assert!(why.contains("already written"), "{why}");
         assert!(!d.path().join(".b.partial").exists());
+    }
+
+    /// Final review M3: the render looks at the cancel flag, and a render
+    /// stopped that way ends the job as cancelled (not failed), writing
+    /// nothing.
+    #[test]
+    fn an_export_cancelled_during_its_render_writes_nothing() {
+        let mut b = core_engine::fixtures::Builder::new();
+        let (seq, lane) = b.sequence("S", "Keys", None).unwrap();
+        b.notes(seq, lane, &[(0, 60, 0x8000, 960)]).unwrap();
+        let doc = b.finish();
+        let opts = SmfOptions {
+            seq,
+            lanes: vec![],
+            type0: false,
+            ppq: 960,
+            mpe: false,
+        };
+        let yes = AtomicBool::new(true);
+        assert!(matches!(
+            render_smf(&doc, &opts, &yes),
+            Err(IoError::Cancelled)
+        ));
+        let clip = ClipOptions {
+            seq,
+            lane,
+            range: None,
+        };
+        let clips = [clip.clone(), clip];
+        assert!(matches!(
+            render_clips(&doc, &clips, &yes),
+            Err(IoError::Cancelled)
+        ));
+        assert!(render_clips(&doc, &clips, &AtomicBool::new(false)).is_ok());
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("x.mid");
+        let job = export_job(
+            move |c| {
+                c.store(true, Ordering::Relaxed);
+                render_smf(&doc, &opts, c)
+            },
+            vec![dest.clone()],
+            false,
+        );
+        let w = job(&AtomicU32::new(0), &AtomicBool::new(false));
+        assert!(matches!(w, Work::Cancelled));
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
     }
 
     #[test]

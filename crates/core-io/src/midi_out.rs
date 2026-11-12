@@ -37,6 +37,7 @@ use core_model::sequence::{SeqLength, Sequence};
 use core_model::tempo::TempoMap;
 use core_model::time::{PPQ, Tick};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What a Standard MIDI File export writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +98,10 @@ const OTHER_SEQS: &str = "Other sequences are not in this file";
 const ENDED_EARLY: &str = "Notes ended early: too far apart for a MIDI file";
 const CUT_AT_END: &str = "Notes cut at the end of the range";
 const STATE_BEFORE: &str = "Program and controller settings before the range are not written";
+const GROUP_SPLIT: &str = "Tracks on several groups written as one MIDI track per group";
+const PATCH_MIX: &str = "Destination patch and mix written as events at the start of the track; read back, they are track events";
+/// A render looks at its cancel flag every this many events.
+const CANCEL_EVERY: usize = 4096;
 const SHORT_BAR: &str =
     "Bar 1 is shorter than bar 2; other programs, and VizDAW, may read it as a pickup";
 
@@ -853,6 +858,16 @@ fn body_class(b: &EventBody) -> Class {
 /// from 15 360 per quarter with round-half-up. Refuses an unknown
 /// sequence or track and a `ppq` other than 480, 960 or 15 360.
 pub fn to_smf(doc: &Document, o: &SmfOptions) -> Result<(SmfFile, Report), IoError> {
+    to_smf_until(doc, o, &AtomicBool::new(false))
+}
+
+/// [`to_smf`], stopping with `Err(Cancelled)` once `cancel` is set (looked
+/// at between tracks and every few thousand events).
+pub fn to_smf_until(
+    doc: &Document,
+    o: &SmfOptions,
+    cancel: &AtomicBool,
+) -> Result<(SmfFile, Report), IoError> {
     if !matches!(o.ppq, 480 | 960 | 15_360) {
         return Err(refused(BAD_PPQ));
     }
@@ -908,10 +923,15 @@ pub fn to_smf(doc: &Document, o: &SmfOptions) -> Result<(SmfFile, Report), IoErr
         report: &mut report,
         notes: 0,
         per_note: 0,
+        cancel,
+        cancelled: false,
     };
     let mut tracks: Vec<(String, u8, Vec<Item<SmfEvent>>)> = Vec::new();
     let mut written = 0u64;
     for lane in &src.lanes {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(IoError::Cancelled);
+        }
         let played = src.played.get(&lane.id).map_or(&[][..], Vec::as_slice);
         if !writes(lane, played) {
             continue;
@@ -919,6 +939,13 @@ pub fn to_smf(doc: &Document, o: &SmfOptions) -> Result<(SmfFile, Report), IoErr
         written = written.saturating_add(1);
         drum_rows(lane, w.report);
         let groups = w.lane(lane, played);
+        if w.cancelled {
+            return Err(IoError::Cancelled);
+        }
+        if groups.len() > 1 && !o.type0 {
+            let detail = format!("{}: {} tracks", lane.name, groups.len());
+            w.report.add(ItemKind::Note, GROUP_SPLIT, Some(detail));
+        }
         for (i, (g, items)) in groups.into_iter().enumerate() {
             let name = if i == 0 {
                 lane.name.clone()
@@ -1066,6 +1093,8 @@ struct SmfWriter<'s, 'a> {
     report: &'s mut Report,
     notes: u64,
     per_note: u64,
+    cancel: &'s AtomicBool,
+    cancelled: bool,
 }
 
 impl SmfWriter<'_, '_> {
@@ -1085,7 +1114,11 @@ impl SmfWriter<'_, '_> {
         let mut noted = false;
         // Bank selects seen per pair at a tick, waiting for a program.
         let mut banks: BTreeMap<(u8, u8), (i64, bool, bool)> = BTreeMap::new();
-        for r in played {
+        for (n, r) in played.iter().enumerate() {
+            if n % CANCEL_EVERY == 0 && self.cancel.load(Ordering::Relaxed) {
+                self.cancelled = true;
+                return groups;
+            }
             let Some(tick) = r.tick.0.checked_sub(self.origin.tick).filter(|t| *t >= 0) else {
                 self.report.add(ItemKind::LeftOut, OUTSIDE, None);
                 continue;
@@ -1149,7 +1182,12 @@ impl SmfWriter<'_, '_> {
                         });
                     }
                 }
-                for body in preamble_bodies(doc, *d) {
+                let bodies = preamble_bodies(doc, *d);
+                if !bodies.is_empty() {
+                    let name = doc.instruments().get(d).map(|d| d.name.clone());
+                    self.report.add(ItemKind::Note, PATCH_MIX, name);
+                }
+                for body in bodies {
                     for out in translate(&body, ch).msgs() {
                         pre.push(Item {
                             tick: 0,
@@ -1399,6 +1437,16 @@ fn flex(bank: u8, status: u8, text: String, report: &mut Report) -> ClipEvent {
 /// moved to start at 0. Refuses an unknown sequence or track and an empty
 /// or reversed range.
 pub fn to_clip(doc: &Document, o: &ClipOptions) -> Result<(ClipFile, Report), IoError> {
+    to_clip_until(doc, o, &AtomicBool::new(false))
+}
+
+/// [`to_clip`], stopping with `Err(Cancelled)` once `cancel` is set
+/// (looked at every few thousand events).
+pub fn to_clip_until(
+    doc: &Document,
+    o: &ClipOptions,
+    cancel: &AtomicBool,
+) -> Result<(ClipFile, Report), IoError> {
     if let Some((a, b)) = o.range
         && a >= b
     {
@@ -1511,7 +1559,10 @@ pub fn to_clip(doc: &Document, o: &ClipOptions) -> Result<(ClipFile, Report), Io
     let mut noted = false;
     let mut notes = 0u64;
     let mut events: Vec<Item<ClipEvent>> = Vec::new();
-    for e in played.iter().filter(|e| inside(e.tick.0)) {
+    for (n, e) in played.iter().filter(|e| inside(e.tick.0)).enumerate() {
+        if n % CANCEL_EVERY == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(IoError::Cancelled);
+        }
         let Some(tick) = e.tick.0.checked_sub(origin.tick) else {
             continue;
         };
@@ -1618,7 +1669,12 @@ pub fn to_clip(doc: &Document, o: &ClipOptions) -> Result<(ClipFile, Report), Io
         let Some((g, ch)) = preamble_channel(doc, *d, None) else {
             continue;
         };
-        for body in preamble_bodies(doc, *d) {
+        let bodies = preamble_bodies(doc, *d);
+        if !bodies.is_empty() {
+            let name = doc.instruments().get(d).map(|d| d.name.clone());
+            report.add(ItemKind::Note, PATCH_MIX, name);
+        }
+        for body in bodies {
             if let Some(p) = channel_packet(g, ch, &body) {
                 items.push(Item {
                     tick: 0,
