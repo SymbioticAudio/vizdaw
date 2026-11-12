@@ -70,8 +70,10 @@ extension DocumentModel {
     }
 
     /// Project Settings: converts every file into `format` (a job).
-    public func changeFormat(_ format: ProjectFormatRow) {
-        startJob(.format, "Project Settings Failed") { try $0.setProjectFormat(format: format) }
+    /// Answers whether the job started (a refusal is an alert).
+    @discardableResult
+    public func changeFormat(_ format: ProjectFormatRow) -> Bool {
+        startJob(.format, "Project Settings Failed") { try $0.setProjectFormat(format: format) } != nil
     }
 
     /// The banner's Convert.
@@ -126,6 +128,7 @@ extension DocumentModel {
     /// polling stops once none is left.
     public func pollJobs() {
         var still: [JobRow] = []
+        var openFailure: String??
         for j in jobs {
             let r: JobRow
             do {
@@ -141,15 +144,23 @@ extension DocumentModel {
                 if !r.problems.isEmpty { jobProblems = r.problems }
                 refreshAfterJob()
                 // A MIDI import or export the UI started shows its report.
-                if r.kind == .importMidi || r.kind == .exportMidi { interchange.jobEnded() }
+                if r.kind == .importMidi || r.kind == .exportMidi { interchange.jobEnded(r) }
+                if r.kind == .importMidi { openedMidi = nil }
             case .failed(let message):
-                if r.state != .cancelled {
+                if r.kind == .importMidi, openedMidi != nil {
+                    // Open made this project for the file: the store closes it.
+                    openFailure = .some(r.state == .cancelled ? nil : message)
+                } else if r.state != .cancelled, !(r.kind == .exportMidi && interchange.jobFailed(r, message: message)) {
                     alert = AlertItem(title: ProjectBanner.failureTitle(r.kind), message: message)
                 }
                 refreshAfterJob()
             }
         }
         jobs = still
+        if let failure = openFailure, let hook = openedMidi {
+            openedMidi = nil
+            hook(failure)
+        }
     }
 
     public func refreshProjectInfo() {

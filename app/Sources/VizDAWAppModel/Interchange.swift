@@ -76,7 +76,8 @@ public final class InterchangeModel {
     @ObservationIgnored private weak var document: DocumentModel?
     @ObservationIgnored private var infoGeneration = 0
     @ObservationIgnored private var checkGeneration = 0
-    @ObservationIgnored private var pending: [Task<Void, Never>] = []
+    @ObservationIgnored private var pending: [Int: Task<Void, Never>] = [:]
+    @ObservationIgnored private var taskCount = 0
     @ObservationIgnored private var resetting = false
 
     public init(document: DocumentModel) { self.document = document }
@@ -99,27 +100,38 @@ public final class InterchangeModel {
         reportShown = true
     }
 
-    /// A job this document's UI started ended well: its report is shown.
-    func jobEnded() {
-        guard let document, let r = (try? document.session.interchangeReport()) ?? nil else { return }
+    /// A job this document's UI started ended well: its own report is shown.
+    func jobEnded(_ job: JobRow) {
+        guard let r = job.report else { return }
         report = r
         reportShown = true
     }
+
+    /// A job this document's UI started failed. An export's refusal goes
+    /// back to its sheet, which opens again; answers whether it did.
+    func jobFailed(_ job: JobRow, message: String) -> Bool {
+        guard job.kind == .exportMidi, job.state != .cancelled else { return false }
+        exportError = message
+        exportShown = true
+        return true
+    }
+
+    /// The text of `error` without an alert's title.
+    static func message(_ error: any Error) -> String { AlertItem(error, title: "").message }
 
     // MARK: Import
 
     public var importShown = false
     public private(set) var importPath = ""
     public private(set) var info: MidiFileInfoRow?
-    public private(set) var newProject = false
     public var choices: [ChannelChoice] = []
     public var splitChannels = false
     public var mpe = false
-    @ObservationIgnored private var wantsTempo = false
+    private var wantsTempo = false
 
-    /// The core takes the file's tempo into a new project and into a
-    /// sequence without events (Ruling T7-a): the box shows on, disabled.
-    public var useTempoLocked: Bool { newProject || targetIsEmpty }
+    /// The core takes the file's tempo into a sequence without events
+    /// (Ruling T7-a): the box shows on, disabled.
+    public var useTempoLocked: Bool { targetIsEmpty }
 
     public var useTempo: Bool {
         get { useTempoLocked || wantsTempo }
@@ -138,18 +150,18 @@ public final class InterchangeModel {
 
     /// Reads `path`, then shows the import sheet; a refusal is the alert
     /// "Import Failed".
-    public func beginImport(path: String, newProject: Bool = false) {
+    public func beginImport(path: String) {
         guard let document else { return }
         infoGeneration += 1
         let generation = infoGeneration
         let session = document.session
         run {
             let result = await Task.detached { Result { try session.midiFileInfo(path: path) } }.value
-            self.landed(generation, path, newProject, result)
+            self.landed(generation, path, result)
         }
     }
 
-    private func landed(_ generation: Int, _ path: String, _ fresh: Bool, _ result: Result<MidiFileInfoRow, any Error>) {
+    private func landed(_ generation: Int, _ path: String, _ result: Result<MidiFileInfoRow, any Error>) {
         guard generation == infoGeneration, let document else { return }
         switch result {
         case .failure(let error):
@@ -157,7 +169,6 @@ public final class InterchangeModel {
         case .success(let i):
             info = i
             importPath = path
-            newProject = fresh
             choices = i.channels.map { ChannelChoice(group: $0.group, channel: $0.channel, dest: $0.suggested, notes: $0.notes) }
             splitChannels = i.kind == .smf0
             mpe = i.mpeFound
@@ -173,14 +184,13 @@ public final class InterchangeModel {
         let target = DocumentModel.importTarget(
             seq: document.selectedSeq, selection: document.editor.selection.lanes, files: 1,
             tick: document.transport.tick)
-        guard newProject || target != nil else {
+        guard let target else {
             document.alert = AlertItem(title: "Import Failed", message: "No sequence is shown.")
             return
         }
         importShown = false
         let req = MidiImportRequestRow(
-            path: importPath, newProject: newProject, seq: target?.seq ?? 0, lane: newProject ? nil : target?.lane,
-            tick: newProject ? 0 : target?.tick ?? 0,
+            path: importPath, newProject: false, seq: target.seq, lane: target.lane, tick: target.tick,
             channelMap: choices.map { ChannelMapRow(group: $0.group, channel: $0.channel, dest: $0.dest) },
             splitChannels: splitChannels, mpe: mpe, useTempo: useTempo)
         document.startJob(.importMidi, "MIDI Import Failed") { try $0.importMidi(req: req) }
@@ -238,6 +248,7 @@ public final class InterchangeModel {
     public func showExport(_ kind: ExportKind) {
         guard let document else { return }
         resetting = true
+        exportError = nil
         exportKind = kind
         type0 = false
         ppq = 960
@@ -302,7 +313,7 @@ public final class InterchangeModel {
             exportError = nil
         case .failure(let error):
             wontTransfer = nil
-            exportError = AlertItem(error, title: "").message
+            exportError = Self.message(error)
         }
     }
 
@@ -320,12 +331,12 @@ public final class InterchangeModel {
         case .smf:
             let req = smfRequest(seq: seq, path: path, replace: true)
             started = document.startJob(.exportMidi, "MIDI Export Failed", failure: { [self] in
-                exportError = AlertItem($0, title: "").message
+                exportError = Self.message($0)
             }) { try $0.exportMidi(req: req) }
         case .clip:
             let req = clipRequest(seq: seq, path: path, replace: true)
             started = document.startJob(.exportMidi, "MIDI Export Failed", failure: { [self] in
-                exportError = AlertItem($0, title: "").message
+                exportError = Self.message($0)
             }) { try $0.exportMidiClip(req: req) }
         }
         if started != nil { exportShown = false }
@@ -335,14 +346,16 @@ public final class InterchangeModel {
 
     /// Runs `body` as a task the model can wait for.
     private func run(_ body: @escaping @MainActor () async -> Void) {
-        pending.append(Task { await body() })
+        taskCount += 1
+        let id = taskCount
+        pending[id] = Task {
+            await body()
+            pending[id] = nil
+        }
     }
 
     /// Waits until every check started so far has landed (or been dropped).
     public func settle() async {
-        while !pending.isEmpty {
-            let t = pending.removeFirst()
-            await t.value
-        }
+        while let t = pending.values.first { await t.value }
     }
 }

@@ -79,8 +79,7 @@ public final class ProjectSettingsModel {
             }
         }
         if format != loadedFormat {
-            document.changeFormat(format)
-            loadedFormat = format
+            if document.changeFormat(format) { loadedFormat = format }
         }
     }
 }

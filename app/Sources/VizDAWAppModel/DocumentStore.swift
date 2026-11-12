@@ -262,12 +262,25 @@ public final class DocumentStore {
         guard let id = newProject(ProjectFormatRow(sampleRate: 48_000, depth: defaultFormat.depth)),
             let model = documents[id]
         else { return nil }
+        // A job that fails or is cancelled on a project still untouched takes
+        // the project with it; the alert is the store's (as the control
+        // channel's `file.import_midi` does).
+        model.openedMidi = { [weak self, weak model] message in
+            guard let self, let model else { return }
+            guard !model.canUndo else {
+                if let message { model.alert = AlertItem(title: "Import Failed", message: message) }
+                return
+            }
+            close(id)
+            if let message { postAlert(AlertItem(title: "Import Failed", message: message)) }
+        }
         if let error = model.interchange.importIntoNewProject(path: path) {
             close(id)
             postAlert(AlertItem(error, title: "Import Failed"))
             return nil
         }
-        return id
+        // A job that failed at once has already taken the project.
+        return documents[id] == nil ? nil : id
     }
 
     /// Brings a document's window to the front (set by the app).

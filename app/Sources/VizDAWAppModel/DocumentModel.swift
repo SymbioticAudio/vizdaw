@@ -194,6 +194,11 @@ public final class DocumentModel {
         return m
     }
 
+    /// Set by the store for a project it made to open a MIDI file: called
+    /// when that import fails (the message; nil: cancelled) so the store can
+    /// close the project while it is untouched. Cleared once the job ends.
+    @ObservationIgnored var openedMidi: ((String?) -> Void)?
+
     /// The MIDI import, export and report sheets (plan 6a), made once.
     public var interchange: InterchangeModel {
         if let m = interchangeModel { return m }

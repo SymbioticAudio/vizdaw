@@ -36,7 +36,7 @@ import VizDAWCore
         await m.interchange.settle()
         let i = m.interchange
         #expect(i.importShown && i.importPath == "/tmp/a.mid" && i.info == f.midiInfoRow)
-        #expect(i.splitChannels && i.mpe && !i.useTempo && !i.useTempoLocked && !i.newProject)
+        #expect(i.splitChannels && i.mpe && !i.useTempo && !i.useTempoLocked)
         #expect(
             i.choices == [
                 ChannelChoice(group: 0, channel: 0, dest: 5, notes: 10),
@@ -47,12 +47,6 @@ import VizDAWCore
         m.interchange.beginImport(path: "/tmp/b.mid")
         await m.interchange.settle()
         #expect(!i.splitChannels && !i.mpe)
-        // A new project takes the file's tempo, whatever was asked.
-        m.interchange.beginImport(path: "/tmp/c.mid", newProject: true)
-        await m.interchange.settle()
-        #expect(i.useTempo && i.useTempoLocked)
-        i.useTempo = false
-        #expect(i.useTempo, "forced on")
     }
 
     /// Ruling T7-a: the core takes the file's tempo into a sequence without
@@ -238,7 +232,9 @@ import VizDAWCore
         let id = try #require(m.jobs.first { $0.kind == .importMidi }?.id)
         m.pollJobs()
         #expect(!m.interchange.reportShown, "still running")
-        f.jobRows[id] = JobRow(id: id, kind: .importMidi, progress: 1, state: .done, message: nil, problems: [], created: [])
+        f.jobRows[id] = JobRow(
+            id: id, kind: .importMidi, progress: 1, state: .done, message: nil, problems: [], created: [],
+            report: f.lastReport, written: [])
         m.pollJobs()
         #expect(m.interchange.reportShown && m.interchange.report == f.lastReport)
         // A job the control channel started is not in `jobs`: nothing opens.
@@ -296,5 +292,64 @@ import VizDAWCore
         }
         #expect(s.open(path: "/tmp/a.mid") == nil)
         #expect(s.documents.isEmpty && s.alert?.title == "Import Failed")
+    }
+
+    /// Open: a project made for a file the job then refuses goes, with the
+    /// alert owned by the store.
+    @Test func aFailedOpenJobClosesTheUntouchedProject() throws {
+        let f = demoFake()
+        f.jobStartState = .running
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() })
+        s.makeProject = { _ in f }
+        let id = try #require(s.open(path: "/tmp/a.mid"))
+        let m = try #require(s.model(id))
+        let job = try #require(m.jobs.first?.id)
+        f.jobRows[job] = JobRow(
+            id: job, kind: .importMidi, progress: 1, state: .failed, message: "not a MIDI file", problems: [], created: [])
+        m.pollJobs()
+        #expect(s.model(id) == nil && s.documents.isEmpty)
+        #expect(s.alert == AlertItem(title: "Import Failed", message: "not a MIDI file"))
+        // Cancelled: closes quietly.
+        let g = demoFake()
+        g.jobStartState = .running
+        s.makeProject = { _ in g }
+        let id2 = try #require(s.open(path: "/tmp/b.mid"))
+        let m2 = try #require(s.model(id2))
+        let j2 = try #require(m2.jobs.first?.id)
+        g.jobRows[j2] = JobRow(id: j2, kind: .importMidi, progress: 1, state: .cancelled, message: nil, problems: [], created: [])
+        s.alert = nil
+        m2.pollJobs()
+        #expect(s.documents.isEmpty && s.alert == nil)
+    }
+
+    @Test func aFailedOpenJobKeepsAProjectThatWasEdited() throws {
+        let f = demoFake()
+        f.jobStartState = .running
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() })
+        s.makeProject = { _ in f }
+        let id = try #require(s.open(path: "/tmp/a.mid"))
+        let m = try #require(s.model(id))
+        f.snap.undoLabel = "Rename"
+        m.apply(f.snap)
+        let job = try #require(m.jobs.first?.id)
+        f.jobRows[job] = JobRow(
+            id: job, kind: .importMidi, progress: 1, state: .failed, message: "bad", problems: [], created: [])
+        m.pollJobs()
+        #expect(s.model(id) != nil && m.alert == AlertItem(title: "Import Failed", message: "bad"))
+    }
+
+    @Test func aLaterExportFailureReturnsToTheSheet() async throws {
+        let f = busy()
+        f.jobStartState = .running
+        let m = try DocumentModel(session: f)
+        m.interchange.showExport(.smf)
+        await m.interchange.settle()
+        m.interchange.startExport(path: "/tmp/x.mid")
+        #expect(!m.interchange.exportShown)
+        let job = try #require(m.jobs.first { $0.kind == .exportMidi }?.id)
+        f.jobRows[job] = JobRow(
+            id: job, kind: .exportMidi, progress: 1, state: .failed, message: "disk full", problems: [], created: [])
+        m.pollJobs()
+        #expect(m.interchange.exportShown && m.interchange.exportError == "disk full" && m.alert == nil)
     }
 }
