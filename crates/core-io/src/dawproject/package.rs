@@ -1,0 +1,586 @@
+//! An opened `.dawproject` package (plan 6d Task 6): its project and
+//! metadata read and checked, what it says about returning to VizDAW, the
+//! audio it uses, and what the app asks before importing it.
+//!
+//! [`open`] reads, in order, the record (`vizdaw/record.json`, only its
+//! head), `project.xml` and `metadata.xml`, so that the record's text is
+//! gone before the project's tree is built. The project's tree is dropped
+//! before its IDs are checked ([`project_of`] takes it by value), so one
+//! byte budget ([`MAX_MODEL_BYTES`](crate::limits::MAX_MODEL_BYTES)) bounds
+//! the read.
+
+use super::record::{FORMAT, RECORD_ENTRY, RecordHead};
+use super::schema::*;
+use super::units::{EXPORT_LINE, TagKind, strip_tags};
+use crate::IoError;
+use crate::limits::PackageLimits;
+use crate::report::{ItemKind, Report};
+use crate::xml::Tree;
+use crate::zip::{NOT_DAWPROJECT, ZipReader};
+use core_model::format::AudioFormat;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The package entry of the project.
+pub const PROJECT_ENTRY: &str = "project.xml";
+/// The package entry of the song info.
+pub const METADATA_ENTRY: &str = "metadata.xml";
+
+/// Left out: a `metadata.xml` that could not be read (the reason as the
+/// detail); the song info is left out.
+pub const SONG_INFO_UNREADABLE: &str = "Song info that could not be read";
+/// Note: a `vizdaw/record.json` that could not be read (the reason as the
+/// detail); the file is treated as having no record.
+pub const RECORD_UNREADABLE: &str = "The file's VizDAW record could not be read";
+/// Note (Ruling 17): the file's audio has no project rate.
+pub const ODD_RATE: &str = "The file's audio rate isn't a project rate; the project is 48 kHz";
+
+/// The rate of a project when the file gives none.
+const DEFAULT_RATE: u32 = 48_000;
+/// How many items the audio walk counts between looks at the cancel flag.
+const CANCEL_EVERY: usize = 65_536;
+
+/// What a package says about where it came from (spec §7.8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReturnInfo {
+    /// The record's head, if the package has a readable one.
+    pub record: Option<RecordHead>,
+    /// The export ID of the metadata comment's last line
+    /// (`VizDAW export <id>`).
+    pub export_id: Option<String>,
+    /// Note and audio tracks whose comment holds a `vz:t` tag.
+    pub tagged_tracks: u32,
+    /// Note and audio tracks (not folders, buses, VCAs or the master).
+    pub tracks: u32,
+}
+
+impl ReturnInfo {
+    /// Record, export line, or `vz:t` tags on at least half the tracks (§7.8).
+    pub fn from_vizdaw(&self) -> bool {
+        self.record.is_some()
+            || self.export_id.is_some()
+            || (self.tracks > 0 && u64::from(self.tagged_tracks) * 2 >= u64::from(self.tracks))
+    }
+}
+
+/// What the app asks of a package before importing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpInfo {
+    /// The project rate to make (Ruling 17).
+    pub sample_rate: u32,
+    /// Note and audio tracks (S14).
+    pub tracks: u32,
+    /// Distinct audio files.
+    pub audio_files: u32,
+    /// Where it came from.
+    pub ret: ReturnInfo,
+}
+
+/// Where an audio file's bytes are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioSource {
+    /// A package entry, by name.
+    Entry(String),
+    /// A file outside the package (Ruling 19): the path as written, made
+    /// absolute against the package's folder when relative. It may be
+    /// anywhere, or a URL; the import job checks it before reading.
+    External(PathBuf),
+}
+
+/// One audio file the project uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioRef {
+    /// Its number, from 0 in document order; the key of its media.
+    pub key: usize,
+    /// Where it is.
+    pub source: AudioSource,
+    /// Its channels, as the file's `Audio` says (0 when unreadable).
+    pub channels: u16,
+    /// Its rate, as the file's `Audio` says (0 when unreadable).
+    pub sample_rate: u32,
+    /// Its length in frames, from the `Audio`'s duration and rate.
+    pub frames: u64,
+    /// Its name: the file name without its extension.
+    pub name: String,
+}
+
+/// An opened package. The ZIP stays open for [`DpPackage::extract`] and
+/// [`DpPackage::state`].
+pub struct DpPackage {
+    /// The project.
+    pub project: DpProject,
+    /// The song info (empty when the package has none, or it could not be
+    /// read).
+    pub metadata: DpMetaData,
+    /// Where it came from.
+    pub ret: ReturnInfo,
+    /// What reading changed, left out or noted.
+    pub report: Report,
+    zip: ZipReader,
+    limits: PackageLimits,
+    stem: String,
+    audio: Vec<AudioRef>,
+    /// Per audio file: the bytes the import reads, for [`DpPackage::needed_bytes`]
+    /// (the entry's declared size, a regular external file's size), or
+    /// `None` for one that will not be read.
+    sizes: Vec<Option<u64>>,
+    /// Per `Audio` element: its rate.
+    rates: Vec<u32>,
+}
+
+fn stop(cancel: &AtomicBool) -> Result<(), IoError> {
+    if cancel.load(Ordering::Relaxed) {
+        Err(IoError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+/// Reads `tree` as a project and checks its IDs. It takes the tree by
+/// value and drops it before the check, which continues the reader's
+/// byte budget and assumes the tree is gone.
+pub fn project_of(tree: Tree, report: &mut Report) -> Result<DpProject, IoError> {
+    let project = read_project(&tree, report)?;
+    drop(tree);
+    check_ids(&project, report)?;
+    Ok(project)
+}
+
+/// Opens the package at `path`: refuses what is not a DAWproject file (no
+/// `project.xml`, a damaged or too large one, version 2 and later); reads
+/// the song info and the record when they can be read, else lists them.
+/// Looks at `cancel` before any work and while reading.
+pub fn open(
+    path: &Path,
+    limits: &PackageLimits,
+    cancel: &AtomicBool,
+) -> Result<DpPackage, IoError> {
+    stop(cancel)?;
+    let zip = ZipReader::open(path, limits)?;
+    let mut report = Report::default();
+    let record = read_record(&zip, limits, cancel, &mut report)?;
+    stop(cancel)?;
+
+    let entry = zip
+        .find(PROJECT_ENTRY)
+        .ok_or_else(|| IoError::Refused(NOT_DAWPROJECT.to_owned()))?;
+    let text = zip.read(
+        entry,
+        limits.max_project_xml,
+        Some(limits.max_ratio),
+        cancel,
+    )?;
+    let tree = Tree::parse(&text, limits, cancel)?;
+    drop(text);
+    let project = project_of(tree, &mut report)?;
+    stop(cancel)?;
+
+    let metadata = read_metadata_entry(&zip, limits, cancel, &mut report)?;
+    stop(cancel)?;
+
+    let export_id = metadata
+        .fields
+        .last()
+        .and_then(Option::as_deref)
+        .and_then(export_id_of);
+    let (tracks, tagged_tracks) = count_tracks(&project);
+    let ret = ReturnInfo {
+        record,
+        export_id,
+        tagged_tracks,
+        tracks,
+    };
+
+    let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut walk = AudioWalk::new(cancel);
+    walk.project(&project)?;
+    let AudioWalk { refs, rates, .. } = walk;
+    let audio: Vec<AudioRef> = refs
+        .into_iter()
+        .enumerate()
+        .map(|(key, a)| AudioRef {
+            key,
+            source: if a.file.external {
+                AudioSource::External(base.join(&a.file.path))
+            } else {
+                AudioSource::Entry(a.file.path.clone())
+            },
+            channels: u16::try_from(a.channels).ok().unwrap_or(0),
+            sample_rate: u32::try_from(a.sample_rate).ok().unwrap_or(0),
+            frames: frames(a.duration, a.sample_rate),
+            name: audio_name(&a.file.path, key),
+        })
+        .collect();
+    let sizes = audio
+        .iter()
+        .map(|a| match &a.source {
+            AudioSource::Entry(name) => zip.find(name).map(|e| e.size),
+            AudioSource::External(p) => external_size(p),
+        })
+        .collect();
+    if !rates.is_empty() && !rates.iter().any(|r| AudioFormat::RATES.contains(r)) {
+        report.add(ItemKind::Note, ODD_RATE, None);
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(DpPackage {
+        project,
+        metadata,
+        ret,
+        report,
+        zip,
+        limits: *limits,
+        stem,
+        audio,
+        sizes,
+        rates,
+    })
+}
+
+/// The export ID of a metadata comment's last line, if it is the export line.
+pub(crate) fn export_id_of(comment: &str) -> Option<String> {
+    let last = comment.trim_end().rsplit('\n').next()?;
+    let id = last.strip_prefix(EXPORT_LINE)?.trim();
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+/// The record's head; a record that cannot be read is noted and treated as
+/// absent. A cancel is passed on.
+fn read_record(
+    zip: &ZipReader,
+    limits: &PackageLimits,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Result<Option<RecordHead>, IoError> {
+    let Some(entry) = zip.find(RECORD_ENTRY) else {
+        return Ok(None);
+    };
+    let why = match zip.read(entry, limits.max_record, None, cancel) {
+        Err(IoError::Cancelled) => return Err(IoError::Cancelled),
+        Err(e) => e.to_string(),
+        Ok(bytes) => match serde_json::from_slice::<RecordHead>(&bytes) {
+            Ok(head) if head.format == FORMAT => return Ok(Some(head)),
+            Ok(head) => format!("it is format {}", head.format),
+            Err(e) => e.to_string(),
+        },
+    };
+    report.add(ItemKind::Note, RECORD_UNREADABLE, Some(why));
+    Ok(None)
+}
+
+/// The song info; one that cannot be read is listed and left out. A cancel
+/// is passed on.
+fn read_metadata_entry(
+    zip: &ZipReader,
+    limits: &PackageLimits,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Result<DpMetaData, IoError> {
+    let Some(entry) = zip.find(METADATA_ENTRY) else {
+        return Ok(DpMetaData::default());
+    };
+    let tree = zip
+        .read(
+            entry,
+            limits.max_metadata_xml,
+            Some(limits.max_ratio),
+            cancel,
+        )
+        .and_then(|text| Tree::parse(&text, limits, cancel));
+    match tree {
+        Ok(tree) => Ok(read_metadata(&tree, report)),
+        Err(IoError::Cancelled) => Err(IoError::Cancelled),
+        Err(e) => {
+            report.add(ItemKind::LeftOut, SONG_INFO_UNREADABLE, Some(e.to_string()));
+            Ok(DpMetaData::default())
+        }
+    }
+}
+
+/// What a `Track` is to the import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackRole {
+    /// Its channel is the master.
+    Master,
+    /// Its channel is a VCA.
+    Vca,
+    /// It holds tracks: a folder.
+    Folder,
+    /// Its channel is an effect or submix channel.
+    Bus,
+    /// A note or audio track.
+    Content,
+}
+
+/// What `t` is: the master, a VCA, a folder (it holds tracks), a bus (an
+/// effect or submix channel) or a note or audio track.
+pub(crate) fn role_of(t: &DpTrack) -> TrackRole {
+    match t.channel.as_ref().and_then(|c| c.role) {
+        Some(DpMixerRole::Master) => TrackRole::Master,
+        Some(DpMixerRole::Vca) => TrackRole::Vca,
+        _ if !t.children.is_empty() || t.content.contains(&DpContentType::Tracks) => {
+            TrackRole::Folder
+        }
+        Some(DpMixerRole::Effect | DpMixerRole::Submix) => TrackRole::Bus,
+        _ => TrackRole::Content,
+    }
+}
+
+/// Every track of `p`, depth first, without recursion.
+pub(crate) fn all_tracks(p: &DpProject) -> Vec<&DpTrack> {
+    let mut out = Vec::new();
+    let mut stack: Vec<&DpTrack> = p
+        .structure
+        .iter()
+        .rev()
+        .filter_map(|i| match i {
+            DpStructureItem::Track(t) => Some(t),
+            DpStructureItem::Channel(_) => None,
+        })
+        .collect();
+    while let Some(t) = stack.pop() {
+        out.push(t);
+        stack.extend(t.children.iter().rev());
+    }
+    out
+}
+
+/// Note and audio tracks, and how many of them carry a `vz:t` tag.
+fn count_tracks(p: &DpProject) -> (u32, u32) {
+    let (mut tracks, mut tagged) = (0u32, 0u32);
+    for t in all_tracks(p) {
+        if role_of(t) != TrackRole::Content {
+            continue;
+        }
+        tracks = tracks.saturating_add(1);
+        let has_tag = t
+            .named
+            .comment
+            .as_deref()
+            .is_some_and(|c| strip_tags(c).1.iter().any(|(k, _)| *k == TagKind::Track));
+        if has_tag {
+            tagged = tagged.saturating_add(1);
+        }
+    }
+    (tracks, tagged)
+}
+
+/// `seconds` at `rate` in frames, rounded; 0 for what cannot be a length.
+fn frames(seconds: f64, rate: i32) -> u64 {
+    let f = seconds * f64::from(rate);
+    if rate > 0 && f.is_finite() && f > 0.0 {
+        // `as` saturates past `u64::MAX`.
+        f.round() as u64
+    } else {
+        0
+    }
+}
+
+/// A file name without its folders and its extension; "Audio <n>" when
+/// nothing is left.
+fn audio_name(path: &str, key: usize) -> String {
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let stem = match file.rfind('.') {
+        Some(i) if i > 0 => file.get(..i).unwrap_or(file),
+        _ => file,
+    };
+    let stem = stem.trim();
+    if stem.is_empty() {
+        format!("Audio {}", key.saturating_add(1))
+    } else {
+        stem.to_owned()
+    }
+}
+
+/// The size of an external file the import may read: a regular file, not
+/// a URL (Ruling 19).
+fn external_size(p: &Path) -> Option<u64> {
+    if p.to_string_lossy().contains("://") {
+        return None;
+    }
+    std::fs::metadata(p)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .map(|m| m.len())
+}
+
+/// The walk that finds the audio files, in document order.
+struct AudioWalk<'p, 'c> {
+    refs: Vec<&'p DpAudio>,
+    seen: HashMap<(&'p str, bool), usize>,
+    rates: Vec<u32>,
+    n: usize,
+    cancel: &'c AtomicBool,
+}
+
+impl<'p, 'c> AudioWalk<'p, 'c> {
+    fn new(cancel: &'c AtomicBool) -> Self {
+        AudioWalk {
+            refs: Vec::new(),
+            seen: HashMap::new(),
+            rates: Vec::new(),
+            n: 0,
+            cancel,
+        }
+    }
+
+    fn tick(&mut self) -> Result<(), IoError> {
+        self.n = self.n.wrapping_add(1);
+        if self.n % CANCEL_EVERY == 0 {
+            stop(self.cancel)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn project(&mut self, p: &'p DpProject) -> Result<(), IoError> {
+        let mut stack: Vec<&'p DpTimeline> = Vec::new();
+        for s in p.scenes.iter().rev() {
+            stack.extend(&s.content);
+        }
+        if let Some(l) = p.arrangement.as_ref().and_then(|a| a.lanes.as_ref()) {
+            stack.extend(l.items.iter().rev());
+        }
+        // The reader keeps timelines at most 16 deep; the stack holds what
+        // is still to visit, in document order.
+        while let Some(t) = stack.pop() {
+            self.tick()?;
+            match t {
+                DpTimeline::Lanes(l) => stack.extend(l.items.iter().rev()),
+                DpTimeline::Clips(c) => {
+                    for clip in c.clips.iter().rev() {
+                        self.tick()?;
+                        stack.extend(clip.content.as_deref());
+                    }
+                }
+                DpTimeline::Notes(n) => {
+                    for note in n.notes.iter().rev() {
+                        self.tick()?;
+                        stack.extend(note.content.as_deref());
+                    }
+                }
+                DpTimeline::Warps(w) => stack.push(&w.content),
+                DpTimeline::ClipSlot(_, Some(clip)) => stack.extend(clip.content.as_deref()),
+                DpTimeline::Audio(a) => {
+                    self.rates
+                        .push(u32::try_from(a.sample_rate).ok().unwrap_or(0));
+                    let key = (a.file.path.as_str(), a.file.external);
+                    if !self.seen.contains_key(&key) {
+                        self.seen.insert(key, self.refs.len());
+                        self.refs.push(a);
+                    }
+                }
+                DpTimeline::Points(_)
+                | DpTimeline::Markers(..)
+                | DpTimeline::ClipSlot(_, None)
+                | DpTimeline::Video(_)
+                | DpTimeline::Unknown(_) => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl DpPackage {
+    /// Ruling 17's rate; `tracks` counts note and audio tracks, not folders,
+    /// buses or the master (S14). The rate is the one most `Audio` elements
+    /// have among the project rates; a tie goes to 48 kHz when it is one of
+    /// the tied, else to the higher rate; with none at a project rate, 48 kHz
+    /// (and `open` noted [`ODD_RATE`]).
+    pub fn info(&self) -> DpInfo {
+        let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
+        for r in self.rates.iter().filter(|r| AudioFormat::RATES.contains(r)) {
+            let n = counts.entry(*r).or_insert(0);
+            *n = n.saturating_add(1);
+        }
+        let best = counts.values().copied().max().unwrap_or(0);
+        let tied: Vec<u32> = counts
+            .iter()
+            .filter(|(_, n)| **n == best)
+            .map(|(r, _)| *r)
+            .collect();
+        let sample_rate = if tied.is_empty() || tied.contains(&DEFAULT_RATE) {
+            DEFAULT_RATE
+        } else {
+            tied.iter().copied().max().unwrap_or(DEFAULT_RATE)
+        };
+        DpInfo {
+            sample_rate,
+            tracks: self.ret.tracks,
+            audio_files: u32::try_from(self.audio.len()).unwrap_or(u32::MAX),
+            ret: self.ret.clone(),
+        }
+    }
+
+    /// One per distinct File path, in document order.
+    pub fn audio(&self) -> &[AudioRef] {
+        &self.audio
+    }
+
+    /// The bytes an import writes (Ruling 18, L10): every entry's declared
+    /// size (its extracted copy, which [`DpPackage::extract`] never passes)
+    /// plus one converted copy per file that will be read (entries and
+    /// regular external files): its frames × channels × `depth_bytes`, at
+    /// least the file's size × 4 when the `Audio` element understates it.
+    /// Files that will not be read (missing entries, URLs, what is not a
+    /// regular file) count nothing.
+    pub fn needed_bytes(&self, depth_bytes: u32) -> u64 {
+        let mut total = 0u64;
+        for (a, size) in self.audio.iter().zip(&self.sizes) {
+            let Some(size) = *size else { continue };
+            if matches!(a.source, AudioSource::Entry(_)) {
+                total = total.saturating_add(size);
+            }
+            let caf = a
+                .frames
+                .saturating_mul(u64::from(a.channels))
+                .saturating_mul(u64::from(depth_bytes))
+                .max(size.saturating_mul(4));
+            total = total.saturating_add(caf);
+        }
+        total
+    }
+
+    /// Streams `a`'s entry into the new file `to` ([`ZipReader::extract`]),
+    /// returning the bytes written. An external file is refused: it is read
+    /// where it is.
+    pub fn extract(&self, a: &AudioRef, to: &Path, cancel: &AtomicBool) -> Result<u64, IoError> {
+        match &a.source {
+            AudioSource::Entry(name) => {
+                let e = self.zip.find(name).ok_or_else(|| missing(name))?;
+                self.zip.extract(e, to, cancel)
+            }
+            AudioSource::External(p) => Err(IoError::Refused(format!(
+                "{} is outside the package; it is read where it is",
+                core_media::export::display_name(p)
+            ))),
+        }
+    }
+
+    /// The plug-in state entry `path`, at most the limits' `max_state`
+    /// bytes.
+    pub fn state(&self, path: &str) -> Result<Vec<u8>, IoError> {
+        let e = self.zip.find(path).ok_or_else(|| missing(path))?;
+        self.zip
+            .read(e, self.limits.max_state, None, &AtomicBool::new(false))
+    }
+
+    /// The project's IDs (checked when the package was opened).
+    pub fn ids(&self) -> Ids<'_> {
+        check_ids(&self.project, &mut Report::default()).unwrap_or_default()
+    }
+
+    /// The package file's name without its extension.
+    pub(crate) fn stem(&self) -> &str {
+        &self.stem
+    }
+}
+
+/// The refusal for an entry the package does not hold.
+fn missing(name: &str) -> IoError {
+    let shown: String = name.chars().take(64).collect();
+    IoError::Refused(format!("'{shown}' isn't in the DAWproject file"))
+}
