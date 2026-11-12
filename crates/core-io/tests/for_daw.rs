@@ -811,6 +811,11 @@ fn a_thousand_tracks() {
     let took = t.elapsed();
     println!("a_thousand_tracks: midi_files took {took:?}");
     assert_eq!(files.len(), 1002);
+    assert_eq!(files[0].0, "MIDI/0001 T0.mid");
+    let names: Vec<&str> = files[..1000].iter().map(|(p, _)| p.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "numbers sort in track order");
     assert_eq!(files[999].0, "MIDI/1000 T999.mid");
     assert_eq!(files[1000].0, "MIDI/All MIDI.mid");
     assert_eq!(files[1001].0, "Tempo map.mid");
@@ -826,4 +831,186 @@ fn cancel_stops_the_midi_files() {
         midi_files(&d.doc, d.seq, &l, &AtomicBool::new(true)).map(|_| ()),
         Err(IoError::Cancelled)
     );
+}
+
+#[test]
+fn numbers_take_the_width_of_the_total() {
+    let mut d = Doc::new("Song");
+    let dest = d.builtin(0);
+    let long = "é".repeat(150);
+    for k in 0..100 {
+        let name = if k == 49 {
+            long.clone()
+        } else {
+            format!("T{k}")
+        };
+        d.midi_track(&name, dest);
+    }
+    let l = d.layout(&[]);
+    let midi: Vec<&str> = l.midi.iter().map(|(_, p)| p.as_str()).collect();
+    assert_eq!(midi[0], "MIDI/001 T0.mid");
+    assert_eq!(midi[99], "MIDI/100 T99.mid");
+    let file = midi[49].strip_prefix("MIDI/").unwrap();
+    assert!(file.starts_with("050 é"), "{file}");
+    let partial = format!(".{file}.partial").len();
+    assert!((254..=255).contains(&partial), "{partial}");
+}
+
+#[test]
+fn a_bus_a_played_strip_sends_to_is_a_default() {
+    // "Verb" receives a played track's send; a strip nothing plays
+    // through outputs to it. It is still a default stem.
+    let mut d = Doc::new("Song");
+    let keys_dest = d.plugin("Keys");
+    let unused_dest = d.plugin("Unused");
+    d.midi_track("Piano", keys_dest);
+    let keys = d.strip(StripKind::Instrument(keys_dest));
+    let unused = d.strip(StripKind::Instrument(unused_dest));
+    let verb = d.bus("Verb");
+    d.exec(Command::Mixer(MixerCmd::AddSend {
+        strip: keys,
+        send: AuxSend::new(verb),
+    }));
+    d.exec(Command::Mixer(MixerCmd::SetOutput {
+        strip: unused,
+        output: Output::Bus(verb),
+    }));
+    assert_eq!(d.defaults(), [keys, verb]);
+    // A played strip outputting to it: heard in that stem, not its own.
+    d.exec(Command::Mixer(MixerCmd::SetOutput {
+        strip: keys,
+        output: Output::Bus(verb),
+    }));
+    assert_eq!(d.defaults(), [keys]);
+}
+
+/// The first meta of `kind` in the tempo map file: its tick and data.
+fn first_meta(d: &Doc, kind: u8) -> (u64, Vec<u8>) {
+    let (smf, _) = to_tempo_map_smf(&d.doc, d.seq, 960, &AtomicBool::new(false)).unwrap();
+    smf.tracks[0]
+        .events
+        .iter()
+        .find_map(|(t, e)| match e {
+            SmfEvent::Meta { kind: k, data } if *k == kind => Some((*t, data.clone())),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn tempo_line(d: &Doc) -> String {
+    let l = d.layout(&[]);
+    let about = about_text(&d.doc, d.seq, &l, None, &Report::default());
+    about.lines().nth(3).unwrap().to_string()
+}
+
+#[test]
+fn every_tempo_map_has_a_meter_at_0() {
+    let mut d = small_doc();
+    let seq = d.seq;
+    let meter = core_model::meter::MeterMap::new(vec![
+        core_model::meter::MeterEntry {
+            tick: Tick(0),
+            meter: core_model::meter::Meter { num: 3, den: 4 },
+            key: core_model::meter::KeySig {
+                sharps: 0,
+                minor: false,
+            },
+        },
+        core_model::meter::MeterEntry {
+            tick: Tick(3 * Q),
+            meter: core_model::meter::Meter { num: 4, den: 4 },
+            key: core_model::meter::KeySig {
+                sharps: 0,
+                minor: false,
+            },
+        },
+    ])
+    .unwrap();
+    d.exec(Command::Sequence(SequenceCmd::SetMeter { seq, meter }));
+    for (offset, line_meter) in [
+        (0, "3/4 at the start"),
+        (Q, "1/4 for the pickup, then 3/4 from bar 1"),
+        (Q / 2, "3/4 at the start"),
+    ] {
+        d.start_offset(offset);
+        let (tick, data) = first_meta(&d, 0x58);
+        assert_eq!(tick, 0, "offset {offset}");
+        let want = if offset == Q { 1 } else { 3 };
+        assert_eq!(data[0], want, "offset {offset}");
+        let line = tempo_line(&d);
+        assert!(line.contains(&format!(", {line_meter}. ")), "{line}");
+    }
+}
+
+/// "97.25" from 97.25, "120" from 120.0: the About file's BPM text.
+fn bpm_text(b: f64) -> String {
+    format!("{b:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+#[test]
+fn the_tempo_line_matches_the_tempo_map_file() {
+    use core_model::tempo::{Bpm, TempoMap, TempoPoint};
+    let point = |t: i64, bpm: u32, ramp: bool| TempoPoint {
+        tick: Tick(t),
+        bpm: Bpm(bpm),
+        ramp,
+    };
+    for (points, offset) in [
+        // A ramp from the start: the file's first step, not bpm_at(0).
+        (vec![point(0, 100_000, true), point(BAR, 140_000, false)], 0),
+        // A step change, with a pickup before it.
+        (vec![point(0, 97_250, false), point(BAR, 90_000, false)], Q),
+        // A ramp from bar 1, with a pickup before it.
+        (
+            vec![point(0, 80_000, true), point(BAR, 160_000, false)],
+            2 * Q,
+        ),
+    ] {
+        let mut d = small_doc();
+        let seq = d.seq;
+        let tempo = TempoMap::new(points).unwrap();
+        d.exec(Command::Sequence(SequenceCmd::SetTempo { seq, tempo }));
+        d.start_offset(offset);
+        let (tick, data) = first_meta(&d, 0x51);
+        assert_eq!(tick, 0);
+        let micros = u32::from_be_bytes([0, data[0], data[1], data[2]]);
+        let file_bpm = bpm_text(60_000_000.0 / f64::from(micros));
+        let line = tempo_line(&d);
+        assert!(
+            line.starts_with(&format!("Tempo: {file_bpm} BPM, ")),
+            "{line} vs {file_bpm}"
+        );
+    }
+}
+
+#[test]
+fn about_text_is_clean_text() {
+    let mut d = small_doc();
+    let mut info = d.doc.settings().info.clone();
+    // The model keeps song info clean; strip names are free text.
+    info.comment = Some("one\ntwo".into());
+    d.exec(Command::Settings(SettingsCmd::SetInfo { info }));
+    let synth = d.strip(StripKind::BuiltinSynth);
+    d.exec(Command::Mixer(MixerCmd::RenameStrip {
+        strip: synth,
+        name: "Big\nSynth\r\u{7}".into(),
+    }));
+    d.exec(Command::Mixer(MixerCmd::SetColour {
+        strip: synth,
+        colour: Some(Swatch::Blue),
+    }));
+    let strips = d.defaults();
+    let l = d.layout(&strips);
+    let (_, midi) = d.files(&l);
+    let r = route_report(&d.doc, d.seq, &strips, midi);
+    let about = about_text(&d.doc, d.seq, &l, Some(&wav()), &r);
+    assert!(
+        !about.chars().any(|c| c.is_control() && c != '\n'),
+        "{about:?}"
+    );
+    assert!(about.contains("\n  Comment: one\n    two\n"), "{about}");
+    assert!(about.contains("\n    Big Synth\n"), "{about}");
 }

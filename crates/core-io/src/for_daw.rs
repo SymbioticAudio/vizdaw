@@ -12,10 +12,12 @@
 //! takes do not play.
 
 use crate::IoError;
+use crate::limits::Limits;
 use crate::midi_out::{self, OTHER_INFO, SmfOptions, to_smf_until, to_tempo_map_smf};
 use crate::names::safe_part;
 use crate::report::{ItemKind, Report, group};
 use crate::smf;
+use crate::text::sanitize;
 use core_model::command::{Command, LaneCmd, apply};
 use core_model::document::{DestKind, Document};
 use core_model::event::EventBody;
@@ -235,14 +237,16 @@ impl Plays {
     }
 
     /// Ruling 4's strips, in mixer order: those the tracks play into,
-    /// plus every bus a strip they play through sends to and no strip
-    /// outputs to.
+    /// plus every bus a strip they play through sends to and no such strip
+    /// outputs to (a bus the tracks' strips output to is heard in the
+    /// stems' mix and is not a stem of its own).
     fn defaults(&self, doc: &Document) -> Vec<StripId> {
         let m = doc.mixer();
         let reached = self.reached(doc);
         let outputs_to: BTreeSet<StripId> = m
             .strips()
             .values()
+            .filter(|s| reached.contains(&s.id))
             .filter_map(|s| match s.output {
                 Output::Bus(b) => Some(b),
                 Output::Master => None,
@@ -295,9 +299,11 @@ pub fn midi_tracks(doc: &Document, seq: SeqId) -> Result<Vec<LaneId>, IoError> {
         .collect())
 }
 
-/// The bytes `"<number> "` takes before a file part.
-fn number(n: usize) -> String {
-    format!("{:02} ", n)
+/// `"<n> "`, `n` padded with zeros to the digits of `total` (at least
+/// two), so the files sort in order by name in any program: "001" … "120".
+fn number(n: usize, total: usize) -> String {
+    let width = total.to_string().len().max(2);
+    format!("{n:0width$} ")
 }
 
 /// The bytes a file part leaves for the rest of its name: the number, the
@@ -355,13 +361,14 @@ pub fn layout(
             Some(l) => lane_name(*l).unwrap_or(strip.name.as_str()),
             None => strip.name.as_str(),
         };
-        let num = number(audio.len().saturating_add(1));
+        let num = number(audio.len().saturating_add(1), chosen.len());
         let part = safe_part(name, file_reserve(&num, ext));
         audio.push((*id, format!("Audio/{num}{part}.{ext}")));
     }
     let mut midi = Vec::new();
+    let tracks = s.lanes.iter().filter(|l| p.midi.contains(&l.id)).count();
     for l in s.lanes.iter().filter(|l| p.midi.contains(&l.id)) {
-        let num = number(midi.len().saturating_add(1));
+        let num = number(midi.len().saturating_add(1), tracks);
         let part = safe_part(&l.name, file_reserve(&num, "mid"));
         midi.push((l.id, format!("MIDI/{num}{part}.mid")));
     }
@@ -589,6 +596,33 @@ fn duration(frames: u64, rate: u32) -> String {
     format!("{}:{:02}.{}", tenths / 600, tenths % 600 / 10, tenths % 10)
 }
 
+/// `s` without carriage returns, other control characters (newline
+/// kept) or bidirectional overrides, as [`sanitize`] cleans file text.
+fn clean(s: &str) -> String {
+    sanitize(
+        s.as_bytes(),
+        &Limits {
+            max_text_bytes: usize::MAX,
+            ..Limits::default()
+        },
+    )
+    .0
+}
+
+/// `report` with every item's text and details cleaned to one line, so a
+/// name holding a newline cannot break the file's layout.
+fn one_line_report(report: &Report) -> Report {
+    let line = |s: &str| clean(s).replace('\n', " ");
+    let mut r = report.clone();
+    for i in &mut r.items {
+        i.what = line(&i.what);
+        for d in &mut i.details {
+            *d = line(d);
+        }
+    }
+    r
+}
+
 /// The About file (`About these files.txt`): the folder, where the files
 /// start, the tempo and meter there, the stems' format and length, the
 /// song info, the files, and `report` as text. UTF-8 with `\n` line ends,
@@ -603,7 +637,7 @@ pub fn about_text(
     let mut out: Vec<String> = vec![l.folder.clone(), String::new()];
     if let Ok(s) = doc.sequence(seq) {
         out.push(format!("Start: {}", start_sentence(s)));
-        let bpm = bpm_text(s.tempo.bpm_at(midi_out::file_start(s)));
+        let bpm = bpm_text(midi_out::start_bpm(s));
         let meter = match midi_out::start_meters(s) {
             (p, Some(m)) => format!(
                 "{}/{} for the pickup, then {}/{} from bar 1",
@@ -633,6 +667,7 @@ pub fn about_text(
         out.push("Song info".to_string());
         for (label, value) in INFO_LABELS.iter().zip(info.fields()) {
             if let Some(v) = value {
+                let v = clean(v);
                 out.push(format!("  {label}: {}", v.replace('\n', "\n    ")));
             }
         }
@@ -651,7 +686,7 @@ pub fn about_text(
     }
     out.push(String::new());
     out.push("What changed or was left out".to_string());
-    out.push(report.plain("Exported"));
+    out.push(one_line_report(report).plain("Exported"));
     let mut text = out.join("\n");
     text.push('\n');
     text

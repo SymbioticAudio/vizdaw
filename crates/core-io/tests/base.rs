@@ -495,3 +495,22 @@ fn staged_folders_commit_or_vanish() {
     assert!(std::fs::symlink_metadata(other.join("mine")).is_err());
     assert!(std::fs::symlink_metadata(&stale).is_err());
 }
+
+#[test]
+fn folder_names_are_one_plain_name() {
+    let d = tempfile::tempdir().unwrap();
+    for bad in ["a/b", "/abs", "..", ".", "", "a/"] {
+        assert!(
+            matches!(free_folder(d.path(), bad), Err(IoError::Refused(_))),
+            "{bad:?}"
+        );
+    }
+    for bad in [d.path().join(".."), std::path::PathBuf::from("/")] {
+        assert!(
+            matches!(stage_folder(&bad), Err(IoError::Refused(_))),
+            "{bad:?}"
+        );
+    }
+    // Nothing was made beside or above.
+    assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
+}

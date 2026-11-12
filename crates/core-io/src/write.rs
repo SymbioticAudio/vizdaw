@@ -92,6 +92,20 @@ impl Drop for PendingFile {
     }
 }
 
+/// Whether `p` is one plain name: not empty, no separator, not `.` or
+/// `..`, not absolute.
+fn one_component(p: &Path) -> bool {
+    let mut c = p.components();
+    matches!(
+        (c.next(), c.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !p.as_os_str().to_string_lossy().contains('/')
+}
+
+fn not_a_name(name: &str) -> IoError {
+    IoError::Refused(format!("{name} is not a folder name; choose another name"))
+}
+
 /// The most numbered names [`free_folder`] tries.
 const MAX_FOLDER_NUMBER: u32 = 9999;
 
@@ -107,8 +121,12 @@ fn absent(p: &Path) -> Result<bool, IoError> {
 
 /// The first of `name`, `name 2` … `name 9999` in `parent` where neither
 /// the path nor its partial (`.<name>.partial`) exists (lstat). A stale
-/// partial is passed over, never removed. Refused when all are taken.
+/// partial is passed over, never removed. Refused when all are taken, and
+/// when `name` is not one plain name (a separator, `.`, `..` or empty).
 pub fn free_folder(parent: &Path, name: &str) -> Result<PathBuf, IoError> {
+    if !one_component(Path::new(name)) {
+        return Err(not_a_name(name));
+    }
     for n in 1..=MAX_FOLDER_NUMBER {
         let p = if n == 1 {
             parent.join(name)
@@ -134,8 +152,15 @@ pub struct PendingFolder {
 }
 
 /// Makes the staging folder of `dest`. One left from an earlier export is
-/// refused, never reused or removed.
+/// refused, never reused or removed; so is a `dest` that does not end in
+/// a plain name.
 pub fn stage_folder(dest: &Path) -> Result<PendingFolder, IoError> {
+    if !dest
+        .file_name()
+        .is_some_and(|n| one_component(Path::new(n)))
+    {
+        return Err(not_a_name(&dest.display().to_string()));
+    }
     let partial = partial_path(dest);
     match std::fs::create_dir(&partial) {
         Ok(()) => Ok(PendingFolder {

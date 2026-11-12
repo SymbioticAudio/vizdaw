@@ -670,6 +670,8 @@ fn map_changes(
     let at = s.meter.entry_at(Tick(o.tick));
     let mut meter = at.meter;
     let mut key = at.key;
+    // Always a tempo (above) and a meter at 0: the About file's start
+    // line reads them (`start_bpm`, `start_meters`).
     out.push((0, MapEvent::Time(o.pickup.unwrap_or(meter))));
     out.push((0, MapEvent::Key(key)));
     if o.pickup.is_some() && inside(0) {
@@ -1046,6 +1048,21 @@ pub(crate) fn start_meters(s: &Sequence) -> (Meter, Option<Meter>) {
         .and_then(|_| times.find(|(t, _)| Some(*t) == 0i64.checked_sub(o.tick)))
         .map(|(_, m)| m);
     (first, bar1)
+}
+
+/// The tempo written at file position 0 of `s`, in BPM: the first tempo
+/// event of its tempo map file (a ramp's first step as written).
+pub(crate) fn start_bpm(s: &Sequence) -> f64 {
+    let mut scratch = Report::default();
+    let o = origin(s, &mut scratch);
+    map_changes(s, o, None, &mut scratch)
+        .into_iter()
+        .find_map(|(_, e)| match e {
+            MapEvent::Tempo(Tempo::Milli(m)) => Some(f64::from(m) / 1000.0),
+            MapEvent::Tempo(Tempo::Spq(spq)) if spq > 0.0 => Some(60.0 / spq),
+            _ => None,
+        })
+        .unwrap_or_else(|| s.tempo.bpm_at(Tick(o.tick)))
 }
 
 /// The pickup of `s` as written: `Some(beats)` for a pickup bar of its
