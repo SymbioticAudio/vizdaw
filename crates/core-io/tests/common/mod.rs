@@ -67,8 +67,9 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        shrank(layout.size());
+        // Counted as an allocation then a free: while it moves, both exist.
         grew(new_size);
+        shrank(layout.size());
         // SAFETY: forwarded contract.
         unsafe { System.realloc(ptr, layout, new_size) }
     }

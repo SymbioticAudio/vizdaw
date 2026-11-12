@@ -61,6 +61,9 @@ pub const MAX_XML_DEPTH: usize = 256;
 pub const MAX_XML_NODES: usize = 4_000_000;
 /// Most bytes one XML tree holds, arena and nodes, counted as they grow (§6.5).
 pub const MAX_XML_TREE_BYTES: usize = 128 * 1024 * 1024;
+/// Most bytes the typed DAWproject model holds (items and their texts,
+/// counted as it is built), and the same again for the ID check.
+pub const MAX_MODEL_BYTES: usize = 128 * 1024 * 1024;
 /// Most attributes on one XML element (§6.5).
 pub const MAX_XML_ATTRS: usize = 64;
 /// Longest XML element or attribute name, in bytes; longer is broken XML

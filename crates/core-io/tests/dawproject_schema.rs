@@ -280,6 +280,7 @@ fn device(kind: DpDeviceKind, id: &str) -> DpDevice {
             external: true,
         }),
         settings: vec![],
+        other_ids: vec![],
     }
 }
 
@@ -306,8 +307,8 @@ fn channel(id: &str) -> DpChannel {
         .enumerate()
         .map(|(i, k)| device(*k, &format!("{id}d{i}")))
         .collect(),
-        mute: Some(boolean(&format!("{id}m"), false)),
-        pan: Some(real(&format!("{id}p"), DpUnit::Normalized, 0.5)),
+        mute: Some(Box::new(boolean(&format!("{id}m"), false))),
+        pan: Some(Box::new(real(&format!("{id}p"), DpUnit::Normalized, 0.5))),
         sends: vec![DpSend {
             named: named(&format!("{id}s")),
             destination: Some("cmaster".to_owned()),
@@ -316,7 +317,7 @@ fn channel(id: &str) -> DpChannel {
             pan: Some(real(&format!("{id}sp"), DpUnit::Normalized, 0.5)),
             volume: real(&format!("{id}sv"), DpUnit::Decibel, -6.0),
         }],
-        volume: Some(real(&format!("{id}v"), DpUnit::Linear, 1.0)),
+        volume: Some(Box::new(real(&format!("{id}v"), DpUnit::Linear, 1.0))),
     }
 }
 
@@ -473,7 +474,7 @@ fn everything() -> DpProject {
                     DpContentType::Tracks,
                 ],
                 loaded: Some(true),
-                channel: Some(channel("c1")),
+                channel: Some(Box::new(channel("c1"))),
                 children: vec![DpTrack {
                     named: named("tr2"),
                     content: vec![DpContentType::Automation, DpContentType::Markers],
@@ -486,13 +487,13 @@ fn everything() -> DpProject {
                 named: named("trm"),
                 content: vec![DpContentType::Video],
                 loaded: None,
-                channel: Some(DpChannel {
+                channel: Some(Box::new(DpChannel {
                     role: Some(DpMixerRole::Master),
                     destination: None,
                     sends: vec![],
                     devices: vec![],
                     ..channel("cmaster")
-                }),
+                })),
                 children: vec![],
             }),
             DpStructureItem::Channel(DpChannel {
@@ -504,6 +505,10 @@ fn everything() -> DpProject {
         arrangement: Some(DpArrangement {
             named: named("arr"),
             lanes: Some(lanes),
+            markers_head: DpHead {
+                time_unit: Some(DpTimeUnit::Seconds),
+                ..head("amarkers")
+            },
             markers: vec![marker("m1", 0.0), marker("m2", 8.0)],
             tempo_automation: Some(points("tempoauto", vec![DpPointValue::Real(120.0, None)])),
             time_signature_automation: Some(points("sigauto", vec![DpPointValue::TimeSig(6, 8)])),
@@ -545,6 +550,90 @@ fn written_projects_pass_the_vendored_schema() {
     let (back, report) = read_ok(&xml);
     assert!(report.is_empty(), "{report:?}");
     assert_eq!(write_project(&back), xml);
+
+    // What the writer cannot write validly is left out and reported, never
+    // written invalid (each of these is valid, once written).
+    let hostile = DpProject {
+        version: "1.0".to_owned(),
+        application: None,
+        arrangement: Some(DpArrangement {
+            named: DpNamed::default(),
+            lanes: Some(DpLanes {
+                head: DpHead::default(),
+                items: vec![
+                    DpTimeline::Warps(DpWarps {
+                        head: head("w1"),
+                        content_time_unit: DpTimeUnit::Beats,
+                        content: Box::new(DpTimeline::Audio(audio("a1"))),
+                        warps: vec![],
+                    }),
+                    DpTimeline::Warps(DpWarps {
+                        head: head("w2"),
+                        content_time_unit: DpTimeUnit::Beats,
+                        content: Box::new(DpTimeline::Video(head("v1"))),
+                        warps: vec![(0.0, 0.0)],
+                    }),
+                    DpTimeline::Warps(DpWarps {
+                        head: head("w3"),
+                        content_time_unit: DpTimeUnit::Beats,
+                        content: Box::new(DpTimeline::Markers(head("m3"), vec![])),
+                        warps: vec![(0.0, 0.0)],
+                    }),
+                    DpTimeline::Warps(DpWarps {
+                        head: head("w4"),
+                        content_time_unit: DpTimeUnit::Beats,
+                        content: Box::new(DpTimeline::Unknown("Hologram".to_owned())),
+                        warps: vec![(0.0, 0.0)],
+                    }),
+                    DpTimeline::Video(head("v2")),
+                    DpTimeline::Clips(DpClips {
+                        head: DpHead::default(),
+                        clips: vec![clip("c", Some(DpTimeline::Video(head("v3"))))],
+                    }),
+                ],
+            }),
+            markers_head: DpHead::default(),
+            markers: vec![],
+            tempo_automation: None,
+            time_signature_automation: None,
+        }),
+        scenes: vec![
+            DpScene {
+                named: named("s1"),
+                content: None,
+            },
+            DpScene {
+                named: named("s2"),
+                content: Some(DpTimeline::Video(head("v4"))),
+            },
+            DpScene {
+                named: named("s3"),
+                content: Some(DpTimeline::ClipSlot(head("s3c"), None)),
+            },
+        ],
+        ..DpProject::default()
+    };
+    let mut rep = Report::default();
+    let xml = write_project_reporting(&hostile, &mut rep);
+    schema_check(&xsd, &xml);
+    assert!(xml.contains("<Application name=\"VizDAW\""), "{xml}");
+    assert!(
+        xml.contains("s3c") && !xml.contains("s1") && !xml.contains("Warp"),
+        "{xml}"
+    );
+    let it = item(
+        &rep,
+        ItemKind::LeftOut,
+        "Parts the DAWproject file cannot hold",
+    )
+    .expect("reported");
+    assert_eq!(
+        it.details,
+        [
+            "Warps", "Warps", "Warps", "Warps", "Video", "Video", "Scene", "Scene"
+        ]
+    );
+    assert_eq!(write_project(&hostile), xml);
 
     let full = DpMetaData {
         fields: std::array::from_fn(|i| Some(format!("field {i} <&>"))),
@@ -897,4 +986,143 @@ fn the_deepest_allowed_tree_reads_and_drops() {
     assert_eq!(p.structure.len(), 1);
     let _ = p.clone();
     drop(p);
+}
+
+#[test]
+fn the_arrangement_markers_keep_their_head() {
+    let xml = project(
+        "<Arrangement><Lanes><Clips><Clip time=\"0\" reference=\"mk\"/></Clips></Lanes>\
+         <Markers id=\"mk\" timeUnit=\"seconds\" name=\"M\"><Marker time=\"2.5\"/></Markers></Arrangement>",
+    );
+    let (p, r) = read_ok(&xml);
+    assert!(r.is_empty(), "{r:?}");
+    let a = p.arrangement.as_ref().expect("arrangement");
+    assert_eq!(a.markers_head.named.id.as_deref(), Some("mk"));
+    assert_eq!(a.markers_head.time_unit, Some(DpTimeUnit::Seconds));
+    assert_eq!(a.markers[0].time, 2.5);
+    let mut r = Report::default();
+    let ids = check_ids(&p, &mut r).expect("ids");
+    assert!(r.is_empty(), "the id resolves: {r:?}");
+    assert_eq!(ids.kind("mk"), Some(IdKind::Timeline));
+    let out = write_project(&p);
+    assert!(
+        out.contains("<Markers id=\"mk\" name=\"M\" timeUnit=\"seconds\">"),
+        "{out}"
+    );
+    schema_check(&path("Project.xsd"), &out);
+}
+
+#[test]
+fn parts_the_model_drops_still_have_their_ids() {
+    let (p, r) = read_ok(&project(
+        "<Structure><Channel id=\"c\"><Devices>\
+           <Device deviceName=\"D\" deviceRole=\"audioFX\"><Parameters>\
+             <BoolParameter id=\"flag\" value=\"true\"/></Parameters></Device>\
+           <Compressor deviceName=\"C\" deviceRole=\"audioFX\"><Threshold id=\"thr\" unit=\"decibel\"/></Compressor>\
+         </Devices></Channel></Structure>\
+         <Arrangement><Lanes><Points><Target parameter=\"flag\"/></Points>\
+           <Points><Target parameter=\"thr\"/></Points></Lanes></Arrangement>",
+    ));
+    let mut report = Report::default();
+    let ids = check_ids(&p, &mut report).expect("ids");
+    assert_eq!(
+        item(
+            &report,
+            ItemKind::LeftOut,
+            "References to parts that are not in the file"
+        ),
+        None
+    );
+    assert_eq!(ids.kind("flag"), Some(IdKind::Parameter));
+    assert_eq!(ids.kind("thr"), Some(IdKind::Parameter));
+    // The boolean parameter is not kept (noted), its id is; a clash is caught.
+    assert_eq!(
+        item(&r, ItemKind::Note, "Parts of the file VizDAW doesn't know").map(|i| i.count),
+        Some(1)
+    );
+    let (p, _) = read_ok(&project(
+        "<Structure><Track id=\"flag\"/><Channel><Devices>\
+           <Device deviceName=\"D\" deviceRole=\"audioFX\"><Parameters>\
+             <BoolParameter id=\"flag\"/></Parameters></Device></Devices></Channel></Structure>",
+    ));
+    assert!(check_ids(&p, &mut Report::default()).is_err());
+}
+
+#[test]
+fn smaller_reading_rules() {
+    let what = "Parts of the file that could not be read";
+    let unknown = "Parts of the file VizDAW doesn't know";
+    // Points without their target are left out.
+    let (p, r) = read_ok(&project(
+        "<Arrangement><Lanes><Points><RealPoint time=\"0\" value=\"1\"/></Points></Lanes></Arrangement>",
+    ));
+    assert_eq!(lanes_of(&p).items.len(), 0);
+    assert_eq!(
+        item(&r, ItemKind::LeftOut, what).map(|i| i.details.clone()),
+        Some(vec!["Points".to_owned()])
+    );
+    // A built-in device's misspelled child is unknown; a real setting is not.
+    let (_, r) = read_ok(&project(
+        "<Structure><Channel><Devices><Limiter deviceName=\"L\" deviceRole=\"audioFX\">\
+           <Threshold unit=\"decibel\"/><Treshold unit=\"decibel\"/><Band/></Limiter></Devices></Channel></Structure>",
+    ));
+    assert_eq!(
+        item(&r, ItemKind::Note, unknown).map(|i| i.count),
+        Some(2),
+        "{r:?}"
+    );
+    // Attributes of the wrong point kind are unknown.
+    let (_, r) = read_ok(&project(
+        "<Arrangement><Lanes><Points><Target/>\
+           <BoolPoint time=\"0\" value=\"1\" interpolation=\"hold\"/>\
+           <RealPoint time=\"0\" value=\"1\" numerator=\"3\"/></Points></Lanes></Arrangement>",
+    ));
+    assert_eq!(
+        item(&r, ItemKind::Note, unknown).map(|i| i.count),
+        Some(2),
+        "{r:?}"
+    );
+    // A send dropped for its volume is reported as a send, once.
+    let (_, r) = read_ok(&project(
+        "<Structure><Channel><Sends><Send><Volume/></Send></Sends></Channel></Structure>",
+    ));
+    assert_eq!(
+        item(&r, ItemKind::LeftOut, what).map(|i| i.details.clone()),
+        Some(vec!["Send".to_owned()])
+    );
+    assert_eq!(r.items.len(), 1);
+    // An ID over 256 bytes refuses the file, without echoing it.
+    let long = "i".repeat(257);
+    let (p, _) = read(&project(&format!(
+        "<Structure><Track id=\"{long}\"/></Structure>"
+    )));
+    let e = p.expect_err("refused");
+    assert_eq!(
+        e,
+        IoError::Refused(
+            "This DAWproject file is damaged: an ID is longer than 256 bytes.".to_owned()
+        )
+    );
+    let ok = "i".repeat(256);
+    assert!(
+        read(&project(&format!(
+            "<Structure><Track id=\"{ok}\"/></Structure>"
+        )))
+        .0
+        .is_ok()
+    );
+    // A duplicate of a long code-built ID is refused with a short message.
+    let mut p = read_ok(&project(
+        "<Structure><Track id=\"a\"/><Track id=\"b\"/></Structure>",
+    ))
+    .0;
+    for item in &mut p.structure {
+        if let DpStructureItem::Track(t) = item {
+            t.named.id = Some("z".repeat(10_000));
+        }
+    }
+    let Err(IoError::Refused(m)) = check_ids(&p, &mut Report::default()) else {
+        panic!("refused")
+    };
+    assert!(m.len() < 200, "{}", m.len());
 }

@@ -1,0 +1,124 @@
+//! The typed DAWproject model under hostile size (plan 6d Task 3, L7): a
+//! file whose tree is at its limits reads, or is refused, within the memory
+//! the plan promises, counting every allocation (a reallocation as an
+//! allocation then a free).
+
+mod common;
+
+use common::{CountingAlloc, measure};
+use core_io::IoError;
+use core_io::dawproject::schema::{check_ids, read_project};
+use core_io::limits::{MAX_XML_NODES, PackageLimits};
+use core_io::report::Report;
+use core_io::xml::Tree;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc;
+
+const MIB: usize = 1024 * 1024;
+
+/// The most a fuzz case (XML under 64 MiB) may hold at once beyond its text
+/// (L7: 256 MiB).
+const PEAK: usize = 256 * MIB;
+
+/// A project whose structure or arrangement repeats `item` `n` times.
+fn repeated(open: &str, item: &str, n: usize, close: &str) -> String {
+    format!(
+        "<Project version=\"1.0\"><Application name=\"t\" version=\"1\"/>{open}{}{close}</Project>",
+        item.repeat(n)
+    )
+}
+
+/// Parses, reads and checks `xml`; the tree is dropped before the model.
+fn run(xml: &str) -> (Result<(), IoError>, usize, std::time::Duration) {
+    let start = Instant::now();
+    let (r, seen) = measure(|| {
+        let tree = Tree::parse(
+            xml.as_bytes(),
+            &PackageLimits::default(),
+            &AtomicBool::new(false),
+        )?;
+        let mut report = Report::default();
+        let p = read_project(&tree, &mut report)?;
+        check_ids(&p, &mut report).map(|_| ())
+    });
+    (r, seen.peak, start.elapsed())
+}
+
+#[test]
+fn hostile_sizes_stay_inside_the_promise() {
+    // One node over the tree's node cap is not what is tested here (Task 2
+    // does that); these sit at the cap, each shape the model costs most for.
+    let n = MAX_XML_NODES - 8;
+    let shapes = [
+        (
+            "tracks",
+            repeated("<Structure>", "<Track/>", n, "</Structure>"),
+        ),
+        (
+            "clips",
+            repeated(
+                "<Arrangement><Lanes><Clips>",
+                "<Clip time=\"0\"/>",
+                n,
+                "</Clips></Lanes></Arrangement>",
+            ),
+        ),
+        (
+            "notes",
+            repeated(
+                "<Arrangement><Lanes><Notes>",
+                "<Note time=\"0\" duration=\"1\" channel=\"0\" key=\"60\"/>",
+                n,
+                "</Notes></Lanes></Arrangement>",
+            ),
+        ),
+        (
+            "channels with ids",
+            repeated("<Structure>", "<Channel id=\"c\"/>", n / 2, "</Structure>"),
+        ),
+    ];
+    for (name, xml) in &shapes {
+        let (r, peak, took) = run(xml);
+        println!(
+            "{name}: {} MiB of XML, peak {} MiB, {:?}, {:?}",
+            xml.len() / MIB,
+            peak / MIB,
+            took,
+            r.as_ref().err()
+        );
+        assert!(peak < PEAK, "{name}: peak {} MiB", peak / MIB);
+        // Past the budget the file is refused as having too many parts
+        // (a duplicate ID is the other refusal here).
+        if let Err(e) = r {
+            let IoError::Refused(s) = e else {
+                panic!("{name}: {e:?}")
+            };
+            assert!(
+                s == "This DAWproject file is damaged: it has too many parts."
+                    || s.contains("share the ID"),
+                "{name}: {s}"
+            );
+        }
+        assert!(took.as_secs() < 20, "{name}: {took:?}");
+    }
+}
+
+#[test]
+fn a_big_real_project_still_reads() {
+    // 100 000 notes and 20 000 clips: well inside the budget.
+    let notes =
+        "<Note time=\"0\" duration=\"1\" channel=\"0\" key=\"60\" vel=\"0.5\"/>".repeat(100_000);
+    let clips = "<Clip name=\"c\" time=\"1\" duration=\"2\"/>".repeat(20_000);
+    let xml = repeated(
+        "<Arrangement><Lanes><Clips>",
+        &clips,
+        1,
+        &format!("</Clips><Notes>{notes}</Notes></Lanes></Arrangement>"),
+    );
+    let (r, peak, _) = run(&xml);
+    r.expect("reads");
+    assert!(peak < 128 * MIB, "peak {} MiB", peak / MIB);
+}
