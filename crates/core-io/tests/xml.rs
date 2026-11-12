@@ -699,3 +699,16 @@ proptest! {
         prop_assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
+
+#[test]
+fn attributes_are_listed_in_order() {
+    let t = parse(b"<a x=\"1\" y=\"a&amp;b\"><b/><c z=\"3\"/></a>").expect("parses");
+    let root = t.root();
+    assert_eq!(
+        t.attrs(root).collect::<Vec<_>>(),
+        [("x", "1"), ("y", "a&b")]
+    );
+    let kids = kids(&t, root);
+    assert_eq!(t.attrs(kids[0]).count(), 0);
+    assert_eq!(t.attrs(kids[1]).collect::<Vec<_>>(), [("z", "3")]);
+}

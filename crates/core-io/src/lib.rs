@@ -13,6 +13,7 @@
 )]
 
 pub mod clip;
+pub mod dawproject;
 pub mod for_daw;
 pub mod gm;
 pub mod limits;

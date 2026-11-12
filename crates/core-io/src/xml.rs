@@ -464,6 +464,14 @@ impl Tree {
             .map(|a| self.span(a.value))
     }
 
+    /// The element's attributes as written, in order: name (with any
+    /// prefix) and unescaped, normalised value.
+    pub fn attrs(&self, n: NodeId) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.attr_range(n)
+            .iter()
+            .map(|a| (self.span(a.name), self.span(a.value)))
+    }
+
     /// The element's child elements, in order.
     pub fn children(&self, n: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let first = self.node(n).map_or(NONE, |node| node.first_child);

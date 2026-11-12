@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Project version="1.0">
+  <Application name="Fixture" version="1"/>
+  <Transport>
+    <Tempo id="tempo" unit="bpm" value="120"/>
+    <TimeSignature id="timesig" numerator="4" denominator="4"/>
+  </Transport>
+  <Structure>
+    <Track id="t1" name="Keys" color="#3366cc" contentType="notes">
+      <Channel id="c1" role="regular" audioChannels="2" destination="cmaster">
+        <Devices>
+          <ClapPlugin id="c1d1" name="Pad" deviceID="com.example.pad" deviceName="Pad" deviceRole="instrument" deviceVendor="Example" pluginVersion="2.1" loaded="true">
+            <State path="plugins/001.clap-preset"/>
+          </ClapPlugin>
+        </Devices>
+        <Mute id="c1m" value="false"/>
+        <Pan id="c1p" unit="normalized" value="0.5"/>
+        <Sends>
+          <Send id="c1s0" destination="cmaster" type="post">
+            <Volume id="c1s0v" unit="linear" value="0.25"/>
+          </Send>
+        </Sends>
+        <Volume id="c1v" unit="linear" value="0.8" min="0" max="2"/>
+      </Channel>
+    </Track>
+    <Track id="master" name="Master" contentType="audio notes">
+      <Channel id="cmaster" role="master" audioChannels="2">
+        <Volume id="cmasterv" unit="linear" value="1"/>
+      </Channel>
+    </Track>
+  </Structure>
+  <Arrangement id="arr">
+    <Lanes id="lanes" timeUnit="beats">
+      <Clips id="keysclips" track="t1">
+        <Clip name="Verse pad" time="0" duration="8" contentTimeUnit="beats" playStart="0" playStop="8">
+          <Notes>
+            <Note time="0" duration="1" channel="0" key="60" vel="0.8" rel="0.5"/>
+            <Note time="1" duration="1.5" channel="0" key="64" vel="0.7">
+              <Points unit="semitones">
+                <Target expression="transpose" channel="0" key="64"/>
+                <RealPoint time="0" value="0" interpolation="linear"/>
+                <RealPoint time="0.5" value="1.5"/>
+              </Points>
+            </Note>
+          </Notes>
+        </Clip>
+      </Clips>
+    </Lanes>
+    <Markers>
+      <Marker name="Verse" time="0"/>
+    </Markers>
+  </Arrangement>
+</Project>

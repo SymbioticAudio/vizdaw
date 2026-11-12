@@ -345,3 +345,30 @@ byte:
 48 000 Hz, 96 000 frames): UTF-8, `\n` line ends, one newline at the end.
 The file is the text itself; it was typed from the layout in plan 6b
 Task 1 (folder name, Start, Tempo, Audio, Files, then the report).
+
+## DAWproject (plan 6d)
+
+`tests/data/dawproject/` holds the format's schema files, vendored byte for
+byte, and the hand-written fixtures the typed model is tested against.
+
+- **Reference:** https://github.com/bitwig/dawproject (MIT), commit
+  `ee4dcdde75940f30e14e55401a26955a58b8322b` (`main`, 2025-07-12). The tag
+  `v1.0.0` lacks `Send/Enable` and `Clip@enable`, which `main` has, so the
+  schema we write and check against is `main`'s.
+- **`Project.xsd`:** SHA-256
+  `58e2fd9864772850aac3eab1f3de8693857dc5384df6d29fbc320ae1de2347cc`.
+- **`MetaData.xsd`:** SHA-256
+  `fb3ba378271770dddbcced8990aba537de3d36ff2d58573523460a699221c99f`.
+  `dawproject_schema.rs::xsds_are_the_pinned_ones` checks both.
+- **`LICENSE`:** the reference's MIT licence, verbatim (SHA-256
+  `3aaee5877c9df985f935e40f42f4452182df9e8a8308dcc6cf1a2341458cdfeb`). The
+  notice must stay with the schema files.
+- **`hand_minimal.project.xml` and `hand_minimal.metadata.xml`:** written by
+  hand from plan 6d's format section, element by element in the XSD's order,
+  before any code existed; never generated or blessed. The project is one
+  notes track "Keys" (a channel with mute, pan, volume and one send, and one
+  CLAP device with a state file), a master track, an arrangement with one
+  clip holding two notes (one with a transpose points child) and one marker
+  "Verse". `dawproject_schema.rs` reads them, writes them back byte for byte
+  and validates them (and a project built in code with every element kind)
+  with `xmllint --schema Project.xsd`.

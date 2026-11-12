@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod rawzip_builder;
+pub mod xmllint;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
