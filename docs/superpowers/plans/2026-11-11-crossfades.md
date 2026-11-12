@@ -62,11 +62,11 @@ Every task's requirements include these.
   - Colours, spacing, radii and fonts come from the theme; every new control is accessibility-labelled.
 - **Lints.** Every crate keeps `#![deny(missing_docs)]` and `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic))]`: use `.get()`, iterators and `checked_*`/`saturating_*`. Rust stable, edition 2024, GPL-3.0-only. `core-model`, `core-engine` and `core-control` stay free of OS APIs; everything Rust here runs on Linux.
 - **TDD.** Every new test is run and seen to fail before the code that makes it pass.
-- **Real-time.** This plan adds real-time code (`Segment::gain_at`'s complement) and changes `EventBody::AudioRegion`. Tasks 1 and 3 run the **rt-check gate**: `cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings` and `cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures --test rt_alloc_input_fx --test rt_alloc_midi_strip --test rt_alloc_bounce --test rt_alloc_mpe`. From Task 3 on, the gate also runs the new `--test rt_alloc_crossfade`. Nothing on the render path allocates, locks or does I/O. Segments are built on the control thread.
-- **Format.** `core_model::file::VERSION` goes 8 → 9 in Task 1 (spec §6.4), with the no-op `migrate_v8_to_v9`.
+- **Real-time.** This plan adds real-time code (`Segment::gain_at`'s complement) and changes `EventBody::AudioRegion`. Tasks 1 and 3 run the **rt-check gate**: `cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings` and `cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures --test rt_alloc_input_fx --test rt_alloc_midi_strip --test rt_alloc_bounce --test rt_alloc_mpe`. From Task 3 on, the gate also runs the new `--test rt_alloc_crossfade`. CI's rt-check step (`.github/workflows/ci.yml`) gains `--test rt_alloc_mpe` (missing today) and `--test rt_alloc_crossfade` in Task 3 (F4). Nothing on the render path allocates, locks or does I/O. Segments are built on the control thread.
+- **Format.** `core_model::file::VERSION` goes 8 → 9 in Task 1 (spec §6.4), with the no-op `migrate_v8_to_v9` added to `MIGRATIONS` (F5).
 - **Lessons from plans 6a and 6b (binding):**
   - **No file I/O or parsing on the main thread.** Every new call is a model edit or a model read. The arrangement and audio editor read `overlap_with` and `overlap_frames` from the rows they already fetch, and never compute an overlap in Swift.
-  - **Every dropped item gets a report line.** When an edit drops or shortens a crossfade, `settle` pushes one `Report.warnings` line per region, and the editor's status shows it as other warnings are shown (Ruling 6).
+  - **Every dropped item gets a report line.** When an edit drops or shortens a crossfade, `settle` pushes one `Report.warnings` line per region. Today `Session::execute_with` drops the `Report`, so Task 4 carries every edit's warnings in `DocSnapshot.warnings`, and Task 6 shows them in the editor's status line (F1).
   - **Goldens are hand-written before the code and can fail.** The render goldens are literal curve tables typed into `core-engine/tests/crossfades.rs` (Task 3 Step 1). They are never computed with `fade_curve` and never blessed.
   - **Cancel is tested.** This plan adds no job. Its cancel cases are Escape during an X-handle drag (no edit, no undo step) and a refused drag end (the gesture is cancelled) (Task 6).
   - **One job at a time.** Neither command is a job. Both answer `unavailable` while an editor gesture is open, as `region.*` does today.
@@ -74,7 +74,8 @@ Every task's requirements include these.
   - `AudioEdit::Crossfade { event, length: CrossfadeLengthRow, shape: FadeShapeRow }` and `AudioEdit::RemoveCrossfade { event }`;
   - the enum `CrossfadeLengthRow { Frames { frames: u64 }, UpTo { frames: u64 } }`;
   - `EventRow` gains `crossfade: bool`, `overlap_with: Option<u64>` and `overlap_frames: u64`;
-  - `AudioEditorRegionRow` gains `crossfade: bool` and `crossfade_with: Option<u64>`.
+  - `AudioEditorRegionRow` gains `crossfade: bool` and `crossfade_with: Option<u64>`;
+  - `DocSnapshot` gains `#[uniffi(default)] warnings: Vec<String>` (F1).
 
   Every Swift `switch` over `AudioEdit` gains the two arms in Task 4.
 - **Control channel.** The registry goes 171 → 173 in Task 5. Every command is in the registry and handled (`everyRegisteredMenuCommandHasAHandler`).
@@ -142,7 +143,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 3. **What creates, resizes and removes one.**
    - **Creates:**
      - `AudioCmd::Crossfade`, from Region › Crossfade, its key, `region.crossfade`, and later from imports;
-     - an inserted pair that carries the flag (paste, Duplicate, an import batch; Ruling 6).
+     - an inserted pair that carries the flag (paste, Duplicate, an import batch; Ruling 6). Both regions must arrive in **one** command: `AudioCmd::Insert` has no flag, so 6d/6f insert the pair as two specs in one `EventCmd::Insert` (F22).
    - **Never creates:** dragging regions to overlap, recording, trimming or splitting. There is no auto-crossfade setting (spec §7.0, SP5 "no automatic crossfades").
    - **Resizes:**
      - dragging the X handle;
@@ -157,7 +158,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
      - `UpTo(n)` is `min(n, room)`, for the menu's "whole overlap, or the default when it is longer".
    - *Cost if wrong:* one enum.
 4. **Room, minimum, maximum and default.**
-   - **Overlap.** At the later region's media rate `r`, `frame(t) = round(tempo.tick_to_seconds(t) × r)`. The overlap is `frame(P.tick) + P.length × r / P.rate − frame(R.tick)`, rounded, in `i128`, and positive only. The engine clamps to the partner's real end anyway (Task 3).
+   - **Overlap.** At the later region's media rate `r`, `frame(t) = round(tempo.tick_to_seconds(t) × r)`. The overlap is `frame(P.tick) + P.length × r / P.rate − frame(R.tick)`, rounded, in `i128`, and positive only. The engine pairs by the model's partner `EventId` (Task 3, F9) and clamps the span to the partner's real end, so model and engine agree on *who* pairs. At the project rate (media is imported at it) they agree on the frames too; with a start offset or another media rate they may differ by one frame, which only shortens the audible blend by that frame (F12).
    - **Room** is `min(overlap, R.length − R.fade_out.length_frames)`, so the region's fades still fit it.
    - **Minimum** 1 frame (spec). **Maximum** is the room; there is no absolute cap.
    - **Default length:** an app preference, Settings › Editing › "Default crossfade", 10 ms, from 1 to 1 000 ms (spec: "Settings, 10 ms"). It is converted at the region's media rate and sent as `UpTo`.
@@ -176,13 +177,15 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
      For each region `R` with `crossfade` in a visited take:
      1. No partner, or `R.fade_in.length_frames == 0`: clear the flag. Warning: `Crossfade removed: region '<name>' no longer starts inside another region on its track.`
      2. `R` was in `old` with `crossfade: true`, and its partner then had a different `EventId` from now (a move to another track, a new region in between, or a deleted partner): clear the flag. Warning: `Crossfade removed: region '<name>' now starts inside a different region.`
+        **Exception, a split partner (F2):** the new partner is new in this command, the old partner still exists in the take and ends exactly where the new one starts (in frames), with the same media and `source_offset` continuing (`old.source_offset + old.length == new.source_offset`). That is the second part of a Split of the old partner, the sound is unchanged, and the crossfade stays with no warning.
      3. `R` is new (not in `old`) and its partner is not new: clear the flag, without a warning (a lone copy never joins an old region).
      4. Otherwise, if `R.fade_in.length_frames > room`, shorten it to the room. Warning: `Crossfade on region '<name>' shortened to fit the overlap.`
 
      `<name>` is the region's name, else its media's name.
    - Moving both regions together keeps the crossfade unchanged.
    - Shortening, rather than dropping, follows a trim of the earlier region's end, as other DAWs do.
-   - *Cost if wrong:* dropping instead of shortening is one branch. Settle is cheap: a `ptr_eq` walk over the takes, and a sweep of only the changed takes.
+   - **Cost (F11):** a visited take is first scanned for a flagged region, in `old` or `new`, with no allocation. A take without one is skipped before any sweep, so note edits in a 100 000-note take pay one linear scan.
+   - *Cost if wrong:* dropping instead of shortening is one branch; a slower settle shows in Task 2's bench and Task 4's big-lane test.
 7. **Split** (`AudioCmd::Split`) refuses a point strictly inside a crossfade span `(R.start, R.start + fade_in)`, on `R` or on its partner, with "Split outside the crossfade, or remove the crossfade first."
    - Otherwise the second part gets `crossfade: false`.
    - *Reason:* a split inside the span would end the complement with a click, and splitting the partner there starts a region that takes over.
@@ -190,7 +193,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 8. **The other interactions.**
    - **Region fades:** the partner's own fade-out applies on top of the complement (spec). `SetFades`, `FadeTo` and `RemoveFades` on `R` act on its fade-in, and settle then clears or shortens the crossfade. Remove Fades on a crossfading region clears both, so the crossfade goes, with a warning.
    - **Trim** is Ruling 6.
-   - **Mute:** a muted partner keeps the flag, and the engine plays a plain fade-in, because flatten drops muted events.
+   - **Mute:** a muted partner keeps the flag, and the engine plays a plain fade-in, because flatten drops muted events. The engine never pairs with an older region instead, because it pairs only with the model's partner by `EventId` (F9).
    - **Nested sequences:** a crossfade joins two regions on one take of one sequence, and every use of that sequence plays it. The engine pairs within each lane instance. A partner a reference window cuts away gives a plain fade-in, and a region in a referenced sequence never pairs with one in its parent (different takes).
    - **Takes:** each take's flags are its own; switching the active take changes nothing.
    - **The 6a backlog row "Zero-crossing snapping and edge fades for audio edits"** is not done here. When it lands, a crossfaded start counts as the region's own fade (no edge fade), and the X drag snaps nothing. Task 7 adds that note to the row.
@@ -204,9 +207,32 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
    - **VoiceOver:** the region's label says ", crossfade".
    - **Undo labels:** "Crossfade" (making, resizing or reshaping one) and "Remove Crossfade".
 
-## Pre-flight amendments
+## Pre-flight amendments (2026-11-11)
 
-None yet. A pre-flight review's accepted findings go here, applied in place, as in 6b.
+These come from `.superpowers/sdd/2026-11-11-crossfades/preflight-report.md`, and the controller accepted every proposed ruling. Each is applied in place in the task it touches; where a step and an older line disagree, the amendment wins.
+
+- **F1** Edit warnings reach the user: `DocSnapshot.warnings` from `execute_with`, `edit_all` and the gesture end (Task 4), shown in the status line by `DocumentModel.apply` (Task 6); tests at both layers.
+- **F2** Splitting the earlier region before the later one starts keeps the crossfade (Ruling 6 rule 2's split-partner exception); test `splitting_the_partner_before_the_span_keeps_it` (Task 2).
+- **F3** The two IDs join `RegionCommands.ids`, and `run` and `enabled` handle them first, so they never fall into Fade Out from Cursor; test `crossfadeIdsNeverRunFadeTo` (Task 5).
+- **F4** `ci.yml`'s rt-check step gains `rt_alloc_mpe` and `rt_alloc_crossfade` (Task 3).
+- **F5** Task 1 lists every `VERSION == 8` assert (`file.rs`, `learn.rs`, `input_fx.rs`, `mpe.rs`), the `file.rs` doc line and the `MIGRATIONS` entry.
+- **F6** C in `overlaps_follow_the_engine_rule` is 10 000 frames long, so it ends before E starts (Task 1).
+- **F7** A model test drives extreme ticks, trims, lengths and tempos beside a flagged pair: no panic, valid, keep or warn (Task 2).
+- **F8** The shrinking move uses +13 056 ticks (exactly 20 400 frames, overlap 3 600) (Task 2).
+- **F9** The engine pairs only with the model's partner `EventId`, so a muted partner never lets an older region pair; test `a_muted_partner_never_pairs_with_an_older_region` (Ruling 8, Task 3).
+- **F10** Split edge cases: 1 frame inside the span is refused, exactly at its end works (Task 2).
+- **F11** Settle skips a take with no flagged region before any sweep; `lane_events` sweeps only takes with two or more regions; the existing 100 000-event lane test runs in Task 4 (Ruling 6).
+- **F12** Ruling 4 says where model and engine agree; tests with a start offset and with regions one tick apart (Task 3).
+- **F13** No change to `gain_at`'s cost (a `powf` per sample for Exponential, as fades already do); the no-crossfade golden is a flat 0.25 after frame 800; plus a version-8 pair loaded from JSON renders with no extra segment (Task 3).
+- **F14** The 2 048-case random test runs on documents at the model level (`apply`); the session test keeps 64 cases, reset by undo (Task 4).
+- **F15** The registry help says "all three or none", and `{seq}` alone validates at the registry (Task 5).
+- **F16** The existing `fadeHint` assertions (`AudioEditorEntryTests.swift` ~99 and ~104, `AudioEditorModelTests.swift` ~150) are updated first and seen to fail (Task 6).
+- **F17** Task 6 adds `AudioEditorHandle.regionHandle`'s `.crossfade` arm, `RegionHandles.target`'s `.crossfade` arm and `Int64(clamping:)` in `crossfadeRoom`.
+- **F18** The e2e bounce passes `dither: false` (Task 7).
+- **F19** The e2e gains `audio_file_level(path, frames, level, channels)`; `audio_file` and its callers are unchanged (Task 7).
+- **F20** The e2e uses mono CAFs (one track per import), keeps Linear for the midpoint check, and also checks an Equal Power midpoint (Task 7).
+- **F21** Ruling 6's rules 2 and 3 (dropping on a different partner or a lone copy) join the owner questions (Self-Review).
+- **F22** Ruling 3 and a backlog row record that an import inserts a crossfaded pair in one command (Task 7).
 
 ---
 
@@ -220,12 +246,13 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
   - `src/command/audio.rs` (`Crossfade`, `RemoveCrossfade`, `CrossfadeLength`, names; `Split` sets `b`'s flag false);
   - `src/command/mod.rs` (re-export `CrossfadeLength`);
   - `src/rules.rs` (`validate` extends with `crossfade::problems`);
-  - `src/file.rs` (`VERSION = 9`, `migrate_v8_to_v9`).
+  - `src/file.rs` (`VERSION = 9`, the module doc's `"version": 8` → 9, `migrate_v8_to_v9` appended to `MIGRATIONS`; F5).
 
   Every other `EventBody::AudioRegion { … }` literal gains `crossfade: false`; the compiler lists them in `core-model`, `core-engine`, `core-io`, `core-ffi` and the tests.
 - Test:
   - `crates/core-model/tests/crossfades.rs` (new);
-  - `crates/core-model/tests/file.rs`: every `assert_eq!(VERSION, 8)` becomes 9, plus the new tests.
+  - `crates/core-model/tests/file.rs`: every `assert_eq!(VERSION, 8)` (about lines 658, 676, 695) becomes 9, plus the new tests;
+  - `crates/core-model/tests/learn.rs` (~211), `input_fx.rs` (~262) and `mpe.rs` (~267): their `VERSION == 8` asserts become 9 (F5).
 
 **Interfaces:**
 - Produces:
@@ -290,7 +317,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
     - a region C at tick 0 like A (equal ticks: not inside);
     - a region D on a second take (`LaneCmd::AddTake`) overlapping where A lies on take 1.
   - `remove_crossfade_leaves_a_plain_fade_in`: after a crossfade, `RemoveCrossfade(B)` gives `crossfade: false` and the same `fade_in`, with undo label "Remove Crossfade". A second `RemoveCrossfade` is refused.
-  - `overlaps_follow_the_engine_rule`. Add C inside both A and B (tick 20 000), and E starting exactly where A ends:
+  - `overlaps_follow_the_engine_rule`. Add C inside both A and B (tick 20 000, 10 000 frames, so it ends at frame 41 250; F6), and E starting exactly where A ends (tick 30 720):
     - `overlaps` gives B→A (24 000), C→B and E→B (E starts where A ends, so not inside A), and nothing for A;
     - with a tempo of 60 BPM, B→A is 48 000 − 48 000 = 0, which is not an overlap (B starts at A's end).
   - `validate_names_a_damaged_crossfade`: the fixture's JSON with `"crossfade": true` on A, and then on B with `fade_in` 0, each `from_json` as `Corrupt`, with a problem containing `crossfade`.
@@ -321,7 +348,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
   - `moving_keeps_shrinks_or_drops`. With `EventCmd::Move` of B:
     - by −1 920 ticks: the length is unchanged and there is no warning;
     - by +12 288 ticks (frame 43 200, overlap 4 800): unchanged;
-    - by +13 000 ticks (overlap 3 687): `fade_in` 3 687, the flag kept, one warning containing "shortened";
+    - by +13 056 ticks (exactly 20 400 frames, overlap 3 600; F8): `fade_in` 3 600, the flag kept, one warning containing "shortened";
     - by +16 000 ticks (past A's end): the flag false, `fade_in` 4 800 kept, one warning containing "removed".
 
     Each case is one undo step back to the start.
@@ -344,7 +371,10 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
   - `tempo_changes_shrink_or_drop`: `SequenceCmd::SetTempo` to 240 BPM (B's start moves to frame 12 000, A still ends at 48 000) keeps 4 800. A map that makes B start after A's end clears it.
   - `split_inside_a_crossfade_is_refused`:
     - `Split(B, at: Tick(16_000))` (frame 25 000) and `Split(A, at: Tick(16_640))` (frame 26 000) are refused with Ruling 7's sentence;
-    - `Split(B, at: Tick(25_600))` (frame 40 000) works, and the new part's flag is false.
+    - `Split(B, at: Tick(25_600))` (frame 40 000) works, and the new part's flag is false;
+    - edges (F10): a split 1 frame inside the span (frame 24 001, at its tick) is refused; one exactly at the span's end (frame 28 800, tick 18 432) works, and B keeps its crossfade.
+  - `splitting_the_partner_before_the_span_keeps_it` (F2): `Split(A, at: Tick(7_680))` (frame 12 000) leaves B's flag and length, with no warning; A's second part is B's partner. One undo restores the fixture.
+  - `extreme_edits_beside_a_crossfade_never_panic` (F7), beside the flagged pair: `Move` of B and of A by ±2⁴⁰ ticks, `Trim` by ±`i64::MAX / 2`, an `EventCmd::Insert` of a region of `u64::MAX / 2` frames (refused by its media, not by a panic), and `SetTempo` at the minimum and maximum BPM the tempo map allows. Each is `Ok` or `Err` without a panic; after each `Ok`, `validate` is empty and B either keeps its crossfade or the report has its warning.
   - `settle_leaves_a_valid_document_untouched`: an `EventCmd::SetMute` on the note returns the crossfade unchanged, with no warning.
   - `properties.rs`:
     - `seed` adds one media item (48 kHz, 480 000 frames);
@@ -358,7 +388,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
     The existing undo/redo and save/load properties now cover the two commands (spec §12).
 - [ ] **Step 2: Run** `cargo test -p core-model --test crossfades --test properties`. Expected: FAIL.
 - [ ] **Step 3: Implement** `settle` and the Split refusal. In `apply_in`, call `crossfade::settle(doc, &mut d, &mut report)?` after the command's `apply`, for every command variant.
-- [ ] **Step 4: Run** `cargo test --workspace` and both clippies. Then measure `cargo bench -p core-model` against the baseline. Expected: PASS, with no bench over 10 % slower; give the numbers in the report.
+- [ ] **Step 4: Run** `cargo test --workspace` and both clippies. Then measure `cargo bench -p core-model` against the baseline. Expected: PASS, with no bench over 10 % slower (re-run once before investigating, since laptop noise can exceed that); give the numbers in the report.
 - [ ] **Step 5: Commit** `feat(model): edits keep, shorten or drop crossfades in the same undo step (plan 6c Task 2)`.
 
 ### Task 3: `core-engine`: the complement under the span, golden renders, the null test, rt-check
@@ -366,7 +396,8 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
 **Files:**
 - Modify:
   - `crates/core-engine/src/schedule/audio.rs` (`Segment.xfade`, `Segment.xfade_from`, `gain_at`, the pairing in `build`);
-  - `crates/core-engine/tests/schedule_audio.rs` (the `Segment` literal at `segment_gain_combines_fades` gains the two fields; new cases).
+  - `crates/core-engine/tests/schedule_audio.rs` (the `Segment` literal at `segment_gain_combines_fades` gains the two fields; new cases);
+  - `.github/workflows/ci.yml`: the rt-check step gains `--test rt_alloc_mpe --test rt_alloc_crossfade` (F4).
 - Create:
   - `crates/core-engine/tests/crossfades.rs`;
   - `crates/core-engine/tests/rt_alloc_crossfade.rs`.
@@ -384,7 +415,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
     `gain_at(f)` multiplies by `fade_curve(xfade.shape, 1 − x)` when `xfade.length_frames > 0` and `f ≥ xfade_from`, where `x = min((f − xfade_from) / len, 1)`. That is 1 − x for Linear, cos against sin for Equal Power, and the mirror for the other two (spec §7.0). It stays `// RT`: no allocation and no branch on anything but the segment.
   - **Pairing in `build`** (control thread). `Use` gains `raw_start: i64` (the signed frame before the cut at 0), `crossfade: bool` and `fade_in`. After a group's winner pieces are flushed, for each piece won by a crossfading use `u`:
     1. Intersect the piece with the span `[u.raw_start, u.raw_start + fade_in)`.
-    2. Find the partner `p` among the group's other uses: the max `(start, order)` with `p.raw_start < u.raw_start < p.raw_start + p.frames`.
+    2. Find the partner `p` among the group's other uses: the use whose region event (`r.path.last().event`) is the model's partner, `core_model::crossfade::overlap(doc, u's event)`'s `with`, memoised per take. It must also satisfy `p.raw_start < u.raw_start < p.raw_start + p.frames`; if several uses of that event qualify (loops), take the max `(start, order)`. No other region is ever a partner (F9).
     3. Clip the intersection to `p`'s end, and push a copy of `p.seg` over it, with `xfade = u.fade_in`, `xfade_from = p.region_offset + (u.raw_start − p.raw_start)` and `file_frame` moved to the piece's start.
 
     No partner means no extra segment. `needs()` then includes the extra segments without change.
@@ -412,11 +443,14 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
     - `golden_renders_for_each_shape`: for each shape, the left output at frames 800, 900, 1 000 and 1 100 is `0.5·OUT[k] + 0.25·IN[k]` (±1e-5). It is 0.5 at frames 0 and 799, and 0.25 at frames 1 200 and 1 799.
     - `crossfade_beside_a_plain_fade_out`: A also has a 200-frame linear fade-out. With Linear, frame 1 000 is 0.375, frame 1 100 is 0.25 and frame 1 150 is 0.234375 (±1e-6).
     - `null_test_matches_a_hand_mix`: A and B are the ramp media of `graph_regions.rs` (`value(f)` and its negative), with Equal Power over 400 frames. For every frame 0…1 800, the engine equals `A(f)·cos(π/2·x) + B(f)·sin(π/2·x)` inside the span, and the single region outside it. `x` and the hand mix are computed in `f64` with no call to `fade_curve`; the largest difference is under 1e-6.
-    - `a_region_without_a_crossfade_renders_as_before`: the same layout without the command gives 0.5 up to frame 799, then 0.25 shaped by B's own fade-in only.
+    - `a_region_without_a_crossfade_renders_as_before`: the same layout without the command gives 0.5 up to frame 799, then a flat 0.25 (B has no fade-in of its own; F13).
+    - `a_version_8_pair_loads_and_renders_as_before` (F13): the overlapping pair saved as JSON with `"version": 8` loads through `file::from_json` and compiles with no segment whose `xfade.length_frames` is non-zero.
   - `schedule_audio.rs`:
     - `a_crossfade_plays_the_earlier_region_under_the_span`: the segments are A `[0, 800)`, A `[800, 1200)` with `xfade {400, Linear}` and `xfade_from` 800, and B `[800, 1800)`. The plain segments have `xfade.length_frames == 0`.
     - `a_third_region_in_the_span_cuts_the_complement`: with C at frame 1 000 for 100 frames, A's extra segments are exactly `[800, 1000)` and `[1100, 1200)`.
     - `a_muted_partner_leaves_a_plain_fade_in`: A muted gives no extra segment.
+    - `a_muted_partner_never_pairs_with_an_older_region` (F9): with Z at frame 0 for 2 000 frames under A, and A muted, there is still no extra segment (Z is not B's partner in the model).
+    - `pairs_with_a_start_offset_and_one_tick_apart` (F12): with a sequence start offset of one beat, the extra segment's span is 400 frames ±1 and ends at A's end; with B one tick after A's start (inside A), B pairs with A.
     - `crossfades_repeat_in_each_pass_of_a_looped_track`: in a lane looped at 2 000 frames, every pass has its own A extra segment at its own `xfade_from`.
     - `segment_gain_applies_the_complement`: a literal segment with `xfade {400, Linear}` from 800 gives `gain_at` 1.0, 0.75 and 0.5 at 800, 900 and 1 000; with a fade-out, the two multiply.
   - `rt_alloc_crossfade.rs`, as `rt_alloc.rs`'s regions phase:
@@ -424,7 +458,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
     - a loop range around the span and locates every 500 blocks;
     - no allocations while armed, and output in more than half the blocks.
 - [ ] **Step 2: Run** `cargo test -p core-engine --test crossfades --test schedule_audio` and `cargo test -p core-engine --features rt-check --test rt_alloc_crossfade`. Expected: FAIL.
-- [ ] **Step 3: Implement** the items above.
+- [ ] **Step 3: Implement** the items above, and the `ci.yml` line (F4). Say in the report that `gain_at`'s cost is unchanged in kind: a `powf` per sample for an Exponential crossfade, as for fades (F13).
 - [ ] **Step 4: Run** `cargo test -p core-engine`, both clippies and the rt-check gate with `rt_alloc_crossfade`. Expected: PASS (about +10 tests). Every existing render test passes unchanged.
 - [ ] **Step 5: Commit** `feat(engine): crossfades play the earlier region under the span (plan 6c Task 3)`.
 
@@ -435,6 +469,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
   - `crates/core-ffi/src/edit.rs` (`AudioEdit` variants, `CrossfadeLengthRow`, `audio_cmd`);
   - `src/events.rs` (`EventRow` fields; `lane_events` fills them from `crossfade::overlaps` of the active take; `spec` carries `crossfade`);
   - `src/control.rs` (`AudioEditorRegionRow` fields; `audio_editor_json` adds `"crossfade"`);
+  - `src/snapshot.rs` and `src/session.rs` (F1): `DocSnapshot.warnings`. `execute_with` (session.rs ~1064), `edit_all` and the gesture's final step keep `history.execute`'s `Report.warnings` in `Inner.last_warnings`. The snapshot those calls return carries them; every other snapshot (`snapshot()`, undo, redo, `idle`) has `[]`. Normalize keeps its own `news.problems` path;
   - `app/Tests/VizDAWAppModelTests/FakeSession.swift` (records the new edits like the others); every Swift `switch` over `AudioEdit`.
 - Test: `crates/core-ffi/tests/crossfades.rs` (new; `serial` with `force_offline`), `crates/core-ffi/tests/control.rs`
 
@@ -449,12 +484,13 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
     - `Frames { u64::MAX }`, `Frames { 0 }`, `UpTo { 0 }`;
     - event `u64::MAX`, the note, A;
     - a region overlapping only on another take.
-  - `random_crossfade_edits_never_panic`: proptest, 2 048 cases of `(event 0..40 or any u64, Frames|UpTo with any u64, any shape)` and `RemoveCrossfade(any)`. Each result is `Ok` or a non-`Internal` error, and `rules::validate` of the result is empty.
+  - `random_crossfade_edits_never_panic`: proptest, 2 048 cases at the model level (`audio_cmd` of a random `AudioEdit` applied with `core_model::command::apply` to the fixture document): `(event 0..40 or any u64, Frames|UpTo with any u64, any shape)` and `RemoveCrossfade(any)`. Each result is `Ok` or an error, never a panic, and `rules::validate` of an `Ok` result is empty. A session version runs 64 cases on one session, resetting with `undo` after each `Ok`, and no result is `Internal` (F14).
+  - `edit_warnings_reach_the_snapshot` (F1): with the crossfade made, an `EventEdit::Move` of B past A's end returns a `DocSnapshot` whose `warnings` has one line starting "Crossfade removed" and saying "track". A following `snapshot()` has none. An `edit_all` and a gesture end with the same move carry it too.
   - `pasted_rows_carry_the_flag`: `spec(row)` of B's flagged row is `crossfade: true`. Inserting A's and B's specs into another lane keeps it (Ruling 6).
   - `tests/control.rs` `audio_editor_state_shows_the_crossfade`: a row with `crossfade: true` and `crossfade_with: Some(7)` gives `"crossfade": {"frames": 4800, "shape": "equal_power", "with": 7}`. Without it, `"crossfade": null`.
 - [ ] **Step 2: Run** `cargo test -p core-ffi --test crossfades --test control`. Expected: fail to compile.
 - [ ] **Step 3: Implement** the items above, then `scripts/build-ffi.sh` and the Swift switch arms (`FakeSession` records the edit).
-- [ ] **Step 4: Run** `cargo test --workspace`, `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: PASS (about +6 Rust; Swift unchanged).
+- [ ] **Step 4: Run** `cargo test --workspace` (including the existing `lane_events_of_100_000_events_is_fast`, which now also runs `overlaps`: `lane_events` sweeps only a take with two or more regions; F11), `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: PASS (about +7 Rust; Swift unchanged).
 - [ ] **Step 5: Commit** `feat(ffi): crossfade edits, overlap rows and the audio editor's crossfade state (plan 6c Task 4)`.
 
 ### Task 5: The Region menu, the preference and the control channel
@@ -480,7 +516,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
 - Consumes: Task 4.
 - Produces:
   - **Registry parameters** for `region.crossfade`:
-    - `opt_id_param("seq")`, `opt_id_param("lane")`, `opt_id_param("event")`;
+    - `opt_id_param("seq")`, `opt_id_param("lane")`, `opt_id_param("event")`, each with help ending "(give seq, lane and event together, or none: the selection)" (F15);
     - `length_ms` (`Text`, "Milliseconds, more than 0, as text (\"12.5\"); default: the whole overlap, at most Settings › Editing's default crossfade");
     - `shape` (`Choice ["linear","equal_power","exponential","s_curve"]`, default `equal_power`).
 
@@ -505,10 +541,11 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
 
       The core's refusals are `failed` with its sentence ("Crossfade Failed"). An open gesture is `unavailable`. With `length_ms`, it sends `Frames`.
     - `enabled` is true for `crossfade` when `crossfadeTarget` is non-nil, and for `removeCrossfade` when that target has `crossfade`.
+    - **Routing (F3):** both IDs join `RegionCommands.ids` (so `ControlCommands.handled` has them). `run(_:on:_:)` and `enabled` test for them **first**: `run` calls `crossfade(m, defaultMs: RegionCommands.defaultCrossfadeMs)` (10, used only when no host is at hand) or `removeCrossfade(m)`, and never reaches the `.fadeTo` line. `ControlCommands.run` dispatches them to `runChannel` with `host.crossfadeMs` before `_ where RegionCommands.ids.contains(id)`.
 
 - [ ] **Step 1: Write the failing tests.**
   - core-control `crossfade_commands_check_their_params`:
-    - `{}`, `{seq, lane, event}` and `{length_ms: "12.5", shape: "linear"}` validate;
+    - `{}`, `{seq, lane, event}`, `{seq}` alone (the Swift layer refuses it, not the registry; F15) and `{length_ms: "12.5", shape: "linear"}` validate;
     - `shape: "cubic"`, `event: -1`, `length_ms: 5` (not text) and extra keys are `InvalidParams`.
 
     `every_command_survives_random_params` (2 048 cases) covers both.
@@ -522,6 +559,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
       - `event` that is the note, an unknown ID, or a region on another track;
       - `event` A, which starts inside nothing, reaches the session and is `failed` with the core's sentence.
     - `crossfadeIsUnavailableDuringAGesture` and `removeCrossfadeNeedsACrossfade`.
+    - `crossfadeIdsNeverRunFadeTo` (F3): `RegionCommands.run("region.crossfade", m)`, `run("region.remove_crossfade", m)` and `ControlCommands.run` of each with no arguments (a key's path) send only `.crossfade` / `.removeCrossfade` edits, never `.fadeTo`; with no target they send nothing.
     - `everyRegisteredMenuCommandHasAHandler` passes with the new IDs.
   - `NudgeTests.crossfadePreferenceIsKeptAndClamped`: the default is 10; 0 and 5 000 clamp to 1 and 1 000; a new `EditingPreferences` on the same `MemoryDefaults` reads the stored value.
 - [ ] **Step 2: Run** `cargo test -p core-control` and `scripts/swift.sh test --filter RegionCommands`. Expected: FAIL.
@@ -542,24 +580,28 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
   - `AudioEditorCanvas.swift` (draws the X; a11y "Crossfade Handle"; the readout);
   - `ArrangementView.swift` (the drag readout "<n> ms" for `.crossfade`);
   - `app/Sources/VizDAWAppModel/AudioEditorModel.swift` (`AudioEditorBox.crossfade`, `text`, `type`, `setShape`, `stateRow`);
+  - `DocumentModel.swift` (`apply` shows `warnings`; F1);
   - `AudioEditorEntry.swift` (`fadeFrames`, `fadeHint`, `crossfadeInHint`, `noCrossfadeHint`);
   - `PaneContent.swift` (`Inspector.rows`);
   - `app/Sources/VizDAW/AudioEditorPane.swift` (the Crossfade field and picker in place of Fade In).
 - Test:
   - `app/Tests/VizDAWEditorsTests/RegionEditingTests.swift`, `AudioEditorGeometryTests.swift`;
-  - `app/Tests/VizDAWAppModelTests/AudioEditorModelTests.swift`, `AudioEditorEntryTests.swift`, `RegionHandleViewTests.swift`, `LeftPaneTests.swift`.
+  - `app/Tests/VizDAWAppModelTests/AudioEditorModelTests.swift`, `AudioEditorEntryTests.swift`, `RegionHandleViewTests.swift`, `LeftPaneTests.swift`, `EditorModelTests.swift`.
 
 **Interfaces:**
-- Consumes: Tasks 4–5.
+- Consumes: Task 4 (Task 5 only for the menu IDs the shape menu's Remove runs through `editor.edit`).
 - Produces:
   - **`RegionHandles`:**
     - `label(.crossfade)` is "Crossfade";
     - `rects` gives `.crossfade` in place of `.fadeIn` when `r.crossfade`, at `fadeInX`;
-    - `static func crossfadeRoom(_ r: EventRow) -> Int64` is `max(min(overlapFrames, frames − fadeOut), 0)`;
+    - `static func crossfadeRoom(_ r: EventRow) -> Int64` is `max(min(Int64(clamping: overlapFrames), Int64(clamping: frames) − fadeOut), 0)` (F17);
     - `fades(.crossfade)` clamps the fade-in to `1...max(room, 1)`;
     - `fadeCommand(.crossfade)` gives `.audio(edit: .crossfade(event:, length: .frames(frames:), shape: r.fadeIn.shape))`;
     - `shapeCommand(.crossfade, s)` keeps the length;
-    - `fadeArea` gives `.crossfade` over a crossfade's fade-in area.
+    - `fadeArea` gives `.crossfade` over a crossfade's fade-in area;
+    - `target`'s switch gains `.crossfade` with the fades (F17).
+  - `AudioEditorHandle.regionHandle` gains `.crossfade: .crossfade` (F17).
+  - **Edit warnings (F1):** `DocumentModel.apply(_:)` sets `editor.status` to `s.warnings.joined(separator: " ")` when it is non-empty.
   - `RegionDrawing.crossfadeLines(_ r: EventRow, in rect: CGRect) -> [(CGPoint, CGPoint)]`: `[(minX, maxY)→(fadeInX, minY), (minX, minY)→(fadeInX, maxY)]`, or `[]` without a crossfade. `draw` strokes them in place of the fade-in line.
   - `fadeShapeMenu` for `.crossfade` titles its items "Crossfade: <shape>" and adds "Remove Crossfade" (`.audio(edit: .removeCrossfade(event:))`).
   - `RegionA11y.label` adds ", crossfade" when `r.crossfade`. ", fades" then counts the fade-out only.
@@ -583,6 +625,8 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
     - `crossfadeMenuOffersShapesAndRemove`: five titles in order, the current one checked, and the last runs `.removeCrossfade`.
     - `a11yLabelSaysCrossfade`.
   - `AudioEditorGeometryTests.crossfadeCornerInTheAudioEditor`: `drawn` has `.crossfade` at the fade-in end; `hit` there gives `.crossfade`, and when both corners reach the press, the nearer one wins as for `.fadeIn`.
+  - Update first (F16): the existing `fadeHint` assertions in `AudioEditorEntryTests.swift` (~99, ~104) and `AudioEditorModelTests.swift` (~150) expect the new text; run them and see them fail.
+  - `EditorModelTests.editWarningsShowInTheStatus` (F1): a fake session whose edit returns a snapshot with `warnings ["Crossfade removed: …"]` leaves that text in `editor.status`; one with none leaves the status alone.
   - `AudioEditorEntryTests.fadeFramesReadsMsSecondsAndFrames` at 48 kHz:
     - "250 ms" gives 12 000, "1.5 s" gives 72 000, "480 frames" gives 480, "1 frame" gives 1 and a bare "10" gives 480;
     - refused (nil): "1.5 frames", "-3 frames", "NaN", "inf ms", "1e30 frames", "" and "frames".
@@ -611,19 +655,20 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
 - Consumes: Tasks 1–6.
 
 - [ ] **Step 1: Write the e2e** `crossfades_over_the_channel` (`#[ignore = "needs a window server and VIZDAW_E2E_APP"]`, throwaway home, offline):
-  1. Write `a.caf` (2 s at 0.25) and `b.caf` (2 s at 0.5) in the home with the existing `audio_file`-style helper. Run `file.new` (an empty project, so nothing else sounds in the bounce; read `selected_seq` as the e2e at `file.new` does), then `media.import` of `a` at tick 0, which makes a new track. Read that lane from `state.get document`. Run `media.import` of `b` with that `lane` at tick 15 360 (0.5 s), so the overlap is 1.5 s.
+  1. Write `a.caf` (2 s at 0.25) and `b.caf` (2 s at 0.5), both **mono**, in the home with a new helper `audio_file_level(path, frames, level, channels)` beside `audio_file` (F19; `audio_file` and its callers are unchanged). Mono makes one track per import (F20). Run `file.new` (an empty project, so nothing else sounds in the bounce; read `selected_seq` as the e2e at `file.new` does), then `media.import` of `a` at tick 0, which makes a new track. Read that lane from `state.get document`. Run `media.import` of `b` with that `lane` at tick 15 360 (0.5 s), so the overlap is 1.5 s.
   2. Select `b`'s region by its element (`wait_for_label_like(…, "Region b on ", …)` and `ui.click`), and read `event` and the lane from `state.get selection`.
   3. Hostile calls:
      - `region.crossfade` with `length_ms` "0", with `shape` "cubic", and with only `seq` is `InvalidParams`;
      - with `event` set to `a`'s region (found the same way) it is `Failed`;
      - `state.get document`'s `undo` is unchanged, and `window_numbers` is unchanged.
   4. `region.crossfade {seq, lane, event: b, length_ms: "100", shape: "linear"}` gives `undo` "Crossfade". With `b` selected, `state.get audio_editor`'s `region.crossfade` is `{"frames": 4800, "shape": "linear", "with": <a>}`, and `boxes.crossfade` is "100 ms".
-  5. `file.bounce` to `home/x.wav` (16-bit, 48 kHz, range `selection` from tick 0 to tick 46 080) and `read_wav16`. With `s(f)` the left sample at frame `f`:
+  5. `file.bounce` to `home/x.wav` (16-bit, 48 kHz, `dither: false` (F18), range `selection` from tick 0 to tick 46 080) and `read_wav16`. With `s(f)` the left sample at frame `f`:
      - before = `s(12_000)`, mid = `s(26_400)` (the span's middle), after = `s(40_000)`;
      - `|mid − (before + after) / 2| ≤ 3` LSB, and `after > before`.
 
      Ratios, not levels, so the strip's gain does not matter.
-  6. `region.remove_crossfade` with no arguments (the selection) gives `undo` "Remove Crossfade". `region.crossfade` with no arguments gives a crossfade of 480 frames (Settings' 10 ms) and `shape` "equal_power". `edit.undo` twice brings back the linear one.
+  6. `region.remove_crossfade` with no arguments (the selection) gives `undo` "Remove Crossfade". `region.crossfade` with no arguments gives a crossfade of 480 frames (Settings' 10 ms) and `shape` "equal_power". A second bounce (dither off) checks Equal Power's midpoint (F20): `s(24_240)` is within 3 LSB of `0.7071 × (before + after)`. `edit.undo` twice brings back the linear one.
+  7. With the crossfade back and `b` selected, `region.remove_fades` (the channel has no move or delete) sets the fade-in to 0, so settle drops the crossfade: the result's `status`, which `ControlCommands.ran` takes from `editor.status`, contains "Crossfade removed" (F1).
 - [ ] **Step 2: Add README checks 274–281** after 273, under "### Crossfades (plan 6c)". Start with a line naming the tests that cover the rest (`core-model/tests/crossfades.rs`, `core-engine/tests/crossfades.rs`, `core-ffi/tests/crossfades.rs`, `RegionCommandsTests`, `RegionEditingTests`, `AudioEditorModelTests` and the e2e `crossfades_over_the_channel`).
   - 274: Put two regions on one track so that the second starts inside the first, select both and choose Region › Crossfade. An X covers the start of the overlap: 10 ms, or the whole overlap when it is shorter. Region › Remove Crossfade turns it back into a plain fade-in; Undo brings the crossfade back.
   - 275: Drag the X's handle. The length follows, with an "<n> ms" readout. It stops at the end of the first region, and at 1 frame. One Undo ("Crossfade") puts it back; Escape mid-drag changes nothing.
@@ -638,6 +683,7 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
   - "Crossfades with a partner ID or per-side shapes" (Ruling 1);
   - "Split inside a crossfade" (Ruling 7: two shorter crossfades instead of a refusal);
   - "Add crossfades to every overlap" (Ruling 2: one command for old projects);
+  - "Imports insert a crossfaded pair in one command" (F22): `AudioCmd::Insert` has no flag, so 6d, 6f and 6h insert both regions as specs in one `EventCmd::Insert`; a later region inserted alone loses its flag (Ruling 6 rule 3).
   - "Crossfade the waveform drawing": the earlier region's tail under the X is not drawn, and the overview's fade shape (`core-ffi/src/overviews.rs`) ignores the complement.
 
   Also append to the existing "Zero-crossing snapping and edge fades for audio edits" row: "Plan 6c Ruling 8: a crossfaded start counts as the region's own fade, so it gets no edge fade, and the X drag snaps nothing." Add to the "A control-channel path to set a fade shape" row: "`region.crossfade`'s `shape` (plan 6c) sets a crossfade's; plain fades still have none."
@@ -675,3 +721,4 @@ None yet. A pre-flight review's accepted findings go here, applied in place, as 
   2. Ruling 6: shortening rather than dropping when the overlap shrinks.
   3. Ruling 7: refusing a split inside a crossfade.
   4. Ruling 5: `seq`, `lane` and `event` are optional, which differs from the plain parameters in §10.
+  5. Ruling 6 rules 2 and 3 drop a crossfade in cases the spec does not list: when the region it crossed is replaced by a different one, and when the later region is copied alone (F21).
