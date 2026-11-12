@@ -98,14 +98,7 @@ extension Panels {
 
     /// The folder for stems (owner answer 2: files already there are kept).
     static func chooseBounceFolder() -> String? {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Bounce"
-        panel.message = "Choose a folder for the stems."
-        return panel.runModal() == .OK ? panel.url?.path : nil
+        chooseFolder(prompt: "Bounce", message: "Choose a folder for the stems.")
     }
 
     /// A folder to search for missing media (Search Folder…).
@@ -144,13 +137,24 @@ extension Panels {
 
     /// The folder for one MIDI Clip File per track.
     static func chooseMidiExportFolder() -> String? {
+        chooseFolder(prompt: "Export", message: "Choose a folder: each track becomes one MIDI Clip File in it.")
+    }
+
+    /// The folder the export folder for another DAW goes in (plan 6b; the
+    /// sheet comes first, Ruling 11).
+    static func chooseExportFolder() -> String? {
+        chooseFolder(prompt: "Export Here", message: "Choose where to put the folder for another DAW.")
+    }
+
+    /// A folder to write into, one that can be made in the panel (F16).
+    private static func chooseFolder(prompt: String, message: String) -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Export"
-        panel.message = "Choose a folder: each track becomes one MIDI Clip File in it."
+        panel.prompt = prompt
+        panel.message = message
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 

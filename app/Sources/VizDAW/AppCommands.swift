@@ -96,6 +96,9 @@ struct AppCommands: Commands {
                     Button(keyBindings.row(InterchangeCommands.exportClip)?.title ?? "MIDI Clip File…") {
                         doc?.interchange.showExport(.clip)
                     }
+                    Button(keyBindings.row(InterchangeCommands.exportForDaw)?.title ?? "For Another DAW…") {
+                        doc?.forDaw.shown = true
+                    }
                 }
                 .disabled(doc == nil)
                 Button(keyBindings.row(InterchangeCommands.report)?.title ?? "Last Import or Export Report…") {

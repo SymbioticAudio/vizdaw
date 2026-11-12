@@ -2,12 +2,29 @@ import Foundation
 import Observation
 import VizDAWCore
 
+/// The audio format a sheet asks for (plan 6b Task 5): what the shared
+/// Format, Bits, Rate and Dither rows bind to, in Bounce and in Export for
+/// Another DAW.
+@MainActor
+public protocol AudioFormatChoices: AnyObject, Observable {
+    var container: ContainerRow { get set }
+    var depth: BitDepthRow { get set }
+    var rate: UInt32 { get }
+    /// "Other…" is the chosen rate.
+    var otherRate: Bool { get }
+    /// The picker's value: a listed rate, or 0 for "Other…".
+    var rateChoice: UInt32 { get set }
+    var dither: Bool { get set }
+    /// The "Other…" field, clamped to 8,000–384,000.
+    func setOtherRate(_ hz: Int)
+}
+
 /// The Bounce sheet's model (plan 5f-2 Task 6; Rulings 3, 5, 8, 11; owner
 /// answer 2): the choices, the core's check of them (the external-MIDI
 /// warning, the files it would write, the length) and the running job.
 @Observable
 @MainActor
-public final class BounceModel {
+public final class BounceModel: AudioFormatChoices {
     public enum Source: Equatable, Sendable { case mix, stems }
 
     /// Weak: the sheet can outlive its document.

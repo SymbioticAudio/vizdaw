@@ -289,4 +289,36 @@ import VizDAWCore
         await d.settle()
         #expect(d.check == nil && d.error == "No sequence is shown.")
     }
+    @Test func lengthIsTheStemsTimeAndTheTail() async throws {
+        let f = fake()
+        let (m, d) = try await shown(f)
+        defer { withExtendedLifetime(m) {} }
+        #expect(d.length == "0:01.0 + tail", "the check's frames at the export rate")
+        d.rate = 88_200
+        await d.settle()
+        #expect(d.length == "0:00.5 + tail")
+        m.select(nil)
+        d.refresh()
+        await d.settle()
+        #expect(d.length == "", "no check, no length")
+    }
+
+    /// Bounce and For Another DAW share the sheet's format rows.
+    @Test func bothModelsOfferTheSameFormatChoices() async throws {
+        let f = fake()
+        let (m, d) = try await shown(f)
+        defer { withExtendedLifetime(m) {} }
+        func choose(_ c: some AudioFormatChoices) {
+            c.container = .caf
+            c.depth = .float32
+            c.dither = true
+            c.rateChoice = 0
+            c.setOtherRate(1_000_000)
+        }
+        for c: any AudioFormatChoices in [m.bounce, d] {
+            choose(c)
+            #expect(c.container == .caf && c.depth == .float32 && c.dither)
+            #expect(c.otherRate && c.rateChoice == 0 && c.rate == 384_000)
+        }
+    }
 }

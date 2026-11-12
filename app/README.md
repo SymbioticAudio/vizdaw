@@ -2482,3 +2482,49 @@ MIDI file, open it in the DAW you use that reads MIDI files, and check
 tracks, notes, tempo and markers; export a MIDI file from that DAW and
 import it into VizDAW. Also export one track as a MIDI Clip File and open it
 in any other software that reads `.midi2`, if you have one (F20).
+
+### Export for another DAW (plan 6b)
+
+By eye and by ear; the folder's layout, names, MIDI files and About file are
+tested (`core-io/tests/for_daw.rs`, `midi_out.rs`), the job, its stems,
+cancelling at every stage and the refusals (`core-ffi/tests/for_daw.rs`), the
+command (`core-control/tests/commands.rs`, `InterchangeCommandsTests`), the sheet's model
+(`ForDawModelTests`, `InterchangeTests`) and the e2e
+`exports_for_another_daw_over_the_channel`.
+
+267. File › Export › For Another DAW… shows the sheet:
+     - the line under the title;
+     - every track's strip and each send-only bus ticked;
+     - Format, Bits, Rate and Dither as in Bounce;
+     - "Add the stems to this project" (off);
+     - the start sentence and length;
+     - "What won't transfer", which updates as you change any option.
+
+     Then open File › Bounce…: it looks and behaves as before (the shared
+     format rows; F15).
+268. Export asks for a place, then writes "<Song> for another DAW" there,
+     with `Audio/`, `MIDI/` (one file per MIDI track plus `All MIDI.mid`),
+     `Tempo map.mid` and `About these files.txt`. Exporting again makes
+     "… 2", and the first folder is untouched. The report sheet opens, and
+     Show in Finder shows the folder.
+269. Open `About these files.txt`: start, tempo, meter, sample rate and
+     format, the song info, every file, and the report.
+270. A track on an external MIDI destination gets a MIDI file and no stem,
+     and the report says so. Mute a track's strip in the mixer: its stem is
+     still written, and the report says the strip is muted. Mute an audio
+     track itself: the report names the track as muted (F14). Untick a
+     strip: the report lists it.
+271. Give the song a one-beat pickup. The sheet and the About file say every
+     file starts one beat before bar 1. Import the folder's `All MIDI.mid`
+     and a stem into a new project at its start: they line up.
+272. Tick "Add the stems to this project": new tracks named after the stems
+     at the start point; one Undo ("Add Stems") removes them all, and the
+     folder stays.
+273. Cancel during a long export: no folder is left and the project is
+     unchanged. Drop two MIDI files, then start an export at once: the sheet
+     waits, then exports after the imports.
+
+**Owner check (manual, only the owner can do):** drop the folder's stems and
+MIDI files at bar 1 in the DAW you use that reads only audio and MIDI files.
+Check that they line up and that the tempo is right. Repeat with a song that
+has a pickup, placing the files where the About file says.

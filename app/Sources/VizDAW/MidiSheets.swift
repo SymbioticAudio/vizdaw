@@ -216,8 +216,8 @@ struct MidiExportSheet: View {
     }
 }
 
-/// The dry run's report, in the export sheet.
-private struct WontTransfer: View {
+/// The dry run's report, in the export sheets.
+struct WontTransfer: View {
     @Environment(\.symbioticTheme) private var theme
     let report: ReportRow?
     /// No answer yet and no refusal: the dry run is running.

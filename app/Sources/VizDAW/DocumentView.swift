@@ -33,6 +33,12 @@ struct DocumentView: View {
             ) {
                 BounceSheet(bounce: model.bounce)
             }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.forDaw.shown && !ControlChannel.active }, set: { model.forDaw.shown = $0 })
+            ) {
+                ForDawSheet(forDaw: model.forDaw, document: model)
+            }
             // The MIDI sheets and the report open only for what the user
             // started here, never under the control channel (plan 6a).
             .sheet(

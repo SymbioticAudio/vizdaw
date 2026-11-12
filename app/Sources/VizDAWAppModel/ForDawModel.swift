@@ -8,7 +8,7 @@ import VizDAWCore
 /// job instead of failing as `Busy`.
 @Observable
 @MainActor
-public final class ForDawModel {
+public final class ForDawModel: AudioFormatChoices {
     /// Jobs the core cannot run an export beside; also what holds back
     /// dropped MIDI files while one is listed.
     public static let blocking: Set<JobKindRow> = [.bounce, .importMidi, .exportMidi, .exportProject]
@@ -68,6 +68,13 @@ public final class ForDawModel {
     public var progress: Float? {
         guard let job else { return nil }
         return document?.jobs.first { $0.id == job }?.progress
+    }
+
+    /// The stems' length before the tail, at the export rate (F7), or ""
+    /// with no check.
+    public var length: String {
+        guard let check else { return "" }
+        return MediaModel.duration(frames: check.frames, rate: rate) + " + tail"
     }
 
     /// The picker's value: a listed rate, or 0 for "Other…".

@@ -3855,3 +3855,191 @@ fn midi_files_round_trip_over_the_channel() {
     assert_eq!(window_numbers(&mut app).len(), windows.len() + 1);
     app.quit();
 }
+
+/// The `MTrk` chunks of a Standard MIDI File (after its `MThd`), walked by
+/// their lengths.
+fn mtrk_chunks(bytes: &[u8]) -> usize {
+    let mut at = 0usize;
+    let mut n = 0;
+    while let Some(head) = bytes.get(at..at + 8) {
+        let len = u32::from_be_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        if &head[..4] == b"MTrk" {
+            n += 1;
+        }
+        at += 8 + len;
+    }
+    n
+}
+
+/// The `.wav` files in `dir`.
+fn wavs_in(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Every path under `dir`, files and folders.
+fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        out.push(p.clone());
+        if p.is_dir() {
+            walk(&p, out);
+        }
+    }
+}
+
+/// README 267–273 through the channel (plan 6b Task 5): export the demo for
+/// another DAW, re-import its MIDI and stems, export again with "Add the
+/// stems to this project", and the refusals. The reply comes once the
+/// `.exportProject` job ends; no call opens a sheet or a panel.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn exports_for_another_daw_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let windows = window_numbers(&mut app);
+    let tmp = home.join("Exports");
+    std::fs::create_dir(&tmp).unwrap();
+    let lanes = |app: &mut App| {
+        let doc = app.call("state.get", json!({"target": "document", "window": w}));
+        doc["lanes"].as_array().unwrap().len()
+    };
+
+    // A dry run: a report, nothing written.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"dry_run": true, "path": tmp}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    assert_eq!(r["written"], json!([]), "{r}");
+    assert_eq!(
+        std::fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "tmp stays empty"
+    );
+
+    // The folder and its files.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": tmp}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    let written = r["written"].as_array().unwrap();
+    assert_eq!(written.len(), 1, "{r}");
+    let folder = PathBuf::from(written[0].as_str().unwrap());
+    assert_eq!(folder.parent(), Some(tmp.as_path()), "{r}");
+    let name = folder.file_name().unwrap().to_str().unwrap().to_string();
+    assert!(name.ends_with(" for another DAW"), "{name}");
+    for f in [
+        "Tempo map.mid",
+        "About these files.txt",
+        "MIDI/All MIDI.mid",
+    ] {
+        assert!(folder.join(f).is_file(), "{f} in {folder:?}");
+    }
+    let stems = wavs_in(&folder.join("Audio"));
+    assert!(!stems.is_empty(), "at least one stem");
+    let mut all = Vec::new();
+    walk(&tmp, &mut all);
+    assert!(
+        !all.iter()
+            .any(|p| p.to_string_lossy().ends_with(".partial")),
+        "no partial is left: {all:?}"
+    );
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no call opened a sheet or a panel"
+    );
+
+    // The MIDI back in at the start: one track per MIDI track after the
+    // conductor (F17).
+    let all_midi = folder.join("MIDI/All MIDI.mid");
+    let bytes = std::fs::read(&all_midi).unwrap();
+    assert_eq!(&bytes[..4], b"MThd");
+    let tracks = mtrk_chunks(&bytes) - 1;
+    assert!(tracks > 0, "{tracks}");
+    let before = lanes(&mut app);
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_midi", "params": {"path": all_midi, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import MIDI File", "{r}");
+    assert_eq!(lanes(&mut app), before + tracks);
+
+    // And the stems: one track each.
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    for (k, stem) in stems.iter().enumerate() {
+        let before = lanes(&mut app);
+        let r = app.call(
+            "command.run",
+            json!({"id": "media.import", "params": {"path": stem, "seq": seq, "tick": 0}, "window": w}),
+        );
+        assert_eq!(r["undo"], "Import Audio", "stem {k}: {r}");
+        assert_eq!(lanes(&mut app), before + 1, "stem {k}");
+    }
+
+    // Again, adding the stems: "… 2", the first folder untouched, one
+    // track per stem in one undo step.
+    let first: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        walk(&folder, &mut v);
+        v.sort();
+        v
+    };
+    let before = lanes(&mut app);
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": tmp, "add_to_project": true}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Add Stems", "{r}");
+    let second = PathBuf::from(r["written"][0].as_str().unwrap());
+    assert_eq!(second, tmp.join(format!("{name} 2")), "{r}");
+    let added = wavs_in(&second.join("Audio")).len();
+    assert!(added > 0, "{r}");
+    assert_eq!(lanes(&mut app), before + added);
+    let mut again = Vec::new();
+    walk(&folder, &mut again);
+    again.sort();
+    assert_eq!(again, first, "the first folder is untouched");
+    let exported = r["report"].clone();
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.interchange_report", "window": w}),
+    );
+    assert_eq!(r["report"], exported, "{r}");
+
+    // Refusals: inside the demo's package, and no path.
+    let pkg = home.join("Demo.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": pkg}, "window": w}),
+    );
+    assert!(pkg.is_dir());
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": pkg}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+    assert!(
+        e.message.contains(&pkg.display().to_string()),
+        "names the path: {e:?}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Save"), "{e:?}");
+    assert_eq!(window_numbers(&mut app), windows);
+    app.quit();
+}
