@@ -63,6 +63,9 @@ pub const MAX_XML_NODES: usize = 4_000_000;
 pub const MAX_XML_TREE_BYTES: usize = 128 * 1024 * 1024;
 /// Most attributes on one XML element (§6.5).
 pub const MAX_XML_ATTRS: usize = 64;
+/// Longest XML element or attribute name, in bytes; longer is broken XML
+/// (no DAWproject name comes close).
+pub const MAX_XML_NAME_BYTES: usize = 1024;
 /// Longest number in a file, in characters (§6.5).
 pub const MAX_NUMBER_CHARS: usize = 64;
 /// Deepest timeline nesting: clips in clips, warps, note children and

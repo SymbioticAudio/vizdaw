@@ -205,6 +205,7 @@ fn nesting_and_size_limits() {
     let kept = t.text(t.root());
     assert!(kept.len() <= MAX_TEXT_BYTES && kept.len() > MAX_TEXT_BYTES - 2);
     assert!(kept.chars().all(|c| c == 'é'));
+    assert!(t.text_cut(t.root()));
 
     // The tree's bytes are counted as it grows: past the budget it is
     // refused, and the parse never holds much more than the budget.
@@ -218,6 +219,77 @@ fn nesting_and_size_limits() {
     assert!(seen.peak < 2 * 1024 * 1024, "peak {}", seen.peak);
     let few = format!("<r>{}</r>", "<Note key=\"60\" time=\"1\"/>".repeat(1_000));
     assert_eq!(parse_with(few.as_bytes(), &limits).unwrap().len(), 1_001);
+
+    // A huge text node of CRs (end-of-line normalised) is kept up to 64 KiB
+    // without a copy of the whole node; so is one in CDATA, and one thrown
+    // away in an element with children.
+    let crs = "\r".repeat(32 * 1024 * 1024);
+    for text in [
+        format!("<a>{crs}</a>"),
+        format!("<a><![CDATA[{crs}]]></a>"),
+        format!("<a><b/>{crs}</a>"),
+        format!("{crs}<a/>{crs}"),
+    ] {
+        let (r, seen) = measure(|| parse(text.as_bytes()));
+        let t = r.unwrap();
+        assert!(seen.peak < 1024 * 1024, "peak {}", seen.peak);
+        let kept = t.text(t.root());
+        assert!(
+            kept.is_empty() || (kept.len() == MAX_TEXT_BYTES && kept.bytes().all(|b| b == b'\n'))
+        );
+    }
+
+    // Element and attribute names over 1 KiB are refused before the parser
+    // copies them.
+    let broken = damaged("its XML is broken");
+    let name = "n".repeat(64 * 1024 * 1024);
+    for text in [
+        format!("<{name}/>"),
+        format!("<{name}>"),
+        format!("<a></{name}>"),
+        format!("<a {name}=\"1\"/>"),
+    ] {
+        let (r, seen) = measure(|| parse(text.as_bytes()));
+        assert_eq!(refusal(r), broken);
+        assert!(seen.peak < 1024 * 1024, "peak {}", seen.peak);
+    }
+    let n1k = "n".repeat(1024);
+    let t = parse(format!("<{n1k} {n1k}=\"v\"></{n1k}>").as_bytes()).unwrap();
+    assert_eq!(t.attr(t.root(), &n1k), Some("v"));
+    let n1k1 = "n".repeat(1025);
+    assert_eq!(refusal(parse(format!("<{n1k1}/>").as_bytes())), broken);
+    assert_eq!(
+        refusal(parse(format!("<a {n1k1}=\"v\"/>").as_bytes())),
+        broken
+    );
+    // Long attribute values are not names.
+    let t = parse(format!("<a v=\"{}\" w='{}'/>", "x".repeat(4096), "y".repeat(4096)).as_bytes())
+        .unwrap();
+    assert_eq!(t.attr(t.root(), "w").map(str::len), Some(4096));
+}
+
+#[test]
+fn cut_and_dropped_text_are_recorded() {
+    // Exactly 64 KiB is not cut; one byte more is.
+    let at = |n: usize| format!("<a>{}</a>", "x".repeat(n));
+    let t = parse(at(MAX_TEXT_BYTES).as_bytes()).unwrap();
+    assert_eq!(t.text(t.root()).len(), MAX_TEXT_BYTES);
+    assert!(!t.text_cut(t.root()));
+    let t = parse(at(MAX_TEXT_BYTES + 1).as_bytes()).unwrap();
+    assert!(t.text_cut(t.root()));
+    // A cut made by a reference past the limit.
+    let t = parse(format!("<a>{}&amp;</a>", "x".repeat(MAX_TEXT_BYTES)).as_bytes()).unwrap();
+    assert!(t.text_cut(t.root()));
+    assert_eq!(t.dropped_text(), 0);
+
+    // Layout whitespace is nothing; mixed-content text is counted by run.
+    let t = parse(SMALL.as_bytes()).unwrap();
+    assert_eq!(t.dropped_text(), 0);
+    assert!(!t.text_cut(t.root()));
+    let t = parse(b"<Title>A<b/>B &amp; C<c/>  <d/>&#32;<![CDATA[D]]></Title>").unwrap();
+    assert_eq!(t.dropped_text(), 3);
+    assert_eq!(t.text(t.root()), "");
+    assert!(!t.text_cut(t.root()));
 }
 
 #[test]
@@ -251,6 +323,8 @@ fn numbers_are_strict() {
     assert_eq!(double("5."), Some(5.0));
     assert_eq!(double(" 2 "), Some(2.0));
     assert_eq!(double("+3E-1"), Some(0.3));
+    // Underflow rounds to zero, as XSD allows.
+    assert_eq!(double("1e-999"), Some(0.0));
     let neg_zero = double("-0").unwrap();
     assert!(neg_zero == 0.0 && neg_zero.is_sign_negative());
     for bad in [
@@ -326,6 +400,20 @@ fn structure_errors_are_refused() {
         refusal(parse(br#"<a x="1" x="2"/>"#)),
         damaged("an element repeats an attribute")
     );
+    // A declaration anywhere but first.
+    for bad in [
+        &b"<a/><?xml version=\"1.0\"?>"[..],
+        b"<!-- c --><?xml version=\"1.0\"?><a/>",
+        b" <?xml version=\"1.0\"?><a/>",
+        b"<?xml version=\"1.0\"?><?xml version=\"1.0\"?><a/>",
+    ] {
+        assert_eq!(
+            refusal(parse(bad)),
+            broken,
+            "{:?}",
+            String::from_utf8_lossy(bad)
+        );
+    }
     // Comments and whitespace after the root are fine.
     assert!(parse(b"<a/>\n<!-- end -->\n").is_ok());
 }

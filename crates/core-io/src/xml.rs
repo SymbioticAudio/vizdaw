@@ -10,12 +10,26 @@
 //! [`PackageLimits::max_tree_bytes`] (its arena and nodes, counted as they
 //! grow), more than [`MAX_XML_ATTRS`] attributes on an element, a repeated
 //! attribute, an attribute value over [`MAX_TEXT_BYTES`] and broken markup.
-//! It never recurses. Beyond the text and the tree it holds one element's
-//! pending text (at most [`MAX_TEXT_BYTES`]) and the parser's copy of the
-//! open elements' names.
+//! Element and attribute names over [`MAX_XML_NAME_BYTES`] are refused as
+//! broken by a pass over the text before the parser sees it (the parser
+//! copies open elements' names). It never recurses. Beyond the text and the
+//! tree it holds one element's pending text (at most [`MAX_TEXT_BYTES`]) and
+//! the parser's copy of the open elements' names (at most 256 KiB).
+//!
+//! The reader records what it leaves out instead of reporting it: a text cut
+//! at [`MAX_TEXT_BYTES`] ([`Tree::text_cut`]) and text dropped from elements
+//! that have child elements ([`Tree::dropped_text`]). The mappers (Tasks 4
+//! and 10) turn these into report lines.
+//!
+//! It accepts what the parser accepts beyond that: `<` in attribute values,
+//! control characters such as NUL and U+FFFE in text and values, and names
+//! that are not XML names. Consumers must sanitize every text and value
+//! (`text::sanitize`) before showing or storing it.
 
 use crate::IoError;
-use crate::limits::{MAX_NUMBER_CHARS, MAX_TEXT_BYTES, MAX_XML_ATTRS, PackageLimits};
+use crate::limits::{
+    MAX_NUMBER_CHARS, MAX_TEXT_BYTES, MAX_XML_ATTRS, MAX_XML_NAME_BYTES, PackageLimits,
+};
 use crate::zip::damaged;
 use quick_xml::XmlVersion;
 use quick_xml::errors::Error as XmlError;
@@ -34,6 +48,8 @@ const CHECK_EVERY: u64 = 65_536;
 const RAW_ATTR_FACTOR: usize = 8;
 /// No node, child or text.
 const NONE: u32 = u32::MAX;
+/// Set in [`Node::text`] when the text was cut at [`MAX_TEXT_BYTES`].
+const CUT: u32 = 1 << 31;
 
 const DOCTYPE: &str = "it declares a document type";
 const ENTITY: &str = "it uses an unknown entity";
@@ -65,7 +81,7 @@ struct Node {
     first_attr: u32,
     first_child: u32,
     next_sibling: u32,
-    /// Index into `Tree::texts`, or [`NONE`].
+    /// Index into `Tree::texts`, with [`CUT`] if it was cut; or [`NONE`].
     text: u32,
 }
 
@@ -87,6 +103,7 @@ pub struct Tree {
     nodes: Vec<Node>,
     attrs: Vec<AttrRec>,
     texts: Vec<Span>,
+    dropped_text: usize,
 }
 
 /// One element open during the parse.
@@ -194,6 +211,10 @@ struct Builder {
     pending: String,
     /// Whether the innermost element has had a child element.
     has_child: bool,
+    /// Whether `pending` was cut at [`MAX_TEXT_BYTES`].
+    pending_cut: bool,
+    /// Whether a run of dropped non-whitespace text is under way.
+    dropping: bool,
     root_done: bool,
     max_depth: usize,
     max_nodes: usize,
@@ -271,7 +292,13 @@ impl Builder {
             node: id,
             last_child: NONE,
         });
+        // The parent's text so far is mixed content: dropped.
+        if !is_xml_space(&self.pending) {
+            self.tree.dropped_text = self.tree.dropped_text.saturating_add(1);
+        }
         self.pending.clear();
+        self.pending_cut = false;
+        self.dropping = false;
         self.has_child = false;
         Ok(())
     }
@@ -287,12 +314,18 @@ impl Builder {
             self.pending = text;
             self.pending.clear();
             let at = index(self.tree.texts.len())?;
+            if at >= CUT {
+                return Err(damaged(TOO_MANY));
+            }
             self.budget.room(&mut self.tree.texts, 1)?;
             self.tree.texts.push(span);
             if let Some(n) = self.tree.nodes.get_mut(frame.node as usize) {
-                n.text = at;
+                n.text = if self.pending_cut { at | CUT } else { at };
             }
         }
+        self.pending.clear();
+        self.pending_cut = false;
+        self.dropping = false;
         // The parent has had this child.
         self.has_child = true;
         if self.stack.is_empty() {
@@ -301,8 +334,11 @@ impl Builder {
         Ok(())
     }
 
-    /// Text inside or around the root.
-    fn text(&mut self, s: &str) -> Result<(), IoError> {
+    /// Text inside or around the root, as written (`eol`: with line ends
+    /// still to normalise; a reference's character is not). Only what fits
+    /// in `pending` is ever looked at past the first checks, so a huge text
+    /// costs no copy.
+    fn text(&mut self, s: &str, eol: bool) -> Result<(), IoError> {
         if self.stack.is_empty() {
             return if is_xml_space(s) {
                 Ok(())
@@ -311,14 +347,27 @@ impl Builder {
             };
         }
         if self.has_child {
+            if !self.dropping && !is_xml_space(s) {
+                self.dropping = true;
+                self.tree.dropped_text = self.tree.dropped_text.saturating_add(1);
+            }
             return Ok(());
         }
-        let room = MAX_TEXT_BYTES.saturating_sub(self.pending.len());
-        let mut cut = s.len().min(room);
-        while !s.is_char_boundary(cut) {
-            cut = cut.saturating_sub(1);
+        if self.pending_cut {
+            return Ok(());
         }
-        self.pending.push_str(s.get(..cut).unwrap_or_default());
+        let mut chars = s.chars().peekable();
+        while let Some(mut c) = chars.next() {
+            if eol && c == '\r' {
+                chars.next_if_eq(&'\n');
+                c = '\n';
+            }
+            if self.pending.len().saturating_add(c.len_utf8()) > MAX_TEXT_BYTES {
+                self.pending_cut = true;
+                break;
+            }
+            self.pending.push(c);
+        }
         Ok(())
     }
 
@@ -339,7 +388,7 @@ impl Builder {
             Err(_) => return Err(damaged(BROKEN)),
         };
         let mut buf = [0u8; 4];
-        self.text(c.encode_utf8(&mut buf))
+        self.text(c.encode_utf8(&mut buf), false)
     }
 }
 
@@ -430,8 +479,22 @@ impl Tree {
     /// [`MAX_TEXT_BYTES`]); otherwise empty.
     pub fn text(&self, n: NodeId) -> &str {
         self.node(n)
-            .and_then(|node| self.texts.get(node.text as usize))
+            .filter(|node| node.text != NONE)
+            .and_then(|node| self.texts.get((node.text & !CUT) as usize))
             .map_or("", |s| self.span(*s))
+    }
+
+    /// Whether the element's text was cut at [`MAX_TEXT_BYTES`].
+    pub fn text_cut(&self, n: NodeId) -> bool {
+        self.node(n)
+            .is_some_and(|node| node.text != NONE && node.text & CUT != 0)
+    }
+
+    /// How many runs of non-whitespace text were dropped because their
+    /// element has child elements (mixed content). Whitespace is layout and
+    /// is not counted.
+    pub fn dropped_text(&self) -> usize {
+        self.dropped_text
     }
 
     /// How many elements the tree holds (a parsed tree holds its root).
@@ -453,6 +516,9 @@ fn parse_observed(
     }
     let text = text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(text);
     let text = std::str::from_utf8(text).map_err(|_| damaged(NOT_UTF8))?;
+    if !names_fit(text.as_bytes()) {
+        return Err(damaged(BROKEN));
+    }
     let mut reader = quick_xml::Reader::from_str(text);
     {
         let c = reader.config_mut();
@@ -468,6 +534,7 @@ fn parse_observed(
             nodes: Vec::new(),
             attrs: Vec::new(),
             texts: Vec::new(),
+            dropped_text: 0,
         },
         budget: Budget {
             used: 0,
@@ -476,6 +543,8 @@ fn parse_observed(
         stack: Vec::new(),
         pending: String::new(),
         has_child: false,
+        pending_cut: false,
+        dropping: false,
         root_done: false,
         max_depth: limits.max_depth,
         max_nodes: limits.max_nodes,
@@ -496,14 +565,16 @@ fn parse_observed(
                 b.close()?;
             }
             Event::End(_) => b.close()?,
-            Event::Text(t) => b.text(&t.xml_content(XmlVersion::Implicit1_0))?,
+            Event::Text(t) => b.text(&t, true)?,
             Event::CData(t) => {
                 if b.stack.is_empty() {
                     return Err(damaged(BROKEN));
                 }
-                b.text(&t.xml_content(XmlVersion::Implicit1_0))?;
+                b.text(&t, true)?;
             }
             Event::GeneralRef(r) => b.reference(&r)?,
+            // A declaration only as the very first thing.
+            Event::Decl(_) if events > 1 => return Err(damaged(BROKEN)),
             Event::Decl(d) => match d.encoding() {
                 None => {}
                 Some(Ok(enc)) if enc.eq_ignore_ascii_case("utf-8") => {}
@@ -519,6 +590,83 @@ fn parse_observed(
         return Err(damaged(BROKEN));
     }
     Ok(b.tree)
+}
+
+fn is_space_byte(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+/// Whether every element and attribute name in `b` is at most
+/// [`MAX_XML_NAME_BYTES`], measured as the parser will see it: an element
+/// name runs to whitespace or the tag's unquoted `>` (less a closing `/`).
+/// One pass, no allocation. Names inside comments and CDATA are measured
+/// too (a hostile-only false refusal); `<!` and `<?` markup is not a name.
+fn names_fit(b: &[u8]) -> bool {
+    let find = |from: usize, byte: u8| {
+        b.get(from..)
+            .and_then(|r| r.iter().position(|&c| c == byte))
+            .map(|p| from.saturating_add(p))
+    };
+    let mut i = 0;
+    while let Some(lt) = find(i, b'<') {
+        i = lt.saturating_add(1);
+        match b.get(i) {
+            Some(b'!' | b'?') => continue,
+            Some(b'/') => i = i.saturating_add(1),
+            _ => {}
+        }
+        // The element name, as the parser takes it (quotes and all).
+        let start = i;
+        loop {
+            match b.get(i) {
+                None => return i.saturating_sub(start) <= MAX_XML_NAME_BYTES,
+                Some(&c) if is_space_byte(c) || c == b'>' => break,
+                Some(&q @ (b'"' | b'\'')) => match find(i.saturating_add(1), q) {
+                    Some(end) => i = end.saturating_add(1),
+                    None => i = b.len(),
+                },
+                Some(_) => i = i.saturating_add(1),
+            }
+            if i.saturating_sub(start) > MAX_XML_NAME_BYTES.saturating_add(1) {
+                return false;
+            }
+        }
+        let mut len = i.saturating_sub(start);
+        if b.get(i) == Some(&b'>') && i > start && b.get(i.saturating_sub(1)) == Some(&b'/') {
+            len = len.saturating_sub(1);
+        }
+        if len > MAX_XML_NAME_BYTES {
+            return false;
+        }
+        // The attributes, to the tag's end; values are skipped whole.
+        loop {
+            match b.get(i) {
+                None => return true,
+                Some(b'>') => {
+                    i = i.saturating_add(1);
+                    break;
+                }
+                Some(b'<') => break,
+                Some(&q @ (b'"' | b'\'')) => match find(i.saturating_add(1), q) {
+                    Some(end) => i = end.saturating_add(1),
+                    None => return true,
+                },
+                Some(&c) if is_space_byte(c) || c == b'/' || c == b'=' => i = i.saturating_add(1),
+                Some(_) => {
+                    let start = i;
+                    while b.get(i).is_some_and(|&c| {
+                        !is_space_byte(c) && !matches!(c, b'/' | b'=' | b'>' | b'<' | b'"' | b'\'')
+                    }) {
+                        i = i.saturating_add(1);
+                        if i.saturating_sub(start) > MAX_XML_NAME_BYTES {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// The XSD `double` lexical form without its special values: an optional
@@ -622,7 +770,8 @@ pub fn fmt_double(v: f64) -> String {
 pub enum Attr<'a> {
     /// Text, escaped.
     Str(&'a str),
-    /// A number, by [`fmt_double`].
+    /// A number, by [`fmt_double`]. The caller checks it is finite first:
+    /// a NaN or infinity is a bug (a debug assertion) and is written "0".
     F64(f64),
     /// An integer.
     I64(i64),
