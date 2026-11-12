@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        170,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report"
+        171,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1923,6 +1923,62 @@ fn interchange_commands_check_their_params() {
             .params
             .is_empty()
     );
+}
+
+/// Plan 6b Task 3: `file.export_for_daw` checks its parameters; a missing
+/// path passes here and the app answers it (Save, unless `dry_run`).
+#[test]
+fn export_for_daw_checks_its_params() {
+    let run = |params: Value| json!({ "id": "file.export_for_daw", "params": params });
+    let good = [
+        json!({ "path": "/tmp/x" }),
+        json!({ "dry_run": true }),
+        json!({ "path": "/tmp/x", "seq": 1, "strips": "3,5", "container": "aiff", "depth": "16",
+                "rate": 44100, "dither": true, "add_to_project": true, "dry_run": false }),
+        json!({ "path": "/tmp/x", "strips": "none", "container": "caf", "depth": "32f", "rate": 8000 }),
+        json!({ "path": "/tmp/x", "container": "wav", "depth": "24", "rate": 384000 }),
+    ];
+    for params in good {
+        assert!(
+            matches!(
+                ok("command.run", run(params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{params}"
+        );
+    }
+    let bad = [
+        json!({ "path": "/tmp/x", "container": "mp3" }),
+        json!({ "path": "/tmp/x", "depth": "8" }),
+        json!({ "path": "/tmp/x", "depth": 16 }),
+        json!({ "path": "/tmp/x", "rate": 0 }),
+        json!({ "path": "/tmp/x", "rate": 7999 }),
+        json!({ "path": "/tmp/x", "rate": 384001 }),
+        json!({ "path": "/tmp/x", "rate": "44100" }),
+        json!({ "path": "relative" }),
+        json!({ "path": "/tmp/a\u{0}b" }),
+        json!({ "path": "/tmp/x", "seq": -1 }),
+        json!({ "path": "/tmp/x", "strips": ["1"] }),
+        json!({ "path": "/tmp/x", "dither": "yes" }),
+        json!({ "path": "/tmp/x", "replace": true }),
+        json!({ "path": "/tmp/x", "extra": 1 }),
+    ];
+    for params in bad {
+        let (code, _) = err("command.run", run(params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}");
+    }
+    // No path passes here; the app answers the Save dialog (as for
+    // `file.export_midi`), so the registry must say it will.
+    assert!(matches!(
+        ok("command.run", run(json!({}))),
+        Command::CommandRun { .. }
+    ));
+    let spec = registry::find("file.export_for_daw").expect("registered");
+    assert!(spec.document && spec.menu == "File" && spec.title == "For Another DAW…");
+    assert_eq!(spec.dialogs.len(), 1);
+    let d = &spec.dialogs[0];
+    assert!(d.name == "Save" && !d.always && d.answered_by == ["path"]);
+    assert_eq!(d.when, "no path and no dry_run");
 }
 
 /// Plan 5f-3 (Ruling 5): `region.open_external` takes an optional

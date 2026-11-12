@@ -316,4 +316,107 @@ import VizDAWCore
         #expect(ControlJobs.answer(row(.importMidi, .failed)) == .failed("boom"))
         #expect(ControlJobs.answer(row(.exportMidi, .cancelled)) == .failed("boom; already written: /tmp/a.mid"))
     }
+
+    // MARK: file.export_for_daw (plan 6b Task 3)
+
+    func forDawCalls(_ f: FakeSession) -> Int { f.forDawChecks.count + f.forDawExports.count }
+
+    @Test func forDawBuildsTheRequest() throws {
+        let (s, id, m, f) = try demo()
+        let seq = try #require(m.selectedSeq)
+        guard
+            case .job(let command, let doc, _) = run(
+                InterchangeCommands.exportForDaw,
+                [
+                    ("path", .text(value: "/tmp/out")), ("strips", .text(value: "3,5")),
+                    ("container", .text(value: "aiff")), ("depth", .text(value: "16")), ("rate", .int(value: 44100)),
+                    ("add_to_project", .flag(value: true)),
+                ], m, s, id)
+        else { Issue.record("not a job"); return }
+        #expect(command == "file.export_for_daw" && doc == id)
+        #expect(
+            f.forDawExports.last
+                == ForDawRequestRow(
+                    seq: seq, strips: [3, 5], container: .aiff, depth: .int16, rate: 44100, dither: true,
+                    path: "/tmp/out", addToProject: true))
+        // The defaults: the project's rate and depth, WAV, the usual strips, no dither at 32f.
+        _ = run(InterchangeCommands.exportForDaw, [("path", .text(value: "/tmp/out"))], m, s, id)
+        let d = try #require(f.forDawExports.last)
+        #expect(d.seq == seq && d.strips == nil && d.container == .wav && d.rate == 48_000 && d.depth == .int24)
+        #expect(!d.addToProject)
+        _ = run(
+            InterchangeCommands.exportForDaw,
+            [("path", .text(value: "/tmp/out")), ("strips", .text(value: "none")), ("depth", .text(value: "32f")), ("seq", .int(value: 2))],
+            m, s, id)
+        let n = try #require(f.forDawExports.last)
+        #expect(n.strips == [] && n.depth == .float32 && !n.dither && n.seq == 2)
+        _ = run(
+            InterchangeCommands.exportForDaw,
+            [("path", .text(value: "/tmp/out")), ("depth", .text(value: "16")), ("dither", .flag(value: false))], m, s, id)
+        #expect(f.forDawExports.last?.dither == false)
+    }
+
+    @Test func forDawChecksItsArguments() throws {
+        let (s, id, m, f) = try demo()
+        for bad in ["1,,2", "a", "1,1", "", "1,", ",1", "-1", "1 2", "none,1", "99999999999999999999"] {
+            let o = run(
+                InterchangeCommands.exportForDaw, [("path", .text(value: "/tmp/out")), ("strips", .text(value: bad))], m, s, id)
+            let fail = failure(o)
+            #expect(fail?.code == .invalidParams, "strips \(bad)")
+            #expect(fail?.message.contains("file.export_for_daw") == true && fail?.message.contains("strips") == true, "\(bad)")
+        }
+        // The same refusals on a dry run.
+        let dry = failure(
+            run(InterchangeCommands.exportForDaw, [("dry_run", .flag(value: true)), ("strips", .text(value: "1,1"))], m, s, id))
+        #expect(dry?.code == .invalidParams)
+        #expect(forDawCalls(f) == 0)
+    }
+
+    @Test func forDawDryRunWritesNothing() async throws {
+        let (s, id, m, f) = try demo()
+        let report = ReportRow(summary: "Would export 3 files", items: [])
+        f.forDawCheckAnswer = .success(
+            ForDawCheckRow(
+                report: report, folder: "Song for another DAW", files: ["a.mid"], strips: [], start: "Every file starts at bar 1.",
+                frames: 0, warning: nil))
+        for withPath in [false, true] {
+            let args: [(String, ControlValue)] =
+                [("dry_run", .flag(value: true))] + (withPath ? [("path", .text(value: "/tmp/out"))] : [])
+            let o = run(InterchangeCommands.exportForDaw, args, m, s, id)
+            guard case .pending = o else { Issue.record("not off the main thread: \(args)"); return }
+            guard case .done(let r) = await settled(o),
+                case .interchange(let command, let doc, let window, _, let got, let written) = r
+            else { Issue.record("not an interchange result"); return }
+            #expect(command == "file.export_for_daw" && doc == id.uuidString && window == nil)
+            #expect(got == report && written.isEmpty)
+        }
+        #expect(f.forDawChecks.count == 2 && f.forDawExports.isEmpty)
+        #expect(f.forDawChecks.map(\.path) == ["", "/tmp/out"])
+        #expect(f.checkOnMain.allSatisfy { !$0 }, "checked off the main thread")
+        f.forDawCheckAnswer = .failure(VizError.Model(message: "no room"))
+        let refused = failure(
+            await settled(run(InterchangeCommands.exportForDaw, [("dry_run", .flag(value: true))], m, s, id)))
+        #expect(refused?.code == .failed && refused?.message.contains("no room") == true)
+        #expect(f.forDawExports.isEmpty && calls(f) == 0)
+    }
+
+    @Test func forDawWithoutPathAsksForSave() throws {
+        let (s, id, m, f) = try demo()
+        for args: [(String, ControlValue)] in [[], [("dry_run", .flag(value: false))], [("container", .text(value: "caf"))]] {
+            let d = failure(run(InterchangeCommands.exportForDaw, args, m, s, id))
+            #expect(d?.code == .dialogRequired && d?.dialog == "Save")
+            #expect(d?.message.contains("`path`") == true)
+        }
+        #expect(forDawCalls(f) == 0)
+    }
+
+    @Test func forDawJobsAnswerWithTheirSummary() {
+        let done = JobRow(
+            id: 1, kind: .exportProject, progress: 1, state: .done, message: "boom", problems: ["clipped"], created: [],
+            report: ReportRow(summary: "Exported 3 files", items: []), written: ["/tmp/a.mid"])
+        #expect(ControlJobs.answer(done) == .ok(status: "Exported 3 files"))
+        var cancelled = done
+        cancelled.state = .cancelled
+        #expect(ControlJobs.answer(cancelled) == .failed("boom; clipped; already written: /tmp/a.mid"))
+    }
 }

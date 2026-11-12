@@ -1,8 +1,8 @@
 import Foundation
 import VizDAWCore
 
-/// `file.import_midi`, `file.export_midi`, `file.export_midi_clip` and
-/// `file.interchange_report` over the control channel (plan 6a Task 8): the
+/// `file.import_midi`, `file.export_midi`, `file.export_midi_clip`,
+/// `file.export_for_daw` and `file.interchange_report` over the control channel (plan 6a Task 8): the
 /// Open and Save dialogs' answers as parameters, checked here before the
 /// core sees them; the core checks the destinations.
 ///
@@ -10,7 +10,8 @@ import VizDAWCore
 /// `{"group", "channel", "dest"}` (group and channel 0 to 15, `dest` an ID or
 /// null, each pair once), `lanes` that is not track IDs separated by commas
 /// (each once), `start` without `end`, or `start` not before `end` is
-/// `invalid_params` and never reaches the session. A missing `path` is
+/// `invalid_params` and never reaches the session (so is `strips` that is not
+/// strip IDs or `none`, or repeats one). A missing `path` is
 /// `dialog_required` ("Open" or "Save") unless `dry_run` is set. Nothing here
 /// opens a panel, a sheet or a window. Nothing here reads a file or renders
 /// on the main thread either: a `new_project` import's first read and a
@@ -20,7 +21,8 @@ import VizDAWCore
 public enum InterchangeCommands {
     public static let importMidi = "file.import_midi", exportMidi = "file.export_midi"
     public static let exportClip = "file.export_midi_clip", report = "file.interchange_report"
-    public static let ids: Set<String> = [importMidi, exportMidi, exportClip, report]
+    public static let exportForDaw = "file.export_for_daw"
+    public static let ids: Set<String> = [importMidi, exportMidi, exportClip, exportForDaw, report]
 
     /// So `parse` can answer a `Result`.
     typealias Parsed<T> = Result<T, ControlFailure>
@@ -175,6 +177,51 @@ public enum InterchangeCommands {
                 start: start, end: end))
     }
 
+    /// The export for another DAW `args` ask for; `path` is "" for a check.
+    /// Defaults: the shown sequence, WAV at the project's rate and depth,
+    /// the usual strips, dither on at 16 bits only.
+    static func forDawRequest(_ args: [ControlArg], _ m: DocumentModel) -> Parsed<ForDawRequestRow> {
+        let id = exportForDaw
+        let seq: UInt64
+        switch seqArg(args, id, m) {
+        case .failure(let f): return .failure(f)
+        case .success(let s): seq = s
+        }
+        var strips: [UInt64]?
+        if let text = args.text("strips") {
+            strips = []
+            if text != "none" {
+                for part in text.split(separator: ",", omittingEmptySubsequences: false) {
+                    guard !part.isEmpty, part.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) }),
+                        let n = UInt64(part)
+                    else { return bad(id, "`strips` is strip IDs separated by commas, e.g. \"1,2\", or none") }
+                    guard strips?.contains(n) == false else { return bad(id, "`strips` lists strip \(n) twice") }
+                    strips?.append(n)
+                }
+            }
+        }
+        let base = (try? m.session.projectInfo().format) ?? ProjectFormatRow(sampleRate: 48_000, depth: .int24)
+        let container: ContainerRow
+        switch args.text("container") {
+        case "aiff": container = .aiff
+        case "caf": container = .caf
+        default: container = .wav
+        }
+        let depth: BitDepthRow
+        switch args.text("depth") {
+        case "16": depth = .int16
+        case "24": depth = .int24
+        case "32f": depth = .float32
+        default: depth = base.depth
+        }
+        let rate = args.int("rate").flatMap { UInt32(exactly: $0) } ?? base.sampleRate
+        let dither = depth == .float32 ? false : (args.flag("dither") ?? (depth == .int16))
+        return .success(
+            ForDawRequestRow(
+                seq: seq, strips: strips, container: container, depth: depth, rate: rate, dither: dither,
+                path: args.text("path") ?? "", addToProject: args.flag("add_to_project") ?? false))
+    }
+
     /// Projects `file.import_midi` made whose job has not ended.
     private static var madeProjects = Set<UUID>()
 
@@ -276,6 +323,21 @@ public enum InterchangeCommands {
                     if case .failure(let error) = read { return .failed(.thrown(error, "Import Failed")) }
                     return importIntoNewProject(request, pickSeq: pickSeq, store: store)
                 })
+        case exportForDaw:
+            let dryRun = args.flag("dry_run") ?? false
+            let req: ForDawRequestRow
+            switch forDawRequest(args, m) {
+            case .failure(let f): return .failed(f)
+            case .success(let r): req = r
+            }
+            let session = m.session
+            if dryRun { return Self.dryRun(id, docID, m) { try session.exportForDawCheck(req: req).report } }
+            guard path != nil else { return .failed(.dialog("Save", "path")) }
+            do {
+                return .job(command: id, doc: docID, job: try session.exportForDaw(req: req))
+            } catch {
+                return .failed(.thrown(error, "Export Failed"))
+            }
         case exportMidi, exportClip:
             let dryRun = args.flag("dry_run") ?? false
             guard dryRun || path != nil else { return .failed(.dialog("Save", "path")) }

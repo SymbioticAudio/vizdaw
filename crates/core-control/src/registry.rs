@@ -661,6 +661,71 @@ const EXPORT_MIDI_CLIP_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `file.export_for_daw` (plan 6b Task 3): an export folder for another DAW.
+/// It never replaces anything: an existing folder's name gets " 2".
+const FOR_DAW_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The folder to put the export folder in (answers the Save dialog; needed unless dry_run). An existing export folder is never replaced: the new one is numbered.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "strips",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Strip IDs whose stems are written, comma-separated, or none for MIDI files only (default: the usual strips).",
+    },
+    ParamSpec {
+        name: "container",
+        kind: ParamKind::Choice(&["wav", "aiff", "caf"]),
+        required: false,
+        help: "The stems' file type: wav (default), aiff or caf.",
+    },
+    ParamSpec {
+        name: "depth",
+        kind: ParamKind::Choice(&["16", "24", "32f"]),
+        required: false,
+        help: "The stems' bit depth: 16, 24 or 32f (default: the project's).",
+    },
+    ParamSpec {
+        name: "rate",
+        kind: ParamKind::Int {
+            min: 8000,
+            max: 384000,
+        },
+        required: false,
+        help: "The stems' sample rate in Hz (default: the project's).",
+    },
+    ParamSpec {
+        name: "dither",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Dither at 16 and 24 bits (default: on at 16 bits, off for 32f).",
+    },
+    ParamSpec {
+        name: "add_to_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Add the stems to this project as heard (default false); one undo step.",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
 /// A media item by ID (plan 5b).
 const MEDIA_ID: ParamSpec = ParamSpec {
     name: "media",
@@ -1269,6 +1334,22 @@ pub const COMMANDS: &[CommandSpec] = &[
             "file.export_midi_clip",
             "File",
             "MIDI Clip File…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        params: FOR_DAW_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd(
+            "file.export_for_daw",
+            "File",
+            "For Another DAW…",
             None,
             true,
         )
