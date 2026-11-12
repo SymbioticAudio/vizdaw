@@ -24,6 +24,10 @@ pub enum JobKindRow {
     Bounce,
     /// Import an external edit (plan 5f-3).
     ExternalEdit,
+    /// Import a MIDI file (plan 6a).
+    ImportMidi,
+    /// Export MIDI files (plan 6a).
+    ExportMidi,
 }
 
 /// Where a job is.
@@ -56,6 +60,12 @@ pub struct JobRow {
     pub problems: Vec<String>,
     /// Media items it created.
     pub created: Vec<u64>,
+    /// What a MIDI import or export did (plan 6a).
+    #[uniffi(default = None)]
+    pub report: Option<crate::interchange::ReportRow>,
+    /// The absolute paths an export put in place (plan 6a).
+    #[uniffi(default)]
+    pub written: Vec<String>,
 }
 
 /// Where imported audio goes.
@@ -118,6 +128,19 @@ pub enum Work {
         /// What the copy became (more than one item: a file wider than
         /// stereo), or why not.
         file: Result<Vec<Imported>, String>,
+    },
+    /// A parsed MIDI file and where it lands (plan 6a), applied as one
+    /// undo step.
+    ImportMidi {
+        /// The file (boxed: it is large), or why it could not be read.
+        result: Result<Box<core_io::midi_in::MidiImport>, String>,
+        /// Where and how it lands.
+        place: core_io::midi_in::Placement,
+    },
+    /// A MIDI export (plan 6a): its files are already in place.
+    ExportMidi {
+        /// The files written and the report, or why the export failed.
+        result: Result<(Vec<String>, core_io::report::Report), String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,
@@ -325,5 +348,7 @@ pub fn row(
         message,
         problems,
         created,
+        report: None,
+        written: Vec::new(),
     }
 }

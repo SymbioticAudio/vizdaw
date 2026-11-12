@@ -118,3 +118,71 @@ fn opens_the_checked_in_demo_fixture() {
     assert_eq!(snap.sequences.len(), 3);
     assert!(!snap.dirty);
 }
+
+/// The project ID in the package at `p`.
+fn project_id(p: &std::path::Path) -> Option<String> {
+    core_model::file::load(p)
+        .unwrap()
+        .settings()
+        .project_id
+        .clone()
+}
+
+#[test]
+fn save_stamps_a_project_id_and_save_as_keeps_it() {
+    vizdaw_ffi::host::force_offline();
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.vizdaw");
+    let s = Session::new_empty().unwrap();
+    s.save_as(a.to_string_lossy().into_owned()).unwrap();
+    let id = project_id(&a).expect("stamped on the first save");
+    assert!(core_model::document::check_project_id(&id), "{id}");
+    assert!(!s.snapshot().unwrap().dirty);
+    // Save As is the same song: the same ID (Ruling T1-a).
+    let b = dir.path().join("b.vizdaw");
+    s.save_as(b.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(project_id(&b).as_deref(), Some(id.as_str()));
+    s.save().unwrap();
+    assert_eq!(project_id(&b).as_deref(), Some(id.as_str()));
+    s.close().unwrap();
+    let again = Session::open(b.to_string_lossy().into_owned()).unwrap();
+    again.save().unwrap();
+    assert_eq!(project_id(&b).as_deref(), Some(id.as_str()));
+    again.close().unwrap();
+
+    // Another project gets another ID.
+    let c = dir.path().join("c.vizdaw");
+    let other = Session::new_empty().unwrap();
+    other.save_as(c.to_string_lossy().into_owned()).unwrap();
+    assert_ne!(project_id(&c), Some(id.clone()));
+    other.close().unwrap();
+
+    // A version-7 project gets one on its next save.
+    let old = dir.path().join("old.vizdaw");
+    fs::create_dir(&old).unwrap();
+    let json = core_model::file::to_json(&core_model::document::Document::new()).unwrap();
+    let v7 = json.replacen(
+        &format!("\"version\": {}", core_model::file::VERSION),
+        "\"version\": 7",
+        1,
+    );
+    assert_ne!(v7, json, "the version was rewritten");
+    fs::write(old.join("project.json"), v7).unwrap();
+    assert_eq!(project_id(&old), None);
+    let s = Session::open(old.to_string_lossy().into_owned()).unwrap();
+    s.save().unwrap();
+    let stamped = project_id(&old).expect("stamped");
+    assert!(core_model::document::check_project_id(&stamped));
+    s.close().unwrap();
+
+    // A save while an edit is open skips the stamp; the next save stamps.
+    let d = dir.path().join("d.vizdaw");
+    let s = Session::new_empty().unwrap();
+    s.begin_edit("Drag".into()).unwrap();
+    s.save_as(d.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(project_id(&d), None);
+    s.end_edit().unwrap();
+    s.save().unwrap();
+    assert!(project_id(&d).is_some_and(|i| core_model::document::check_project_id(&i)));
+    s.close().unwrap();
+}

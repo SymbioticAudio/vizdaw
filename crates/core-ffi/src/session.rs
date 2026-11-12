@@ -203,6 +203,8 @@ pub(crate) struct Inner {
     bounce_copies: Option<(u64, u64)>,
     /// Finished bounces' files and media, by job (Ruling 10).
     bounce_results: std::collections::BTreeMap<u64, crate::bounce::BounceResultRow>,
+    /// The last MIDI import's or export's report (plan 6a; runtime only).
+    interchange_report: Option<crate::interchange::ReportRow>,
     /// Each region's external-edit copy while the project is open (plan
     /// 5f-3 Ruling 3; runtime only): retention keeps them, close lets them go.
     edits: std::collections::BTreeMap<core_model::ids::EventId, crate::external::EditCopy>,
@@ -330,6 +332,7 @@ impl Inner {
             meters: Default::default(),
             bounce_copies: None,
             bounce_results: Default::default(),
+            interchange_report: None,
             edits: Default::default(),
             edits_writing: 0,
             mpe_owed: Default::default(),
@@ -854,7 +857,16 @@ impl Session {
 
     /// Saves to `path`: plugin states captured first (`Busy`, with
     /// nothing written, when a plugin call is on the stack).
+    ///
+    /// A document without a project ID gets one first, in every version of
+    /// the history; not inside an open edit, where the next save stamps it
+    /// (plan 6a Ruling 16, F23). Save As keeps it (Ruling T1-a).
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
+        if inner.doc().settings().project_id.is_none() && !inner.history.in_transaction() {
+            inner
+                .history
+                .stamp_project_id(&crate::project_id::fresh())?;
+        }
         let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
         let mut refs = inner.history.referenced_media_anywhere();
@@ -3296,6 +3308,11 @@ impl Session {
         host::debug_input_changes(self.id)
     }
 
+    /// The document as `project.json` text (test hook, plan 6a).
+    pub fn debug_document_json(&self) -> String {
+        core_model::file::to_json(lock(&self.inner).doc()).unwrap_or_default()
+    }
+
     /// True when every job thread has ended, applied or not (test hook).
     pub fn debug_jobs_settled(&self) -> bool {
         lock(&self.inner).jobs.settled()
@@ -4029,6 +4046,9 @@ pub(crate) fn discard(
             .collect(),
         // What an external edit imported; its copy stays (plan 5f-3).
         Work::ExternalEdit { file, .. } => file.into_iter().flatten().map(|i| i.path).collect(),
+        // An import wrote nothing; an export's files are in place and its
+        // partials already gone (plan 6a).
+        Work::ImportMidi { .. } | Work::ExportMidi { .. } => Vec::new(),
         Work::Cancelled => Vec::new(),
     };
     for f in files {
@@ -4128,6 +4148,40 @@ impl Session {
                         ),
                     }
                 }
+                Work::ImportMidi { result, place } => {
+                    let applied = result
+                        .map_err(|message| VizError::Model { message })
+                        .and_then(|imp| apply_midi_import(inner, &imp, place));
+                    match applied {
+                        Ok(report) => {
+                            changed = true;
+                            let report = crate::interchange::report_row(&report, "Imported");
+                            inner.interchange_report = Some(report.clone());
+                            let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+                            r.report = Some(report);
+                            r
+                        }
+                        Err(e) => row(
+                            id,
+                            kind,
+                            JobStateRow::Failed,
+                            Some(e.to_string()),
+                            vec![],
+                            vec![],
+                        ),
+                    }
+                }
+                Work::ExportMidi { result } => match result {
+                    Ok((written, report)) => {
+                        let report = crate::interchange::report_row(&report, "Exported");
+                        inner.interchange_report = Some(report.clone());
+                        let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+                        r.report = Some(report);
+                        r.written = written;
+                        r
+                    }
+                    Err(why) => row(id, kind, JobStateRow::Failed, Some(why), vec![], vec![]),
+                },
                 Work::Relink { files } => {
                     let (done, problems) = apply_relink(inner, &root, files);
                     changed |= !done.is_empty();
@@ -4180,6 +4234,48 @@ impl Session {
         }
         self.apply_pending_pass(inner);
     }
+}
+
+/// Applies a parsed MIDI file (plan 6a): into the project as one undo step
+/// "Import MIDI File", or as a new project through a scratch history that
+/// then replaces the session's, leaving nothing to undo (Ruling 6). Into a
+/// sequence without events the file's tempo and meter are used whatever
+/// `use_tempo` says. On an error (or a panic) nothing changes.
+fn apply_midi_import(
+    inner: &mut Inner,
+    imp: &core_io::midi_in::MidiImport,
+    mut place: core_io::midi_in::Placement,
+) -> Result<core_io::report::Report, VizError> {
+    const LABEL: &str = "Import MIDI File";
+    let s = inner.doc().sequence(place.seq)?;
+    place.use_tempo |= s
+        .lanes
+        .iter()
+        .all(|l| l.takes.iter().all(|t| t.events.is_empty()));
+    let mut report = core_io::report::Report::default();
+    let run = |h: &mut History, report: &mut core_io::report::Report| -> Result<(), VizError> {
+        h.begin(LABEL)?;
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            core_io::midi_in::apply(h, imp, &place, report)
+        }));
+        let failed = match applied {
+            Ok(Ok(_)) => return h.commit().map_err(VizError::from),
+            Ok(Err(e)) => VizError::from(e),
+            Err(p) => VizError::Internal {
+                message: crate::guard::panic_message(p.as_ref()),
+            },
+        };
+        let _ = h.abort();
+        Err(failed)
+    };
+    if place.new_project {
+        let mut scratch = History::new(inner.doc().clone());
+        run(&mut scratch, &mut report)?;
+        inner.history = History::new(scratch.doc().clone());
+    } else {
+        run(&mut inner.history, &mut report)?;
+    }
+    Ok(report)
 }
 
 /// One import job's result per source file: `(file name, the items it
@@ -8763,6 +8859,177 @@ impl Session {
             self.apply_jobs(&mut inner);
             Ok(inner.bounce_results.get(&job).cloned())
         })
+    }
+}
+
+/// MIDI files (plan 6a): import and export jobs, their checks, the last
+/// report and song info.
+#[uniffi::export]
+impl Session {
+    /// What the import sheet shows for the file at `path` (read and parsed
+    /// here, off the session lock; the app calls it off the main actor,
+    /// F12): its kind, tracks, channels with their suggested destinations,
+    /// tempo and MPE. `Model` for a path, file or content refused; `Io` for
+    /// a failed read.
+    pub fn midi_file_info(
+        &self,
+        path: String,
+    ) -> Result<crate::interchange::MidiFileInfoRow, VizError> {
+        ffi_guard(|| {
+            let p = crate::interchange::file_path(&path)?;
+            let imp = core_io::midi_in::parse_file(
+                &p,
+                &core_io::midi_in::ImportOptions::default(),
+                &core_io::limits::Limits::default(),
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .map_err(crate::interchange::io_error)?;
+            Ok(crate::interchange::file_info(lock(&self.inner).doc(), &imp))
+        })
+    }
+
+    /// Starts importing a MIDI file (plan 6a): the job ID; `job` reports it
+    /// and applies it as one undo step "Import MIDI File" (none as a new
+    /// project, Ruling 6). Every refusal of the request is `Model` with
+    /// nothing read; `Busy` while recording, inside an open edit, and while
+    /// a bounce or another MIDI import or export is unapplied.
+    pub fn import_midi(
+        &self,
+        req: crate::interchange::MidiImportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let plan = crate::interchange::import_plan(inner.doc(), &req)?;
+            self.interchange_idle(&mut inner)?;
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ImportMidi,
+                crate::interchange::import_job(plan),
+            )
+        })
+    }
+
+    /// Starts a Standard MIDI File export of the document as it is now: the
+    /// job ID. Refusals and `Busy` as `import_midi`; the file is written as
+    /// a partial and renamed into place.
+    pub fn export_midi(
+        &self,
+        req: crate::interchange::SmfExportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let opts = crate::interchange::smf_options(inner.doc(), &req)?;
+            let dest =
+                crate::interchange::file_dest(&req.path, req.replace, &self.export_roots(&inner))?;
+            self.interchange_idle(&mut inner)?;
+            let job = crate::interchange::smf_job(inner.doc().clone(), opts, dest, req.replace);
+            inner.jobs.spawn(crate::jobs::JobKindRow::ExportMidi, job)
+        })
+    }
+
+    /// What `export_midi` would report (nothing is written; `path` and
+    /// `replace` are not looked at, F2).
+    pub fn export_midi_check(
+        &self,
+        req: crate::interchange::SmfExportRequestRow,
+    ) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let (doc, opts) = {
+                let inner = lock(&self.inner);
+                let opts = crate::interchange::smf_options(inner.doc(), &req)?;
+                (inner.doc().clone(), opts)
+            };
+            crate::interchange::smf_check(&doc, &opts)
+        })
+    }
+
+    /// Starts a MIDI Clip File export: one file per track (`path` is the
+    /// file for one track, the folder for several, named `NN <track>.midi2`;
+    /// every name is checked first). Refusals and `Busy` as `import_midi`.
+    pub fn export_midi_clip(
+        &self,
+        req: crate::interchange::ClipExportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let plan = crate::interchange::clip_plan(inner.doc(), &req)?;
+            let dests = crate::interchange::clip_dests(&plan, &req, &self.export_roots(&inner))?;
+            self.interchange_idle(&mut inner)?;
+            let job = crate::interchange::clip_job(inner.doc().clone(), plan, dests, req.replace);
+            inner.jobs.spawn(crate::jobs::JobKindRow::ExportMidi, job)
+        })
+    }
+
+    /// What `export_midi_clip` would report (nothing is written; `path`
+    /// and `replace` are not looked at, F2).
+    pub fn export_midi_clip_check(
+        &self,
+        req: crate::interchange::ClipExportRequestRow,
+    ) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let (doc, plan) = {
+                let inner = lock(&self.inner);
+                let plan = crate::interchange::clip_plan(inner.doc(), &req)?;
+                (inner.doc().clone(), plan)
+            };
+            crate::interchange::clip_check(&doc, &plan)
+        })
+    }
+
+    /// The report of this document's last MIDI import or export job, if any.
+    pub fn interchange_report(&self) -> Result<Option<crate::interchange::ReportRow>, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            Ok(inner.interchange_report.clone())
+        })
+    }
+
+    /// The project's song info.
+    pub fn song_info(&self) -> Result<crate::interchange::SongInfoRow, VizError> {
+        ffi_guard(|| Ok((&lock(&self.inner).doc().settings().info).into()))
+    }
+
+    /// Sets the song info, one undo step; `Model` for a field the rules
+    /// refuse (over 4 096 bytes, control characters).
+    pub fn set_song_info(
+        &self,
+        info: crate::interchange::SongInfoRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Settings(SettingsCmd::SetInfo {
+                info: info.into(),
+            }))
+        })
+    }
+}
+
+impl Session {
+    /// Where exports may not write: the media root and the scratch package.
+    fn export_roots(&self, inner: &Inner) -> [PathBuf; 2] {
+        [inner.root(self.id), crate::media::scratch_root(self.id)]
+    }
+
+    /// `Busy` while recording, inside an open edit, or while a bounce or a
+    /// MIDI import or export is unapplied (finished jobs apply first).
+    fn interchange_idle(&self, inner: &mut Inner) -> Result<(), VizError> {
+        if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+            return Err(recording_busy());
+        }
+        if inner.history.in_transaction() {
+            return Err(edit_open_busy());
+        }
+        self.apply_jobs_after_edit(inner);
+        use crate::jobs::JobKindRow;
+        if inner.jobs.pending(&[
+            JobKindRow::Bounce,
+            JobKindRow::ImportMidi,
+            JobKindRow::ExportMidi,
+        ]) {
+            return Err(VizError::Busy {
+                message: "Wait for the running import, export or bounce to finish.".into(),
+            });
+        }
+        Ok(())
     }
 }
 

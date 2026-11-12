@@ -35,6 +35,7 @@ pub mod guard;
 pub mod host;
 pub mod input;
 pub mod input_fx;
+pub mod interchange;
 pub mod jobs;
 pub mod keys;
 pub mod live;
@@ -45,6 +46,7 @@ pub mod mpe;
 pub mod overviews;
 pub mod passes;
 pub mod plugins;
+pub mod project_id;
 pub mod record;
 pub mod recovery;
 pub mod relink;
@@ -104,6 +106,11 @@ pub use format::{BitDepthRow, ProjectFormatRow, ProjectInfoRow, format_label, pr
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
 pub use input_fx::{ArpModeRow, FeelRow, InputFxKindRow, InputFxRow, input_fx_from_json};
+pub use interchange::{
+    ChannelMapRow, ChannelUseRow, ClipExportRequestRow, MidiFileInfoRow, MidiFileKindRow,
+    MidiImportRequestRow, ReportItemRow, ReportKindRow, ReportRow, SmfExportRequestRow,
+    SongInfoRow,
+};
 pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
 pub use live::InputInfoRow;

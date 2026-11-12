@@ -394,7 +394,7 @@ fn tail_frames(ms: u32, rate: u32) -> u64 {
 
 /// Checks a destination path's text (Ruling 3): at most 1024 bytes,
 /// no NUL byte (final review m3), absolute, no `..`.
-fn dest_path(s: &str) -> Result<PathBuf, VizError> {
+pub(crate) fn dest_path(s: &str) -> Result<PathBuf, VizError> {
     if s.len() > MAX_PATH_BYTES {
         return Err(model(format!(
             "the path is longer than {MAX_PATH_BYTES} bytes"
@@ -416,7 +416,7 @@ fn dest_path(s: &str) -> Result<PathBuf, VizError> {
 /// Refuses a `folder` that does not exist or lies inside one of `roots`
 /// (the package and the scratch root) or inside any project package (a
 /// `*.vizdaw` folder; final review T4-M10), after canonicalising it.
-fn outside(folder: &Path, roots: &[PathBuf]) -> Result<(), VizError> {
+pub(crate) fn outside(folder: &Path, roots: &[PathBuf]) -> Result<(), VizError> {
     if !folder.is_dir() {
         return Err(model(format!("{}: no such folder", folder.display())));
     }
@@ -447,7 +447,7 @@ fn outside(folder: &Path, roots: &[PathBuf]) -> Result<(), VizError> {
 
 /// Refuses a file whose partial (`.<name>.partial`, written first) would
 /// be longer than [`MAX_PATH_BYTES`] (final review m3).
-fn partial_fits(file: &Path) -> Result<(), VizError> {
+pub(crate) fn partial_fits(file: &Path) -> Result<(), VizError> {
     if partial_path(file).as_os_str().len() > MAX_PATH_BYTES {
         return Err(model(format!(
             "{}: the path is longer than {MAX_PATH_BYTES} bytes with its partial file; choose a shorter one",

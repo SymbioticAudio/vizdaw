@@ -25,6 +25,7 @@ core-editor = { path = "../core-editor" }
 core-model = { path = "../core-model" }
 core-engine = { path = "../core-engine", features = ["fixtures"] }
 core-host = { path = "../core-host" }
+core-io = { path = "../core-io" }
 core-media = { path = "../core-media" }
 core-surface = { path = "../core-surface" }
 serde = { version = "1", features = ["derive"] }

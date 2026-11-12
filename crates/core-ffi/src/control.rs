@@ -709,6 +709,22 @@ pub enum ControlResult {
         /// The editors' status line afterwards.
         status: Option<String>,
     },
+    /// `file.import_midi`, `file.export_midi`, `file.export_midi_clip` and
+    /// `file.interchange_report` (plan 6a).
+    Interchange {
+        /// Registry ID.
+        command: String,
+        /// The document it acted on or made.
+        doc: String,
+        /// The window it opened (an import as a new project).
+        window: Option<i64>,
+        /// The undo label afterwards.
+        undo_label: Option<String>,
+        /// What the import or export did (or the check would do).
+        report: Option<crate::interchange::ReportRow>,
+        /// The absolute paths an export put in place.
+        written: Vec<String>,
+    },
     /// `state.get transport`.
     Transport {
         /// Document ID.
@@ -1271,6 +1287,17 @@ pub fn result_json(r: &ControlResult) -> Value {
         } => json!({
             "command": command, "doc": doc, "window": window, "undo": undo_label, "status": status,
         }),
+        ControlResult::Interchange {
+            command,
+            doc,
+            window,
+            undo_label,
+            report,
+            written,
+        } => json!({
+            "command": command, "doc": doc, "window": window, "undo": undo_label,
+            "report": report.as_ref().map(report_json), "written": written,
+        }),
         ControlResult::Transport { doc, state } => transport_json(doc, state),
         ControlResult::Media { doc, items } => json!({
             "doc": doc,
@@ -1521,6 +1548,22 @@ pub fn result_json(r: &ControlResult) -> Value {
             elapsed_ms,
         } => json!({ "condition": condition, "elapsed_ms": elapsed_ms }),
     }
+}
+
+/// A report as `{summary, items: [{kind, what, count, details}]}`.
+fn report_json(r: &crate::interchange::ReportRow) -> Value {
+    use crate::interchange::ReportKindRow;
+    json!({
+        "summary": r.summary,
+        "items": r.items.iter().map(|i| json!({
+            "kind": match i.kind {
+                ReportKindRow::Changed => "changed",
+                ReportKindRow::LeftOut => "left_out",
+                ReportKindRow::Note => "note",
+            },
+            "what": i.what, "count": i.count, "details": i.details,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn window_kind(k: WindowKindRow) -> &'static str {

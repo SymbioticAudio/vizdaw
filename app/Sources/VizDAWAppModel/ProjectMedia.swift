@@ -24,6 +24,8 @@ extension ProjectBanner {
         case .convert, .format: "Converting media…"
         case .bounce: "Bouncing…"
         case .externalEdit: "Importing the external edit…"
+        case .importMidi: "Importing the MIDI file…"
+        case .exportMidi: "Exporting MIDI…"
         }
     }
 
@@ -35,6 +37,8 @@ extension ProjectBanner {
         case .convert, .format: "Conversion Failed"
         case .bounce: "Bounce Failed"
         case .externalEdit: "External Edit Failed"
+        case .importMidi: "MIDI Import Failed"
+        case .exportMidi: "MIDI Export Failed"
         }
     }
 }

@@ -448,6 +448,7 @@ dependencies = [
  "core-engine",
  "core-ffi",
  "core-host",
+ "core-io",
  "core-media",
  "core-model",
  "core-surface",

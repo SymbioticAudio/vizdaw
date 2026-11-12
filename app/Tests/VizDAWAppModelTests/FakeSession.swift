@@ -679,6 +679,75 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func bounceResult(job: UInt64) throws -> BounceResultRow? { resultRow }
 
+    // MARK: MIDI files (plan 6a)
+
+    /// What the MIDI calls answer, and what they were called with.
+    var midiInfoRow = MidiFileInfoRow(kind: .smf1, tracks: 0, channels: [], hasTempo: false, mpeFound: false)
+    var midiInfoPaths: [String] = []
+    var midiImports: [MidiImportRequestRow] = []
+    var smfExports: [SmfExportRequestRow] = []
+    var clipExports: [ClipExportRequestRow] = []
+    var smfChecks: [SmfExportRequestRow] = []
+    var clipChecks: [ClipExportRequestRow] = []
+    /// Thrown by every MIDI call that has one set.
+    var interchangeError: VizError?
+    var interchangeCheck = ReportRow(summary: "Exported nothing", items: [])
+    var lastReport: ReportRow?
+    var interchangeReportCalls = 0
+    var song = SongInfoRow(
+        title: nil, artist: nil, album: nil, originalArtist: nil, composer: nil, songwriter: nil,
+        producer: nil, arranger: nil, year: nil, genre: nil, copyright: nil, website: nil, comment: nil)
+    var songInfoSets: [SongInfoRow] = []
+
+    private func interchangeJob(_ kind: JobKindRow, _ base: UInt64, _ n: Int) -> UInt64 {
+        let id = base + UInt64(n)
+        jobRows[id] = JobRow(
+            id: id, kind: kind, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
+            message: nil, problems: [], created: [])
+        return id
+    }
+    func midiFileInfo(path: String) throws -> MidiFileInfoRow {
+        if let e = interchangeError { throw e }
+        midiInfoPaths.append(path)
+        return midiInfoRow
+    }
+    func importMidi(req: MidiImportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        midiImports.append(req)
+        return interchangeJob(.importMidi, 6000, midiImports.count)
+    }
+    func exportMidi(req: SmfExportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        smfExports.append(req)
+        return interchangeJob(.exportMidi, 7000, smfExports.count)
+    }
+    func exportMidiCheck(req: SmfExportRequestRow) throws -> ReportRow {
+        if let e = interchangeError { throw e }
+        smfChecks.append(req)
+        return interchangeCheck
+    }
+    func exportMidiClip(req: ClipExportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        clipExports.append(req)
+        return interchangeJob(.exportMidi, 8000, clipExports.count)
+    }
+    func exportMidiClipCheck(req: ClipExportRequestRow) throws -> ReportRow {
+        if let e = interchangeError { throw e }
+        clipChecks.append(req)
+        return interchangeCheck
+    }
+    func interchangeReport() throws -> ReportRow? {
+        interchangeReportCalls += 1
+        return lastReport
+    }
+    func songInfo() throws -> SongInfoRow { song }
+    func setSongInfo(info: SongInfoRow) throws -> DocSnapshot {
+        if let e = interchangeError { throw e }
+        songInfoSets.append(info)
+        song = info
+        return commandResult()
+    }
+
     // MARK: External sample editor (plan 5f-3)
 
     /// One `applyExternalEdit` call.
