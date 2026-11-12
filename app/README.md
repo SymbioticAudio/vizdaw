@@ -2550,13 +2550,17 @@ X handle and its menu (`RegionEditingTests`), the typed box
 276. Right-click the X. There are four "Crossfade: …" shapes (the current one
      ticked) and Remove Crossfade. Each shape changes the sound, not the
      length, and VoiceOver still names the region with ", crossfade".
-277. In the audio editor with the later region selected, the Crossfade box
+277. Select the later region alone (a click on a crossfaded region's body
+     selects both: click its X handle or its top edge instead, or click it on
+     the Piano Roll's region strip). In the audio editor the Crossfade box
      and shape picker replace Fade In. Type "25 ms", then "1200 frames": both
      land as one Undo step each. Type "abc": the status says how to type a
      fade.
-278. The inspector shows "Crossfade 10 ms, Equal Power" for the region.
-279. Move the later region right until it overlaps the first by less than
-     the crossfade: the crossfade shortens and the status says so. Move it
+278. With that region still selected alone, the inspector shows "Crossfade
+     10 ms, Equal Power" for it.
+279. On the Piano Roll's region strip (a body drag in the arrangement moves
+     both regions), move the later region right until it overlaps the first
+     by less than the crossfade: the crossfade shortens and the status says so. Move it
      past the first region's end: the crossfade goes, with a status line, and
      moving it back does not bring it back (Undo does). Split inside the X:
      refused with its sentence. Split later in the region: the new part has

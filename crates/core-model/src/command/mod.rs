@@ -48,6 +48,10 @@ pub struct Report {
     pub moved: Vec<AnyId>,
     /// Non-fatal notes for the user.
     pub warnings: Vec<String>,
+    /// The warnings that are about one event (a crossfade settled), each
+    /// with that event: a later line about the same event replaces an
+    /// earlier one when notes are merged. The lines are also in `warnings`.
+    pub settled: Vec<(crate::ids::EventId, String)>,
 }
 
 /// The result of applying a command.

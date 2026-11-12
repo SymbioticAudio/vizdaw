@@ -4167,6 +4167,12 @@ fn crossfades_over_the_channel() {
         json!({"id": "region.crossfade", "params": {"seq": seq, "lane": lane, "event": a}, "window": w}),
     );
     assert_eq!(e.code, ErrorCode::Failed, "a starts inside nothing: {e:?}");
+    // Longer than the 1.5 s overlap: refused, nothing changes.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.crossfade", "params": {"seq": seq, "lane": lane, "event": b, "length_ms": "2000"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "past the overlap: {e:?}");
     assert_eq!(undo(&mut app), undo0);
     assert_eq!(window_numbers(&mut app), windows, "no sheet or panel");
 

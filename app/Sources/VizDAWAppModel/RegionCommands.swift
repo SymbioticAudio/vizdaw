@@ -184,13 +184,6 @@ extension RegionCommands {
         return f >= 1 ? UInt64(min(f, 1e15)) : 1
     }
 
-    /// What the edit's settle notes say, kept on the status line (so the
-    /// channel's reply carries them).
-    static func announceNotes(_ m: DocumentModel) {
-        let notes = m.snapshot.editNotes
-        if !notes.isEmpty { m.editor.status = notes.joined(separator: " ") }
-    }
-
     /// Region › Crossfade and its key: the default length, or the overlap
     /// if shorter, equal power, as one edit.
     @discardableResult
@@ -201,7 +194,6 @@ extension RegionCommands {
         guard m.editor.edit(.audio(edit: .crossfade(event: t.row.id, length: length, shape: .equalPower))) else {
             return .refused(m.editor.status ?? "The crossfade was refused.")
         }
-        announceNotes(m)
         return .done
     }
 
@@ -213,7 +205,6 @@ extension RegionCommands {
         guard m.editor.edit(.audio(edit: .removeCrossfade(event: t.row.id))) else {
             return .refused(m.editor.status ?? "Remove Crossfade was refused.")
         }
-        announceNotes(m)
         return .done
     }
 
@@ -291,7 +282,6 @@ extension RegionCommands {
         } catch {
             return .failed(.thrown(error, id == crossfade ? "Crossfade Failed" : "Remove Crossfade Failed"))
         }
-        announceNotes(m)
         return .done(ControlCommands.ran(id, doc, m))
     }
 }

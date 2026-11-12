@@ -219,7 +219,7 @@ pub(crate) struct Inner {
     /// steps of the open edit, waiting for the snapshot `end_edit` returns
     /// (plan 6c pre-flight F1). Every other snapshot carries only its own
     /// command's notes; a conversion's notes live in its job row.
-    last_warnings: Vec<String>,
+    last_warnings: Vec<Note>,
     /// Destinations' mix and MPE configuration batches a full engine
     /// command ring refused, oldest first: `idle` sends them again
     /// (final review m4).
@@ -662,22 +662,37 @@ impl Inner {
     }
 }
 
-/// Adds `new` lines to `notes`, one per region: a later line about the same
-/// region replaces the earlier one (the last step decides what is said).
-fn merge_notes(notes: &mut Vec<String>, new: Vec<String>) {
-    // "Crossfade on region 'x' …" / "Crossfade removed: region 'x' …".
-    fn key(line: &str) -> &str {
-        line.find("region '")
-            .and_then(|i| {
-                let from = i + "region '".len();
-                line.get(from..)?.find("' ").map(|j| &line[..from + j])
-            })
-            .unwrap_or(line)
+/// One edit note: the event it is about (a settled crossfade), if any, and
+/// the line.
+type Note = (Option<core_model::ids::EventId>, String);
+
+/// The report's warning lines as notes.
+fn notes_of(r: core_model::command::Report) -> Vec<Note> {
+    let settled = r.settled;
+    r.warnings
+        .into_iter()
+        .map(|line| {
+            let id = settled.iter().find(|(_, l)| *l == line).map(|(id, _)| *id);
+            (id, line)
+        })
+        .collect()
+}
+
+/// Adds `new` lines to `notes`, one per event: a later line about the same
+/// event replaces the earlier one (the last step decides what is said).
+/// Regions are told apart by id, never by name.
+fn merge_notes(notes: &mut Vec<Note>, new: Vec<Note>) {
+    for n in new {
+        notes.retain(|o| match (o.0, n.0) {
+            (Some(a), Some(b)) => a != b,
+            _ => *o != n,
+        });
+        notes.push(n);
     }
-    for line in new {
-        notes.retain(|n| key(n) != key(&line));
-        notes.push(line);
-    }
+}
+
+fn note_lines(notes: Vec<Note>) -> Vec<String> {
+    notes.into_iter().map(|(_, l)| l).collect()
 }
 
 /// "demo" for `/x/demo.vizdaw`, "Untitled" without a path.
@@ -1096,7 +1111,7 @@ impl Session {
         // Inside an open edit the notes wait for its end (a drag's last
         // step decides what is said).
         if inner.edit_label.is_some() {
-            inner.last_warnings.clone_from(&report.warnings);
+            inner.last_warnings = notes_of(report.clone());
         }
         inner.version += 1;
         // The user's own MPE setting wins over a controller's MCM still
@@ -2444,7 +2459,7 @@ impl Session {
             self.commit_held(&mut inner);
             self.apply_pending_automation(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
-            let notes = std::mem::take(&mut inner.last_warnings);
+            let notes = note_lines(std::mem::take(&mut inner.last_warnings));
             inner.snapshot_with(notes)
         })
     }
@@ -3630,7 +3645,7 @@ impl Session {
             inner.version += 1;
             self.commit_held(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
-            let snapshot = inner.snapshot_with(notes)?;
+            let snapshot = inner.snapshot_with(note_lines(notes))?;
             drop(inner);
             if let Some(seq) = cmds.iter().find_map(crate::edit::claims_engine) {
                 self.claim_for_input(SeqId(seq));
@@ -3663,6 +3678,9 @@ impl Session {
                 inner.history.abort()?;
                 inner.history.begin(label)?;
                 inner.version += 1;
+                // A refused step leaves the rewound document: nothing from
+                // the step before is said about it.
+                inner.last_warnings.clear();
             }
             match self.execute_with(c, &crate::edit::view_filter(filter.as_ref())) {
                 Ok(s) => Ok(s),
@@ -9801,13 +9819,13 @@ impl Session {
             let users = core_model::command::media::regions_using(inner.doc(), id);
             let filter = ViewFilter::default();
             inner.history.begin("Remove Media")?;
-            let run = (|| -> Result<Vec<String>, VizError> {
+            let run = (|| -> Result<Vec<Note>, VizError> {
                 let mut notes = Vec::new();
                 if !users.is_empty() {
                     let r = inner
                         .history
                         .execute(&Command::Event(EventCmd::Delete { events: users }), &filter)?;
-                    merge_notes(&mut notes, r.warnings);
+                    merge_notes(&mut notes, notes_of(r));
                 }
                 let r = inner.history.execute(
                     &Command::Media(MediaCmd::Remove {
@@ -9816,7 +9834,7 @@ impl Session {
                     }),
                     &filter,
                 )?;
-                merge_notes(&mut notes, r.warnings);
+                merge_notes(&mut notes, notes_of(r));
                 Ok(notes)
             })();
             let notes = match run {
@@ -9832,7 +9850,7 @@ impl Session {
             inner.version += 1;
             inner.reload_host(self.id);
             self.mark(&mut inner);
-            inner.snapshot_with(notes)
+            inner.snapshot_with(note_lines(notes))
         })
     }
 

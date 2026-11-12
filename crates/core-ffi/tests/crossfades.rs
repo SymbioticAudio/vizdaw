@@ -663,3 +663,67 @@ fn a_convert_that_shortens_a_crossfade_says_so() {
     );
     assert!(fx.s.snapshot().unwrap().edit_notes.is_empty());
 }
+
+/// Notes are kept per region id: two same-named regions that both lose
+/// their crossfade in one edit are both told, and a shorten followed by a
+/// drop of one region in the same edit shows only the last line.
+#[test]
+fn notes_are_keyed_by_region_not_by_name() {
+    let _g = serial();
+    let fx = fixture();
+    // A second pair on the same track: the same media, so the same names.
+    insert(&fx, fx.lane, 8 * BAR, 0, 48_000).unwrap();
+    insert(&fx, fx.lane, 8 * BAR + Q, 48_000, 48_000).unwrap();
+    let r = regions(&fx.s, fx.seq, fx.lane);
+    assert_eq!(r.len(), 4);
+    let d = r[3].id;
+    for id in [fx.b, d] {
+        fx.s.edit(xfade(id, frames(4_800), FadeShapeRow::Linear), None)
+            .unwrap();
+    }
+    let mv = |id: u64, delta: i64| EditCommand::Event {
+        edit: EventEdit::Move {
+            events: vec![id],
+            delta,
+            to_lane: None,
+        },
+    };
+    // Both pairs are dropped in one edit: one line each.
+    let snap =
+        fx.s.edit_all("Move".into(), vec![mv(fx.b, 2 * BAR), mv(d, 2 * BAR)], None)
+            .unwrap();
+    assert_eq!(snap.edit_notes.len(), 2, "{:?}", snap.edit_notes);
+    fx.s.undo().unwrap();
+    // A shorten, then a drop of the same region: the drop alone is said.
+    let snap =
+        fx.s.edit_all(
+            "Move".into(),
+            vec![mv(fx.b, Q - 1_536), mv(fx.b, 2 * BAR)],
+            None,
+        )
+        .unwrap();
+    assert_eq!(snap.edit_notes.len(), 1, "{:?}", snap.edit_notes);
+    assert!(snap.edit_notes[0].starts_with("Crossfade removed"));
+}
+
+/// A refused gesture step leaves no notes from the step before it.
+#[test]
+fn a_refused_gesture_step_clears_the_notes() {
+    let _g = serial();
+    let fx = fixture();
+    fx.s.edit(xfade(fx.b, frames(4_800), FadeShapeRow::Linear), None)
+        .unwrap();
+    fx.s.begin_edit("Move".into()).unwrap();
+    let step = fx.s.edit_gesture(move_b(&fx, 2 * BAR), None).unwrap();
+    assert_eq!(step.edit_notes.len(), 1);
+    let bad = EditCommand::Event {
+        edit: EventEdit::Move {
+            events: vec![u64::MAX],
+            delta: 1,
+            to_lane: None,
+        },
+    };
+    assert!(fx.s.edit_gesture(bad, None).is_err());
+    let end = fx.s.end_edit().unwrap();
+    assert!(end.edit_notes.is_empty(), "{:?}", end.edit_notes);
+}

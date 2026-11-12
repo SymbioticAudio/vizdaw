@@ -376,7 +376,10 @@ pub(crate) fn settle(old: &Document, new: &mut Document, r: &mut Report) -> Resu
                     Some("no longer starts inside another region on its track."),
                 )
             };
-            r.warnings.extend(line);
+            if let Some(line) = line {
+                r.settled.push((ev.id, line.clone()));
+                r.warnings.push(line);
+            }
             fixes.push(e);
         }
     }
