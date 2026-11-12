@@ -438,54 +438,89 @@ pub(crate) fn role_of(t: &DpTrack) -> TrackRole {
     }
 }
 
-/// Every track of `p`, depth first, without recursion.
-pub(crate) fn all_tracks(p: &DpProject) -> Vec<&DpTrack> {
-    let mut out = Vec::new();
-    let mut stack: Vec<&DpTrack> = p
-        .structure
-        .iter()
-        .rev()
-        .filter_map(|i| match i {
-            DpStructureItem::Track(t) => Some(t),
-            DpStructureItem::Channel(_) => None,
-        })
-        .collect();
-    while let Some(t) = stack.pop() {
-        out.push(t);
-        stack.extend(t.children.iter().rev());
+/// Decides each structure node's role in walk order, for both the count at
+/// `open` and the structure walk of the import, so the two agree: the first
+/// master (track or channel) is the master, every later master is a bus,
+/// and a VCA is no bus.
+#[derive(Debug, Default)]
+pub(crate) struct Roles {
+    master_seen: bool,
+}
+
+impl Roles {
+    /// The role `t` gets, and whether it is the project's master. A master
+    /// after the first is a [`TrackRole::Bus`].
+    pub(crate) fn track(&mut self, t: &DpTrack) -> (TrackRole, bool) {
+        let role = role_of(t);
+        if role != TrackRole::Master {
+            return (role, false);
+        }
+        if self.master_seen {
+            (TrackRole::Bus, false)
+        } else {
+            self.master_seen = true;
+            (TrackRole::Master, true)
+        }
     }
-    out
+
+    /// Whether the top-level channel `c` is the project's master, and
+    /// whether it is a bus (neither the master nor a VCA).
+    pub(crate) fn channel(&mut self, c: &DpChannel) -> (bool, bool) {
+        let master = c.role == Some(DpMixerRole::Master) && !self.master_seen;
+        self.master_seen |= master;
+        let vca = c.role == Some(DpMixerRole::Vca);
+        (master, !master && !vca)
+    }
+}
+
+/// Whether a track with `role` becomes a bus.
+pub(crate) fn is_bus(role: TrackRole) -> bool {
+    matches!(role, TrackRole::Folder | TrackRole::Bus)
 }
 
 /// Note and audio tracks, how many of them carry a `vz:t` tag, and the
-/// buses (folders, effect and submix channels, and channels outside tracks).
+/// buses the import builds (folders, effect and submix channels, channels
+/// outside tracks, and every master after the first), counted in the
+/// structure walk's order with [`Roles`].
 fn count_tracks(p: &DpProject, cancel: &AtomicBool) -> Result<(u32, u32, usize), IoError> {
-    let (mut tracks, mut tagged) = (0u32, 0u32);
-    let mut buses = p
-        .structure
-        .iter()
-        .filter(|i| matches!(i, DpStructureItem::Channel(_)))
-        .count();
-    for (i, t) in all_tracks(p).into_iter().enumerate() {
-        if i % CANCEL_EVERY == 0 {
-            stop(cancel)?;
-        }
-        match role_of(t) {
-            TrackRole::Content => {}
-            TrackRole::Folder | TrackRole::Bus => {
+    let (mut tracks, mut tagged, mut buses) = (0u32, 0u32, 0usize);
+    let mut roles = Roles::default();
+    let mut seen = 0usize;
+    let mut stack: Vec<&DpTrack> = Vec::new();
+    for item in &p.structure {
+        let top = match item {
+            DpStructureItem::Channel(c) => {
+                if roles.channel(c).1 {
+                    buses = buses.saturating_add(1);
+                }
+                continue;
+            }
+            DpStructureItem::Track(t) => t,
+        };
+        stack.push(top);
+        while let Some(t) = stack.pop() {
+            if seen % CANCEL_EVERY == 0 {
+                stop(cancel)?;
+            }
+            seen = seen.saturating_add(1);
+            stack.extend(t.children.iter().rev());
+            let (role, _) = roles.track(t);
+            if is_bus(role) {
                 buses = buses.saturating_add(1);
                 continue;
             }
-            TrackRole::Master | TrackRole::Vca => continue,
-        }
-        tracks = tracks.saturating_add(1);
-        let has_tag = t
-            .named
-            .comment
-            .as_deref()
-            .is_some_and(|c| strip_tags(c).1.iter().any(|(k, _)| *k == TagKind::Track));
-        if has_tag {
-            tagged = tagged.saturating_add(1);
+            if role != TrackRole::Content {
+                continue;
+            }
+            tracks = tracks.saturating_add(1);
+            let has_tag = t
+                .named
+                .comment
+                .as_deref()
+                .is_some_and(|c| strip_tags(c).1.iter().any(|(k, _)| *k == TagKind::Track));
+            if has_tag {
+                tagged = tagged.saturating_add(1);
+            }
         }
     }
     Ok((tracks, tagged, buses))

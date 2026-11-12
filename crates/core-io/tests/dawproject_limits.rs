@@ -1262,8 +1262,60 @@ fn import_tracks_and_buses() {
     };
     open_xml(&project(&folder(5), ""), &lowered).expect("5 folders");
     assert!(refused(open_xml(&project(&folder(6), ""), &lowered)).contains("more than 5 buses"));
+    // Every master after the first becomes a bus, so it counts as one: the
+    // project's own master plus 5 more opens, plus 6 more is refused.
+    let masters = |n: usize| -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    r#"<Track id="x{i}" contentType="audio"><Channel id="xc{i}" role="master"/></Track>"#
+                )
+            })
+            .collect()
+    };
+    let pkg = open_xml(&project(&masters(5), ""), &lowered).expect("5 extra masters");
+    let (_, doc) = imported_report(&pkg);
+    assert_eq!(bus_count(&doc), 5, "the count at open is what apply builds");
+    assert!(refused(open_xml(&project(&masters(6), ""), &lowered)).contains("more than 5 buses"));
+    // At the real cap: `MAX_IMPORT_BUSES + 1` extra master tracks are
+    // refused.
+    assert!(
+        refused(open_xml(
+            &project(&masters(limits::MAX_IMPORT_BUSES + 1), ""),
+            &PackageLimits::default()
+        ))
+        .contains("more than 256 buses")
+    );
+    // A top-level master channel and a VCA channel are no buses: a legal
+    // file with exactly `MAX_IMPORT_BUSES` buses besides them opens, and
+    // builds exactly that many.
+    let legal = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Project version="1.0"><Application name="T" version="1"/><Structure><Channel id="mc" role="master"/><Channel id="vc" role="vca"/>{}</Structure><Arrangement/></Project>"#,
+        tracks(limits::MAX_IMPORT_BUSES, "effect", "audio")
+    );
+    let pkg = open_xml(&legal, &PackageLimits::default()).expect("256 buses and a master channel");
+    let (_, doc) = imported_report(&pkg);
+    assert_eq!(bus_count(&doc), limits::MAX_IMPORT_BUSES);
+    // A top-level channel that is neither is a bus, counted with the rest.
+    let one_more = legal.replace(
+        r#"<Channel id="vc" role="vca"/>"#,
+        r#"<Channel id="vc" role="effect"/>"#,
+    );
+    assert!(
+        refused(open_xml(&one_more, &PackageLimits::default())).contains("more than 256 buses")
+    );
     assert_eq!(limits::MAX_IMPORT_TRACKS, 1_000);
     assert_eq!(limits::MAX_IMPORT_BUSES, 256);
+}
+
+/// How many buses `doc`'s mixer holds.
+fn bus_count(doc: &core_model::document::Document) -> usize {
+    doc.mixer()
+        .strips()
+        .values()
+        .filter(|s| s.kind == core_model::mixer::StripKind::Bus)
+        .count()
 }
 
 #[test]

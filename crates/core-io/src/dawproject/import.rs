@@ -41,7 +41,7 @@ pub use apply::apply;
 use maps::clean_name;
 pub use timeline::*;
 
-use super::package::{DpPackage, TrackRole, role_of};
+use super::package::{DpPackage, Roles, TrackRole, is_bus};
 use super::plugins::PlistCodec;
 use super::schema::*;
 use super::units::{
@@ -645,7 +645,7 @@ impl<'a, 'p> Cx<'a, 'p> {
         let p = &self.pkg.project;
         let mut out = Vec::new();
         let mut buses = 0usize;
-        let mut master_seen = false;
+        let mut roles = Roles::default();
         let mut next_bus = || {
             let b = buses;
             buses = buses.saturating_add(1);
@@ -668,14 +668,8 @@ impl<'a, 'p> Cx<'a, 'p> {
             self.tick()?;
             match item {
                 Item::Track(t, parent) => {
-                    let mut role = role_of(t);
-                    let master = role == TrackRole::Master && !master_seen;
-                    if role == TrackRole::Master && master_seen {
-                        role = TrackRole::Bus;
-                    }
-                    master_seen |= master;
-                    let bus =
-                        matches!(role, TrackRole::Folder | TrackRole::Bus).then(&mut next_bus);
+                    let (role, master) = roles.track(t);
+                    let bus = is_bus(role).then(&mut next_bus);
                     let target = match role {
                         TrackRole::Master => Target::Master,
                         TrackRole::Folder | TrackRole::Bus => Target::Bus(bus.unwrap_or(0)),
@@ -701,10 +695,8 @@ impl<'a, 'p> Cx<'a, 'p> {
                     });
                 }
                 Item::Channel(c) => {
-                    let master = c.role == Some(DpMixerRole::Master) && !master_seen;
-                    master_seen |= master;
-                    let vca = c.role == Some(DpMixerRole::Vca);
-                    let bus = (!master && !vca).then(&mut next_bus);
+                    let (master, is_a_bus) = roles.channel(c);
+                    let bus = is_a_bus.then(&mut next_bus);
                     let target = match bus {
                         Some(b) => Target::Bus(b),
                         None if master => Target::Master,

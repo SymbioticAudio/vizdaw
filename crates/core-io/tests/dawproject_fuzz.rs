@@ -437,6 +437,9 @@ struct Hostile {
     unknown: bool,
     words: usize,
     prolog: bool,
+    /// Extra `role="master"` tracks after the first (each a bus to the
+    /// import).
+    masters: usize,
 }
 
 const NUMBERS: [&str; 7] = [
@@ -460,9 +463,21 @@ fn hostile() -> impl Strategy<Value = Hostile> {
         any::<bool>(),
         prop_oneof![3 => Just(0usize), 1 => Just(1000usize)],
         any::<bool>(),
+        prop_oneof![6 => Just(0usize), 1 => 1usize..300, 1 => Just(100_000usize)],
     )
         .prop_map(
-            |(doctype, nesting, repeats, number, dangling, cycle, unknown, words, prolog)| {
+            |(
+                doctype,
+                nesting,
+                repeats,
+                number,
+                dangling,
+                cycle,
+                unknown,
+                words,
+                prolog,
+                masters,
+            )| {
                 Hostile {
                     doctype,
                     nesting,
@@ -473,6 +488,7 @@ fn hostile() -> impl Strategy<Value = Hostile> {
                     unknown,
                     words,
                     prolog,
+                    masters,
                 }
             },
         )
@@ -520,6 +536,12 @@ fn xml_of(h: &Hostile) -> String {
     for i in 0..h.repeats {
         let _ = write!(s, "<Track id=\"r{i}\" name=\"r\" contentType=\"notes\"/>");
     }
+    for i in 0..h.masters {
+        let _ = write!(
+            s,
+            "<Track id=\"x{i}\" contentType=\"audio\"><Channel id=\"xc{i}\" role=\"master\"/></Track>"
+        );
+    }
     s.push_str("</Structure><Arrangement><Lanes timeUnit=\"beats\"><Lanes track=\"t1\"><Clips>");
     for _ in 0..h.nesting {
         let _ = write!(s, "<Clip time=\"{n}\" duration=\"4\"><Clips>");
@@ -565,6 +587,7 @@ fn hostile_xml_has_the_shapes_it_names() {
         unknown: true,
         words: 0,
         prolog: true,
+        masters: 0,
     };
     let try_it = |h: &Hostile| {
         let dir = tempfile::tempdir().unwrap();
@@ -587,6 +610,19 @@ fn hostile_xml_has_the_shapes_it_names() {
         }),
         Err(IoError::Refused(_))
     ));
+    // Repeated master tracks are buses: past the bus cap they are refused.
+    match try_it(&Hostile {
+        masters: core_io::limits::MAX_IMPORT_BUSES + 1,
+        ..base.clone()
+    }) {
+        Err(IoError::Refused(s)) => assert!(s.contains("more than 256 buses"), "{s}"),
+        other => panic!("{other:?}"),
+    }
+    try_it(&Hostile {
+        masters: core_io::limits::MAX_IMPORT_BUSES - 1,
+        ..base.clone()
+    })
+    .expect("255 extra masters and one effect channel are 256 buses");
     assert!(matches!(
         try_it(&Hostile {
             dangling: true,
