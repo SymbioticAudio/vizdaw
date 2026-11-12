@@ -536,9 +536,7 @@ import VizDAWCore
     /// a temporary support folder).
     @Test func dawprojectCommandsRefuseHostileArguments() async throws {
         setenv("VIZDAW_AUDIO", "offline", 1)
-        let support = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vizdaw-swift-hostile-\(ProcessInfo.processInfo.processIdentifier)")
-        try setSupportDir(path: support.path)
+        let support = try TestSupportDir.subfolder("hostile")
         defer { try? FileManager.default.removeItem(at: support) }
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { try Session.newDemo() }, open: { _ in demoFake() })
         defer { s.closeAll() }
@@ -559,7 +557,13 @@ import VizDAWCore
             sentences.insert(r?.message ?? "")
         }
         #expect(s.documents.count == 1, "no project made")
-        for p in hostile {
+        // The export's own refusals (a missing file in a real folder would
+        // be a fine destination, so it is not listed here).
+        let badDestinations = [
+            "relative.dawproject", long, support.path + "/a\u{0}.dawproject", support.path,
+            support.path + "/a.mid",
+        ]
+        for p in badDestinations {
             let r = failure(run(InterchangeCommands.exportDawproject, [("path", .text(value: p))], m, s, id))
             #expect(r?.code == .failed && r?.message.isEmpty == false, "\(p.prefix(80))")
             sentences.insert(r?.message ?? "")

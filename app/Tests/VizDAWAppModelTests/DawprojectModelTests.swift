@@ -158,6 +158,17 @@ import VizDAWCore
         await d.settle()
         d.start(path: "/tmp/a.dawproject", replace: false)
         #expect(d.checkError == "a.dawproject exists" && d.shown && m.alert == nil && !d.running)
+
+        // A check still in flight when the start is refused lands late: the
+        // refusal stays (fix round 1).
+        let release = DispatchSemaphore(value: 0)
+        f.dawprojectCheckHold = { $0.regionGain == .leaveOut ? release : nil }
+        d.regionGain = .leaveOut
+        d.start(path: "/tmp/a.dawproject", replace: false)
+        #expect(d.checkError == "a.dawproject exists")
+        release.signal()
+        await d.settle()
+        #expect(d.checkError == "a.dawproject exists", "the late check does not erase it")
     }
 
     @Test func requestCarriesTheBlockRule() async throws {

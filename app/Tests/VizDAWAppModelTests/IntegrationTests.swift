@@ -56,9 +56,8 @@ import VizDAWCore
 @Suite struct MixerIntegrationTests {
     @Test func aBusAndASaveThroughTheRealLibrary() throws {
         setenv("VIZDAW_AUDIO", "offline", 1)
-        let support = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vizdaw-swift-test-\(ProcessInfo.processInfo.processIdentifier)")
-        try setSupportDir(path: support.path)
+        let support = try TestSupportDir.subfolder("mixer")
+        defer { try? FileManager.default.removeItem(at: support) }
         let doc = try DocumentModel(session: Session.newDemo())
         let mixer = try MixerModel(document: doc)
         #expect(mixer.strips.map(\.name) == ["Built-in Synth"])
@@ -73,7 +72,6 @@ import VizDAWCore
         #expect(!info.crashed, "open here, not a crash")
         #expect(info.autosave == nil)
         try doc.session.close()
-        try? FileManager.default.removeItem(at: support)
     }
 }
 

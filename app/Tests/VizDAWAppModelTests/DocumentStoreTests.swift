@@ -194,7 +194,7 @@ extension DocumentStoreTests {
         try? FileManager.default.removeItem(at: dir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        try setSupportDir(path: dir.appendingPathComponent("support").path)
+        _ = TestSupportDir.shared
         let src = dir.appendingPathComponent("src")
         try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
         let project = """

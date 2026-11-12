@@ -46,6 +46,7 @@ public final class DawprojectModel {
     public private(set) var defaultName = ""
     /// The export is kept until the running job ends.
     public private(set) var waiting = false
+    /// The export job the sheet started (it may have ended).
     public private(set) var job: UInt64?
 
     /// The job is still listed as running.
@@ -54,6 +55,7 @@ public final class DawprojectModel {
         return document.jobs.contains { $0.id == job }
     }
 
+    /// The running export's progress, 0 to 1; nil with none listed.
     public var progress: Float? {
         guard let job else { return nil }
         return document?.jobs.first { $0.id == job }?.progress
@@ -153,13 +155,17 @@ public final class DawprojectModel {
         ) { try $0.exportDawproject(req: req) }
     }
 
+    /// The sheet's Cancel while waiting: the kept export is dropped and
+    /// nothing is sent.
     public func cancelWaiting() {
         kept = nil
         waiting = false
     }
 
-    /// The sheet again, with the choices as they were and `message`.
+    /// The sheet again, with the choices as they were and `message`. A
+    /// check still in flight is dropped, so it cannot erase the message.
     private func fail(_ message: String) {
+        generation += 1
         checkError = message
         reopening = true
         shown = true
