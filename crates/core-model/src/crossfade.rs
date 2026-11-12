@@ -16,6 +16,7 @@ use crate::ids::{EventId, LaneId, SeqId, TakeId};
 use crate::lane::Take;
 use crate::time::Tick;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 /// The shape of a crossfade made without one (plan 6c Ruling 4): equal
 /// power keeps the level of two unrelated sounds steady.
@@ -186,19 +187,17 @@ type TakeKey = (SeqId, LaneId, TakeId);
 
 /// The overlaps of the take at `key` in `doc`, computed once per settle.
 fn overlaps_at<'a>(
-    cache: &'a mut Vec<(TakeKey, BTreeMap<EventId, Overlap>)>,
+    cache: &'a mut BTreeMap<TakeKey, BTreeMap<EventId, Overlap>>,
     doc: &Document,
     key: TakeKey,
 ) -> Option<&'a BTreeMap<EventId, Overlap>> {
-    let i = match cache.iter().position(|(k, _)| *k == key) {
-        Some(i) => i,
-        None => {
+    match cache.entry(key) {
+        Entry::Occupied(o) => Some(o.into_mut()),
+        Entry::Vacant(v) => {
             let take = doc.lane(key.0, key.1).ok()?.take(key.2)?;
-            cache.push((key, overlaps(doc, key.0, take)));
-            cache.len() - 1
+            Some(v.insert(overlaps(doc, key.0, take)))
         }
-    };
-    cache.get(i).map(|(_, m)| m)
+    }
 }
 
 /// Whether `new_p` is the second part of a split of `old_p` (plan 6c F2):
@@ -242,12 +241,63 @@ fn is_split_partner(old: &Document, new: &Document, old_p: EventId, new_p: Event
     m1 == m2 && o1.checked_add(*l1) == Some(*o2) && gap == i128::from(*l1)
 }
 
+/// What rules 2–4 of Ruling 6 make of a flagged region with a partner and
+/// a fade in.
+enum Verdict {
+    /// Unchanged.
+    Keep,
+    /// Rule 2: the partner changed.
+    Different,
+    /// Rule 3: a new region on an old partner.
+    LoneCopy,
+    /// Rule 4: the fade in is longer than this room.
+    Shorten(u64),
+}
+
+/// Rules 2–4 for flagged region `id` of `new`, whose partner is `o`.
+fn settle_one(
+    old: &Document,
+    new: &Document,
+    old_cache: &mut BTreeMap<TakeKey, BTreeMap<EventId, Overlap>>,
+    id: EventId,
+    o: &Overlap,
+) -> Result<Verdict> {
+    match old.event(id).ok() {
+        Some((old_ev, loc)) if is_flagged(old_ev) => {
+            let old_partner = overlaps_at(old_cache, old, (loc.seq, loc.lane, loc.take))
+                .and_then(|m| m.get(&id))
+                .map(|p| p.with);
+            let same = old_partner == Some(o.with)
+                || old_partner.is_some_and(|p| is_split_partner(old, new, p, o.with));
+            if !same {
+                return Ok(Verdict::Different);
+            }
+        }
+        Some(_) => {}
+        // A lone copy never joins an old region.
+        None if old.locate(o.with).is_ok() => return Ok(Verdict::LoneCopy),
+        None => {}
+    }
+    let room = o.frames.min(free_length(new, id)?);
+    let fade_in = match &new.event(id)?.0.body {
+        EventBody::AudioRegion { fade_in, .. } => fade_in.length_frames,
+        _ => 0,
+    };
+    Ok(if fade_in > room {
+        Verdict::Shorten(room)
+    } else {
+        Verdict::Keep
+    })
+}
+
 /// Keeps, shortens or drops each crossfade a command disturbed (plan 6c
 /// Ruling 6), in the same undo step: `old` is the document before the
 /// command, `new` after it. It visits each take whose events changed, every
 /// take of a sequence whose tempo changed or that is new, and every take
 /// when the media pool changed. Each change gets a line in `r.warnings`,
-/// except a lone copy losing its flag.
+/// except a lone copy that starts inside an old region: it loses its flag
+/// silently (rule 3). A lone copy that starts inside nothing gets rule 1's
+/// line, since that rule comes first.
 pub(crate) fn settle(old: &Document, new: &mut Document, r: &mut Report) -> Result<()> {
     // No media, no regions.
     if new.media().is_empty() {
@@ -275,7 +325,7 @@ pub(crate) fn settle(old: &Document, new: &mut Document, r: &mut Report) -> Resu
     if visit.is_empty() {
         return Ok(());
     }
-    let mut old_cache = Vec::new();
+    let mut old_cache = BTreeMap::new();
     let mut fixes: Vec<Event> = Vec::new();
     for key in visit {
         let doc: &Document = new;
@@ -287,68 +337,47 @@ pub(crate) fn settle(old: &Document, new: &mut Document, r: &mut Report) -> Resu
             let EventBody::AudioRegion { fade_in, .. } = &ev.body else {
                 continue;
             };
-            let name = region_name(doc, ev);
-            let partner = found.get(&ev.id);
-            // The region before the command, if it was flagged then.
-            let was = old.event(ev.id).ok();
-            let mut fixed = ev.clone();
-            let clear = |e: &mut Event| {
-                if let EventBody::AudioRegion { crossfade, .. } = &mut e.body {
-                    *crossfade = false;
+            // Each fix is the region with its flag cleared or its fade in
+            // shortened, plus a warning (`None`: silent).
+            let fix = |shorten: Option<u64>, why: Option<&str>| {
+                let mut e = ev.clone();
+                if let EventBody::AudioRegion {
+                    crossfade, fade_in, ..
+                } = &mut e.body
+                {
+                    match shorten {
+                        Some(n) => fade_in.length_frames = n,
+                        None => *crossfade = false,
+                    }
                 }
+                let name = region_name(doc, ev);
+                let line = why.map(|w| match shorten {
+                    Some(_) => format!("Crossfade on region '{name}' {w}"),
+                    None => format!("Crossfade removed: region '{name}' {w}"),
+                });
+                (e, line)
             };
-            let Some(o) = partner.filter(|_| fade_in.length_frames > 0) else {
-                clear(&mut fixed);
-                r.warnings.push(format!(
-                    "Crossfade removed: region '{name}' no longer starts inside another region on its track."
-                ));
-                fixes.push(fixed);
-                continue;
+            let (e, line) = if fade_in.length_frames == 0 {
+                // Controller ruling T2-a.
+                fix(None, Some("has no fade-in."))
+            } else if let Some(o) = found.get(&ev.id) {
+                match settle_one(old, doc, &mut old_cache, ev.id, o)? {
+                    Verdict::Keep => continue,
+                    Verdict::Different => fix(None, Some("now starts inside a different region.")),
+                    Verdict::LoneCopy => fix(None, None),
+                    // The room is at least 1: an overlap is at least 1
+                    // frame, and the fades already fit the region.
+                    Verdict::Shorten(0) => fix(None, Some("has no fade-in.")),
+                    Verdict::Shorten(n) => fix(Some(n), Some("shortened to fit the overlap.")),
+                }
+            } else {
+                fix(
+                    None,
+                    Some("no longer starts inside another region on its track."),
+                )
             };
-            match was {
-                Some((old_ev, loc)) if is_flagged(old_ev) => {
-                    let old_partner =
-                        overlaps_at(&mut old_cache, old, (loc.seq, loc.lane, loc.take))
-                            .and_then(|m| m.get(&ev.id))
-                            .map(|p| p.with);
-                    let same = old_partner == Some(o.with)
-                        || old_partner.is_some_and(|p| is_split_partner(old, doc, p, o.with));
-                    if !same {
-                        clear(&mut fixed);
-                        r.warnings.push(format!(
-                            "Crossfade removed: region '{name}' now starts inside a different region."
-                        ));
-                        fixes.push(fixed);
-                        continue;
-                    }
-                }
-                Some(_) => {}
-                None => {
-                    // A lone copy never joins an old region.
-                    if old.locate(o.with).is_ok() {
-                        clear(&mut fixed);
-                        fixes.push(fixed);
-                        continue;
-                    }
-                }
-            }
-            let room = o.frames.min(free_length(doc, ev.id)?);
-            if fade_in.length_frames > room {
-                if room == 0 {
-                    clear(&mut fixed);
-                    r.warnings.push(format!(
-                        "Crossfade removed: region '{name}' no longer starts inside another region on its track."
-                    ));
-                } else {
-                    if let EventBody::AudioRegion { fade_in, .. } = &mut fixed.body {
-                        fade_in.length_frames = room;
-                    }
-                    r.warnings.push(format!(
-                        "Crossfade on region '{name}' shortened to fit the overlap."
-                    ));
-                }
-                fixes.push(fixed);
-            }
+            r.warnings.extend(line);
+            fixes.push(e);
         }
     }
     for e in fixes {

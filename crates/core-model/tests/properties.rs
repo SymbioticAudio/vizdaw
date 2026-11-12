@@ -113,6 +113,16 @@ enum Op {
         front: i64,
         back: i64,
     },
+    /// Split a region `ticks` after its start (Ruling 7 and F2).
+    Split {
+        ev: usize,
+        ticks: i64,
+    },
+    SetFades {
+        ev: usize,
+        fade_in: u64,
+        fade_out: u64,
+    },
 }
 
 fn arb_shape() -> impl Strategy<Value = FadeShape> {
@@ -152,6 +162,9 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => i().prop_map(|ev| Op::RemoveCrossfade { ev }),
         2 => (i(), -5_000i64..5_000, -5_000i64..5_000)
             .prop_map(|(ev, front, back)| Op::Trim { ev, front, back }),
+        1 => (i(), 1i64..(2 * Q)).prop_map(|(ev, ticks)| Op::Split { ev, ticks }),
+        1 => (i(), 0u64..30_000, 0u64..5_000)
+            .prop_map(|(ev, fade_in, fade_out)| Op::SetFades { ev, fade_in, fade_out }),
     ]
 }
 
@@ -366,6 +379,28 @@ fn concrete(d: &Document, op: &Op) -> Option<Command> {
             event: pick(&regions(d), ev)?,
             front_frames: front,
             back_frames: back,
+        }),
+        Op::Split { ev, ticks } => {
+            let event = pick(&regions(d), ev)?;
+            Command::Audio(AudioCmd::Split {
+                event,
+                at: Tick(d.event(event).ok()?.0.tick.0 + ticks),
+            })
+        }
+        Op::SetFades {
+            ev,
+            fade_in,
+            fade_out,
+        } => Command::Audio(AudioCmd::SetFades {
+            event: pick(&regions(d), ev)?,
+            fade_in: Fade {
+                length_frames: fade_in,
+                shape: FadeShape::Linear,
+            },
+            fade_out: Fade {
+                length_frames: fade_out,
+                shape: FadeShape::Linear,
+            },
         }),
     })
 }

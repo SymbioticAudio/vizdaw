@@ -774,16 +774,16 @@ fn fade_edits_settle_it() {
             fade_out: Fade::default(),
         })
     };
-    let (w, a) = step(&d, set_in(0));
-    one_warning(&w, "removed");
-    assert!(!fades(&a, B).2);
-
-    let (w, a) = step(
-        &d,
+    // Controller ruling T2-a: its own line, not "no longer starts inside".
+    for c in [
+        set_in(0),
         Command::Audio(AudioCmd::RemoveFades { events: vec![B] }),
-    );
-    one_warning(&w, "removed");
-    assert!(!fades(&a, B).2);
+    ] {
+        let (w, a) = step(&d, c);
+        assert_eq!(w, vec!["Crossfade removed: region 'a' has no fade-in."]);
+        assert!(!w[0].contains("no longer starts inside"), "{w:?}");
+        assert!(!fades(&a, B).2);
+    }
 
     let (w, a) = step(&d, set_in(30_000));
     one_warning(&w, "shortened");
@@ -924,4 +924,35 @@ fn settle_leaves_a_valid_document_untouched() {
     assert!(a.report.warnings.is_empty(), "{:?}", a.report.warnings);
     assert_eq!(a.doc.event(B).unwrap().0, d.event(B).unwrap().0);
     assert_eq!(a.doc.event(A).unwrap().0, d.event(A).unwrap().0);
+}
+
+#[test]
+fn a_media_change_beside_the_pair_settles_it() {
+    // Crossfade over the whole overlap, then relink the media at 44 101 Hz:
+    // the regions rescale and the fade in rounds one frame past the room.
+    let d = run(
+        &doc(),
+        cross(B, CrossfadeLength::UpTo(u64::MAX), FadeShape::Linear),
+    )
+    .unwrap();
+    assert_eq!(fades(&d, B).0.length_frames, 24_000);
+    let (w, a) = step(
+        &d,
+        Command::Media(MediaCmd::Relink {
+            media: MediaId(0),
+            path: "Media/b.caf".into(),
+            content_hash: None,
+            length_frames: 176_404,
+            channels: 2,
+            sample_rate: 44_101,
+        }),
+    );
+    one_warning(&w, "shortened");
+    assert!(fades(&a, B).2);
+    assert_eq!(
+        fades(&a, B).0.length_frames,
+        crossfade::room(&a, B).unwrap()
+    );
+    assert!(core_model::rules::validate(&a).is_empty());
+    assert_eq!(from_json(&to_json(&a).unwrap()).unwrap(), a);
 }
