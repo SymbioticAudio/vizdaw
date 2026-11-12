@@ -4023,7 +4023,11 @@ fn exports_for_another_daw_over_the_channel() {
     assert!(added > 0, "{r}");
     assert_eq!(lanes(&mut app), before + added);
     app.call("command.run", json!({"id": "edit.undo", "window": w}));
-    assert_eq!(lanes(&mut app), before, "one Undo removes every added track");
+    assert_eq!(
+        lanes(&mut app),
+        before,
+        "one Undo removes every added track"
+    );
     let mut again = Vec::new();
     walk(&folder, &mut again);
     again.sort();
