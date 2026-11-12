@@ -26,14 +26,20 @@
 //! time signature automation; seconds go through the tempo map built so
 //! far. Then markers, song info and the sequence's name.
 //!
+//! **The arrangement** (Task 7, `timeline`): clips, notes, controller
+//! points, audio, crossfades and automation onto the tracks, shared clips
+//! as sequences, the clip launcher's slots as unplaced sequences.
+//!
 //! Everything the plan cannot hold is listed in the report; each `what` is
 //! a constant (or, when it names something, a function) here.
 
 mod apply;
 mod maps;
+mod timeline;
 
 pub use apply::apply;
 use maps::clean_name;
+pub use timeline::*;
 
 use super::package::{DpPackage, TrackRole, role_of};
 use super::plugins::PlistCodec;
@@ -49,7 +55,7 @@ use core_model::command::{
 use core_model::document::{DestKind, MAX_INFO_BYTES, SongInfo};
 use core_model::error::ModelError;
 use core_model::history::History;
-use core_model::ids::{AnyId, DestId, PluginInstanceId, SeqId, StripId};
+use core_model::ids::{AnyId, DestId, LaneId, PluginInstanceId, SeqId, StripId};
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
 use core_model::mixer::{
     AuxSend, BUILTIN_SYNTH_REF, GAIN_FLOOR_DB, GAIN_MAX_DB, Output, PluginFormat, PluginRef,
@@ -286,6 +292,8 @@ struct Plan {
     master: Mix,
     builtin: Option<Mix>,
     tracks: Vec<TrackPlan>,
+    /// The tracks' clips, the new sequences and the media (Task 7).
+    arranged: timeline::Arranged,
 }
 
 // ---------------------------------------------------------------- cancel
@@ -402,6 +410,16 @@ struct Cx<'a, 'p> {
     states: HashMap<(String, PluginFormat), StateRead>,
     /// The bytes those states hold.
     held: u64,
+    /// Each note or audio track's index in the plan, by track ID (`None`
+    /// for the master, folders, buses and VCAs).
+    track_index: HashMap<&'p str, Option<usize>>,
+    /// Each note or audio track's index in the plan, by its channel's ID.
+    chan_track: HashMap<&'p str, usize>,
+    /// The slot each device became, by device ID.
+    dev_slot: HashMap<&'p str, timeline::SlotAt>,
+    /// Each send's channel and its index among the strip's sends, by send
+    /// ID (`usize::MAX` once a loop cut it).
+    send_at: HashMap<&'p str, (&'p str, usize)>,
 }
 
 /// Maps `pkg` to a plan for [`apply`]. Looks at `cancel` before any work and
@@ -415,8 +433,6 @@ pub fn map(
     cancel: &AtomicBool,
 ) -> Result<DpImport, IoError> {
     stop(cancel)?;
-    // The timeline mapping (plan 6d Task 7) places the media.
-    let _ = media;
     let mut cx = Cx {
         pkg,
         env,
@@ -426,6 +442,10 @@ pub fn map(
         targets: HashMap::new(),
         states: HashMap::new(),
         held: 0,
+        track_index: HashMap::new(),
+        chan_track: HashMap::new(),
+        dev_slot: HashMap::new(),
+        send_at: HashMap::new(),
     };
     let p = &pkg.project;
     if p.dropped_text > 0 {
@@ -448,9 +468,12 @@ pub fn map(
         master: Mix::default(),
         builtin: None,
         tracks: Vec::new(),
+        arranged: timeline::Arranged::default(),
     };
     cx.structure(&nodes, &mut plan)?;
-    cut_loops(&mut plan, &mut cx.report);
+    let cut = cut_loops(&mut plan, &mut cx.report);
+    cx.sends_cut(&cut);
+    plan.arranged = cx.arrangement(&mut plan, media)?;
     let (name, info) = cx.song_info();
     plan.name = name;
     plan.info = info;
@@ -554,8 +577,8 @@ impl<'a, 'p> Cx<'a, 'p> {
         }
     }
 
-    /// Walks every timeline for what this task lists (clip comments); the
-    /// timeline mapping itself is plan 6d Task 7's.
+    /// Walks every timeline once for the clip comments it lists (the
+    /// arrangement itself is `timeline`'s).
     fn timelines(&mut self) -> Result<(), IoError> {
         let p = &self.pkg.project;
         let mut stack: Vec<&'p DpTimeline> = Vec::new();
@@ -715,6 +738,16 @@ impl<'a, 'p> Cx<'a, 'p> {
                     bus,
                     master,
                 } => {
+                    if let Some(id) = t.named.id.as_deref() {
+                        let index = (role == TrackRole::Content).then_some(plan.tracks.len());
+                        self.track_index.insert(id, index);
+                        if let (Some(i), Some(c)) = (
+                            index,
+                            t.channel.as_ref().and_then(|c| c.named.id.as_deref()),
+                        ) {
+                            self.chan_track.insert(c, i);
+                        }
+                    }
                     let default_out = parent.map_or(Out::Master, Out::Bus);
                     match role {
                         TrackRole::Vca => {
@@ -815,7 +848,13 @@ impl<'a, 'p> Cx<'a, 'p> {
         let audio = t.content.contains(&DpContentType::Audio);
         let midi = if notes {
             Some(match first.and_then(|i| devices.get(i)) {
-                Some(d) => self.instrument(d, &name)?,
+                Some(d) => {
+                    let m = self.instrument(d, &name)?;
+                    if let (Midi::Plugin(_), Some(id)) = (&m, d.named.id.as_deref()) {
+                        self.dev_slot.insert(id, timeline::SlotAt::Instrument);
+                    }
+                    m
+                }
                 None => {
                     self.add(ItemKind::Note, PLAYS_BUILTIN, Some(name.clone()));
                     Midi::Builtin
@@ -1108,6 +1147,9 @@ impl<'a, 'p> Cx<'a, 'p> {
             let level_db = self
                 .level(&s.volume, &format!("send level of '{owner}'"))
                 .unwrap_or(0.0);
+            if let (Some(id), Some(chan)) = (s.named.id.as_deref(), c.named.id.as_deref()) {
+                self.send_at.insert(id, (chan, mix.sends.len()));
+            }
             mix.sends.push(SendPlan {
                 bus,
                 level_db,
@@ -1134,10 +1176,15 @@ impl<'a, 'p> Cx<'a, 'p> {
                             strip_tags(c).1.iter().any(|(k, _)| *k == TagKind::Eq)
                         });
                         if let Some(slot) = self.slot(d)? {
-                            if eq_tag && mix.eq.is_none() {
+                            let at = if eq_tag && mix.eq.is_none() {
                                 mix.eq = Some(slot);
+                                timeline::SlotAt::Eq
                             } else {
                                 mix.inserts.push(slot);
+                                timeline::SlotAt::Insert(mix.inserts.len() - 1)
+                            };
+                            if let Some(id) = d.named.id.as_deref() {
+                                self.dev_slot.insert(id, at);
                             }
                         }
                     }
@@ -1184,8 +1231,9 @@ fn kind_name(kind: DpDeviceKind) -> &'static str {
 
 /// Cuts the bus outputs and sends that would make a loop: one walk, depth
 /// first and without recursion, removes every edge that closes a cycle
-/// (what is left has none).
-fn cut_loops(plan: &mut Plan, report: &mut Report) {
+/// (what is left has none). Returns the sends removed, `(bus, index)`, the
+/// last first.
+fn cut_loops(plan: &mut Plan, report: &mut Report) -> Vec<(usize, usize)> {
     // Edges: (from, to, None for the output or Some(send index)).
     let n = plan.buses.len();
     let mut edges: Vec<Vec<(usize, Option<usize>)>> = vec![Vec::new(); n];
@@ -1233,6 +1281,7 @@ fn cut_loops(plan: &mut Plan, report: &mut Report) {
     }
     // Sends are removed from the last, so earlier indices stay valid.
     cut.sort_by(|a, b| b.cmp(a));
+    let mut sends = Vec::new();
     for (bus, which) in cut {
         let Some(b) = plan.buses.get_mut(bus) else {
             continue;
@@ -1245,9 +1294,11 @@ fn cut_loops(plan: &mut Plan, report: &mut Report) {
             Some(k) => {
                 if k < b.mix.sends.len() {
                     b.mix.sends.remove(k);
+                    sends.push((bus, k));
                 }
                 report.add(ItemKind::LeftOut, LOOP_SENDS, Some(b.name.clone()));
             }
         }
     }
+    sends
 }

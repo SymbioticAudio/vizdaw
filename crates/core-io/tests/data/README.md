@@ -372,3 +372,52 @@ byte, and the hand-written fixtures the typed model is tested against.
   "Verse". `dawproject_schema.rs` reads them, writes them back byte for byte
   and validates them (and a project built in code with every element kind)
   with `xmllint --schema Project.xsd`.
+- **`hand_timeline.project.xml`:** written by hand before the timeline
+  import existed (plan 6d Task 7); never generated or blessed. At 120 BPM in
+  4/4, beside a master "Master" (channel `mc`, volume `mcv`) and an effect
+  bus "FX" (`fxc`), it holds one track per test of
+  `dawproject_timeline_in.rs`, named after the test, with exactly the clips
+  that test states (a "<test> 2" or "3" track where a test compares two
+  cases):
+  - `notes_land_where_the_clips_play`: a clip at beat 4, `playStart` 1,
+    `playStop` 3, notes at 0.5, 1, 2.5 and 3 (keys 60 to 63, a beat each);
+  - `looped_clip_becomes_a_looped_use`: "Loop A" (loop 0–2, 6 beats), "Loop
+    B" (loop 0–2, 5 beats, at 8) and "Loop C" (`playStart` 1, loop 0–2, 4
+    beats, at 16; keys 62 at 0 and 64 at 1);
+  - `alias_clips_share_one_sequence`: a clip whose `Notes id="riff"` a
+    second clip references; tracks 2 and 3 (CLAP instruments X and Y) share
+    "Shared" (`riff2`);
+  - `same_name_same_content_is_reshared`: "A" (key 60) at 0 and 4, "A" (key
+    62) at 8, "B" (key 60) at 12;
+  - `note_expressions_map_to_per_note_expression`: a note with transpose 2,
+    timbre 0.5 at 0.25, pressure 1 at 0.5, gain 0.5, pan 0.25 and formant;
+    a note at 2 with transpose 60;
+  - `midi_points_become_events`: CC 1 = 0.5 at 0, pitch bend 0.5 at 1, CC 0
+    = 0, CC 32 = 1/127 and program 5 at 2, linear CC 7 points at 3 and 3.5;
+  - `audio_clips_map_to_regions`: "Region" at beat 2 (seconds content 0.5 to
+    1.5, fade-in 0.01 s) and "Muted" at 8 (fade-out 0.25 beats,
+    `enable="false"`), all audio clips on `audio/a.wav` (48 kHz, stereo, 10 s);
+  - `negative_fade_in_starts_the_clip_earlier`: a clip at 4 with
+    `fadeInTime` −0.5 beats, then a pair at 10 and 12 where the second has
+    the same negative fade-in over the first;
+  - `nested_clips_compose_their_offsets`: a clip at 8 (3 beats) holding clips
+    at 0 and 2 (one second of audio each);
+  - `identity_warps_are_not_reported`: warps (0, 0 s) and (8, 4 s); track 2
+    (0, 0 s) and (8, 2 s);
+  - `overlapping_clips_with_covering_fades_become_crossfades`: A at 0 (1 s,
+    fade-out 0.5 s) and B at beat 1 (fade-in 0.5 s); track 2 the same with
+    no fade-out and a 0.1 s fade-in;
+  - `automation_points_become_events`: a track (channel `a12c`: volume, pan,
+    mute, a send to FX and a CLAP effect with parameter 7, −12 to 12 dB) with
+    volume, pan (one held step), mute, send and parameter points; points at
+    the arrangement's top level for track 2's volume (`a12bv`) and the
+    master's (`mcv`);
+  - `seconds_timelines_map_through_the_tempo_map`: a seconds timeline with a
+    clip at 0.5 s; track 2, a beats `Clips` inside a seconds `Lanes` (clip at
+    4);
+  - "Bass": the scenes' track (two scenes, one slot each, keys 36 and 38),
+    and a `Video` in its lanes;
+  - `hostile_numbers_leave_items_out`: a clip at 1e300, notes of duration −1,
+    key 200, channel 99 and velocity 2.0, a `NaN` point, an `Audio` with
+    `sampleRate="0"` and a clip of duration −1, beside readable notes at 1
+    and 2 and a CC point at 1.

@@ -155,6 +155,8 @@ pub struct DpPackage {
     limits: PackageLimits,
     stem: String,
     audio: Vec<AudioRef>,
+    /// Each audio file's key, by its path and whether it is outside.
+    keys: HashMap<(String, bool), usize>,
     /// Per `Audio` element: its rate.
     rates: Vec<u32>,
 }
@@ -225,7 +227,13 @@ pub fn open(
     let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut walk = AudioWalk::new(cancel);
     walk.project(&project)?;
-    let AudioWalk { refs, rates, .. } = walk;
+    let AudioWalk {
+        refs, rates, seen, ..
+    } = walk;
+    let keys = seen
+        .into_iter()
+        .map(|((path, external), key)| ((path.to_owned(), external), key))
+        .collect();
     let audio: Vec<AudioRef> = refs
         .into_iter()
         .enumerate()
@@ -258,6 +266,7 @@ pub fn open(
         limits: *limits,
         stem,
         audio,
+        keys,
         rates,
     })
 }
@@ -280,13 +289,9 @@ fn read_record(
     let Some(entry) = zip.find(RECORD_ENTRY) else {
         return Ok(None);
     };
-    let read = zip.read_prefix(
-        entry,
-        limits.max_record,
-        RECORD_HEAD_BYTES,
-        Some(limits.max_ratio),
-        cancel,
-    );
+    // Only the head is unpacked (at most `RECORD_HEAD_BYTES`), so the
+    // ratio limit, which guards whole entries, does not apply.
+    let read = zip.read_prefix(entry, limits.max_record, RECORD_HEAD_BYTES, None, cancel);
     let why = match read {
         Err(IoError::Cancelled) => return Err(IoError::Cancelled),
         Err(e) => e.to_string(),
@@ -619,6 +624,11 @@ impl DpPackage {
     /// One per distinct File path, in document order.
     pub fn audio(&self) -> &[AudioRef] {
         &self.audio
+    }
+
+    /// The key of the audio file `file` names ([`AudioRef::key`]).
+    pub(crate) fn audio_key(&self, file: &DpFileRef) -> Option<usize> {
+        self.keys.get(&(file.path.clone(), file.external)).copied()
     }
 
     /// The bytes an import writes (Ruling 18, L10): every entry's declared

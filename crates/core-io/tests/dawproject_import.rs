@@ -604,6 +604,27 @@ fn tags_are_stripped_and_counted() {
     let pkg = open_ok(&path);
     assert!(pkg.ret.record.is_none());
     has(&pkg.report, ItemKind::Note, RECORD_UNREADABLE);
+
+    // A record packed tighter than 200:1 (its document is one long run):
+    // only its first 64 KiB is unpacked, so the ratio does not apply.
+    let record = format!(
+        r#"{{"format":1,"project_id":"P","export_id":"E8","document":"{}"}}"#,
+        "a".repeat(4_000_000)
+    );
+    let path = package(
+        dir.path(),
+        "TightRec",
+        &[
+            ("project.xml", project.as_bytes()),
+            ("vizdaw/record.json", record.as_bytes()),
+        ],
+    );
+    let pkg = open_ok(&path);
+    assert_eq!(
+        pkg.ret.record.as_ref().map(|h| h.export_id.as_str()),
+        Some("E8")
+    );
+    lacks(&pkg.report, RECORD_UNREADABLE);
 }
 
 #[test]
