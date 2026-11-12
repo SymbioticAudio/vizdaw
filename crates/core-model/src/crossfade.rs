@@ -56,7 +56,8 @@ pub fn overlaps(doc: &Document, seq: SeqId, take: &Take) -> BTreeMap<EventId, Ov
     let Ok(sequence) = doc.sequence(seq) else {
         return out;
     };
-    let tempo = &sequence.tempo;
+    // The indexed map: an import that places crossfades uses the same one.
+    let tempo = sequence.tempo.clock();
     // The regions still sounding at the current start, in take order.
     let mut sounding: Vec<Seen> = Vec::new();
     for ev in take.events.values() {
