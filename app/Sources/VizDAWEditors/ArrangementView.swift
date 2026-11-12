@@ -495,7 +495,7 @@ public final class ArrangementView: EditorCanvas {
             copy: d.copy)
     }
 
-    // MARK: Dropping audio files (spec §10.2; plan 5b Ruling 8)
+    // MARK: Dropping audio and MIDI files (spec §10.2; plan 5b Ruling 8; plan 6a Ruling 12)
 
     public override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         seq != nil && !AudioDrop.paths(sender.draggingPasteboard).isEmpty ? .copy : []
@@ -510,7 +510,8 @@ public final class ArrangementView: EditorCanvas {
     }
 
     /// Imports `paths` dropped at `p` (content coordinates): into the lane
-    /// under it, or new lanes below the last one.
+    /// under it, or new lanes below the last one; MIDI files through the
+    /// MIDI import (plan 6a Ruling 12).
     @discardableResult
     func drop(_ paths: [String], at p: CGPoint) -> Bool {
         let keys = lanes
@@ -519,7 +520,7 @@ public final class ArrangementView: EditorCanvas {
                 seq: seq, lanes: keys, row: geometry.row(atY: p.y, count: keys.count), tick: axis.tick(atX: p.x),
                 snap: snap, meter: meter)
         else { return false }
-        document.importAudio(paths: paths, target: target)
+        document.interchange.importDropped(paths: paths, target: target)
         return true
     }
 
@@ -588,7 +589,7 @@ public final class ArrangementView: EditorCanvas {
                 out.append(
                     CanvasAccessibilityItem(
                         label: RegionA11y.label(
-                            r, name: media.row(r.media)?.name ?? "audio", laneName: rows[i].name, meter: meter,
+                            r, name: RegionA11y.name(r, mediaName: media.row(r.media)?.name), laneName: rows[i].name, meter: meter,
                             offline: media.offline(r.media) != nil),
                         frame: rect, selected: editor.isSelected(event: r.id),
                         press: { [weak self] in

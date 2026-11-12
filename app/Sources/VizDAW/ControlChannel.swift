@@ -102,6 +102,8 @@ enum ControlChannel {
         case .job(let command, let doc, let job):
             // The server's app timeout is for stalls; a job gets its own.
             _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
+            // A project an import made shows its window, as `file.new`'s does.
+            if InterchangeCommands.madeProject(doc) { ControlWindows.openDocument(doc) }
             whenJobEnds(server, token, command: command, doc: doc, job: job)
         case .measure(let doc, let job):
             whenMeasured(server, token, doc: doc, job: job)
@@ -151,6 +153,8 @@ enum ControlChannel {
                 m.refreshAfterJob()
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
                 if j.kind == .importMidi || j.kind == .exportMidi {
+                    // The reply names the made project's window once it is on screen.
+                    if window == nil, InterchangeCommands.madeProject(doc), !expired { return false }
                     InterchangeCommands.jobEnded(doc, failed: false, store: appStore, close: { _ in })
                     _ = try? server.reply(
                         token: token,

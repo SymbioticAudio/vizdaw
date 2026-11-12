@@ -164,6 +164,17 @@ private let box = CGRect(x: 0, y: 10, width: 160, height: 40)
             RegionA11y.label(r, name: "kick", laneName: "Audio 3", meter: meter, offline: true)
                 == "Region kick on Audio 3, bars 1 to 2, gain +3.0 dB, offline, muted")
     }
+
+    /// Plan 6a Task 10: a region's own name, else its file's.
+    @Test func aRegionsNameComesBeforeItsFilesName() {
+        var r = region(fadeIn: 0, gain: 0)
+        #expect(RegionA11y.name(r, mediaName: "kick.wav") == "kick.wav")
+        #expect(RegionA11y.name(r, mediaName: nil) == "audio")
+        r.regionName = "Take 3"
+        #expect(RegionA11y.name(r, mediaName: "kick.wav") == "Take 3")
+        r.regionName = ""
+        #expect(RegionA11y.name(r, mediaName: "kick.wav") == "kick.wav")
+    }
 }
 
 /// Final review V1, V2, V4: where the gain line and the offline labels go.

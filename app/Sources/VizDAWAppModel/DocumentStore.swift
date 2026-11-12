@@ -256,9 +256,17 @@ public final class DocumentStore {
         return add("Open Failed") { try recovery.openWith(path, options) }
     }
 
-    /// A new 48 kHz project holding the MIDI file at `path`; a refusal leaves
-    /// nothing behind and alerts "Import Failed".
-    private func openMidi(_ path: String) -> UUID? {
+    /// The import sheet's Import with "a new project" chosen: the sheet
+    /// closes and a new project imports its file with its choices.
+    public func importAsNewProject(_ sheet: InterchangeModel) -> UUID? {
+        sheet.importShown = false
+        return openMidi(sheet.importPath, like: sheet)
+    }
+
+    /// A new 48 kHz project holding the MIDI file at `path` (with `sheet`'s
+    /// choices, else the defaults); a refusal leaves nothing behind and
+    /// alerts "Import Failed".
+    private func openMidi(_ path: String, like sheet: InterchangeModel? = nil) -> UUID? {
         guard let id = newProject(ProjectFormatRow(sampleRate: 48_000, depth: defaultFormat.depth)),
             let model = documents[id]
         else { return nil }
@@ -274,7 +282,7 @@ public final class DocumentStore {
             close(id)
             if let message { postAlert(AlertItem(title: "Import Failed", message: message)) }
         }
-        if let error = model.interchange.importIntoNewProject(path: path) {
+        if let error = model.interchange.importIntoNewProject(path: path, like: sheet) {
             close(id)
             postAlert(AlertItem(error, title: "Import Failed"))
             return nil

@@ -2433,3 +2433,52 @@ recording and round trip (`core-ffi/tests/passes.rs`), the session
 256. With an arpeggiator or a transpose on the MPE track: transposed notes
      keep their own bends; arpeggiated notes play without per-note
      expression (by design).
+
+### MIDI files (plan 6a)
+
+By eye and by ear; the readers and writers are tested (`core-io/tests/smf_bytes.rs`,
+`clip_bytes.rs`, `midi_in.rs`, `midi_out.rs`, and the fuzzers `smf_fuzz.rs`,
+`clip_fuzz.rs`), the jobs and refusals (`core-ffi/tests/interchange.rs`), the
+sheets' models (`InterchangeTests`, `ProjectSettingsModelTests`,
+`AudioDropViewTests`), the commands (`InterchangeCommandsTests`) and the e2e
+`midi_files_round_trip_over_the_channel`.
+
+257. File › Import MIDI File… on a type 1 file shows the sheet: where (this
+     project at the playhead, or a new project), the channel → destination
+     table with suggestions, Split by channel, Treat as MPE, Use the file's
+     tempo map (off). Import: new tracks at the playhead; one Undo ("Import
+     MIDI File") removes them all.
+258. The report sheet opens after the import: the summary line, Changed /
+     Left out / Notes with counts and disclosure rows naming tracks and
+     bars; Copy and Save as Text… work; File › Last Import or Export
+     Report… reopens it.
+259. A type 0 file splits into one track per channel; channel 10 becomes a
+     drum track with General MIDI row names.
+260. Drop a `.mid` on the arrangement: it lands at the drop point (on the
+     track under it for a one-track file). Drop a `.wav` and a `.mid`
+     together: both import.
+261. File › Open… a `.mid` (and double-click one in Finder after
+     `scripts/make-app.sh`, choosing VizDAW): a new untitled project with
+     the file's tempo and title.
+262. File › Export › MIDI File…: the sheet's type, resolution, tracks and
+     MPE options update "What won't transfer" as you change them; Export
+     asks for a place; the file opens again in VizDAW with the same notes.
+263. File › Export › MIDI Clip File… with one track writes one `.midi2`;
+     with three tracks, a folder of three; with a time selection, only that
+     range.
+264. Exporting over an existing file asks first; choosing a place inside
+     the project is refused with a message; Cancel during a long export
+     leaves no file.
+265. File › Project Settings… has a Song info section: type a title and
+     composer, OK; Undo ("Set Song Info") clears them; Save, close and
+     reopen: they are there.
+266. Select a region: the inspector's Region name can be typed (one Undo,
+     "Rename Region"); the arrangement shows the new name (in the region's
+     VoiceOver label: the arrangement draws no region names); clearing it
+     shows the file's name again.
+
+**Owner check (manual, only the owner can do):** export the demo song as a
+MIDI file, open it in the DAW you use that reads MIDI files, and check
+tracks, notes, tempo and markers; export a MIDI file from that DAW and
+import it into VizDAW. Also export one track as a MIDI Clip File and open it
+in any other software that reads `.midi2`, if you have one (F20).

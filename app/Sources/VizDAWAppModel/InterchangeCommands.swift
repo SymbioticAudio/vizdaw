@@ -175,6 +175,10 @@ public enum InterchangeCommands {
     /// Projects `file.import_midi` made whose job has not ended.
     private static var madeProjects = Set<UUID>()
 
+    /// Whether `file.import_midi` made project `doc` for a job not yet
+    /// ended: the channel shows its window, as `file.new` does.
+    public static func madeProject(_ doc: UUID) -> Bool { madeProjects.contains(doc) }
+
     /// Tells the command its job on `doc` ended. A project it made and the
     /// job failed or was cancelled on goes, if nothing was done in it since;
     /// `close` closes it (window and all).

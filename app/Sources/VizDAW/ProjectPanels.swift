@@ -129,4 +129,38 @@ extension Panels {
         panel.message = "Choose audio files: they are converted into the project's format."
         return panel.runModal() == .OK ? panel.urls.map(\.path) : []
     }
+
+    /// Where to write a MIDI export (`ext` "mid" or "midi2"); the panel
+    /// itself confirms a replace (the old file stays until the new one is
+    /// complete).
+    static func chooseMidiExportFile(name: String, ext: String) -> String? {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(name).\(ext)"
+        if let t = UTType(filenameExtension: ext) { panel.allowedContentTypes = [t] }
+        panel.canCreateDirectories = true
+        panel.prompt = "Export"
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// The folder for one MIDI Clip File per track.
+    static func chooseMidiExportFolder() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Export"
+        panel.message = "Choose a folder: each track becomes one MIDI Clip File in it."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// Where the report sheet's Save as Text… writes.
+    static func chooseReportText(name: String) -> String? {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(name).txt"
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        panel.prompt = "Save"
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
 }

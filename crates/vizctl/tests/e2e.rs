@@ -3715,3 +3715,143 @@ fn records_mpe_as_per_note_expression() {
     assert_eq!(l.mpe.map(|m| m.members), Some(15));
     app.quit();
 }
+
+/// The windows' numbers and kinds, to show a call opened none.
+fn window_numbers(app: &mut App) -> Vec<(Value, Value)> {
+    let w = app.call("state.get", json!({"target": "windows"}));
+    w["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| (x["number"].clone(), x["kind"].clone()))
+        .collect()
+}
+
+/// README 257–266 through the channel (plan 6a Task 10): export the demo
+/// as a MIDI file and a MIDI Clip File, import them back into the demo and
+/// into a new project, and the refusals. No call opens a sheet or a panel;
+/// only the new project's window appears.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn midi_files_round_trip_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let lanes = doc["lanes"].as_array().unwrap().clone();
+    let tracks_before = lanes.len();
+    // What plays is written (a reference's events too), and only tracks
+    // with events make tracks again; the conductor makes none (F11).
+    let midi_tracks = lanes
+        .iter()
+        .filter(|l| l["events"].as_u64().unwrap_or(0) + l["references"].as_u64().unwrap_or(0) > 0)
+        .count();
+    assert!(midi_tracks > 0, "{doc}");
+    let windows = window_numbers(&mut app);
+
+    // A dry run: a report, no file.
+    let smf = home.join("demo.mid");
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"dry_run": true}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    assert_eq!(r["written"], json!([]), "{r}");
+    assert!(!smf.exists());
+
+    // The file, and what it wrote.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"path": smf}, "window": w}),
+    );
+    assert_eq!(r["written"], json!([smf.display().to_string()]), "{r}");
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    let bytes = std::fs::read(&smf).unwrap();
+    assert_eq!(&bytes[..4], b"MThd");
+
+    // One track as a MIDI Clip File.
+    let clip = home.join("one.midi2");
+    let lane = lanes
+        .iter()
+        .find(|l| l["events"].as_u64().unwrap_or(0) > 0)
+        .unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_midi_clip", "params": {"path": clip, "lanes": lane.to_string()}, "window": w}),
+    );
+    assert_eq!(r["written"], json!([clip.display().to_string()]), "{r}");
+    assert_eq!(&std::fs::read(&clip).unwrap()[..8], b"SMF2CLIP");
+
+    // Back into the demo at bar 9 (the demo is in 4/4): one undo step.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_midi", "params": {"path": smf, "tick": 8 * 4 * 15_360}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import MIDI File", "{r}");
+    let imported = r["report"].clone();
+    assert!(imported["summary"].is_string(), "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(
+        doc["lanes"].as_array().unwrap().len(),
+        tracks_before + midi_tracks,
+        "{doc}"
+    );
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.interchange_report", "window": w}),
+    );
+    assert_eq!(r["report"], imported, "{r}");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no call opened a sheet or a panel"
+    );
+
+    // As a new project: a second document, whose window is shown.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_midi", "params": {"path": clip, "new_project": true}, "window": w}),
+    );
+    assert!(r["doc"].is_string() && r["doc"] != demo["doc"], "{r}");
+    assert!(r["window"].is_i64(), "the new project's window: {r}");
+    let after = window_numbers(&mut app);
+    assert_eq!(after.len(), windows.len() + 1, "{after:?}");
+    assert!(
+        after
+            .iter()
+            .any(|(n, k)| *n == r["window"] && k == "document"),
+        "{after:?}"
+    );
+    let made = app.call(
+        "state.get",
+        json!({"target": "document", "window": r["window"]}),
+    );
+    assert_eq!(made["lanes"].as_array().unwrap().len(), 1, "{made}");
+
+    // Refusals: inside the demo's package, and no path.
+    let pkg = home.join("Demo.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": pkg}, "window": w}),
+    );
+    assert!(pkg.is_dir());
+    let inside = pkg.join("inside.mid");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"path": inside}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+    assert!(!inside.exists());
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Save"), "{e:?}");
+    assert_eq!(window_numbers(&mut app).len(), windows.len() + 1);
+    app.quit();
+}

@@ -1,6 +1,7 @@
 import AppKit
 import Observation
 import SwiftUI
+import UniformTypeIdentifiers
 import VizDAWAppModel
 import VizDAWCore
 
@@ -65,6 +66,10 @@ struct AppCommands: Commands {
                 }
                 .keyboardShortcut(KeyMenu.shortcut("media.import"))
                 .disabled(doc == nil)
+                Button(keyBindings.row(InterchangeCommands.importMidi)?.title ?? "Import MIDI File…") {
+                    if let doc, let path = Panels.chooseMidi() { doc.interchange.beginImport(path: path) }
+                }
+                .disabled(doc == nil)
                 Button("Create Demo Project") { show(store.newDemo()) }
                 Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
             }
@@ -78,10 +83,25 @@ struct AppCommands: Commands {
                     .keyboardShortcut(KeyMenu.shortcut("file.save_as"))
                     .disabled(doc == nil)
                 Divider()
-                Button("Project Settings…") { projectSettings() }
+                Button("Project Settings…") { doc?.projectSettings.show() }
                     .disabled(doc == nil)
                 Button("Bounce…") { doc?.bounce.shown = true }
                     .disabled(doc == nil)
+                // Each opens its options sheet; the sheet's Export asks where
+                // (plan 6a Ruling 18).
+                Menu("Export") {
+                    Button(keyBindings.row(InterchangeCommands.exportMidi)?.title ?? "MIDI File…") {
+                        doc?.interchange.showExport(.smf)
+                    }
+                    Button(keyBindings.row(InterchangeCommands.exportClip)?.title ?? "MIDI Clip File…") {
+                        doc?.interchange.showExport(.clip)
+                    }
+                }
+                .disabled(doc == nil)
+                Button(keyBindings.row(InterchangeCommands.report)?.title ?? "Last Import or Export Report…") {
+                    doc?.interchange.showLastReport()
+                }
+                .disabled(doc?.interchange.report == nil)
                 Button("Relink Media…") { doc?.media.relinkShown = true }
                     .keyboardShortcut(KeyMenu.shortcut("media.relink"))
                     .disabled(doc?.media.relinkable.isEmpty ?? true)
@@ -387,24 +407,6 @@ struct AppCommands: Commands {
         report(RegionCommands.normalize(peakDb: peak, doc), doc)
     }
 
-    private func projectSettings() {
-        guard let m = doc, let info = m.projectInfo ?? (try? m.session.projectInfo()) else { return }
-        let media = (try? m.session.media()) ?? []
-        let files = media.count
-        let seconds = media.reduce(0.0) { $0 + Double($1.frames) / Double(max($1.sampleRate, 1)) }
-        let minutes = seconds >= 60 ? String(format: "%.0f min", seconds / 60) : String(format: "%.0f s", seconds)
-        let note =
-            files == 0
-            ? "The project has no audio files yet."
-            : "Changing the format converts \(files) audio file\(files == 1 ? "" : "s") (\(minutes) of audio) into new files (one undo step)."
-        guard
-            let f = FormatPanel.run(
-                title: "Project Settings", message: "Format: \(formatLabel(format: info.format)). \(note)",
-                initial: info.format, ok: "Change")
-        else { return }
-        if f != info.format { m.changeFormat(f) }
-    }
-
     private func show(_ id: UUID?) {
         if let id { openWindow(value: id) }
     }
@@ -427,17 +429,35 @@ struct AppCommands: Commands {
 /// Open and save panels.
 @MainActor
 enum Panels {
-    /// A `.vizdaw` package. In the bundle the UTI (a package) makes it a
-    /// file; under `swift run` it looks like a folder. Both are
-    /// selectable and the store checks the extension.
+    /// The MIDI files File › Open and Import MIDI File… take (plan 6a).
+    static var midiTypes: [UTType] {
+        [UTType.midi] + ["mid", "midi", "smf", "midi2"].compactMap { UTType(filenameExtension: $0) }
+    }
+
+    /// A `.vizdaw` package or a MIDI file. In the bundle the UTI (a
+    /// package) makes a project a file; under `swift run` it looks like a
+    /// folder. Both are selectable and the store checks the extension.
     static func chooseProject() -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.treatsFilePackagesAsDirectories = false
         panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 } + midiTypes
         panel.prompt = "Open"
-        panel.message = "Choose a .vizdaw project"
+        panel.message = "Choose a VizDAW project or a MIDI file"
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// File › Import MIDI File…: a Standard MIDI File or a MIDI Clip File.
+    static func chooseMidi() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = midiTypes
+        panel.prompt = "Import"
+        panel.message = "Choose a MIDI file: its tracks are added at the playhead."
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 

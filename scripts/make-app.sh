@@ -53,6 +53,18 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
             <key>LSTypeIsPackage</key><true/>
             <key>LSItemContentTypes</key><array><string>org.vizdaw.project</string></array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>MIDI File</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.midi-audio</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>MIDI Clip File</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>org.vizdaw.midi-clip</string></array>
+        </dict>
     </array>
     <key>UTExportedTypeDeclarations</key>
     <array>
@@ -63,6 +75,15 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
             <key>UTTypeTagSpecification</key>
             <dict>
                 <key>public.filename-extension</key><array><string>vizdaw</string></array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>org.vizdaw.midi-clip</string>
+            <key>UTTypeDescription</key><string>MIDI Clip File</string>
+            <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>midi2</string></array>
             </dict>
         </dict>
     </array>

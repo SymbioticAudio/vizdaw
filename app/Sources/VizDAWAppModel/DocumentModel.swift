@@ -62,6 +62,9 @@ public final class DocumentModel {
     /// The edited name (view state lives here: the Command Line Tools
     /// cannot expand SwiftUI's `@State` macro).
     public var renameDraft = ""
+    /// The inspector's Region name as typed, for the region it was typed
+    /// for (plan 6a Task 10); nil when nothing is being typed.
+    public private(set) var regionNameDraft: (event: UInt64, text: String)?
     /// The fault popover is open.
     public var showsFaults = false
     /// Sidebar sheets and the delete confirmation (plan 4a).
@@ -555,6 +558,29 @@ public final class DocumentModel {
     /// Names region `event` (empty clears the name): one undo step.
     public func renameRegion(_ event: UInt64, to name: String) {
         editor.edit(.audio(edit: .setName(event: event, name: name.isEmpty ? nil : name)))
+    }
+
+    /// The Region name field's text for `event`: the draft, else the
+    /// region's own name ("" without one: the field shows the file's name
+    /// as its placeholder).
+    public func regionNameText(_ event: UInt64) -> String {
+        if let d = regionNameDraft, d.event == event { return d.text }
+        guard let r = editedRegion?.row, r.id == event else { return "" }
+        return r.regionName ?? ""
+    }
+
+    public func editRegionName(_ event: UInt64, _ text: String) { regionNameDraft = (event, text) }
+
+    public func cancelRegionName() { regionNameDraft = nil }
+
+    /// Return in the field: one rename when the trimmed text differs from
+    /// the region's name (blank clears it).
+    public func commitRegionName() {
+        guard let d = regionNameDraft else { return }
+        regionNameDraft = nil
+        let name = d.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let r = editedRegion?.row, r.id == d.event, name != (r.regionName ?? "") else { return }
+        renameRegion(d.event, to: name)
     }
 
     public func rename(_ seq: UInt64, to name: String) {

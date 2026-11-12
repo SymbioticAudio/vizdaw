@@ -87,6 +87,9 @@ public final class InterchangeModel {
     /// The report the sheet shows.
     public var report: ReportRow?
     public var reportShown = false
+    /// What the export that made `report` wrote (Show in Finder); empty
+    /// for an import or a report the session kept from before.
+    public private(set) var written: [String] = []
 
     /// File › Last Import/Export Report: shows the session's last report.
     public func showLastReport() {
@@ -96,6 +99,7 @@ public final class InterchangeModel {
             document.editor.status = "There is no import or export report yet."
             return
         }
+        if last != report { written = [] }
         report = last
         reportShown = true
     }
@@ -104,6 +108,7 @@ public final class InterchangeModel {
     func jobEnded(_ job: JobRow) {
         guard let r = job.report else { return }
         report = r
+        written = job.kind == .exportMidi ? job.written : []
         reportShown = true
     }
 
@@ -127,6 +132,9 @@ public final class InterchangeModel {
     public var choices: [ChannelChoice] = []
     public var splitChannels = false
     public var mpe = false
+    /// The sheet's "where": a new project instead of this one
+    /// (`DocumentStore.importAsNewProject`).
+    public var intoNewProject = false
     private var wantsTempo = false
 
     /// The core takes the file's tempo into a sequence without events
@@ -173,6 +181,7 @@ public final class InterchangeModel {
             splitChannels = i.kind == .smf0
             mpe = i.mpeFound
             wantsTempo = false
+            intoNewProject = false
             importShown = true
         }
     }
@@ -211,13 +220,16 @@ public final class InterchangeModel {
     }
 
     /// Imports `path` into this new, empty project with the defaults
-    /// (Ruling 12). The refusal, if any, is answered, not shown.
-    func importIntoNewProject(path: String) -> (any Error)? {
+    /// (Ruling 12), or with `sheet`'s choices, every channel on a new
+    /// destination (the project has none yet). The refusal, if any, is
+    /// answered, not shown.
+    func importIntoNewProject(path: String, like sheet: InterchangeModel? = nil) -> (any Error)? {
         guard let document else { return nil }
         var failure: (any Error)?
         let req = MidiImportRequestRow(
-            path: path, newProject: true, seq: document.selectedSeq ?? 0, lane: nil, tick: 0, channelMap: [],
-            splitChannels: nil, mpe: false, useTempo: true)
+            path: path, newProject: true, seq: document.selectedSeq ?? 0, lane: nil, tick: 0,
+            channelMap: sheet?.choices.map { ChannelMapRow(group: $0.group, channel: $0.channel, dest: nil) } ?? [],
+            splitChannels: sheet?.splitChannels, mpe: sheet?.mpe ?? false, useTempo: true)
         document.startJob(.importMidi, "Import Failed", failure: { failure = $0 }) { try $0.importMidi(req: req) }
         return failure
     }
@@ -326,6 +338,9 @@ public final class InterchangeModel {
             return
         }
         exportError = nil
+        // Hidden before the job starts: a failure on `startJob`'s first poll
+        // opens the sheet again (`jobFailed`), and must stay open.
+        exportShown = false
         let started: UInt64?
         switch exportKind {
         case .smf:
@@ -339,7 +354,7 @@ public final class InterchangeModel {
                 exportError = Self.message($0)
             }) { try $0.exportMidiClip(req: req) }
         }
-        if started != nil { exportShown = false }
+        if started == nil { exportShown = true }
     }
 
     // MARK: Waiting

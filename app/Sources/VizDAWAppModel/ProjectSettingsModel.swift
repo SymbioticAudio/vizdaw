@@ -47,14 +47,34 @@ public final class ProjectSettingsModel {
     public var rate: UInt32 = 48_000
     public var depth: BitDepthRow = .int24
     public var song = SongText()
+    /// The sheet is up (plan 6a Task 10; never under the control channel).
+    public var shown = false
+    /// What a format change would convert, read by `load()`.
+    public private(set) var mediaNote = ""
 
     public init(document: DocumentModel) { self.document = document }
 
     public var format: ProjectFormatRow { ProjectFormatRow(sampleRate: rate, depth: depth) }
 
+    /// File › Project Settings…: loads, then shows the sheet.
+    public func show() {
+        load()
+        shown = true
+    }
+
+    /// The sheet's line about converting the project's audio files.
+    static func note(_ media: [MediaRow]) -> String {
+        guard !media.isEmpty else { return "The project has no audio files yet." }
+        let seconds = media.reduce(0.0) { $0 + Double($1.frames) / Double(max($1.sampleRate, 1)) }
+        let length = seconds >= 60 ? String(format: "%.0f min", seconds / 60) : String(format: "%.0f s", seconds)
+        let files = media.count == 1 ? "1 audio file" : "\(media.count) audio files"
+        return "Changing the format converts \(files) (\(length) of audio) into new files (one undo step)."
+    }
+
     /// Reads the project's format and song info.
     public func load() {
         guard let document else { return }
+        mediaNote = Self.note((try? document.session.media()) ?? [])
         do {
             loadedFormat = try document.session.projectInfo().format
             loadedSong = SongText(try document.session.songInfo())

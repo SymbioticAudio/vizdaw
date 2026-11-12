@@ -33,6 +33,36 @@ struct DocumentView: View {
             ) {
                 BounceSheet(bounce: model.bounce)
             }
+            // The MIDI sheets and the report open only for what the user
+            // started here, never under the control channel (plan 6a).
+            .sheet(
+                isPresented: Binding(
+                    get: { model.interchange.importShown && !ControlChannel.active },
+                    set: { model.interchange.importShown = $0 })
+            ) {
+                MidiImportSheet(interchange: model.interchange, destinations: appStore.mixer(docID)?.destinations ?? [])
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.interchange.exportShown && !ControlChannel.active },
+                    set: { model.interchange.exportShown = $0 })
+            ) {
+                MidiExportSheet(interchange: model.interchange, document: model)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.interchange.reportShown && !ControlChannel.active },
+                    set: { model.interchange.reportShown = $0 })
+            ) {
+                ReportSheet(interchange: model.interchange)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.projectSettings.shown && !ControlChannel.active },
+                    set: { model.projectSettings.shown = $0 })
+            ) {
+                ProjectSettingsSheet(settings: model.projectSettings, editor: model.editor)
+            }
             .sheet(
                 item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
             ) { _ in

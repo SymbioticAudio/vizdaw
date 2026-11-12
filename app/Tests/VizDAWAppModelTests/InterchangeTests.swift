@@ -352,4 +352,77 @@ import VizDAWCore
         m.pollJobs()
         #expect(m.interchange.exportShown && m.interchange.exportError == "disk full" && m.alert == nil)
     }
+
+    /// An export that fails on the poll inside `startJob` keeps its sheet
+    /// open with the reason (Task 10 carry-over).
+    @Test func anImmediateExportFailureKeepsTheSheet() async throws {
+        let f = busy()
+        f.jobStartState = .failed
+        let m = try DocumentModel(session: f)
+        m.interchange.showExport(.clip)
+        await m.interchange.settle()
+        m.interchange.startExport(path: "/tmp/x.midi2")
+        #expect(m.jobs.isEmpty && f.clipExports.count == 1)
+        #expect(m.interchange.exportShown && m.interchange.exportError != nil && m.alert == nil)
+        // Refused up front: the sheet stays with the reason.
+        f.interchangeError = .Model(message: "inside the project")
+        m.interchange.startExport(path: "/tmp/p.vizdaw/x.midi2")
+        #expect(m.interchange.exportShown && m.interchange.exportError == "inside the project")
+    }
+
+    /// The import sheet's "a new project": the store makes the project and
+    /// imports with the sheet's choices, every channel on a new destination
+    /// (the new project has none yet).
+    @Test func theSheetsNewProjectImportsWithItsChoices() async throws {
+        var made: [FakeSession] = []
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() })
+        s.makeProject = { _ in
+            let f = demoFake()
+            made.append(f)
+            return f
+        }
+        let f = busy()
+        f.midiInfoRow = info(.smf1)
+        let m = try DocumentModel(session: f)
+        m.interchange.beginImport(path: "/tmp/a.mid")
+        await m.interchange.settle()
+        #expect(!m.interchange.intoNewProject)
+        m.interchange.intoNewProject = true
+        m.interchange.splitChannels = true
+        m.interchange.mpe = true
+        let id = try #require(s.importAsNewProject(m.interchange))
+        #expect(s.model(id) != nil && !m.interchange.importShown && f.midiImports.isEmpty)
+        let r = try #require(made.first?.midiImports.last)
+        #expect(r.path == "/tmp/a.mid" && r.newProject && r.useTempo && r.splitChannels == true && r.mpe)
+        #expect(r.channelMap.count == 3 && r.channelMap.allSatisfy { $0.dest == nil })
+        // Read again: the choice starts as this project.
+        m.interchange.beginImport(path: "/tmp/a.mid")
+        await m.interchange.settle()
+        #expect(!m.interchange.intoNewProject)
+    }
+
+    /// The report sheet offers Show in Finder for what an export wrote.
+    @Test func anExportsReportKeepsWhatItWrote() async throws {
+        let f = busy()
+        f.jobStartState = .running
+        let m = try DocumentModel(session: f)
+        m.interchange.showExport(.smf)
+        await m.interchange.settle()
+        m.interchange.startExport(path: "/tmp/x.mid")
+        let job = try #require(m.jobs.first { $0.kind == .exportMidi }?.id)
+        let report = ReportRow(summary: "Exported 2 tracks", items: [])
+        f.jobRows[job] = JobRow(
+            id: job, kind: .exportMidi, progress: 1, state: .done, message: nil, problems: [], created: [],
+            report: report, written: ["/tmp/x.mid"])
+        m.pollJobs()
+        #expect(m.interchange.reportShown && m.interchange.written == ["/tmp/x.mid"])
+        // The same report again keeps them; another one has none.
+        f.lastReport = report
+        m.interchange.reportShown = false
+        m.interchange.showLastReport()
+        #expect(m.interchange.reportShown && m.interchange.written == ["/tmp/x.mid"])
+        f.lastReport = ReportRow(summary: "Imported 1 track", items: [])
+        m.interchange.showLastReport()
+        #expect(m.interchange.report == f.lastReport && m.interchange.written.isEmpty)
+    }
 }

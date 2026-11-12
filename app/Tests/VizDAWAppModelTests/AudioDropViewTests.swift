@@ -24,6 +24,29 @@ import VizDAWCore
         #expect(f.imports.count == 2)
     }
 
+    /// Plan 6a Task 10 (Ruling 12): MIDI files go to the MIDI import, the
+    /// rest to the audio import, at the same place.
+    @Test func midiAndAudioDroppedTogetherBothImport() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let v = ArrangementView(document: m)
+        v.frame = NSRect(x: 0, y: 0, width: 800, height: 300)
+        v.layout()
+        #expect(v.drop(["/a.mid", "/b.wav"], at: CGPoint(x: 81, y: 70)))
+        let r = try #require(f.midiImports.last)
+        #expect(r.path == "/a.mid" && r.seq == 3 && r.lane == 31 && r.tick == 30_720 && !r.newProject)
+        #expect(f.imports.last?.0 == ["/b.wav"])
+        #expect(f.imports.last?.1 == ImportTargetRow(seq: 3, lane: 31, tick: 30_720))
+        let a = audioFake()
+        let n = try DocumentModel(session: a)
+        n.editor.openDetail(.sequence(3), kind: .pianoRoll)
+        let strip = RegionStripView(model: n.pianoRoll(.pane))
+        strip.frame = NSRect(x: 0, y: 0, width: 800, height: 60)
+        strip.timeAxis = TimeAxis(ticksPerPoint: 96)
+        #expect(strip.drop(["/c.midi2"], at: CGPoint(x: PianoRollContainer.sideWidth + 160, y: 11)))
+        #expect(a.midiImports.last?.path == "/c.midi2" && a.midiImports.last?.lane == 33 && a.imports.isEmpty)
+    }
+
     @Test func theRegionStripImportsIntoTheRegionsLaneOrTheEditLane() throws {
         let f = audioFake()
         let m = try DocumentModel(session: f)

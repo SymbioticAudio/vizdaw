@@ -205,6 +205,13 @@ public enum WaveformGeometry {
 
 /// VoiceOver labels for regions (spec §3.5).
 public enum RegionA11y {
+    /// What a region is called (plan 6a Task 10): its own name, else its
+    /// file's, else "audio".
+    public static func name(_ r: EventRow, mediaName: String?) -> String {
+        if let n = r.regionName, !n.isEmpty { return n }
+        return mediaName ?? "audio"
+    }
+
     public static func label(_ r: EventRow, name: String, laneName: String, meter: [MeterEntryRow], offline: Bool) -> String {
         let end = r.tick > Int64.max - max(r.duration, 1) ? Int64.max : r.tick + max(r.duration, 1) - 1
         let first = MeterMath.bar(at: r.tick, meter).number
