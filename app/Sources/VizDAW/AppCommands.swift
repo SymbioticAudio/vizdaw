@@ -70,6 +70,14 @@ struct AppCommands: Commands {
                     if let doc, let path = Panels.chooseMidi() { doc.interchange.beginImport(path: path) }
                 }
                 .disabled(doc == nil)
+                // A DAWproject file always opens as a new project (plan 6d
+                // Ruling 17), so it needs no open document.
+                Menu("Import Project") {
+                    Button(keyBindings.row(InterchangeCommands.importDawproject)?.title ?? "DAWproject…") {
+                        if let path = Panels.chooseDawprojectToOpen() { store.openDawproject(path) }
+                    }
+                    .accessibilityLabel("Import a DAWproject file as a new project")
+                }
                 Button("Create Demo Project") { show(store.newDemo()) }
                 Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
             }
@@ -90,6 +98,11 @@ struct AppCommands: Commands {
                 // Each opens its options sheet; the sheet's Export asks where
                 // (plan 6a Ruling 18).
                 Menu("Export") {
+                    // The most complete export comes first (plan 6d).
+                    Button(keyBindings.row(InterchangeCommands.exportDawproject)?.title ?? "DAWproject…") {
+                        doc?.dawproject.shown = true
+                    }
+                    .help("Most complete: tracks, mix, plug-ins, automation")
                     Button(keyBindings.row(InterchangeCommands.exportMidi)?.title ?? "MIDI File…") {
                         doc?.interchange.showExport(.smf)
                     }
@@ -450,18 +463,20 @@ enum Panels {
         [UTType.midi] + ["mid", "midi", "smf", "midi2"].compactMap { UTType(filenameExtension: $0) }
     }
 
-    /// A `.vizdaw` package or a MIDI file. In the bundle the UTI (a
-    /// package) makes a project a file; under `swift run` it looks like a
-    /// folder. Both are selectable and the store checks the extension.
+    /// A `.vizdaw` package, a MIDI file or a DAWproject file (plan 6d). In
+    /// the bundle the UTI (a package) makes a project a file; under `swift
+    /// run` it looks like a folder. Both are selectable and the store checks
+    /// the extension.
     static func chooseProject() -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.treatsFilePackagesAsDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 } + midiTypes
+        panel.allowedContentTypes =
+            [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 } + midiTypes + dawprojectTypes
         panel.prompt = "Open"
-        panel.message = "Choose a VizDAW project or a MIDI file"
+        panel.message = "Choose a VizDAW project, a MIDI file or a DAWproject file"
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 

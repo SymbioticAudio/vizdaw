@@ -2573,3 +2573,50 @@ X handle and its menu (`RegionEditingTests`), the typed box
 
 **Owner check (manual, only the owner can do):** make, drag, type and remove
 a crossfade, and listen through it (spec §12).
+
+### DAWproject (plan 6d)
+
+By eye; the ZIP and XML readers and writers, the export, the import and the
+hostile files are tested (`core-io/tests/zip.rs`, `xml.rs` and
+`dawproject_*.rs`), the jobs, plug-in state, checks and cancelling at every
+stage (`core-ffi/tests/dawproject.rs`), the preset codec
+(`platform-macos/tests/plist.rs`), the sheet's model, the commands and the
+store (`DawprojectModelTests`, `InterchangeCommandsTests`) and the e2e
+`dawproject_round_trip_over_the_channel`.
+
+282. File › Export › DAWproject… opens the sheet with its header line, the
+     Region gain picker and "What won't transfer". Choosing Leave out adds
+     "Region gain" to the list (on a project with region gain). Cancel
+     closes it.
+283. Export… proposes "<Song>.dawproject". After the job, the report opens
+     with its summary and groups; Show in Finder selects the file.
+284. Export again to the same name. The panel asks to replace; Cancel there
+     leaves the old file; Replace writes the new one.
+285. Start a bounce, then export a DAWproject. The sheet says it is waiting
+     and exports when the bounce ends.
+286. File › Import Project › DAWproject… with the file from 283. A new
+     untitled window opens, with:
+     - the tracks, regions with their fade lengths and the crossfade's X;
+     - notes with per-note expression in the Piano Roll;
+     - the tempo ramp, markers, levels, sends and automation.
+
+     Edit › Undo is unavailable. The report says "This file came from a
+     VizDAW project".
+287. Double-click the `.dawproject` in Finder, and drop it on the Dock icon.
+     Each does what 286 does.
+288. Import a file whose instrument is not installed. The track's instrument
+     shows as a placeholder named after the plug-in, and the report says it
+     is not installed and keeps its settings.
+289. Cancel an import from its progress. The new window closes and nothing
+     new is in the project's media.
+290. Fill every Song info field in Project Settings, then export and import.
+     The new project's Song info matches, and its comment has no "VizDAW
+     export" line.
+
+**Owner check (manual, only the owner can do; spec §12, 6d's part):**
+- export the demo song;
+- open it in the DAW you use that reads DAWproject;
+- check tracks, clips, fades, notes with expression, tempo, markers, levels,
+  sends and automation;
+- export a DAWproject back from it and import that into VizDAW as a new
+  project; check what arrived against the report.

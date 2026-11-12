@@ -4265,3 +4265,132 @@ fn crossfades_over_the_channel() {
     assert_eq!(window_numbers(&mut app), windows);
     app.quit();
 }
+
+/// README 282–290 through the channel (plan 6d Task 13): hostile calls to
+/// both DAWproject commands change nothing and open nothing; a dry run
+/// writes nothing; the export writes a ZIP and refuses to replace it
+/// without `replace`; the import makes a new project with the demo's
+/// tracks and the VizDAW-origin note, and its report is the one
+/// `file.interchange_report` gives. Only the new project's window appears.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn dawproject_round_trip_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let tracks = doc["lanes"].as_array().unwrap().len();
+    assert!(tracks > 0, "{doc}");
+    let windows = window_numbers(&mut app);
+    let tmp = home.join("Exports");
+    std::fs::create_dir(&tmp).unwrap();
+    let file = home.join("demo.dawproject");
+
+    // Hostile calls: each refused, none opens anything.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": file, "region_gain": "half"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": "demo.dawproject"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "a relative path: {e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Save"), "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.import_dawproject", "params": {"path": file, "mode": "merge"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    assert!(!file.exists());
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no hostile call opened a sheet, a panel or a window"
+    );
+
+    // A dry run: a report, nothing written.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"dry_run": true}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    assert_eq!(r["written"], json!([]), "{r}");
+    assert_eq!(
+        std::fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "tmp stays empty"
+    );
+    assert!(!file.exists());
+
+    // The file: a ZIP.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": file}, "window": w}),
+    );
+    let summary = r["report"]["summary"].as_str().unwrap_or_default();
+    assert!(summary.starts_with("Exported"), "{r}");
+    let bytes = std::fs::read(&file).unwrap();
+    assert_eq!(&bytes[..4], b"PK\x03\x04");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "the export opened nothing"
+    );
+
+    // Again without `replace`: refused, naming the file, which is kept.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": file}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+    assert!(
+        e.message.contains("demo.dawproject"),
+        "names the file: {e:?}"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), bytes, "the old file is kept");
+
+    // Back in as a new project: its window, the demo's tracks and the note.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_dawproject", "params": {"path": file}, "window": w}),
+    );
+    assert!(r["doc"].is_string() && r["doc"] != demo["doc"], "{r}");
+    assert!(r["window"].is_i64(), "the new project's window: {r}");
+    let imported = r["report"].clone();
+    assert!(
+        imported
+            .to_string()
+            .contains("This file came from a VizDAW project"),
+        "{imported}"
+    );
+    let after = window_numbers(&mut app);
+    assert_eq!(after.len(), windows.len() + 1, "{after:?}");
+    assert!(
+        after
+            .iter()
+            .any(|(n, k)| *n == r["window"] && k == "document"),
+        "{after:?}"
+    );
+    let made = app.call(
+        "state.get",
+        json!({"target": "document", "window": r["window"]}),
+    );
+    assert_eq!(made["lanes"].as_array().unwrap().len(), tracks, "{made}");
+
+    // The new window's report is the import's.
+    let again = app.call(
+        "command.run",
+        json!({"id": "file.interchange_report", "window": r["window"]}),
+    );
+    assert_eq!(again["report"], imported, "{again}");
+    app.quit();
+}

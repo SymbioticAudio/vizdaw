@@ -451,3 +451,28 @@ fn plist_strings_say_track() {
     }
     assert!(hits.is_empty(), "{} hits:\n{}", hits.len(), hits.join("\n"));
 }
+
+/// The DAWproject report texts plan 6d added (Tasks 3, 9 and 10), checked
+/// by value as well as by the source scan above, so a text moved into a
+/// generated or test-only place is still checked.
+#[test]
+fn dawproject_report_texts_say_track() {
+    use core_io::dawproject::import::EMPTY_CLIPS;
+    use core_io::dawproject::{UNREADABLE_VALUES, UNWRITABLE_PARTS};
+    use vizdaw_ffi::dawproject::{OFFLINE_AUDIO, TOO_LONG_FOR_WAV, not_captured};
+    let texts = [
+        UNREADABLE_VALUES.to_string(),
+        UNWRITABLE_PARTS.to_string(),
+        OFFLINE_AUDIO.to_string(),
+        TOO_LONG_FOR_WAV.to_string(),
+        EMPTY_CLIPS.to_string(),
+        not_captured("Lead"),
+    ];
+    assert_eq!(texts[0], "Values in the file that could not be read");
+    assert_eq!(texts[1], "Parts the DAWproject file cannot hold");
+    assert_eq!(texts[2], "Offline audio");
+    assert_eq!(texts[4], "Empty clips");
+    for t in &texts {
+        assert!(!says_lane(t), "{t:?} says lane");
+    }
+}

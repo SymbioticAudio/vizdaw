@@ -22,6 +22,18 @@ const NAMES: &[&str] = &[
     "Komplete",
     "Kontrol",
     "Microsoft",
+    // DAWproject's origin and the other readers and converters its README
+    // lists (plan 6d Task 13).
+    "Bitwig",
+    "PreSonus",
+    "Studio One",
+    "Cubasis",
+    "VST Live",
+    "n-Track",
+    "DawVert",
+    "ProjectConverter",
+    "Cockos",
+    "Reaper",
 ];
 
 fn is_word(b: u8) -> bool {
@@ -61,6 +73,10 @@ fn self_check() {
         "Native Instruments GmbH",
         "(Logic)",
         "Studio Vision Pro",
+        "a Bitwig file",
+        "PreSonus Studio One",
+        "n-Track Studio",
+        "Cockos Reaper",
     ] {
         assert!(third_party_name(bad).is_some(), "must catch {bad:?}");
     }
@@ -72,6 +88,8 @@ fn self_check() {
         "Logical",
         "SVPN",
         "a host-integration keyboard",
+        "VST Left out",
+        "a DAWproject file",
         "",
     ] {
         assert_eq!(third_party_name(clean), None, "must pass {clean:?}");

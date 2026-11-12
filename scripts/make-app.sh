@@ -65,6 +65,12 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
             <key>LSHandlerRank</key><string>Alternate</string>
             <key>LSItemContentTypes</key><array><string>org.vizdaw.midi-clip</string></array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>DAWproject</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>org.vizdaw.dawproject</string></array>
+        </dict>
     </array>
     <key>UTExportedTypeDeclarations</key>
     <array>
@@ -84,6 +90,20 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
             <key>UTTypeTagSpecification</key>
             <dict>
                 <key>public.filename-extension</key><array><string>midi2</string></array>
+            </dict>
+        </dict>
+    </array>
+    <!-- DAWproject (plan 6d): an open format we read and write but do not
+         own, so the type is imported, not exported. -->
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>org.vizdaw.dawproject</string>
+            <key>UTTypeDescription</key><string>DAWproject</string>
+            <key>UTTypeConformsTo</key><array><string>public.zip-archive</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>dawproject</string></array>
             </dict>
         </dict>
     </array>

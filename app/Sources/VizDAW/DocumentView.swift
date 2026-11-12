@@ -54,6 +54,12 @@ private struct DocumentSheets: ViewModifier {
                 ForDawSheet(forDaw: model.forDaw, document: model)
             }
             .sheet(
+                isPresented: Binding(
+                    get: { model.dawproject.shown && !ControlChannel.active }, set: { model.dawproject.shown = $0 })
+            ) {
+                DawprojectSheet(dawproject: model.dawproject, document: model)
+            }
+            .sheet(
                 item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
             ) { _ in
                 TrackSynthSheet(

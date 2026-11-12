@@ -146,6 +146,38 @@ extension Panels {
         chooseFolder(prompt: "Export Here", message: "Choose where to put the folder for another DAW.")
     }
 
+    /// The DAWproject type: the bundle's imported `org.vizdaw.dawproject`,
+    /// else (under `swift run`) the extension's dynamic type (plan 6d).
+    static var dawprojectTypes: [UTType] {
+        [UTType("org.vizdaw.dawproject") ?? UTType(filenameExtension: "dawproject")].compactMap { $0 }
+    }
+
+    /// File › Import Project › DAWproject…: the file to open as a new
+    /// project (plan 6d).
+    static func chooseDawprojectToOpen() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = dawprojectTypes
+        panel.prompt = "Import"
+        panel.message = "Choose a DAWproject file: it opens as a new project."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// Where the DAWproject export writes; `name` is the core's
+    /// (`dawprojectName`). The panel itself confirms a replace, so a chosen
+    /// path is sent with `replace` (the old file stays until the new one is
+    /// complete).
+    static func chooseDawprojectFile(name: String) -> String? {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = name
+        panel.allowedContentTypes = dawprojectTypes
+        panel.canCreateDirectories = true
+        panel.prompt = "Export"
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
     /// A folder to write into, one that can be made in the panel (F16).
     private static func chooseFolder(prompt: String, message: String) -> String? {
         let panel = NSOpenPanel()
