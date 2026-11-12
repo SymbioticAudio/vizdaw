@@ -156,7 +156,16 @@ impl Grows for String {
 impl Budget {
     /// Makes room for `extra` more items in `v`, growing it (doubling, but
     /// never past the budget) only when it is full.
-    fn room<G: Grows>(&mut self, v: &mut G, extra: usize) -> Result<(), IoError> {
+    ///
+    /// Growing moves the items to a new buffer, so for a moment both are
+    /// held: the old buffer and the new one are charged together, and the
+    /// tree's bytes never pass the budget, not even while a table grows.
+    ///
+    /// An empty table is sized at once for `first` items (what the pass over
+    /// the text says it will hold), so a large table is not copied as it
+    /// grows; it is sized only when first needed, so a file refused early
+    /// costs nothing.
+    fn room<G: Grows>(&mut self, v: &mut G, extra: usize, first: usize) -> Result<(), IoError> {
         let item = G::ITEM.max(1);
         let need = v
             .len_now()
@@ -166,18 +175,44 @@ impl Budget {
         if need <= cap {
             return Ok(());
         }
-        let others = self.used.saturating_sub(cap.saturating_mul(item));
-        let most = self.max.saturating_sub(others) / item;
+        // `used` already holds the old buffer; the new one comes on top.
+        let most = self.max.saturating_sub(self.used) / item;
         if need > most {
             return Err(damaged(TOO_MANY));
         }
-        let want = need.max(cap.saturating_mul(2)).max(64).min(most);
+        let grown = if cap == 0 {
+            first
+        } else {
+            cap.saturating_mul(2)
+        };
+        let want = need.max(grown).max(64).min(most);
+        let others = self.used.saturating_sub(cap.saturating_mul(item));
         if !v.try_grow(want.saturating_sub(v.len_now())) {
             return Err(damaged(TOO_MANY));
         }
         self.used = others.saturating_add(v.cap_now().saturating_mul(item));
         Ok(())
     }
+}
+
+/// What a pass over the text says the tree will hold at most (comments
+/// can only make these larger; CDATA, and text split by comments, can make
+/// the texts larger than this), so the tables are sized once, at their
+/// first use, and seldom grow.
+#[derive(Debug, Default, Clone, Copy)]
+struct Bounds {
+    /// Start tags.
+    elements: usize,
+    /// Attribute names.
+    attrs: usize,
+    /// Texts of elements, the runs after a start tag that are not all
+    /// whitespace.
+    texts: usize,
+    /// Element and attribute names, attribute values as written (unescaping
+    /// only shortens them; a value over [`MAX_TEXT_BYTES`] is refused, so
+    /// each counts at most that) and those texts, each at most
+    /// [`MAX_TEXT_BYTES`].
+    arena: usize,
 }
 
 /// `n` as an arena or table index.
@@ -206,6 +241,8 @@ fn from_xml(e: &XmlError) -> IoError {
 struct Builder {
     tree: Tree,
     budget: Budget,
+    /// What the tables are first sized for.
+    bounds: Bounds,
     stack: Vec<Frame>,
     /// The innermost element's text while it has no child element.
     pending: String,
@@ -223,7 +260,8 @@ struct Builder {
 impl Builder {
     /// Pushes `s` into the arena.
     fn intern(&mut self, s: &str) -> Result<Span, IoError> {
-        self.budget.room(&mut self.tree.arena, s.len())?;
+        self.budget
+            .room(&mut self.tree.arena, s.len(), self.bounds.arena)?;
         let start = index(self.tree.arena.len())?;
         let len = index(s.len())?;
         self.tree.arena.push_str(s);
@@ -259,10 +297,12 @@ impl Builder {
             }
             let name = self.intern(a.key.as_ref())?;
             let value = self.intern(&value)?;
-            self.budget.room(&mut self.tree.attrs, 1)?;
+            self.budget
+                .room(&mut self.tree.attrs, 1, self.bounds.attrs)?;
             self.tree.attrs.push(AttrRec { name, value });
         }
-        self.budget.room(&mut self.tree.nodes, 1)?;
+        self.budget
+            .room(&mut self.tree.nodes, 1, self.bounds.elements)?;
         self.tree.nodes.push(Node {
             name_start: name.start,
             name_len: name.len,
@@ -317,7 +357,8 @@ impl Builder {
             if at >= CUT {
                 return Err(damaged(TOO_MANY));
             }
-            self.budget.room(&mut self.tree.texts, 1)?;
+            self.budget
+                .room(&mut self.tree.texts, 1, self.bounds.texts)?;
             self.tree.texts.push(span);
             if let Some(n) = self.tree.nodes.get_mut(frame.node as usize) {
                 n.text = if self.pending_cut { at | CUT } else { at };
@@ -535,9 +576,9 @@ fn parse_observed(
     }
     let text = text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(text);
     let text = std::str::from_utf8(text).map_err(|_| damaged(NOT_UTF8))?;
-    if !names_fit(text.as_bytes()) {
+    let Some(bounds) = scan(text.as_bytes()) else {
         return Err(damaged(BROKEN));
-    }
+    };
     let mut reader = quick_xml::Reader::from_str(text);
     {
         let c = reader.config_mut();
@@ -558,6 +599,10 @@ fn parse_observed(
         budget: Budget {
             used: 0,
             max: limits.max_tree_bytes,
+        },
+        bounds: Bounds {
+            elements: bounds.elements.min(limits.max_nodes),
+            ..bounds
         },
         stack: Vec::new(),
         pending: String::new(),
@@ -617,28 +662,34 @@ fn is_space_byte(b: u8) -> bool {
 
 /// Whether every element and attribute name in `b` is at most
 /// [`MAX_XML_NAME_BYTES`], measured as the parser will see it: an element
-/// name runs to whitespace or the tag's unquoted `>` (less a closing `/`).
-/// One pass, no allocation. Names inside comments and CDATA are measured
-/// too (a hostile-only false refusal); `<!` and `<?` markup is not a name.
-fn names_fit(b: &[u8]) -> bool {
+/// name runs to whitespace or the tag's unquoted `>` (less a closing `/`),
+/// with the [`Bounds`] of the tree; `None` if a name is too long. One pass,
+/// no allocation. Names inside comments and CDATA are measured too (a
+/// hostile-only false refusal); `<!` and `<?` markup is not a name.
+fn scan(b: &[u8]) -> Option<Bounds> {
+    let mut n = Bounds::default();
     let find = |from: usize, byte: u8| {
         b.get(from..)
             .and_then(|r| r.iter().position(|&c| c == byte))
             .map(|p| from.saturating_add(p))
     };
+    let add = |x: &mut usize, by: usize| *x = x.saturating_add(by);
     let mut i = 0;
     while let Some(lt) = find(i, b'<') {
         i = lt.saturating_add(1);
-        match b.get(i) {
+        let end_tag = match b.get(i) {
             Some(b'!' | b'?') => continue,
-            Some(b'/') => i = i.saturating_add(1),
-            _ => {}
-        }
+            Some(b'/') => {
+                i = i.saturating_add(1);
+                true
+            }
+            _ => false,
+        };
         // The element name, as the parser takes it (quotes and all).
         let start = i;
         loop {
             match b.get(i) {
-                None => return i.saturating_sub(start) <= MAX_XML_NAME_BYTES,
+                None => return (i.saturating_sub(start) <= MAX_XML_NAME_BYTES).then_some(n),
                 Some(&c) if is_space_byte(c) || c == b'>' => break,
                 Some(&q @ (b'"' | b'\'')) => match find(i.saturating_add(1), q) {
                     Some(end) => i = end.saturating_add(1),
@@ -647,7 +698,7 @@ fn names_fit(b: &[u8]) -> bool {
                 Some(_) => i = i.saturating_add(1),
             }
             if i.saturating_sub(start) > MAX_XML_NAME_BYTES.saturating_add(1) {
-                return false;
+                return None;
             }
         }
         let mut len = i.saturating_sub(start);
@@ -655,20 +706,39 @@ fn names_fit(b: &[u8]) -> bool {
             len = len.saturating_sub(1);
         }
         if len > MAX_XML_NAME_BYTES {
-            return false;
+            return None;
+        }
+        if !end_tag {
+            add(&mut n.elements, 1);
+            add(&mut n.arena, len);
         }
         // The attributes, to the tag's end; values are skipped whole.
         loop {
             match b.get(i) {
-                None => return true,
+                None => return Some(n),
                 Some(b'>') => {
+                    let empty = b.get(i.saturating_sub(1)) == Some(&b'/');
                     i = i.saturating_add(1);
+                    if !end_tag && !empty {
+                        // The element's text, if it is a leaf.
+                        let to = find(i, b'<').unwrap_or(b.len());
+                        let run = b.get(i..to).unwrap_or_default();
+                        if !run.iter().all(|&c| is_space_byte(c)) {
+                            add(&mut n.texts, 1);
+                            add(&mut n.arena, run.len().min(MAX_TEXT_BYTES));
+                        }
+                    }
                     break;
                 }
                 Some(b'<') => break,
                 Some(&q @ (b'"' | b'\'')) => match find(i.saturating_add(1), q) {
-                    Some(end) => i = end.saturating_add(1),
-                    None => return true,
+                    Some(end) => {
+                        // A longer value is refused.
+                        let len = end.saturating_sub(i).saturating_sub(1);
+                        add(&mut n.arena, len.min(MAX_TEXT_BYTES));
+                        i = end.saturating_add(1);
+                    }
+                    None => return Some(n),
                 },
                 Some(&c) if is_space_byte(c) || c == b'/' || c == b'=' => i = i.saturating_add(1),
                 Some(_) => {
@@ -678,14 +748,16 @@ fn names_fit(b: &[u8]) -> bool {
                     }) {
                         i = i.saturating_add(1);
                         if i.saturating_sub(start) > MAX_XML_NAME_BYTES {
-                            return false;
+                            return None;
                         }
                     }
+                    add(&mut n.attrs, 1);
+                    add(&mut n.arena, i.saturating_sub(start));
                 }
             }
         }
     }
-    true
+    Some(n)
 }
 
 /// The XSD `double` lexical form without its special values: an optional

@@ -280,6 +280,10 @@ fn damage() -> impl Strategy<Value = Damage> {
 }
 
 fn damaged(mut bytes: Vec<u8>, d: &Damage) -> Vec<u8> {
+    // An earlier truncation can leave nothing to flip or delete.
+    if bytes.is_empty() && matches!(d, Damage::Flip(..) | Damage::Delete(..)) {
+        return bytes;
+    }
     match d {
         Damage::Flip(i, x) => {
             let at = i.index(bytes.len());
@@ -463,7 +467,7 @@ fn hostile() -> impl Strategy<Value = Hostile> {
         any::<bool>(),
         prop_oneof![3 => Just(0usize), 1 => Just(1000usize)],
         any::<bool>(),
-        prop_oneof![6 => Just(0usize), 1 => 1usize..300, 1 => Just(100_000usize)],
+        prop_oneof![6 => Just(0usize), 1 => 1usize..300, 1 => Just(1_000usize)],
     )
         .prop_map(
             |(

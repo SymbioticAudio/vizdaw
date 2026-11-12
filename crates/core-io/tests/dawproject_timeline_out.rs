@@ -1364,27 +1364,79 @@ fn a_last_point_is_inside_its_clip() {
     let c = rule_clips(&p, &format!("t{}", keys.0));
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].duration, Some(2.0 + 1.0 / 15_360.0));
-    // The unrolled use of a sequence ending in a point is no different.
+    // A clip that a silence gap ends, its last event a point, is no
+    // different: the next clip starts after the gap.
     let mut b = Builder::new();
     let synth = b.dest("Synth", BUILTIN_SYNTH_REF, 0).unwrap();
     let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
-    let (riff, rl) = b.sequence("Riff", "Riff", Some(synth)).unwrap();
-    b.notes(riff, rl, &[(0, 60, 0x8000, Q)]).unwrap();
+    b.notes(seq, keys, &[(0, 60, 0x8000, Q), (6 * Q, 62, 0x8000, Q)])
+        .unwrap();
     b.event(
-        riff,
-        rl,
-        BAR - 1,
+        seq,
+        keys,
+        2 * Q,
         EventBody::Cc {
             index: 1,
             value: 0x4000_0000,
         },
     )
     .unwrap();
-    length(&mut b, riff, BAR);
-    b.reference(seq, keys, 0, riff, 1, 0).unwrap();
     let doc = b.finish();
     let p = read_back(&run(&doc, seq));
-    let c = clips(&p, &format!("t{}", keys.0));
-    assert_eq!(c.len(), 1);
-    assert!(c[0].duration.unwrap() >= 4.0, "{:?}", c[0].duration);
+    let c = rule_clips(&p, &format!("t{}", keys.0));
+    assert_eq!(
+        c.iter().map(|c| (c.time, c.duration)).collect::<Vec<_>>(),
+        vec![(0.0, Some(2.0 + 1.0 / 15_360.0)), (6.0, Some(1.0))]
+    );
+}
+
+#[test]
+fn a_use_cut_by_the_song_end_ends_there() {
+    // A use's clip ends where the song does when the song cuts it: its
+    // points past the end do not play and are not written, and the clip is
+    // not made a tick longer for them.
+    let points = |c: &DpClip| {
+        let mut all = Vec::new();
+        if let Some(t) = c.content.as_deref() {
+            walk(t, &mut all);
+        }
+        all.iter()
+            .map(|t| match t {
+                DpTimeline::Points(p) => p.points.len(),
+                _ => 0,
+            })
+            .sum::<usize>()
+    };
+    for (song_len, want_points) in [(BAR + 2 * Q, 1), (BAR + 2 * Q + 1, 2)] {
+        let mut b = Builder::new();
+        let synth = b.dest("Synth", BUILTIN_SYNTH_REF, 0).unwrap();
+        let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+        let (riff, rl) = b.sequence("Riff", "Riff", Some(synth)).unwrap();
+        b.notes(riff, rl, &[(0, 60, 0x8000, Q)]).unwrap();
+        b.event(
+            riff,
+            rl,
+            2 * Q,
+            EventBody::Cc {
+                index: 1,
+                value: 0x4000_0000,
+            },
+        )
+        .unwrap();
+        length(&mut b, riff, BAR);
+        b.reference(seq, keys, 0, riff, 2, 0).unwrap();
+        length(&mut b, seq, song_len);
+        let doc = b.finish();
+        let p = read_back(&run(&doc, seq));
+        let c = clips(&p, &format!("t{}", keys.0));
+        assert_eq!(c.len(), 1, "{song_len}");
+        assert_eq!(c[0].named.name.as_deref(), Some("Riff"));
+        assert_eq!(c[0].loop_end, None, "cut, so not a loop");
+        assert_eq!(
+            c[0].duration,
+            Some(song_len as f64 / Q as f64),
+            "the song's end, {song_len}"
+        );
+        assert_eq!(points(&c[0]), want_points, "{song_len}");
+    }
 }

@@ -10,7 +10,7 @@ mod common;
 use common::{CountingAlloc, measure};
 use core_io::IoError;
 use core_io::dawproject::schema::{check_ids, read_project};
-use core_io::limits::{MAX_PROJECT_XML_BYTES, MAX_XML_NODES, PackageLimits};
+use core_io::limits::{MAX_XML_NODES, PackageLimits};
 use core_io::report::Report;
 use core_io::xml::Tree;
 use std::sync::atomic::AtomicBool;
@@ -858,9 +858,8 @@ fn xml_nodes() {
 fn xml_tree_bytes() {
     // A ratio-legal (stored) project.xml of 4 000 000 nodes parses with the
     // text, the tree and one working copy in hand: under the text plus
-    // 128 MiB plus 16 MiB (L7). One node more is refused as having too many
-    // parts. (The plan's bound is for the largest text, 256 MiB; this text
-    // is 16 MiB, and its bound is the same formula over it.)
+    // 128 MiB plus 16 MiB (L7), whatever the node count. One node more is
+    // refused as having too many parts.
     let dir = tempfile::tempdir().unwrap();
     let flat = |n: usize| {
         format!(
@@ -882,17 +881,14 @@ fn xml_tree_bytes() {
         Tree::parse(&bytes, &PackageLimits::default(), &AtomicBool::new(false)).map(|_| ())
     });
     r.expect("4 000 000 nodes parse");
-    let bound = MAX_PROJECT_XML_BYTES as usize + 128 * MIB + 16 * MIB;
+    let bound = text.len() + 128 * MIB + 16 * MIB;
     println!(
         "4M nodes: peak {} MiB (bound {} MiB)",
         seen.peak / MIB,
         bound / MIB
     );
-    assert!(seen.peak < bound, "peak {} MiB", seen.peak / MIB);
-    // What this text really costs: its unpacked copy and the tree, whose
-    // vectors double as they grow.
     assert!(
-        seen.peak < 2 * text.len() + 2 * 128 * MIB,
+        seen.peak < text.len() + 144 * MIB,
         "peak {} MiB",
         seen.peak / MIB
     );
@@ -901,8 +897,47 @@ fn xml_tree_bytes() {
     let path = stored(dir.path(), "Wider", &[("project.xml", text.as_bytes())]);
     let (r, seen) = measure(|| open_with(&path, &PackageLimits::default()));
     assert!(refused(r).contains("too many parts"));
-    assert!(seen.peak < bound, "peak {} MiB", seen.peak / MIB);
+    assert!(
+        seen.peak < text.len() + 144 * MIB,
+        "peak {} MiB",
+        seen.peak / MIB
+    );
     assert_eq!(limits::MAX_XML_TREE_BYTES, 128 * MIB);
+}
+
+#[test]
+fn xml_tree_bytes_while_growing() {
+    // CDATA text is out of sight of the pass that sizes the tree, so its
+    // arena and text table grow as the parse goes. A growing table holds
+    // its old and new buffers at once, and both count: the tree never
+    // passes its budget, accepted or refused.
+    let budget = 8 * MIB;
+    let lowered = PackageLimits {
+        max_tree_bytes: budget,
+        ..PackageLimits::default()
+    };
+    let cdata = |n: usize| {
+        format!(
+            "<Project>{}</Project>",
+            format!("<t><![CDATA[{}]]></t>", "x".repeat(100)).repeat(n)
+        )
+    };
+    let parse = |text: &str| {
+        measure(|| Tree::parse(text.as_bytes(), &lowered, &AtomicBool::new(false)).map(|_| ()))
+    };
+    // About 2.5 MiB of tree, grown step by step: it fits.
+    let text = cdata(20_000);
+    let (r, seen) = parse(&text);
+    r.expect("about 2.5 MiB of tree fits in 8 MiB");
+    assert!(seen.peak < budget + MIB, "peak {} KiB", seen.peak / 1024);
+    // Too much for the budget: refused, still within it.
+    let text = cdata(200_000);
+    let (r, seen) = parse(&text);
+    assert!(
+        matches!(&r, Err(IoError::Refused(s)) if s.contains("too many parts")),
+        "{r:?}"
+    );
+    assert!(seen.peak < budget + MIB, "peak {} KiB", seen.peak / 1024);
 }
 
 #[test]
@@ -1008,23 +1043,91 @@ fn reference_cycles() {
     let pkg = open_xml(&looped, &PackageLimits::default()).expect("opens");
     let (report, _) = imported_report(&pkg);
     has_line(&report, ItemKind::Changed, LOOP_OUTPUTS);
-    let cycle = project(
-        r#"<Track id="n" name="N" contentType="notes"><Channel id="nc" role="regular" destination="mc"/></Track>"#,
-        r#"<Lanes timeUnit="beats"><Lanes track="n"><Clips id="c1"><Clip time="0" duration="4"><Clips id="c2"><Clip time="0" duration="2" reference="c1"/></Clips></Clip></Clips></Lanes></Lanes>"#,
-    );
-    let start = std::time::Instant::now();
-    match open_xml(&cycle, &PackageLimits::default()) {
-        Ok(pkg) => {
-            let (report, _) = imported_report(&pkg);
-            assert!(
-                report.items.iter().all(|i| i.what != "never"),
-                "{:?}",
-                report.items
-            );
-        }
-        Err(IoError::Refused(_)) => {}
-        Err(e) => panic!("{e:?}"),
+    // Clips that refer to each other in a loop are refused, each shape with
+    // the same sentence, at once.
+    const LOOP: &str = "This DAWproject file is damaged: clips refer to each other in a loop.";
+    let track = r#"<Track id="n" name="N" contentType="notes"><Channel id="nc" role="regular" destination="mc"/></Track>"#;
+    let on_n = |clips: &str, defs: &str| {
+        project(
+            track,
+            &format!(
+                r#"<Lanes timeUnit="beats"><Lanes track="n"><Clips>{clips}</Clips></Lanes><Lanes>{defs}</Lanes></Lanes>"#
+            ),
+        )
+    };
+    let use_of = |id: &str| format!(r#"<Clip time="0" duration="2" reference="{id}"/>"#);
+    let loops = [
+        // A clip inside c1 that uses c1.
+        project(
+            track,
+            r#"<Lanes timeUnit="beats"><Lanes track="n"><Clips id="c1"><Clip time="0" duration="4"><Clips id="c2"><Clip time="0" duration="2" reference="c1"/></Clips></Clip></Clips></Lanes></Lanes>"#,
+        ),
+        // A timeline that uses itself.
+        on_n(
+            &use_of("s"),
+            &format!(r#"<Clips id="s">{}</Clips>"#, use_of("s")),
+        ),
+        // Two timelines that use each other.
+        on_n(
+            &use_of("x"),
+            &format!(
+                r#"<Clips id="x">{}</Clips><Clips id="y">{}</Clips>"#,
+                use_of("y"),
+                use_of("x")
+            ),
+        ),
+    ];
+    for (i, xml) in loops.iter().enumerate() {
+        let start = std::time::Instant::now();
+        assert_eq!(
+            refused(open_xml(xml, &PackageLimits::default())),
+            LOOP,
+            "loop {i}"
+        );
+        assert!(start.elapsed().as_secs() < 5, "loop {i}");
     }
+    // A use of a timeline that is not in the file is left out with its
+    // line; the rest imports.
+    let pkg = open_xml(
+        &on_n(
+            &format!(
+                r#"{}<Clip time="4" duration="1"><Notes><Note time="0" duration="1" channel="0" key="60" vel="0.5"/></Notes></Clip>"#,
+                use_of("nowhere")
+            ),
+            "",
+        ),
+        &PackageLimits::default(),
+    )
+    .expect("opens");
+    let line = has_line(&pkg.report, ItemKind::LeftOut, MISSING_REFERENCES);
+    assert!(
+        line.details.iter().any(|d| d.ends_with("'nowhere'")),
+        "{:?}",
+        line.details
+    );
+    let (report, doc) = imported_report(&pkg);
+    lacks_line(&report, NESTED_TOO_DEEP);
+    assert_eq!(
+        doc.all_events()
+            .filter(|(_, e)| matches!(e.body, core_model::event::EventBody::Note { .. }))
+            .count(),
+        1,
+        "the note beside the missing use is imported"
+    );
+    // A chain without a loop, longer than the nesting limit: it opens, and
+    // the import stops at the limit with its line.
+    let hops = 40;
+    let defs: String = (1..hops)
+        .map(|k| format!(r#"<Clips id="h{k}">{}</Clips>"#, use_of(&format!("h{}", k + 1))))
+        .chain(std::iter::once(format!(
+            r#"<Notes id="h{hops}"><Note time="0" duration="1" channel="0" key="60" vel="0.5"/></Notes>"#
+        )))
+        .collect();
+    let start = std::time::Instant::now();
+    let pkg = open_xml(&on_n(&use_of("h1"), &defs), &PackageLimits::default()).expect("opens");
+    lacks_line(&pkg.report, MISSING_REFERENCES);
+    let (report, _) = imported_report(&pkg);
+    has_line(&report, ItemKind::LeftOut, NESTED_TOO_DEEP);
     assert!(start.elapsed().as_secs() < 5);
 }
 
@@ -1190,18 +1293,22 @@ fn external_media() {
             .all(|a| matches!(a.source, AudioSource::External(_)))
     );
     assert_eq!(pkg.info().external_files, 4);
-    // `needed_bytes` runs on a thread: a FIFO opened for reading would block
-    // for ever, and this must fail instead of hanging.
+    // `needed_bytes` runs on a detached thread: a FIFO opened for reading
+    // would block for ever, and this must fail instead of hanging (a scoped
+    // thread would be joined, and the test would hang on it).
+    let shared = std::sync::Arc::new(pkg);
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let _ = tx.send(pkg.needed_bytes(3, &AtomicBool::new(false)));
+    {
+        let shared = std::sync::Arc::clone(&shared);
+        std::thread::spawn(move || {
+            let _ = tx.send(shared.needed_bytes(3, &AtomicBool::new(false)));
         });
-        let got = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("needed_bytes returned");
-        assert_eq!(got.unwrap(), 0, "none of them will be read");
-    });
+    }
+    let got = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("needed_bytes returned");
+    assert_eq!(got.unwrap(), 0, "none of them will be read");
+    let pkg: &DpPackage = &shared;
     // The job makes them offline, and the import lists them.
     let media: BTreeMap<usize, MediaSource> = pkg
         .audio()
@@ -1215,7 +1322,7 @@ fn external_media() {
             )
         })
         .collect();
-    let imp = mapped(&pkg, &media);
+    let imp = mapped(pkg, &media);
     assert_eq!(has_line(&imp.report, ItemKind::Note, OFFLINE).count, 4);
 }
 

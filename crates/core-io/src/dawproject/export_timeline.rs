@@ -653,6 +653,12 @@ impl Arr<'_, '_, '_, '_, '_> {
                 c.loop_end = Some(beats(Tick(iter_len)));
                 (lt, c)
             } else {
+                // What plays of a use ends before the song, the track and
+                // the use do, so the clip's end is `end_play` or a note's.
+                debug_assert!(
+                    evs.iter().all(|r| r.tick.0 < end_play),
+                    "a use's event at or past its end"
+                );
                 let lo = evs.iter().map(|r| r.tick.0).min().unwrap_or(lt);
                 let start = lt.min(lo).max(l.origin);
                 let end = evs
