@@ -231,13 +231,13 @@ public final class ForDawModel: AudioFormatChoices {
         reopening = false
     }
 
-    /// A job ended (`pollJobs`, once the job list is settled): the kept
-    /// request starts if nothing blocks it any more.
     /// A finished or cancelled export closes the sheet.
     func jobDone(_ job: JobRow) {
         if job.kind == .exportProject, job.id == self.job { shown = false }
     }
 
+    /// A job ended (`pollJobs`, once the job list is settled): the kept
+    /// request starts if nothing blocks it any more.
     func jobEnded() {
         guard let req = kept, !blocked(by: req) else { return }
         begin(req)

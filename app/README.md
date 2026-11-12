@@ -2521,8 +2521,9 @@ the sheet's model (`ForDawModelTests`, `InterchangeTests`) and the e2e
      at the start point; one Undo ("Add Stems") removes them all, and the
      folder stays.
 273. Cancel during a long export, in the sheet (it stays up with its
-     progress and Cancel): no folder is left and the project is unchanged. Drop two MIDI files, then start an export at once: the sheet
-     waits, then exports after the imports.
+     progress and Cancel): no folder is left and the project is unchanged.
+     Drop two MIDI files, then start an export at once: the sheet waits,
+     then exports after the imports.
 
 **Owner check (manual, only the owner can do):** drop the folder's stems and
 MIDI files at bar 1 in the DAW you use that reads only audio and MIDI files.
