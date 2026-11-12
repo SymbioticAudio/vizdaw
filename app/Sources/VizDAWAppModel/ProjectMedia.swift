@@ -153,7 +153,7 @@ extension DocumentModel {
                 if !r.problems.isEmpty { jobProblems = r.problems }
                 refreshAfterJob()
                 // A MIDI import or export the UI started shows its report.
-                if r.kind == .importMidi || r.kind == .exportMidi || r.kind == .exportProject { interchange.jobEnded(r) }
+                if [.importMidi, .exportMidi, .exportProject].contains(r.kind) { interchange.jobEnded(r) }
                 if r.kind == .importMidi { openedMidi = nil }
             case .failed(let message):
                 if r.kind == .importMidi, openedMidi != nil {
@@ -182,7 +182,7 @@ extension DocumentModel {
         // dropped files queued (F11): only `importEnded` clears them.
         for r in blockersEnded where ForDawModel.blocking.contains(r.kind) || ForDawModel.mediaJobs.contains(r.kind) {
             if ForDawModel.blocking.contains(r.kind) { interchange.blockingEnded() }
-            forDaw.jobEnded(r)
+            forDaw.jobEnded()
         }
     }
 

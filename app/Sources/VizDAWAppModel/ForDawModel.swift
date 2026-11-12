@@ -32,7 +32,8 @@ public final class ForDawModel {
     /// Showing resets the choices to the project's defaults.
     public var shown = false {
         didSet {
-            guard shown, !oldValue, !reopening else { return }
+            // Showing again while an export waits keeps it, as waiting.
+            guard shown, !oldValue, !reopening, !waiting else { return }
             reset()
         }
     }
@@ -125,6 +126,7 @@ public final class ForDawModel {
     public func refresh() {
         guard let document else { return }
         guard let req = request(path: "") else {
+            generation += 1
             check = nil
             error = "No sequence is shown."
             return
@@ -218,7 +220,7 @@ public final class ForDawModel {
 
     /// A job ended (`pollJobs`, once the job list is settled): the kept
     /// request starts if nothing blocks it any more.
-    func jobEnded(_ job: JobRow) {
+    func jobEnded() {
         guard let req = kept, !blocked(by: req) else { return }
         begin(req)
     }

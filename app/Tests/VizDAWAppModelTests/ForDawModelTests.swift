@@ -63,7 +63,7 @@ import VizDAWCore
             change()
             await d.settle()
             #expect(f.forDawChecks.count == n + 1, "\(what) checks once")
-            #expect(f.forDawChecks.last?.strips == [1, 2] || f.forDawChecks.last?.strips == [1] || f.forDawChecks.last?.strips == [2])
+            #expect(f.forDawChecks.last?.strips == d.stems.sorted(), "sends the shown stems")
             n = f.forDawChecks.count
         }
         await next("stems") { d.stems = [1, 2] }
@@ -195,5 +195,98 @@ import VizDAWCore
         await d.settle()
         strings.append(d.error ?? "")
         #expect(strings.allSatisfy { !$0.lowercased().contains("lane") })
+    }
+
+    func running(_ f: FakeSession, _ m: DocumentModel, _ id: UInt64, _ kind: JobKindRow) {
+        f.jobRows[id] = JobRow(id: id, kind: kind, progress: 0.4, state: .running, message: nil, problems: [], created: [])
+        m.jobs.append(f.jobRows[id]!)
+    }
+
+    func finish(_ f: FakeSession, _ id: UInt64, _ kind: JobKindRow) {
+        f.jobRows[id] = JobRow(id: id, kind: kind, progress: 1, state: .done, message: nil, problems: [], created: [])
+    }
+
+    @Test func eachBlockingKindBlocksOnItsOwn() async throws {
+        for kind in [JobKindRow.bounce, .exportMidi, .exportProject] {
+            let f = fake()
+            f.jobStartState = .running
+            let (m, d) = try await shown(f)
+            running(f, m, 90, kind)
+            d.start(folder: "/tmp/x")
+            #expect(f.forDawExports.isEmpty && d.waiting, "\(kind) blocks")
+            finish(f, 90, kind)
+            m.pollJobs()
+            #expect(f.forDawExports.count == 1 && !d.waiting, "\(kind) ends: it starts")
+        }
+    }
+
+    @Test func twoBlockersEndingInOnePollStartTheExportOnce() async throws {
+        let f = fake()
+        f.jobStartState = .running
+        let (m, d) = try await shown(f)
+        running(f, m, 90, .bounce)
+        running(f, m, 91, .importMidi)
+        d.start(folder: "/tmp/x")
+        finish(f, 90, .bounce)
+        finish(f, 91, .importMidi)
+        m.pollJobs()
+        #expect(f.forDawExports.count == 1 && m.alert == nil)
+    }
+
+    @Test func anUnknownJobCountsAsEnded() async throws {
+        let f = fake()
+        f.jobStartState = .running
+        let (m, d) = try await shown(f)
+        m.jobs.append(JobRow(id: 77, kind: .bounce, progress: 0, state: .running, message: nil, problems: [], created: []))
+        d.start(folder: "/tmp/x")
+        #expect(d.waiting)
+        m.pollJobs()
+        #expect(f.forDawExports.count == 1 && !d.waiting)
+    }
+
+    @Test func aDropAndAKeptExportWaitingOnTheSameJobBothProceedInOrder() async throws {
+        let f = fake()
+        f.jobStartState = .running
+        let (m, d) = try await shown(f)
+        running(f, m, 90, .bounce)
+        m.interchange.importDropped(paths: ["/tmp/a.mid"], target: ImportTargetRow(seq: 3, lane: nil, tick: 0))
+        d.start(folder: "/tmp/x")
+        #expect(f.midiImports.isEmpty && f.forDawExports.isEmpty)
+        finish(f, 90, .bounce)
+        m.pollJobs()
+        #expect(f.midiImports.count == 1 && f.forDawExports.isEmpty && d.waiting, "the drop first; the export waits for it")
+        try ended(f, m, .importMidi, .done)
+        #expect(f.forDawExports.count == 1 && !d.waiting)
+    }
+
+    @Test func showingAgainKeepsAWaitingExport() async throws {
+        let f = fake()
+        f.jobStartState = .running
+        let (m, d) = try await shown(f)
+        running(f, m, 90, .bounce)
+        d.rate = 96_000
+        d.start(folder: "/tmp/x")
+        d.shown = false
+        d.shown = true
+        await d.settle()
+        #expect(d.waiting && d.rate == 96_000)
+        finish(f, 90, .bounce)
+        m.pollJobs()
+        #expect(f.forDawExports.last?.rate == 96_000)
+    }
+
+    @Test func noSequenceDropsAnOlderCheck() async throws {
+        let f = fake()
+        let (m, d) = try await shown(f)
+        let release = DispatchSemaphore(value: 0)
+        f.forDawCheckHold = { _ in release }
+        d.rate = 96_000
+        m.forDaw.refresh()
+        m.select(nil)
+        d.refresh()
+        release.signal()
+        release.signal()
+        await d.settle()
+        #expect(d.check == nil && d.error == "No sequence is shown.")
     }
 }
