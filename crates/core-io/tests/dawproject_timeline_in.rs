@@ -1582,3 +1582,41 @@ fn exported_fills_and_channels_come_back() {
     );
     assert_eq!(rules::validate(a.h.doc()), Vec::<String>::new());
 }
+
+#[test]
+fn a_last_point_on_a_barline_stays_inside_the_sequence() {
+    // A derived length is the barline at or after the content's end, and a
+    // point ends at its own tick: a file whose content ends in a point on a
+    // barline would put that point at the sequence's end, outside its
+    // window. The import locks the length to the barline after it.
+    let track = r#"<Track id="t1" name="Keys" contentType="notes"><Channel id="t1c" role="regular" destination="mc"><Volume id="t1v" unit="linear" value="1"/></Channel></Track>"#;
+    let arrangement = |last: &str| {
+        format!(
+            r#"<Lanes timeUnit="beats"><Lanes track="t1"><Clips><Clip time="0" duration="1"><Notes><Note time="0" duration="1" channel="0" key="60" vel="0.5"/></Notes></Clip></Clips><Points unit="linear"><Target parameter="t1v"/><RealPoint time="2" value="0.5"/><RealPoint time="{last}" value="0.25"/></Points></Lanes></Lanes>"#
+        )
+    };
+    let a = imported(&project_xml(track, &arrangement("4")));
+    let s = sequence(&a, a.seq);
+    assert_eq!(
+        s.length,
+        SeqLength::Locked(Tick(8 * BEAT)),
+        "the next barline"
+    );
+    let len = core_model::query::seq_length(a.h.doc(), a.seq).unwrap();
+    let points: Vec<i64> = events(&a, "Keys")
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::Automation { .. }))
+        .map(|e| e.tick.0)
+        .collect();
+    assert_eq!(points, [2 * BEAT, 4 * BEAT]);
+    assert!(points.iter().all(|t| *t < len.0), "every point plays");
+    lacks(&a.report, PAST_END);
+    // A last point inside the last bar needs nothing: the length stays
+    // derived.
+    let a = imported(&project_xml(track, &arrangement("3")));
+    assert_eq!(sequence(&a, a.seq).length, SeqLength::Derived);
+    assert_eq!(
+        core_model::query::seq_length(a.h.doc(), a.seq).unwrap(),
+        Tick(4 * BEAT)
+    );
+}

@@ -9,6 +9,50 @@ use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
 use core_model::ids::MediaId;
 use core_model::sequence::SeqLength;
 
+/// Locks `seq`'s length when its derived length would leave an event out.
+///
+/// A derived length is the barline at or after the content's end, and a
+/// point (a controller, automation or other one-tick event) ends at its own
+/// tick. So a file whose content ends in a point on a barline would import
+/// with that point at the sequence's end, outside its window, where the
+/// file plays it. The length is locked to the barline after the last such
+/// event (or one tick past it near the end of the timeline); a point that
+/// no length can cover is left out with its line.
+fn cover_last_event(h: &mut History, seq: SeqId, report: &mut Report) -> Result<(), ModelError> {
+    let doc = h.doc();
+    let s = doc.sequence(seq)?;
+    if matches!(s.length, SeqLength::Locked(_)) {
+        return Ok(());
+    }
+    let derived = core_model::query::seq_length(doc, seq)?;
+    let last = s
+        .lanes
+        .iter()
+        .filter(|l| l.length.is_none())
+        .filter_map(|l| l.active())
+        .flat_map(|t| t.events.values())
+        .map(|e| e.tick)
+        .max();
+    let Some(last) = last.filter(|t| *t >= derived) else {
+        return Ok(());
+    };
+    let after = Tick(last.0.saturating_add(1));
+    let bar = s.meter.barline_at_or_after(after);
+    let length = if bar.0 <= MAX_TICKS { bar } else { after };
+    if length.0 > MAX_TICKS {
+        report.add(ItemKind::LeftOut, PAST_END, None);
+        return Ok(());
+    }
+    run(
+        h,
+        Command::Sequence(SequenceCmd::SetLength {
+            seq,
+            length: SeqLength::Locked(length),
+        }),
+    )?;
+    Ok(())
+}
+
 fn run(h: &mut History, cmd: Command) -> Result<CmdReport, ModelError> {
     h.execute(&cmd, &ViewFilter::default())
 }
@@ -441,6 +485,7 @@ pub fn apply(
         )?;
     }
     apply_arranged(h, plan, seq, &placed, report)?;
+    cover_last_event(h, seq, report)?;
     let s = &mut report.summary;
     s.tracks = s.tracks.saturating_add(lanes);
     s.markers = s

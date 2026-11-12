@@ -1846,13 +1846,6 @@ fn build(s: &Spec) -> (Document, SeqId) {
         }
         audio_lanes.push((lane, strip, t, bus.is_some() && t.strip.send.is_some()));
     }
-    // A last note past every other event: a sequence's derived length is the
-    // barline at or after its content's end, and a point on that barline is
-    // outside it (the model's rule, and so lost from a file whose content
-    // ends there). The projection counts the note, so it must come back.
-    if let Some((lane, ..)) = lanes.first() {
-        b.notes(seq, *lane, &[(90 * Q, 0, 1, Q)]).unwrap();
-    }
     // Events.
     for ((lane, strip, slot, has_send), t) in lanes.iter().zip(&s.notes) {
         let mut events: Vec<EventSpec> = t
