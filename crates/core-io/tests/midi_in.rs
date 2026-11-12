@@ -262,9 +262,18 @@ fn place(seq: SeqId) -> Placement {
 /// Applies inside one transaction; returns the history, lanes and report.
 fn apply_to(doc: Document, imp: &MidiImport, p: &Placement) -> (History, Vec<LaneId>, Report) {
     let mut h = History::new(doc);
-    let mut report = imp.report.clone();
+    let mut report = Report::default();
     h.begin("Import MIDI File").unwrap();
     let lanes = apply(&mut h, imp, p, &mut report).unwrap();
+    // `apply` merges the import's own report.
+    for i in &imp.report.items {
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|r| r.kind == i.kind && r.what == i.what)
+        );
+    }
     h.commit().unwrap();
     (h, lanes, report)
 }
@@ -1204,14 +1213,66 @@ fn importing_into_a_project_keeps_its_tempo_map() {
         vec![(bar9.0, 60, 15_360)]
     );
 
+    // With the file's maps at bar 9: bars 1-8 keep the project's ramp and
+    // 4/4; the file's 90 BPM and 3/4 start at bar 9, with its first note.
     p.use_tempo = true;
-    let (h, _, report) = apply_to(doc, &imp, &p);
+    let (h, lanes, report) = apply_to(doc.clone(), &imp, &p);
     let s = h.doc().sequence(seq).unwrap();
-    assert_eq!(s.tempo, imp.tempo);
-    assert_eq!(s.tempo.points()[0].bpm, Bpm(90_000));
-    assert_eq!(s.meter, imp.meter);
-    has(&report, ItemKind::Changed, "tempo");
+    let points: Vec<(Tick, u32, bool)> = s
+        .tempo
+        .points()
+        .iter()
+        .map(|p| (p.tick, p.bpm.0, p.ramp))
+        .collect();
+    assert_eq!(
+        points,
+        vec![
+            (Tick(0), 120_000, true),
+            (Tick(61_440), 140_000, false),
+            (bar9, 90_000, false),
+        ]
+    );
+    let entries: Vec<(Tick, Meter)> = s
+        .meter
+        .entries()
+        .iter()
+        .map(|e| (e.tick, e.meter))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            (Tick(0), Meter { num: 4, den: 4 }),
+            (bar9, Meter { num: 3, den: 4 }),
+        ]
+    );
+    let first = lane_events(&h, seq, lanes[0])[0].tick;
+    let at = s.meter.tick_to_bbu(first, 1);
+    assert_eq!((at.bar, at.beat, at.unit), (9, 1, 0));
+    assert_eq!(has(&report, ItemKind::Changed, "replaced from bar 9"), 1);
+    lacks(&report, "moved to the start of bar");
     assert!(report.summary.tempo_map);
+
+    // Off a barline, the drop moves to the start of its bar (Changed).
+    p.tick = bar9 + Tick(100);
+    let (h, lanes, report) = apply_to(doc.clone(), &imp, &p);
+    assert_eq!(lane_events(&h, seq, lanes[0])[0].tick, bar9);
+    has(&report, ItemKind::Changed, "moved to the start of bar 9");
+
+    // Maps that already match the file change nothing and say nothing.
+    let (h, _, _) = apply_to(doc.clone(), &imp, &place_at_zero_with_maps(seq));
+    let same = h.doc().clone();
+    let mut h2 = History::new(same);
+    let mut report = Report::default();
+    h2.begin("Import MIDI File").unwrap();
+    apply(&mut h2, &imp, &place_at_zero_with_maps(seq), &mut report).unwrap();
+    h2.commit().unwrap();
+    lacks(&report, "replaced from bar");
+}
+
+fn place_at_zero_with_maps(seq: SeqId) -> Placement {
+    let mut p = place(seq);
+    p.use_tempo = true;
+    p
 }
 
 #[test]
@@ -1472,7 +1533,8 @@ proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(cases(256)))]
 
     /// Damaged files parse or are refused, and whatever parses applies
-    /// cleanly into a project and as a new project.
+    /// cleanly into a project (at 0 and spliced in at an off-barline drop)
+    /// and as a new project.
     #[test]
     fn damaged_files_parse_or_refuse_and_apply(
         pick in 0usize..16,
@@ -1490,13 +1552,14 @@ proptest::proptest! {
         let limits = Limits { max_events: 100_000, ..Limits::default() };
         match parse(&bytes, &opts, &limits, &no_cancel()) {
             Ok(imp) => {
-                for new_project in [false, true] {
+                for (new_project, at) in [(false, 0), (true, 0), (false, 3 * 61_440 + 77)] {
                     let (doc, seq) = empty_doc();
                     let mut p = place(seq);
                     p.new_project = new_project;
                     p.use_tempo = true;
+                    p.tick = Tick(at);
                     let mut h = History::new(doc);
-                    let mut report = imp.report.clone();
+                    let mut report = Report::default();
                     h.begin("Import MIDI File").unwrap();
                     let r = apply(&mut h, &imp, &p, &mut report);
                     proptest::prop_assert!(r.is_ok(), "{r:?}");
@@ -1508,4 +1571,154 @@ proptest::proptest! {
             Err(e) => proptest::prop_assert!(false, "unexpected {e:?}"),
         }
     }
+}
+
+#[test]
+fn a_drop_onto_an_instrument_track_keeps_its_instrument() {
+    let (doc, seq, drop) = doc_with_track();
+    let a = run(
+        &doc,
+        &Command::Routing(RoutingCmd::AddDestination {
+            name: "Piano".into(),
+            kind: DestKind::plugin("Piano"),
+            default_patch: None,
+        }),
+    )
+    .unwrap();
+    let piano = created_dest(&a.report.created);
+    let doc = run(
+        &a.doc,
+        &Command::Lane(LaneCmd::SetDest {
+            seq,
+            lane: drop,
+            dest: Some(piano),
+        }),
+    )
+    .unwrap()
+    .doc;
+    // A drum file on channel 10 with one note on channel 2.
+    let f = type1(
+        960,
+        vec![vec![
+            (0, on(9, 36, 100)),
+            (0, on(9, 38, 100)),
+            (0, on(1, 60, 100)),
+            (480, off(9, 36, 0)),
+            (480, off(9, 38, 0)),
+            (480, off(1, 60, 0)),
+        ]],
+    );
+    let imp = import(&f);
+    let mut p = place(seq);
+    p.lane = Some(drop);
+    let (h, lanes, report) = apply_to(doc, &imp, &p);
+    assert_eq!(lanes, vec![drop]);
+    let d = h.doc();
+    let names: Vec<&str> = d.instruments().values().map(|x| x.name.as_str()).collect();
+    assert_eq!(names, vec!["Piano", "Built-in Synth (ch 2)"]);
+    let ch2_ = d
+        .instruments()
+        .iter()
+        .find(|(_, x)| x.name == "Built-in Synth (ch 2)")
+        .map(|(id, _)| *id);
+    let lane = d.lane(seq, drop).unwrap();
+    assert_eq!(lane.midi_dest, Some(piano));
+    assert!(lane.drum.is_none());
+    for e in lane_events(&h, seq, drop) {
+        let want = if e.group_channel == Some((0, 1)) {
+            ch2_
+        } else {
+            None
+        };
+        assert_eq!(e.dest, want, "{e:?}");
+    }
+    has(&report, ItemKind::Note, "was not made a drum track");
+
+    // MPE that the drop track does not take is noted too.
+    let mut events = vec![(0, cc(0, 101, 0)), (0, cc(0, 100, 6)), (0, cc(0, 6, 15))];
+    events.extend(mpe_body());
+    let imp = import(&type1(960, vec![events]));
+    let (doc, seq, drop) = doc_with_track();
+    let mut p = place(seq);
+    p.lane = Some(drop);
+    let (_, _, report) = apply_to(doc, &imp, &p);
+    has(&report, ItemKind::Note, "was not set to MPE");
+}
+
+#[test]
+fn other_texts_channel_prefixes_and_sysex_map() {
+    let f = type1(
+        960,
+        vec![vec![
+            (0, text(0x04, "Piano")),
+            (0, text(0x08, "Grand")),
+            (0, text(0x09, "Port A")),
+            (0, text(0x0A, "ten")),
+            (0, meta(0x20, &[3])),
+            (0, SmfEvent::SysEx(vec![0x7E, 0x7F, 0x09, 0x01])),
+            (0, SmfEvent::SysEx(vec![0x41, 0x80])),
+            (0, on(3, 60, 100)),
+            (960, off(3, 60, 0)),
+        ]],
+    );
+    let imp = import(&f);
+    let t = &imp.tracks[0];
+    let txt = |s: &str| EventBody::Text {
+        kind: TextKind::Text,
+        text: s.into(),
+    };
+    let expected = vec![
+        spec(0, None, txt("Instrument: Piano")),
+        spec(0, None, txt("Program: Grand")),
+        spec(0, None, txt("Device: Port A")),
+        spec(0, None, txt("ten")),
+        spec(
+            0,
+            Some((0, 3)),
+            EventBody::SysEx {
+                data: Arc::from(vec![0x7Eu8, 0x7F, 0x09, 0x01]),
+                eight_bit: false,
+            },
+        ),
+        spec(
+            0,
+            Some((0, 3)),
+            note_with(60, up7(100), 0, 15_360, None, vec![]),
+        ),
+    ];
+    assert_eq!(t.events, expected);
+    assert_eq!(
+        has(&imp.report, ItemKind::Changed, "names became text events"),
+        3
+    );
+    has(&imp.report, ItemKind::Note, "Channel prefixes");
+    assert_eq!(
+        has(&imp.report, ItemKind::LeftOut, "Damaged SysEx messages"),
+        1
+    );
+}
+
+#[test]
+fn nothing_is_made_for_events_all_past_the_end() {
+    let (doc, seq, _) = doc_with_track();
+    let imp = import(&type1(
+        960,
+        vec![vec![(0, on(0, 60, 100)), (960, off(0, 60, 0))]],
+    ));
+    let mut p = place(seq);
+    p.tick = Tick(MAX_TICKS);
+    p.tick = p.tick + Tick(1);
+    let (h, lanes, report) = apply_to(doc, &imp, &p);
+    assert!(lanes.is_empty());
+    assert!(h.doc().instruments().is_empty());
+    assert_eq!(h.doc().sequence(seq).unwrap().lanes.len(), 1);
+    assert_eq!(
+        has(
+            &report,
+            ItemKind::LeftOut,
+            "Events past the end of the timeline"
+        ),
+        1
+    );
+    assert_eq!(report.summary.tracks, 0);
 }

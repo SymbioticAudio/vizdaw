@@ -16,7 +16,10 @@
 //! | track name | `03` on the track | Metadata 0x03 clip name |
 //!
 //! The conductor is track 1 of a type 1 file, or the one track of a type 0
-//! file (its copyright only at tick 0).
+//! file (its copyright only at tick 0). Other SMF text kinds become
+//! `Text { kind: Text }`: `04`, `08` and `09` prefixed "Instrument: ",
+//! "Program: " and "Device: " (the model has no kind for them), `0A` to
+//! `0F` as they are.
 
 use crate::IoError;
 use crate::clip::{self, ClipEvent, ClipFile};
@@ -165,6 +168,8 @@ const SEQ_SPECIFIC: &str = "Sequencer-specific data";
 const SMPTE_OFFSET: &str = "SMPTE offsets";
 const ESCAPES: &str = "Escaped MIDI data";
 const OTHER_TEXT: &str = "Text events of other kinds";
+const NAMES_AS_TEXT: &str = "Instrument, program and device names became text events";
+const CHANNEL_PREFIX: &str = "Channel prefixes not kept (each message has its own channel)";
 const OTHER_META: &str = "Unknown meta events";
 const BAD_PORT: &str = "Port changes past group 16";
 const BAD_SYSEX: &str = "Damaged SysEx messages";
@@ -172,7 +177,8 @@ const UNKNOWN: &str = "Unknown MIDI messages";
 const INFO_CUT: &str = "Song info cut to 4 096 bytes";
 const NOT_EMPTY: &str = "A new-project import needs an empty project";
 const TEMPO_NOT_USED: &str = "The file's tempo map was not used";
-const TEMPO_REPLACED: &str = "The project's tempo and meter were replaced by the file's";
+const TEMPO_REPLACED: &str = "The project's tempo and meter were replaced from bar ";
+const MOVED_TO_BAR: &str = "Import moved to the start of bar ";
 const TITLE_NOT_USED: &str = "The file's title was not used";
 const COPYRIGHT_NOT_USED: &str = "The file's copyright was not used";
 
@@ -254,20 +260,28 @@ pub fn suggested_dest(doc: &Document, group: u8, channel: u8) -> DestChoice {
 
 /// Applies `imp` to sequence `place.seq` with commands run through `h`,
 /// inside the caller's open transaction (the caller commits, or aborts on
-/// `Err`). Adds to `report` (pass the import's own report to keep both)
-/// and fills its summary. Returns the track that received each import
-/// track, in order.
+/// `Err`). Merges the import's own report into `report`, adds what applying
+/// changed or left out, and fills its summary. Returns the track that
+/// received each import track with events, in order.
 ///
-/// In order: a destination per [`DestChoice::NewBuiltin`] pair, named
-/// "Built-in Synth (ch N)"; with `use_tempo` or `new_project` the file's
-/// tempo and meter maps (and, as a new project or into a sequence without
-/// events, its pickup as the start offset; Ruling 8); per track a new track
-/// named by it on its main pair's destination (or the drop track for a
-/// one-track import), its events in one insert (an event whose pair plays
-/// elsewhere than the track carries a `dest` override), General MIDI row
-/// names for a drum track, its MPE zone; the markers merged in; and as a new
-/// project the title as the sequence name and the copyright as song info.
-/// Into a project the title and copyright are noted as not used (Ruling 7).
+/// In order:
+/// - a destination per [`DestChoice::NewBuiltin`] pair, named "Built-in
+///   Synth (ch N)". A one-track drop onto a track with a destination plays
+///   the file's main pair there unless `channel_map` names it.
+/// - with `use_tempo` or `new_project`, the file's tempo and meter maps from
+///   the drop position on (the project's maps before it stay; a drop off a
+///   barline moves to the start of its bar). At position 0, as a new
+///   project or into a sequence without events, the file's pickup becomes
+///   the start offset (Ruling 8).
+/// - per track with events left after placement: a new track named by it on
+///   its main pair's destination (or the drop track for a one-track
+///   import), its events in one insert (an event whose pair plays elsewhere
+///   than the track carries a `dest` override), General MIDI row names for
+///   a drum track and its MPE zone (noted, not applied, on a drop track).
+/// - the markers merged in; as a new project the title as the sequence name
+///   and the copyright as song info. Into a project the title and copyright
+///   are noted as not used (Ruling 7).
+///
 /// `new_project` on a document with any track is refused.
 pub fn apply(
     h: &mut History,
@@ -284,25 +298,80 @@ pub fn apply(
     if let Some(l) = place.lane {
         doc.lane(seq, l)?;
     }
+    report.merge(imp.report.clone());
     let no_events = s
         .lanes
         .iter()
         .all(|l| l.takes.iter().all(|t| t.events.is_empty()));
     let use_maps = place.new_project || place.use_tempo;
-    let pickup = if use_maps && (place.new_project || no_events) {
+    let old_tempo = s.tempo.clone();
+    let old_meter = s.meter.clone();
+
+    // Where file position 0 goes: with the file's maps, a barline.
+    let mut at = place.tick.0.max(0);
+    if use_maps && at > 0 {
+        let e = old_meter.entry_at(Tick(at));
+        let bar = e.meter.bar_ticks().max(1);
+        let snapped = at
+            .checked_sub(e.tick.0)
+            .map(|rel| rel.div_euclid(bar))
+            .and_then(|k| k.checked_mul(bar))
+            .and_then(|d| d.checked_add(e.tick.0))
+            .unwrap_or(at);
+        if snapped != at {
+            let n = old_meter.tick_to_bbu(Tick(snapped), 1).bar;
+            let what = format!("{MOVED_TO_BAR}{n}");
+            report.add(ItemKind::Changed, &what, None);
+        }
+        at = snapped;
+    }
+    let pickup = if use_maps && at == 0 && (place.new_project || no_events) {
         imp.start_offset.0.max(0)
     } else {
         0
     };
-    let base = place
-        .tick
-        .0
-        .max(0)
+    let base = at
         .checked_sub(pickup)
         .ok_or_else(|| ModelError::range("tick", place.tick.0))?;
 
+    // Each track's events at their places; tracks with none make nothing.
+    let mut tracks: Vec<(&ImportTrack, Vec<EventSpec>)> = Vec::new();
+    for t in &imp.tracks {
+        let mut events = Vec::with_capacity(t.events.len());
+        for e in &t.events {
+            match placed(e.tick, base) {
+                Some(tick) => {
+                    let mut e = e.clone();
+                    e.tick = tick;
+                    events.push(e);
+                }
+                None => report.add(ItemKind::LeftOut, PAST_END, None),
+            }
+        }
+        if !events.is_empty() {
+            tracks.push((t, events));
+        }
+    }
+
+    let drop = place.lane.filter(|_| imp.tracks.len() == 1);
     let mut dests: BTreeMap<(u8, u8), DestId> = BTreeMap::new();
-    for (g, c) in channels(imp).into_keys() {
+    if let Some(l) = drop
+        && let Some(d) = h.doc().lane(seq, l)?.midi_dest
+        && let Some(main) = tracks.first().and_then(|(t, _)| t.main)
+        && !place.channel_map.contains_key(&main)
+    {
+        dests.insert(main, d);
+    }
+    let pairs: BTreeSet<(u8, u8)> = tracks
+        .iter()
+        .flat_map(|(_, events)| events)
+        .filter(|e| is_channel_voice(&e.body))
+        .filter_map(|e| e.group_channel)
+        .collect();
+    for (g, c) in pairs {
+        if dests.contains_key(&(g, c)) {
+            continue;
+        }
         let choice = place
             .channel_map
             .get(&(g, c))
@@ -340,10 +409,16 @@ pub fn apply(
                 shift_meter(&imp.meter, pickup),
             )
         } else {
-            (imp.tempo.clone(), imp.meter.clone())
+            (
+                splice_tempo(&old_tempo, &imp.tempo, at, report),
+                splice_meter(&old_meter, &imp.meter, at, report),
+            )
         };
-        run(h, Command::Sequence(SequenceCmd::SetTempo { seq, tempo }))?;
-        run(h, Command::Sequence(SequenceCmd::SetMeter { seq, meter }))?;
+        let changed = tempo != old_tempo || meter != old_meter;
+        if changed {
+            run(h, Command::Sequence(SequenceCmd::SetTempo { seq, tempo }))?;
+            run(h, Command::Sequence(SequenceCmd::SetMeter { seq, meter }))?;
+        }
         if pickup > 0 || place.new_project {
             run(
                 h,
@@ -354,23 +429,35 @@ pub fn apply(
             )?;
         }
         report.summary.tempo_map = true;
-        if !place.new_project {
-            report.add(ItemKind::Changed, TEMPO_REPLACED, None);
+        if changed && !place.new_project {
+            let n = old_meter.tick_to_bbu(Tick(at), 1).bar;
+            let what = format!("{TEMPO_REPLACED}{n} by the file's");
+            report.add(ItemKind::Changed, &what, None);
         }
     } else if imp.has_tempo || imp.meter != MeterMap::default() {
         report.add(ItemKind::Note, TEMPO_NOT_USED, None);
     }
 
-    let drop = place.lane.filter(|_| imp.tracks.len() == 1);
     let mut index = place
         .lane
         .and_then(|l| h.doc().sequence(seq).ok()?.lane_index(l))
         .and_then(|i| i.checked_add(1));
-    let mut lanes = Vec::with_capacity(imp.tracks.len());
+    let mut lanes = Vec::with_capacity(tracks.len());
     let mut notes = 0u64;
-    for t in &imp.tracks {
+    for (t, mut events) in tracks {
         let (lane, lane_dest, new) = match drop {
-            Some(l) => (l, h.doc().lane(seq, l)?.midi_dest, false),
+            Some(l) => {
+                let lane = h.doc().lane(seq, l)?;
+                if t.drum && lane.drum.is_none() {
+                    let what = format!("Track '{}' was not made a drum track", lane.name);
+                    report.add(ItemKind::Note, &what, None);
+                }
+                if t.mpe.is_some() && lane.mpe.is_none() {
+                    let what = format!("Track '{}' was not set to MPE", lane.name);
+                    report.add(ItemKind::Note, &what, None);
+                }
+                (l, lane.midi_dest, false)
+            }
             None => {
                 let r = run(
                     h,
@@ -393,14 +480,7 @@ pub fn apply(
                 (lane, dest, true)
             }
         };
-        let mut events = Vec::with_capacity(t.events.len());
-        for e in &t.events {
-            let Some(tick) = placed(e.tick, base) else {
-                report.add(ItemKind::LeftOut, PAST_END, None);
-                continue;
-            };
-            let mut e = e.clone();
-            e.tick = tick;
+        for e in &mut events {
             if is_channel_voice(&e.body)
                 && let Some(d) = e.group_channel.and_then(|p| dests.get(&p)).copied()
                 && Some(d) != lane_dest
@@ -410,11 +490,8 @@ pub fn apply(
             if matches!(e.body, EventBody::Note { .. }) {
                 notes = notes.saturating_add(1);
             }
-            events.push(e);
         }
-        if !events.is_empty() {
-            run(h, Command::Event(EventCmd::Insert { seq, lane, events }))?;
-        }
+        run(h, Command::Event(EventCmd::Insert { seq, lane, events }))?;
         if new && t.drum {
             let r = run(
                 h,
@@ -459,14 +536,16 @@ pub fn apply(
                 None => report.add(ItemKind::LeftOut, PAST_END, None),
             }
         }
-        markers.sort_by_key(|m| m.tick);
-        run(
-            h,
-            Command::Sequence(SequenceCmd::SetMarkers {
-                seq,
-                markers: markers.into_iter().collect(),
-            }),
-        )?;
+        if added > 0 {
+            markers.sort_by_key(|m| m.tick);
+            run(
+                h,
+                Command::Sequence(SequenceCmd::SetMarkers {
+                    seq,
+                    markers: markers.into_iter().collect(),
+                }),
+            )?;
+        }
         report.summary.markers = report.summary.markers.saturating_add(added);
     }
 
@@ -494,6 +573,43 @@ pub fn apply(
         }
     }
     Ok(lanes)
+}
+
+/// The project's tempo points before `at`, then the file's moved to start
+/// there (a point moved past the end is left out).
+fn splice_tempo(project: &TempoMap, file: &TempoMap, at: i64, report: &mut Report) -> TempoMap {
+    let mut points: Vec<TempoPoint> = project
+        .points()
+        .iter()
+        .filter(|p| p.tick.0 < at)
+        .copied()
+        .collect();
+    for p in file.points() {
+        match placed(p.tick, at) {
+            Some(tick) => points.push(TempoPoint { tick, ..*p }),
+            None => report.add(ItemKind::LeftOut, PAST_END, None),
+        }
+    }
+    TempoMap::new(points).unwrap_or_else(|_| project.clone())
+}
+
+/// The project's meter entries before `at` (a barline of its meter), then
+/// the file's moved to start there.
+fn splice_meter(project: &MeterMap, file: &MeterMap, at: i64, report: &mut Report) -> MeterMap {
+    let mut entries: Vec<MeterEntry> = project
+        .entries()
+        .iter()
+        .filter(|e| e.tick.0 < at)
+        .copied()
+        .collect();
+    for e in file.entries() {
+        match placed(e.tick, at) {
+            Some(tick) => entries.push(MeterEntry { tick, ..*e }),
+            None => report.add(ItemKind::LeftOut, PAST_END, None),
+        }
+    }
+    entries.dedup_by(|e, prev| e.meter == prev.meter && e.key == prev.key);
+    MeterMap::new(entries).unwrap_or_else(|_| project.clone())
 }
 
 // ---- apply helpers ----
@@ -886,9 +1002,24 @@ impl<'a> Ctx<'a> {
                         let text = self.text(data);
                         b.text(tick, TextKind::Cue, text);
                     }
-                    0x04 | 0x08..=0x0F => self.add(ItemKind::LeftOut, OTHER_TEXT),
-                    // Channel prefix: its channel messages carry their own.
-                    0x20 => {}
+                    // Instrument, program and device names have no text
+                    // kind: they become plain text named by a prefix.
+                    0x04 | 0x08 | 0x09 => {
+                        let prefix = match *kind {
+                            0x04 => "Instrument: ",
+                            0x08 => "Program: ",
+                            _ => "Device: ",
+                        };
+                        let text = self.text(data);
+                        b.text(tick, TextKind::Text, format!("{prefix}{text}"));
+                        self.add(ItemKind::Changed, NAMES_AS_TEXT);
+                    }
+                    0x0A..=0x0F => {
+                        let text = self.text(data);
+                        b.text(tick, TextKind::Text, text);
+                    }
+                    // Channel prefix: every channel message has its own.
+                    0x20 => self.add(ItemKind::Note, CHANNEL_PREFIX),
                     0x21 => match data.as_slice() {
                         [p] if *p <= 15 => group = *p,
                         _ => self.add(ItemKind::LeftOut, BAD_PORT),
