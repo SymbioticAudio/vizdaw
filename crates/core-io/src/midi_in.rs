@@ -181,6 +181,7 @@ const TEMPO_REPLACED: &str = "The project's tempo and meter were replaced from b
 const MOVED_TO_BAR: &str = "Import moved to the start of bar ";
 const TITLE_NOT_USED: &str = "The file's title was not used";
 const COPYRIGHT_NOT_USED: &str = "The file's copyright was not used";
+const PICKUP_READ: &str = "First bar read as a pickup";
 
 /// How many events are mapped between looks at the cancel flag.
 const CANCEL_EVERY: usize = 65_536;
@@ -330,6 +331,10 @@ pub fn apply(
     } else {
         0
     };
+    if pickup > 0 {
+        // Ruling 8 cannot tell a pickup from a short first bar: say so.
+        report.add(ItemKind::Note, PICKUP_READ, None);
+    }
     let base = at
         .checked_sub(pickup)
         .ok_or_else(|| ModelError::range("tick", place.tick.0))?;

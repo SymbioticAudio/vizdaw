@@ -348,19 +348,11 @@ fn spec() -> impl Strategy<Value = Spec> {
                 let beat = 4 * Q / i64::from(meter.1);
                 let pickup_ticks = i64::from(pickup_beats) * beat;
                 let bar = beat * i64::from(meter.0);
-                // A longer second bar after a first bar would read back as
-                // a pickup (Ruling 8): such a change moves to bar 3.
+                // A longer bar 2 after bar 1 (no pickup) reads back as a
+                // pickup (Ruling 8); the property checks that shift.
                 let change = change
                     .filter(|(_, num, den)| (*num, *den) != (meter.0, meter.1))
-                    .map(|(k, num, den)| {
-                        let longer = 4 * Q / i64::from(den) * i64::from(num) > bar;
-                        let k = if k == 1 && pickup_beats == 0 && longer {
-                            2
-                        } else {
-                            k
-                        };
-                        (k * bar, num, den)
-                    });
+                    .map(|(k, num, den)| (k * bar, num, den));
                 let mut tempo = vec![(0, bpm0, first_ramp)];
                 let mut points = points;
                 points.sort_by_key(|p| p.0);
@@ -520,6 +512,30 @@ fn build(s: &Spec) -> (Doc, Vec<LaneId>) {
     (d, lanes)
 }
 
+/// Bar 1's length when it is shorter than bar 2 and there is no pickup.
+fn short_first_bar(s: &core_model::sequence::Sequence) -> Option<i64> {
+    let e = s.meter.entries();
+    let (a, b) = (e.front()?, e.get(1)?);
+    let bar = a.meter.bar_ticks();
+    (s.start_offset.0 == 0 && b.tick.0 == bar && bar < b.meter.bar_ticks()).then_some(bar)
+}
+
+/// `points` (by tick) moved back by `by`, the last at or before 0 becoming
+/// the one at 0, as import removes a pickup.
+fn collapse<T: Copy>(points: Vec<(i64, T)>, by: i64, at: impl Fn(T, i64) -> T) -> Vec<T> {
+    let mut out: Vec<T> = Vec::new();
+    for (t, p) in points {
+        let t = t - by;
+        if t <= 0 {
+            out.clear();
+            out.push(at(p, 0));
+        } else {
+            out.push(at(p, t));
+        }
+    }
+    out
+}
+
 /// The original tempo map with each ramp replaced by its steps (one every
 /// 3 840 ticks, each as long in time as the ramp's stretch), as
 /// `(tick, bpm, is_step)`.
@@ -557,16 +573,47 @@ proptest! {
             !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
             "{:?}", report.items
         );
-        let (h, seq, back, _) = as_new_project(&bytes);
+        // A short bar 1 without a pickup reads back as one (Ruling 8): the
+        // export says so, and everything moves back by bar 1.
+        let misread = short_first_bar(&original);
+        prop_assert_eq!(
+            report.items.iter().any(|i| i.what.contains("may read it as a pickup")),
+            misread.is_some()
+        );
+        let by = misread.unwrap_or(0);
+        let (h, seq, back, r) = as_new_project(&bytes);
+        prop_assert_eq!(
+            r.items.iter().any(|i| i.what == "First bar read as a pickup"),
+            by > 0 || original.start_offset.0 > 0
+        );
         let got = h.doc().sequence(seq).unwrap();
         prop_assert_eq!(back.len(), lanes.len());
         for (a, b) in lanes.iter().zip(&back) {
-            prop_assert_eq!(events_of(&d.doc, d.seq, *a), events_of(h.doc(), seq, *b));
+            let want: Vec<(i64, String)> = events_of(&d.doc, d.seq, *a)
+                .into_iter()
+                .map(|(t, b)| (t - by, b))
+                .collect();
+            prop_assert_eq!(want, events_of(h.doc(), seq, *b));
         }
-        prop_assert_eq!(&got.meter, &original.meter);
-        prop_assert_eq!(&got.markers, &original.markers);
-        prop_assert_eq!(got.start_offset, original.start_offset);
-        let want = steps_of(&original.tempo);
+        let want_meter = MeterMap::new(collapse(
+            original.meter.entries().iter().map(|e| (e.tick.0, *e)).collect(),
+            by,
+            |e, t| MeterEntry { tick: Tick(t), ..e },
+        ))
+        .unwrap();
+        prop_assert_eq!(&got.meter, &want_meter);
+        let want_markers: Vec<Marker> = original
+            .markers
+            .iter()
+            .map(|m| Marker { tick: Tick(m.tick.0 - by), name: m.name.clone() })
+            .collect();
+        prop_assert_eq!(got.markers.iter().cloned().collect::<Vec<_>>(), want_markers);
+        prop_assert_eq!(got.start_offset.0, original.start_offset.0 + by);
+        let want = collapse(
+            steps_of(&original.tempo).into_iter().map(|p| (p.0, p)).collect(),
+            by,
+            |p, t| (t, p.1, p.2),
+        );
         let have: Vec<TempoPoint> = got.tempo.points().iter().copied().collect();
         prop_assert_eq!(have.len(), want.len(), "{:?} vs {:?}", have, want);
         for (h, (t, bpm, step)) in have.iter().zip(&want) {
@@ -600,7 +647,10 @@ proptest! {
         prop_assert_eq!(rounded, moved);
         let (h, seq, back, _) = as_new_project(&bytes);
         for (a, b) in lanes.iter().zip(&back) {
-            let mut want = notes_of(&d.doc, d.seq, *a);
+            let mut want: Vec<(i64, u8, i64)> = notes_of(&d.doc, d.seq, *a)
+                .into_iter()
+                .map(|n| (n.0 - by, n.1, n.2))
+                .collect();
             let mut have = notes_of(h.doc(), seq, *b);
             want.sort_by_key(|n| (n.1, n.0));
             have.sort_by_key(|n| (n.1, n.0));
@@ -1130,4 +1180,57 @@ fn free_bank_selects_merge_into_the_program() {
         )]
     );
     assert!(!events.iter().any(|e| e.1.starts_with("Cc")));
+}
+
+#[test]
+fn a_short_first_bar_reads_back_as_a_pickup() {
+    // 4/4 then 5/4 from bar 2 writes the same bytes as a one-bar pickup
+    // into 5/4 (Ruling 8): both sides say so, and every event keeps its
+    // time; only the bar numbers move.
+    let mut d = Doc::new("Song");
+    let seq = d.seq;
+    let meter = MeterMap::new(vec![
+        MeterEntry {
+            tick: Tick(0),
+            meter: Meter { num: 4, den: 4 },
+            key: KeySig::default(),
+        },
+        MeterEntry {
+            tick: Tick(BAR),
+            meter: Meter { num: 5, den: 4 },
+            key: KeySig::default(),
+        },
+    ])
+    .unwrap();
+    d.exec(Command::Sequence(SequenceCmd::SetMeter { seq, meter }));
+    let dest = d.builtin(0, 0);
+    let lane = d.track("Bass", dest);
+    d.put(
+        lane,
+        vec![note(0, 60, up7(100), Q), note(BAR, 62, up7(100), Q)],
+    );
+    let (bytes, report) = d.smf(960, false);
+    has(&report, ItemKind::Note, "Bar 1 is shorter than bar 2");
+    let (h, seq2, back, r) = as_new_project(&bytes);
+    assert_eq!(has(&r, ItemKind::Note, "First bar read as a pickup"), 1);
+    let got = h.doc().sequence(seq2).unwrap();
+    assert_eq!(got.start_offset, Tick(BAR));
+    assert_eq!(
+        got.meter
+            .entries()
+            .iter()
+            .map(|e| (e.tick, e.meter))
+            .collect::<Vec<_>>(),
+        vec![(Tick(0), Meter { num: 5, den: 4 })]
+    );
+    // Both notes, a bar apart, the first now in the pickup.
+    assert_eq!(
+        notes_of(h.doc(), seq2, back[0]),
+        vec![(-BAR, 60, Q), (0, 62, Q)]
+    );
+    let secs = |doc: &Document, s: SeqId, t: i64| {
+        let seq = doc.sequence(s).unwrap();
+        seq.tempo.tick_to_seconds(Tick(t)) - seq.tempo.tick_to_seconds(-seq.start_offset)
+    };
+    assert_eq!(secs(&d.doc, seq, BAR), secs(h.doc(), seq2, 0));
 }

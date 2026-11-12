@@ -23,16 +23,17 @@ use core_engine::midi1::{
     Class, Midi1Msg, bend14, note_on_velocity, release_velocity, translate, value7,
 };
 use core_engine::mpe::{MpeEncoder, configuration};
-use core_model::command::{Command, LaneCmd, apply};
+use core_model::command::{Command, LaneCmd, SequenceCmd, apply};
 use core_model::document::{DestKind, Document};
 use core_model::event::{EventBody, PerNoteKind, TextKind};
-use core_model::ids::{DestId, LaneId, SeqId};
-use core_model::lane::Lane;
+use core_model::ids::{DestId, EventId, LaneId, SeqId};
+use core_model::lane::{Lane, LaneInput};
 use core_model::meter::{KeySig, Meter};
 use core_model::mpe::MpeConfig;
 use core_model::query::{ResolvedEvent, flatten, seq_length};
+use core_model::rules::MAX_TICKS;
 use core_model::selection::ViewFilter;
-use core_model::sequence::Sequence;
+use core_model::sequence::{SeqLength, Sequence};
 use core_model::tempo::TempoMap;
 use core_model::time::{PPQ, Tick};
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,6 +88,17 @@ const PER_NOTE_LATE: &str = "Per-note values at or after the end of their note";
 const STOLEN: &str = "Notes cut short: more notes than MPE member channels";
 const TYPE0_NAMES: &str = "Track names (type 0 file)";
 const TYPE0_GROUPS: &str = "Groups 2 to 16 written as group 1 (type 0 file)";
+const INACTIVE_TAKES: &str = "Inactive takes";
+const MPE_INPUT: &str = "MPE input settings are not in MIDI files";
+const INPUT_FX: &str = "Input effects are not in MIDI files";
+const INPUTS: &str = "Track inputs and record arm are not in MIDI files";
+const SYNTH_TRACKING: &str = "Synth tracking (Track Synth) is not in MIDI files";
+const OTHER_SEQS: &str = "Other sequences are not in this file";
+const ENDED_EARLY: &str = "Notes ended early: too far apart for a MIDI file";
+const CUT_AT_END: &str = "Notes cut at the end of the range";
+const STATE_BEFORE: &str = "Program and controller settings before the range are not written";
+const SHORT_BAR: &str =
+    "Bar 1 is shorter than bar 2; other programs, and VizDAW, may read it as a pickup";
 
 /// A tempo ramp is written as a step every 1/16 note.
 const STEP: i64 = PPQ / 4;
@@ -186,6 +198,9 @@ fn source<'a>(
         }
     }
 
+    vizdaw_only(doc, s, &lanes, &played, report);
+    cut_reference_notes(&copy, s, &lanes, &filter, report);
+
     let mut stack = vec![seq];
     let muted = muted_notes(doc, lanes.iter().copied(), true, &mut stack);
     add_n(report, ItemKind::LeftOut, MUTED, muted);
@@ -218,6 +233,167 @@ fn source<'a>(
         lanes,
         played,
     })
+}
+
+/// What export does not carry beyond the events (spec §7.1's listed
+/// rows): a MIDI strip's mute, inactive takes, and VizDAW-only settings.
+fn vizdaw_only(
+    doc: &Document,
+    s: &Sequence,
+    lanes: &[&Lane],
+    played: &BTreeMap<LaneId, Vec<ResolvedEvent>>,
+    report: &mut Report,
+) {
+    let used: BTreeSet<DestId> = played
+        .values()
+        .flatten()
+        .filter(|r| r.body.is_midi())
+        .filter_map(|r| r.dest)
+        .collect();
+    for d in used.iter().filter_map(|d| doc.instruments().get(d)) {
+        if d.kind.is_external() && d.midi_mix.mute {
+            let what = format!(
+                "{} is muted in its MIDI strip; its notes were written anyway",
+                d.name
+            );
+            report.add(ItemKind::Note, &what, None);
+        }
+    }
+    for l in lanes {
+        let name = || Some(l.name.clone());
+        for t in l.takes.iter() {
+            if t.id != l.active_take && !t.events.is_empty() {
+                report.add(ItemKind::LeftOut, INACTIVE_TAKES, name());
+            }
+        }
+        if l.mpe.is_some() {
+            report.add(ItemKind::Note, MPE_INPUT, name());
+        }
+        if !l.input_fx.is_empty() {
+            report.add(ItemKind::Note, INPUT_FX, name());
+        }
+        if l.input.is_some() || l.arm {
+            report.add(ItemKind::Note, INPUTS, name());
+        }
+        if l.input.as_ref().and_then(LaneInput::return_of).is_some() {
+            report.add(ItemKind::Note, SYNTH_TRACKING, name());
+        }
+    }
+    // Sequences the export reaches through references, in any take.
+    let mut reached: BTreeSet<SeqId> = BTreeSet::from([s.id]);
+    let mut todo: Vec<SeqId> = lanes.iter().flat_map(|l| refs_of(l)).collect();
+    while let Some(id) = todo.pop() {
+        if reached.insert(id)
+            && let Ok(t) = doc.sequence(id)
+        {
+            todo.extend(t.lanes.iter().flat_map(refs_of));
+        }
+    }
+    let others = doc
+        .sequences()
+        .keys()
+        .filter(|id| !reached.contains(id))
+        .count();
+    add_n(
+        report,
+        ItemKind::Note,
+        OTHER_SEQS,
+        u64::try_from(others).unwrap_or(u64::MAX),
+    );
+}
+
+/// The sequences `l`'s active take references.
+fn refs_of(l: &Lane) -> Vec<SeqId> {
+    l.active()
+        .into_iter()
+        .flat_map(|t| t.events.values())
+        .filter_map(|e| match e.body {
+            EventBody::Reference { seq, .. } => Some(seq),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Counts as "Events outside the sequence" the events inside references
+/// that the sequence's window cuts off: `flatten` of `copy` (mutes and
+/// solos already cleared) with the window opened to the timeline's limits
+/// and loops off, against the real window. Only events of references whose
+/// own start plays are counted (a reference starting outside is counted
+/// once, by the caller's pass).
+fn cut_reference_notes(
+    copy: &Document,
+    s: &Sequence,
+    lanes: &[&Lane],
+    filter: &ViewFilter,
+    report: &mut Report,
+) {
+    if !lanes.iter().any(|l| !refs_of(l).is_empty()) {
+        return;
+    }
+    let (seq, len) = (s.id, seq_length(copy, s.id).map_or(i64::MAX, |t| t.0));
+    let lo = s.start_offset.0.checked_neg().unwrap_or(i64::MIN);
+    let mut wide = copy.clone();
+    let mut cmds = vec![
+        Command::Sequence(SequenceCmd::SetStartOffset {
+            seq,
+            offset: Tick(MAX_TICKS),
+        }),
+        Command::Sequence(SequenceCmd::SetLength {
+            seq,
+            length: SeqLength::Locked(Tick(MAX_TICKS)),
+        }),
+    ];
+    for l in lanes.iter().filter(|l| l.looped) {
+        cmds.push(Command::Lane(LaneCmd::SetLength {
+            seq,
+            lane: l.id,
+            length: l.length,
+            looped: false,
+            locked: l.length_locked,
+        }));
+    }
+    for cmd in &cmds {
+        match apply(&wide, cmd) {
+            Ok(a) => wide = a.doc,
+            Err(_) => return,
+        }
+    }
+    let Ok(events) = flatten(&wide, seq, None, filter) else {
+        return;
+    };
+    // Where each top-level reference starts, as it plays.
+    let starts: BTreeMap<EventId, i64> = lanes
+        .iter()
+        .flat_map(|l| {
+            l.active()
+                .into_iter()
+                .flat_map(|t| t.events.values())
+                .filter(|e| matches!(e.body, EventBody::Reference { .. }))
+                .filter_map(|e| Some((e.id, e.tick.0.checked_add(l.play_shift.0)?)))
+        })
+        .collect();
+    for r in events {
+        let [top, _, ..] = r.path.as_slice() else {
+            continue;
+        };
+        let plays = starts.get(&top.event).is_some_and(|t| *t < len);
+        if plays && carried(&r.body) && (r.tick.0 < lo || r.tick.0 >= len) {
+            report.add(ItemKind::LeftOut, OUTSIDE, None);
+        }
+    }
+}
+
+/// Bar 1 shorter than bar 2 with no pickup: Ruling 8 reads it back as a
+/// pickup, here and elsewhere (a Note).
+fn short_first_bar(s: &Sequence, report: &mut Report) {
+    let e = s.meter.entries();
+    if let (Some(a), Some(b)) = (e.front(), e.get(1))
+        && s.start_offset.0 == 0
+        && b.tick.0 == a.meter.bar_ticks()
+        && a.meter.bar_ticks() < b.meter.bar_ticks()
+    {
+        report.add(ItemKind::Note, SHORT_BAR, None);
+    }
 }
 
 /// Whether a MIDI file carries this kind of event.
@@ -312,17 +488,16 @@ fn writes(lane: &Lane, played: &[ResolvedEvent]) -> bool {
 /// sequence's name (which is written as the title).
 fn other_info(doc: &Document, s: &Sequence, report: &mut Report) {
     let info = &doc.settings().info;
-    for (i, f) in info.fields().iter().enumerate() {
-        let Some(v) = f else { continue };
-        let left_out = match i {
-            0 => v.as_str() != s.name,
-            10 => false,
-            _ => true,
-        };
-        if left_out {
-            report.add(ItemKind::LeftOut, OTHER_INFO, None);
-        }
-    }
+    let set = info.fields().iter().filter(|f| f.is_some()).count();
+    let kept = usize::from(info.copyright.is_some())
+        + usize::from(info.title.as_deref() == Some(s.name.as_str()));
+    let n = set.saturating_sub(kept);
+    add_n(
+        report,
+        ItemKind::LeftOut,
+        OTHER_INFO,
+        u64::try_from(n).unwrap_or(u64::MAX),
+    );
 }
 
 fn drum_rows(lane: &Lane, report: &mut Report) {
@@ -685,6 +860,7 @@ pub fn to_smf(doc: &Document, o: &SmfOptions) -> Result<(SmfFile, Report), IoErr
     let src = source(doc, o.seq, &o.lanes, &mut report)?;
     let s = src.seq;
     other_info(doc, s, &mut report);
+    short_first_bar(s, &mut report);
     let origin = origin(s, &mut report);
 
     let mut conductor: Vec<Item<SmfEvent>> = Vec::new();
@@ -811,14 +987,51 @@ fn finish(mut items: Vec<Item<SmfEvent>>, ppq: u16, report: &mut Report) -> SmfT
     let rounded = format!("Positions rounded to {ppq} ticks per quarter");
     let mut events = Vec::with_capacity(items.len().saturating_add(1));
     let mut prev = 0u64;
+    // Notes sounding in the file, by channel and pitch, so a note-off too
+    // far away still ends its note and one whose note-on was left out is
+    // left out too.
+    let mut sounding: BTreeMap<(u8, u8), u32> = BTreeMap::new();
+    let mut dropped = false;
     for it in items {
-        let Some((tick, moved)) = scale(it.tick, ppq) else {
+        let Some((mut tick, moved)) = scale(it.tick, ppq) else {
             report.add(ItemKind::LeftOut, OUTSIDE, None);
             continue;
         };
+        let note = match &it.ev {
+            SmfEvent::Channel(m) => match m.bytes {
+                [s, p, v] if s & 0xF0 == 0x90 && v > 0 => Some((true, (s & 0x0F, p))),
+                [s, p, _] if matches!(s & 0xF0, 0x80 | 0x90) => Some((false, (s & 0x0F, p))),
+                _ => None,
+            },
+            _ => None,
+        };
         if tick.checked_sub(prev).is_none_or(|d| d > MAX_DELTA) {
-            report.add(ItemKind::LeftOut, FAR, None);
-            continue;
+            let ends_written =
+                matches!(note, Some((false, k)) if sounding.get(&k).is_some_and(|n| *n > 0));
+            match prev.checked_add(MAX_DELTA).filter(|_| ends_written) {
+                Some(t) => {
+                    report.add(ItemKind::Changed, ENDED_EARLY, None);
+                    tick = t;
+                }
+                None => {
+                    report.add(ItemKind::LeftOut, FAR, None);
+                    dropped = true;
+                    continue;
+                }
+            }
+        }
+        match note {
+            Some((true, k)) => {
+                let n = sounding.entry(k).or_insert(0);
+                *n = n.saturating_add(1);
+            }
+            Some((false, k)) => match sounding.get_mut(&k) {
+                Some(n) if *n > 0 => *n -= 1,
+                // Its note-on was left out (too far): so is the note-off.
+                _ if dropped => continue,
+                _ => {}
+            },
+            None => {}
         }
         if moved {
             report.add(ItemKind::Changed, &rounded, None);
@@ -1201,6 +1414,9 @@ pub fn to_clip(doc: &Document, o: &ClipOptions) -> Result<(ClipFile, Report), Io
         .ok_or_else(|| refused(NO_TRACK))?;
     other_info(doc, s, &mut report);
     drum_rows(lane, &mut report);
+    if o.range.is_none() {
+        short_first_bar(s, &mut report);
+    }
     let (origin, end) = match o.range {
         Some((a, b)) => (
             Origin {
@@ -1259,6 +1475,11 @@ pub fn to_clip(doc: &Document, o: &ClipOptions) -> Result<(ClipFile, Report), Io
         }
     }
     let mut markers = 0u64;
+    if end.is_none() {
+        for _ in s.markers.iter().filter(|m| m.tick.0 < origin.tick) {
+            r.add(ItemKind::LeftOut, OUTSIDE, None);
+        }
+    }
     for m in s.markers.iter().filter(|m| inside(m.tick.0)) {
         let Some(tick) = m.tick.0.checked_sub(origin.tick) else {
             continue;
@@ -1269,6 +1490,23 @@ pub fn to_clip(doc: &Document, o: &ClipOptions) -> Result<(ClipFile, Report), Io
     }
 
     let played = src.played.get(&lane.id).map_or(&[][..], Vec::as_slice);
+    if o.range.is_some() {
+        // The state in force at the range's start is not carried over.
+        let before = played.iter().filter(|e| {
+            e.tick.0 < origin.tick
+                && matches!(
+                    e.body,
+                    EventBody::Program { .. }
+                        | EventBody::Cc { .. }
+                        | EventBody::PitchBend { .. }
+                        | EventBody::ChannelPressure { .. }
+                )
+        });
+        for _ in before {
+            r.add(ItemKind::Note, STATE_BEFORE, None);
+        }
+    }
+    let end_rel = end.and_then(|b| b.checked_sub(origin.tick));
     let mut dests: BTreeSet<DestId> = BTreeSet::new();
     let mut noted = false;
     let mut notes = 0u64;
@@ -1315,9 +1553,13 @@ pub fn to_clip(doc: &Document, o: &ClipOptions) -> Result<(ClipFile, Report), Io
                     r.add(ItemKind::LeftOut, ZERO, None);
                     continue;
                 }
-                let Some(off) = tick.checked_add(duration.0) else {
+                let Some(mut off) = tick.checked_add(duration.0) else {
                     continue;
                 };
+                if let Some(e) = end_rel.filter(|e| off > *e) {
+                    r.add(ItemKind::Changed, CUT_AT_END, None);
+                    off = e;
+                }
                 notes = notes.saturating_add(1);
                 let attr = attribute.map(|a| ump::NoteAttribute {
                     kind: a.kind,

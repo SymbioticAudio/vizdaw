@@ -1166,3 +1166,273 @@ fn far_apart_events_are_left_out() {
     lacks(&r, "too far apart");
     assert_eq!(channel_msgs(&f, 1).len(), 3);
 }
+
+// ---- fix round 1 ----
+
+#[test]
+fn a_muted_midi_strip_is_noted() {
+    let mut d = Doc::new("Song");
+    let dest = d.dest("Bass Synth", "ext:bass", 0, None);
+    d.exec(Command::Routing(RoutingCmd::SetMidiMix {
+        dest,
+        mix: MidiMix {
+            volume: None,
+            pan: None,
+            mute: true,
+        },
+    }));
+    let bass = d.track("Bass", Some(dest));
+    d.put(bass, vec![note(0, 60, up7(100), Q)]);
+    let (f, r) = d.smf(960);
+    assert_eq!(
+        has(
+            &r,
+            ItemKind::Note,
+            "Bass Synth is muted in its MIDI strip; its notes were written anyway"
+        ),
+        1
+    );
+    assert_eq!(smf_notes(&f, 1).len(), 1);
+    let (_, r) = to_clip(
+        &d.doc,
+        &ClipOptions {
+            seq: d.seq,
+            lane: bass,
+            range: None,
+        },
+    )
+    .unwrap();
+    has(&r, ItemKind::Note, "is muted in its MIDI strip");
+    // Unmuted: no Note.
+    let (d2, _) = small_doc();
+    lacks(&d2.smf(960).1, "MIDI strip");
+}
+
+#[test]
+fn export_lists_what_only_vizdaw_keeps() {
+    use core_model::input_fx::{InputFx, InputFxKind};
+    use core_model::lane::{InputChannels, LaneInput};
+    let mut d = Doc::new("Song");
+    let seq = d.seq;
+    let _other = d.sequence("Unused");
+    let ext = d.dest("Hardware", "ext:hw", 1, None);
+    let dest = d.builtin(0);
+    let keys = d.track("Keys", Some(dest));
+    d.put(keys, vec![note(0, 60, up7(100), Q)]);
+    d.exec(Command::Lane(LaneCmd::AddTake {
+        seq,
+        lane: keys,
+        name: "Take 2".into(),
+    }));
+    d.put(keys, vec![note(Q, 62, up7(100), Q)]);
+    d.exec(Command::Lane(LaneCmd::SetMpe {
+        seq,
+        lane: keys,
+        mpe: Some(MpeConfig::default()),
+    }));
+    d.exec(Command::Lane(LaneCmd::SetInputFx {
+        seq,
+        lane: keys,
+        chain: vec![InputFx {
+            kind: InputFxKind::Transpose { semitones: 2 },
+            bypass: false,
+        }],
+    }));
+    let pad = d.track("Pad", Some(dest));
+    d.exec(Command::Lane(LaneCmd::SetInput {
+        seq,
+        lane: pad,
+        input: Some(LaneInput::Midi {
+            port: None,
+            channel: None,
+        }),
+    }));
+    d.flags(pad, None, None);
+    d.exec(Command::Lane(LaneCmd::SetFlags {
+        seq,
+        lane: pad,
+        mute: None,
+        solo: None,
+        arm: Some(true),
+    }));
+    let ret = d.track("Return", None);
+    d.exec(Command::Lane(LaneCmd::SetInput {
+        seq,
+        lane: ret,
+        input: Some(LaneInput::Audio {
+            channels: InputChannels::Stereo(0),
+            return_of: Some(ext),
+        }),
+    }));
+    let (_, r) = d.smf(960);
+    assert_eq!(has(&r, ItemKind::LeftOut, "Inactive takes"), 1);
+    has(&r, ItemKind::Note, "MPE input settings");
+    has(&r, ItemKind::Note, "Input effects");
+    assert!(has(&r, ItemKind::Note, "Track inputs and record arm") >= 2);
+    has(&r, ItemKind::Note, "Synth tracking");
+    assert_eq!(has(&r, ItemKind::Note, "Other sequences"), 1);
+    for i in &r.items {
+        assert!(!i.what.to_lowercase().contains("lane"), "{}", i.what);
+    }
+}
+
+#[test]
+fn far_apart_note_offs_are_still_written() {
+    let mut d = Doc::new("Song");
+    let dest = d.builtin(0);
+    let lane = d.track("Bass", Some(dest));
+    let far = 0x1000_0000i64;
+    d.put(
+        lane,
+        vec![
+            note(0, 60, up7(100), Q),
+            note(Q, 62, up7(100), far),
+            ev(
+                Q + 3 * far,
+                EventBody::Cc {
+                    index: 1,
+                    value: up32(1, 7),
+                },
+            ),
+        ],
+    );
+    let (f, r) = d.smf(15_360);
+    smf::write(&f).unwrap();
+    // Both notes end (smf_notes asserts none is left hanging).
+    let notes = smf_notes(&f, 1);
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[1].3, 0x0FFF_FFFF);
+    has(&r, ItemKind::Changed, "Notes ended early");
+    has(
+        &r,
+        ItemKind::LeftOut,
+        "Events too far apart for a MIDI file",
+    );
+}
+
+fn clip_of(d: &Doc, lane: LaneId, range: Option<(i64, i64)>) -> (core_io::clip::ClipFile, Report) {
+    to_clip(
+        &d.doc,
+        &ClipOptions {
+            seq: d.seq,
+            lane,
+            range: range.map(|(a, b)| (Tick(a), Tick(b))),
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn clip_notes_are_cut_at_the_range_end() {
+    let (mut d, bass) = small_doc();
+    d.put(bass, vec![note(BAR - Q, 64, up7(100), 2 * Q)]);
+    let (c, r) = clip_of(&d, bass, Some((0, BAR)));
+    assert_eq!(c.end, BAR as u64);
+    assert!(c.events.iter().all(|(t, _)| *t <= BAR as u64));
+    assert!(c.events.contains(&(
+        BAR as u64,
+        ClipEvent::Packet(ump::note_off(0, 0, 64, 0, None))
+    )));
+    assert_eq!(
+        has(&r, ItemKind::Changed, "Notes cut at the end of the range"),
+        1
+    );
+    let bytes = clip::write(&c);
+    let back = clip::read(&bytes, &Default::default(), &Default::default())
+        .unwrap()
+        .0;
+    assert_eq!(back.end, BAR as u64);
+}
+
+#[test]
+fn clip_markers_before_the_start_are_reported() {
+    let (mut d, bass) = small_doc();
+    let seq = d.seq;
+    d.exec(Command::Sequence(SequenceCmd::SetStartOffset {
+        seq,
+        offset: Tick(Q),
+    }));
+    d.markers(&[(-2 * Q, "Early"), (0, "One")]);
+    let (_, r) = clip_of(&d, bass, None);
+    assert_eq!(has(&r, ItemKind::LeftOut, "Events outside the sequence"), 1);
+    let (_, r) = d.smf(960);
+    assert_eq!(has(&r, ItemKind::LeftOut, "Events outside the sequence"), 1);
+}
+
+#[test]
+fn reference_notes_cut_by_the_sequence_are_reported() {
+    let mut d = Doc::new("Song");
+    let (riff, riff_lane) = d.sequence("Riff");
+    d.put_in(
+        riff,
+        riff_lane,
+        vec![note(0, 60, up7(100), Q), note(BAR + Q, 62, up7(100), Q)],
+    );
+    let seq = d.seq;
+    d.exec(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(BAR)),
+    }));
+    let dest = d.builtin(0);
+    d.exec(Command::Lane(LaneCmd::SetDest {
+        seq: riff,
+        lane: riff_lane,
+        dest: Some(dest),
+    }));
+    let lane = d.track("Refs", Some(dest));
+    d.put(lane, vec![ev(0, EventBody::reference(riff))]);
+    let (f, r) = d.smf(960);
+    assert_eq!(smf_notes(&f, 1).len(), 1);
+    assert_eq!(has(&r, ItemKind::LeftOut, "Events outside the sequence"), 1);
+}
+
+#[test]
+fn a_clip_range_notes_the_state_before_it() {
+    let (mut d, bass) = small_doc();
+    d.put(
+        bass,
+        vec![
+            ev(
+                0,
+                EventBody::Program {
+                    program: 5,
+                    bank: None,
+                },
+            ),
+            ev(
+                Q,
+                EventBody::Cc {
+                    index: 7,
+                    value: up32(90, 7),
+                },
+            ),
+            note(BAR, 62, up7(100), Q),
+        ],
+    );
+    let (_, r) = clip_of(&d, bass, Some((BAR, 2 * BAR)));
+    assert_eq!(
+        has(
+            &r,
+            ItemKind::Note,
+            "Program and controller settings before the range are not written"
+        ),
+        2
+    );
+    let (_, r) = clip_of(&d, bass, None);
+    lacks(&r, "before the range");
+}
+
+#[test]
+fn a_short_first_bar_is_noted() {
+    let mut d = Doc::new("Song");
+    d.meter(&[(0, 4, 4, 0), (BAR, 5, 4, 0)]);
+    let dest = d.builtin(0);
+    let lane = d.track("Bass", Some(dest));
+    d.put(lane, vec![note(0, 60, up7(100), Q)]);
+    let what = "Bar 1 is shorter than bar 2; other programs, and VizDAW, may read it as a pickup";
+    assert_eq!(has(&d.smf(960).1, ItemKind::Note, what), 1);
+    has(&clip_of(&d, lane, None).1, ItemKind::Note, what);
+    // A real pickup, or a longer first bar, says nothing.
+    d.meter(&[(0, 5, 4, 0), (BAR + Q, 4, 4, 0)]);
+    lacks(&d.smf(960).1, "may read it as a pickup");
+}
