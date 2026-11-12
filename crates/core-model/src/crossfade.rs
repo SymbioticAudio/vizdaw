@@ -8,11 +8,13 @@
 //! `(tick, id)` that starts strictly earlier in ticks and is still sounding
 //! at the later region's start, in frames.
 
+use crate::command::Report;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
-use crate::event::{EventBody, FadeShape};
-use crate::ids::{EventId, SeqId};
+use crate::event::{Event, EventBody, FadeShape};
+use crate::ids::{EventId, LaneId, SeqId, TakeId};
 use crate::lane::Take;
+use crate::time::Tick;
 use std::collections::BTreeMap;
 
 /// The shape of a crossfade made without one (plan 6c Ruling 4): equal
@@ -116,6 +118,243 @@ pub(crate) fn free_length(doc: &Document, event: EventId) -> Result<u64> {
             "{event} is not an audio region"
         ))),
     }
+}
+
+/// Whether `e` is a region with the crossfade flag.
+fn is_flagged(e: &Event) -> bool {
+    matches!(
+        e.body,
+        EventBody::AudioRegion {
+            crossfade: true,
+            ..
+        }
+    )
+}
+
+/// The refusal of a split inside a crossfade (plan 6c Ruling 7).
+const SPLIT_INSIDE: &str = "Split outside the crossfade, or remove the crossfade first.";
+
+/// Refuses a split of region `event` at `at` strictly inside a crossfade
+/// span `(R.start, R.start + fade_in)`, where `R` is `event` itself or a
+/// flagged region whose partner is `event` (plan 6c Ruling 7).
+pub(crate) fn check_split(doc: &Document, event: EventId, at: Tick) -> Result<()> {
+    let (_, loc) = doc.event(event)?;
+    let sequence = doc.sequence(loc.seq)?;
+    let Some(take) = doc.lane(loc.seq, loc.lane)?.take(loc.take) else {
+        return Ok(());
+    };
+    if !take.events.values().any(is_flagged) {
+        return Ok(());
+    }
+    let tempo = &sequence.tempo;
+    let found = overlaps(doc, loc.seq, take);
+    for r in take.events.values().filter(|e| is_flagged(e)) {
+        let partner = found.get(&r.id).map(|o| o.with);
+        if r.id != event && partner != Some(event) {
+            continue;
+        }
+        let EventBody::AudioRegion { media, fade_in, .. } = &r.body else {
+            continue;
+        };
+        let Some(item) = doc.media().get(media) else {
+            continue;
+        };
+        let rate = f64::from(item.sample_rate.max(1));
+        let pos = ((tempo.tick_to_seconds(at) - tempo.tick_to_seconds(r.tick)) * rate).round();
+        if pos > 0.0 && pos < fade_in.length_frames as f64 {
+            return Err(ModelError::invalid(SPLIT_INSIDE));
+        }
+    }
+    Ok(())
+}
+
+/// A region's name for a warning: its own, else its media's.
+fn region_name(doc: &Document, e: &Event) -> String {
+    match &e.body {
+        EventBody::AudioRegion { name: Some(n), .. } => n.clone(),
+        EventBody::AudioRegion { media, .. } => doc
+            .media()
+            .get(media)
+            .map(|m| m.name.clone())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Where a take is.
+type TakeKey = (SeqId, LaneId, TakeId);
+
+/// The overlaps of the take at `key` in `doc`, computed once per settle.
+fn overlaps_at<'a>(
+    cache: &'a mut Vec<(TakeKey, BTreeMap<EventId, Overlap>)>,
+    doc: &Document,
+    key: TakeKey,
+) -> Option<&'a BTreeMap<EventId, Overlap>> {
+    let i = match cache.iter().position(|(k, _)| *k == key) {
+        Some(i) => i,
+        None => {
+            let take = doc.lane(key.0, key.1).ok()?.take(key.2)?;
+            cache.push((key, overlaps(doc, key.0, take)));
+            cache.len() - 1
+        }
+    };
+    cache.get(i).map(|(_, m)| m)
+}
+
+/// Whether `new_p` is the second part of a split of `old_p` (plan 6c F2):
+/// it is new in this command, `old_p` still exists and ends exactly where
+/// `new_p` starts, with the same media and the source continuing.
+fn is_split_partner(old: &Document, new: &Document, old_p: EventId, new_p: EventId) -> bool {
+    if old.locate(new_p).is_ok() {
+        return false;
+    }
+    let (Ok((first, lf)), Ok((second, ls))) = (new.event(old_p), new.event(new_p)) else {
+        return false;
+    };
+    if (lf.seq, lf.lane, lf.take) != (ls.seq, ls.lane, ls.take) || second.tick <= first.tick {
+        return false;
+    }
+    let (
+        EventBody::AudioRegion {
+            media: m1,
+            source_offset: o1,
+            length: l1,
+            ..
+        },
+        EventBody::AudioRegion {
+            media: m2,
+            source_offset: o2,
+            ..
+        },
+    ) = (&first.body, &second.body)
+    else {
+        return false;
+    };
+    let (Some(item), Ok(sequence)) = (new.media().get(m1), new.sequence(lf.seq)) else {
+        return false;
+    };
+    let rate = f64::from(item.sample_rate.max(1));
+    let tempo = &sequence.tempo;
+    let gap = frames_at(
+        tempo.tick_to_seconds(second.tick) - tempo.tick_to_seconds(first.tick),
+        rate,
+    );
+    m1 == m2 && o1.checked_add(*l1) == Some(*o2) && gap == i128::from(*l1)
+}
+
+/// Keeps, shortens or drops each crossfade a command disturbed (plan 6c
+/// Ruling 6), in the same undo step: `old` is the document before the
+/// command, `new` after it. It visits each take whose events changed, every
+/// take of a sequence whose tempo changed or that is new, and every take
+/// when the media pool changed. Each change gets a line in `r.warnings`,
+/// except a lone copy losing its flag.
+pub(crate) fn settle(old: &Document, new: &mut Document, r: &mut Report) -> Result<()> {
+    // No media, no regions.
+    if new.media().is_empty() {
+        return Ok(());
+    }
+    let media_changed = !old.media().ptr_eq(new.media());
+    let mut visit: Vec<TakeKey> = Vec::new();
+    for s in new.sequences().values() {
+        let old_s = old.sequences().get(&s.id);
+        let all = media_changed || old_s.is_none_or(|o| o.tempo != s.tempo);
+        for l in &s.lanes {
+            let old_l = old_s.and_then(|o| o.lane(l.id));
+            for t in &l.takes {
+                let changed = all
+                    || old_l
+                        .and_then(|ol| ol.take(t.id))
+                        .is_none_or(|ot| !ot.events.ptr_eq(&t.events));
+                // Most takes have no crossfade: skip the sweep for them.
+                if changed && t.events.values().any(is_flagged) {
+                    visit.push((s.id, l.id, t.id));
+                }
+            }
+        }
+    }
+    if visit.is_empty() {
+        return Ok(());
+    }
+    let mut old_cache = Vec::new();
+    let mut fixes: Vec<Event> = Vec::new();
+    for key in visit {
+        let doc: &Document = new;
+        let Some(take) = doc.lane(key.0, key.1).ok().and_then(|l| l.take(key.2)) else {
+            continue;
+        };
+        let found = overlaps(doc, key.0, take);
+        for ev in take.events.values().filter(|e| is_flagged(e)) {
+            let EventBody::AudioRegion { fade_in, .. } = &ev.body else {
+                continue;
+            };
+            let name = region_name(doc, ev);
+            let partner = found.get(&ev.id);
+            // The region before the command, if it was flagged then.
+            let was = old.event(ev.id).ok();
+            let mut fixed = ev.clone();
+            let clear = |e: &mut Event| {
+                if let EventBody::AudioRegion { crossfade, .. } = &mut e.body {
+                    *crossfade = false;
+                }
+            };
+            let Some(o) = partner.filter(|_| fade_in.length_frames > 0) else {
+                clear(&mut fixed);
+                r.warnings.push(format!(
+                    "Crossfade removed: region '{name}' no longer starts inside another region on its track."
+                ));
+                fixes.push(fixed);
+                continue;
+            };
+            match was {
+                Some((old_ev, loc)) if is_flagged(old_ev) => {
+                    let old_partner =
+                        overlaps_at(&mut old_cache, old, (loc.seq, loc.lane, loc.take))
+                            .and_then(|m| m.get(&ev.id))
+                            .map(|p| p.with);
+                    let same = old_partner == Some(o.with)
+                        || old_partner.is_some_and(|p| is_split_partner(old, doc, p, o.with));
+                    if !same {
+                        clear(&mut fixed);
+                        r.warnings.push(format!(
+                            "Crossfade removed: region '{name}' now starts inside a different region."
+                        ));
+                        fixes.push(fixed);
+                        continue;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    // A lone copy never joins an old region.
+                    if old.locate(o.with).is_ok() {
+                        clear(&mut fixed);
+                        fixes.push(fixed);
+                        continue;
+                    }
+                }
+            }
+            let room = o.frames.min(free_length(doc, ev.id)?);
+            if fade_in.length_frames > room {
+                if room == 0 {
+                    clear(&mut fixed);
+                    r.warnings.push(format!(
+                        "Crossfade removed: region '{name}' no longer starts inside another region on its track."
+                    ));
+                } else {
+                    if let EventBody::AudioRegion { fade_in, .. } = &mut fixed.body {
+                        fade_in.length_frames = room;
+                    }
+                    r.warnings.push(format!(
+                        "Crossfade on region '{name}' shortened to fit the overlap."
+                    ));
+                }
+                fixes.push(fixed);
+            }
+        }
+    }
+    for e in fixes {
+        new.replace_event(e)?;
+    }
+    Ok(())
 }
 
 /// One line per crossfade that breaks the rules (for `validate`).

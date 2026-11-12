@@ -298,6 +298,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
             if *at <= ev.tick || first < 1.0 || first >= length as f64 {
                 return Err(ModelError::range("split.at", at.0));
             }
+            crossfade::check_split(d, *event, *at)?;
             let first = first as u64;
             let mut a = ev.clone();
             a.body = EventBody::AudioRegion {

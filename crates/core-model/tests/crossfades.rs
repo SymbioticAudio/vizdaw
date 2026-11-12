@@ -543,3 +543,385 @@ fn a_flagged_region_with_no_room_says_so() {
         other => panic!("expected Corrupt, got {other:?}"),
     }
 }
+
+// ---- Task 2: settle, Split's refusal ----
+
+const BAR: i64 = 4 * 15_360;
+const SPLIT_REFUSAL: &str = "Split outside the crossfade, or remove the crossfade first.";
+
+/// The fixture with `Crossfade(B, Frames(4800), Linear)` applied.
+fn flagged() -> Document {
+    run(
+        &doc(),
+        cross(B, CrossfadeLength::Frames(4800), FadeShape::Linear),
+    )
+    .unwrap()
+}
+
+/// Runs `c` through a History on `d`: the report's warnings, the document,
+/// and a check that one undo returns to `d`.
+fn step(d: &Document, c: Command) -> (Vec<String>, Document) {
+    let mut h = History::new(d.clone());
+    let report = h.execute(&c, &ViewFilter::default()).unwrap();
+    let after = h.doc().clone();
+    assert_eq!(h.undo_depth(), 1);
+    h.undo().unwrap();
+    assert_eq!(h.doc(), d, "one undo restores the start");
+    (report.warnings, after)
+}
+
+fn mv(events: Vec<EventId>, delta: i64, to_lane: Option<(SeqId, LaneId)>) -> Command {
+    Command::Event(EventCmd::Move {
+        events,
+        delta: Tick(delta),
+        to_lane,
+    })
+}
+
+fn trim(event: EventId, front_frames: i64, back_frames: i64) -> Command {
+    Command::Audio(AudioCmd::Trim {
+        event,
+        front_frames,
+        back_frames,
+    })
+}
+
+fn split(event: EventId, at: i64) -> Command {
+    Command::Audio(AudioCmd::Split {
+        event,
+        at: Tick(at),
+    })
+}
+
+fn add_lane(d: &Document) -> Document {
+    run(
+        d,
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Two".into(),
+            index: None,
+        }),
+    )
+    .unwrap()
+}
+
+fn one_warning(w: &[String], text: &str) {
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains(text), "{w:?}");
+    assert!(!w[0].contains("lane"), "{w:?}");
+}
+
+#[test]
+fn moving_keeps_shrinks_or_drops() {
+    let d = flagged();
+    let (w, a) = step(&d, mv(vec![B], -1_920, None));
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!(fades(&a, B).0.length_frames, 4800);
+    assert!(fades(&a, B).2);
+
+    let (w, a) = step(&d, mv(vec![B], 12_288, None));
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!(fades(&a, B).0.length_frames, 4800);
+    assert!(fades(&a, B).2);
+
+    let (w, a) = step(&d, mv(vec![B], 13_056, None));
+    one_warning(&w, "shortened");
+    assert_eq!(fades(&a, B).0.length_frames, 3600);
+    assert!(fades(&a, B).2);
+
+    let (w, a) = step(&d, mv(vec![B], 16_000, None));
+    one_warning(&w, "removed");
+    assert!(w[0].contains("track"), "{w:?}");
+    assert!(!fades(&a, B).2);
+    assert_eq!(fades(&a, B).0.length_frames, 4800);
+    assert!(core_model::rules::validate(&a).is_empty());
+}
+
+#[test]
+fn moving_both_together_keeps_it() {
+    let d = flagged();
+    let (w, a) = step(&d, mv(vec![A, B], 2 * BAR, None));
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!(fades(&a, B), fades(&d, B));
+    let d1 = add_lane(&d);
+    let (w, a) = step(&d1, mv(vec![A, B], 0, Some((SeqId(0), LaneId(1)))));
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!(fades(&a, B), fades(&d, B));
+    assert_eq!(a.locate(B).unwrap().lane, LaneId(1));
+}
+
+#[test]
+fn trims_shrink_it() {
+    let d = flagged();
+    let (w, a) = step(&d, trim(A, 0, 22_000));
+    one_warning(&w, "shortened");
+    assert_eq!(fades(&a, B).0.length_frames, 2000);
+    assert!(fades(&a, B).2);
+
+    let (w, a) = step(&d, trim(B, 23_000, 0));
+    one_warning(&w, "shortened");
+    assert_eq!(fades(&a, B).0.length_frames, 1000);
+    assert!(fades(&a, B).2);
+
+    let (w, a) = step(&d, trim(A, 0, 24_000));
+    one_warning(&w, "removed");
+    assert!(!fades(&a, B).2);
+}
+
+#[test]
+fn a_different_partner_drops_it() {
+    let d = flagged();
+    let (w, a) = step(&d, Command::Event(EventCmd::Delete { events: vec![A] }));
+    one_warning(&w, "removed");
+    assert!(!fades(&a, B).2);
+
+    // C (event 3): inside A, before B, covering B's start.
+    let (w, a) = step(&d, region_at(14_000, 0, 10_000));
+    one_warning(&w, "different region");
+    assert!(w[0].starts_with("Crossfade removed"), "{w:?}");
+    assert!(!fades(&a, B).2);
+    assert_eq!(crossfade::overlap(&a, B).unwrap().unwrap().with, EventId(3));
+
+    // B alone to track 1, onto a long region there.
+    let d1 = add_lane(&d);
+    let d1 = run(
+        &d1,
+        Command::Audio(AudioCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            tick: Tick(0),
+            media: MediaId(0),
+            source_offset: 0,
+            length: 96_000,
+            gain_db: 0.0,
+            fade_in: Fade::default(),
+            fade_out: Fade::default(),
+        }),
+    )
+    .unwrap();
+    let (w, a) = step(&d1, mv(vec![B], 0, Some((SeqId(0), LaneId(1)))));
+    one_warning(&w, "different region");
+    assert!(!fades(&a, B).2);
+    assert!(core_model::rules::validate(&a).is_empty());
+}
+
+fn created_events(r: &core_model::command::Report) -> Vec<EventId> {
+    r.created
+        .iter()
+        .filter_map(|c| match c {
+            core_model::ids::AnyId::Event(e) => Some(*e),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn copies_keep_it_only_with_their_partner() {
+    let d = flagged();
+    let dup = |events: Vec<EventId>| {
+        Command::Event(EventCmd::Duplicate {
+            events,
+            ticks: Tick(4 * BAR),
+            semitones: 0,
+        })
+    };
+    // Both together: the copied B keeps it.
+    let a = apply(&d, &dup(vec![A, B])).unwrap();
+    assert!(a.report.warnings.is_empty(), "{:?}", a.report.warnings);
+    let copies = created_events(&a.report);
+    assert_eq!(copies.len(), 2);
+    let flags: Vec<bool> = copies.iter().map(|c| fades(&a.doc, *c).2).collect();
+    assert_eq!(flags.iter().filter(|f| **f).count(), 1, "{flags:?}");
+
+    // A alone, then B alone onto A's copy: the lone copy has no flag.
+    let d1 = run(&d, dup(vec![A])).unwrap();
+    let a = apply(&d1, &dup(vec![B])).unwrap();
+    assert!(a.report.warnings.is_empty(), "{:?}", a.report.warnings);
+    let copy = created_events(&a.report)[0];
+    assert!(crossfade::overlap(&a.doc, copy).unwrap().is_some());
+    assert!(!fades(&a.doc, copy).2);
+    assert!(fades(&a.doc, B).2);
+
+    // The two specs inserted together into an empty track keep it.
+    let d2 = add_lane(&d);
+    let specs = vec![d2.event(A).unwrap().0.spec(), d2.event(B).unwrap().0.spec()];
+    let a = apply(
+        &d2,
+        &Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            events: specs,
+        }),
+    )
+    .unwrap();
+    assert!(a.report.warnings.is_empty(), "{:?}", a.report.warnings);
+    let copies = created_events(&a.report);
+    assert_eq!(copies.len(), 2);
+    assert!(copies.iter().any(|c| fades(&a.doc, *c).2));
+    assert!(core_model::rules::validate(&a.doc).is_empty());
+}
+
+#[test]
+fn fade_edits_settle_it() {
+    let d = flagged();
+    let set_in = |frames: u64| {
+        Command::Audio(AudioCmd::SetFades {
+            event: B,
+            fade_in: Fade {
+                length_frames: frames,
+                shape: FadeShape::Linear,
+            },
+            fade_out: Fade::default(),
+        })
+    };
+    let (w, a) = step(&d, set_in(0));
+    one_warning(&w, "removed");
+    assert!(!fades(&a, B).2);
+
+    let (w, a) = step(
+        &d,
+        Command::Audio(AudioCmd::RemoveFades { events: vec![B] }),
+    );
+    one_warning(&w, "removed");
+    assert!(!fades(&a, B).2);
+
+    let (w, a) = step(&d, set_in(30_000));
+    one_warning(&w, "shortened");
+    assert_eq!(fades(&a, B).0.length_frames, 24_000);
+    assert!(fades(&a, B).2);
+}
+
+fn tempo(bpm: u32) -> Command {
+    Command::Sequence(SequenceCmd::SetTempo {
+        seq: SeqId(0),
+        tempo: TempoMap::constant(Bpm(bpm)).unwrap(),
+    })
+}
+
+#[test]
+fn tempo_changes_shrink_or_drop() {
+    let d = flagged();
+    let (w, a) = step(&d, tempo(240_000));
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!(fades(&a, B).0.length_frames, 4800);
+    assert!(fades(&a, B).2);
+    assert_eq!(crossfade::overlap(&a, B).unwrap().unwrap().frames, 36_000);
+
+    // At 50 BPM B starts at frame 57 600, after A's end.
+    let (w, a) = step(&d, tempo(50_000));
+    one_warning(&w, "removed");
+    assert!(!fades(&a, B).2);
+}
+
+#[test]
+fn split_inside_a_crossfade_is_refused() {
+    let d = flagged();
+    invalid(run(&d, split(B, 16_000)), SPLIT_REFUSAL);
+    invalid(run(&d, split(A, 16_640)), SPLIT_REFUSAL);
+    // F10: the first tick inside the span (frame 24 001 rounds to it).
+    invalid(run(&d, split(B, 15_361)), SPLIT_REFUSAL);
+    invalid(run(&d, split(A, 15_361)), SPLIT_REFUSAL);
+
+    let a = apply(&d, &split(B, 25_600)).unwrap();
+    let second = created_events(&a.report)[0];
+    assert!(!fades(&a.doc, second).2);
+    assert!(fades(&a.doc, B).2);
+    assert!(a.report.warnings.is_empty(), "{:?}", a.report.warnings);
+
+    // F10: exactly at the span's end (frame 28 800) works, on either.
+    for ev in [A, B] {
+        let (w, a) = step(&d, split(ev, 18_432));
+        assert!(w.is_empty(), "{w:?}");
+        assert!(fades(&a, B).2);
+        assert_eq!(fades(&a, B).0.length_frames, 4800);
+        assert!(core_model::rules::validate(&a).is_empty());
+    }
+}
+
+#[test]
+fn splitting_the_partner_before_the_span_keeps_it() {
+    let d = flagged();
+    let mut h = History::new(d.clone());
+    let report = h.execute(&split(A, 7_680), &ViewFilter::default()).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let second = created_events(&report)[0];
+    assert_eq!(fades(h.doc(), B), fades(&d, B));
+    assert_eq!(
+        crossfade::overlap(h.doc(), B).unwrap(),
+        Some(Overlap {
+            with: second,
+            frames: 24_000
+        })
+    );
+    assert!(core_model::rules::validate(h.doc()).is_empty());
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &d);
+}
+
+#[test]
+fn extreme_edits_beside_a_crossfade_never_panic() {
+    let d = flagged();
+    let big = 1i64 << 40;
+    let half = i64::MAX / 2;
+    let huge = Command::Event(EventCmd::Insert {
+        seq: SeqId(0),
+        lane: LaneId(0),
+        events: vec![EventSpec::new(
+            Tick(14_000),
+            EventBody::AudioRegion {
+                media: MediaId(0),
+                source_offset: 0,
+                length: u64::MAX / 2,
+                gain_db: 0.0,
+                fade_in: Fade::default(),
+                fade_out: Fade::default(),
+                name: None,
+                crossfade: false,
+            },
+        )],
+    });
+    // Refused by its media, not by a panic.
+    assert!(apply(&d, &huge).is_err());
+    let mut cmds = vec![
+        mv(vec![B], big, None),
+        mv(vec![B], -big, None),
+        mv(vec![A], big, None),
+        mv(vec![A], -big, None),
+        tempo(Bpm::MIN.0),
+        tempo(Bpm::MAX.0),
+        huge,
+    ];
+    for ev in [A, B] {
+        for (f, b) in [(half, 0), (-half, 0), (0, half), (0, -half), (half, half)] {
+            cmds.push(trim(ev, f, b));
+        }
+    }
+    for c in cmds {
+        if let Ok(a) = apply(&d, &c) {
+            let v = core_model::rules::validate(&a.doc);
+            assert!(v.is_empty(), "{c:?}: {v:?}");
+            let kept = fades(&a.doc, B).2;
+            assert!(
+                kept || a.report.warnings.iter().any(|w| w.contains("Crossfade")),
+                "{c:?}: {:?}",
+                a.report
+            );
+        }
+    }
+}
+
+#[test]
+fn settle_leaves_a_valid_document_untouched() {
+    let d = flagged();
+    let a = apply(
+        &d,
+        &Command::Event(EventCmd::SetMute {
+            events: vec![NOTE],
+            mute: true,
+        }),
+    )
+    .unwrap();
+    assert!(a.report.warnings.is_empty(), "{:?}", a.report.warnings);
+    assert_eq!(a.doc.event(B).unwrap().0, d.event(B).unwrap().0);
+    assert_eq!(a.doc.event(A).unwrap().0, d.event(A).unwrap().0);
+}

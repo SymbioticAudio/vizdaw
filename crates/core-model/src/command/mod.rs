@@ -209,6 +209,7 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
             &mut report,
         )?),
     };
+    crate::crossfade::settle(doc, &mut d, &mut report)?;
     Ok(Applied {
         doc: d,
         report,
