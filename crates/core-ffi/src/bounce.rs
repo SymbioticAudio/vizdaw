@@ -161,6 +161,9 @@ pub const DEFAULT_TAIL_CAP_MS: u32 = 10_000;
 pub const MAX_TAIL_CAP_MS: u32 = 30_000;
 /// The bounce engine's block and the plugin copies' (Ruling 6).
 pub const BLOCK: u32 = 1024;
+/// What a clip line about an "Add to project" import says after its
+/// name: it describes the project's copy, not an exported file.
+pub(crate) const ADDED_CLIPPED: &str = " (added to the project): ";
 /// How long the job waits for the plugin copies to load (Ruling 6).
 const READY_WAIT: Duration = Duration::from_secs(60);
 /// The job's poll while it waits for the copies.
@@ -1104,10 +1107,7 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
                     // The project format clips what the float render kept
                     // (final review I1; owner answer 1: clips are reported).
                     for i in v.iter().filter(|i| i.clipped > 0) {
-                        clips.push(format!(
-                            "{name} (added to the project): {}",
-                            clipped_words(i.clipped)
-                        ));
+                        clips.push(format!("{name}{ADDED_CLIPPED}{}", clipped_words(i.clipped)));
                     }
                     files.push((name.clone(), Ok(v)));
                 }

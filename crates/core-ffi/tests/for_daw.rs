@@ -1087,3 +1087,72 @@ fn plugin_copies_end_with_the_export() {
     );
     assert_eq!(j.state, JobStateRow::Done, "{j:?}");
 }
+
+/// Review minor 3: "Add" with default strips that are empty (only external
+/// MIDI plays) is refused as `Some([])` is.
+#[test]
+fn add_with_no_default_stems_is_refused() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Builder::new();
+    let ext = b.dest("Ext", "port:Outboard", 0).unwrap();
+    let (seq, lead) = b.sequence("S", "Lead", Some(ext)).unwrap();
+    b.notes(seq, lead, &[(0, 64, 0x8000, Q)]).unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    s.debug_set_trash_dir(Some(text(&dir.path().join("Trash"))));
+    let r = ForDawRequestRow {
+        seq: seq.0,
+        strips: None,
+        container: ContainerRow::Wav,
+        depth: BitDepthRow::Int24,
+        rate: 48_000,
+        dither: false,
+        path: text(dir.path()),
+        add_to_project: true,
+    };
+    let c = s
+        .export_for_daw_check(ForDawRequestRow {
+            add_to_project: false,
+            ..r.clone()
+        })
+        .unwrap();
+    assert!(c.strips.is_empty(), "no default stems: {:?}", c.strips);
+    for result in [
+        s.export_for_daw(r.clone()).map(|_| ()),
+        s.export_for_daw_check(r).map(|_| ()),
+    ] {
+        match result {
+            Err(VizError::Model { message }) => assert!(message.contains("strip"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(listing(dir.path()), Vec::<String>::new());
+    s.close().unwrap();
+}
+
+/// Review minor 10: MIDI files only write no audio, so the audio format
+/// is not looked at.
+#[test]
+fn midi_only_ignores_the_audio_format() {
+    let _g = serial();
+    let p = project(0, |_, _| {});
+    let r = ForDawRequestRow {
+        strips: Some(Vec::new()),
+        rate: 0,
+        ..req(&p)
+    };
+    let c = p.s.export_for_daw_check(r.clone()).unwrap();
+    assert!(
+        c.files.iter().all(|f| !f.starts_with("Audio/")),
+        "{:?}",
+        c.files
+    );
+    let j = export(&p, r);
+    let folder = PathBuf::from(&j.written[0]);
+    assert_eq!(std::fs::read_dir(folder.join("Audio")).unwrap().count(), 0);
+    assert!(
+        about(&folder).contains("Audio: none; no strips were chosen."),
+        "{}",
+        about(&folder)
+    );
+}

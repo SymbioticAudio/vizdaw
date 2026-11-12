@@ -9576,7 +9576,6 @@ fn with_params(doc: Document, sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)>
 }
 
 impl Session {
-    /// `req` checked against the document and this session's media roots.
     /// Starts a render job of `kind` for `plan` (a bounce, or an export
     /// for another DAW whose `body` wraps one): the live plug-in states
     /// captured into a copy of the document, the plug-in copies started
@@ -9678,6 +9677,7 @@ impl Session {
         }
     }
 
+    /// `req` checked against the document and this session's media roots.
     fn bounce_plan(
         &self,
         inner: &Inner,

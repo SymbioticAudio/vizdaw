@@ -119,16 +119,28 @@ pub(crate) fn check(
     } else {
         Some(dest_path(&req.path)?)
     };
-    if req.add_to_project && req.strips.as_ref().is_some_and(Vec::is_empty) {
-        return Err(model(
-            "Choose at least one strip to add its stem to the project.",
-        ));
-    }
     let strips: Vec<StripId> = match &req.strips {
         None => layout::default_strips(doc, seq).map_err(io_error)?,
         Some(v) => v.iter().map(|id| StripId(*id)).collect(),
     };
-    let fmt = bounce::export_format(req.container, req.depth, req.rate, req.dither);
+    // Also when the defaults are empty (only external MIDI plays).
+    if req.add_to_project && strips.is_empty() {
+        return Err(model(
+            "Choose at least one strip to add its stem to the project.",
+        ));
+    }
+    // MIDI files only: no audio is written, so the audio format is not
+    // looked at (the project's rate stands in).
+    let fmt = if strips.is_empty() {
+        bounce::export_format(
+            req.container,
+            req.depth,
+            doc.settings().format.sample_rate,
+            false,
+        )
+    } else {
+        bounce::export_format(req.container, req.depth, req.rate, req.dither)
+    };
     let layout = layout::layout(doc, seq, &strips, fmt.container.extension()).map_err(io_error)?;
     let start = Tick(0i64.saturating_sub(s.start_offset.0));
     let end = core_model::query::seq_length(doc, seq)?;
@@ -429,16 +441,23 @@ pub(crate) fn run(job: ForDawJob, progress: &AtomicU32, cancel: &AtomicBool) -> 
     if cancelled() {
         return stopped(imports, Stop::Cancelled);
     }
-    // 4. The About file.
+    // 4. The About file. The clip lines of the "Add" imports describe the
+    // project's copies, not the exported files: the job's report only.
     let written = guarded(|| {
-        let report = full_report(&doc, &plan, midi, &problems);
+        let exported: Vec<String> = problems
+            .iter()
+            .filter(|p| !p.contains(bounce::ADDED_CLIPPED))
+            .cloned()
+            .collect();
+        let report = full_report(&doc, &plan, midi.clone(), &problems);
+        let about = full_report(&doc, &plan, midi, &exported);
         let audio = frames.map(|frames| AboutAudio {
             container: container_name(plan.fmt.container),
             bits: plan.fmt.depth.label().to_string(),
             rate: plan.fmt.rate,
             frames,
         });
-        let text = layout::about_text(&doc, seq, &l, audio.as_ref(), &report);
+        let text = layout::about_text(&doc, seq, &l, audio.as_ref(), &about);
         put(&folder, &l.about, text.as_bytes())?;
         if cancel_at == Some(2) {
             cancel.store(true, Ordering::Relaxed);
@@ -449,15 +468,19 @@ pub(crate) fn run(job: ForDawJob, progress: &AtomicU32, cancel: &AtomicBool) -> 
         Ok(r) => r,
         Err(s) => return stopped(imports, s),
     };
-    // 5. The last cancel; 6. the rename.
-    if cancelled() {
-        return stopped(imports, Stop::Cancelled);
-    }
-    match pending.commit() {
+    // 5. The last cancel; 6. the rename. Inside `catch_unwind` too, so a
+    // panic still hands the imports back to be discarded.
+    let renamed = guarded(|| {
+        if cancelled() {
+            return Err(Stop::Cancelled);
+        }
+        Ok(pending.commit()?)
+    });
+    match renamed {
         Ok(dest) => {
             progress.store(1f32.to_bits(), Ordering::Relaxed);
             end(imports, Ok(report), vec![dest.display().to_string()])
         }
-        Err(e) => stopped(imports, e.into()),
+        Err(s) => stopped(imports, s),
     }
 }
