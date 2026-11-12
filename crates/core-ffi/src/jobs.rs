@@ -139,8 +139,10 @@ pub enum Work {
     },
     /// A MIDI export (plan 6a): its files are already in place.
     ExportMidi {
-        /// The files written and the report, or why the export failed.
-        result: Result<(Vec<String>, core_io::report::Report), String>,
+        /// The report, or why the export failed.
+        result: Result<core_io::report::Report, String>,
+        /// The files put in place, in order (also when a later one failed).
+        written: Vec<String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,

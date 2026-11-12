@@ -862,12 +862,13 @@ impl Session {
     /// the history; not inside an open edit, where the next save stamps it
     /// (plan 6a Ruling 16, F23). Save As keeps it (Ruling T1-a).
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
+        let captured = self.capture_all(inner)?;
+        // After the capture: a `Busy` capture leaves the document as it was.
         if inner.doc().settings().project_id.is_none() && !inner.history.in_transaction() {
             inner
                 .history
                 .stamp_project_id(&crate::project_id::fresh())?;
         }
-        let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
         let mut refs = inner.history.referenced_media_anywhere();
         // Recordings kept for the recovery offer go with the project
@@ -4171,17 +4172,21 @@ impl Session {
                         ),
                     }
                 }
-                Work::ExportMidi { result } => match result {
-                    Ok((written, report)) => {
-                        let report = crate::interchange::report_row(&report, "Exported");
-                        inner.interchange_report = Some(report.clone());
-                        let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
-                        r.report = Some(report);
-                        r.written = written;
-                        r
-                    }
-                    Err(why) => row(id, kind, JobStateRow::Failed, Some(why), vec![], vec![]),
-                },
+                Work::ExportMidi { result, written } => {
+                    let mut r = match result {
+                        Ok(report) => {
+                            let report = crate::interchange::report_row(&report, "Exported");
+                            inner.interchange_report = Some(report.clone());
+                            let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+                            r.report = Some(report);
+                            r
+                        }
+                        Err(why) => row(id, kind, JobStateRow::Failed, Some(why), vec![], vec![]),
+                    };
+                    // A failed job still names what it put in place.
+                    r.written = written;
+                    r
+                }
                 Work::Relink { files } => {
                     let (done, problems) = apply_relink(inner, &root, files);
                     changed |= !done.is_empty();
@@ -4241,6 +4246,11 @@ impl Session {
 /// then replaces the session's, leaving nothing to undo (Ruling 6). Into a
 /// sequence without events the file's tempo and meter are used whatever
 /// `use_tempo` says. On an error (or a panic) nothing changes.
+///
+/// A new-project import replaces the whole history: edits made to the
+/// empty project while the job ran (song info, tempo) stay in the document
+/// but lose their undo steps (Ruling 6 accepts this; the app shows the
+/// project only once the import is applied).
 fn apply_midi_import(
     inner: &mut Inner,
     imp: &core_io::midi_in::MidiImport,
@@ -8889,8 +8899,8 @@ impl Session {
     }
 
     /// Starts importing a MIDI file (plan 6a): the job ID; `job` reports it
-    /// and applies it as one undo step "Import MIDI File" (none as a new
-    /// project, Ruling 6). Every refusal of the request is `Model` with
+    /// and applies it as one undo step "Import MIDI File" (as a new project,
+    /// Ruling 6, the history is replaced instead: nothing to undo). Every refusal of the request is `Model` with
     /// nothing read; `Busy` while recording, inside an open edit, and while
     /// a bounce or another MIDI import or export is unapplied.
     pub fn import_midi(
@@ -8899,8 +8909,10 @@ impl Session {
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
-            let plan = crate::interchange::import_plan(inner.doc(), &req)?;
+            // Finished jobs apply first, so the request is checked against
+            // the document the job will land in.
             self.interchange_idle(&mut inner)?;
+            let plan = crate::interchange::import_plan(inner.doc(), &req)?;
             inner.jobs.spawn(
                 crate::jobs::JobKindRow::ImportMidi,
                 crate::interchange::import_job(plan),
@@ -8917,10 +8929,10 @@ impl Session {
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
             let opts = crate::interchange::smf_options(inner.doc(), &req)?;
             let dest =
                 crate::interchange::file_dest(&req.path, req.replace, &self.export_roots(&inner))?;
-            self.interchange_idle(&mut inner)?;
             let job = crate::interchange::smf_job(inner.doc().clone(), opts, dest, req.replace);
             inner.jobs.spawn(crate::jobs::JobKindRow::ExportMidi, job)
         })
@@ -8951,9 +8963,9 @@ impl Session {
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
             let plan = crate::interchange::clip_plan(inner.doc(), &req)?;
             let dests = crate::interchange::clip_dests(&plan, &req, &self.export_roots(&inner))?;
-            self.interchange_idle(&mut inner)?;
             let job = crate::interchange::clip_job(inner.doc().clone(), plan, dests, req.replace);
             inner.jobs.spawn(crate::jobs::JobKindRow::ExportMidi, job)
         })

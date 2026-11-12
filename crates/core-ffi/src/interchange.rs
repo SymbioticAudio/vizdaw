@@ -187,7 +187,8 @@ pub struct SmfExportRequestRow {
 pub struct ClipExportRequestRow {
     /// The sequence.
     pub seq: u64,
-    /// The tracks (at least one).
+    /// The tracks (at least one). Several are written as `NN <track>.midi2`,
+    /// numbered in the sequence's track order (not this list's order).
     pub lanes: Vec<u64>,
     /// A file for one track, a folder for several (ignored by the check).
     pub path: String,
@@ -515,15 +516,44 @@ fn free(p: &Path, replace: bool) -> Result<(), VizError> {
     Ok(())
 }
 
+/// The longest file name most file systems take, in bytes.
+const MAX_NAME_BYTES: usize = 255;
+
+/// Refuses `p` when its name, or its partial's (`.<name>.partial`), is
+/// longer than [`MAX_NAME_BYTES`]: refused now, not in the job.
+fn name_fits(p: &Path) -> Result<(), VizError> {
+    let long = |q: &Path| q.file_name().is_some_and(|n| n.len() > MAX_NAME_BYTES);
+    if long(p) || long(&partial_path(p)) {
+        let name = display_name(p);
+        let mut short: String = name.chars().take(40).collect();
+        if short.len() < name.len() {
+            short.push('…');
+        }
+        return Err(model(format!(
+            "{short}: the file name is longer than {MAX_NAME_BYTES} bytes with its partial file; choose a shorter one"
+        )));
+    }
+    Ok(())
+}
+
+/// The path text of an export's destination, as `bounce` checks it.
+fn export_path(text: &str) -> Result<PathBuf, VizError> {
+    if text.is_empty() {
+        return Err(model("Choose where to export."));
+    }
+    dest_path(text)
+}
+
 /// The file an export writes, checked: absolute, outside `roots` and any
-/// project, its partial's path short enough, and free.
+/// project, its partial's path and name short enough, and free.
 pub(crate) fn file_dest(text: &str, replace: bool, roots: &[PathBuf]) -> Result<PathBuf, VizError> {
-    let p = file_path(text)?;
+    let p = export_path(text)?;
     let parent = p
         .parent()
         .ok_or_else(|| model(format!("{text}: choose a file")))?;
     outside(parent, roots)?;
     partial_fits(&p)?;
+    name_fits(&p)?;
     free(&p, replace)?;
     Ok(p)
 }
@@ -539,7 +569,7 @@ pub(crate) fn clip_dests(
     if plan.names.len() == 1 {
         return Ok(vec![file_dest(&req.path, req.replace, roots)?]);
     }
-    let folder = file_path(&req.path)?;
+    let folder = export_path(&req.path)?;
     if std::fs::symlink_metadata(&folder).is_ok() && !folder.is_dir() {
         return Err(model(format!("{} is not a folder", req.path)));
     }
@@ -548,6 +578,7 @@ pub(crate) fn clip_dests(
     for (k, name) in plan.names.iter().enumerate() {
         let f = folder.join(clip_name(k, name));
         partial_fits(&f)?;
+        name_fits(&f)?;
         free(&f, req.replace)?;
         out.push(f);
     }
@@ -618,20 +649,25 @@ pub(crate) fn import_job(
     }
 }
 
+/// Why an export's writing stopped: the reason and the files already in
+/// place (bounce Ruling 12).
+type WriteFailure = (String, Vec<String>);
+
 /// Writes every file's partial, then commits them in order (bounce Ruling
 /// 12). `Ok(None)`: cancelled, with the partials removed. A commit failure
-/// names the files already in place.
+/// names the files already in place, in its message and its list.
 fn write_all(
     files: Vec<(PathBuf, Vec<u8>)>,
     replace: bool,
     cancel: &AtomicBool,
-) -> Result<Option<Vec<String>>, String> {
+) -> Result<Option<Vec<String>>, WriteFailure> {
     let mut pending = Vec::with_capacity(files.len());
     for (dest, bytes) in files {
         if cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        pending.push(write_partial(&dest, &bytes, replace).map_err(|e| e.to_string())?);
+        let p = write_partial(&dest, &bytes, replace).map_err(|e| (e.to_string(), Vec::new()))?;
+        pending.push(p);
     }
     if cancel.load(Ordering::Relaxed) {
         return Ok(None);
@@ -640,9 +676,10 @@ fn write_all(
     for p in pending {
         match p.commit() {
             Ok(path) => done.push(path.display().to_string()),
-            Err(e) if done.is_empty() => return Err(e.to_string()),
+            Err(e) if done.is_empty() => return Err((e.to_string(), done)),
             Err(e) => {
-                return Err(format!("{e} (already written: {})", done.join(", ")));
+                let why = format!("{e} (already written: {})", done.join(", "));
+                return Err((why, done));
             }
         }
     }
@@ -661,19 +698,19 @@ fn export_job(
             return Work::Cancelled;
         }
         let ran = catch_unwind(AssertUnwindSafe(|| {
-            let (bytes, report) = render().map_err(|e| e.to_string())?;
+            let (bytes, report) = render().map_err(|e| (e.to_string(), Vec::new()))?;
             progress.store(0.5f32.to_bits(), Ordering::Relaxed);
             let written = write_all(dests.into_iter().zip(bytes).collect(), replace, cancel)?;
             Ok(written.map(|w| (w, report)))
         }));
         progress.store(1f32.to_bits(), Ordering::Relaxed);
-        let result = match ran {
-            Ok(Ok(Some(done))) => Ok(done),
+        let (result, written) = match ran {
+            Ok(Ok(Some((done, report)))) => (Ok(report), done),
             Ok(Ok(None)) => return Work::Cancelled,
-            Ok(Err(why)) => Err(why),
-            Err(p) => Err(internal(p.as_ref())),
+            Ok(Err((why, done))) => (Err(why), done),
+            Err(p) => (Err(internal(p.as_ref())), Vec::new()),
         };
-        Work::ExportMidi { result }
+        Work::ExportMidi { result, written }
     }
 }
 
@@ -700,6 +737,21 @@ pub(crate) fn clip_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_commit_lists_the_files_in_place() {
+        let d = tempfile::tempdir().unwrap();
+        let first = d.path().join("a.mid");
+        // A non-empty folder cannot be replaced by a rename.
+        let second = d.path().join("b");
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(second.join("keep"), b"x").unwrap();
+        let files = vec![(first.clone(), b"1".to_vec()), (second, b"2".to_vec())];
+        let (why, done) = write_all(files, true, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(done, vec![first.display().to_string()]);
+        assert!(why.contains("already written"), "{why}");
+        assert!(!d.path().join(".b.partial").exists());
+    }
 
     #[test]
     fn clip_names_number_and_clean_the_track() {

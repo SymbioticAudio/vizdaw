@@ -214,19 +214,37 @@ fn midi_file_info_refuses_hostile_paths() {
         .set_len(64 * 1024 * 1024 + 1)
         .unwrap();
     let not_midi = write(dir.path(), "notes.mid", b"hello, this is text");
-    for p in [
+    let (a, b) = (dir.path().join("a.mid"), dir.path().join("b.mid"));
+    std::os::unix::fs::symlink(&b, &a).unwrap();
+    std::os::unix::fs::symlink(&a, &b).unwrap();
+    let mut paths = vec![
         String::new(),
         "relative.mid".to_string(),
+        format!("/{}", "x".repeat(4_999)),
+        format!("{}/n\0l.mid", dir.path().display()),
         text(dir.path()),
         text(&dir.path().join("missing.mid")),
         text(&huge),
         not_midi,
         "/dev/zero".to_string(),
-    ] {
+        text(&a),
+    ];
+    let fifo = dir.path().join("fifo.mid");
+    if std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        paths.push(text(&fifo));
+    }
+    for p in paths {
+        // A FIFO with no writer must not block the call.
+        let t = Instant::now();
         match s.midi_file_info(p.clone()) {
             Err(VizError::Model { .. } | VizError::Io { .. }) => {}
             other => panic!("{p}: {other:?}"),
         }
+        assert!(t.elapsed() < Duration::from_secs(5), "{p} took too long");
     }
     s.close().unwrap();
 }
@@ -520,6 +538,43 @@ fn hostile_export_paths_are_refused() {
         let r = s.export_midi_clip(clip_req(seq, lanes.clone(), text(&folder)));
         assert!(is_model(&r), "{folder:?}: {r:?}");
     }
+    // Path texts: empty, relative, 5 000 bytes, NUL.
+    let long = format!("/{}", "x".repeat(4_999));
+    let nul = format!("{}/n\0l.mid", dir.path().display());
+    for t in [String::new(), "relative.mid".into(), long, nul] {
+        let r = s.export_midi(smf_req(seq, t.clone()));
+        assert!(is_model(&r), "{t:?}: {r:?}");
+        let r = s.export_midi_clip(clip_req(seq, vec![lane], t.clone()));
+        assert!(is_model(&r), "{t:?}: {r:?}");
+        let r = s.export_midi_clip(clip_req(seq, lanes.clone(), t.clone()));
+        assert!(is_model(&r), "{t:?}: {r:?}");
+    }
+    match s.export_midi(smf_req(seq, String::new())) {
+        Err(VizError::Model { message }) => assert_eq!(message, "Choose where to export."),
+        other => panic!("{other:?}"),
+    }
+    // A symlinked folder that leads into a package: as the export file's
+    // parent and as the clips' folder.
+    for target in [pkg.clone(), other.clone()] {
+        let link = dir.path().join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let r = s.export_midi(smf_req(seq, text(&link.join("x.mid"))));
+        assert!(is_model(&r), "{target:?}: {r:?}");
+        let r = s.export_midi_clip(clip_req(seq, vec![lane], text(&link.join("x.midi2"))));
+        assert!(is_model(&r), "{target:?}: {r:?}");
+        let r = s.export_midi_clip(clip_req(seq, lanes.clone(), text(&link)));
+        assert!(is_model(&r), "{target:?}: {r:?}");
+    }
+    // A name over 255 bytes is refused before the job, naming the limit.
+    let r = s.export_midi(smf_req(
+        seq,
+        text(&dir.path().join(format!("{}.mid", "n".repeat(250)))),
+    ));
+    match r {
+        Err(VizError::Model { message }) => assert!(message.contains("255"), "{message}"),
+        other => panic!("{other:?}"),
+    }
     // A file where a folder is wanted, and a folder where a file is.
     let file = write(dir.path(), "file", b"x");
     assert!(is_model(&s.export_midi_clip(clip_req(seq, lanes, file))));
@@ -655,6 +710,17 @@ fn hostile_requests_are_refused() {
         );
     }
     // The checks refuse the same things.
+    for r in [
+        s.export_midi_check(smf_req(9_999, String::new())),
+        s.export_midi_check(SmfExportRequestRow {
+            lanes: vec![foreign],
+            ..smf_req(seq, String::new())
+        }),
+        s.export_midi_clip_check(clip_req(9_999, vec![lane], String::new())),
+        s.export_midi_clip_check(clip_req(seq, vec![foreign], String::new())),
+    ] {
+        assert!(matches!(r, Err(VizError::Model { .. })), "{r:?}");
+    }
     assert!(matches!(
         s.export_midi_check(SmfExportRequestRow {
             ppq: 0,
@@ -689,6 +755,34 @@ fn busy_states_refuse() {
         s.import_midi(import_req(path.clone(), seq)),
         s.export_midi(smf_req(seq, x.clone())),
         s.export_midi_clip(clip_req(seq, vec![s.lanes(seq).unwrap()[0].id], x.clone())),
+    ] {
+        assert!(matches!(r, Err(VizError::Busy { .. })), "{r:?}");
+    }
+    // A cancelled job ends even while job threads are held.
+    s.cancel_job(id).unwrap();
+    assert_eq!(wait_job(&s, id).state, JobStateRow::Cancelled);
+
+    // While a bounce is unapplied.
+    let id = s
+        .bounce(vizdaw_ffi::BounceRequestRow {
+            seq,
+            source: vizdaw_ffi::BounceSourceRow::Mix,
+            range: vizdaw_ffi::BounceRangeRow::Ticks {
+                start: 0,
+                end: 4 * Q,
+            },
+            container: vizdaw_ffi::ContainerRow::Wav,
+            depth: vizdaw_ffi::BitDepthRow::Int24,
+            rate: 48_000,
+            dither: false,
+            path: Some(text(&dir.path().join("mix.wav"))),
+            add_to_project: false,
+            replace: false,
+        })
+        .unwrap();
+    for r in [
+        s.import_midi(import_req(path.clone(), seq)),
+        s.export_midi(smf_req(seq, x.clone())),
     ] {
         assert!(matches!(r, Err(VizError::Busy { .. })), "{r:?}");
     }
@@ -751,6 +845,27 @@ fn busy_states_refuse() {
     assert!(matches!(res, Err(VizError::Busy { .. })), "{res:?}");
     r.stop().unwrap();
     r.close().unwrap();
+}
+
+#[test]
+fn long_clip_names_are_refused_before_the_job() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Builder::new();
+    let long = "k".repeat(250);
+    let (seq, one) = b.sequence("S", &long, None).unwrap();
+    let two = b.lane(seq, "Two", None).unwrap();
+    for l in [one, two] {
+        b.notes(seq, l, &[(0, 60, 0x8000, Q)]).unwrap();
+    }
+    let s = Session::from_document(b.finish()).unwrap();
+    let r = s.export_midi_clip(clip_req(seq.0, vec![one.0, two.0], text(dir.path())));
+    match r {
+        Err(VizError::Model { message }) => assert!(message.contains("255"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    s.close().unwrap();
 }
 
 #[test]

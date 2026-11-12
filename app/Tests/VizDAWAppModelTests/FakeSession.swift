@@ -738,9 +738,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func interchangeReport() throws -> ReportRow? {
         interchangeReportCalls += 1
+        if let e = interchangeError { throw e }
         return lastReport
     }
-    func songInfo() throws -> SongInfoRow { song }
+    func songInfo() throws -> SongInfoRow {
+        if let e = interchangeError { throw e }
+        return song
+    }
     func setSongInfo(info: SongInfoRow) throws -> DocSnapshot {
         if let e = interchangeError { throw e }
         songInfoSets.append(info)
