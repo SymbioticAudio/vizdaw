@@ -1381,10 +1381,16 @@ fn many_shared_clips_are_bounded() {
     // Twice MAX_NEW_SEQUENCES clips, each the only use of its own notes,
     // beside an audio clip (so the model looks at crossfades on every
     // command): the first MAX_NEW_SEQUENCES become sequences, the rest are
-    // left out, and the import stays fast.
+    // unrolled onto the track (loops repeated), and the import stays fast.
     let n = 2 * MAX_NEW_SEQUENCES;
+    // The last clip loops its one beat three times.
     let clips: String = (0..n)
-        .map(|k| format!(r#"<Clip time="{k}" duration="1" playStart="0" reference="n{k}"/>"#))
+        .map(|k| match k + 1 == n {
+            false => format!(r#"<Clip time="{k}" duration="1" playStart="0" reference="n{k}"/>"#),
+            true => format!(
+                r#"<Clip time="{k}" duration="3" playStart="0" loopStart="0" loopEnd="1" reference="n{k}"/>"#
+            ),
+        })
         .collect();
     let defs: String = (0..n)
         .map(|k| {
@@ -1409,7 +1415,26 @@ fn many_shared_clips_are_bounded() {
     let uses = uses_of(&events(&a, "Many"));
     assert_eq!(uses.len(), MAX_NEW_SEQUENCES);
     assert_eq!(a.h.doc().sequences().len(), MAX_NEW_SEQUENCES + 1);
-    has(&a.report, ItemKind::LeftOut, TOO_MUCH);
+    lacks(&a.report, TOO_MUCH);
+    has(&a.report, ItemKind::Changed, UNROLLED);
+    let notes = notes_of(&events(&a, "Many"));
+    let k = MAX_NEW_SEQUENCES as i64;
+    assert_eq!(
+        notes.first(),
+        Some(&(k * BEAT, 0, BEAT)),
+        "the 1 025th clip's note"
+    );
+    let last = (n - 1) as i64;
+    assert_eq!(
+        notes[notes.len() - 3..],
+        [
+            (last * BEAT, (n - 1) as u8 % 128, BEAT),
+            ((last + 1) * BEAT, (n - 1) as u8 % 128, BEAT),
+            ((last + 2) * BEAT, (n - 1) as u8 % 128, BEAT),
+        ],
+        "the looped one repeated"
+    );
+    assert_eq!(notes.len(), n - MAX_NEW_SEQUENCES + 2);
     assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
 }
 

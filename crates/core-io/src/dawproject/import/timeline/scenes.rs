@@ -78,7 +78,6 @@ impl<'p> Tl<'_, '_, 'p> {
         } else {
             evs.iter().map(ev_end).max().unwrap_or(0)
         };
-        self.cx.add(ItemKind::Changed, SLOTS, None);
         let name = format!("{scene} \u{2013} {}", self.name_of(track));
         let name = self.made_name(&name);
         self.slots.push(RawSeq {

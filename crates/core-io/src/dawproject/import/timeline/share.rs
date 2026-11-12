@@ -70,6 +70,10 @@ impl<'p> Tl<'_, '_, 'p> {
             self.count_n(ItemKind::LeftOut, TOO_MUCH, self.slots.len() - room);
             self.slots.truncate(room);
         }
+        // The slots line counts the slots that became sequences.
+        if !self.slots.is_empty() {
+            self.count_n(ItemKind::Changed, SLOTS, self.slots.len());
+        }
         seqs.append(&mut self.slots);
 
         // Each track's main channel: the one most of its notes are on.
@@ -242,6 +246,47 @@ impl<'p> Tl<'_, '_, 'p> {
         }
     }
 
+    /// A use that gets no sequence (past [`MAX_NEW_SEQUENCES`]) straight
+    /// onto its track: its pass repeated for a looped clip, cut where the
+    /// clip ends; each event spends the walk's budget (Changed
+    /// [`UNROLLED`]).
+    fn unroll(&mut self, c: &Cand<'_>) {
+        self.count(ItemKind::Changed, UNROLLED);
+        let passes = if c.looped && c.len > 0 {
+            c.total.saturating_add(c.len - 1) / c.len
+        } else {
+            1
+        };
+        let end = if c.looped { c.total } else { i64::MAX };
+        for k in 0..passes {
+            let at = k.saturating_mul(c.len);
+            for e in &c.pass {
+                let tick = e.tick.saturating_add(at);
+                // A pass is not in time order.
+                if tick >= end {
+                    continue;
+                }
+                if !self.spend() {
+                    return;
+                }
+                let mut e = Ev {
+                    tick: tick.saturating_add(c.tick),
+                    mute: e.mute || c.mute,
+                    ..e.clone()
+                };
+                if let EventBody::Note { duration, .. } = &mut e.body
+                    && tick.saturating_add(duration.0) > end
+                {
+                    duration.0 = end - tick;
+                    self.count(ItemKind::Changed, NOTES_CUT);
+                }
+                if let Some(v) = self.evs.get_mut(c.track) {
+                    v.push(e);
+                }
+            }
+        }
+    }
+
     /// Groups the candidates (spec §7.4): clips that play one timeline,
     /// or share a name and have the same content, are one sequence per
     /// destination; a lone named clip goes straight onto its track.
@@ -325,9 +370,14 @@ impl<'p> Tl<'_, '_, 'p> {
                 let Some(head) = ms.first().and_then(|&m| cands.get(m)) else {
                     continue;
                 };
-                // Past MAX_NEW_SEQUENCES, the uses are left out.
+                // Past MAX_NEW_SEQUENCES, the uses are unrolled onto their
+                // tracks.
                 if seqs.len() >= MAX_NEW_SEQUENCES {
-                    self.count_n(ItemKind::LeftOut, TOO_MUCH, ms.len());
+                    for &m in &ms {
+                        if let Some(c) = cands.get(m) {
+                            self.unroll(c);
+                        }
+                    }
                     continue;
                 }
                 let name = match head.name.clone() {
