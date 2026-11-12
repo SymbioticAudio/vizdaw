@@ -54,8 +54,6 @@ pub const VELOCITY_SCALE_AUTOMATION: &str = "Velocity-scale automation";
 pub const UNPLACED_AUTOMATION: &str = "Automation of mixer parts not in the file";
 /// Left out: region gain, with [`RegionGain::LeaveOut`] (by region).
 pub const REGION_GAIN: &str = "Region gain";
-/// Left out: regions whose media item is not in the project (by track).
-pub const MISSING_MEDIA: &str = "Regions whose audio is not in the project";
 /// Changed: fades of a shape other than linear (a count).
 pub const FADE_SHAPES: &str = "Fade shapes (the file keeps fade lengths only)";
 /// Changed: crossfades (Ruling 10; a count).
@@ -68,6 +66,10 @@ pub const NESTED_AUDIO: &str = "Audio inside nested sequences was written as pla
 /// Note: regions that start inside another without a crossfade (by track).
 pub const OVERLAPS: &str =
     "Overlapping regions: in VizDAW the later one takes over; other DAWs may play both";
+/// Note: muted regions and muted uses inside a used sequence, which do not
+/// play and are not written (by sequence).
+pub const NESTED_MUTED: &str =
+    "Muted regions and uses inside a used sequence were not written (they do not play)";
 /// Note: transposed reference uses (a count).
 pub const TRANSPOSED: &str = "Transposed uses of a sequence were written as played";
 
@@ -109,6 +111,7 @@ pub(super) fn arrange(
         transposes: BTreeSet::new(),
         seq_len: seq_length(l.doc, l.seq.id).map_or(i64::MAX, |t| t.0),
     };
+    a.nested_muted()?;
     let mut lanes = Vec::new();
     for (pi, p) in l.parts.iter().enumerate() {
         lanes.push(DpTimeline::Lanes(a.track(pi, p)?));
@@ -293,6 +296,7 @@ struct Region<'e> {
     r: Ev<'e>,
     id: EventId,
     crossfade: bool,
+    muted: bool,
     rate: f64,
     secs: f64,
     end_secs: f64,
@@ -340,6 +344,11 @@ impl Arr<'_, '_, '_, '_, '_> {
         let mut dests: BTreeSet<DestId> = BTreeSet::new();
         for r in events {
             self.ticker.tick()?;
+            // What a muted use holds is written in its disabled clip (MIDI,
+            // regions) or not at all (automation, texts, SysEx: they never
+            // play).
+            let in_muted_use =
+                r.path.len() > 1 && r.path.first().is_some_and(|s| l.muted.contains(&s.event));
             match &r.body {
                 EventBody::AudioRegion { .. } => {
                     if p.audio {
@@ -347,6 +356,8 @@ impl Arr<'_, '_, '_, '_, '_> {
                     }
                 }
                 _ if !midi_here => {}
+                EventBody::Automation { .. } | EventBody::Text { .. } | EventBody::SysEx { .. }
+                    if in_muted_use => {}
                 EventBody::Automation { .. } => autos.push(r),
                 EventBody::Text { .. } => self.report.add(ItemKind::LeftOut, TEXTS, None),
                 EventBody::SysEx { .. } => self.report.add(ItemKind::LeftOut, SYSEX, None),
@@ -419,6 +430,50 @@ impl Arr<'_, '_, '_, '_, '_> {
             },
             items,
         })
+    }
+
+    /// Notes the muted regions and uses inside the sequences the exported
+    /// tracks use, through every level (each sequence once).
+    fn nested_muted(&mut self) -> Result<(), IoError> {
+        let l = self.l;
+        let refs = |lane: &core_model::lane::Lane| -> Vec<core_model::ids::SeqId> {
+            lane.active()
+                .into_iter()
+                .flat_map(|t| t.events.values())
+                .filter_map(|e| match e.body {
+                    EventBody::Reference { seq, .. } => Some(seq),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut todo: Vec<core_model::ids::SeqId> = l.seq.lanes.iter().flat_map(refs).collect();
+        let mut seen = BTreeSet::from([l.seq.id]);
+        while let Some(id) = todo.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Ok(s) = l.doc.sequence(id) else { continue };
+            for lane in &s.lanes {
+                for e in lane.active().into_iter().flat_map(|t| t.events.values()) {
+                    self.ticker.tick()?;
+                    match e.body {
+                        EventBody::Reference { seq, .. } => {
+                            if e.mute {
+                                self.report
+                                    .add(ItemKind::Note, NESTED_MUTED, Some(s.name.clone()));
+                            }
+                            todo.push(seq);
+                        }
+                        EventBody::AudioRegion { .. } if e.mute => {
+                            self.report
+                                .add(ItemKind::Note, NESTED_MUTED, Some(s.name.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Notes once each transposed reference on `path` (the played notes
@@ -627,6 +682,7 @@ impl Arr<'_, '_, '_, '_, '_> {
         let rel = |t: i64| beats(Tick(t.saturating_sub(start)));
         let mut notes: Vec<N> = Vec::new();
         let mut points: BTreeMap<PointsKey, DpPoints> = BTreeMap::new();
+        let mut pressures: Vec<Ev<'_>> = Vec::new();
         for r in evs {
             self.ticker.tick()?;
             let (group, ch) = r.group_channel.unwrap_or((0, 0));
@@ -698,32 +754,50 @@ impl Arr<'_, '_, '_, '_, '_> {
                 EventBody::ChannelPressure { value } => {
                     push_point(&mut points, (3, ch, 0), hold(time, norm32(*value)));
                 }
-                EventBody::PolyPressure { pitch, value } => {
-                    // On a sounding note of its key: that note's pressure.
-                    let t = r.tick.0;
-                    let on = notes
-                        .iter_mut()
-                        .rev()
-                        .find(|n| n.key == *pitch && n.channel == ch && n.tick <= t && t < n.end);
-                    match on {
-                        Some(n) => {
-                            let at = beats(Tick(t.saturating_sub(n.tick)));
-                            if let Some(list) = n.expr.get_mut(2) {
-                                list.push(hold(at, norm32(*value)));
-                            }
-                        }
-                        None => push_point(
-                            &mut points,
-                            (4, ch, i32::from(*pitch)),
-                            hold(time, norm32(*value)),
-                        ),
-                    }
-                }
+                EventBody::PolyPressure { .. } => pressures.push(r),
                 EventBody::SysEx { .. }
                 | EventBody::Text { .. }
                 | EventBody::Reference { .. }
                 | EventBody::AudioRegion { .. }
                 | EventBody::Automation { .. } => {}
+            }
+        }
+        // After every note, so pressure at a note's own tick finds it.
+        // The notes of each key and channel, in time order.
+        let mut by_key: BTreeMap<(u8, i32), Vec<usize>> = BTreeMap::new();
+        for (i, n) in notes.iter().enumerate() {
+            by_key.entry((n.key, n.channel)).or_default().push(i);
+        }
+        for r in pressures {
+            let EventBody::PolyPressure { pitch, value } = &r.body else {
+                continue;
+            };
+            let ch = i32::from(r.group_channel.map_or(0, |g| g.1) & 0x0F);
+            let t = r.tick.0;
+            // On a sounding note of its key: that note's pressure.
+            let on = by_key.get(&(*pitch, ch)).and_then(|list| {
+                let upto = list.partition_point(|&i| notes.get(i).is_some_and(|n| n.tick <= t));
+                list.iter()
+                    .take(upto)
+                    .rev()
+                    // Notes of one key rarely overlap deeply; the bound
+                    // keeps a hostile clip linear.
+                    .take(64)
+                    .copied()
+                    .find(|&i| notes.get(i).is_some_and(|n| t < n.end))
+            });
+            match on.and_then(|i| notes.get_mut(i)) {
+                Some(n) => {
+                    let at = beats(Tick(t.saturating_sub(n.tick)));
+                    if let Some(list) = n.expr.get_mut(2) {
+                        list.push(hold(at, norm32(*value)));
+                    }
+                }
+                None => push_point(
+                    &mut points,
+                    (4, ch, i32::from(*pitch)),
+                    hold(rel(t), norm32(*value)),
+                ),
             }
         }
         let kinds = [
@@ -815,9 +889,9 @@ impl Arr<'_, '_, '_, '_, '_> {
             else {
                 continue;
             };
+            // The model refuses a region whose media item is missing, on
+            // insert and on load (`rules::check_event`, `rules::validate`).
             let Some(m) = doc.media().get(media) else {
-                self.report
-                    .add(ItemKind::LeftOut, MISSING_MEDIA, Some(p.name()));
                 continue;
             };
             let Some(last) = r.path.last() else { continue };
@@ -846,7 +920,8 @@ impl Arr<'_, '_, '_, '_, '_> {
             let end_secs = secs + *length as f64 / rate;
             let end = tempo.seconds_to_tick(end_secs).0;
             let duration = end.saturating_sub(r.tick.0).max(1);
-            let muted = top && l.muted.contains(&last.event);
+            // A muted region, or one inside a muted use.
+            let muted = r.path.first().is_some_and(|s| l.muted.contains(&s.event));
             let clip = DpClip {
                 named: DpNamed {
                     id: None,
@@ -889,6 +964,7 @@ impl Arr<'_, '_, '_, '_, '_> {
                 r,
                 id: last.event,
                 crossfade: *crossfade,
+                muted,
                 rate,
                 secs,
                 end_secs,
@@ -900,13 +976,16 @@ impl Arr<'_, '_, '_, '_, '_> {
 
         // Crossfades: the earlier clip fades out over the whole overlap.
         let mut overlapped = false;
+        // The latest end of the playing regions so far, in seconds.
+        let mut last_end = f64::NEG_INFINITY;
         for j in 0..out.len() {
             self.ticker.tick()?;
             let Some(b) = out.get(j) else { continue };
-            let sounding = out
-                .iter()
-                .take(j)
-                .any(|a| (a.end_secs * b.rate).round() > (b.secs * b.rate).round());
+            if b.muted {
+                continue;
+            }
+            let sounding = (last_end * b.rate).round() > (b.secs * b.rate).round();
+            last_end = last_end.max(b.end_secs);
             if !b.crossfade {
                 overlapped |= sounding;
                 continue;

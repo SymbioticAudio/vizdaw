@@ -9,16 +9,20 @@ use core_engine::fixtures::{BAR, Builder, Q};
 use core_io::IoError;
 use core_io::dawproject::export::{
     AudioFile, CANCEL_EVERY, CROSSFADES, ClipRule, DpExport, EVENTS_OUTSIDE, ExportEnv,
-    ExportOptions, FADE_SHAPES, MIDI_GROUPS, MUTED_NOTES, NESTED_AUDIO, NOTE_ATTRIBUTES,
-    OTHER_PER_NOTE, OVERLAPS, REGION_GAIN, RegionGain, SOLO_AUTOMATION, SYSEX, TEXTS, TRANSPOSED,
-    VELOCITY_SCALE_AUTOMATION, check, debug_cancel_after, debug_items_after_cancel, export,
+    ExportOptions, FADE_SHAPES, MIDI_GROUPS, MUTED_NOTES, NESTED_AUDIO, NESTED_MUTED,
+    NOTE_ATTRIBUTES, OTHER_PER_NOTE, OVERLAPS, REGION_GAIN, RegionGain, SOLO_AUTOMATION, SYSEX,
+    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VELOCITY_SCALE_AUTOMATION, check, debug_cancel_after,
+    debug_items_after_cancel, export,
 };
 use core_io::dawproject::plugins::{NoPlist, PlistCodec};
+use core_io::dawproject::record::{Snapshot, projection};
 use core_io::dawproject::schema::*;
 use core_io::limits::PackageLimits;
 use core_io::report::{ItemKind, Report};
 use core_io::xml::{Tree, double};
 use core_model::automation::AutomationTarget;
+use core_model::automation::SendIndex;
+use core_model::command::MixerCmd;
 use core_model::command::{
     AudioCmd, Command, CrossfadeLength, EventCmd, MediaCmd, RoutingCmd, SequenceCmd,
 };
@@ -27,6 +31,7 @@ use core_model::event::{
     EventBody, EventSpec, Fade, FadeShape, NoteAttribute, PerNoteCtl, PerNoteKind, TextKind,
 };
 use core_model::ids::{AnyId, DestId, EventId, LaneId, MediaId, OutputPathId, SeqId, StripId};
+use core_model::mixer::{AuxSend, ParamId, PluginFormat, PluginRef};
 use core_model::mixer::{BUILTIN_SYNTH_REF, StripKind};
 use core_model::sequence::SeqLength;
 use core_model::time::Tick;
@@ -854,6 +859,21 @@ fn listed_fixture() -> (Document, SeqId) {
     .unwrap();
     // A second region inside the first, not crossfading.
     plain_region(&mut b, seq, drums, Q, media);
+    // Automation of a send the strip lacks, and of a strip no track plays.
+    let spare = output(&mut b, "Spare");
+    let spare = b.strip_of(StripKind::AudioPath(spare)).unwrap();
+    b.events(
+        seq,
+        drums,
+        vec![
+            spec(
+                0,
+                automation(AutomationTarget::SendLevel(drum_strip, SendIndex(3)), 0.5),
+            ),
+            spec(0, automation(AutomationTarget::StripFader(spare), 0.5)),
+        ],
+    )
+    .unwrap();
     // A note past the end of the sequence.
     length(&mut b, seq, 4 * BAR);
     b.notes(seq, keys, &[(5 * BAR, 60, 0x8000, Q)]).unwrap();
@@ -875,6 +895,7 @@ fn what_is_left_out_on_the_timeline() {
         VELOCITY_SCALE_AUTOMATION,
         REGION_GAIN,
         EVENTS_OUTSIDE,
+        UNPLACED_AUTOMATION,
     ] {
         assert_eq!(
             count(r, ItemKind::LeftOut, what),
@@ -883,6 +904,7 @@ fn what_is_left_out_on_the_timeline() {
             r.items
         );
     }
+    assert_eq!(item(r, ItemKind::LeftOut, UNPLACED_AUTOMATION).count, 2);
     for what in [FADE_SHAPES, MIDI_GROUPS, NESTED_AUDIO] {
         assert_eq!(
             count(r, ItemKind::Changed, what),
@@ -915,6 +937,8 @@ fn what_is_left_out_on_the_timeline() {
         NESTED_AUDIO,
         OVERLAPS,
         TRANSPOSED,
+        UNPLACED_AUTOMATION,
+        NESTED_MUTED,
     ] {
         assert!(
             r.items.iter().all(|i| i.what != what),
@@ -1100,4 +1124,218 @@ fn timeline_export_stops_when_cancelled() {
     assert!(flag.load(Ordering::Relaxed), "the hook raised the flag");
     assert_eq!(got, Err(IoError::Cancelled));
     assert!(after <= CANCEL_EVERY, "{after} events after the flag");
+}
+
+/// "Keys" (notes on the built-in synth, audio on "Keys out") using "Inner"
+/// at bar 1, muted when `muted`. "Inner" holds a note, a region on "Keys
+/// out", a fader point for "Keys out" and a lyric; with `inner_muted` also a
+/// muted region.
+fn muted_use_fixture(muted: bool, inner_muted: bool) -> (Document, SeqId, LaneId) {
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", BUILTIN_SYNTH_REF, 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    let out = output(&mut b, "Keys out");
+    route(&mut b, seq, keys, out);
+    let strip = b.strip_of(StripKind::AudioPath(out)).unwrap();
+    let (inner, inner_lane) = b.sequence("Inner", "Inner", Some(synth)).unwrap();
+    b.notes(inner, inner_lane, &[(0, 60, 0x8000, Q)]).unwrap();
+    let inner_audio = b.lane(inner, "Inner audio", None).unwrap();
+    route(&mut b, inner, inner_audio, out);
+    let media = b.media("Media/a.caf", 48_000, 2).unwrap();
+    plain_region(&mut b, inner, inner_audio, 0, media);
+    if inner_muted {
+        let r = plain_region(&mut b, inner, inner_audio, 2 * Q, media);
+        mute(&mut b, r);
+    }
+    b.events(
+        inner,
+        inner_lane,
+        vec![
+            spec(0, automation(AutomationTarget::StripFader(strip), 0.5)),
+            spec(
+                0,
+                EventBody::Text {
+                    kind: TextKind::Lyric,
+                    text: "la".into(),
+                },
+            ),
+        ],
+    )
+    .unwrap();
+    let u = b.reference(seq, keys, 0, inner, 1, 0).unwrap();
+    if muted {
+        mute(&mut b, u);
+    }
+    (b.finish(), seq, keys)
+}
+
+#[test]
+fn a_muted_use_stays_silent() {
+    let (doc, seq, keys) = muted_use_fixture(true, false);
+    let x = run(&doc, seq);
+    validates(&x);
+    let p = read_back(&x);
+    let (notes, audio) = (format!("t{}", keys.0), format!("t{}a", keys.0));
+    let c = clips(&p, &notes);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].enable, Some(false), "the use's MIDI");
+    let c = clips(&p, &audio);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].enable, Some(false), "the region inside the muted use");
+    assert!(track_points(&p, &notes).is_empty(), "no automation from it");
+    assert!(track_points(&p, &audio).is_empty(), "no automation from it");
+    for what in [TEXTS, MUTED_NOTES] {
+        assert_eq!(count(&x.report, ItemKind::LeftOut, what), 0, "{what}");
+    }
+    // The record's projection is the document's: nothing of the muted use
+    // plays.
+    let snap: Snapshot = serde_json::from_str(&x.snapshot_json).unwrap();
+    let want = projection(&doc, seq).unwrap();
+    assert_eq!(snap.projection, want);
+    assert!(want.tracks.iter().all(|t| t.regions.is_empty()));
+    assert!(want.tracks.iter().all(|t| t.automation.is_empty()));
+    assert!(want.tracks.iter().all(|t| t.notes_played.is_empty()));
+
+    // Unmuted, the same use plays all of it.
+    let (doc, seq, keys) = muted_use_fixture(false, false);
+    let x = run(&doc, seq);
+    let p = read_back(&x);
+    assert_eq!(clips(&p, &format!("t{}a", keys.0))[0].enable, None);
+    assert_eq!(track_points(&p, &format!("t{}", keys.0)).len(), 1);
+    assert_eq!(count(&x.report, ItemKind::LeftOut, TEXTS), 1);
+}
+
+#[test]
+fn muted_parts_inside_a_use_are_noted() {
+    let (doc, seq, keys) = muted_use_fixture(false, true);
+    let x = run(&doc, seq);
+    let it = item(&x.report, ItemKind::Note, NESTED_MUTED);
+    assert_eq!(it.count, 1);
+    assert_eq!(it.details, vec!["Inner".to_string()]);
+    // The muted region does not play and is not written.
+    let p = read_back(&x);
+    assert_eq!(clips(&p, &format!("t{}a", keys.0)).len(), 1);
+}
+
+#[test]
+fn a_muted_region_is_disabled_and_overlaps_nothing() {
+    let mut b = Builder::new();
+    let (seq, drums) = b.sequence("Song", "Drums", None).unwrap();
+    let out = output(&mut b, "Drums");
+    route(&mut b, seq, drums, out);
+    let media = b.media("Media/a.caf", 48_000, 2).unwrap();
+    let a = plain_region(&mut b, seq, drums, 0, media);
+    mute(&mut b, a);
+    plain_region(&mut b, seq, drums, Q, media);
+    let doc = b.finish();
+    let x = run(&doc, seq);
+    validates(&x);
+    let p = read_back(&x);
+    let c = clips(&p, &format!("t{}", drums.0));
+    assert_eq!(c.len(), 2);
+    assert_eq!(c[0].enable, Some(false));
+    assert_eq!(c[1].enable, None);
+    assert_eq!(
+        count(&x.report, ItemKind::Note, OVERLAPS),
+        0,
+        "{:#?}",
+        x.report.items
+    );
+}
+
+#[test]
+fn parameter_and_send_automation_targets_resolve() {
+    let mut b = Builder::new();
+    let (seq, drums) = b.sequence("Song", "Drums", None).unwrap();
+    let out = output(&mut b, "Drums");
+    route(&mut b, seq, drums, out);
+    let strip = b.strip_of(StripKind::AudioPath(out)).unwrap();
+    let verb = b.bus("Verb").unwrap();
+    b.mixer(MixerCmd::AddSend {
+        strip,
+        send: AuxSend::new(verb),
+    })
+    .unwrap();
+    let slot = b
+        .insert(
+            strip,
+            PluginRef {
+                format: PluginFormat::Clap,
+                id: "org.example.delay".into(),
+                name: "Delay".into(),
+                vendor: String::new(),
+                version: String::new(),
+            },
+        )
+        .unwrap();
+    b.events(
+        seq,
+        drums,
+        vec![
+            spec(
+                0,
+                automation(AutomationTarget::SendLevel(strip, SendIndex(0)), 0.5),
+            ),
+            spec(
+                Q,
+                automation(AutomationTarget::PluginParam(slot, ParamId(5)), 0.25),
+            ),
+            spec(Q, automation(AutomationTarget::StripPan(strip), 0.75)),
+        ],
+    )
+    .unwrap();
+    let doc = b.finish();
+    let x = run(&doc, seq);
+    // `validates` runs the ID check: every `Points@parameter` resolves.
+    validates(&x);
+    let p = read_back(&x);
+    let params: Vec<(Option<String>, Option<DpUnit>)> = track_points(&p, &format!("t{}", drums.0))
+        .iter()
+        .map(|p| (p.target.parameter.clone(), p.unit))
+        .collect();
+    let s = strip.0;
+    assert_eq!(
+        params,
+        vec![
+            (Some(format!("c{s}s0v")), Some(DpUnit::Linear)),
+            (Some(format!("c{s}d{}q5", slot.0)), Some(DpUnit::Normalized)),
+            (Some(format!("c{s}p")), Some(DpUnit::Normalized)),
+        ]
+    );
+}
+
+#[test]
+fn pressure_at_its_notes_start_is_the_notes() {
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", BUILTIN_SYNTH_REF, 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    // The pressure is made first, so it plays before the note at tick 0.
+    b.event(
+        seq,
+        keys,
+        0,
+        EventBody::PolyPressure {
+            pitch: 60,
+            value: 0x4000_0000,
+        },
+    )
+    .unwrap();
+    b.notes(seq, keys, &[(0, 60, 0x8000, Q)]).unwrap();
+    let doc = b.finish();
+    let p = read_back(&run(&doc, seq));
+    let c = clips(&p, &format!("t{}", keys.0));
+    assert_eq!(c.len(), 1);
+    let pts = points_of(&c[0]);
+    assert!(
+        pts.iter()
+            .any(|x| x.target.expression == Some(DpExpression::Pressure)),
+        "{:#?}",
+        c[0]
+    );
+    assert!(
+        pts.iter()
+            .all(|x| x.target.expression != Some(DpExpression::PolyPressure)),
+        "{:#?}",
+        c[0]
+    );
 }
