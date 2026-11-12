@@ -24,7 +24,7 @@ struct ReportSheet: View {
                 if groups.isEmpty {
                     Text("Everything transferred.")
                         .font(theme.type.body.font)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.text.secondary.color)
                 } else {
                     ScrollView(.vertical) {
                         VStack(alignment: .leading, spacing: theme.spacing.s) {
@@ -61,8 +61,9 @@ struct ReportSheet: View {
                     .accessibilityLabel("Show the exported files in Finder")
                 }
                 Spacer()
+                // As the Track Synth sheet's Done: Escape closes it.
                 Button("Done") { interchange.reportShown = false }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.cancelAction)
             }
         }
         .padding(theme.spacing.l)
@@ -110,7 +111,7 @@ private struct ReportItemView: View {
                     ForEach(Array(details.enumerated()), id: \.offset) { _, d in
                         Text(d)
                             .font(theme.type.caption.font)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(theme.text.secondary.color)
                             .textSelection(.enabled)
                     }
                 }

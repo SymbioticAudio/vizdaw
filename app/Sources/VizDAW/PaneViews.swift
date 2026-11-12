@@ -154,7 +154,7 @@ struct InspectorPane: View {
                             Text(r.label)
                                 .foregroundStyle(.secondary)
                                 .gridColumnAlignment(.trailing)
-                            if r.label == "Region", let region = model.inspectorRegion {
+                            if r.kind == .regionName, let region = model.inspectorRegion {
                                 regionName(region)
                             } else {
                                 Text(r.value)
@@ -182,7 +182,8 @@ struct InspectorPane: View {
         .textFieldStyle(.roundedBorder)
         .onSubmit { m.commitRegionName() }
         .onExitCommand { m.cancelRegionName() }
-        .onDisappear { m.commitRegionName() }
+        .onChange(of: region.id) { m.regionSelectionChanged() }
+        .onDisappear { m.regionSelectionChanged() }
         .accessibilityLabel("Region name")
     }
 }

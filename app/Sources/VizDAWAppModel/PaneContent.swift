@@ -121,12 +121,18 @@ public struct EditedRegion: Equatable, Sendable {
 }
 
 public struct InspectorRow: Equatable, Sendable {
+    /// What the row shows: text, or the region's name, which can be typed
+    /// (plan 6a Task 10).
+    public enum Kind: Equatable, Sendable { case text, regionName }
+
     public let label: String
     public let value: String
+    public let kind: Kind
 
-    public init(label: String, value: String) {
+    public init(label: String, value: String, kind: Kind = .text) {
         self.label = label
         self.value = value
+        self.kind = kind
     }
 }
 
@@ -159,7 +165,7 @@ public enum Inspector {
         }
         if let region {
             out += [
-                InspectorRow(label: "Region", value: regionName ?? "Region"),
+                InspectorRow(label: "Region", value: regionName ?? "Region", kind: .regionName),
                 InspectorRow(label: "Gain", value: String(format: "%.1f dB", region.gainDb)),
                 InspectorRow(label: "Fade In", value: fadeText(region.fadeIn.length, sampleRate)),
                 InspectorRow(label: "Fade Out", value: fadeText(region.fadeOut.length, sampleRate)),

@@ -64,7 +64,8 @@ public final class DocumentModel {
     public var renameDraft = ""
     /// The inspector's Region name as typed, for the region it was typed
     /// for (plan 6a Task 10); nil when nothing is being typed.
-    public private(set) var regionNameDraft: (event: UInt64, text: String)?
+    /// `name` is the region's name when typing began.
+    public private(set) var regionNameDraft: (event: UInt64, text: String, name: String)?
     /// The fault popover is open.
     public var showsFaults = false
     /// Sidebar sheets and the delete confirmation (plan 4a).
@@ -569,19 +570,33 @@ public final class DocumentModel {
         return r.regionName ?? ""
     }
 
-    public func editRegionName(_ event: UInt64, _ text: String) { regionNameDraft = (event, text) }
+    public func editRegionName(_ event: UInt64, _ text: String) {
+        if let d = regionNameDraft, d.event == event {
+            regionNameDraft?.text = text
+            return
+        }
+        // Another region's draft is committed first: it never carries over.
+        commitRegionName()
+        let name = editedRegion.flatMap { $0.row.id == event ? $0.row.regionName : nil } ?? ""
+        regionNameDraft = (event, text, name)
+    }
 
     public func cancelRegionName() { regionNameDraft = nil }
 
-    /// Return in the field: one rename when the trimmed text differs from
-    /// the region's name (blank clears it).
+    /// Return in the field: one rename of the region the draft was typed
+    /// for, when the trimmed text differs from its name then (blank clears
+    /// it).
     public func commitRegionName() {
         guard let d = regionNameDraft else { return }
         regionNameDraft = nil
         let name = d.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let r = editedRegion?.row, r.id == d.event, name != (r.regionName ?? "") else { return }
+        guard name != d.name else { return }
         renameRegion(d.event, to: name)
     }
+
+    /// The inspector's region changed or the field went away: the draft
+    /// goes to the region it was typed for.
+    public func regionSelectionChanged() { commitRegionName() }
 
     public func rename(_ seq: UInt64, to name: String) {
         command("Rename Failed") { try $0.renameSequence(seq: seq, name: name) }

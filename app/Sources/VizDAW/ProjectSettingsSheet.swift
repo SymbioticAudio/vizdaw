@@ -38,7 +38,7 @@ struct ProjectSettingsSheet: View {
                     .accessibilityLabel("Bit depth")
                     Text(settings.mediaNote)
                         .font(theme.type.caption.font)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.text.secondary.color)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Section("Song info") {

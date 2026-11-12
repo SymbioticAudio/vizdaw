@@ -102,8 +102,6 @@ enum ControlChannel {
         case .job(let command, let doc, let job):
             // The server's app timeout is for stalls; a job gets its own.
             _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
-            // A project an import made shows its window, as `file.new`'s does.
-            if InterchangeCommands.madeProject(doc) { ControlWindows.openDocument(doc) }
             whenJobEnds(server, token, command: command, doc: doc, job: job)
         case .measure(let doc, let job):
             whenMeasured(server, token, doc: doc, job: job)
@@ -133,6 +131,9 @@ enum ControlChannel {
     /// Answers once job `job` of `doc` ended (an import or conversion may
     /// take minutes; `jobWait` at most).
     static func whenJobEnds(_ server: ControlServer, _ token: UInt64, command: String, doc: UUID, job: UInt64) {
+        // A project an import made shows its window once the import
+        // succeeded (as `file.new`'s does); a failed one closes unseen.
+        var opened = false
         later(token, seconds: Double(jobWait) / 1000) { expired in
             guard let m = appStore.model(doc) else {
                 _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
@@ -154,7 +155,13 @@ enum ControlChannel {
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
                 if j.kind == .importMidi || j.kind == .exportMidi {
                     // The reply names the made project's window once it is on screen.
-                    if window == nil, InterchangeCommands.madeProject(doc), !expired { return false }
+                    if window == nil, InterchangeCommands.madeProject(doc), !expired {
+                        if !opened {
+                            opened = true
+                            ControlWindows.openDocument(doc)
+                        }
+                        return false
+                    }
                     InterchangeCommands.jobEnded(doc, failed: false, store: appStore, close: { _ in })
                     _ = try? server.reply(
                         token: token,

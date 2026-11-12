@@ -106,7 +106,7 @@ private let regionLabels: Set<String> = ["Region", "Gain", "Fade In", "Fade Out"
         select([5], in: m)
         let rows = m.inspectorRows(destinations: [], strips: [])
         #expect(rows.first == InspectorRow(label: "Name", value: "Lane 30"))   // the followed (armed) lane
-        #expect(rows.contains(InspectorRow(label: "Region", value: "loop")))
+        #expect(rows.contains(InspectorRow(label: "Region", value: "loop", kind: .regionName)))
     }
     @Test func aSelectedNoteOrReferenceGivesNoRegionRows() {
         var reference = noteRow(6, tick: 0)
@@ -166,7 +166,7 @@ private let regionLabels: Set<String> = ["Region", "Gain", "Fade In", "Fade Out"
         let rows = Inspector.rows(lane: lane(1, audioOut: 7), region: ev, regionName: "Take.wav", destinations: [],
                                   strips: [strip(10, .audioPath(path: 7))], sampleRate: 48000)
         #expect(rows.contains(InspectorRow(label: "Plays", value: "Audio: Strip 10")))
-        #expect(rows.contains(InspectorRow(label: "Region", value: "Take.wav")))
+        #expect(rows.contains(InspectorRow(label: "Region", value: "Take.wav", kind: .regionName)))
         #expect(rows.contains(InspectorRow(label: "Gain", value: "-3.5 dB")))
         #expect(rows.contains(InspectorRow(label: "Fade In", value: "10 ms")))
         #expect(rows.contains(InspectorRow(label: "Fade Out", value: "0 ms")))

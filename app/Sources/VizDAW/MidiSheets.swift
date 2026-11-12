@@ -19,7 +19,7 @@ struct MidiImportSheet: View {
             if let info = interchange.info {
                 Text(Self.describe(info, path: interchange.importPath))
                     .font(theme.type.caption.font)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.text.secondary.color)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Picker("Import into", selection: $interchange.intoNewProject) {
@@ -31,7 +31,7 @@ struct MidiImportSheet: View {
             if interchange.choices.isEmpty {
                 Text("The file plays no notes on any channel.")
                     .font(theme.type.body.font)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.text.secondary.color)
             } else {
                 Text(interchange.intoNewProject ? "In a new project each channel plays a new built-in synth." : "Where each channel plays")
                     .font(theme.type.body.font)
@@ -42,7 +42,7 @@ struct MidiImportSheet: View {
                                 .frame(minWidth: 120, alignment: .leading)
                             Text(c.notes == 1 ? "1 note" : "\(c.notes) notes")
                                 .font(theme.type.caption.font.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(theme.text.secondary.color)
                             Spacer(minLength: theme.spacing.s)
                             Picker("Destination", selection: $c.dest) {
                                 Text("New built-in synth").tag(UInt64?.none)
@@ -130,7 +130,7 @@ struct MidiExportSheet: View {
                     : "One track, lossless, as a MIDI 2.0 Clip File"
             )
             .font(theme.type.caption.font)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(theme.text.secondary.color)
             if isSmf {
                 Picker("Type", selection: $interchange.type0) {
                     Text("Type 1 (one MIDI track per track)").tag(false)
@@ -165,7 +165,7 @@ struct MidiExportSheet: View {
                 if interchange.lanes.count > 1 {
                     Text("Each track becomes one file in the folder you choose.")
                         .font(theme.type.caption.font)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.text.secondary.color)
                 }
             }
             Text("What won't transfer").font(theme.type.body.font)
@@ -187,6 +187,15 @@ struct MidiExportSheet: View {
         }
         .padding(theme.spacing.l)
         .frame(width: 480)
+        .alert(
+            interchange.replaceQuestion?.message ?? "",
+            isPresented: Binding(
+                get: { interchange.replaceQuestion != nil },
+                set: { if !$0 { interchange.answerReplace(false) } })
+        ) {
+            Button("Replace", role: .destructive) { interchange.answerReplace(true) }
+            Button("Cancel", role: .cancel) { interchange.answerReplace(false) }
+        }
     }
 
     /// The Save panel (a folder for several clip tracks), then the job.
@@ -198,7 +207,9 @@ struct MidiExportSheet: View {
             let name = document.lanes.first { $0.id == id }?.name ?? document.snapshot.title
             path = Panels.chooseMidiExportFile(name: name, ext: "midi2")
         } else {
-            path = Panels.chooseMidiExportFolder()
+            // A folder: names already in it are asked about first.
+            if let folder = Panels.chooseMidiExportFolder() { interchange.exportToFolder(folder) }
+            return
         }
         guard let path else { return }
         interchange.startExport(path: path)
@@ -218,7 +229,7 @@ private struct WontTransfer: View {
             if groups.isEmpty {
                 Text("Everything transfers.")
                     .font(theme.type.caption.font)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.text.secondary.color)
             } else {
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: theme.spacing.xs) {

@@ -70,10 +70,10 @@ import VizDAWCore
 
     @Test func regionNameShowsInTheInspector() throws {
         let (named, _) = try document(name: "Take 3")
-        #expect(named.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Region", value: "Take 3")))
+        #expect(named.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Region", value: "Take 3", kind: .regionName)))
         let (plain, _) = try document(name: nil)
         let media = plain.media.row(7)?.name ?? "?"
-        #expect(plain.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Region", value: media)))
+        #expect(plain.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Region", value: media, kind: .regionName)))
     }
 
     @Test func renamingARegionIsOneUndoStep() throws {
@@ -107,5 +107,25 @@ import VizDAWCore
         m.editRegionName(5, " ")
         m.commitRegionName()
         #expect(f.edits.last == .audio(edit: .setName(event: 5, name: nil)), "cleared: the file's name shows")
+    }
+
+    /// Review round 1: a draft is its region's own. Selecting another one
+    /// commits it to the region it was typed for, and it never shows on
+    /// the other.
+    @Test func aDraftCommitsToItsOwnRegionWhenTheSelectionChanges() throws {
+        let (m, f) = try document(name: "Take 3")
+        m.editRegionName(5, "Lead")
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [], events: []))
+        #expect(m.regionNameText(5) == "Lead", "still typed")
+        m.regionSelectionChanged()
+        #expect(f.edits.last == .audio(edit: .setName(event: 5, name: "Lead")))
+        #expect(m.regionNameDraft == nil && m.regionNameText(5) == "")
+        // Typed back to its own name: nothing to send.
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [], events: [5]))
+        let n = f.edits.count
+        m.editRegionName(5, "Take 3x")
+        m.editRegionName(5, "Take 3")
+        m.regionSelectionChanged()
+        #expect(f.edits.count == n)
     }
 }

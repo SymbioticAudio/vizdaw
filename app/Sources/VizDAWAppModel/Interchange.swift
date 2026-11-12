@@ -261,6 +261,7 @@ public final class InterchangeModel {
         guard let document else { return }
         resetting = true
         exportError = nil
+        replaceQuestion = nil
         exportKind = kind
         type0 = false
         ppq = 960
@@ -329,8 +330,55 @@ public final class InterchangeModel {
         }
     }
 
-    /// The Save panel's answer: a file, or a folder for several clip tracks
-    /// (the panel has confirmed replacing).
+    /// "N files already exist in <folder>. Replace them?" before a clip
+    /// export into a folder (review round 1).
+    public struct ReplaceQuestion: Equatable, Sendable {
+        public let folder: String
+        public let count: Int
+
+        public var message: String {
+            let name = (folder as NSString).lastPathComponent
+            return count == 1
+                ? "1 file already exists in \(name). Replace them?"
+                : "\(count) files already exist in \(name). Replace them?"
+        }
+    }
+
+    public private(set) var replaceQuestion: ReplaceQuestion?
+
+    /// The names a clip export of several tracks writes in its folder, in
+    /// the sequence's track order: the core's `NN <track>.midi2`.
+    public func clipFileNames() -> [String] {
+        let picked = (document?.lanes ?? []).filter { lanes.contains($0.id) }
+        return picked.enumerated().map { k, l in
+            String(format: "%02d ", k + 1) + l.name.replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-") + ".midi2"
+        }
+    }
+
+    /// The folder panel's answer for several clip tracks: exports at once
+    /// when none of its names is taken, else asks first.
+    public func exportToFolder(_ folder: String) {
+        let taken = clipFileNames().filter {
+            FileManager.default.fileExists(atPath: (folder as NSString).appendingPathComponent($0))
+        }
+        guard taken.isEmpty else {
+            replaceQuestion = ReplaceQuestion(folder: folder, count: taken.count)
+            return
+        }
+        startExport(path: folder)
+    }
+
+    /// Replace: the export replaces them. Cancel: nothing is written and
+    /// the sheet stays.
+    public func answerReplace(_ replace: Bool) {
+        guard let q = replaceQuestion else { return }
+        replaceQuestion = nil
+        if replace { startExport(path: q.folder) }
+    }
+
+    /// The Save panel's answer (which has confirmed replacing), or a folder
+    /// whose taken names the user agreed to replace (`exportToFolder`).
     public func startExport(path: String) {
         guard let document else { return }
         guard let seq = document.selectedSeq else {

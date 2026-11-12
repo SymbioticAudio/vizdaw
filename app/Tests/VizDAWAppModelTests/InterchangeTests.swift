@@ -425,4 +425,38 @@ import VizDAWCore
         m.interchange.showLastReport()
         #expect(m.interchange.report == f.lastReport && m.interchange.written.isEmpty)
     }
+
+    /// Review round 1: several clip tracks go into a folder, which never
+    /// replaces files silently: names already there are asked about first.
+    @Test func aClipFolderExportAsksBeforeReplacing() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vzclip-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let f = busy()
+        var a = lane(30, "Gro/ove"), b = lane(31, "Chords")
+        a.midiEventCount = 1
+        b.midiEventCount = 1
+        f.laneTable[3] = [a, b]
+        let m = try DocumentModel(session: f)
+        let x = m.interchange
+        x.showExport(.clip)
+        await x.settle()
+        #expect(x.clipFileNames() == ["01 Gro-ove.midi2", "02 Chords.midi2"])
+        x.exportToFolder(dir.path)
+        #expect(f.clipExports.last?.path == dir.path && f.clipExports.last?.replace == true && x.replaceQuestion == nil)
+        // One of the names exists: asked, nothing written yet.
+        x.showExport(.clip)
+        try Data().write(to: dir.appendingPathComponent("02 Chords.midi2"))
+        x.exportToFolder(dir.path)
+        #expect(f.clipExports.count == 1 && x.exportShown)
+        let q = try #require(x.replaceQuestion)
+        #expect(q.message == "1 file already exists in \(dir.lastPathComponent). Replace them?")
+        x.answerReplace(false)
+        #expect(f.clipExports.count == 1 && x.replaceQuestion == nil && x.exportShown)
+        try Data().write(to: dir.appendingPathComponent("01 Gro-ove.midi2"))
+        x.exportToFolder(dir.path)
+        #expect(x.replaceQuestion?.message == "2 files already exist in \(dir.lastPathComponent). Replace them?")
+        x.answerReplace(true)
+        #expect(f.clipExports.count == 2 && f.clipExports.last?.replace == true && x.replaceQuestion == nil)
+    }
 }
