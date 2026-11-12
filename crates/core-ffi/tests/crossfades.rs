@@ -19,9 +19,8 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{force_offline, reset_host};
 use vizdaw_ffi::{
-    AudioEdit, BitDepthRow, CrossfadeLengthRow, EditCommand, EventEdit, EventKindRow, EventRow,
-    FadeRow, FadeShapeRow, ImportTargetRow, JobStateRow, LaneEdit, ProjectFormatRow, Session,
-    VizError,
+    AudioEdit, CrossfadeLengthRow, EditCommand, EventEdit, EventKindRow, EventRow, FadeRow,
+    FadeShapeRow, ImportTargetRow, JobStateRow, LaneEdit, Session, VizError,
 };
 
 const Q: i64 = 15_360;
@@ -615,8 +614,11 @@ fn the_earlier_regions_envelope_follows_the_complement() {
 }
 
 /// Carry-over: a sample-rate convert that shortens a crossfade says so.
+/// macOS only: resampling uses the system importer, which Linux CI lacks.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_convert_that_shortens_a_crossfade_says_so() {
+    use vizdaw_ffi::{BitDepthRow, ProjectFormatRow};
     let _g = serial();
     // Found by search: at 44.1 kHz the rounded overlap (5 510) is one
     // frame under the rounded crossfade (5 511).
