@@ -12,13 +12,19 @@ private let toneLane = LaneKey(3, 30)
 /// offset 0, 24 000 frames; region 73 at tick 0, offset 24 000, 24 000
 /// frames. The IDs avoid `editorFake()`'s reference block 7.
 @MainActor func audioEditorDocument(
-    gainDb: Float = 0, fadeIn: Int64 = 0, fadeOut: Int64 = 0, media: Bool = true
+    gainDb: Float = 0, fadeIn: Int64 = 0, fadeOut: Int64 = 0, media: Bool = true, overlap: UInt64? = nil
 ) -> (FakeSession, DocumentModel) {
     let f = editorFake()
     var r71 = regionRow(
         71, tick: 48_000, duration: 61_440, frames: 48_000, media: 5, gainDb: gainDb, fadeIn: fadeIn,
         fadeOut: fadeOut)
     r71.sourceOffset = 24_000
+    if let overlap {
+        // Its fade in is a crossfade with region 72 (plan 6c).
+        r71.crossfade = true
+        r71.overlapWith = 72
+        r71.overlapFrames = overlap
+    }
     let r72 = regionRow(72, tick: 0, duration: 30_720, frames: 24_000, media: 5)
     var r73 = regionRow(73, tick: 0, duration: 30_720, frames: 24_000, media: 5)
     r73.sourceOffset = 24_000
@@ -242,5 +248,88 @@ private let toneLane = LaneKey(3, 30)
         #expect(a.amplitude == 16)
         for _ in 0..<10 { a.shorter() }
         #expect(a.amplitude == 1)
+    }
+
+    // MARK: Plan 6c Task 6: the Crossfade box
+
+    @Test func crossfadeBoxTypesMsAndFrames() {
+        let (f, m) = audioEditorDocument(fadeIn: 2_400, overlap: 30_000)
+        selectEvents([71], in: m)
+        let a = m.audioEditor
+        #expect(a.text(.crossfade) == "50 ms")
+        #expect(a.text(.fadeIn) == "\u{2013}", "the fade in shows as the crossfade")
+        func xfade(_ n: UInt64) -> EditCommand {
+            .audio(edit: .crossfade(event: 71, length: .frames(frames: n), shape: .linear))
+        }
+        #expect(a.type(.crossfade, "25 ms"))
+        #expect(f.edits == [xfade(1_200)])
+        #expect(a.type(.crossfade, "999999 ms"))
+        #expect(f.edits.last == xfade(30_000), "held to the room")
+        #expect(a.type(.crossfade, "0 frames"))
+        #expect(f.edits.last == xfade(1), "at least one frame")
+        #expect(a.type(.crossfade, "50 ms"))
+        #expect(a.type(.crossfade, "2400 frames"))
+        #expect(f.edits.count == 3, "its own text, or its own length, sends nothing")
+        #expect(a.type(.crossfade, "1.5 frames") == false)
+        #expect(m.editor.status == AudioEditorEntry.fadeHint)
+        #expect(f.edits.count == 3)
+    }
+
+    @Test func fadeInBoxRefusesOnACrossfade() {
+        let (f, m) = audioEditorDocument(fadeIn: 2_400, overlap: 30_000)
+        selectEvents([71], in: m)
+        #expect(m.audioEditor.type(.fadeIn, "10 ms") == false)
+        #expect(m.editor.status == AudioEditorEntry.crossfadeInHint)
+        #expect(f.edits.isEmpty)
+    }
+
+    @Test func crossfadeBoxWithoutACrossfade() {
+        let (f, m) = audioEditorDocument(fadeIn: 2_400)
+        selectEvents([71], in: m)
+        #expect(m.audioEditor.text(.crossfade) == "\u{2013}")
+        #expect(m.audioEditor.type(.crossfade, "10 ms") == false)
+        #expect(m.editor.status == AudioEditorEntry.noCrossfadeHint)
+        #expect(f.edits.isEmpty)
+        // The fade boxes read frames too.
+        #expect(m.audioEditor.type(.fadeOut, "480 frames"))
+        #expect(
+            f.edits == [
+                .audio(
+                    edit: .setFades(
+                        event: 71, fadeIn: FadeRow(length: 2_400, shape: .linear),
+                        fadeOut: FadeRow(length: 480, shape: .linear)))
+            ])
+    }
+
+    @Test func crossfadeShapePickerKeepsTheLength() {
+        let (f, m) = audioEditorDocument(fadeIn: 2_400, overlap: 30_000)
+        selectEvents([71], in: m)
+        let a = m.audioEditor
+        a.setShape(.crossfade, .equalPower)
+        #expect(f.edits == [.audio(edit: .crossfade(event: 71, length: .frames(frames: 2_400), shape: .equalPower))])
+        a.setShape(.crossfade, .linear)
+        #expect(f.edits.count == 1, "the same shape sends nothing")
+        // Without a crossfade the picker sends nothing.
+        let (g, n) = audioEditorDocument(fadeIn: 2_400)
+        selectEvents([71], in: n)
+        n.audioEditor.setShape(.crossfade, .sCurve)
+        #expect(g.edits.isEmpty)
+    }
+
+    @Test func stateRowCarriesTheCrossfade() {
+        let (_, m) = audioEditorDocument(fadeIn: 2_400, overlap: 30_000)
+        selectEvents([71], in: m)
+        let s = m.audioEditor.stateRow()
+        #expect(s.boxes.contains(AudioEditorBoxRow(name: "crossfade", text: "50 ms")))
+        #expect(s.boxes.contains(AudioEditorBoxRow(name: "fade_in", text: "\u{2013}")))
+        #expect(s.region?.crossfade == true)
+        #expect(s.region?.crossfadeWith == 72)
+        let (_, n) = audioEditorDocument(fadeIn: 2_400)
+        selectEvents([71], in: n)
+        #expect(n.audioEditor.stateRow().region?.crossfade == false)
+        #expect(n.audioEditor.stateRow().region?.crossfadeWith == nil)
+        #expect(AudioEditorBox.crossfade.rawValue == "crossfade")
+        #expect(AudioEditorBox.crossfade.label == "Crossfade Length")
+        #expect(AudioEditorBox.crossfade.hint == AudioEditorEntry.fadeHint)
     }
 }

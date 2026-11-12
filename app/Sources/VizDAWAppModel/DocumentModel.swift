@@ -879,6 +879,9 @@ public final class DocumentModel {
         // mixer refetch prunes the selection then (final review I1).
         if moved && !selectedStrips.isEmpty { _ = try? selectedStripsThatExist() }
         editor.sync(s)
+        // An edit's settle notes (a crossfade shortened or dropped; plan 6c
+        // pre-flight F1) are said on the status line, never silently.
+        if !s.editNotes.isEmpty { editor.status = s.editNotes.joined(separator: " ") }
         if selectedSeq.map({ id in !s.sequences.contains { $0.id == id } }) ?? true {
             selectedSeq = s.sequences.first(where: \.topLevel)?.id ?? s.sequences.first?.id
         }

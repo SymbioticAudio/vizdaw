@@ -5,7 +5,9 @@ import VizDAWCore
 
 /// The parts of an audio region a press can grab (spec §10.2).
 public enum RegionHandle: Equatable, Sendable {
-    case fadeIn, fadeOut, gain
+    /// `crossfade` is the X a crossfaded region shows in place of its
+    /// fade-in corner (plan 6c): it sets the crossfade's length.
+    case fadeIn, fadeOut, gain, crossfade
 }
 
 /// A handle under the pointer: its region (lane and row) and the region's
@@ -37,9 +39,7 @@ public enum RegionHandles {
     /// With ⇧.
     public static let fineDbPerPoint: Float = 0.05
     /// The fade shapes, as the menu names them.
-    public static let shapes: [(FadeShapeRow, String)] = [
-        (.linear, "Linear"), (.equalPower, "Equal Power"), (.exponential, "Exponential"), (.sCurve, "S-Curve"),
-    ]
+    public static let shapes: [(FadeShapeRow, String)] = RegionCommands.fadeShapes
 
     /// The gesture's (and undo step's) name.
     public static func label(_ h: RegionHandle) -> String {
@@ -47,6 +47,7 @@ public enum RegionHandles {
         case .fadeIn: "Fade In"
         case .fadeOut: "Fade Out"
         case .gain: "Region Gain"
+        case .crossfade: "Crossfade"
         }
     }
 
@@ -69,11 +70,11 @@ public enum RegionHandles {
     }
 
     /// The handles of `r` in `rect` (none when it is narrower than
-    /// `minWidth`).
+    /// `minWidth`). A crossfaded region's fade-in corner is `.crossfade`.
     public static func rects(_ r: EventRow, in rect: CGRect) -> [(RegionHandle, CGRect)] {
         guard rect.width >= minWidth, rect.height >= size else { return [] }
         return [
-            (.fadeIn, CGRect(x: fadeInX(r, in: rect) - size / 2, y: rect.minY, width: size, height: size)),
+            (r.crossfade ? .crossfade : .fadeIn, CGRect(x: fadeInX(r, in: rect) - size / 2, y: rect.minY, width: size, height: size)),
             (.fadeOut, CGRect(x: fadeOutX(r, in: rect) - size / 2, y: rect.minY, width: size, height: size)),
             (.gain, CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: band)),
         ]
@@ -86,8 +87,12 @@ public enum RegionHandles {
         return nil
     }
 
+    /// How long the crossfade on `r` can be (pre-flight F17).
+    public static func crossfadeRoom(_ r: EventRow) -> Int64 { RegionCommands.crossfadeRoom(r) }
+
     /// The fades after dragging `handle` by `dx` points, clamped so both
-    /// fit the region.
+    /// fit the region; a crossfade's fade in stays within 1 frame and its
+    /// room.
     public static func fades(_ r: EventRow, _ handle: RegionHandle, dx: CGFloat, in rect: CGRect) -> (
         fadeIn: Int64, fadeOut: Int64
     ) {
@@ -101,17 +106,28 @@ public enum RegionHandles {
         case .fadeIn: return (min(max(fi + delta, 0), max(len - fo, 0)), fo)
         case .fadeOut: return (fi, min(max(fo - delta, 0), max(len - fi, 0)))
         case .gain: return (fi, fo)
+        case .crossfade: return (min(max(fi + delta, 1), max(crossfadeRoom(r), 1)), fo)
         }
     }
 
-    /// A fade drag's full target (nil: no change).
+    /// A fade drag's full target (nil: no change). The X's is the
+    /// crossfade at its new length, in its shape.
     public static func fadeCommand(_ r: EventRow, _ handle: RegionHandle, dx: CGFloat, in rect: CGRect) -> EditCommand? {
         let (fi, fo) = fades(r, handle, dx: dx, in: rect)
         guard fi != r.fadeIn.length || fo != r.fadeOut.length else { return nil }
+        if handle == .crossfade {
+            return .audio(edit: .crossfade(event: r.id, length: .frames(frames: UInt64(fi)), shape: r.fadeIn.shape))
+        }
         return .audio(
             edit: .setFades(
                 event: r.id, fadeIn: FadeRow(length: fi, shape: r.fadeIn.shape),
                 fadeOut: FadeRow(length: fo, shape: r.fadeOut.shape)))
+    }
+
+    /// The X drag's readout: the crossfade's length after dragging `dx`
+    /// points, in whole ms at `rate` ("625 ms").
+    public static func crossfadeReadout(_ r: EventRow, dx: CGFloat, in rect: CGRect, rate: UInt32) -> String {
+        AudioEditorEntry.fadeText(frames: fades(r, .crossfade, dx: dx, in: rect).fadeIn, rate: rate)
     }
 
     /// The gain after dragging the band `dy` points (up is louder), in
@@ -135,7 +151,7 @@ public enum RegionHandles {
     ) -> EditCommand? {
         switch handle {
         case .gain: gainCommand(r, dy: dy, fine: fine)
-        case .fadeIn, .fadeOut: fadeCommand(r, handle, dx: dx, in: rect)
+        case .fadeIn, .fadeOut, .crossfade: fadeCommand(r, handle, dx: dx, in: rect)
         }
     }
 
@@ -149,6 +165,10 @@ public enum RegionHandles {
         switch handle {
         case .fadeIn where r.fadeIn.shape != shape:
             .audio(edit: .setFades(event: r.id, fadeIn: FadeRow(length: r.fadeIn.length, shape: shape), fadeOut: r.fadeOut))
+        case .crossfade where r.fadeIn.shape != shape:
+            .audio(
+                edit: .crossfade(
+                    event: r.id, length: .frames(frames: UInt64(clamping: max(r.fadeIn.length, 1))), shape: shape))
         case .fadeOut where r.fadeOut.shape != shape:
             .audio(edit: .setFades(event: r.id, fadeIn: r.fadeIn, fadeOut: FadeRow(length: r.fadeOut.length, shape: shape)))
         default:
@@ -158,9 +178,10 @@ public enum RegionHandles {
 
     /// Which fade's area `p` is in (between the region's edge and the
     /// fade's handle, for a fade with a length): the shape menu's target.
+    /// A crossfade's fade in is `.crossfade`.
     public static func fadeArea(_ p: CGPoint, row r: EventRow, in rect: CGRect) -> RegionHandle? {
         guard rect.contains(p) else { return nil }
-        if r.fadeIn.length > 0, p.x <= fadeInX(r, in: rect) { return .fadeIn }
+        if r.fadeIn.length > 0, p.x <= fadeInX(r, in: rect) { return r.crossfade ? .crossfade : .fadeIn }
         if r.fadeOut.length > 0, p.x >= fadeOutX(r, in: rect) { return .fadeOut }
         return nil
     }
@@ -218,7 +239,9 @@ public enum RegionA11y {
         let last = MeterMath.bar(at: max(end, r.tick), meter).number
         let bars = first == last ? "bar \(first)" : "bars \(first) to \(last)"
         var s = "Region \(name) on \(laneName), \(bars), gain \(RegionHandles.gainLabel(r.gainDb))"
-        if r.fadeIn.length > 0 || r.fadeOut.length > 0 { s += ", fades" }
+        // A crossfade says so; its fade in is not one of the fades.
+        if r.crossfade { s += ", crossfade" }
+        if (!r.crossfade && r.fadeIn.length > 0) || r.fadeOut.length > 0 { s += ", fades" }
         if offline { s += ", offline" }
         if r.mute { s += ", muted" }
         return s

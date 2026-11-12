@@ -548,6 +548,7 @@ final class FakeControlHost: ControlHost {
             e?.boxes == [
                 AudioEditorBoxRow(name: "gain", text: "\u{2212}4.2 dB"),
                 AudioEditorBoxRow(name: "fade_in", text: "250 ms"),
+                AudioEditorBoxRow(name: "crossfade", text: "\u{2013}"),
                 AudioEditorBoxRow(name: "fade_out", text: "0 ms"),
                 AudioEditorBoxRow(name: "start", text: "0:00.500"),
                 AudioEditorBoxRow(name: "length", text: "0:01.000"),

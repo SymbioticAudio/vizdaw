@@ -167,11 +167,19 @@ public enum Inspector {
             out += [
                 InspectorRow(label: "Region", value: regionName ?? "Region", kind: .regionName),
                 InspectorRow(label: "Gain", value: String(format: "%.1f dB", region.gainDb)),
-                InspectorRow(label: "Fade In", value: fadeText(region.fadeIn.length, sampleRate)),
+                region.crossfade
+                    ? InspectorRow(label: "Crossfade", value: crossfadeText(region.fadeIn, sampleRate))
+                    : InspectorRow(label: "Fade In", value: fadeText(region.fadeIn.length, sampleRate)),
                 InspectorRow(label: "Fade Out", value: fadeText(region.fadeOut.length, sampleRate)),
             ]
         }
         return out
+    }
+
+    /// A crossfade's length and shape: "10 ms, Equal Power" (plan 6c).
+    private static func crossfadeText(_ fade: FadeRow, _ rate: Double) -> String {
+        let shape = RegionCommands.fadeShapes.first { $0.0 == fade.shape }?.1 ?? "Linear"
+        return "\(fadeText(fade.length, rate)), \(shape)"
     }
 
     private static func fadeText(_ frames: Int64, _ rate: Double) -> String {

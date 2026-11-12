@@ -96,16 +96,36 @@ import Testing
         #expect(AudioEditorEntry.gainText(11.04) == "+11.0 dB")
         // The hints, as the status line shows them.
         #expect(AudioEditorEntry.gainHint == "Type a gain in dB, like \u{2212}4.2 or +6.")
-        #expect(AudioEditorEntry.fadeHint == "Type a fade like 250 ms or 1.5 s.")
+        #expect(AudioEditorEntry.fadeHint == "Type a fade like 250 ms, 1.5 s or 480 frames.")
         #expect(AudioEditorEntry.timeHint == "Type a time like 0:01.250, 1.25 s or 1250 ms.")
         #expect(AudioEditorEntry.peakHint == "Type a peak from \u{2212}96 to 0 dB, like \u{2212}0.3.")
         #expect(AudioEditorEntry.noMediaHint == "This region's audio file is unknown.")
         for (box, hint) in [
             (AudioEditorBox.gain, AudioEditorEntry.gainHint), (.fadeIn, AudioEditorEntry.fadeHint),
-            (.fadeOut, AudioEditorEntry.fadeHint), (.start, AudioEditorEntry.timeHint),
+            (.fadeOut, AudioEditorEntry.fadeHint), (.crossfade, AudioEditorEntry.fadeHint), (.start, AudioEditorEntry.timeHint),
             (.length, AudioEditorEntry.timeHint), (.peak, AudioEditorEntry.peakHint),
         ] {
             #expect(box.hint == hint, "\(box)")
         }
+    }
+
+    /// Plan 6c Task 6: the fade boxes read ms, seconds and whole frames.
+    @Test func fadeFramesReadsMsSecondsAndFrames() {
+        func f(_ t: String) -> Int64? { AudioEditorEntry.fadeFrames(t, rate: 48_000) }
+        #expect(f("250 ms") == 12_000)
+        #expect(f("1.5 s") == 72_000)
+        #expect(f("480 frames") == 480)
+        #expect(f("1 frame") == 1)
+        #expect(f("10") == 480, "a bare number is in ms")
+        #expect(f("0 frames") == 0)
+        #expect(f("4611686018427387903 frames") == Int64.max / 2)
+        for t in [
+            "1.5 frames", "-3 frames", "NaN", "inf ms", "1e30 frames", "", "frames", "4611686018427387904 frames",
+            "99999999999999999999 frames", "+3 frames", "3 framess", "0x10 frames",
+        ] {
+            #expect(f(t) == nil, "\(t)")
+        }
+        #expect(AudioEditorEntry.crossfadeInHint == "This region's fade in is a crossfade: type its length in the Crossfade box.")
+        #expect(AudioEditorEntry.noCrossfadeHint == "This region has no crossfade. Use Region \u{203A} Crossfade.")
     }
 }

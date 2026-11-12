@@ -276,4 +276,19 @@ let grooveLane = LaneKey(3, 30)
         await settle()
         #expect(m.editor.status == "no info")
     }
+
+    /// Pre-flight F1 (plan 6c): an edit's settle notes show in the status
+    /// line; an edit without notes leaves the status alone.
+    @Test func editWarningsShowInTheStatus() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let note = "Crossfade removed: the region no longer starts inside the one before it."
+        nextSnapshot(f) { $0.editNotes = [note] }
+        #expect(m.editor.edit(.event(edit: .delete(events: [1]))))
+        #expect(m.editor.status == note)
+        m.editor.status = "Earlier."
+        nextSnapshot(f) { $0.editNotes = [] }
+        #expect(m.editor.edit(.event(edit: .delete(events: [1]))))
+        #expect(m.editor.status == "Earlier.")
+    }
 }

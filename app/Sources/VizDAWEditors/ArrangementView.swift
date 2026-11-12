@@ -28,7 +28,8 @@ public final class ArrangementView: EditorCanvas {
     private var drag: Drag?
     /// A fade or gain handle being dragged (plan 5b Ruling 7).
     private var handleDrag: (hit: RegionHandleHit, from: CGPoint)?
-    /// The gain readout while the gain band is dragged.
+    /// The gain readout while the gain band is dragged, the length while
+    /// a crossfade's X is (plan 6c).
     private var readout: (text: String, at: CGPoint)?
 
     public init(document: DocumentModel) {
@@ -338,12 +339,25 @@ public final class ArrangementView: EditorCanvas {
             fine: modifiers.contains(.shift))
     }
 
+    /// The gain band's ±dB, or the X's "<n> ms" (plan 6c), by the pointer.
     private func showReadout(_ d: (hit: RegionHandleHit, from: CGPoint), to: CGPoint, modifiers: Modifiers) {
-        guard d.hit.handle == .gain else { return }
-        let g = RegionHandles.gain(d.hit.row, dy: to.y - d.from.y, fine: modifiers.contains(.shift))
-        readout = (RegionHandles.gainLabel(g), CGPoint(x: to.x + 12, y: to.y - 20))
+        let text: String
+        switch d.hit.handle {
+        case .gain:
+            text = RegionHandles.gainLabel(
+                RegionHandles.gain(d.hit.row, dy: to.y - d.from.y, fine: modifiers.contains(.shift)))
+        case .crossfade:
+            text = RegionHandles.crossfadeReadout(
+                d.hit.row, dx: to.x - d.from.x, in: d.hit.rect, rate: RegionCommands.sampleRate(of: d.hit.row, document))
+        case .fadeIn, .fadeOut:
+            return
+        }
+        readout = (text, CGPoint(x: to.x + 12, y: to.y - 20))
         overlay.needsDisplay = true
     }
+
+    /// The readout drawn now (tests).
+    var readoutText: String? { readout?.text }
 
     private func clearReadout() {
         guard readout != nil else { return }

@@ -26,6 +26,19 @@ public enum RegionCommands {
         normalize, fadeIn, fadeOut, removeFades, openExternal, reloadExternal, crossfade, removeCrossfade,
     ]
 
+    /// The fade shapes, as menus, pickers and the inspector name them.
+    nonisolated public static let fadeShapes: [(FadeShapeRow, String)] = [
+        (.linear, "Linear"), (.equalPower, "Equal Power"), (.exponential, "Exponential"), (.sCurve, "S-Curve"),
+    ]
+
+    /// How long a crossfade on `r` can be (pre-flight F17): the overlap,
+    /// within what the fade out leaves of the region; never below 0.
+    nonisolated public static func crossfadeRoom(_ r: EventRow) -> Int64 {
+        // Both sides are 0 or more, so the difference cannot overflow.
+        let left = Int64(clamping: r.frames) - max(r.fadeOut.length, 0)
+        return max(min(Int64(clamping: r.overlapFrames), left), 0)
+    }
+
     /// Settings › Editing's default crossfade when no host is at hand.
     public static let defaultCrossfadeMs = EditingPreferences.defaultCrossfadeMs
     public static let noCrossfadeTarget = "Select two overlapping audio regions on one track, or the later one."
@@ -155,12 +168,18 @@ extension RegionCommands {
         }
     }
 
+    /// The region's media rate, the project rate when the media is unknown
+    /// (the model's cached read), else 48 kHz.
+    public static func sampleRate(of row: EventRow, _ m: DocumentModel) -> UInt32 {
+        if let r = m.media.row(row.media)?.sampleRate, r > 0 { return r }
+        if let r = m.projectInfo?.format.sampleRate, r > 0 { return r }
+        return 48_000
+    }
+
     /// `ms` as frames at the region's media rate (the project rate when the
     /// media is unknown), at least 1.
     static func frames(ms: Double, of row: EventRow, _ m: DocumentModel) -> UInt64 {
-        var rate = Double(m.media.row(row.media)?.sampleRate ?? 0)
-        if rate <= 0 { rate = Double(m.projectInfo?.format.sampleRate ?? 48_000) }  // the model's cached read
-        if rate <= 0 { rate = 48_000 }
+        let rate = Double(sampleRate(of: row, m))
         let f = (ms * rate / 1_000).rounded()
         return f >= 1 ? UInt64(min(f, 1e15)) : 1
     }

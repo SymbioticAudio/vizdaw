@@ -209,4 +209,20 @@ private let regionLabels: Set<String> = ["Region", "Gain", "Fade In", "Fade Out"
         mixer.disappeared(.window)
         #expect(!mixer.isTouched(fader))   // the last placement gone ends it
     }
+
+    /// Plan 6c Task 6: a crossfade's row in place of the fade in.
+    @Test func inspectorShowsTheCrossfade() {
+        var r = regionRow(5, tick: 0, duration: 61_440, frames: 96_000, fadeIn: 480, fadeOut: 4_800)
+        r.fadeIn.shape = .equalPower
+        r.crossfade = true
+        r.overlapWith = 4
+        r.overlapFrames = 9_600
+        let m = inspectorDocument([r])
+        select([5], in: m)
+        let rows = m.inspectorRows(destinations: [], strips: [])
+        #expect(rows.contains(InspectorRow(label: "Crossfade", value: "10 ms, Equal Power")))
+        #expect(!rows.contains { $0.label == "Fade In" })
+        #expect(rows.contains(InspectorRow(label: "Fade Out", value: "100 ms")))
+        #expect(rows.map(\.label).suffix(4) == ["Region", "Gain", "Crossfade", "Fade Out"])
+    }
 }

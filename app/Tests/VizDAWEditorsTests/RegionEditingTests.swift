@@ -216,3 +216,110 @@ private let box = CGRect(x: 0, y: 10, width: 160, height: 40)
         #expect(at.y + line <= strip.maxY + 1, "the label fits the 18-point row")
     }
 }
+
+/// A crossfaded region (plan 6c Task 6): `region` with its fade in a
+/// crossfade over `overlap` frames of the earlier region.
+private func crossfaded(fadeIn: Int64 = 12_000, fadeOut: Int64 = 24_000, overlap: UInt64 = 30_000) -> EventRow {
+    var r = region(fadeIn: fadeIn, fadeOut: fadeOut)
+    r.crossfade = true
+    r.overlapWith = 3
+    r.overlapFrames = overlap
+    return r
+}
+
+/// Plan 6c Task 6: the crossfade's X handle, its drag, shapes and label.
+@MainActor
+@Suite struct CrossfadeHandleTests {
+    @Test func crossfadeHandleReplacesTheFadeIn() {
+        let r = crossfaded()
+        let handles = RegionHandles.rects(r, in: box).map(\.0)
+        #expect(handles == [.crossfade, .fadeOut, .gain])
+        #expect(RegionHandles.rects(r, in: box).first?.1.midX == RegionHandles.fadeInX(r, in: box))
+        #expect(RegionHandles.hit(CGPoint(x: 20, y: 12), row: r, in: box) == .crossfade)
+        #expect(RegionHandles.label(.crossfade) == "Crossfade")
+        let plain = region(fadeIn: 12_000, fadeOut: 24_000)
+        #expect(RegionHandles.rects(plain, in: box).map(\.0) == [.fadeIn, .fadeOut, .gain], "unflagged: unchanged")
+        #expect(RegionHandles.fadeArea(CGPoint(x: 10, y: 30), row: r, in: box) == .crossfade)
+        #expect(RegionHandles.fadeArea(CGPoint(x: 140, y: 30), row: r, in: box) == .fadeOut)
+    }
+
+    @Test func crossfadeDragClampsToTheRoom() {
+        let r = crossfaded()
+        #expect(RegionHandles.crossfadeRoom(r) == 30_000)
+        #expect(RegionHandles.fades(r, .crossfade, dx: -1_000, in: box) == (1, 24_000))
+        #expect(RegionHandles.fades(r, .crossfade, dx: 1_000, in: box) == (30_000, 24_000), "up to the overlap")
+        #expect(RegionHandles.fades(r, .crossfade, dx: 10, in: box) == (18_000, 24_000))
+        // The fade out leaves less than the overlap.
+        let tight = crossfaded(fadeOut: 80_000, overlap: 30_000)
+        #expect(RegionHandles.crossfadeRoom(tight) == 16_000)
+        #expect(RegionHandles.fades(tight, .crossfade, dx: 1_000, in: box).fadeIn == 16_000)
+        #expect(RegionHandles.fadeCommand(r, .crossfade, dx: 0, in: box) == nil)
+        #expect(
+            RegionHandles.fadeCommand(r, .crossfade, dx: 1_000, in: box)
+                == .audio(edit: .crossfade(event: 4, length: .frames(frames: 30_000), shape: .linear)))
+        #expect(
+            RegionHandles.target(r, .crossfade, rect: box, dx: -1_000, dy: 5, fine: false)
+                == .audio(edit: .crossfade(event: 4, length: .frames(frames: 1), shape: .linear)))
+        // Hostile rows: an overlap past Int64 does not trap; no room is 1.
+        var huge = crossfaded()
+        huge.overlapFrames = .max
+        huge.frames = .max
+        #expect(RegionHandles.crossfadeRoom(huge) == Int64.max - 24_000)
+        #expect(RegionHandles.crossfadeRoom(crossfaded(overlap: 0)) == 0)
+        #expect(RegionHandles.fades(crossfaded(overlap: 0), .crossfade, dx: 50, in: box).fadeIn == 1)
+        #expect(RegionHandles.crossfadeReadout(r, dx: 1_000, in: box, rate: 48_000) == "625 ms")
+        #expect(RegionHandles.crossfadeReadout(r, dx: -1_000, in: box, rate: 48_000) == "0 ms", "1 frame")
+    }
+
+    @Test func crossfadeShapeKeepsTheLength() {
+        let r = crossfaded()
+        #expect(
+            RegionHandles.shapeCommand(r, .crossfade, .sCurve)
+                == .audio(edit: .crossfade(event: 4, length: .frames(frames: 12_000), shape: .sCurve)))
+        #expect(RegionHandles.shapeCommand(r, .crossfade, .linear) == nil, "already that shape")
+    }
+
+    @Test func crossfadeLinesMakeAnX() {
+        var r = crossfaded(fadeIn: 300, fadeOut: 0, overlap: 500)
+        r.frames = 1_000
+        let rect = CGRect(x: 0, y: 0, width: 100, height: 40)
+        let lines = RegionDrawing.crossfadeLines(r, in: rect)
+        #expect(lines.count == 2)
+        #expect(lines.first?.0 == CGPoint(x: 0, y: 40) && lines.first?.1 == CGPoint(x: 30, y: 0))
+        #expect(lines.last?.0 == CGPoint(x: 0, y: 0) && lines.last?.1 == CGPoint(x: 30, y: 40))
+        r.crossfade = false
+        #expect(RegionDrawing.crossfadeLines(r, in: rect).isEmpty)
+    }
+
+    @Test func crossfadeMenuOffersShapesAndRemove() {
+        var r = crossfaded()
+        r.fadeIn.shape = .equalPower
+        var sent: [EditCommand] = []
+        let menu = RegionDrawing.fadeShapeMenu(r, .crossfade) { sent.append($0) }
+        #expect(
+            menu.items.map(\.title) == [
+                "Crossfade: Linear", "Crossfade: Equal Power", "Crossfade: Exponential", "Crossfade: S-Curve",
+                "Remove Crossfade",
+            ])
+        #expect(menu.items.map { $0.state == .on } == [false, true, false, false, false])
+        let remove = try! #require(menu.items.last)
+        _ = remove.target?.perform(remove.action)
+        #expect(sent == [.audio(edit: .removeCrossfade(event: 4))])
+        let linear = menu.items[0]
+        _ = linear.target?.perform(linear.action)
+        #expect(sent.last == .audio(edit: .crossfade(event: 4, length: .frames(frames: 12_000), shape: .linear)))
+        // A plain fade's menu is unchanged.
+        let plain = RegionDrawing.fadeShapeMenu(region(fadeIn: 10), .fadeIn) { _ in }
+        #expect(plain.items.map(\.title).allSatisfy { $0.hasPrefix("Fade In: ") } && plain.items.count == 4)
+    }
+
+    @Test func a11yLabelSaysCrossfade() {
+        let meter = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor: false)]
+        #expect(
+            RegionA11y.label(crossfaded(fadeOut: 0), name: "kick", laneName: "Audio 3", meter: meter, offline: false)
+                == "Region kick on Audio 3, bar 1, gain 0.0 dB, crossfade")
+        #expect(
+            RegionA11y.label(crossfaded(), name: "kick", laneName: "Audio 3", meter: meter, offline: false)
+                == "Region kick on Audio 3, bar 1, gain 0.0 dB, crossfade, fades")
+    }
+}
