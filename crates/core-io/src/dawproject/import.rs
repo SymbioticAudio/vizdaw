@@ -367,6 +367,13 @@ pub fn debug_items_after_pause() -> usize {
     hook::AFTER.load(Ordering::SeqCst)
 }
 
+/// Test hook: the items the hooked mapping has processed so far (set a
+/// pause past the end to count a whole mapping).
+#[cfg(feature = "test-hooks")]
+pub fn debug_items_seen() -> usize {
+    hook::SEEN.load(Ordering::SeqCst)
+}
+
 // ---------------------------------------------------------------- mapping
 
 /// What a channel ID names, for destinations and sends.

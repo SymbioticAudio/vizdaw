@@ -137,7 +137,7 @@ impl<'p> Tl<'_, '_, 'p> {
             .named
             .name
             .as_deref()
-            .map(|n| clean_name(n).0)
+            .map(|n| self.made_name(n))
             .filter(|n| !n.is_empty());
         let ps = c.play_start.unwrap_or(0.0);
         let lp = loop_for(c);

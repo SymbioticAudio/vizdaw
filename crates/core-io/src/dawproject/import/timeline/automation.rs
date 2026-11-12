@@ -92,15 +92,9 @@ impl<'p> Tl<'_, '_, 'p> {
                 Some(AutoAt::Param(s, slot, ParamId(u64::from(id as u32))))
             }
         });
-        let owns = |tl: &Self, i: usize| tl.has_strip.get(i).copied().unwrap_or(false);
-        let at = at.filter(|a| match a {
-            AutoAt::Fader(StripAt::Track(i))
-            | AutoAt::Pan(StripAt::Track(i))
-            | AutoAt::Mute(StripAt::Track(i))
-            | AutoAt::Send(StripAt::Track(i), _)
-            | AutoAt::Param(StripAt::Track(i), _, _) => owns(self, *i),
-            _ => true,
-        });
+        // Whether the track owns a strip, and whether it shares the
+        // built-in synth's, is known once every track's notes and audio
+        // are (`finish`).
         let Some(at) = at else {
             self.cx
                 .add(ItemKind::LeftOut, UNPLACED, Some(param.to_owned()));
@@ -142,6 +136,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 held = true;
                 self.autos.push(AutoEv {
                     owner,
+                    param,
                     tick: tick - 1,
                     mute: f.muted,
                     at,
@@ -152,6 +147,7 @@ impl<'p> Tl<'_, '_, 'p> {
             last = Some((tick, value, hold));
             self.autos.push(AutoEv {
                 owner,
+                param,
                 tick,
                 mute: f.muted,
                 at,
@@ -202,7 +198,7 @@ impl<'p> Tl<'_, '_, 'p> {
             return None;
         }
         if !(0.0..=1.0).contains(&raw) {
-            self.cx.add(ItemKind::Changed, VALUES_CLAMPED, None);
+            self.count(ItemKind::Changed, VALUES_CLAMPED);
         }
         Some(raw.clamp(0.0, 1.0))
     }

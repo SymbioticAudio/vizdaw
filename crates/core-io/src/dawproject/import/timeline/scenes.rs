@@ -12,7 +12,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 .named
                 .name
                 .as_deref()
-                .map(|n| clean_name(n).0)
+                .map(|n| self.made_name(n))
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| format!("Scene {}", si.saturating_add(1)));
             let mut stack: Vec<(&'p DpTimeline, Frame, Option<usize>)> =
@@ -80,7 +80,7 @@ impl<'p> Tl<'_, '_, 'p> {
         };
         self.cx.add(ItemKind::Changed, SLOTS, None);
         let name = format!("{scene} \u{2013} {}", self.name_of(track));
-        let (name, _) = clean_name(&name);
+        let name = self.made_name(&name);
         self.slots.push(RawSeq {
             name,
             track,

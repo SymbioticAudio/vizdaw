@@ -37,7 +37,6 @@ impl<'p> Tl<'_, '_, 'p> {
         let why = match self.sources.get(&key) {
             Some(MediaSource::Online(items)) if !items.is_empty() => {
                 for it in items {
-                    self.paths.insert(it.path.clone());
                     self.media.push(MediaPlan {
                         path: it.path.clone(),
                         name: it.name.clone(),
@@ -89,31 +88,25 @@ impl<'p> Tl<'_, '_, 'p> {
         out
     }
 
-    /// `Media/<name>.caf`, made safe and unique among the import's items.
+    /// `Media/<name>.caf`, made safe ([`crate::names::safe_part`], with
+    /// `\` mapped too, which a media path may not hold) and unique among
+    /// the import's items, online ones included, ignoring case (as the
+    /// disk does).
     pub(super) fn offline_path(&mut self, name: &str) -> String {
-        let stem: String = name
-            .chars()
-            .map(|c| {
-                if matches!(c, '/' | '\\' | ':') || c.is_control() {
-                    '-'
-                } else {
-                    c
-                }
-            })
-            .collect();
-        let mut stem = stem.trim().trim_start_matches('.').to_owned();
-        let (cut, _) = crate::dawproject::import::maps::cut_to(&stem, 200);
-        stem = cut.trim_end().to_owned();
-        if stem.is_empty() {
-            stem = "Audio".to_owned();
-        }
+        // Room for ".caf" and " <n>".
+        const RESERVE: usize = ".caf".len() + " 4294967295".len();
+        let stem = crate::names::safe_part(&name.replace('\\', "-"), RESERVE);
+        let key = stem.to_lowercase();
         let mut path = format!("Media/{stem}.caf");
-        let mut n = 2u32;
-        while self.paths.contains(&path) {
+        // The next number to try for this stem, so many files of one name
+        // stay linear.
+        let mut n = self.path_next.get(&key).copied().unwrap_or(2);
+        while self.paths.contains(&path.to_lowercase()) {
             path = format!("Media/{stem} {n}.caf");
             n = n.saturating_add(1);
         }
-        self.paths.insert(path.clone());
+        self.path_next.insert(key, n);
+        self.paths.insert(path.to_lowercase());
         path
     }
 
@@ -138,6 +131,7 @@ impl<'p> Tl<'_, '_, 'p> {
             return Ok(());
         }
         let Some(key) = self.cx.pkg.audio_key(&a.file) else {
+            self.left_out(AUDIO_UNLISTED);
             return Ok(());
         };
         let items = self.media_for(key);
@@ -182,7 +176,7 @@ impl<'p> Tl<'_, '_, 'p> {
         };
         let frames = first.frames as f64;
         if offset >= frames {
-            self.cx.add(ItemKind::Changed, AUDIO_CUT, None);
+            self.count(ItemKind::LeftOut, AUDIO_PAST_FILE);
             return Ok(());
         }
         if end > frames {
@@ -194,6 +188,7 @@ impl<'p> Tl<'_, '_, 'p> {
         // Within 0 … the file's frames, so the casts are exact.
         let (mut source_offset, mut length) = (offset as u64, (end - offset) as u64);
         if length == 0 {
+            self.count(ItemKind::LeftOut, AUDIO_TOO_SHORT);
             return Ok(());
         }
         let mut tick = tick;
@@ -210,9 +205,15 @@ impl<'p> Tl<'_, '_, 'p> {
                         DpTimeUnit::Beats => crate::dawproject::units::ticks(-fin)
                             .map_or(0.0, |(t, _)| start_s - self.clock.secs(tick - t.0)),
                     };
-                    let ext = ((ext_s * rate).round().max(0.0) as u64)
+                    let want = (ext_s * rate).round().max(0.0) as u64;
+                    let ext = want
                         .min(source_offset)
                         .min((start_s * rate).round().max(0.0) as u64);
+                    // The file (or the timeline) starts too soon for all of
+                    // it: what is left is a plain fade, or none.
+                    if ext < want {
+                        self.count(ItemKind::Changed, CROSSFADES_PLAIN);
+                    }
                     source_offset -= ext;
                     length = length.saturating_add(ext);
                     tick = self.clock.tick(start_s - ext as f64 / rate);
@@ -243,6 +244,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 mute: f.muted,
                 rate,
                 negative,
+                dropped: false,
                 plan: RegionPlan {
                     media: m,
                     source_offset,
@@ -291,7 +293,7 @@ impl<'p> Tl<'_, '_, 'p> {
             return t;
         }
         let name = format!("{} ch {}", self.name_of(track), part.saturating_add(1));
-        let (name, _) = clean_name(&name);
+        let name = self.made_name(&name);
         let t = self.new_track(name.clone(), true);
         self.extra_at.insert((track, part), t);
         self.cx.add(ItemKind::Changed, WIDE_AUDIO, Some(name));
@@ -302,18 +304,32 @@ impl<'p> Tl<'_, '_, 'p> {
     /// a region that starts inside the one before it, with a fade-in that
     /// fits the overlap (and the earlier fade-out covering it, unless the
     /// fade-in came from a negative `fadeInTime`), crossfades with it.
-    pub(super) fn crossfades(&mut self, regs: &mut [Reg]) {
+    pub(super) fn crossfades(&mut self, regs: &mut [Reg]) -> Result<(), IoError> {
         // (index, tick, seconds, length in seconds) of the regions still
-        // sounding, as `crossfade::overlaps` finds partners.
+        // sounding, as `crossfade::overlaps` finds partners. A region that
+        // would start over MAX_SOUNDING of them is left out, so the set
+        // (here and in the model's sweep) stays that small.
         let mut sounding: Vec<(usize, i64, f64, f64)> = Vec::new();
         let frames_at = |s: f64, rate: f64| (s * rate).round() as i128;
         for j in 0..regs.len() {
+            self.tick()?;
             let Some(b) = regs.get(j) else { continue };
             let (tick, rate, negative) = (b.tick, b.rate, b.negative);
             let (fin, fout, len) = (b.plan.fade_in, b.plan.fade_out, b.plan.length);
             let secs = self.clock.secs(tick);
             let start = frames_at(secs, rate);
-            sounding.retain(|&(_, _, s, l)| frames_at(s + l, rate) > start);
+            let ends_after =
+                |&&(_, _, s, l): &&(usize, i64, f64, f64)| frames_at(s + l, rate) > start;
+            // Counted before `retain`, which the model never runs for a
+            // region it does not hold.
+            if sounding.iter().filter(ends_after).count() >= MAX_SOUNDING {
+                if let Some(b) = regs.get_mut(j) {
+                    b.dropped = true;
+                }
+                self.count(ItemKind::LeftOut, TOO_MUCH);
+                continue;
+            }
+            sounding.retain(|p| ends_after(&p));
             let partner = sounding.iter().rev().find(|p| p.1 < tick).copied();
             let mut made = false;
             if let Some((i, _, s, l)) = partner {
@@ -339,5 +355,6 @@ impl<'p> Tl<'_, '_, 'p> {
             }
             sounding.push((j, tick, secs, len as f64 / rate));
         }
+        Ok(())
     }
 }

@@ -29,15 +29,16 @@ impl<'p> Tl<'_, '_, 'p> {
                 self.left_out(BAD_NOTES);
                 continue;
             };
-            if end > f.hi {
+            let cut = end > f.hi;
+            if cut {
                 end = f.hi;
-                self.cx.add(ItemKind::Changed, NOTES_CUT, None);
+                self.count(ItemKind::Changed, NOTES_CUT);
             }
             let duration = end.saturating_sub(start).max(0);
             let scale = |tl: &mut Self, v: f64| -> u16 {
                 let c = v.clamp(0.0, 1.0);
                 if c != v {
-                    tl.cx.add(ItemKind::Changed, VEL_CLAMPED, None);
+                    tl.count(ItemKind::Changed, VEL_CLAMPED);
                 }
                 (c * 65_535.0).round() as u16
             };
@@ -50,7 +51,7 @@ impl<'p> Tl<'_, '_, 'p> {
                     f,
                     note,
                     start,
-                    duration,
+                    (duration, cut),
                     (pitch, ch),
                     &mut per_note,
                     to,
@@ -85,7 +86,7 @@ impl<'p> Tl<'_, '_, 'p> {
         f: &Frame,
         note: &DpNote,
         start: i64,
-        duration: i64,
+        (duration, cut): (i64, bool),
         (pitch, ch): (u8, u8),
         out: &mut Vec<PerNoteCtl>,
         to: To,
@@ -141,15 +142,19 @@ impl<'p> Tl<'_, '_, 'p> {
                     self.bad_value("note expression point");
                     continue;
                 }
-                // Past a cut note's end: cut with it.
+                // Past a cut note's end: cut with it (listed with the
+                // note); past an uncut one's, left out.
                 if offset > duration {
+                    if !cut {
+                        self.count(ItemKind::LeftOut, EXPRESSION_PAST_END);
+                    }
                     continue;
                 }
                 match kind {
                     None => {
                         let c = v.clamp(-48.0, 48.0);
                         if c != v {
-                            self.cx.add(ItemKind::Changed, TRANSPOSE_CLAMPED, None);
+                            self.count(ItemKind::Changed, TRANSPOSE_CLAMPED);
                         }
                         const CENTRE: f64 = 2_147_483_648.0;
                         let value = (CENTRE + c * CENTRE / 48.0)
@@ -192,7 +197,7 @@ impl<'p> Tl<'_, '_, 'p> {
     /// (Changed).
     pub(super) fn norm(&mut self, v: f64) -> u32 {
         if !(0.0..=1.0).contains(&v) {
-            self.cx.add(ItemKind::Changed, VALUES_CLAMPED, None);
+            self.count(ItemKind::Changed, VALUES_CLAMPED);
         }
         to_u32(v)
     }
@@ -343,51 +348,71 @@ impl<'p> Tl<'_, '_, 'p> {
 
 /// Joins each program with the bank select (CC 0 and 32) at its tick on
 /// its channel (Ruling 13, inverted); the two controllers are dropped.
-pub(super) fn pair_banks(evs: &mut Vec<Ev>) {
-    if !evs
-        .iter()
-        .any(|e| matches!(e.body, EventBody::Program { bank: None, .. }))
-    {
-        return;
+/// Each tick's controllers are indexed once by channel, so many programs
+/// and controllers at one tick stay linear; `tick` is called once per
+/// tick.
+pub(super) fn pair_banks(
+    evs: &mut Vec<Ev>,
+    tick: &mut dyn FnMut() -> Result<(), IoError>,
+) -> Result<(), IoError> {
+    let open = |e: &Ev| matches!(e.body, EventBody::Program { bank: None, .. });
+    if !evs.iter().any(open) {
+        return Ok(());
     }
     evs.sort_by_key(|e| e.tick);
     let seven = |v: u32| (from_u32(v) * 127.0).round().clamp(0.0, 127.0) as u8;
     let mut drop = vec![false; evs.len()];
+    // This tick's CC 0 and 32 by (channel, controller), in order, with
+    // how many the programs before took.
+    let mut ccs: HashMap<(u8, u8), (Vec<usize>, usize)> = HashMap::new();
     let mut from = 0;
     while from < evs.len() {
-        let tick = evs.get(from).map_or(0, |e| e.tick);
+        tick()?;
+        let at = evs.get(from).map_or(0, |e| e.tick);
         let to = from
             + evs
                 .get(from..)
-                .map_or(0, |r| r.partition_point(|e| e.tick == tick));
+                .map_or(0, |r| r.partition_point(|e| e.tick == at));
         let to = to.max(from + 1);
-        for p in from..to {
-            let Some(Ev {
-                ch,
-                body: EventBody::Program { bank: None, .. },
+        let group = evs.get(from..to).unwrap_or_default();
+        if !group.iter().any(open) {
+            from = to;
+            continue;
+        }
+        ccs.clear();
+        for (k, e) in (from..).zip(group) {
+            if let EventBody::Cc {
+                index: n @ (0 | 32),
                 ..
-            }) = evs.get(p)
-            else {
+            } = e.body
+            {
+                ccs.entry((e.ch, n)).or_default().0.push(k);
+            }
+        }
+        let mut banks: Vec<(usize, (u8, u8), usize, usize)> = Vec::new();
+        for (p, e) in (from..).zip(group) {
+            if !open(e) {
+                continue;
+            }
+            let next = |ccs: &HashMap<(u8, u8), (Vec<usize>, usize)>, n: u8| {
+                ccs.get(&(e.ch, n))
+                    .and_then(|(v, used)| v.get(*used).copied())
+            };
+            let (Some(m), Some(l)) = (next(&ccs, 0), next(&ccs, 32)) else {
                 continue;
             };
-            let ch = *ch;
-            let find = |n: u8, drop: &[bool]| {
-                (from..to).find(|&k| {
-                    !drop.get(k).copied().unwrap_or(true)
-                        && evs.get(k).is_some_and(|e| {
-                            e.ch == ch
-                                && matches!(e.body, EventBody::Cc { index, .. } if index == n)
-                        })
-                })
-            };
-            let (Some(m), Some(l)) = (find(0, &drop), find(32, &drop)) else {
-                continue;
-            };
+            for n in [0, 32] {
+                if let Some((_, used)) = ccs.get_mut(&(e.ch, n)) {
+                    *used += 1;
+                }
+            }
             let value = |k: usize| match evs.get(k).map(|e| &e.body) {
                 Some(EventBody::Cc { value, .. }) => seven(*value),
                 _ => 0,
             };
-            let bank = (value(m), value(l));
+            banks.push((p, (value(m), value(l)), m, l));
+        }
+        for (p, bank, m, l) in banks {
             for k in [m, l] {
                 if let Some(d) = drop.get_mut(k) {
                     *d = true;
@@ -409,4 +434,5 @@ pub(super) fn pair_banks(evs: &mut Vec<Ev>) {
         k += 1;
         keep
     });
+    Ok(())
 }

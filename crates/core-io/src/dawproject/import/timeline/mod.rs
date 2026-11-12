@@ -7,8 +7,8 @@
 //! parent's (beats at the top); a clip's content is in its
 //! `contentTimeUnit`, else the clip's unit. Every place is a [`Frame`]: the
 //! tick and second where content time 0 lies, and the window of ticks that
-//! plays. Seconds go through the imported tempo map ([`Clock`], the model's
-//! own arithmetic with a binary search). A clip plays its content from
+//! plays. Seconds go through the imported tempo map ([`Clock`]: the model's
+//! own indexed lookup, the one its crossfade partners use). A clip plays its content from
 //! `playStart` to `playStop` (or for its `duration`), its loop repeating
 //! from `loopStart` to `loopEnd`; nested clips compose and cut to the outer
 //! window. Anything placed before 0 or past the timeline is left out.
@@ -29,8 +29,11 @@
 //! whole walk (each clip, pass, note and point it makes) at [`EXPANSION`]
 //! times the file's own parts plus [`EXPANSION_FLOOR`], at most
 //! [`Limits::default`]'s event count, so a small file of references cannot
-//! grow into millions of notes; the cancel flag is looked at as everywhere
-//! else in the mapping.
+//! grow into millions of notes. The passes after the walk stay near linear:
+//! at most [`MAX_SOUNDING`] regions of a track sound at once and the
+//! arrangement adds at most [`MAX_NEW_SEQUENCES`] sequences. The cancel flag
+//! is looked at as everywhere else in the mapping, per region and per tick
+//! of controllers too.
 
 mod audio;
 mod automation;
@@ -84,6 +87,17 @@ pub const OFFLINE: &str = "Audio files that could not be read (they are offline;
 pub const WIDE_AUDIO: &str = "Audio files wider than stereo were split into mono tracks";
 /// Changed: audio clips that play past their file's end.
 pub const AUDIO_CUT: &str = "Audio clips cut at the end of their file";
+/// Left out: audio clips that start at or past the end of their file.
+pub const AUDIO_PAST_FILE: &str = "Audio clips that start past the end of their file";
+/// Left out: audio clips shorter than one frame.
+pub const AUDIO_TOO_SHORT: &str = "Audio clips shorter than a frame";
+/// Left out: audio clips whose file the package does not list.
+pub const AUDIO_UNLISTED: &str = "Audio clips whose file the project does not list";
+/// Left out: note expression past the end of a note that was not cut.
+pub const EXPRESSION_PAST_END: &str = "Note expression past the end of its note";
+/// Changed: a track's notes on its main channel, when that is not the
+/// first, play on its instrument's channel (by track).
+pub const MAIN_CHANNEL: &str = "Notes on a track's main channel play on its instrument's channel";
 /// Changed: fades longer than their region.
 pub const FADES_CUT: &str = "Fades longer than their clip were shortened";
 /// Left out: fades of a clip that holds clips.
@@ -98,6 +112,10 @@ pub const AUTOMATION_TRACK: &str =
     "Automation of the master and buses was put on a new track 'Automation'";
 /// Left out: automation of parts the import does not hold (by parameter).
 pub const UNPLACED: &str = "Automation of parts VizDAW does not hold";
+/// Left out: automation of tracks on the built-in synth's shared strip,
+/// other than the track whose settings it took, and the mute automation of
+/// any of them (by track).
+pub const SHARED_AUTOMATION: &str = "Automation of tracks that share the built-in synth";
 /// Changed: clip launcher slots (a count).
 pub const SLOTS: &str = "Clip launcher slots became unplaced sequences";
 /// Left out: audio and automation in clip launcher slots, and slots
@@ -120,6 +138,16 @@ pub const TOO_MUCH: &str = "Clips and notes repeated past the import's limit";
 pub const EXPANSION: usize = 16;
 /// The walk's budget beyond [`EXPANSION`] times the file's parts.
 pub const EXPANSION_FLOOR: usize = 65_536;
+/// The most regions of one track that may sound at once; a region that
+/// would start over this many is left out ([`TOO_MUCH`]), which keeps
+/// finding crossfade partners (here and in the model) bounded.
+pub const MAX_SOUNDING: usize = 128;
+/// The most sequences the arrangement may add (shared clips and clip
+/// launcher slots); the uses of any past it are left out ([`TOO_MUCH`]).
+/// Each sequence costs the model a sweep of every sequence on each of its
+/// commands once media exist, so applying them is quadratic in their
+/// number: 1 024 keeps that to a few seconds in a debug build.
+pub const MAX_NEW_SEQUENCES: usize = 1024;
 
 /// The name of the track that holds automation with no track of its own.
 const AUTOMATION_NAME: &str = "Automation";
@@ -333,14 +361,18 @@ struct Reg {
     rate: f64,
     /// Its fade-in came from a negative `fadeInTime`.
     negative: bool,
+    /// Left out: it would start over [`MAX_SOUNDING`] regions.
+    dropped: bool,
     plan: RegionPlan,
 }
 
 /// An automation point on its way to a track (`None`: the automation
 /// track).
 #[derive(Debug, Clone)]
-struct AutoEv {
+struct AutoEv<'p> {
     owner: Option<usize>,
+    /// The parameter's ID.
+    param: &'p str,
     tick: i64,
     mute: bool,
     at: AutoAt,
@@ -440,6 +472,8 @@ struct Tl<'c, 'a, 'p> {
     params: HashMap<&'p str, (Role<'p>, &'p str)>,
     /// What the walk may still do.
     budget: usize,
+    /// Report lines counted here and added once ([`Tl::count`]).
+    tally: Vec<(ItemKind, &'static str, usize)>,
     /// Every track's name: the plan's, then the new ones.
     names: Vec<String>,
     /// New tracks: (name, audio).
@@ -450,7 +484,7 @@ struct Tl<'c, 'a, 'p> {
     evs: Vec<Vec<Ev>>,
     clips: Vec<usize>,
     regs: Vec<Reg>,
-    autos: Vec<AutoEv>,
+    autos: Vec<AutoEv<'p>>,
     cands: Vec<Cand<'p>>,
     slots: Vec<RawSeq>,
     pass: Vec<Ev>,
@@ -458,9 +492,12 @@ struct Tl<'c, 'a, 'p> {
     pass_other: bool,
     media: Vec<MediaPlan>,
     media_at: HashMap<usize, Vec<usize>>,
+    /// Every media path of the import, in lower case: each online item's,
+    /// then the offline ones made.
     paths: HashSet<String>,
-    /// Per track: whether it owns a strip automation can drive.
-    has_strip: Vec<bool>,
+    /// The next number to try for an offline path, by its stem in lower
+    /// case.
+    path_next: HashMap<String, u32>,
     /// The names of clips holding audio.
     clip_names: Vec<String>,
 }
@@ -497,6 +534,7 @@ impl<'a, 'p> Cx<'a, 'p> {
             referenced: HashSet::new(),
             params: HashMap::new(),
             budget: Limits::default().max_events,
+            tally: Vec::new(),
             names: plan.tracks.iter().map(|t| t.name.clone()).collect(),
             extra: Vec::new(),
             extra_at: HashMap::new(),
@@ -511,12 +549,15 @@ impl<'a, 'p> Cx<'a, 'p> {
             pass_other: false,
             media: Vec::new(),
             media_at: HashMap::new(),
-            paths: HashSet::new(),
-            has_strip: plan
-                .tracks
-                .iter()
-                .map(|t| t.midi.is_some() || t.audio)
+            paths: sources
+                .values()
+                .flat_map(|s| match s {
+                    MediaSource::Online(items) => items.as_slice(),
+                    _ => &[],
+                })
+                .map(|it| it.path.to_lowercase())
                 .collect(),
+            path_next: HashMap::new(),
             clip_names: Vec::new(),
             sources,
             cx: self,
@@ -551,6 +592,27 @@ impl<'p> Tl<'_, '_, 'p> {
         }
     }
 
+    /// Counts one more of a line that may come once per note or region;
+    /// [`Tl::flush`] adds them to the report.
+    fn count(&mut self, kind: ItemKind, what: &'static str) {
+        self.count_n(kind, what, 1);
+    }
+
+    /// Counts `n` more of a line ([`Tl::count`]).
+    fn count_n(&mut self, kind: ItemKind, what: &'static str, n: usize) {
+        match self.tally.iter_mut().find(|t| t.0 == kind && t.1 == what) {
+            Some(t) => t.2 = t.2.saturating_add(n),
+            None => self.tally.push((kind, what, n)),
+        }
+    }
+
+    /// Adds the counted lines to the report.
+    fn flush(&mut self) {
+        for (kind, what, n) in std::mem::take(&mut self.tally) {
+            self.cx.add_n(kind, what, n);
+        }
+    }
+
     fn left_out(&mut self, what: &str) {
         self.cx.add(ItemKind::LeftOut, what, None);
     }
@@ -558,6 +620,16 @@ impl<'p> Tl<'_, '_, 'p> {
     fn bad_value(&mut self, what: &str) {
         self.cx
             .add(ItemKind::LeftOut, UNREADABLE_VALUES, Some(what.to_owned()));
+    }
+
+    /// A name the import makes from user text, cleaned as names are; a cut
+    /// one is listed.
+    fn made_name(&mut self, raw: &str) -> String {
+        let (name, cut) = clean_name(raw);
+        if cut {
+            self.cx.add(ItemKind::Changed, NAMES_CUT, None);
+        }
+        name
     }
 
     fn name_of(&self, track: usize) -> String {
@@ -571,7 +643,6 @@ impl<'p> Tl<'_, '_, 'p> {
         self.extra.push((name, audio));
         self.evs.push(Vec::new());
         self.clips.push(0);
-        self.has_strip.push(audio);
         i
     }
 }

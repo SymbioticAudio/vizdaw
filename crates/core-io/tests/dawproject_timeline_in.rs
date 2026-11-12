@@ -5,13 +5,15 @@
 
 use core_io::IoError;
 use core_io::dawproject::import::{
-    AUTOMATION_TRACK, BAD_NOTES, DpImport, EXPANSION, EXPANSION_FLOOR, FORMANT, HELD_STEPS,
-    ImportEnv, MIDI_RAMPS, MediaSource, NESTED_TOO_DEEP, NOTES_CUT, OFFLINE, PAST_END,
-    SHARED_SPLIT, SLOTS, TIME_STRETCH, TOO_MUCH, TRANSPOSE_CLAMPED, UNROLLED, VEL_CLAMPED, VIDEO,
-    WIDE_AUDIO, apply, map,
+    AUDIO_PAST_FILE, AUDIO_TOO_SHORT, AUTOMATION_TRACK, BAD_NOTES, CROSSFADES_PLAIN, DpImport,
+    EXPANSION, EXPANSION_FLOOR, EXPRESSION_PAST_END, FORMANT, HELD_STEPS, ImportEnv, MAIN_CHANNEL,
+    MIDI_RAMPS, MediaSource, NAMES_CUT, NESTED_TOO_DEEP, NOTES_CUT, OFFLINE, PAST_END,
+    SHARED_AUTOMATION, SHARED_SPLIT, SLOTS, TIME_STRETCH, TOO_MUCH, TRANSPOSE_CLAMPED, UNROLLED,
+    VEL_CLAMPED, VIDEO, WIDE_AUDIO, apply, map,
 };
 use core_io::dawproject::import::{
-    CANCEL_EVERY, debug_items_after_pause, debug_pause_at, debug_paused,
+    CANCEL_EVERY, MAX_NEW_SEQUENCES, MAX_SOUNDING, debug_items_after_pause, debug_items_seen,
+    debug_pause_at, debug_paused,
 };
 use core_io::dawproject::package::{DpPackage, open};
 use core_io::dawproject::plugins::PlistCodec;
@@ -323,6 +325,17 @@ fn notes_land_where_the_clips_play() {
     };
     assert_eq!(*velocity, 32_768, "0.5 × 65 535, rounded");
     assert_eq!(*release_velocity, 0, "no rel reads as 0");
+
+    // A note with no vel plays at MIDI's 100.
+    let a = imported(&project_xml(
+        &note_track("t", "NoVel"),
+        r#"<Lanes timeUnit="beats"><Lanes track="t"><Clips><Clip time="0" duration="1" playStart="0"><Notes><Note time="0" duration="1" channel="0" key="60"/></Notes></Clip></Clips></Lanes></Lanes>"#,
+    ));
+    let evs = events(&a, "NoVel");
+    let EventBody::Note { velocity, .. } = &evs[0].body else {
+        panic!("a note")
+    };
+    assert_eq!(*velocity, (100.0 / 127.0 * 65_535.0_f64).round() as u16);
 }
 
 #[test]
@@ -705,6 +718,56 @@ fn automation_points_become_events() {
         .collect();
     assert_eq!(got, vec![(AutomationTarget::StripFader(master), 0)]);
     has(&a.report, ItemKind::Note, AUTOMATION_TRACK);
+
+    // Two note tracks on the built-in synth share its strip: the first
+    // (whose settings the strip took) drives its fader; the second's
+    // automation, and the mute automation of either, is left out.
+    let chan = |id: &str| {
+        format!(
+            r#"<Channel id="{id}c" role="regular" destination="mc"><Volume id="{id}v" unit="linear" value="1" min="0" max="4"/><Mute id="{id}m" value="false"/></Channel>"#
+        )
+    };
+    let structure = format!(
+        r#"<Track id="s1" name="Synth A" contentType="notes">{}</Track><Track id="s2" name="Synth B" contentType="notes">{}</Track>"#,
+        chan("s1"),
+        chan("s2")
+    );
+    let points = |track: &str, param: &str, value: &str| {
+        format!(
+            r#"<Lanes track="{track}"><Points unit="linear"><Target parameter="{param}"/><RealPoint time="0" value="{value}" interpolation="linear"/></Points></Lanes>"#
+        )
+    };
+    let mute = |track: &str| {
+        format!(
+            r#"<Lanes track="{track}"><Points><Target parameter="{track}m"/><BoolPoint time="0" value="true"/></Points></Lanes>"#
+        )
+    };
+    let arrangement = format!(
+        r#"<Lanes timeUnit="beats">{}{}{}{}</Lanes>"#,
+        points("s1", "s1v", "0.5"),
+        mute("s1"),
+        points("s2", "s2v", "2"),
+        mute("s2")
+    );
+    let a = imported(&project_xml(&structure, &arrangement));
+    let synth =
+        a.h.doc()
+            .mixer()
+            .find_kind(StripKind::BuiltinSynth)
+            .unwrap();
+    let autos = |name: &str| -> Vec<AutomationTarget> {
+        events(&a, name)
+            .into_iter()
+            .filter_map(|e| match e.body {
+                EventBody::Automation { target, .. } => Some(target),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(autos("Synth A"), vec![AutomationTarget::StripFader(synth)]);
+    assert_eq!(autos("Synth B"), Vec::<AutomationTarget>::new());
+    let i = item(&a.report, ItemKind::LeftOut, SHARED_AUTOMATION).expect("the shared line");
+    assert_eq!(i.details, vec!["Synth A".to_owned(), "Synth B".to_owned()]);
 }
 
 #[test]
@@ -899,8 +962,16 @@ fn exported_files_come_back() {
     assert_eq!(notes_of(&seq_events(&riff)), vec![(0, 62, BEAT)]);
 
     // The crossfade comes back; the earlier region's fade-out was the
-    // overlap, so it is cleared.
+    // overlap, so it is cleared. The second keeps its name.
     let drums = events(&a, "Drums");
+    let names: Vec<Option<String>> = drums
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::AudioRegion { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec![None, Some("Hit".to_owned())]);
     assert_eq!(
         regions_of(&drums),
         vec![
@@ -1022,6 +1093,55 @@ fn offline_audio_keeps_its_regions() {
     );
     let i = item(&a.report, ItemKind::Note, OFFLINE).expect("the offline line");
     assert_eq!(i.details, vec!["gone: it is damaged".to_owned()]);
+
+    // An offline file placed before an online one of the same stem never
+    // takes the online item's path, even in another case (as the disk
+    // compares them).
+    let structure = r#"<Track id="a" name="A" contentType="audio"><Channel id="ac" role="regular" destination="mc"/></Track>"#;
+    let clip = |time: u32, path: &str| {
+        format!(
+            r#"<Clip time="{time}" duration="2" contentTimeUnit="seconds" playStart="0" playStop="1"><Audio sampleRate="48000" channels="1" duration="2"><File path="{path}"/></Audio></Clip>"#
+        )
+    };
+    let arrangement = format!(
+        r#"<Lanes timeUnit="beats"><Lanes track="a"><Clips>{}{}{}</Clips></Lanes></Lanes>"#,
+        clip(0, "audio/kick.wav"),
+        clip(4, "samples/kick.wav"),
+        clip(8, "loops/KICK.aif")
+    );
+    let pkg = package(dir.path(), &project_xml(structure, &arrangement));
+    let keys: Vec<(usize, String)> = pkg
+        .audio()
+        .iter()
+        .map(|a| (a.key, a.name.clone()))
+        .collect();
+    assert_eq!(keys.len(), 3, "{keys:?}");
+    let online = Imported {
+        path: "Media/Kick.caf".into(),
+        name: "kick".into(),
+        original_name: "kick.wav".into(),
+        channels: 1,
+        sample_rate: 48_000,
+        length_frames: 96_000,
+        content_hash: "h".into(),
+        clipped: 0,
+    };
+    let gone = || MediaSource::Offline {
+        why: "it is missing".into(),
+    };
+    let media = BTreeMap::from([
+        (keys[0].0, gone()),
+        (keys[1].0, MediaSource::Online(vec![online])),
+        (keys[2].0, gone()),
+    ]);
+    let a = apply_to_new(&mapped(&pkg, &media));
+    let mut paths: Vec<String> = a.h.doc().media().values().map(|m| m.path.clone()).collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        ["Media/KICK 3.caf", "Media/Kick.caf", "Media/kick 2.caf"]
+    );
+    assert_eq!(regions_of(&events(&a, "A")).len(), 3);
 }
 
 #[test]
@@ -1172,4 +1292,268 @@ fn mapping_is_deterministic() {
     let (a, b) = (apply_to_new(&first), apply_to_new(&first));
     assert_eq!(a.h.doc(), b.h.doc());
     assert_eq!(a.report, b.report);
+}
+
+/// A track "Stack" whose one clip holds `outer` clips, each a use of 32
+/// clips that crossfade (a negative `fadeInTime`) into one 600 s file:
+/// each region starts 64 ticks after the one before and overlaps all the
+/// others.
+fn region_stack(outer: usize) -> String {
+    let inner: String = (0..32)
+        .map(|k| {
+            format!(
+                r#"<Clip time="{}" duration="1200" contentTimeUnit="seconds" playStart="0.5" fadeTimeUnit="seconds" fadeInTime="-0.001" reference="aud"/>"#,
+                (64 * k) as f64 / 15_360.0
+            )
+        })
+        .collect();
+    let outer: String = (0..outer)
+        .map(|i| {
+            format!(
+                r#"<Clip time="{}" duration="3000" playStart="0" reference="l"/>"#,
+                (2048 * i) as f64 / 15_360.0
+            )
+        })
+        .collect();
+    project_xml(
+        r#"<Track id="a" name="Stack" contentType="audio"><Channel id="ac" role="regular" destination="mc"/></Track>"#,
+        &format!(
+            r#"<Lanes timeUnit="beats"><Lanes track="a"><Clips><Clip time="0" duration="5000" playStart="0"><Clips>{outer}</Clips></Clip></Clips></Lanes><Lanes><Clips id="l">{inner}</Clips><Audio id="aud" sampleRate="48000" channels="1" duration="600"><File path="audio/s.wav"/></Audio></Lanes></Lanes>"#
+        ),
+    )
+}
+
+#[test]
+fn overlapping_region_stacks_are_bounded() {
+    // About 90 000 regions that all overlap, from a file of 8 000 clips:
+    // at most MAX_SOUNDING of them sound at once, the rest are left out,
+    // and the import stays fast.
+    let xml = region_stack(8_000);
+    let start = std::time::Instant::now();
+    let a = imported(&xml);
+    let regions = regions_of(&events(&a, "Stack"));
+    assert_eq!(
+        regions.len(),
+        MAX_SOUNDING,
+        "the regions that may sound at once"
+    );
+    assert!(
+        regions[1..].iter().all(|r| r.5),
+        "each crossfades into the one before"
+    );
+    has(&a.report, ItemKind::LeftOut, TOO_MUCH);
+    assert_eq!(rules::validate(a.h.doc()), Vec::<String>::new());
+    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+
+    // The passes after the walk look at the cancel flag: paused 70 000
+    // items before the end (among the regions), the mapping stops within
+    // one interval of the flag.
+    let dir = tempfile::tempdir().unwrap();
+    let pkg = package(dir.path(), &xml);
+    let media = converted(&pkg);
+    let env = ImportEnv {
+        installed: &yes,
+        plist: &NoCodec,
+        rate: 48_000,
+    };
+    let flag = AtomicBool::new(false);
+    debug_pause_at(&flag, Some(usize::MAX));
+    map(&pkg, &media, &env, &flag).expect("maps");
+    let total = debug_items_seen();
+    debug_pause_at(&flag, Some(total - 70_000));
+    let got = std::thread::scope(|s| {
+        s.spawn(|| {
+            while !debug_paused() {
+                std::thread::yield_now();
+            }
+            flag.store(true, Ordering::Relaxed);
+        });
+        map(&pkg, &media, &env, &flag).map(|_| ())
+    });
+    let after = debug_items_after_pause();
+    debug_pause_at(&flag, None);
+    assert_eq!(got, Err(IoError::Cancelled));
+    assert!(after <= CANCEL_EVERY, "{after} items after the flag");
+}
+
+#[test]
+fn many_shared_clips_are_bounded() {
+    // Twice MAX_NEW_SEQUENCES clips, each the only use of its own notes,
+    // beside an audio clip (so the model looks at crossfades on every
+    // command): the first MAX_NEW_SEQUENCES become sequences, the rest are
+    // left out, and the import stays fast.
+    let n = 2 * MAX_NEW_SEQUENCES;
+    let clips: String = (0..n)
+        .map(|k| format!(r#"<Clip time="{k}" duration="1" playStart="0" reference="n{k}"/>"#))
+        .collect();
+    let defs: String = (0..n)
+        .map(|k| {
+            format!(
+                r#"<Notes id="n{k}"><Note time="0" duration="1" channel="0" key="{}" vel="0.5"/></Notes>"#,
+                k % 128
+            )
+        })
+        .collect();
+    let structure = format!(
+        r#"{}<Track id="a" name="Audio" contentType="audio"><Channel id="ac" role="regular" destination="mc"/></Track>"#,
+        note_track("t", "Many")
+    );
+    let xml = project_xml(
+        &structure,
+        &format!(
+            r#"<Lanes timeUnit="beats"><Lanes track="t"><Clips>{clips}</Clips></Lanes><Lanes track="a"><Clips><Clip time="0" duration="2" contentTimeUnit="seconds" playStart="0" playStop="1"><Audio sampleRate="48000" channels="1" duration="2"><File path="audio/x.wav"/></Audio></Clip></Clips></Lanes><Lanes>{defs}</Lanes></Lanes>"#
+        ),
+    );
+    let start = std::time::Instant::now();
+    let a = imported(&xml);
+    let uses = uses_of(&events(&a, "Many"));
+    assert_eq!(uses.len(), MAX_NEW_SEQUENCES);
+    assert_eq!(a.h.doc().sequences().len(), MAX_NEW_SEQUENCES + 1);
+    has(&a.report, ItemKind::LeftOut, TOO_MUCH);
+    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+}
+
+#[test]
+fn quiet_drops_are_listed() {
+    // Expression past the end of a note that was not cut; notes whose main
+    // channel is not the first; a clip name past the limit.
+    let long = "n".repeat(5_000);
+    let notes = format!(
+        r#"<Lanes track="t"><Clips><Clip time="0" duration="4" playStart="0" name="{long}"><Notes><Note time="0" duration="1" channel="2" key="60" vel="0.5"><Lanes><Points unit="normalized"><Target expression="timbre"/><RealPoint time="2" value="0.5"/></Points></Lanes></Note></Notes></Clip></Clips></Lanes>"#
+    );
+    // A region shorter than a frame, one past its file's end, and a
+    // negative fade-in where the file starts.
+    let audio = |play: &str, fade: &str| {
+        format!(
+            r#"<Clip time="4" duration="2" contentTimeUnit="seconds" {play} fadeTimeUnit="seconds" {fade}><Audio sampleRate="48000" channels="1" duration="2"><File path="audio/x.wav"/></Audio></Clip>"#
+        )
+    };
+    let clips = [
+        audio(r#"playStart="0" playStop="0.000001""#, ""),
+        audio(r#"playStart="5" playStop="6""#, ""),
+        audio(r#"playStart="0" playStop="1""#, r#"fadeInTime="-0.5""#),
+    ]
+    .concat();
+    let structure = format!(
+        r#"{}<Track id="a" name="A" contentType="audio"><Channel id="ac" role="regular" destination="mc"/></Track>"#,
+        note_track("t", "N")
+    );
+    let a = imported(&project_xml(
+        &structure,
+        &format!(
+            r#"<Lanes timeUnit="beats">{notes}<Lanes track="a"><Clips>{clips}</Clips></Lanes></Lanes>"#
+        ),
+    ));
+    has(&a.report, ItemKind::LeftOut, EXPRESSION_PAST_END);
+    let i = item(&a.report, ItemKind::Changed, MAIN_CHANNEL).expect("the channel line");
+    assert_eq!(i.details, vec!["N: channel 3".to_owned()]);
+    has(&a.report, ItemKind::Changed, NAMES_CUT);
+    has(&a.report, ItemKind::LeftOut, AUDIO_TOO_SHORT);
+    has(&a.report, ItemKind::LeftOut, AUDIO_PAST_FILE);
+    has(&a.report, ItemKind::Changed, CROSSFADES_PLAIN);
+    assert_eq!(
+        regions_of(&events(&a, "A")),
+        vec![(4 * BEAT, 0, 48_000, 0, 0, false, false)],
+        "the fade-in had no file before it"
+    );
+}
+
+#[test]
+fn exported_fills_and_channels_come_back() {
+    // What Task 5's timeline fixture does not hold: a use that fills its
+    // length, and a note on a channel other than its track's.
+    use core_engine::fixtures::{BAR, Builder, Q};
+    use core_io::dawproject::export::{ClipRule, ExportEnv, ExportOptions, RegionGain, export};
+    use core_io::dawproject::plugins::NoPlist;
+    use core_model::event::EventSpec;
+    use core_model::mixer::BUILTIN_SYNTH_REF;
+
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", BUILTIN_SYNTH_REF, 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    let (riff, riff_lane) = b.sequence("Riff", "Riff", Some(synth)).unwrap();
+    b.notes(riff, riff_lane, &[(0, 62, 0x8000, Q)]).unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq: riff,
+        length: SeqLength::Locked(Tick(BAR)),
+    }))
+    .unwrap();
+    b.notes(
+        seq,
+        keys,
+        &[(4 * BAR, 60, 0x8000, Q), (5 * BAR, 60, 0x8000, Q)],
+    )
+    .unwrap();
+    let mut on_four = EventSpec::new(
+        Tick(6 * BAR),
+        EventBody::Note {
+            pitch: 64,
+            velocity: 0x8000,
+            release_velocity: 0,
+            duration: Tick(Q),
+            attribute: None,
+            per_note: Default::default(),
+        },
+    );
+    on_four.group_channel = Some((0, 3));
+    let fill = EventSpec::new(
+        Tick(0),
+        EventBody::Reference {
+            seq: riff,
+            length: Some(Tick(6 * Q)),
+            loop_count: LoopCount::Fill,
+            transpose: 0,
+        },
+    );
+    b.events(seq, keys, vec![on_four, fill]).unwrap();
+    let doc = b.finish();
+    let x = export(
+        &doc,
+        &ExportOptions {
+            seq,
+            region_gain: RegionGain::Apply,
+            clips: ClipRule::SilenceGap(Tick(4 * Q)),
+        },
+        &ExportEnv {
+            plist: &NoPlist,
+            app_version: "1.2.3",
+            project_id: "00000000-0000-4000-8000-000000000001",
+            export_id: "E1",
+            exported_at: 1_700_000_000,
+        },
+        &AtomicBool::new(false),
+    )
+    .expect("exports");
+
+    let a = imported(&x.project_xml);
+    let evs = events(&a, "Keys");
+    // Task 5 writes a filling use as its notes, unrolled, in a clip named
+    // after the sequence (no loop): it comes back as those notes.
+    assert_eq!(uses_of(&evs), vec![]);
+    assert_eq!(
+        notes_of(&evs),
+        vec![
+            (0, 62, Q),
+            (BAR, 62, Q),
+            (4 * BAR, 60, Q),
+            (5 * BAR, 60, Q),
+            (6 * BAR, 64, Q)
+        ]
+    );
+    let channels: Vec<(i64, Option<(u8, u8)>)> = evs
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::Note { .. }))
+        .map(|e| (e.tick.0, e.group_channel))
+        .collect();
+    assert_eq!(
+        channels,
+        vec![
+            (0, None),
+            (BAR, None),
+            (4 * BAR, None),
+            (5 * BAR, None),
+            (6 * BAR, Some((0, 3)))
+        ]
+    );
+    assert_eq!(rules::validate(a.h.doc()), Vec::<String>::new());
 }

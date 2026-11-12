@@ -38,6 +38,12 @@ impl<'p> Tl<'_, '_, 'p> {
                 *u = true;
             }
         }
+        // The track whose settings the built-in synth's strip took (Task 6):
+        // the first that said it plays it, else the first that does now.
+        let declared = plan
+            .tracks
+            .iter()
+            .position(|t| t.midi == Some(Midi::Builtin));
         for (i, t) in plan.tracks.iter_mut().enumerate() {
             if midi_used.get(i).copied().unwrap_or(false) && t.midi.is_none() {
                 t.midi = Some(Midi::Builtin);
@@ -58,6 +64,12 @@ impl<'p> Tl<'_, '_, 'p> {
         let mut items: Vec<Vec<Item>> = vec![Vec::new(); n];
         let mut seqs: Vec<RawSeq> = Vec::new();
         self.group(plan, &mut items, &mut seqs)?;
+        // Slots past MAX_NEW_SEQUENCES are left out.
+        let room = MAX_NEW_SEQUENCES.saturating_sub(seqs.len());
+        if self.slots.len() > room {
+            self.count_n(ItemKind::LeftOut, TOO_MUCH, self.slots.len() - room);
+            self.slots.truncate(room);
+        }
         seqs.append(&mut self.slots);
 
         // Each track's main channel: the one most of its notes are on.
@@ -87,10 +99,18 @@ impl<'p> Tl<'_, '_, 'p> {
                 best
             })
             .collect();
+        // Notes on a main channel other than the first play on the track's
+        // instrument's channel.
+        for (t, (m, c)) in main.iter().zip(&counts).enumerate() {
+            if *m != 0 && c.iter().any(|k| *k > 0) {
+                let detail = format!("{}: channel {}", self.name_of(t), m + 1);
+                self.cx.add(ItemKind::Changed, MAIN_CHANNEL, Some(detail));
+            }
+        }
         let gc = |main: u8, ch: u8| (ch != u8::MAX && ch != main).then_some((0, ch));
 
         for (t, v) in self.evs.iter_mut().enumerate() {
-            pair_banks(v);
+            pair_banks(v, &mut || self.cx.tick())?;
             let m = main.get(t).copied().unwrap_or(0);
             if let Some(out) = items.get_mut(t) {
                 for e in v.drain(..) {
@@ -115,11 +135,11 @@ impl<'p> Tl<'_, '_, 'p> {
                     .get(from..)
                     .map_or(0, |r| r.partition_point(|x| x.track == track));
             if let Some(slice) = regs.get_mut(from..to) {
-                self.crossfades(slice);
+                self.crossfades(slice)?;
             }
             from = to.max(from + 1);
         }
-        for r in regs {
+        for r in regs.into_iter().filter(|r| !r.dropped) {
             if let Some(out) = items.get_mut(r.track) {
                 out.push(Item {
                     tick: Tick(r.tick),
@@ -128,7 +148,86 @@ impl<'p> Tl<'_, '_, 'p> {
                 });
             }
         }
+        self.place_automation(plan, declared, &mut items);
+        for v in &mut items {
+            v.sort_by_key(|i| i.tick);
+        }
+
+        let mut out = Vec::with_capacity(seqs.len());
+        for mut s in seqs {
+            pair_banks(&mut s.evs, &mut || self.cx.tick())?;
+            let m = main.get(s.track).copied().unwrap_or(0);
+            out.push(SeqPlan {
+                name: s.name,
+                track: s.track,
+                length: Tick(s.len.max(1)),
+                events: s
+                    .evs
+                    .into_iter()
+                    .map(|e| EventSpec {
+                        tick: Tick(e.tick),
+                        dest: None,
+                        group_channel: gc(m, e.ch),
+                        mute: e.mute,
+                        body: e.body,
+                    })
+                    .collect(),
+            });
+        }
+        self.flush();
+        Ok(Arranged {
+            items,
+            seqs: out,
+            media: self.media,
+        })
+    }
+
+    /// Puts each automation point on its track. A point on a track's strip
+    /// needs the track to own one (known now that every track's notes and
+    /// audio are). On the built-in synth's shared strip only the track whose
+    /// settings the strip took (`builtin`) drives it, and never its mute: a
+    /// track's mute there is the track's own, which automation does not
+    /// drive (Task 6).
+    fn place_automation(&mut self, plan: &Plan, builtin: Option<usize>, items: &mut [Vec<Item>]) {
+        let first = builtin.or_else(|| {
+            plan.tracks
+                .iter()
+                .position(|t| t.midi == Some(Midi::Builtin))
+        });
+        let owns = |i: usize| {
+            plan.tracks
+                .get(i)
+                .is_some_and(|t| t.midi.is_some() || t.audio)
+        };
+        let shares = |i: usize| {
+            plan.tracks
+                .get(i)
+                .is_some_and(|t| t.midi == Some(Midi::Builtin) && !t.audio)
+        };
+        let mut unplaced: HashSet<&str> = HashSet::new();
+        let mut shared: HashSet<usize> = HashSet::new();
         for a in std::mem::take(&mut self.autos) {
+            let strip = match a.at {
+                AutoAt::Fader(s) | AutoAt::Pan(s) | AutoAt::Mute(s) => s,
+                AutoAt::Send(s, _) | AutoAt::Param(s, _, _) => s,
+            };
+            if let StripAt::Track(i) = strip {
+                if !owns(i) {
+                    if unplaced.insert(a.param) {
+                        self.cx
+                            .add(ItemKind::LeftOut, UNPLACED, Some(a.param.to_owned()));
+                    }
+                    continue;
+                }
+                if shares(i) && (matches!(a.at, AutoAt::Mute(_)) || Some(i) != first) {
+                    if shared.insert(i) {
+                        let name = self.name_of(i);
+                        self.cx
+                            .add(ItemKind::LeftOut, SHARED_AUTOMATION, Some(name));
+                    }
+                    continue;
+                }
+            }
             let Some(t) = a.owner else { continue };
             if let Some(out) = items.get_mut(t) {
                 out.push(Item {
@@ -141,38 +240,6 @@ impl<'p> Tl<'_, '_, 'p> {
                 });
             }
         }
-        for v in &mut items {
-            v.sort_by_key(|i| i.tick);
-        }
-
-        let seqs = seqs
-            .into_iter()
-            .map(|mut s| {
-                pair_banks(&mut s.evs);
-                let m = main.get(s.track).copied().unwrap_or(0);
-                SeqPlan {
-                    name: s.name,
-                    track: s.track,
-                    length: Tick(s.len.max(1)),
-                    events: s
-                        .evs
-                        .into_iter()
-                        .map(|e| EventSpec {
-                            tick: Tick(e.tick),
-                            dest: None,
-                            group_channel: gc(m, e.ch),
-                            mute: e.mute,
-                            body: e.body,
-                        })
-                        .collect(),
-                }
-            })
-            .collect();
-        Ok(Arranged {
-            items,
-            seqs,
-            media: self.media,
-        })
     }
 
     /// Groups the candidates (spec §7.4): clips that play one timeline,
@@ -258,9 +325,18 @@ impl<'p> Tl<'_, '_, 'p> {
                 let Some(head) = ms.first().and_then(|&m| cands.get(m)) else {
                     continue;
                 };
-                let name = head.name.clone().unwrap_or_else(|| {
-                    clean_name(&format!("{} clip {}", self.name_of(head.track), head.n)).0
-                });
+                // Past MAX_NEW_SEQUENCES, the uses are left out.
+                if seqs.len() >= MAX_NEW_SEQUENCES {
+                    self.count_n(ItemKind::LeftOut, TOO_MUCH, ms.len());
+                    continue;
+                }
+                let name = match head.name.clone() {
+                    Some(n) => n,
+                    None => {
+                        let made = format!("{} clip {}", self.name_of(head.track), head.n);
+                        self.made_name(&made)
+                    }
+                };
                 let (track, len) = (head.track, head.len);
                 // Every member's pass is the same: the sequence takes the
                 // first's.

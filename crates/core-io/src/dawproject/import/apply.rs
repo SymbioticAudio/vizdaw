@@ -1,6 +1,6 @@
 //! Applying a mapped import to a new project.
 
-use super::timeline::{AutoAt, Body, SlotAt, StripAt, UNPLACED};
+use super::timeline::{AutoAt, Body, CROSSFADES_PLAIN, SlotAt, StripAt, UNPLACED};
 use super::*;
 use core_model::automation::{AutomationTarget, SendIndex, target_exists};
 use core_model::command::{EventCmd, MediaCmd};
@@ -30,6 +30,9 @@ fn created_plugin(r: &CmdReport) -> Result<PluginInstanceId, ModelError> {
 pub(super) struct MixSlots {
     pub(super) eq: Option<PluginInstanceId>,
     pub(super) inserts: Vec<PluginInstanceId>,
+    /// Each planned send's index among the strip's sends (`None`: not
+    /// made).
+    pub(super) sends: Vec<Option<usize>>,
 }
 
 /// What the arrangement needs of the applied structure: each plan track's
@@ -63,6 +66,7 @@ fn apply_mix(
     states: &mut SlotStates,
 ) -> Result<MixSlots, ModelError> {
     let mut made = MixSlots::default();
+    let mut sent = 0usize;
     let mixer = |cmd| Command::Mixer(cmd);
     if mix.gain_db != 0.0 {
         run(
@@ -111,8 +115,11 @@ fn apply_mix(
         }
         for s in &mix.sends {
             let Some(target) = buses.get(s.bus).copied() else {
+                made.sends.push(None);
                 continue;
             };
+            made.sends.push(Some(sent));
+            sent += 1;
             run(
                 h,
                 mixer(MixerCmd::AddSend {
@@ -465,7 +472,9 @@ fn target_of(h: &History, at: AutoAt, placed: &Applied) -> Option<AutomationTarg
         AutoAt::Pan(s) => AutomationTarget::StripPan(strip(s)?.0),
         AutoAt::Mute(s) => AutomationTarget::StripMute(strip(s)?.0),
         AutoAt::Send(s, i) => {
-            AutomationTarget::SendLevel(strip(s)?.0, SendIndex(u16::try_from(i).ok()?))
+            let (id, made) = strip(s)?;
+            let k = made.sends.get(i).copied().flatten()?;
+            AutomationTarget::SendLevel(id, SendIndex(u16::try_from(k).ok()?))
         }
         AutoAt::Param(s, slot, q) => {
             let id = match (slot, s) {
@@ -577,7 +586,7 @@ fn apply_arranged(
         }
         if !s.events.is_empty() {
             notes = notes.saturating_add(count_notes(s.events.iter().map(|e| &e.body)));
-            run(
+            let r = run(
                 h,
                 Command::Event(EventCmd::Insert {
                     seq: id,
@@ -585,6 +594,7 @@ fn apply_arranged(
                     events: s.events.clone(),
                 }),
             )?;
+            settled(&r, report);
         }
         seqs.push(id);
     }
@@ -664,7 +674,7 @@ fn apply_arranged(
             });
         }
         notes = notes.saturating_add(count_notes(specs.iter().map(|e| &e.body)));
-        run(
+        let r = run(
             h,
             Command::Event(EventCmd::Insert {
                 seq,
@@ -672,6 +682,7 @@ fn apply_arranged(
                 events: specs,
             }),
         )?;
+        settled(&r, report);
     }
     let s = &mut report.summary;
     s.notes = s.notes.saturating_add(notes);
@@ -681,6 +692,21 @@ fn apply_arranged(
         .audio_files
         .saturating_add(u64::try_from(media.len()).unwrap_or(u64::MAX));
     Ok(())
+}
+
+/// Lists what the model's crossfade rules changed in an insert. The
+/// timeline mapping places crossfades by the model's own rule and tempo
+/// lookup, so this should never happen; if it does, the change is reported,
+/// never dropped.
+fn settled(r: &CmdReport, report: &mut Report) {
+    debug_assert!(
+        r.settled.is_empty(),
+        "the model changed crossfades the import made: {:?}",
+        r.settled
+    );
+    for (_, line) in &r.settled {
+        report.add(ItemKind::Changed, CROSSFADES_PLAIN, Some(line.clone()));
+    }
 }
 
 fn count_notes<'e>(bodies: impl Iterator<Item = &'e EventBody>) -> u64 {
