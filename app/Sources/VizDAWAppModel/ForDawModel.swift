@@ -32,8 +32,9 @@ public final class ForDawModel: AudioFormatChoices {
     /// Showing resets the choices to the project's defaults.
     public var shown = false {
         didSet {
-            // Showing again while an export waits keeps it, as waiting.
-            guard shown, !oldValue, !reopening, !waiting else { return }
+            // Showing again while an export waits or runs keeps it, with its
+            // progress and Cancel.
+            guard shown, !oldValue, !reopening, !waiting, !running else { return }
             reset()
         }
     }
@@ -49,6 +50,8 @@ public final class ForDawModel: AudioFormatChoices {
 
     /// The core's check of the choices.
     public private(set) var check: ForDawCheckRow?
+    /// The rate `check` was made at: its frames are at that rate.
+    private var checkRate: UInt32 = 48_000
     /// Why the last check or start was refused, shown in the sheet.
     public private(set) var error: String?
     /// The export is kept until the running job ends.
@@ -74,7 +77,7 @@ public final class ForDawModel: AudioFormatChoices {
     /// with no check.
     public var length: String {
         guard let check else { return "" }
-        return MediaModel.duration(frames: check.frames, rate: rate) + " + tail"
+        return MediaModel.duration(frames: check.frames, rate: checkRate) + " + tail"
     }
 
     /// The picker's value: a listed rate, or 0 for "Other…".
@@ -145,16 +148,17 @@ public final class ForDawModel: AudioFormatChoices {
         let id = taskCount
         tasks[id] = Task {
             let result = await Task.detached { Result { try session.exportForDawCheck(req: req) } }.value
-            self.landed(mine, result)
+            self.landed(mine, req.rate, result)
             self.tasks[id] = nil
         }
     }
 
-    private func landed(_ mine: Int, _ result: Result<ForDawCheckRow, any Error>) {
+    private func landed(_ mine: Int, _ rate: UInt32, _ result: Result<ForDawCheckRow, any Error>) {
         guard mine == generation else { return }
         switch result {
         case .success(let row):
             check = row
+            checkRate = rate
             error = nil
             if awaitingDefaults {
                 awaitingDefaults = false
@@ -190,6 +194,9 @@ public final class ForDawModel: AudioFormatChoices {
             error = "No sequence is shown."
             return
         }
+        // One export at a time from the sheet: a running one is cancelled
+        // or left to finish first.
+        guard !running else { return }
         error = nil
         if blocked(by: req) {
             kept = req
@@ -203,9 +210,8 @@ public final class ForDawModel: AudioFormatChoices {
         guard let document else { return }
         kept = nil
         waiting = false
-        // Hidden before the job starts: a refusal on `startJob`'s first poll
-        // opens the sheet again, and must stay open.
-        shown = false
+        // The sheet stays up with progress and Cancel, as Bounce's does; a
+        // refusal on `startJob`'s first poll shows its message in it.
         job = document.startJob(
             .exportProject, "Export Failed",
             failure: { [self] in fail(InterchangeModel.message($0)) }
@@ -227,6 +233,11 @@ public final class ForDawModel: AudioFormatChoices {
 
     /// A job ended (`pollJobs`, once the job list is settled): the kept
     /// request starts if nothing blocks it any more.
+    /// A finished or cancelled export closes the sheet.
+    func jobDone(_ job: JobRow) {
+        if job.kind == .exportProject, job.id == self.job { shown = false }
+    }
+
     func jobEnded() {
         guard let req = kept, !blocked(by: req) else { return }
         begin(req)
@@ -235,7 +246,8 @@ public final class ForDawModel: AudioFormatChoices {
     /// An export failed: the sheet opens again with the message. Answers
     /// whether it did (a cancelled one is quiet).
     func jobFailed(_ job: JobRow, message: String) -> Bool {
-        guard job.kind == .exportProject, job.state != .cancelled else { return false }
+        guard job.kind == .exportProject, job.id == self.job else { return false }
+        guard job.state != .cancelled else { return false }
         fail(message)
         return true
     }

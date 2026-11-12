@@ -275,6 +275,47 @@ import VizDAWCore
         #expect(f.forDawExports.last?.rate == 96_000)
     }
 
+    @Test func theSheetStaysUpWhileTheExportRuns() async throws {
+        let f = fake()
+        f.jobStartState = .running
+        let (m, d) = try await shown(f)
+        d.start(folder: "/tmp/x")
+        #expect(d.shown && d.running && d.job != nil, "progress and Cancel are visible")
+        let job = d.job
+        d.shown = false
+        d.shown = true
+        await d.settle()
+        #expect(d.running && d.job == job, "showing again keeps the job")
+        let exports = f.forDawExports.count
+        d.start(folder: "/tmp/y")
+        #expect(f.forDawExports.count == exports && d.job == job && !d.waiting, "no second export from the sheet")
+        try ended(f, m, .exportProject, .done)
+        #expect(!d.shown, "closes on success")
+    }
+
+    @Test func cancellingTheRunningExportClosesTheSheet() async throws {
+        let f = fake()
+        f.jobStartState = .running
+        let (m, d) = try await shown(f)
+        d.start(folder: "/tmp/x")
+        try ended(f, m, .exportProject, .cancelled)
+        #expect(!d.shown && m.alert == nil)
+    }
+
+    @Test func theLengthUsesTheRateTheCheckWasMadeAt() async throws {
+        let f = fake()
+        let (m, d) = try await shown(f)
+        defer { withExtendedLifetime(m) {} }
+        #expect(d.length == "0:01.0 + tail")
+        let release = DispatchSemaphore(value: 0)
+        f.forDawCheckHold = { $0.rate == 88_200 ? release : nil }
+        d.rate = 88_200
+        #expect(d.length == "0:01.0 + tail", "the old check is still at the old rate")
+        release.signal()
+        await d.settle()
+        #expect(d.length == "0:00.5 + tail")
+    }
+
     @Test func noSequenceDropsAnOlderCheck() async throws {
         let f = fake()
         let (m, d) = try await shown(f)

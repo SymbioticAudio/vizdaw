@@ -3965,7 +3965,9 @@ fn exports_for_another_daw_over_the_channel() {
     let all_midi = folder.join("MIDI/All MIDI.mid");
     let bytes = std::fs::read(&all_midi).unwrap();
     assert_eq!(&bytes[..4], b"MThd");
-    let tracks = mtrk_chunks(&bytes) - 1;
+    let tracks = mtrk_chunks(&bytes)
+        .checked_sub(1)
+        .expect("a conductor track");
     assert!(tracks > 0, "{tracks}");
     let before = lanes(&mut app);
     let r = app.call(
@@ -3988,7 +3990,20 @@ fn exports_for_another_daw_over_the_channel() {
         assert_eq!(lanes(&mut app), before + 1, "stem {k}");
     }
 
-    // Again, adding the stems: "… 2", the first folder untouched, one
+    // Again without adding: "… 2", and the undo label stays that of the
+    // last edit.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": tmp}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "no edit without Add: {r}");
+    assert_eq!(
+        PathBuf::from(r["written"][0].as_str().unwrap()),
+        tmp.join(format!("{name} 2")),
+        "{r}"
+    );
+
+    // Again, adding the stems: "… 3", the first folder untouched, one
     // track per stem in one undo step.
     let first: Vec<PathBuf> = {
         let mut v = Vec::new();
@@ -4003,10 +4018,12 @@ fn exports_for_another_daw_over_the_channel() {
     );
     assert_eq!(r["undo"], "Add Stems", "{r}");
     let second = PathBuf::from(r["written"][0].as_str().unwrap());
-    assert_eq!(second, tmp.join(format!("{name} 2")), "{r}");
+    assert_eq!(second, tmp.join(format!("{name} 3")), "{r}");
     let added = wavs_in(&second.join("Audio")).len();
     assert!(added > 0, "{r}");
     assert_eq!(lanes(&mut app), before + added);
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    assert_eq!(lanes(&mut app), before, "one Undo removes every added track");
     let mut again = Vec::new();
     walk(&folder, &mut again);
     again.sort();

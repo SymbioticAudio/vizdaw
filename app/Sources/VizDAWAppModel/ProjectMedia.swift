@@ -155,7 +155,9 @@ extension DocumentModel {
                 // A MIDI import or export the UI started shows its report.
                 if [.importMidi, .exportMidi, .exportProject].contains(r.kind) { interchange.jobEnded(r) }
                 if r.kind == .importMidi { openedMidi = nil }
+                forDaw.jobDone(r)
             case .failed(let message):
+                if r.state == .cancelled { forDaw.jobDone(r) }
                 if r.kind == .importMidi, openedMidi != nil {
                     // Open made this project for the file: the store closes it.
                     openFailure = .some(r.state == .cancelled ? nil : message)

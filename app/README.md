@@ -2488,8 +2488,8 @@ in any other software that reads `.midi2`, if you have one (F20).
 By eye and by ear; the folder's layout, names, MIDI files and About file are
 tested (`core-io/tests/for_daw.rs`, `midi_out.rs`), the job, its stems,
 cancelling at every stage and the refusals (`core-ffi/tests/for_daw.rs`), the
-command (`core-control/tests/commands.rs`, `InterchangeCommandsTests`), the sheet's model
-(`ForDawModelTests`, `InterchangeTests`) and the e2e
+command (`core-control/tests/commands.rs`, `InterchangeCommandsTests`),
+the sheet's model (`ForDawModelTests`, `InterchangeTests`) and the e2e
 `exports_for_another_daw_over_the_channel`.
 
 267. File › Export › For Another DAW… shows the sheet:
@@ -2520,8 +2520,8 @@ command (`core-control/tests/commands.rs`, `InterchangeCommandsTests`), the shee
 272. Tick "Add the stems to this project": new tracks named after the stems
      at the start point; one Undo ("Add Stems") removes them all, and the
      folder stays.
-273. Cancel during a long export: no folder is left and the project is
-     unchanged. Drop two MIDI files, then start an export at once: the sheet
+273. Cancel during a long export, in the sheet (it stays up with its
+     progress and Cancel): no folder is left and the project is unchanged. Drop two MIDI files, then start an export at once: the sheet
      waits, then exports after the imports.
 
 **Owner check (manual, only the owner can do):** drop the folder's stems and
