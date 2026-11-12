@@ -4,9 +4,11 @@ use crate::{IoError, io_err};
 use std::io::Read;
 use std::path::Path;
 
-/// `path` opened as a regular file (one symlink hop; FIFO, device, directory refused), checked again on the handle.
-/// The kind is checked before opening, so a FIFO never blocks the open; a
-/// symlink loop is the operating system's error.
+/// `path` opened as a regular file (the whole symlink chain is followed; a
+/// loop is the operating system's error). A FIFO, device or directory is
+/// refused before opening, and the kind is checked again on the handle.
+/// A path swapped for a FIFO between the check and the open can still
+/// block the open: `std` offers no non-blocking open.
 pub fn open_regular(path: &Path) -> Result<std::fs::File, IoError> {
     let not_file = || {
         IoError::Refused(format!(

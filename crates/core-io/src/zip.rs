@@ -56,6 +56,7 @@ pub struct EntryInfo {
 pub struct ZipReader {
     archive: rawzip::ZipArchive<rawzip::FileReader>,
     entries: Vec<EntryInfo>,
+    cancel_at_chunk: Option<u64>,
 }
 
 impl std::fmt::Debug for ZipReader {
@@ -202,8 +203,13 @@ impl ZipReader {
             });
         }
         // Each entry's local header and data must be its own: two records
-        // sharing bytes are how overlapping bombs multiply their output.
-        let mut spans = Vec::with_capacity(entries.len());
+        // sharing bytes are how overlapping bombs multiply their output. The
+        // central directory is a span too, from its start to the end of all
+        // inputs, so no entry's data may reach into or past it: a packed
+        // size larger than the bytes really there would make the ratio
+        // check meaningless.
+        let mut spans = Vec::with_capacity(entries.len().saturating_add(1));
+        spans.push((archive.directory_offset(), u64::MAX));
         for (e, start) in entries.iter().zip(headers) {
             let found = archive
                 .get_entry(e.way)
@@ -217,7 +223,19 @@ impl ZipReader {
         }) {
             return Err(damaged("two entries share their data"));
         }
-        Ok(ZipReader { archive, entries })
+        Ok(ZipReader {
+            archive,
+            entries,
+            cancel_at_chunk: None,
+        })
+    }
+
+    /// Test hook: once `chunk` chunks (1-based) of an entry have gone to
+    /// their destination, sets the caller's cancel flag, as a user's cancel
+    /// arriving at that moment would. `None` turns it off.
+    #[doc(hidden)]
+    pub fn debug_cancel_at_chunk(&mut self, chunk: Option<u64>) {
+        self.cancel_at_chunk = chunk;
     }
 
     /// The package's file entries, in directory order.
@@ -258,6 +276,8 @@ impl ZipReader {
 
     /// Streams `e` into a new file `to` (`create_new`); `to` is removed on any error or cancel.
     /// Returns the bytes written, which never pass the size `e` declares.
+    /// If `to` cannot be removed after a failure, the error is an `Io` that
+    /// names the file left behind, in place of the failure's own.
     pub fn extract(&self, e: &EntryInfo, to: &Path, cancel: &AtomicBool) -> Result<u64, IoError> {
         readable(e)?;
         let mut file = match std::fs::OpenOptions::new()
@@ -283,9 +303,16 @@ impl ZipReader {
                 file.sync_all().map_err(|err| io_err(to, "written", &err))?;
                 Ok(n)
             });
-        if r.is_err() {
+        if let Err(why) = r {
             drop(file);
-            let _ = std::fs::remove_file(to);
+            return match std::fs::remove_file(to) {
+                Ok(()) => Err(why),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(why),
+                Err(err) => Err(IoError::Io(format!(
+                    "{} was left behind ({why}) and could not be removed: {err}",
+                    core_media::export::display_name(to)
+                ))),
+            };
         }
         r
     }
@@ -326,6 +353,7 @@ impl ZipReader {
         let mut buf = vec![0u8; CHUNK];
         let mut count: u64 = 0;
         let mut crc = rawzip::Crc32::new();
+        let mut chunks: u64 = 0;
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(IoError::Cancelled);
@@ -354,6 +382,10 @@ impl ZipReader {
             }
             crc.update(chunk);
             sink(chunk)?;
+            chunks = chunks.saturating_add(1);
+            if self.cancel_at_chunk == Some(chunks) {
+                cancel.store(true, Ordering::Relaxed);
+            }
         }
         if count < e.size {
             return Err(damaged(format!("{name} is cut short")));

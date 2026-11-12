@@ -13,9 +13,7 @@ use core_io::limits::PackageLimits;
 use core_io::zip::{EntryMethod, TOO_LARGE, ZipReader, ZipWriter, check_name};
 use proptest::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -204,6 +202,29 @@ fn overlapping_entries_are_refused() {
         refusal(open_bytes(&bytes)),
         damaged("two entries share their data")
     );
+}
+
+#[test]
+fn a_compressed_size_past_the_directory_is_refused() {
+    // A 10 MiB deflate bomb whose central record claims ~4 GiB packed, so
+    // that "size / compressed" looks harmless; DEFLATE stops at its own end
+    // marker, so the over-long range would never be read.
+    let zeros = vec![0u8; 10 * MIB as usize];
+    let mut bytes = raw_zip(&[RawEntry::deflated("project.xml", &zeros)]);
+    let cd = bytes
+        .windows(4)
+        .rposition(|w| w == [0x50, 0x4b, 0x01, 0x02])
+        .unwrap();
+    bytes
+        .get_mut(cd + 20..cd + 24)
+        .unwrap()
+        .copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+    let cancel = no_cancel();
+    let r = open_bytes(&bytes).and_then(|zip| {
+        let e = zip.find("project.xml").unwrap();
+        zip.read(e, 64 * MIB, Some(200), &cancel)
+    });
+    assert_eq!(refusal(r), damaged("two entries share their data"));
 }
 
 fn many(n: usize) -> Vec<RawEntry> {
@@ -414,9 +435,10 @@ fn extract_is_bounded_and_cleans_up() {
     let zip = ZipReader::open(&path, &PackageLimits::default()).unwrap();
     let e = zip.find("audio/001.wav").unwrap();
     let to = dir.path().join("crc.wav");
-    assert!(zip.extract(e, &to, &cancel).is_err());
+    let checksum = damaged("audio/001.wav fails its checksum");
+    assert_eq!(refusal(zip.extract(e, &to, &cancel)), checksum);
     assert!(std::fs::symlink_metadata(&to).is_err());
-    assert!(zip.read(e, MIB, None, &cancel).is_err());
+    assert_eq!(refusal(zip.read(e, MIB, None, &cancel)), checksum);
 
     // An existing destination is refused and left as it was.
     let good = put(dir.path(), "good.dawproject", &small_zip());
@@ -433,36 +455,31 @@ fn extract_is_bounded_and_cleans_up() {
     assert_eq!(zip.extract(e, &fresh, &cancel).unwrap(), 3);
     assert_eq!(std::fs::read(&fresh).unwrap(), [1, 2, 3]);
 
-    // A cancel from a second thread once the first chunk is written.
+    // A cancel arriving once the first 64 KiB chunk is written (the hook
+    // sets the flag there): Cancelled, and the copy is gone.
     let big = dir.path().join("big.dawproject");
     let mut w = ZipWriter::new(std::fs::File::create(&big).unwrap());
-    let mut src = std::io::Read::take(std::io::repeat(0), 256 * MIB);
+    let mut src = std::io::Read::take(std::io::repeat(0), 4 * MIB);
     assert_eq!(
         w.add_from("audio/big.wav", EntryMethod::Deflated, &mut src, &cancel)
             .unwrap(),
-        256 * MIB
+        4 * MIB
     );
     w.finish().unwrap();
-    let zip = ZipReader::open(&big, &PackageLimits::default()).unwrap();
-    let e = zip.find("audio/big.wav").unwrap();
+    let mut zip = ZipReader::open(&big, &PackageLimits::default()).unwrap();
+    let e = zip.find("audio/big.wav").unwrap().clone();
+    // Without the hook the whole entry extracts.
+    let whole = dir.path().join("whole.wav");
+    assert_eq!(zip.extract(&e, &whole, &cancel).unwrap(), 4 * MIB);
+    zip.debug_cancel_at_chunk(Some(1));
     let to = dir.path().join("big.wav");
-    let stop = Arc::new(AtomicBool::new(false));
-    let watcher = {
-        let (stop, to) = (Arc::clone(&stop), to.clone());
-        std::thread::spawn(move || {
-            let until = Instant::now() + Duration::from_secs(20);
-            while Instant::now() < until {
-                if std::fs::metadata(&to).is_ok_and(|m| m.len() > 0) {
-                    break;
-                }
-                std::thread::yield_now();
-            }
-            stop.store(true, Ordering::Relaxed);
-        })
-    };
-    assert_eq!(zip.extract(e, &to, &stop), Err(IoError::Cancelled));
-    watcher.join().unwrap();
+    let stop = AtomicBool::new(false);
+    assert_eq!(zip.extract(&e, &to, &stop), Err(IoError::Cancelled));
+    assert!(stop.load(Ordering::Relaxed), "the hook set the flag");
     assert!(std::fs::symlink_metadata(&to).is_err());
+    // And a read stops the same way.
+    let stop = AtomicBool::new(false);
+    assert_eq!(zip.read(&e, 64 * MIB, None, &stop), Err(IoError::Cancelled));
 
     // A writer cancelled mid-entry stops.
     let set = AtomicBool::new(true);
