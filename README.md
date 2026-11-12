@@ -81,7 +81,7 @@ Windows.
 
 ## Building from source
 
-You need macOS 14 or newer, Rust 1.85 or newer, and the Xcode Command Line
+You need macOS 14 or newer, Rust 1.86 or newer, and the Xcode Command Line
 Tools. Then, from the project folder:
 
 ```bash
