@@ -202,7 +202,8 @@ pub const PLUGIN_SETTINGS: &str = "Settings of plug-ins";
 /// the import holds ([`PackageLimits::max_state_total`](crate::limits::PackageLimits)).
 pub const TOO_LARGE_TO_CARRY: &str = "too large to carry";
 
-const NOT_NEW: &str = "A DAWproject opens as a new project.";
+/// The refusal of an import into a project that has tracks (Ruling 17).
+pub const NOT_NEW: &str = "A DAWproject opens as a new project.";
 /// The output path reference of a new audio track (as Track Synth makes).
 const AUDIO_REFERENCE: &str = "audio:1-2";
 const BUILTIN_NAME: &str = "Built-in Synth (ch 1)";

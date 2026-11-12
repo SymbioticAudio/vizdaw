@@ -432,6 +432,7 @@ impl<'p> Tl<'_, '_, 'p> {
                         continue;
                     }
                     let Some(t) = self.content_of(c) else {
+                        self.left_out(EMPTY_CLIPS);
                         continue;
                     };
                     let Some(p) = self.place_clip(c, &f) else {

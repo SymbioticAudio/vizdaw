@@ -307,10 +307,15 @@ fn model(message: impl Into<String>) -> VizError {
 
 // ---- request checks ----
 
-/// The path text of a MIDI file to read or write, as `bounce` checks it.
-pub(crate) fn file_path(text: &str) -> Result<PathBuf, VizError> {
+/// What [`file_path`] calls a MIDI file.
+pub(crate) const MIDI_FILE: &str = "a MIDI file";
+
+/// The path text of a file to read or write, as `bounce` checks it;
+/// `noun` ("a MIDI file", "a DAWproject file") names it in the refusal of
+/// an empty path (S5).
+pub(crate) fn file_path(text: &str, noun: &str) -> Result<PathBuf, VizError> {
     if text.is_empty() {
-        return Err(model("choose a MIDI file"));
+        return Err(model(format!("choose {noun}")));
     }
     dest_path(text)
 }
@@ -355,7 +360,7 @@ pub(crate) fn import_plan(
     doc: &Document,
     req: &MidiImportRequestRow,
 ) -> Result<ImportPlan, VizError> {
-    let path = file_path(&req.path)?;
+    let path = file_path(&req.path, MIDI_FILE)?;
     let seq = sequence(doc, req.seq)?;
     let lane = req.lane.map(|l| track(doc, seq, l)).transpose()?;
     if !(-MAX_TICKS..=MAX_TICKS).contains(&req.tick) {

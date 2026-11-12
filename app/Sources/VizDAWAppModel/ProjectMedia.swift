@@ -28,6 +28,7 @@ extension ProjectBanner {
         case .exportMidi: "Exporting MIDI…"
         case .exportProject: "Exporting for another DAW…"
         case .exportDawproject: "Exporting DAWproject…"
+        case .importProject: "Importing DAWproject…"
         }
     }
 
@@ -43,6 +44,7 @@ extension ProjectBanner {
         case .exportMidi: "MIDI Export Failed"
         case .exportProject: "Export Failed"
         case .exportDawproject: "DAWproject Export Failed"
+        case .importProject: "DAWproject Import Failed"
         }
     }
 }
@@ -155,7 +157,7 @@ extension DocumentModel {
                 if !r.problems.isEmpty { jobProblems = r.problems }
                 refreshAfterJob()
                 // A MIDI import or export the UI started shows its report.
-                if [.importMidi, .exportMidi, .exportProject, .exportDawproject].contains(r.kind) { interchange.jobEnded(r) }
+                if [.importMidi, .exportMidi, .exportProject, .exportDawproject, .importProject].contains(r.kind) { interchange.jobEnded(r) }
                 if r.kind == .importMidi { openedMidi = nil }
                 forDaw.jobDone(r)
             case .failed(let message):

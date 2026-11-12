@@ -35,6 +35,8 @@ pub enum JobKindRow {
     ExportProject,
     /// Export a DAWproject file (plan 6d L1).
     ExportDawproject,
+    /// Import a DAWproject file as a new project (plan 6d L1).
+    ImportProject,
 }
 
 /// Where a job is.
@@ -165,6 +167,16 @@ pub enum Work {
         result: Result<core_io::report::Report, String>,
         /// The export folder, once it is in place.
         written: Vec<String>,
+    },
+    /// A DAWproject import (plan 6d Task 10): the media it made (removed
+    /// unless applied) and the plan.
+    ImportProject {
+        /// `(audio file name, the items it became)` per file converted,
+        /// in order.
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// The mapped import (boxed: it is large), or why there is none
+        /// (`"Cancelled"`: it was cancelled).
+        result: Result<Box<core_io::dawproject::import::DpImport>, String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,

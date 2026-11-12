@@ -6,10 +6,10 @@
 use core_io::IoError;
 use core_io::dawproject::import::{
     AUDIO_PAST_FILE, AUDIO_TOO_SHORT, AUTOMATION_TRACK, BAD_NOTES, CROSSFADES_PLAIN, DpImport,
-    EXPANSION, EXPANSION_FLOOR, EXPRESSION_PAST_END, FORMANT, HELD_STEPS, ImportEnv, MAIN_CHANNEL,
-    MIDI_RAMPS, MediaSource, NAMES_CUT, NESTED_TOO_DEEP, NOTES_CUT, OFFLINE, PAST_END,
-    SHARED_AUTOMATION, SHARED_SPLIT, SLOTS, TIME_STRETCH, TOO_MUCH, TRANSPOSE_CLAMPED, UNROLLED,
-    VEL_CLAMPED, VIDEO, WIDE_AUDIO, apply, map,
+    EMPTY_CLIPS, EXPANSION, EXPANSION_FLOOR, EXPRESSION_PAST_END, FORMANT, HELD_STEPS, ImportEnv,
+    MAIN_CHANNEL, MIDI_RAMPS, MediaSource, NAMES_CUT, NESTED_TOO_DEEP, NOTES_CUT, OFFLINE,
+    PAST_END, SHARED_AUTOMATION, SHARED_SPLIT, SLOTS, TIME_STRETCH, TOO_MUCH, TRANSPOSE_CLAMPED,
+    UNROLLED, VEL_CLAMPED, VIDEO, WIDE_AUDIO, apply, map,
 };
 use core_io::dawproject::import::{
     CANCEL_EVERY, MAX_NEW_SEQUENCES, MAX_SOUNDING, debug_items_after_pause, debug_items_seen,
@@ -1481,6 +1481,28 @@ fn quiet_drops_are_listed() {
         vec![(4 * BEAT, 0, 48_000, 0, 0, false, false)],
         "the fade-in had no file before it"
     );
+}
+
+/// Task 9 carry: an export writes a left-out audio clip with no content;
+/// each clip with nothing in it (no timeline and no reference) is listed,
+/// a nested one too, and makes no region.
+#[test]
+fn empty_clips_are_listed() {
+    let structure = r#"<Track id="a" name="A" contentType="audio"><Channel id="ac" role="regular" destination="mc"/></Track>"#;
+    let clips = concat!(
+        r#"<Clip time="0" duration="2" name="Gone"/>"#,
+        r#"<Clip time="4" duration="2"/>"#,
+        r#"<Clip time="8" duration="4"><Clips><Clip time="0" duration="1"/></Clips></Clip>"#,
+    );
+    let a = imported(&project_xml(
+        structure,
+        &format!(
+            r#"<Lanes timeUnit="beats"><Lanes track="a"><Clips>{clips}</Clips></Lanes></Lanes>"#
+        ),
+    ));
+    let i = item(&a.report, ItemKind::LeftOut, EMPTY_CLIPS).expect("the empty clips line");
+    assert_eq!(i.count, 3);
+    assert!(events(&a, "A").is_empty());
 }
 
 #[test]

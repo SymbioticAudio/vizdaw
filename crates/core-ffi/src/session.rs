@@ -474,7 +474,9 @@ impl Inner {
     /// streamer reads the media, plan 5f-2 Ruling 9; an external edit
     /// imports in the format it started with and relinks a region, plan
     /// 5f-3 Ruling 6; an export for another DAW renders as a bounce does,
-    /// plan 6b Ruling 9). An import does not block them.
+    /// plan 6b Ruling 9; a DAWproject export reads the media, and its
+    /// import converts into the project format, plan 6d). An Import Audio
+    /// job does not block them.
     fn media_jobs_idle(&self) -> Result<(), VizError> {
         use crate::jobs::JobKindRow;
         if self.jobs.pending(&[
@@ -485,6 +487,7 @@ impl Inner {
             JobKindRow::ExternalEdit,
             JobKindRow::ExportProject,
             JobKindRow::ExportDawproject,
+            JobKindRow::ImportProject,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
@@ -3213,10 +3216,12 @@ impl Session {
         })
     }
 
-    /// The next DAWproject export cancels itself after `stage` (1: its
-    /// files are made; 2: its first WAV is staged; 3: `project.xml` is in
-    /// the partial; 4: the partial is synced, before the rename; None:
-    /// never).
+    /// The next DAWproject export or import cancels itself after `stage`
+    /// (export: 1 its files are made; 2 its first WAV is staged; 3
+    /// `project.xml` is in the partial; 4 the partial is synced, before the
+    /// rename; import: 5 the file is opened; 6 its first entry is
+    /// extracted; 7 its first audio file is converted; 8 it is mapped;
+    /// None: never).
     pub fn debug_dawproject_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
         ffi_guard(|| {
             lock(&self.inner).dawproject_cancel_at = stage;
@@ -3224,8 +3229,22 @@ impl Session {
         })
     }
 
-    /// DAWproject exports assume `bytes` free at their destination (None:
-    /// the disk's). It stays set until changed.
+    /// Parameter `param` of slot `slot` as the running plug-in reports it
+    /// now (test hook; L4). `Model` while the slot is not running.
+    pub fn debug_plugin_param(&self, slot: u64, param: u64) -> Result<f64, VizError> {
+        ffi_guard(|| {
+            plugins::with(self.id, |p| {
+                p.and_then(|p| p.instance(PluginInstanceId(slot)))
+                    .and_then(|i| i.param_value(core_model::mixer::ParamId(param)))
+            })?
+            .ok_or_else(|| VizError::Model {
+                message: format!("slot {slot} is not running, or has no parameter {param}"),
+            })
+        })
+    }
+
+    /// DAWproject exports and imports assume `bytes` free at their
+    /// destination (None: the disk's). It stays set until changed.
     pub fn debug_free_bytes(&self, bytes: Option<u64>) -> Result<(), VizError> {
         ffi_guard(|| {
             lock(&self.inner).dawproject_free = bytes;
@@ -4221,6 +4240,7 @@ impl Drop for Session {
                     crate::jobs::JobKindRow::Bounce,
                     crate::jobs::JobKindRow::ExportProject,
                     crate::jobs::JobKindRow::ExportDawproject,
+                    crate::jobs::JobKindRow::ImportProject,
                 ])
             {
                 let root = inner.root(self.id);
@@ -4286,6 +4306,13 @@ pub(crate) fn discard(
             .collect(),
         // The stems it added (plan 6b F1); a folder in place stays.
         Work::ExportForDaw { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .map(|i| i.path)
+            .collect(),
+        // What a DAWproject import converted (plan 6d Task 10).
+        Work::ImportProject { files, .. } => files
             .into_iter()
             .filter_map(|(_, r)| r.ok())
             .flatten()
@@ -4418,6 +4445,11 @@ impl Session {
                         ),
                     }
                 }
+                Work::ImportProject { files, result } => {
+                    let r = apply_dawproject_work(inner, &root, id, kind, files, result);
+                    changed |= r.state == JobStateRow::Done;
+                    r
+                }
                 Work::ExportMidi { result, written } => {
                     let mut r = match result {
                         Ok(report) => {
@@ -4549,6 +4581,120 @@ fn apply_midi_import(
     } else {
         run(&mut inner.history, &mut report)?;
     }
+    Ok(report)
+}
+
+/// Applies a finished DAWproject import (plan 6d Task 10): as a new
+/// project, through a scratch history that then replaces the session's,
+/// leaving nothing to undo (spec §6.1). On `Err` (and a cancel) the media
+/// it converted is removed, with the overviews built for it, and the row is
+/// Failed (Cancelled for a cancel).
+fn apply_dawproject_work(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    kind: crate::jobs::JobKindRow,
+    files: ImportFiles,
+    result: Result<Box<core_io::dawproject::import::DpImport>, String>,
+) -> crate::jobs::JobRow {
+    use crate::jobs::{JobStateRow, row};
+    let applied = result
+        .map_err(|message| VizError::Model { message })
+        .and_then(|imp| apply_dawproject_import(inner, &imp));
+    match applied {
+        Ok(report) => {
+            let report = crate::interchange::report_row(&report, "Imported");
+            inner.interchange_report = Some(report.clone());
+            let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+            r.report = Some(report);
+            r
+        }
+        Err(e) => {
+            let keep = inner.kept();
+            // Overviews it built for audio no history state holds go too.
+            let hashes: std::collections::BTreeSet<String> =
+                inner.named_media().into_values().flatten().collect();
+            for f in files.into_iter().filter_map(|(_, r)| r.ok()).flatten() {
+                remove_unkept(root, &f.path, &keep);
+                if !hashes.contains(&f.content_hash)
+                    && let Some(at) = core_media::overview::Overview::path(root, &f.content_hash)
+                {
+                    let _ = std::fs::remove_file(at);
+                }
+            }
+            match e {
+                VizError::Model { message } if message == crate::for_daw::CANCELLED => {
+                    row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
+                }
+                e => row(
+                    id,
+                    kind,
+                    JobStateRow::Failed,
+                    Some(match e {
+                        VizError::Model { message } => message,
+                        e => e.to_string(),
+                    }),
+                    vec![],
+                    vec![],
+                ),
+            }
+        }
+    }
+}
+
+/// Applies a mapped DAWproject file as a new project (Ruling 17), as
+/// `apply_midi_import`'s new-project path does: a scratch history, one
+/// transaction "Import DAWproject" (a panic or error aborts it), the new
+/// plug-ins' states captured, then the session's history replaced. The
+/// project must have no tracks. On an error nothing changes.
+fn apply_dawproject_import(
+    inner: &mut Inner,
+    imp: &core_io::dawproject::import::DpImport,
+) -> Result<core_io::report::Report, VizError> {
+    const LABEL: &str = "Import DAWproject";
+    let doc = inner.doc();
+    if doc.sequences().values().any(|s| !s.lanes.is_empty()) {
+        return Err(VizError::Model {
+            message: core_io::dawproject::import::NOT_NEW.into(),
+        });
+    }
+    let seq = doc
+        .sequences()
+        .keys()
+        .next()
+        .copied()
+        .ok_or_else(|| VizError::Model {
+            message: "the project has no sequence".into(),
+        })?;
+    let mut report = core_io::report::Report::default();
+    let mut scratch = History::new(doc.clone());
+    scratch.begin(LABEL)?;
+    let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        core_io::dawproject::import::apply(&mut scratch, imp, seq, &mut report)
+    }));
+    let states = match applied {
+        Ok(Ok(states)) => {
+            scratch.commit()?;
+            states
+        }
+        Ok(Err(e)) => {
+            let _ = scratch.abort();
+            return Err(e.into());
+        }
+        Err(p) => {
+            let _ = scratch.abort();
+            return Err(VizError::Internal {
+                message: crate::guard::panic_message(p.as_ref()),
+            });
+        }
+    };
+    for (slot, bytes) in &states {
+        scratch.capture_state(*slot, bytes)?;
+    }
+    inner.history = History::new(scratch.doc().clone());
+    // Serials of the replaced history's steps name nothing now.
+    inner.last_step = None;
+    inner.surfaces.tempo_step = None;
     Ok(report)
 }
 
@@ -9163,7 +9309,7 @@ impl Session {
         path: String,
     ) -> Result<crate::interchange::MidiFileInfoRow, VizError> {
         ffi_guard(|| {
-            let p = crate::interchange::file_path(&path)?;
+            let p = crate::interchange::file_path(&path, crate::interchange::MIDI_FILE)?;
             let imp = core_io::midi_in::parse_file(
                 &p,
                 &core_io::midi_in::ImportOptions::default(),
@@ -9457,6 +9603,56 @@ impl Session {
         })
     }
 
+    /// Starts importing the DAWproject file `req.path` into this project,
+    /// which must have no tracks (plan 6d Task 10; Ruling 17: the app makes
+    /// a new project at `dawproject_info`'s rate first): the job ID; `job`
+    /// reports it (kind `ImportProject`) and its report, and applies it
+    /// with nothing to undo. `Model` at once for path text refused and a
+    /// project with a track; `Busy` as `export_dawproject`, and while a
+    /// media job is unapplied. Nothing is read before the job: every
+    /// refusal of the file fails the job with the reader's sentence.
+    pub fn import_dawproject(
+        &self,
+        req: crate::dawproject::DawprojectImportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            // The catalog's lock is not taken under the session's.
+            let installed = crate::dawproject::installed();
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let path =
+                crate::interchange::file_path(&req.path, crate::dawproject::DAWPROJECT_FILE)?;
+            if inner
+                .doc()
+                .sequences()
+                .values()
+                .any(|s| !s.lanes.is_empty())
+            {
+                return Err(VizError::Model {
+                    message: core_io::dawproject::import::NOT_NEW.into(),
+                });
+            }
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.dawproject_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::dawproject::ImportJob {
+                path,
+                root: inner.root(self.id),
+                format: inner.doc().settings().format,
+                reserved: inner.reserved_names(),
+                installed,
+                cancel_at,
+                free,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ImportProject,
+                crate::dawproject::import_job(job),
+            )
+        })
+    }
+
     /// The file name a DAWproject export of sequence `seq` suggests:
     /// "<Song>.dawproject" (the song title, else the sequence's name, made
     /// safe). `Model` for an unknown sequence.
@@ -9503,7 +9699,7 @@ impl Session {
 
     /// `Busy` while recording, inside an open edit, or while a bounce, a
     /// MIDI import or export, an export for another DAW or a DAWproject
-    /// export is unapplied (finished jobs apply first).
+    /// export or import is unapplied (finished jobs apply first).
     fn interchange_idle(&self, inner: &mut Inner) -> Result<(), VizError> {
         if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
             return Err(recording_busy());
@@ -9519,6 +9715,7 @@ impl Session {
             JobKindRow::ExportMidi,
             JobKindRow::ExportProject,
             JobKindRow::ExportDawproject,
+            JobKindRow::ImportProject,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the running import, export or bounce to finish.".into(),

@@ -127,6 +127,9 @@ pub const VIDEO: &str = "Video";
 pub const TRACK_MARKERS: &str = "Markers inside tracks";
 /// Left out: clips, notes and audio on no note or audio track.
 pub const NO_TRACK: &str = "Clips on no note or audio track";
+/// Left out: clips with no content (no timeline and no reference), as an
+/// export writes a clip whose audio it left out (a count).
+pub const EMPTY_CLIPS: &str = "Empty clips";
 /// Left out: clips and references nested past the limit.
 pub const NESTED_TOO_DEEP: &str = "Clips nested more than 16 deep";
 /// Left out: what lies past the walk's budget ([`EXPANSION`] times the

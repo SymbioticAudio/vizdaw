@@ -87,7 +87,9 @@ pub use control::{
     ViewPanesRow, WaitConditionRow, WaitFactsRow, WindowKindRow, WindowRefRow, WindowRow,
     control_command_ids, control_element_check, control_host_busy, control_wait_met,
 };
-pub use dawproject::{DawprojectExportRequestRow, RegionGainRow};
+pub use dawproject::{
+    DawprojectExportRequestRow, DawprojectImportRequestRow, DawprojectInfoRow, RegionGainRow,
+};
 pub use drum::{
     DrumBandKindRow, DrumBandRow, DrumCellRow, DrumEdit, DrumGridLayoutRow, DrumGridSettingsRow,
     DrumHitRow, DrumLaneRow, DrumNewRow, DrumPaintHitRow, DrumRowRow, DrumSpotRow, DrumStrokeRow,
@@ -161,6 +163,17 @@ pub fn shutdown() -> Result<(), VizError> {
         host::reset();
         Ok(())
     })
+}
+
+/// What a DAWproject file at `path` holds for the app before an import
+/// (plan 6d L8): the project rate to make, its tracks and audio files and
+/// whether it came from VizDAW. A free function, so it works with no
+/// document open; call it off the main thread (it opens and parses the
+/// file). Nothing outside the package is looked at. `Model` for a path or
+/// file refused (with the reader's sentence), `Io` when it cannot be read.
+#[uniffi::export]
+pub fn dawproject_info(path: String) -> Result<DawprojectInfoRow, VizError> {
+    ffi_guard(|| dawproject::info(&path))
 }
 
 /// Panics inside the guard (test hook): returns `VizError::Internal`.

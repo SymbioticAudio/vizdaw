@@ -836,6 +836,27 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         dawprojectNames.append(seq)
         return dawprojectNameAnswer
     }
+    /// DAWproject imports (plan 6d Task 10): what they were called with
+    /// (job IDs from 11 001). The info read is the free function
+    /// `dawprojectInfo(path:)`; this stand-in for it logs the paths it was
+    /// asked (and whether on the main thread) and gives a settable answer.
+    var dawprojectImports: [DawprojectImportRequestRow] = []
+    var dawprojectInfoPaths: [String] = []
+    var dawprojectInfoAnswer: Result<DawprojectInfoRow, VizError> = .success(
+        DawprojectInfoRow(sampleRate: 48_000, tracks: 0, audioFiles: 0, fromVizdaw: false, exportId: nil))
+    func importDawproject(req: DawprojectImportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        dawprojectImports.append(req)
+        return interchangeJob(.importProject, 11000, dawprojectImports.count)
+    }
+    func dawprojectInfo(path: String) throws -> DawprojectInfoRow {
+        interchangeLock.lock()
+        dawprojectInfoPaths.append(path)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return try dawprojectInfoAnswer.get()
+    }
     func interchangeReport() throws -> ReportRow? {
         interchangeReportCalls += 1
         if let e = interchangeError { throw e }

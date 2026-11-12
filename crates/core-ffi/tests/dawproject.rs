@@ -1,5 +1,5 @@
-//! DAWproject export from the app (plan 6d Task 9; spec §6, §7.8, §11;
-//! Ruling 16; L1, L6, S6, S9). Projects are saved packages in temporary
+//! DAWproject export and import from the app (plan 6d Tasks 9 and 10;
+//! spec §6, §7.8, §11, §12; Rulings 16–19; L1, L4, L6, L8, S6, S9, S10). Projects are saved packages in temporary
 //! folders at 48 kHz 24-bit with generated CAF media: track "Mono" plays
 //! `Media/mono.caf` (one channel) and "Stereo" plays `Media/stereo.caf`
 //! (two), through one audio path with the test gain CLAP on it. One test at a
@@ -28,7 +28,8 @@ use std::time::{Duration, Instant};
 use vizdaw_ffi::dawproject::{CAPTURE_FAILS_HOOK, OFFLINE_AUDIO, TOO_LONG_FOR_WAV, not_captured};
 use vizdaw_ffi::host::{force_offline, reset_host};
 use vizdaw_ffi::{
-    BlockRule, DawprojectExportRequestRow, JobKindRow, JobRow, JobStateRow, RecordSpecRow,
+    BitDepthRow, BlockRule, DawprojectExportRequestRow, DawprojectImportRequestRow,
+    DawprojectInfoRow, JobKindRow, JobRow, JobStateRow, ProjectFormatRow, RecordSpecRow,
     RegionGainRow, ReportKindRow, ReportRow, Session, SlotStatus, VizError,
 };
 
@@ -1172,4 +1173,767 @@ fn hostile_requests() {
     );
     assert_eq!(listing(&p.out), before, "nothing written");
     assert!(snapshots(&p.pkg).is_empty());
+}
+
+// ---------------------------------------------------------------- import (Task 10)
+
+/// The hand-written fixtures of `core-io`.
+const FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../core-io/tests/data/dawproject"
+);
+
+fn import_req(path: &Path) -> DawprojectImportRequestRow {
+    DawprojectImportRequestRow { path: text(path) }
+}
+
+/// A new project to import into: 48 kHz 24-bit, no tracks, saved as
+/// `I.vizdaw` in its own folder (so its media root is known), with a
+/// private Trash.
+struct Target {
+    dir: tempfile::TempDir,
+    pkg: PathBuf,
+    s: Arc<Session>,
+}
+
+fn target() -> Target {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Session::new_project(ProjectFormatRow {
+        sample_rate: 48_000,
+        depth: BitDepthRow::Int24,
+    })
+    .unwrap();
+    s.debug_set_trash_dir(Some(text(&dir.path().join("Trash"))));
+    s.debug_free_bytes(None).unwrap();
+    let pkg = dir.path().join("I.vizdaw");
+    s.save_as(text(&pkg)).unwrap();
+    Target { dir, pkg, s }
+}
+
+/// Imports `path` into `t` and waits for the job to end.
+fn import(t: &Target, path: &Path) -> JobRow {
+    let j = wait_job(&t.s, t.s.import_dawproject(import_req(path)).unwrap());
+    assert_eq!(j.kind, JobKindRow::ImportProject);
+    j
+}
+
+/// The session's document.
+fn doc_of(s: &Session) -> Document {
+    core_model::file::from_json(&s.debug_document_json()).unwrap()
+}
+
+/// The first sequence of the session's document.
+fn first_seq(s: &Session) -> SeqId {
+    SeqId(s.snapshot().unwrap().sequences[0].id)
+}
+
+/// The files (not folders) under `<root>/Media`, hidden ones and
+/// `.incoming` included, relative and sorted.
+fn media_files(root: &Path) -> Vec<String> {
+    listing(&root.join("Media"))
+        .into_iter()
+        .filter(|f| !f.ends_with('/'))
+        .collect()
+}
+
+/// `R.vizdaw` at 48 kHz 24-bit: "Song" with "Keys" (two notes with
+/// per-note expression on the built-in synth, its strip at −3 dB) and
+/// "Stereo" (regions A at tick 0 and B a half region later, both
+/// `Media/stereo.caf`, B crossfading over A for 1 200 frames; its audio
+/// path at −6 dB with a −10 dB send to the bus "Verb"), a tempo ramp over
+/// bars 2 to 4, two markers and song info.
+fn rich() -> Project {
+    use core_model::command::{AudioCmd, CrossfadeLength, MixerCmd, SequenceCmd, SettingsCmd};
+    use core_model::document::SongInfo;
+    use core_model::event::{EventBody, EventSpec, FadeShape, PerNoteCtl, PerNoteKind};
+    use core_model::mixer::AuxSend;
+    use core_model::sequence::Marker;
+    use core_model::time::Tick;
+    let dir = tempfile::tempdir().unwrap();
+    let pkg = dir.path().join("R.vizdaw");
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    let note = |pitch: u8, bend: u32| EventBody::Note {
+        pitch,
+        velocity: 0x8000,
+        release_velocity: 0,
+        duration: Tick(Q),
+        attribute: None,
+        per_note: [
+            PerNoteCtl {
+                kind: PerNoteKind::PitchBend,
+                offset: Tick(0),
+                value: bend,
+            },
+            PerNoteCtl {
+                kind: PerNoteKind::Registered(74),
+                offset: Tick(Q / 4),
+                value: 0x4000_0000,
+            },
+        ]
+        .into_iter()
+        .collect(),
+    };
+    b.events(
+        seq,
+        keys,
+        vec![
+            EventSpec::new(Tick(0), note(60, 0x9000_0000)),
+            EventSpec::new(Tick(2 * Q), note(64, 0x7000_0000)),
+        ],
+    )
+    .unwrap();
+    let stereo = b.lane(seq, "Stereo", None).unwrap();
+    let m = b.media("Media/stereo.caf", FRAMES, 2).unwrap();
+    // 4 800 frames are 0.1 s, 3 072 ticks at 120 BPM: B starts 2 400
+    // frames into A.
+    b.region(
+        seq,
+        stereo,
+        0,
+        m,
+        0,
+        FRAMES,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+    let second = b
+        .region(
+            seq,
+            stereo,
+            1_536,
+            m,
+            0,
+            FRAMES,
+            0.0,
+            Fade::default(),
+            Fade::default(),
+        )
+        .unwrap();
+    b.run(Command::Audio(AudioCmd::Crossfade {
+        event: second,
+        length: CrossfadeLength::Frames(1_200),
+        shape: FadeShape::Linear,
+    }))
+    .unwrap();
+    b.tempo(
+        seq,
+        &[
+            (0, 120, false),
+            (core_engine::fixtures::BAR, 120, true),
+            (3 * core_engine::fixtures::BAR, 90, false),
+        ],
+    )
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetMarkers {
+        seq,
+        markers: vec![
+            Marker {
+                tick: Tick(0),
+                name: "Verse".into(),
+            },
+            Marker {
+                tick: Tick(2 * core_engine::fixtures::BAR),
+                name: "Chorus".into(),
+            },
+        ]
+        .into_iter()
+        .collect(),
+    }))
+    .unwrap();
+    b.run(Command::Settings(SettingsCmd::SetInfo {
+        info: SongInfo {
+            title: Some("Rich".into()),
+            artist: Some("Someone".into()),
+            ..SongInfo::default()
+        },
+    }))
+    .unwrap();
+    let synth_strip = strip_of(b.doc(), |k| matches!(k, StripKind::BuiltinSynth))[0];
+    let path = strip_of(b.doc(), |k| matches!(k, StripKind::AudioPath(_)))[0];
+    let verb = b.bus("Verb").unwrap();
+    for (strip, gain_db) in [(synth_strip, -3.0), (path, -6.0)] {
+        b.mixer(MixerCmd::SetGain { strip, gain_db }).unwrap();
+    }
+    b.mixer(MixerCmd::AddSend {
+        strip: path,
+        send: AuxSend {
+            level_db: -10.0,
+            ..AuxSend::new(verb)
+        },
+    })
+    .unwrap();
+    let doc = b.finish();
+    core_model::file::save(&doc, &pkg).unwrap();
+    write_caf(&pkg.join("Media/stereo.caf"), 2);
+    let s = Session::open(text(&pkg)).unwrap();
+    s.debug_set_trash_dir(Some(text(&dir.path().join("Trash"))));
+    s.debug_free_bytes(None).unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    Project {
+        dir,
+        pkg,
+        s,
+        seq: seq.0,
+        out,
+    }
+}
+
+/// A package at `dir/<stem>.dawproject` holding `entries` (XML deflated,
+/// the rest stored).
+fn zip_of(dir: &Path, stem: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+    let path = dir.join(format!("{stem}.dawproject"));
+    let mut z = core_io::zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    for (name, bytes) in entries {
+        let method = if name.ends_with(".xml") {
+            EntryMethod::Deflated
+        } else {
+            EntryMethod::Stored
+        };
+        z.add(name, method, bytes).unwrap();
+    }
+    z.finish().unwrap();
+    path
+}
+
+/// `project.xml` with one audio track "A" whose clips, 4 beats apart, play
+/// mono files at `paths` (`external` for the ones outside the package).
+fn audio_project(paths: &[(&str, bool)]) -> String {
+    let clips: String = paths
+        .iter()
+        .enumerate()
+        .map(|(k, (p, ext))| {
+            format!(
+                r#"<Clip time="{}" duration="1" contentTimeUnit="seconds" playStart="0" playStop="0.25"><Audio sampleRate="48000" channels="1" duration="0.5"><File path="{p}" external="{ext}"/></Audio></Clip>"#,
+                k * 4
+            )
+        })
+        .collect();
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Project version="1.0">
+  <Application name="Fixture" version="1"/>
+  <Transport><Tempo id="tempo" unit="bpm" value="120"/></Transport>
+  <Structure>
+    <Track id="m" name="Master" contentType="audio notes"><Channel id="mc" role="master"/></Track>
+    <Track id="a" name="A" contentType="audio"><Channel id="ac" role="regular" destination="mc"/></Track>
+  </Structure>
+  <Arrangement><Lanes timeUnit="beats"><Lanes track="a"><Clips>{clips}</Clips></Lanes></Lanes></Arrangement>
+</Project>"#
+    )
+}
+
+/// L8, Ruling 16: the free function reads a file with no session: our
+/// own export says where it came from; another DAW's file does not.
+#[test]
+fn info_reads_rate_tracks_and_return() {
+    let _g = serial();
+    let p = project();
+    let dest = p.out.join("x.dawproject");
+    export(&p.s, req(p.seq, &dest));
+    let info = vizdaw_ffi::dawproject_info(text(&dest)).unwrap();
+    let snap = snapshots(&p.pkg);
+    assert_eq!(snap.len(), 1);
+    assert_eq!(
+        info,
+        DawprojectInfoRow {
+            sample_rate: 48_000,
+            tracks: 2,
+            audio_files: 2,
+            from_vizdaw: true,
+            export_id: Some(snap[0].trim_end_matches(".json").to_owned()),
+        }
+    );
+
+    let project = std::fs::read(format!("{FIXTURES}/hand_other.project.xml")).unwrap();
+    let metadata = std::fs::read(format!("{FIXTURES}/hand_other.metadata.xml")).unwrap();
+    let other = zip_of(
+        &p.out,
+        "Other",
+        &[("project.xml", &project), ("metadata.xml", &metadata)],
+    );
+    let info = vizdaw_ffi::dawproject_info(text(&other)).unwrap();
+    assert!(!info.from_vizdaw);
+    assert_eq!(info.export_id, None);
+    assert_eq!(info.sample_rate, 48_000);
+    assert_eq!(info.tracks, 3);
+}
+
+/// Spec §6.1, Ruling 17: an export comes back as a new project with its
+/// tracks, notes and expression, online audio, crossfade, tempo, markers,
+/// song info, levels and send, and nothing to undo.
+#[test]
+fn import_as_new_project() {
+    let _g = serial();
+    let p = rich();
+    let dest = p.out.join("Rich.dawproject");
+    export(&p.s, req(p.seq, &dest));
+    let t = target();
+    let j = import(&t, &dest);
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    let report = j.report.clone().expect("a report");
+    assert!(
+        report.summary.starts_with("Imported 2 tracks, "),
+        "{}",
+        report.summary
+    );
+    assert_eq!(
+        items(
+            &report,
+            ReportKindRow::Note,
+            core_io::dawproject::import::FROM_VIZDAW
+        ),
+        1
+    );
+    assert_eq!(t.s.interchange_report().unwrap(), Some(report));
+    assert_eq!(t.s.snapshot().unwrap().undo_label, None, "nothing to undo");
+
+    let a = core_io::dawproject::record::projection(&doc_of(&p.s), SeqId(p.seq)).unwrap();
+    let i = core_io::dawproject::record::projection(&doc_of(&t.s), first_seq(&t.s)).unwrap();
+    let names = |x: &core_io::dawproject::record::Projection| {
+        x.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(names(&i), ["Keys", "Stereo"]);
+    assert_eq!(names(&i), names(&a));
+    // Notes and their expression.
+    assert_eq!(i.tracks[0].notes_played, a.tracks[0].notes_played);
+    assert!(
+        i.tracks[0]
+            .notes_played
+            .iter()
+            .all(|n| n.expression.len() == 2)
+    );
+    // The regions, online, with the source's audio; B's crossfade.
+    let hash = core_media::caf::hash_file(&p.pkg.join("Media/stereo.caf")).unwrap();
+    let (ra, ri) = (&a.tracks[1].regions, &i.tracks[1].regions);
+    assert_eq!(ri.len(), 2);
+    for (x, y) in ra.iter().zip(ri) {
+        assert_eq!(
+            (x.tick, x.offset, x.length, x.fade_in, x.crossfade),
+            (y.tick, y.offset, y.length, y.fade_in, y.crossfade)
+        );
+        assert_eq!(y.media_hash.as_deref(), Some(hash.as_str()));
+    }
+    assert!(!ri[0].crossfade && ri[1].crossfade);
+    let media = t.s.media().unwrap();
+    assert_eq!(media.len(), 1);
+    assert!(media.iter().all(|m| m.offline.is_none()), "{media:?}");
+    // The maps, markers and song info.
+    assert_eq!(i.tempo, a.tempo);
+    assert!(i.tempo.iter().any(|p| p.2), "the ramp");
+    assert_eq!(i.markers, a.markers);
+    assert_eq!(i.info, a.info);
+    // The levels and the send.
+    let strip = |x: &core_io::dawproject::record::Projection, k: usize| {
+        x.strips[x.tracks[k].strip.unwrap()].clone()
+    };
+    for k in 0..2 {
+        assert!((strip(&i, k).gain_db - strip(&a, k).gain_db).abs() < 1e-9);
+    }
+    assert!((strip(&i, 0).gain_db + 3.0).abs() < 1e-9);
+    let sends = |x: &core_io::dawproject::record::Projection| {
+        let s = strip(x, 1);
+        s.sends
+            .iter()
+            .map(|(to, db, pre, on)| (x.strips[*to].name.clone(), *db, *pre, *on))
+            .collect::<Vec<_>>()
+    };
+    let (sa, si) = (sends(&a), sends(&i));
+    assert_eq!(si.len(), 1);
+    assert_eq!(si[0].0, "Verb");
+    assert!((si[0].1 - sa[0].1).abs() < 1e-9 && (si[0].1 + 10.0).abs() < 1e-9);
+    assert_eq!((si[0].2, si[0].3), (sa[0].2, sa[0].3));
+}
+
+/// Spec §12, L4: a CLAP's settings go out in the file and come back into
+/// the new project's plug-in.
+#[test]
+fn clap_state_round_trips() {
+    let _g = serial();
+    let p = project();
+    let slot = p.s.plugin_slots().unwrap()[0].id;
+    // The value reaches the plug-in while it processes.
+    p.s.play(p.seq).unwrap();
+    idle_until(&p.s, |s| s.transport().unwrap().playing);
+    p.s.set_param(slot, 0, 0.25).unwrap();
+    idle_until(&p.s, |s| {
+        s.params(slot)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == 0 && (r.value - 0.25).abs() < 1e-9)
+    });
+    p.s.stop().unwrap();
+    let dest = p.out.join("x.dawproject");
+    export(&p.s, req(p.seq, &dest));
+    let t = target();
+    let j = import(&t, &dest);
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    let gain = |s: &Session| {
+        s.plugin_slots()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.plugin.id == GAIN_ID && r.status == SlotStatus::Live)
+    };
+    idle_until(&t.s, |s| gain(s).is_some());
+    let new = gain(&t.s).unwrap().id;
+    let v = t.s.debug_plugin_param(new, 0).unwrap();
+    assert!((v - 0.25).abs() < 1e-9, "{v}");
+}
+
+/// Lessons, S10: a cancel before the run and after each of stages 5–8
+/// leaves `Media/` and the document as they were.
+#[test]
+fn cancel_at_every_stage_leaves_media_unchanged() {
+    let _g = serial();
+    let p = project();
+    let dest = p.out.join("x.dawproject");
+    export(&p.s, req(p.seq, &dest));
+    let t = target();
+    let before = media_files(&t.pkg);
+    let doc = t.s.debug_document_json();
+    // Before the run.
+    t.s.debug_free_bytes(None).unwrap();
+    t.s.debug_hold_jobs(true).unwrap();
+    let id = t.s.import_dawproject(import_req(&dest)).unwrap();
+    t.s.cancel_job(id).unwrap();
+    t.s.debug_hold_jobs(false).unwrap();
+    assert_eq!(wait_job(&t.s, id).state, JobStateRow::Cancelled);
+    assert_eq!(media_files(&t.pkg), before);
+    assert_eq!(t.s.debug_document_json(), doc);
+    for stage in 5..=8 {
+        t.s.debug_free_bytes(None).unwrap();
+        t.s.debug_dawproject_cancel_at(Some(stage)).unwrap();
+        let j = import(&t, &dest);
+        assert_eq!(j.state, JobStateRow::Cancelled, "stage {stage}: {j:?}");
+        assert_eq!(media_files(&t.pkg), before, "stage {stage}");
+        assert_eq!(t.s.debug_document_json(), doc, "stage {stage}");
+    }
+    // The hook is used once.
+    assert_eq!(import(&t, &dest).state, JobStateRow::Done);
+}
+
+/// Ruling 19: an entry that is absent or not audio, an external file that
+/// is not a regular file and a URL each become an offline item with its
+/// region, listed.
+#[test]
+fn missing_and_undecodable_audio_become_offline() {
+    let _g = serial();
+    let t = target();
+    let dir = t.dir.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    let fifo = dir.join("pipe.wav");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let fifo_text = text(&fifo);
+    let xml = audio_project(&[
+        ("audio/absent.wav", false),
+        ("audio/junk.wav", false),
+        (&fifo_text, true),
+        ("http://x/a.wav", true),
+    ]);
+    let junk: Vec<u8> = (0..1024u32).map(|i| (i * 7 % 251) as u8).collect();
+    let path = zip_of(
+        &dir,
+        "Bad",
+        &[("project.xml", xml.as_bytes()), ("audio/junk.wav", &junk)],
+    );
+    let j = import(&t, &path);
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    let report = j.report.unwrap();
+    // core-io lists them as a Note (Task 7): the regions are kept.
+    let d = details(
+        &report,
+        ReportKindRow::Note,
+        core_io::dawproject::import::OFFLINE,
+    );
+    assert_eq!(d.len(), 4, "{report:?}");
+    assert_eq!(
+        d[0],
+        "absent: 'audio/absent.wav' isn't in the DAWproject file"
+    );
+    // The decoder's own words, naming the entry, not the extracted copy.
+    assert!(
+        d[1].starts_with("junk: ") && d[1].contains("junk.wav") && !d[1].contains(".incoming"),
+        "{}",
+        d[1]
+    );
+    assert_eq!(d[2], "pipe: it is not a regular file");
+    assert_eq!(d[3], "a: it is a URL, not a file");
+    let media = t.s.media().unwrap();
+    assert_eq!(media.len(), 4);
+    assert!(media.iter().all(|m| m.offline.is_some()), "{media:?}");
+    let doc = doc_of(&t.s);
+    let regions = doc
+        .sequence(first_seq(&t.s))
+        .unwrap()
+        .lanes
+        .iter()
+        .flat_map(|l| l.takes.iter())
+        .flat_map(|k| k.events.values())
+        .filter(|e| matches!(e.body, core_model::event::EventBody::AudioRegion { .. }))
+        .count();
+    assert_eq!(regions, 4);
+    assert!(media_files(&t.pkg).is_empty(), "no audio was written");
+}
+
+/// Ruling 18: an import that would not fit fails before writing anything.
+#[test]
+fn import_not_enough_space_refuses() {
+    let _g = serial();
+    let p = project();
+    let dest = p.out.join("x.dawproject");
+    export(&p.s, req(p.seq, &dest));
+    let t = target();
+    t.s.debug_free_bytes(Some(10)).unwrap();
+    let j = import(&t, &dest);
+    assert_eq!(j.state, JobStateRow::Failed);
+    let m = j.message.unwrap();
+    assert!(
+        m.starts_with("Not enough free space to import this file (it needs ")
+            && m.ends_with(" MB)."),
+        "{m}"
+    );
+    assert!(media_files(&t.pkg).is_empty());
+    assert!(t.s.lanes(first_seq(&t.s).0).unwrap().is_empty());
+    t.s.debug_free_bytes(None).unwrap();
+}
+
+/// Ruling 18: what is not a DAWproject file version 1, or leaves the
+/// package, fails with the reader's sentence and writes nothing.
+#[test]
+fn import_refused_files() {
+    let _g = serial();
+    let t = target();
+    let dir = t.dir.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    let not_zip = dir.join("plain.dawproject");
+    std::fs::write(&not_zip, b"this is not a ZIP file").unwrap();
+    let v2 = zip_of(
+        &dir,
+        "V2",
+        &[(
+            "project.xml",
+            audio_project(&[])
+                .replace(r#"version="1.0""#, r#"version="2.0""#)
+                .as_bytes(),
+        )],
+    );
+    // A name that leaves the package: written as "aa/evil.wav", then
+    // patched in the local header and the directory (the CRC covers the
+    // data only).
+    let evil = zip_of(
+        &dir,
+        "Evil",
+        &[
+            (
+                "project.xml",
+                audio_project(&[("audio/a.wav", false)]).as_bytes(),
+            ),
+            ("aa/evil.wav", b"RIFF"),
+        ],
+    );
+    let mut bytes = std::fs::read(&evil).unwrap();
+    let mut patched = 0;
+    for k in 0..bytes.len().saturating_sub(11) {
+        if &bytes[k..k + 11] == b"aa/evil.wav" {
+            bytes[k..k + 3].copy_from_slice(b"../");
+            patched += 1;
+        }
+    }
+    assert_eq!(patched, 2);
+    std::fs::write(&evil, &bytes).unwrap();
+    for (path, what) in [
+        (&not_zip, "not a ZIP"),
+        (&v2, "version 2"),
+        (&evil, "a name with .."),
+    ] {
+        let refusal = match vizdaw_ffi::dawproject_info(text(path)) {
+            Err(VizError::Model { message }) => message,
+            other => panic!("{what}: {other:?}"),
+        };
+        let j = import(&t, path);
+        assert_eq!(j.state, JobStateRow::Failed, "{what}: {j:?}");
+        assert_eq!(j.message.as_deref(), Some(refusal.as_str()), "{what}");
+        assert!(media_files(&t.pkg).is_empty(), "{what}");
+        assert!(t.s.lanes(first_seq(&t.s).0).unwrap().is_empty(), "{what}");
+    }
+    let r = vizdaw_ffi::dawproject_info(text(&v2));
+    assert!(
+        matches!(&r, Err(VizError::Model { message }) if message.contains("version 2.0")),
+        "{r:?}"
+    );
+}
+
+/// Ruling 17: a project with tracks is refused at once.
+#[test]
+fn into_a_project_with_tracks_is_refused() {
+    let _g = serial();
+    let p = project();
+    let dest = p.out.join("x.dawproject");
+    export(&p.s, req(p.seq, &dest));
+    match p.s.import_dawproject(import_req(&dest)) {
+        Err(VizError::Model { message }) => {
+            assert_eq!(message, core_io::dawproject::import::NOT_NEW)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// L1: one interchange job at a time; a media job, an open edit and
+/// recording refuse.
+#[test]
+fn import_busy_states_refuse() {
+    let _g = serial();
+    let p = project();
+    let dest = p.out.join("x.dawproject");
+    export(&p.s, req(p.seq, &dest));
+    let t = target();
+    let seq = first_seq(&t.s).0;
+    // A running export.
+    t.s.debug_hold_jobs(true).unwrap();
+    let e =
+        t.s.export_dawproject(req(seq, &p.out.join("y.dawproject")))
+            .unwrap();
+    busy(t.s.import_dawproject(import_req(&dest)), "an export");
+    t.s.cancel_job(e).unwrap();
+    t.s.debug_hold_jobs(false).unwrap();
+    wait_job(&t.s, e);
+    // A Convert job.
+    t.s.debug_hold_jobs(true).unwrap();
+    let c = t.s.convert_media().unwrap();
+    busy(t.s.import_dawproject(import_req(&dest)), "a Convert job");
+    t.s.cancel_job(c).unwrap();
+    t.s.debug_hold_jobs(false).unwrap();
+    wait_job(&t.s, c);
+    // A running import holds exports, MIDI imports and media jobs.
+    t.s.debug_hold_jobs(true).unwrap();
+    let i = t.s.import_dawproject(import_req(&dest)).unwrap();
+    busy(t.s.import_dawproject(import_req(&dest)), "another import");
+    busy(
+        t.s.export_dawproject(req(seq, &p.out.join("z.dawproject"))),
+        "an export under an import",
+    );
+    busy(t.s.convert_media(), "a conversion under an import");
+    t.s.cancel_job(i).unwrap();
+    t.s.debug_hold_jobs(false).unwrap();
+    assert_eq!(wait_job(&t.s, i).state, JobStateRow::Cancelled);
+    // An open edit.
+    t.s.begin_edit("Drag".into()).unwrap();
+    busy(t.s.import_dawproject(import_req(&dest)), "an open edit");
+    t.s.end_edit().unwrap();
+    // Recording (offline, an armed track): Busy comes before the track
+    // refusal.
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (rseq, keys) = b.sequence("S", "Keys", Some(synth)).unwrap();
+    b.run(Command::Lane(LaneCmd::SetInput {
+        seq: rseq,
+        lane: keys,
+        input: Some(LaneInput::Midi {
+            port: Some("Keys".into()),
+            channel: None,
+        }),
+    }))
+    .unwrap();
+    b.run(Command::Lane(LaneCmd::SetFlags {
+        seq: rseq,
+        lane: keys,
+        mute: None,
+        solo: None,
+        arm: Some(true),
+    }))
+    .unwrap();
+    let r = Session::from_document(b.finish()).unwrap();
+    r.debug_set_trash_dir(Some(text(&p.dir.path().join("Trash"))));
+    r.record(
+        rseq.0,
+        RecordSpecRow {
+            replace: true,
+            punch: None,
+            looped: false,
+            count_in_bars: 0,
+            pre_roll_bars: 0,
+            passes_as_takes: true,
+        },
+    )
+    .unwrap();
+    let until = Instant::now() + common::wait_limit();
+    while !r.record_state().unwrap().recording {
+        assert!(Instant::now() < until, "recording did not start");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    busy(r.import_dawproject(import_req(&dest)), "recording");
+    r.stop().unwrap();
+    r.close().unwrap();
+    assert!(media_files(&t.pkg).is_empty());
+}
+
+/// Hostile paths: `Model` or `Io` (never `Internal`) from the info read
+/// and from the import, which may also fail its job with the reader's
+/// sentence; nothing is written.
+#[test]
+fn import_hostile_requests() {
+    let _g = serial();
+    let t = target();
+    let out = t.dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let fifo = out.join("fifo.dawproject");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let lp = out.join("loop.dawproject");
+    std::os::unix::fs::symlink(&lp, &lp).unwrap();
+    let folder = out.join("dir.dawproject");
+    std::fs::create_dir(&folder).unwrap();
+    let device = out.join("zero.dawproject");
+    std::os::unix::fs::symlink("/dev/zero", &device).unwrap();
+    let long = format!("/{}.dawproject", "a/".repeat(2100));
+    let paths: Vec<(String, &str)> = vec![
+        (String::new(), "empty"),
+        ("relative.dawproject".into(), "relative"),
+        (text(&folder), "a folder"),
+        (text(&fifo), "a FIFO"),
+        ("/dev/zero".into(), "/dev/zero"),
+        (text(&device), "a link to /dev/zero"),
+        (text(&lp), "a symlink loop"),
+        (long, "over 4 KiB"),
+        (format!("{}/a\0b.dawproject", text(&out)), "a NUL"),
+        (format!("{}/../x.dawproject", text(&out)), "a .. component"),
+        (text(&t.pkg.join("in.dawproject")), "inside the package"),
+        (text(&out.join("missing.zip")), "missing, ending .zip"),
+    ];
+    let fine = |r: &VizError| matches!(r, VizError::Model { .. } | VizError::Io { .. });
+    for (path, what) in &paths {
+        match vizdaw_ffi::dawproject_info(path.clone()) {
+            Err(e) => assert!(fine(&e), "info, {what}: {e:?}"),
+            Ok(i) => panic!("info, {what}: {i:?}"),
+        }
+        match t
+            .s
+            .import_dawproject(DawprojectImportRequestRow { path: path.clone() })
+        {
+            Err(e) => assert!(fine(&e), "import, {what}: {e:?}"),
+            Ok(id) => {
+                let j = wait_job(&t.s, id);
+                assert_eq!(j.state, JobStateRow::Failed, "import, {what}: {j:?}");
+                let m = j.message.unwrap_or_default();
+                assert!(!m.starts_with("internal error"), "import, {what}: {m}");
+            }
+        }
+    }
+    assert!(media_files(&t.pkg).is_empty());
+    assert!(t.s.lanes(first_seq(&t.s).0).unwrap().is_empty());
 }

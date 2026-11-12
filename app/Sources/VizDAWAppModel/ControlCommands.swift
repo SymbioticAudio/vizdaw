@@ -74,7 +74,7 @@ public enum ControlJobs {
             // A MIDI import or export reports in its summary; what it
             // created is not media (plan 6a Task 8). An export for another
             // DAW is one with an export (plan 6b Task 3).
-            if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject {
+            if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject || j.kind == .importProject {
                 return .ok(status: j.report?.summary)
             }
             if j.kind != .format, j.created.isEmpty, !j.problems.isEmpty {

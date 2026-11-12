@@ -3,7 +3,9 @@
 //! written), the job that stages the WAV copies, writes the package as a
 //! partial, renames it into place and keeps the snapshot, the plug-in lines
 //! only the session can know, the AU property-list codec and the snapshots
-//! a Save keeps (Ruling 16).
+//! a Save keeps (Ruling 16); and the import (Task 10): the info read, the
+//! job that extracts and converts the audio and maps the file, applied by
+//! the session as a new project.
 
 use crate::blocks::BlockRule;
 use crate::error::VizError;
@@ -777,6 +779,318 @@ pub(crate) fn keep_snapshots(from: &Path, to: &Path) -> Result<(), String> {
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+// ---- the import (Task 10) ----
+
+/// What the app reads of a DAWproject file before it imports it (L8).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DawprojectInfoRow {
+    /// The rate of the project to make (Ruling 17).
+    pub sample_rate: u32,
+    /// Note and audio tracks (S14).
+    pub tracks: u32,
+    /// Distinct audio files.
+    pub audio_files: u32,
+    /// The file came from VizDAW (Ruling 16).
+    pub from_vizdaw: bool,
+    /// The export it came from: its record's, else its song info's export
+    /// line's.
+    pub export_id: Option<String>,
+}
+
+/// Import a DAWproject file into this (new, empty) project.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DawprojectImportRequestRow {
+    /// The file (absolute).
+    pub path: String,
+}
+
+/// What [`crate::interchange::file_path`] calls a DAWproject file.
+pub(crate) const DAWPROJECT_FILE: &str = "a DAWproject file";
+
+/// The import's free-space failure: it needs `bytes`.
+pub fn not_enough_space_to_import(bytes: u64) -> String {
+    format!(
+        "Not enough free space to import this file (it needs {} MB).",
+        bytes.div_ceil(1_000_000)
+    )
+}
+
+/// Opens the file at `text` (checked as `file_path` checks it) and reads
+/// what [`DawprojectInfoRow`] holds. Nothing outside the package is looked
+/// at.
+pub(crate) fn info(text: &str) -> Result<DawprojectInfoRow, VizError> {
+    use core_io::dawproject::package::open;
+    use core_io::limits::PackageLimits;
+    let path = crate::interchange::file_path(text, DAWPROJECT_FILE)?;
+    let pkg = open(&path, &PackageLimits::default(), &AtomicBool::new(false)).map_err(io_error)?;
+    let i = pkg.info();
+    Ok(DawprojectInfoRow {
+        sample_rate: i.sample_rate,
+        tracks: i.tracks,
+        audio_files: i.audio_files,
+        from_vizdaw: i.ret.from_vizdaw(),
+        export_id: i
+            .ret
+            .record
+            .as_ref()
+            .map(|r| r.export_id.clone())
+            .or_else(|| i.ret.export_id.clone()),
+    })
+}
+
+/// Plug-ins installed here: `(format, ID)` of every catalog entry that is
+/// enabled and usable (OK or not validated yet).
+pub(crate) type Installed = std::collections::HashSet<(core_model::mixer::PluginFormat, String)>;
+
+/// The installed plug-ins, from the catalog now.
+pub(crate) fn installed() -> Installed {
+    use core_host::catalog::PluginStatus;
+    crate::catalog::with(|c| {
+        c.rows()
+            .into_iter()
+            .filter(|r| {
+                r.enabled && matches!(r.status, PluginStatus::Ok | PluginStatus::NotValidated)
+            })
+            .map(|r| (r.plugin.format, r.plugin.id))
+            .collect()
+    })
+}
+
+/// Everything the import job needs (all of it owned: it runs on its
+/// thread).
+pub(crate) struct ImportJob {
+    /// The file.
+    pub path: PathBuf,
+    /// The media root the audio is converted into.
+    pub root: PathBuf,
+    /// The project's format: the audio is converted to it, and its rate is
+    /// the mapping's.
+    pub format: core_model::format::AudioFormat,
+    /// Names no new media file may take
+    /// (`History::referenced_media_anywhere`).
+    pub reserved: BTreeSet<String>,
+    /// The plug-ins installed here.
+    pub installed: Installed,
+    /// The stage after which it cancels itself (test hook: 5 opened, 6 the
+    /// first entry extracted, 7 the first file converted, 8 mapped).
+    pub cancel_at: Option<u32>,
+    /// The free bytes to assume (test hook; `None`: the disk's).
+    pub free: Option<u64>,
+}
+
+/// The files an import converted: `(name, items)`.
+type ImportFiles = Vec<(String, Result<Vec<core_media::import::Imported>, String>)>;
+
+/// A fresh name in `Media/.incoming/` for an extracted entry, keeping its
+/// extension when it is a short ASCII one (the decoder may use it).
+fn extracted_name(entry: &str) -> String {
+    use std::sync::atomic::AtomicU64;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let ext = Path::new(entry)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty() && e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or("audio");
+    format!(
+        "dp-{:x}-{:x}-{:x}.{ext}",
+        std::process::id(),
+        nanos,
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Ruling 19: the file an external path names, when it may be read: not
+/// a URL (`scheme://`), and a regular file, following one link at most.
+/// Never written.
+fn external_file(p: &Path) -> Result<PathBuf, String> {
+    if p.to_string_lossy().contains("://") {
+        return Err("it is a URL, not a file".into());
+    }
+    let why = |e: std::io::Error| e.to_string();
+    let m = std::fs::symlink_metadata(p).map_err(why)?;
+    let (real, m) = if m.file_type().is_symlink() {
+        let to = std::fs::read_link(p).map_err(why)?;
+        let to = match p.parent() {
+            Some(dir) if to.is_relative() => dir.join(to),
+            _ => to,
+        };
+        let m = std::fs::symlink_metadata(&to).map_err(why)?;
+        (to, m)
+    } else {
+        (p.to_path_buf(), m)
+    };
+    if m.is_file() {
+        Ok(real)
+    } else {
+        Err("it is not a regular file".into())
+    }
+}
+
+/// The import job's body: the mapped import, or how it stopped. Converted
+/// media goes into `files` as it is made, so the caller can remove it
+/// whatever happens.
+fn import_body(
+    job: &ImportJob,
+    importer: &dyn core_media::import::MediaImporter,
+    files: &mut ImportFiles,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Box<core_io::dawproject::import::DpImport>, Stop> {
+    use core_io::dawproject::import::{ImportEnv, MediaSource, map};
+    use core_io::dawproject::package::{AudioSource, open};
+    use core_io::limits::PackageLimits;
+    use core_media::MediaError;
+    use core_media::import::{INCOMING_DIR, import_reserved};
+    let stage = |n: u32| {
+        if job.cancel_at == Some(n) {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    };
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    let set = |f: f32| progress.store(f.to_bits(), Ordering::Relaxed);
+    // 1. Open.
+    let pkg = open(&job.path, &PackageLimits::default(), cancel)?;
+    stage(5);
+    if cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    set(0.1);
+    // 2. The free space (external files are looked at only now).
+    let depth = u32::try_from(job.format.depth.bytes()).unwrap_or(u32::MAX);
+    let need = pkg.needed_bytes(depth, cancel)?;
+    let free = job.free.or_else(|| crate::record::free_bytes(&job.root));
+    if free.is_some_and(|f| need > f) {
+        return Err(Stop::Failed(not_enough_space_to_import(need)));
+    }
+    // 3. The audio.
+    let incoming = job.root.join(INCOMING_DIR);
+    let n = pkg.audio().len().max(1) as f32;
+    let mut media = BTreeMap::new();
+    let (mut extracted, mut converted) = (false, false);
+    for (k, a) in pkg.audio().iter().enumerate() {
+        let mut each = |f: f32| set(0.1 + 0.8 * (k as f32 + f.clamp(0.0, 1.0)) / n);
+        let mut convert = |from: &Path, converted: &mut bool| {
+            let r = import_reserved(
+                importer,
+                from,
+                &job.root,
+                job.format,
+                &a.name,
+                &job.reserved,
+                &mut each,
+                cancel,
+            );
+            if !std::mem::replace(converted, true) {
+                stage(7);
+            }
+            r
+        };
+        // `Err(None)`: cancelled; `Err(Some(why))`: offline.
+        let r: Result<Vec<core_media::import::Imported>, Option<String>> = match &a.source {
+            AudioSource::Entry(name) => {
+                let copy = incoming.join(extracted_name(name));
+                let made = std::fs::create_dir_all(&incoming)
+                    .map_err(|e| IoError::Io(format!("{}: {e}", display_name(&incoming))))
+                    .and_then(|()| pkg.extract(a, &copy, cancel));
+                match made {
+                    Err(IoError::Cancelled) => Err(None),
+                    Err(e) => Err(Some(e.to_string())),
+                    Ok(_) => {
+                        if !std::mem::replace(&mut extracted, true) {
+                            stage(6);
+                        }
+                        let r = if cancelled() {
+                            Err(MediaError::Cancelled)
+                        } else {
+                            convert(&copy, &mut converted)
+                        };
+                        let _ = std::fs::remove_file(&copy);
+                        let file = entry_file(name);
+                        r.map(|mut items| {
+                            for i in &mut items {
+                                i.original_name = file.to_owned();
+                            }
+                            items
+                        })
+                        .map_err(|e| match e {
+                            MediaError::Cancelled => None,
+                            // The entry's name, not the extracted copy's.
+                            e => Some(e.to_string().replace(&copy.display().to_string(), file)),
+                        })
+                    }
+                }
+            }
+            AudioSource::External(p) => match external_file(p) {
+                Ok(real) => convert(&real, &mut converted).map_err(|e| match e {
+                    MediaError::Cancelled => None,
+                    e => Some(e.to_string()),
+                }),
+                Err(why) => Err(Some(why)),
+            },
+        };
+        match r {
+            Err(None) => return Err(Stop::Cancelled),
+            Ok(items) => {
+                files.push((a.name.clone(), Ok(items.clone())));
+                media.insert(a.key, MediaSource::Online(items));
+            }
+            Err(Some(why)) => {
+                media.insert(a.key, MediaSource::Offline { why });
+            }
+        }
+        if cancelled() {
+            return Err(Stop::Cancelled);
+        }
+    }
+    set(0.9);
+    // 4. The plan.
+    let has =
+        |f: core_model::mixer::PluginFormat, id: &str| job.installed.contains(&(f, id.to_owned()));
+    let env = ImportEnv {
+        installed: &has,
+        plist: plist(),
+        rate: job.format.sample_rate,
+    };
+    let imp = map(&pkg, &media, &env, cancel)?;
+    stage(8);
+    if cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    Ok(Box::new(imp))
+}
+
+/// The import job: every step inside `catch_unwind`. Whatever it
+/// converted is returned with the result, so the session removes it when
+/// the import is not applied (6b F1).
+pub(crate) fn import_job(
+    job: ImportJob,
+) -> impl FnOnce(&AtomicU32, &AtomicBool) -> Work + Send + 'static {
+    move |progress, cancel| {
+        let mut files = ImportFiles::new();
+        if cancel.load(Ordering::Relaxed) {
+            return Work::ImportProject {
+                files,
+                result: Err(crate::for_daw::CANCELLED.to_owned()),
+            };
+        }
+        let importer = crate::media::importer();
+        let ran = catch_unwind(AssertUnwindSafe(|| {
+            import_body(&job, importer.as_ref(), &mut files, progress, cancel)
+        }));
+        progress.store(1f32.to_bits(), Ordering::Relaxed);
+        let result = match ran {
+            Ok(Ok(imp)) => Ok(imp),
+            Ok(Err(Stop::Cancelled)) => Err(crate::for_daw::CANCELLED.to_owned()),
+            Ok(Err(Stop::Failed(why))) => Err(why),
+            Err(p) => Err(format!("internal error: {}", panic_message(p.as_ref()))),
+        };
+        Work::ImportProject { files, result }
+    }
 }
 
 #[cfg(test)]
