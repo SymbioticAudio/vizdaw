@@ -58,16 +58,16 @@ Every task's requirements include these.
 - **Lessons from plan 6a's reviews (binding):**
   - **The core owns file naming.** Every name the UI shows or checks comes from the core (`ForDawCheckRow.folder`, `.files`); Swift never builds a file name.
   - **Never replace anything without explicit confirmation.** This route never replaces (Ruling 1). Existence is always `symlink_metadata` (lstat): a dangling link counts as taken.
-  - **No file I/O or parsing on the main thread.** `export_for_daw` checks only text and the model before it spawns (Ruling 8). The app calls `export_for_daw_check` from a detached task with a generation counter, as 6a's checks do.
+  - **No file I/O or parsing on the main thread.** `export_for_daw` checks only text and the model before it spawns (Ruling 8). Its one carve-out is the one `bounce` already has: `refresh_media` and the plug-in capture. Say so in Task 2's report (F13). The app calls `export_for_daw_check` from a detached task with a generation counter, as 6a's checks do, and the check's lstat runs off the session lock.
   - **Every dropped item gets a report line.** That covers tracks, strips, notes, song info and colours (Task 1's `route_report_lists_everything_dropped`).
-  - **Goldens are hand-written before the code and can fail.** A missing golden fails unless `VIZDAW_BLESS=1`, which CI never sets.
-  - **A single interchange job runs at a time,** so UI flows that start one while another runs queue rather than fail (Task 4).
-  - **Cancel mid-job is tested** at every stage (Task 2).
+  - **Goldens are hand-written before the code and can fail.** This plan's goldens (`for_daw_tempo_map.mid`, `for_daw_about.txt`) are read with a copy of 6a's never-blessed `hand_golden` (`core-io/tests/midi_out.rs`). `VIZDAW_BLESS` never writes them, and a missing one fails (F4).
+  - **A single interchange job runs at a time,** so UI flows that start one while another runs queue rather than fail (Task 4). The For-DAW sheet and dropped MIDI files queue. Other sheets keep 6a's readable `Busy` alert (F10).
+  - **Cancel mid-job is tested** at every stage (Task 2): before the job runs, while the MIDI files are written, mid-render, after the render, and after the About file before the rename (F6). A late cancel or failure also discards the "Add" imports (F1).
 - **UniFFI changes** (Task 2 only; every new field `#[uniffi(default)]` or `#[uniffi(default = None)]` where a record already exists):
   - `JobKindRow::ExportProject`;
   - records `ForDawRequestRow` and `ForDawCheckRow`;
   - `Session::export_for_daw` and `Session::export_for_daw_check`.
-  - `FakeSession` gains both methods in Task 2. Every Swift `switch` over `JobKindRow` gains `.exportProject` in Task 2.
+  - `FakeSession` gains both methods in Task 2, with the logs and answers that Tasks 3 and 4 use (F8). Every Swift `switch` over `JobKindRow` gains `.exportProject` in Task 2.
 - **Control channel.** The registry goes 170 → 171 in Task 3. Every command is in the registry and handled (`everyRegisteredMenuCommandHasAHandler`).
 - **Each task ends green.**
   - Always:
@@ -137,14 +137,18 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
    - *Cost if wrong:* a `replace` parameter and a confirmation, if the owner wants to overwrite (owner question).
 2. **The common start point is `midi_out::file_start`**: the pickup's start when it is a whole number of beats, else whole bars before bar 1 (6a Ruling 8).
    - The bounce renders from `-start_offset` (frame 0 of the engine). For the padded case, the file stems get leading silence of the frames between the two points (`Plan.lead`).
+   - `core-ffi`'s `for_daw` computes `lead` as `TempoTable::build(&s.tempo, file_start, project rate).tick_to_frame(-start_offset)`. The silence goes into the project-rate temporary, so the export's rate conversion scales it with the audio. `ForDawCheckRow.frames` and the About file's frames are at the *export* rate (F7: accepted, with the rate refined to where the samples are).
    - Added stems land at `-start_offset`, where their audio begins.
    - *Cost if wrong:* the MIDI writer would write odd pickups as a short bar instead.
 3. **The stems are the bounce's file stems** (5f-2 Ruling 5: post-fader, before mute and solo), so a muted strip still gets its stem, with a Note.
    - "Add the stems to this project" uses the bounce's existing add-to-project path (spec §7.6), which places *heard* stems.
+   - A *track* muted in the project (its lane flag) gets the Note "Track 'X' is muted in the project" from `route_report` when no MIDI file's report already carries it. A strip muted in the mixer gets Task 1's strip Note (F14).
    - *Cost if wrong:* importing the written files instead (owner question, since spec §7.6 also says "as heard").
 4. **Default strips** are the strips this sequence's tracks play through, plus every bus that some strip sends to and no strip outputs to. These are, in mixer order:
    - the `Instrument(d)`, `InstrumentOutput(d, _)` and `BuiltinSynth` strips of every destination its events resolve to (`ResolvedEvent.dest` from `flatten`);
-   - the `AudioPath` strip of every track holding audio that plays, resolved as `core_engine::schedule::compile` resolves a track's output.
+   - the `AudioPath` strip of every played region's `ResolvedEvent.audio_out` from `flatten`, as `core_engine::schedule` reads it (`schedule/audio.rs`). A region with no `audio_out` is unrouted and plays nowhere: it is Left out, "Audio regions with no output", with track names (F18).
+
+   A chosen strip that no track of this sequence plays through is accepted. Its stem is silent and it is Left out, "Strips no track of this sequence plays through", by name (spec §10 hostile row).
 
    Master is refused as a stem ("The master is the mix; choose track and bus strips."). `strips: None` means the defaults; `Some([])` means MIDI files only.
    *Cost if wrong:* one function.
@@ -157,6 +161,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
    - Each track's file is `to_smf` with `lanes: [l]`. `All MIDI.mid` holds every MIDI track. `Tempo map.mid` is the new `to_tempo_map_smf` (type 1 with the conductor track only).
    - A MIDI track is a track whose played events include a MIDI event (`flatten`, active take).
    - The report takes `All MIDI.mid`'s report once (`Tempo map.mid`'s when there is no MIDI track). It drops 6a's "Song info other than title and copyright" item, because the About file carries the song info, and adds a Note saying so.
+   - `export_for_daw_check` renders only that one report (All MIDI or the tempo map), never the per-track files: the check needs the report, not the bytes (F12).
    - *Cost if wrong:* report wording.
 7. **The job's order.**
    1. Check the destination and make the staging folder `.<folder>.partial` beside it, with `Audio/` and `MIDI/` inside.
@@ -166,7 +171,13 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
    5. Make a last cancel check.
    6. Rename the folder (`rename_excl`).
 
-   Any failure or cancel removes the staging folder recursively; this job made it, and nothing else is removed. A taken name at the rename fails the job, leaving nothing.
+   Any failure or cancel removes the staging folder recursively; this job made it, and nothing else is removed. A taken name at the rename fails the job, leaving nothing. Every MIDI, About and stem write uses `replace = false`.
+
+   **The "Add" imports** belong to `for_daw::run` from the moment `bounce::run` returns Done. On any later cancel or failure (steps 4–6), it returns `Work::ExportForDaw { files, result: Err(..) }` (a cancel's `Err` is `"Cancelled"`, and the row's state is Cancelled). `apply_jobs` applies `files` only on `Ok` and otherwise discards them through the same `remove_unkept` path, because `Work::Cancelled` carries no files (F1).
+
+   **Paths:** the plan built before the spawn holds stem paths *relative* to the export folder (`Audio/01 Bass.wav`). After step 1, `for_daw::run` rebases `plan.stem_files` onto the staging folder, then runs `partial_fits` on every final path and `outside` on the destination, all in the job (F3).
+
+   Steps 1, 2 and 4 run inside `catch_unwind`. The rename and `PendingFolder`'s `Drop` are outside it, but unwinding still runs `Drop`, so nothing leaks (F21).
    *Cost if wrong:* a retry with the next number.
 8. **No file I/O before the spawn.**
    - `Session::export_for_daw` checks the request text, the model and the format. Every file-system check runs first in the job, and a refusal fails the job with its sentence: the destination is a folder, it is outside the project and every package, and the names fit.
@@ -174,12 +185,40 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
    - *Cost if wrong:* those refusals move earlier.
 9. **One interchange job at a time.**
    - `ExportProject` joins `interchange_idle`'s pending kinds and the bounce's busy check, and `inner.bounce_copies` ends when no `Bounce` *or* `ExportProject` job is pending.
+   - `ExportProject` also joins `media_jobs_idle`'s list, because it reads the media as a bounce does. It joins the media-job list `open_external` checks and the session-close shutdown that stops a running bounce first (`session.rs`, "A bounce still running stops first") (F2).
    - The UI queues behind running jobs instead of showing `Busy` (Task 4).
 10. **Report and labels.**
     - `Summary` gains `audio_files: u64`, written after tracks ("Exported 2 tracks, 3 audio files, 1 200 notes, the tempo map and 4 markers"). `tracks` counts the MIDI files' tracks.
     - The add-to-project undo step is "Add Stems". `JobRow.written` is `[<the export folder>]`.
     - Bounce problems (clipped samples, bypassed plug-ins, offline regions, underruns) become one Changed item, "Problems while rendering the audio", with each line as a detail.
 11. **The sheet comes before the folder panel** (plan 6a Ruling 18), so "What won't transfer" shows before the user clicks Export.
+
+## Pre-flight amendments (2026-11-11)
+
+These come from `.superpowers/sdd/2026-11-11-export-for-another-daw/preflight-report.md`, and the controller accepted every proposed ruling. Each is applied in place in the task it touches; where a step and an older line disagree, the amendment wins.
+
+- **F1** "Add" imports belong to `for_daw::run` after the bounce. Any later cancel or failure returns them in `Err`, and `apply_jobs` discards them (Ruling 7, Task 2).
+- **F2** `ExportProject` joins `media_jobs_idle`, `open_external`'s list and the session-close shutdown; there are tests for Convert, external edit and close (Ruling 9, Task 2).
+- **F3** Stem paths are planned relative to the export folder and rebased onto the staging folder in the job, where `partial_fits` and `outside` run (Ruling 7, Task 2).
+- **F4** The goldens are read with 6a's never-blessed `hand_golden` (Global Constraints, Task 1).
+- **F5** The About tempo line comes from the same `origin`/`map_changes` as `Tempo map.mid`, with the pickup meter named; test `tempo_line_with_a_pickup` (Task 1).
+- **F6** `debug_for_daw_cancel_at` stages 1 (after the first MIDI file) and 2 (after About, before the rename) join the cancel test (Task 2).
+- **F7** `lead` comes from `TempoTable` built from `file_start`, at the project rate of the temporary. The check's and the About file's frames are at the export rate; test `stems_align_at_another_rate` (Ruling 2, Task 2).
+- **F8** `FakeSession` gains request logs, a settable check answer and job IDs in Task 2, for Tasks 3–4.
+- **F9** The stale-partial test uses the dotted `partial_path` name (Task 1).
+- **F10** With "Add", the sheet also waits for media jobs; other sheets keep the `Busy` alert (Task 4).
+- **F11** A new `blockingEnded()` restarts waiting drops; `importEnded`'s guard stays; test `cancelledExportKeepsTheDropQueue` (Task 4).
+- **F12** `a_thousand_tracks` is measured first, with a shared-source entry point if it is slow; the check renders only one report (Ruling 6, Task 1).
+- **F13** The `refresh_media` and capture carve-out is named in the report; the check's lstat runs off the lock (Global Constraints, Task 2).
+- **F14** A muted track gets a Note even without MIDI; README 270 separates a muted strip from a muted track (Ruling 3, Tasks 1, 5).
+- **F15** README 267 also checks that Bounce… is unchanged after the shared rows (Task 5).
+- **F16** One private folder-panel helper serves all three panels (Task 5).
+- **F17** e2e step 4 counts `All MIDI.mid`'s `MTrk` chunks (Task 5).
+- **F18** Audio strips come from `ResolvedEvent.audio_out`; unrouted regions and strips no track plays through are reported (Ruling 4, Task 1).
+- **F19** `snapshot().undo_label` replaces `undo_label()` (Task 2).
+- **F20** A backlog row covers a track-to-file map in the About file (Task 5).
+- **F21** `catch_unwind` covers steps 1, 2 and 4; `Drop` covers the rest on unwind (Ruling 7).
+- **F22** The off-macOS folder-rename fallback is named in Task 2's report.
 
 ---
 
@@ -189,7 +228,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 - Create: `crates/core-io/src/names.rs`, `crates/core-io/src/for_daw.rs`
 - Modify:
   - `crates/core-io/src/lib.rs` (the two modules);
-  - `src/midi_out.rs` (`file_start`, `to_tempo_map_smf`, and `OTHER_INFO` becomes `pub`);
+  - `src/midi_out.rs` (`file_start`, `to_tempo_map_smf`, and `OTHER_INFO` becomes `pub` with a doc line);
   - `src/report.rs` (`Summary.audio_files`, `summary_line`, `Report::plain`);
   - `src/write.rs` (`free_folder`, `stage_folder`, `PendingFolder`).
 - Test:
@@ -246,6 +285,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - Left out, "Strips not chosen";
     - Note, "Strip 'X' is muted in the project; its stem is written" (and the solo form, as 6a words it);
     - Left out, "Strip colours";
+    - Left out, "Audio regions with no output" (track names; F18);
+    - Left out, "Strips no track of this sequence plays through" (strip names);
+    - Note, "Track 'X' is muted in the project", for a muted track the MIDI report does not already name (F14);
     - Note, "Stems are taken before the buses they play through";
     - Note, "Mix, effects and automation are part of the audio files" (only with stems);
     - Note, "Song info is in About these files.txt" (only with song info).
@@ -258,7 +300,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - **`about_text`**: UTF-8, `\n` line ends, ending in one newline. Exactly this, in order:
     1. the folder name, then a blank line;
     2. `Start: <start_sentence>`;
-    3. `Tempo: <bpm> BPM, <num>/<den> at the start. Tempo map.mid holds every tempo and meter change and the markers.` The BPM is `bpm_at(file_start)`, at most two decimals with trailing zeros dropped. The meter is the entry at tick 0.
+    3. `Tempo: <bpm> BPM, <num>/<den> at the start. Tempo map.mid holds every tempo and meter change and the markers.` The BPM is `bpm_at(file_start)`, at most two decimals with trailing zeros dropped. The tempo and meter come from the same `origin`/`map_changes` the tempo-map file is written from, at file position 0 (F5).
+       - With a whole-beat pickup, the meter part reads `<p>/<den> for the pickup, then <num>/<den> from bar 1`, e.g. `1/4 for the pickup, then 4/4 from bar 1`.
+       - With a padded pickup it is the meter written at position 0.
     4. `Audio: <container>, <bits>, <rate with report's thousands grouping> Hz. Every audio file is <frames grouped> frames (<m>:<ss.s>) long: to the song's end plus the tail.`, or `Audio: none; no strips were chosen.`;
     5. when any song-info field is set: a blank line, `Song info`, then `  <Field>: <value>` for each set field in `SongInfo` order. The labels are Title, Artist, Album, Original artist, Composer, Songwriter, Producer, Arranger, Year, Genre, Copyright, Website and Comment, and a multi-line comment indents its later lines by 4 spaces.
     6. a blank line, `Files`, then `  <path>` for each of `l.files()` except the About file itself. `All MIDI.mid` gets ` (every MIDI track)` and the tempo map ` (tempo, meter and markers)`.
@@ -292,13 +336,13 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
       - `layout(small, seq, &default_strips(..), "wav")` gives exactly the paths above, with folder "Song for another DAW";
       - `midi_files` gives `MIDI/01 Bass.mid` and `MIDI/All MIDI.mid`, each byte-equal to 6a's `export_small_type1_960.mid`, and `Tempo map.mid` byte-equal to `for_daw_tempo_map.mid`;
       - `about_text` of the route report is byte-equal to `for_daw_about.txt`.
-      - A missing golden fails unless `VIZDAW_BLESS=1`.
+      - Both goldens are read with a copy of 6a's never-blessed `hand_golden`, so a missing or different file fails (F4).
     - `names_are_safe_and_numbered`:
       - track "A/B:C" gives `MIDI/01 A-B-C.mid`, ".hidden" gives `MIDI/02 -hidden.mid`, and "" (made through a strip name) gives `Untitled`;
       - a 300-byte "é…" name is cut at a character boundary so `.NN <name>.mid.partial` is at most 255 bytes;
       - two tracks named "Bass" give `01 Bass.mid` and `02 Bass.mid`;
       - the folder comes from `SongInfo.title` "My/Song" (`My-Song for another DAW`), else the sequence name, else "Untitled".
-      - In `base.rs`, `free_folder`: free gives `name`; an existing folder, an existing file, a dangling symlink and a stale `name.partial` folder each give `name 2` (lstat), and the stale partial is left in place. `stage_folder` + drop leaves nothing; `commit` gives the folder; a `dest` that appears before commit is Refused, and the staging folder is gone afterwards.
+      - In `base.rs`, `free_folder`: free gives `name`; an existing folder, an existing file, a dangling symlink and a stale `.name.partial` folder (built with `core_media::export::partial_path(&parent.join(name))`) each give `name 2` (lstat). The stale partial is left in place, and an undotted `name.partial` does not count as taken (F9). `stage_folder` + drop leaves nothing; `commit` gives the folder; a `dest` that appears before commit is Refused, and the staging folder is gone afterwards.
     - `default_strips_are_track_strips_and_send_only_buses`:
       - included, in mixer order: a plug-in instrument's strip and its extra output strip, the built-in synth strip, an audio track's output strip, and a bus that only receives sends;
       - excluded: a bus a track's strip outputs to, master, and a strip no track of this sequence plays through;
@@ -312,9 +356,11 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
       - song info with a composer;
       - an inactive take.
 
-      Each item above appears with its names, and "Song info other than title and copyright" does not. 6a's "Inactive takes" appears once with count 1 (not once per MIDI file). `summary.audio_files` equals the chosen strips, and `summary.tracks` equals the MIDI tracks.
+      Each item above appears with its names, and "Song info other than title and copyright" does not. A second document has no MIDI track and holds an audio track muted in the project, plus a region with no output: the report gives the Note "Track 'Gtr' is muted in the project" and the Left out item for the region (F14, F18). 6a's "Inactive takes" appears once with count 1 (not once per MIDI file). `summary.audio_files` equals the chosen strips, and `summary.tracks` equals the MIDI tracks.
+    - `tempo_line_with_a_pickup` (F5): with a one-beat pickup in 4/4 at 120 BPM, the About line reads `Tempo: 120 BPM, 1/4 for the pickup, then 4/4 from bar 1. …`. The meter in `Tempo map.mid` at delta 0 is 1/4 (`FF 58 04 01 02 …`).
     - `start_sentences`: the three sentences above for `start_offset` 0, one beat in 4/4, and one and a half beats in 4/4; `file_start` is `Tick(-61_440)` (one 4/4 bar) for the last.
     - `a_thousand_tracks`: 1 000 MIDI tracks of one note give 1 000 files ending `MIDI/1000 T999.mid`, plus All MIDI and the tempo map, in under 10 s.
+      - Measure it first (F12). Each `to_smf` call flattens the whole sequence, so if it takes over about 5 s, add an internal shared-source entry point to `midi_out` (one flatten for every file) rather than raising the limit. Report the time either way.
     - `cancel_stops_the_midi_files`: with `cancel` set, `midi_files` is `Err(Cancelled)`.
   - `base.rs`:
     - `report_plain_matches_the_sheet`: 120 details given as 50 give `"  Muted notes (120)"`, 50 lines `"    bar k"`, then `"    and 70 more"`; an empty report gives `"Exported nothing\nEverything transferred."`.
@@ -336,8 +382,11 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `Session::bounce`'s body after the plan becomes `fn spawn_render`;
     - `ImportAs::FOR_DAW`;
     - `apply_jobs`, `discard`, `interchange_idle`, the bounce busy check and the `bounce_copies` end check;
+    - `media_jobs_idle`, the media-job list `open_external` checks, and the close-time shutdown that stops a running bounce (F2);
+    - `debug_for_daw_cancel_at(stage: Option<u32>)` (`test-hooks`; stage 1 sets cancel after the first MIDI file is written, stage 2 after the About file is written; F6);
     - the two new methods.
-  - `app/Tests/VizDAWAppModelTests/FakeSession.swift`; `app/Sources/VizDAWAppModel/ProjectMedia.swift` (`jobText` "Exporting for another DAW…", `failureTitle` "Export Failed"); every other Swift `switch` over `JobKindRow`.
+  - `app/Tests/VizDAWAppModelTests/FakeSession.swift`. It gains the two methods plus `forDawChecks: [ForDawRequestRow]`, `forDawExports: [ForDawRequestRow]`, a settable `forDawCheckAnswer: Result<ForDawCheckRow, VizError>` and job IDs from its `interchangeJob` factory, for Tasks 3–4 (F8).
+  - `app/Sources/VizDAWAppModel/ProjectMedia.swift` (`jobText` "Exporting for another DAW…", `failureTitle` "Export Failed"); every other Swift `switch` over `JobKindRow`.
 - Test: `crates/core-ffi/tests/for_daw.rs` (new). Its fixtures are built as `tests/bounce.rs`'s `project` builds them: a saved package in a temp folder, 48 kHz float, generated CAF media. Copy the helpers it needs.
 
 **Interfaces:**
@@ -357,7 +406,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
         pub files: Vec<String>,         // Layout::files(), relative to the folder
         pub strips: Vec<u64>,           // the strips it would render (the defaults for None)
         pub start: String,              // start_sentence
-        pub frames: u64,                // the render's frames before the tail, with the lead
+        pub frames: u64,                // the render's frames before the tail, with the lead, at the export rate (F7)
         pub warning: Option<String>,    // the bounce check's sentences (external MIDI, offline, space)
     }
     ```
@@ -367,18 +416,19 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - It does no file I/O before the spawn (Ruling 8), apart from `refresh_media` and the plug-in capture, as `bounce` does.
   - `Session::export_for_daw_check(req) -> Result<ForDawCheckRow, VizError>`: the same checks. With a non-empty `path`, it also checks the destination and numbers the folder (lstat only). It renders the MIDI on a clone off the session lock. Nothing is written.
   - `bounce::stems_plan(doc: &Document, seq: SeqId, strips: &[StripId], start: Tick, end: Tick, fmt: ExportFormat, files: Vec<PathBuf>, lead: u64, add: bool, offline: &BTreeMap<MediaId, OfflineReasonRow>) -> Result<Plan, VizError>`:
-    - it builds a stems `Plan` for files the caller has named and checked, with `stem_files = (f, f)` and `import_names` from the files' stems;
+    - it builds a stems `Plan` for files named relative to the export folder, with `stem_files = (f, f)` and `import_names` from the files' stems. `for_daw::run` rebases them onto the staging folder in the job (Ruling 7, F3);
     - `plan` and `stems_plan` share one helper for the strips, the range frames, the format and the external-lane and offline-region counts;
     - `plan` keeps refusing `start < 0` and sets `lead: 0`.
-  - `Plan.lead: u64`: `render` writes `lead` zero frames to each *file* stem's writer before the render (not to heard stems), and each file stem's `write_partial` is told `lead + stats.frames`.
+  - `Plan.lead: u64` (project-rate frames, Ruling 2): `render` writes `lead` zero frames to each *file* stem's writer before the render (not to heard stems), and each file stem's `write_partial` is told `lead + stats.frames`.
   - `fn spawn_render(&self, inner: &mut Inner, plan: Plan, kind: JobKindRow, body: impl FnOnce(bounce::Job, &AtomicU32, &AtomicBool) -> Work + Send + 'static) -> Result<u64, VizError>`: the capture, the copies and the hooks, moved out of `bounce`.
   - `ImportAs::FOR_DAW`: label "Add Stems", origin `Bounced`, tracks named after their item. It clamps the tick to `-start_offset` of the target sequence instead of 0; give `ImportAs` a `pickup: bool` field.
   - `Work::ExportForDaw { files: ImportFiles, target: Option<ImportTargetRow>, result: Result<Report, String>, written: Vec<String> }`.
+    - `apply_jobs`, on `Err`: it discards `files` (`remove_unkept`), and the row is Failed or, for `"Cancelled"`, Cancelled (F1).
     - `apply_jobs`, on `Ok`: it applies `files` with `FOR_DAW` (when there are any), sets the job row's `report` and `written` and `interchange_report`, and keeps the folder whatever the apply does (an apply error fails the row with `written` kept).
     - `discard` removes `files`' imports, as for `Work::Bounce`.
-  - `for_daw::run(job: ForDawJob, progress: &AtomicU32, cancel: &AtomicBool) -> Work`. It follows Ruling 7 and wraps `bounce::run`: `Work::Bounce { failed: Some(_) }` fails the job and `Work::Cancelled` cancels it, and both drop the `PendingFolder`. Steps 1, 2 and 4 run inside `catch_unwind`. The target tick for "Add" is `-start_offset`.
+  - `for_daw::run(job: ForDawJob, progress: &AtomicU32, cancel: &AtomicBool) -> Work`. It follows Ruling 7 and wraps `bounce::run`: `Work::Bounce { failed: Some(_) }` fails the job and `Work::Cancelled` cancels it, and both drop the `PendingFolder`. After a Done bounce it keeps the imports and returns them in every outcome (F1). Steps 1, 2 and 4 run inside `catch_unwind` (F21). The target tick for "Add" is `-start_offset`.
 
-- [ ] **Step 1: Write the failing tests** in `tests/for_daw.rs`. They use temp folders only, `serial` with `force_offline`, and `debug_hold_jobs`, `debug_bounce_cancel_at` and `debug_bounce_fail_import` from the `test-hooks` feature.
+- [ ] **Step 1: Write the failing tests** in `tests/for_daw.rs`. They use temp folders only, `serial` with `force_offline`, and `debug_hold_jobs`, `debug_bounce_cancel_at`, `debug_bounce_fail_import` and the new `debug_for_daw_cancel_at` from the `test-hooks` feature.
   - `writes_the_folder_layout`: a "Bass" MIDI track on the built-in synth and a "Gtr" audio track with a region, exported to `tmp`.
     - The job ends Done with `written == [tmp/"Song for another DAW"]`.
     - The folder holds exactly the check's `files` (two stems, two MIDI files, the tempo map, the About file).
@@ -392,14 +442,16 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `a_second_export_numbers_the_folder`: a second export makes "Song for another DAW 2", leaving the first folder's files byte-equal and its listing unchanged. A dangling symlink named "Song for another DAW 3" makes the third export "… 4".
   - `external_midi_gets_a_midi_file_and_no_stem`: a track on an external destination gets `MIDI/NN <track>.mid`, no stem, and the report's Left out item names it.
   - `add_to_project_is_one_undo_step`: `add_to_project: true` with a one-beat pickup.
-    - The tracks increase by one per stem, each region starts at `-start_offset`, and `undo_label() == "Add Stems"`.
+    - The tracks increase by one per stem, each region starts at `-start_offset`, and `snapshot().undo_label == Some("Add Stems")` (F19).
     - One `undo` makes `debug_document_json` equal to before. The folder still exists.
   - `cancel_at_every_stage_leaves_nothing`. Cancel:
     - while held, before the job runs;
+    - with `debug_for_daw_cancel_at(Some(1))`, after the first MIDI file is written into the staging folder;
     - with `debug_bounce_cancel_at(Some(0.4))` (mid-render);
-    - with `Some(1.0)`, which sets cancel as the bounce finishes, before the About file and rename.
+    - with `Some(1.0)`, which sets cancel as the bounce finishes, after the "Add" imports were handed over and before the About file;
+    - with `debug_for_daw_cancel_at(Some(2))`, after the About file and before the rename (F6).
 
-    Each, with and without `add_to_project`, ends `Cancelled`. Afterwards there is no export folder and no `.…partial` folder, the listings of `Media/` and `Media/.incoming/` are equal to before, and the document JSON is unchanged.
+    Each, with and without `add_to_project`, ends `Cancelled`. Afterwards there is no export folder and no `.…partial` folder, the listings of `Media/` and `Media/.incoming/` are equal to before (the late cases with `add_to_project` prove F1), and the document JSON is unchanged.
   - `a_failed_add_leaves_nothing`: `debug_bounce_fail_import(Some(0))` with `add_to_project` ends `Failed`, leaving no folder, the same `Media/` and the same document.
   - `check_writes_nothing_and_names_the_folder`:
     - with `path: ""`, the check gives folder "Song for another DAW", the layout's files, the default strip IDs, the start sentence and `frames > 0`;
@@ -417,10 +469,13 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - while a for-DAW job is held, `bounce`, `export_midi`, `import_midi` and a second `export_for_daw` are `Err(Busy)`;
     - while a bounce is held, `export_for_daw` is `Err(Busy)`;
     - while recording (offline, an armed track), it is `Err(Busy)`;
-    - with `add_to_project` while a Convert job is held, it is `Err(Busy)`.
+    - with `add_to_project` while a Convert job is held, it is `Err(Busy)`;
+    - while a for-DAW job is held, `convert_media` (and a Format change) is `Err(Busy)`, and so is opening a region in the external editor (F2);
+    - closing the session while a for-DAW job runs stops it, leaving no folder, no staging folder and no imports (F2).
+  - `stems_align_at_another_rate` (F7): an export at 44 100 Hz from a 48 kHz project with a 1.5-beat pickup has lead = 1.25 s × 44 100 (±1 frame), and the check's and the About file's frames equal the written files' frames.
   - `plugin_copies_end_with_the_export`: a project with a test-plugin insert exports, and then a bounce starts and ends Done (the copies were released).
 - [ ] **Step 2: Run** `cargo test -p core-ffi --test for_daw`. Expected: fail to compile.
-- [ ] **Step 3: Implement** the items above. `tests/bounce.rs` must pass unchanged: `plan`'s behaviour does not change.
+- [ ] **Step 3: Implement** the items above. `tests/bounce.rs` must pass unchanged: `plan`'s behaviour does not change. The task report names the main-thread carve-out (F13). It also says that off macOS, `rename_excl`'s fallbacks handle files only: a folder commit there fails cleanly (the job fails, nothing is left), and no Linux run tests it (F22).
 - [ ] **Step 4: Run** `cargo test --workspace`, `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: PASS (about +12 Rust; Swift unchanged apart from the new enum case and `FakeSession`).
 - [ ] **Step 5: Commit** `feat(ffi): export-for-another-DAW job on the bounce, with staging, numbering and add to project (plan 6b Task 2)` with every file above.
 
@@ -482,7 +537,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `ProjectMedia.swift` (`pollJobs`):
     - an ended `.exportProject` job the UI started calls `interchange.jobEnded` (report, and `written` for Show in Finder);
     - a failed one calls `forDaw.jobFailed`;
-    - every ended job of a `ForDawModel.blocking` kind calls `forDaw.jobEnded` and `interchange.importEnded`; `importEnded` also restarts a drop queue that was waiting on such a job.
+    - every ended job of a `ForDawModel.blocking` kind calls `forDaw.jobEnded` and the new `interchange.blockingEnded()`, which only calls `startNextDrop()`. `importEnded` keeps its `dropJob` guard and its rule that a cancelled *drop* job clears the queue (F11).
   - `Interchange.swift`: `jobEnded` keeps `written` for `.exportProject` too; `startNextDrop` waits while a blocking job is listed.
 - Test: `app/Tests/VizDAWAppModelTests/ForDawModelTests.swift` (new), `InterchangeTests.swift`
 
@@ -495,7 +550,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `container`, `depth`, `rate`, `otherRate`, `rateChoice`, `setOtherRate(_:)`, `dither` and `addToProject`, as in `BounceModel`;
     - `check: ForDawCheckRow?`, `error: String?`, `waiting: Bool`, `job: UInt64?`, `running`, `progress`;
     - `refresh()`. The first check after showing sends `strips: nil` and sets `stems` from `check.strips` without another check. Later changes send `Some(stems.sorted())`. Each runs in `Task.detached`, and only the latest generation lands.
-    - `start(folder: String)`. If `document.jobs` lists a `.bounce`, `.importMidi`, `.exportMidi` or `.exportProject` job, it keeps the request and sets `waiting`. Otherwise it calls `document.startJob(.exportProject, "Export Failed")`.
+    - `start(folder: String)`. If `document.jobs` lists a `.bounce`, `.importMidi`, `.exportMidi` or `.exportProject` job, it keeps the request and sets `waiting`. With `addToProject`, a `.format`, `.convert`, `.relink` or `.externalEdit` job also makes it wait (F10). Otherwise it calls `document.startJob(.exportProject, "Export Failed")`.
     - `cancelWaiting()`;
     - `jobEnded(_ job: JobRow)`: starts the kept request once no blocking job is listed;
     - `jobFailed(_:message:) -> Bool`: the sheet opens again with `error`.
@@ -516,7 +571,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `aFinishedExportShowsTheReportWithTheFolder`: a Done `.exportProject` job sets `interchange.report`, `reportShown` and `written == [folder]`.
     - `aFailedExportReopensTheSheet`: a Failed one shows the sheet with the message, and no alert.
     - `noStringSaysLane`: every string the model makes says "track".
+  - `ForDawModelTests.addWaitsForMediaJobs` (F10): with `addToProject` and a running `.convert` job, `start` waits. Without `addToProject` it starts at once.
   - `InterchangeTests.droppedMidiWaitsForTheExport`: two `.mid` paths dropped while an `.exportProject` job runs make no `importMidi` call. When it ends, the first starts.
+  - `InterchangeTests.cancelledExportKeepsTheDropQueue` (F11): a *cancelled* `.exportProject` job leaves both waiting drops queued, and the first then starts.
 - [ ] **Step 2: Run** `scripts/swift.sh test --filter ForDaw` and `--filter Interchange`. Expected: FAIL.
 - [ ] **Step 3: Implement** to pass the tests.
 - [ ] **Step 4: Run** `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: PASS (about +8 Swift).
@@ -528,8 +585,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 - Create: `app/Sources/VizDAW/ForDawSheet.swift`
 - Modify:
   - `app/Sources/VizDAW/BounceSheet.swift`: extract its Format/Bits/Rate/Dither rows into `struct AudioFormatRows: View`, bound to either model through a small protocol `AudioFormatChoices` that `BounceModel` and `ForDawModel` adopt;
+  - `app/Sources/VizDAWAppModel/ForDawModel.swift` (conforms to `AudioFormatChoices`);
   - `MidiSheets.swift`: `WontTransfer` loses `private`;
-  - `ProjectPanels.swift`: `Panels.chooseExportFolder()`, an `NSOpenPanel` for folders with `canCreateDirectories`, prompt "Export Here" and message "Choose where to put the folder for another DAW.";
+  - `ProjectPanels.swift`: `Panels.chooseExportFolder()`, an `NSOpenPanel` for folders with `canCreateDirectories`, prompt "Export Here" and message "Choose where to put the folder for another DAW.". It goes through one private `chooseFolder(prompt:message:)` that `chooseBounceFolder` and `chooseMidiExportFolder` also use (F16).
   - `AppCommands.swift`: Export submenu, after "MIDI Clip File…";
   - `DocumentView.swift`: attach the sheet beside `BounceSheet`;
   - `app/README.md`, `docs/feature-backlog.md`, `crates/vizctl/tests/e2e.rs`.
@@ -554,7 +612,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   1. `file.create_demo`.
   2. `file.export_for_daw` with `dry_run: true` returns an `interchange` result with a report and `written: []`, and `tmp` stays empty.
   3. `file.export_for_daw {path: tmp}`: `written[0]` is `tmp/<demo song> for another DAW`, holding `Tempo map.mid`, `About these files.txt`, `MIDI/All MIDI.mid` and at least one `Audio/*.wav`, and nothing ending `.partial`.
-  4. `file.import_midi` of `MIDI/All MIDI.mid` at tick 0 adds as many tracks as the demo has MIDI tracks (`state.get document`).
+  4. `file.import_midi` of `MIDI/All MIDI.mid` at tick 0 adds as many tracks as that file has `MTrk` chunks after the conductor (counted in the test from the file's bytes; `state.get document`) (F17).
   5. `media.import` of each stem adds one track per stem.
   6. `file.export_for_daw {path: tmp, add_to_project: true}` makes "… 2", adds one track per stem, and gives `undo_label` "Add Stems".
   7. `file.interchange_report` returns its report.
@@ -567,9 +625,10 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - "Add the stems to this project" (off);
     - the start sentence and length;
     - "What won't transfer", which updates as you change any option.
+    - Then open File › Bounce…: it looks and behaves as before (the shared format rows; F15).
   - 268: Export asks for a place, then writes "<Song> for another DAW" there, with `Audio/`, `MIDI/` (one file per MIDI track plus `All MIDI.mid`), `Tempo map.mid` and `About these files.txt`. Exporting again makes "… 2", and the first folder is untouched. The report sheet opens, and Show in Finder shows the folder.
   - 269: Open `About these files.txt`: start, tempo, meter, sample rate and format, the song info, every file, and the report.
-  - 270: A track on an external MIDI destination gets a MIDI file and no stem, and the report says so. Mute a track: its stem is still written, and the report says it is muted. Untick a strip: the report lists it.
+  - 270: A track on an external MIDI destination gets a MIDI file and no stem, and the report says so. Mute a track's strip in the mixer: its stem is still written, and the report says the strip is muted. Mute an audio track itself: the report names the track as muted (F14). Untick a strip: the report lists it.
   - 271: Give the song a one-beat pickup. The sheet and the About file say every file starts one beat before bar 1. Import the folder's `All MIDI.mid` and a stem into a new project at its start: they line up.
   - 272: Tick "Add the stems to this project": new tracks named after the stems at the start point; one Undo ("Add Stems") removes them all, and the folder stays.
   - 273: Cancel during a long export: no folder is left and the project is unchanged. Drop two MIDI files, then start an export at once: the sheet waits, then exports after the imports.
@@ -581,7 +640,8 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - a stem that renders silent is still written (only external MIDI is known before the render);
   - `replace` for the export folder, if the owner wants it (Ruling 1);
   - added stems are the heard stems while the files ignore mute and solo (Ruling 3);
-  - the re-import idea's origin (Ardour, spec §2 goal 7), credited here, nowhere in the app.
+  - the re-import idea's origin (Ardour, spec §2 goal 7), credited here, nowhere in the app;
+  - the About file lists files, not a track-to-file map: stems shared by several tracks are named after the strip (spec §7.6 "the track list"; F20).
 - [ ] **Step 5: Run all the gates:**
   - `cargo fmt --all -- --check`;
   - both clippies and `cargo clippy -p core-ffi --lib -- -D warnings`;
@@ -612,8 +672,8 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `names::safe_part`, `write::{free_folder, stage_folder, PendingFolder}`, `Report::plain`, `Summary.audio_files`;
   - `midi_out::{file_start, to_tempo_map_smf}`;
   - `for_daw::{Layout, AboutAudio, default_strips, midi_tracks, layout, midi_files, route_report, start_sentence, about_text}`;
-  - `ForDawRequestRow`, `ForDawCheckRow`, `JobKindRow::ExportProject`, `Work::ExportForDaw`, `bounce::stems_plan`, `Plan.lead`, `spawn_render`, `ImportAs::FOR_DAW`, `export_for_daw(_check)`;
-  - `InterchangeCommands.exportForDaw`/`forDawRequest`, `ForDawModel` (`blocking`, `jobEnded`, `jobFailed`), `AudioFormatRows`, `ForDawSheet`, `Panels.chooseExportFolder`.
+  - `ForDawRequestRow`, `ForDawCheckRow`, `JobKindRow::ExportProject`, `Work::ExportForDaw`, `bounce::stems_plan`, `Plan.lead`, `spawn_render`, `ImportAs::FOR_DAW`, `export_for_daw(_check)`, `debug_for_daw_cancel_at`;
+  - `InterchangeCommands.exportForDaw`/`forDawRequest`, `ForDawModel` (`blocking`, `jobEnded`, `jobFailed`), `InterchangeModel.blockingEnded`, `AudioFormatRows`, `ForDawSheet`, `Panels.chooseExportFolder`.
 - **Review Focus:** each line names its tests in the owning task.
 - **Spec questions for the owner:**
   1. Rulings 1 and 3: no `replace`, and the added stems are the heard stems.
