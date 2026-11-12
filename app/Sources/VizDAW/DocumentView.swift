@@ -14,6 +14,20 @@ struct DocumentView: View {
     var body: some View {
         DocumentShell(model: model, docID: docID)
             .navigationTitle(model.windowTitle)
+            .modifier(DocumentSheets(model: model, docID: docID))
+            .modifier(InterchangeSheets(model: model, docID: docID))
+            .modifier(DocumentAlerts(model: model))
+    }
+}
+
+/// The document's sheets, apart from `DocumentView.body` so the type
+/// checker can handle the chain (one `.sheet` per sheet).
+private struct DocumentSheets: ViewModifier {
+    @Bindable var model: DocumentModel
+    let docID: UUID
+
+    func body(content: Content) -> some View {
+        content
             .sheet(
                 item: Binding(
                     get: { model.editor.referenceDraft }, set: { model.editor.referenceDraft = $0 })
@@ -39,6 +53,29 @@ struct DocumentView: View {
             ) {
                 ForDawSheet(forDaw: model.forDaw, document: model)
             }
+            .sheet(
+                item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
+            ) { _ in
+                TrackSynthSheet(
+                    sheets: model.synth, editor: model.editor, channels: model.inputs.knownChannels ?? 256)
+            }
+            .sheet(
+                item: Binding(
+                    get: { model.synth.newDestination }, set: { if $0 == nil { model.synth.closeNewDestination() } })
+            ) { _ in
+                NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
+            }
+    }
+}
+
+/// The MIDI and project sheets (plan 6a), split from `DocumentSheets` to
+/// keep each chain short for the type checker.
+private struct InterchangeSheets: ViewModifier {
+    @Bindable var model: DocumentModel
+    let docID: UUID
+
+    func body(content: Content) -> some View {
+        content
             // The MIDI sheets and the report open only for what the user
             // started here, never under the control channel (plan 6a).
             .sheet(
@@ -69,18 +106,15 @@ struct DocumentView: View {
             ) {
                 ProjectSettingsSheet(settings: model.projectSettings, editor: model.editor)
             }
-            .sheet(
-                item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
-            ) { _ in
-                TrackSynthSheet(
-                    sheets: model.synth, editor: model.editor, channels: model.inputs.knownChannels ?? 256)
-            }
-            .sheet(
-                item: Binding(
-                    get: { model.synth.newDestination }, set: { if $0 == nil { model.synth.closeNewDestination() } })
-            ) { _ in
-                NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
-            }
+    }
+}
+
+/// The document's alerts (recovered recordings and the document alert).
+private struct DocumentAlerts: ViewModifier {
+    @Bindable var model: DocumentModel
+
+    func body(content: Content) -> some View {
+        content
             .alert(
                 "Recovered Recordings",
                 isPresented: Binding(
@@ -106,7 +140,7 @@ struct DocumentView: View {
             } message: { item in
                 Text(item.message)
             }
-        }
+    }
 }
 
 /// The transport bar along the top of the window (plan 7a Ruling 9): an
