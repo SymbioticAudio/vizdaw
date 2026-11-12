@@ -344,6 +344,10 @@ pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection,
         let mut automation: BTreeMap<String, Vec<(i64, f64)>> = BTreeMap::new();
         for r in l.played.get(&p.lane.id).map_or(&[][..], Vec::as_slice) {
             ticker.tick()?;
+            // What a muted reference use holds does not play.
+            if r.path.len() > 1 && r.path.first().is_some_and(|x| l.muted.contains(&x.event)) {
+                continue;
+            }
             let tick = r.tick.0;
             match &r.body {
                 EventBody::AudioRegion {

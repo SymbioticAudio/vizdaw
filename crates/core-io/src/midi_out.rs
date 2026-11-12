@@ -73,8 +73,8 @@ const EMPTY_RANGE: &str = "The range to export is empty.";
 
 const VELOCITIES: &str = "Velocities rounded to 7 bits (MIDI file)";
 const VALUES: &str = "Controller, pressure and pitch bend values rounded (MIDI file)";
-const MUTED: &str = "Muted notes";
-const OUTSIDE: &str = "Events outside the sequence";
+pub(crate) const MUTED: &str = "Muted notes";
+pub(crate) const OUTSIDE: &str = "Events outside the sequence";
 const ATTRIBUTES: &str = "Note attributes";
 const SYSEX8: &str = "8-bit SysEx";
 const DRUM_ROWS: &str = "Drum row names";

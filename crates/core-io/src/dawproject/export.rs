@@ -21,6 +21,12 @@
 //! Everything the file cannot hold is listed in the report; each `what` is
 //! a constant (or, when it names something, a function) here.
 
+use super::export_timeline::arrange;
+pub use super::export_timeline::{
+    CROSSFADES, EVENTS_OUTSIDE, FADE_SHAPES, MIDI_GROUPS, MISSING_MEDIA, MUTED_NOTES, NESTED_AUDIO,
+    NOTE_ATTRIBUTES, OTHER_PER_NOTE, OVERLAPS, REGION_GAIN, SOLO_AUTOMATION, SYSEX, TEXTS,
+    TRANSPOSED, UNPLACED_AUTOMATION, VELOCITY_SCALE_AUTOMATION,
+};
 use super::plugins::{PlistCodec, state_entry};
 use super::record::{self, ObjectRef, Record, Snapshot};
 use super::schema::*;
@@ -132,11 +138,12 @@ pub fn export(
     env: &ExportEnv<'_>,
     cancel: &AtomicBool,
 ) -> Result<DpExport, IoError> {
-    let built = build(doc, o.seq, env.plist, env.app_version, cancel)?;
+    let built = build(doc, o, env.plist, env.app_version, cancel)?;
     let Built {
         layout,
         project,
         states,
+        audio,
         ids,
         mut report,
     } = built;
@@ -182,7 +189,7 @@ pub fn export(
         metadata_xml,
         record_json,
         snapshot_json,
-        audio: Vec::new(),
+        audio,
         states,
         report,
     })
@@ -198,7 +205,7 @@ pub fn check(
     plist: &dyn PlistCodec,
     cancel: &AtomicBool,
 ) -> Result<Report, IoError> {
-    let mut built = build(doc, o.seq, plist, env!("CARGO_PKG_VERSION"), cancel)?;
+    let mut built = build(doc, o, plist, env!("CARGO_PKG_VERSION"), cancel)?;
     write_project_reporting(&built.project, &mut built.report);
     stop(cancel)?;
     Ok(built.report)
@@ -506,9 +513,11 @@ pub(super) struct Layout<'a> {
     pub(super) seq: &'a Sequence,
     /// The tick at file time 0.
     pub(super) origin: i64,
-    /// What each track plays (with top-level regions unmuted).
+    /// What each track plays (with top-level regions and reference uses
+    /// unmuted).
     pub(super) played: BTreeMap<LaneId, Vec<ResolvedEvent>>,
-    /// The top-level regions that are muted in the project.
+    /// The top-level regions and reference uses that are muted in the
+    /// project.
     pub(super) muted: BTreeSet<EventId>,
     /// The tracks, in order.
     pub(super) parts: Vec<Part<'a>>,
@@ -573,15 +582,24 @@ impl Layout<'_> {
     }
 }
 
-/// A copy of `doc` whose top-level regions in `s` play unmuted, and the
-/// regions that were muted.
-fn unmute_regions(doc: &Document, s: &Sequence) -> Result<(Document, BTreeSet<EventId>), IoError> {
+/// A copy of `doc` whose top-level regions and reference uses in `s` play
+/// unmuted, and the ones that were muted.
+fn unmute_top_level(
+    doc: &Document,
+    s: &Sequence,
+) -> Result<(Document, BTreeSet<EventId>), IoError> {
     let muted: BTreeSet<EventId> = s
         .lanes
         .iter()
         .filter_map(Lane::active)
         .flat_map(|t| t.events.values())
-        .filter(|e| e.mute && matches!(e.body, EventBody::AudioRegion { .. }))
+        .filter(|e| {
+            e.mute
+                && matches!(
+                    e.body,
+                    EventBody::AudioRegion { .. } | EventBody::Reference { .. }
+                )
+        })
         .map(|e| e.id)
         .collect();
     if muted.is_empty() {
@@ -652,13 +670,23 @@ pub(super) fn layout<'a>(
     let s = sequence(doc, seq)?;
     stop(cancel)?;
     let origin = file_start(s).0;
-    let (copy, muted) = unmute_regions(doc, s)?;
+    let (copy, muted) = unmute_top_level(doc, s)?;
     let mut scratch = Report::default();
     let played = midi_out::source(&copy, seq, &[], &mut scratch)?.played;
     drop(copy);
     stop(cancel)?;
-    // From `source`'s report only the track mute and solo Notes apply here
-    // (L11); the rest is worded for MIDI files.
+    // From `source`'s report the track mute and solo Notes (L11), and the
+    // muted notes and events outside the sequence it counts; the rest is
+    // worded for MIDI files.
+    for i in scratch.items.iter().filter(|i| {
+        i.kind == ItemKind::LeftOut && [MUTED_NOTES, EVENTS_OUTSIDE].contains(&i.what.as_str())
+    }) {
+        add_n(report, i.kind, &i.what, i.count);
+        if let Some(item) = report.items.iter_mut().find(|x| x.what == i.what) {
+            item.details.extend(i.details.iter().cloned());
+            item.details.truncate(crate::limits::MAX_DETAILS);
+        }
+    }
     for lane in &s.lanes {
         for what in [
             midi_out::muted_track(&lane.name),
@@ -879,6 +907,7 @@ struct Built<'a> {
     layout: Layout<'a>,
     project: DpProject,
     states: Vec<(String, Vec<u8>)>,
+    audio: Vec<AudioFile>,
     ids: BTreeMap<String, ObjectRef>,
     report: Report,
 }
@@ -1373,16 +1402,17 @@ fn metadata(doc: &Document, export_id: &str) -> DpMetaData {
     m
 }
 
-/// The layout, the project model and the state entries of sequence `seq`.
+/// The layout, the project model, the state entries and the audio entries
+/// of `o`'s sequence.
 fn build<'a>(
     doc: &'a Document,
-    seq: SeqId,
+    o: &ExportOptions,
     plist: &dyn PlistCodec,
     app_version: &str,
     cancel: &AtomicBool,
 ) -> Result<Built<'a>, IoError> {
     let mut report = Report::default();
-    let layout = layout(doc, seq, &mut report, cancel)?;
+    let layout = layout(doc, o.seq, &mut report, cancel)?;
     let s = layout.seq;
     vizdaw_only(doc, s, &mut report);
     let mut ctx = Ctx {
@@ -1471,28 +1501,28 @@ fn build<'a>(
     let (tempo, time_signature, mut arrangement) = maps(s, layout.origin, &mut ctx.report);
     ctx.ids.insert("tempo".to_owned(), obj("tempo", s.id.0));
     ctx.ids.insert("timesig".to_owned(), obj("meter", s.id.0));
+    let timeline = arrange(
+        &layout,
+        o.clips,
+        o.region_gain,
+        &mut ctx.report,
+        &mut Ticker::new(cancel),
+    )?;
+    stop(cancel)?;
     arrangement.lanes = Some(DpLanes {
         head: DpHead {
             time_unit: Some(DpTimeUnit::Beats),
             ..DpHead::default()
         },
-        items: layout
-            .parts
-            .iter()
-            .map(|p| {
-                DpTimeline::Lanes(DpLanes {
-                    head: DpHead {
-                        track: Some(p.id()),
-                        ..DpHead::default()
-                    },
-                    items: Vec::new(),
-                })
-            })
-            .collect(),
+        items: timeline.lanes,
     });
     let markers = u64::try_from(arrangement.markers.len()).unwrap_or(u64::MAX);
     let mut report = ctx.report;
     report.summary.tracks = u64::try_from(layout.parts.len()).unwrap_or(u64::MAX);
+    report.summary.notes = timeline.notes;
+    report.summary.regions = timeline.regions;
+    report.summary.automation_points = timeline.points;
+    report.summary.audio_files = u64::try_from(timeline.audio.len()).unwrap_or(u64::MAX);
     report.summary.markers = markers;
     report.summary.plugins = ctx.plugins;
     report.summary.tempo_map = true;
@@ -1511,6 +1541,7 @@ fn build<'a>(
         layout,
         project,
         states: ctx.states,
+        audio: timeline.audio,
         ids: ctx.ids,
         report,
     })
