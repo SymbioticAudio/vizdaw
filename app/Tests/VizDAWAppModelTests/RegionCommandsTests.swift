@@ -192,10 +192,25 @@ import VizDAWCore
         refused(
             RegionCommands.crossfade, [ControlArg(name: "shape", value: .text(value: "cubic"))], "shape", "cubic")
         refused(RegionCommands.crossfade, [ControlArg(name: "shape", value: .int(value: 1))], "shape", "int shape")
-        for part in [Array(ids(3, 30, 11).prefix(2)), [ids(3, 30, 11)[2]], [ids(3, 30, 11)[0]]] {
-            refused(RegionCommands.crossfade, part, "event", "partial \(part.count)")
-            refused(RegionCommands.removeCrossfade, part, "event", "partial remove \(part.count)")
+        let all = ids(3, 30, 11)
+        for (part, missing) in [(Array(all.prefix(2)), "event"), ([all[2]], "seq"), ([all[0]], "lane"), ([all[1]], "seq")] {
+            for id in [RegionCommands.crossfade, RegionCommands.removeCrossfade] {
+                refused(id, part, missing, "partial \(part.map(\.name)) \(id)")
+                let out = RegionCommands.runChannel(id, args: part, doc: UUID(), m, defaultMs: 10)
+                if case .failed(let fail) = out { #expect(fail.message.contains("`\(missing)` is missing"), "\(fail.message)") }
+            }
         }
+        let twice = [ControlArg(name: "length_ms", value: .text(value: "5")), ControlArg(name: "length_ms", value: .text(value: "6"))]
+        refused(RegionCommands.crossfade, all + twice, "length_ms", "duplicated length_ms")
+        refused(RegionCommands.crossfade, all + [all[0]], "seq", "duplicated seq")
+        refused(RegionCommands.crossfade, ids(3, 30, Int64.max), "event", "event at Int64.max")
+        refused(RegionCommands.crossfade, ids(Int64.max, 30, 11), "lane", "seq at Int64.max")
+        refused(
+            RegionCommands.crossfade,
+            [all[0], all[1], ControlArg(name: "event", value: .text(value: "11.5"))], "event", "text id")
+        refused(
+            RegionCommands.crossfade,
+            [all[0], all[1], ControlArg(name: "event", value: .flag(value: true))], "event", "flag id")
         refused(RegionCommands.crossfade, ids(3, 31, 1), "event", "the note")
         refused(RegionCommands.crossfade, ids(3, 30, 999), "event", "unknown event")
         refused(RegionCommands.crossfade, ids(3, 30, 12), "event", "another track's region")
@@ -269,12 +284,17 @@ import VizDAWCore
     }
 
     @Test func crossfadeIdsNeverRunFadeTo() throws {
-        let (m, f) = try crossfadeModel()
+        let f = editorFake()
+        let a = regionRow(10, tick: 0, duration: 61_440, frames: 96_000)
+        var b = regionRow(11, tick: 30_720, duration: 61_440, frames: 96_000)
+        b.overlapWith = 10
+        b.overlapFrames = 24_000
+        b.crossfade = true
+        f.laneEventTable["3/30"] = LaneEvents(seq: 3, lane: 30, rev: 1, events: [a, b])
         let host = FakeControlHost()
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
         let doc = try #require(s.newDemo())
         let dm = try #require(s.model(doc))
-        _ = m
         dm.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 30)], events: [10, 11]))
         for id in [RegionCommands.crossfade, RegionCommands.removeCrossfade] {
             #expect(RegionCommands.ids.contains(id))
@@ -297,9 +317,9 @@ import VizDAWCore
             #expect(RegionCommands.run(id, dm) != .done)
             let out = ControlCommands.run(id, args: [], doc: (doc, dm), store: s, host: host)
             guard case .failed(let fail) = out, fail.code == .unavailable else {
-            Issue.record("\(out)")
-            return
-        }
+                Issue.record("\(out)")
+                return
+            }
         }
         #expect(f.edits.isEmpty)
         // The default length comes from the host.
@@ -307,5 +327,31 @@ import VizDAWCore
         dm.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 30)], events: [11]))
         _ = ControlCommands.run(RegionCommands.crossfade, args: [], doc: (doc, dm), store: s, host: host)
         #expect(f.edits.last == .audio(edit: .crossfade(event: 11, length: .upTo(frames: 2_400), shape: .equalPower)))
+    }
+
+    @Test func channelRemoveWithoutACrossfadeIsUnavailableBeforeTheCore() throws {
+        let (m, f) = try crossfadeModel()
+        var b = regionRow(11, tick: 30_720, duration: 61_440, frames: 96_000)
+        b.overlapWith = 10
+        b.overlapFrames = 24_000
+        f.laneEventTable["3/30"] = LaneEvents(
+            seq: 3, lane: 30, rev: 1, events: [regionRow(10, tick: 0, duration: 61_440, frames: 96_000), b])
+        pick(m, [11])
+        let out = RegionCommands.runChannel(RegionCommands.removeCrossfade, args: [], doc: UUID(), m, defaultMs: 10)
+        guard case .failed(let fail) = out, fail.code == .unavailable else {
+            Issue.record("\(out)")
+            return
+        }
+        #expect(fail.message == "The selected region has no crossfade.")
+        #expect(f.edits.isEmpty)
+    }
+
+    @Test func aBadDefaultLengthStillMakesOneFrame() throws {
+        let (m, f) = try crossfadeModel()
+        pick(m, [11])
+        for ms in [Double.nan, 0, -4] {
+            #expect(RegionCommands.crossfade(m, defaultMs: ms) == .done)
+            #expect(f.edits.last == .audio(edit: .crossfade(event: 11, length: .upTo(frames: 1), shape: .equalPower)))
+        }
     }
 }

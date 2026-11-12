@@ -159,7 +159,7 @@ extension RegionCommands {
     /// media is unknown), at least 1.
     static func frames(ms: Double, of row: EventRow, _ m: DocumentModel) -> UInt64 {
         var rate = Double(m.media.row(row.media)?.sampleRate ?? 0)
-        if rate <= 0 { rate = Double((try? m.session.projectInfo().format.sampleRate) ?? 48_000) }
+        if rate <= 0 { rate = Double(m.projectInfo?.format.sampleRate ?? 48_000) }  // the model's cached read
         if rate <= 0 { rate = 48_000 }
         let f = (ms * rate / 1_000).rounded()
         return f >= 1 ? UInt64(min(f, 1e15)) : 1
@@ -209,6 +209,9 @@ extension RegionCommands {
         func bad(_ param: String, _ why: String) -> ControlOutcome {
             .failed(.of(.invalidParams, "\(id): `\(param)` \(why)"))
         }
+        for name in ["seq", "lane", "event", "length_ms", "shape"] where args.filter({ $0.name == name }).count > 1 {
+            return bad(name, "is given more than once")
+        }
         let given = ["seq", "lane", "event"].filter { n in args.contains { $0.name == n } }
         guard given.isEmpty || given.count == 3 else {
             return bad(
@@ -235,6 +238,7 @@ extension RegionCommands {
         if given.isEmpty {
             guard m.editor.gesture == nil else { return ControlCommands.unavailable(EditorModel.gestureOpenMessage) }
             guard let t = crossfadeTarget(m) else { return ControlCommands.unavailable(noCrossfadeTarget) }
+            if id == removeCrossfade, !t.row.crossfade { return ControlCommands.unavailable(noCrossfadeMessage) }
             target = t
         } else {
             guard let seq = MpeCommands.id(args, "seq") else { return bad("seq", "must be a sequence ID") }

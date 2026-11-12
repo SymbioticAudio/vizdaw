@@ -51,6 +51,12 @@ struct EditingSettingsView: View {
             })
     }
 
+    /// "10 ms", "12.5 ms": one decimal place only when there is one.
+    private static func msText(_ v: Double) -> String {
+        let t = v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+        return "\(t) ms"
+    }
+
     var body: some View {
         Form {
             Section("Nudge in Time") {
@@ -99,12 +105,11 @@ struct EditingSettingsView: View {
                     value: $prefs.crossfadeMs, in: EditingPreferences.crossfadeRange, step: 1
                 ) {
                     LabeledContent("Default crossfade") {
-                        Text("\(Int(prefs.crossfadeMs.rounded())) ms")
+                        Text(Self.msText(prefs.crossfadeMs))
                             .monospacedDigit()
                             .foregroundStyle(theme.text.secondary.color)
                     }
                 }
-                .accessibilityLabel("Default crossfade in milliseconds")
             }
             // Plan 5f-3 Ruling 5: applications only, chosen with a panel.
             Section("External Sample Editor") {
