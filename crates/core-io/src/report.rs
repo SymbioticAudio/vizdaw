@@ -31,6 +31,8 @@ pub struct Item {
 pub struct Summary {
     /// Tracks in the result.
     pub tracks: u64,
+    /// Audio files in the result.
+    pub audio_files: u64,
     /// Regions in the result.
     pub regions: u64,
     /// Notes in the result.
@@ -88,6 +90,7 @@ impl Report {
     pub fn merge(&mut self, other: Report) {
         let (s, o) = (&mut self.summary, other.summary);
         s.tracks = s.tracks.saturating_add(o.tracks);
+        s.audio_files = s.audio_files.saturating_add(o.audio_files);
         s.regions = s.regions.saturating_add(o.regions);
         s.notes = s.notes.saturating_add(o.notes);
         s.markers = s.markers.saturating_add(o.markers);
@@ -126,6 +129,7 @@ impl Report {
         };
         let parts: Vec<String> = [
             count(s.tracks, "track", "tracks"),
+            count(s.audio_files, "audio file", "audio files"),
             count(s.regions, "region", "regions"),
             count(s.notes, "note", "notes"),
             s.tempo_map.then(|| "the tempo map".to_string()),
@@ -141,6 +145,47 @@ impl Report {
             Some((only, [])) => format!("{verb} {only}"),
             Some((last, rest)) => format!("{verb} {} and {last}", rest.join(", ")),
         }
+    }
+
+    /// The report as text, as the report sheet's Copy gives it: the summary
+    /// line, then the groups "Changed", "Left out" and "Notes" (empty ones
+    /// omitted), each item as `"  <what>"` or `"  <what> (<count>)"` with
+    /// its details as `"    <detail>"` and, after them, `"    and N more"`
+    /// when it happened more often than it has details. With no
+    /// items: the summary, then "Everything transferred.". No newline at
+    /// the end.
+    pub fn plain(&self, verb: &str) -> String {
+        let mut lines = vec![self.summary_line(verb)];
+        if self.is_empty() {
+            lines.push("Everything transferred.".to_string());
+            return lines.join("\n");
+        }
+        for (title, kind) in [
+            ("Changed", ItemKind::Changed),
+            ("Left out", ItemKind::LeftOut),
+            ("Notes", ItemKind::Note),
+        ] {
+            let mut items = self.items.iter().filter(|i| i.kind == kind).peekable();
+            if items.peek().is_none() {
+                continue;
+            }
+            lines.push(title.to_string());
+            for i in items {
+                lines.push(if i.count > 1 {
+                    format!("  {} ({})", i.what, i.count)
+                } else {
+                    format!("  {}", i.what)
+                });
+                lines.extend(i.details.iter().map(|d| format!("    {d}")));
+                let given = u64::try_from(i.details.len()).unwrap_or(u64::MAX);
+                // "and N more" follows given details; an item kept without
+                // any shows only its count.
+                if given > 0 && i.count > given {
+                    lines.push(format!("    and {} more", i.count - given));
+                }
+            }
+        }
+        lines.join("\n")
     }
 }
 

@@ -1,4 +1,5 @@
-//! Partial-file writes: a temp file beside the destination, then a rename.
+//! Partial-file writes: a temp file beside the destination, then a rename;
+//! and the same for a whole folder.
 
 use crate::{IoError, io_err};
 use core_media::export::{display_name, partial_path};
@@ -87,6 +88,99 @@ impl Drop for PendingFile {
     fn drop(&mut self) {
         if !self.committed {
             let _ = std::fs::remove_file(&self.partial);
+        }
+    }
+}
+
+/// The most numbered names [`free_folder`] tries.
+const MAX_FOLDER_NUMBER: u32 = 9999;
+
+/// Whether nothing is at `p`, by `symlink_metadata` (lstat): a dangling
+/// link is something.
+fn absent(p: &Path) -> Result<bool, IoError> {
+    match std::fs::symlink_metadata(p) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(io_err(p, "checked", &e)),
+    }
+}
+
+/// The first of `name`, `name 2` … `name 9999` in `parent` where neither
+/// the path nor its partial (`.<name>.partial`) exists (lstat). A stale
+/// partial is passed over, never removed. Refused when all are taken.
+pub fn free_folder(parent: &Path, name: &str) -> Result<PathBuf, IoError> {
+    for n in 1..=MAX_FOLDER_NUMBER {
+        let p = if n == 1 {
+            parent.join(name)
+        } else {
+            parent.join(format!("{name} {n}"))
+        };
+        if absent(&p)? && absent(&partial_path(&p))? {
+            return Ok(p);
+        }
+    }
+    Err(IoError::Refused(format!(
+        "Every name from {name} to {name} {MAX_FOLDER_NUMBER} is taken; choose another folder"
+    )))
+}
+
+/// A staging folder (`.<name>.partial` beside its destination) being
+/// filled. Dropping it uncommitted removes it and everything in it.
+#[derive(Debug)]
+pub struct PendingFolder {
+    partial: PathBuf,
+    dest: PathBuf,
+    committed: bool,
+}
+
+/// Makes the staging folder of `dest`. One left from an earlier export is
+/// refused, never reused or removed.
+pub fn stage_folder(dest: &Path) -> Result<PendingFolder, IoError> {
+    let partial = partial_path(dest);
+    match std::fs::create_dir(&partial) {
+        Ok(()) => Ok(PendingFolder {
+            partial,
+            dest: dest.to_path_buf(),
+            committed: false,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(IoError::Refused(format!(
+            "{} is left from an earlier export; remove it or choose another name",
+            display_name(&partial)
+        ))),
+        Err(e) => Err(io_err(dest, "written", &e)),
+    }
+}
+
+impl PendingFolder {
+    /// The staging folder, to write into.
+    pub fn path(&self) -> &Path {
+        &self.partial
+    }
+
+    /// Moves the staging folder to its destination, only if that name is
+    /// still free. Refused when it is taken; the staging folder is then
+    /// removed.
+    pub fn commit(mut self) -> Result<PathBuf, IoError> {
+        match core_media::import::rename_excl(&self.partial, &self.dest) {
+            Ok(()) => {
+                self.committed = true;
+                sync_parent(&self.dest);
+                Ok(std::mem::take(&mut self.dest))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(IoError::Refused(
+                format!("{} exists; choose another name", display_name(&self.dest)),
+            )),
+            Err(e) => Err(io_err(&self.dest, "written", &e)),
+        }
+    }
+}
+
+impl Drop for PendingFolder {
+    fn drop(&mut self) {
+        if !self.committed {
+            // This job made it: remove it whole (a link in it is removed,
+            // never followed).
+            let _ = std::fs::remove_dir_all(&self.partial);
         }
     }
 }

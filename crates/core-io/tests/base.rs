@@ -3,7 +3,7 @@ use core_io::limits::Limits;
 use core_io::read::read_regular;
 use core_io::report::{ItemKind, Report};
 use core_io::text::sanitize;
-use core_io::write::write_partial;
+use core_io::write::{free_folder, stage_folder, write_partial};
 use proptest::prelude::*;
 use std::time::{Duration, Instant};
 
@@ -343,4 +343,155 @@ fn io_errors_name_the_file() {
     );
     let e = write_partial(&d.path().join("no/such/dir/x.mid"), b"", false).unwrap_err();
     assert!(matches!(&e, IoError::Io(m) if m.contains("x.mid")), "{e:?}");
+}
+
+#[test]
+fn report_plain_matches_the_sheet() {
+    assert_eq!(
+        Report::default().plain("Exported"),
+        "Exported nothing\nEverything transferred."
+    );
+    let mut r = Report::default();
+    r.summary.notes = 3;
+    for k in 1..=120 {
+        r.add(ItemKind::LeftOut, "Muted notes", Some(format!("bar {k}")));
+    }
+    // Kept without details: the count alone, no "and N more".
+    r.add(ItemKind::Note, "Once", None);
+    r.add(ItemKind::Changed, "Twice", None);
+    r.add(ItemKind::Changed, "Twice", None);
+    let mut want = vec![
+        "Exported 3 notes".to_string(),
+        "Changed".into(),
+        "  Twice (2)".into(),
+        "Left out".into(),
+        "  Muted notes (120)".into(),
+    ];
+    want.extend((1..=50).map(|k| format!("    bar {k}")));
+    want.push("    and 70 more".into());
+    want.push("Notes".into());
+    want.push("  Once".into());
+    assert_eq!(r.plain("Exported"), want.join("\n"));
+}
+
+#[test]
+fn summary_line_counts_audio_files_after_tracks() {
+    let mut r = Report::default();
+    r.summary.tracks = 2;
+    r.summary.audio_files = 3;
+    r.summary.notes = 1200;
+    r.summary.tempo_map = true;
+    r.summary.markers = 4;
+    assert_eq!(
+        r.summary_line("Exported"),
+        "Exported 2 tracks, 3 audio files, 1 200 notes, the tempo map and 4 markers"
+    );
+    let mut r = Report::default();
+    r.summary.audio_files = 1;
+    assert_eq!(r.summary_line("Exported"), "Exported 1 audio file");
+    let mut sum = Report::default();
+    sum.merge(r.clone());
+    sum.merge(r);
+    assert_eq!(sum.summary.audio_files, 2);
+}
+
+#[test]
+fn free_folder_numbers_past_anything_taken() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path();
+    let name = "Song for another DAW";
+    assert_eq!(free_folder(p, name).unwrap(), p.join(name));
+    // An undotted "<name>.partial" is someone else's: it does not count.
+    std::fs::create_dir(p.join(format!("{name}.partial"))).unwrap();
+    assert_eq!(free_folder(p, name).unwrap(), p.join(name));
+
+    let taken: [&dyn Fn(&std::path::Path); 4] = [
+        &|q| std::fs::create_dir(q.join(name)).unwrap(),
+        &|q| std::fs::write(q.join(name), b"x").unwrap(),
+        &|q| std::os::unix::fs::symlink(q.join("nowhere"), q.join(name)).unwrap(),
+        &|q| {
+            let stale = core_media::export::partial_path(&q.join(name));
+            std::fs::create_dir(stale).unwrap();
+        },
+    ];
+    for (i, take) in taken.iter().enumerate() {
+        let e = tempfile::tempdir().unwrap();
+        take(e.path());
+        assert_eq!(
+            free_folder(e.path(), name).unwrap(),
+            e.path().join(format!("{name} 2")),
+            "case {i}"
+        );
+        if i == 3 {
+            // The stale partial is passed over, never removed.
+            let stale = core_media::export::partial_path(&e.path().join(name));
+            assert!(std::fs::symlink_metadata(stale).unwrap().is_dir());
+        }
+    }
+
+    // " 2" taken too: " 3"; every number up to 9999 taken: refused.
+    let e = tempfile::tempdir().unwrap();
+    std::fs::create_dir(e.path().join("A")).unwrap();
+    std::fs::create_dir(e.path().join("A 2")).unwrap();
+    assert_eq!(free_folder(e.path(), "A").unwrap(), e.path().join("A 3"));
+    for n in 3..=9999 {
+        std::fs::write(e.path().join(format!("A {n}")), b"").unwrap();
+    }
+    assert!(matches!(
+        free_folder(e.path(), "A"),
+        Err(IoError::Refused(_))
+    ));
+}
+
+#[test]
+fn staged_folders_commit_or_vanish() {
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("Song for another DAW");
+    let partial = core_media::export::partial_path(&dest);
+
+    // Dropped uncommitted: nothing is left, contents included.
+    let f = stage_folder(&dest).unwrap();
+    assert_eq!(f.path(), partial.as_path());
+    std::fs::create_dir(f.path().join("MIDI")).unwrap();
+    std::fs::write(f.path().join("MIDI/01 Bass.mid"), b"x").unwrap();
+    drop(f);
+    assert!(std::fs::symlink_metadata(&partial).is_err());
+    assert!(std::fs::symlink_metadata(&dest).is_err());
+
+    // Committed: the folder, with its contents.
+    let f = stage_folder(&dest).unwrap();
+    std::fs::write(f.path().join("About these files.txt"), b"hi").unwrap();
+    assert_eq!(f.commit().unwrap(), dest);
+    assert_eq!(
+        std::fs::read(dest.join("About these files.txt")).unwrap(),
+        b"hi"
+    );
+    assert!(std::fs::symlink_metadata(&partial).is_err());
+
+    // A stale staging folder is refused by name and left alone.
+    let other = d.path().join("Other");
+    let stale = core_media::export::partial_path(&other);
+    std::fs::create_dir(&stale).unwrap();
+    let e = stage_folder(&other).unwrap_err();
+    assert!(
+        matches!(&e, IoError::Refused(m) if m == ".Other.partial is left from an earlier export; remove it or choose another name"),
+        "{e:?}"
+    );
+    assert!(stale.is_dir());
+    std::fs::remove_dir(&stale).unwrap();
+
+    // The destination appears before the commit: refused, theirs kept,
+    // the staging folder gone.
+    let f = stage_folder(&other).unwrap();
+    std::fs::write(f.path().join("mine"), b"1").unwrap();
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("theirs"), b"2").unwrap();
+    let e = f.commit().unwrap_err();
+    assert!(
+        matches!(&e, IoError::Refused(m) if m == "Other exists; choose another name"),
+        "{e:?}"
+    );
+    assert_eq!(std::fs::read(other.join("theirs")).unwrap(), b"2");
+    assert!(std::fs::symlink_metadata(other.join("mine")).is_err());
+    assert!(std::fs::symlink_metadata(&stale).is_err());
 }

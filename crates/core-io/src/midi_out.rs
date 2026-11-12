@@ -78,7 +78,8 @@ const OUTSIDE: &str = "Events outside the sequence";
 const ATTRIBUTES: &str = "Note attributes";
 const SYSEX8: &str = "8-bit SysEx";
 const DRUM_ROWS: &str = "Drum row names";
-const OTHER_INFO: &str = "Song info other than title and copyright";
+/// The report item for song info a MIDI file does not carry (Left out).
+pub const OTHER_INFO: &str = "Song info other than title and copyright";
 const ZERO: &str = "Notes of zero length";
 const FAR: &str = "Events too far apart for a MIDI file";
 const PICKUP_BAR: &str = "Pickup written as a full bar";
@@ -877,44 +878,7 @@ pub fn to_smf_until(
     other_info(doc, s, &mut report);
     short_first_bar(s, &mut report);
     let origin = origin(s, &mut report);
-
-    let mut conductor: Vec<Item<SmfEvent>> = Vec::new();
-    if !s.name.is_empty() {
-        conductor.push(Item {
-            tick: 0,
-            key: meta_key(SUB_NAME),
-            ev: smf_meta(0x03, s.name.as_bytes().to_vec()),
-        });
-    }
-    if let Some(c) = &doc.settings().info.copyright {
-        conductor.push(Item {
-            tick: 0,
-            key: meta_key(SUB_COPYRIGHT),
-            ev: smf_meta(0x02, c.as_bytes().to_vec()),
-        });
-    }
-    for (tick, e) in map_changes(s, origin, None, &mut report) {
-        let (sub, ev) = map_meta(e);
-        conductor.push(Item {
-            tick,
-            key: meta_key(sub),
-            ev,
-        });
-    }
-    let mut markers = 0u64;
-    for m in &s.markers {
-        match m.tick.0.checked_sub(origin.tick).filter(|t| *t >= 0) {
-            Some(tick) => {
-                markers = markers.saturating_add(1);
-                conductor.push(Item {
-                    tick,
-                    key: meta_key(SUB_MARKER),
-                    ev: smf_meta(0x06, m.name.as_bytes().to_vec()),
-                });
-            }
-            None => report.add(ItemKind::LeftOut, OUTSIDE, None),
-        }
-    }
+    let (conductor, markers) = conductor(doc, s, origin, &mut report);
 
     let mut w = SmfWriter {
         src: &src,
@@ -1001,6 +965,132 @@ pub fn to_smf_until(
             format: u16::from(!o.type0),
             division: Division::Ppq(o.ppq),
             tracks: out,
+        },
+        report,
+    ))
+}
+
+/// The conductor track's events: the title (the sequence's name),
+/// copyright, the tempo, meter and key from `origin`, and the markers
+/// (those before file position 0 are Left out); with the markers written.
+fn conductor(
+    doc: &Document,
+    s: &Sequence,
+    origin: Origin,
+    report: &mut Report,
+) -> (Vec<Item<SmfEvent>>, u64) {
+    let mut conductor: Vec<Item<SmfEvent>> = Vec::new();
+    if !s.name.is_empty() {
+        conductor.push(Item {
+            tick: 0,
+            key: meta_key(SUB_NAME),
+            ev: smf_meta(0x03, s.name.as_bytes().to_vec()),
+        });
+    }
+    if let Some(c) = &doc.settings().info.copyright {
+        conductor.push(Item {
+            tick: 0,
+            key: meta_key(SUB_COPYRIGHT),
+            ev: smf_meta(0x02, c.as_bytes().to_vec()),
+        });
+    }
+    for (tick, e) in map_changes(s, origin, None, report) {
+        let (sub, ev) = map_meta(e);
+        conductor.push(Item {
+            tick,
+            key: meta_key(sub),
+            ev,
+        });
+    }
+    let mut markers = 0u64;
+    for m in &s.markers {
+        match m.tick.0.checked_sub(origin.tick).filter(|t| *t >= 0) {
+            Some(tick) => {
+                markers = markers.saturating_add(1);
+                conductor.push(Item {
+                    tick,
+                    key: meta_key(SUB_MARKER),
+                    ev: smf_meta(0x06, m.name.as_bytes().to_vec()),
+                });
+            }
+            None => report.add(ItemKind::LeftOut, OUTSIDE, None),
+        }
+    }
+    (conductor, markers)
+}
+
+/// The tick at file position 0 of sequence `s` (Ruling 8): its pickup's
+/// start when that is a whole number of beats, else whole bars before
+/// bar 1.
+pub fn file_start(s: &Sequence) -> Tick {
+    Tick(origin(s, &mut Report::default()).tick)
+}
+
+/// The meter written at file position 0 of `s`, and with a pickup bar of
+/// its own, the meter of bar 1 after it: the same `origin` and
+/// `map_changes` the files are written from.
+pub(crate) fn start_meters(s: &Sequence) -> (Meter, Option<Meter>) {
+    let mut scratch = Report::default();
+    let o = origin(s, &mut scratch);
+    let mut times = map_changes(s, o, None, &mut scratch)
+        .into_iter()
+        .filter_map(|(t, e)| match e {
+            MapEvent::Time(m) => Some((t, m)),
+            _ => None,
+        });
+    let first = times
+        .next()
+        .map_or_else(|| s.meter.entry_at(Tick(o.tick)).meter, |(_, m)| m);
+    let bar1 = o
+        .pickup
+        .and_then(|_| times.find(|(t, _)| Some(*t) == 0i64.checked_sub(o.tick)))
+        .map(|(_, m)| m);
+    (first, bar1)
+}
+
+/// The pickup of `s` as written: `Some(beats)` for a pickup bar of its
+/// own, `None` otherwise; and the whole bars written before bar 1 when
+/// the pickup is padded (0 without a pickup).
+pub(crate) fn pickup_shape(s: &Sequence) -> (Option<u8>, i64) {
+    let o = origin(s, &mut Report::default());
+    if let Some(m) = o.pickup {
+        return (Some(m.num), 0);
+    }
+    let bar = s.meter.entry_at(Tick::ZERO).meter.bar_ticks().max(1);
+    (None, o.tick.checked_neg().map_or(0, |t| t / bar))
+}
+
+/// The tempo map of sequence `seq` alone, as a type 1 Standard MIDI File
+/// whose one track is [`to_smf`]'s conductor (title, copyright, tempo,
+/// meter, key and markers). Refuses an unknown sequence and a `ppq` other
+/// than 480, 960 or 15 360; stops with `Err(Cancelled)` once `cancel` is
+/// set.
+pub fn to_tempo_map_smf(
+    doc: &Document,
+    seq: SeqId,
+    ppq: u16,
+    cancel: &AtomicBool,
+) -> Result<(SmfFile, Report), IoError> {
+    if !matches!(ppq, 480 | 960 | 15_360) {
+        return Err(refused(BAD_PPQ));
+    }
+    let s = doc.sequence(seq).map_err(|_| refused(NO_SEQ))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(IoError::Cancelled);
+    }
+    let mut report = Report::default();
+    other_info(doc, s, &mut report);
+    short_first_bar(s, &mut report);
+    let origin = origin(s, &mut report);
+    let (items, markers) = conductor(doc, s, origin, &mut report);
+    let track = finish(items, ppq, &mut report);
+    report.summary.markers = markers;
+    report.summary.tempo_map = true;
+    Ok((
+        SmfFile {
+            format: 1,
+            division: Division::Ppq(ppq),
+            tracks: vec![track],
         },
         report,
     ))

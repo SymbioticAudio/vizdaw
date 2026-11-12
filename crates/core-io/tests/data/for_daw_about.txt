@@ -1,0 +1,16 @@
+Song for another DAW
+
+Start: Every file starts at bar 1.
+Tempo: 120 BPM, 4/4 at the start. Tempo map.mid holds every tempo and meter change and the markers.
+Audio: WAV, 24-bit, 48 000 Hz. Every audio file is 96 000 frames (0:02.0) long: to the song's end plus the tail.
+
+Files
+  MIDI/01 Bass.mid
+  MIDI/All MIDI.mid (every MIDI track)
+  Tempo map.mid (tempo, meter and markers)
+  Audio/01 Bass.wav
+
+What changed or was left out
+Exported 1 track, 1 audio file, 1 note and the tempo map
+Notes
+  Mix, effects and automation are part of the audio files

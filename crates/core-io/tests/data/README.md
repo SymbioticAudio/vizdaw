@@ -315,3 +315,33 @@ and both tracks' events in one track (type 0, no track names).
 
 The notes of "Lead" at bar 1 and at bar 4 start outside the range and are
 not written.
+
+## Export for another DAW goldens (plan 6b Task 1)
+
+`for_daw.rs::small_files_match_the_goldens` compares `for_daw`'s output
+with these byte for byte. Both were written by hand before the code
+existed; they are never blessed, and a missing one fails. The document is
+the small one above: "Song" at 120 BPM in 4/4 and C major, one track
+"Bass" on the built-in synth on group 1, channel 1, holding one note
+(pitch 60, velocity `up7(100)`, tick 0, a quarter long).
+
+### `for_daw_tempo_map.mid`
+
+`Tempo map.mid`: type 1, one track, 960 PPQ (`MThd` `0001 0001 03C0`).
+The track is the conductor of `export_small_type1_960.mid`, byte for
+byte:
+
+```
+00 FF 03 04 53 6F 6E 67   track name "Song"
+00 FF 51 03 07 A1 20      tempo 500 000 us per quarter (120 BPM)
+00 FF 58 04 04 02 18 08   time signature 4/4, 24 clocks, 8 32nds
+00 FF 59 02 00 00         key signature C major
+00 FF 2F 00               end of track
+```
+
+### `for_daw_about.txt`
+
+`About these files.txt` for that document, with one WAV stem (24-bit,
+48 000 Hz, 96 000 frames): UTF-8, `\n` line ends, one newline at the end.
+The file is the text itself; it was typed from the layout in plan 6b
+Task 1 (folder name, Start, Tempo, Audio, Files, then the report).

@@ -13,10 +13,12 @@
 )]
 
 pub mod clip;
+pub mod for_daw;
 pub mod gm;
 pub mod limits;
 pub mod midi_in;
 pub mod midi_out;
+pub mod names;
 pub mod read;
 pub mod report;
 pub mod smf;
