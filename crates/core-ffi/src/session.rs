@@ -215,6 +215,11 @@ pub(crate) struct Inner {
     /// last per lane, waiting to be written back once no recording or edit
     /// is open; a user's own setting of the lane drops its entry.
     mpe_owed: std::collections::BTreeMap<LaneId, Option<core_model::mpe::MpeConfig>>,
+    /// The model's notes (a crossfade shortened or dropped) from the edit
+    /// steps of the open edit, or from a finished conversion, waiting for
+    /// the snapshot `end_edit` returns (plan 6c pre-flight F1). Every other
+    /// snapshot carries only its own command's notes.
+    last_warnings: Vec<String>,
     /// Destinations' mix and MPE configuration batches a full engine
     /// command ring refused, oldest first: `idle` sends them again
     /// (final review m4).
@@ -340,6 +345,7 @@ impl Inner {
             edits: Default::default(),
             edits_writing: 0,
             mpe_owed: Default::default(),
+            last_warnings: Vec::new(),
             mix_owed: Vec::new(),
             #[cfg(feature = "test-hooks")]
             bounce_cancel_at: None,
@@ -634,6 +640,12 @@ impl Inner {
     }
 
     fn snapshot(&mut self) -> Result<DocSnapshot, VizError> {
+        self.snapshot_with(Vec::new())
+    }
+
+    /// [`Inner::snapshot`] whose `warnings` also carry `notes` (the model's
+    /// report lines of the edit that made it).
+    fn snapshot_with(&mut self, notes: Vec<String>) -> Result<DocSnapshot, VizError> {
         self.revs.update(self.history.doc());
         let doc = self.doc();
         Ok(DocSnapshot {
@@ -644,7 +656,7 @@ impl Inner {
             undo_label: self.history.undo_label().map(str::to_string),
             redo_label: self.history.redo_label().map(str::to_string),
             sequences: seq_rows(doc)?,
-            warnings: warnings(doc),
+            warnings: warnings(doc).into_iter().chain(notes).collect(),
         })
     }
 }
@@ -1061,7 +1073,12 @@ impl Session {
             records_busy(&inner)?;
         }
         let before = inner.doc().clone();
-        inner.history.execute(&cmd, filter)?;
+        let report = inner.history.execute(&cmd, filter)?;
+        // Inside an open edit the notes wait for its end (a drag's last
+        // step decides what is said).
+        if inner.edit_label.is_some() {
+            inner.last_warnings.clone_from(&report.warnings);
+        }
         inner.version += 1;
         // The user's own MPE setting wins over a controller's MCM still
         // waiting to be written back (plan 5g-2 Task 6 review m1), also
@@ -1084,7 +1101,7 @@ impl Session {
         self.release_vanished(&mut inner);
         self.resync_plugin_automation(&mut inner, Some(&before));
         self.send_mix_changes(&mut inner, &before);
-        inner.snapshot()
+        inner.snapshot_with(report.warnings)
     }
 
     /// Captures the state of every running plugin that `next` (the
@@ -2384,6 +2401,7 @@ impl Session {
             let mut inner = lock(&self.inner);
             inner.history.begin(label.clone())?;
             inner.edit_label = Some(label);
+            inner.last_warnings.clear();
             Ok(())
         })
     }
@@ -2403,7 +2421,8 @@ impl Session {
             self.commit_held(&mut inner);
             self.apply_pending_automation(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
-            inner.snapshot()
+            let notes = std::mem::take(&mut inner.last_warnings);
+            inner.snapshot_with(notes)
         })
     }
 
@@ -3549,10 +3568,12 @@ impl Session {
             }
             // A panic inside a command must not leave the transaction open:
             // `ffi_guard` alone would report it but keep `edit_label` set.
+            let mut notes = Vec::new();
             let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for (step, c) in core.into_iter().enumerate() {
                     edit_all_hook(&label, step);
                     self.execute_with(c, &filter)?;
+                    notes.append(&mut lock(&self.inner).last_warnings);
                 }
                 Ok::<(), VizError>(())
             }));
@@ -3566,6 +3587,7 @@ impl Session {
             if let Some(e) = failure {
                 let mut inner = lock(&self.inner);
                 inner.edit_label = None;
+                inner.last_warnings.clear();
                 if inner.history.in_transaction() {
                     inner.history.abort()?;
                 }
@@ -3581,7 +3603,8 @@ impl Session {
             inner.version += 1;
             self.commit_held(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
-            let snapshot = inner.snapshot()?;
+            notes.append(&mut inner.last_warnings);
+            let snapshot = inner.snapshot_with(notes)?;
             drop(inner);
             if let Some(seq) = cmds.iter().find_map(crate::edit::claims_engine) {
                 self.claim_for_input(SeqId(seq));
@@ -3637,6 +3660,7 @@ impl Session {
                 inner.reload_host(self.id);
             }
             inner.edit_label = None;
+            inner.last_warnings.clear();
             self.commit_held(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
@@ -4814,14 +4838,21 @@ fn apply_convert(
         }
     };
     match inner.history.execute(&cmd, &ViewFilter::default()) {
-        Ok(_) => Ok((
-            files
-                .iter()
-                .filter(|(_, r)| r.is_ok())
-                .map(|(m, _)| m.0)
-                .collect(),
-            problems,
-        )),
+        Ok(report) => {
+            // The rescale may shorten or drop a crossfade: the user hears of
+            // it in the job's problems and in the snapshot the next closed
+            // edit returns (plan 6c pre-flight F1).
+            problems.extend(report.warnings.iter().cloned());
+            inner.last_warnings.extend(report.warnings);
+            Ok((
+                files
+                    .iter()
+                    .filter(|(_, r)| r.is_ok())
+                    .map(|(m, _)| m.0)
+                    .collect(),
+                problems,
+            ))
+        }
         Err(e) => {
             remove(&files);
             Err((e.into(), problems))
@@ -8510,12 +8541,13 @@ impl Session {
                 })
                 .collect();
             let lin = 10f32.powf(gain_db / 20.0);
+            let xfades = crate::overviews::crossfades_over(&doc, core_model::ids::EventId(event));
             let gain = |c: usize| -> f32 {
                 let Some(Some((a, b))) = spans.get(c) else {
                     return 0.0;
                 };
                 let r = (a + b) / 2 - source_offset.min((a + b) / 2);
-                lin * crate::overviews::fade_gain(r, length, fade_in, fade_out)
+                lin * crate::overviews::fade_gain(r, length, fade_in, fade_out, &xfades)
             };
             let file = inner.root(self.id).join(&m.path);
             Ok(crate::overviews::columns(
@@ -8574,6 +8606,7 @@ impl Session {
                     gain_db,
                     fade_in,
                     fade_out,
+                    xfades: crate::overviews::crossfades_over(doc, core_model::ids::EventId(event)),
                 }
             };
             Ok(crate::overviews::envelope(

@@ -309,6 +309,18 @@ pub struct EventRow {
     /// A region's name (plan 6a; `None`: unnamed).
     #[uniffi(default = None)]
     pub region_name: Option<String>,
+    /// A region's fade in is a crossfade with the region it starts inside
+    /// (plan 6c).
+    #[uniffi(default = false)]
+    pub crossfade: bool,
+    /// The region (of the same take) this one starts inside, if any; filled
+    /// by `lane_events` (plan 6c).
+    #[uniffi(default = None)]
+    pub overlap_with: Option<u64>,
+    /// How many frames of this region's media the region it starts inside
+    /// still sounds (0: none; filled by `lane_events`).
+    #[uniffi(default = 0)]
+    pub overlap_frames: u64,
 }
 
 const NO_FADE: FadeRow = FadeRow {
@@ -351,6 +363,9 @@ impl EventRow {
             eight_bit: false,
             automation: None,
             region_name: None,
+            crossfade: false,
+            overlap_with: None,
+            overlap_frames: 0,
         }
     }
 }
@@ -520,12 +535,17 @@ pub fn fade_of(f: &FadeRow) -> Fade {
     Fade {
         // A negative length is no fade.
         length_frames: u64::try_from(f.length).unwrap_or(0),
-        shape: match f.shape {
-            FadeShapeRow::Linear => FadeShape::Linear,
-            FadeShapeRow::EqualPower => FadeShape::EqualPower,
-            FadeShapeRow::Exponential => FadeShape::Exponential,
-            FadeShapeRow::SCurve => FadeShape::SCurve,
-        },
+        shape: shape_of(f.shape),
+    }
+}
+
+/// A fade shape from its row.
+pub fn shape_of(s: FadeShapeRow) -> FadeShape {
+    match s {
+        FadeShapeRow::Linear => FadeShape::Linear,
+        FadeShapeRow::EqualPower => FadeShape::EqualPower,
+        FadeShapeRow::Exponential => FadeShape::Exponential,
+        FadeShapeRow::SCurve => FadeShape::SCurve,
     }
 }
 
@@ -650,9 +670,10 @@ pub fn row(
             fade_in,
             fade_out,
             name,
-            ..
+            crossfade,
         } => {
             r.region_name = name.clone();
+            r.crossfade = *crossfade;
             r.media = Some(media.0);
             r.source_offset = *source_offset;
             r.frames = *length;
@@ -737,7 +758,7 @@ pub fn spec(row: &EventRow) -> Result<EventSpec, VizError> {
             fade_in: fade_of(&row.fade_in),
             fade_out: fade_of(&row.fade_out),
             name: row.region_name.clone(),
-            crossfade: false,
+            crossfade: row.crossfade,
         },
         EventKindRow::Automation => {
             let a = row
@@ -771,9 +792,28 @@ pub fn lane_events(
     let events = l
         .active()
         .map(|t| {
+            // Only a take with two or more regions can overlap itself.
+            let regions = t
+                .events
+                .values()
+                .filter(|e| matches!(e.body, EventBody::AudioRegion { .. }))
+                .take(2)
+                .count();
+            let overlaps = if regions >= 2 {
+                core_model::crossfade::overlaps(doc, seq, t)
+            } else {
+                BTreeMap::new()
+            };
             t.events
                 .values()
-                .map(|e| row(doc, &s.tempo, &mut spans, e))
+                .map(|e| {
+                    let mut r = row(doc, &s.tempo, &mut spans, e);
+                    if let Some(o) = overlaps.get(&e.id) {
+                        r.overlap_with = Some(o.with.0);
+                        r.overlap_frames = o.frames;
+                    }
+                    r
+                })
                 .collect()
         })
         .unwrap_or_default();

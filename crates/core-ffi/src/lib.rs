@@ -92,8 +92,8 @@ pub use drum::{
     DrumViewRow, QuantizeChoiceRow,
 };
 pub use edit::{
-    AudioEdit, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneInputRow, LaneRef,
-    MonitorModeRow, QuantizeRow, ReferenceEdit, SequenceEdit, ViewFilterRow,
+    AudioEdit, CrossfadeLengthRow, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneInputRow,
+    LaneRef, MonitorModeRow, QuantizeRow, ReferenceEdit, SequenceEdit, ViewFilterRow,
 };
 pub use editor::EditorSize;
 pub use error::VizError;

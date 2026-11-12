@@ -207,6 +207,12 @@ pub struct AudioEditorRegionRow {
     pub sample_rate: u32,
     /// Whether the media is offline or unknown.
     pub offline: bool,
+    /// The region's fade in is a crossfade (plan 6c).
+    #[uniffi(default = false)]
+    pub crossfade: bool,
+    /// The region it crosses (the earlier one).
+    #[uniffi(default = None)]
+    pub crossfade_with: Option<u64>,
 }
 
 /// `state.get audio_editor` (plan 7c Ruling 10).
@@ -1222,6 +1228,10 @@ fn audio_editor_json(doc: &str, e: &AudioEditorStateRow) -> Value {
             "source_offset": r.source_offset, "length": r.length,
             "media_frames": r.media_frames, "sample_rate": r.sample_rate,
             "offline": r.offline,
+            "crossfade": r.crossfade.then(|| json!({
+                "frames": r.fade_in.length, "shape": fade_shape_text(r.fade_in.shape),
+                "with": r.crossfade_with,
+            })),
         })
     });
     let boxes: serde_json::Map<String, Value> = e
