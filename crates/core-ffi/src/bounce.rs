@@ -319,11 +319,14 @@ pub(crate) struct Plan {
     pub offline_regions: usize,
     /// The project rate `frames` is counted at.
     pub project_rate: u32,
+    /// Zero frames (at the project rate) each file stem starts with, before
+    /// the render (plan 6b Ruling 2); 0 for a bounce.
+    pub lead: u64,
 }
 
 impl Plan {
     /// The sources the render makes.
-    fn sources(&self) -> usize {
+    pub(crate) fn sources(&self) -> usize {
         if self.mix {
             1
         } else {
@@ -468,28 +471,17 @@ pub(crate) fn plan(
     offline: &BTreeMap<MediaId, crate::media::OfflineReasonRow>,
 ) -> Result<Plan, VizError> {
     let seq = SeqId(req.seq);
-    let s = doc.sequence(seq)?;
+    doc.sequence(seq)?;
     let (mix, strips) = match &req.source {
         BounceSourceRow::Mix => (true, Vec::new()),
         BounceSourceRow::Stems { strips } => {
             if strips.is_empty() {
                 return Err(model("choose at least one strip to bounce"));
             }
-            if strips.len() > doc.mixer().order().len() {
-                return Err(model("more strips than the mixer has"));
-            }
-            let mut seen = BTreeSet::new();
-            for id in strips {
-                doc.mixer()
-                    .strip(StripId(*id))
-                    .map_err(|_| model(format!("no strip {id}")))?;
-                if !seen.insert(*id) {
-                    return Err(model(format!("strip {id} is listed twice")));
-                }
-            }
             (false, strips.iter().map(|s| StripId(*s)).collect())
         }
     };
+    check_strips(doc, &strips)?;
     let (start, end) = match req.range {
         BounceRangeRow::Song => (0, core_model::query::seq_length(doc, seq)?.0),
         BounceRangeRow::Ticks { start, end } => (start, end),
@@ -501,35 +493,14 @@ pub(crate) fn plan(
         return Err(model("the range is empty"));
     }
     let (start, end) = (Tick(start), Tick(end));
-    let project = doc.settings().format;
-    let fmt = ExportFormat {
-        container: req.container.into(),
-        depth: match req.depth {
-            BitDepthRow::Int16 => BitDepth::Int16,
-            BitDepthRow::Int24 => BitDepth::Int24,
-            BitDepthRow::Float32 => BitDepth::Float32,
-        },
-        rate: req.rate,
-        dither: req.dither,
-        dither_stream: 0,
-    };
-    fmt.check().map_err(|e| model(media_words(&e)))?;
-    let table = TempoTable::build(&s.tempo, -s.start_offset, f64::from(project.sample_rate));
-    let frames = table
-        .tick_to_frame(end)
-        .saturating_sub(table.tick_to_frame(start));
-    if frames == 0 {
-        return Err(model("the range holds no audio frames"));
-    }
+    let fmt = export_format(req.container, req.depth, req.rate, req.dither);
+    let common = common(doc, seq, start, end, &fmt, offline)?;
     // The CAF importer converts depth only: without the system converter a
     // file at another rate is refused now, not after the render (final
     // review m4).
     #[cfg(not(target_os = "macos"))]
-    if req.path.is_some() && fmt.rate != project.sample_rate {
-        return Err(model(format!(
-            "{} Hz to {} Hz: resampling needs the system importer; bounce at {} Hz",
-            project.sample_rate, fmt.rate, project.sample_rate
-        )));
+    if req.path.is_some() {
+        same_rate(&fmt, common.project_rate)?;
     }
     let ext = fmt.container.extension();
     let (mut mix_path, mut stem_files) = (None, Vec::new());
@@ -569,19 +540,107 @@ pub(crate) fn plan(
                 .map_or_else(|| "Mix".to_string(), |s| s.to_string_lossy().into_owned()),
         ]
     } else {
-        strips
-            .iter()
-            .enumerate()
-            .map(|(k, s)| {
-                stem_files
-                    .get(k)
-                    .and_then(|(_, f)| f.file_stem())
-                    .map_or_else(|| strip_name(doc, *s), |n| n.to_string_lossy().into_owned())
-            })
-            .collect()
+        import_names(doc, &strips, &stem_files)
     };
-    // The external-MIDI lanes and the offline regions of the range (Ruling
-    // 8, pre-flight M5).
+    Ok(Plan {
+        seq,
+        start,
+        end,
+        frames: common.frames,
+        mix,
+        strips,
+        fmt,
+        mix_path,
+        stem_files,
+        replace: req.replace,
+        add: req.add_to_project,
+        import_names,
+        external_lanes: common.external_lanes,
+        offline_regions: common.offline_regions,
+        project_rate: common.project_rate,
+        lead: 0,
+    })
+}
+
+/// The files' format from a request's fields.
+pub(crate) fn export_format(
+    container: ContainerRow,
+    depth: BitDepthRow,
+    rate: u32,
+    dither: bool,
+) -> ExportFormat {
+    ExportFormat {
+        container: container.into(),
+        depth: match depth {
+            BitDepthRow::Int16 => BitDepth::Int16,
+            BitDepthRow::Int24 => BitDepth::Int24,
+            BitDepthRow::Float32 => BitDepth::Float32,
+        },
+        rate,
+        dither,
+        dither_stream: 0,
+    }
+}
+
+/// Refuses a rate other than the project's (no system converter).
+#[cfg(not(target_os = "macos"))]
+fn same_rate(fmt: &ExportFormat, project: u32) -> Result<(), VizError> {
+    if fmt.rate != project {
+        return Err(model(format!(
+            "{project} Hz to {} Hz: resampling needs the system importer; bounce at {project} Hz",
+            fmt.rate
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses an unknown strip, one listed twice, and more strips than the
+/// mixer has.
+fn check_strips(doc: &Document, strips: &[StripId]) -> Result<(), VizError> {
+    if strips.len() > doc.mixer().order().len() {
+        return Err(model("more strips than the mixer has"));
+    }
+    let mut seen = BTreeSet::new();
+    for id in strips {
+        doc.mixer()
+            .strip(*id)
+            .map_err(|_| model(format!("no strip {id}")))?;
+        if !seen.insert(*id) {
+            return Err(model(format!("strip {id} is listed twice")));
+        }
+    }
+    Ok(())
+}
+
+/// What `plan` and `stems_plan` both work out for a range.
+struct Common {
+    frames: u64,
+    external_lanes: u32,
+    offline_regions: usize,
+    project_rate: u32,
+}
+
+/// The range's frames at the project rate (refused when none), the format
+/// checked, and the range's lanes on external MIDI and offline regions
+/// (Ruling 8, pre-flight M5).
+fn common(
+    doc: &Document,
+    seq: SeqId,
+    start: Tick,
+    end: Tick,
+    fmt: &ExportFormat,
+    offline: &BTreeMap<MediaId, crate::media::OfflineReasonRow>,
+) -> Result<Common, VizError> {
+    let s = doc.sequence(seq)?;
+    fmt.check().map_err(|e| model(media_words(&e)))?;
+    let project = doc.settings().format;
+    let table = TempoTable::build(&s.tempo, -s.start_offset, f64::from(project.sample_rate));
+    let frames = table
+        .tick_to_frame(end)
+        .saturating_sub(table.tick_to_frame(start));
+    if frames == 0 {
+        return Err(model("the range holds no audio frames"));
+    }
     let mut external: BTreeSet<(SeqId, core_model::ids::LaneId)> = BTreeSet::new();
     let mut offline_regions = 0usize;
     for e in core_model::query::flatten(doc, seq, Some((start, end)), &ViewFilter::default())? {
@@ -596,27 +655,92 @@ pub(crate) fn plan(
                 }
             }
             EventBody::AudioRegion { media, .. } if offline.contains_key(media) => {
-                offline_regions += 1;
+                offline_regions = offline_regions.saturating_add(1);
             }
             _ => {}
         }
     }
+    Ok(Common {
+        frames,
+        external_lanes: u32::try_from(external.len()).unwrap_or(u32::MAX),
+        offline_regions,
+        project_rate: project.sample_rate,
+    })
+}
+
+/// The imports' names: each file stem's file name without its extension,
+/// else the strip's name.
+fn import_names(doc: &Document, strips: &[StripId], files: &[(PathBuf, PathBuf)]) -> Vec<String> {
+    strips
+        .iter()
+        .enumerate()
+        .map(|(k, s)| {
+            files
+                .get(k)
+                .and_then(|(_, f)| f.file_stem())
+                .map_or_else(|| strip_name(doc, *s), |n| n.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+/// A stems plan for an export for another DAW (plan 6b Rulings 2, 7):
+/// `strips` rendered over `[start, end)` (`start` may be the pickup's
+/// start, before bar 1) to `files`, named relative to the export folder
+/// (`stem_files` is `(f, f)`; the job rebases them, F3), each file stem
+/// starting with `lead` zero frames at the project rate. Nothing is
+/// looked at on disk. With `add`, the heard stems are imported, named
+/// after the files.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stems_plan(
+    doc: &Document,
+    seq: SeqId,
+    strips: &[StripId],
+    start: Tick,
+    end: Tick,
+    fmt: ExportFormat,
+    files: Vec<PathBuf>,
+    lead: u64,
+    add: bool,
+    offline: &BTreeMap<MediaId, crate::media::OfflineReasonRow>,
+) -> Result<Plan, VizError> {
+    doc.sequence(seq)?;
+    check_strips(doc, strips)?;
+    if files.len() != strips.len() {
+        return Err(VizError::Internal {
+            message: "one file per strip".into(),
+        });
+    }
+    if start >= end {
+        return Err(model("the range is empty"));
+    }
+    let common = common(doc, seq, start, end, &fmt, offline)?;
+    #[cfg(not(target_os = "macos"))]
+    if !strips.is_empty() {
+        same_rate(&fmt, common.project_rate)?;
+    }
+    let stem_files: Vec<(PathBuf, PathBuf)> = files.into_iter().map(|f| (f.clone(), f)).collect();
+    let import_names = if add {
+        import_names(doc, strips, &stem_files)
+    } else {
+        Vec::new()
+    };
     Ok(Plan {
         seq,
         start,
         end,
-        frames,
-        mix,
-        strips,
+        frames: common.frames,
+        mix: false,
+        strips: strips.to_vec(),
         fmt,
-        mix_path,
+        mix_path: None,
         stem_files,
-        replace: req.replace,
-        add: req.add_to_project,
+        replace: false,
+        add,
         import_names,
-        external_lanes: u32::try_from(external.len()).unwrap_or(u32::MAX),
-        offline_regions,
-        project_rate: project.sample_rate,
+        external_lanes: common.external_lanes,
+        offline_regions: common.offline_regions,
+        project_rate: common.project_rate,
+        lead,
     })
 }
 
@@ -827,6 +951,22 @@ fn render(
             }
         }
     }
+    // The file stems' leading silence (plan 6b Ruling 2): not the heard
+    // stems, which land where their audio begins.
+    if plan.lead > 0 && !plan.mix {
+        let zeros = vec![0f32; BLOCK as usize * 2];
+        for w in writers.iter_mut().take(plan.stem_files.len()) {
+            let mut left = plan.lead;
+            while left > 0 {
+                let n = left.min(u64::from(BLOCK));
+                let samples = usize::try_from(n.saturating_mul(2)).unwrap_or(usize::MAX);
+                if let Err(e) = w.write(zeros.get(..samples).unwrap_or(&zeros)) {
+                    return Rendered::Failed(media_words(&e));
+                }
+                left = left.saturating_sub(n);
+            }
+        }
+    }
     let mut buf: Vec<f32> = Vec::new();
     let stats = core_engine::bounce::bounce(
         &mut engine,
@@ -1006,12 +1146,18 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
             dither_stream: k as u64,
             ..plan.fmt
         };
+        // A file stem holds its leading silence too (plan 6b Ruling 2).
+        let frames = if base.is_some() {
+            plan.lead.saturating_add(stats.frames)
+        } else {
+            stats.frames
+        };
         let r = core_media::export::write_partial(
             importer.as_ref(),
             temp,
             dest,
             &fmt,
-            Some(stats.frames),
+            Some(frames),
             replace,
             &mut |f| prog.set(0.9 + 0.1 * (k as f32 + f.clamp(0.0, 1.0)) / n),
             cancel,

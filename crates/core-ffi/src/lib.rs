@@ -30,6 +30,7 @@ pub mod editor;
 pub mod error;
 pub mod events;
 pub mod external;
+pub mod for_daw;
 pub mod format;
 pub mod guard;
 pub mod host;
@@ -102,6 +103,7 @@ pub use events::{
     PerNotePoint, PerNoteValueRow, SequenceInfo, TempoPointRow, TextKindRow,
 };
 pub use external::{ExternalEditRow, ExternalEditStateRow};
+pub use for_daw::{ForDawCheckRow, ForDawRequestRow};
 pub use format::{BitDepthRow, ProjectFormatRow, ProjectInfoRow, format_label, project_rates};
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};

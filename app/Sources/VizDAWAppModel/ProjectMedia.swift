@@ -26,6 +26,7 @@ extension ProjectBanner {
         case .externalEdit: "Importing the external edit…"
         case .importMidi: "Importing the MIDI file…"
         case .exportMidi: "Exporting MIDI…"
+        case .exportProject: "Exporting for another DAW…"
         }
     }
 
@@ -39,6 +40,7 @@ extension ProjectBanner {
         case .externalEdit: "External Edit Failed"
         case .importMidi: "MIDI Import Failed"
         case .exportMidi: "MIDI Export Failed"
+        case .exportProject: "Export Failed"
         }
     }
 }

@@ -785,6 +785,26 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         interchangeLock.unlock()
         return clipNames
     }
+    /// Exports for another DAW (plan 6b): what they were called with, and
+    /// what the check answers (F8).
+    var forDawChecks: [ForDawRequestRow] = []
+    var forDawExports: [ForDawRequestRow] = []
+    var forDawCheckAnswer: Result<ForDawCheckRow, VizError> = .success(ForDawCheckRow(
+        report: ReportRow(summary: "Exported nothing", items: []), folder: "Song for another DAW",
+        files: [], strips: [], start: "Every file starts at bar 1.", frames: 0, warning: nil))
+    func exportForDaw(req: ForDawRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        forDawExports.append(req)
+        return interchangeJob(.exportProject, 9000, forDawExports.count)
+    }
+    func exportForDawCheck(req: ForDawRequestRow) throws -> ForDawCheckRow {
+        interchangeLock.lock()
+        forDawChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return try forDawCheckAnswer.get()
+    }
     func interchangeReport() throws -> ReportRow? {
         interchangeReportCalls += 1
         if let e = interchangeError { throw e }

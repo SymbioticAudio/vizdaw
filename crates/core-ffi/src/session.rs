@@ -227,6 +227,10 @@ pub(crate) struct Inner {
     /// (test hook).
     #[cfg(feature = "test-hooks")]
     bounce_fail_import_at: Option<u32>,
+    /// The next export for another DAW cancels itself after this stage
+    /// (test hook: 1 after its first MIDI file, 2 after the About file).
+    #[cfg(feature = "test-hooks")]
+    for_daw_cancel_at: Option<u32>,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -341,6 +345,8 @@ impl Inner {
             bounce_cancel_at: None,
             #[cfg(feature = "test-hooks")]
             bounce_fail_import_at: None,
+            #[cfg(feature = "test-hooks")]
+            for_daw_cancel_at: None,
         }
     }
 
@@ -431,7 +437,8 @@ impl Inner {
     /// meanwhile (5a Task 11 review Minor 4; preflight M3; a bounce's
     /// streamer reads the media, plan 5f-2 Ruling 9; an external edit
     /// imports in the format it started with and relinks a region, plan
-    /// 5f-3 Ruling 6). An import does not block them.
+    /// 5f-3 Ruling 6; an export for another DAW renders as a bounce does,
+    /// plan 6b Ruling 9). An import does not block them.
     fn media_jobs_idle(&self) -> Result<(), VizError> {
         use crate::jobs::JobKindRow;
         if self.jobs.pending(&[
@@ -440,6 +447,7 @@ impl Inner {
             JobKindRow::Relink,
             JobKindRow::Bounce,
             JobKindRow::ExternalEdit,
+            JobKindRow::ExportProject,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
@@ -3027,6 +3035,16 @@ impl Session {
         })
     }
 
+    /// The next export for another DAW cancels itself after `stage` (1:
+    /// its first MIDI file is written; 2: its About file is written, before
+    /// the rename; None: never; plan 6b F6).
+    pub fn debug_for_daw_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).for_daw_cancel_at = stage;
+            Ok(())
+        })
+    }
+
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
@@ -3984,11 +4002,15 @@ impl Drop for Session {
         // A bounce still running stops first (plan 5f-2 pre-flight I2):
         // its engine holds its plugin copies' processors, which end below;
         // one without copies must not write after its session went (final
-        // review T4-M5).
+        // review T4-M5). So does an export for another DAW, which renders
+        // through one (plan 6b F2).
         {
             let mut inner = lock(&self.inner);
             if inner.bounce_copies.is_some()
-                || inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce])
+                || inner.jobs.pending(&[
+                    crate::jobs::JobKindRow::Bounce,
+                    crate::jobs::JobKindRow::ExportProject,
+                ])
             {
                 let root = inner.root(self.id);
                 let keep = inner.kept();
@@ -4046,6 +4068,13 @@ pub(crate) fn discard(
             .collect(),
         // Only the media it imported; the files it exported stay.
         Work::Bounce { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .map(|i| i.path)
+            .collect(),
+        // The stems it added (plan 6b F1); a folder in place stays.
+        Work::ExportForDaw { files, .. } => files
             .into_iter()
             .filter_map(|(_, r)| r.ok())
             .flatten()
@@ -4193,6 +4222,16 @@ impl Session {
                     r.written = written;
                     r
                 }
+                Work::ExportForDaw {
+                    files,
+                    target,
+                    result,
+                    written,
+                } => {
+                    let r = apply_for_daw(inner, &root, id, kind, files, target, result, written);
+                    changed |= !r.created.is_empty();
+                    r
+                }
                 Work::Relink { files } => {
                     let (done, problems) = apply_relink(inner, &root, files);
                     changed |= !done.is_empty();
@@ -4220,8 +4259,12 @@ impl Session {
         }
         // A bounce's plugin copies end with its job, however it ended:
         // applied, failed, cancelled or panicked (plan 5f-2 Ruling 6,
-        // pre-flight I2).
-        if inner.bounce_copies.is_some() && !inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce])
+        // pre-flight I2); so do an export's for another DAW (plan 6b).
+        if inner.bounce_copies.is_some()
+            && !inner.jobs.pending(&[
+                crate::jobs::JobKindRow::Bounce,
+                crate::jobs::JobKindRow::ExportProject,
+            ])
         {
             if let Some((_, token)) = inner.bounce_copies.take() {
                 plugins::end_bounce(token);
@@ -4315,6 +4358,9 @@ struct ImportAs {
     origin: fn(&core_media::import::Imported) -> core_model::document::MediaOrigin,
     /// New lanes are named after their item (else "Audio <n>").
     named_lanes: bool,
+    /// The tick may be as early as the target sequence's pickup start
+    /// (else a negative tick lands at 0).
+    pickup: bool,
 }
 
 impl ImportAs {
@@ -4325,6 +4371,7 @@ impl ImportAs {
             original_name: item.original_name.clone(),
         },
         named_lanes: false,
+        pickup: false,
     };
 
     /// A bounce's "Add to project": `Bounced` items on lanes named after them.
@@ -4332,6 +4379,16 @@ impl ImportAs {
         label: "Bounce",
         origin: |_| core_model::document::MediaOrigin::Bounced,
         named_lanes: true,
+        pickup: false,
+    };
+
+    /// An export's "Add the stems to this project" (plan 6b): `Bounced`
+    /// items on tracks named after them, from the pickup's start.
+    const FOR_DAW: ImportAs = ImportAs {
+        label: "Add Stems",
+        origin: |_| core_model::document::MediaOrigin::Bounced,
+        named_lanes: true,
+        pickup: true,
     };
 
     /// The name of the new lane for `item`, the sequence's `n`th.
@@ -4433,11 +4490,16 @@ fn apply_import_as(
                         })?
                 }
             };
+            let earliest = if how.pickup {
+                0i64.saturating_sub(h.doc().sequence(seq)?.start_offset.0)
+            } else {
+                0
+            };
             h.execute(
                 &Command::Audio(AudioCmd::Insert {
                     seq,
                     lane,
-                    tick: Tick(t.tick.max(0)),
+                    tick: Tick(t.tick.max(earliest)),
                     media,
                     source_offset: 0,
                     length: item.length_frames,
@@ -4460,6 +4522,60 @@ fn apply_import_as(
             Err(fail(e, problems))
         }
     }
+}
+
+/// Applies a finished export for another DAW (plan 6b Ruling 7, F1): on
+/// `Ok` its folder is in place, kept whatever the "Add" apply does, and
+/// the stems are added as one undo step "Add Stems"; otherwise the
+/// imports are removed and the row is Failed, or Cancelled for a cancel.
+#[allow(clippy::too_many_arguments)]
+fn apply_for_daw(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    kind: crate::jobs::JobKindRow,
+    files: ImportFiles,
+    target: Option<crate::jobs::ImportTargetRow>,
+    result: Result<core_io::report::Report, String>,
+    written: Vec<String>,
+) -> crate::jobs::JobRow {
+    use crate::jobs::{JobStateRow, row};
+    let report = match result {
+        Ok(r) => crate::interchange::report_row(&r, "Exported"),
+        Err(why) => {
+            let keep = inner.kept();
+            for f in files.into_iter().filter_map(|(_, r)| r.ok()).flatten() {
+                remove_unkept(root, &f.path, &keep);
+            }
+            let mut r = if why == crate::for_daw::CANCELLED {
+                row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
+            } else {
+                row(id, kind, JobStateRow::Failed, Some(why), vec![], vec![])
+            };
+            r.written = written;
+            return r;
+        }
+    };
+    inner.interchange_report = Some(report.clone());
+    let applied = if files.is_empty() {
+        Ok((Vec::new(), Vec::new()))
+    } else {
+        apply_import_as(inner, root, files, target, &ImportAs::FOR_DAW)
+    };
+    let mut r = match applied {
+        Ok((created, problems)) => row(id, kind, JobStateRow::Done, None, problems, created),
+        Err((e, problems)) => row(
+            id,
+            kind,
+            JobStateRow::Failed,
+            Some(e.to_string()),
+            problems,
+            vec![],
+        ),
+    };
+    r.report = Some(report);
+    r.written = written;
+    r
 }
 
 /// Applies a finished relink job: one undo step "Relink Media" per item
@@ -8759,92 +8875,23 @@ impl Session {
                     message: "A bounce is running.".into(),
                 });
             }
+            if inner
+                .jobs
+                .pending(&[crate::jobs::JobKindRow::ExportProject])
+            {
+                return Err(VizError::Busy {
+                    message: "Wait for the export to finish.".into(),
+                });
+            }
             if req.add_to_project {
                 inner.media_jobs_idle()?;
             }
-            // The live states, as Save captures them (Ruling 6), with the
-            // values the plugins were sent and the document does not have
-            // yet (read first: a capture counts them as saved).
-            // An automated or riding parameter keeps its static value, as a
-            // capture keeps it (final review T4-M2; plan 5e-1 Ruling 15).
-            let slots = mixer::slot_ids(inner.doc());
-            let mut kept = core_model::automation::automated_targets(inner.doc());
-            kept.extend(inner.riding_params());
-            let sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)> = plugins::with(self.id, |p| {
-                p.map(|p| {
-                    slots
-                        .iter()
-                        .map(|id| {
-                            let mut v = p.uncommitted(*id);
-                            v.retain(|(param, _)| !kept.contains(&(*id, *param)));
-                            (*id, v)
-                        })
-                        .filter(|(_, v)| !v.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default()
-            })?;
-            self.capture_all(&mut inner)?;
-            let doc = with_params(inner.doc().clone(), sent);
-            let root = inner.root(self.id);
-            let format = doc.settings().format;
-            let copies = if mixer::slot_ids(&doc).is_empty() {
-                None
-            } else {
-                Some(plugins::start_bounce(
-                    self.id,
-                    &doc,
-                    f64::from(format.sample_rate),
-                    crate::bounce::BLOCK,
-                )?)
-            };
-            let token = copies.as_ref().map(|c| c.token);
-            #[cfg(feature = "test-hooks")]
-            let (cancel_at, fail_import_at) = (
-                inner.bounce_cancel_at.take(),
-                inner
-                    .bounce_fail_import_at
-                    .take()
-                    .and_then(|k| usize::try_from(k).ok()),
-            );
-            #[cfg(not(feature = "test-hooks"))]
-            let (cancel_at, fail_import_at) = (None, None);
-            let job = crate::bounce::Job {
-                problems: plan.offline_sentence().into_iter().collect(),
+            self.spawn_render(
+                &mut inner,
                 plan,
-                media: crate::media::files(&doc, &root, &inner.offline),
-                doc,
-                root,
-                reserved: inner.reserved_names(),
-                format,
-                tail_cap_ms: crate::bounce::bounce_settings().tail_cap_ms,
-                copies: copies.map(|c| crate::bounce::Copies {
-                    factory: c.factory,
-                    ready: c.ready,
-                    problems: c.problems,
-                }),
-                cancel_at,
-                fail_import_at,
-            };
-            let spawned = inner
-                .jobs
-                .spawn(crate::jobs::JobKindRow::Bounce, move |progress, cancel| {
-                    crate::bounce::run(job, progress, cancel)
-                });
-            match spawned {
-                Ok(id) => {
-                    if let Some(t) = token {
-                        inner.bounce_copies = Some((id, t));
-                    }
-                    Ok(id)
-                }
-                Err(e) => {
-                    if let Some(t) = token {
-                        plugins::end_bounce(t);
-                    }
-                    Err(e)
-                }
-            }
+                crate::jobs::JobKindRow::Bounce,
+                crate::bounce::run,
+            )
         })
     }
 
@@ -9014,6 +9061,86 @@ impl Session {
         })
     }
 
+    /// Starts an export for another DAW (plan 6b; spec §7.1, §7.6): the
+    /// job ID. The job writes "<Song> for another DAW" (numbered when
+    /// taken, Ruling 1) in the folder `req.path` and, with
+    /// `add_to_project`, adds the stems as heard in one undo step "Add
+    /// Stems"; `job` reports it, its report and the folder. `Model` at once
+    /// for an unknown sequence, a strip that is unknown, listed twice or
+    /// the master, a format refused, path text refused, and "Add" with no
+    /// strips; every check of the file system runs in the job, which fails
+    /// with its sentence (Ruling 8). `Busy` while recording, inside an open
+    /// edit, while a bounce, a MIDI import or export or another such
+    /// export is unapplied, and with "Add" while a media job is. Apart
+    /// from the media refresh and the plug-in capture `bounce` also makes,
+    /// nothing touches the disk before the job (F13).
+    pub fn export_for_daw(&self, req: crate::for_daw::ForDawRequestRow) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            if req.add_to_project {
+                inner.media_jobs_idle()?;
+            }
+            inner.refresh_media(self.id, false);
+            let c = crate::for_daw::check(inner.doc(), &req, true, &inner.offline)?;
+            let parent = c.parent.ok_or_else(|| VizError::Model {
+                message: "Choose where to export.".into(),
+            })?;
+            let roots = self.export_roots(&inner).to_vec();
+            #[cfg(feature = "test-hooks")]
+            let cancel_at = inner.for_daw_cancel_at.take();
+            #[cfg(not(feature = "test-hooks"))]
+            let cancel_at = None;
+            let layout = c.layout;
+            self.spawn_render(
+                &mut inner,
+                c.plan,
+                crate::jobs::JobKindRow::ExportProject,
+                move |bounce, progress, cancel| {
+                    crate::for_daw::run(
+                        crate::for_daw::ForDawJob {
+                            bounce,
+                            parent,
+                            roots,
+                            layout,
+                            cancel_at,
+                        },
+                        progress,
+                        cancel,
+                    )
+                },
+            )
+        })
+    }
+
+    /// What `export_for_daw` would do with `req`, checked as it checks it
+    /// (Busy aside): "What won't transfer", the folder's name (numbered
+    /// when `req.path` names a folder, looked at with lstat), the files,
+    /// the strips, where the files start, the stems' frames and the
+    /// bounce's warnings. Nothing is written; the folder is looked at and
+    /// the MIDI report rendered off the session lock (F13).
+    pub fn export_for_daw_check(
+        &self,
+        req: crate::for_daw::ForDawRequestRow,
+    ) -> Result<crate::for_daw::ForDawCheckRow, VizError> {
+        ffi_guard(|| {
+            let (doc, c, roots, root) = {
+                let mut inner = lock(&self.inner);
+                inner.refresh_media(self.id, false);
+                let c = crate::for_daw::check(inner.doc(), &req, false, &inner.offline)?;
+                let roots = self.export_roots(&inner).to_vec();
+                (inner.doc().clone(), c, roots, inner.root(self.id))
+            };
+            crate::for_daw::check_row(
+                &doc,
+                &c,
+                &roots,
+                crate::bounce::bounce_settings().tail_cap_ms,
+                core_media::record::free_bytes(&root),
+            )
+        })
+    }
+
     /// The report of this document's last MIDI import or export job, if any.
     pub fn interchange_report(&self) -> Result<Option<crate::interchange::ReportRow>, VizError> {
         ffi_guard(|| {
@@ -9048,8 +9175,9 @@ impl Session {
         [inner.root(self.id), crate::media::scratch_root(self.id)]
     }
 
-    /// `Busy` while recording, inside an open edit, or while a bounce or a
-    /// MIDI import or export is unapplied (finished jobs apply first).
+    /// `Busy` while recording, inside an open edit, or while a bounce, a
+    /// MIDI import or export or an export for another DAW is unapplied
+    /// (finished jobs apply first).
     fn interchange_idle(&self, inner: &mut Inner) -> Result<(), VizError> {
         if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
             return Err(recording_busy());
@@ -9063,6 +9191,7 @@ impl Session {
             JobKindRow::Bounce,
             JobKindRow::ImportMidi,
             JobKindRow::ExportMidi,
+            JobKindRow::ExportProject,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the running import, export or bounce to finish.".into(),
@@ -9097,6 +9226,7 @@ impl Session {
                     JobKindRow::Format,
                     JobKindRow::Convert,
                     JobKindRow::Relink,
+                    JobKindRow::ExportProject,
                 ]) {
                     return Err(VizError::Busy {
                         message: "Wait for the media job to finish.".into(),
@@ -9447,6 +9577,107 @@ fn with_params(doc: Document, sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)>
 
 impl Session {
     /// `req` checked against the document and this session's media roots.
+    /// Starts a render job of `kind` for `plan` (a bounce, or an export
+    /// for another DAW whose `body` wraps one): the live plug-in states
+    /// captured into a copy of the document, the plug-in copies started
+    /// (when it renders anything, Ruling 6) and the test hooks taken.
+    fn spawn_render(
+        &self,
+        inner: &mut Inner,
+        plan: crate::bounce::Plan,
+        kind: crate::jobs::JobKindRow,
+        body: impl FnOnce(
+            crate::bounce::Job,
+            &std::sync::atomic::AtomicU32,
+            &std::sync::atomic::AtomicBool,
+        ) -> crate::jobs::Work
+        + Send
+        + 'static,
+    ) -> Result<u64, VizError> {
+        // The live states, as Save captures them (Ruling 6), with the
+        // values the plugins were sent and the document does not have
+        // yet (read first: a capture counts them as saved).
+        // An automated or riding parameter keeps its static value, as a
+        // capture keeps it (final review T4-M2; plan 5e-1 Ruling 15).
+        let slots = mixer::slot_ids(inner.doc());
+        let mut kept = core_model::automation::automated_targets(inner.doc());
+        kept.extend(inner.riding_params());
+        let sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)> = plugins::with(self.id, |p| {
+            p.map(|p| {
+                slots
+                    .iter()
+                    .map(|id| {
+                        let mut v = p.uncommitted(*id);
+                        v.retain(|(param, _)| !kept.contains(&(*id, *param)));
+                        (*id, v)
+                    })
+                    .filter(|(_, v)| !v.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+        })?;
+        self.capture_all(inner)?;
+        let doc = with_params(inner.doc().clone(), sent);
+        let root = inner.root(self.id);
+        let format = doc.settings().format;
+        // MIDI files only render nothing: no copies.
+        let copies = if mixer::slot_ids(&doc).is_empty() || plan.sources() == 0 {
+            None
+        } else {
+            Some(plugins::start_bounce(
+                self.id,
+                &doc,
+                f64::from(format.sample_rate),
+                crate::bounce::BLOCK,
+            )?)
+        };
+        let token = copies.as_ref().map(|c| c.token);
+        #[cfg(feature = "test-hooks")]
+        let (cancel_at, fail_import_at) = (
+            inner.bounce_cancel_at.take(),
+            inner
+                .bounce_fail_import_at
+                .take()
+                .and_then(|k| usize::try_from(k).ok()),
+        );
+        #[cfg(not(feature = "test-hooks"))]
+        let (cancel_at, fail_import_at) = (None, None);
+        let job = crate::bounce::Job {
+            problems: plan.offline_sentence().into_iter().collect(),
+            plan,
+            media: crate::media::files(&doc, &root, &inner.offline),
+            doc,
+            root,
+            reserved: inner.reserved_names(),
+            format,
+            tail_cap_ms: crate::bounce::bounce_settings().tail_cap_ms,
+            copies: copies.map(|c| crate::bounce::Copies {
+                factory: c.factory,
+                ready: c.ready,
+                problems: c.problems,
+            }),
+            cancel_at,
+            fail_import_at,
+        };
+        let spawned = inner
+            .jobs
+            .spawn(kind, move |progress, cancel| body(job, progress, cancel));
+        match spawned {
+            Ok(id) => {
+                if let Some(t) = token {
+                    inner.bounce_copies = Some((id, t));
+                }
+                Ok(id)
+            }
+            Err(e) => {
+                if let Some(t) = token {
+                    plugins::end_bounce(t);
+                }
+                Err(e)
+            }
+        }
+    }
+
     fn bounce_plan(
         &self,
         inner: &Inner,

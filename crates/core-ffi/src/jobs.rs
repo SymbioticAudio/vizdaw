@@ -28,6 +28,8 @@ pub enum JobKindRow {
     ImportMidi,
     /// Export MIDI files (plan 6a).
     ExportMidi,
+    /// Export the project for another DAW (plan 6b).
+    ExportProject,
 }
 
 /// Where a job is.
@@ -142,6 +144,20 @@ pub enum Work {
         /// The report, or why the export failed.
         result: Result<core_io::report::Report, String>,
         /// The files put in place, in order (also when a later one failed).
+        written: Vec<String>,
+    },
+    /// An export for another DAW (plan 6b Ruling 7, F1): its folder is in
+    /// place on `Ok`; the "Add" imports are applied only then, and
+    /// discarded otherwise.
+    ExportForDaw {
+        /// Per stem: what its "Add" import became (empty without "Add").
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// Where regions go.
+        target: Option<ImportTargetRow>,
+        /// The report, or why the export failed (`"Cancelled"`: it was
+        /// cancelled).
+        result: Result<core_io::report::Report, String>,
+        /// The export folder, once it is in place.
         written: Vec<String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
