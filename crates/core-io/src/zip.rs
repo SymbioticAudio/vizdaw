@@ -308,6 +308,38 @@ impl ZipReader {
         Ok(out)
     }
 
+    /// The first `prefix` bytes of `e` (all of it when shorter), with the
+    /// size and ratio checks of [`ZipReader::read`] on the entry as a whole
+    /// (refused with `TOO_LARGE` when it declares more than `max`). Unpacking
+    /// stops at `prefix`, so the checksum of a longer entry is not checked.
+    pub fn read_prefix(
+        &self,
+        e: &EntryInfo,
+        max: u64,
+        prefix: usize,
+        ratio: Option<u64>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, IoError> {
+        let mut out = Vec::new();
+        let mut enough = false;
+        let got = self.stream(e, Some(max), ratio, cancel, &mut |chunk| {
+            let room = prefix.saturating_sub(out.len());
+            out.extend_from_slice(chunk.get(..room.min(chunk.len())).unwrap_or_default());
+            if out.len() >= prefix {
+                // Stops the stream; the error is not passed on.
+                enough = true;
+                Err(IoError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        match got {
+            Err(_) if enough => Ok(out),
+            Ok(_) => Ok(out),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Streams `e` into a new file `to` (`create_new`); `to` is removed on any error or cancel.
     /// Returns the bytes written, which never pass the size `e` declares.
     /// If `to` cannot be removed after a failure, the error is an `Io` that

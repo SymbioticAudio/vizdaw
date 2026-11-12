@@ -29,6 +29,12 @@
 //! Everything the plan cannot hold is listed in the report; each `what` is
 //! a constant (or, when it names something, a function) here.
 
+mod apply;
+mod maps;
+
+pub use apply::apply;
+use maps::clean_name;
+
 use super::package::{DpPackage, TrackRole, role_of};
 use super::plugins::PlistCodec;
 use super::schema::*;
@@ -118,12 +124,10 @@ pub const MASTER_SENDS: &str = "Sends on the master";
 pub const LOOP_OUTPUTS: &str = "Outputs that would make a loop went to the master";
 /// Left out: bus sends that would have made a loop (by bus).
 pub const LOOP_SENDS: &str = "Sends that would make a loop";
-/// Left out: comment text (tags removed) on tracks, channels, devices,
-/// clips and markers.
-pub const COMMENTS: &str = "Comments on tracks, clips and markers";
-/// Left out: colours the project has no place for (markers, and tracks
-/// that own no strip).
-pub const COLOURS_AND_COMMENTS: &str = "Colours and comments on markers and tracks";
+/// Left out: colours the project has no place for (markers, tracks that
+/// own no strip) and comment text, tags removed (tracks, channels, devices,
+/// clips, markers); the place as the detail.
+pub const COLOURS_AND_COMMENTS: &str = "Colours and comments on tracks, clips and markers";
 /// Changed: a colour that is not one of the swatches (Ruling 15).
 pub const COLOURS_NEAREST: &str = "Colours changed to the nearest VizDAW colour";
 /// Changed: meter changes off a barline.
@@ -154,56 +158,43 @@ pub const NO_STRIP: &str = "Mixer settings of tracks with no instrument or audio
 pub const FROM_VIZDAW: &str =
     "This file came from a VizDAW project; it was opened as a new project";
 
-/// Note: a plug-in that is not installed here.
-pub fn not_installed(name: &str) -> String {
-    format!("Plug-in '{name}' is not installed; it keeps its settings until it is")
-}
+/// Changed: a track with notes and audio has its settings and effects on
+/// both its strips (by track).
+pub const BOTH_STRIPS: &str =
+    "Effects of tracks with notes and audio were put on both their strips";
+/// Left out: the master's pan and solo (VizDAW's master has neither).
+pub const MASTER_PAN_SOLO: &str = "Pan and solo on the master";
 
-/// Left out: a VST plug-in.
-pub fn vst(name: &str) -> String {
-    format!("Plug-in '{name}' (VST)")
-}
+// Each kind below is one item whatever the count, the names as details
+// (at most `MAX_DETAILS`), so the report stays small for any file.
 
-/// Left out: a plug-in the file gives no ID for.
-pub fn no_plugin_id(name: &str) -> String {
-    format!("Plug-in '{name}' (no plug-in ID)")
-}
-
-/// Note: a note track with no instrument the project can play.
-pub fn plays_builtin(track: &str) -> String {
-    format!("Track '{track}' plays the built-in synth")
-}
-
-/// Left out: another DAW's built-in effect, with its settings as details.
-pub fn builtin_effect(kind: &str, track: &str) -> String {
-    format!("Built-in effect '{kind}' on track '{track}'")
-}
-
-/// Left out: another DAW's built-in instrument, with its settings as
-/// details.
-pub fn builtin_instrument(kind: &str, track: &str) -> String {
-    format!("Built-in instrument '{kind}' on track '{track}'")
-}
-
-/// Left out: an instrument after a track's first, or on a bus.
-pub fn extra_instrument(name: &str) -> String {
-    format!("Instrument '{name}' (a track plays one instrument)")
-}
-
-/// Left out: a note effect.
-pub fn note_effect(name: &str) -> String {
-    format!("Note effect '{name}'")
-}
-
-/// Left out: an analyzer.
-pub fn analyzer(name: &str) -> String {
-    format!("Analyzer '{name}'")
-}
-
-/// Left out (Ruling 8): a plug-in's settings that could not be read.
-pub fn plugin_settings(name: &str) -> String {
-    format!("Settings of plug-in '{name}'")
-}
+/// Note: plug-ins that are not installed here (by name).
+pub const NOT_INSTALLED: &str =
+    "Plug-ins that are not installed; they keep their settings until they are";
+/// Left out: VST plug-ins (by name).
+pub const VST: &str = "VST plug-ins";
+/// Left out: plug-ins the file gives no ID for (by name).
+pub const NO_PLUGIN_ID: &str = "Plug-ins with no plug-in ID";
+/// Note: note tracks with no instrument VizDAW can play (by track).
+pub const PLAYS_BUILTIN: &str = "Tracks that play the built-in synth";
+/// Left out: other DAWs' built-in effects; `<kind> on track '<name>'` and
+/// each setting as details.
+pub const BUILTIN_EFFECTS: &str = "Built-in effects on tracks";
+/// Left out: other DAWs' built-in instruments, as [`BUILTIN_EFFECTS`].
+pub const BUILTIN_INSTRUMENTS: &str = "Built-in instruments on tracks";
+/// Left out: instruments after a track's first, or on a bus (`<name> on
+/// '<owner>'`).
+pub const EXTRA_INSTRUMENTS: &str = "Instruments after a track's first (a track plays one)";
+/// Left out: note effects (by name).
+pub const NOTE_EFFECTS: &str = "Note effects";
+/// Left out: analyzers (by name).
+pub const ANALYZERS: &str = "Analyzers";
+/// Left out (Ruling 8): plug-in settings that could not be read or carried
+/// (`<name>: <why>`).
+pub const PLUGIN_SETTINGS: &str = "Settings of plug-ins";
+/// The reason, in a [`PLUGIN_SETTINGS`] detail, for a state past the total
+/// the import holds ([`PackageLimits::max_state_total`](crate::limits::PackageLimits)).
+pub const TOO_LARGE_TO_CARRY: &str = "too large to carry";
 
 const NOT_NEW: &str = "A DAWproject opens as a new project.";
 /// The output path reference of a new audio track (as Track Synth makes).
@@ -397,6 +388,9 @@ enum Node<'p> {
     },
 }
 
+/// A state entry's bytes, or why there are none.
+type StateRead = Result<Arc<[u8]>, String>;
+
 struct Cx<'a, 'p> {
     pkg: &'p DpPackage,
     env: &'a ImportEnv<'a>,
@@ -404,6 +398,10 @@ struct Cx<'a, 'p> {
     report: Report,
     n: usize,
     targets: HashMap<&'p str, Target>,
+    /// Plug-in states read so far, by entry and format.
+    states: HashMap<(String, PluginFormat), StateRead>,
+    /// The bytes those states hold.
+    held: u64,
 }
 
 /// Maps `pkg` to a plan for [`apply`]. Looks at `cancel` before any work and
@@ -426,6 +424,8 @@ pub fn map(
         report: pkg.report.clone(),
         n: 0,
         targets: HashMap::new(),
+        states: HashMap::new(),
+        held: 0,
     };
     let p = &pkg.project;
     if p.dropped_text > 0 {
@@ -527,7 +527,7 @@ impl<'a, 'p> Cx<'a, 'p> {
     fn comment(&mut self, comment: Option<&str>, place: impl FnOnce() -> String) {
         let Some(c) = comment else { return };
         if !strip_tags(c).0.is_empty() {
-            self.add(ItemKind::LeftOut, COMMENTS, Some(place()));
+            self.add(ItemKind::LeftOut, COLOURS_AND_COMMENTS, Some(place()));
         }
     }
 
@@ -552,223 +552,6 @@ impl<'a, 'p> Cx<'a, 'p> {
                 None
             }
         }
-    }
-
-    // ---- maps
-
-    /// A beats or seconds time as ticks; seconds through `seconds`. `None`
-    /// (listed) for a time before 0 or past the timeline.
-    fn time(&mut self, t: f64, unit: DpTimeUnit, tempo: &TempoMap) -> Option<Tick> {
-        let tick = match unit {
-            DpTimeUnit::Beats => super::units::ticks(t).map(|(t, _)| t),
-            DpTimeUnit::Seconds if t.is_finite() => Some(tempo.seconds_to_tick(t)),
-            DpTimeUnit::Seconds => None,
-        };
-        match tick {
-            Some(k) if (0..=MAX_TICKS).contains(&k.0) => Some(k),
-            _ => {
-                self.add(ItemKind::LeftOut, PAST_END, None);
-                None
-            }
-        }
-    }
-
-    /// A tempo in BPM, clamped to 5–999 (Changed); `None` (listed) when not
-    /// a number.
-    fn bpm(&mut self, v: f64, what: &str) -> Option<Bpm> {
-        if !v.is_finite() {
-            self.add(ItemKind::LeftOut, UNREADABLE_VALUES, Some(what.to_owned()));
-            return None;
-        }
-        let c = v.clamp(Bpm::MIN.as_f64(), Bpm::MAX.as_f64());
-        if c != v {
-            self.add(ItemKind::Changed, TEMPO_CLAMPED, None);
-        }
-        // Within 5 000–999 000 milli-BPM, so the cast is exact.
-        Some(Bpm((c * 1000.0).round() as u32))
-    }
-
-    fn meter(&mut self, num: i32, den: i32) -> Option<Meter> {
-        let m = u8::try_from(num)
-            .ok()
-            .zip(u8::try_from(den).ok())
-            .map(|(num, den)| Meter { num, den })
-            .filter(|m| m.is_valid());
-        if m.is_none() {
-            self.add(ItemKind::LeftOut, BAD_METER, Some(format!("{num}/{den}")));
-        }
-        m
-    }
-
-    /// The tempo map, then the meter map (meter times in seconds go
-    /// through the finished tempo map).
-    fn maps(&mut self) -> Result<(TempoMap, MeterMap), IoError> {
-        let p = &self.pkg.project;
-        let arr = p.arrangement.as_ref();
-        let first = p
-            .tempo
-            .as_ref()
-            .and_then(|t| t.value)
-            .and_then(|v| self.bpm(v, "Tempo@value"))
-            .unwrap_or(Bpm(120_000));
-        let mut points = vec![TempoPoint {
-            tick: Tick::ZERO,
-            bpm: first,
-            ramp: false,
-        }];
-        // Seconds at the last point, for seconds times.
-        let mut secs_at_last = 0.0f64;
-        if let Some(a) = arr.and_then(|a| a.tempo_automation.as_ref()) {
-            let unit = a.head.time_unit.unwrap_or(DpTimeUnit::Beats);
-            if a.unit.is_some_and(|u| u != DpUnit::Bpm) {
-                self.add(
-                    ItemKind::LeftOut,
-                    UNREADABLE_VALUES,
-                    Some("TempoAutomation@unit".to_owned()),
-                );
-            } else {
-                for pt in &a.points {
-                    self.tick()?;
-                    let DpPointValue::Real(v, how) = pt.value else {
-                        self.add(
-                            ItemKind::LeftOut,
-                            UNREADABLE_VALUES,
-                            Some("TempoAutomation point".to_owned()),
-                        );
-                        continue;
-                    };
-                    let Some(bpm) = self.bpm(v, "TempoAutomation point") else {
-                        continue;
-                    };
-                    let ramp = how == Some(DpInterpolation::Linear);
-                    let Some(last) = points.last().copied() else {
-                        continue;
-                    };
-                    let tick = match unit {
-                        DpTimeUnit::Beats => super::units::ticks(pt.time).map(|(t, _)| t.0),
-                        DpTimeUnit::Seconds => {
-                            let dt = pt.time - secs_at_last;
-                            if dt < 0.0 {
-                                self.add(ItemKind::LeftOut, MAP_ORDER, None);
-                                continue;
-                            }
-                            seconds_after(last, bpm, dt).map(|d| last.tick.0.saturating_add(d))
-                        }
-                    };
-                    let Some(tick) = tick.filter(|t| (0..=MAX_TICKS).contains(t)) else {
-                        self.add(ItemKind::LeftOut, PAST_END, None);
-                        continue;
-                    };
-                    if unit == DpTimeUnit::Seconds && tick >= last.tick.0 {
-                        secs_at_last = pt.time;
-                    }
-                    let new = TempoPoint {
-                        tick: Tick(tick),
-                        bpm,
-                        ramp,
-                    };
-                    match points.last_mut() {
-                        Some(l) if l.tick.0 == tick => *l = new,
-                        Some(l) if l.tick.0 > tick => {
-                            self.add(ItemKind::LeftOut, MAP_ORDER, None);
-                        }
-                        _ => points.push(new),
-                    }
-                }
-            }
-        }
-        let tempo = TempoMap::new(points)
-            .or_else(|_| TempoMap::constant(Bpm(120_000)))
-            .unwrap_or_default();
-
-        let key = KeySig::default();
-        let m0 = p
-            .time_signature
-            .as_ref()
-            .and_then(|t| self.meter(t.numerator, t.denominator))
-            .unwrap_or(Meter { num: 4, den: 4 });
-        let mut entries = vec![MeterEntry {
-            tick: Tick::ZERO,
-            meter: m0,
-            key,
-        }];
-        if let Some(a) = arr.and_then(|a| a.time_signature_automation.as_ref()) {
-            let unit = a.head.time_unit.unwrap_or(DpTimeUnit::Beats);
-            for pt in &a.points {
-                self.tick()?;
-                let DpPointValue::TimeSig(num, den) = pt.value else {
-                    self.add(
-                        ItemKind::LeftOut,
-                        UNREADABLE_VALUES,
-                        Some("TimeSignatureAutomation point".to_owned()),
-                    );
-                    continue;
-                };
-                let Some(meter) = self.meter(num, den) else {
-                    continue;
-                };
-                let Some(tick) = self.time(pt.time, unit, &tempo) else {
-                    continue;
-                };
-                let Some(last) = entries.last().copied() else {
-                    continue;
-                };
-                if tick < last.tick {
-                    self.add(ItemKind::LeftOut, MAP_ORDER, None);
-                    continue;
-                }
-                let bar = last.meter.bar_ticks().max(1);
-                let rel = tick.0.saturating_sub(last.tick.0);
-                let at = rel
-                    .checked_add(bar - 1)
-                    .map(|r| r / bar * bar)
-                    .and_then(|r| r.checked_add(last.tick.0))
-                    .filter(|t| *t <= MAX_TICKS);
-                let Some(at) = at else {
-                    self.add(ItemKind::LeftOut, PAST_END, None);
-                    continue;
-                };
-                if at != tick.0 {
-                    self.add(ItemKind::Changed, METER_MOVED, None);
-                }
-                if at == last.tick.0 {
-                    if let Some(l) = entries.last_mut() {
-                        l.meter = meter;
-                    }
-                } else if meter != last.meter {
-                    entries.push(MeterEntry {
-                        tick: Tick(at),
-                        meter,
-                        key,
-                    });
-                }
-            }
-        }
-        let meter = MeterMap::new(entries).unwrap_or_default();
-        Ok((tempo, meter))
-    }
-
-    fn markers(&mut self, tempo: &TempoMap) -> Result<Vec<Marker>, IoError> {
-        let Some(a) = self.pkg.project.arrangement.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let unit = a.markers_head.time_unit.unwrap_or(DpTimeUnit::Beats);
-        let mut out = Vec::new();
-        for (i, m) in a.markers.iter().enumerate() {
-            self.tick()?;
-            let name = self.name(m.named.name.as_deref(), || {
-                format!("Marker {}", i.saturating_add(1))
-            });
-            if m.named.color.is_some() {
-                self.add(ItemKind::LeftOut, COLOURS_AND_COMMENTS, Some(name.clone()));
-            }
-            self.comment(m.named.comment.as_deref(), || format!("marker '{name}'"));
-            if let Some(tick) = self.time(m.time, unit, tempo) {
-                out.push(Marker { tick, name });
-            }
-        }
-        out.sort_by_key(|m| m.tick);
-        Ok(out)
     }
 
     /// Walks every timeline for what this task lists (clip comments); the
@@ -1032,9 +815,9 @@ impl<'a, 'p> Cx<'a, 'p> {
         let audio = t.content.contains(&DpContentType::Audio);
         let midi = if notes {
             Some(match first.and_then(|i| devices.get(i)) {
-                Some(d) => self.instrument(d, &name),
+                Some(d) => self.instrument(d, &name)?,
                 None => {
-                    self.add(ItemKind::Note, &plays_builtin(&name), None);
+                    self.add(ItemKind::Note, PLAYS_BUILTIN, Some(name.clone()));
                     Midi::Builtin
                 }
             })
@@ -1055,6 +838,9 @@ impl<'a, 'p> Cx<'a, 'p> {
         };
         let shares = midi == Some(Midi::Builtin);
         let owns = matches!(midi, Some(Midi::Plugin(_))) || audio;
+        if matches!(midi, Some(Midi::Plugin(_))) && audio {
+            self.add(ItemKind::Changed, BOTH_STRIPS, Some(name.clone()));
+        }
         if owns {
             mix.colour = self.colour(colour_hex);
         } else if colour_hex.is_some() {
@@ -1092,63 +878,119 @@ impl<'a, 'p> Cx<'a, 'p> {
     }
 
     /// The instrument a track plays from its first instrument device.
-    fn instrument(&mut self, d: &DpDevice, track: &str) -> Midi {
+    fn instrument(&mut self, d: &DpDevice, track: &str) -> Result<Midi, IoError> {
         let name = d.device_name.clone();
-        match d.kind {
-            DpDeviceKind::Au | DpDeviceKind::Clap => match self.slot(d) {
+        Ok(match d.kind {
+            DpDeviceKind::Au | DpDeviceKind::Clap => match self.slot(d)? {
                 Some(s) => Midi::Plugin(s),
                 None => Midi::Builtin,
             },
             DpDeviceKind::Vst2 | DpDeviceKind::Vst3 => {
-                self.add(ItemKind::LeftOut, &vst(&name), None);
+                self.add(ItemKind::LeftOut, VST, Some(name));
                 Midi::Builtin
             }
             kind => {
-                let what = builtin_instrument(kind_name(kind), track);
-                self.add_with(ItemKind::LeftOut, &what, &d.settings);
+                self.builtin_device(BUILTIN_INSTRUMENTS, kind, track, &d.settings);
                 Midi::Builtin
             }
+        })
+    }
+
+    /// Another DAW's built-in device on `track`, listed once under `what`
+    /// with its settings as details.
+    fn builtin_device(&mut self, what: &str, kind: DpDeviceKind, track: &str, settings: &[String]) {
+        let place = format!("{} on track '{track}'", kind_name(kind));
+        let details: Vec<String> = if settings.is_empty() {
+            vec![place]
+        } else {
+            settings
+                .iter()
+                .take(crate::limits::MAX_DETAILS)
+                .map(|s| format!("{place}: {s}"))
+                .collect()
+        };
+        self.add_with(ItemKind::LeftOut, what, &details);
+    }
+
+    /// A plug-in state entry, read once per path and format and shared by
+    /// every device naming it. The states held together stay within the
+    /// limits' `max_state_total`; past it, `Err` is [`TOO_LARGE_TO_CARRY`].
+    fn state_of(&mut self, path: &str, format: PluginFormat) -> Result<StateRead, IoError> {
+        let key = (path.to_owned(), format);
+        if let Some(r) = self.states.get(&key) {
+            return Ok(r.clone());
         }
+        let limits = self.pkg.limits();
+        let room = limits.max_state_total.saturating_sub(self.held);
+        let got = if self
+            .pkg
+            .entry_size(path)
+            .is_some_and(|n| n <= limits.max_state && n > room)
+        {
+            Err(TOO_LARGE_TO_CARRY.to_owned())
+        } else {
+            match self.pkg.state(path, self.cancel) {
+                Err(IoError::Cancelled) => return Err(IoError::Cancelled),
+                Err(e) => Err(e.to_string()),
+                Ok(raw) => match format {
+                    PluginFormat::Clap => Ok(raw),
+                    PluginFormat::Au => {
+                        let bin = self.env.plist.to_binary(&raw);
+                        drop(raw);
+                        bin
+                    }
+                },
+            }
+        };
+        let got = got.and_then(|b| {
+            let n = u64::try_from(b.len()).unwrap_or(u64::MAX);
+            if n > room {
+                Err(TOO_LARGE_TO_CARRY.to_owned())
+            } else {
+                self.held = self.held.saturating_add(n);
+                Ok(Arc::from(b))
+            }
+        });
+        self.states.insert(key, got.clone());
+        Ok(got)
     }
 
     /// An AU or CLAP device as a slot, with its state.
-    fn slot(&mut self, d: &DpDevice) -> Option<SlotPlan> {
+    fn slot(&mut self, d: &DpDevice) -> Result<Option<SlotPlan>, IoError> {
         let name = d.device_name.clone();
         let format = match d.kind {
             DpDeviceKind::Au => PluginFormat::Au,
             DpDeviceKind::Clap => PluginFormat::Clap,
-            _ => return None,
+            _ => return Ok(None),
         };
         self.comment(d.named.comment.as_deref(), || format!("plug-in '{name}'"));
         let Some(id) = d.device_id.as_deref().filter(|i| !i.trim().is_empty()) else {
-            self.add(ItemKind::LeftOut, &no_plugin_id(&name), None);
-            return None;
+            self.add(ItemKind::LeftOut, NO_PLUGIN_ID, Some(name));
+            return Ok(None);
         };
         if !(self.env.installed)(format, id) {
-            self.add(ItemKind::Note, &not_installed(&name), None);
+            self.add(ItemKind::Note, NOT_INSTALLED, Some(name.clone()));
         }
         let state = match &d.state {
             None => None,
             Some(f) if f.external => {
-                self.add(ItemKind::LeftOut, &plugin_settings(&name), None);
+                let why = format!("{name}: it is outside the file");
+                self.add(ItemKind::LeftOut, PLUGIN_SETTINGS, Some(why));
                 None
             }
-            Some(f) => {
-                let bytes = self.pkg.state(&f.path).map_err(|e| e.to_string());
-                let bytes = match format {
-                    PluginFormat::Au => bytes.and_then(|b| self.env.plist.to_binary(&b)),
-                    PluginFormat::Clap => bytes,
-                };
-                match bytes {
-                    Ok(b) => Some(Arc::from(b)),
-                    Err(why) => {
-                        self.add(ItemKind::LeftOut, &plugin_settings(&name), Some(why));
-                        None
-                    }
+            Some(f) => match self.state_of(&f.path, format)? {
+                Ok(b) => Some(b),
+                Err(why) => {
+                    self.add(
+                        ItemKind::LeftOut,
+                        PLUGIN_SETTINGS,
+                        Some(format!("{name}: {why}")),
+                    );
+                    None
                 }
-            }
+            },
         };
-        Some(SlotPlan {
+        Ok(Some(SlotPlan {
             plugin: PluginRef {
                 format,
                 id: id.to_owned(),
@@ -1158,7 +1000,7 @@ impl<'a, 'p> Cx<'a, 'p> {
             },
             bypass: d.enabled.as_ref().and_then(|e| e.value) == Some(false),
             state,
-        })
+        }))
     }
 
     /// A level parameter in dB: linear through `db_of_linear`, decibels as
@@ -1166,7 +1008,8 @@ impl<'a, 'p> Cx<'a, 'p> {
     fn level(&mut self, p: &DpRealParam, what: &str) -> Option<f64> {
         let v = p.value?;
         let db = match p.unit {
-            DpUnit::Linear if !v.is_nan() => db_of_linear(v),
+            // A normalised volume is read as a linear gain from 0 to 1.
+            DpUnit::Linear | DpUnit::Normalized if !v.is_nan() => db_of_linear(v),
             DpUnit::Decibel if !v.is_nan() => v.max(GAIN_FLOOR_DB),
             _ => {
                 self.add(ItemKind::LeftOut, UNREADABLE_VALUES, Some(what.to_owned()));
@@ -1183,18 +1026,11 @@ impl<'a, 'p> Cx<'a, 'p> {
     /// A pan parameter as −1 … +1: normalised as it is, other units scaled
     /// by their finite `min`/`max`; `None` (listed) otherwise.
     fn pan(&mut self, p: &DpRealParam, what: &str) -> Option<f64> {
-        let v = p.value.filter(|v| v.is_finite());
-        let n = match (p.unit, v, p.min, p.max) {
-            (DpUnit::Normalized, Some(v), _, _) => Some(v),
-            (_, Some(v), Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() && hi > lo => {
-                Some((v - lo) / (hi - lo))
-            }
-            _ => None,
-        };
+        let n = pan_value(p);
         if n.is_none() {
             self.add(ItemKind::LeftOut, UNREADABLE_VALUES, Some(what.to_owned()));
         }
-        n.map(|n| pan_of_normalized(n.clamp(0.0, 1.0)))
+        n
     }
 
     /// Where a destination ID goes: the master, a bus, or (Changed) the
@@ -1242,6 +1078,11 @@ impl<'a, 'p> Cx<'a, 'p> {
         }
         mix.mute = c.mute.as_ref().and_then(|m| m.value).unwrap_or(false);
         mix.solo = c.solo.unwrap_or(false);
+        if master && (mix.pan.abs() > 1e-9 || mix.solo) {
+            self.add(ItemKind::LeftOut, MASTER_PAN_SOLO, None);
+            mix.pan = 0.0;
+            mix.solo = false;
+        }
         for s in &c.sends {
             self.tick()?;
             if master {
@@ -1257,9 +1098,10 @@ impl<'a, 'p> Cx<'a, 'p> {
                 continue;
             };
             // A send's pan has no place in VizDAW; a centred one loses nothing.
-            let off_centre = s.pan.as_ref().is_some_and(|p| {
-                p.unit != DpUnit::Normalized || p.value.is_some_and(|v| (v - 0.5).abs() > 1e-9)
-            });
+            let off_centre = s
+                .pan
+                .as_ref()
+                .is_some_and(|p| pan_value(p).is_none_or(|v| v.abs() > 1e-9));
             if off_centre {
                 self.add(ItemKind::LeftOut, SEND_PAN, Some(owner.to_owned()));
             }
@@ -1281,20 +1123,17 @@ impl<'a, 'p> Cx<'a, 'p> {
             let name = d.device_name.clone();
             match d.role {
                 DpDeviceRole::Instrument => {
-                    self.add(
-                        ItemKind::LeftOut,
-                        &extra_instrument(&name),
-                        Some(owner.to_owned()),
-                    );
+                    let detail = format!("{name} on '{owner}'");
+                    self.add(ItemKind::LeftOut, EXTRA_INSTRUMENTS, Some(detail));
                 }
-                DpDeviceRole::NoteFx => self.add(ItemKind::LeftOut, &note_effect(&name), None),
-                DpDeviceRole::Analyzer => self.add(ItemKind::LeftOut, &analyzer(&name), None),
+                DpDeviceRole::NoteFx => self.add(ItemKind::LeftOut, NOTE_EFFECTS, Some(name)),
+                DpDeviceRole::Analyzer => self.add(ItemKind::LeftOut, ANALYZERS, Some(name)),
                 DpDeviceRole::AudioFx => match d.kind {
                     DpDeviceKind::Au | DpDeviceKind::Clap => {
                         let eq_tag = d.named.comment.as_deref().is_some_and(|c| {
                             strip_tags(c).1.iter().any(|(k, _)| *k == TagKind::Eq)
                         });
-                        if let Some(slot) = self.slot(d) {
+                        if let Some(slot) = self.slot(d)? {
                             if eq_tag && mix.eq.is_none() {
                                 mix.eq = Some(slot);
                             } else {
@@ -1303,51 +1142,28 @@ impl<'a, 'p> Cx<'a, 'p> {
                         }
                     }
                     DpDeviceKind::Vst2 | DpDeviceKind::Vst3 => {
-                        self.add(ItemKind::LeftOut, &vst(&name), None);
+                        self.add(ItemKind::LeftOut, VST, Some(name));
                     }
-                    kind => {
-                        let what = builtin_effect(kind_name(kind), owner);
-                        self.add_with(ItemKind::LeftOut, &what, &d.settings);
-                    }
+                    kind => self.builtin_device(BUILTIN_EFFECTS, kind, owner, &d.settings),
                 },
             }
         }
         Ok(mix)
     }
+}
 
-    /// The song info and the sequence's name (the title, else the file's
-    /// stem).
-    fn song_info(&mut self) -> (String, SongInfo) {
-        let m = &self.pkg.metadata;
-        let mut info = SongInfo::default();
-        for (i, (out, field)) in info.fields_mut().into_iter().zip(&m.fields).enumerate() {
-            let Some(text) = field else { continue };
-            let mut text = text.as_str();
-            let stripped;
-            if i == METADATA_FIELDS.len().saturating_sub(1) {
-                stripped = without_export_line(text);
-                text = &stripped;
-            }
-            let (kept, cut) = cut_to(text.trim_end(), MAX_INFO_BYTES);
-            if cut || m.cut.get(i).copied().unwrap_or(false) {
-                let field = METADATA_FIELDS.get(i).copied().unwrap_or("");
-                self.add(ItemKind::Changed, INFO_CUT, Some(field.to_owned()));
-            }
-            if !kept.trim().is_empty() {
-                *out = Some(kept.to_owned());
-            }
+/// A pan parameter as −1 … +1: normalised as it is, other units scaled by
+/// their finite `min`/`max`; `None` when it cannot be read.
+fn pan_value(p: &DpRealParam) -> Option<f64> {
+    let v = p.value.filter(|v| v.is_finite())?;
+    let n = match (p.unit, p.min, p.max) {
+        (DpUnit::Normalized, _, _) => v,
+        (_, Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() && hi > lo => {
+            (v - lo) / (hi - lo)
         }
-        let stem = self.pkg.stem().to_owned();
-        let name = self.name(info.title.as_deref(), || {
-            let (s, _) = clean_name(&stem);
-            if s.is_empty() {
-                "Sequence 1".to_owned()
-            } else {
-                s
-            }
-        });
-        (name, info)
-    }
+        _ => return None,
+    };
+    Some(pan_of_normalized(n.clamp(0.0, 1.0)))
 }
 
 /// The element name of a built-in device kind.
@@ -1364,74 +1180,6 @@ fn kind_name(kind: DpDeviceKind) -> &'static str {
         DpDeviceKind::Limiter => "Limiter",
         DpDeviceKind::Other => "Device",
     }
-}
-
-/// `comment` without its last line when that is the export line.
-fn without_export_line(comment: &str) -> String {
-    let trimmed = comment.trim_end();
-    let (head, last) = match trimmed.rfind('\n') {
-        Some(i) => (
-            trimmed.get(..i).unwrap_or(""),
-            trimmed.get(i + 1..).unwrap_or(""),
-        ),
-        None => ("", trimmed),
-    };
-    if last.starts_with(EXPORT_LINE) {
-        head.trim_end().to_owned()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
-/// `s` cut to at most `max` bytes at a character boundary, and whether it
-/// was cut.
-fn cut_to(s: &str, max: usize) -> (&str, bool) {
-    if s.len() <= max {
-        return (s, false);
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    (s.get(..end).unwrap_or(""), true)
-}
-
-/// `raw` as a track, bus, marker or sequence name: control and zero-width
-/// characters dropped (as `core_model::lane::valid_name` wants), trimmed,
-/// cut to [`MAX_INFO_BYTES`]; and whether it was cut.
-fn clean_name(raw: &str) -> (String, bool) {
-    let bad =
-        |c: char| c.is_control() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}');
-    let mut out = String::new();
-    let mut cut = false;
-    for c in raw.trim().chars().filter(|c| !bad(*c)) {
-        if out.len().saturating_add(c.len_utf8()) > MAX_INFO_BYTES {
-            cut = true;
-            break;
-        }
-        out.push(c);
-    }
-    (out.trim().to_owned(), cut)
-}
-
-/// The ticks after a tempo point `last` at which `dt` seconds have passed,
-/// when the next point's tempo is `next` (a ramp from `last` reaches it
-/// there). `None` for a time before `last` or one that is not a number.
-fn seconds_after(last: TempoPoint, next: Bpm, dt: f64) -> Option<i64> {
-    if !dt.is_finite() || dt < 0.0 {
-        return None;
-    }
-    let b0 = last.bpm.as_f64();
-    let b1 = next.as_f64();
-    let ppq = PPQ as f64;
-    let ticks = if last.ramp && (b1 - b0).abs() > 1e-9 {
-        // A linear ramp over L ticks lasts 60 L ln(b1/b0) / (PPQ (b1 − b0)).
-        dt * ppq * (b1 - b0) / (60.0 * (b1 / b0).ln())
-    } else {
-        dt * ppq * b0 / 60.0
-    };
-    let t = ticks.round();
-    (t.is_finite() && t <= MAX_TICKS as f64).then_some(t as i64)
 }
 
 /// Cuts the bus outputs and sends that would make a loop: one walk, depth
@@ -1502,386 +1250,4 @@ fn cut_loops(plan: &mut Plan, report: &mut Report) {
             }
         }
     }
-}
-
-// ---------------------------------------------------------------- applying
-
-fn run(h: &mut History, cmd: Command) -> Result<CmdReport, ModelError> {
-    h.execute(&cmd, &ViewFilter::default())
-}
-
-fn created<T>(r: &CmdReport, f: impl Fn(&AnyId) -> Option<T>) -> Option<T> {
-    r.created.iter().find_map(f)
-}
-
-fn created_plugin(r: &CmdReport) -> Result<PluginInstanceId, ModelError> {
-    created(r, |id| match id {
-        AnyId::Plugin(p) => Some(*p),
-        _ => None,
-    })
-    .ok_or_else(|| ModelError::invalid("no plug-in was created"))
-}
-
-fn strip_of(h: &History, kind: StripKind) -> Result<StripId, ModelError> {
-    h.doc()
-        .mixer()
-        .find_kind(kind)
-        .ok_or_else(|| ModelError::invalid("the strip was not created"))
-}
-
-/// Applies `mix` to `strip`; with `flags`, its mute and solo too; on the
-/// master, no output and no sends. New slots with a state join `states`.
-fn apply_mix(
-    h: &mut History,
-    strip: StripId,
-    mix: &Mix,
-    buses: &[StripId],
-    flags: bool,
-    master: bool,
-    states: &mut SlotStates,
-) -> Result<(), ModelError> {
-    let mixer = |cmd| Command::Mixer(cmd);
-    if mix.gain_db != 0.0 {
-        run(
-            h,
-            mixer(MixerCmd::SetGain {
-                strip,
-                gain_db: mix.gain_db,
-            }),
-        )?;
-    }
-    if mix.pan != 0.0 && !master {
-        run(
-            h,
-            mixer(MixerCmd::SetPan {
-                strip,
-                pan: mix.pan,
-            }),
-        )?;
-    }
-    if flags && mix.mute {
-        run(h, mixer(MixerCmd::SetMute { strip, mute: true }))?;
-    }
-    if flags && mix.solo && !master {
-        run(h, mixer(MixerCmd::SetSolo { strip, solo: true }))?;
-    }
-    if mix.colour.is_some() {
-        run(
-            h,
-            mixer(MixerCmd::SetColour {
-                strip,
-                colour: mix.colour,
-            }),
-        )?;
-    }
-    if !master {
-        if let Out::Bus(b) = mix.output
-            && let Some(bus) = buses.get(b).copied()
-        {
-            run(
-                h,
-                mixer(MixerCmd::SetOutput {
-                    strip,
-                    output: Output::Bus(bus),
-                }),
-            )?;
-        }
-        for s in &mix.sends {
-            let Some(target) = buses.get(s.bus).copied() else {
-                continue;
-            };
-            run(
-                h,
-                mixer(MixerCmd::AddSend {
-                    strip,
-                    send: AuxSend {
-                        target,
-                        level_db: s.level_db,
-                        pre_fader: s.pre,
-                        enabled: s.enabled,
-                    },
-                }),
-            )?;
-        }
-    }
-    let mut slot_done = |h: &mut History, id: PluginInstanceId, plan: &SlotPlan| {
-        if plan.bypass {
-            run(
-                h,
-                mixer(MixerCmd::SetBypass {
-                    slot: id,
-                    bypass: true,
-                }),
-            )?;
-        }
-        if let Some(s) = &plan.state {
-            states.push((id, Arc::clone(s)));
-        }
-        Ok::<(), ModelError>(())
-    };
-    if let Some(eq) = &mix.eq {
-        let r = run(
-            h,
-            mixer(MixerCmd::SetEq {
-                strip,
-                plugin: Some(eq.plugin.clone()),
-            }),
-        )?;
-        let id = created_plugin(&r)?;
-        slot_done(h, id, eq)?;
-    }
-    for ins in &mix.inserts {
-        let r = run(
-            h,
-            mixer(MixerCmd::AddInsert {
-                strip,
-                index: None,
-                plugin: ins.plugin.clone(),
-            }),
-        )?;
-        let id = created_plugin(&r)?;
-        slot_done(h, id, ins)?;
-    }
-    Ok(())
-}
-
-/// The plug-in slots `mix` makes.
-fn slots(mix: &Mix) -> u64 {
-    u64::try_from(mix.inserts.len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(u64::from(mix.eq.is_some()))
-}
-
-/// Inside the caller's open transaction on a document with no tracks;
-/// returns each new plugin slot's state to capture after the commit.
-///
-/// Makes, in order: the buses, the shared built-in-synth destination when a
-/// track needs it, each track (its destination or plug-in instrument, its
-/// output path, its strips' settings and, on the shared synth, its mute
-/// and solo), the synth's, the buses' and the master's settings, then the
-/// tempo and meter maps, the markers, the sequence's name and the song
-/// info. Merges the import's report into `report` and fills its summary.
-pub fn apply(
-    h: &mut History,
-    imp: &DpImport,
-    seq: SeqId,
-    report: &mut Report,
-) -> Result<SlotStates, ModelError> {
-    let doc = h.doc();
-    doc.sequence(seq)?;
-    if doc.sequences().values().any(|s| !s.lanes.is_empty()) {
-        return Err(ModelError::invalid(NOT_NEW));
-    }
-    report.merge(imp.report.clone());
-    let plan = &imp.plan;
-    let mut states = Vec::new();
-    let mut plugins = 0u64;
-
-    let mut buses = Vec::with_capacity(plan.buses.len());
-    for b in &plan.buses {
-        let r = run(
-            h,
-            Command::Mixer(MixerCmd::AddBus {
-                name: b.name.clone(),
-                index: None,
-            }),
-        )?;
-        let id = created(&r, |id| match id {
-            AnyId::Strip(s) => Some(*s),
-            _ => None,
-        })
-        .ok_or_else(|| ModelError::invalid("no bus was created"))?;
-        buses.push(id);
-    }
-
-    let mut builtin: Option<DestId> = None;
-    if plan.tracks.iter().any(|t| t.midi == Some(Midi::Builtin)) {
-        let r = run(
-            h,
-            Command::Routing(RoutingCmd::AddDestination {
-                name: BUILTIN_NAME.to_owned(),
-                kind: DestKind::MidiEndpoint {
-                    endpoint_ref: BUILTIN_SYNTH_REF.to_owned(),
-                    group: 0,
-                    channel: 0,
-                },
-                default_patch: None,
-            }),
-        )?;
-        builtin = created(&r, |id| match id {
-            AnyId::Dest(d) => Some(*d),
-            _ => None,
-        });
-    }
-
-    let mut lanes = 0u64;
-    for t in &plan.tracks {
-        let r = run(
-            h,
-            Command::Lane(LaneCmd::Add {
-                seq,
-                name: t.name.clone(),
-                index: None,
-            }),
-        )?;
-        let lane = created(&r, |id| match id {
-            AnyId::Lane(l) => Some(*l),
-            _ => None,
-        })
-        .ok_or_else(|| ModelError::invalid("no track was created"))?;
-        lanes = lanes.saturating_add(1);
-        let mut owned: Vec<StripId> = Vec::new();
-        match &t.midi {
-            Some(Midi::Plugin(slot)) => {
-                let mut s = PluginSlot::new(PluginInstanceId(0), slot.plugin.clone());
-                s.bypass = slot.bypass;
-                let r = run(
-                    h,
-                    Command::Routing(RoutingCmd::AddDestination {
-                        name: t.name.clone(),
-                        kind: DestKind::PluginInstrument { slot: s },
-                        default_patch: None,
-                    }),
-                )?;
-                let dest = created(&r, |id| match id {
-                    AnyId::Dest(d) => Some(*d),
-                    _ => None,
-                })
-                .ok_or_else(|| ModelError::invalid("no destination was created"))?;
-                let id = created_plugin(&r)?;
-                if let Some(st) = &slot.state {
-                    states.push((id, Arc::clone(st)));
-                }
-                plugins = plugins.saturating_add(1);
-                run(
-                    h,
-                    Command::Lane(LaneCmd::SetDest {
-                        seq,
-                        lane,
-                        dest: Some(dest),
-                    }),
-                )?;
-                owned.push(strip_of(h, StripKind::Instrument(dest))?);
-            }
-            Some(Midi::Builtin) => {
-                run(
-                    h,
-                    Command::Lane(LaneCmd::SetDest {
-                        seq,
-                        lane,
-                        dest: builtin,
-                    }),
-                )?;
-            }
-            None => {}
-        }
-        if t.audio {
-            let r = run(
-                h,
-                Command::Routing(RoutingCmd::AddOutput {
-                    name: t.name.clone(),
-                    reference: AUDIO_REFERENCE.to_owned(),
-                }),
-            )?;
-            let out = created(&r, |id| match id {
-                AnyId::Output(o) => Some(*o),
-                _ => None,
-            })
-            .ok_or_else(|| ModelError::invalid("no output path was created"))?;
-            run(
-                h,
-                Command::Lane(LaneCmd::SetOutput {
-                    seq,
-                    lane,
-                    output: Some(out),
-                }),
-            )?;
-            owned.push(strip_of(h, StripKind::AudioPath(out))?);
-        }
-        for strip in owned {
-            apply_mix(
-                h,
-                strip,
-                &t.mix,
-                &buses,
-                t.flags.is_none(),
-                false,
-                &mut states,
-            )?;
-            plugins = plugins.saturating_add(slots(&t.mix));
-        }
-        if let Some((mute, solo)) = t.flags
-            && (mute || solo)
-        {
-            run(
-                h,
-                Command::Lane(LaneCmd::SetFlags {
-                    seq,
-                    lane,
-                    mute: mute.then_some(true),
-                    solo: solo.then_some(true),
-                    arm: None,
-                }),
-            )?;
-        }
-    }
-    if let (Some(mix), Some(_)) = (&plan.builtin, builtin) {
-        let strip = strip_of(h, StripKind::BuiltinSynth)?;
-        apply_mix(h, strip, mix, &buses, false, false, &mut states)?;
-        plugins = plugins.saturating_add(slots(mix));
-    }
-    for (b, id) in plan.buses.iter().zip(buses.clone()) {
-        apply_mix(h, id, &b.mix, &buses, true, false, &mut states)?;
-        plugins = plugins.saturating_add(slots(&b.mix));
-    }
-    let master = h.doc().mixer().master();
-    apply_mix(h, master, &plan.master, &buses, true, true, &mut states)?;
-    plugins = plugins.saturating_add(slots(&plan.master));
-
-    run(
-        h,
-        Command::Sequence(SequenceCmd::SetTempo {
-            seq,
-            tempo: plan.tempo.clone(),
-        }),
-    )?;
-    run(
-        h,
-        Command::Sequence(SequenceCmd::SetMeter {
-            seq,
-            meter: plan.meter.clone(),
-        }),
-    )?;
-    if !plan.markers.is_empty() {
-        run(
-            h,
-            Command::Sequence(SequenceCmd::SetMarkers {
-                seq,
-                markers: plan.markers.iter().cloned().collect(),
-            }),
-        )?;
-    }
-    run(
-        h,
-        Command::Sequence(SequenceCmd::Rename {
-            seq,
-            name: plan.name.clone(),
-        }),
-    )?;
-    if !plan.info.is_empty() {
-        run(
-            h,
-            Command::Settings(SettingsCmd::SetInfo {
-                info: plan.info.clone(),
-            }),
-        )?;
-    }
-    let s = &mut report.summary;
-    s.tracks = s.tracks.saturating_add(lanes);
-    s.markers = s
-        .markers
-        .saturating_add(u64::try_from(plan.markers.len()).unwrap_or(u64::MAX));
-    s.plugins = s.plugins.saturating_add(plugins);
-    s.tempo_map = true;
-    Ok(states)
 }

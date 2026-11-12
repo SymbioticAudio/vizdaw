@@ -55,6 +55,9 @@ pub const MAX_METADATA_XML_BYTES: u64 = 1024 * 1024;
 pub const MAX_RECORD_BYTES: u64 = 256 * 1024 * 1024;
 /// Largest plug-in state entry, unpacked, in bytes (§6.5).
 pub const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
+/// Most bytes of plug-in state one import holds at once, all states
+/// together (states shared by several plug-ins count once).
+pub const MAX_STATE_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 /// Deepest XML element nesting (§6.5).
 pub const MAX_XML_DEPTH: usize = 256;
 /// Most nodes in one XML tree (§6.5).
@@ -90,6 +93,8 @@ pub struct PackageLimits {
     pub max_record: u64,
     /// Largest plug-in state entry, unpacked, in bytes.
     pub max_state: u64,
+    /// Most bytes of plug-in state an import holds, all states together.
+    pub max_state_total: u64,
     /// Most an XML entry may unpack to, as a multiple of its packed size.
     pub max_ratio: u64,
     /// Deepest XML element nesting.
@@ -108,6 +113,7 @@ impl Default for PackageLimits {
             max_metadata_xml: MAX_METADATA_XML_BYTES,
             max_record: MAX_RECORD_BYTES,
             max_state: MAX_STATE_BYTES,
+            max_state_total: MAX_STATE_TOTAL_BYTES,
             max_ratio: MAX_XML_RATIO,
             max_depth: MAX_XML_DEPTH,
             max_nodes: MAX_XML_NODES,

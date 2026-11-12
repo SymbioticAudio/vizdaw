@@ -1,15 +1,19 @@
 //! DAWproject import of the package, the structure, the mixer, plug-ins,
 //! the tempo and meter maps, markers and song info (plan 6d Task 6).
 
+mod common;
+
+use common::measure;
 use core_io::IoError;
 use core_io::dawproject::import::{
-    CANCEL_EVERY, COLOURS_NEAREST, COMMENTS, DpImport, FOLDERS, FROM_VIZDAW, INFO_CUT, ImportEnv,
-    METER_MOVED, MediaSource, NAMES_CUT, OUTPUT_TO_TRACK, VCA, apply, builtin_effect,
-    debug_items_after_pause, debug_pause_at, debug_paused, map, not_installed, plays_builtin,
-    plugin_settings, vst,
+    BOTH_STRIPS, BUILTIN_EFFECTS, CANCEL_EVERY, COLOURS_AND_COMMENTS, COLOURS_NEAREST, DpImport,
+    FOLDERS, FROM_VIZDAW, INFO_CUT, ImportEnv, METER_MOVED, MediaSource, NAMES_CUT, NOT_INSTALLED,
+    OUTPUT_TO_TRACK, PLAYS_BUILTIN, PLUGIN_SETTINGS, TOO_LARGE_TO_CARRY, VCA, VST, apply,
+    debug_items_after_pause, debug_pause_at, debug_paused, map,
 };
 use core_io::dawproject::package::{
-    AudioSource, DpPackage, ODD_RATE, RECORD_UNREADABLE, SONG_INFO_UNREADABLE, open,
+    AudioSource, DpPackage, ODD_RATE, RECORD_UNREADABLE, SONG_INFO_UNREADABLE,
+    debug_take_external_stats, external_files_note, open,
 };
 use core_io::dawproject::plugins::PlistCodec;
 use core_io::limits::PackageLimits;
@@ -29,6 +33,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[global_allocator]
+static ALLOC: common::CountingAlloc = common::CountingAlloc;
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/dawproject");
 const BEAT: i64 = 15_360;
@@ -278,6 +285,30 @@ fn has(r: &Report, kind: ItemKind, what: &str) {
     );
 }
 
+/// The item `what` of `kind` has a detail starting with `start`.
+#[track_caller]
+fn has_detail(r: &Report, kind: ItemKind, what: &str, start: &str) {
+    let i = item(r, kind, what).unwrap_or_else(|| panic!("no {kind:?} '{what}' in {:#?}", r.items));
+    assert!(
+        i.details.iter().any(|d| d.starts_with(start)),
+        "no detail '{start}…' in {:?}",
+        i.details
+    );
+}
+
+/// No item `what` has a detail starting with `start`.
+#[track_caller]
+fn lacks_detail(r: &Report, what: &str, start: &str) {
+    assert!(
+        r.items
+            .iter()
+            .filter(|i| i.what == what)
+            .all(|i| i.details.iter().all(|d| !d.starts_with(start))),
+        "unexpected '{what}' detail '{start}…' in {:#?}",
+        r.items
+    );
+}
+
 #[track_caller]
 fn lacks(r: &Report, what: &str) {
     assert!(
@@ -336,10 +367,15 @@ fn reads_the_hand_other_file() {
         Output::Master
     );
 
-    has(r, ItemKind::LeftOut, &vst("Bass VST"));
-    let eq = item(r, ItemKind::LeftOut, &builtin_effect("Equalizer", "Gtr")).expect("EQ line");
+    has_detail(r, ItemKind::LeftOut, VST, "Bass VST");
+    let eq = item(r, ItemKind::LeftOut, BUILTIN_EFFECTS).expect("EQ line");
+    assert_eq!(eq.count, 1);
     assert_eq!(eq.details.len(), 2, "{:?}", eq.details);
-    assert!(eq.details[0].contains("bell"), "{:?}", eq.details);
+    assert!(
+        eq.details[0].starts_with("Equalizer on track 'Gtr': Band type=bell"),
+        "{:?}",
+        eq.details
+    );
     assert!(eq.details[1].contains("highPass"), "{:?}", eq.details);
     has(r, ItemKind::LeftOut, VCA);
 
@@ -452,8 +488,8 @@ fn plugins_map_or_wait() {
 
     let lead_only = |_: PluginFormat, id: &str| id == "org.example.lead";
     let a = imported(&pkg, &lead_only);
-    lacks(&a.report, &not_installed("Lead"));
-    has(&a.report, ItemKind::Note, &not_installed("Delay"));
+    lacks_detail(&a.report, NOT_INSTALLED, "Lead");
+    has_detail(&a.report, ItemKind::Note, NOT_INSTALLED, "Delay");
     let lead = lane(&a, "Lead");
     let core_model::document::DestKind::PluginInstrument { slot } =
         &a.h.doc().instruments()[&lead.midi_dest.unwrap()].kind
@@ -465,7 +501,7 @@ fn plugins_map_or_wait() {
     // Not installed: still mapped, with its state, and the Note.
     let none = |_: PluginFormat, _: &str| false;
     let a = imported(&pkg, &none);
-    has(&a.report, ItemKind::Note, &not_installed("Lead"));
+    has_detail(&a.report, ItemKind::Note, NOT_INSTALLED, "Lead");
     let lead = lane(&a, "Lead");
     let core_model::document::DestKind::PluginInstrument { slot } =
         &a.h.doc().instruments()[&lead.midi_dest.unwrap()].kind
@@ -489,11 +525,11 @@ fn plugins_map_or_wait() {
         ],
     );
     let a = imported(&open_ok(&path), &yes);
-    has(&a.report, ItemKind::LeftOut, &plugin_settings("Delay"));
+    has_detail(&a.report, ItemKind::LeftOut, PLUGIN_SETTINGS, "Delay");
     let gtr = audio_strip(&a, &lane(&a, "Gtr"));
     assert_eq!(gtr.inserts.len(), 1);
     assert_eq!(state_of(&a, gtr.inserts[0].id), None);
-    lacks(&a.report, &plugin_settings("Lead"));
+    lacks_detail(&a.report, PLUGIN_SETTINGS, "Lead");
     // No metadata.xml: the title is the file's stem.
     assert_eq!(a.h.doc().sequence(a.seq).unwrap().name, "NoDelayState");
 }
@@ -515,7 +551,7 @@ fn tags_are_stripped_and_counted() {
     assert_eq!(pkg.ret.tracks, 4);
     assert!(!pkg.ret.from_vizdaw());
     let a = imported(&pkg, &yes);
-    has(&a.report, ItemKind::LeftOut, COMMENTS);
+    has(&a.report, ItemKind::LeftOut, COLOURS_AND_COMMENTS);
     lacks(&a.report, FROM_VIZDAW);
 
     let pkg = small(dir.path(), &four(["vz:t3", "vz:t4", "", ""]), None);
@@ -523,7 +559,7 @@ fn tags_are_stripped_and_counted() {
     assert!(pkg.ret.from_vizdaw());
     let a = imported(&pkg, &yes);
     has(&a.report, ItemKind::Note, FROM_VIZDAW);
-    lacks(&a.report, COMMENTS);
+    lacks(&a.report, COLOURS_AND_COMMENTS);
 
     // The export line in the metadata comment.
     let meta = "<MetaData><Title>T</Title><Comment>Notes\nVizDAW export E9</Comment></MetaData>";
@@ -599,7 +635,7 @@ fn channel_destinations() {
     let plain = r#"<Track id="p" name="Plain" contentType="notes"><Channel id="pc" role="regular"/></Track>"#.to_string();
     let pkg = small(dir.path(), &project_xml(&plain, ""), None);
     let a = imported(&pkg, &yes);
-    has(&a.report, ItemKind::Note, &plays_builtin("Plain"));
+    has_detail(&a.report, ItemKind::Note, PLAYS_BUILTIN, "Plain");
     assert_eq!(
         midi_strip(&a, &lane(&a, "Plain")).kind,
         StripKind::BuiltinSynth
@@ -744,8 +780,13 @@ fn needed_bytes_counts_entries_external_files_and_converted_copies() {
     // Entry: 5 000 extracted + its CAF (1.5 s × 48 000 × 2 × 4 = 576 000);
     // the external file: its CAF (48 000 × 1 × 4 = 192 000, over 1 000 × 4);
     // the URL is never read, so it makes nothing.
-    assert_eq!(pkg.needed_bytes(4), 5_000 + 576_000 + 192_000);
-    assert_eq!(pkg.needed_bytes(2), 5_000 + 288_000 + 96_000);
+    let flag = AtomicBool::new(false);
+    assert_eq!(pkg.needed_bytes(4, &flag), Ok(5_000 + 576_000 + 192_000));
+    assert_eq!(pkg.needed_bytes(2, &flag), Ok(5_000 + 288_000 + 96_000));
+    assert_eq!(
+        pkg.needed_bytes(4, &AtomicBool::new(true)),
+        Err(IoError::Cancelled)
+    );
 
     // A lying element: the size floor (file size × 4) wins.
     let liar = r#"<Clip time="0" duration="1"><Audio sampleRate="48000" channels="1" duration="0"><File path="audio/1.wav"/></Audio></Clip>"#.to_string();
@@ -755,7 +796,7 @@ fn needed_bytes_counts_entries_external_files_and_converted_copies() {
         "Liar",
         &[("project.xml", project.as_bytes()), ("audio/1.wav", &entry)],
     );
-    assert_eq!(open_ok(&path).needed_bytes(4), 5_000 + 20_000);
+    assert_eq!(open_ok(&path).needed_bytes(4, &flag), Ok(5_000 + 20_000));
 
     // Extracting an entry writes its bytes; an external file is not
     // extracted.
@@ -929,9 +970,9 @@ fn apply_validates_and_is_one_step() {
 #[test]
 fn every_dropped_item_is_listed() {
     use core_io::dawproject::import::{
-        BAD_METER, COLOURS_AND_COMMENTS, LEVELS_CUT, LOOP_OUTPUTS, LOOP_SENDS, MAP_ORDER,
-        MASTER_SENDS, NO_STRIP, SEND_PAN, SEND_TARGETS, SHARED_SYNTH, TEMPO_CLAMPED, TEXT_DROPPED,
-        analyzer, builtin_instrument, extra_instrument, no_plugin_id, note_effect,
+        ANALYZERS, BAD_METER, BUILTIN_INSTRUMENTS, EXTRA_INSTRUMENTS, LEVELS_CUT, LOOP_OUTPUTS,
+        LOOP_SENDS, MAP_ORDER, MASTER_SENDS, NO_PLUGIN_ID, NO_STRIP, NOTE_EFFECTS, SEND_PAN,
+        SEND_TARGETS, SHARED_SYNTH, TEMPO_CLAMPED, TEXT_DROPPED,
     };
     let dir = tempfile::tempdir().unwrap();
     let project = r##"<?xml version="1.0" encoding="UTF-8"?>
@@ -1007,21 +1048,17 @@ fn every_dropped_item_is_listed() {
         (ItemKind::LeftOut, MASTER_SENDS.to_string()),
         (ItemKind::Changed, LOOP_OUTPUTS.to_string()),
         (ItemKind::LeftOut, LOOP_SENDS.to_string()),
-        (ItemKind::LeftOut, extra_instrument("More")),
-        (ItemKind::LeftOut, note_effect("Arp")),
-        (ItemKind::LeftOut, analyzer("Scope")),
-        (ItemKind::LeftOut, no_plugin_id("Nameless")),
+        (ItemKind::LeftOut, EXTRA_INSTRUMENTS.to_string()),
+        (ItemKind::LeftOut, NOTE_EFFECTS.to_string()),
+        (ItemKind::LeftOut, ANALYZERS.to_string()),
+        (ItemKind::LeftOut, NO_PLUGIN_ID.to_string()),
         (ItemKind::LeftOut, SEND_TARGETS.to_string()),
         (ItemKind::LeftOut, SEND_PAN.to_string()),
         (ItemKind::Changed, LEVELS_CUT.to_string()),
         (ItemKind::LeftOut, SHARED_SYNTH.to_string()),
-        (
-            ItemKind::LeftOut,
-            builtin_instrument("BuiltinDevice", "Organ"),
-        ),
+        (ItemKind::LeftOut, BUILTIN_INSTRUMENTS.to_string()),
         (ItemKind::LeftOut, NO_STRIP.to_string()),
         (ItemKind::LeftOut, COLOURS_AND_COMMENTS.to_string()),
-        (ItemKind::LeftOut, COMMENTS.to_string()),
         (ItemKind::Changed, TEMPO_CLAMPED.to_string()),
         (ItemKind::LeftOut, BAD_METER.to_string()),
         (ItemKind::LeftOut, MAP_ORDER.to_string()),
@@ -1029,6 +1066,16 @@ fn every_dropped_item_is_listed() {
     ] {
         has(r, kind, &what);
     }
+    has_detail(r, ItemKind::LeftOut, EXTRA_INSTRUMENTS, "More on 'Keys'");
+    has_detail(r, ItemKind::LeftOut, NOTE_EFFECTS, "Arp");
+    has_detail(r, ItemKind::LeftOut, ANALYZERS, "Scope");
+    has_detail(r, ItemKind::LeftOut, NO_PLUGIN_ID, "Nameless");
+    has_detail(
+        r,
+        ItemKind::LeftOut,
+        BUILTIN_INSTRUMENTS,
+        "BuiltinDevice on track 'Organ'",
+    );
     assert!(
         rules::validate(a.h.doc()).is_empty(),
         "{:?}",
@@ -1075,4 +1122,242 @@ fn every_dropped_item_is_listed() {
             (16 * BEAT, Meter { num: 3, den: 4 })
         ]
     );
+}
+
+/// A package of `entries`, each written with its own method.
+fn package_with(dir: &Path, stem: &str, entries: &[(&str, &[u8], EntryMethod)]) -> PathBuf {
+    let path = dir.join(format!("{stem}.dawproject"));
+    let mut z = ZipWriter::new(std::fs::File::create(&path).unwrap());
+    for (name, bytes, method) in entries {
+        z.add(name, *method, bytes).unwrap();
+    }
+    z.finish().unwrap();
+    path
+}
+
+/// `n` note tracks, each playing a CLAP instrument whose state is
+/// `state(i)`.
+fn tracks_with_states(n: usize, state: impl Fn(usize) -> String) -> String {
+    let tracks: String = (0..n)
+        .map(|i| {
+            format!(
+                r#"<Track id="t{i}" name="T{i}" contentType="notes"><Channel id="c{i}" role="regular"><Devices><ClapPlugin id="d{i}" deviceID="org.example.s" deviceName="S{i}" deviceRole="instrument"><State path="{}"/></ClapPlugin></Devices></Channel></Track>"#,
+                state(i)
+            )
+        })
+        .collect();
+    project_xml(&tracks, "")
+}
+
+/// Bytes deflate cannot shrink much.
+fn noise(n: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+#[test]
+fn plugin_states_are_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let flag = AtomicBool::new(false);
+
+    // One deflated 64 MiB state (about 64 KiB packed) named by 1 000
+    // devices: the ratio refuses it before it is unpacked, once.
+    let zeros = vec![0u8; 64 << 20];
+    let project = tracks_with_states(1_000, |_| "plugins/big.clap-preset".into());
+    let path = package_with(
+        dir.path(),
+        "Zeros",
+        &[
+            ("project.xml", project.as_bytes(), EntryMethod::Deflated),
+            ("plugins/big.clap-preset", &zeros, EntryMethod::Deflated),
+        ],
+    );
+    drop(zeros);
+    let pkg = open_ok(&path);
+    let (imp, seen) = measure(|| mapped(&pkg, &yes));
+    assert!(seen.peak < 16 << 20, "peak {} bytes", seen.peak);
+    let line = item(&imp.report, ItemKind::LeftOut, PLUGIN_SETTINGS).expect("listed");
+    assert_eq!(line.count, 1_000);
+
+    // A 1 MiB state named by 1 000 devices is read once and shared.
+    let state = noise(1 << 20, 7);
+    let path = package_with(
+        dir.path(),
+        "Shared",
+        &[
+            ("project.xml", project.as_bytes(), EntryMethod::Deflated),
+            ("plugins/big.clap-preset", &state, EntryMethod::Stored),
+        ],
+    );
+    let pkg = open_ok(&path);
+    let (imp, seen) = measure(|| mapped(&pkg, &yes));
+    assert!(seen.peak < 8 << 20, "peak {} bytes", seen.peak);
+    lacks(&imp.report, PLUGIN_SETTINGS);
+    let (doc, seq) = new_doc();
+    let mut h = History::new(doc);
+    h.begin("Import DAWproject").unwrap();
+    let states = apply(&mut h, &imp, seq, &mut Report::default()).unwrap();
+    h.commit().unwrap();
+    assert_eq!(states.len(), 1_000);
+    assert!(states.iter().all(|(_, s)| Arc::ptr_eq(s, &states[0].1)));
+    assert_eq!(&*states[0].1, &state[..]);
+
+    // Distinct states past the total cap are left out as too large to carry.
+    let entries: Vec<(String, Vec<u8>)> = (0..5)
+        .map(|i| (format!("plugins/{i}.clap-preset"), noise(1 << 20, i + 1)))
+        .collect();
+    let project = tracks_with_states(5, |i| format!("plugins/{i}.clap-preset"));
+    let mut files: Vec<(&str, &[u8], EntryMethod)> =
+        vec![("project.xml", project.as_bytes(), EntryMethod::Deflated)];
+    files.extend(
+        entries
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice(), EntryMethod::Stored)),
+    );
+    let path = package_with(dir.path(), "Many", &files);
+    let lowered = PackageLimits {
+        max_state_total: 3 << 20,
+        ..PackageLimits::default()
+    };
+    let pkg = open(&path, &lowered, &flag).unwrap();
+    let imp = mapped(&pkg, &yes);
+    let line = item(&imp.report, ItemKind::LeftOut, PLUGIN_SETTINGS).expect("listed");
+    assert_eq!(line.count, 2);
+    assert!(
+        line.details.iter().all(|d| d.ends_with(TOO_LARGE_TO_CARRY)),
+        "{:?}",
+        line.details
+    );
+}
+
+#[test]
+fn many_tracks_keep_the_report_small() {
+    let dir = tempfile::tempdir().unwrap();
+    let tracks: String = (0..100_000)
+        .map(|i| {
+            format!(
+                r#"<Track id="t{i}" name="T{i}" contentType="notes"><Channel id="c{i}" role="regular"/></Track>"#
+            )
+        })
+        .collect();
+    let pkg = small(dir.path(), &project_xml(&tracks, ""), None);
+    let start = std::time::Instant::now();
+    let imp = mapped(&pkg, &yes);
+    let took = start.elapsed();
+    assert!(took.as_secs() < 30, "{took:?}");
+    assert!(imp.report.items.len() < 10, "{:#?}", imp.report.items.len());
+    let line = item(&imp.report, ItemKind::Note, PLAYS_BUILTIN).expect("listed");
+    assert_eq!(line.count, 100_000);
+    assert_eq!(line.details.len(), core_io::limits::MAX_DETAILS);
+}
+
+#[test]
+fn opening_never_looks_at_external_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let external = r#"<Clip time="0" duration="1"><Audio sampleRate="48000" channels="1" duration="1"><File path="/net/hostile.example/share/x.wav" external="true"/></Audio></Clip>"#;
+    debug_take_external_stats();
+    let pkg = small(
+        dir.path(),
+        &with_audio(&[external.to_string(), audio_clip("audio/1.wav", 48_000)]),
+        None,
+    );
+    let info = pkg.info();
+    assert_eq!(info.external_files, 1);
+    assert_eq!(debug_take_external_stats(), 0, "open and info stat nothing");
+    assert_eq!(
+        external_files_note(info.external_files).as_deref(),
+        Some("1 external audio file (checked when you import)")
+    );
+    assert_eq!(
+        external_files_note(3).as_deref(),
+        Some("3 external audio files (checked when you import)")
+    );
+    assert_eq!(external_files_note(0), None);
+
+    // The confirmed import's size check is where they are looked at.
+    let outside = dir.path().join("o.wav");
+    std::fs::write(&outside, vec![0u8; 10]).unwrap();
+    let clip = format!(
+        r#"<Clip time="0" duration="1"><Audio sampleRate="48000" channels="1" duration="1"><File path="{}" external="true"/></Audio></Clip>"#,
+        outside.display()
+    );
+    let pkg = small(dir.path(), &with_audio(&[clip]), None);
+    assert_eq!(debug_take_external_stats(), 0);
+    assert_eq!(pkg.needed_bytes(4, &AtomicBool::new(false)), Ok(192_000));
+    assert_eq!(debug_take_external_stats(), 1);
+}
+
+#[test]
+fn eq_slot_units_and_states_map() {
+    let dir = tempfile::tempdir().unwrap();
+    use core_io::dawproject::import::{MASTER_PAN_SOLO, SEND_PAN};
+    let structure = r##"
+    <Track id="q" name="Q" contentType="notes">
+      <Channel id="qc" role="regular" destination="mc">
+        <Devices>
+          <ClapPlugin id="qd" deviceID="org.example.q" deviceName="Inst" deviceRole="instrument"/>
+          <ClapPlugin id="qe" comment="vz:q5" deviceID="org.example.eq" deviceName="Eq" deviceRole="audioFX"/>
+          <ClapPlugin id="qf" deviceID="org.example.fx" deviceName="Fx" deviceRole="audioFX"/>
+          <AuPlugin id="qg" deviceID="aufx/test/xmpl" deviceName="Ext" deviceRole="audioFX"><State path="/elsewhere/x.aupreset" external="true"/></AuPlugin>
+        </Devices>
+        <Pan unit="percent" value="50" min="-100" max="100"/>
+        <Sends><Send id="qs" destination="bc" type="post"><Pan unit="linear" value="0" min="-1" max="1"/><Volume unit="linear" value="1"/></Send></Sends>
+        <Volume unit="decibel" value="-6"/>
+      </Channel>
+    </Track>
+    <Track id="n" name="N" contentType="audio">
+      <Channel id="nc" role="regular" destination="mc"><Volume unit="normalized" value="0.5"/></Channel>
+    </Track>
+    <Track id="b" name="B" contentType="audio"><Channel id="bc" role="effect" destination="mc"/></Track>"##;
+    let project = project_xml(structure, "").replace(
+        r#"<Channel id="mc" role="master"/>"#,
+        r#"<Channel id="mc" role="master" solo="true"><Pan unit="normalized" value="0.25"/></Channel>"#,
+    );
+    let pkg = small(dir.path(), &project, None);
+    let a = imported(&pkg, &yes);
+    let q = midi_strip(&a, &lane(&a, "Q"));
+    assert_eq!(
+        q.eq.as_ref().map(|e| e.plugin.id.as_str()),
+        Some("org.example.eq")
+    );
+    let inserts: Vec<&str> = q.inserts.iter().map(|s| s.plugin.id.as_str()).collect();
+    assert_eq!(inserts, ["org.example.fx", "aufx/test/xmpl"]);
+    assert_eq!(q.gain_db, -6.0);
+    assert!((q.pan - 0.5).abs() < 1e-9, "{}", q.pan);
+    assert_eq!(q.sends.len(), 1);
+    lacks(&a.report, SEND_PAN);
+    // The external state is left out; the devices without one are not listed.
+    let line = item(&a.report, ItemKind::LeftOut, PLUGIN_SETTINGS).expect("listed");
+    assert_eq!(line.count, 1);
+    assert!(line.details[0].starts_with("Ext"), "{:?}", line.details);
+    let n = audio_strip(&a, &lane(&a, "N"));
+    assert!((n.gain_db - -6.0206).abs() < 1e-3, "{}", n.gain_db);
+    has(&a.report, ItemKind::LeftOut, MASTER_PAN_SOLO);
+    let master =
+        a.h.doc()
+            .mixer()
+            .strip(a.h.doc().mixer().master())
+            .unwrap()
+            .clone();
+    assert_eq!(master.pan, 0.0);
+    assert!(!master.solo);
+}
+
+#[test]
+fn notes_and_audio_on_one_track_use_both_strips() {
+    let dir = tempfile::tempdir().unwrap();
+    let structure = r#"<Track id="t" name="Both" contentType="notes audio"><Channel id="tc" role="regular" destination="mc"><Devices><ClapPlugin id="td" deviceID="org.example.i" deviceName="I" deviceRole="instrument"/><ClapPlugin id="te" deviceID="org.example.fx" deviceName="Fx" deviceRole="audioFX"/></Devices></Channel></Track>"#;
+    let pkg = small(dir.path(), &project_xml(structure, ""), None);
+    let a = imported(&pkg, &yes);
+    let l = lane(&a, "Both");
+    assert_eq!(midi_strip(&a, &l).inserts.len(), 1);
+    assert_eq!(audio_strip(&a, &l).inserts.len(), 1);
+    has_detail(&a.report, ItemKind::Changed, BOTH_STRIPS, "Both");
 }

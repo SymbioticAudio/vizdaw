@@ -2,9 +2,11 @@
 //! metadata read and checked, what it says about returning to VizDAW, the
 //! audio it uses, and what the app asks before importing it.
 //!
-//! [`open`] reads, in order, the record (`vizdaw/record.json`, only its
-//! head), `project.xml` and `metadata.xml`, so that the record's text is
-//! gone before the project's tree is built. The project's tree is dropped
+//! [`open`] reads, in order, the record (`vizdaw/record.json`: only the
+//! first 64 KiB, for its head), `project.xml` and `metadata.xml`. It never
+//! looks at files outside the package (a preview must not reach the paths a
+//! file names, such as network mounts): [`DpPackage::needed_bytes`], in the
+//! confirmed import, does. The project's tree is dropped
 //! before its IDs are checked ([`project_of`] takes it by value), so one
 //! byte budget ([`MAX_MODEL_BYTES`](crate::limits::MAX_MODEL_BYTES)) bounds
 //! the read.
@@ -17,6 +19,7 @@ use crate::limits::PackageLimits;
 use crate::report::{ItemKind, Report};
 use crate::xml::Tree;
 use crate::zip::{NOT_DAWPROJECT, ZipReader};
+use core_model::document::MAX_INFO_BYTES;
 use core_model::format::AudioFormat;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -38,8 +41,36 @@ pub const ODD_RATE: &str = "The file's audio rate isn't a project rate; the proj
 
 /// The rate of a project when the file gives none.
 const DEFAULT_RATE: u32 = 48_000;
-/// How many items the audio walk counts between looks at the cancel flag.
+/// How many items the walks count between looks at the cancel flag.
 const CANCEL_EVERY: usize = 65_536;
+/// How much of `vizdaw/record.json` is read for its head (the export
+/// writes the head's three fields first).
+const RECORD_HEAD_BYTES: usize = 64 * 1024;
+
+/// The line the app shows before an import for the files outside the
+/// package, which are not looked at until the import is confirmed; `None`
+/// for none.
+pub fn external_files_note(n: u32) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("1 external audio file (checked when you import)".to_owned()),
+        n => Some(format!(
+            "{n} external audio files (checked when you import)"
+        )),
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    static EXTERNAL_STATS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: how many external files this thread has looked at since the
+/// last call, which resets the count.
+#[cfg(feature = "test-hooks")]
+pub fn debug_take_external_stats() -> usize {
+    EXTERNAL_STATS.with(|c| c.replace(0))
+}
 
 /// What a package says about where it came from (spec §7.8).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -73,6 +104,9 @@ pub struct DpInfo {
     pub tracks: u32,
     /// Distinct audio files.
     pub audio_files: u32,
+    /// How many of them are outside the package (not looked at before the
+    /// import: see [`external_files_note`]).
+    pub external_files: u32,
     /// Where it came from.
     pub ret: ReturnInfo,
 }
@@ -101,7 +135,7 @@ pub struct AudioRef {
     pub sample_rate: u32,
     /// Its length in frames, from the `Audio`'s duration and rate.
     pub frames: u64,
-    /// Its name: the file name without its extension.
+    /// Its name: the file name without its extension, at most 4 096 bytes.
     pub name: String,
 }
 
@@ -121,10 +155,6 @@ pub struct DpPackage {
     limits: PackageLimits,
     stem: String,
     audio: Vec<AudioRef>,
-    /// Per audio file: the bytes the import reads, for [`DpPackage::needed_bytes`]
-    /// (the entry's declared size, a regular external file's size), or
-    /// `None` for one that will not be read.
-    sizes: Vec<Option<u64>>,
     /// Per `Audio` element: its rate.
     rates: Vec<u32>,
 }
@@ -184,7 +214,7 @@ pub fn open(
         .last()
         .and_then(Option::as_deref)
         .and_then(export_id_of);
-    let (tracks, tagged_tracks) = count_tracks(&project);
+    let (tracks, tagged_tracks) = count_tracks(&project, cancel)?;
     let ret = ReturnInfo {
         record,
         export_id,
@@ -212,13 +242,6 @@ pub fn open(
             name: audio_name(&a.file.path, key),
         })
         .collect();
-    let sizes = audio
-        .iter()
-        .map(|a| match &a.source {
-            AudioSource::Entry(name) => zip.find(name).map(|e| e.size),
-            AudioSource::External(p) => external_size(p),
-        })
-        .collect();
     if !rates.is_empty() && !rates.iter().any(|r| AudioFormat::RATES.contains(r)) {
         report.add(ItemKind::Note, ODD_RATE, None);
     }
@@ -235,7 +258,6 @@ pub fn open(
         limits: *limits,
         stem,
         audio,
-        sizes,
         rates,
     })
 }
@@ -258,10 +280,17 @@ fn read_record(
     let Some(entry) = zip.find(RECORD_ENTRY) else {
         return Ok(None);
     };
-    let why = match zip.read(entry, limits.max_record, None, cancel) {
+    let read = zip.read_prefix(
+        entry,
+        limits.max_record,
+        RECORD_HEAD_BYTES,
+        Some(limits.max_ratio),
+        cancel,
+    );
+    let why = match read {
         Err(IoError::Cancelled) => return Err(IoError::Cancelled),
         Err(e) => e.to_string(),
-        Ok(bytes) => match serde_json::from_slice::<RecordHead>(&bytes) {
+        Ok(bytes) => match head_of(&bytes) {
             Ok(head) if head.format == FORMAT => return Ok(Some(head)),
             Ok(head) => format!("it is format {}", head.format),
             Err(e) => e.to_string(),
@@ -269,6 +298,59 @@ fn read_record(
     };
     report.add(ItemKind::Note, RECORD_UNREADABLE, Some(why));
     Ok(None)
+}
+
+/// A record's head from the start of its text: its `format`, `project_id`
+/// and `export_id`, read up to the third of them, whatever follows.
+fn head_of(bytes: &[u8]) -> Result<RecordHead, String> {
+    use serde::de::{Deserializer, Error, IgnoredAny, MapAccess, Visitor};
+
+    /// The error that stops the parse once the head is complete.
+    const DONE: &str = "head read";
+
+    struct Head<'a>(&'a mut Option<RecordHead>);
+
+    impl<'de> Visitor<'de> for Head<'_> {
+        type Value = ();
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a VizDAW record")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let (mut format, mut project_id, mut export_id) = (None, None, None);
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "format" => format = Some(map.next_value::<u32>()?),
+                    "project_id" => project_id = Some(map.next_value::<String>()?),
+                    "export_id" => export_id = Some(map.next_value::<String>()?),
+                    _ => {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                if let (Some(format), Some(p), Some(e)) = (format, &project_id, &export_id) {
+                    *self.0 = Some(RecordHead {
+                        format,
+                        project_id: p.clone(),
+                        export_id: e.clone(),
+                    });
+                    return Err(A::Error::custom(DONE));
+                }
+            }
+            Err(A::Error::custom(
+                "it has no format, project_id and export_id",
+            ))
+        }
+    }
+
+    let mut head = None;
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let got = (&mut de).deserialize_map(Head(&mut head));
+    match (head, got) {
+        (Some(h), _) => Ok(h),
+        (None, Err(e)) => Err(e.to_string()),
+        (None, Ok(())) => Err("it is empty".to_owned()),
+    }
 }
 
 /// The song info; one that cannot be read is listed and left out. A cancel
@@ -349,9 +431,12 @@ pub(crate) fn all_tracks(p: &DpProject) -> Vec<&DpTrack> {
 }
 
 /// Note and audio tracks, and how many of them carry a `vz:t` tag.
-fn count_tracks(p: &DpProject) -> (u32, u32) {
+fn count_tracks(p: &DpProject, cancel: &AtomicBool) -> Result<(u32, u32), IoError> {
     let (mut tracks, mut tagged) = (0u32, 0u32);
-    for t in all_tracks(p) {
+    for (i, t) in all_tracks(p).into_iter().enumerate() {
+        if i % CANCEL_EVERY == 0 {
+            stop(cancel)?;
+        }
         if role_of(t) != TrackRole::Content {
             continue;
         }
@@ -365,7 +450,7 @@ fn count_tracks(p: &DpProject) -> (u32, u32) {
             tagged = tagged.saturating_add(1);
         }
     }
-    (tracks, tagged)
+    Ok((tracks, tagged))
 }
 
 /// `seconds` at `rate` in frames, rounded; 0 for what cannot be a length.
@@ -387,7 +472,14 @@ fn audio_name(path: &str, key: usize) -> String {
         Some(i) if i > 0 => file.get(..i).unwrap_or(file),
         _ => file,
     };
-    let stem = stem.trim();
+    let mut stem = stem.trim();
+    if stem.len() > MAX_INFO_BYTES {
+        let mut end = MAX_INFO_BYTES;
+        while !stem.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        stem = stem.get(..end).unwrap_or("").trim_end();
+    }
     if stem.is_empty() {
         format!("Audio {}", key.saturating_add(1))
     } else {
@@ -401,6 +493,8 @@ fn external_size(p: &Path) -> Option<u64> {
     if p.to_string_lossy().contains("://") {
         return None;
     }
+    #[cfg(feature = "test-hooks")]
+    EXTERNAL_STATS.with(|c| c.set(c.get().saturating_add(1)));
     std::fs::metadata(p)
         .ok()
         .filter(std::fs::Metadata::is_file)
@@ -511,6 +605,13 @@ impl DpPackage {
             sample_rate,
             tracks: self.ret.tracks,
             audio_files: u32::try_from(self.audio.len()).unwrap_or(u32::MAX),
+            external_files: u32::try_from(
+                self.audio
+                    .iter()
+                    .filter(|a| matches!(a.source, AudioSource::External(_)))
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
             ret: self.ret.clone(),
         }
     }
@@ -527,10 +628,19 @@ impl DpPackage {
     /// least the file's size × 4 when the `Audio` element understates it.
     /// Files that will not be read (missing entries, URLs, what is not a
     /// regular file) count nothing.
-    pub fn needed_bytes(&self, depth_bytes: u32) -> u64 {
+    ///
+    /// External files are looked at here, not in [`open`]: this runs in the
+    /// import the user confirmed, never for a preview. Looks at `cancel`
+    /// before each file.
+    pub fn needed_bytes(&self, depth_bytes: u32, cancel: &AtomicBool) -> Result<u64, IoError> {
         let mut total = 0u64;
-        for (a, size) in self.audio.iter().zip(&self.sizes) {
-            let Some(size) = *size else { continue };
+        for a in &self.audio {
+            stop(cancel)?;
+            let size = match &a.source {
+                AudioSource::Entry(name) => self.zip.find(name).map(|e| e.size),
+                AudioSource::External(p) => external_size(p),
+            };
+            let Some(size) = size else { continue };
             if matches!(a.source, AudioSource::Entry(_)) {
                 total = total.saturating_add(size);
             }
@@ -541,7 +651,7 @@ impl DpPackage {
                 .max(size.saturating_mul(4));
             total = total.saturating_add(caf);
         }
-        total
+        Ok(total)
     }
 
     /// Streams `a`'s entry into the new file `to` ([`ZipReader::extract`]),
@@ -561,14 +671,29 @@ impl DpPackage {
     }
 
     /// The plug-in state entry `path`, at most the limits' `max_state`
-    /// bytes.
-    pub fn state(&self, path: &str) -> Result<Vec<u8>, IoError> {
+    /// bytes and within their ratio; looks at `cancel` as it unpacks.
+    pub fn state(&self, path: &str, cancel: &AtomicBool) -> Result<Vec<u8>, IoError> {
         let e = self.zip.find(path).ok_or_else(|| missing(path))?;
-        self.zip
-            .read(e, self.limits.max_state, None, &AtomicBool::new(false))
+        self.zip.read(
+            e,
+            self.limits.max_state,
+            Some(self.limits.max_ratio),
+            cancel,
+        )
     }
 
-    /// The project's IDs (checked when the package was opened).
+    /// The declared size of entry `name`, if the package holds it.
+    pub(crate) fn entry_size(&self, name: &str) -> Option<u64> {
+        self.zip.find(name).map(|e| e.size)
+    }
+
+    /// The limits the package was opened with.
+    pub(crate) fn limits(&self) -> &PackageLimits {
+        &self.limits
+    }
+
+    /// The project's IDs (checked when the package was opened). Each call
+    /// re-runs the whole ID scan, as long as the open did: call it once.
     pub fn ids(&self) -> Ids<'_> {
         check_ids(&self.project, &mut Report::default()).unwrap_or_default()
     }
