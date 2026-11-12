@@ -3,7 +3,7 @@ use core_io::limits::Limits;
 use core_io::read::read_regular;
 use core_io::report::{ItemKind, Report};
 use core_io::text::sanitize;
-use core_io::write::{free_folder, stage_folder, write_partial};
+use core_io::write::{create_partial, free_folder, stage_folder, write_partial};
 use proptest::prelude::*;
 use std::time::{Duration, Instant};
 
@@ -108,6 +108,55 @@ fn partial_files_are_removed_unless_committed() {
     let e = write_partial(&dest, b"abc", false).unwrap_err();
     assert!(
         matches!(&e, IoError::Refused(m) if m == ".x.mid.partial is left from an earlier export; remove it or choose another name"),
+        "{e:?}"
+    );
+    assert_eq!(std::fs::read(&partial).unwrap(), b"stale");
+}
+
+/// Plan 6d Task 9: the streaming partial is refused as `write_partial`
+/// is, removed unless committed, and committed by the same rename.
+#[test]
+fn streamed_partials_are_refused_and_removed_like_written_ones() {
+    use std::io::Write;
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("x.dawproject");
+    let partial = d.path().join(".x.dawproject.partial");
+
+    let (pending, file) = create_partial(&dest, false).unwrap();
+    drop(file);
+    assert!(partial.exists() && !dest.exists());
+    drop(pending);
+    assert!(!partial.exists() && !dest.exists());
+
+    let (pending, mut file) = create_partial(&dest, false).unwrap();
+    file.write_all(b"abc").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert_eq!(pending.commit().unwrap(), dest);
+    assert!(!partial.exists());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
+
+    // Taken without replace: refused before anything is made.
+    let e = create_partial(&dest, false).unwrap_err();
+    assert!(
+        matches!(&e, IoError::Refused(m) if m == "x.dawproject exists; choose another name or replace it"),
+        "{e:?}"
+    );
+    assert!(!partial.exists());
+
+    // With replace the old file stays until the commit.
+    let (pending, mut file) = create_partial(&dest, true).unwrap();
+    file.write_all(b"new").unwrap();
+    drop(file);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
+    pending.commit().unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+
+    // A stale partial is refused by name and left alone.
+    std::fs::write(&partial, b"stale").unwrap();
+    let e = create_partial(&dest, true).unwrap_err();
+    assert!(
+        matches!(&e, IoError::Refused(m) if m == ".x.dawproject.partial is left from an earlier export; remove it or choose another name"),
         "{e:?}"
     );
     assert_eq!(std::fs::read(&partial).unwrap(), b"stale");

@@ -11,7 +11,7 @@ import VizDAWCore
 public final class ForDawModel: AudioFormatChoices {
     /// Jobs the core cannot run an export beside; also what holds back
     /// dropped MIDI files while one is listed.
-    public static let blocking: Set<JobKindRow> = [.bounce, .importMidi, .exportMidi, .exportProject]
+    public static let blocking: Set<JobKindRow> = [.bounce, .importMidi, .exportMidi, .exportProject, .exportDawproject]
     /// Jobs that change the media "Add to project" would add to.
     static let mediaJobs: Set<JobKindRow> = [.format, .convert, .relink, .externalEdit]
 

@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 
+/// The stack of a job thread.
+const JOB_STACK_BYTES: usize = 16 << 20;
+
 /// What a job does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum JobKindRow {
@@ -30,6 +33,8 @@ pub enum JobKindRow {
     ExportMidi,
     /// Export the project for another DAW (plan 6b).
     ExportProject,
+    /// Export a DAWproject file (plan 6d L1).
+    ExportDawproject,
 }
 
 /// Where a job is.
@@ -139,7 +144,8 @@ pub enum Work {
         /// Where and how it lands.
         place: core_io::midi_in::Placement,
     },
-    /// A MIDI export (plan 6a): its files are already in place.
+    /// A MIDI or DAWproject export's files (plans 6a, 6d): already in
+    /// place; the row's kind says which export it was.
     ExportMidi {
         /// The report, or why the export failed.
         result: Result<core_io::report::Report, String>,
@@ -223,6 +229,9 @@ impl Jobs {
         self.unapplied.fetch_add(1, Ordering::SeqCst);
         let thread = std::thread::Builder::new()
             .name(format!("vizdaw-job-{id}"))
+            // A large document's model and export need more than the
+            // default 2 MiB (plan 6d Task 7 carry).
+            .stack_size(JOB_STACK_BYTES)
             .spawn(move || {
                 while held.load(Ordering::Relaxed) && !c.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(1));

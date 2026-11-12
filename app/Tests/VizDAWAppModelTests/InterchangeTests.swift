@@ -455,6 +455,26 @@ import VizDAWCore
         #expect(m.interchange.exportShown && m.interchange.exportError == "disk full" && m.alert == nil)
     }
 
+    /// L1: a failed DAWproject export is its own kind: titled as such, and
+    /// it opens no MIDI sheet.
+    @Test func aFailedDawprojectExportIsTitledAndOpensNoMidiSheet() async throws {
+        let f = busy()
+        f.jobStartState = .running
+        let m = try DocumentModel(session: f)
+        let req = DawprojectExportRequestRow(
+            seq: 3, path: "/tmp/x.dawproject", replace: false, regionGain: .apply, blocks: .wholeLane)
+        let job = try #require(m.startJob(.exportDawproject, "DAWproject Export Failed") { try $0.exportDawproject(req: req) })
+        #expect(f.dawprojectExports == [req] && job == 10001)
+        #expect(ProjectBanner.jobText(.exportDawproject) == "Exporting DAWproject…")
+        f.jobRows[job] = JobRow(
+            id: job, kind: .exportDawproject, progress: 1, state: .failed, message: "disk full", problems: [],
+            created: [])
+        m.pollJobs()
+        #expect(m.alert == AlertItem(title: "DAWproject Export Failed", message: "disk full"))
+        #expect(!m.interchange.exportShown && m.interchange.exportError == nil)
+        #expect(!m.interchange.jobFailed(f.jobRows[job]!, message: "disk full"))
+    }
+
     /// An export that fails on the poll inside `startJob` keeps its sheet
     /// open with the reason (Task 10 carry-over).
     @Test func anImmediateExportFailureKeepsTheSheet() async throws {

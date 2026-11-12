@@ -16,10 +16,13 @@ pub struct PendingFile {
     committed: bool,
 }
 
-/// Writes `bytes` to the partial beside `dest`. Without `replace`, an
-/// existing `dest` is refused before anything is written. A partial left by
-/// a crashed run is refused, never overwritten.
-pub fn write_partial(dest: &Path, bytes: &[u8], replace: bool) -> Result<PendingFile, IoError> {
+/// The partial beside `dest`, open for streaming; refused like
+/// [`write_partial`]: without `replace`, an existing `dest` (lstat: a
+/// dangling link counts) is refused before anything is made, and a partial
+/// left by a crashed run is refused, never overwritten. The caller writes
+/// and syncs the file, then commits the [`PendingFile`]; dropping it
+/// uncommitted removes the partial.
+pub fn create_partial(dest: &Path, replace: bool) -> Result<(PendingFile, std::fs::File), IoError> {
     if !replace && std::fs::symlink_metadata(dest).is_ok() {
         return Err(IoError::Refused(format!(
             "{} exists; choose another name or replace it",
@@ -27,7 +30,7 @@ pub fn write_partial(dest: &Path, bytes: &[u8], replace: bool) -> Result<Pending
         )));
     }
     let partial = partial_path(dest);
-    let mut file = match std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&partial)
@@ -48,6 +51,13 @@ pub fn write_partial(dest: &Path, bytes: &[u8], replace: bool) -> Result<Pending
         replace,
         committed: false,
     };
+    Ok((pending, file))
+}
+
+/// Writes `bytes` to the partial beside `dest`, refused as
+/// [`create_partial`] refuses.
+pub fn write_partial(dest: &Path, bytes: &[u8], replace: bool) -> Result<PendingFile, IoError> {
+    let (pending, mut file) = create_partial(dest, replace)?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(|e| io_err(dest, "written", &e))?;

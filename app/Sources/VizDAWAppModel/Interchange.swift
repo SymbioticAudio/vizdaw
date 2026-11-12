@@ -109,12 +109,13 @@ public final class InterchangeModel {
     func jobEnded(_ job: JobRow) {
         guard let r = job.report else { return }
         report = r
-        written = job.kind == .exportMidi || job.kind == .exportProject ? job.written : []
+        written = job.kind == .exportMidi || job.kind == .exportProject || job.kind == .exportDawproject ? job.written : []
         reportShown = true
     }
 
-    /// A job this document's UI started failed. An export's refusal goes
-    /// back to its sheet, which opens again; answers whether it did.
+    /// A job this document's UI started failed. A MIDI export's refusal
+    /// goes back to its sheet, which opens again; answers whether it did
+    /// (never for another kind, such as a DAWproject export).
     func jobFailed(_ job: JobRow, message: String) -> Bool {
         guard job.kind == .exportMidi, job.state != .cancelled else { return false }
         exportError = message

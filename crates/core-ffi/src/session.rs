@@ -236,6 +236,18 @@ pub(crate) struct Inner {
     /// (test hook: 1 after its first MIDI file, 2 after the About file).
     #[cfg(feature = "test-hooks")]
     for_daw_cancel_at: Option<u32>,
+    /// The slots running here when the plug-in host was last looked at
+    /// (on load, failure and restart; at each export): a DAWproject check
+    /// on a thread without the host reads it (plan 6d Task 9).
+    live_slots: std::collections::BTreeSet<PluginInstanceId>,
+    /// The next DAWproject export cancels itself after this stage (test
+    /// hook: 1 after the files, 2 after the first WAV, 3 after
+    /// `project.xml`, 4 before the rename).
+    #[cfg(feature = "test-hooks")]
+    dawproject_cancel_at: Option<u32>,
+    /// The free bytes DAWproject exports assume (test hook).
+    #[cfg(feature = "test-hooks")]
+    dawproject_free: Option<u64>,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -353,6 +365,11 @@ impl Inner {
             bounce_fail_import_at: None,
             #[cfg(feature = "test-hooks")]
             for_daw_cancel_at: None,
+            live_slots: Default::default(),
+            #[cfg(feature = "test-hooks")]
+            dawproject_cancel_at: None,
+            #[cfg(feature = "test-hooks")]
+            dawproject_free: None,
         }
     }
 
@@ -454,6 +471,7 @@ impl Inner {
             JobKindRow::Bounce,
             JobKindRow::ExternalEdit,
             JobKindRow::ExportProject,
+            JobKindRow::ExportDawproject,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
@@ -884,6 +902,63 @@ impl Session {
         Ok(all)
     }
 
+    /// Notes which slots run here now (`Inner::live_slots`).
+    fn look_at_slots(&self, inner: &mut Inner) {
+        let all = crate::dawproject::all_slots(inner.doc());
+        let live = plugins::with(self.id, |p| {
+            p.map(|p| {
+                all.iter()
+                    .copied()
+                    .filter(|id| matches!(p.state(*id), Some(core_host::SlotState::Live)))
+                    .collect::<std::collections::BTreeSet<PluginInstanceId>>()
+            })
+        });
+        if let Ok(Some(live)) = live {
+            inner.live_slots = live;
+        }
+    }
+
+    /// Captures every running plug-in's state for a DAWproject export (plan
+    /// 6d Task 9), as [`Session::capture_all`] does for a save; returns the
+    /// slots it could not capture: `None` for those not running here (a
+    /// placeholder, or still loading), else the capture's error. Their
+    /// stored states are used. On a thread without the plug-in host, every
+    /// slot not seen running at the last look is uncaptured.
+    fn capture_for_export(
+        &self,
+        inner: &mut Inner,
+    ) -> Result<crate::dawproject::Uncaptured, VizError> {
+        let riding = inner.riding_params();
+        let all = crate::dawproject::all_slots(inner.doc());
+        let cached = inner.live_slots.clone();
+        let history = &mut inner.history;
+        let (failed, live) = plugins::with(self.id, |p| match p {
+            Some(p) => {
+                let failed = p.capture_all(history, &riding);
+                let live: std::collections::BTreeSet<PluginInstanceId> = all
+                    .iter()
+                    .copied()
+                    .filter(|id| matches!(p.state(*id), Some(core_host::SlotState::Live)))
+                    .collect();
+                (failed, Some(live))
+            }
+            None => (Vec::new(), None),
+        })?;
+        if let Some(l) = &live {
+            inner.live_slots.clone_from(l);
+        }
+        let live = live.unwrap_or(cached);
+        let mut out: crate::dawproject::Uncaptured = all
+            .into_iter()
+            .filter(|id| !live.contains(id))
+            .map(|id| (id, None))
+            .collect();
+        for (id, e) in failed {
+            out.insert(id, Some(e.to_string()));
+        }
+        Ok(out)
+    }
+
     /// Autosaves (spec §10) a project with a path and unsaved changes,
     /// every [`recovery::autosave_interval`] and right after a plugin
     /// loaded; never inside an open edit (a drag). A busy plugin registry
@@ -941,6 +1016,14 @@ impl Session {
             Some(id) => file::save(&inner.doc().clone().with_project_id(id), path)?,
             None => file::save(inner.doc(), path)?,
         }
+        // The DAWproject snapshots go with the project, pruned (plan 6d
+        // Ruling 16): a failure is news, never a failed save.
+        if let Err(e) = crate::dawproject::keep_snapshots(&inner.root(self.id), path) {
+            inner
+                .news
+                .problems
+                .push(format!("DAWproject merge records not kept: {e}"));
+        }
         if let Some(id) = &stamp {
             inner.history.stamp_project_id(id)?;
         }
@@ -996,6 +1079,9 @@ impl Session {
             inner.news.doc_changed = true;
         }
         self.sync_loaded_plugins(inner, &r.loaded);
+        if !r.loaded.is_empty() || !r.failed.is_empty() || !r.restart.is_empty() {
+            self.look_at_slots(inner);
+        }
         // A plugin window's moves are gestures too (spec §7.1); the
         // parameters they write as automation are not parameter steps
         // (plan 5e-1 Ruling 15, pre-flight M13).
@@ -3107,6 +3193,26 @@ impl Session {
         })
     }
 
+    /// The next DAWproject export cancels itself after `stage` (1: its
+    /// files are made; 2: its first WAV is staged; 3: `project.xml` is in
+    /// the partial; 4: the partial is synced, before the rename; None:
+    /// never).
+    pub fn debug_dawproject_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).dawproject_cancel_at = stage;
+            Ok(())
+        })
+    }
+
+    /// DAWproject exports assume `bytes` free at their destination (None:
+    /// the disk's).
+    pub fn debug_free_bytes(&self, bytes: Option<u64>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).dawproject_free = bytes;
+            Ok(())
+        })
+    }
+
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
@@ -4083,6 +4189,7 @@ impl Drop for Session {
                 || inner.jobs.pending(&[
                     crate::jobs::JobKindRow::Bounce,
                     crate::jobs::JobKindRow::ExportProject,
+                    crate::jobs::JobKindRow::ExportDawproject,
                 ])
             {
                 let root = inner.root(self.id);
@@ -9223,6 +9330,103 @@ impl Session {
         })
     }
 
+    /// Starts a DAWproject export of sequence `req.seq` (plan 6d Task 9;
+    /// spec §6): the job ID; `job` reports it (kind `ExportDawproject`),
+    /// its report and the file. `Model` at once for an unknown sequence and
+    /// a path refused (not absolute, inside the project, a folder, taken
+    /// without `replace`, not ending in `.dawproject`, a name too long for
+    /// the files made beside it); `Busy` as `export_midi`. Before the job
+    /// it looks at the disk only for the destination's lstat, the media
+    /// refresh and the plug-in capture (as `export_midi` and `bounce`
+    /// do). A project with no ID gets one, with no undo step (Ruling 16).
+    pub fn export_dawproject(
+        &self,
+        req: crate::dawproject::DawprojectExportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let opts = crate::dawproject::options(inner.doc(), &req)?;
+            let dest = crate::dawproject::dest(&req.path, req.replace, &self.export_roots(&inner))?;
+            inner.refresh_media(self.id, false);
+            let uncaptured = self.capture_for_export(&mut inner)?;
+            let project_id = match inner.doc().settings().project_id.clone() {
+                Some(id) => id,
+                None => {
+                    let id = crate::project_id::fresh();
+                    inner.history.stamp_project_id(&id)?;
+                    // The title shows Edited.
+                    inner.news.doc_changed = true;
+                    id
+                }
+            };
+            let exported_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.dawproject_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::dawproject::ExportJob {
+                doc: inner.doc().clone(),
+                opts,
+                dest,
+                replace: req.replace,
+                root: inner.root(self.id),
+                project_id,
+                export_id: crate::project_id::fresh(),
+                exported_at,
+                uncaptured,
+                offline: inner.offline.keys().copied().collect(),
+                cancel_at,
+                free,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ExportDawproject,
+                crate::dawproject::job(job),
+            )
+        })
+    }
+
+    /// What `export_dawproject` would report for `req`, checked as it
+    /// checks it (`Busy` and the path aside): the plug-ins are captured
+    /// here, the report is made off the session lock. Nothing is written
+    /// and no project ID is stamped.
+    pub fn export_dawproject_check(
+        &self,
+        req: crate::dawproject::DawprojectExportRequestRow,
+    ) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let (doc, opts, uncaptured, will_capture) = {
+                let mut inner = lock(&self.inner);
+                let opts = crate::dawproject::options(inner.doc(), &req)?;
+                inner.refresh_media(self.id, false);
+                let here = plugins::with(self.id, |p| p.is_some())?;
+                let uncaptured = self.capture_for_export(&mut inner)?;
+                // Off the host's thread the job captures what runs now.
+                let will_capture = if here {
+                    std::collections::BTreeSet::new()
+                } else {
+                    inner.live_slots.clone()
+                };
+                (inner.doc().clone(), opts, uncaptured, will_capture)
+            };
+            let report = crate::dawproject::check(&doc, &opts, &uncaptured, &will_capture)?;
+            Ok(crate::interchange::report_row(&report, "Exported"))
+        })
+    }
+
+    /// The file name a DAWproject export of sequence `seq` suggests:
+    /// "<Song>.dawproject" (the song title, else the sequence's name, made
+    /// safe). `Model` for an unknown sequence.
+    pub fn dawproject_name(&self, seq: u64) -> Result<String, VizError> {
+        ffi_guard(|| {
+            core_io::dawproject::export::file_name(lock(&self.inner).doc(), SeqId(seq))
+                .map_err(crate::interchange::io_error)
+        })
+    }
+
     /// The report of this document's last MIDI import or export job, if any.
     pub fn interchange_report(&self) -> Result<Option<crate::interchange::ReportRow>, VizError> {
         ffi_guard(|| {
@@ -9258,8 +9462,8 @@ impl Session {
     }
 
     /// `Busy` while recording, inside an open edit, or while a bounce, a
-    /// MIDI import or export or an export for another DAW is unapplied
-    /// (finished jobs apply first).
+    /// MIDI import or export, an export for another DAW or a DAWproject
+    /// export is unapplied (finished jobs apply first).
     fn interchange_idle(&self, inner: &mut Inner) -> Result<(), VizError> {
         if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
             return Err(recording_busy());
@@ -9274,6 +9478,7 @@ impl Session {
             JobKindRow::ImportMidi,
             JobKindRow::ExportMidi,
             JobKindRow::ExportProject,
+            JobKindRow::ExportDawproject,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the running import, export or bounce to finish.".into(),

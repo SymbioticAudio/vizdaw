@@ -810,6 +810,32 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let reply = forDawCheckReply { return reply(req) }
         return try forDawCheckAnswer.get()
     }
+    /// DAWproject exports (plan 6d Task 9): what they were called with
+    /// (job IDs from 10 001), what the check answers and the names asked.
+    var dawprojectExports: [DawprojectExportRequestRow] = []
+    var dawprojectChecks: [DawprojectExportRequestRow] = []
+    var dawprojectCheckAnswer: Result<ReportRow, VizError> = .success(
+        ReportRow(summary: "Exported nothing", items: []))
+    var dawprojectNames: [UInt64] = []
+    var dawprojectNameAnswer = "Song.dawproject"
+    func exportDawproject(req: DawprojectExportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        dawprojectExports.append(req)
+        return interchangeJob(.exportDawproject, 10000, dawprojectExports.count)
+    }
+    func exportDawprojectCheck(req: DawprojectExportRequestRow) throws -> ReportRow {
+        interchangeLock.lock()
+        dawprojectChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return try dawprojectCheckAnswer.get()
+    }
+    func dawprojectName(seq: UInt64) throws -> String {
+        if let e = interchangeError { throw e }
+        dawprojectNames.append(seq)
+        return dawprojectNameAnswer
+    }
     func interchangeReport() throws -> ReportRow? {
         interchangeReportCalls += 1
         if let e = interchangeError { throw e }

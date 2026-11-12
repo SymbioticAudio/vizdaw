@@ -74,7 +74,7 @@ public enum ControlJobs {
             // A MIDI import or export reports in its summary; what it
             // created is not media (plan 6a Task 8). An export for another
             // DAW is one with an export (plan 6b Task 3).
-            if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject {
+            if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject {
                 return .ok(status: j.report?.summary)
             }
             if j.kind != .format, j.created.isEmpty, !j.problems.isEmpty {
@@ -84,7 +84,7 @@ public enum ControlJobs {
         case .failed, .cancelled:
             // A bounce that failed after some renames names what is on disk
             // (plan 5f-2 Ruling 12: renamed files stay).
-            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : j.kind == .exportMidi || j.kind == .exportProject ? j.written : []
+            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject ? j.written : []
             let tail = written.isEmpty ? [] : ["already written: " + written.joined(separator: ", ")]
             return .failed(([j.message ?? "the job was cancelled"] + j.problems + tail).joined(separator: "; "))
         }

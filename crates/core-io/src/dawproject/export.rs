@@ -224,6 +224,22 @@ pub fn file_name(doc: &Document, seq: SeqId) -> Result<String, IoError> {
     Ok(format!("{}{SUFFIX}", safe_part(title, SUFFIX.len())))
 }
 
+/// The plug-in slots an export of `seq` writes as devices, each once
+/// (copies of a shared instrument included). Only the caller knows which
+/// slots are not loaded; it adds their lines ([`not_loaded`],
+/// [`plugin_settings`]) for these (plan 6d Task 9).
+pub fn exported_slots(
+    doc: &Document,
+    seq: SeqId,
+    cancel: &AtomicBool,
+) -> Result<BTreeSet<PluginInstanceId>, IoError> {
+    let l = layout(doc, seq, &mut Report::default(), cancel)?;
+    Ok(l.chans
+        .iter()
+        .flat_map(|c| c.slots().into_iter().map(|(s, _, _)| s.id))
+        .collect())
+}
+
 /// The package's extension, with its dot.
 const SUFFIX: &str = ".dawproject";
 

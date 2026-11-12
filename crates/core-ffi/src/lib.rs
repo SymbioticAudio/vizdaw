@@ -24,6 +24,7 @@ pub mod bounce;
 pub mod catalog;
 pub mod clock;
 pub mod control;
+pub mod dawproject;
 pub mod drum;
 pub mod edit;
 pub mod editor;
@@ -86,6 +87,7 @@ pub use control::{
     ViewPanesRow, WaitConditionRow, WaitFactsRow, WindowKindRow, WindowRefRow, WindowRow,
     control_command_ids, control_element_check, control_host_busy, control_wait_met,
 };
+pub use dawproject::{DawprojectExportRequestRow, RegionGainRow};
 pub use drum::{
     DrumBandKindRow, DrumBandRow, DrumCellRow, DrumEdit, DrumGridLayoutRow, DrumGridSettingsRow,
     DrumHitRow, DrumLaneRow, DrumNewRow, DrumPaintHitRow, DrumRowRow, DrumSpotRow, DrumStrokeRow,
