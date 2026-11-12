@@ -30,6 +30,14 @@ import VizDAWCore
         return nil
     }
 
+    /// `o`, or the outcome it is pending on once that is there (final
+    /// review I2, M4).
+    func settled(_ o: ControlOutcome) async -> ControlOutcome {
+        guard case .pending(let p) = o else { return o }
+        await p.settle()
+        return p.outcome ?? .failed(.of(.failed, "no outcome"))
+    }
+
     func calls(_ f: FakeSession) -> Int {
         f.midiImports.count + f.smfExports.count + f.clipExports.count + f.smfChecks.count + f.clipChecks.count
     }
@@ -113,7 +121,7 @@ import VizDAWCore
         #expect(calls(f) == 0, "nothing reached the core")
     }
 
-    @Test func dryRunWritesNothing() throws {
+    @Test func dryRunWritesNothing() async throws {
         let (s, id, m, f) = try demo()
         f.interchangeCheck = ReportRow(summary: "Would export 2 tracks", items: [])
         let seq = try #require(m.selectedSeq)
@@ -121,7 +129,9 @@ import VizDAWCore
             for withPath in [false, true] {
                 let args: [(String, ControlValue)] =
                     [("dry_run", .flag(value: true))] + (withPath ? [("path", .text(value: "/tmp/a.mid"))] : [])
-                guard case .done(let r) = run(cmd, args, m, s, id) else { Issue.record("not done: \(cmd) \(args)"); return }
+                let o = run(cmd, args, m, s, id)
+                guard case .pending = o else { Issue.record("not off the main thread: \(cmd) \(args)"); return }
+                guard case .done(let r) = await settled(o) else { Issue.record("not done: \(cmd) \(args)"); return }
                 guard case .interchange(let command, let doc, let window, _, let report, let written) = r else {
                     Issue.record("not an interchange result: \(r)"); return
                 }
@@ -130,6 +140,11 @@ import VizDAWCore
             }
         }
         #expect(f.smfChecks.count == 2 && f.clipChecks.count == 2)
+        #expect(f.checkOnMain.count == 4 && f.checkOnMain.allSatisfy { !$0 }, "rendered off the main thread")
+        // A refused check answers its reason.
+        f.interchangeError = VizError.Model(message: "no tracks")
+        let refused = failure(await settled(run(InterchangeCommands.exportMidi, [("dry_run", .flag(value: true))], m, s, id)))
+        #expect(refused?.code == .failed && refused?.message.contains("no tracks") == true)
         #expect(f.smfExports.isEmpty && f.clipExports.isEmpty && f.midiImports.isEmpty, "nothing was written")
         #expect(f.smfChecks.first?.seq == seq && f.smfChecks.first?.type0 == false && f.smfChecks.first?.ppq == 960)
         #expect(f.smfChecks.first?.lanes == [30, 31], "every track by default")
@@ -176,8 +191,8 @@ import VizDAWCore
                     seq: 2, lanes: [20, 21], path: "/tmp/dir", replace: false, start: 0, end: 960))
     }
 
-    @Test func newProjectMakesADocument() throws {
-        let (s, id, m, _) = try demo()
+    @Test func newProjectMakesADocument() async throws {
+        let (s, id, m, f) = try demo()
         let fresh = FakeSession([seq(9, "New", topLevel: true)])
         var formats: [ProjectFormatRow] = []
         s.makeProject = { f in
@@ -186,10 +201,15 @@ import VizDAWCore
         }
         s.defaultFormat = ProjectFormatRow(sampleRate: 96_000, depth: .int16)
         let before = s.documents.count
-        let o = run(
+        let first = run(
             InterchangeCommands.importMidi, [("path", .text(value: "/tmp/a.mid")), ("new_project", .flag(value: true))],
             m, s, id)
+        // The file is read off the main thread before any project is made.
+        guard case .pending = first else { Issue.record("not pending: \(first)"); return }
+        #expect(s.documents.count == before)
+        let o = await settled(first)
         guard case .job(let command, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(f.midiInfoPaths == ["/tmp/a.mid"] && f.checkOnMain == [false])
         #expect(command == "file.import_midi" && doc != id)
         #expect(s.documents.count == before + 1 && s.model(doc) != nil)
         #expect(formats == [ProjectFormatRow(sampleRate: 48_000, depth: .int16)], "48 kHz at the default depth")
@@ -197,7 +217,7 @@ import VizDAWCore
         #expect(fresh.midiImports.first?.seq == s.model(doc)?.selectedSeq)
     }
 
-    @Test func aRefusedNewProjectImportMakesNoProject() throws {
+    @Test func aRefusedNewProjectImportMakesNoProject() async throws {
         let (s, id, m, f) = try demo()
         let fresh = FakeSession([seq(9, "New", topLevel: true)])
         var made = 0
@@ -210,7 +230,7 @@ import VizDAWCore
         let new: (String, ControlValue) = ("new_project", .flag(value: true))
         // The file is read first: a refusal leaves nothing behind.
         f.interchangeError = VizError.Model(message: "not a MIDI file")
-        let r = failure(run(InterchangeCommands.importMidi, [path, new], m, s, id))
+        let r = failure(await settled(run(InterchangeCommands.importMidi, [path, new], m, s, id)))
         #expect(r?.code == .failed && r?.message.contains("not a MIDI file") == true)
         f.interchangeError = nil
         #expect(s.documents.count == before && made == 0)
@@ -224,7 +244,7 @@ import VizDAWCore
         let bid = try #require(bare.newEmpty())
         let bm = try #require(bare.model(bid))
         #expect(bm.selectedSeq == nil)
-        guard case .job = run(InterchangeCommands.importMidi, [path, new], bm, bare, bid) else {
+        guard case .job = await settled(run(InterchangeCommands.importMidi, [path, new], bm, bare, bid)) else {
             Issue.record("not a job")
             return
         }
@@ -233,14 +253,14 @@ import VizDAWCore
         #expect(none?.code == .failed)
     }
 
-    @Test func aFailedImportClosesTheProjectItMade() throws {
+    @Test func aFailedImportClosesTheProjectItMade() async throws {
         let (s, id, m, _) = try demo()
         let fresh = FakeSession([seq(9, "New", topLevel: true)])
         fresh.jobStartState = .failed
         s.makeProject = { _ in fresh }
         let before = s.documents.count
         let args: [(String, ControlValue)] = [("path", .text(value: "/tmp/a.mid")), ("new_project", .flag(value: true))]
-        guard case .job(_, let doc, _) = run(InterchangeCommands.importMidi, args, m, s, id) else {
+        guard case .job(_, let doc, _) = await settled(run(InterchangeCommands.importMidi, args, m, s, id)) else {
             Issue.record("not a job")
             return
         }
@@ -248,7 +268,7 @@ import VizDAWCore
         InterchangeCommands.jobEnded(doc, failed: true, store: s) { s.close($0) }
         #expect(s.documents.count == before && s.model(doc) == nil)
         // A successful job keeps it.
-        guard case .job(_, let ok, _) = run(InterchangeCommands.importMidi, args, m, s, id) else { return }
+        guard case .job(_, let ok, _) = await settled(run(InterchangeCommands.importMidi, args, m, s, id)) else { return }
         InterchangeCommands.jobEnded(ok, failed: false, store: s) { s.close($0) }
         #expect(s.model(ok) != nil)
         // Not a project this command made: left alone.

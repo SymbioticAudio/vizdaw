@@ -206,17 +206,49 @@ public final class InterchangeModel {
     }
 
     /// Files dropped on a track list or the arrangement (Ruling 12): every
-    /// MIDI file imports with the defaults at `target`, the rest are audio.
+    /// MIDI file imports with the defaults at `target`, each its own
+    /// track(s) and undo step; the rest are audio. The core takes one MIDI
+    /// import at a time, so the files queue: the next starts when the one
+    /// before ends (`importEnded`), and one that fails is reported and the
+    /// queue moves on (final review I1).
     public func importDropped(paths: [String], target: ImportTargetRow) {
         guard let document else { return }
         for path in paths where Self.isMidi(path) {
-            let req = MidiImportRequestRow(
-                path: path, newProject: false, seq: target.seq, lane: target.lane, tick: target.tick,
-                channelMap: [], splitChannels: nil, mpe: false, useTempo: false)
-            document.startJob(.importMidi, "MIDI Import Failed") { try $0.importMidi(req: req) }
+            dropQueue.append(
+                MidiImportRequestRow(
+                    path: path, newProject: false, seq: target.seq, lane: target.lane, tick: target.tick,
+                    channelMap: [], splitChannels: nil, mpe: false, useTempo: false))
         }
+        if dropJob == nil { startNextDrop() }
         let audio = paths.filter { !Self.isMidi($0) }
         if !audio.isEmpty { document.importAudio(paths: audio, target: target) }
+    }
+
+    /// Dropped MIDI files waiting for the running one.
+    @ObservationIgnored private(set) var dropQueue: [MidiImportRequestRow] = []
+    /// The running dropped file's job.
+    @ObservationIgnored private var dropJob: UInt64?
+
+    /// Starts the queue's next file; one refused at the start, or ended on
+    /// `startJob`'s own poll, lets the one after it go at once.
+    private func startNextDrop() {
+        guard let document else { return }
+        while dropJob == nil, !dropQueue.isEmpty {
+            let req = dropQueue.removeFirst()
+            guard let id = document.startJob(.importMidi, "MIDI Import Failed", { try $0.importMidi(req: req) })
+            else { continue }
+            if document.jobs.contains(where: { $0.id == id }) { dropJob = id }
+        }
+    }
+
+    /// An import job of this document ended (`pollJobs`, after its outcome
+    /// is shown): the next dropped file starts. A cancelled one empties the
+    /// queue: the user stopped the drop.
+    func importEnded(_ job: JobRow) {
+        guard job.id == dropJob else { return }
+        dropJob = nil
+        if job.state == .cancelled { dropQueue.removeAll() }
+        startNextDrop()
     }
 
     /// Imports `path` into this new, empty project with the defaults
@@ -262,6 +294,7 @@ public final class InterchangeModel {
         resetting = true
         exportError = nil
         replaceQuestion = nil
+        namesGeneration += 1
         exportKind = kind
         type0 = false
         ppq = 960
@@ -330,43 +363,52 @@ public final class InterchangeModel {
         }
     }
 
-    /// "N files already exist in <folder>. Replace them?" before a clip
-    /// export into a folder (review round 1).
+    /// "N files already exist in <folder>. Replace them?" ("1 file …
+    /// Replace it?") before a clip export into a folder (review round 1).
     public struct ReplaceQuestion: Equatable, Sendable {
         public let folder: String
-        public let count: Int
+        /// The core's names of the files already there.
+        public let taken: [String]
+
+        public var count: Int { taken.count }
 
         public var message: String {
             let name = (folder as NSString).lastPathComponent
             return count == 1
-                ? "1 file already exists in \(name). Replace them?"
+                ? "1 file already exists in \(name). Replace it?"
                 : "\(count) files already exist in \(name). Replace them?"
         }
     }
 
     public private(set) var replaceQuestion: ReplaceQuestion?
+    @ObservationIgnored private var namesGeneration = 0
 
-    /// The names a clip export of several tracks writes in its folder, in
-    /// the sequence's track order: the core's `NN <track>.midi2`.
-    public func clipFileNames() -> [String] {
-        let picked = (document?.lanes ?? []).filter { lanes.contains($0.id) }
-        return picked.enumerated().map { k, l in
-            String(format: "%02d ", k + 1) + l.name.replacingOccurrences(of: "/", with: "-")
-                .replacingOccurrences(of: ":", with: "-") + ".midi2"
-        }
-    }
-
-    /// The folder panel's answer for several clip tracks: exports at once
-    /// when none of its names is taken, else asks first.
+    /// The folder panel's answer for several clip tracks. The core names
+    /// the files and says which are taken (final review I3), off the main
+    /// actor: none taken, the export starts without `replace`, so a file
+    /// that appears meanwhile is the core's refusal in the sheet; else the
+    /// user is asked first.
     public func exportToFolder(_ folder: String) {
-        let taken = clipFileNames().filter {
-            FileManager.default.fileExists(atPath: (folder as NSString).appendingPathComponent($0))
-        }
-        guard taken.isEmpty else {
-            replaceQuestion = ReplaceQuestion(folder: folder, count: taken.count)
+        guard let document, let seq = document.selectedSeq else {
+            exportError = "No sequence is shown."
             return
         }
-        startExport(path: folder)
+        namesGeneration += 1
+        let generation = namesGeneration
+        let session = document.session
+        let req = clipRequest(seq: seq, path: folder, replace: false)
+        run {
+            let result = await Task.detached { Result { try session.exportMidiClipNames(req: req) } }.value
+            guard generation == self.namesGeneration else { return }
+            switch result {
+            case .failure(let error):
+                self.exportError = Self.message(error)
+            case .success(let names) where names.taken.isEmpty:
+                self.startExport(path: folder, replace: false)
+            case .success(let names):
+                self.replaceQuestion = ReplaceQuestion(folder: folder, taken: names.taken)
+            }
+        }
     }
 
     /// Replace: the export replaces them. Cancel: nothing is written and
@@ -374,12 +416,13 @@ public final class InterchangeModel {
     public func answerReplace(_ replace: Bool) {
         guard let q = replaceQuestion else { return }
         replaceQuestion = nil
-        if replace { startExport(path: q.folder) }
+        if replace { startExport(path: q.folder, replace: true) }
     }
 
-    /// The Save panel's answer (which has confirmed replacing), or a folder
-    /// whose taken names the user agreed to replace (`exportToFolder`).
-    public func startExport(path: String) {
+    /// The Save panel's answer (which has confirmed replacing: `replace`),
+    /// or a folder (`exportToFolder`), replacing only what the user agreed
+    /// to replace.
+    public func startExport(path: String, replace: Bool = true) {
         guard let document else { return }
         guard let seq = document.selectedSeq else {
             exportError = "No sequence is shown."
@@ -392,12 +435,12 @@ public final class InterchangeModel {
         let started: UInt64?
         switch exportKind {
         case .smf:
-            let req = smfRequest(seq: seq, path: path, replace: true)
+            let req = smfRequest(seq: seq, path: path, replace: replace)
             started = document.startJob(.exportMidi, "MIDI Export Failed", failure: { [self] in
                 exportError = Self.message($0)
             }) { try $0.exportMidi(req: req) }
         case .clip:
-            let req = clipRequest(seq: seq, path: path, replace: true)
+            let req = clipRequest(seq: seq, path: path, replace: replace)
             started = document.startJob(.exportMidi, "MIDI Export Failed", failure: { [self] in
                 exportError = Self.message($0)
             }) { try $0.exportMidiClip(req: req) }

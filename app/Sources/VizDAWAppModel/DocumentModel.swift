@@ -585,13 +585,22 @@ public final class DocumentModel {
 
     /// Return in the field: one rename of the region the draft was typed
     /// for, when the trimmed text differs from its name then (blank clears
-    /// it).
+    /// it). A draft whose region was deleted meanwhile goes quietly (final
+    /// review M9).
     public func commitRegionName() {
         guard let d = regionNameDraft else { return }
         regionNameDraft = nil
         let name = d.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard name != d.name else { return }
+        guard name != d.name, regionExists(d.event) else { return }
         renameRegion(d.event, to: name)
+    }
+
+    /// Whether event `event` is still in one of the shown sequence's tracks.
+    func regionExists(_ event: UInt64) -> Bool {
+        guard let seq = selectedSeq else { return false }
+        return lanes.contains { l in
+            editor.laneEvents(LaneKey(seq, l.id))?.events.contains { $0.id == event } == true
+        }
     }
 
     /// The inspector's region changed or the field went away: the draft

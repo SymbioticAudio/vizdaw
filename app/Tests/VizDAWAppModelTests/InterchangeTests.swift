@@ -264,6 +264,61 @@ import VizDAWCore
         #expect(f.imports.count == 1 && f.imports[0].0 == ["/tmp/b.wav"] && f.imports[0].1 == target)
         #expect(InterchangeModel.isMidi("/x/y.MIDI") && InterchangeModel.isMidi("a.mid2") == false)
         #expect(InterchangeModel.isMidi("a.midi2") && InterchangeModel.isMidi("a.Smf") && !InterchangeModel.isMidi("a.wav"))
+        #expect(m.alert == nil, "the second file is not refused as busy")
+    }
+
+    /// Final review I1: the core takes one MIDI import at a time, so
+    /// dropped files queue; each starts when the one before ends, as its
+    /// own job (its own tracks and undo step), and a failure is reported
+    /// and the queue moves on.
+    @Test func severalDroppedMidiFilesImportOneAfterAnother() throws {
+        let f = busy()
+        f.jobStartState = .running
+        let m = try DocumentModel(session: f)
+        let target = ImportTargetRow(seq: 3, lane: nil, tick: 0)
+        m.interchange.importDropped(paths: ["/tmp/a.mid", "/tmp/b.mid", "/tmp/c.mid"], target: target)
+        #expect(f.midiImports.map(\.path) == ["/tmp/a.mid"] && m.alert == nil)
+        #expect(throws: VizError.self) { try f.importMidi(req: f.midiImports[0]) }
+        func end(_ k: Int, _ state: JobStateRow, _ message: String? = nil) throws {
+            let id = try #require(m.jobs.first { $0.kind == .importMidi }?.id)
+            f.jobRows[id] = JobRow(
+                id: id, kind: .importMidi, progress: 1, state: state, message: message, problems: [], created: [],
+                report: ReportRow(summary: "Imported \(k)", items: []), written: [])
+            m.pollJobs()
+        }
+        m.pollJobs()
+        #expect(f.midiImports.count == 1, "still running: the next waits")
+        try end(1, .done)
+        #expect(f.midiImports.map(\.path) == ["/tmp/a.mid", "/tmp/b.mid"] && m.alert == nil)
+        #expect(m.interchange.report?.summary == "Imported 1")
+        try end(2, .failed, "not a MIDI file")
+        #expect(m.alert == AlertItem(title: ProjectBanner.failureTitle(.importMidi), message: "not a MIDI file"))
+        #expect(f.midiImports.map(\.path) == ["/tmp/a.mid", "/tmp/b.mid", "/tmp/c.mid"], "moved on")
+        try end(3, .done)
+        #expect(m.jobs.isEmpty && f.midiImports.count == 3 && m.interchange.dropQueue.isEmpty)
+        #expect(f.midiImports.allSatisfy { $0.seq == 3 && $0.lane == nil && !$0.newProject })
+    }
+
+    /// Two files whose jobs end at once (on `startJob`'s own poll), and a
+    /// file the core refuses at the start: each is tried once, in order.
+    @Test func twoDroppedFilesThatEndAtOnceBothImport() throws {
+        let f = busy()
+        let m = try DocumentModel(session: f)
+        let target = ImportTargetRow(seq: 3, lane: 31, tick: 0)
+        m.interchange.importDropped(paths: ["/tmp/a.mid", "/tmp/b.mid"], target: target)
+        #expect(f.midiImports.map(\.path) == ["/tmp/a.mid", "/tmp/b.mid"] && m.alert == nil && m.jobs.isEmpty)
+        f.interchangeError = .Model(message: "bad")
+        m.interchange.importDropped(paths: ["/tmp/c.mid", "/tmp/d.mid"], target: target)
+        #expect(m.alert?.title == "MIDI Import Failed" && m.interchange.dropQueue.isEmpty)
+        f.interchangeError = nil
+        // A cancelled drop stops the files after it.
+        f.jobStartState = .running
+        m.alert = nil
+        m.interchange.importDropped(paths: ["/tmp/e.mid", "/tmp/f.mid"], target: target)
+        let id = try #require(m.jobs.first?.id)
+        f.jobRows[id] = JobRow(id: id, kind: .importMidi, progress: 1, state: .cancelled, message: nil, problems: [], created: [])
+        m.pollJobs()
+        #expect(f.midiImports.last?.path == "/tmp/e.mid" && m.interchange.dropQueue.isEmpty && m.alert == nil)
     }
 
     @Test func openRoutesMidiFiles() throws {
@@ -426,37 +481,54 @@ import VizDAWCore
         #expect(m.interchange.report == f.lastReport && m.interchange.written.isEmpty)
     }
 
-    /// Review round 1: several clip tracks go into a folder, which never
-    /// replaces files silently: names already there are asked about first.
+    /// Review round 1, final review I3: several clip tracks go into a
+    /// folder, which never replaces files silently. The core names the
+    /// files and says which are taken (asked off the main actor); the
+    /// export replaces only when the user chose Replace.
     @Test func aClipFolderExportAsksBeforeReplacing() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vzclip-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
         let f = busy()
-        var a = lane(30, "Gro/ove"), b = lane(31, "Chords")
-        a.midiEventCount = 1
-        b.midiEventCount = 1
-        f.laneTable[3] = [a, b]
         let m = try DocumentModel(session: f)
         let x = m.interchange
         x.showExport(.clip)
         await x.settle()
-        #expect(x.clipFileNames() == ["01 Gro-ove.midi2", "02 Chords.midi2"])
-        x.exportToFolder(dir.path)
-        #expect(f.clipExports.last?.path == dir.path && f.clipExports.last?.replace == true && x.replaceQuestion == nil)
-        // One of the names exists: asked, nothing written yet.
+        f.clipNames = ClipNamesRow(names: ["01 A.midi2", "02 B.midi2"], taken: [])
+        x.exportToFolder("/tmp/out")
+        await x.settle()
+        let asked = try #require(f.clipNameRequests.last)
+        #expect(asked.path == "/tmp/out" && asked.lanes == [30, 31] && asked.replace == false)
+        #expect(f.checkOnMain.allSatisfy { !$0 }, "asked off the main actor")
+        #expect(f.clipExports.last?.path == "/tmp/out" && f.clipExports.last?.replace == false && x.replaceQuestion == nil)
+        // One of the names is taken: asked, nothing written yet.
         x.showExport(.clip)
-        try Data().write(to: dir.appendingPathComponent("02 Chords.midi2"))
-        x.exportToFolder(dir.path)
+        await x.settle()
+        f.clipNames = ClipNamesRow(names: ["01 A.midi2", "02 B.midi2"], taken: ["02 B.midi2"])
+        x.exportToFolder("/tmp/out")
+        await x.settle()
         #expect(f.clipExports.count == 1 && x.exportShown)
         let q = try #require(x.replaceQuestion)
-        #expect(q.message == "1 file already exists in \(dir.lastPathComponent). Replace them?")
+        #expect(q.taken == ["02 B.midi2"] && q.message == "1 file already exists in out. Replace it?")
         x.answerReplace(false)
         #expect(f.clipExports.count == 1 && x.replaceQuestion == nil && x.exportShown)
-        try Data().write(to: dir.appendingPathComponent("01 Gro-ove.midi2"))
-        x.exportToFolder(dir.path)
-        #expect(x.replaceQuestion?.message == "2 files already exist in \(dir.lastPathComponent). Replace them?")
+        f.clipNames = ClipNamesRow(names: ["01 A.midi2", "02 B.midi2"], taken: ["01 A.midi2", "02 B.midi2"])
+        x.exportToFolder("/tmp/out")
+        await x.settle()
+        #expect(x.replaceQuestion?.message == "2 files already exist in out. Replace them?")
         x.answerReplace(true)
         #expect(f.clipExports.count == 2 && f.clipExports.last?.replace == true && x.replaceQuestion == nil)
+        // The core's refusal (a file that appeared meanwhile) shows in the sheet.
+        x.showExport(.clip)
+        await x.settle()
+        f.clipNames = ClipNamesRow(names: ["01 A.midi2", "02 B.midi2"], taken: [])
+        f.interchangeError = .Model(message: "01 A.midi2 exists; choose another name or replace it")
+        x.exportToFolder("/tmp/out")
+        await x.settle()
+        #expect(x.exportShown && x.exportError == "01 A.midi2 exists; choose another name or replace it")
+        #expect(m.alert == nil)
+        f.interchangeError = nil
+        // A folder the core refuses: the reason, nothing started.
+        f.clipNamesError = .Model(message: "out is not a folder")
+        x.exportToFolder("/tmp/out")
+        await x.settle()
+        #expect(x.exportShown && x.exportError == "out is not a folder" && f.clipExports.count == 2)
     }
 }

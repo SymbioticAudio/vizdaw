@@ -86,7 +86,7 @@ struct VizDAWApp: App {
                 {
                 case .failed(let f): m.editor.status = f.message
                 case .opened(_, let d): ControlWindows.openDocument(d)
-                case .done, .job, .measure: break
+                case .done, .job, .measure, .pending: break
                 }
             }
         }

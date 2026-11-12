@@ -129,6 +129,7 @@ extension DocumentModel {
     public func pollJobs() {
         var still: [JobRow] = []
         var openFailure: String??
+        var importsEnded: [JobRow] = []
         for j in jobs {
             let r: JobRow
             do {
@@ -140,6 +141,7 @@ extension DocumentModel {
             switch jobAnswer(r) {
             case .wait:
                 still.append(r)
+                continue
             case .ok:
                 if !r.problems.isEmpty { jobProblems = r.problems }
                 refreshAfterJob()
@@ -155,12 +157,16 @@ extension DocumentModel {
                 }
                 refreshAfterJob()
             }
+            if r.kind == .importMidi { importsEnded.append(r) }
         }
         jobs = still
         if let failure = openFailure, let hook = openedMidi {
             openedMidi = nil
             hook(failure)
         }
+        // Dropped files waiting for this one start now (final review I1),
+        // after `jobs` is settled: `startJob` adds to it.
+        for r in importsEnded { interchange.importEnded(r) }
     }
 
     public func refreshProjectInfo() {

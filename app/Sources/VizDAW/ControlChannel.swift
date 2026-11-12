@@ -105,6 +105,17 @@ enum ControlChannel {
             whenJobEnds(server, token, command: command, doc: doc, job: job)
         case .measure(let doc, let job):
             whenMeasured(server, token, doc: doc, job: job)
+        case .pending(let p):
+            // A file read or a render: as long as a job may take.
+            _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
+            later(token, seconds: Double(jobWait) / 1000) { expired in
+                if let o = p.outcome {
+                    answer(server, token, o)
+                    return true
+                }
+                if expired { _ = try? server.fail(token: token, failure: .of(.timeout, "the call did not end in time")) }
+                return expired
+            }
         }
     }
 
@@ -466,7 +477,7 @@ enum ControlChannel {
                 case .failed(let f):
                     _ = try? server.fail(token: token, failure: f)
                     return
-                case .done, .opened, .job, .measure:
+                case .done, .opened, .job, .measure, .pending:
                     if case .opened(_, let doc) = outcome { ControlWindows.openDocument(doc) }
                     sent += 1
                     continue

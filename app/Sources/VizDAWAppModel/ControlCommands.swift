@@ -15,6 +15,33 @@ public enum ControlOutcome {
     /// A Measure started off the main thread (plan 5d-2 Ruling 6): the app
     /// answers with `SynthCommands.answer` when it ends.
     case measure(doc: UUID, job: MeasureJob)
+    /// Work started off the main thread (a file read, a dry run's render;
+    /// final review I2, M4): the app answers with its outcome once it is
+    /// there, which may itself be a job.
+    case pending(PendingOutcome)
+}
+
+/// A control call's answer computed off the main actor: `work` runs on a
+/// detached task, then `then` makes the outcome on the main actor.
+@MainActor
+public final class PendingOutcome {
+    /// The answer; nil while the work runs.
+    public private(set) var outcome: ControlOutcome?
+    private var task: Task<Void, Never>?
+
+    public init<T: Sendable>(
+        _ work: @escaping @Sendable () -> Result<T, any Error>,
+        then: @escaping @MainActor @Sendable (Result<T, any Error>) -> ControlOutcome
+    ) {
+        let detached = Task.detached { work() }
+        task = Task { @MainActor in
+            let r = await detached.value
+            self.outcome = then(r)
+        }
+    }
+
+    /// Waits until `outcome` is there.
+    public func settle() async { await task?.value }
 }
 
 /// How a job that ended is answered (fix round 1, I-2).

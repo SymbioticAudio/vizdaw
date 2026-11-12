@@ -128,4 +128,17 @@ import VizDAWCore
         m.regionSelectionChanged()
         #expect(f.edits.count == n)
     }
+
+    /// Final review M9: a draft for a region deleted while it was typed is
+    /// dropped quietly when the field goes, not sent as a failing rename.
+    @Test func aDraftForADeletedRegionIsDropped() throws {
+        let (m, f) = try document(name: "Take 3")
+        m.editRegionName(5, "Lead")
+        f.laneEventTable["3/31"] = LaneEvents(seq: 3, lane: 31, rev: 3, events: [])
+        nextSnapshot(f) { $0.laneRevs[1].rev = 3 }
+        m.undo()
+        let n = f.edits.count
+        m.regionSelectionChanged()
+        #expect(f.edits.count == n && m.regionNameDraft == nil && m.alert == nil)
+    }
 }

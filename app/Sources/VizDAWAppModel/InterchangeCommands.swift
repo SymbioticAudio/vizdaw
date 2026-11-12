@@ -12,7 +12,10 @@ import VizDAWCore
 /// (each once), `start` without `end`, or `start` not before `end` is
 /// `invalid_params` and never reaches the session. A missing `path` is
 /// `dialog_required` ("Open" or "Save") unless `dry_run` is set. Nothing here
-/// opens a panel, a sheet or a window.
+/// opens a panel, a sheet or a window. Nothing here reads a file or renders
+/// on the main thread either: a `new_project` import's first read and a
+/// `dry_run` are `.pending` until their detached work ends (final review
+/// I2, M4).
 @MainActor
 public enum InterchangeCommands {
     public static let importMidi = "file.import_midi", exportMidi = "file.export_midi"
@@ -187,6 +190,46 @@ public enum InterchangeCommands {
         close(doc)
     }
 
+    /// Makes the project `file.import_midi` with `new_project` imports
+    /// into and starts the import there (`pickSeq`: into its shown
+    /// sequence).
+    private static func importIntoNewProject(
+        _ request: MidiImportRequestRow, pickSeq: Bool, store: DocumentStore
+    ) -> ControlOutcome {
+        guard let made = store.newProject(ProjectFormatRow(sampleRate: 48_000, depth: store.defaultFormat.depth)),
+            let fresh = store.model(made)
+        else {
+            if let a = store.takeAlert() { return .failed(.alert(a)) }
+            return .failed(.of(.failed, "\(importMidi) made no document."))
+        }
+        madeProjects.insert(made)
+        var req = request
+        if pickSeq, let shown = fresh.selectedSeq { req.seq = shown }
+        do {
+            return .job(command: importMidi, doc: made, job: try fresh.session.importMidi(req: req))
+        } catch {
+            return .failed(.thrown(error, "Import Failed"))
+        }
+    }
+
+    /// A dry run's answer, computed off the main thread (final review M4).
+    private static func dryRun(
+        _ id: String, _ docID: UUID, _ m: DocumentModel, _ check: @escaping @Sendable () throws -> ReportRow
+    ) -> ControlOutcome {
+        .pending(
+            PendingOutcome({ Result { try check() } }) { r in
+                switch r {
+                case .success(let report):
+                    return .done(
+                        .interchange(
+                            command: id, doc: docID.uuidString, window: nil, undoLabel: m.snapshot.undoLabel,
+                            report: report, written: []))
+                case .failure(let error):
+                    return .failed(.thrown(error, "Export Check Failed"))
+                }
+            })
+    }
+
     /// Runs `id` (one of `ids`) on document `docID`.
     public static func run(
         _ id: String, args: [ControlArg], _ docID: UUID, _ m: DocumentModel, store: DocumentStore
@@ -217,29 +260,22 @@ public enum InterchangeCommands {
             case .failure(let f): return .failed(f)
             case .success(let r): request = r
             }
-            var (target, doc, req) = (m, docID, request)
-            if newProject {
-                // The core reads the file first: a refusal makes no project.
+            guard newProject else {
                 do {
-                    _ = try m.session.midiFileInfo(path: path)
+                    return .job(command: id, doc: docID, job: try m.session.importMidi(req: request))
                 } catch {
                     return .failed(.thrown(error, "Import Failed"))
                 }
-                guard let made = store.newProject(ProjectFormatRow(sampleRate: 48_000, depth: store.defaultFormat.depth)),
-                    let fresh = store.model(made)
-                else {
-                    if let a = store.takeAlert() { return .failed(.alert(a)) }
-                    return .failed(.of(.failed, "\(id) made no document."))
-                }
-                (target, doc) = (fresh, made)
-                madeProjects.insert(made)
-                if args.int("seq") == nil, let shown = fresh.selectedSeq { req.seq = shown }
             }
-            do {
-                return .job(command: id, doc: doc, job: try target.session.importMidi(req: req))
-            } catch {
-                return .failed(.thrown(error, "Import Failed"))
-            }
+            // The core reads the file first, off the main thread (final
+            // review I2): a refusal makes no project.
+            let session = m.session
+            let pickSeq = args.int("seq") == nil
+            return .pending(
+                PendingOutcome({ Result { try session.midiFileInfo(path: path) } }) { read in
+                    if case .failure(let error) = read { return .failed(.thrown(error, "Import Failed")) }
+                    return importIntoNewProject(request, pickSeq: pickSeq, store: store)
+                })
         case exportMidi, exportClip:
             let dryRun = args.flag("dry_run") ?? false
             guard dryRun || path != nil else { return .failed(.dialog("Save", "path")) }
@@ -250,8 +286,9 @@ public enum InterchangeCommands {
                     case .failure(let f): return .failed(f)
                     case .success(let r): req = r
                     }
+                    let session = m.session
                     return dryRun
-                        ? result(try m.session.exportMidiCheck(req: req))
+                        ? Self.dryRun(id, docID, m) { try session.exportMidiCheck(req: req) }
                         : .job(command: id, doc: docID, job: try m.session.exportMidi(req: req))
                 }
                 let req: ClipExportRequestRow
@@ -259,8 +296,9 @@ public enum InterchangeCommands {
                 case .failure(let f): return .failed(f)
                 case .success(let r): req = r
                 }
+                let session = m.session
                 return dryRun
-                    ? result(try m.session.exportMidiClipCheck(req: req))
+                    ? Self.dryRun(id, docID, m) { try session.exportMidiClipCheck(req: req) }
                     : .job(command: id, doc: docID, job: try m.session.exportMidiClip(req: req))
             } catch {
                 return .failed(.thrown(error, dryRun ? "Export Check Failed" : "Export Failed"))

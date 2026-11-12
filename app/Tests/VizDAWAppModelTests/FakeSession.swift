@@ -654,6 +654,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         jobCalls += 1
         if jobBusy { throw VizError.Busy(message: "busy") }
         guard let j = jobRows[id] else { throw VizError.Model(message: "unknown job \(id)") }
+        // An ended job is applied when it is read, as the core does.
+        if j.state != .running { unapplied.remove(id) }
         return j
     }
     var cancelled: [UInt64] = []
@@ -699,8 +701,20 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         producer: nil, arranger: nil, year: nil, genre: nil, copyright: nil, website: nil, comment: nil)
     var songInfoSets: [SongInfoRow] = []
 
+    /// MIDI import and export jobs not yet read in an ended state. As the
+    /// core's `interchange_idle`, a new one applies those that ended first
+    /// and is `Busy` while one still runs.
+    var unapplied: Set<UInt64> = []
+    func interchangeIdle() throws {
+        unapplied = unapplied.filter { jobRows[$0]?.state == .running }
+        if !unapplied.isEmpty {
+            throw VizError.Busy(message: "Wait for the running import, export or bounce to finish.")
+        }
+    }
+
     private func interchangeJob(_ kind: JobKindRow, _ base: UInt64, _ n: Int) -> UInt64 {
         let id = base + UInt64(n)
+        unapplied.insert(id)
         jobRows[id] = JobRow(
             id: id, kind: kind, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
             message: nil, problems: [], created: [])
@@ -725,11 +739,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func importMidi(req: MidiImportRequestRow) throws -> UInt64 {
         if let e = interchangeError { throw e }
+        try interchangeIdle()
         midiImports.append(req)
         return interchangeJob(.importMidi, 6000, midiImports.count)
     }
     func exportMidi(req: SmfExportRequestRow) throws -> UInt64 {
         if let e = interchangeError { throw e }
+        try interchangeIdle()
         smfExports.append(req)
         return interchangeJob(.exportMidi, 7000, smfExports.count)
     }
@@ -744,6 +760,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func exportMidiClip(req: ClipExportRequestRow) throws -> UInt64 {
         if let e = interchangeError { throw e }
+        try interchangeIdle()
         clipExports.append(req)
         return interchangeJob(.exportMidi, 8000, clipExports.count)
     }
@@ -754,6 +771,19 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         checkOnMain.append(Thread.isMainThread)
         interchangeLock.unlock()
         return interchangeCheck
+    }
+    /// What `exportMidiClipNames` answers (`clipNamesError` is thrown
+    /// instead), and what it was asked.
+    var clipNames = ClipNamesRow(names: [], taken: [])
+    var clipNamesError: VizError?
+    var clipNameRequests: [ClipExportRequestRow] = []
+    func exportMidiClipNames(req: ClipExportRequestRow) throws -> ClipNamesRow {
+        if let e = clipNamesError { throw e }
+        interchangeLock.lock()
+        clipNameRequests.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return clipNames
     }
     func interchangeReport() throws -> ReportRow? {
         interchangeReportCalls += 1
