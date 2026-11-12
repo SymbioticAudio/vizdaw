@@ -21,7 +21,7 @@
 //! Everything the file cannot hold is listed in the report; each `what` is
 //! a constant (or, when it names something, a function) here.
 
-use super::plugins::{NoPlist, PlistCodec, state_entry};
+use super::plugins::{PlistCodec, state_entry};
 use super::record::{self, ObjectRef, Record, Snapshot};
 use super::schema::*;
 use super::units::{EXPORT_LINE, TagKind, beats, linear_gain, pan_normalized, swatch_hex, tag};
@@ -188,9 +188,17 @@ pub fn export(
     })
 }
 
-/// The report `export` gives, with `NoPlist` and no record (the dry run).
-pub fn check(doc: &Document, o: &ExportOptions, cancel: &AtomicBool) -> Result<Report, IoError> {
-    let mut built = build(doc, o.seq, &NoPlist, env!("CARGO_PKG_VERSION"), cancel)?;
+/// The report `export` gives, without the record (the dry run). It takes
+/// the same `plist` codec as the export, so the AU settings lines are the
+/// export's: pass [`NoPlist`](super::plugins::NoPlist) only where the export
+/// would use it too.
+pub fn check(
+    doc: &Document,
+    o: &ExportOptions,
+    plist: &dyn PlistCodec,
+    cancel: &AtomicBool,
+) -> Result<Report, IoError> {
+    let mut built = build(doc, o.seq, plist, env!("CARGO_PKG_VERSION"), cancel)?;
     write_project_reporting(&built.project, &mut built.report);
     stop(cancel)?;
     Ok(built.report)
@@ -246,10 +254,6 @@ pub const KEY_SIGNATURES: &str = "Key signatures";
 /// Left out: automated plug-in parameters whose ID needs more than 32 bits
 /// (by plug-in), with their automation.
 pub const PARAMS_PAST_32_BITS: &str = "Plug-in parameters past 32 bits";
-/// Left out (spec §6.4): marker colours and comments, track comments. The
-/// document holds none of them (a track's colour is its strip's, and is
-/// written), so the export has nothing to list here today.
-pub const COLOURS_AND_COMMENTS: &str = "Colours and comments on markers and tracks";
 /// Left out: the sequence's comment (the file has no place for it).
 pub const SEQUENCE_COMMENTS: &str = "Sequence comments";
 /// Left out: instrument and audio path strips no exported track plays
@@ -337,6 +341,8 @@ impl<'a> Ticker<'a> {
 
     /// One more item.
     pub(super) fn tick(&mut self) -> Result<(), IoError> {
+        #[cfg(feature = "test-hooks")]
+        hook::on_tick(self.cancel);
         self.n = self.n.wrapping_add(1);
         if self.n % CANCEL_EVERY == 0 {
             stop(self.cancel)
@@ -344,6 +350,49 @@ impl<'a> Ticker<'a> {
             Ok(())
         }
     }
+}
+
+#[cfg(feature = "test-hooks")]
+mod hook {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    thread_local! {
+        pub(super) static AT: Cell<Option<usize>> = const { Cell::new(None) };
+        pub(super) static SEEN: Cell<usize> = const { Cell::new(0) };
+        pub(super) static AFTER: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Counts one item; sets `cancel` at the chosen item, then counts the
+    /// items processed after it.
+    pub(super) fn on_tick(cancel: &AtomicBool) {
+        let Some(at) = AT.with(Cell::get) else { return };
+        let n = SEEN.with(|c| {
+            c.set(c.get().saturating_add(1));
+            c.get()
+        });
+        if n == at {
+            cancel.store(true, Ordering::Relaxed);
+        } else if n > at {
+            AFTER.with(|c| c.set(c.get().saturating_add(1)));
+        }
+    }
+}
+
+/// Test hook: this thread's next exports and dry runs set their cancel flag
+/// at their `items`-th event (counted across stages), and count the events
+/// they process after it; `None` turns the hook off. Resets the counts.
+#[cfg(feature = "test-hooks")]
+pub fn debug_cancel_after(items: Option<usize>) {
+    hook::AT.with(|c| c.set(items));
+    hook::SEEN.with(|c| c.set(0));
+    hook::AFTER.with(|c| c.set(0));
+}
+
+/// Test hook: the events processed after [`debug_cancel_after`]'s flag.
+#[cfg(feature = "test-hooks")]
+pub fn debug_items_after_cancel() -> usize {
+    hook::AFTER.with(std::cell::Cell::get)
 }
 
 fn sequence(doc: &Document, seq: SeqId) -> Result<&Sequence, IoError> {
@@ -410,6 +459,8 @@ pub(super) struct Chan<'a> {
     pub(super) strip: Option<&'a Strip>,
     /// Whether it is one of several copies of an instrument strip.
     pub(super) copy: bool,
+    /// The track a plain channel belongs to.
+    pub(super) lane: Option<LaneId>,
     /// The plug-in instrument it plays.
     pub(super) instrument: Option<&'a PluginSlot>,
     /// Its role.
@@ -608,13 +659,19 @@ pub(super) fn layout<'a>(
     stop(cancel)?;
     // From `source`'s report only the track mute and solo Notes apply here
     // (L11); the rest is worded for MIDI files.
-    for i in scratch.items.into_iter().filter(|i| {
-        i.kind == ItemKind::Note
-            && i.what.starts_with("Track '")
-            && (i.what.ends_with("' is muted in the project")
-                || i.what.ends_with("' is silenced by a solo in the project"))
-    }) {
-        report.add(i.kind, &i.what, None);
+    for lane in &s.lanes {
+        for what in [
+            midi_out::muted_track(&lane.name),
+            midi_out::soloed_out(&lane.name),
+        ] {
+            if scratch
+                .items
+                .iter()
+                .any(|i| i.kind == ItemKind::Note && i.what == what)
+            {
+                report.add(ItemKind::Note, &what, None);
+            }
+        }
     }
 
     // Each track's halves and how they reach the mixer.
@@ -688,6 +745,7 @@ pub(super) fn layout<'a>(
             },
             strip: None,
             copy: false,
+            lane: Some(lane.id),
             instrument: None,
             role: DpMixerRole::Regular,
             to: Some(to),
@@ -716,6 +774,7 @@ pub(super) fn layout<'a>(
                     name: st.name.clone(),
                     strip: Some(st),
                     copy,
+                    lane: None,
                     instrument,
                     role: DpMixerRole::Regular,
                     to: Some(output_id(doc, st.output)),
@@ -782,6 +841,7 @@ pub(super) fn layout<'a>(
             name: st.name.clone(),
             strip: Some(st),
             copy: false,
+            lane: None,
             instrument: None,
             role,
             to: Some(output_id(doc, st.output)),
@@ -794,6 +854,7 @@ pub(super) fn layout<'a>(
             name: st.name.clone(),
             strip: Some(st),
             copy: false,
+            lane: None,
             instrument: None,
             role: DpMixerRole::Master,
             to: None,
@@ -842,6 +903,8 @@ fn obj(kind: &str, id: u64) -> ObjectRef {
     ObjectRef {
         kind: kind.to_owned(),
         id,
+        slot: None,
+        index: None,
     }
 }
 
@@ -945,7 +1008,13 @@ impl Ctx<'_, '_> {
                 continue;
             };
             let pid = format!("{id}q{}", param.0);
-            self.ids.insert(pid.clone(), obj("parameter", param.0));
+            self.ids.insert(
+                pid.clone(),
+                ObjectRef {
+                    slot: Some(slot.id.0),
+                    ..obj("parameter", param.0)
+                },
+            );
             parameters.push(DpRealParam {
                 named: named(pid),
                 parameter_id: Some(i32::from_ne_bytes(bits.to_ne_bytes())),
@@ -957,6 +1026,8 @@ impl Ctx<'_, '_> {
         }
         let state = self.state(slot);
         self.ids.insert(id.clone(), obj("device", slot.id.0));
+        self.ids
+            .insert(format!("{id}e"), obj("device_enable", slot.id.0));
         self.plugins = self.plugins.saturating_add(1);
         DpDevice {
             kind: match p.format {
@@ -993,14 +1064,47 @@ impl Ctx<'_, '_> {
             (s.gain_db, s.pan, s.mute, s.solo)
         });
         let mut sends = Vec::new();
+        // The channel and its mixer parameters (a plain channel's by its
+        // track).
+        let (owner, prefix) = match (c.strip, c.lane) {
+            (Some(st), _) => (st.id.0, ""),
+            (None, Some(l)) => (l.0, "channel_"),
+            (None, None) => (0, "channel_"),
+        };
+        self.ids.insert(
+            id.clone(),
+            obj(
+                if c.strip.is_some() {
+                    "strip"
+                } else {
+                    "channel"
+                },
+                owner,
+            ),
+        );
+        for (suffix, kind) in [("v", "volume"), ("p", "pan"), ("m", "mute")] {
+            self.ids.insert(
+                format!("{id}{suffix}"),
+                obj(&format!("{prefix}{kind}"), owner),
+            );
+        }
         if let Some(st) = c.strip {
-            self.ids.insert(id.clone(), obj("strip", st.id.0));
             if st.automation != AutomationMode::Read && self.listed_strips.insert(st.id) {
                 self.report
                     .add(ItemKind::LeftOut, AUTOMATION_MODES, Some(st.name.clone()));
             }
             for (i, send) in st.sends.iter().enumerate() {
                 let sid = format!("{id}s{i}");
+                let index = u64::try_from(i).ok();
+                for (suffix, kind) in [("", "send"), ("v", "send_volume"), ("e", "send_enable")] {
+                    self.ids.insert(
+                        format!("{sid}{suffix}"),
+                        ObjectRef {
+                            index,
+                            ..obj(kind, st.id.0)
+                        },
+                    );
+                }
                 sends.push(DpSend {
                     named: named(sid.clone()),
                     destination: Some(format!("c{}", send.target.0)),
@@ -1064,10 +1168,11 @@ fn vizdaw_only(doc: &Document, s: &Sequence, report: &mut Report) {
             report.add(ItemKind::LeftOut, DRUM_ROWS, name());
         }
     }
-    // Sequences the export reaches through references, in any take.
+    // Sequences the export reaches through references in the active takes
+    // (what plays).
     let refs_of = |l: &Lane| -> Vec<SeqId> {
-        l.takes
-            .iter()
+        l.active()
+            .into_iter()
             .flat_map(|t| t.events.values())
             .filter_map(|e| match e.body {
                 EventBody::Reference { seq, .. } => Some(seq),
@@ -1185,6 +1290,23 @@ fn maps(
                 })
             })
             .collect(),
+    });
+    // With a pickup the first point is after file time 0: the tempo there
+    // (the first point's, which governs earlier ticks) is held from 0.
+    let tempo_automation = tempo_automation.map(|mut t| {
+        if t.points.first().is_some_and(|p| p.time > 0.0) {
+            t.points.insert(
+                0,
+                DpPoint {
+                    time: 0.0,
+                    value: DpPointValue::Real(
+                        s.tempo.bpm_at(Tick(origin)),
+                        Some(DpInterpolation::Hold),
+                    ),
+                },
+            );
+        }
+        t
     });
     let entries = s.meter.entries();
     let pickup = s.start_offset.0 > 0;
@@ -1347,6 +1469,8 @@ fn build<'a>(
     stop(cancel)?;
 
     let (tempo, time_signature, mut arrangement) = maps(s, layout.origin, &mut ctx.report);
+    ctx.ids.insert("tempo".to_owned(), obj("tempo", s.id.0));
+    ctx.ids.insert("timesig".to_owned(), obj("meter", s.id.0));
     arrangement.lanes = Some(DpLanes {
         head: DpHead {
             time_unit: Some(DpTimeUnit::Beats),

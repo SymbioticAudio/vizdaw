@@ -7,7 +7,9 @@ use common::xmllint::schema_check;
 use core_engine::fixtures::{BAR, Builder, Q};
 use core_io::IoError;
 use core_io::dawproject::export::{
-    ClipRule, DpExport, ExportEnv, ExportOptions, RegionGain, check, export, file_name,
+    CANCEL_EVERY, ClipRule, DpExport, EARLY_MARKERS, ExportEnv, ExportOptions, RegionGain,
+    SEQUENCE_COMMENTS, UNPLAYED_STRIPS, check, debug_cancel_after, debug_items_after_cancel,
+    export, file_name,
 };
 use core_io::dawproject::plugins::{NoPlist, PlistCodec, state_entry};
 use core_io::dawproject::record::{ObjectRef, Record, Snapshot, projection};
@@ -35,7 +37,6 @@ use core_model::mpe::MpeConfig;
 use core_model::sequence::{KeySlot, Marker};
 use core_model::time::Tick;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/dawproject");
 
@@ -564,8 +565,12 @@ fn listed_fixture() -> (Document, SeqId) {
     b.notes(seq, ext_lane, &[(0, 60, 0x8000, Q)]).unwrap();
     b.notes(seq, gm_lane, &[(0, 36, 0x8000, Q)]).unwrap();
 
-    // Inactive take: a note, then a new (active) take.
+    // Inactive take: a note and a use of "Hidden", then a new (active)
+    // take; "Hidden" is reached only from the inactive take, so it is not
+    // exported.
+    let (hidden, _) = b.sequence("Hidden", "Track 1", None).unwrap();
     b.notes(seq, keys, &[(0, 64, 0x8000, Q)]).unwrap();
+    b.reference(seq, keys, BAR, hidden, 1, 0).unwrap();
     b.run(Command::Lane(LaneCmd::AddTake {
         seq,
         lane: keys,
@@ -664,6 +669,24 @@ fn listed_fixture() -> (Document, SeqId) {
     .unwrap();
     flags(&mut b, seq, muted, Some(true), None);
     flags(&mut b, seq, solo, None, Some(true));
+    // An output no track uses, a sequence comment and a marker before the
+    // pickup's start.
+    output(&mut b, "Spare");
+    b.run(Command::Sequence(SequenceCmd::SetComment {
+        seq,
+        comment: "remember the bridge".into(),
+    }))
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetMarkers {
+        seq,
+        markers: vec![Marker {
+            tick: Tick(-2 * Q),
+            name: "Count-in".into(),
+        }]
+        .into_iter()
+        .collect(),
+    }))
+    .unwrap();
     let b = capture(b, delay, &[1, 2, 3, 4]);
     (b.finish(), seq)
 }
@@ -708,6 +731,9 @@ fn listed_lines() -> Vec<(ItemKind, &'static str)> {
         ),
         (Note, "Track 'Muted' is muted in the project"),
         (Note, "Track 'Keys' is silenced by a solo in the project"),
+        (LeftOut, UNPLAYED_STRIPS),
+        (LeftOut, SEQUENCE_COMMENTS),
+        (LeftOut, EARLY_MARKERS),
     ]
 }
 
@@ -726,17 +752,20 @@ fn vizdaw_only_state_is_listed() {
             x.report.items
         );
     }
-    assert_eq!(
-        item(
-            &x.report,
-            ItemKind::LeftOut,
-            "Other sequences (not exported)"
-        )
-        .count,
-        1
+    let others = item(
+        &x.report,
+        ItemKind::LeftOut,
+        "Other sequences (not exported)",
     );
+    assert_eq!(others.count, 2);
+    assert!(others.details.contains(&"Hidden".to_string()), "{others:?}");
+    assert!(others.details.contains(&"Other".to_string()), "{others:?}");
+    let detail = |what: &str| item(&x.report, ItemKind::LeftOut, what).details.clone();
+    assert_eq!(detail(UNPLAYED_STRIPS), vec!["Spare".to_string()]);
+    assert_eq!(detail(SEQUENCE_COMMENTS), vec!["Song".to_string()]);
+    assert_eq!(detail(EARLY_MARKERS), vec!["Count-in".to_string()]);
     // The same lines from the dry run.
-    let dry = check(&doc, &opts(seq), &AtomicBool::new(false)).unwrap();
+    let dry = check(&doc, &opts(seq), &NoPlist, &AtomicBool::new(false)).unwrap();
     assert_eq!(dry.items, x.report.items);
 
     let f = structure_fixture();
@@ -799,6 +828,8 @@ fn tags_and_record() {
     let obj = |kind: &str, id: u64| ObjectRef {
         kind: kind.into(),
         id,
+        slot: None,
+        index: None,
     };
     assert_eq!(rec.ids.get("t0"), Some(&obj("track", 0)));
     assert_eq!(rec.ids.get("t1"), Some(&obj("track", 1)));
@@ -815,6 +846,129 @@ fn tags_and_record() {
     assert_eq!(snap.ids, rec.ids);
     assert_eq!(snap.origin, 0);
     assert_eq!(snap.projection, projection(&f.doc, f.seq).unwrap());
+}
+
+/// Every `id="…"` the project text holds.
+fn xml_ids(xml: &str) -> Vec<String> {
+    xml.split(" id=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn every_exported_id_is_in_the_record() {
+    // A plug-in parameter that automation drives, beside the other fixtures.
+    let mut b = Builder::new();
+    let (dest, slot) = b.plugin_dest("Synth", synth_ref()).unwrap();
+    let (seq, lane) = b.sequence("Song", "Keys", Some(dest)).unwrap();
+    b.event(
+        seq,
+        lane,
+        0,
+        EventBody::Automation {
+            target: AutomationTarget::PluginParam(slot, ParamId(5)),
+            value: 0.5,
+        },
+    )
+    .unwrap();
+    let strip = b.strip_of(StripKind::Instrument(dest)).unwrap();
+    let params = (b.finish(), seq);
+
+    let f = structure_fixture();
+    let fixtures = [
+        (f.doc.clone(), f.seq),
+        listed_fixture(),
+        params.clone(),
+        {
+            let (d, s, _, _) = shared_instrument_fixture();
+            (d, s)
+        },
+        {
+            let (d, s, _, _, _) = shared_audio_fixture();
+            (d, s)
+        },
+        {
+            let (d, s, _) = mixed_fixture();
+            (d, s)
+        },
+        pickup_fixture(),
+    ];
+    for (doc, seq) in &fixtures {
+        let x = run(doc, *seq);
+        let rec: Record = serde_json::from_str(&x.record_json).unwrap();
+        let ids = xml_ids(&x.project_xml);
+        assert!(ids.len() > 10);
+        for id in &ids {
+            assert!(rec.ids.contains_key(id), "{id} is not in the record");
+        }
+        assert_eq!(
+            rec.ids.len(),
+            ids.len(),
+            "the record names only written IDs"
+        );
+    }
+
+    let obj = |kind: &str, id: u64, slot: Option<u64>, index: Option<u64>| ObjectRef {
+        kind: kind.into(),
+        id,
+        slot,
+        index,
+    };
+    let rec: Record = serde_json::from_str(&run(&params.0, params.1).record_json).unwrap();
+    let ch = format!("c{}d{}", strip.0, slot.0);
+    assert_eq!(
+        rec.ids.get(&format!("{ch}q5")),
+        Some(&obj("parameter", 5, Some(slot.0), None))
+    );
+    assert_eq!(
+        rec.ids.get(&format!("{ch}e")),
+        Some(&obj("device_enable", slot.0, None, None))
+    );
+    let rec: Record = serde_json::from_str(&run(&f.doc, f.seq).record_json).unwrap();
+    assert_eq!(rec.ids.get("c2v"), Some(&obj("volume", 2, None, None)));
+    assert_eq!(rec.ids.get("c2p"), Some(&obj("pan", 2, None, None)));
+    assert_eq!(rec.ids.get("c2m"), Some(&obj("mute", 2, None, None)));
+    assert_eq!(rec.ids.get("c2s0"), Some(&obj("send", 2, None, Some(0))));
+    assert_eq!(
+        rec.ids.get("c2s0v"),
+        Some(&obj("send_volume", 2, None, Some(0)))
+    );
+    assert_eq!(
+        rec.ids.get("c2s0e"),
+        Some(&obj("send_enable", 2, None, Some(0)))
+    );
+    assert_eq!(rec.ids.get("b3"), Some(&obj("strip", 3, None, None)));
+    assert_eq!(rec.ids.get("master"), Some(&obj("strip", 0, None, None)));
+    assert_eq!(
+        rec.ids.get("tempo"),
+        Some(&obj("tempo", f.seq.0, None, None))
+    );
+    assert_eq!(
+        rec.ids.get("timesig"),
+        Some(&obj("meter", f.seq.0, None, None))
+    );
+    let (doc, seq, one, _, _) = shared_audio_fixture();
+    let rec: Record = serde_json::from_str(&run(&doc, seq).record_json).unwrap();
+    let k = format!("k{}", one.0);
+    assert_eq!(rec.ids.get(&k), Some(&obj("channel", one.0, None, None)));
+    assert_eq!(
+        rec.ids.get(&format!("{k}v")),
+        Some(&obj("channel_volume", one.0, None, None))
+    );
+}
+
+#[test]
+fn the_dry_run_uses_the_export_codec() {
+    let f = structure_fixture();
+    let delay = "Settings of plug-in 'Delay'";
+    let x = run(&f.doc, f.seq);
+    let dry = check(&f.doc, &opts(f.seq), &FakePlist, &AtomicBool::new(false)).unwrap();
+    assert_eq!(dry.items, x.report.items);
+    assert_eq!(count(&dry, ItemKind::LeftOut, delay), 0);
+    let dry = check(&f.doc, &opts(f.seq), &NoPlist, &AtomicBool::new(false)).unwrap();
+    assert_eq!(count(&dry, ItemKind::LeftOut, delay), 1);
 }
 
 #[test]
@@ -964,6 +1118,7 @@ fn plugin_states() {
 fn pickup_fixture() -> (Document, SeqId) {
     let mut b = Builder::new();
     let (seq, _) = b.sequence("Song", "Keys", None).unwrap();
+    b.tempo(seq, &[(0, 120, false), (BAR, 140, false)]).unwrap();
     b.run(Command::Sequence(SequenceCmd::SetStartOffset {
         seq,
         offset: Tick(Q),
@@ -1018,7 +1173,25 @@ fn pickup_moves_file_time_zero() {
             (1.0, DpPointValue::TimeSig(4, 4))
         ]
     );
-    assert!(arr.tempo_automation.is_none(), "one tempo point");
+    // The tempo automation starts at file time 0, before the map's first
+    // point at bar 1.
+    let tempo: Vec<_> = arr
+        .tempo_automation
+        .as_ref()
+        .expect("two tempo points")
+        .points
+        .iter()
+        .map(|p| (p.time, p.value.clone()))
+        .collect();
+    let hold = Some(DpInterpolation::Hold);
+    assert_eq!(
+        tempo,
+        vec![
+            (0.0, DpPointValue::Real(120.0, hold)),
+            (1.0, DpPointValue::Real(120.0, hold)),
+            (5.0, DpPointValue::Real(140.0, hold)),
+        ]
+    );
 }
 
 fn big_song(notes: i64) -> (Document, SeqId) {
@@ -1039,29 +1212,33 @@ fn export_stops_when_cancelled() {
         export(&f.doc, &opts(f.seq), &env(&FakePlist), &set).map(|_| ()),
         Err(IoError::Cancelled)
     );
-    assert_eq!(check(&f.doc, &opts(f.seq), &set), Err(IoError::Cancelled));
+    assert_eq!(
+        check(&f.doc, &opts(f.seq), &FakePlist, &set),
+        Err(IoError::Cancelled)
+    );
+
+    // The flag goes up at the 100 000th event of a 300 000-note song: at
+    // most one interval of work follows it, in the export and the dry run.
+    let (doc, seq) = big_song(300_000);
+    let flag = AtomicBool::new(false);
+    debug_cancel_after(Some(100_000));
+    let got = export(&doc, &opts(seq), &env(&FakePlist), &flag).map(|_| ());
+    let after = debug_items_after_cancel();
+    debug_cancel_after(None);
+    assert_eq!(got, Err(IoError::Cancelled));
+    assert!(flag.load(Ordering::Relaxed), "the hook raised the flag");
+    assert!(after <= CANCEL_EVERY, "{after} events after the flag");
 
     let flag = AtomicBool::new(false);
-    let started = AtomicBool::new(false);
-    let (got, after) = std::thread::scope(|s| {
-        // The document is built and exported on the job's thread (it is
-        // not shared between threads).
-        let job = s.spawn(|| {
-            let (doc, seq) = big_song(300_000);
-            started.store(true, Ordering::Relaxed);
-            export(&doc, &opts(seq), &env(&FakePlist), &flag).map(|_| ())
-        });
-        while !started.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-        let at = std::time::Instant::now();
-        flag.store(true, Ordering::Relaxed);
-        let got = job.join().unwrap();
-        (got, at.elapsed())
-    });
+    debug_cancel_after(Some(100_000));
+    let got = check(&doc, &opts(seq), &FakePlist, &flag);
+    let after = debug_items_after_cancel();
+    debug_cancel_after(None);
     assert_eq!(got, Err(IoError::Cancelled));
-    assert!(after < Duration::from_secs(10), "took {after:?} to stop");
+    assert!(
+        after <= CANCEL_EVERY,
+        "dry run: {after} events after the flag"
+    );
 }
 
 /// The song of `projection_is_id_free`, built in one of two orders.

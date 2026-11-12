@@ -28,13 +28,36 @@ pub const KEEP_SNAPSHOTS: usize = 10;
 /// The record's and the snapshot's format.
 pub const FORMAT: u32 = 1;
 
-/// The VizDAW object an XML ID stands for.
+/// The VizDAW object an XML ID stands for. Every ID the export writes has
+/// one. `kind` and what `id` (and `slot`, `index`) name:
+///
+/// - `track`: a track's `Track` (`t<lane>`, `t<lane>a`); `id` is the lane;
+/// - `strip`: a strip's channel or its copy (`c<strip>`, `c<strip>t<lane>`),
+///   a bus track (`b<strip>`) or the master track; `id` is the strip;
+/// - `channel`: a plain channel (`k<lane>`, `k<lane>a`); `id` is its track;
+/// - `volume`, `pan`, `mute`: a strip channel's parameter (`id` the strip);
+///   `channel_volume`, `channel_pan`, `channel_mute`: a plain channel's
+///   (`id` its track);
+/// - `send`, `send_volume`, `send_enable`: a send and its parameters; `id`
+///   is the strip, `index` the send's position;
+/// - `device`, `device_enable`: a plug-in and its on/off; `id` is the
+///   instance;
+/// - `parameter`: a plug-in parameter; `id` is the parameter, `slot` its
+///   instance;
+/// - `tempo`, `meter`: the transport's tempo and time signature; `id` is the
+///   sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectRef {
-    /// "track", "strip", "device" or "parameter".
+    /// What it is (see above).
     pub kind: String,
     /// Its ID's number.
     pub id: u64,
+    /// The plug-in instance of a `parameter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u64>,
+    /// The position of a send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u64>,
 }
 
 /// `vizdaw/record.json`.

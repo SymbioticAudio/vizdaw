@@ -134,6 +134,16 @@ fn add_n(report: &mut Report, kind: ItemKind, what: &str, n: u64) {
 
 // ---- what plays ----
 
+/// The Note for track `name`, muted in the project but written.
+pub(crate) fn muted_track(name: &str) -> String {
+    format!("Track '{name}' is muted in the project")
+}
+
+/// The Note for track `name`, silenced by another track's solo but written.
+pub(crate) fn soloed_out(name: &str) -> String {
+    format!("Track '{name}' is silenced by a solo in the project")
+}
+
 /// The chosen tracks of a sequence and what they play.
 pub(crate) struct Source<'a> {
     pub(crate) doc: &'a Document,
@@ -163,11 +173,9 @@ pub(crate) fn source<'a>(
     let any_solo = s.lanes.iter().any(|l| l.solo);
     for l in &lanes {
         if l.mute {
-            let what = format!("Track '{}' is muted in the project", l.name);
-            report.add(ItemKind::Note, &what, None);
+            report.add(ItemKind::Note, &muted_track(&l.name), None);
         } else if any_solo && !l.solo {
-            let what = format!("Track '{}' is silenced by a solo in the project", l.name);
-            report.add(ItemKind::Note, &what, None);
+            report.add(ItemKind::Note, &soloed_out(&l.name), None);
         }
     }
     let mut copy = doc.clone();

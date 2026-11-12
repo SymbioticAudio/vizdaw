@@ -230,6 +230,20 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The DAWproject schema's element names that contain the word, and the
+/// one folder whose sources may spell them: the file format's own names,
+/// never text the app shows.
+const FORMAT_ELEMENTS: &[(&str, &str)] = &[("core-io/src/dawproject/schema/", "Lanes")];
+
+/// Whether `lit` in the source at `path` is exactly a DAWproject element
+/// name written by the schema code.
+fn format_element(path: &str, lit: &str) -> bool {
+    let path = path.replace('\\', "/");
+    FORMAT_ELEMENTS
+        .iter()
+        .any(|(dir, name)| lit == *name && path.contains(dir))
+}
+
 #[test]
 fn no_refusal_or_undo_text_says_lane() {
     self_check();
@@ -263,11 +277,24 @@ fn no_refusal_or_undo_text_says_lane() {
         rust_files(&root.join(d).join("src"), &mut files);
     }
     assert!(files.len() > 50, "the source directories were found");
+    assert!(format_element(
+        "/x/crates/core-io/src/dawproject/schema/read.rs",
+        "Lanes"
+    ));
+    assert!(!format_element(
+        "/x/crates/core-io/src/dawproject/export.rs",
+        "Lanes"
+    ));
+    assert!(!format_element(
+        "/x/crates/core-io/src/dawproject/schema/read.rs",
+        "Lanes here"
+    ));
     let mut hits = Vec::new();
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
+        let path = f.to_string_lossy();
         for (line, lit) in literals(&text) {
-            if says_lane(&lit) {
+            if says_lane(&lit) && !format_element(&path, &lit) {
                 hits.push(format!("{}:{line}: {lit:?}", f.display()));
             }
         }
