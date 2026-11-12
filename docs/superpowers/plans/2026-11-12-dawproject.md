@@ -17,7 +17,7 @@ It also keeps a snapshot of each export in the project for plan 6e's merge. Impo
 
   Everything there is platform-neutral. The AU property-list conversion sits behind a `PlistCodec` trait.
 - **`core-ffi`** gains `dawproject.rs`:
-  - an `ExportProject` job: WAV copies staged beside the destination, the ZIP written as a partial, then renamed into place, then the snapshot written into the package's `Interchange/`;
+  - an `ExportDawproject` job (its own kind; 6b's `ExportProject` is "Export for another DAW", pre-flight L1): WAV copies staged beside the destination, the ZIP written as a partial, then renamed into place, then the snapshot written into the package's `Interchange/`;
   - an `ImportProject` job: open, extract and convert the audio through `MediaImporter`, map;
   - the session methods. An import applies as a new project, as 6a's new-project MIDI import does.
 - `platform-macos` gains `plist` (CoreFoundation conversion).
@@ -100,9 +100,9 @@ Every task's requirements include these.
 
 - **Shell.** Every command runs after `export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools` and `cd /Users/lattawb/workspace/vizdaw`. Run Swift only through `scripts/build-ffi.sh` (after any FFI change), `scripts/swift.sh build|test` and `scripts/make-app.sh`. Never run `swift`, `xcodebuild` or `xcrun` directly.
 - **Branch and commits.**
-  - Branch `sp6-import` (at `0466205` when this plan was written; plans 6a, 6b and 6c are finished on it). Never switch branches, never push.
+  - Branch `sp6-import` (at `0466205` when this plan was written, `4e933b4` with it; plans 6a, 6b and 6c are finished on it). Never switch branches, never push.
   - Commit at the end of every task by explicit paths (never `git add -A`). Never commit `.superpowers/`, `.DS_Store` or generated FFI (`app/Sources/VizDAWCore/vizdaw_ffi.swift`, `app/Sources/vizdaw_ffiFFI/include/`, `target/ffi/`, `dist/`).
-  - `Cargo.lock` changes only in Task 1, by the crates in Tech Stack and what they pull in (`miniz_oxide`, `adler2`); no later task adds a dependency. The workspace `rust-version` goes 1.85 → 1.86 in Task 1, which `quick-xml` 0.42 needs.
+  - `Cargo.lock` changes only in Task 1, by the crates in Tech Stack and what they pull in (`miniz_oxide`, `adler2`, `crc32fast`, `simd-adler32`; Task 1 Step 5 copies `cargo tree -p core-io -e normal`'s new crates and licences into Tech Stack and Task 13's notices row, S1); no later task adds a dependency (Task 1 also adds `core-io`'s path dev-dependency on `core-engine` with `fixtures`, L3). The workspace `rust-version` goes 1.85 → 1.86 in Task 1, which `quick-xml` 0.42 needs.
   - Every message ends with the executing session's own attribution lines: its harness's `Co-Authored-By` line naming the model actually running, then the session line, e.g.
     ```
     Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -154,19 +154,20 @@ Every task's requirements include these.
     - They are read with a copy of 6a's never-blessed `hand_golden` (`core-io/tests/midi_out.rs`). `VIZDAW_BLESS` never writes them, and a missing one fails.
   - **Cancel is tested** at every stage of both jobs (Tasks 9, 10, 12).
   - **One interchange job at a time.**
-    - `ImportProject` joins `interchange_idle`'s pending kinds.
+    - `ImportProject` and `ExportDawproject` join `interchange_idle`'s pending kinds and `ForDawModel.blocking` (L1).
     - The export sheet queues behind running jobs as 6b's sheet does. An import always runs in its own new document, so it never waits.
   - **Every user action is one undo step.**
     - An import as a new project leaves nothing to undo (spec §6.1).
     - An export adds no step. Its project-ID stamp is not one (`History::stamp_project_id`).
   - **Edit notes and the report are surfaced.** The report sheet opens when a UI-started job ends. Last Import or Export Report… reopens it.
 - **UniFFI changes** (Tasks 9–10 only; every new field on an existing record is `#[uniffi(default)]` or `#[uniffi(default = None)]`):
-  - `JobKindRow::ImportProject`; the enum `RegionGainRow { Apply, LeaveOut }`;
+  - `JobKindRow::ImportProject` and `JobKindRow::ExportDawproject` (L1); the enum `RegionGainRow { Apply, LeaveOut }`;
   - records `DawprojectExportRequestRow`, `DawprojectImportRequestRow` and `DawprojectInfoRow`;
   - `Session::export_dawproject`, `export_dawproject_check`, `dawproject_name`, `dawproject_info` and `import_dawproject`;
-  - the `test-hooks` methods `debug_dawproject_cancel_at` and `debug_free_bytes`.
+  - the `test-hooks` methods `debug_dawproject_cancel_at`, `debug_free_bytes` and `debug_plugin_param(slot, param) -> Result<f64, VizError>` (reads a loaded slot's current parameter value from the host; L4);
+  - the free function `dawproject_info(path: String) -> Result<DawprojectInfoRow, VizError>` (`#[uniffi::export]` in `lib.rs`, beside `shutdown`), so the store reads a file with no document open (L8).
 
-  `FakeSession` gains each method, with logs and settable answers, in the task that adds it. Every Swift `switch` over `JobKindRow` gains `.importProject` in Task 10.
+  `FakeSession` gains each method, with logs and settable answers, in the task that adds it. Every Swift `switch` over `JobKindRow` and every `==`/`contains` chain on job kinds gains both kinds: `ProjectMedia.swift` `jobText` ("Exporting DAWproject…", "Importing DAWproject…") and `failureTitle` ("DAWproject Export Failed", "DAWproject Import Failed"), `ControlChannel.swift` (~167), `ControlCommands.swift` (~77, ~87: a finished job of either kind answers `.ok(status: report.summary)`), `Interchange.swift` (~112, ~119: `jobFailed` reopens no MIDI sheet for them). `.exportDawproject` lands in Task 9, `.importProject` in Task 10 (L1).
 - **Control channel.** The registry goes 173 → 175 in Task 11. Every command is in the registry and handled (`everyRegisteredMenuCommandHasAHandler`).
 - **Each task ends green.**
   - Always:
@@ -333,7 +334,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
      - stored uncompressed, with every XML and JSON entry deflated (spec §7.4).
    - *Cost if wrong:* other DAWs' media pools show "001.wav"; readable names are one function (an owner question).
 10. **Crossfades (spec §7.0).**
-    - **Export:** a crossfading region B over A writes overlapping clips: B's `fadeInTime` is its crossfade length, and A's `fadeOutTime` is `max(A.fade_out, overlap)`. Changed: "Crossfades were written as overlapping clips with matching fades".
+    - **Export:** a crossfading region B over A writes overlapping clips: B's `fadeInTime` is its crossfade length, and A's `fadeOutTime` is `max(A.fade_out, overlap)`. Changed: "Crossfades were written as overlapping clips; the earlier clip's fade-out covers the overlap". Other DAWs hear A fade over the whole overlap even when B's fade-in is shorter (S4).
     - **Import:** where clip B starts inside clip A on one track, B's fade-in is at least 1 frame and at most the overlap + 1 frame, and A's fade-out is at least the overlap − 1 frame, B becomes a crossfade:
       - `fade_in` = `min(B's fade-in, room)`, Linear;
       - A's fade-out is cleared when it was within one frame of the overlap.
@@ -373,6 +374,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
       - pan: `unit="normalized"`, the value as is;
       - mute: `BoolPoint`;
       - plug-in parameter: `unit="normalized"`.
+    - On a shared instrument strip copied per track, `Points@parameter` names the copy of the track that holds the automation event.
     - Solo and velocity-scale automation are Left out (the format has no solo parameter).
     - **Import:**
       - `hold` adds a point one tick before the next, with the held value. Changed: "Held automation steps were written as one-tick ramps".
@@ -389,7 +391,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - **`vizdaw/record.json`:** `{format: 1, project_id, export_id, exported_at (Unix seconds), app_version, seq, origin, ids: {<xml id>: {kind, id}}, document: <project.json as JSON>}`. The whole document is a superset of "the VizDAW-only state", which is simplest and lossless for 6e. Its plug-in blobs are the `plugins/` entries.
     - **The snapshot:** `Interchange/<export id>.json` in the package is `{format: 1, project_id, export_id, exported_at, seq, origin, ids, projection}`. `projection` is Task 4's `Projection` of what was exported.
     - **Export IDs:** `project_id::fresh()`. A project with no `project_id` gets one stamped at export (`History::stamp_project_id`, no undo step; the title shows Edited).
-    - **Save:** `save_to` copies the root's snapshots into a new package (regular files named `<uuid>.json`, lstat, links skipped), then prunes the package's `Interchange/` to the 10 newest by modification time (ties by name). A failure is a news problem, never a failed save.
+    - **Save:** `save_to` makes the package's `Interchange/` when needed (`create_dir_all`, a link refused; L6), copies the root's snapshots into a new package (regular files named `<uuid>.json`, lstat, links skipped), then prunes the package's `Interchange/` to the 10 newest by modification time (ties by name). A failure is a news problem, never a failed save.
     - **Import (6d):** reads only `RecordHead {format, project_id, export_id}`. A VizDAW file gets the Note "This file came from a VizDAW project; it was opened as a new project".
     - *Cost if wrong:* 6e may want a smaller record; one projection call.
 17. **Import as a new project only (spec §6.1, owner scope for 6d).**
@@ -401,7 +403,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - entry names of at most 1 024 bytes;
     - `project.xml` at most 256 MiB; `metadata.xml` at most 1 MiB; `vizdaw/record.json` at most 256 MiB; a state file at most 64 MiB;
     - XML at most 200:1, by declared and by actual inflated size;
-    - XML depth 256; 16 000 000 nodes; 64 attributes per element;
+    - XML depth 256; 4 000 000 nodes and 128 MiB of tree (arena and nodes, counted as they grow; past either, "it has too many parts"); 64 attributes per element. So a parse holds at most the XML text (256 MiB) plus 128 MiB, and the hostile-case budget is "under 2 s and 256 MiB" for fuzz cases, whose XML is under 64 MiB (L7);
     - attribute and text values at most 64 KiB (`MAX_TEXT_BYTES`);
     - numbers at most 64 characters;
     - timeline nesting (clips in clips, warps, note children, reference chains) at most 16.
@@ -420,14 +422,46 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - deeper nesting;
     - `metadata.xml` that fails its own limits.
 
-    Before extracting, the referenced audio entries' declared sizes × 2 (the extracted copy and the CAF) must fit `free_bytes` of the package's volume, else "Not enough free space to import this file (it needs <n> MB)."
+    Before extracting, `needed_bytes` must fit `free_bytes` of the package's volume (L10): every referenced entry's declared size (the extracted copy) plus one converted CAF per audio source (entries and regular external files, sized from `metadata` in `open`), each CAF sized as frames × channels × the project depth's bytes from the `Audio` element (with its file size × 4 as the floor when the element lies), else "Not enough free space to import this file (it needs <n> MB)."
     *Cost if wrong:* constants.
 19. **What `core-io` returns to `core-ffi`.** `core-io` never decodes audio.
     - The import job extracts each referenced entry to `Media/.incoming/<fresh>.<ext>` (`create_new`), converts it with `import_reserved`, and removes the extracted copy.
-    - External files are read only when the path is not a URL (`scheme://`) and `metadata` (one symlink hop) says it is a regular file. They are never written.
+    - External files may be anywhere a relative `..` or absolute path points (the format allows it); they are read only when the path is not a URL (`scheme://`) and `metadata` (one symlink hop) says it is a regular file. They are never written.
     - Failures become `MediaSource::Offline { why }`: an offline media item (path `Media/<safe name>.caf`, the file's rate, channels and length), relinkable, and listed: "Audio files that could not be read (they are offline; relink them)".
     - A source wider than stereo becomes several mono items. The first stays on the clip's track; each other channel's region goes on a new track "<track> ch <n>" (Changed).
     - *Cost if wrong:* the multichannel rule only.
+
+## Pre-flight amendments (2026-11-12)
+
+These come from `.superpowers/sdd/2026-11-12-dawproject/preflight-report.md`, and the controller accepted every proposed ruling. Each is applied in place in the task it touches; where a step and an older line disagree, the amendment wins.
+
+- **L1** DAWproject export gets its own `JobKindRow::ExportDawproject` (6b's `ExportProject` stays "Export for another DAW"); both new kinds join every Swift `switch` and `==` chain, `interchange_idle` and `ForDawModel.blocking` (Global Constraints, Tasks 9, 10, 12).
+- **L2** `FixedBars(1)` gives 2 note clips; the Riff uses are separate (Task 5).
+- **L3** `core-io` gains a path dev-dependency on `core-engine` with `fixtures` (Task 1).
+- **L4** `debug_plugin_param(slot, param)` reads a parameter for `clap_state_round_trips` (Task 10).
+- **L5** A looped clip whose `playStart` is not its `loopStart` is unrolled, with Changed; the sequence's length is `loopEnd − loopStart` (Task 7).
+- **L6** `Interchange/` is created by the snapshot writer and by `keep_snapshots`; tested on a package without it (Ruling 16, Task 9).
+- **L7** The tree is capped at 4 000 000 nodes and 128 MiB; a limits test parses at the cap under the allocator (Ruling 18, Tasks 1, 8).
+- **L8** `dawproject_info` is a free UniFFI function; `openDawproject` returns at once and works with no document open; `open(path:)` returns `nil` for it (Tasks 10–12).
+- **L9** Cancel is tested inside `Tree::parse`, `map` and `export` (Tasks 2, 4, 6).
+- **L10** `needed_bytes` counts entries, external files and one CAF per source at the project depth (Ruling 18, Tasks 6, 8, 10).
+- **L11** Track mute and solo get their report Notes on export (Task 4).
+- **S1** The lockfile and notice lists come from `cargo tree` (Tasks 1, 13).
+- **S2** The root README says Rust 1.86 (Task 1).
+- **S3** Schema types are prefixed `Dp` (Task 3).
+- **S4** The crossfade Changed line says the earlier fade covers the overlap (Ruling 10, Task 5).
+- **S5** `file_path` takes the noun for its refusal (Task 10).
+- **S6** `export_dawproject` checks the staging folder's name length (Task 9).
+- **S7** The e2e expects `InvalidParams` for a relative path; the Swift hostile tests bypass the registry (Tasks 11, 13).
+- **S8** Allocation counts are per thread (Tasks 1, 8).
+- **S9** A WAV copy past 4 GiB is Left out before staging (Task 9).
+- **S10** Cancel tests clear `debug_free_bytes` (Task 10).
+- **S11** No `id` is written on non-referenceable elements; tested (Task 3).
+- **S12** `ZipReader::read` returns `TOO_LARGE` past `max` (Task 1).
+- **S13** Task 5's fixture states ticks, frames and the crossfade command (Task 5).
+- **S14** `DpInfo.tracks` counts note and audio tracks only (Task 6).
+- **S15** The plan's base commit is noted (Global Constraints).
+- **Also from the report:** a shared strip's copy owns its automation target (Ruling 14); external `..` paths are allowed by the format and read only as regular audio (Ruling 19); "Colours and comments on markers and tracks" is listed on export (Task 4); `hand_timeline`'s content is defined by Task 7's tests; Task 6 keeps the tempo map for Task 7.
 
 ---
 
@@ -442,28 +476,20 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `quick-xml = { version = "0.42.0", default-features = false }`;
     - `serde = { version = "1", features = ["derive"] }`;
     - `serde_json = "1"`;
+    - `[dev-dependencies] core-engine = { path = "../core-engine", features = ["fixtures"] }` (Tasks 4–8 build fixtures with `core_engine::fixtures::Builder`; L3);
+  - `README.md` ("Rust 1.86 or newer"; S2);
   - `Cargo.lock`; `crates/core-io/src/lib.rs` (`pub mod zip;`, `IoError` unchanged); `src/limits.rs`; `src/read.rs`.
 - Create: `crates/core-io/src/zip.rs`, `crates/core-io/tests/common/mod.rs`, `crates/core-io/tests/common/rawzip_builder.rs`, `crates/core-io/tests/zip.rs`.
 
 **Interfaces:**
 - Produces:
   - ```rust
-    // limits.rs (constants as Ruling 18)
-    pub const MAX_ZIP_ENTRIES: usize = 10_000;
-    pub const MAX_ENTRY_NAME_BYTES: usize = 1024;
-    pub const MAX_XML_RATIO: u64 = 200;
-    pub const MAX_PROJECT_XML_BYTES: u64 = 256 * 1024 * 1024;
-    pub const MAX_METADATA_XML_BYTES: u64 = 1024 * 1024;
-    pub const MAX_RECORD_BYTES: u64 = 256 * 1024 * 1024;
-    pub const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
-    pub const MAX_XML_DEPTH: usize = 256;
-    pub const MAX_XML_NODES: usize = 16_000_000;
-    pub const MAX_XML_ATTRS: usize = 64;
-    pub const MAX_NUMBER_CHARS: usize = 64;
-    pub const MAX_TIMELINE_NESTING: usize = 16;
+    // limits.rs: one `pub const MAX_…` per value of Ruling 18 (MAX_ZIP_ENTRIES, MAX_ENTRY_NAME_BYTES, MAX_XML_RATIO,
+    // MAX_PROJECT_XML_BYTES, MAX_METADATA_XML_BYTES, MAX_RECORD_BYTES, MAX_STATE_BYTES, MAX_XML_DEPTH, MAX_XML_NODES,
+    // MAX_XML_TREE_BYTES, MAX_XML_ATTRS, MAX_NUMBER_CHARS, MAX_TIMELINE_NESTING)
     /// The limits a package reader applies; tests lower them.
     pub struct PackageLimits { pub max_entries: usize, pub max_project_xml: u64, pub max_metadata_xml: u64,
-        pub max_record: u64, pub max_state: u64, pub max_ratio: u64, pub max_depth: usize, pub max_nodes: usize }
+        pub max_record: u64, pub max_state: u64, pub max_ratio: u64, pub max_depth: usize, pub max_nodes: usize, pub max_tree_bytes: usize }
     impl Default for PackageLimits { /* the constants */ }
     // read.rs
     /// `path` opened as a regular file (one symlink hop; FIFO, device, directory refused), checked again on the handle.
@@ -476,7 +502,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
         pub fn open(path: &Path, limits: &PackageLimits) -> Result<ZipReader, IoError>;
         pub fn entries(&self) -> &[EntryInfo];
         pub fn find(&self, name: &str) -> Option<&EntryInfo>;
-        /// Inflates `e` (CRC and size verified). Refused past `max` bytes, and,
+        /// Inflates `e` (CRC and size verified). Refused with `TOO_LARGE` past `max` bytes (S12), and,
         /// with `ratio`, when declared or actual size / compressed > ratio.
         pub fn read(&self, e: &EntryInfo, max: u64, ratio: Option<u64>, cancel: &AtomicBool) -> Result<Vec<u8>, IoError>;
         /// Streams `e` into a new file `to` (`create_new`); `to` is removed on any error or cancel.
@@ -521,7 +547,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `entry_count_limits`:
     - 10 000 entries open;
     - 10 001 are refused;
-    - an EOCD claiming 65 535 entries over a 2-entry directory is refused before iterating, and a counting allocator in the test sees under 1 MiB allocated by `open`.
+    - an EOCD claiming 65 535 entries over a 2-entry directory is refused before iterating, and a thread-local counting allocator sees under 1 MiB allocated by `open` on the test's own thread (S8).
   - `xml_bombs_are_refused`:
     - a Deflated entry of 50 MiB of zeros, read with `ratio: Some(200)` → "unpacks to more than 200 times";
     - the same entry with a declared size of 1 KiB → "is larger than it says" after at most 1 KiB + one buffer is held;
@@ -537,7 +563,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `random_bytes_never_panic`: proptest with `cases(256)` (copy 6a's `cases` reading `VIZDAW_FUZZ_CASES`).
 - [ ] **Step 3: Run** `cargo test -p core-io --test zip`. Expected: fail to compile.
 - [ ] **Step 4: Implement** the items above. `read` caps its `Vec` growth at `min(max, declared) + 64 KiB` and counts every inflated byte. `extract` copies in 64 KiB chunks through `verifying_reader`.
-- [ ] **Step 5: Run** `cargo test --workspace`, both clippies (the Linux one proves `rawzip` and `flate2` build there). Expected: PASS (about +11 Rust). `git diff --stat Cargo.lock` lists only the new crates.
+- [ ] **Step 5: Run** `cargo test --workspace`, both clippies (the Linux one proves `rawzip` and `flate2` build there). Expected: PASS (about +12 Rust). `git diff --stat Cargo.lock` lists only the new crates; `cargo tree -p core-io -e normal` gives their licences for this plan's lists (S1).
 - [ ] **Step 6: Commit** `feat(io): bounded ZIP reader and writer, package limits (plan 6d Task 1)` with every file above.
 
 ### Task 2: `core-io::xml`: the bounded tree reader, strict numbers and the escaping writer
@@ -612,6 +638,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `structure_errors_are_refused`: `<a></b>`, `<a>`, `<a/><b/>`, `<a/>x` and `<a x="1" x="2"/>`.
   - `writer_escapes_and_round_trips`: a name of `<>&"'`, tab, newline, U+0001, U+202E and "🎹" written as an attribute and as text parses back equal, minus U+0001.
   - `fmt_double` with `double` round-trips exactly for 1/3, 0.1, 1e-300, 2⁵³, `15_360.0 / 15_360.0` (written "1") and `65_535.0 / 65_535.0`, and for every `n / 65_535.0` with n in 0..=65 535.
+  - `parse_stops_when_cancelled` (L9): a pre-set flag returns `Cancelled` before the first element; a flag set from a second thread while a 300 000-element text parses returns `Cancelled` within one check interval (65 536 events).
   - `random_xml_never_panics`: proptest, `cases(512)`. A tag-soup generator mixes known DAWproject names, random attributes with `&`, `<`, entity references, DOCTYPE fragments and depth up to 300. Each case is `Ok` or `Refused` in under 2 s.
 - [ ] **Step 2: Run** `cargo test -p core-io --test xml`. Expected: fail to compile.
 - [ ] **Step 3: Implement.** A depth stack of `NodeId`s; names and values pushed into the arena as they arrive. The node count is checked before each push.
@@ -638,7 +665,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 
 **Interfaces:**
 - Consumes: Task 2.
-- Produces the typed model. Every type derives `Debug, Clone, PartialEq`; optional XML attributes are `Option`.
+- Produces the typed model. Every type derives `Debug, Clone, PartialEq`; optional XML attributes are `Option`. **Every schema type is prefixed `Dp`** (`DpNamed`, `DpTrack`, `DpChannel`, `DpSend`, `DpDevice`, `DpClip`, `DpNote`, `DpPoint`, `DpUnit`, …) so a glob import never shadows `Send` or a `core_model` name (S3). The blocks below omit the prefix for brevity, except `DpProject` and `DpMetaData`.
   - **Shared and parameter types:**
     ```rust
     pub struct Named { pub id: Option<String>, pub name: Option<String>, pub color: Option<String>, pub comment: Option<String> }
@@ -711,7 +738,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - a cycle of clip `reference`s (including a clip whose reference holds itself) → "This DAWproject file is damaged: clips refer to each other in a loop.";
     - a dangling or wrong-kind IDREF stays in the model, and `check_ids` reports it (Left out, "References to parts that are not in the file"). The mappers then treat it as absent.
   - **Writing rules:**
-    - XSD order;
+    - XSD order; `id` is written only on referenceable types, never on `Clip`, `Marker`, `Note`, `Point` or `Scene` (their `named.id` is ignored; S11);
     - attributes in the order `id`, `name`, `color`, `comment`, then the element's own in the struct's field order;
     - `None` attributes omitted; `Markers` omitted when empty;
     - `Note@channel` always written.
@@ -728,7 +755,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `xsds_are_the_pinned_ones`: the SHA-256 of both vendored files, from `shasum -a 256` (macOS) or `sha256sum` through `Command`, equals the values in this plan's format section. With neither tool on `PATH` it prints "skipped: no SHA-256 tool" (macOS always has `shasum`).
   - `reads_the_hand_minimal_project`: asserts the typed fields (names, units, values, IDREFs, the note expression's target and points).
   - `writes_the_hand_minimal_project_byte_for_byte`: `write_project(read_project(x)) == x`, and the same for metadata (`hand_golden`).
-  - `written_projects_pass_the_vendored_schema`: `schema_check` on both hand files, and on a `DpProject` built in code with every element kind.
+  - `written_projects_pass_the_vendored_schema`: `schema_check` on both hand files, and on a `DpProject` built in code with every element kind and an `id` set on every `named`, clips and markers included (S11).
   - `ids_are_checked`:
     - a duplicate `id` is refused;
     - a self-referencing clip and a two-clip loop are refused;
@@ -833,6 +860,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
         - "Key signatures"
         - "Settings of plug-in '<name>'"
         - "Plug-in parameters past 32 bits"
+        - "Colours and comments on markers and tracks" (spec §6.4)
       - Changed:
         - the two shared-strip lines (Ruling 6)
         - "Tracks with notes and audio were split in two"
@@ -840,6 +868,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
         - the external-MIDI and built-in-synth lines (Ruling 6)
         - the two plug-in-state lines (Ruling 8)
         - the pickup line (Ruling 3)
+        - "Track '<name>' is muted in the project" and "Track '<name>' is silenced by a solo in the project" (from `midi_out::source`; the track is written unmuted, its channel's `Mute` is the strip's; L11)
 
       Only lines whose state the document has appear. Each `what` is a constant in `export.rs`.
 
@@ -859,7 +888,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - two tracks on one plug-in instrument → two `Track`s, each with a `ClapPlugin` (IDs `c<s>t<l1>d<i>`, `c<s>t<l2>d<i>`), two state entries with equal bytes, and the Changed line with count 1 and detail "2 tracks";
     - two tracks on one audio path → a submix `Track` `b<s>` holding channel `c<s>`, the tracks' channels plain `k<lane>` with `destination="c<s>"`, and the Changed line.
   - `mixed_track_splits`: a track with a note and a region → `t<l>` (`notes`) and `t<l>a` (`audio`) named "Keys" and "Keys audio", and the Changed line.
-  - `vizdaw_only_state_is_listed`: a fixture with each listed state gives each Left out or Note `what` above exactly once. A fixture without any gives none of them.
+  - `vizdaw_only_state_is_listed` (with a muted and a soloed track, L11): a fixture with each listed state gives each Left out or Note `what` above exactly once. A fixture without any gives none of them.
   - `tags_and_record`:
     - every `Track@comment` is `vz:t<lane>`, every `Channel@comment` is `vz:s<strip>`;
     - the metadata comment is "c\nVizDAW export E1" (with `export_id` "E1"), and only "VizDAW export E1" when the comment is empty;
@@ -872,6 +901,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - a slot with `state: None` → the Note "Plug-in 'Synth' has no saved settings";
     - a `ParamId(1 << 33)` automation target → "Plug-in parameters past 32 bits".
   - `pickup_moves_file_time_zero`: a start offset of one beat → the "Verse" marker at `time="1"`, `Record.origin == -15360`, and the pickup Note.
+  - `export_stops_when_cancelled` (L9): a pre-set flag returns `Cancelled`; a flag set from a second thread during the export of a 300 000-note song returns `Cancelled` within one 65 536-item interval (`export` and `check` look at the flag every 65 536 events).
   - `projection_is_id_free`: the same song built twice with different creation orders gives equal projections.
 - [ ] **Step 3: Run** `cargo test -p core-io --test dawproject_export`. Expected: fail to compile.
 - [ ] **Step 4: Implement** the items above.
@@ -920,12 +950,12 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - CC 1 = 0.25 at beat 0.5; a `Program { 5, bank (0, 1) }` at beat 12;
     - a use of sequence "Riff" (one bar) looped 2× at bar 5; a muted use of "Riff" at bar 9;
   - track "Drums":
-    - region A at tick 0, 48 000 frames, linear fade-in 480;
-    - region B at frame 24 000, 48 000 frames, `Crossfade(Frames(4800), Linear)`, named "Hit", gain −6 dB (with `RegionGain::Apply`);
+    - region A at tick 0, 48 000 frames, a Linear fade-in of 480 frames;
+    - region B at tick 15 360 (frame 24 000 at 120 BPM and 48 kHz), 48 000 frames, named "Hit", gain −6 dB (with `RegionGain::Apply`); then `AudioCmd::Crossfade { event: B, length: Frames(4_800), shape: Linear }` (S13);
   - fader automation on "Drums": points at 0, 1 and 2 beats (0.0, 0.631, 1.0); mute automation on at beat 3.
 - [ ] **Step 2: Write the failing tests** in `tests/dawproject_timeline_out.rs`:
   - `timeline_matches_the_hand_golden`; `exports_pass_the_vendored_schema`.
-  - `clip_rules_group_as_the_arrangement_shows`: the "Keys" notes give 2 clips under `SilenceGap(4 beats)`, 3 under `FixedBars(1)` (beats 0–4, 12–16 and the program's bar), and 1 under `WholeTrack`.
+  - `clip_rules_group_as_the_arrangement_shows`: the "Keys" notes give 2 clips under `SilenceGap(4 beats)`, 2 under `FixedBars(1)` (bar 1, beats 0–4, and bar 4, beats 12–16, which holds the program too), and 1 under `WholeTrack`. The two "Riff" uses are clips of their own under every rule and are not in these counts (L2).
   - `looped_and_unrolled_uses`: a use looped 3× with identical passes → one clip with `loopEnd` = the pass and `duration` 3 passes. A use whose last pass is cut by the sequence's end → an unlooped clip holding every played note.
   - `numbers_come_back_exactly`:
     - for v in [0, 1, 32 767, 65 535], `xml::double(vel) × 65 535` rounds to v;
@@ -933,7 +963,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - region offsets of 0, 1 and 2⁴⁰ − 1 frames at 44 100 come back from `playStart` exactly.
   - `what_is_left_out_on_the_timeline`: a fixture with a SysEx, a lyric, a note attribute, a muted note, `Registered(1)`, velocity-scale and solo automation, an EqualPower fade and `leave_out` gives each `what` above once.
   - `region_gain_entries`: `Apply` gives `audio/001.wav` (A, 0 dB) and `audio/002.wav` (B's media, −6 dB); `LeaveOut` gives one entry and the Left out line naming "Hit".
-  - `crossfade_writes_matching_fades`: A's `fadeOutTime` is 0.5 (24 000 frames of overlap), B's `fadeInTime` is 0.1, and the crossfade Changed line appears.
+  - `crossfade_writes_matching_fades`: A's `fadeOutTime` is 0.5 (24 000 frames of overlap), B's `fadeInTime` is 0.1, and the crossfade Changed line appears (its S4 wording).
   - `default_patch_and_midi_mix_at_time_zero`: a destination with `Patch { 10, None }` and `MidiMix { volume: Some(100), pan: Some(64) }` gives track-level `Points` at time 0: `programChange` 10, `channelController` 7 = 100/127 and 10 = 64/127.
 - [ ] **Step 3: Run** `cargo test -p core-io --test dawproject_timeline_out`. Expected: FAIL.
 - [ ] **Step 4: Implement.**
@@ -965,9 +995,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     pub enum AudioSource { Entry(String), External(PathBuf) }
     pub struct AudioRef { pub key: usize, pub source: AudioSource, pub channels: u16, pub sample_rate: u32, pub frames: u64, pub name: String }
     impl DpPackage {
-        pub fn info(&self) -> DpInfo;               // Ruling 17's rate
+        pub fn info(&self) -> DpInfo;               // Ruling 17's rate; `tracks` counts note and audio tracks, not folders, buses or the master (S14)
         pub fn audio(&self) -> &[AudioRef];          // one per distinct File path, in document order
-        pub fn needed_bytes(&self) -> u64;           // Ruling 18
+        pub fn needed_bytes(&self, depth_bytes: u32) -> u64;   // Ruling 18 (L10)
         pub fn extract(&self, a: &AudioRef, to: &Path, cancel: &AtomicBool) -> Result<u64, IoError>;
         pub fn state(&self, path: &str) -> Result<Vec<u8>, IoError>;   // ≤ max_state
     }
@@ -1055,6 +1085,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - none → 48 000;
     - `audio_files` counts distinct paths.
   - `hostile_text_is_sanitised`: a track name with U+0001, U+202E and 70 000 bytes, and a title of 70 000 bytes, import cut and clean, with the Changed lines.
+  - `map_stops_when_cancelled` (L9): `open` and `map` with a pre-set flag return `Cancelled` before any work; a flag set from a second thread during `map` of a 300 000-note file returns `Cancelled` within one 65 536-item interval.
   - `apply_validates_and_is_one_step`: `begin` → `apply` → `commit` gives `rules::validate` empty, and `undo` restores the empty project.
 - [ ] **Step 3: Run** `cargo test -p core-io --test dawproject_import`. Expected: fail to compile.
 - [ ] **Step 4: Implement** the items above. `map` checks the cancel flag every 65 536 items.
@@ -1071,6 +1102,8 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 - Consumes: Task 6.
 - Produces the timeline mapping inside `map`/`apply`:
   - **Time:**
+    - Task 6's `map` builds the tempo map first and keeps it in the mapping state; every seconds conversion uses it;
+    - `text::sanitize` takes `Limits::default()` beside the `PackageLimits`;
     - time units are inherited from the parent timeline, defaulting to beats;
     - a clip's content timeline uses `contentTimeUnit`, else the parent's unit;
     - seconds → ticks through the imported tempo map;
@@ -1085,7 +1118,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - **Re-sharing (spec §7.4):**
     - clips with a `reference` to one content, clips with a loop, and clips that share a name and have identical content each become uses of one new sequence, on the same track or on tracks with the same destination;
     - the sequence is named after the clip (else "<track> clip <n>"), with one lane on that destination;
-    - the use is a `Reference` with `loop_count` `Count(n)` when the duration is a whole number of passes, else `Fill` with `length`;
+    - the use is a `Reference` with `loop_count` `Count(n)` when the duration is a whole number of passes, else `Fill` with `length`. The sequence's length is `loopEnd − loopStart`. A looped clip whose `playStart` is not its `loopStart`, or whose pass cannot start at the sequence's start, is unrolled onto the track with Changed "Looped clips with a different start were unrolled" (L5);
     - other note clips go straight onto the track;
     - uses across tracks with different destinations get one sequence each, with the Note "Shared clips on tracks with different instruments became separate sequences".
   - **Expression (Ruling 12, the inverse):**
@@ -1112,13 +1145,14 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - **Automation (Ruling 14, the inverse):** a `Points` whose target parameter is a channel's `Volume`, `Pan`, `Mute`, a send's `Volume` or a device's parameter → automation events on the owning track.
   - **Clip launcher and video:** `Scenes`' `ClipSlot`s → unplaced sequences "<scene> – <track>", with Changed "Clip launcher slots became unplaced sequences"; `Video` → Left out "Video".
 
-- [ ] **Step 1: Write `hand_timeline`.** Every case below is one track or clip of it, positions chosen so each assertion has one reasonable value.
+- [ ] **Step 1: Write `hand_timeline`** before any code: one track per Step 2 test, named after the test, holding exactly the clips, points and values that test states (the positions and values in Step 2 are the fixture's). The test-data README lists the tracks.
 - [ ] **Step 2: Write the failing tests** in `tests/dawproject_timeline_in.rs`:
   - `notes_land_where_the_clips_play`: a clip at time 4 with `playStart` 1 and `playStop` 3 holding notes at 0.5, 1, 2.5 (duration 1) and 3 → notes at ticks of beats 4 and 5.5 (the 2.5 note cut to 0.5 beats, with Changed); the 0.5 and 3 notes are out.
   - `looped_clip_becomes_a_looped_use`:
     - `loopStart 0 loopEnd 2 duration 6` → a sequence named after the clip and a use with `Count(3)`;
     - `duration 5` → `Fill` with `length` 5 beats;
-    - `playStart 1` with `loopStart 0` → the first pass starts 1 beat in.
+    - the new sequence's length is `loopEnd − loopStart`;
+    - `playStart 1` with `loopStart 0` (a use cannot start inside its sequence) → the notes go straight on the track, unrolled from beat 1 of the content, with Changed "Looped clips with a different start were unrolled" (L5).
   - `alias_clips_share_one_sequence`: two clips referencing one `Notes` on one track → one sequence, two uses. On two tracks with different instruments → two sequences and the Note.
   - `same_name_same_content_is_reshared`: two clips "A" with the same notes → one sequence; "A" with different notes, and "A"/"B" with the same notes → separate.
   - `note_expressions_map_to_per_note_expression`:
@@ -1195,14 +1229,15 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
       - `crossfades_survive`: flag and length exact; shape Linear;
       - `a_thousand_tracks`: 1 000 tracks × 10 notes, export + import under 10 s in debug, timed with `Instant`.
     - `every_export_passes_the_schema`: 16 generated specs through `schema_check` (XSD), both files.
-  - `dawproject_fuzz.rs`, with a counting `#[global_allocator]` (as `core-engine`'s `rt_alloc` tests count) asserting a peak under 256 MiB per case, and each case under 2 s:
+  - `dawproject_fuzz.rs`, with a `#[global_allocator]` that counts per thread (S8), asserting the case thread's peak under 256 MiB, and each case under 2 s:
     - `damaged_packages_never_panic`: byte flips, inserts, deletes and truncations (`cases(256)`) of the zipped `hand_minimal`, `hand_other`, `hand_timeline` and one `export` output. Each `open` + `map` is `Ok` or `Refused`, never `Io` for in-memory faults and never a panic.
     - `hostile_zips_never_panic`: generator over `raw_zip` with traversal names, duplicates, link modes, flags, method 99, declared sizes 0 / `u32::MAX` / ZIP64, and a 50 MiB-of-zeros `project.xml`.
     - `hostile_xml_never_panics`: generator of `project.xml` texts with DOCTYPE, depth up to 300, 10⁵ elements, numbers from {`1e400`, `NaN`, `-0`, `inf`, 70 digits}, dangling and cyclic IDREFs, unknown elements, and `contentType` lists of 1 000 words.
   - `dawproject_limits.rs`: one test per §6.5 row this plan owns, each at the limit (accepted) and one past it (refused or left out with its line), using lowered `PackageLimits` for the size rows:
     - `zip_entries`, `zip_names` (each forbidden form), `zip_links`, `zip_encrypted`, `zip_ratio` (200:1 accepted, 201:1 refused);
-    - `free_space_estimate` (`needed_bytes` = 2 × the referenced entries' sizes);
+    - `free_space_estimate` (`needed_bytes` = entry sizes + one CAF per source, external files included, at 2, 3 and 4 bytes per sample; L10);
     - `xml_size`, `xml_doctype`, `xml_depth` (256/257), `xml_nodes`;
+    - `xml_tree_bytes`: a ratio-legal ZIP of `<a/>` repeated to the node cap parses (and one more is refused) with the counting allocator's peak under `MAX_PROJECT_XML_BYTES`-sized text + 128 MiB + 16 MiB (L7);
     - `numbers` (`MAX_NUMBER_CHARS` 64/65; finite only);
     - `idrefs_resolve`, `reference_cycles`, `nesting` (16/17);
     - `positions` (beats at `MAX_TICKS / 15 360` accepted, one beat past it left out);
@@ -1227,8 +1262,8 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `save_to` calls `dawproject::keep_snapshots`;
     - `capture_all` gains a sibling, `capture_for_export`;
   - `src/write.rs` in `core-io`: `create_partial`; `write_partial` rebuilt on it;
-  - `crates/platform-macos/src/lib.rs`;
-  - `app/Tests/VizDAWAppModelTests/FakeSession.swift`.
+  - `crates/platform-macos/src/lib.rs`, `crates/core-ffi/src/jobs.rs` (`JobKindRow::ExportDawproject`);
+  - `app/Tests/VizDAWAppModelTests/FakeSession.swift` and the Swift job-kind sites named in Global Constraints (L1), with a test that a failed `.exportDawproject` row is titled "DAWproject Export Failed" and opens no MIDI sheet.
 
 **Interfaces:**
 - Consumes: Tasks 1–8; `interchange::{file_dest, report_row, io_error}`; `Session::{interchange_idle, export_roots}`.
@@ -1257,15 +1292,15 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - **`export_dawproject`** (on the lock):
     - `interchange_idle`;
     - the sequence must exist;
-    - `file_dest(&req.path, req.replace, &roots)`, and the extension must be `dawproject` ("Choose a name ending in .dawproject.");
+    - `file_dest(&req.path, req.replace, &roots)`, and the extension must be `dawproject` ("Choose a name ending in .dawproject."); `name_fits` also checks the longest name the job makes, `.<name>.audio.partial` (S6);
     - `refresh_media` and `capture_for_export`, which captures every loaded slot and returns the slots it could not capture;
     - the project ID stamped when missing (Ruling 16);
     - `export_id = project_id::fresh()`, `exported_at` = now (Unix seconds), `app_version = env!("CARGO_PKG_VERSION")`;
-    - then the doc is cloned and an `ExportProject` job spawned.
+    - then the doc is cloned and an `ExportDawproject` job spawned.
   - **The job** (inside `catch_unwind`; stage numbers for `debug_dawproject_cancel_at`):
     1. `core_io::dawproject::export` (stage 1 after);
     2. the free-space check: the WAVs' total bytes at the project depth plus the XML, × 2, against `free_bytes` of the destination's folder (or `debug_free_bytes`) → "Not enough free space to export (it needs <n> MB).";
-    3. `stage_folder(<dest>.audio)` (a hidden `.<name>.dawproject.audio.partial`, always removed). Each `AudioFile` is written there from the media item's CAF with `PcmWriter` (WAV, project depth, media rate, `dither: false`), with gain applied as `10^(g/20)` per sample (stage 2 after the first);
+    3. a media copy whose WAV would pass 4 GiB is not staged: Left out "Audio too long for a WAV file" with its names, its clips written without audio (S9). Then `stage_folder(<dest>.audio)` (a hidden `.<name>.dawproject.audio.partial`, always removed). Each `AudioFile` is written there from the media item's CAF with `PcmWriter` (WAV, project depth, media rate, `dither: false`), with gain applied as `10^(g/20)` per sample (stage 2 after the first);
     4. `create_partial(dest, replace)` → `ZipWriter` over a `BufWriter`, in this order:
        - `metadata.xml`, `project.xml` and `vizdaw/record.json` (Deflated; stage 3 after `project.xml`);
        - `audio/*` (Stored, `add_from` with cancel);
@@ -1273,9 +1308,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 
        then `finish`, `sync_all` and a last cancel look (stage 4);
     5. `commit`;
-    6. the snapshot, `write_partial(<root>/Interchange/<export id>.json, replace: false)` + commit. A failure adds the Note "The merge record could not be kept in the project: <why>"; the export is still Done.
+    6. the snapshot: `Interchange/` is made with `create_dir_all` when missing (lstat; a link or a file there is refused), then `write_partial(<root>/Interchange/<export id>.json, replace: false)` + commit (L6). A failure adds the Note "The merge record could not be kept in the project: <why>"; the export is still Done.
 
-    The job returns `Work::ExportMidi { result, written: [dest] }` (its apply is the generic report-and-files path; its doc line becomes "A MIDI or DAWproject export").
+    The job returns `Work::ExportMidi { result, written: [dest] }` under the kind `JobKindRow::ExportDawproject` (L1): the payload's apply is the generic report-and-files path; its doc line becomes "A MIDI or DAWproject export's files"; the row's kind is what the app titles.
   - The slots `capture_for_export` could not capture use their stored state. With none stored, the Left out line is "Settings of plug-in '<name>'" (spec §11).
   - **`export_dawproject_check`** checks as `export_dawproject` does, minus Busy and the path, then calls `core_io::dawproject::check` off the lock.
   - **`dawproject_name`** is `file_name`.
@@ -1295,7 +1330,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
       - `JobRow.written` is the file and `report.summary` starts "Exported".
     - `region_gain_apply_and_leave_out`: a −6 dB region's copy has samples × 0.501 187 ±1 LSB; `LeaveOut` writes one copy and the Left out line.
     - `snapshots_are_kept_and_save_prunes_to_ten`:
-      - 12 exports of an untitled project → 12 snapshots in the scratch root's `Interchange/`;
+      - the first export of a project with no `Interchange/` makes it (L6); 12 exports of an untitled project → 12 snapshots in the scratch root's `Interchange/`;
       - Save As → the new package has the 10 newest;
       - a symlink placed in `Interchange/` is not followed or copied;
       - each snapshot's `export_id` matches the record in its ZIP.
@@ -1320,7 +1355,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 - Modify:
   - `crates/core-ffi/src/dawproject.rs`, `src/jobs.rs` (`JobKindRow::ImportProject`, `Work::ImportProject`), `src/session.rs` (`apply_jobs` arm, `apply_dawproject_import`, `interchange_idle`'s kinds);
   - `app/Tests/VizDAWAppModelTests/FakeSession.swift`;
-  - every Swift `switch` over `JobKindRow`.
+  - every Swift `switch` and `==` chain over `JobKindRow` named in Global Constraints (L1).
 - Test: `crates/core-ffi/tests/dawproject.rs` (import cases)
 
 **Interfaces:**
@@ -1330,19 +1365,19 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     #[derive(uniffi::Record)] pub struct DawprojectInfoRow { pub sample_rate: u32, pub tracks: u32, pub audio_files: u32,
         pub from_vizdaw: bool, pub export_id: Option<String> }
     #[derive(uniffi::Record)] pub struct DawprojectImportRequestRow { pub path: String }
-    pub fn dawproject_info(&self, path: String) -> Result<DawprojectInfoRow, VizError>;   // off the lock: open + info
+    #[uniffi::export] pub fn dawproject_info(path: String) -> Result<DawprojectInfoRow, VizError>;   // a free function (L8): open + info, no session
     pub fn import_dawproject(&self, req: DawprojectImportRequestRow) -> Result<u64, VizError>;
     // jobs.rs
     /// A DAWproject import: the media it made (removed unless applied) and the plan.
     Work::ImportProject { files: Vec<(String, Result<Vec<Imported>, String>)>, result: Result<Box<core_io::dawproject::DpImport>, String> }
     ```
   - **`import_dawproject`:**
-    - `interchange_idle`, `media_jobs_idle`, `file_path`;
+    - `interchange_idle`, `media_jobs_idle`, `file_path` (which gains a noun argument, "a MIDI file" / "a DAWproject file", for its refusal; S5);
     - refused when the document has a track (Ruling 17);
     - spawns `ImportProject` with the root, the project format, `referenced_media_anywhere()` keys as reserved names, a snapshot of the installed `(format, id)` pairs (enabled catalog entries), `plist()` and the importer.
   - **The job** (inside `catch_unwind`; stages 5–8):
     1. `open` (stage 5 after);
-    2. `needed_bytes` against `free_bytes(root)` (or `debug_free_bytes`) → "Not enough free space to import this file (it needs <n> MB).";
+    2. `needed_bytes(project depth)` against `free_bytes(root)` (or `debug_free_bytes`) → "Not enough free space to import this file (it needs <n> MB).";
     3. per `AudioRef`, with progress:
        - `Entry` → `extract` to `<root>/Media/.incoming/<fresh>.<ext>` (stage 6 after the first), `import_reserved` with stem = the ref's name (stage 7 after the first), then the extracted copy removed;
        - `External` → Ruling 19's checks, then `import_reserved` from it;
@@ -1367,8 +1402,8 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - B's crossfade flag; the tempo ramp, markers, song info, strip gains and the send;
     - `snapshot().undo_label == None`;
     - the report summary "Imported 2 tracks, …" and the from-VizDAW Note.
-  - `clap_state_round_trips`: the test gain plug-in with parameter 0 at 0.25 → export → import → after loading, `debug_plugin_value` reads 0.25 (spec §12).
-  - `cancel_at_every_stage_leaves_media_unchanged`: a cancel before the run, and stages 5–8, each end Cancelled. The listings of `Media/` and `Media/.incoming/` equal those taken before; `debug_document_json` is unchanged.
+  - `clap_state_round_trips`: the test gain plug-in with parameter 0 at 0.25 → export → import → after loading, the new `debug_plugin_param(slot, 0)` reads 0.25 (spec §12; L4).
+  - `cancel_at_every_stage_leaves_media_unchanged` (each case clears `debug_free_bytes` first; S10): a cancel before the run, and stages 5–8, each end Cancelled. The listings of `Media/` and `Media/.incoming/` equal those taken before; `debug_document_json` is unchanged.
   - `missing_and_undecodable_audio_become_offline`: a referenced entry that is absent, an entry of 1 KiB of garbage, an external FIFO and `http://x/a.wav` → the job is Done with 4 offline regions and the Left out line with 4 details.
   - `not_enough_space_refuses`; `refused_files` (non-ZIP, version 2, traversal names: Failed with the sentence, nothing in `Media/`); `into_a_project_with_tracks_is_refused` (Model).
   - `busy_states_refuse` (recording, open edit, a running export, a Convert job).
@@ -1406,7 +1441,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `static let importDawproject = "file.import_dawproject", exportDawproject = "file.export_dawproject"`, both joining `ids`;
     - `static func dawprojectRequest(_ args: [ControlArg], _ m: DocumentModel) -> Parsed<DawprojectExportRequestRow>`, with `blocks` = `m.editor.layout.blockRule.rule`;
     - in `run`:
-      - **import:** with no `path`, `.dialog("Open", "path")`. Otherwise `.pending`, which reads `session.dawprojectInfo(path:)` off the main thread. A refusal answers `.failed(.thrown(error, "Import Failed"))` and makes no project. Else `importDawprojectIntoNewProject`: `store.newProject(ProjectFormatRow(sampleRate: info.sampleRate, depth: store.defaultFormat.depth))`, `madeProjects.insert`, `.job(command:, doc: made, job: importDawproject(req:))`.
+      - **import:** with no `path`, `.dialog("Open", "path")`. Otherwise `.pending`, which reads the free function `dawprojectInfo(path:)` off the main thread (L8). A refusal answers `.failed(.thrown(error, "Import Failed"))` and makes no project. Else `importDawprojectIntoNewProject`: `store.newProject(ProjectFormatRow(sampleRate: info.sampleRate, depth: store.defaultFormat.depth))`, `madeProjects.insert`, `.job(command:, doc: made, job: importDawproject(req:))`.
       - **export:** with `dry_run`, `.pending` with `exportDawprojectCheck`. Without a path, `.dialog("Save", "path")`. Otherwise `.job(…exportDawproject(req:))`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1419,7 +1454,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `importDawprojectReadsOffTheMainActorThenMakesTheProject`: the fake info answers 44 100 → one `newProject` at 44 100, and one `importDawproject` with the path on the new document. A refused info → no project, `failed`.
     - `importDawprojectWithoutPathAsksForOpen`; `exportDawprojectWithoutPathAsksForSave`; `exportDawprojectDryRunIsPendingAndWritesNothing`.
     - `exportDawprojectBuildsTheRequest`: `{path, replace: true, region_gain: "leave_out", seq}` → the row, `blocks` from the layout.
-    - `dawprojectCommandsRefuseHostileArguments`: `path` empty, relative, over 4 KiB or with NUL → the core's `failed` sentence. `seq` not an ID → `invalid_params` naming the command and the parameter, with no session call. An unknown sequence → the core's `failed` sentence.
+    - `dawprojectCommandsRefuseHostileArguments` (these call `InterchangeCommands.run` directly, past the registry's `Path` checks; S7): `path` empty, relative, over 4 KiB or with NUL → the core's `failed` sentence. `seq` not an ID → `invalid_params` naming the command and the parameter, with no session call. An unknown sequence → the core's `failed` sentence.
     - `everyRegisteredMenuCommandHasAHandler` passes.
 - [ ] **Step 2: Run** `cargo test -p core-control` and `scripts/swift.sh test --filter InterchangeCommands`. Expected: FAIL.
 - [ ] **Step 3: Implement** the items above.
@@ -1434,7 +1469,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `app/Sources/VizDAWAppModel/DocumentModel.swift` (lazy `dawproject`, as `forDaw`);
   - `ForDawModel.swift` (`blocking` gains `.importProject`);
   - `Interchange.swift` (`InterchangeModel.isDawproject(_:)`);
-  - `DocumentStore.swift` (`open(path:)` sends `.dawproject` to `openDawproject`);
+  - `DocumentStore.swift` (`open(path:)` sends `.dawproject` to `openDawproject` and returns `nil`; an injectable `dawprojectInfo: @Sendable (String) throws -> DawprojectInfoRow`, the free function by default, so tests fake it; L8);
   - `app/Tests/VizDAWAppModelTests/DocumentStoreTests.swift`.
 
 **Interfaces:**
@@ -1457,10 +1492,14 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
         public func settle() async
     }
     // DocumentStore
-    /// A new project at the file's rate importing `path`; the info is read off the main thread,
-    /// a refusal makes no project and alerts "Import Failed"; a job that fails or is cancelled
-    /// on a still-untouched project closes it (as `openMidi`).
-    @discardableResult public func openDawproject(_ path: String) -> Bool
+    /// Starts opening `path` and returns at once (L8): a detached task calls the free function
+    /// `dawprojectInfo(path:)` (no document or session needed), then on the main actor makes a
+    /// project at the file's rate and starts `importDawproject`. A refusal makes no project and
+    /// alerts "Import Failed"; a job that fails or is cancelled on a still-untouched project
+    /// closes it (as `openMidi`). `open(path:)` returns `nil` for a `.dawproject`.
+    public func openDawproject(_ path: String)
+    /// Waits for every pending open (tests).
+    public func settle() async
     ```
   - The report sheet opens through `InterchangeModel.report` when the job ends, as 6a's jobs do. Its title is "Import Report" or "Export Report", and its summary starts "Imported" or "Exported".
 
@@ -1473,7 +1512,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `failedJobShowsItsMessage`: a Failed job row puts its message in `checkError` and opens no report.
     - `requestCarriesTheBlockRule`: the layout's `.fixedBars(2)` is in the sent row.
   - `DocumentStoreTests`:
-    - `openingADawprojectMakesAProjectAtItsRate`: info 44 100 → one `newProject` at 44 100 and one `importDawproject`.
+    - `openingADawprojectMakesAProjectAtItsRate`: with no document open, info 44 100 → after `settle()`, one `newProject` at 44 100 and one `importDawproject`; the info closure ran off the main actor (L8).
     - `aRefusedFileMakesNoProject`: the info throws → no new document, and the alert "Import Failed" with the core's sentence.
     - `aCancelledImportClosesTheUntouchedProject`: the job is Cancelled → the made project closes. A project edited meanwhile stays.
     - `openPathRoutesByExtension`: `.dawproject` → `openDawproject`; `.DAWPROJECT` too; `.zip` → the "not a .vizdaw project" alert.
@@ -1515,7 +1554,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   1. `app.new_demo`, and read its track count from `state.get document`.
   2. Hostile calls:
      - `file.export_dawproject` with `region_gain: "half"` → `InvalidParams`;
-     - with a relative `path` → `Failed`;
+     - with a relative `path` → `InvalidParams` (the registry's `Path` kind refuses it; S7);
      - with no `path` and no `dry_run` → `dialog_required` "Save";
      - `file.import_dawproject` with `mode: "merge"` → `InvalidParams`.
 
@@ -1555,7 +1594,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - "DAWproject: crossfades as a negative fadeInTime" (Ruling 10);
   - "DAWproject: send pan, VCA channels and folder tracks" (spec §14 already lists folder tracks; append "send pan and VCAs (plan 6d)" to that row);
   - "DAWproject: the built-in Equalizer onto Multi-Q's bands" (spec §8: 6g; note "6d leaves it out with its bands listed");
-  - "Third-party licence notices shown in the app" (the MIT notices of `rawzip`, `flate2`, `miniz_oxide`, `adler2`, `quick-xml`, `memchr` and the vendored DAWproject XSDs; owner to choose where they show);
+  - "Third-party licence notices shown in the app" (the MIT notices of `rawzip`, `flate2`, `miniz_oxide`, `adler2`, `crc32fast`, `simd-adler32`, `quick-xml`, `memchr` (as Task 1's `cargo tree` lists them) and the vendored DAWproject XSDs; owner to choose where they show);
   - "DAWproject: `.clap-preset` container" (Ruling 8: raw stream; revisit if hosts agree on a container).
 - [ ] **Step 4: Run all the gates:**
   - `cargo fmt --all -- --check`;
@@ -1600,24 +1639,14 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - the merge prompt, `mode: merge`, `project`, `snapshot` and `preview`, matching and the Conflicts group (6e);
   - the Multi-Q `Equalizer` mapping (6g, which comes after 6d);
   - AAF and OMF (6f, 6h).
-- **Names are consistent across tasks:**
-  - `zip::{ZipReader, ZipWriter, EntryInfo, EntryMethod, check_name}`, `PackageLimits`, `read::open_regular`, `write::create_partial`;
-  - `xml::{Tree, NodeId, XmlWriter, Attr, double, double_or_inf, int, boolean, fmt_double}`;
-  - `dawproject::schema::{DpProject, …, read_project, write_project, read_metadata, write_metadata, check_ids, Ids}`;
-  - `dawproject::{export, check, file_name, ExportOptions, ExportEnv, DpExport, AudioFile, RegionGain, ClipRule}`;
-  - `dawproject::{open, DpPackage, DpInfo, ReturnInfo, AudioRef, AudioSource, MediaSource, ImportEnv, DpImport, map, apply}`;
-  - `record::{Record, RecordHead, Snapshot, Projection, projection, RECORD_ENTRY, SNAPSHOT_DIR, KEEP_SNAPSHOTS}`;
-  - `units::{beats, ticks, linear_gain, db_of_linear, pan_normalized, pan_of_normalized, swatch_hex, nearest_swatch, tag, strip_tags, TagKind}`;
-  - `plugins::{PlistCodec, NoPlist, state_entry}`;
-  - `RegionGainRow`, `DawprojectExportRequestRow`, `DawprojectImportRequestRow`, `DawprojectInfoRow`, `JobKindRow::ImportProject`, `Work::ImportProject`;
-  - `Session::{export_dawproject, export_dawproject_check, dawproject_name, dawproject_info, import_dawproject}`;
-  - `DawprojectModel`, `DocumentStore.openDawproject`, `InterchangeCommands.{importDawproject, exportDawproject}`.
+- **Names are consistent across tasks:** every name used in a later task is the one an earlier task's Interfaces block produces (checked against each block).
 - **Review Focus:** each line names its tests in the owning task.
 - **Spec conflicts and questions for the owner:**
   1. Ruling 1: `rawzip` + `flate2` instead of the spec's `zip` crate.
   2. Ruling 2: the spec says DAWproject has "no release tags", but there is a `v1.0.0` tag. Its XSD lacks `Clip@enable` and `Send/Enable`, so our muted clips validate only against `main`.
   3. Ruling 10: the Reference documents a crossfade form (a negative `fadeInTime`) that the spec says does not exist. We export overlapping clips as the spec says, and read both forms.
   4. Ruling 12: the Reference does not fix the time base of a note's expression points; we write them relative to the note.
-  5. Ruling 17: until 6e, a file from VizDAW imports as a new project with a Note. `file.import_dawproject` takes only `mode: new`, rather than answering `dialog_required` "Return" (spec §10).
-  6. Ruling 9: numbered audio entry names (`audio/001.wav`).
-  7. The workspace's `rust-version` goes 1.85 → 1.86 for `quick-xml` 0.42.
+  5. L1: DAWproject export uses a new job kind, `ExportDawproject`, not spec §6.2's `ExportProject`, which 6b already uses for Export for another DAW.
+  6. Ruling 17: until 6e, a file from VizDAW imports as a new project with a Note. `file.import_dawproject` takes only `mode: new`, rather than answering `dialog_required` "Return" (spec §10).
+  7. Ruling 9: numbered audio entry names (`audio/001.wav`).
+  8. The workspace's `rust-version` goes 1.85 → 1.86 for `quick-xml` 0.42.
