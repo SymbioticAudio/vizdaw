@@ -130,6 +130,8 @@ public final class DocumentModel {
     public internal(set) var overviewVersion = 0
     @ObservationIgnored private var mediaModel: MediaModel?
     @ObservationIgnored private var bounceModel: BounceModel?
+    @ObservationIgnored private var interchangeModel: InterchangeModel?
+    @ObservationIgnored private var projectSettingsModel: ProjectSettingsModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
     @ObservationIgnored private var inputFxModel: InputFxModel?
@@ -189,6 +191,22 @@ public final class DocumentModel {
         if let m = bounceModel { return m }
         let m = BounceModel(document: self)
         bounceModel = m
+        return m
+    }
+
+    /// The MIDI import, export and report sheets (plan 6a), made once.
+    public var interchange: InterchangeModel {
+        if let m = interchangeModel { return m }
+        let m = InterchangeModel(document: self)
+        interchangeModel = m
+        return m
+    }
+
+    /// Project Settings with the song info (plan 6a), made once.
+    public var projectSettings: ProjectSettingsModel {
+        if let m = projectSettingsModel { return m }
+        let m = ProjectSettingsModel(document: self)
+        projectSettingsModel = m
         return m
     }
 
@@ -527,6 +545,11 @@ public final class DocumentModel {
         let current = snapshot.sequences.first { $0.id == seq }?.name
         guard !trimmed.isEmpty, trimmed != current else { return }
         rename(seq, to: trimmed)
+    }
+
+    /// Names region `event` (empty clears the name): one undo step.
+    public func renameRegion(_ event: UInt64, to name: String) {
+        editor.edit(.audio(edit: .setName(event: event, name: name.isEmpty ? nil : name)))
     }
 
     public func rename(_ seq: UInt64, to name: String) {

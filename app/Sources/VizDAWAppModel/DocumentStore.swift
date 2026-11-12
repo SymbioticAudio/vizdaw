@@ -232,8 +232,11 @@ public final class DocumentStore {
         return add("Demo Project Failed", make)
     }
 
-    /// Opens a `.vizdaw` package; other paths are refused with an alert.
+    /// Opens a `.vizdaw` package; a MIDI file (`mid`, `midi`, `smf`,
+    /// `midi2`) makes a new project and imports into it (plan 6a Ruling 12);
+    /// other paths are refused with an alert.
     public func open(path: String) -> UUID? {
+        if InterchangeModel.isMidi(path) { return openMidi(path) }
         guard (path as NSString).pathExtension == "vizdaw" else {
             postAlert(AlertItem(
                 title: "Open Failed",
@@ -251,6 +254,20 @@ public final class DocumentStore {
         }
         guard let options = recovery.options(for: path) else { return nil }
         return add("Open Failed") { try recovery.openWith(path, options) }
+    }
+
+    /// A new 48 kHz project holding the MIDI file at `path`; a refusal leaves
+    /// nothing behind and alerts "Import Failed".
+    private func openMidi(_ path: String) -> UUID? {
+        guard let id = newProject(ProjectFormatRow(sampleRate: 48_000, depth: defaultFormat.depth)),
+            let model = documents[id]
+        else { return nil }
+        if let error = model.interchange.importIntoNewProject(path: path) {
+            close(id)
+            postAlert(AlertItem(error, title: "Import Failed"))
+            return nil
+        }
+        return id
     }
 
     /// Brings a document's window to the front (set by the app).

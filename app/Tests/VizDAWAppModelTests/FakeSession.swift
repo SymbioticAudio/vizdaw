@@ -706,9 +706,21 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
             message: nil, problems: [], created: [])
         return id
     }
+    /// Whether each sheet-side call (`midiFileInfo`, the dry runs) ran on the
+    /// main thread (F12: they must not), and the lock for the detached tasks
+    /// that make them.
+    var checkOnMain: [Bool] = []
+    let interchangeLock = NSLock()
+    /// Holds a dry run until released (`checkHold`'s semaphore); answers it
+    /// per request (`checkReply`).
+    var checkHold: (@Sendable (SmfExportRequestRow) -> DispatchSemaphore?)?
+    var checkReply: (@Sendable (SmfExportRequestRow) -> ReportRow)?
     func midiFileInfo(path: String) throws -> MidiFileInfoRow {
         if let e = interchangeError { throw e }
+        interchangeLock.lock()
         midiInfoPaths.append(path)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
         return midiInfoRow
     }
     func importMidi(req: MidiImportRequestRow) throws -> UInt64 {
@@ -723,8 +735,12 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func exportMidiCheck(req: SmfExportRequestRow) throws -> ReportRow {
         if let e = interchangeError { throw e }
+        interchangeLock.lock()
         smfChecks.append(req)
-        return interchangeCheck
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        checkHold?(req)?.wait()
+        return checkReply?(req) ?? interchangeCheck
     }
     func exportMidiClip(req: ClipExportRequestRow) throws -> UInt64 {
         if let e = interchangeError { throw e }
@@ -733,7 +749,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func exportMidiClipCheck(req: ClipExportRequestRow) throws -> ReportRow {
         if let e = interchangeError { throw e }
+        interchangeLock.lock()
         clipChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
         return interchangeCheck
     }
     func interchangeReport() throws -> ReportRow? {

@@ -140,6 +140,8 @@ extension DocumentModel {
             case .ok:
                 if !r.problems.isEmpty { jobProblems = r.problems }
                 refreshAfterJob()
+                // A MIDI import or export the UI started shows its report.
+                if r.kind == .importMidi || r.kind == .exportMidi { interchange.jobEnded() }
             case .failed(let message):
                 if r.state != .cancelled {
                     alert = AlertItem(title: ProjectBanner.failureTitle(r.kind), message: message)

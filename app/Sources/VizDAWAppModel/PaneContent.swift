@@ -83,7 +83,7 @@ extension DocumentModel {
     public func inspectorRows(destinations: [DestRow], strips: [StripRow]) -> [InspectorRow] {
         let region = inspectorRegion
         return Inspector.rows(
-            lane: focusLanes().first, region: region, regionName: media.row(region?.media)?.name,
+            lane: focusLanes().first, region: region, regionName: region?.regionName.flatMap { $0.isEmpty ? nil : $0 } ?? media.row(region?.media)?.name,
             destinations: destinations, strips: strips,
             sampleRate: Double(fileRate(of: editedRegion?.media) ?? projectInfo?.format.sampleRate ?? 0))
     }
