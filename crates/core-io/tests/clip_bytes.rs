@@ -534,3 +534,170 @@ proptest! {
         prop_assert_eq!(ump::decode(&t[0]), D::Text { group: g, form: 0, bank: 1, status: 2, data });
     }
 }
+
+/// Flex Data text packets on `group`, `addr` (0 channel, 1 group) and
+/// `channel`, without the 384-byte cut `ump::text` applies.
+fn raw_text(group: u8, addr: u8, channel: u8, bank: u8, status: u8, s: &[u8]) -> Vec<Vec<u8>> {
+    let chunks: Vec<&[u8]> = s.chunks(12).collect();
+    let n = chunks.len();
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let form: u32 = match (i, n) {
+                (_, 1) => 0,
+                (0, _) => 1,
+                _ if i + 1 == n => 3,
+                _ => 2,
+            };
+            let w0 = 0xD000_0000u32
+                | (u32::from(group) << 24)
+                | (form << 22)
+                | (u32::from(addr) << 20)
+                | (u32::from(channel) << 16)
+                | (u32::from(bank) << 8)
+                | u32::from(status);
+            let mut b = w0.to_be_bytes().to_vec();
+            b.extend_from_slice(c);
+            b.resize(16, 0);
+            b
+        })
+        .collect()
+}
+
+/// A clip at 960 ticks per quarter whose sequence is `packets`, each with
+/// its own DCS 0 unless `share` (one DCS for all).
+fn clip_of(packets: &[Vec<u8>]) -> Vec<u8> {
+    let mut b = hex(&format!("{MAGIC} {DCS0} 003003C0 {DCS0} {START} {DCS0}"));
+    for p in packets {
+        b.extend_from_slice(p);
+    }
+    b.extend(hex(&format!("{DCS0} {END}")));
+    b
+}
+
+#[test]
+fn flex_text_is_cut_at_384_bytes() {
+    assert_eq!(ump::MAX_FLEX_TEXT_BYTES, 384);
+    // 383 bytes, then "é" over bytes 383-384, then more: 400 bytes.
+    let mut s = "a".repeat(383);
+    s.push('é');
+    s.push_str(&"b".repeat(15));
+    assert_eq!(s.len(), 400);
+    let want = "a".repeat(383);
+
+    // The builder cuts on a character boundary: one message of 32 packets.
+    let packets = ump::text(1, 4, 0, &s);
+    assert_eq!(packets.len(), 32);
+    let bytes: Vec<u8> = packets
+        .iter()
+        .flat_map(|p| p.words()[1..].iter().flat_map(|w| w.to_be_bytes()))
+        .filter(|b| *b != 0)
+        .collect();
+    assert_eq!(bytes, want.as_bytes());
+
+    // A file with the whole 400 bytes in 34 packets reads cut, and writes
+    // back as one conforming message.
+    let b = clip_of(&raw_text(0, 1, 0, 1, 4, s.as_bytes()));
+    let (c, report) = rd(&b).unwrap();
+    let text = ClipEvent::Text {
+        group: 0,
+        bank: 1,
+        status: 4,
+        text: want,
+    };
+    assert_eq!(c.events, vec![(0, text)]);
+    assert_eq!(
+        has(&report, ItemKind::Changed, "Texts over 384 bytes cut"),
+        1
+    );
+    let again = write(&c);
+    let (back, report) = rd(&again).unwrap();
+    assert_eq!(back, c);
+    assert!(report.is_empty(), "{report:?}");
+}
+
+#[test]
+fn channel_texts_interleave() {
+    let a = raw_text(0, 0, 1, 2, 1, b"first lyric, channel 2");
+    let b = raw_text(0, 0, 2, 2, 1, b"second lyric, channel 3");
+    let (c, report) = rd(&clip_of(&[
+        a[0].clone(),
+        b[0].clone(),
+        a[1].clone(),
+        b[1].clone(),
+    ]))
+    .unwrap();
+    assert!(report.is_empty(), "{report:?}");
+    let texts: Vec<&str> = c
+        .events
+        .iter()
+        .filter_map(|(_, e)| match e {
+            ClipEvent::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["first lyric, channel 2", "second lyric, channel 3"]
+    );
+}
+
+#[test]
+fn a_text_part_of_another_kind_is_not_merged() {
+    let start = raw_text(0, 1, 0, 1, 3, b"a clip name of 24 bytes.");
+    let other = raw_text(0, 1, 0, 2, 1, b"lyric text of 24 bytes..");
+    let (c, report) = rd(&clip_of(&[start[0].clone(), other[1].clone()])).unwrap();
+    assert!(c.events.is_empty(), "{:?}", c.events);
+    assert_eq!(has(&report, ItemKind::LeftOut, "Unfinished texts"), 2);
+}
+
+#[test]
+fn write_sorts_events_by_tick() {
+    let n = |p: u8| ClipEvent::Packet(ump::note_on(0, 0, p, 0x8000, None));
+    let c = ClipFile {
+        tpq: 960,
+        header: vec![],
+        events: vec![(10, n(1)), (5, n(2)), (10, n(3))],
+        end: 10,
+    };
+    let (back, _) = rd(&write(&c)).unwrap();
+    assert_eq!(back.events, vec![(5, n(2)), (10, n(1)), (10, n(3))]);
+}
+
+#[test]
+fn write_leaves_out_timing_and_clip_packets() {
+    let note = ClipEvent::Packet(note_on());
+    let clean = ClipFile {
+        tpq: 960,
+        header: vec![],
+        events: vec![(0, note.clone())],
+        end: 0,
+    };
+    let mut dirty = clean.clone();
+    let p = |p: Packet| (0, ClipEvent::Packet(p));
+    dirty.events = vec![
+        p(ump::dcs(5)),
+        p(ump::dctpq(96)),
+        p(ump::noop()),
+        p(ump::start_of_clip()),
+        (0, note),
+        p(ump::end_of_clip()),
+    ];
+    dirty.header = vec![ClipEvent::Packet(ump::dcs(7))];
+    assert_eq!(write(&dirty), write(&clean));
+}
+
+#[test]
+fn cancel_stops_the_read() {
+    let cancel = AtomicBool::new(true);
+    let r = read(&write(&golden()), &Limits::default(), &cancel);
+    assert_eq!(r.map(|_| ()), Err(IoError::Cancelled));
+    // Partway: the flag is looked at every 65 536 packets, so a long clip
+    // read with the flag set stops too (it is looked at first as well).
+    let long = clip_hex(&vec![note_hex(); 70_000].join(" "));
+    assert_eq!(
+        read(&long, &Limits::default(), &cancel).map(|_| ()),
+        Err(IoError::Cancelled)
+    );
+}

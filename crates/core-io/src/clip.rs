@@ -16,7 +16,7 @@ use crate::limits::Limits;
 use crate::report::{ItemKind, Report, group};
 use crate::smf::{SYSEX_OVER, SYSEX_UNFINISHED, TEXT_CUT};
 use crate::text::sanitize;
-use crate::ump::{self, Decoded, MAX_DCS, Packet};
+use crate::ump::{self, Decoded, MAX_DCS, MAX_FLEX_TEXT_BYTES, Packet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// One message of a clip, with multi-packet messages assembled.
@@ -85,6 +85,7 @@ const PROFILES: &str = "Profile settings in the clip were not used";
 const MOVED: &str = "Clip settings moved to the start of the clip";
 const SYSEX_DAMAGED: &str = "Damaged SysEx messages";
 const TEXT_UNFINISHED: &str = "Unfinished texts";
+const FLEX_TEXT_CUT: &str = "Texts over 384 bytes cut";
 
 fn refused(s: &str) -> IoError {
     IoError::Refused(s.to_string())
@@ -110,12 +111,15 @@ enum Phase {
 /// Refuses, with one sentence, a file without the `SMF2CLIP` magic, without
 /// DCTPQ or with DCTPQ 0, without Start of Clip or with a second one, with a
 /// packet cut off at its end, or with more packets than `limits.max_events`
-/// (Delta Clockstamps, NOOPs and the clip markers are not counted). Messages
+/// (Delta Clockstamps, NOOPs and the clip markers are not counted; every
+/// packet of a SysEx or text is, so a 1 MiB SysEx 7 counts about 175 000). Messages
 /// before DCTPQ (profile settings) are noted and not used; header messages
 /// past the first Set Tempo and Set Time Signature move to tick 0 of the
 /// sequence (Changed); unknown messages are left out; SysEx over
 /// `limits.max_sysex_bytes`, damaged or never finished is left out; texts
-/// over `limits.max_text_bytes` are cut; data after End of Clip is ignored;
+/// over `limits.max_text_bytes` or [`MAX_FLEX_TEXT_BYTES`] (one Flex Data
+/// message) are cut, so every text read writes back as one message; a text
+/// packet whose status differs from its start's leaves both out; data after End of Clip is ignored;
 /// without End of Clip the clip ends at its last event. Memory grows only
 /// with the bytes present. Returns `Err(Cancelled)` once `cancel` is set
 /// (looked at first and every 65 536 packets).
@@ -274,6 +278,8 @@ struct OpenSysEx {
 struct OpenText {
     /// Where its event sits.
     index: usize,
+    /// Its status bank and status, which every later packet must repeat.
+    kind: (u8, u8),
     /// Its bytes so far, without padding zeros, at most `cap` of them.
     raw: Vec<u8>,
     /// True once bytes past `cap` were dropped.
@@ -304,7 +310,7 @@ struct Reader<'l> {
     sysex7: Vec<Option<OpenSysEx>>,
     /// Open SysEx 8 by group × 256 + stream (4 096).
     sysex8: Vec<Option<OpenSysEx>>,
-    /// Open texts by group (16).
+    /// Open texts by group × 64 + address × 16 + channel (1 024).
     texts: Vec<Option<OpenText>>,
 }
 
@@ -320,7 +326,7 @@ impl<'l> Reader<'l> {
             report: Report::default(),
             sysex7: (0..16).map(|_| None).collect(),
             sysex8: (0..4096).map(|_| None).collect(),
-            texts: (0..16).map(|_| None).collect(),
+            texts: (0..1024).map(|_| None).collect(),
         }
     }
 
@@ -375,7 +381,12 @@ impl<'l> Reader<'l> {
                     data,
                     ..
                 },
-            ) => self.text(g, form, bank, status, &data, tick),
+            ) => {
+                // Group, then address and channel (bits 21-16 of word 0).
+                let addr = (p.words().first().copied().unwrap_or(0) >> 16) & 0x3F;
+                let slot = (usize::from(g) << 6) | addr as usize;
+                self.text(slot, g, form, (bank, status), &data, tick);
+            }
             (0x1 | 0x2 | 0x4 | 0xD, _) => self.events.push((tick, ClipEvent::Packet(p))),
             _ => self.report.add(ItemKind::LeftOut, UNKNOWN, at(tick)),
         }
@@ -508,45 +519,48 @@ impl<'l> Reader<'l> {
         }
     }
 
-    /// One Flex Data text packet.
-    fn text(&mut self, g: u8, form: u8, bank: u8, status: u8, data: &[u8; 12], tick: u64) {
-        let open = self.texts.get_mut(usize::from(g)).and_then(Option::take);
+    /// One Flex Data text packet of `kind` (status bank, status) for
+    /// open-text `slot`.
+    fn text(&mut self, slot: usize, g: u8, form: u8, kind: (u8, u8), data: &[u8; 12], tick: u64) {
+        let open = self.texts.get_mut(slot).and_then(Option::take);
         let mut o = match (form, open) {
             (0 | 1, open) => {
                 if let Some(o) = open {
                     self.unfinished_text(o);
                 }
                 let index = self.events.len();
-                let text = String::new();
+                let (bank, status) = kind;
                 self.events.push((
                     tick,
                     ClipEvent::Text {
                         group: g,
                         bank,
                         status,
-                        text,
+                        text: String::new(),
                     },
                 ));
                 OpenText {
                     index,
+                    kind,
                     raw: Vec::new(),
                     cut: false,
                     tick,
                 }
             }
-            (_, Some(o)) => o,
-            (_, None) => {
+            (_, Some(o)) if o.kind == kind => o,
+            (_, open) => {
+                // A part with no start, or of another text than the open one.
+                if let Some(o) = open {
+                    self.unfinished_text(o);
+                }
                 self.report
                     .add(ItemKind::LeftOut, TEXT_UNFINISHED, at(tick));
                 return;
             }
         };
+        let max = self.limits.max_text_bytes.min(MAX_FLEX_TEXT_BYTES);
         // Enough raw bytes for any text of the limit, after cleaning.
-        let cap = self
-            .limits
-            .max_text_bytes
-            .saturating_mul(4)
-            .saturating_add(4);
+        let cap = max.saturating_mul(4).saturating_add(4);
         for &b in data.iter().filter(|b| **b != 0) {
             if o.raw.len() >= cap {
                 o.cut = true;
@@ -555,15 +569,24 @@ impl<'l> Reader<'l> {
             o.raw.push(b);
         }
         if form == 0 || form == 3 {
-            let (s, cut) = sanitize(&o.raw, self.limits);
+            let limits = Limits {
+                max_text_bytes: max,
+                ..*self.limits
+            };
+            let (s, cut) = sanitize(&o.raw, &limits);
             if cut || o.cut {
-                self.report.add(ItemKind::Changed, TEXT_CUT, at(o.tick));
+                let what = if max < self.limits.max_text_bytes {
+                    FLEX_TEXT_CUT
+                } else {
+                    TEXT_CUT
+                };
+                self.report.add(ItemKind::Changed, what, at(o.tick));
             }
             if let Some((_, ClipEvent::Text { text, .. })) = self.events.get_mut(o.index) {
                 *text = s;
             }
-        } else if let Some(slot) = self.texts.get_mut(usize::from(g)) {
-            *slot = Some(o);
+        } else if let Some(open) = self.texts.get_mut(slot) {
+            *open = Some(o);
         }
     }
 
@@ -591,10 +614,15 @@ impl<'l> Reader<'l> {
     }
 }
 
-/// The packets of `e`.
+/// The packets of `e`; none for a utility (MT 0x0: DCS, DCTPQ, NOOP, …)
+/// or Start or End of Clip packet, which `write` places itself.
 fn packets_of(e: &ClipEvent) -> Vec<Packet> {
     match e {
-        ClipEvent::Packet(p) => vec![*p],
+        ClipEvent::Packet(p) => match ump::decode(p) {
+            Decoded::StartOfClip | Decoded::EndOfClip => vec![],
+            _ if p.mt() == 0x0 => vec![],
+            _ => vec![*p],
+        },
         ClipEvent::SysEx7 { group, data } => ump::sysex7(*group, data),
         ClipEvent::SysEx8 { group, data } => ump::sysex8(*group, 0, data),
         ClipEvent::Text {
@@ -610,9 +638,9 @@ fn packets_of(e: &ClipEvent) -> Vec<Packet> {
 /// the rest.
 fn put_gap(out: &mut Vec<u8>, mut ticks: u64) {
     let max = u64::from(MAX_DCS);
-    while ticks > max {
+    while let Some(rest) = ticks.checked_sub(max).filter(|r| *r > 0) {
         ump::write_packets(&[ump::dcs(MAX_DCS), ump::noop()], out);
-        ticks -= max;
+        ticks = rest;
     }
     let rest = u32::try_from(ticks).unwrap_or(MAX_DCS);
     ump::write_packets(&[ump::dcs(rest)], out);
@@ -621,23 +649,37 @@ fn put_gap(out: &mut Vec<u8>, mut ticks: u64) {
 /// Writes `c` as a MIDI Clip File: `DCS 0` + DCTPQ, each header message
 /// with `DCS 0`, `DCS 0` + Start of Clip, each event with its own DCS (gaps
 /// over 1 048 575 ticks restarted with NOOP), then End of Clip at
-/// `c.end`. SysEx 8 is written as stream 0 and texts are addressed to their
-/// group. Ticks out of order are written as gaps of 0, and an `end` before
-/// the last event as the last event's tick. A `Packet` holding SysEx or
-/// text is written as it is (`read` gives it back assembled).
+/// `c.end`. Events are written in tick order (a stable sort: events at one
+/// tick keep their order); an `end` before the last event is written as the
+/// last event's tick. SysEx 8 is written as stream 0, texts are addressed
+/// to their group and cut to [`MAX_FLEX_TEXT_BYTES`] (callers cut and
+/// report first). A `Packet` holding a utility message (DCS, DCTPQ, NOOP,
+/// …) or Start or End of Clip is a caller error and is left out; one
+/// holding SysEx or text is written as it is (`read` gives it back
+/// assembled).
 pub fn write(c: &ClipFile) -> Vec<u8> {
     let mut out = MAGIC.to_vec();
     ump::write_packets(&[ump::dcs(0), ump::dctpq(c.tpq)], &mut out);
     for e in &c.header {
-        ump::write_packets(&[ump::dcs(0)], &mut out);
-        ump::write_packets(&packets_of(e), &mut out);
+        let packets = packets_of(e);
+        if !packets.is_empty() {
+            ump::write_packets(&[ump::dcs(0)], &mut out);
+            ump::write_packets(&packets, &mut out);
+        }
     }
     ump::write_packets(&[ump::dcs(0), ump::start_of_clip()], &mut out);
+    let mut events: Vec<&(u64, ClipEvent)> = c.events.iter().collect();
+    events.sort_by_key(|(tick, _)| *tick);
     let mut prev = 0u64;
-    for (tick, e) in &c.events {
+    for (tick, e) in events {
+        let packets = packets_of(e);
+        if packets.is_empty() {
+            continue;
+        }
+        // Sorted, so the gap is never negative.
         put_gap(&mut out, tick.saturating_sub(prev));
-        prev = prev.max(*tick);
-        ump::write_packets(&packets_of(e), &mut out);
+        prev = *tick;
+        ump::write_packets(&packets, &mut out);
     }
     put_gap(&mut out, c.end.saturating_sub(prev));
     ump::write_packets(&[ump::end_of_clip()], &mut out);

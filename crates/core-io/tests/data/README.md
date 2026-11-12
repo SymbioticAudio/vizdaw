@@ -135,10 +135,16 @@ quarter, one note.
 ### `every_kind.midi2`
 
 960 ticks per quarter, with every message kind the reader knows, a text
-and a SysEx over two packets, and a gap restarted with a NOOP:
+and SysEx 7 and SysEx 8 over two packets, a gap restarted with a NOOP, and
+two things the reader drops with a report item: a profile setting before
+DCTPQ (Note) and a JR Timestamp (Left out, "Unknown MIDI messages").
+`clip::write` gives the file back without those two (and the DCS before
+the JR Timestamp):
 
 ```
 534D4632 434C4950                              SMF2CLIP
+30167E7F 0D220100                              SysEx 7 before DCTPQ, a profile setting: 7E 7F 0D 22 01 00
+30357E00 00000000                              ... end: 7E 00 00 00 00
 00400000 003003C0                              DCS 0, DCTPQ 960
 00400000 D0100000 02FAF080 00000000 00000000   Set Tempo (120 BPM)
 00400000 D0100001 03020800 00000000 00000000   Set Time Signature 3/4
@@ -163,7 +169,10 @@ and a SysEx over two packets, and a gap restarted with a NOOP:
 00400000 30164310 4C00007E                     SysEx 7 start: 43 10 4C 00 00 7E
          30340102 03040000                     ... end: 01 02 03 04
 00400000 5005007E 7F0D7000 00000000 00000000   SysEx 8, stream 0: 7E 7F 0D 70
-004003C0 40803C00 00000000                     960 ticks: MIDI 2.0 note off 60
+00400000 501E0000 01020304 05060708 090A0B0C   SysEx 8 start, stream 0: 00 01 ... 0C
+         5038000D 0E0F1011 12130000 00000000   ... end: 0D 0E ... 13
+00400000 00201234                              JR Timestamp (not used in a file)
+004003C0 40803C03 00007800                     960 ticks: MIDI 2.0 note off 60, velocity 0, pitch 7.9 attribute
 004FFFFF 00000000                              DCS 1 048 575, NOOP
 00400001 20803C00                              1 tick: MIDI 1.0 note off 60
 00400000 F0210000 00000000 00000000 00000000   End of Clip

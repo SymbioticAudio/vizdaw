@@ -372,6 +372,9 @@ const FLEX_KEY_SIG: u8 = 0x05;
 pub const BANK_METADATA: u8 = 0x01;
 /// Flex Data status bank for performance text (0x01 lyrics, …).
 pub const BANK_PERFORMANCE: u8 = 0x02;
+/// The most text bytes one Flex Data message holds: 32 packets of 12
+/// bytes (M2-104-UM 7.5.1).
+pub const MAX_FLEX_TEXT_BYTES: usize = 384;
 /// Flex Data address "group" (bits 21-20 = 1).
 const FLEX_ADDR_GROUP: u32 = 1;
 // UMP Stream (MT 0xF) statuses, bits 25-16 (figures 24, 25).
@@ -581,10 +584,15 @@ fn parts(data: &[u8], size: usize) -> Vec<&[u8]> {
 /// each, the last zero-padded): status `bank` 0x01 (metadata) or 0x02
 /// (performance), then `status`. Empty text is one packet of zeros.
 ///
-/// The packets form one message whatever its length; M2-104-UM 7.5.1 caps
-/// a Flex Data message at 32 packets (384 bytes), which callers keep to.
+/// A Flex Data message is at most 32 packets (M2-104-UM 7.5.1), so text
+/// over [`MAX_FLEX_TEXT_BYTES`] is cut there, on a character boundary.
+/// This is a backstop: callers cut first and say so in their report.
 pub fn text(bank: u8, status: u8, group: u8, s: &str) -> Vec<Packet> {
-    let p = parts(s.as_bytes(), 12);
+    let mut end = s.len().min(MAX_FLEX_TEXT_BYTES);
+    while !s.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let p = parts(s.get(..end).unwrap_or_default().as_bytes(), 12);
     let n = p.len();
     p.iter()
         .enumerate()

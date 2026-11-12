@@ -140,12 +140,51 @@ fn soup_packet() -> impl Strategy<Value = Vec<u8>> {
     })
 }
 
+/// A run of packets of one multi-packet kind on one group: a start, up to
+/// 400 continues, sometimes an end and sometimes a second start in the
+/// middle; SysEx 7, SysEx 8 or Flex Data text.
+fn chain() -> impl Strategy<Value = Vec<u8>> {
+    (
+        0u32..3,
+        0u32..16,
+        0usize..400,
+        any::<bool>(),
+        any::<u32>(),
+        0usize..400,
+    )
+        .prop_map(|(kind, group, len, end, fill, restart)| {
+            let (mt, words, base) = match kind {
+                0 => (0x3u32, 2, 0x0006_0000u32),
+                1 => (0x5, 4, 0x000E_0000),
+                _ => (0xD, 4, 0x0010_0103),
+            };
+            // Form bits: SysEx in 23-20, Flex Data in 23-22.
+            let form = |f: u32| if mt == 0xD { f << 22 } else { f << 20 };
+            let packet = |f: u32| {
+                let mut w = vec![(mt << 28) | (group << 24) | form(f) | base];
+                w.extend(std::iter::repeat_n(fill & 0x7F7F_7F7F, words - 1));
+                w
+            };
+            let mut ws = packet(1);
+            for i in 0..len {
+                if i == restart {
+                    ws.extend(packet(1));
+                }
+                ws.extend(packet(2));
+            }
+            if end {
+                ws.extend(packet(3));
+            }
+            ws.iter().flat_map(|w| w.to_be_bytes()).collect()
+        })
+}
+
 /// A plausible header (magic, DCS 0, DCTPQ, DCS 0, Start of Clip; parts
 /// dropped now and then) and packet soup.
 fn soup() -> impl Strategy<Value = Vec<u8>> {
     (
         prop::collection::vec(any::<bool>(), 5),
-        prop::collection::vec(soup_packet(), 0..48),
+        prop::collection::vec(prop_oneof![8 => soup_packet(), 1 => chain()], 0..48),
     )
         .prop_map(|(keep, packets)| {
             let parts: [&[u8]; 5] = [
@@ -167,16 +206,83 @@ fn soup() -> impl Strategy<Value = Vec<u8>> {
         })
 }
 
+/// The golden reads with an empty report and writes back byte for byte
+/// (`every_kind.midi2` has its own test below).
 #[test]
 fn fixtures_read_cleanly() {
-    let all = fixtures();
-    assert!(all.len() >= 2, "fixtures are missing");
-    let cancel = AtomicBool::new(false);
-    for bytes in all {
-        let (c, report) = read(&bytes, &limits(), &cancel).unwrap();
-        assert!(report.is_empty(), "{report:?}");
-        assert_eq!(write(&c), bytes);
+    assert!(fixtures().len() >= 2, "fixtures are missing");
+    let bytes = include_bytes!("data/golden_minimal.midi2");
+    let (c, report) = read(bytes, &limits(), &AtomicBool::new(false)).unwrap();
+    assert!(report.is_empty(), "{report:?}");
+    assert_eq!(write(&c), bytes.to_vec());
+}
+
+/// Bytes from hex digits; spaces are ignored.
+fn hex(s: &str) -> Vec<u8> {
+    let d: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    d.chunks(2)
+        .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+        .collect()
+}
+
+/// `bytes` without the first `cut`.
+fn without(bytes: &[u8], cut: &[u8]) -> Vec<u8> {
+    let at = bytes.windows(cut.len()).position(|w| w == cut).unwrap();
+    [&bytes[..at], &bytes[at + cut.len()..]].concat()
+}
+
+/// `every_kind.midi2` reads with a report item for each thing it drops,
+/// and writes back without them.
+#[test]
+fn every_kind_drops_only_the_profile_and_the_timestamp() {
+    use core_io::report::ItemKind;
+    let bytes = include_bytes!("data/every_kind.midi2");
+    let (c, report) = read(bytes, &limits(), &AtomicBool::new(false)).unwrap();
+    let items: Vec<(ItemKind, &str, u64)> = report
+        .items
+        .iter()
+        .map(|i| (i.kind, i.what.as_str(), i.count))
+        .collect();
+    assert_eq!(
+        items,
+        vec![
+            (ItemKind::LeftOut, "Unknown MIDI messages", 1),
+            (
+                ItemKind::Note,
+                "Profile settings in the clip were not used",
+                1
+            ),
+        ]
+    );
+    let want = without(bytes, &hex("30167E7F 0D220100 30357E00 00000000"));
+    let want = without(&want, &hex("00400000 00201234"));
+    assert_eq!(write(&c), want);
+}
+
+/// 8 MiB of timing, reserved and JR Timestamp packets reads in bounded time.
+#[test]
+fn large_input_reads_in_bounded_time() {
+    let mut b =
+        hex("534D4632 434C4950 00400000 003003C0 00400000 F0200000 00000000 00000000 00000000");
+    let unit = hex("00400001 00000000 60000000 00201234");
+    for _ in 0..(8 << 20) / unit.len() {
+        b.extend_from_slice(&unit);
     }
+    b.extend(hex("00400000 F0210000 00000000 00000000 00000000"));
+    let lim = Limits {
+        max_events: 10_000_000,
+        ..Limits::default()
+    };
+    let t = Instant::now();
+    let (c, report) = read(&b, &lim, &AtomicBool::new(false)).unwrap();
+    assert!(
+        t.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        t.elapsed()
+    );
+    assert!(c.events.is_empty());
+    assert_eq!(c.end, (8 << 20) / 16);
+    assert_eq!(report.items[0].count, (8 << 20) / 16 * 2);
 }
 
 #[test]
@@ -184,6 +290,12 @@ fn every_kind_reads_as_written() {
     use core_io::clip::ClipEvent;
     let bytes = include_bytes!("data/every_kind.midi2");
     let (c, _) = read(bytes, &limits(), &AtomicBool::new(false)).unwrap();
+    let attr = core_io::ump::NoteAttribute {
+        kind: 3,
+        data: 0x7800,
+    };
+    let off = ClipEvent::Packet(core_io::ump::note_off(0, 0, 60, 0, Some(attr)));
+    assert!(c.events.contains(&(960, off)));
     assert_eq!((c.tpq, c.header.len(), c.end), (960, 2, 960 + 0x10_0000));
     let texts: Vec<&str> = c
         .events
@@ -215,9 +327,13 @@ fn every_kind_reads_as_written() {
                 group: 0,
                 data: vec![0x7E, 0x7F, 0x0D, 0x70]
             },
+            &ClipEvent::SysEx8 {
+                group: 0,
+                data: (0..0x14).collect()
+            },
         ]
     );
-    assert_eq!(c.events.len(), 20);
+    assert_eq!(c.events.len(), 21);
 }
 
 proptest! {
