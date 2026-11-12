@@ -177,3 +177,141 @@ the JR Timestamp):
 00400001 20803C00                              1 tick: MIDI 1.0 note off 60
 00400000 F0210000 00000000 00000000 00000000   End of Clip
 ```
+
+## MIDI export goldens (plan 6a Task 6)
+
+`midi_out.rs` compares `midi_out`'s output with these byte for byte. A
+missing golden fails its test.
+
+### Hand-written: `export_small_type1_960.mid` and `export_small_clip.midi2`
+
+Written by hand as hex before the export code existed (a throwaway script
+only turned the hex into bytes), from Ruling 10, the text table in
+`midi_in.rs` and the layouts above. They are the export of one sequence
+"Song" at 120 BPM in 4/4 and C major, no markers, with one track "Bass" on
+a built-in synth on group 1, channel 1 (no patch, no mix) holding one note:
+pitch 60, velocity `up7(100)` (0xC924), release 0, at tick 0 for 15 360
+ticks (a quarter). `small_goldens_match` checks them; they are never
+blessed.
+
+`export_small_type1_960.mid` is `golden_type1.mid` above, byte for byte:
+the conductor is the sequence name "Song", tempo, time and key signatures;
+track 2 is "Bass" with `00 90 3C 64`, `87 40 80 3C 00`.
+
+`export_small_clip.midi2` (every message with its own DCS):
+
+```
+534D4632 434C4950                              SMF2CLIP
+00400000 00303C00                              DCS 0, DCTPQ 15 360
+00400000 D0100000 02FAF080 00000000 00000000   Set Tempo 50 000 000 x 10 ns (120 BPM)
+00400000 D0100001 04020800 00000000 00000000   Set Time Signature 4/4
+00400000 F0200000 00000000 00000000 00000000   Start of Clip
+00400000 D0100102 536F6E67 00000000 00000000   composition name "Song"
+00400000 D0100103 42617373 00000000 00000000   clip name "Bass"
+00400000 D0100005 03000000 00000000 00000000   Set Key Signature 0 sharps, tonic C
+00400000 40903C00 C9240000                     note on 60, velocity 0xC924
+00403C00 40803C00 00000000                     15 360 ticks: note off 60, velocity 0
+00400000 F0210000 00000000 00000000 00000000   End of Clip
+```
+
+### Regression goldens
+
+`export_type1_960.mid`, `export_type0_960.mid`, `export_type1_480.mid` and
+`export_type1_15360.mid` (`golden_options`) and `export_clip.midi2`
+(`clip_export_is_exact`) were made by one run with `VIZDAW_BLESS=1` (never
+set in CI) and then decoded by hand, as below, against Ruling 10 and the
+layouts above. The document (`golden_doc` in `midi_out.rs`): "Song" at
+120 BPM, ramping 120 → 140 over bar 2, 3/4 from bar 3, D major, markers
+"Intro" (bar 1) and "Verse" (bar 3), copyright "Copyright 2026 the VizDAW
+tests"; "Bass" on an external destination on channel 1 with patch bank
+0/1 program 33 and MIDI volume 100 (a MIDI mix is only kept for an
+external destination), holding notes, a lyric, a SysEx, a muted note, a
+controller and a bend; "Drums" on a built-in synth on channel 10, a drum
+track. `export_clip.midi2` adds a track "Lead" (channel 3) and exports it
+for bar 2 to bar 4.
+
+`export_type1_960.mid`: `MThd`, type 1, 3 tracks, 960 (`03C0`).
+
+Conductor:
+
+```
+00 FF 03 04 "Song"                    title (the sequence name)
+00 FF 02 1F "Copyright 2026 ..."      copyright
+00 FF 51 03 07 A1 20                  tempo 500 000 us (120 BPM)
+00 FF 58 04 04 02 18 08               4/4
+00 FF 59 02 02 00                     D major
+00 FF 06 05 "Intro"                   marker
+9E 00 FF 51 03 07 97 06               3 840 (bar 2): 497 414 us, the ramp's first step
+81 70 FF 51 03 07 83 18               240 (1/16) later: the next step; 16 steps in all,
+...                                   each shorter (07 6F 92 ... 06 91 A0)
+81 70 FF 51 03 06 8A 1B               7 680 (bar 3): 428 571 us (140 BPM)
+00 FF 58 04 03 02 18 08               3/4
+00 FF 06 05 "Verse"                   marker
+00 FF 2F 00                           end of track
+```
+
+Track 2:
+
+```
+00 FF 03 04 "Bass"                    track name
+00 FF 05 04 "Down"                    lyric (metas first, Ruling 10)
+00 B0 00 00   00 B0 20 01   00 C0 21  default patch: bank 0/1, program 33 (patch class)
+00 B0 07 64                           MIDI mix volume 100 (control class)
+00 F0 05 7E 7F 09 01 F7               SysEx (after the control messages)
+00 90 28 5A                           note on 40 (note-ons last)
+83 60 80 28 00   00 90 2B 64          480: note off 40, then note on 43
+83 60 80 2B 00                        960: note off 43 (the muted note 45 is not written)
+87 40 B0 01 40                        1 920: CC 1 = 64
+87 40 E0 64 40                        2 880: pitch bend 8 292
+A5 40 90 28 50   87 40 80 28 00       7 680 (bar 3): note 40 for a quarter
+87 40 90 2B 50   87 40 80 2B 00       9 600: note 43 for a quarter
+00 FF 2F 00                           end of track
+```
+
+Track 3:
+
+```
+00 FF 03 05 "Drums"
+00 99 24 6E   00 99 2A 46             notes 36 and 42 on channel 10
+81 70 89 24 00   00 89 2A 00          240: their note-offs
+81 70 99 2A 46   81 70 89 2A 00       480 and 720: note 42
+81 70 99 26 64   81 70 89 26 00       960 and 1 200: note 38
+94 50 99 24 6E   81 70 89 24 00       3 840 (bar 2) and 4 080: note 36
+00 FF 2F 00
+```
+
+`export_type1_480.mid` and `export_type1_15360.mid` are the same events at
+480 and 15 360 ticks per quarter; `export_type0_960.mid` is the conductor's
+and both tracks' events in one track (type 0, no track names).
+
+`export_clip.midi2` ("Lead", bar 2 to bar 4, at 15 360 ticks per quarter):
+
+```
+534D4632 434C4950                              SMF2CLIP
+00400000 00303C00                              DCTPQ 15 360
+00400000 D0100000 02F6FE42 00000000 00000000   header: Set Tempo 49 741 378 (the ramp's first step)
+00400000 D0100001 04020800 00000000 00000000   header: 4/4 (in force at bar 2)
+00400000 F0200000 00000000 00000000 00000000   Start of Clip
+00400000 D0100102 536F6E67 00000000 00000000   composition name "Song"
+00400000 D0100103 4C656164 00000000 00000000   clip name "Lead"
+00400000 D0500104 ... D0900104 ... D0D00104 ... copyright in three packets (start, continue, end)
+00400000 D0100005 24000000 00000000 00000000   key: 2 sharps, tonic D (in the data at 0, F8)
+00400064 40923C03 12347800                     100: note on 60 ch 3, velocity 0x1234, pitch 7.9 attribute 0x7800
+00400000 40023C4A 90000000                     per-note registered controller 74 (after its note-on)
+004001F4 40623C00 81000000                     600: per-note pitch bend
+004001F4 40823C00 04000000                     1 100: note off 60, release 0x0400
+00400384 40B24A00 12345678                     2 000: CC 74, 32 bits
+00400730 D0100000 02EF3561 ...                 3 840: the ramp's second step; then 14 more,
+00400F00 D0100000 02E794F7 ...                 3 840 ticks apart, each faster
+...
+00400F00 D0100000 028DF2B7 ...                 61 440 (bar 3): Set Tempo 42 857 143 (140 BPM)
+00400000 D0100001 03020800 ...                 3/4
+00400000 D0500100 6D61726B 65723A20 56657273   "marker: Vers" (start) ...
+         D0D00100 65000000 00000000 00000000   ... "e" (end)
+00403C00 40923E00 FFFF0000                     76 800: note on 62, velocity 0xFFFF
+00403C00 40823E00 00000000                     92 160: note off 62
+00403C00 F0210000 00000000 00000000 00000000   107 520 (bar 4): End of Clip
+```
+
+The notes of "Lead" at bar 1 and at bar 4 start outside the range and are
+not written.
