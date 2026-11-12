@@ -25,6 +25,7 @@ pub mod smf;
 pub mod text;
 pub mod ump;
 pub mod write;
+pub mod xml;
 pub mod zip;
 
 /// Why a read, write or conversion did not happen.

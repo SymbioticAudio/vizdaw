@@ -77,7 +77,7 @@ impl std::fmt::Debug for ZipReader {
 }
 
 /// A whole-file refusal: "This DAWproject file is damaged: <why>."
-fn damaged(why: impl std::fmt::Display) -> IoError {
+pub(crate) fn damaged(why: impl std::fmt::Display) -> IoError {
     IoError::Refused(format!("This DAWproject file is damaged: {why}."))
 }
 
