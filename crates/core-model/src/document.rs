@@ -1,6 +1,7 @@
 //! The document: settings, instrument list, outputs, media pool and
 //! sequences, plus a derived event index.
 
+use crate::arc_map::ArcMap;
 use crate::error::{ModelError, Result};
 use crate::event::Event;
 use crate::format::AudioFormat;
@@ -27,7 +28,7 @@ pub struct Settings {
     /// Autosave copies to keep (default 10).
     pub autosave_keep: u32,
     /// Named select-and-modify templates.
-    pub templates: OrdMap<String, ModifyTemplate>,
+    pub templates: ArcMap<String, ModifyTemplate>,
     /// The project's audio format: every media file is stored in it
     /// (sub-project 5 spec §4.1).
     pub format: AudioFormat,
@@ -153,7 +154,7 @@ impl Default for Settings {
         Settings {
             history_depth: 200,
             autosave_keep: 10,
-            templates: OrdMap::new(),
+            templates: ArcMap::new(),
             format: AudioFormat::DEFAULT,
             learn: Vec::new(),
             info: SongInfo::default(),
@@ -390,17 +391,17 @@ pub struct EventLoc {
 #[serde(into = "DocumentRepr", try_from = "DocumentRepr")]
 pub struct Document {
     settings: Settings,
-    instruments: OrdMap<DestId, Destination>,
-    outputs: OrdMap<OutputPathId, OutputPath>,
-    media: OrdMap<MediaId, MediaItem>,
-    sequences: OrdMap<SeqId, Sequence>,
+    instruments: ArcMap<DestId, Destination>,
+    outputs: ArcMap<OutputPathId, OutputPath>,
+    media: ArcMap<MediaId, MediaItem>,
+    sequences: ArcMap<SeqId, Sequence>,
     mixer: Mixer,
     /// Plugin state blobs by ID (Plan Ruling 8). Never serialized into
     /// `project.json`; `file::save`/`load` keep them in `PluginState/`.
     states: OrdMap<StateBlobId, Arc<[u8]>>,
     counters: Counters,
     /// Derived, never serialized: event ID -> location.
-    index: OrdMap<EventId, EventLoc>,
+    index: ArcMap<EventId, EventLoc>,
 }
 
 impl Default for Document {
@@ -450,8 +451,8 @@ fn collect_unique<K: Ord + Clone + std::fmt::Display, V: Clone>(
     items: Vec<V>,
     key: impl Fn(&V) -> K,
     what: &str,
-) -> std::result::Result<OrdMap<K, V>, String> {
-    let mut m = OrdMap::new();
+) -> std::result::Result<ArcMap<K, V>, String> {
+    let mut m = ArcMap::new();
     for v in items {
         let k = key(&v);
         if m.insert(k.clone(), v).is_some() {
@@ -480,7 +481,7 @@ impl TryFrom<DocumentRepr> for Document {
             mixer,
             states: OrdMap::new(),
             counters,
-            index: OrdMap::new(),
+            index: ArcMap::new(),
         };
         d.rebuild_index()?;
         Ok(d)
@@ -495,14 +496,14 @@ impl Document {
         let mixer = Mixer::new(counters.alloc_strip());
         Document {
             settings: Settings::default(),
-            instruments: OrdMap::new(),
-            outputs: OrdMap::new(),
-            media: OrdMap::new(),
-            sequences: OrdMap::new(),
+            instruments: ArcMap::new(),
+            outputs: ArcMap::new(),
+            media: ArcMap::new(),
+            sequences: ArcMap::new(),
             mixer,
             states: OrdMap::new(),
             counters,
-            index: OrdMap::new(),
+            index: ArcMap::new(),
         }
     }
 
@@ -517,19 +518,19 @@ impl Document {
         &self.settings
     }
     /// Instrument list.
-    pub fn instruments(&self) -> &OrdMap<DestId, Destination> {
+    pub fn instruments(&self) -> &ArcMap<DestId, Destination> {
         &self.instruments
     }
     /// Output paths.
-    pub fn outputs(&self) -> &OrdMap<OutputPathId, OutputPath> {
+    pub fn outputs(&self) -> &ArcMap<OutputPathId, OutputPath> {
         &self.outputs
     }
     /// Media pool.
-    pub fn media(&self) -> &OrdMap<MediaId, MediaItem> {
+    pub fn media(&self) -> &ArcMap<MediaId, MediaItem> {
         &self.media
     }
     /// Sequences.
-    pub fn sequences(&self) -> &OrdMap<SeqId, Sequence> {
+    pub fn sequences(&self) -> &ArcMap<SeqId, Sequence> {
         &self.sequences
     }
     /// ID counters.
@@ -671,13 +672,13 @@ impl Document {
     pub(crate) fn settings_mut(&mut self) -> &mut Settings {
         &mut self.settings
     }
-    pub(crate) fn instruments_mut(&mut self) -> &mut OrdMap<DestId, Destination> {
+    pub(crate) fn instruments_mut(&mut self) -> &mut ArcMap<DestId, Destination> {
         &mut self.instruments
     }
-    pub(crate) fn outputs_mut(&mut self) -> &mut OrdMap<OutputPathId, OutputPath> {
+    pub(crate) fn outputs_mut(&mut self) -> &mut ArcMap<OutputPathId, OutputPath> {
         &mut self.outputs
     }
-    pub(crate) fn media_mut(&mut self) -> &mut OrdMap<MediaId, MediaItem> {
+    pub(crate) fn media_mut(&mut self) -> &mut ArcMap<MediaId, MediaItem> {
         &mut self.media
     }
     pub(crate) fn counters_mut(&mut self) -> &mut Counters {
@@ -838,7 +839,7 @@ impl Document {
 
     /// Rebuilds the event index; fails on duplicate event IDs.
     pub(crate) fn rebuild_index(&mut self) -> std::result::Result<(), String> {
-        let mut index = OrdMap::new();
+        let mut index = ArcMap::new();
         for (loc, e) in self.all_events() {
             if index.insert(e.id, loc).is_some() {
                 return Err(format!("duplicate event id {}", e.id));

@@ -15,6 +15,7 @@
     )
 )]
 
+pub mod arc_map;
 pub mod automation;
 pub mod command;
 pub mod crossfade;

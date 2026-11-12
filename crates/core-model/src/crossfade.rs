@@ -14,6 +14,7 @@ use crate::error::{ModelError, Result};
 use crate::event::{Event, EventBody, FadeShape};
 use crate::ids::{EventId, LaneId, SeqId, TakeId};
 use crate::lane::Take;
+use crate::sequence::Sequence;
 use crate::time::Tick;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -295,7 +296,8 @@ fn settle_one(
 /// Ruling 6), in the same undo step: `old` is the document before the
 /// command, `new` after it. It visits each take whose events changed, every
 /// take of a sequence whose tempo changed or that is new, and every take
-/// when the media pool changed. Each change gets a line in `r.warnings`,
+/// when the media pool changed; sequences shared with `old` are skipped
+/// without being walked. Each change gets a line in `r.warnings`,
 /// except a lone copy that starts inside an old region: it loses its flag
 /// silently (rule 3). A lone copy that starts inside nothing gets rule 1's
 /// line, since that rule comes first.
@@ -305,8 +307,18 @@ pub(crate) fn settle(old: &Document, new: &mut Document, r: &mut Report) -> Resu
         return Ok(());
     }
     let media_changed = !old.media().ptr_eq(new.media());
+    // Without a media change only the sequences the command touched can
+    // need settling: the rest are shared with `old` (one diff, not a sweep).
+    let touched: Vec<&Sequence> = if media_changed {
+        new.sequences().values().collect()
+    } else {
+        new.sequences()
+            .changed_keys(old.sequences())
+            .filter_map(|id| new.sequences().get(id))
+            .collect()
+    };
     let mut visit: Vec<TakeKey> = Vec::new();
-    for s in new.sequences().values() {
+    for s in touched {
         let old_s = old.sequences().get(&s.id);
         let all = media_changed || old_s.is_none_or(|o| o.tempo != s.tempo);
         for l in &s.lanes {

@@ -407,7 +407,7 @@ fn duplicate(d: &mut Document, seq: SeqId, lane: LaneId, r: &mut Report) -> Resu
             copy.active_take = tid;
         }
         r.created.push(AnyId::Take(tid));
-        let mut events = im::OrdMap::new();
+        let mut events = crate::arc_map::ArcMap::new();
         for e in t.events.values() {
             if matches!(e.body, EventBody::Automation { .. }) {
                 continue;

@@ -956,3 +956,52 @@ fn a_media_change_beside_the_pair_settles_it() {
     assert!(core_model::rules::validate(&a).is_empty());
     assert_eq!(from_json(&to_json(&a).unwrap()).unwrap(), a);
 }
+
+/// `flagged()` plus `n` empty sequences after it.
+fn flagged_among(n: usize) -> Document {
+    let mut d = flagged();
+    for i in 0..n {
+        d = run(
+            &d,
+            Command::Sequence(SequenceCmd::New {
+                name: format!("S{i}"),
+            }),
+        )
+        .unwrap();
+    }
+    d
+}
+
+#[test]
+fn settle_finds_the_touched_sequence_among_many() {
+    // Hundreds of sequences: seq 0 sits in another tree node than the one
+    // the command's own change lands in, yet it is still settled.
+    let d = flagged_among(300);
+    let (w, a) = step(&d, mv(vec![B], 16_000, None));
+    one_warning(&w, "removed");
+    assert!(!fades(&a, B).2);
+    assert!(core_model::rules::validate(&a).is_empty());
+    // A change elsewhere leaves the pair alone.
+    let (w, a) = step(
+        &d,
+        Command::Sequence(SequenceCmd::Rename {
+            seq: SeqId(150),
+            name: "X".into(),
+        }),
+    );
+    assert!(w.is_empty(), "{w:?}");
+    assert!(fades(&a, B).2);
+}
+
+#[test]
+fn settle_skips_the_sequences_a_command_left_alone() {
+    // With media in the pool, settle used to walk every sequence on every
+    // command: 4 096 new sequences took 6.5 s in a debug build (O(n²)).
+    // Now it walks only the changed ones (~0.1 s); the bound leaves room
+    // for a loaded machine.
+    let t = std::time::Instant::now();
+    let d = flagged_among(4096);
+    let took = t.elapsed();
+    assert_eq!(d.sequences().len(), 4097);
+    assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+}
