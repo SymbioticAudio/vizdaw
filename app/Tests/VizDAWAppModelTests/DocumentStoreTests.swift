@@ -187,6 +187,8 @@ extension DocumentStoreTests {
 /// dropped), as 6a's and 6b's reports are.
 @MainActor
 @Suite(.serialized) struct DawprojectIntegrationTests {
+    init() { _ = TestSupportDir.shared }
+
     @Test func hostileNamesReachTheReportCleaned() async throws {
         setenv("VIZDAW_AUDIO", "offline", 1)
         let dir = FileManager.default.temporaryDirectory
