@@ -1851,6 +1851,7 @@ fn interchange_commands_check_their_params() {
             json!({ "path": "/tmp/a.mid", "lane": i64::MAX }),
         ),
         ("file.import_midi", json!({ "path": "relative.mid" })),
+        ("file.import_midi", json!({ "path": "/tmp/a\u{0}.mid" })),
         (
             "file.import_midi",
             json!({ "path": "/tmp/a.mid", "extra": true }),

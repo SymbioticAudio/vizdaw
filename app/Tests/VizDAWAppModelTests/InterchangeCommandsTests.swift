@@ -197,6 +197,77 @@ import VizDAWCore
         #expect(fresh.midiImports.first?.seq == s.model(doc)?.selectedSeq)
     }
 
+    @Test func aRefusedNewProjectImportMakesNoProject() throws {
+        let (s, id, m, f) = try demo()
+        let fresh = FakeSession([seq(9, "New", topLevel: true)])
+        var made = 0
+        s.makeProject = { _ in
+            made += 1
+            return fresh
+        }
+        let before = s.documents.count
+        let path: (String, ControlValue) = ("path", .text(value: "/tmp/a.mid"))
+        let new: (String, ControlValue) = ("new_project", .flag(value: true))
+        // The file is read first: a refusal leaves nothing behind.
+        f.interchangeError = VizError.Model(message: "not a MIDI file")
+        let r = failure(run(InterchangeCommands.importMidi, [path, new], m, s, id))
+        #expect(r?.code == .failed && r?.message.contains("not a MIDI file") == true)
+        f.interchangeError = nil
+        #expect(s.documents.count == before && made == 0)
+        // A drop track cannot exist in a new project.
+        let l = failure(run(InterchangeCommands.importMidi, [path, new, ("lane", .int(value: 2))], m, s, id))
+        #expect(l?.code == .invalidParams && l?.message.contains("lane") == true)
+        #expect(s.documents.count == before && made == 0 && f.midiImports.isEmpty)
+        // A new project needs no sequence shown in this one.
+        let bare = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { FakeSession([]) }, open: { _ in demoFake() })
+        bare.makeProject = { _ in fresh }
+        let bid = try #require(bare.newEmpty())
+        let bm = try #require(bare.model(bid))
+        #expect(bm.selectedSeq == nil)
+        guard case .job = run(InterchangeCommands.importMidi, [path, new], bm, bare, bid) else {
+            Issue.record("not a job")
+            return
+        }
+        #expect(fresh.midiImports.first?.seq == 9)
+        let none = failure(run(InterchangeCommands.importMidi, [path], bm, bare, bid))
+        #expect(none?.code == .failed)
+    }
+
+    @Test func aFailedImportClosesTheProjectItMade() throws {
+        let (s, id, m, _) = try demo()
+        let fresh = FakeSession([seq(9, "New", topLevel: true)])
+        fresh.jobStartState = .failed
+        s.makeProject = { _ in fresh }
+        let before = s.documents.count
+        let args: [(String, ControlValue)] = [("path", .text(value: "/tmp/a.mid")), ("new_project", .flag(value: true))]
+        guard case .job(_, let doc, _) = run(InterchangeCommands.importMidi, args, m, s, id) else {
+            Issue.record("not a job")
+            return
+        }
+        #expect(s.documents.count == before + 1)
+        InterchangeCommands.jobEnded(doc, failed: true, store: s) { s.close($0) }
+        #expect(s.documents.count == before && s.model(doc) == nil)
+        // A successful job keeps it.
+        guard case .job(_, let ok, _) = run(InterchangeCommands.importMidi, args, m, s, id) else { return }
+        InterchangeCommands.jobEnded(ok, failed: false, store: s) { s.close($0) }
+        #expect(s.model(ok) != nil)
+        // Not a project this command made: left alone.
+        InterchangeCommands.jobEnded(id, failed: true, store: s) { s.close($0) }
+        #expect(s.model(id) != nil)
+    }
+
+    @Test func importRefusalsNeverReachTheSession() throws {
+        let (s, id, m, f) = try demo()
+        #expect(m.editor.beginGesture("Move", lanes: [], origin: .other))
+        let g = failure(run(InterchangeCommands.importMidi, [("path", .text(value: "/tmp/a.mid"))], m, s, id))
+        #expect(g?.code == .unavailable)
+        #expect(f.midiImports.isEmpty)
+        f.interchangeError = VizError.Model(message: "bad seq")
+        let b = failure(run(InterchangeCommands.exportClip, [("path", .text(value: "/tmp/d")), ("seq", .int(value: 99))], m, s, id))
+        #expect(b?.code == .failed, "a lanes failure is not an empty list")
+        #expect(f.clipExports.isEmpty)
+    }
+
     @Test func reportCommandCallsTheSessionOnce() throws {
         let (s, id, m, f) = try demo()
         f.lastReport = ReportRow(summary: "Imported 2 tracks", items: [])

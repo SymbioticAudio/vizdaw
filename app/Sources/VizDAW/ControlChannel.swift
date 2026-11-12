@@ -151,6 +151,7 @@ enum ControlChannel {
                 m.refreshAfterJob()
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
                 if j.kind == .importMidi || j.kind == .exportMidi {
+                    InterchangeCommands.jobEnded(doc, failed: false, store: appStore, close: { _ in })
                     _ = try? server.reply(
                         token: token,
                         result: .interchange(
@@ -167,6 +168,9 @@ enum ControlChannel {
             case .failed(let message):
                 // A failed import may still have changed nothing; a refresh is harmless.
                 m.refreshAfterJob()
+                InterchangeCommands.jobEnded(doc, failed: true, store: appStore) { id in
+                    if let w = ControlWindows.window(of: id) { w.performClose(nil) } else { appStore.close(id) }
+                }
                 _ = try? server.fail(token: token, failure: .of(.failed, message))
                 return true
             }

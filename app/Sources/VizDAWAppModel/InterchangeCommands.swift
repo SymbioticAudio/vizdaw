@@ -63,7 +63,11 @@ public enum InterchangeCommands {
     /// `lanes` as track IDs (each once); nil text: every track of `seq`.
     static func tracks(_ text: String?, seq: UInt64, _ id: String, _ m: DocumentModel) -> Parsed<[UInt64]> {
         guard let text else {
-            return .success(((try? m.session.lanes(seq: seq)) ?? []).map(\.id))
+            do {
+                return .success(try m.session.lanes(seq: seq).map(\.id))
+            } catch {
+                return .failure(.thrown(error, "Tracks Unavailable"))
+            }
         }
         var out: [UInt64] = []
         for part in text.split(separator: ",", omittingEmptySubsequences: false) {
@@ -76,11 +80,16 @@ public enum InterchangeCommands {
         return .success(out)
     }
 
-    private static func seqArg(_ args: [ControlArg], _ id: String, _ m: DocumentModel) -> Parsed<UInt64> {
+    /// `seq`, else the shown sequence; `orNone` lets a call that needs none
+    /// (an import into a new project) go on with 0, replaced once it exists.
+    private static func seqArg(
+        _ args: [ControlArg], _ id: String, _ m: DocumentModel, orNone: Bool = false
+    ) -> Parsed<UInt64> {
         if let s = args.int("seq") {
             guard let n = UInt64(exactly: s) else { return bad(id, "`seq` is a sequence ID") }
             return .success(n)
         }
+        if orNone { return .success(0) }
         guard let shown = m.selectedSeq else { return .failure(.of(.failed, "\(id): no sequence is shown")) }
         return .success(shown)
     }
@@ -89,7 +98,11 @@ public enum InterchangeCommands {
     static func importRequest(_ args: [ControlArg], _ path: String, _ m: DocumentModel) -> Parsed<MidiImportRequestRow> {
         let id = importMidi
         let seq: UInt64
-        switch seqArg(args, id, m) {
+        let fresh = args.flag("new_project") ?? false
+        if fresh, args.int("lane") != nil {
+            return bad(id, "`lane` names a track of this project; a new project has none")
+        }
+        switch seqArg(args, id, m, orNone: fresh) {
         case .failure(let f): return .failure(f)
         case .success(let s): seq = s
         }
@@ -125,10 +138,13 @@ public enum InterchangeCommands {
         case .failure(let f): return .failure(f)
         case .success(let l): lanes = l
         }
+        guard let ppq = UInt16(args.text("ppq") ?? "960"), [480, 960, 15360].contains(ppq) else {
+            return bad(id, "`ppq` is 480, 960 or 15360")
+        }
         return .success(
             SmfExportRequestRow(
                 seq: seq, lanes: lanes, path: args.text("path") ?? "", replace: args.flag("replace") ?? false,
-                type0: args.text("type") == "0", ppq: UInt16(args.text("ppq") ?? "960") ?? 960,
+                type0: args.text("type") == "0", ppq: ppq,
                 mpe: args.flag("mpe") ?? false))
     }
 
@@ -154,6 +170,17 @@ public enum InterchangeCommands {
             ClipExportRequestRow(
                 seq: seq, lanes: lanes, path: args.text("path") ?? "", replace: args.flag("replace") ?? false,
                 start: start, end: end))
+    }
+
+    /// Projects `file.import_midi` made whose job has not ended.
+    private static var madeProjects = Set<UUID>()
+
+    /// Tells the command its job on `doc` ended. A project it made and the
+    /// job failed or was cancelled on goes, if nothing was done in it since;
+    /// `close` closes it (window and all).
+    public static func jobEnded(_ doc: UUID, failed: Bool, store: DocumentStore, close: (UUID) -> Void) {
+        guard madeProjects.remove(doc) != nil, failed, let m = store.model(doc), !m.canUndo else { return }
+        close(doc)
     }
 
     /// Runs `id` (one of `ids`) on document `docID`.
@@ -188,6 +215,12 @@ public enum InterchangeCommands {
             }
             var (target, doc, req) = (m, docID, request)
             if newProject {
+                // The core reads the file first: a refusal makes no project.
+                do {
+                    _ = try m.session.midiFileInfo(path: path)
+                } catch {
+                    return .failed(.thrown(error, "Import Failed"))
+                }
                 guard let made = store.newProject(ProjectFormatRow(sampleRate: 48_000, depth: store.defaultFormat.depth)),
                     let fresh = store.model(made)
                 else {
@@ -195,6 +228,7 @@ public enum InterchangeCommands {
                     return .failed(.of(.failed, "\(id) made no document."))
                 }
                 (target, doc) = (fresh, made)
+                madeProjects.insert(made)
                 if args.int("seq") == nil, let shown = fresh.selectedSeq { req.seq = shown }
             }
             do {
