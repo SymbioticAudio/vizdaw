@@ -106,3 +106,65 @@ Track 3:
 81 40 81 2B 00            192 ticks: note off 43
 00 FF 2F 00               end of track
 ```
+
+## MIDI Clip Files (plan 6a Task 4)
+
+These were written by hand as hex, 32-bit word by word, from the MIDI Clip
+File layout (M2-116-U) and the UMP layouts (M2-104-UM v1.1.2). A throwaway
+script only turned the hex below into bytes (the text after each line's
+words is a comment). Every word is big-endian; every message has its own
+Delta Clockstamp (DCS), as `clip::write` writes them, so `clip::write`
+gives each file back byte for byte.
+
+### `golden_minimal.midi2`
+
+The golden of `clip_bytes.rs::writes_the_minimal_golden`: 15 360 ticks per
+quarter, one note.
+
+```
+534D4632 434C4950                              SMF2CLIP
+00400000 00303C00                              DCS 0, DCTPQ 15 360
+00400000 D0100000 02FAF080 00000000 00000000   Set Tempo 50 000 000 x 10 ns (120 BPM)
+00400000 D0100001 04020800 00000000 00000000   Set Time Signature 4/4, 8 32nds
+00400000 F0200000 00000000 00000000 00000000   Start of Clip
+00400000 40903C00 80000000                     note on 60, velocity 0x8000
+00403C00 40803C00 00000000                     15 360 ticks: note off 60
+00400000 F0210000 00000000 00000000 00000000   End of Clip
+```
+
+### `every_kind.midi2`
+
+960 ticks per quarter, with every message kind the reader knows, a text
+and a SysEx over two packets, and a gap restarted with a NOOP:
+
+```
+534D4632 434C4950                              SMF2CLIP
+00400000 003003C0                              DCS 0, DCTPQ 960
+00400000 D0100000 02FAF080 00000000 00000000   Set Tempo (120 BPM)
+00400000 D0100001 03020800 00000000 00000000   Set Time Signature 3/4
+00400000 F0200000 00000000 00000000 00000000   Start of Clip
+00400000 D0100005 15000000 00000000 00000000   Set Key Signature 1 sharp, tonic E (E minor)
+00400000 D0100102 536F6E67 00000000 00000000   composition name "Song"
+00400000 D0100103 42617373 00000000 00000000   clip name "Bass"
+00400000 D0500201 48656C6C 6F2C2056 697A4441   lyric "Hello, VizDA" (start)
+         D0D00201 57212100 00000000 00000000   ... "W!!" (end)
+00400000 10F60000                              MIDI 1.0 system: tune request
+00400000 20903C64                              MIDI 1.0 note on 60, velocity 100
+00400000 40903C03 C9247800                     MIDI 2.0 note on 60, velocity 0xC924, pitch 7.9 attribute
+00400000 40A03C00 80000000                     poly pressure 60
+00400000 40B00700 80000000                     controller 7
+00400000 40C00001 21000102                     program 33, bank 1/2
+00400000 40D00000 40000000                     channel pressure
+00400000 40E00000 80000000                     pitch bend centre
+00400000 40003C03 80000000                     per-note registered controller 3 on 60
+00400000 40103C05 12345678                     per-note assignable controller 5 on 60
+00400000 40603C00 80000000                     per-note pitch bend centre on 60
+00400000 30047E7F 09010000                     SysEx 7: 7E 7F 09 01 (one packet)
+00400000 30164310 4C00007E                     SysEx 7 start: 43 10 4C 00 00 7E
+         30340102 03040000                     ... end: 01 02 03 04
+00400000 5005007E 7F0D7000 00000000 00000000   SysEx 8, stream 0: 7E 7F 0D 70
+004003C0 40803C00 00000000                     960 ticks: MIDI 2.0 note off 60
+004FFFFF 00000000                              DCS 1 048 575, NOOP
+00400001 20803C00                              1 tick: MIDI 1.0 note off 60
+00400000 F0210000 00000000 00000000 00000000   End of Clip
+```

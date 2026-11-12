@@ -12,11 +12,13 @@
     )
 )]
 
+pub mod clip;
 pub mod limits;
 pub mod read;
 pub mod report;
 pub mod smf;
 pub mod text;
+pub mod ump;
 pub mod write;
 
 /// Why a read, write or conversion did not happen.

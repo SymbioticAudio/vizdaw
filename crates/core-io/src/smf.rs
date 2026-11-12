@@ -74,9 +74,9 @@ const END_OF_TRACK: u8 = 0x2F;
 const NOT_MIDI: &str = "This isn't a MIDI file.";
 const BAD_TIMING: &str = "This MIDI file's timing can't be read.";
 const UNKNOWN_CHUNKS: &str = "Unknown file sections skipped";
-const SYSEX_OVER: &str = "SysEx messages over 1 MiB";
-const SYSEX_UNFINISHED: &str = "Unfinished SysEx messages";
-const TEXT_CUT: &str = "Texts over 64 KiB cut";
+pub(crate) const SYSEX_OVER: &str = "SysEx messages over 1 MiB";
+pub(crate) const SYSEX_UNFINISHED: &str = "Unfinished SysEx messages";
+pub(crate) const TEXT_CUT: &str = "Texts over 64 KiB cut";
 const NO_END: &str = "Tracks without an End of Track";
 const AFTER_END: &str = "Data after the End of Track skipped";
 
