@@ -194,12 +194,17 @@ fn region(d: &Document, id: EventId) -> Result<(Event, SeqId, f64)> {
 /// Shortens a region's fades so together they fit it: the fade in first,
 /// then the fade out to what is left (5a Ruling 1).
 pub(crate) fn clamp_fades(ev: &mut Event) {
+    clamp_region_fades(&mut ev.body);
+}
+
+/// [`clamp_fades`] on an event body (a no-op for anything but a region).
+pub(crate) fn clamp_region_fades(body: &mut EventBody) {
     if let EventBody::AudioRegion {
         length,
         fade_in,
         fade_out,
         ..
-    } = &mut ev.body
+    } = body
     {
         fade_in.length_frames = fade_in.length_frames.min(*length);
         fade_out.length_frames = fade_out
