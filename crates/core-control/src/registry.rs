@@ -710,7 +710,7 @@ const FOR_DAW_PARAMS: &[ParamSpec] = &[
         name: "dither",
         kind: ParamKind::Flag,
         required: false,
-        help: "Dither at 16 and 24 bits (default: on at 16 bits, off for 32f).",
+        help: "Dither the stems (default: on at 16 bits only, off at 24; 32f never dithers, whatever this says).",
     },
     ParamSpec {
         name: "add_to_project",

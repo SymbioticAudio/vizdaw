@@ -402,12 +402,29 @@ import VizDAWCore
 
     @Test func forDawWithoutPathAsksForSave() throws {
         let (s, id, m, f) = try demo()
-        for args: [(String, ControlValue)] in [[], [("dry_run", .flag(value: false))], [("container", .text(value: "caf"))]] {
+        for args: [(String, ControlValue)] in [
+            [], [("dry_run", .flag(value: false))], [("container", .text(value: "caf"))], [("path", .text(value: ""))],
+        ] {
             let d = failure(run(InterchangeCommands.exportForDaw, args, m, s, id))
             #expect(d?.code == .dialogRequired && d?.dialog == "Save")
             #expect(d?.message.contains("`path`") == true)
         }
         #expect(forDawCalls(f) == 0)
+    }
+
+    @Test func forDawRefusesBadSeqRateAndUnknownStrips() throws {
+        let (s, id, m, f) = try demo()
+        let path: (String, ControlValue) = ("path", .text(value: "/tmp/out"))
+        for bad: (String, ControlValue) in [("seq", .int(value: -1)), ("rate", .int(value: 7_999)), ("rate", .int(value: 1 << 40))] {
+            let fail = failure(run(InterchangeCommands.exportForDaw, [path, bad], m, s, id))
+            #expect(fail?.code == .invalidParams && fail?.message.contains("file.export_for_daw") == true, "\(bad)")
+        }
+        #expect(forDawCalls(f) == 0)
+        // A strip the project lacks is the core's refusal, answered as a failure with no job.
+        f.interchangeError = VizError.Model(message: "no strip 99")
+        let unknown = failure(run(InterchangeCommands.exportForDaw, [path, ("strips", .text(value: "99"))], m, s, id))
+        #expect(unknown?.code == .failed && unknown?.message.contains("no strip 99") == true)
+        #expect(f.forDawExports.isEmpty)
     }
 
     @Test func forDawJobsAnswerWithTheirSummary() {

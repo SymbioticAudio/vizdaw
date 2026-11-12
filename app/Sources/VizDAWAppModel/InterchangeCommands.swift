@@ -2,7 +2,8 @@ import Foundation
 import VizDAWCore
 
 /// `file.import_midi`, `file.export_midi`, `file.export_midi_clip`,
-/// `file.export_for_daw` and `file.interchange_report` over the control channel (plan 6a Task 8): the
+/// `file.export_for_daw` and `file.interchange_report` over the control
+/// channel (plans 6a Task 8, 6b Task 3): the
 /// Open and Save dialogs' answers as parameters, checked here before the
 /// core sees them; the core checks the destinations.
 ///
@@ -214,7 +215,13 @@ public enum InterchangeCommands {
         case "32f": depth = .float32
         default: depth = base.depth
         }
-        let rate = args.int("rate").flatMap { UInt32(exactly: $0) } ?? base.sampleRate
+        var rate = base.sampleRate
+        if let r = args.int("rate") {
+            guard let n = UInt32(exactly: r), (8_000...384_000).contains(n) else {
+                return bad(id, "`rate` is 8000 to 384000 Hz")
+            }
+            rate = n
+        }
         let dither = depth == .float32 ? false : (args.flag("dither") ?? (depth == .int16))
         return .success(
             ForDawRequestRow(
@@ -323,21 +330,6 @@ public enum InterchangeCommands {
                     if case .failure(let error) = read { return .failed(.thrown(error, "Import Failed")) }
                     return importIntoNewProject(request, pickSeq: pickSeq, store: store)
                 })
-        case exportForDaw:
-            let dryRun = args.flag("dry_run") ?? false
-            let req: ForDawRequestRow
-            switch forDawRequest(args, m) {
-            case .failure(let f): return .failed(f)
-            case .success(let r): req = r
-            }
-            let session = m.session
-            if dryRun { return Self.dryRun(id, docID, m) { try session.exportForDawCheck(req: req).report } }
-            guard path != nil else { return .failed(.dialog("Save", "path")) }
-            do {
-                return .job(command: id, doc: docID, job: try session.exportForDaw(req: req))
-            } catch {
-                return .failed(.thrown(error, "Export Failed"))
-            }
         case exportMidi, exportClip:
             let dryRun = args.flag("dry_run") ?? false
             guard dryRun || path != nil else { return .failed(.dialog("Save", "path")) }
@@ -364,6 +356,21 @@ public enum InterchangeCommands {
                     : .job(command: id, doc: docID, job: try m.session.exportMidiClip(req: req))
             } catch {
                 return .failed(.thrown(error, dryRun ? "Export Check Failed" : "Export Failed"))
+            }
+        case exportForDaw:
+            let dryRun = args.flag("dry_run") ?? false
+            let req: ForDawRequestRow
+            switch forDawRequest(args, m) {
+            case .failure(let f): return .failed(f)
+            case .success(let r): req = r
+            }
+            let session = m.session
+            if dryRun { return Self.dryRun(id, docID, m) { try session.exportForDawCheck(req: req).report } }
+            guard let path, !path.isEmpty else { return .failed(.dialog("Save", "path")) }
+            do {
+                return .job(command: id, doc: docID, job: try session.exportForDaw(req: req))
+            } catch {
+                return .failed(.thrown(error, "Export Failed"))
             }
         default:
             return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))

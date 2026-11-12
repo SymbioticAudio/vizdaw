@@ -1962,6 +1962,10 @@ fn export_for_daw_checks_its_params() {
         json!({ "path": "/tmp/x", "dither": "yes" }),
         json!({ "path": "/tmp/x", "replace": true }),
         json!({ "path": "/tmp/x", "extra": 1 }),
+        json!({ "path": format!("/{}", "x".repeat(100_000)) }),
+        json!({ "path": "/tmp/x", "strips": "1,".repeat(50_000) }),
+        json!({ "path": "/tmp/x", "container": "x".repeat(100_000) }),
+        json!({ "path": "/tmp/x", "depth": "x".repeat(100_000) }),
     ];
     for params in bad {
         let (code, _) = err("command.run", run(params.clone()));
