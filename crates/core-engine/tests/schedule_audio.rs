@@ -581,3 +581,73 @@ fn segment_gain_applies_the_complement() {
     assert!((g.gain_at(1000) - 0.5).abs() < 1e-6);
     assert!((g.gain_at(1100) - 0.125).abs() < 1e-6);
 }
+
+#[test]
+fn an_offline_partner_gives_a_silent_complement_counted_once() {
+    let (mut b, seq, lane) = base();
+    let (_, bb) = pair(&mut b, seq, lane);
+    crossfade(&mut b, bb, CrossfadeLength::Frames(400), FadeShape::Linear);
+    // A's media (0) is offline: its complement is offline like its other
+    // piece, B plays online, and A counts as one offline region.
+    let (s, r) = run(b.doc(), seq, &[0]);
+    let x = extras(&s.audio);
+    assert_eq!(x.len(), 1);
+    assert!(!x[0].online);
+    let online: Vec<(u64, bool)> = s
+        .audio
+        .segments(OutputPathId(0))
+        .iter()
+        .map(|g| (g.media.0, g.online))
+        .collect();
+    assert_eq!(online.iter().filter(|(_, o)| !o).count(), 2);
+    assert!(online.contains(&(1, true)));
+    assert_eq!(r.audio_offline, 1);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("1 audio region(s) play silence"))
+    );
+    // A cut region resuming after a later one is one region, too.
+    let (mut b, seq, lane) = base();
+    b.region(seq, lane, 0, MediaId(0), 0, 4 * QF, 0.0, none(), none())
+        .unwrap();
+    b.region(seq, lane, Q, MediaId(1), 0, QF, 0.0, none(), none())
+        .unwrap();
+    let (s, r) = run(b.doc(), seq, &[0]);
+    assert_eq!(s.audio.segments(OutputPathId(0)).len(), 3);
+    assert_eq!(r.audio_offline, 1);
+}
+
+/// Review (a): flatten places a referenced region at its own start (it
+/// clips only the length at the window's end), so the complement keeps
+/// step with the later region's fade in inside a reference.
+#[test]
+fn a_crossfade_inside_a_reference_keeps_its_place() {
+    let mut b = Builder::new();
+    let (child, cl) = b.sequence("Loop", "Audio", None).unwrap();
+    b.media("Media/a.caf", 480_000, 2).unwrap();
+    b.media("Media/b.caf", 480_000, 1).unwrap();
+    let (_, bb) = pair(&mut b, child, cl);
+    crossfade(&mut b, bb, CrossfadeLength::Frames(400), FadeShape::Linear);
+    let (song, sl) = b.sequence("Song", "Refs", None).unwrap();
+    b.reference(song, sl, BAR, child, 2, 0).unwrap();
+    let (s, _) = run(b.doc(), song, &[]);
+    let x = extras(&s.audio);
+    // The child is one bar (4 QF) long; two uses from bar 2.
+    let got: Vec<(u64, u64, u64)> = x
+        .iter()
+        .map(|g| (g.start, g.frames, g.xfade_from))
+        .collect();
+    assert_eq!(
+        got,
+        vec![(4 * QF + 800, 400, 800), (8 * QF + 800, 400, 800)]
+    );
+    let bs: Vec<u64> = s
+        .audio
+        .segments(OutputPathId(0))
+        .iter()
+        .filter(|g| g.media.0 == 1)
+        .map(|g| g.start)
+        .collect();
+    assert_eq!(bs, vec![4 * QF + 800, 8 * QF + 800]);
+}

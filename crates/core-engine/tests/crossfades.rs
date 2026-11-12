@@ -5,9 +5,13 @@
 // The tables are hand-written literals, not the library's constants.
 #![allow(clippy::approx_constant)]
 
-use core_engine::fixtures::Builder;
+use core_engine::backend::AudioBackend;
+use core_engine::bounce::{BounceSpec, bounce};
+use core_engine::engine::{Engine, EngineConfig};
+use core_engine::fixtures::{Builder, Q};
 use core_engine::graph::exec::{Graph, Runner};
 use core_engine::graph::{GraphSpec, InputSpec, NodeSpec, StripSpec, Tap, plan};
+use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::schedule::{AudioSchedule, CompileOptions, TargetKind, TargetTable, compile};
 use core_media::caf::{CafWriter, WriteMode};
 use core_media::stream::{DiskMode, MediaFile, StreamConfig, Streamer};
@@ -15,8 +19,10 @@ use core_model::command::{AudioCmd, Command, CrossfadeLength};
 use core_model::event::{Fade, FadeShape};
 use core_model::format::BitDepth;
 use core_model::ids::{EventId, MediaId, OutputPathId};
+use core_model::time::Tick;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use FadeShape::{EqualPower, Exponential, Linear, SCurve};
 
@@ -85,14 +91,18 @@ fn graph() -> Graph {
 
 /// The document's audio schedule (its first sequence).
 fn schedule(b: &Builder) -> AudioSchedule {
+    schedule_with(b, &[])
+}
+
+/// The same with media `offline` offline.
+fn schedule_with(b: &Builder, offline: &[u64]) -> AudioSchedule {
     let seq = *b.doc().sequences().keys().next().unwrap();
     let mut table = TargetTable::new();
-    let (s, _) = compile(
-        b.doc(),
-        seq,
-        &CompileOptions::new(48_000.0),
-        &mut |k: &TargetKind| table.intern(k.clone()).map(Ok),
-    )
+    let mut opts = CompileOptions::new(48_000.0);
+    opts.offline_media = offline.iter().map(|m| MediaId(*m)).collect();
+    let (s, _) = compile(b.doc(), seq, &opts, &mut |k: &TargetKind| {
+        table.intern(k.clone()).map(Ok)
+    })
     .unwrap();
     s.audio
 }
@@ -113,7 +123,12 @@ fn streamer(dir: &Path, items: &[(u64, &str)]) -> (Streamer, core_media::stream:
 
 /// Renders frames 0..2048 of `b`'s path 0 (left channel).
 fn render(b: &Builder, dir: &Path) -> Vec<f32> {
-    let audio = Arc::new(schedule(b));
+    render_with(b, dir, &[])
+}
+
+/// The same with media `offline` offline.
+fn render_with(b: &Builder, dir: &Path, offline: &[u64]) -> Vec<f32> {
+    let audio = Arc::new(schedule_with(b, offline));
     let (s, r) = streamer(dir, &[(0, "a.caf"), (1, "b.caf")]);
     s.set_plan(Arc::from(audio.needs()));
     s.hint(0);
@@ -355,4 +370,175 @@ fn model_and_engine_agree_on_fractional_frames() {
         }
     }
     assert!(checked >= 30, "{checked}");
+}
+
+/// The DC pair with a 400-frame Linear crossfade, by hand: A (0.5) alone,
+/// then 0.5 (1 − x) + 0.25 x over the span, then B (0.25) alone.
+fn linear_golden(f: u64) -> f32 {
+    match f {
+        0..800 => 0.5,
+        800..1200 => {
+            let x = (f - 800) as f32 / 400.0;
+            0.5 * (1.0 - x) + 0.25 * x
+        }
+        1200..1800 => 0.25,
+        _ => 0.0,
+    }
+}
+
+/// An engine on the offline backend playing `b`'s first sequence, with
+/// the DC media of `dir`.
+fn engine_rig(b: &Builder, dir: &Path) -> (Engine, OfflineBackend) {
+    let seq = *b.doc().sequences().keys().next().unwrap();
+    let mut cfg = EngineConfig::new(48_000.0);
+    cfg.disk = DiskMode::Manual;
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(64))).unwrap();
+    engine.set_media(vec![
+        MediaFile {
+            id: MediaId(0),
+            path: dir.join("a.caf"),
+        },
+        MediaFile {
+            id: MediaId(1),
+            path: dir.join("b.caf"),
+        },
+    ]);
+    engine.load(b.doc(), seq).unwrap();
+    let mut out = OfflineBackend::new(48_000.0, 128);
+    out.start(renderer).unwrap();
+    out.reserve(4096);
+    (engine, out)
+}
+
+/// `n` frames of the left output, in blocks of 128 (the disk serviced
+/// before each).
+fn play(engine: &mut Engine, out: &mut OfflineBackend, n: usize) -> Vec<f32> {
+    let mut got = Vec::new();
+    while got.len() < n {
+        engine.streamer().service();
+        out.block(128);
+        got.extend_from_slice(out.output(128).0);
+    }
+    got.truncate(n);
+    got
+}
+
+fn linear_pair(dir: &Path) -> Builder {
+    dc_media(dir);
+    let (mut b, ev) = pair(Fade::default());
+    crossfade(&mut b, ev, 400, Linear);
+    b
+}
+
+#[test]
+fn a_locate_into_the_span_plays_the_golden() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = linear_pair(dir.path());
+    let (mut engine, mut out) = engine_rig(&b, dir.path());
+    engine.locate_frame(900).unwrap();
+    engine.play().unwrap();
+    let got = play(&mut engine, &mut out, 1000);
+    // The strip's pan law is a constant: read it where B plays alone.
+    let k = got[1200 - 900] / 0.25;
+    assert!(k > 0.1, "{k}");
+    for (i, x) in got.iter().enumerate() {
+        let f = 900 + i as u64;
+        let want = k * linear_golden(f);
+        assert!((x - want).abs() < 1e-6, "frame {f}: {x} vs {want}");
+    }
+    assert!(
+        !engine
+            .faults()
+            .contains(core_engine::render::Faults::STREAM_UNDERRUN)
+    );
+}
+
+#[test]
+fn a_loop_wrap_inside_the_span_plays_the_golden() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = linear_pair(dir.path());
+    let (mut engine, mut out) = engine_rig(&b, dir.path());
+    // Frames 700–1100: A alone, then the span from 800; the seam at 1 100
+    // is inside the span and wraps to before it, three times.
+    engine.set_loop_range(Some((700, 1100))).unwrap();
+    engine.locate_frame(700).unwrap();
+    engine.play().unwrap();
+    let got = play(&mut engine, &mut out, 1300);
+    let k = got[0] / 0.5;
+    assert!(k > 0.1, "{k}");
+    for (i, x) in got.iter().enumerate() {
+        let f = 700 + (i as u64 % 400);
+        let want = k * linear_golden(f);
+        assert!(
+            (x - want).abs() < 1e-6,
+            "output {i} (frame {f}): {x} vs {want}"
+        );
+    }
+    assert!(
+        !engine
+            .faults()
+            .contains(core_engine::render::Faults::STREAM_UNDERRUN)
+    );
+}
+
+#[test]
+fn an_offline_partner_leaves_the_later_region_fading_in_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = linear_pair(dir.path());
+    let l = render_with(&b, dir.path(), &[0]);
+    for (f, x) in l.iter().enumerate() {
+        let want = match f {
+            0..800 => 0.0,
+            800..1200 => 0.25 * (f - 800) as f32 / 400.0,
+            1200..1800 => 0.25,
+            _ => 0.0,
+        };
+        assert!((x - want).abs() < 1e-6, "frame {f}: {x} vs {want}");
+    }
+}
+
+/// A bounce of a crossfade is the playback render, frame for frame, and
+/// both are the hand-written golden.
+#[test]
+fn a_bounce_of_a_crossfade_matches_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = linear_pair(dir.path());
+    let (mut engine, mut out) = engine_rig(&b, dir.path());
+    let spec = BounceSpec {
+        mix: true,
+        stems: vec![],
+        heard_stems: vec![],
+        start: Tick::ZERO,
+        end: Tick(Q),
+        tail_cap: 48_000,
+    };
+    let mut mix = Vec::new();
+    let stats = bounce(
+        &mut engine,
+        &mut out,
+        &spec,
+        128,
+        &mut |k, l, _| {
+            if k == 0 {
+                mix.extend_from_slice(l);
+            }
+            Ok(())
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(mix.len() as u64, stats.frames);
+    let (mut engine, mut out) = engine_rig(&b, dir.path());
+    engine.play().unwrap();
+    let plain = play(&mut engine, &mut out, mix.len());
+    for (f, (x, y)) in mix.iter().zip(&plain).enumerate() {
+        assert_eq!(x, y, "frame {f}");
+    }
+    let k = plain[0] / 0.5;
+    assert!(k > 0.1, "{k}");
+    for (f, x) in plain.iter().enumerate() {
+        let want = k * linear_golden(f as u64);
+        assert!((x - want).abs() < 1e-6, "frame {f}: {x} vs {want}");
+    }
 }

@@ -277,9 +277,12 @@ fn complements(
         let mut s = p.seg;
         s.start = lo;
         s.frames = hi - lo;
-        s.file_frame = p.file_frame + (lo - p.start);
+        s.file_frame = p.file_frame.saturating_add(lo - p.start);
         s.xfade = u.fade_in;
-        s.xfade_from = p.seg.region_offset + u.raw_start.abs_diff(p.raw_start);
+        s.xfade_from = p
+            .seg
+            .region_offset
+            .saturating_add(u.raw_start.abs_diff(p.raw_start));
         out.push(s);
     }
 }
@@ -335,6 +338,10 @@ pub(crate) fn build(
         if cut >= length {
             continue;
         }
+        let online = !offline.contains(&media);
+        if !online {
+            report.audio_offline += 1;
+        }
         let refs: Vec<EventId> = r
             .path
             .iter()
@@ -363,7 +370,7 @@ pub(crate) fn build(
                 region_frames: written,
                 fade_in,
                 fade_out,
-                online: !offline.contains(&media),
+                online,
                 top_lane: r.path.first().map_or(last.lane, |p| p.lane),
                 xfade: Fade::default(),
                 xfade_from: 0,
@@ -418,7 +425,6 @@ pub(crate) fn build(
             segments.sort_by_key(|s| s.start);
             let longest = segments.iter().map(|s| s.frames).max().unwrap_or(0);
             report.audio_segments += segments.len();
-            report.audio_offline += segments.iter().filter(|s| !s.online).count();
             PathSegments {
                 path,
                 segments: segments.into_boxed_slice(),
