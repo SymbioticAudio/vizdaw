@@ -184,6 +184,9 @@ public protocol ControlHost: AnyObject {
     /// Opens document `doc`'s media pool window (plan 5b).
     func showMediaPool(_ doc: UUID)
     var nudge: NudgeSettings { get }
+    /// Settings › Editing's default crossfade in milliseconds (plan 6c
+    /// Task 5).
+    var crossfadeMs: Double { get }
     /// The app's key bindings (plan 4f).
     var keys: KeyBindings { get }
     /// Gives a transport field of document `doc`'s window the keyboard
@@ -507,6 +510,8 @@ public enum ControlCommands {
                 return .failed(.of(.invalidParams, "`peak_db` must be a level from -96 to 0 dB, like \"-0.3\""))
             }
             if let f = failure(RegionCommands.normalize(peakDb: peak, m)) { return f }
+        case RegionCommands.crossfade, RegionCommands.removeCrossfade:
+            return RegionCommands.runChannel(id, args: args, doc: docID, m, defaultMs: host.crossfadeMs)
         case _ where RegionCommands.ids.contains(id):
             if let f = failure(RegionCommands.run(id, m)) { return f }
         case _ where detail[id] != nil:

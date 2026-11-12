@@ -227,6 +227,19 @@ struct AppCommands: Commands {
             commandItem(RegionCommands.fadeIn, RegionCommands.self)
             commandItem(RegionCommands.fadeOut, RegionCommands.self)
             commandItem(RegionCommands.removeFades, RegionCommands.self)
+            Button(keyBindings.row(RegionCommands.crossfade)?.title ?? "Crossfade") {
+                if let doc {
+                    report(
+                        RegionCommands.crossfade(doc, defaultMs: AppControlHost.shared.crossfadeMs), doc)
+                }
+            }
+            .keyboardShortcut(KeyMenu.shortcut(RegionCommands.crossfade))
+            .disabled(doc.map { !RegionCommands.enabled(RegionCommands.crossfade, $0) } ?? true)
+            Button(keyBindings.row(RegionCommands.removeCrossfade)?.title ?? "Remove Crossfade") {
+                if let doc { report(RegionCommands.removeCrossfade(doc), doc) }
+            }
+            .keyboardShortcut(KeyMenu.shortcut(RegionCommands.removeCrossfade))
+            .disabled(doc.map { !RegionCommands.enabled(RegionCommands.removeCrossfade, $0) } ?? true)
             Divider()
             Button(keyBindings.row(RegionCommands.openExternal)?.title ?? "Open in External Editor") {
                 if let doc { openExternal(doc) }

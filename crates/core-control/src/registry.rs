@@ -793,6 +793,50 @@ const fn opt_id_param(name: &'static str, help: &'static str) -> ParamSpec {
     }
 }
 
+/// `region.crossfade` (plan 6c Task 5).
+const CROSSFADE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The later region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    ParamSpec {
+        name: "length_ms",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Milliseconds, more than 0, as text (\"12.5\"); default: the whole overlap, at most Settings > Editing's default crossfade.",
+    },
+    ParamSpec {
+        name: "shape",
+        kind: ParamKind::Choice(&["linear", "equal_power", "exponential", "s_curve"]),
+        required: false,
+        help: "The crossfade's shape (default: equal_power).",
+    },
+];
+
+/// `region.remove_crossfade` (plan 6c Task 5).
+const REMOVE_CROSSFADE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The later region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+];
+
 /// `track.new_*` (plan tracks Ruling 5).
 const NEW_TRACK_PARAMS: &[ParamSpec] = &[
     opt_id_param("seq", "The sequence (default: the selected one)."),
@@ -1623,6 +1667,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         true,
     ),
     cmd("region.remove_fades", "Region", "Remove Fades", None, true),
+    CommandSpec {
+        params: CROSSFADE_PARAMS,
+        ..cmd("region.crossfade", "Region", "Crossfade", None, true)
+    },
+    CommandSpec {
+        params: REMOVE_CROSSFADE_PARAMS,
+        ..cmd(
+            "region.remove_crossfade",
+            "Region",
+            "Remove Crossfade",
+            None,
+            true,
+        )
+    },
     CommandSpec {
         params: EXTERNAL_PARAMS,
         dialogs: &[DialogSpec {

@@ -93,6 +93,19 @@ struct EditingSettingsView: View {
                 }
                 .disabled(!scaleSteps.wrappedValue || prefs.nudge.followKeySignature)
             }
+            // Plan 6c Task 5: Region › Crossfade's length.
+            Section("Crossfades") {
+                Stepper(
+                    value: $prefs.crossfadeMs, in: EditingPreferences.crossfadeRange, step: 1
+                ) {
+                    LabeledContent("Default crossfade") {
+                        Text("\(Int(prefs.crossfadeMs.rounded())) ms")
+                            .monospacedDigit()
+                            .foregroundStyle(theme.text.secondary.color)
+                    }
+                }
+                .accessibilityLabel("Default crossfade in milliseconds")
+            }
             // Plan 5f-3 Ruling 5: applications only, chosen with a panel.
             Section("External Sample Editor") {
                 LabeledContent("Application") {

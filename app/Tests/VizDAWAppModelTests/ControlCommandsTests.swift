@@ -7,6 +7,8 @@ import VizDAWCore
 final class FakeControlHost: ControlHost {
     var calls: [String] = []
     var nudge = NudgeSettings()
+    /// Settings › Editing's default crossfade (plan 6c Task 5).
+    var crossfadeMs: Double = 10
     var surfaces: any SurfaceCore = FakeSurfaceCore()
     /// The editor `region.open_external` uses without `app` (plan 5f-3).
     var externalEditor: ExternalEditorChoice = .none

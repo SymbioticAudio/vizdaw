@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        171,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw"
+        173,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -2042,6 +2042,70 @@ fn external_commands_check_their_params() {
         .unwrap();
     assert_eq!(open.dialogs[0].name, "Choose External Editor");
     assert_eq!(open.dialogs[0].answered_by, ["app"]);
+}
+
+/// Plan 6c Task 5: `region.crossfade` takes the three IDs (all or none;
+/// the Swift layer refuses a part, F15), `length_ms` as text and a shape;
+/// `region.remove_crossfade` the three IDs only. No dialogs.
+#[test]
+fn crossfade_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for good in [
+        json!({}),
+        json!({ "seq": 1, "lane": 2, "event": 3 }),
+        json!({ "seq": 1 }),
+        json!({ "length_ms": "12.5", "shape": "linear" }),
+        json!({ "shape": "s_curve" }),
+        json!({ "shape": "equal_power" }),
+        json!({ "shape": "exponential", "seq": 1, "lane": 2, "event": 3 }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run("region.crossfade", good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    for bad in [
+        json!({ "shape": "cubic" }),
+        json!({ "shape": "Linear" }),
+        json!({ "event": -1 }),
+        json!({ "event": "3" }),
+        json!({ "length_ms": 5 }),
+        json!({ "length_ms": null, "extra": 1 }),
+        json!({ "extra": 1 }),
+    ] {
+        let (code, _) = err("command.run", run("region.crossfade", bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    for good in [json!({}), json!({ "seq": 1, "lane": 2, "event": 3 })] {
+        assert!(matches!(
+            ok("command.run", run("region.remove_crossfade", good)),
+            Command::CommandRun { .. }
+        ));
+    }
+    for bad in [
+        json!({ "length_ms": "5" }),
+        json!({ "shape": "linear" }),
+        json!({ "event": -1 }),
+    ] {
+        let (code, _) = err("command.run", run("region.remove_crossfade", bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    for id in ["region.crossfade", "region.remove_crossfade"] {
+        let c = COMMANDS.iter().find(|c| c.id == id).unwrap();
+        assert!(c.document && c.menu == "Region" && c.menu_item, "{id}");
+        assert!(c.dialogs.is_empty(), "{id}: never a dialog");
+    }
+    assert_eq!(
+        COMMANDS
+            .iter()
+            .find(|c| c.id == "region.crossfade")
+            .unwrap()
+            .title,
+        "Crossfade"
+    );
 }
 
 /// Plan 5f-4 Ruling 2: `surface.add` takes the Kontrol type.

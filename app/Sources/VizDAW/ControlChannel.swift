@@ -659,6 +659,7 @@ final class AppControlHost: ControlHost {
     }
 
     var nudge: NudgeSettings { editingPreferences.nudge }
+    var crossfadeMs: Double { editingPreferences.crossfadeMs }
     var keys: KeyBindings { keyBindings }
     /// `ui.theme`'s preference (plan 7b Task B4).
     var appearance: AppearancePreferences { appearancePreferences }
