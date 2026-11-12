@@ -505,6 +505,17 @@ impl Tree {
         self.dropped_text
     }
 
+    /// The bytes the tree holds (the capacity of its arena and tables), for
+    /// callers that keep one budget across the tree and what they build
+    /// from it.
+    pub fn bytes(&self) -> usize {
+        self.arena
+            .capacity()
+            .saturating_add(self.nodes.capacity().saturating_mul(size_of::<Node>()))
+            .saturating_add(self.attrs.capacity().saturating_mul(size_of::<AttrRec>()))
+            .saturating_add(self.texts.capacity().saturating_mul(size_of::<Span>()))
+    }
+
     /// How many elements the tree holds (a parsed tree holds its root).
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {

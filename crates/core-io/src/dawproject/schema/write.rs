@@ -495,6 +495,14 @@ pub fn write_project_reporting(p: &DpProject, rep: &mut Report) -> String {
             write_lanes(&mut w, rep, l);
         }
         write_markers(&mut w, "Markers", &arr.markers_head, &arr.markers);
+        if arr.markers.is_empty() && arr.markers_head != DpHead::default() {
+            // The XSD wants a marker in `Markers`: its head has nowhere to go.
+            rep.add(
+                ItemKind::LeftOut,
+                UNWRITABLE_PARTS,
+                Some("Markers".to_owned()),
+            );
+        }
         if let Some(t) = &arr.tempo_automation {
             write_points(&mut w, "TempoAutomation", t);
         }

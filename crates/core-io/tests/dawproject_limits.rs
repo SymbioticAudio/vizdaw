@@ -31,6 +31,18 @@ fn repeated(open: &str, item: &str, n: usize, close: &str) -> String {
     )
 }
 
+/// Like [`repeated`], with the item's number between `before` and `after`.
+fn unique(open: &str, before: &str, after: &str, n: usize, close: &str) -> String {
+    use std::fmt::Write as _;
+    let mut s = format!("<Project version=\"1.0\"><Application name=\"t\" version=\"1\"/>{open}");
+    for i in 0..n {
+        let _ = write!(s, "{before}{i}{after}");
+    }
+    s.push_str(close);
+    s.push_str("</Project>");
+    s
+}
+
 /// Parses, reads and checks `xml`; the tree is dropped before the model.
 fn run(xml: &str) -> (Result<(), IoError>, usize, std::time::Duration) {
     let start = Instant::now();
@@ -79,6 +91,35 @@ fn hostile_sizes_stay_inside_the_promise() {
             "channels with ids",
             repeated("<Structure>", "<Channel id=\"c\"/>", n / 2, "</Structure>"),
         ),
+        (
+            "unique track ids",
+            unique(
+                "<Structure>",
+                "<Track id=\"t",
+                "\"/>",
+                1_900_000,
+                "</Structure>",
+            ),
+        ),
+        (
+            "unique parameter ids",
+            unique(
+                "<Structure><Channel><Devices><Equalizer deviceName=\"E\" deviceRole=\"audioFX\">",
+                "<InputGain unit=\"linear\" id=\"p",
+                "\"/>",
+                1_900_000,
+                "</Equalizer></Devices></Channel></Structure>",
+            ),
+        ),
+        (
+            "short markers",
+            repeated(
+                "<Arrangement><Markers>",
+                "<Marker name=\"m\" time=\"1\"/>",
+                600_000,
+                "</Markers></Arrangement>",
+            ),
+        ),
     ];
     for (name, xml) in &shapes {
         let (r, peak, took) = run(xml);
@@ -121,4 +162,45 @@ fn a_big_real_project_still_reads() {
     let (r, peak, _) = run(&xml);
     r.expect("reads");
     assert!(peak < 128 * MIB, "peak {} MiB", peak / MIB);
+}
+
+#[test]
+fn the_id_check_is_bounded_too() {
+    use core_io::dawproject::schema::{DpNamed, DpProject, DpStructureItem, DpTrack};
+    let track = |i: usize| {
+        DpStructureItem::Track(DpTrack {
+            named: DpNamed {
+                id: Some(format!("t{i}")),
+                ..DpNamed::default()
+            },
+            content: vec![],
+            loaded: None,
+            channel: None,
+            children: vec![],
+        })
+    };
+    let mut p = DpProject {
+        version: "1.0".to_owned(),
+        structure: (0..1_000_000).map(track).collect(),
+        ..DpProject::default()
+    };
+    let (r, seen) = measure(|| check_ids(&p, &mut Report::default()).map(|ids| ids.kind("t7")));
+    println!("1M unique ids: peak {} MiB", seen.peak / MIB);
+    assert_eq!(
+        r.expect("checks"),
+        Some(core_io::dawproject::schema::IdKind::Track)
+    );
+    assert!(seen.peak < 128 * MIB, "peak {} MiB", seen.peak / MIB);
+    // With the model's bytes already near the budget, the same check is
+    // refused, early.
+    p.model_bytes = core_io::limits::MAX_MODEL_BYTES - 1000;
+    let (r, seen) = measure(|| check_ids(&p, &mut Report::default()).map(|_| ()));
+    println!("near the budget: peak {} MiB", seen.peak / MIB);
+    assert_eq!(
+        r,
+        Err(IoError::Refused(
+            "This DAWproject file is damaged: it has too many parts.".to_owned()
+        ))
+    );
+    assert!(seen.peak < 4 * MIB, "peak {} MiB", seen.peak / MIB);
 }

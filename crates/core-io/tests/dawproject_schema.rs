@@ -518,6 +518,7 @@ fn everything() -> DpProject {
             content: Some(DpTimeline::ClipSlot(head("sceneslot"), None)),
         }],
         dropped_text: 0,
+        model_bytes: 0,
     }
 }
 
@@ -592,7 +593,7 @@ fn written_projects_pass_the_vendored_schema() {
                     }),
                 ],
             }),
-            markers_head: DpHead::default(),
+            markers_head: head("emptymarkers"),
             markers: vec![],
             tempo_automation: None,
             time_signature_automation: None,
@@ -630,7 +631,7 @@ fn written_projects_pass_the_vendored_schema() {
     assert_eq!(
         it.details,
         [
-            "Warps", "Warps", "Warps", "Warps", "Video", "Video", "Scene", "Scene"
+            "Warps", "Warps", "Warps", "Warps", "Video", "Video", "Markers", "Scene", "Scene"
         ]
     );
     assert_eq!(write_project(&hostile), xml);

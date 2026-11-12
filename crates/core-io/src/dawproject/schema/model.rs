@@ -187,6 +187,10 @@ pub struct DpProject {
     /// How many runs of text the tree dropped for being in an element with
     /// child elements ([`Tree::dropped_text`](crate::xml::Tree::dropped_text)); for the mappers to report.
     pub dropped_text: usize,
+    /// The bytes the reader counted for this model (not the tree's), so that
+    /// [`check_ids`](super::check_ids) continues the same budget. Zero for a
+    /// project built in code.
+    pub model_bytes: usize,
 }
 
 /// One entry of the structure.
@@ -643,7 +647,7 @@ pub struct DpMetaData {
     pub dropped_text: usize,
 }
 
-/// A running total of the bytes a model (or a check of one) holds, against
+/// A running total of the bytes a read holds, against
 /// [`MAX_MODEL_BYTES`](crate::limits::MAX_MODEL_BYTES). Past the cap `over`
 /// is set and the work stops adding.
 #[derive(Debug, Default)]
@@ -653,6 +657,18 @@ pub(super) struct Cap {
 }
 
 impl Cap {
+    /// A total that already holds `used` bytes.
+    pub(super) fn starting_at(used: usize) -> Self {
+        let mut cap = Cap::default();
+        cap.charge(used);
+        cap
+    }
+
+    /// The bytes counted so far.
+    pub(super) fn used(&self) -> usize {
+        self.used
+    }
+
     /// Counts `bytes` more.
     pub(super) fn charge(&mut self, bytes: usize) {
         self.used = self.used.saturating_add(bytes);
@@ -662,8 +678,26 @@ impl Cap {
     }
 
     /// Counts a `T` held in a `Vec` (which may be up to twice as large as
-    /// its length) and `extra` bytes of text.
+    /// its length) and `extra` bytes.
     pub(super) fn item<T>(&mut self, extra: usize) {
         self.charge(size_of::<T>().saturating_mul(2).saturating_add(extra));
+    }
+
+    /// Counts a heap text of `len` bytes: rounded up, with the allocator's
+    /// own header. Nothing for an empty one.
+    pub(super) fn text(&mut self, len: usize) {
+        if len > 0 {
+            self.charge(len.next_multiple_of(16).saturating_add(16));
+        }
+    }
+
+    /// Counts the growth of a collection to `bytes` (what it holds now, on
+    /// top of `seen`, what was counted before): the old allocation is kept
+    /// counted, as it lives while the new one is made.
+    pub(super) fn grew(&mut self, seen: &mut usize, bytes: usize) {
+        if bytes > *seen {
+            self.charge(bytes);
+            *seen = bytes;
+        }
     }
 }

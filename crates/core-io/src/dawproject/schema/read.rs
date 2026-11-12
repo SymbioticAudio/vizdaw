@@ -62,16 +62,21 @@ struct Rd<'a> {
     t: &'a Tree,
     rep: &'a mut Report,
     cap: Cap,
+    /// What the tree held when the count began.
+    tree_bytes: usize,
     /// A refusal found on the way; the work stops at the next loop.
     stop: Option<IoError>,
 }
 
 impl<'a> Rd<'a> {
     fn new(t: &'a Tree, rep: &'a mut Report) -> Self {
+        let tree_bytes = t.bytes();
         Rd {
             t,
             rep,
-            cap: Cap::default(),
+            // The tree is alive while the model is built from it.
+            cap: Cap::starting_at(tree_bytes),
+            tree_bytes,
             stop: None,
         }
     }
@@ -155,7 +160,12 @@ impl<'a> Rd<'a> {
         if cut {
             self.bad_value(n, a);
         }
-        self.cap.charge(s.len());
+        let s = {
+            let mut s = s;
+            s.shrink_to_fit();
+            s
+        };
+        self.cap.text(s.len());
         Some(s)
     }
 
@@ -297,6 +307,7 @@ impl<'a> Rd<'a> {
                 None => self.unknown(|| format!("Track@contentType {}", clean(word).0)),
             }
         }
+        self.cap.text(content.capacity());
         let mut track = DpTrack {
             named: self.named(n, true),
             content,
@@ -446,7 +457,8 @@ impl<'a> Rd<'a> {
                 name if kind.settings_children().contains(&name) => {
                     if d.settings.len() < MAX_SETTINGS {
                         let setting = self.setting(c);
-                        self.cap.item::<String>(setting.len());
+                        self.cap.item::<String>(0);
+                        self.cap.text(setting.len());
                         d.settings.push(setting);
                     } else {
                         self.unknown_element(c);
@@ -483,7 +495,8 @@ impl<'a> Rd<'a> {
         }
         if t.attr(n, "id").is_some() {
             if let Some(id) = self.id_string(n, "id") {
-                self.cap.item::<String>(id.len());
+                self.cap.item::<String>(0);
+                self.cap.text(id.len());
                 out.push(id);
             }
         }
@@ -657,7 +670,7 @@ impl<'a> Rd<'a> {
         if !is_timeline(name) {
             self.unknown_element(n);
             let name = clean(name).0;
-            self.cap.charge(name.len());
+            self.cap.text(name.len());
             return Some(DpTimeline::Unknown(name));
         }
         if level > MAX_TIMELINE_NESTING {
@@ -935,6 +948,9 @@ impl<'a> Rd<'a> {
         };
         let mut file = None;
         for c in t.children(n) {
+            if self.halted() {
+                break;
+            }
             if t.name(c) == "File" && file.is_none() {
                 file = self.file_ref(c);
             } else {
@@ -1107,6 +1123,7 @@ impl<'a> Rd<'a> {
             return Err(e);
         }
         p.dropped_text = t.dropped_text();
+        p.model_bytes = self.cap.used().saturating_sub(self.tree_bytes);
         Ok(p)
     }
 
@@ -1127,6 +1144,9 @@ impl<'a> Rd<'a> {
         let t = self.t;
         self.check_attrs(n, &[]);
         for c in t.children(n) {
+            if self.halted() {
+                break;
+            }
             match t.name(c) {
                 "Tempo" if p.tempo.is_none() => p.tempo = self.real(c),
                 "TimeSignature" if p.time_signature.is_none() => {

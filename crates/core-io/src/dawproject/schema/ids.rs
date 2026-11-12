@@ -39,13 +39,14 @@ pub enum IdKind {
     Other,
 }
 
-/// The IDs of a project and what they name.
+/// The IDs of a project and what they name. It borrows the IDs from the
+/// project it was made from.
 #[derive(Debug, Clone, Default)]
-pub struct Ids {
-    map: HashMap<String, IdKind>,
+pub struct Ids<'a> {
+    map: HashMap<&'a str, IdKind>,
 }
 
-impl Ids {
+impl Ids<'_> {
     /// What `id` names, if it names anything.
     pub fn kind(&self, id: &str) -> Option<IdKind> {
         self.map.get(id).copied()
@@ -59,53 +60,101 @@ struct Reference<'a> {
     what: &'static str,
 }
 
+/// What a hash table of `capacity` entries of `entry` bytes holds, with its
+/// control bytes and the headroom of its power-of-two size.
+fn table_bytes(capacity: usize, entry: usize) -> usize {
+    let buckets = capacity
+        .saturating_mul(8)
+        .div_ceil(7)
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX);
+    buckets.saturating_mul(entry.saturating_add(1))
+}
+
 /// One walk over the model: its IDs, references and the edges that could
-/// make clips play each other.
-#[derive(Default)]
+/// make clips play each other. Everything it grows is counted in `cap`
+/// (which the model's own bytes started), and the walk stops once over.
 struct Scan<'a> {
-    ids: HashMap<String, IdKind>,
-    duplicate: Option<String>,
+    ids: HashMap<&'a str, IdKind>,
+    ids_seen: usize,
+    duplicate: Option<&'a str>,
     refs: Vec<Reference<'a>>,
+    refs_seen: usize,
     /// The IDs of the timelines around the part being walked.
     around: Vec<&'a str>,
-    /// Timeline ID to the IDs of the timelines inside it with an ID, and of
-    /// those its clips (directly inside it) refer to.
-    edges: HashMap<&'a str, Vec<&'a str>>,
+    around_seen: usize,
+    /// (from, to): `from` is a timeline ID, `to` the ID of a timeline inside
+    /// it (with an ID of its own) or one its clips (directly inside it)
+    /// refer to.
+    edges: Vec<(&'a str, &'a str)>,
+    edges_seen: usize,
     cap: Cap,
 }
 
 impl<'a> Scan<'a> {
-    fn register(&mut self, id: &str, kind: IdKind) {
-        self.cap.charge(id.len().saturating_add(64));
-        if self.ids.insert(id.to_owned(), kind).is_some() && self.duplicate.is_none() {
-            self.duplicate = Some(id.to_owned());
+    fn new(start: usize) -> Self {
+        Scan {
+            ids: HashMap::new(),
+            ids_seen: 0,
+            duplicate: None,
+            refs: Vec::new(),
+            refs_seen: 0,
+            around: Vec::new(),
+            around_seen: 0,
+            edges: Vec::new(),
+            edges_seen: 0,
+            cap: Cap::starting_at(start),
         }
     }
 
-    fn id(&mut self, n: &DpNamed, kind: IdKind) {
+    fn register(&mut self, id: &'a str, kind: IdKind) {
+        if self.cap.over {
+            return;
+        }
+        if self.ids.insert(id, kind).is_some() && self.duplicate.is_none() {
+            self.duplicate = Some(id);
+        }
+        let bytes = table_bytes(self.ids.capacity(), size_of::<(&str, IdKind)>());
+        self.cap.grew(&mut self.ids_seen, bytes);
+    }
+
+    fn id(&mut self, n: &'a DpNamed, kind: IdKind) {
         if let Some(id) = &n.id {
             self.register(id, kind);
         }
     }
 
     fn reference(&mut self, id: &'a Option<String>, want: IdKind, what: &'static str) {
+        if self.cap.over {
+            return;
+        }
         if let Some(id) = id {
-            self.cap
-                .charge(size_of::<Reference<'_>>().saturating_mul(2));
             self.refs.push(Reference { id, want, what });
+            let bytes = self
+                .refs
+                .capacity()
+                .saturating_mul(size_of::<Reference<'_>>());
+            self.cap.grew(&mut self.refs_seen, bytes);
         }
     }
 
     fn edge(&mut self, from: &'a str, to: &'a str) {
-        self.cap.charge(size_of::<&str>().saturating_mul(4));
-        self.edges.entry(from).or_default().push(to);
+        if self.cap.over {
+            return;
+        }
+        self.edges.push((from, to));
+        let bytes = self
+            .edges
+            .capacity()
+            .saturating_mul(size_of::<(&str, &str)>());
+        self.cap.grew(&mut self.edges_seen, bytes);
     }
 
-    fn real(&mut self, p: &DpRealParam) {
+    fn real(&mut self, p: &'a DpRealParam) {
         self.id(&p.named, IdKind::Parameter);
     }
 
-    fn bool_param(&mut self, p: &DpBoolParam) {
+    fn bool_param(&mut self, p: &'a DpBoolParam) {
         self.id(&p.named, IdKind::Parameter);
     }
 
@@ -132,7 +181,7 @@ impl<'a> Scan<'a> {
                 self.bool_param(e);
             }
             for id in &d.other_ids {
-                self.register(id, IdKind::Parameter);
+                self.register(id.as_str(), IdKind::Parameter);
             }
         }
         if let Some(m) = &c.mute {
@@ -168,6 +217,8 @@ impl<'a> Scan<'a> {
             self.edge(parent, id);
         }
         self.around.push(id);
+        let bytes = self.around.capacity().saturating_mul(size_of::<&str>());
+        self.cap.grew(&mut self.around_seen, bytes);
         true
     }
 
@@ -244,36 +295,60 @@ impl<'a> Scan<'a> {
         }
     }
 
-    /// Whether the edges hold a loop.
-    fn has_loop(&self) -> bool {
+    /// Whether the edges hold a loop; `Err` if the check passed the budget.
+    fn has_loop(&mut self) -> Result<bool, IoError> {
+        self.edges.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let edges = std::mem::take(&mut self.edges);
+        let range = |node: &str| {
+            (
+                edges.partition_point(|e| e.0 < node),
+                edges.partition_point(|e| e.0 <= node),
+            )
+        };
         // false: on the path being walked; true: finished.
         let mut state: HashMap<&str, bool> = HashMap::new();
-        for &start in self.edges.keys() {
+        let (mut state_seen, mut path_seen) = (0, 0);
+        let mut path: Vec<(&str, usize, usize)> = Vec::new();
+        for &(start, _) in &edges {
             if state.contains_key(start) {
                 continue;
             }
             state.insert(start, false);
-            let mut path: Vec<(&str, usize)> = vec![(start, 0)];
+            let (from, to) = range(start);
+            path.push((start, from, to));
             while let Some(top) = path.last_mut() {
-                let node = top.0;
-                let next = self.edges.get(node).and_then(|v| v.get(top.1)).copied();
-                let Some(next) = next else {
+                if self.cap.over {
+                    return Err(damaged("it has too many parts"));
+                }
+                let (node, at, end) = *top;
+                if at >= end {
                     state.insert(node, true);
                     path.pop();
                     continue;
+                }
+                top.1 = at.saturating_add(1);
+                let Some(&(_, next)) = edges.get(at) else {
+                    path.pop();
+                    continue;
                 };
-                top.1 = top.1.saturating_add(1);
                 match state.get(next) {
-                    Some(false) => return true,
+                    Some(false) => return Ok(true),
                     Some(true) => {}
                     None => {
                         state.insert(next, false);
-                        path.push((next, 0));
+                        let (from, to) = range(next);
+                        path.push((next, from, to));
                     }
                 }
+                let bytes = table_bytes(state.capacity(), size_of::<(&str, bool)>());
+                self.cap.grew(&mut state_seen, bytes);
+                let bytes = path
+                    .capacity()
+                    .saturating_mul(size_of::<(&str, usize, usize)>());
+                self.cap.grew(&mut path_seen, bytes);
             }
         }
-        false
+        Ok(false)
     }
 }
 
@@ -282,10 +357,13 @@ impl<'a> Scan<'a> {
 /// reference to nothing, or to the wrong kind of part, is counted in `report`
 /// as left out ([`MISSING_REFERENCES`]) while it stays in the model. Clips,
 /// markers, notes and points have no IDs, so their `named.id` is ignored.
-/// The check is itself bounded by
-/// [`MAX_MODEL_BYTES`](crate::limits::MAX_MODEL_BYTES).
-pub fn check_ids(p: &DpProject, report: &mut Report) -> Result<Ids, IoError> {
-    let mut s = Scan::default();
+/// The check continues the budget the reader counted
+/// ([`DpProject::model_bytes`], against
+/// [`MAX_MODEL_BYTES`](crate::limits::MAX_MODEL_BYTES)) and so assumes the
+/// tree the project was read from has been dropped; past it the file is
+/// refused as having too many parts.
+pub fn check_ids<'a>(p: &'a DpProject, report: &mut Report) -> Result<Ids<'a>, IoError> {
+    let mut s = Scan::new(p.model_bytes);
     if let Some(t) = &p.tempo {
         s.real(t);
     }
@@ -323,10 +401,10 @@ pub fn check_ids(p: &DpProject, report: &mut Report) -> Result<Ids, IoError> {
     if s.cap.over {
         return Err(damaged("it has too many parts"));
     }
-    if let Some(id) = &s.duplicate {
+    if let Some(id) = s.duplicate {
         return Err(damaged(format!("two parts share the ID '{}'", shown(id))));
     }
-    if s.has_loop() {
+    if s.has_loop()? {
         return Err(damaged("clips refer to each other in a loop"));
     }
     for r in &s.refs {
