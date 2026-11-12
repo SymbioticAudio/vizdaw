@@ -135,20 +135,20 @@ fn add_n(report: &mut Report, kind: ItemKind, what: &str, n: u64) {
 // ---- what plays ----
 
 /// The chosen tracks of a sequence and what they play.
-struct Source<'a> {
-    doc: &'a Document,
-    seq: &'a Sequence,
+pub(crate) struct Source<'a> {
+    pub(crate) doc: &'a Document,
+    pub(crate) seq: &'a Sequence,
     /// The chosen tracks, in display order.
-    lanes: Vec<&'a Lane>,
+    pub(crate) lanes: Vec<&'a Lane>,
     /// What each plays, by tick (stable).
-    played: BTreeMap<LaneId, Vec<ResolvedEvent>>,
+    pub(crate) played: BTreeMap<LaneId, Vec<ResolvedEvent>>,
 }
 
 /// The tracks `chosen` (empty: all) of sequence `seq`, flattened with
 /// their mute and every solo of the sequence cleared, the other tracks
 /// hidden. Notes muted tracks, and counts what `flatten` drops silently:
 /// muted notes and events outside the sequence (F10).
-fn source<'a>(
+pub(crate) fn source<'a>(
     doc: &'a Document,
     seq: SeqId,
     chosen: &[LaneId],
