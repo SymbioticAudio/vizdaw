@@ -2529,3 +2529,43 @@ the sheet's model (`ForDawModelTests`, `InterchangeTests`) and the e2e
 MIDI files at bar 1 in the DAW you use that reads only audio and MIDI files.
 Check that they line up and that the tempo is right. Repeat with a song that
 has a pickup, placing the files where the About file says.
+
+### Crossfades (plan 6c)
+
+By eye and by ear; the model, its checks and what each edit does to a
+crossfade are tested (`core-model/tests/crossfades.rs`), the sound of every
+shape (`core-engine/tests/crossfades.rs`), the edits, rows and warnings
+(`core-ffi/tests/crossfades.rs`), the commands (`RegionCommandsTests`), the
+X handle and its menu (`RegionEditingTests`), the typed box
+(`AudioEditorModelTests`) and the e2e `crossfades_over_the_channel`.
+
+274. Put two regions on one track so that the second starts inside the
+     first, select both and choose Region › Crossfade. An X covers the start
+     of the overlap: 10 ms, or the whole overlap when it is shorter. Region ›
+     Remove Crossfade turns it back into a plain fade-in; Undo brings the
+     crossfade back.
+275. Drag the X's handle. The length follows, with an "<n> ms" readout. It
+     stops at the end of the first region, and at 1 frame. One Undo
+     ("Crossfade") puts it back; Escape mid-drag changes nothing.
+276. Right-click the X. There are four "Crossfade: …" shapes (the current one
+     ticked) and Remove Crossfade. Each shape changes the sound, not the
+     length, and VoiceOver still names the region with ", crossfade".
+277. In the audio editor with the later region selected, the Crossfade box
+     and shape picker replace Fade In. Type "25 ms", then "1200 frames": both
+     land as one Undo step each. Type "abc": the status says how to type a
+     fade.
+278. The inspector shows "Crossfade 10 ms, Equal Power" for the region.
+279. Move the later region right until it overlaps the first by less than
+     the crossfade: the crossfade shortens and the status says so. Move it
+     past the first region's end: the crossfade goes, with a status line, and
+     moving it back does not bring it back (Undo does). Split inside the X:
+     refused with its sentence. Split later in the region: the new part has
+     no X.
+280. Listen across the overlap with Linear and with Equal Power: no click, no
+     gap. Open a project saved before this build that has overlapping
+     regions: they still cut hard from one to the next.
+281. Settings › Editing › Default crossfade: set 50 ms. Region › Crossfade on
+     a long overlap makes 50 ms; the value is kept after a relaunch.
+
+**Owner check (manual, only the owner can do):** make, drag, type and remove
+a crossfade, and listen through it (spec §12).

@@ -572,6 +572,22 @@ fn audio_file(path: &std::path::Path, frames: usize) {
     w.finish().unwrap();
 }
 
+/// A 48 kHz float CAF of `frames` frames of `channels` channels, every
+/// sample at `level` (plan 6c Task 7, F19: [`audio_file`] with a level).
+fn audio_file_level(path: &std::path::Path, frames: usize, level: f32, channels: u16) {
+    let mut w = core_media::caf::CafWriter::create(
+        path,
+        48_000,
+        channels,
+        core_model::format::BitDepth::Float32,
+        core_media::caf::WriteMode::Normal,
+    )
+    .unwrap();
+    w.write(&vec![level; usize::from(channels) * frames])
+        .unwrap();
+    w.finish().unwrap();
+}
+
 /// README steps 109–116 through the channel (plan 5a): a 44.1 kHz/16-bit
 /// project stores an imported 48 kHz file in its own format; the demo
 /// imports into a new lane, plays the region without disk faults, and
@@ -4061,6 +4077,185 @@ fn exports_for_another_daw_over_the_channel() {
     );
     assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
     assert!(e.message.contains("Save"), "{e:?}");
+    assert_eq!(window_numbers(&mut app), windows);
+    app.quit();
+}
+
+/// README 274–281 through the channel (plan 6c Task 7): two mono regions
+/// on one track, the later one starting 0.5 s into the earlier; hostile
+/// `region.crossfade` calls change nothing; a 100 ms Linear crossfade,
+/// heard in a bounce as the midpoint of the two levels; Remove Crossfade,
+/// the default 10 ms Equal Power one and its midpoint; Undo twice; and
+/// Remove Fades drops the crossfade with a status line (F1).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn crossfades_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    // 1. Mono files make one track each (F20): 2 s at 0.25 and at 0.5.
+    let (a_file, b_file) = (home.join("a.caf"), home.join("b.caf"));
+    audio_file_level(&a_file, 96_000, 0.25, 1);
+    audio_file_level(&b_file, 96_000, 0.5, 1);
+    let made = app.call("command.run", json!({"id": "file.new"}));
+    let w = made["window"].clone();
+    wait_for_label(&mut app, &w, "Track Headers");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": a_file, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let lanes = doc["lanes"].as_array().unwrap();
+    assert_eq!(lanes.len(), 1, "one track for a mono file: {doc}");
+    let lane = lanes[0]["id"].as_u64().unwrap();
+    // 0.5 s in at 120 BPM: the overlap is 1.5 s.
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": b_file, "seq": seq, "lane": lane, "tick": 15_360}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(doc["lanes"].as_array().unwrap().len(), 1, "{doc}");
+    assert_eq!(doc["lanes"][0]["regions"], 2, "{doc}");
+
+    // 2. Each region by its element; `b` ends selected. The two overlap,
+    // so they make one block, and a click on a region's body selects the
+    // block: the click lands on the region's gain band instead (its top
+    // edge, the later region on top), at `at` of its width, which selects
+    // that region alone.
+    let select = |app: &mut App, name: &str, at: f64| -> (Value, Value) {
+        let (_, label) = wait_for_label_like(app, &w, &format!("Region {name} on "), "");
+        let tree = app.call("ui.tree", json!({"window": w}));
+        let f = find_node(&tree["nodes"], &label).expect("the region")["frame"].clone();
+        let num = |k: &str| f[k].as_f64().unwrap();
+        let (x, y) = (num("x") + at * num("width"), num("y") + 2.0);
+        app.call("ui.click", json!({"window": w, "point": {"x": x, "y": y}}));
+        let sel = app.call("state.get", json!({"target": "selection", "window": w}));
+        assert_eq!(sel["events"].as_array().unwrap().len(), 1, "{label}: {sel}");
+        (sel["events"][0].clone(), sel["lanes"][0]["lane"].clone())
+    };
+    // `a` 0.2 s in, before `b` starts; `b` 0.2 s before its end, after
+    // `a` ends.
+    let (a, a_lane) = select(&mut app, "a", 0.1);
+    let (b, b_lane) = select(&mut app, "b", 0.9);
+    assert_ne!(a, b);
+    assert_eq!((a_lane, b_lane.clone()), (json!(lane), json!(lane)));
+    let lane = b_lane;
+
+    // 3. Hostile calls change nothing and open nothing.
+    let undo = |app: &mut App| {
+        app.call("state.get", json!({"target": "document", "window": w}))["undo"].clone()
+    };
+    let undo0 = undo(&mut app);
+    let windows = window_numbers(&mut app);
+    for params in [
+        json!({"seq": seq, "lane": lane, "event": b, "length_ms": "0"}),
+        json!({"seq": seq, "lane": lane, "event": b, "shape": "cubic"}),
+        json!({"seq": seq}),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "region.crossfade", "params": params.clone(), "window": w}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {e:?}");
+    }
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.crossfade", "params": {"seq": seq, "lane": lane, "event": a}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "a starts inside nothing: {e:?}");
+    assert_eq!(undo(&mut app), undo0);
+    assert_eq!(window_numbers(&mut app), windows, "no sheet or panel");
+
+    // 4. 100 ms, Linear: 4800 frames at 48 kHz, crossing `a`.
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.crossfade", "params": {"seq": seq, "lane": lane, "event": b, "length_ms": "100", "shape": "linear"}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Crossfade", "{r}");
+    app.call(
+        "command.run",
+        json!({"id": "editors.audio_editor", "window": w}),
+    );
+    let crossfade = |frames: u64, shape: &str| json!({"frames": frames, "shape": shape, "with": a});
+    let s = wait_for_state(&mut app, &w, "audio_editor", |s| {
+        s["region"]["event"] == b && s["region"]["crossfade"] == crossfade(4800, "linear")
+    });
+    assert_eq!(s["boxes"]["crossfade"], "100 ms", "{s}");
+
+    // 5. The bounce, dither off (F18): ratios, not levels, so the strip's
+    // gain does not matter.
+    let bounce = |app: &mut App, name: &str| -> Vec<i32> {
+        let path = home.join(name);
+        let r = app.call(
+            "command.run",
+            json!({"id": "file.bounce", "params": {"path": path, "bits": "16", "rate": 48_000, "dither": false, "range": "selection", "start": 0, "end": 46_080}, "window": w}),
+        );
+        assert!(
+            r["status"].as_str().unwrap_or("").starts_with("wrote "),
+            "{r}"
+        );
+        let (rate, ch, bits, frames, samples) = read_wav16(&path);
+        assert_eq!((rate, bits), (48_000, 16), "{r}");
+        assert!(frames >= 72_000, "{frames}");
+        let ch = usize::from(ch);
+        samples.iter().step_by(ch).map(|s| i32::from(*s)).collect()
+    };
+    let left = bounce(&mut app, "x.wav");
+    let s = |f: usize| left[f];
+    let (before, mid, after) = (s(12_000), s(26_400), s(40_000));
+    assert!(after > before, "b is louder: {before} {after}");
+    assert!(
+        (2 * mid - (before + after)).abs() <= 6,
+        "Linear's midpoint {mid} is halfway between {before} and {after}"
+    );
+
+    // 6. Remove Crossfade on the selection, then the default: 10 ms
+    // (480 frames), Equal Power, heard at 0.7071 of each side at its middle.
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.remove_crossfade", "window": w}),
+    );
+    assert_eq!(r["undo"], "Remove Crossfade", "{r}");
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.crossfade", "window": w}),
+    );
+    assert_eq!(r["undo"], "Crossfade", "{r}");
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        s["region"]["crossfade"] == crossfade(480, "equal_power")
+    });
+    let left = bounce(&mut app, "y.wav");
+    let ep = left[24_240];
+    let want = std::f64::consts::FRAC_1_SQRT_2 * f64::from(before + after);
+    assert!(
+        (f64::from(ep) - want).abs() <= 3.0,
+        "Equal Power's midpoint {ep} is 0.7071 × ({before} + {after}) = {want}"
+    );
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_undo(&mut app, &w, "Crossfade");
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        s["region"]["crossfade"] == crossfade(4800, "linear")
+    });
+
+    // 7. Remove Fades on `b` takes its fade in to 0: settle drops the
+    // crossfade, and the status says so (F1).
+    let (again, _) = select(&mut app, "b", 0.9);
+    assert_eq!(again, b);
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.remove_fades", "window": w}),
+    );
+    let status = r["status"].as_str().unwrap_or("");
+    assert!(status.contains("Crossfade removed"), "{r}");
+    let s = wait_for_state(&mut app, &w, "audio_editor", |s| {
+        s["region"]["event"] == b && s["region"]["crossfade"].is_null()
+    });
+    assert_eq!(s["region"]["fade_in"]["frames"], 0, "{s}");
     assert_eq!(window_numbers(&mut app), windows);
     app.quit();
 }
