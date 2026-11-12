@@ -447,8 +447,11 @@ memory).
   - a region's `gain_db` is 0 after `Apply` (its copy has the gain) and the
     original's after `LeaveOut` is not carried.
 
-  Instrument destinations and audio output paths are named after their track
-  (the import names them so). Notes on the track's main channel (the one with
+  Instrument destinations are named apart from their track ("Instrument
+  <n>", "<track> Synth"), and the property compares strip names exactly: the
+  import names an instrument from the file's channel (or device) name and
+  falls back to the track's name only when the file gives none. Audio output
+  paths are named after their track (the import names them so). Notes on the track's main channel (the one with
   the most notes) play on the instrument's channel on import; the generator
   keeps channel 0 the main one, and `group_channels_are_written_as_group_one`
   states the other case.

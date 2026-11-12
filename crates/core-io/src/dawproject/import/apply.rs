@@ -328,7 +328,7 @@ pub fn apply(
                 let r = run(
                     h,
                     Command::Routing(RoutingCmd::AddDestination {
-                        name: t.name.clone(),
+                        name: t.dest_name.clone(),
                         kind: DestKind::PluginInstrument { slot: s },
                         default_patch: None,
                     }),

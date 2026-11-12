@@ -664,6 +664,44 @@ fn channel_destinations() {
 }
 
 #[test]
+fn instruments_keep_the_files_names() {
+    // The instrument a track makes is named from the file's channel, else
+    // its instrument device, and from the track only when the file names
+    // neither. Two tracks may share a name the file gives.
+    let dir = tempfile::tempdir().unwrap();
+    let track = |id: &str, name: &str, chan: &str, device: &str| {
+        format!(
+            r#"<Track id="{id}" name="{name}" contentType="notes"><Channel id="{id}c" {chan} role="regular" destination="mc"><Devices><ClapPlugin id="{id}d" {device} deviceID="org.example.{id}" deviceName="Plug-in {id}" deviceRole="instrument"/></Devices></Channel></Track>"#
+        )
+    };
+    let structure = [
+        track("a", "Lead", r#"name="Big Synth""#, r#"name="Device A""#),
+        track("b", "Pad", r#"name="Big Synth""#, ""),
+        track("c", "Bass", "", r#"name="Low End""#),
+        track("d", "Keys", "", ""),
+        track("e", "Arp", r#"name="  ""#, ""),
+    ]
+    .concat();
+    let pkg = small(dir.path(), &project_xml(&structure, ""), None);
+    let a = imported(&pkg, &yes);
+    let dest_name = |track: &str| {
+        let dest = lane(&a, track).midi_dest.expect("a destination");
+        a.h.doc().instruments()[&dest].name.clone()
+    };
+    assert_eq!(dest_name("Lead"), "Big Synth");
+    assert_eq!(dest_name("Pad"), "Big Synth");
+    assert_eq!(dest_name("Bass"), "Low End");
+    assert_eq!(dest_name("Keys"), "Keys");
+    assert_eq!(dest_name("Arp"), "Arp", "a blank name is no name");
+    assert_eq!(midi_strip(&a, &lane(&a, "Lead")).name, "Big Synth");
+    assert_eq!(
+        lane(&a, "Lead").name,
+        "Lead",
+        "the track keeps its own name"
+    );
+}
+
+#[test]
 fn refused_packages() {
     let dir = tempfile::tempdir().unwrap();
     let flag = AtomicBool::new(false);

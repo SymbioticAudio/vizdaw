@@ -430,20 +430,27 @@ fn spec_at(tick: i64, body: EventBody) -> EventSpec {
 }
 
 /// The sequence of a new song with a note track "name" on its own CLAP
-/// instrument (named the same: the import names an instrument after its
-/// track). Returns the instrument's strip and plug-in instance.
+/// instrument "<name> Synth" (named apart from its track, so a trip shows
+/// the import keeps the file's name). Returns the instrument's strip and
+/// plug-in instance.
 fn song(b: &mut Builder, name: &str) -> (SeqId, LaneId, DestId, PluginInstanceId) {
     let (dest, slot) = b
-        .plugin_dest(name, clap(&format!("org.example.{name}")))
+        .plugin_dest(
+            &format!("{name} Synth"),
+            clap(&format!("org.example.{name}")),
+        )
         .unwrap();
     let (seq, lane) = b.sequence("Song", name, Some(dest)).unwrap();
     (seq, lane, dest, slot)
 }
 
-/// A further note track "name" on its own instrument.
+/// A further note track "name" on its own instrument "<name> Synth".
 fn note_track(b: &mut Builder, seq: SeqId, name: &str) -> (LaneId, DestId, PluginInstanceId) {
     let (dest, slot) = b
-        .plugin_dest(name, clap(&format!("org.example.{name}")))
+        .plugin_dest(
+            &format!("{name} Synth"),
+            clap(&format!("org.example.{name}")),
+        )
         .unwrap();
     let lane = b.lane(seq, name, Some(dest)).unwrap();
     (lane, dest, slot)
@@ -903,6 +910,10 @@ fn shared_instrument_is_copied() {
         seen.push(dest);
     }
     assert_ne!(seen[0], seen[1], "each track has its own copy");
+    // Each copy keeps the instrument's own name, not its track's.
+    for dest in &seen {
+        assert_eq!(t.doc.instruments().get(dest).unwrap().name, "Synth");
+    }
     let pa = projection(&doc, seq).unwrap();
     let pb = projection(&t.doc, t.seq).unwrap();
     assert_eq!(
@@ -915,6 +926,9 @@ fn shared_instrument_is_copied() {
             .map(|t| &t.notes_played)
             .collect::<Vec<_>>()
     );
+    let names = |p: &Projection| p.strips.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&pb), names(&pa), "strip names exact");
+    assert_eq!(names(&pb)[..2], ["Synth", "Synth"]);
     assert_eq!(
         pb.strips
             .iter()
@@ -1699,8 +1713,12 @@ fn build(s: &Spec) -> (Document, SeqId) {
     let mut lanes = Vec::new();
     for (i, t) in s.notes.iter().enumerate() {
         let name = format!("Track {i}");
+        // Named apart from the track: the import keeps the file's name.
         let (dest, slot) = b
-            .plugin_dest(&name, clap(&format!("org.example.{name}")))
+            .plugin_dest(
+                &format!("Instrument {i}"),
+                clap(&format!("org.example.{name}")),
+            )
             .unwrap();
         let lane = match seq {
             None => {

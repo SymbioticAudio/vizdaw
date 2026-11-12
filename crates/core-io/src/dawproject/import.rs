@@ -266,6 +266,10 @@ enum Midi {
 #[derive(Debug, Clone, PartialEq)]
 struct TrackPlan {
     name: String,
+    /// The name of the instrument destination a track on a plug-in makes:
+    /// the file's channel name, else its instrument device's name, else the
+    /// track's name.
+    dest_name: String,
     midi: Option<Midi>,
     audio: bool,
     /// The settings of the strips the track owns.
@@ -874,6 +878,16 @@ impl<'a, 'p> Cx<'a, 'p> {
                 ..Mix::default()
             },
         };
+        let dest_name = if matches!(midi, Some(Midi::Plugin(_))) {
+            let device = first.and_then(|i| devices.get(i));
+            let own = channel
+                .and_then(|c| c.named.name.as_deref())
+                .filter(|n| !n.trim().is_empty())
+                .or(device.and_then(|d| d.named.name.as_deref()));
+            self.name(own, || name.clone())
+        } else {
+            name.clone()
+        };
         let shares = midi == Some(Midi::Builtin);
         let owns = matches!(midi, Some(Midi::Plugin(_))) || audio;
         if matches!(midi, Some(Midi::Plugin(_))) && audio {
@@ -908,6 +922,7 @@ impl<'a, 'p> Cx<'a, 'p> {
         }
         Ok(TrackPlan {
             name,
+            dest_name,
             midi,
             audio,
             mix,

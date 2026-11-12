@@ -11,6 +11,7 @@ impl<'p> Tl<'_, '_, 'p> {
     pub(super) fn finish(mut self, plan: &mut Plan) -> Result<Arranged, IoError> {
         for (name, audio) in std::mem::take(&mut self.extra) {
             plan.tracks.push(TrackPlan {
+                dest_name: name.clone(),
                 name,
                 midi: None,
                 audio,
