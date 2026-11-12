@@ -416,10 +416,10 @@ public enum InterchangeCommands {
                 return .failed(.thrown(error, "Export Failed"))
             }
         case importDawproject:
-            guard let path else { return .failed(.dialog("Open", "path")) }
+            guard let path, !path.isEmpty else { return .failed(.dialog("Open", "path")) }
             // The core reads the file first, off the main thread (L8): a
             // refusal makes no project.
-            let read = store.readDawprojectInfo
+            let read = store.dawprojectInfo
             return .pending(
                 PendingOutcome({ Result { try read(path) } }) { info in
                     switch info {

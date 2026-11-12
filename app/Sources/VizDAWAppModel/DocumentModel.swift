@@ -136,6 +136,7 @@ public final class DocumentModel {
     @ObservationIgnored private var bounceModel: BounceModel?
     @ObservationIgnored private var interchangeModel: InterchangeModel?
     @ObservationIgnored private var forDawModel: ForDawModel?
+    @ObservationIgnored private var dawprojectModel: DawprojectModel?
     @ObservationIgnored private var projectSettingsModel: ProjectSettingsModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
@@ -207,10 +208,19 @@ public final class DocumentModel {
         return m
     }
 
-    /// Set by the store for a project it made to open a MIDI file: called
-    /// when that import fails (the message; nil: cancelled) so the store can
-    /// close the project while it is untouched. Cleared once the job ends.
-    @ObservationIgnored var openedMidi: ((String?) -> Void)?
+    /// File › Export as DAWproject… (plan 6d Task 12), made once.
+    public var dawproject: DawprojectModel {
+        if let m = dawprojectModel { return m }
+        let m = DawprojectModel(document: self)
+        dawprojectModel = m
+        return m
+    }
+
+    /// Set by the store for a project it made to open a MIDI or DAWproject
+    /// file: called when that import fails (the message; nil: cancelled) so
+    /// the store can close the project while it is untouched. Cleared once
+    /// the job ends.
+    @ObservationIgnored var openedFile: ((String?) -> Void)?
 
     /// The MIDI import, export and report sheets (plan 6a), made once.
     public var interchange: InterchangeModel {

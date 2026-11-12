@@ -158,6 +158,12 @@ public final class InterchangeModel {
         ["mid", "midi", "smf", "midi2"].contains((path as NSString).pathExtension.lowercased())
     }
 
+    /// Whether Open and drops send `path` to the DAWproject import
+    /// (`DocumentStore.openDawproject`; any case of the extension).
+    public static func isDawproject(_ path: String) -> Bool {
+        (path as NSString).pathExtension.lowercased() == "dawproject"
+    }
+
     /// Reads `path`, then shows the import sheet; a refusal is the alert
     /// "Import Failed".
     public func beginImport(path: String) {

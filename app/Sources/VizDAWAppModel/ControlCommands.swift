@@ -655,6 +655,11 @@ public enum ControlOpen {
     public static func open(
         path: String, answers: RecoveryAnswersRow, store: DocumentStore, command: String? = nil
     ) -> ControlOutcome {
+        // The store's DAWproject open runs in the background and opens a
+        // window: the channel has its own command, which answers the job.
+        if InterchangeModel.isDawproject(path) {
+            return .failed(.of(.invalidParams, "Use file.import_dawproject to open a DAWproject file."))
+        }
         // An open project is never opened twice, and no window is fronted.
         if store.documentID(forPath: path) != nil {
             let name = (path as NSString).lastPathComponent

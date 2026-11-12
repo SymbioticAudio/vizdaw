@@ -39,10 +39,17 @@ public final class DocumentStore {
     /// Makes a project in a format (set by `live()`; tests set a fake).
     public var makeProject: ((ProjectFormatRow) throws -> any SessionProtocol)?
 
-    /// Reads a DAWproject file's header with no document open (plan 6d Task
-    /// 11; the core's free function `dawprojectInfo(path:)`; tests set a
-    /// fake). It parses the file: call it off the main thread.
-    public var readDawprojectInfo: @Sendable (String) throws -> DawprojectInfoRow = { try dawprojectInfo(path: $0) }
+    /// Reads a DAWproject file's header with no document open (plan 6d L8;
+    /// the core's free function `dawprojectInfo(path:)`; tests set a fake).
+    /// It parses the file: call it off the main thread. Both the UI's open
+    /// and `file.import_dawproject` read through it.
+    public var dawprojectInfo: @Sendable (String) throws -> DawprojectInfoRow = {
+        try VizDAWCore.dawprojectInfo(path: $0)
+    }
+
+    /// Opens in flight (`openDawproject`), so tests can wait for them.
+    @ObservationIgnored private var opening: [Int: Task<Void, Never>] = [:]
+    @ObservationIgnored private var openCount = 0
 
     /// The app's preferences (in memory in tests; `live()` sets the real
     /// store, which is itself in memory under `VIZDAW_SUPPORT_DIR`).
@@ -239,9 +246,14 @@ public final class DocumentStore {
 
     /// Opens a `.vizdaw` package; a MIDI file (`mid`, `midi`, `smf`,
     /// `midi2`) makes a new project and imports into it (plan 6a Ruling 12);
-    /// other paths are refused with an alert.
+    /// a `.dawproject` starts `openDawproject` and answers nil (its project
+    /// comes once the file is read); other paths are refused with an alert.
     public func open(path: String) -> UUID? {
         if InterchangeModel.isMidi(path) { return openMidi(path) }
+        if InterchangeModel.isDawproject(path) {
+            openDawproject(path)
+            return nil
+        }
         guard (path as NSString).pathExtension == "vizdaw" else {
             postAlert(AlertItem(
                 title: "Open Failed",
@@ -275,10 +287,21 @@ public final class DocumentStore {
         guard let id = newProject(ProjectFormatRow(sampleRate: 48_000, depth: defaultFormat.depth)),
             let model = documents[id]
         else { return nil }
-        // A job that fails or is cancelled on a project still untouched takes
-        // the project with it; the alert is the store's (as the control
-        // channel's `file.import_midi` does).
-        model.openedMidi = { [weak self, weak model] message in
+        closeIfUntouched(id, model)
+        if let error = model.interchange.importIntoNewProject(path: path, like: sheet) {
+            close(id)
+            postAlert(AlertItem(error, title: "Import Failed"))
+            return nil
+        }
+        // A job that failed at once has already taken the project.
+        return documents[id] == nil ? nil : id
+    }
+
+    /// A job that fails or is cancelled on project `id`, made for a file,
+    /// takes the project with it while it is still untouched; the alert is
+    /// the store's (as the control channel's imports do).
+    private func closeIfUntouched(_ id: UUID, _ model: DocumentModel) {
+        model.openedFile = { [weak self, weak model] message in
             guard let self, let model else { return }
             guard !model.canUndo else {
                 if let message { model.alert = AlertItem(title: "Import Failed", message: message) }
@@ -287,13 +310,52 @@ public final class DocumentStore {
             close(id)
             if let message { postAlert(AlertItem(title: "Import Failed", message: message)) }
         }
-        if let error = model.interchange.importIntoNewProject(path: path, like: sheet) {
-            close(id)
+    }
+
+    /// Starts opening `path` and returns at once (L8): a detached task
+    /// calls `dawprojectInfo` (no document or session needed), then on the
+    /// main actor makes a project at the file's rate and starts
+    /// `importDawproject`; its window opens (`enqueue`). A refusal makes no
+    /// project and alerts "Import Failed"; a job that fails or is cancelled
+    /// on a still-untouched project closes it (as `openMidi`).
+    public func openDawproject(_ path: String) {
+        let read = dawprojectInfo
+        openCount += 1
+        let n = openCount
+        opening[n] = Task {
+            let info = await Task.detached { Result { try read(path) } }.value
+            self.dawprojectRead(path, info)
+            self.opening[n] = nil
+        }
+    }
+
+    private func dawprojectRead(_ path: String, _ info: Result<DawprojectInfoRow, any Error>) {
+        let row: DawprojectInfoRow
+        switch info {
+        case .failure(let error):
             postAlert(AlertItem(error, title: "Import Failed"))
-            return nil
+            return
+        case .success(let r): row = r
+        }
+        guard let id = newProject(ProjectFormatRow(sampleRate: row.sampleRate, depth: defaultFormat.depth)),
+            let model = documents[id]
+        else { return }
+        closeIfUntouched(id, model)
+        var failure: (any Error)?
+        let req = DawprojectImportRequestRow(path: path)
+        model.startJob(.importProject, "Import Failed", failure: { failure = $0 }) { try $0.importDawproject(req: req) }
+        if let failure {
+            close(id)
+            postAlert(AlertItem(failure, title: "Import Failed"))
+            return
         }
         // A job that failed at once has already taken the project.
-        return documents[id] == nil ? nil : id
+        if documents[id] != nil { enqueue(id) }
+    }
+
+    /// Waits for every pending open (tests).
+    public func settle() async {
+        while let t = opening.values.first { await t.value }
     }
 
     /// Brings a document's window to the front (set by the app).

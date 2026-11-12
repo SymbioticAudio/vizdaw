@@ -452,7 +452,7 @@ import VizDAWCore
         s.defaultFormat = ProjectFormatRow(sampleRate: 96_000, depth: .int16)
         f.dawprojectInfoAnswer = .success(
             DawprojectInfoRow(sampleRate: 44_100, tracks: 2, audioFiles: 0, fromVizdaw: false, exportId: nil))
-        s.readDawprojectInfo = { try f.dawprojectInfo(path: $0) }
+        s.dawprojectInfo = { try f.dawprojectInfo(path: $0) }
         let before = s.documents.count
         let first = run(
             InterchangeCommands.importDawproject, [("path", .text(value: "/tmp/a.dawproject"))], m, s, id)
@@ -498,7 +498,12 @@ import VizDAWCore
         let o = run(InterchangeCommands.exportDawproject, [("dry_run", .flag(value: true))], m, s, id)
         guard case .pending = o else { Issue.record("not pending: \(o)"); return }
         guard case .done(let result) = await settled(o) else { Issue.record("not done"); return }
-        _ = result
+        guard case .interchange(let command, let doc, let window, _, let report, let written) = result else {
+            Issue.record("not an interchange result: \(result)")
+            return
+        }
+        #expect(command == "file.export_dawproject" && doc == id.uuidString && window == nil)
+        #expect(report == ReportRow(summary: "Would leave out 1", items: []) && written.isEmpty)
         #expect(f.dawprojectChecks.count == 1 && f.dawprojectExports.isEmpty)
         #expect(f.dawprojectChecks.first?.path == "" && f.checkOnMain == [false])
         f.dawprojectCheckAnswer = .failure(VizError.Model(message: "no room"))
@@ -525,41 +530,60 @@ import VizDAWCore
         #expect(d?.replace == false && d?.regionGain == .apply && d?.seq == m.selectedSeq)
     }
 
+    /// Hostile paths reach the real core, which refuses each with its own
+    /// sentence (Task 11 review): the store's default `dawprojectInfo` is the
+    /// free function, and the export runs on a real session (offline audio,
+    /// a temporary support folder).
     @Test func dawprojectCommandsRefuseHostileArguments() async throws {
-        let (s, id, m, f) = try demo()
-        let hostile = ["", "relative.dawproject", "/tmp/" + String(repeating: "a", count: 5_000) + ".dawproject", "/tmp/a\u{0}.dawproject"]
-        let before = s.documents.count
-        // Past the registry's checks the core answers with its own sentence.
-        f.dawprojectInfoAnswer = .failure(VizError.Model(message: "the path is not usable"))
-        s.readDawprojectInfo = { try f.dawprojectInfo(path: $0) }
-        for p in hostile where !p.isEmpty {
+        setenv("VIZDAW_AUDIO", "offline", 1)
+        let support = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vizdaw-swift-hostile-\(ProcessInfo.processInfo.processIdentifier)")
+        try setSupportDir(path: support.path)
+        defer { try? FileManager.default.removeItem(at: support) }
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { try Session.newDemo() }, open: { _ in demoFake() })
+        defer { s.closeAll() }
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        let long = support.path + "/" + String(repeating: "a", count: 5_000) + ".dawproject"
+        let hostile = [
+            "relative.dawproject", long, support.path + "/a\u{0}.dawproject", support.path + "/missing.dawproject",
+            support.path + "/x.dawproject/../../a.dawproject",
+        ]
+        // An empty path is the Open dialog's, as a missing one.
+        let e = failure(run(InterchangeCommands.importDawproject, [("path", .text(value: ""))], m, s, id))
+        #expect(e?.code == .dialogRequired && e?.dialog == "Open")
+        var sentences: Set<String> = []
+        for p in hostile {
             let r = failure(await settled(run(InterchangeCommands.importDawproject, [("path", .text(value: p))], m, s, id)))
-            #expect(r?.code == .failed && r?.message.contains("the path is not usable") == true)
+            #expect(r?.code == .failed && r?.message.isEmpty == false, "\(p.prefix(80))")
+            sentences.insert(r?.message ?? "")
         }
-        #expect(s.documents.count == before)
-        f.interchangeError = VizError.Model(message: "the path is not usable")
-        for p in hostile where !p.isEmpty {
+        #expect(s.documents.count == 1, "no project made")
+        for p in hostile {
             let r = failure(run(InterchangeCommands.exportDawproject, [("path", .text(value: p))], m, s, id))
-            #expect(r?.code == .failed && r?.message.contains("the path is not usable") == true)
+            #expect(r?.code == .failed && r?.message.isEmpty == false, "\(p.prefix(80))")
+            sentences.insert(r?.message ?? "")
         }
-        f.interchangeError = nil
-        #expect(f.dawprojectExports.isEmpty)
+        #expect(m.jobs.isEmpty && sentences.count > 1, "the core's own sentences: \(sentences)")
+        let written = (try? FileManager.default.contentsOfDirectory(atPath: support.path)) ?? []
+        #expect(!written.contains { $0.hasSuffix(".dawproject") }, "nothing written")
         // A `seq` that is no ID never reaches the session.
-        let calls = f.dawprojectChecks.count
         for dry in [false, true] {
             let r = failure(
                 run(
                     InterchangeCommands.exportDawproject,
-                    [("path", .text(value: "/tmp/a.dawproject")), ("seq", .int(value: -1)), ("dry_run", .flag(value: dry))],
+                    [("path", .text(value: support.path + "/a.dawproject")), ("seq", .int(value: -1)), ("dry_run", .flag(value: dry))],
                     m, s, id))
             #expect(r?.code == .invalidParams)
             #expect(r?.message.contains("file.export_dawproject") == true && r?.message.contains("seq") == true)
         }
-        #expect(f.dawprojectExports.isEmpty && f.dawprojectChecks.count == calls)
         // An unknown sequence is the core's sentence.
-        f.interchangeError = VizError.Model(message: "no such sequence")
-        let u = failure(run(InterchangeCommands.exportDawproject, [("path", .text(value: "/tmp/a.dawproject")), ("seq", .int(value: 99))], m, s, id))
-        #expect(u?.code == .failed && u?.message.contains("no such sequence") == true)
+        let u = failure(
+            run(
+                InterchangeCommands.exportDawproject,
+                [("path", .text(value: support.path + "/a.dawproject")), ("seq", .int(value: 9_999))], m, s, id))
+        #expect(u?.code == .failed && u?.message.isEmpty == false)
+        #expect(!FileManager.default.fileExists(atPath: support.path + "/a.dawproject"))
     }
 
     @Test func aBusyDawprojectJobIsRefusedWithNothingMadeOrWritten() async throws {
@@ -575,10 +599,13 @@ import VizDAWCore
         let fresh = FakeSession([seq(9, "New", topLevel: true)])
         fresh.interchangeError = VizError.Busy(message: "Wait for the running import, export or bounce to finish.")
         s.makeProject = { _ in fresh }
-        s.readDawprojectInfo = { try f.dawprojectInfo(path: $0) }
+        s.dawprojectInfo = { try f.dawprojectInfo(path: $0) }
+        var made: [UUID] = []
+        s.didMake = { doc, _ in made.append(doc) }
         let before = s.documents.count
         let r = failure(await settled(run(InterchangeCommands.importDawproject, [("path", .text(value: "/tmp/a.dawproject"))], m, s, id)))
         #expect(r?.code == .busy && r?.message.contains("Wait for the running") == true)
         #expect(s.documents.count == before && fresh.dawprojectImports.isEmpty)
+        #expect(made.count == 1 && made.allSatisfy { !InterchangeCommands.madeProject($0) && s.model($0) == nil })
     }
 }

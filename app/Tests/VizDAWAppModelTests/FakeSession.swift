@@ -824,11 +824,17 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         dawprojectExports.append(req)
         return interchangeJob(.exportDawproject, 10000, dawprojectExports.count)
     }
+    /// Holds a DAWproject check until released; answers it per request
+    /// (plan 6d Task 12).
+    var dawprojectCheckHold: (@Sendable (DawprojectExportRequestRow) -> DispatchSemaphore?)?
+    var dawprojectCheckReply: (@Sendable (DawprojectExportRequestRow) -> ReportRow)?
     func exportDawprojectCheck(req: DawprojectExportRequestRow) throws -> ReportRow {
         interchangeLock.lock()
         dawprojectChecks.append(req)
         checkOnMain.append(Thread.isMainThread)
         interchangeLock.unlock()
+        dawprojectCheckHold?(req)?.wait()
+        if let reply = dawprojectCheckReply { return reply(req) }
         return try dawprojectCheckAnswer.get()
     }
     func dawprojectName(seq: UInt64) throws -> String {

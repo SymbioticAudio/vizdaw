@@ -158,15 +158,20 @@ extension DocumentModel {
                 refreshAfterJob()
                 // A MIDI import or export the UI started shows its report.
                 if [.importMidi, .exportMidi, .exportProject, .exportDawproject, .importProject].contains(r.kind) { interchange.jobEnded(r) }
-                if r.kind == .importMidi { openedMidi = nil }
+                if r.kind == .importMidi || r.kind == .importProject { openedFile = nil }
                 forDaw.jobDone(r)
+                dawproject.jobDone(r)
             case .failed(let message):
-                if r.state == .cancelled { forDaw.jobDone(r) }
-                if r.kind == .importMidi, openedMidi != nil {
+                if r.state == .cancelled {
+                    forDaw.jobDone(r)
+                    dawproject.jobDone(r)
+                }
+                if r.kind == .importMidi || r.kind == .importProject, openedFile != nil {
                     // Open made this project for the file: the store closes it.
                     openFailure = .some(r.state == .cancelled ? nil : message)
                 } else if r.state != .cancelled, !(r.kind == .exportMidi && interchange.jobFailed(r, message: message)),
-                    !(r.kind == .exportProject && forDaw.jobFailed(r, message: message))
+                    !(r.kind == .exportProject && forDaw.jobFailed(r, message: message)),
+                    !(r.kind == .exportDawproject && dawproject.jobFailed(r, message: message))
                 {
                     alert = AlertItem(title: ProjectBanner.failureTitle(r.kind), message: message)
                 }
@@ -176,8 +181,8 @@ extension DocumentModel {
             blockersEnded.append(r)
         }
         jobs = still
-        if let failure = openFailure, let hook = openedMidi {
-            openedMidi = nil
+        if let failure = openFailure, let hook = openedFile {
+            openedFile = nil
             hook(failure)
         }
         // Dropped files waiting for this one start now (final review I1),
@@ -189,6 +194,7 @@ extension DocumentModel {
         for r in blockersEnded where ForDawModel.blocking.contains(r.kind) || ForDawModel.mediaJobs.contains(r.kind) {
             if ForDawModel.blocking.contains(r.kind) { interchange.blockingEnded() }
             forDaw.jobEnded()
+            dawproject.jobEnded()
         }
     }
 
