@@ -164,6 +164,7 @@ fn up_to_takes_the_overlap_or_less() {
 #[test]
 fn crossfade_refusals() {
     let d = doc();
+    let before = d.clone();
     let none = "This region does not start inside another region on its track.";
     let short = "A crossfade is at least 1 frame long.";
     for len in [CrossfadeLength::Frames(0), CrossfadeLength::UpTo(0)] {
@@ -231,7 +232,7 @@ fn crossfade_refusals() {
         none,
     );
     // Refusals leave the document unchanged (apply is pure).
-    assert_eq!(d, doc());
+    assert_eq!(d, before);
 }
 
 #[test]
@@ -400,4 +401,145 @@ fn split_keeps_the_flag_on_the_first_part_only() {
         })
         .unwrap();
     assert!(!fades(&a.doc, second).2);
+}
+
+#[test]
+fn a_muted_partner_is_still_the_partner() {
+    // F9: the partner is found by rule, not by mute.
+    let d = run(
+        &doc(),
+        Command::Event(EventCmd::SetMute {
+            events: vec![A],
+            mute: true,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        crossfade::overlap(&d, B).unwrap(),
+        Some(Overlap {
+            with: A,
+            frames: 24_000
+        })
+    );
+    let d = run(
+        &d,
+        cross(B, CrossfadeLength::Frames(100), FadeShape::Linear),
+    )
+    .unwrap();
+    assert!(fades(&d, B).2);
+}
+
+#[test]
+fn a_region_on_another_track_is_not_a_partner() {
+    let d = run(
+        &doc(),
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Two".into(),
+            index: None,
+        }),
+    )
+    .unwrap();
+    let d = run(
+        &d,
+        Command::Audio(AudioCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            tick: Tick(15_360),
+            media: MediaId(0),
+            source_offset: 0,
+            length: 48_000,
+            gain_db: 0.0,
+            fade_in: Fade::default(),
+            fade_out: Fade::default(),
+        }),
+    )
+    .unwrap();
+    // Event 3 starts inside A's time span, but A is on track 0.
+    assert_eq!(crossfade::overlap(&d, EventId(3)).unwrap(), None);
+    assert!(
+        run(
+            &d,
+            cross(EventId(3), CrossfadeLength::Frames(10), FadeShape::Linear)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn huge_lengths_are_refused_without_wrapping() {
+    let d = doc();
+    let before = d.clone();
+    for len in [
+        CrossfadeLength::Frames(u64::MAX),
+        CrossfadeLength::UpTo(u64::MAX),
+    ] {
+        match len {
+            CrossfadeLength::Frames(_) => {
+                assert!(run(&d, cross(B, len, FadeShape::Linear)).is_err())
+            }
+            // UpTo clamps to the room.
+            CrossfadeLength::UpTo(_) => {
+                let r = run(&d, cross(B, len, FadeShape::Linear)).unwrap();
+                assert_eq!(fades(&r, B).0.length_frames, 24_000);
+            }
+        }
+    }
+    assert_eq!(d, before);
+}
+
+#[test]
+fn a_huge_fade_in_in_the_file_is_corrupt() {
+    let mut v: Value = serde_json::from_str(&to_json(&doc()).unwrap()).unwrap();
+    each_region(&mut v, &mut |i, r| {
+        if i == 1 {
+            r["crossfade"] = true.into();
+            r["fade_in"]["length_frames"] = u64::MAX.into();
+        }
+    });
+    assert!(matches!(
+        from_json(&v.to_string()),
+        Err(ModelError::Corrupt { .. })
+    ));
+}
+
+#[test]
+fn a_flagged_region_with_missing_media_gets_only_the_media_problem() {
+    let mut v: Value = serde_json::from_str(&to_json(&doc()).unwrap()).unwrap();
+    each_region(&mut v, &mut |i, r| {
+        if i == 1 {
+            r["crossfade"] = true.into();
+            r["fade_in"]["length_frames"] = 100.into();
+            r["media"] = 77.into();
+        }
+    });
+    match from_json(&v.to_string()) {
+        Err(ModelError::Corrupt { problems }) => {
+            assert!(!problems.is_empty());
+            assert!(
+                !problems.iter().any(|p| p.contains("crossfade")),
+                "{problems:?}"
+            );
+        }
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_flagged_region_with_no_room_says_so() {
+    let mut v: Value = serde_json::from_str(&to_json(&doc()).unwrap()).unwrap();
+    each_region(&mut v, &mut |i, r| {
+        if i == 0 {
+            r["crossfade"] = true.into();
+        }
+    });
+    match from_json(&v.to_string()) {
+        Err(ModelError::Corrupt { problems }) => {
+            assert!(
+                problems.iter().any(|p| p.contains("crossfade")),
+                "{problems:?}"
+            );
+        }
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
 }

@@ -148,6 +148,12 @@ pub(crate) fn problems(doc: &Document) -> Vec<String> {
                     else {
                         continue;
                     };
+                    // A missing media item is reported by the event's own
+                    // check; a partner cannot be found without it.
+                    if !matches!(&e.body, EventBody::AudioRegion { media, .. } if doc.media().contains_key(media))
+                    {
+                        continue;
+                    }
                     let Some(o) = found.get(&e.id) else {
                         p.push(format!(
                             "crossfade {}: the region does not start inside another region",
@@ -157,7 +163,12 @@ pub(crate) fn problems(doc: &Document) -> Vec<String> {
                     };
                     let room = o.frames.min(length.saturating_sub(fade_out.length_frames));
                     let n = fade_in.length_frames;
-                    if n == 0 || n > room {
+                    if room == 0 {
+                        p.push(format!(
+                            "crossfade {}: the region has no room for a crossfade",
+                            e.id
+                        ));
+                    } else if n == 0 || n > room {
                         p.push(format!(
                             "crossfade {}: length {n} frames is not between 1 and {room}",
                             e.id
