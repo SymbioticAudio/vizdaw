@@ -2603,7 +2603,9 @@ store (`DawprojectModelTests`, `InterchangeCommandsTests`) and the e2e
      Edit › Undo is unavailable. The report says "This file came from a
      VizDAW project".
 287. Double-click the `.dawproject` in Finder, and drop it on the Dock icon.
-     Each does what 286 does.
+     Each does what 286 does. If another installed app owns `.dawproject`,
+     double-click may open that app instead: use File › Import Project ›
+     DAWproject… or File › Open… then.
 288. Import a file whose instrument is not installed. The track's instrument
      shows as a placeholder named after the plug-in, and the report says it
      is not installed and keeps its settings.

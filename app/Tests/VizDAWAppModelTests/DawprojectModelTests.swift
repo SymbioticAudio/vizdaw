@@ -113,6 +113,28 @@ import VizDAWCore
         }
     }
 
+    /// Fix round 1: the panel confirmed a replace only of what was there
+    /// when it returned. A file that appears while the export waits is not
+    /// replaced: the request goes without `replace`, and the core refuses.
+    @Test func replaceOnlyWhatWasThereAtConfirm() async throws {
+        for taken in [false, true] {
+            let f = fake()
+            f.jobStartState = .running
+            let (m, d) = try await shown(f)
+            var asked: [String] = []
+            d.exists = { asked.append($0); return taken }
+            running(f, m, .bounce)
+            d.confirmed(path: "/tmp/a.dawproject")
+            #expect(asked == ["/tmp/a.dawproject"], "checked once, at confirm")
+            #expect(d.waiting && f.dawprojectExports.isEmpty)
+            // Whatever is there by the time the bounce ends is not asked about.
+            d.exists = { _ in Issue.record("checked again after confirm"); return true }
+            end(f, m, 99, .bounce, .done)
+            let r = try #require(f.dawprojectExports.last)
+            #expect(r.path == "/tmp/a.dawproject" && r.replace == taken, "taken: \(taken)")
+        }
+    }
+
     @Test func cancelWaitingSendsNothing() async throws {
         let f = fake()
         f.jobStartState = .running

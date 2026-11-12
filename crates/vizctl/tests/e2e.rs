@@ -4284,9 +4284,27 @@ fn dawproject_round_trip_over_the_channel() {
     let tracks = doc["lanes"].as_array().unwrap().len();
     assert!(tracks > 0, "{doc}");
     let windows = window_numbers(&mut app);
-    let tmp = home.join("Exports");
-    std::fs::create_dir(&tmp).unwrap();
     let file = home.join("demo.dawproject");
+    // Everything under the throwaway home, to show the dry run adds nothing.
+    // The app keeps writing its own files there, so a folder that goes away
+    // mid-walk is skipped.
+    fn walk_quiet(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for p in rd.flatten().map(|e| e.path()) {
+            out.push(p.clone());
+            if p.is_dir() {
+                walk_quiet(&p, out);
+            }
+        }
+    }
+    let listing = || {
+        let mut v = Vec::new();
+        walk_quiet(&home, &mut v);
+        v.sort();
+        v
+    };
 
     // Hostile calls: each refused, none opens anything.
     let e = app.call_err(
@@ -4317,18 +4335,23 @@ fn dawproject_round_trip_over_the_channel() {
         "no hostile call opened a sheet, a panel or a window"
     );
 
-    // A dry run: a report, nothing written.
+    // A dry run: a report, nothing written anywhere under the home.
+    let before = listing();
     let r = app.call(
         "command.run",
         json!({"id": "file.export_dawproject", "params": {"dry_run": true}, "window": w}),
     );
     assert!(r["report"]["summary"].is_string(), "{r}");
     assert_eq!(r["written"], json!([]), "{r}");
-    assert_eq!(
-        std::fs::read_dir(&tmp).unwrap().count(),
-        0,
-        "tmp stays empty"
-    );
+    let new: Vec<_> = listing()
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e == "dawproject" || e == "partial")
+        })
+        .collect();
+    assert!(new.is_empty(), "the dry run wrote {new:?}");
     assert!(!file.exists());
 
     // The file: a ZIP.

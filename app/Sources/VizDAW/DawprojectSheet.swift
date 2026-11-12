@@ -6,8 +6,9 @@ import VizDAWCore
 /// File › Export › DAWproject… (spec §9; plan 6d Task 13): the region gain
 /// choice and "What won't transfer" from the core's check as it changes.
 /// The sheet comes first and Export… asks where, with the core's file name.
-/// The Save panel confirms a replace, so a chosen path is sent with
-/// `replace`. All state lives in `DawprojectModel`.
+/// The Save panel confirms a replace, so a chosen path that was taken then
+/// is sent with `replace` (`DawprojectModel.confirmed`). All state lives in
+/// `DawprojectModel`.
 struct DawprojectSheet: View {
     @Environment(\.symbioticTheme) private var theme
     @Bindable var dawproject: DawprojectModel
@@ -74,9 +75,9 @@ struct DawprojectSheet: View {
     }
 
     /// The Save panel with the core's name, then the job (or the wait for a
-    /// running one). The panel has confirmed any replace.
+    /// running one). The panel has confirmed a replace of what is there now.
     private func begin() {
         guard let path = Panels.chooseDawprojectFile(name: dawproject.defaultName) else { return }
-        dawproject.start(path: path, replace: true)
+        dawproject.confirmed(path: path)
     }
 }

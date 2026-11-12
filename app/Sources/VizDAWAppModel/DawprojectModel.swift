@@ -119,6 +119,21 @@ public final class DawprojectModel {
 
     // MARK: Start
 
+    /// Whether something is at `path` (lstat: a dangling link counts as
+    /// taken). One stat, right after the Save panel stat'd the same path;
+    /// tests replace it.
+    @ObservationIgnored public var exists: (String) -> Bool = { path in
+        (try? FileManager.default.attributesOfItem(atPath: path)) != nil
+    }
+
+    /// The Save panel's answer. The panel confirmed a replace only of what
+    /// was at `path` when it returned, so `replace` is sent only then: a file
+    /// that appears while the export waits is refused by the core, which
+    /// names it, never replaced unconfirmed.
+    public func confirmed(path: String) {
+        start(path: path, replace: exists(path))
+    }
+
     /// Whether a job the core refuses an export beside (`Busy`) is listed.
     private var blocked: Bool {
         guard let document else { return false }

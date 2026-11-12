@@ -146,10 +146,17 @@ extension Panels {
         chooseFolder(prompt: "Export Here", message: "Choose where to put the folder for another DAW.")
     }
 
-    /// The DAWproject type: the bundle's imported `org.vizdaw.dawproject`,
-    /// else (under `swift run`) the extension's dynamic type (plan 6d).
+    /// The DAWproject types: the bundle's imported `org.vizdaw.dawproject`
+    /// and the type the system gives the extension, which is another app's
+    /// when one exports it (or a dynamic type under `swift run`). Both, as
+    /// `midiTypes` lists both, so a file typed either way can be chosen.
     static var dawprojectTypes: [UTType] {
-        [UTType("org.vizdaw.dawproject") ?? UTType(filenameExtension: "dawproject")].compactMap { $0 }
+        var out: [UTType] = []
+        for t in [UTType("org.vizdaw.dawproject"), UTType(filenameExtension: "dawproject")].compactMap({ $0 })
+        where !out.contains(t) {
+            out.append(t)
+        }
+        return out
     }
 
     /// File › Import Project › DAWproject…: the file to open as a new

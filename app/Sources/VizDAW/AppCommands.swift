@@ -76,7 +76,6 @@ struct AppCommands: Commands {
                     Button(keyBindings.row(InterchangeCommands.importDawproject)?.title ?? "DAWproject…") {
                         if let path = Panels.chooseDawprojectToOpen() { store.openDawproject(path) }
                     }
-                    .accessibilityLabel("Import a DAWproject file as a new project")
                 }
                 Button("Create Demo Project") { show(store.newDemo()) }
                 Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }

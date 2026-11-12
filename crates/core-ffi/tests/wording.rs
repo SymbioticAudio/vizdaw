@@ -471,7 +471,12 @@ fn dawproject_report_texts_say_track() {
     assert_eq!(texts[0], "Values in the file that could not be read");
     assert_eq!(texts[1], "Parts the DAWproject file cannot hold");
     assert_eq!(texts[2], "Offline audio");
+    assert_eq!(texts[3], "Audio too long for a WAV file");
     assert_eq!(texts[4], "Empty clips");
+    assert_eq!(
+        texts[5],
+        "Plug-in 'Lead' did not give its current settings; its saved settings were written"
+    );
     for t in &texts {
         assert!(!says_lane(t), "{t:?} says lane");
     }
