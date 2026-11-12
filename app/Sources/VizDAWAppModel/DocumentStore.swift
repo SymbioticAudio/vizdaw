@@ -39,6 +39,11 @@ public final class DocumentStore {
     /// Makes a project in a format (set by `live()`; tests set a fake).
     public var makeProject: ((ProjectFormatRow) throws -> any SessionProtocol)?
 
+    /// Reads a DAWproject file's header with no document open (plan 6d Task
+    /// 11; the core's free function `dawprojectInfo(path:)`; tests set a
+    /// fake). It parses the file: call it off the main thread.
+    public var readDawprojectInfo: @Sendable (String) throws -> DawprojectInfoRow = { try dawprojectInfo(path: $0) }
+
     /// The app's preferences (in memory in tests; `live()` sets the real
     /// store, which is itself in memory under `VIZDAW_SUPPORT_DIR`).
     public var defaults: UserDefaults = MemoryDefaults()

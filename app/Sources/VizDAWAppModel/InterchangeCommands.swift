@@ -2,7 +2,7 @@ import Foundation
 import VizDAWCore
 
 /// `file.import_midi`, `file.export_midi`, `file.export_midi_clip`,
-/// `file.export_for_daw` and `file.interchange_report` over the control
+/// `file.export_for_daw`, `file.import_dawproject`, `file.export_dawproject` and `file.interchange_report` over the control
 /// channel (plans 6a Task 8, 6b Task 3): the
 /// Open and Save dialogs' answers as parameters, checked here before the
 /// core sees them; the core checks the destinations.
@@ -23,7 +23,10 @@ public enum InterchangeCommands {
     public static let importMidi = "file.import_midi", exportMidi = "file.export_midi"
     public static let exportClip = "file.export_midi_clip", report = "file.interchange_report"
     public static let exportForDaw = "file.export_for_daw"
-    public static let ids: Set<String> = [importMidi, exportMidi, exportClip, exportForDaw, report]
+    public static let importDawproject = "file.import_dawproject", exportDawproject = "file.export_dawproject"
+    public static let ids: Set<String> = [
+        importMidi, exportMidi, exportClip, exportForDaw, importDawproject, exportDawproject, report,
+    ]
 
     /// So `parse` can answer a `Result`.
     typealias Parsed<T> = Result<T, ControlFailure>
@@ -229,6 +232,22 @@ public enum InterchangeCommands {
                 path: args.text("path") ?? "", addToProject: args.flag("add_to_project") ?? false))
     }
 
+    /// The DAWproject export `args` ask for; `path` is "" for a check.
+    /// Default region gain: applied.
+    static func dawprojectRequest(_ args: [ControlArg], _ m: DocumentModel) -> Parsed<DawprojectExportRequestRow> {
+        let id = exportDawproject
+        let seq: UInt64
+        switch seqArg(args, id, m) {
+        case .failure(let f): return .failure(f)
+        case .success(let s): seq = s
+        }
+        return .success(
+            DawprojectExportRequestRow(
+                seq: seq, path: args.text("path") ?? "", replace: args.flag("replace") ?? false,
+                regionGain: args.text("region_gain") == "leave_out" ? .leaveOut : .apply,
+                blocks: m.editor.layout.blockRule.rule))
+    }
+
     /// Projects `file.import_midi` made whose job has not ended.
     private static var madeProjects = Set<UUID>()
 
@@ -262,6 +281,30 @@ public enum InterchangeCommands {
         do {
             return .job(command: importMidi, doc: made, job: try fresh.session.importMidi(req: req))
         } catch {
+            return .failed(.thrown(error, "Import Failed"))
+        }
+    }
+
+    /// Makes the project `file.import_dawproject` imports into (at the file's
+    /// rate) and starts the import there. A refusal leaves no project.
+    private static func importDawprojectIntoNewProject(
+        _ path: String, rate: UInt32, store: DocumentStore
+    ) -> ControlOutcome {
+        guard let made = store.newProject(ProjectFormatRow(sampleRate: rate, depth: store.defaultFormat.depth)),
+            let fresh = store.model(made)
+        else {
+            if let a = store.takeAlert() { return .failed(.alert(a)) }
+            return .failed(.of(.failed, "\(importDawproject) made no document."))
+        }
+        madeProjects.insert(made)
+        do {
+            return .job(
+                command: importDawproject, doc: made,
+                job: try fresh.session.importDawproject(req: DawprojectImportRequestRow(path: path)))
+        } catch {
+            // Refused before a job started (e.g. Busy): nothing was done in it.
+            madeProjects.remove(made)
+            store.close(made)
             return .failed(.thrown(error, "Import Failed"))
         }
     }
@@ -369,6 +412,34 @@ public enum InterchangeCommands {
             guard let path, !path.isEmpty else { return .failed(.dialog("Save", "path")) }
             do {
                 return .job(command: id, doc: docID, job: try session.exportForDaw(req: req))
+            } catch {
+                return .failed(.thrown(error, "Export Failed"))
+            }
+        case importDawproject:
+            guard let path else { return .failed(.dialog("Open", "path")) }
+            // The core reads the file first, off the main thread (L8): a
+            // refusal makes no project.
+            let read = store.readDawprojectInfo
+            return .pending(
+                PendingOutcome({ Result { try read(path) } }) { info in
+                    switch info {
+                    case .failure(let error): return .failed(.thrown(error, "Import Failed"))
+                    case .success(let row):
+                        return importDawprojectIntoNewProject(path, rate: row.sampleRate, store: store)
+                    }
+                })
+        case exportDawproject:
+            let dryRun = args.flag("dry_run") ?? false
+            let req: DawprojectExportRequestRow
+            switch dawprojectRequest(args, m) {
+            case .failure(let f): return .failed(f)
+            case .success(let r): req = r
+            }
+            let session = m.session
+            if dryRun { return Self.dryRun(id, docID, m) { try session.exportDawprojectCheck(req: req) } }
+            guard let path, !path.isEmpty else { return .failed(.dialog("Save", "path")) }
+            do {
+                return .job(command: id, doc: docID, job: try session.exportDawproject(req: req))
             } catch {
                 return .failed(.thrown(error, "Export Failed"))
             }

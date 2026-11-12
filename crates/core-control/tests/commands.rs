@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        173,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade"
+        175,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -2588,4 +2588,80 @@ fn mpe_commands_check_their_params() {
         let (code, _) = err("command.run", run(id, params.clone()));
         assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
     }
+}
+
+/// Plan 6d Task 11: the DAWproject commands check their parameters; the
+/// import's "Open" dialog is always (answered by `path`), the export's
+/// "Save" is not, so `dry_run` needs no path.
+#[test]
+fn dawproject_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("file.export_dawproject", json!({})),
+        (
+            "file.export_dawproject",
+            json!({ "path": "/x/a.dawproject" }),
+        ),
+        (
+            "file.export_dawproject",
+            json!({ "region_gain": "leave_out", "dry_run": true }),
+        ),
+        (
+            "file.export_dawproject",
+            json!({ "path": "/x/a.dawproject", "replace": true, "seq": 3, "region_gain": "apply" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "mode": "new" }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "mode": "merge" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "relative.dawproject" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a\u{0}.dawproject" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "extra": 1 }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "dry_run": true }),
+        ),
+        ("file.export_dawproject", json!({ "region_gain": "half" })),
+        ("file.export_dawproject", json!({ "seq": -1 })),
+        ("file.export_dawproject", json!({ "replace": "yes" })),
+        ("file.export_dawproject", json!({ "dry_run": 1 })),
+        ("file.export_dawproject", json!({ "extra": true })),
+        (
+            "file.export_dawproject",
+            json!({ "path": "relative.dawproject" }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let (code, message) = err("command.run", run("file.import_dawproject", json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Open"), "{message}");
 }

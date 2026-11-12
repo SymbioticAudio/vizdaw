@@ -436,4 +436,149 @@ import VizDAWCore
         cancelled.state = .cancelled
         #expect(ControlJobs.answer(cancelled) == .failed("boom; clipped; already written: /tmp/a.mid"))
     }
+
+    // MARK: DAWproject (plan 6d Task 11)
+
+    func dawprojectCalls(_ f: FakeSession) -> Int { f.dawprojectImports.count + f.dawprojectExports.count + f.dawprojectChecks.count }
+
+    @Test func importDawprojectReadsOffTheMainActorThenMakesTheProject() async throws {
+        let (s, id, m, f) = try demo()
+        let fresh = FakeSession([seq(9, "New", topLevel: true)])
+        var formats: [ProjectFormatRow] = []
+        s.makeProject = { fmt in
+            formats.append(fmt)
+            return fresh
+        }
+        s.defaultFormat = ProjectFormatRow(sampleRate: 96_000, depth: .int16)
+        f.dawprojectInfoAnswer = .success(
+            DawprojectInfoRow(sampleRate: 44_100, tracks: 2, audioFiles: 0, fromVizdaw: false, exportId: nil))
+        s.readDawprojectInfo = { try f.dawprojectInfo(path: $0) }
+        let before = s.documents.count
+        let first = run(
+            InterchangeCommands.importDawproject, [("path", .text(value: "/tmp/a.dawproject"))], m, s, id)
+        guard case .pending = first else { Issue.record("not pending: \(first)"); return }
+        #expect(s.documents.count == before, "no project before the file is read")
+        let o = await settled(first)
+        guard case .job(let command, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(f.dawprojectInfoPaths == ["/tmp/a.dawproject"] && f.checkOnMain == [false])
+        #expect(command == "file.import_dawproject" && doc != id && s.model(doc) != nil)
+        #expect(formats == [ProjectFormatRow(sampleRate: 44_100, depth: .int16)])
+        #expect(fresh.dawprojectImports.map(\.path) == ["/tmp/a.dawproject"])
+        #expect(InterchangeCommands.madeProject(doc))
+        InterchangeCommands.jobEnded(doc, failed: false, store: s) { s.close($0) }
+        // A refused file: no project, the core's sentence.
+        f.dawprojectInfoAnswer = .failure(VizError.Model(message: "not a DAWproject file"))
+        let r = failure(
+            await settled(run(InterchangeCommands.importDawproject, [("path", .text(value: "/tmp/b.dawproject"))], m, s, id)))
+        #expect(r?.code == .failed && r?.message.contains("not a DAWproject file") == true)
+        #expect(s.documents.count == before + 1 && formats.count == 1)
+    }
+
+    @Test func importDawprojectWithoutPathAsksForOpen() throws {
+        let (s, id, m, f) = try demo()
+        for args: [(String, ControlValue)] in [[], [("mode", .text(value: "new"))]] {
+            let d = failure(run(InterchangeCommands.importDawproject, args, m, s, id))
+            #expect(d?.code == .dialogRequired && d?.dialog == "Open")
+        }
+        #expect(dawprojectCalls(f) == 0 && f.dawprojectInfoPaths.isEmpty)
+    }
+
+    @Test func exportDawprojectWithoutPathAsksForSave() throws {
+        let (s, id, m, f) = try demo()
+        for args: [(String, ControlValue)] in [[], [("dry_run", .flag(value: false))], [("path", .text(value: ""))]] {
+            let d = failure(run(InterchangeCommands.exportDawproject, args, m, s, id))
+            #expect(d?.code == .dialogRequired && d?.dialog == "Save")
+        }
+        #expect(dawprojectCalls(f) == 0)
+    }
+
+    @Test func exportDawprojectDryRunIsPendingAndWritesNothing() async throws {
+        let (s, id, m, f) = try demo()
+        f.dawprojectCheckAnswer = .success(ReportRow(summary: "Would leave out 1", items: []))
+        let o = run(InterchangeCommands.exportDawproject, [("dry_run", .flag(value: true))], m, s, id)
+        guard case .pending = o else { Issue.record("not pending: \(o)"); return }
+        guard case .done(let result) = await settled(o) else { Issue.record("not done"); return }
+        _ = result
+        #expect(f.dawprojectChecks.count == 1 && f.dawprojectExports.isEmpty)
+        #expect(f.dawprojectChecks.first?.path == "" && f.checkOnMain == [false])
+        f.dawprojectCheckAnswer = .failure(VizError.Model(message: "no room"))
+        let bad = failure(await settled(run(InterchangeCommands.exportDawproject, [("dry_run", .flag(value: true))], m, s, id)))
+        #expect(bad?.code == .failed && bad?.message.contains("no room") == true && f.dawprojectExports.isEmpty)
+    }
+
+    @Test func exportDawprojectBuildsTheRequest() throws {
+        let (s, id, m, f) = try demo()
+        m.editor.updateLayout { $0.blockRule = .fixedBars(2) }
+        let o = run(
+            InterchangeCommands.exportDawproject,
+            [("path", .text(value: "/tmp/a.dawproject")), ("replace", .flag(value: true)),
+             ("region_gain", .text(value: "leave_out")), ("seq", .int(value: 2))], m, s, id)
+        guard case .job(let command, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(command == "file.export_dawproject" && doc == id)
+        #expect(
+            f.dawprojectExports.last
+                == DawprojectExportRequestRow(
+                    seq: 2, path: "/tmp/a.dawproject", replace: true, regionGain: .leaveOut,
+                    blocks: BlockRuleSetting.fixedBars(2).rule))
+        _ = run(InterchangeCommands.exportDawproject, [("path", .text(value: "/tmp/b.dawproject"))], m, s, id)
+        let d = f.dawprojectExports.last
+        #expect(d?.replace == false && d?.regionGain == .apply && d?.seq == m.selectedSeq)
+    }
+
+    @Test func dawprojectCommandsRefuseHostileArguments() async throws {
+        let (s, id, m, f) = try demo()
+        let hostile = ["", "relative.dawproject", "/tmp/" + String(repeating: "a", count: 5_000) + ".dawproject", "/tmp/a\u{0}.dawproject"]
+        let before = s.documents.count
+        // Past the registry's checks the core answers with its own sentence.
+        f.dawprojectInfoAnswer = .failure(VizError.Model(message: "the path is not usable"))
+        s.readDawprojectInfo = { try f.dawprojectInfo(path: $0) }
+        for p in hostile where !p.isEmpty {
+            let r = failure(await settled(run(InterchangeCommands.importDawproject, [("path", .text(value: p))], m, s, id)))
+            #expect(r?.code == .failed && r?.message.contains("the path is not usable") == true)
+        }
+        #expect(s.documents.count == before)
+        f.interchangeError = VizError.Model(message: "the path is not usable")
+        for p in hostile where !p.isEmpty {
+            let r = failure(run(InterchangeCommands.exportDawproject, [("path", .text(value: p))], m, s, id))
+            #expect(r?.code == .failed && r?.message.contains("the path is not usable") == true)
+        }
+        f.interchangeError = nil
+        #expect(f.dawprojectExports.isEmpty)
+        // A `seq` that is no ID never reaches the session.
+        let calls = f.dawprojectChecks.count
+        for dry in [false, true] {
+            let r = failure(
+                run(
+                    InterchangeCommands.exportDawproject,
+                    [("path", .text(value: "/tmp/a.dawproject")), ("seq", .int(value: -1)), ("dry_run", .flag(value: dry))],
+                    m, s, id))
+            #expect(r?.code == .invalidParams)
+            #expect(r?.message.contains("file.export_dawproject") == true && r?.message.contains("seq") == true)
+        }
+        #expect(f.dawprojectExports.isEmpty && f.dawprojectChecks.count == calls)
+        // An unknown sequence is the core's sentence.
+        f.interchangeError = VizError.Model(message: "no such sequence")
+        let u = failure(run(InterchangeCommands.exportDawproject, [("path", .text(value: "/tmp/a.dawproject")), ("seq", .int(value: 99))], m, s, id))
+        #expect(u?.code == .failed && u?.message.contains("no such sequence") == true)
+    }
+
+    @Test func aBusyDawprojectJobIsRefusedWithNothingMadeOrWritten() async throws {
+        let (s, id, m, f) = try demo()
+        // Export: a running job makes the next one Busy.
+        f.jobStartState = .running
+        let first = run(InterchangeCommands.exportDawproject, [("path", .text(value: "/tmp/a.dawproject"))], m, s, id)
+        guard case .job = first else { Issue.record("not a job"); return }
+        let busy = failure(run(InterchangeCommands.exportDawproject, [("path", .text(value: "/tmp/b.dawproject"))], m, s, id))
+        #expect(busy?.code == .busy && busy?.message.contains("Wait for the running") == true)
+        #expect(f.dawprojectExports.count == 1, "only the first was started")
+        // Import: the new project's session refuses; no project stays.
+        let fresh = FakeSession([seq(9, "New", topLevel: true)])
+        fresh.interchangeError = VizError.Busy(message: "Wait for the running import, export or bounce to finish.")
+        s.makeProject = { _ in fresh }
+        s.readDawprojectInfo = { try f.dawprojectInfo(path: $0) }
+        let before = s.documents.count
+        let r = failure(await settled(run(InterchangeCommands.importDawproject, [("path", .text(value: "/tmp/a.dawproject"))], m, s, id)))
+        #expect(r?.code == .busy && r?.message.contains("Wait for the running") == true)
+        #expect(s.documents.count == before && fresh.dawprojectImports.isEmpty)
+    }
 }

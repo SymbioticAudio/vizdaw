@@ -661,6 +661,59 @@ const EXPORT_MIDI_CLIP_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `file.import_dawproject` (plan 6d Task 11): a DAWproject file as a new project.
+const IMPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("dawproject"),
+        required: false,
+        help: "The .dawproject file to open as a new project (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(&["new"]),
+        required: false,
+        help: "new (default): the file opens as a new project.",
+    },
+];
+
+/// `file.export_dawproject` (plan 6d Task 11): a DAWproject file.
+const EXPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("dawproject"),
+        required: false,
+        help: "The .dawproject file to write (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "region_gain",
+        kind: ParamKind::Choice(&["apply", "leave_out"]),
+        required: false,
+        help: "apply (default): region gain is applied to the exported audio; leave_out: it is left out.",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Return what won't transfer; write nothing.",
+    },
+];
+
 /// `file.export_for_daw` (plan 6b Task 3): an export folder for another DAW.
 /// It never replaces anything: an existing folder's name gets " 2".
 const FOR_DAW_PARAMS: &[ParamSpec] = &[
@@ -1397,6 +1450,26 @@ pub const COMMANDS: &[CommandSpec] = &[
             None,
             true,
         )
+    },
+    CommandSpec {
+        params: IMPORT_DAWPROJECT_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.import_dawproject", "File", "DAWproject…", None, true)
+    },
+    CommandSpec {
+        params: EXPORT_DAWPROJECT_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_dawproject", "File", "DAWproject…", None, true)
     },
     CommandSpec {
         ..cmd(
