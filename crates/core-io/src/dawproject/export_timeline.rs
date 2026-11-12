@@ -137,6 +137,18 @@ fn end_of(r: &ResolvedEvent) -> i64 {
     }
 }
 
+/// The tick a clip holding `evs` must reach so that its last controller
+/// point (which is at one tick, not a span) is inside it: a clip's content
+/// is `[start, start + duration)`, so a point on the clip's last tick needs
+/// one more.
+fn points_end(evs: &[Ev<'_>]) -> i64 {
+    evs.iter()
+        .filter(|r| !matches!(r.body, EventBody::Note { .. }))
+        .map(|r| r.tick.0.saturating_add(1))
+        .max()
+        .unwrap_or(i64::MIN)
+}
+
 /// The span `[start, end)` of the `bars`-bar window holding `tick`, counted
 /// from bar 1 (as the arrangement's blocks are).
 fn bar_span(meter: &MeterMap, tick: i64, bars: u32) -> (i64, i64) {
@@ -538,6 +550,7 @@ impl Arr<'_, '_, '_, '_, '_> {
                 Some((s, e)) => (s.max(self.l.origin), e.max(g.end)),
                 None => (g.start, g.end),
             };
+            let end = end.max(points_end(&g.evs));
             let content = self.content(&g.evs, start)?;
             let duration = beats(Tick(end.saturating_sub(start).max(1)));
             out.push((start, note_clip(self.rel(start), duration, content)));
@@ -568,7 +581,12 @@ impl Arr<'_, '_, '_, '_, '_> {
         }) else {
             // Not a use of this track (cannot happen): a plain clip.
             let start = evs.first().map_or(0, |r| r.tick.0);
-            let end = evs.iter().map(|r| end_of(r)).max().unwrap_or(start);
+            let end = evs
+                .iter()
+                .map(|r| end_of(r))
+                .max()
+                .unwrap_or(start)
+                .max(points_end(evs));
             let content = self.content(evs, start)?;
             out.push((
                 start,
@@ -642,7 +660,8 @@ impl Arr<'_, '_, '_, '_, '_> {
                     .map(|r| end_of(r))
                     .max()
                     .unwrap_or(end_play)
-                    .max(end_play);
+                    .max(end_play)
+                    .max(points_end(&evs));
                 let content = self.content(&evs, start)?;
                 (
                     start,

@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod package;
 pub mod rawzip_builder;
 pub mod xmllint;
 

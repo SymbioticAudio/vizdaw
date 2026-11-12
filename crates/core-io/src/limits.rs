@@ -80,6 +80,16 @@ pub const MAX_NUMBER_CHARS: usize = 64;
 /// reference chains (§6.5).
 pub const MAX_TIMELINE_NESTING: usize = 16;
 
+/// Most note and audio tracks a DAWproject may hold; more is refused. The
+/// model applies a command in time linear in the project, so an import that
+/// builds n tracks takes time quadratic in n: 1 000 tracks apply in well
+/// under a second, 100 000 would take hours.
+pub const MAX_IMPORT_TRACKS: usize = 1_000;
+/// Most buses (folders, effect and submix channels) a DAWproject may hold;
+/// more is refused, for the same reason as [`MAX_IMPORT_TRACKS`] (a bus costs
+/// more to add than a track).
+pub const MAX_IMPORT_BUSES: usize = 256;
+
 /// The limits a package reader applies; tests lower them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackageLimits {
@@ -103,6 +113,10 @@ pub struct PackageLimits {
     pub max_nodes: usize,
     /// Most bytes one XML tree holds.
     pub max_tree_bytes: usize,
+    /// Most note and audio tracks the project may hold.
+    pub max_import_tracks: usize,
+    /// Most buses the project may hold.
+    pub max_import_buses: usize,
 }
 
 impl Default for PackageLimits {
@@ -118,6 +132,8 @@ impl Default for PackageLimits {
             max_depth: MAX_XML_DEPTH,
             max_nodes: MAX_XML_NODES,
             max_tree_bytes: MAX_XML_TREE_BYTES,
+            max_import_tracks: MAX_IMPORT_TRACKS,
+            max_import_buses: MAX_IMPORT_BUSES,
         }
     }
 }

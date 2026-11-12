@@ -39,6 +39,22 @@ pub const RECORD_UNREADABLE: &str = "The file's VizDAW record could not be read"
 /// Note (Ruling 17): the file's audio has no project rate.
 pub const ODD_RATE: &str = "The file's audio rate isn't a project rate; the project is 48 kHz";
 
+/// The refusal for a project with more tracks than an import can build in
+/// a bounded time (the limit in the sentence is the track limit).
+fn too_many_tracks(limit: usize) -> IoError {
+    IoError::Refused(format!(
+        "This DAWproject file has more than {limit} tracks, more than VizDAW can open."
+    ))
+}
+
+/// The refusal for a project with more buses than an import can build in a
+/// bounded time.
+fn too_many_buses(limit: usize) -> IoError {
+    IoError::Refused(format!(
+        "This DAWproject file has more than {limit} buses, more than VizDAW can open."
+    ))
+}
+
 /// The rate of a project when the file gives none.
 const DEFAULT_RATE: u32 = 48_000;
 /// How many items the walks count between looks at the cancel flag.
@@ -216,7 +232,13 @@ pub fn open(
         .last()
         .and_then(Option::as_deref)
         .and_then(export_id_of);
-    let (tracks, tagged_tracks) = count_tracks(&project, cancel)?;
+    let (tracks, tagged_tracks, buses) = count_tracks(&project, cancel)?;
+    if usize::try_from(tracks).unwrap_or(usize::MAX) > limits.max_import_tracks {
+        return Err(too_many_tracks(limits.max_import_tracks));
+    }
+    if buses > limits.max_import_buses {
+        return Err(too_many_buses(limits.max_import_buses));
+    }
     let ret = ReturnInfo {
         record,
         export_id,
@@ -435,15 +457,26 @@ pub(crate) fn all_tracks(p: &DpProject) -> Vec<&DpTrack> {
     out
 }
 
-/// Note and audio tracks, and how many of them carry a `vz:t` tag.
-fn count_tracks(p: &DpProject, cancel: &AtomicBool) -> Result<(u32, u32), IoError> {
+/// Note and audio tracks, how many of them carry a `vz:t` tag, and the
+/// buses (folders, effect and submix channels, and channels outside tracks).
+fn count_tracks(p: &DpProject, cancel: &AtomicBool) -> Result<(u32, u32, usize), IoError> {
     let (mut tracks, mut tagged) = (0u32, 0u32);
+    let mut buses = p
+        .structure
+        .iter()
+        .filter(|i| matches!(i, DpStructureItem::Channel(_)))
+        .count();
     for (i, t) in all_tracks(p).into_iter().enumerate() {
         if i % CANCEL_EVERY == 0 {
             stop(cancel)?;
         }
-        if role_of(t) != TrackRole::Content {
-            continue;
+        match role_of(t) {
+            TrackRole::Content => {}
+            TrackRole::Folder | TrackRole::Bus => {
+                buses = buses.saturating_add(1);
+                continue;
+            }
+            TrackRole::Master | TrackRole::Vca => continue,
         }
         tracks = tracks.saturating_add(1);
         let has_tag = t
@@ -455,7 +488,7 @@ fn count_tracks(p: &DpProject, cancel: &AtomicBool) -> Result<(u32, u32), IoErro
             tagged = tagged.saturating_add(1);
         }
     }
-    Ok((tracks, tagged))
+    Ok((tracks, tagged, buses))
 }
 
 /// `seconds` at `rate` in frames, rounded; 0 for what cannot be a length.

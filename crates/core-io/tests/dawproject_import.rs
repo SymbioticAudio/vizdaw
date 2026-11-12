@@ -1261,7 +1261,7 @@ fn plugin_states_are_bounded() {
 #[test]
 fn many_tracks_keep_the_report_small() {
     let dir = tempfile::tempdir().unwrap();
-    let tracks: String = (0..100_000)
+    let tracks: String = (0..core_io::limits::MAX_IMPORT_TRACKS)
         .map(|i| {
             format!(
                 r#"<Track id="t{i}" name="T{i}" contentType="notes"><Channel id="c{i}" role="regular"/></Track>"#
@@ -1275,7 +1275,7 @@ fn many_tracks_keep_the_report_small() {
     assert!(took.as_secs() < 30, "{took:?}");
     assert!(imp.report.items.len() < 10, "{:#?}", imp.report.items.len());
     let line = item(&imp.report, ItemKind::Note, PLAYS_BUILTIN).expect("listed");
-    assert_eq!(line.count, 100_000);
+    assert_eq!(line.count, core_io::limits::MAX_IMPORT_TRACKS as u64);
     assert_eq!(line.details.len(), core_io::limits::MAX_DETAILS);
 }
 
@@ -1381,4 +1381,42 @@ fn notes_and_audio_on_one_track_use_both_strips() {
     assert_eq!(midi_strip(&a, &l).inserts.len(), 1);
     assert_eq!(audio_strip(&a, &l).inserts.len(), 1);
     has_detail(&a.report, ItemKind::Changed, BOTH_STRIPS, "Both");
+}
+
+#[test]
+fn a_hostile_count_of_tracks_is_refused_at_once() {
+    // Found by the hostile-XML property (plan 6d Task 8): applying n tracks
+    // takes time quadratic in n (the model handles each command in time
+    // linear in the project), so 100 000 tracks ran for
+    // hours and held gigabytes. Past the limits the file is refused when it
+    // is opened.
+    let dir = tempfile::tempdir().unwrap();
+    for (n, effect, why) in [
+        (20_000, false, "more than 1000 tracks"),
+        (20_000, true, "more than 256 buses"),
+    ] {
+        let structure: String = (0..n)
+            .map(|i| {
+                let role = if effect { "effect" } else { "regular" };
+                format!(
+                    r#"<Track id="t{i}" contentType="{}"><Channel id="c{i}" role="{role}" destination="mc"/></Track>"#,
+                    if effect { "audio" } else { "notes" }
+                )
+            })
+            .collect();
+        let project = project_xml(&structure, "");
+        let path = package(dir.path(), "Many", &[("project.xml", project.as_bytes())]);
+        let start = std::time::Instant::now();
+        let (r, seen) = measure(|| open(&path, &PackageLimits::default(), &AtomicBool::new(false)));
+        let Err(IoError::Refused(s)) = r else {
+            panic!("{n} tracks were not refused")
+        };
+        assert!(s.contains(why), "{s}");
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+        assert!(
+            seen.peak < 256 * 1024 * 1024,
+            "peak {} MiB",
+            seen.peak >> 20
+        );
+    }
 }

@@ -1339,3 +1339,52 @@ fn pressure_at_its_notes_start_is_the_notes() {
         c[0]
     );
 }
+
+#[test]
+fn a_last_point_is_inside_its_clip() {
+    // Found by the round-trip property (plan 6d Task 8): a clip is
+    // `[time, time + duration)`, so a controller point on the clip's last
+    // tick was cut off by the import. The clip reaches one tick past it.
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", BUILTIN_SYNTH_REF, 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    b.notes(seq, keys, &[(0, 60, 0x8000, Q)]).unwrap();
+    b.event(
+        seq,
+        keys,
+        2 * Q,
+        EventBody::Cc {
+            index: 1,
+            value: 0x4000_0000,
+        },
+    )
+    .unwrap();
+    let doc = b.finish();
+    let p = read_back(&run(&doc, seq));
+    let c = rule_clips(&p, &format!("t{}", keys.0));
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].duration, Some(2.0 + 1.0 / 15_360.0));
+    // The unrolled use of a sequence ending in a point is no different.
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", BUILTIN_SYNTH_REF, 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    let (riff, rl) = b.sequence("Riff", "Riff", Some(synth)).unwrap();
+    b.notes(riff, rl, &[(0, 60, 0x8000, Q)]).unwrap();
+    b.event(
+        riff,
+        rl,
+        BAR - 1,
+        EventBody::Cc {
+            index: 1,
+            value: 0x4000_0000,
+        },
+    )
+    .unwrap();
+    length(&mut b, riff, BAR);
+    b.reference(seq, keys, 0, riff, 1, 0).unwrap();
+    let doc = b.finish();
+    let p = read_back(&run(&doc, seq));
+    let c = clips(&p, &format!("t{}", keys.0));
+    assert_eq!(c.len(), 1);
+    assert!(c[0].duration.unwrap() >= 4.0, "{:?}", c[0].duration);
+}

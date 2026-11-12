@@ -421,3 +421,48 @@ byte, and the hand-written fixtures the typed model is tested against.
     key 200, channel 99 and velocity 2.0, a `NaN` point, an `Audio` with
     `sampleRate="0"` and a clip of duration −1, beside readable notes at 1
     and 2 and a CC point at 1.
+
+### Round-trip, fuzz and limits harnesses (plan 6d Task 8)
+
+These tests add no data files. They build their inputs in code, or reuse the
+fixtures above (`hand_minimal`, `hand_other`, `hand_timeline` zipped in
+memory).
+
+- **`dawproject_round_trip.rs`:** `trip` exports a document with a fake AU
+  codec, checks `project.xml` and `metadata.xml` against the vendored XSDs,
+  writes the package with `ZipWriter` (every audio entry a 44-byte stub WAV,
+  from `common/package.rs`), opens it, maps it with each entry's media as the
+  original item (`Imported` with the original's content hash, or, for a
+  region's gain copy, `<hash>@<gain>`) and applies it to a new project at the
+  same rate. `round_trip` returns the imported document and the two reports.
+  `same` compares `projection(original)` with `projection(imported)`:
+  - exact: names, notes with their expression (as a set), MIDI events, region
+    ticks, offsets, lengths, fades, mutes, crossfade flags, markers, song
+    info, the tempo and meter maps, sends' targets and flags, and devices
+    (format, ID, bypass, state hash), and colours;
+  - within 1e-9: levels, pan, send levels and automation values (the one-tick
+    hold points the import adds are dropped);
+  - the original's ticks move by its origin (the import has no pickup);
+  - a ramp on the last tempo point is not compared (it leads nowhere);
+  - a region's `gain_db` is 0 after `Apply` (its copy has the gain) and the
+    original's after `LeaveOut` is not carried.
+
+  Instrument destinations and audio output paths are named after their track
+  (the import names them so). Notes on the track's main channel (the one with
+  the most notes) play on the instrument's channel on import; the generator
+  keeps channel 0 the main one, and `group_channels_are_written_as_group_one`
+  states the other case.
+- **`dawproject_fuzz.rs`:** a counting global allocator (per thread, a
+  reallocation counted as an allocation then a free), each case under 2 s and
+  256 MiB on its own thread. `damaged_packages_never_panic` damages four valid
+  packages (flips, inserts, deletes, truncations); `hostile_zips_never_panic`
+  builds packages byte by byte with `rawzip_builder` (traversal names,
+  duplicates, links, flags, methods 12 and 99, sizes 0, `u32::MAX` and ZIP64,
+  a 50 MiB-of-zeros `project.xml`); `hostile_xml_never_panics` puts a DOCTYPE,
+  depth up to 300, up to 10^5 elements, absurd numbers, dangling and cyclic
+  IDs, unknown elements and long `contentType` lists in a template project.
+  Every case ends in `Ok` or `Refused` after `open`, `map` and `apply`.
+  `VIZDAW_FUZZ_CASES=n` sets the case count.
+- **`dawproject_limits.rs`:** one test per limit of Ruling 18, at the limit
+  and one past it, with lowered `PackageLimits` where the size makes that
+  cheaper than building it.
