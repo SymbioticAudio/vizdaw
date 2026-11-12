@@ -798,11 +798,16 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         forDawExports.append(req)
         return interchangeJob(.exportProject, 9000, forDawExports.count)
     }
+    /// Holds a for-DAW check until released; answers it per request.
+    var forDawCheckHold: (@Sendable (ForDawRequestRow) -> DispatchSemaphore?)?
+    var forDawCheckReply: (@Sendable (ForDawRequestRow) -> ForDawCheckRow)?
     func exportForDawCheck(req: ForDawRequestRow) throws -> ForDawCheckRow {
         interchangeLock.lock()
         forDawChecks.append(req)
         checkOnMain.append(Thread.isMainThread)
         interchangeLock.unlock()
+        forDawCheckHold?(req)?.wait()
+        if let reply = forDawCheckReply { return reply(req) }
         return try forDawCheckAnswer.get()
     }
     func interchangeReport() throws -> ReportRow? {

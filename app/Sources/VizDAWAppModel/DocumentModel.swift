@@ -135,6 +135,7 @@ public final class DocumentModel {
     @ObservationIgnored private var mediaModel: MediaModel?
     @ObservationIgnored private var bounceModel: BounceModel?
     @ObservationIgnored private var interchangeModel: InterchangeModel?
+    @ObservationIgnored private var forDawModel: ForDawModel?
     @ObservationIgnored private var projectSettingsModel: ProjectSettingsModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
@@ -195,6 +196,14 @@ public final class DocumentModel {
         if let m = bounceModel { return m }
         let m = BounceModel(document: self)
         bounceModel = m
+        return m
+    }
+
+    /// File › Export for Another DAW… (plan 6b), made once.
+    public var forDaw: ForDawModel {
+        if let m = forDawModel { return m }
+        let m = ForDawModel(document: self)
+        forDawModel = m
         return m
     }
 

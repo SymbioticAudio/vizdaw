@@ -39,11 +39,12 @@ public enum ReportText {
         i.count > 1 ? "\(i.what) (\(i.count))" : i.what
     }
 
-    /// The places given, then "and N more" when there were more.
+    /// The places given, then "and N more" when there were more. An item
+    /// kept without places shows only its count (as `Report::plain`).
     public static func details(_ i: ReportItemRow) -> [String] {
         var out = i.details
         let given = UInt64(i.details.count)
-        if i.count > given { out.append("and \(i.count - given) more") }
+        if given > 0, i.count > given { out.append("and \(i.count - given) more") }
         return out
     }
 
@@ -108,7 +109,7 @@ public final class InterchangeModel {
     func jobEnded(_ job: JobRow) {
         guard let r = job.report else { return }
         report = r
-        written = job.kind == .exportMidi ? job.written : []
+        written = job.kind == .exportMidi || job.kind == .exportProject ? job.written : []
         reportShown = true
     }
 
@@ -232,14 +233,25 @@ public final class InterchangeModel {
     /// Starts the queue's next file; one refused at the start, or ended on
     /// `startJob`'s own poll, lets the one after it go at once.
     private func startNextDrop() {
-        guard let document else { return }
-        while dropJob == nil, !dropQueue.isEmpty {
+        guard let document, !startingDrops else { return }
+        startingDrops = true
+        defer { startingDrops = false }
+        while dropJob == nil, !dropQueue.isEmpty,
+            !document.jobs.contains(where: { ForDawModel.blocking.contains($0.kind) })
+        {
             let req = dropQueue.removeFirst()
             guard let id = document.startJob(.importMidi, "MIDI Import Failed", { try $0.importMidi(req: req) })
             else { continue }
             if document.jobs.contains(where: { $0.id == id }) { dropJob = id }
         }
     }
+
+    /// `startJob` polls, which ends in `startNextDrop` again.
+    @ObservationIgnored private var startingDrops = false
+
+    /// A job the core cannot run a MIDI import beside ended (`pollJobs`,
+    /// after the job list is settled): waiting dropped files may start.
+    func blockingEnded() { startNextDrop() }
 
     /// An import job of this document ended (`pollJobs`, after its outcome
     /// is shown): the next dropped file starts. A cancelled one empties the

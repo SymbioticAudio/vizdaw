@@ -321,6 +321,53 @@ import VizDAWCore
         #expect(f.midiImports.last?.path == "/tmp/e.mid" && m.interchange.dropQueue.isEmpty && m.alert == nil)
     }
 
+    /// Plan 6b Task 4: the core takes one interchange job at a time, so
+    /// dropped MIDI files wait for a running export.
+    @Test func droppedMidiWaitsForTheExport() async throws {
+        let f = busy()
+        f.jobStartState = .running
+        let m = try DocumentModel(session: f)
+        m.forDaw.shown = true
+        await m.forDaw.settle()
+        m.forDaw.start(folder: "/tmp/x")
+        #expect(f.forDawExports.count == 1)
+        m.interchange.importDropped(
+            paths: ["/tmp/a.mid", "/tmp/b.mid"], target: ImportTargetRow(seq: 3, lane: nil, tick: 0))
+        #expect(f.midiImports.isEmpty && m.alert == nil && m.interchange.dropQueue.count == 2)
+        let id = try #require(m.jobs.first { $0.kind == .exportProject }?.id)
+        f.jobRows[id] = JobRow(id: id, kind: .exportProject, progress: 1, state: .done, message: nil, problems: [], created: [])
+        m.pollJobs()
+        #expect(f.midiImports.map(\.path) == ["/tmp/a.mid"] && m.alert == nil)
+    }
+
+    /// F11: only a cancelled *drop* job clears the queue; a cancelled export
+    /// leaves the waiting drops, and the first then starts.
+    @Test func cancelledExportKeepsTheDropQueue() async throws {
+        let f = busy()
+        f.jobStartState = .running
+        let m = try DocumentModel(session: f)
+        m.forDaw.shown = true
+        await m.forDaw.settle()
+        m.forDaw.start(folder: "/tmp/x")
+        m.interchange.importDropped(
+            paths: ["/tmp/a.mid", "/tmp/b.mid"], target: ImportTargetRow(seq: 3, lane: nil, tick: 0))
+        let id = try #require(m.jobs.first { $0.kind == .exportProject }?.id)
+        f.jobRows[id] = JobRow(id: id, kind: .exportProject, progress: 1, state: .cancelled, message: nil, problems: [], created: [])
+        m.pollJobs()
+        #expect(f.midiImports.map(\.path) == ["/tmp/a.mid"] && m.interchange.dropQueue.count == 1 && m.alert == nil)
+    }
+
+    /// The report's "and N more" follows given details only, as the core's
+    /// `Report::plain` does.
+    @Test func moreIsOnlyAfterGivenDetails() {
+        let bare = ReportItemRow(kind: .leftOut, what: "Muted notes", count: 120, details: [])
+        #expect(ReportText.details(bare).isEmpty)
+        let some = ReportItemRow(kind: .leftOut, what: "Muted notes", count: 5, details: ["bar 1", "bar 2"])
+        #expect(ReportText.details(some) == ["bar 1", "bar 2", "and 3 more"])
+        let r = ReportRow(summary: "Exported", items: [bare])
+        #expect(ReportText.plain(r) == "Exported\nLeft out\n  Muted notes (120)")
+    }
+
     @Test func openRoutesMidiFiles() throws {
         var made: [FakeSession] = []
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() })

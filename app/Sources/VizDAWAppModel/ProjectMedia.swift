@@ -132,12 +132,17 @@ extension DocumentModel {
         var still: [JobRow] = []
         var openFailure: String??
         var importsEnded: [JobRow] = []
+        var blockersEnded: [JobRow] = []
         for j in jobs {
             let r: JobRow
             do {
                 r = try session.job(id: j.id)
             } catch {
-                if case .Busy = error as? VizError { still.append(j) }
+                if case .Busy = error as? VizError {
+                    still.append(j)
+                } else {
+                    blockersEnded.append(j)
+                }
                 continue
             }
             switch jobAnswer(r) {
@@ -148,18 +153,21 @@ extension DocumentModel {
                 if !r.problems.isEmpty { jobProblems = r.problems }
                 refreshAfterJob()
                 // A MIDI import or export the UI started shows its report.
-                if r.kind == .importMidi || r.kind == .exportMidi { interchange.jobEnded(r) }
+                if r.kind == .importMidi || r.kind == .exportMidi || r.kind == .exportProject { interchange.jobEnded(r) }
                 if r.kind == .importMidi { openedMidi = nil }
             case .failed(let message):
                 if r.kind == .importMidi, openedMidi != nil {
                     // Open made this project for the file: the store closes it.
                     openFailure = .some(r.state == .cancelled ? nil : message)
-                } else if r.state != .cancelled, !(r.kind == .exportMidi && interchange.jobFailed(r, message: message)) {
+                } else if r.state != .cancelled, !(r.kind == .exportMidi && interchange.jobFailed(r, message: message)),
+                    !(r.kind == .exportProject && forDaw.jobFailed(r, message: message))
+                {
                     alert = AlertItem(title: ProjectBanner.failureTitle(r.kind), message: message)
                 }
                 refreshAfterJob()
             }
             if r.kind == .importMidi { importsEnded.append(r) }
+            blockersEnded.append(r)
         }
         jobs = still
         if let failure = openFailure, let hook = openedMidi {
@@ -169,6 +177,13 @@ extension DocumentModel {
         // Dropped files waiting for this one start now (final review I1),
         // after `jobs` is settled: `startJob` adds to it.
         for r in importsEnded { interchange.importEnded(r) }
+        // Anything waiting for a job to end (dropped MIDI files, an export)
+        // goes now that the list is settled. A cancelled export keeps the
+        // dropped files queued (F11): only `importEnded` clears them.
+        for r in blockersEnded where ForDawModel.blocking.contains(r.kind) || ForDawModel.mediaJobs.contains(r.kind) {
+            if ForDawModel.blocking.contains(r.kind) { interchange.blockingEnded() }
+            forDaw.jobEnded(r)
+        }
     }
 
     public func refreshProjectInfo() {
