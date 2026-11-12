@@ -183,6 +183,7 @@ fn audio_region_extent_uses_the_tempo_map() {
             fade_in: Fade::default(),
             fade_out: Fade::default(),
             name: None,
+            crossfade: false,
         },
     );
     // 1 s at 120 BPM = 2 beats, so it ends at beat 5 -> rounded to 2 bars.
@@ -269,6 +270,7 @@ fn media_in_use_lists_regions() {
             fade_in: Fade::default(),
             fade_out: Fade::default(),
             name: None,
+            crossfade: false,
         },
     );
     let d = insert(&base(), 1, 1, vec![region]);

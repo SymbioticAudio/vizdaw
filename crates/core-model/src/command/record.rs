@@ -172,6 +172,7 @@ fn region_spec(r: &RecordedRegion, files: &Files<'_>) -> Result<EventSpec> {
             fade_in: Fade::default(),
             fade_out: Fade::default(),
             name: None,
+            crossfade: false,
         },
     ))
 }

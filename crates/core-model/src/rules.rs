@@ -255,6 +255,7 @@ pub fn check_event_fields(doc: &Document, ev: &EventSpec) -> Result<()> {
             fade_in,
             fade_out,
             name,
+            ..
         } => {
             if let Some(n) = name {
                 check_region_name(n)?;
@@ -508,5 +509,6 @@ pub fn validate(doc: &Document) -> Vec<String> {
     }
     p.extend(crate::mixer_rules::mixer_problems(doc));
     p.extend(crate::learn::problems(&doc.settings().learn));
+    p.extend(crate::crossfade::problems(doc));
     p
 }

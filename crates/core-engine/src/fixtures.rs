@@ -541,6 +541,7 @@ pub fn demo_audio_document() -> Result<Document> {
                 fade_in: Fade::default(),
                 fade_out: Fade::default(),
                 name: None,
+                crossfade: false,
             },
         )?;
     }

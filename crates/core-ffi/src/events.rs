@@ -650,6 +650,7 @@ pub fn row(
             fade_in,
             fade_out,
             name,
+            ..
         } => {
             r.region_name = name.clone();
             r.media = Some(media.0);
@@ -736,6 +737,7 @@ pub fn spec(row: &EventRow) -> Result<EventSpec, VizError> {
             fade_in: fade_of(&row.fade_in),
             fade_out: fade_of(&row.fade_out),
             name: row.region_name.clone(),
+            crossfade: false,
         },
         EventKindRow::Automation => {
             let a = row

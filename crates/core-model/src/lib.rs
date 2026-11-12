@@ -17,6 +17,7 @@
 
 pub mod automation;
 pub mod command;
+pub mod crossfade;
 pub mod document;
 pub mod error;
 pub mod event;

@@ -207,8 +207,9 @@ fn learn_maps_round_trip_and_are_absent_when_empty() {
     // Learn maps need no format bump of their own; version 4 is plan 7b's
     // EQ slot and strip colour (Ruling 8); version 5 is plan 5g-1's input
     // effects (Ruling 18); version 6 is plan 5g-1b's MIDI mix; version 7
-    // is plan 5g-2's MPE settings; version 8 is plan 6a's song info, region names and project ID.
-    assert_eq!(core_model::file::VERSION, 8);
+    // is plan 5g-2's MPE settings; version 8 is plan 6a's song info, region names and project ID;
+    // version 9 is plan 6c's crossfade flag.
+    assert_eq!(core_model::file::VERSION, 9);
     let bare = serde_json::to_string(&m)
         .unwrap()
         .replace(",\"pickup\":true", "");

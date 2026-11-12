@@ -135,6 +135,7 @@ fn event_range_checks() {
         fade_in: Default::default(),
         fade_out: Default::default(),
         name: None,
+        crossfade: false,
     }));
     assert!(bad(EventBody::AudioRegion {
         media: MediaId(0),
@@ -144,6 +145,7 @@ fn event_range_checks() {
         fade_in: Default::default(),
         fade_out: Default::default(),
         name: None,
+        crossfade: false,
     }));
     let mut spec = EventSpec::new(Tick(0), EventBody::note(60, 1, Tick(1)));
     spec.group_channel = Some((0, 16));

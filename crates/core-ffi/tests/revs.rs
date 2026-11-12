@@ -238,6 +238,7 @@ fn a_media_pool_change_bumps_only_lanes_holding_regions() {
             fade_in: Fade::default(),
             fade_out: Fade::default(),
             name: None,
+            crossfade: false,
         },
     )
     .unwrap();
