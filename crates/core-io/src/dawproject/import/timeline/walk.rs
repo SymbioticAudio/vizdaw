@@ -125,12 +125,41 @@ impl<'p> Tl<'_, '_, 'p> {
             }
             None => 0,
         };
-        // The event it names: the first clip to name one keeps it.
+        // The event it names: the first clip to name one keeps it, and so
+        // do the clips after it on the same track that each start where
+        // the one before ends or later (the export writes a use one clip
+        // per pass of its track's loop, in time order, `use_clips`).
+        let start = self.at(f, c.time).unwrap_or(i64::MIN);
+        let end = c
+            .duration
+            .and_then(|d| self.at(f, c.time + d))
+            .unwrap_or(start)
+            .max(start);
         let tag = self
             .cx
             .named(None, &[], c.named.comment.as_deref(), &[TagKind::Event])
             .map(|n| n.number())
-            .filter(|&n| first(&mut self.cx.claims.events, &mut self.cx.claims.ignored, n));
+            .filter(|&n| {
+                let claims = &mut self.cx.claims;
+                match claims.events.get_mut(&n) {
+                    None => {
+                        claims.events.insert(n, (track, end));
+                        true
+                    }
+                    Some((t, last)) if *t == track => {
+                        let follows = start >= *last;
+                        *last = (*last).max(end);
+                        if !follows {
+                            claims.ignored = claims.ignored.saturating_add(1);
+                        }
+                        follows
+                    }
+                    Some(_) => {
+                        claims.ignored = claims.ignored.saturating_add(1);
+                        false
+                    }
+                }
+            });
         let mut tf = *f;
         tf.tag = tag;
         let f = &tf;

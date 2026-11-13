@@ -587,6 +587,9 @@ impl Arr<'_, '_, '_, '_, '_> {
 
     /// The clips of reference use `id` (`event` on track `p`): one per pass
     /// of the track's loop, looped when every pass of the use is the same.
+    /// Each carries the use's tag; the import takes the clips of one track
+    /// that each start at or after the end of the one before as one use's
+    /// passes (`import::timeline`'s `top_clip`).
     fn use_clips(
         &mut self,
         p: &Part<'_>,

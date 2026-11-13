@@ -152,6 +152,22 @@ impl TagKind {
     }
 }
 
+/// The ID of the copy of shared strip `strip`'s channel on track `lane`
+/// (`c<strip>t<lane>`): a strip several tracks play through is written once
+/// per track, each copy with the strip's tag and its devices' tags.
+pub fn copy_channel_id(strip: u64, lane: u64) -> String {
+    format!("c{strip}t{lane}")
+}
+
+/// The strip a [`copy_channel_id`] copies; `None` for any other ID.
+pub fn copied_strip(id: &str) -> Option<u64> {
+    let (strip, lane) = id.strip_prefix('c')?.split_once('t')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(strip) && digits(lane)).then_some(())?;
+    lane.parse::<u64>().ok()?;
+    strip.parse().ok()
+}
+
 /// The tag `vz:<letter><id>`.
 pub fn tag(kind: TagKind, id: u64) -> String {
     format!("vz:{}{id}", kind.letter())

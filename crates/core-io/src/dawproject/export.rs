@@ -30,7 +30,9 @@ pub use super::export_timeline::{
 use super::plugins::{PlistCodec, state_entry};
 use super::record::{self, ObjectRef, Record, Snapshot};
 use super::schema::*;
-use super::units::{EXPORT_LINE, TagKind, beats, linear_gain, pan_normalized, swatch_hex, tag};
+use super::units::{
+    EXPORT_LINE, TagKind, beats, copy_channel_id, linear_gain, pan_normalized, swatch_hex, tag,
+};
 use crate::IoError;
 use crate::midi_out::{self, file_start, start_bpm, start_meters};
 use crate::names::safe_part;
@@ -840,7 +842,7 @@ pub(super) fn layout<'a>(
                 };
                 Chan {
                     id: if copy {
-                        format!("c{}t{}", st.id.0, lane.id.0)
+                        copy_channel_id(st.id.0, lane.id.0)
                     } else {
                         format!("c{}", st.id.0)
                     },

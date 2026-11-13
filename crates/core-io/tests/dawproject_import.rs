@@ -1498,6 +1498,24 @@ mod origins {
         (doc, seq, x)
     }
 
+    /// `doc`'s `seq` exported.
+    fn export_of(doc: &Document, seq: SeqId) -> DpExport {
+        let o = ExportOptions {
+            seq,
+            region_gain: RegionGain::Apply,
+            clips: ClipRule::SilenceGap(Tick(4 * Q)),
+            left_out: Default::default(),
+        };
+        let env = ExportEnv {
+            plist: &TestPlist,
+            app_version: "1.2.3",
+            project_id: PROJECT,
+            export_id: EXPORT,
+            exported_at: 1_700_000_000,
+        };
+        export(doc, &o, &env, &AtomicBool::new(false)).expect("exports")
+    }
+
     /// The export's IDs, as the snapshot holds them.
     fn ids_of(x: &DpExport) -> BTreeMap<String, ObjectRef> {
         read_snapshot(x.snapshot_json.as_bytes())
@@ -1702,6 +1720,62 @@ mod origins {
     }
 
     #[test]
+    fn our_repeated_tags_are_not_ignored() {
+        let (doc, seq) = merge::shared_fixture();
+        let x = export_of(&doc, seq);
+        // The shapes are there: the pad strip's channel twice, the use's
+        // tag on more than one clip.
+        let pad = lane_of(&doc, seq, "Pad A");
+        let pad_strip = doc
+            .mixer()
+            .find_kind(StripKind::Instrument(pad.midi_dest.unwrap()))
+            .unwrap();
+        let strip_tag = format!(r#"comment="vz:s{}""#, pad_strip.0);
+        assert_eq!(x.project_xml.matches(&strip_tag).count(), 2, "two copies");
+        let lp = lane_of(&doc, seq, "Loop");
+        let use_id = events(&lp, is_use)[0];
+        let use_tag = format!(r#"comment="vz:e{}""#, use_id.0);
+        assert!(
+            x.project_xml.matches(&use_tag).count() > 1,
+            "one clip per pass"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_of(dir.path(), &x, str::to_owned);
+        let ids = ids_of(&x);
+        for trusted in [None, Some(&ids)] {
+            let t = tagged(&pkg, &BTreeMap::new(), trusted);
+            lacks(&t.a.report, TAGS_IGNORED);
+            let new = t.a.h.doc();
+            let o = &t.origins;
+            let nm = new.mixer();
+            let base = doc.mixer().strip(pad_strip).unwrap();
+            for name in ["Pad A", "Pad B"] {
+                let l = lane_of(new, t.a.seq, name);
+                let base_lane = lane_of(&doc, seq, name);
+                assert_eq!(o.lanes[&l.id], (base_lane.id.0, false), "{name}");
+                let s = nm
+                    .find_kind(StripKind::Instrument(l.midi_dest.unwrap()))
+                    .unwrap();
+                assert_eq!(o.strips[&s], pad_strip.0, "{name}'s strip");
+                assert_eq!(
+                    o.slots[&instrument_slot(new, &l)],
+                    instrument_slot(&doc, &pad).0,
+                    "{name}'s instrument"
+                );
+                let insert = nm.strip(s).unwrap().inserts[0].id;
+                assert_eq!(o.slots[&insert], base.inserts[0].id.0, "{name}'s insert");
+            }
+            let nl = lane_of(new, t.a.seq, "Loop");
+            let top: Vec<EventId> = nl.active().unwrap().events.values().map(|e| e.id).collect();
+            assert!(top.len() > 1, "{top:?}");
+            for e in &top {
+                assert_eq!(o.events.get(e), Some(&use_id.0), "every pass is the use");
+            }
+        }
+    }
+
+    #[test]
     fn trusted_ids_win_over_tags() {
         let (doc, seq, x) = exported();
         let (bass, keys) = (lane_of(&doc, seq, "Bass"), lane_of(&doc, seq, "Keys"));
@@ -1748,7 +1822,8 @@ mod origins {
     }
 
     /// The hostile file: hostile tags and IDs, and `clips` one-note clips
-    /// on track A all tagged `vz:e5`.
+    /// on track A all tagged `vz:e5`, each starting before the one before
+    /// it ends (so they are not one use's passes).
     fn hostile(clips: usize) -> String {
         let structure = concat!(
             r#"<Track id="ta" name="A" comment="vz:t1" contentType="notes"/>"#,
@@ -1760,7 +1835,8 @@ mod origins {
         let mut s = String::with_capacity(clips * 160);
         for i in 0..clips {
             s.push_str(&format!(
-                r#"<Clip time="{i}" duration="1" comment="vz:e5"><Notes><Note time="0" duration="0.5" channel="0" key="60" vel="0.5"/></Notes></Clip>"#
+                r#"<Clip time="{}" duration="1" comment="vz:e5"><Notes><Note time="0" duration="0.5" channel="0" key="60" vel="0.5"/></Notes></Clip>"#,
+                i as f64 / 2.0
             ));
         }
         let arrangement =

@@ -2,7 +2,9 @@
 //! identity the snapshot keeps. Task 4 adds the merge harness.
 
 use core_engine::fixtures::{BAR, Builder, Q};
-use core_model::command::{AudioCmd, Command, CrossfadeLength, MediaCmd, MixerCmd, SequenceCmd};
+use core_model::command::{
+    AudioCmd, Command, CrossfadeLength, LaneCmd, MediaCmd, MixerCmd, SequenceCmd,
+};
 use core_model::document::{Document, MediaOrigin};
 use core_model::event::{Fade, FadeShape};
 use core_model::ids::{AnyId, MediaId, SeqId};
@@ -133,6 +135,52 @@ pub fn fixture() -> (Document, SeqId) {
         ]
         .into_iter()
         .collect(),
+    }))
+    .unwrap();
+    (b.finish(), seq)
+}
+
+/// Sequence "Song" (eight bars) with the two shapes in which the export
+/// repeats a tag:
+///
+/// - "Pad A" and "Pad B" both play CLAP instrument "Pad Synth"
+///   (`org.example.Pad`), whose strip has the insert `org.example.Chorus`,
+///   so its channel is copied into each track; each has a note at tick 0;
+/// - "Loop" on CLAP instrument "Arp Synth" (`org.example.Arp`) loops its
+///   first two bars, and uses sequence "Arp" (two notes, one bar) at bar 1
+///   twice, across the loop's end, so the use is one clip per pass.
+pub fn shared_fixture() -> (Document, SeqId) {
+    let mut b = Builder::new();
+    let (pad, _) = b.plugin_dest("Pad Synth", clap("org.example.Pad")).unwrap();
+    let (seq, pad_a) = b.sequence("Song", "Pad A", Some(pad)).unwrap();
+    let pad_b = b.lane(seq, "Pad B", Some(pad)).unwrap();
+    b.notes(seq, pad_a, &[(0, 60, 0x8000, Q)]).unwrap();
+    b.notes(seq, pad_b, &[(0, 64, 0x8000, Q)]).unwrap();
+    let strip = b.strip_of(StripKind::Instrument(pad)).unwrap();
+    b.insert(strip, clap("org.example.Chorus")).unwrap();
+
+    let (arp, _) = b.plugin_dest("Arp Synth", clap("org.example.Arp")).unwrap();
+    let lp = b.lane(seq, "Loop", Some(arp)).unwrap();
+    let (riff, rl) = b.sequence("Arp", "Arp", Some(arp)).unwrap();
+    b.notes(riff, rl, &[(0, 48, 0x8000, Q), (2 * Q, 55, 0x9000, Q)])
+        .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq: riff,
+        length: SeqLength::Locked(Tick(BAR)),
+    }))
+    .unwrap();
+    b.reference(seq, lp, BAR, riff, 2, 0).unwrap();
+    b.run(Command::Lane(LaneCmd::SetLength {
+        seq,
+        lane: lp,
+        length: Some(Tick(2 * BAR)),
+        looped: true,
+        locked: false,
+    }))
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(8 * BAR)),
     }))
     .unwrap();
     (b.finish(), seq)

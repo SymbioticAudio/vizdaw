@@ -45,8 +45,10 @@ use super::package::{DpPackage, Roles, TrackRole, is_bus};
 use super::plugins::PlistCodec;
 use super::record::ObjectRef;
 use super::schema::*;
+#[cfg(doc)]
+use super::units::copy_channel_id;
 use super::units::{
-    EXPORT_LINE, TagKind, db_of_linear, nearest_swatch, pan_of_normalized, strip_tags,
+    EXPORT_LINE, TagKind, copied_strip, db_of_linear, nearest_swatch, pan_of_normalized, strip_tags,
 };
 use crate::IoError;
 use crate::report::{ItemKind, Report};
@@ -489,6 +491,9 @@ struct Cx<'a, 'p> {
     send_at: HashMap<&'p str, (&'p str, usize)>,
     /// What the tags and trusted IDs have named so far.
     claims: Claims,
+    /// The shared strip the channel being mapped copies
+    /// ([`copied_strip`]), for its devices' claims.
+    copy: Option<u64>,
 }
 
 /// What the file's tags and trusted IDs have named so far, per map, and how
@@ -496,10 +501,14 @@ struct Cx<'a, 'p> {
 #[derive(Debug, Default)]
 struct Claims {
     lanes: HashSet<(u64, bool)>,
-    strips: HashSet<u64>,
-    events: HashSet<u64>,
+    /// Each strip named, with the shared strip its first channel copies.
+    strips: HashMap<u64, Option<u64>>,
+    /// Each event named: the plan track of its clips and where the last of
+    /// them ends.
+    events: HashMap<u64, (usize, i64)>,
     markers: HashSet<u64>,
-    slots: HashSet<u64>,
+    /// Each slot named, with the shared strip its first channel copies.
+    slots: HashMap<u64, Option<u64>>,
     ignored: usize,
 }
 
@@ -530,6 +539,29 @@ fn first<K: std::hash::Hash + Eq>(set: &mut HashSet<K>, ignored: &mut usize, key
     }
 }
 
+/// Whether a claim on `n` from a channel copying shared strip `copy` keeps
+/// it: the first claim does, and so does a later one when both channels
+/// are copies of the same shared strip (the export writes one per track,
+/// [`copy_channel_id`]). Any other later claim is counted in `ignored`.
+fn first_or_copy(
+    map: &mut HashMap<u64, Option<u64>>,
+    ignored: &mut usize,
+    n: u64,
+    copy: Option<u64>,
+) -> bool {
+    match map.get(&n) {
+        None => {
+            map.insert(n, copy);
+            true
+        }
+        Some(c) if copy.is_some() && *c == copy => true,
+        Some(_) => {
+            *ignored = ignored.saturating_add(1);
+            false
+        }
+    }
+}
+
 /// Maps `pkg` to a plan for [`apply`]. Looks at `cancel` before any work and
 /// every [`CANCEL_EVERY`] items. The report starts with the package's.
 /// `media` (what became of each [`DpPackage::audio`] file) is for the
@@ -555,6 +587,7 @@ pub fn map(
         dev_slot: HashMap::new(),
         send_at: HashMap::new(),
         claims: Claims::default(),
+        copy: None,
     };
     let p = &pkg.project;
     if p.dropped_text > 0 {
@@ -719,7 +752,13 @@ impl<'a, 'p> Cx<'a, 'p> {
             return None;
         }
         let n = named.number();
-        first(&mut self.claims.strips, &mut self.claims.ignored, n).then_some(n)
+        let copy = c
+            .named
+            .id
+            .as_deref()
+            .and_then(copied_strip)
+            .filter(|s| *s == n);
+        first_or_copy(&mut self.claims.strips, &mut self.claims.ignored, n, copy).then_some(n)
     }
 
     /// The swatch nearest `hex` (Changed unless exact); a malformed colour
@@ -1003,6 +1042,9 @@ impl<'a, 'p> Cx<'a, 'p> {
         let name = self.name(t.named.name.as_deref(), || format!("Track {n}"));
         self.comment(t.named.comment.as_deref(), || format!("track '{name}'"));
         let channel = t.channel.as_deref();
+        self.copy = channel
+            .and_then(|c| c.named.id.as_deref())
+            .and_then(copied_strip);
         // The audio part of a track: audio and no notes (a split track's
         // second half, or an audio track).
         let audio_part =
@@ -1098,6 +1140,7 @@ impl<'a, 'p> Cx<'a, 'p> {
         } else {
             None
         };
+        self.copy = None;
         Ok(TrackPlan {
             name,
             dest_name,
@@ -1212,7 +1255,10 @@ impl<'a, 'p> Cx<'a, 'p> {
                 &[TagKind::Device, TagKind::Eq],
             )
             .map(|n| n.number())
-            .filter(|&n| first(&mut self.claims.slots, &mut self.claims.ignored, n));
+            .filter(|&n| {
+                let copy = self.copy;
+                first_or_copy(&mut self.claims.slots, &mut self.claims.ignored, n, copy)
+            });
         let state = match &d.state {
             None => None,
             Some(f) if f.external => {
