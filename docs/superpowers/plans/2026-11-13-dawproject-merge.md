@@ -1069,7 +1069,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 - **Deliberately not here:** the AAF and OMF routes (6f, 6h), Multi-Q and its `Equalizer` mapping (6g), single-note conflicts, and merging replaced audio (backlog rows, Task 11).
 - **Names are consistent across tasks:** every name used in a later task is one an earlier task's Interfaces block produces (checked: `Identity`, `TrackIds`, `EventAt`, `UseAt`, `StripIds`, `Origins`, `apply_tagged`, `Theirs`, `Matched`, `Matches`, `MatchedBy`, `MergePlan`, `MergePreview`, `Decision`, `Outcome`, `Unit`, `apply_merge`, `LABEL`, `MergeStepRow`, `DawprojectMergeRequestRow`, `MergePreviewRow`, `SnapshotRow`, `ReturnPrompt`, `ReturnChoice`, `MergeModel`).
 - **Review Focus:** each line names its tests in the owning task.
-- **Spec conflicts and questions for the owner** (each settled by a Ruling until answered):
+- **Spec conflicts and questions for the owner.** Owner answers (2026-11-13): items 2 and 4 confirmed as ruled. Items 1, 3 and 5 are the controller's calls (the keep list wins; the file cannot carry gain; 6d's threshold kept).
   1. Ruling 7: a track the other DAW deleted is kept, emptied, when it holds what the file cannot carry. The spec's table says "Removed", but its keep list says inactive takes and input effects always stay.
   2. Ruling 8: an edit to a shared sequence also plays where the sequence is used outside the merged sequence (other sequences, keyboard slots), with a Note. The alternative is private copies for every exported use.
   3. Ruling 11: region gain never comes back. The file has no clip gain, and 6d's import sets 0, though §7.8 lists "region names and gain" as taken from theirs.
