@@ -817,6 +817,37 @@ pub fn not_enough_space_to_import(bytes: u64) -> String {
     )
 }
 
+/// The import's failure when a decoder delivers more audio than its file
+/// says ([`core_media::import::LONGER_THAN_PROBED`]).
+pub fn audio_longer_than_it_says(file: &str) -> String {
+    format!("The audio file {file} holds more audio than it says, so the import stopped.")
+}
+
+/// Why converting one audio file ended without its media.
+enum Halt {
+    /// The job was cancelled.
+    Cancelled,
+    /// The job stops: the sentence says why.
+    Refused(String),
+    /// The file goes offline: why.
+    Offline(String),
+}
+
+impl Halt {
+    /// A conversion's error, for the file the report calls `file`.
+    fn of(e: core_media::MediaError, file: &str) -> Halt {
+        use core_media::MediaError;
+        match e {
+            MediaError::Cancelled => Halt::Cancelled,
+            MediaError::Refused(s) if s == core_media::import::LONGER_THAN_PROBED => {
+                Halt::Refused(audio_longer_than_it_says(file))
+            }
+            MediaError::Refused(s) => Halt::Refused(s),
+            e => Halt::Offline(e.to_string()),
+        }
+    }
+}
+
 /// Opens the file at `text` (checked as `file_path` checks it) and reads
 /// what [`DawprojectInfoRow`] holds. Nothing outside the package is looked
 /// at.
@@ -931,6 +962,10 @@ fn external_file(p: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// The bytes the free-space check allows each converted file beyond its
+/// samples (its header and chunks).
+const CAF_HEADROOM: u64 = 64 * 1024;
+
 /// The import job's body: the mapped import, or how it stopped. Converted
 /// media goes into `files` as it is made, so the caller can remove it
 /// whatever happens.
@@ -945,7 +980,7 @@ fn import_body(
     use core_io::dawproject::package::{AudioSource, open};
     use core_io::limits::PackageLimits;
     use core_media::MediaError;
-    use core_media::import::{INCOMING_DIR, import_reserved};
+    use core_media::import::{INCOMING_DIR, import_checked};
     let stage = |n: u32| {
         if job.cancel_at == Some(n) {
             cancel.store(true, Ordering::Relaxed);
@@ -967,21 +1002,42 @@ fn import_body(
     if free.is_some_and(|f| need > f) {
         return Err(Stop::Failed(not_enough_space_to_import(need)));
     }
-    // 3. The audio.
+    // 3. The audio. Each file is checked again once probed (final review
+    // I1): the file's own duration is not trusted, so the space its
+    // conversion may take, at the probe's frame budget, must still be
+    // free; and the conversion stops at that budget.
     let incoming = job.root.join(INCOMING_DIR);
     let n = pkg.audio().len().max(1) as f32;
     let mut media = BTreeMap::new();
     let (mut extracted, mut converted) = (false, false);
+    // What this job has converted so far, counted against `job.free` (the
+    // disk's own count already holds it).
+    let mut used = 0u64;
     for (k, a) in pkg.audio().iter().enumerate() {
         let mut each = |f: f32| set(0.1 + 0.8 * (k as f32 + f.clamp(0.0, 1.0)) / n);
-        let mut convert = |from: &Path, converted: &mut bool| {
-            let r = import_reserved(
+        let mut convert = |from: &Path, copy: u64, converted: &mut bool| {
+            let mut room = |info: &core_media::import::SourceInfo, budget: u64| {
+                let need = budget
+                    .saturating_mul(u64::from(info.channels))
+                    .saturating_mul(u64::from(depth))
+                    .saturating_add(CAF_HEADROOM.saturating_mul(u64::from(info.channels)));
+                let left = match job.free {
+                    Some(f) => Some(f.saturating_sub(used).saturating_sub(copy)),
+                    None => crate::record::free_bytes(&job.root),
+                };
+                if left.is_some_and(|f| need > f) {
+                    return Err(MediaError::Refused(not_enough_space_to_import(need)));
+                }
+                Ok(())
+            };
+            let r = import_checked(
                 importer,
                 from,
                 &job.root,
                 job.format,
                 &a.name,
                 &job.reserved,
+                &mut room,
                 &mut each,
                 cancel,
             );
@@ -990,24 +1046,23 @@ fn import_body(
             }
             r
         };
-        // `Err(None)`: cancelled; `Err(Some(why))`: offline.
-        let r: Result<Vec<core_media::import::Imported>, Option<String>> = match &a.source {
+        let r: Result<Vec<core_media::import::Imported>, Halt> = match &a.source {
             AudioSource::Entry(name) => {
                 let copy = incoming.join(extracted_name(name));
                 let made = std::fs::create_dir_all(&incoming)
                     .map_err(|e| IoError::Io(format!("{}: {e}", display_name(&incoming))))
                     .and_then(|()| pkg.extract(a, &copy, cancel));
                 match made {
-                    Err(IoError::Cancelled) => Err(None),
-                    Err(e) => Err(Some(e.to_string())),
-                    Ok(_) => {
+                    Err(IoError::Cancelled) => Err(Halt::Cancelled),
+                    Err(e) => Err(Halt::Offline(e.to_string())),
+                    Ok(size) => {
                         if !std::mem::replace(&mut extracted, true) {
                             stage(6);
                         }
                         let r = if cancelled() {
                             Err(MediaError::Cancelled)
                         } else {
-                            convert(&copy, &mut converted)
+                            convert(&copy, size, &mut converted)
                         };
                         let _ = std::fs::remove_file(&copy);
                         let file = entry_file(name);
@@ -1017,29 +1072,38 @@ fn import_body(
                             }
                             items
                         })
-                        .map_err(|e| match e {
-                            MediaError::Cancelled => None,
+                        .map_err(|e| match Halt::of(e, file) {
                             // The entry's name, not the extracted copy's.
-                            e => Some(e.to_string().replace(&copy.display().to_string(), file)),
+                            Halt::Offline(why) => {
+                                Halt::Offline(why.replace(&copy.display().to_string(), file))
+                            }
+                            h => h,
                         })
                     }
                 }
             }
             AudioSource::External(p) => match external_file(p) {
-                Ok(real) => convert(&real, &mut converted).map_err(|e| match e {
-                    MediaError::Cancelled => None,
-                    e => Some(e.to_string()),
-                }),
-                Err(why) => Err(Some(why)),
+                Ok(real) => {
+                    convert(&real, 0, &mut converted).map_err(|e| Halt::of(e, &display_name(p)))
+                }
+                Err(why) => Err(Halt::Offline(why)),
             },
         };
         match r {
-            Err(None) => return Err(Stop::Cancelled),
+            Err(Halt::Cancelled) => return Err(Stop::Cancelled),
+            Err(Halt::Refused(why)) => return Err(Stop::Failed(why)),
             Ok(items) => {
+                for i in &items {
+                    used = used.saturating_add(
+                        i.length_frames
+                            .saturating_mul(u64::from(i.channels))
+                            .saturating_mul(u64::from(depth)),
+                    );
+                }
                 files.push((a.name.clone(), Ok(items.clone())));
                 media.insert(a.key, MediaSource::Online(items));
             }
-            Err(Some(why)) => {
+            Err(Halt::Offline(why)) => {
                 media.insert(a.key, MediaSource::Offline { why });
             }
         }

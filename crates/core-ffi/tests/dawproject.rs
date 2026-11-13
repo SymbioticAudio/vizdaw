@@ -1707,6 +1707,146 @@ fn import_not_enough_space_refuses() {
     t.s.debug_free_bytes(None).unwrap();
 }
 
+/// An 8-bit mono WAV at 8 kHz holding `frames` frames of silence.
+fn wav8(frames: u32) -> Vec<u8> {
+    let mut w = b"RIFF".to_vec();
+    w.extend_from_slice(&(36 + frames).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    w.extend_from_slice(&1u16.to_le_bytes()); // mono
+    w.extend_from_slice(&8000u32.to_le_bytes());
+    w.extend_from_slice(&8000u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&8u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&frames.to_le_bytes());
+    w.extend(std::iter::repeat_n(0x80u8, frames as usize));
+    w
+}
+
+/// A mono 16-bit 48 kHz FLAC of `blocks` silent blocks of 4096 frames
+/// (verbatim subframes) whose header gives no length (total samples 0).
+fn flac_of_unknown_length(blocks: u8) -> Vec<u8> {
+    fn crc8(b: &[u8]) -> u8 {
+        b.iter().fold(0u8, |mut c, x| {
+            c ^= x;
+            for _ in 0..8 {
+                c = if c & 0x80 != 0 {
+                    (c << 1) ^ 0x07
+                } else {
+                    c << 1
+                };
+            }
+            c
+        })
+    }
+    fn crc16(b: &[u8]) -> u16 {
+        b.iter().fold(0u16, |mut c, x| {
+            c ^= u16::from(*x) << 8;
+            for _ in 0..8 {
+                c = if c & 0x8000 != 0 {
+                    (c << 1) ^ 0x8005
+                } else {
+                    c << 1
+                };
+            }
+            c
+        })
+    }
+    assert!(blocks < 128);
+    let mut out = b"fLaC".to_vec();
+    // STREAMINFO, the last metadata block: blocks of 4096, frame sizes
+    // unknown, then 48000 Hz (20 bits), mono (3), 16 bits (5) and total
+    // samples 0 (36), and no MD5.
+    out.extend_from_slice(&[0x80, 0, 0, 34]);
+    out.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0]);
+    let packed: u64 = (48_000u64 << 44) | (15u64 << 36);
+    out.extend_from_slice(&packed.to_be_bytes());
+    out.extend_from_slice(&[0; 16]);
+    for k in 0..blocks {
+        // Sync and fixed blocks; 4096 frames (12), 48 kHz (10); mono,
+        // 16 bits; the frame number.
+        let mut frame = vec![0xFF, 0xF8, 0xCA, 0x08, k];
+        frame.push(crc8(&frame));
+        frame.push(0x02); // a verbatim subframe
+        frame.extend(std::iter::repeat_n(0u8, 4096 * 2));
+        let c = crc16(&frame);
+        frame.extend_from_slice(&c.to_be_bytes());
+        out.extend_from_slice(&frame);
+    }
+    out
+}
+
+/// Final review I1: the free space is checked again once each file is
+/// probed, so a file whose stated duration understates it (here an 8 kHz
+/// 8-bit WAV said to last half a second, which converts to 18 times its
+/// size) cannot fill the disk; nothing is left.
+#[cfg(target_os = "macos")]
+#[test]
+fn import_rechecks_the_space_from_the_probe() {
+    let _g = serial();
+    let t = target();
+    let dir = t.dir.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    let path = zip_of(
+        &dir,
+        "Short",
+        &[
+            (
+                "project.xml",
+                audio_project(&[("audio/a.wav", false)]).as_bytes(),
+            ),
+            ("audio/a.wav", &wav8(100_000)),
+        ],
+    );
+    // The file's own numbers need about 0.5 MB; the conversion about 2.
+    t.s.debug_free_bytes(Some(1_000_000)).unwrap();
+    let j = import(&t, &path);
+    t.s.debug_free_bytes(None).unwrap();
+    assert_eq!(j.state, JobStateRow::Failed, "{j:?}");
+    assert_eq!(
+        j.message.as_deref(),
+        Some("Not enough free space to import this file (it needs 3 MB).")
+    );
+    assert!(media_files(&t.pkg).is_empty(), "{:?}", media_files(&t.pkg));
+    assert!(t.s.lanes(first_seq(&t.s).0).unwrap().is_empty());
+    // With room, the same file imports.
+    let j = import(&t, &path);
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+}
+
+/// Final review I1: a conversion stops at its frame budget (the probe's
+/// frames at the project rate plus a second): a FLAC whose header gives
+/// no length decodes far past it, so the import stops and leaves nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn import_stops_a_file_longer_than_it_says() {
+    let _g = serial();
+    let t = target();
+    let dir = t.dir.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    let path = zip_of(
+        &dir,
+        "Long",
+        &[
+            (
+                "project.xml",
+                audio_project(&[("audio/a.flac", false)]).as_bytes(),
+            ),
+            ("audio/a.flac", &flac_of_unknown_length(30)),
+        ],
+    );
+    let j = import(&t, &path);
+    assert_eq!(j.state, JobStateRow::Failed, "{j:?}");
+    assert_eq!(
+        j.message.as_deref(),
+        Some(vizdaw_ffi::dawproject::audio_longer_than_it_says("a.flac").as_str())
+    );
+    assert!(media_files(&t.pkg).is_empty(), "{:?}", media_files(&t.pkg));
+    assert!(t.s.lanes(first_seq(&t.s).0).unwrap().is_empty());
+}
+
 /// Ruling 18: what is not a DAWproject file version 1, or leaves the
 /// package, fails with the reader's sentence and writes nothing.
 #[test]
