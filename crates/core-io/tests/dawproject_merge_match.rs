@@ -1172,3 +1172,68 @@ fn a_new_track_never_takes_a_bus() {
         "Reverb"
     );
 }
+
+#[test]
+fn an_exact_length_wins_over_a_near_one() {
+    // b's 9 is within a tick of both of a's notes; a's 10 must take b's 10.
+    let a = part(vec![note(0, 60, 10), note(0, 60, 9)]);
+    let b = part(vec![note(0, 60, 9), note(0, 60, 10)]);
+    assert_eq!(notes(&a, &b), vec![(Some(0), Some(1)), (Some(1), Some(0))]);
+    let a = audio_part(vec![region(0, 10, Some("h"), None)]);
+    let b = audio_part(vec![
+        region(0, 9, Some("h"), None),
+        region(0, 10, Some("h"), None),
+    ]);
+    assert_eq!(untagged(&a, &b), vec![(Some(0), Some(1)), (None, Some(0))]);
+}
+
+#[test]
+fn a_region_with_gain_comes_back_with_its_stem() {
+    // A real `Apply` export of a region at −6 dB: its audio comes back as a
+    // gain copy, with another hash and the same stem.
+    let (doc, seq) = fixture();
+    let mut b = Builder::from_doc(doc);
+    let keys = b
+        .doc()
+        .sequence(seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .find(|l| l.name == "Keys")
+        .unwrap()
+        .id;
+    let m = media(&mut b, "gained", 48_000, 2);
+    let none = Fade {
+        length_frames: 0,
+        shape: FadeShape::Linear,
+    };
+    b.region(seq, keys, 4 * BAR, m, 0, 48_000, -6.0, none, none)
+        .unwrap();
+    let t = trip(&b.finish(), seq);
+    let (th, mt) = matched(&t, &return_file(&t, Strip::Tags, |_, _| {}));
+    each_once(&t, &th, &mt);
+    let bi = base_track(&t, "Keys audio");
+    let ti = of_base(&mt.tracks, bi).theirs.unwrap();
+    let nb = normalised(&t.snapshot.projection, &t.snapshot);
+    let at = |rs: &[PRegion]| rs.iter().position(|r| r.tick == 4 * BAR).unwrap();
+    let (base_r, theirs_r) = (
+        at(&nb.tracks[bi].regions),
+        at(&th.projection.tracks[ti].regions),
+    );
+    let x = &nb.tracks[bi].regions[base_r];
+    let y = &th.projection.tracks[ti].regions[theirs_r];
+    assert_eq!(x.stem.as_deref(), Some("gained"));
+    assert_eq!(y.stem, x.stem, "the same stem on both sides");
+    assert_eq!(x.media_hash, None, "Apply: no hash for a gain copy");
+    assert_eq!(y.media_hash.as_deref(), Some("hash-gained@-6"));
+    let got = region_pairs(&t, &th, &mt, "Keys audio");
+    assert!(complete(&got), "{got:?}");
+    assert!(got.contains(&(Some(base_r), Some(theirs_r))), "{got:?}");
+
+    // With theirs' hash gone too (offline), the stem still pairs it.
+    let mut th = th;
+    th.projection.tracks[ti].regions[theirs_r].media_hash = None;
+    let got = region_pairs(&t, &th, &mt, "Keys audio");
+    assert!(complete(&got), "{got:?}");
+    assert!(got.contains(&(Some(base_r), Some(theirs_r))), "{got:?}");
+}

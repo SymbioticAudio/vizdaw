@@ -588,8 +588,9 @@ impl Near {
 
     /// The first free row at `tick` (the tick itself first, then one
     /// before, then one after; within [`NOTE_TICKS`]) whose length is
-    /// within `len_tol` of `len`, the lowest length then index first.
-    /// At most `2 * NOTE_TICKS + 1` range lookups.
+    /// is `len`, else (only when none is) within `len_tol` of `len`, the
+    /// lowest length then index first. At most `2 * (2 * NOTE_TICKS + 1)`
+    /// range lookups.
     fn find(&self, tick: i64, len: u64, len_tol: u64) -> Option<(i64, u64, usize)> {
         let mut ticks = vec![tick];
         for d in 1..=NOTE_TICKS {
@@ -598,12 +599,17 @@ impl Near {
         }
         let lo = len.saturating_sub(len_tol);
         let hi = len.saturating_add(len_tol);
-        ticks.into_iter().find_map(|t| {
-            self.0
-                .range((t, lo, 0)..=(t, hi, usize::MAX))
-                .next()
-                .copied()
-        })
+        // The exact length first (at any of the ticks), so a row never
+        // takes a near one that an exact row of the other side needs.
+        let first = |lo: u64, hi: u64| {
+            ticks.iter().find_map(|&t| {
+                self.0
+                    .range((t, lo, 0)..=(t, hi, usize::MAX))
+                    .next()
+                    .copied()
+            })
+        };
+        first(len, len).or_else(|| first(lo, hi))
     }
 }
 
