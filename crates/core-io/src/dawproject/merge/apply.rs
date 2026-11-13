@@ -33,11 +33,14 @@
 //! together. **Devices:** a strip's bypass and state units after a device
 //! list change name the slots the change left.
 //!
-//! **Shared sequences (Ruling 8) are Task 6b's.** Until then a reference
-//! use's notes count as its track's: when theirs changes what plays
-//! through a use, the use is replaced by what it plays (`LaneEdit`'s
-//! `unroll`, listed under [`text::LOOPS_UNROLLED`]). Task 6b puts the
-//! edit into the sequence, or a private copy, before that fallback.
+//! **Shared sequences (Ruling 8, Task 6b; [`shared`]).** With a format-2
+//! snapshot, theirs' changes to what plays through one of ours' reference
+//! uses are gathered per use and go into the used sequence, or a private
+//! copy of it, after the lanes' edits. A use that cannot take them as one
+//! edit (passes edited differently, or an edit the sequence cannot play
+//! the same) is replaced by what theirs plays (`LaneEdit`'s `unroll`,
+//! listed under [`text::LOOPS_UNROLLED`]). With a format-1 snapshot every
+//! such use is replaced so (Ruling 3: a use counts as its notes).
 
 use super::decide::{MergePlan, Outcome, StripField, Unit, same_note, same_region, ticks_near};
 use super::matching::{Matched, notes, regions};
@@ -70,12 +73,14 @@ use core_model::time::Tick;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod shared;
+
 /// The merge's one undo step.
 pub const LABEL: &str = "Merge DAWproject";
 
 /// Inside the caller's open transaction on the project `plan` was made
-/// against: carries out each decision (Rulings 5–7, 9–11; Ruling 8's
-/// shared uses are Task 6b), then merges the plan's report into `report`.
+/// against: carries out each decision (Rulings 5–11), then merges the
+/// plan's report into `report`.
 /// `report.summary` keeps its counts; the merge's summary line is
 /// `text::summary(&plan.preview)` (Ruling 15). `date` names conflict takes
 /// ("Returned <date>").
@@ -148,6 +153,12 @@ pub fn apply_merge(
     for d in out.unrolled {
         report.add(ItemKind::Changed, text::LOOPS_UNROLLED, Some(d));
     }
+    for d in out.copies {
+        report.add(ItemKind::Changed, text::PRIVATE_COPIES, Some(d));
+    }
+    for d in out.elsewhere {
+        report.add(ItemKind::Note, text::SHARED_ELSEWHERE, Some(d));
+    }
     report.merge(out.report);
     report.summary = counts;
     Ok(())
@@ -166,6 +177,10 @@ struct Out {
     takes: Vec<String>,
     /// [`text::LOOPS_UNROLLED`] details.
     unrolled: Vec<String>,
+    /// [`text::PRIVATE_COPIES`] details.
+    copies: Vec<String>,
+    /// [`text::SHARED_ELSEWHERE`] details.
+    elsewhere: Vec<String>,
     /// Lines from adding theirs' new tracks and placing their automation.
     report: Report,
 }
@@ -189,6 +204,9 @@ struct Cx<'a> {
     theirs_buses: BTreeMap<StripId, usize>,
     /// The rows of `matches.strips` whose bus step 1 added.
     new_strips: BTreeMap<usize, StripId>,
+    /// Whether edits inside uses are refined (Ruling 8): a format-2
+    /// snapshot.
+    refine: bool,
 }
 
 impl<'a> Cx<'a> {
@@ -234,6 +252,7 @@ impl<'a> Cx<'a> {
             theirs_tracks,
             theirs_buses: bus_of_strip(&th.doc),
             new_strips: BTreeMap::new(),
+            refine: plan.base.identity.is_some(),
         }
     }
 
@@ -336,24 +355,27 @@ impl<'a> Cx<'a> {
 struct LaneEdit {
     /// Top-level events deleted.
     delete: BTreeSet<EventId>,
-    /// Played events inside uses that are deleted: (event, use).
-    gone_in_uses: BTreeSet<(u64, u64)>,
-    /// Uses replaced by what they play (Task 6b's seam).
+    /// Played events inside uses that are deleted: (event, use, the tick
+    /// it plays at), so one pass of a looped use loses it alone.
+    gone_in_uses: BTreeSet<(u64, u64, i64)>,
+    /// Uses replaced by what they play.
     unroll: BTreeSet<u64>,
     insert: Vec<EventSpec>,
     /// Top-level regions edited in place (`EventCmd::Replace`), so they
     /// keep their events (Task 6 fix round 2).
     replace: Vec<(EventId, EventSpec)>,
+    /// Changes inside uses, for Ruling 8 ([`shared::resolve`]).
+    inside: Vec<shared::Change>,
 }
 
 impl LaneEdit {
-    /// Deletes ours' played event `at`: itself at the top level, else the
-    /// use it plays through is unrolled without it.
-    fn delete(&mut self, at: &EventAt) {
+    /// Deletes ours' played event `at`, playing at `tick`: itself at the
+    /// top level, else the use it plays through is unrolled without it.
+    fn delete(&mut self, at: &EventAt, tick: i64) {
         if at.event == at.top {
             self.delete.insert(EventId(at.event));
         } else {
-            self.gone_in_uses.insert((at.event, at.top));
+            self.gone_in_uses.insert((at.event, at.top, tick));
             self.unroll.insert(at.top);
         }
     }
@@ -423,7 +445,7 @@ fn tracks(h: &mut History, cx: &Cx<'_>, date: &str, out: &mut Out) -> Result<(),
             None => continue,
         };
         match &d.unit {
-            Unit::Notes => edit_notes(cx, &mut edit, o, t, shift),
+            Unit::Notes => edit_notes(h.doc(), cx, &mut edit, (o, t), lane, shift),
             Unit::Regions => edit_regions(h, cx, &mut edit, o, t, shift)?,
             Unit::Automation(key) => edit_curve(h.doc(), cx, &mut edit, key, (o, t), shift, out),
             _ => {}
@@ -432,9 +454,15 @@ fn tracks(h: &mut History, cx: &Cx<'_>, date: &str, out: &mut Out) -> Result<(),
             *e = edit;
         }
     }
+    // Ruling 8: the uses theirs edited inside, then the lanes (an unrolled
+    // use plays its sequence as it was), then the sequences.
+    let shared = shared::resolve(h.doc(), cx, &mut edits);
     for (lane, edit) in edits {
         apply_edit(h, cx, lane, edit, out)?;
     }
+    shared::write(h, &shared)?;
+    out.copies.extend(shared.copies);
+    out.elsewhere.extend(shared.elsewhere);
     for (lane, parts) in takes {
         conflict_take(h, cx, lane, &parts, date, out)?;
     }
@@ -551,44 +579,123 @@ fn midi_unpaired(a: &[(i64, String)], b: &[(i64, String)]) -> (Vec<usize>, BTree
 
 /// Ruling 5: note-level edits. Ours' notes theirs does not have (within
 /// the tolerances) are deleted and theirs' are inserted; MIDI events as a
-/// set.
-fn edit_notes(cx: &Cx<'_>, edit: &mut LaneEdit, o: usize, t: usize, shift: i64) {
-    let (Some(ot), Some(oi), Some(tt)) = (
+/// set. With [`Cx::refine`], a change to what plays through a use is that
+/// use's (Ruling 8, [`shared`]).
+fn edit_notes(
+    doc: &Document,
+    cx: &Cx<'_>,
+    edit: &mut LaneEdit,
+    (o, t): (usize, usize),
+    lane: u64,
+    shift: i64,
+) {
+    let (Some(ot), Some(oi), Some(tt), Some(ti)) = (
         cx.normal.tracks.get(o),
         cx.ids.tracks.get(o),
         cx.th.projection.tracks.get(t),
+        cx.th.identity.tracks.get(t),
     ) else {
         return;
     };
+    let owners = cx.refine.then(|| shared::Owners::new(doc, cx, lane, t));
+    let raw = |tick: i64| tick.saturating_add(cx.origin);
+    let ours_of = |at: &EventAt| owners.as_ref().and_then(|w| w.of_ours(at));
+    let theirs_of = |at: &EventAt, tick: i64| {
+        owners
+            .as_ref()
+            .and_then(|w| w.of_theirs(doc, cx, at, raw(tick)))
+    };
+    let lost = |at: &EventAt, tick: i64| shared::Lost {
+        at: *at,
+        tick: raw(tick),
+    };
+    let note = |j: usize| -> Option<shared::Gained> {
+        let (n, at) = (tt.notes_played.get(j)?, ti.notes.get(j)?);
+        Some(shared::Gained {
+            tick: raw(n.tick),
+            key: shared::Key::Note(n.clone()),
+            spec: theirs_spec(cx, at, n.tick, Some(n.pitch), shift)?,
+        })
+    };
     let mut add = BTreeSet::new();
     for (i, j) in notes(ot, tt) {
-        let same = match (
+        let (a, b) = (
             i.and_then(|i| ot.notes_played.get(i)),
             j.and_then(|j| tt.notes_played.get(j)),
-        ) {
-            (Some(a), Some(b)) => same_note(a, b),
-            _ => false,
-        };
-        if same {
+        );
+        if let (Some(a), Some(b)) = (a, b)
+            && same_note(a, b)
+        {
             continue;
         }
-        if let Some(at) = i.and_then(|i| oi.notes.get(i)) {
-            edit.delete(at);
+        let ours = i.and_then(|i| Some((oi.notes.get(i)?, a?.tick)));
+        let theirs = j.and_then(|j| Some((j, theirs_of(ti.notes.get(j)?, b?.tick))));
+        let ou = ours.and_then(|(at, _)| ours_of(at));
+        if let Some((at, tick)) = ours {
+            match ou {
+                Some(u) => {
+                    let with = theirs
+                        .filter(|(_, tu)| *tu == Some(u))
+                        .and_then(|(j, _)| note(j));
+                    edit.inside.push(shared::Change {
+                        use_ev: u,
+                        ours: Some(lost(at, tick)),
+                        theirs: with,
+                    });
+                }
+                None => edit.delete(at, raw(tick)),
+            }
         }
-        if let Some(j) = j {
-            add.insert(j);
+        match theirs {
+            Some((j, Some(u))) if ou != Some(u) => edit.inside.push(shared::Change {
+                use_ev: u,
+                ours: None,
+                theirs: note(j),
+            }),
+            Some((j, None)) => {
+                add.insert(j);
+            }
+            _ => {}
         }
     }
     edit.insert
         .extend(theirs_notes(cx, t, shift, |j| add.contains(&j)));
     let (lone_o, lone_t) = midi_unpaired(&ot.midi, &tt.midi);
     for i in lone_o {
-        if let Some(at) = oi.midi.get(i) {
-            edit.delete(at);
+        let (Some(at), Some(m)) = (oi.midi.get(i), ot.midi.get(i)) else {
+            continue;
+        };
+        match ours_of(at) {
+            Some(u) => edit.inside.push(shared::Change {
+                use_ev: u,
+                ours: Some(lost(at, m.0)),
+                theirs: None,
+            }),
+            None => edit.delete(at, raw(m.0)),
+        }
+    }
+    let mut top = BTreeSet::new();
+    for j in lone_t {
+        let (Some(at), Some(m)) = (ti.midi.get(j), tt.midi.get(j)) else {
+            continue;
+        };
+        match theirs_of(at, m.0) {
+            Some(u) => edit.inside.push(shared::Change {
+                use_ev: u,
+                ours: None,
+                theirs: theirs_spec(cx, at, m.0, None, shift).map(|spec| shared::Gained {
+                    tick: raw(m.0),
+                    key: shared::Key::Midi,
+                    spec,
+                }),
+            }),
+            None => {
+                top.insert(j);
+            }
         }
     }
     edit.insert
-        .extend(theirs_midi(cx, t, shift, |j| lone_t.contains(&j)));
+        .extend(theirs_midi(cx, t, shift, |j| top.contains(&j)));
 }
 
 /// Ours' media for theirs' scratch media item `m`: ours' item of the same
@@ -836,22 +943,46 @@ fn edit_regions(
         .map(|p| groups.find(p))
         .collect();
     // A paired top-level region is edited in place, keeping its event (so
-    // the same file merged again pairs it by its tag); anything else is
-    // deleted (a region inside a use unrolls it) and theirs' inserted.
+    // the same file merged again pairs it by its tag). A change to what
+    // plays through a use is that use's (Ruling 8, with `refine`; else it
+    // unrolls the use). Anything else is deleted and theirs' inserted.
+    let owners = cx
+        .refine
+        .then(|| shared::Owners::new(h.doc(), cx, oi.lane, t));
+    let raw = |tick: i64| tick.saturating_add(cx.origin);
     let mut add = BTreeSet::new();
     let mut in_place: BTreeMap<usize, EventId> = BTreeMap::new();
+    // Theirs' regions that are a use's change, with ours' region they
+    // replace.
+    let mut in_use: BTreeMap<usize, (u64, Option<shared::Lost>)> = BTreeMap::new();
     for (p, &(i, j)) in pairs.iter().enumerate() {
         if !dirty.contains(&groups.find(p)) {
             continue;
         }
-        let at = i.and_then(|i| oi.regions.get(i));
+        let at = i.and_then(|i| Some((oi.regions.get(i)?, ot.regions.get(i)?.tick)));
         match (at, j) {
-            (Some(at), Some(j)) if at.event == at.top => {
+            (Some((at, _)), Some(j)) if at.event == at.top => {
                 in_place.insert(j, EventId(at.event));
             }
             _ => {
-                if let Some(at) = at {
-                    edit.delete(at);
+                if let Some((at, tick)) = at {
+                    let lost = shared::Lost {
+                        at: *at,
+                        tick: raw(tick),
+                    };
+                    match owners.as_ref().and_then(|w| w.of_ours(at)) {
+                        Some(u) => match j {
+                            Some(j) => {
+                                in_use.insert(j, (u, Some(lost)));
+                            }
+                            None => edit.inside.push(shared::Change {
+                                use_ev: u,
+                                ours: Some(lost),
+                                theirs: None,
+                            }),
+                        },
+                        None => edit.delete(at, raw(tick)),
+                    }
                 }
             }
         }
@@ -859,12 +990,48 @@ fn edit_regions(
             add.insert(j);
         }
     }
+    // Theirs' regions of no use of ours that lie in one.
+    if let Some(w) = &owners {
+        for &j in &add {
+            if in_place.contains_key(&j) || in_use.contains_key(&j) {
+                continue;
+            }
+            let (Some(at), Some(r)) = (ti.regions.get(j), tt.regions.get(j)) else {
+                continue;
+            };
+            if let Some(u) = w.of_theirs(h.doc(), cx, at, raw(r.tick)) {
+                in_use.insert(j, (u, None));
+            }
+        }
+    }
     if let Some(specs) = theirs_region_specs(h, cx, (o, t), shift, true, |j| add.contains(&j))? {
         for (j, spec) in specs {
-            match in_place.get(&j) {
-                Some(e) => edit.replace.push((*e, spec)),
-                None => edit.insert.push(spec),
+            if let Some(e) = in_place.get(&j) {
+                edit.replace.push((*e, spec));
+            } else if let Some((u, lost)) = in_use.remove(&j) {
+                let Some(r) = tt.regions.get(j) else { continue };
+                edit.inside.push(shared::Change {
+                    use_ev: u,
+                    ours: lost,
+                    theirs: Some(shared::Gained {
+                        tick: raw(r.tick),
+                        key: shared::Key::Region(r.clone()),
+                        spec,
+                    }),
+                });
+            } else {
+                edit.insert.push(spec);
             }
+        }
+    }
+    // A use's change whose region theirs left out (no spec).
+    for (_, (u, lost)) in in_use {
+        if lost.is_some() {
+            edit.inside.push(shared::Change {
+                use_ev: u,
+                ours: lost,
+                theirs: None,
+            });
         }
     }
     Ok(())
@@ -942,10 +1109,10 @@ fn edit_curve(
     out: &mut Out,
 ) {
     if let (Some(ot), Some(oi)) = (cx.raw.tracks.get(o), cx.ids.tracks.get(o)) {
-        for ((target, _), ats) in ot.automation.iter().zip(&oi.automation) {
+        for ((target, points), ats) in ot.automation.iter().zip(&oi.automation) {
             if curve_key(cx, 1, target) == key {
-                for at in ats {
-                    edit.delete(at);
+                for (p, at) in points.iter().zip(ats) {
+                    edit.delete(at, p.0);
                 }
             }
         }
@@ -1008,7 +1175,18 @@ fn apply_edit(
             edit.delete.insert(EventId(*u));
         }
         if let Ok(l) = h.doc().lane(cx.seq, LaneId(lane)) {
-            out.unrolled.push(format!("Track '{}'", l.name));
+            for u in &edit.unroll {
+                let used = match h.doc().event(EventId(*u)).map(|(e, _)| &e.body) {
+                    Ok(EventBody::Reference { seq, .. }) => h
+                        .doc()
+                        .sequence(*seq)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                out.unrolled
+                    .push(format!("Track '{}': use of '{used}'", l.name));
+            }
         }
     }
     if !edit.delete.is_empty() {
@@ -1070,10 +1248,10 @@ fn apply_edit(
 }
 
 /// What `edit`'s unrolled uses of `lane` play, as top-level events, less
-/// the events `edit` deletes (Task 6b's seam).
+/// the played events `edit` deletes.
 fn unrolled(doc: &Document, cx: &Cx<'_>, lane: u64, edit: &LaneEdit, shift: i64) -> Vec<EventSpec> {
-    let keep = |at: &EventAt| {
-        edit.unroll.contains(&at.top) && !edit.gone_in_uses.contains(&(at.event, at.top))
+    let keep = |at: &EventAt, tick: i64| {
+        edit.unroll.contains(&at.top) && !edit.gone_in_uses.contains(&(at.event, at.top, tick))
     };
     let spec = |at: &EventAt, tick: i64, pitch: Option<u8>| -> Option<EventSpec> {
         let (e, _) = doc.event(EventId(at.event)).ok()?;
@@ -1095,23 +1273,23 @@ fn unrolled(doc: &Document, cx: &Cx<'_>, lane: u64, edit: &LaneEdit, shift: i64)
             continue;
         };
         for (n, at) in t.notes_played.iter().zip(&ids.notes) {
-            if keep(at) {
+            if keep(at, n.tick) {
                 out.extend(spec(at, n.tick, Some(n.pitch)));
             }
         }
         for (m, at) in t.midi.iter().zip(&ids.midi) {
-            if keep(at) {
+            if keep(at, m.0) {
                 out.extend(spec(at, m.0, None));
             }
         }
         for (r, at) in t.regions.iter().zip(&ids.regions) {
-            if keep(at) {
+            if keep(at, r.tick) {
                 out.extend(spec(at, r.tick, None));
             }
         }
         for ((_, points), ats) in t.automation.iter().zip(&ids.automation) {
             for (p, at) in points.iter().zip(ats) {
-                if keep(at) {
+                if keep(at, p.0) {
                     out.extend(spec(at, p.0, None));
                 }
             }

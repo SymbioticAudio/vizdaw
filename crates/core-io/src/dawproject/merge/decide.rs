@@ -400,7 +400,7 @@ fn strip_keys(m: &Matches, lens: [usize; 3]) -> [Vec<Option<usize>>; 3] {
 
 /// The sequences of `doc` used outside sequence `seq`: by another
 /// sequence's reference use, or by a keyboard slot.
-fn used_elsewhere(doc: &Document, seq: SeqId) -> BTreeSet<SeqId> {
+pub(super) fn used_elsewhere(doc: &Document, seq: SeqId) -> BTreeSet<SeqId> {
     let mut out = BTreeSet::new();
     for s in doc.sequences().values() {
         if s.keyboard_slot.is_some() {

@@ -42,10 +42,13 @@ pub const NOT_APPLIED: &str =
 // ---------------------------------------------------------------- Changed
 
 /// Changed: shared-sequence uses edited differently (Ruling 8). Detail:
-/// the sequence.
+/// the sequence, "Sequence '<name>'".
 pub const PRIVATE_COPIES: &str =
     "Uses of a shared sequence edited differently became private copies";
-/// Changed: looped uses edited on some passes (Ruling 8).
+/// Changed: looped uses edited on some passes (Ruling 8), and any other
+/// use whose edit the sequence cannot play the same (a nested use's, or
+/// any use with a format-1 snapshot, Ruling 3). Detail: "Track
+/// '<track>': use of '<sequence>'".
 pub const LOOPS_UNROLLED: &str = "Looped uses edited on some passes became notes";
 
 // ---------------------------------------------------------------- Left out
@@ -74,7 +77,7 @@ pub const SNAPSHOT_CHOSEN: &str =
 pub const OLD_EXPORT: &str =
     "This export was made before merging existed; tracks were matched by name and order";
 /// Note: shared-sequence edits play outside the merged sequence too
-/// (Ruling 8). Detail: the sequence.
+/// (Ruling 8). Detail: the sequence, "Sequence '<name>'".
 pub const SHARED_ELSEWHERE: &str =
     "Edits to shared sequences also play where they are used outside the merged sequence";
 /// Note: a conflict take holds only the conflicting part of a split track

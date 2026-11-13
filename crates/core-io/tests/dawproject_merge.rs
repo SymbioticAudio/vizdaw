@@ -24,11 +24,11 @@ use core_io::limits::PackageLimits;
 use core_io::report::{ItemKind, Report};
 use core_model::automation::{AutomationMode, AutomationTarget};
 use core_model::command::{
-    AudioCmd, Command, CrossfadeLength, EventCmd, LaneCmd, MixerCmd, RoutingCmd, SequenceCmd,
-    SettingsCmd,
+    AudioCmd, Command, CrossfadeLength, EventCmd, LaneCmd, MixerCmd, ReferenceCmd, RoutingCmd,
+    SequenceCmd, SettingsCmd,
 };
 use core_model::document::{DestKind, Document};
-use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
+use core_model::event::{EventBody, EventSpec, Fade, FadeShape, LoopCount};
 use core_model::file::to_json;
 use core_model::history::History;
 use core_model::ids::{AnyId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
@@ -1304,8 +1304,9 @@ fn merging_the_same_file_twice_changes_nothing_the_second_time() {
     );
 }
 
-/// Until Task 6b (Ruling 8), a use's notes count as its track's: theirs'
-/// edit inside a use plays on ours exactly as on theirs.
+/// Theirs' edit inside Riff, played through both of its uses, plays on
+/// ours exactly as on theirs (since Task 6b through an edit of Riff,
+/// Ruling 8).
 #[test]
 fn edits_inside_a_use_play_as_theirs() {
     let (doc, seq) = fixture();
@@ -2556,4 +2557,477 @@ fn automation_on_a_track_with_its_own_length_is_listed_with_the_reason() {
     let (h, _) = apply_on(&t.base_doc, &p);
     assert_eq!(h.undo_depth(), 0);
     assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
+}
+
+// ------------------------------------------------- Task 6b: shared sequences (Ruling 8)
+
+/// The sequence named `name`.
+#[track_caller]
+fn seq_named(doc: &Document, name: &str) -> SeqId {
+    doc.sequences()
+        .values()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no sequence {name}"))
+        .id
+}
+
+/// Sequence `s`'s first lane's active-take notes: (event, tick, key).
+fn seq_notes(doc: &Document, s: SeqId) -> Vec<(EventId, i64, u8)> {
+    doc.sequence(s).unwrap().lanes[0]
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::Note { pitch, .. } => Some((e.id, e.tick.0, pitch)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`seq_notes`] without the events.
+fn seq_keys(doc: &Document, s: SeqId) -> Vec<(i64, u8)> {
+    seq_notes(doc, s)
+        .into_iter()
+        .map(|(_, t, k)| (t, k))
+        .collect()
+}
+
+/// The reference uses on track `name` of `seq`: (event, tick, target).
+fn uses_on(doc: &Document, seq: SeqId, name: &str) -> Vec<(EventId, i64, SeqId)> {
+    lane(doc, seq, name)
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::Reference { seq, .. } => Some((e.id, e.tick.0, seq)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Track `track`'s played notes in `p`: (tick, key), sorted.
+fn played_on(p: &Projection, track: usize) -> Vec<(i64, u8)> {
+    let mut n: Vec<(i64, u8)> = p.tracks[track]
+        .notes_played
+        .iter()
+        .map(|n| (n.tick, n.pitch))
+        .collect();
+    n.sort();
+    n
+}
+
+/// The detail list of the report line `what` (kind `kind`).
+#[track_caller]
+fn details(r: &Report, kind: ItemKind, what: &str) -> Vec<String> {
+    item(r, kind, what).details.clone()
+}
+
+/// Riff's second note (Q, key 43) moved `delta` later, in `doc`'s
+/// sequence `riff`.
+fn move_riff_note(h: &mut History, riff: SeqId, index: usize, delta: i64) {
+    let e = seq_notes(h.doc(), riff)[index].0;
+    run(
+        h,
+        Command::Event(EventCmd::Move {
+            events: vec![e],
+            delta: Tick(delta),
+            to_lane: None,
+        }),
+    );
+}
+
+/// `doc` with Bass's second use of "Riff" (bar 4) set to `loops` passes
+/// and `transpose`.
+fn with_second_use(doc: Document, seq: SeqId, loops: u32, transpose: i8) -> Document {
+    changed(&doc, |h| {
+        let (u, _, _) = uses_on(h.doc(), seq, "Bass")[1];
+        run(
+            h,
+            Command::Reference(ReferenceCmd::SetParams {
+                event: u,
+                length: None,
+                loop_count: LoopCount::Count(loops),
+                transpose,
+            }),
+        );
+    })
+}
+
+/// The same file merged a second time changes nothing and adds no step.
+fn merges_twice_to_nothing(t: &Trip, theirs_doc_: &Document, h: History) {
+    let label = h.undo_label().map(str::to_owned);
+    let depth = h.undo_depth();
+    let json = to_json(h.doc()).unwrap();
+    let p = plan(
+        t.snapshot.clone(),
+        theirs_doc(t, theirs_doc_),
+        h.doc(),
+        false,
+        &never(),
+    )
+    .expect("plans");
+    assert!(
+        p.decisions
+            .iter()
+            .all(|d| matches!(d.outcome, Outcome::Same | Outcome::Ours)),
+        "{:#?}",
+        p.decisions
+    );
+    let (h, _) = apply_history(h, &p, DATE);
+    assert_eq!(h.undo_label().map(str::to_owned), label);
+    assert_eq!(h.undo_depth(), depth);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
+/// Ruling 8: theirs moves Riff's second note in both of its uses (bar 2
+/// once, bar 4 twice). The edit goes into Riff, once: the note keeps its
+/// event, no sequence is made and both uses stay uses of Riff. Riff also
+/// plays from a keyboard slot, so `SHARED_ELSEWHERE` names it.
+#[test]
+fn shared_sequence_edited_the_same_way_edits_the_sequence() {
+    let (doc, seq) = fixture();
+    let doc = changed(&doc, |h| {
+        let riff = seq_named(h.doc(), "Riff");
+        run(
+            h,
+            Command::Sequence(SequenceCmd::SetKeyboardSlot {
+                seq: riff,
+                slot: Some(KeySlot {
+                    key: "a".into(),
+                    modifiers: 0,
+                }),
+            }),
+        );
+    });
+    let t = trip(&doc, seq);
+    let riff = seq_named(&t.base_doc, "Riff");
+    let theirs_doc_ = changed(&t.base_doc, |h| move_riff_note(h, riff, 1, Q / 2));
+    let th = theirs_doc(&t, &theirs_doc_);
+    let want = played_on(&th.projection, 0);
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let (h, report) = apply_on(&t.base_doc, &p);
+
+    assert_eq!(h.doc().sequences().len(), t.base_doc.sequences().len());
+    let before = seq_notes(&t.base_doc, riff);
+    let after = seq_notes(h.doc(), riff);
+    assert_eq!(
+        after.iter().map(|n| n.0).collect::<Vec<_>>(),
+        before.iter().map(|n| n.0).collect::<Vec<_>>(),
+        "one edit: the note keeps its event"
+    );
+    assert_eq!(seq_keys(h.doc(), riff), vec![(0, 40), (Q + Q / 2, 43)]);
+    let uses = uses_on(h.doc(), seq, "Bass");
+    assert_eq!(uses, uses_on(&t.base_doc, seq, "Bass"), "both uses stay");
+    assert!(uses.iter().all(|u| u.2 == riff));
+    assert_eq!(played_on(&projection(h.doc(), seq).unwrap(), 0), want);
+    assert_eq!(
+        details(&report, ItemKind::Note, text::SHARED_ELSEWHERE),
+        vec!["Sequence 'Riff'".to_owned()]
+    );
+    assert!(!has(&report, text::PRIVATE_COPIES));
+    assert!(!has(&report, text::LOOPS_UNROLLED));
+    merges_twice_to_nothing(&t, &theirs_doc_, h);
+}
+
+/// Ruling 8: theirs edits only Riff's second use (bar 4, two passes), as
+/// a private copy of its own. That use now plays a new sequence made by
+/// `MakePrivateCopy` ("Riff (copy)") holding the edit; the first use and
+/// Riff itself are unchanged, and `PRIVATE_COPIES` names Riff.
+#[test]
+fn shared_uses_edited_differently_become_private_copies() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let riff = seq_named(&t.base_doc, "Riff");
+    let theirs_doc_ = changed(&t.base_doc, |h| {
+        let (u, _, _) = uses_on(h.doc(), seq, "Bass")[1];
+        run(
+            h,
+            Command::Reference(ReferenceCmd::MakePrivateCopy { event: u }),
+        );
+        let copy = seq_named(h.doc(), "Riff (copy)");
+        move_riff_note(h, copy, 1, Q / 2);
+    });
+    let th = theirs_doc(&t, &theirs_doc_);
+    let want = played_on(&th.projection, 0);
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let (h, report) = apply_on(&t.base_doc, &p);
+
+    let before = uses_on(&t.base_doc, seq, "Bass");
+    let after = uses_on(h.doc(), seq, "Bass");
+    assert_eq!(after.len(), 2);
+    assert_eq!(after[0], before[0], "the first use is unchanged");
+    assert_eq!((after[1].0, after[1].1), (before[1].0, before[1].1));
+    let copy = after[1].2;
+    assert_ne!(copy, riff, "the second use plays a private copy");
+    assert_eq!(h.doc().sequence(copy).unwrap().name, "Riff (copy)");
+    assert_eq!(seq_keys(h.doc(), copy), vec![(0, 40), (Q + Q / 2, 43)]);
+    assert_eq!(
+        seq_notes(h.doc(), riff),
+        seq_notes(&t.base_doc, riff),
+        "Riff is unchanged"
+    );
+    assert_eq!(played_on(&projection(h.doc(), seq).unwrap(), 0), want);
+    assert_eq!(
+        details(&report, ItemKind::Changed, text::PRIVATE_COPIES),
+        vec!["Sequence 'Riff'".to_owned()]
+    );
+    assert!(!has(&report, text::SHARED_ELSEWHERE));
+    assert!(!has(&report, text::LOOPS_UNROLLED));
+    merges_twice_to_nothing(&t, &theirs_doc_, h);
+}
+
+/// Ruling 8: Riff's second use loops 4 times (bars 4–7) and theirs moves
+/// its second note in pass 3 only. The use cannot stay a use: it is
+/// replaced by theirs' notes on the track, `LOOPS_UNROLLED` names it, and
+/// Bass plays exactly as theirs' projection. Riff is unchanged.
+#[test]
+fn looped_use_edited_on_one_pass_becomes_notes() {
+    let (doc, seq) = fixture();
+    let doc = with_second_use(doc, seq, 4, 0);
+    let t = trip(&doc, seq);
+    let riff = seq_named(&t.base_doc, "Riff");
+    let (u, at, _) = uses_on(&t.base_doc, seq, "Bass")[1];
+    let theirs_doc_ = changed(&t.base_doc, |h| {
+        run(h, Command::Reference(ReferenceCmd::Flatten { event: u }));
+        let pass3 = lane(h.doc(), seq, "Bass")
+            .active()
+            .unwrap()
+            .events
+            .values()
+            .find(|e| e.tick.0 == at + 2 * BAR + Q)
+            .expect("pass 3's second note")
+            .id;
+        run(
+            h,
+            Command::Event(EventCmd::Move {
+                events: vec![pass3],
+                delta: Tick(Q / 2),
+                to_lane: None,
+            }),
+        );
+    });
+    let th = theirs_doc(&t, &theirs_doc_);
+    let want = played_on(&th.projection, 0);
+    assert!(want.contains(&(at + 2 * BAR + Q + Q / 2, 43)));
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let (h, report) = apply_on(&t.base_doc, &p);
+
+    let after = uses_on(h.doc(), seq, "Bass");
+    assert_eq!(
+        after,
+        uses_on(&t.base_doc, seq, "Bass")[..1],
+        "the use is gone"
+    );
+    assert_eq!(played_on(&projection(h.doc(), seq).unwrap(), 0), want);
+    assert_eq!(
+        details(&report, ItemKind::Changed, text::LOOPS_UNROLLED),
+        vec!["Track 'Bass': use of 'Riff'".to_owned()]
+    );
+    assert_eq!(seq_notes(h.doc(), riff), seq_notes(&t.base_doc, riff));
+    assert_eq!(h.doc().sequences().len(), t.base_doc.sequences().len());
+    assert!(!has(&report, text::PRIVATE_COPIES));
+    merges_twice_to_nothing(&t, &theirs_doc_, h);
+}
+
+/// Ruling 8: Riff's only use is transposed +2 (bar 4, twice); theirs moves
+/// its first note (played at key 42). The edit goes into Riff at its own,
+/// untransposed key 40.
+#[test]
+fn a_transposed_use_takes_its_edit_untransposed() {
+    let (doc, seq) = fixture();
+    let doc = changed(&with_second_use(doc, seq, 2, 2), |h| {
+        let (first, _, _) = uses_on(h.doc(), seq, "Bass")[0];
+        run(
+            h,
+            Command::Event(EventCmd::Delete {
+                events: vec![first],
+            }),
+        );
+    });
+    let t = trip(&doc, seq);
+    let riff = seq_named(&t.base_doc, "Riff");
+    assert!(played_on(&t.snapshot.projection, 0).contains(&(3 * BAR, 42)));
+    let theirs_doc_ = changed(&t.base_doc, |h| move_riff_note(h, riff, 0, Q / 2));
+    let th = theirs_doc(&t, &theirs_doc_);
+    let want = played_on(&th.projection, 0);
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let (h, report) = apply_on(&t.base_doc, &p);
+
+    assert_eq!(seq_keys(h.doc(), riff), vec![(Q / 2, 40), (Q, 43)]);
+    assert_eq!(
+        seq_notes(h.doc(), riff)[0].0,
+        seq_notes(&t.base_doc, riff)[0].0,
+        "the note keeps its event"
+    );
+    assert_eq!(
+        uses_on(h.doc(), seq, "Bass"),
+        uses_on(&t.base_doc, seq, "Bass")
+    );
+    assert_eq!(played_on(&projection(h.doc(), seq).unwrap(), 0), want);
+    assert!(!has(&report, text::SHARED_ELSEWHERE));
+    assert!(!has(&report, text::PRIVATE_COPIES));
+    assert!(!has(&report, text::LOOPS_UNROLLED));
+}
+
+/// Ruling 3: with a format-1 snapshot, uses are not refined: the edit of
+/// `shared_uses_edited_differently_become_private_copies` makes no
+/// private copy. The edited use becomes notes (Task 6's behaviour) and
+/// `OLD_EXPORT` is listed.
+#[test]
+fn format_one_snapshots_merge_uses_as_notes() {
+    let (doc, seq) = fixture();
+    let mut t = trip(&doc, seq);
+    t.snapshot.format = 1;
+    t.snapshot.identity = None;
+    let riff = seq_named(&t.base_doc, "Riff");
+    let theirs_doc_ = changed(&t.base_doc, |h| {
+        let (u, _, _) = uses_on(h.doc(), seq, "Bass")[1];
+        run(
+            h,
+            Command::Reference(ReferenceCmd::MakePrivateCopy { event: u }),
+        );
+        let copy = seq_named(h.doc(), "Riff (copy)");
+        move_riff_note(h, copy, 1, Q / 2);
+    });
+    let th = theirs_doc(&t, &theirs_doc_);
+    let want = played_on(&th.projection, 0);
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    assert!(has(&p.report, text::OLD_EXPORT));
+    let (h, report) = apply_on(&t.base_doc, &p);
+
+    assert!(has(&report, text::OLD_EXPORT));
+    assert_eq!(h.doc().sequences().len(), t.base_doc.sequences().len());
+    assert!(!has(&report, text::PRIVATE_COPIES));
+    let before = uses_on(&t.base_doc, seq, "Bass");
+    assert_eq!(uses_on(h.doc(), seq, "Bass"), before[..1]);
+    assert_eq!(seq_notes(h.doc(), riff), seq_notes(&t.base_doc, riff));
+    assert_eq!(played_on(&projection(h.doc(), seq).unwrap(), 0), want);
+}
+
+/// Task 6 carry-over: theirs moves region C inside "Clip" (its only use,
+/// at bar 5). The region is edited in Clip, in place: it keeps its event
+/// and ours' media, and the use stays a use (nothing unrolled).
+#[test]
+fn a_changed_region_inside_a_use_edits_its_sequence() {
+    let (doc, seq, [_, _, u]) = regions_fixture();
+    let t = trip(&doc, seq);
+    let clip = seq_named(&t.base_doc, "Clip");
+    let c = t.base_doc.sequence(clip).unwrap().lanes[0]
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .next()
+        .unwrap()
+        .id;
+    let th = theirs_resampled(&t, &moved(&t, &[c], Q));
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let media_before = t.base_doc.media().len();
+    let (h, report) = apply_on(&t.base_doc, &p);
+
+    let keys = lane(h.doc(), seq, "Keys").active().unwrap();
+    let use_ = keys.events.values().find(|e| e.id == u).expect("the use");
+    assert!(matches!(use_.body, EventBody::Reference { seq: s, .. } if s == clip));
+    let (tick, media, _) = region_at(h.doc(), c);
+    assert_eq!(tick, Q, "C is edited in Clip, in place");
+    assert_eq!(media, region_at(&t.base_doc, c).1, "ours' media");
+    assert_eq!(h.doc().media().len(), media_before, "no media added");
+    assert_eq!(h.doc().sequences().len(), t.base_doc.sequences().len());
+    assert!(!has(&report, text::LOOPS_UNROLLED));
+    assert!(!has(&report, text::PRIVATE_COPIES));
+}
+
+/// Ruling 8 with a nested use: sequence "Verse" uses Riff and is used on
+/// Bass at bar 6, beside Riff's own two uses. Theirs edits Riff's second
+/// note, so every play of it changes. Riff also plays inside Verse's use,
+/// so it is not edited itself: its own uses get private copies, and
+/// Verse's use (whose notes are Riff's, nested) becomes notes. Bass plays
+/// exactly as theirs; Riff and Verse are unchanged.
+#[test]
+fn a_sequence_played_inside_another_use_is_not_edited_itself() {
+    let (doc, seq) = fixture();
+    let doc = changed(&doc, |h| {
+        let riff = seq_named(h.doc(), "Riff");
+        let r = h
+            .execute(
+                &Command::Sequence(SequenceCmd::New {
+                    name: "Verse".into(),
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let verse = created(&r, |id| match id {
+            AnyId::Seq(s) => Some(*s),
+            _ => None,
+        });
+        let r = h
+            .execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq: verse,
+                    name: "Verse".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let vl = created(&r, |id| match id {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        });
+        for (s, l, tick, target) in [
+            (verse, vl, 0, riff),
+            (seq, lane(h.doc(), seq, "Bass").id, 5 * BAR, verse),
+        ] {
+            run(
+                h,
+                Command::Reference(ReferenceCmd::Insert {
+                    seq: s,
+                    lane: l,
+                    tick: Tick(tick),
+                    target,
+                    length: None,
+                    loop_count: LoopCount::Count(1),
+                    transpose: 0,
+                }),
+            );
+        }
+    });
+    let t = trip(&doc, seq);
+    let riff = seq_named(&t.base_doc, "Riff");
+    let verse = seq_named(&t.base_doc, "Verse");
+    let theirs_doc_ = changed(&t.base_doc, |h| move_riff_note(h, riff, 1, Q / 2));
+    let th = theirs_doc(&t, &theirs_doc_);
+    let want = played_on(&th.projection, 0);
+    assert!(want.contains(&(5 * BAR + Q + Q / 2, 43)), "{want:?}");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let (h, report) = apply_on(&t.base_doc, &p);
+
+    assert_eq!(played_on(&projection(h.doc(), seq).unwrap(), 0), want);
+    assert_eq!(seq_notes(h.doc(), riff), seq_notes(&t.base_doc, riff));
+    let copies = h
+        .doc()
+        .sequences()
+        .values()
+        .filter(|s| s.name == "Riff (copy)")
+        .count();
+    assert_eq!(copies, 2, "each of Riff's own uses gets a private copy");
+    assert_eq!(
+        h.doc().sequence(verse).unwrap(),
+        t.base_doc.sequence(verse).unwrap()
+    );
+    let uses = uses_on(h.doc(), seq, "Bass");
+    assert_eq!(uses.len(), 2, "Verse's use became notes: {uses:?}");
+    assert!(uses.iter().all(|u| u.2 != riff && u.2 != verse));
+    assert_eq!(
+        details(&report, ItemKind::Changed, text::PRIVATE_COPIES),
+        vec!["Sequence 'Riff'".to_owned()]
+    );
+    assert_eq!(
+        details(&report, ItemKind::Changed, text::LOOPS_UNROLLED),
+        vec!["Track 'Bass': use of 'Verse'".to_owned()]
+    );
+    assert!(!has(&report, text::SHARED_ELSEWHERE));
+    merges_twice_to_nothing(&t, &theirs_doc_, h);
 }
