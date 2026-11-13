@@ -47,7 +47,7 @@ use core_model::mixer::BUILTIN_SYNTH_REF;
 use core_model::mpe::{DEFAULT_BEND_RANGE, MAX_MEMBERS, MpeConfig, MpeZone};
 use core_model::rules::MAX_TICKS;
 use core_model::selection::ViewFilter;
-use core_model::sequence::Marker;
+use core_model::sequence::{Marker, Sequence};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::{PPQ, Tick};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -300,44 +300,10 @@ pub fn apply(
         doc.lane(seq, l)?;
     }
     report.merge(imp.report.clone());
-    let no_events = s
-        .lanes
-        .iter()
-        .all(|l| l.takes.iter().all(|t| t.events.is_empty()));
     let use_maps = place.new_project || place.use_tempo;
     let old_tempo = s.tempo.clone();
     let old_meter = s.meter.clone();
-
-    // Where file position 0 goes: with the file's maps, a barline.
-    let mut at = place.tick.0.max(0);
-    if use_maps && at > 0 {
-        let e = old_meter.entry_at(Tick(at));
-        let bar = e.meter.bar_ticks().max(1);
-        let snapped = at
-            .checked_sub(e.tick.0)
-            .map(|rel| rel.div_euclid(bar))
-            .and_then(|k| k.checked_mul(bar))
-            .and_then(|d| d.checked_add(e.tick.0))
-            .unwrap_or(at);
-        if snapped != at {
-            let n = old_meter.tick_to_bbu(Tick(snapped), 1).bar;
-            let what = format!("{MOVED_TO_BAR}{n}");
-            report.add(ItemKind::Changed, &what, None);
-        }
-        at = snapped;
-    }
-    let pickup = if use_maps && at == 0 && (place.new_project || no_events) {
-        imp.start_offset.0.max(0)
-    } else {
-        0
-    };
-    if pickup > 0 {
-        // Ruling 8 cannot tell a pickup from a short first bar: say so.
-        report.add(ItemKind::Note, PICKUP_READ, None);
-    }
-    let base = at
-        .checked_sub(pickup)
-        .ok_or_else(|| ModelError::range("tick", place.tick.0))?;
+    let Landing { at, pickup, base } = landing(imp, s, place, report)?;
 
     // Each track's events at their places; tracks with none make nothing.
     let mut tracks: Vec<(&ImportTrack, Vec<EventSpec>)> = Vec::new();
@@ -408,17 +374,7 @@ pub fn apply(
     }
 
     if use_maps {
-        let (tempo, meter) = if pickup > 0 {
-            (
-                shift_tempo(&imp.tempo, pickup),
-                shift_meter(&imp.meter, pickup),
-            )
-        } else {
-            (
-                splice_tempo(&old_tempo, &imp.tempo, at, report),
-                splice_meter(&old_meter, &imp.meter, at, report),
-            )
-        };
+        let (tempo, meter) = file_maps(imp, &old_tempo, &old_meter, at, pickup, report);
         let changed = tempo != old_tempo || meter != old_meter;
         if changed {
             run(h, Command::Sequence(SequenceCmd::SetTempo { seq, tempo }))?;
@@ -639,6 +595,91 @@ fn builtin_name(group: u8, channel: u8) -> String {
 }
 
 /// `t` moved by `base`, if it stays within ±`MAX_TICKS`.
+/// Where an import's file position 0 lands ([`landing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Landing {
+    /// The drop tick, snapped to a barline when the file's maps are used.
+    pub(crate) at: i64,
+    /// The pickup read as the start offset (0: none).
+    pub(crate) pickup: i64,
+    /// The tick of file position 0: `at - pickup`.
+    pub(crate) base: i64,
+}
+
+/// Where [`apply`] puts file position 0 of `imp` in sequence `s` with
+/// `place` (a drop off a barline moves to its bar, listed; a pickup at
+/// position 0 of a new project or an empty sequence becomes the start
+/// offset, noted). Shared with the AAF import, which places its audio from
+/// the same tick (plan 6f Task 3).
+pub(crate) fn landing(
+    imp: &MidiImport,
+    s: &Sequence,
+    place: &Placement,
+    report: &mut Report,
+) -> Result<Landing, ModelError> {
+    let no_events = s
+        .lanes
+        .iter()
+        .all(|l| l.takes.iter().all(|t| t.events.is_empty()));
+    let use_maps = place.new_project || place.use_tempo;
+    let old_meter = &s.meter;
+    // Where file position 0 goes: with the file's maps, a barline.
+    let mut at = place.tick.0.max(0);
+    if use_maps && at > 0 {
+        let e = old_meter.entry_at(Tick(at));
+        let bar = e.meter.bar_ticks().max(1);
+        let snapped = at
+            .checked_sub(e.tick.0)
+            .map(|rel| rel.div_euclid(bar))
+            .and_then(|k| k.checked_mul(bar))
+            .and_then(|d| d.checked_add(e.tick.0))
+            .unwrap_or(at);
+        if snapped != at {
+            let n = old_meter.tick_to_bbu(Tick(snapped), 1).bar;
+            let what = format!("{MOVED_TO_BAR}{n}");
+            report.add(ItemKind::Changed, &what, None);
+        }
+        at = snapped;
+    }
+    let pickup = if use_maps && at == 0 && (place.new_project || no_events) {
+        imp.start_offset.0.max(0)
+    } else {
+        0
+    };
+    if pickup > 0 {
+        // Ruling 8 cannot tell a pickup from a short first bar: say so.
+        report.add(ItemKind::Note, PICKUP_READ, None);
+    }
+    let base = at
+        .checked_sub(pickup)
+        .ok_or_else(|| ModelError::range("tick", place.tick.0))?;
+    Ok(Landing { at, pickup, base })
+}
+
+/// The tempo and meter maps [`apply`] sets when it uses the file's: with a
+/// `pickup`, the file's shifted back by it; else the project's before `at`
+/// and the file's from `at` (listed when cut).
+pub(crate) fn file_maps(
+    imp: &MidiImport,
+    tempo: &TempoMap,
+    meter: &MeterMap,
+    at: i64,
+    pickup: i64,
+    report: &mut Report,
+) -> (TempoMap, MeterMap) {
+    if pickup > 0 {
+        (
+            shift_tempo(&imp.tempo, pickup),
+            shift_meter(&imp.meter, pickup),
+        )
+    } else {
+        (
+            splice_tempo(tempo, &imp.tempo, at, report),
+            splice_meter(meter, &imp.meter, at, report),
+        )
+    }
+}
+
 fn placed(t: Tick, base: i64) -> Option<Tick> {
     t.0.checked_add(base)
         .filter(|t| (-MAX_TICKS..=MAX_TICKS).contains(t))

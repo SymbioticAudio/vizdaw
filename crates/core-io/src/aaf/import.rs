@@ -58,8 +58,8 @@ use core_model::meter::MeterMap;
 use core_model::mixer::{GAIN_FLOOR_DB, GAIN_MAX_DB};
 use core_model::rules::MAX_TICKS;
 use core_model::selection::ViewFilter;
-use core_model::sequence::Marker;
-use core_model::tempo::{TempoClock, TempoMap};
+use core_model::sequence::{Marker, Sequence};
+use core_model::tempo::{Bpm, TempoClock, TempoMap};
 use core_model::time::Tick;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,7 +115,8 @@ pub struct AafEnv<'a> {
     /// The tempo map positions go through: the MIDI file's, else (a new
     /// project) 120 BPM, else (into this project) the project's.
     pub tempo: &'a TempoMap,
-    /// Where composition position 0 goes: the sequence's file start.
+    /// Where composition position 0 goes: the sequence's file start, at or
+    /// before 0 ([`tempo_and_start`] gives it with `tempo`).
     pub start: Tick,
     /// Join L/R pairs (the sheet's "Join L/R pairs").
     pub join_pairs: bool,
@@ -310,6 +311,9 @@ struct Placer {
     clock: TempoClock,
     /// The seconds at the file start.
     start_s: f64,
+    /// The earliest tick a part may land on: the file start (a pickup or
+    /// the song's start offset lies before 0), at most 0.
+    min: i64,
     n: i64,
     d: i64,
     rate: u32,
@@ -324,7 +328,7 @@ impl Placer {
     /// The tick of `units`, when it is on the timeline.
     fn tick(&self, units: i64) -> Option<Tick> {
         let t = self.clock.seconds_to_tick(self.start_s + self.secs(units));
-        (0..=MAX_TICKS).contains(&t.0).then_some(t)
+        (self.min..=MAX_TICKS).contains(&t.0).then_some(t)
     }
 
     /// Whether `tick`, back in frames at the project rate, is more than a
@@ -475,6 +479,7 @@ pub fn map(
         at: Placer {
             clock,
             start_s,
+            min: env.start.0.clamp(-MAX_TICKS, 0),
             n: i64::from(n),
             d: i64::from(d),
             rate: env.rate,
@@ -846,6 +851,52 @@ impl Mapper<'_, '_> {
 
 // ---------------------------------------------------------------- applying
 
+/// How [`apply`] places the MIDI file beside (Ruling 8): file position 0
+/// at the start, every pair on [`suggested_dest`](midi_in::suggested_dest),
+/// the file's maps (and pickup) only in a new project.
+fn midi_placement(seq: SeqId, new_project: bool) -> Placement {
+    Placement {
+        seq,
+        lane: None,
+        tick: Tick(0),
+        channel_map: BTreeMap::new(),
+        use_tempo: new_project,
+        new_project,
+    }
+}
+
+/// The tempo map and file start [`map`]'s [`AafEnv`] takes, exactly as
+/// [`apply`] will leave sequence `seq` (as it is now, before the import):
+/// - with a MIDI file, the maps `midi_in::apply` sets (in a new project the
+///   file's, shifted back by its pickup) and the tick it puts the MIDI
+///   file's position 0 on (`-pickup` in a new project), so the audio lines
+///   up with the notes;
+/// - a new project without one: 120 BPM from tick 0 (Ruling 8);
+/// - into this project without one: the project's map from its file start
+///   (`midi_out::file_start`: before 0 when the song has a pickup).
+pub fn tempo_and_start(
+    midi: Option<&MidiImport>,
+    seq: &Sequence,
+    new_project: bool,
+) -> Result<(TempoMap, Tick), ModelError> {
+    match midi {
+        Some(m) => {
+            let place = midi_placement(seq.id, new_project);
+            // `apply` lists these; here they are only computed.
+            let mut scratch = Report::default();
+            let l = midi_in::landing(m, seq, &place, &mut scratch)?;
+            let tempo = if place.new_project || place.use_tempo {
+                midi_in::file_maps(m, &seq.tempo, &seq.meter, l.at, l.pickup, &mut scratch).0
+            } else {
+                seq.tempo.clone()
+            };
+            Ok((tempo, Tick(l.base)))
+        }
+        None if new_project => Ok((TempoMap::constant(Bpm::whole(120))?, Tick(0))),
+        None => Ok((seq.tempo.clone(), crate::midi_out::file_start(seq))),
+    }
+}
+
 fn run(h: &mut History, cmd: Command) -> Result<(), ModelError> {
     h.execute(&cmd, &ViewFilter::default()).map(|_| ())
 }
@@ -873,19 +924,7 @@ pub fn apply(
     }
     match midi {
         Some(m) => {
-            midi_in::apply(
-                h,
-                m,
-                &Placement {
-                    seq,
-                    lane: None,
-                    tick: Tick(0),
-                    channel_map: BTreeMap::new(),
-                    use_tempo: place.new_project,
-                    new_project: place.new_project,
-                },
-                report,
-            )?;
+            midi_in::apply(h, m, &midi_placement(seq, place.new_project), report)?;
         }
         None if place.new_project => {
             report.add(ItemKind::Note, NO_MIDI, None);

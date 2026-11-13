@@ -13,7 +13,7 @@ use core_io::aaf::dict::def;
 use core_io::aaf::import::{
     AafEnv, AafPlace, CLIP_GAIN_CUT, CLIP_GAIN_ENVELOPES, CURVES_LINEAR, FADE_SHAPES, LABEL,
     NO_MIDI, NOT_JOINED, NOT_NEW_AAF, ONE_CHANNEL, POSITIONS_MOVED, Pair, apply, map, pairs,
-    timecode_note,
+    tempo_and_start, timecode_note,
 };
 use core_io::aaf::store::Auid;
 use core_io::aaf::timeline::{
@@ -22,7 +22,7 @@ use core_io::aaf::timeline::{
     SPANS_SOURCES, Shape, Slot,
 };
 use core_io::dawproject::import::{
-    CROSSFADES_PLAIN, DpImport, HELD_STEPS, LEVELS_CUT, MediaSource, OFFLINE,
+    CROSSFADES_PLAIN, DpImport, HELD_STEPS, LEVELS_CUT, MediaSource, OFFLINE, PAST_END,
 };
 use core_io::dawproject::package::{AudioPackage, AudioRef, AudioSource};
 use core_io::limits::{AafLimits, Limits};
@@ -766,6 +766,125 @@ fn midi_beside_sets_the_bars() {
     assert_eq!(regions(&d)[1][0].0, midi.tempo.seconds_to_tick(2.0));
     assert!(!has(&d.report, ItemKind::Note, NO_MIDI));
     assert_eq!(d.report.summary.tracks, 2);
+
+    // A pickup of one beat: the MIDI file's position 0 is at -1 beat, and
+    // the AAF's clips line up with it, the first inside the pickup.
+    let midi = parse(
+        &smf_pickup(),
+        &ImportOptions {
+            split_channels: None,
+            mpe: true,
+        },
+        &Limits::default(),
+        &no(),
+    )
+    .unwrap();
+    let beat = core_model::time::PPQ;
+    assert_eq!(midi.start_offset, Tick(beat));
+    let (doc, seq) = new_doc();
+    let (tempo, start) = tempo_and_start(Some(&midi), doc.sequence(seq).unwrap(), true).unwrap();
+    assert_eq!(start, Tick(-beat));
+    // At 90 BPM a beat is 2/3 s: 32 000 frames.
+    let c = comp(
+        R48,
+        vec![slot(
+            "Gtr",
+            vec![mono_clip(0, 0, 1_000, 0), mono_clip(0, 32_000, 1_000, 0)],
+        )],
+    );
+    let imp = map(
+        &c,
+        &sources,
+        &[],
+        &AafEnv {
+            start,
+            ..env(&audio, &tempo, true)
+        },
+        &no(),
+    )
+    .unwrap();
+    assert!(
+        !has(&imp.report, ItemKind::LeftOut, PAST_END),
+        "{:?}",
+        imp.report
+    );
+    let d = apply_to(doc, seq, &imp, Some(&midi), true);
+    let s = d.h.doc().sequence(seq).unwrap();
+    assert_eq!(s.start_offset, Tick(beat));
+    assert_eq!(s.tempo, tempo);
+    let notes: Vec<Tick> = events(&d)[0]
+        .iter()
+        .filter(|(_, b)| matches!(b, EventBody::Note { .. }))
+        .map(|(t, _)| *t)
+        .collect();
+    assert_eq!(notes, [Tick(-beat), Tick(0)]);
+    let ticks: Vec<Tick> = regions(&d)[1].iter().map(|(t, _)| *t).collect();
+    assert_eq!(ticks, [Tick(-beat), Tick(0)]);
+    assert!(core_model::rules::validate(d.h.doc()).is_empty());
+}
+
+#[test]
+fn into_a_project_with_a_pickup() {
+    let (doc, seq) = new_doc();
+    let mut h = History::new(doc);
+    let beat = core_model::time::PPQ;
+    h.execute(
+        &Command::Sequence(SequenceCmd::SetStartOffset {
+            seq,
+            offset: Tick(beat),
+        }),
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    let doc = h.doc().clone();
+    let (tempo, start) = tempo_and_start(None, doc.sequence(seq).unwrap(), false).unwrap();
+    assert_eq!(start, Tick(-beat));
+    let audio = mono_refs(1);
+    let sources = online(&audio);
+    // At 120 BPM a beat is 0.5 s: 24 000 frames.
+    let c = comp(
+        R48,
+        vec![slot(
+            "A",
+            vec![mono_clip(0, 0, 1_000, 0), mono_clip(0, 24_000, 1_000, 0)],
+        )],
+    );
+    let imp = map(
+        &c,
+        &sources,
+        &[],
+        &AafEnv {
+            start,
+            ..env(&audio, &tempo, true)
+        },
+        &no(),
+    )
+    .unwrap();
+    let d = apply_to(doc, seq, &imp, None, false);
+    let ticks: Vec<Tick> = regions(&d)[0].iter().map(|(t, _)| *t).collect();
+    assert_eq!(ticks, [Tick(-beat), Tick(0)]);
+    assert!(core_model::rules::validate(d.h.doc()).is_empty());
+}
+
+/// A type 0 SMF at 90 BPM whose first bar is a one-beat pickup (1/4, then
+/// 4/4), with a note in the pickup and one on the downbeat.
+fn smf_pickup() -> Vec<u8> {
+    let mut v = b"MThd".to_vec();
+    v.extend_from_slice(&[0, 0, 0, 6, 0, 0, 0, 1, 0x03, 0xC0]);
+    let track: &[u8] = &[
+        0x00, 0xFF, 0x51, 0x03, 0x0A, 0x2C, 0x2B, // 90 BPM
+        0x00, 0xFF, 0x58, 0x04, 0x01, 0x02, 0x18, 0x08, // 1/4
+        0x00, 0x90, 0x3C, 0x64, // note on, in the pickup
+        0x83, 0x60, 0x80, 0x3C, 0x00, // off at 480
+        0x83, 0x60, 0xFF, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08, // 4/4 at 960
+        0x00, 0x90, 0x40, 0x64, // note on, the downbeat
+        0x87, 0x40, 0x80, 0x40, 0x00, // off at 1920
+        0x00, 0xFF, 0x2F, 0x00,
+    ];
+    v.extend_from_slice(b"MTrk");
+    v.extend_from_slice(&(track.len() as u32).to_be_bytes());
+    v.extend_from_slice(track);
+    v
 }
 
 #[test]
