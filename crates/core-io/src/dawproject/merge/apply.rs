@@ -174,7 +174,8 @@ pub fn apply_merge_until(
         let absent = cx.deleted_buses();
         let added = apply_tracks(h, &cx.th.imp, seq, &which, &mut buses, &absent)?;
         cx.stop()?;
-        arrange_tracks(h, &cx.th.imp, seq, &which, &added, cx.origin, &mut lines)?;
+        let flagged = arrange_tracks(h, &cx.th.imp, seq, &which, &added, cx.origin, &mut lines)?;
+        out.flagged.extend(flagged);
         states.extend(added.states.iter().cloned());
         out.report.merge(lines);
     }

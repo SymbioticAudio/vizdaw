@@ -2605,6 +2605,95 @@ fn theirs_crossfade_that_ours_tempo_cannot_hold_is_listed_and_merges_twice_to_no
     merges_twice_to_nothing(&t, &theirs_doc_, h);
 }
 
+/// Task 7 fix round 3: theirs adds track "Pads" with a crossfaded pair;
+/// ours sets 60 BPM, under which the pair no longer overlaps. The new
+/// track is placed as the model holds it there: its crossfade is cleared
+/// and listed with the model's line, nothing panics, and merging again
+/// adds nothing.
+#[test]
+fn a_track_theirs_adds_with_a_crossfade_ours_tempo_cannot_hold() {
+    use core_io::dawproject::import::CROSSFADES_PLAIN;
+    use core_model::tempo::{Bpm, TempoMap};
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let media = *h.doc().media().keys().next().unwrap();
+        let r = h
+            .execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq: i.seq,
+                    name: "Pads".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let pads = created(&r, |id| match id {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        });
+        let r = h
+            .execute(
+                &Command::Event(EventCmd::Insert {
+                    seq: i.seq,
+                    lane: pads,
+                    events: vec![region(media, 0), region(media, Q)],
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let second = r
+            .created
+            .iter()
+            .filter_map(|id| match id {
+                AnyId::Event(e) => Some(*e),
+                _ => None,
+            })
+            .nth(1)
+            .unwrap();
+        run(
+            h,
+            Command::Audio(AudioCmd::Crossfade {
+                event: second,
+                length: CrossfadeLength::Frames(4_800),
+                shape: FadeShape::EqualPower,
+            }),
+        );
+    });
+    let o = ours(&t, |h, i| {
+        run(
+            h,
+            Command::Sequence(SequenceCmd::SetTempo {
+                seq: i.seq,
+                tempo: TempoMap::constant(Bpm::whole(60)).unwrap(),
+            }),
+        )
+    });
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    assert_eq!(p.preview.added, 1, "{:#?}", p.decisions);
+    let (h, report) = apply_on(&o, &p);
+    let flags: Vec<(i64, bool)> = lane(h.doc(), seq, "Pads")
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::AudioRegion { crossfade, .. } => Some((e.tick.0, crossfade)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![(0, false), (Q, false)]);
+    let line = item(&report, ItemKind::Changed, CROSSFADES_PLAIN);
+    assert_eq!(line.count, 1, "{:#?}", report.items);
+    assert!(
+        line.details[0].starts_with("Crossfade removed"),
+        "{:?}",
+        line.details
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+    merges_twice_to_nothing(&t, &theirs_doc_, h);
+}
+
 /// Task 7 fix round 2 (layout 2, from the 4096 run's seed): theirs sets
 /// 450 BPM, so Keys' regions (in beats in the file) come back shorter.
 /// Placed under ours' 120 BPM before the tempo map is theirs, the pair
@@ -3753,6 +3842,7 @@ stripped!(
     a_merge_cancelled_partway_aborts_to_ours,
     theirs_crossfade_that_ours_tempo_cannot_hold_is_listed_and_merges_twice_to_nothing,
     a_crossfade_shortened_before_theirs_tempo_lands_is_set_again,
+    a_track_theirs_adds_with_a_crossfade_ours_tempo_cannot_hold,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,
     both_changed_notes_become_an_alternate_take,

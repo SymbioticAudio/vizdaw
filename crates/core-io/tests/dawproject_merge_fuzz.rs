@@ -91,6 +91,9 @@ enum TheirEdit {
     MoveMarker(u16, i8),
     Tempo(u16),
     DeleteTrack(u16),
+    /// A copy of an audio track (its crossfaded pairs too), as a new track
+    /// without IDs or tags (Task 7 fix round 3).
+    AddTrack(u16),
 }
 
 fn name() -> impl Strategy<Value = String> {
@@ -113,6 +116,7 @@ fn their_edit() -> impl Strategy<Value = TheirEdit> {
         (any::<u16>(), -8i8..=8).prop_map(|(i, d)| TheirEdit::MoveMarker(i, d)),
         (40u16..=240).prop_map(TheirEdit::Tempo),
         any::<u16>().prop_map(TheirEdit::DeleteTrack),
+        any::<u16>().prop_map(TheirEdit::AddTrack),
     ]
 }
 
@@ -328,6 +332,7 @@ fn apply_their_edit(p: &mut DpProject, e: &TheirEdit) {
                 t.value = Some(f64::from(*bpm));
             }
         }
+        TheirEdit::AddTrack(i) => add_track(p, *i),
         TheirEdit::DeleteTrack(i) => {
             let id = pick(&mut plain_tracks(p), *i).and_then(|t| t.named.id.clone());
             if let Some(id) = id {
@@ -341,6 +346,115 @@ fn apply_their_edit(p: &mut DpProject, e: &TheirEdit) {
                 }
             }
         }
+    }
+}
+
+/// `t` and what it holds without IDs or comments (so without tags) and
+/// without its automation (which names the source track's parameters), its
+/// track references to `old` made `new`.
+fn reid(t: &mut DpTimeline, old: &str, new: &str) {
+    let head = |h: &mut core_io::dawproject::DpHead| {
+        h.named.id = None;
+        h.named.comment = None;
+        if h.track.as_deref() == Some(old) {
+            h.track = Some(new.to_owned());
+        }
+    };
+    match t {
+        DpTimeline::Lanes(l) => {
+            head(&mut l.head);
+            // Automation names the source's parameters: not copied.
+            l.items.retain(|i| !matches!(i, DpTimeline::Points(_)));
+            for i in &mut l.items {
+                reid(i, old, new);
+            }
+        }
+        DpTimeline::Clips(c) => {
+            head(&mut c.head);
+            for clip in &mut c.clips {
+                clip.named.id = None;
+                clip.named.comment = None;
+                if let Some(inner) = clip.content.as_deref_mut() {
+                    reid(inner, old, new);
+                }
+            }
+        }
+        DpTimeline::Notes(n) => head(&mut n.head),
+        DpTimeline::Points(x) => head(&mut x.head),
+        DpTimeline::Audio(a) => head(&mut a.head),
+        DpTimeline::Warps(w) => {
+            head(&mut w.head);
+            reid(&mut w.content, old, new);
+        }
+        DpTimeline::Markers(h, _) | DpTimeline::ClipSlot(h, _) | DpTimeline::Video(h) => head(h),
+        DpTimeline::Unknown(_) => {}
+    }
+}
+
+/// [`TheirEdit::AddTrack`]: a copy of the `i`th audio track of VizDAW's
+/// (`t<lane>`), named "<name> copy", with no devices or sends, placed after
+/// the file's last such track, and its arrangement copied with it.
+fn add_track(p: &mut DpProject, i: u16) {
+    let mut audio: Vec<DpTrack> = plain_tracks(p)
+        .into_iter()
+        .filter(|t| {
+            t.named.id.as_deref().is_some_and(|x| x.starts_with('t'))
+                && t.children.is_empty()
+                && t.content
+                    .contains(&core_io::dawproject::DpContentType::Audio)
+        })
+        .map(|t| t.clone())
+        .collect();
+    let Some(src) = pick(&mut audio, i) else {
+        return;
+    };
+    let mut copy = src.clone();
+    let old = copy.named.id.clone().unwrap_or_default();
+    let taken = top_tracks(p);
+    let new = (0usize..)
+        .map(|k| format!("x{k}{old}"))
+        .find(|id| !taken.contains_key(id))
+        .unwrap_or_default();
+    copy.named.id = Some(new.clone());
+    copy.named.comment = None;
+    copy.named.name = Some(format!("{} copy", copy.named.name.unwrap_or_default()));
+    if let Some(c) = copy.channel.as_deref_mut() {
+        c.named.id = Some(format!("{new}c"));
+        c.named.comment = None;
+        c.devices.clear();
+        c.sends.clear();
+        if let Some(v) = c.volume.as_deref_mut() {
+            v.named.id = None;
+        }
+        if let Some(v) = c.pan.as_deref_mut() {
+            v.named.id = None;
+        }
+        if let Some(v) = c.mute.as_deref_mut() {
+            v.named.id = None;
+        }
+    }
+    let lanes: Vec<DpTimeline> = top_items(p)
+        .into_iter()
+        .filter(
+            |t| matches!(t, DpTimeline::Lanes(l) if l.head.track.as_deref() == Some(old.as_str())),
+        )
+        .map(|t| {
+            let mut t = t.clone();
+            reid(&mut t, &old, &new);
+            t
+        })
+        .collect();
+    let at = p
+        .structure
+        .iter()
+        .rposition(|x| {
+            matches!(x, DpStructureItem::Track(t)
+                if t.named.id.as_deref().is_some_and(|i| i.starts_with('t') || i.starts_with('x')))
+        })
+        .map_or(p.structure.len(), |k| k + 1);
+    p.structure.insert(at, DpStructureItem::Track(copy));
+    if let Some(l) = p.arrangement.as_mut().and_then(|a| a.lanes.as_mut()) {
+        l.items.extend(lanes);
     }
 }
 
@@ -740,6 +854,8 @@ fn strip_settings(e: &mut Expected, what: &str, s: [&PStrip; 4]) {
 #[derive(Debug, Default)]
 struct TheirsDid {
     deleted: BTreeSet<String>,
+    /// Tracks theirs added (copies, [`TheirEdit::AddTrack`]).
+    added: BTreeSet<String>,
     /// Each renamed track's new name.
     renamed: BTreeMap<String, String>,
 }
@@ -813,8 +929,7 @@ fn owner_rules(
         .iter()
         .chain(did.renamed.keys())
         .any(|id| id.starts_with('b') && kind(id).is_some_and(|k| k.0 == "strip"));
-    // Theirs' tracks are base's, in order, without those theirs deleted:
-    // the script adds none.
+    // Theirs' tracks are base's, in order, without those theirs deleted.
     let keys: Vec<(u64, bool)> = base
         .p
         .tracks
@@ -827,7 +942,13 @@ fn owner_rules(
         .copied()
         .filter(|k| !deleted.contains(&k.0))
         .collect();
-    assert_eq!(kept.len(), theirs.tracks.len(), "theirs' tracks are base's");
+    // Theirs' tracks are base's kept ones, then the ones theirs added
+    // (placed after them, [`add_track`]).
+    assert_eq!(
+        kept.len() + did.added.len(),
+        theirs.tracks.len(),
+        "theirs' tracks are base's, then its own"
+    );
     let theirs_part: BTreeMap<(u64, bool), &PTrack> =
         kept.iter().copied().zip(&theirs.tracks).collect();
     // Without the record and tags, tracks pair by name, then order (Task
@@ -836,10 +957,15 @@ fn owner_rules(
     // to the plan's own tests.
     let names: Vec<&String> = base.p.tracks.iter().map(|t| &t.name).collect();
     let repeats = names.iter().collect::<BTreeSet<_>>().len() != names.len();
-    let heuristic = strip == Strip::Both
-        && (repeats
-            || (!tracks_renamed.is_empty()
-                && (!deleted.is_empty() || tracks_renamed.iter().any(|n| names.contains(n)))));
+    // A file whose every exported track theirs deleted has no track tags
+    // left: theirs' new tracks pair by order too (Task 4 ruling).
+    let untagged = kept.is_empty() && !did.added.is_empty();
+    let heuristic = untagged
+        || strip == Strip::Both
+            && (repeats
+                || (!did.added.is_empty() && !deleted.is_empty())
+                || (!tracks_renamed.is_empty()
+                    && (!deleted.is_empty() || tracks_renamed.iter().any(|n| names.contains(n)))));
     let shared =
         |i: Option<usize>| i.is_some() && base.p.tracks.iter().filter(|t| t.strip == i).count() > 1;
 
@@ -1253,6 +1379,11 @@ fn check_script(s: &Spec, theirs_script: &[TheirEdit], ours_script: &[OurEdit], 
             apply_their_edit(p, e);
         }
         let after = top_tracks(p);
+        did.added = after
+            .keys()
+            .filter(|id| !before.contains_key(*id))
+            .cloned()
+            .collect();
         for (id, name) in &before {
             match after.get(id) {
                 None => {

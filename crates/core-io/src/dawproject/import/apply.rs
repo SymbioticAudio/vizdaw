@@ -774,7 +774,9 @@ pub(crate) fn apply_tracks(
 /// `added`'s tracks: their events, `shift` ticks later than the file
 /// places them (a merge's pickup, plan 6e Ruling 1), with the media and
 /// sequences they use. A media item reuses one of the project's with the
-/// same content hash (Ruling 9).
+/// same content hash (Ruling 9). Answers each crossfaded region placed,
+/// with its spec, for the merge to set again once the maps are in (the
+/// model may have settled it under the project's tempo map).
 pub(crate) fn arrange_tracks(
     h: &mut History,
     imp: &DpImport,
@@ -783,11 +785,12 @@ pub(crate) fn arrange_tracks(
     added: &Added,
     shift: i64,
     report: &mut Report,
-) -> Result<(), ModelError> {
+) -> Result<Vec<(EventId, EventSpec)>, ModelError> {
     let mut origins = Origins::default();
     let arrange = Arrange {
         which: Some(which.iter().copied().collect()),
         shift,
+        flagged: Some(std::cell::RefCell::new(Vec::new())),
     };
     apply_arranged(
         h,
@@ -797,7 +800,8 @@ pub(crate) fn arrange_tracks(
         report,
         &mut origins,
         &arrange,
-    )
+    )?;
+    Ok(arrange.flagged.map(|f| f.into_inner()).unwrap_or_default())
 }
 
 // ---------------------------------------------------------------- the arrangement
@@ -854,6 +858,12 @@ struct Arrange {
     which: Option<BTreeSet<usize>>,
     /// Ticks added to each track item's tick.
     shift: i64,
+    /// A merge's: each crossfaded region placed, with its spec, for the
+    /// merge to set again once every map is in (plan 6e Task 7 fix round
+    /// 3). The model may settle such a crossfade under the merged tempo
+    /// map; the merge lists that from its own settle (`decide::held`), so
+    /// none is listed here and none is a surprise.
+    flagged: Option<std::cell::RefCell<Vec<(EventId, EventSpec)>>>,
 }
 
 impl Arrange {
@@ -861,6 +871,7 @@ impl Arrange {
         Arrange {
             which: None,
             shift: 0,
+            flagged: None,
         }
     }
 
@@ -1015,7 +1026,7 @@ fn apply_arranged(
                     events: s.events.clone(),
                 }),
             )?;
-            settled(&r, report);
+            settled(&r, &s.events, arrange, report)?;
         }
         seqs.push(Some(id));
     }
@@ -1105,10 +1116,10 @@ fn apply_arranged(
             Command::Event(EventCmd::Insert {
                 seq,
                 lane,
-                events: specs,
+                events: specs.clone(),
             }),
         )?;
-        settled(&r, report);
+        settled(&r, &specs, arrange, report)?;
         let made = r.created.iter().filter_map(|id| match id {
             AnyId::Event(e) => Some(*e),
             _ => None,
@@ -1129,9 +1140,44 @@ fn apply_arranged(
 
 /// Lists what the model's crossfade rules changed in an insert. The
 /// timeline mapping places crossfades by the model's own rule and tempo
-/// lookup, so this should never happen; if it does, the change is reported,
-/// never dropped.
-fn settled(r: &CmdReport, report: &mut Report) {
+/// lookup, so in an import this should never happen; if it does, the
+/// change is reported, never dropped. A merge's insert (`arrange.flagged`)
+/// is placed under the project's tempo map, not the file's: its crossfaded
+/// regions are kept, with their specs, for the merge to set again.
+fn settled(
+    r: &CmdReport,
+    specs: &[EventSpec],
+    arrange: &Arrange,
+    report: &mut Report,
+) -> Result<(), ModelError> {
+    if let Some(flagged) = &arrange.flagged {
+        let made: Vec<EventId> = r
+            .created
+            .iter()
+            .filter_map(|id| match id {
+                AnyId::Event(e) => Some(*e),
+                _ => None,
+            })
+            .collect();
+        if made.len() != specs.len() {
+            return Err(ModelError::invalid(
+                "the insert made a different number of events",
+            ));
+        }
+        let mut f = flagged.borrow_mut();
+        for (e, s) in made.into_iter().zip(specs) {
+            if matches!(
+                s.body,
+                EventBody::AudioRegion {
+                    crossfade: true,
+                    ..
+                }
+            ) {
+                f.push((e, s.clone()));
+            }
+        }
+        return Ok(());
+    }
     debug_assert!(
         r.settled.is_empty(),
         "the model changed crossfades the import made: {:?}",
@@ -1140,6 +1186,7 @@ fn settled(r: &CmdReport, report: &mut Report) {
     for (_, line) in &r.settled {
         report.add(ItemKind::Changed, CROSSFADES_PLAIN, Some(line.clone()));
     }
+    Ok(())
 }
 
 fn count_notes<'e>(bodies: impl Iterator<Item = &'e EventBody>) -> u64 {
