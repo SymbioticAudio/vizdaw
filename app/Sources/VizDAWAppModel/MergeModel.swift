@@ -34,6 +34,9 @@ public final class MergeModel {
     @ObservationIgnored private var abandoned: Set<UInt64> = []
     /// Set while the model itself changes `shown` or `chosenSnapshot`.
     @ObservationIgnored private var quiet = false
+    /// `send` is inside `startJob`: its job's ID is not in `job` yet, so a
+    /// merge job that ends in the first poll is this sheet's.
+    @ObservationIgnored private var starting = false
 
     public init(document: DocumentModel) { self.document = document }
 
@@ -104,6 +107,14 @@ public final class MergeModel {
         }
     }
 
+    /// The window's write-back of the sheet binding. Under the control
+    /// channel the binding reads false although the sheet is held, so that
+    /// false is not a dismissal and cancels nothing.
+    public func setPresented(_ newValue: Bool, channelActive: Bool) {
+        if !newValue, channelActive { return }
+        presented = newValue
+    }
+
     /// Another of the document's sheets is up.
     private var otherSheetShown: Bool {
         guard let document else { return false }
@@ -143,6 +154,11 @@ public final class MergeModel {
     public func begin(path: String, info: DawprojectInfoRow) {
         guard document != nil else { return }
         if job != nil || waiting || shown {
+            if next != nil {
+                // One merge waits already: nothing is replaced silently.
+                document?.editor.status = "A merge is waiting; finish it before opening another."
+                return
+            }
             next = (path, info)
             return
         }
@@ -220,6 +236,8 @@ public final class MergeModel {
         waiting = false
         error = nil
         let req = DawprojectMergeRequestRow(path: path, snapshot: snapshot, step: .hold, date: MergeDate.today())
+        starting = true
+        defer { starting = false }
         // A refusal (recording, an open edit) shows in the sheet.
         job = document.startJob(
             .mergeDawproject, ProjectBanner.failureTitle(.mergeDawproject),
@@ -316,9 +334,13 @@ public final class MergeModel {
             if r.state == .done, let document { try? document.session.cancelMerge(job: r.id) }
             return
         }
+        if job == nil, starting { job = r.id }
         guard r.id == job else { return }
         if r.state == .cancelled {
+            // The core ended the hold: say so, or the sheet shows nothing.
             job = nil
+            held = false
+            error = r.message ?? "The merge was cancelled."
             return
         }
         preview = r.merge
@@ -330,6 +352,7 @@ public final class MergeModel {
     func jobFailed(_ r: JobRow, message: String) -> Bool {
         guard r.kind == .mergeDawproject else { return false }
         if abandoned.remove(r.id) != nil { return true }
+        if job == nil, starting, r.state != .cancelled { job = r.id }
         guard r.id == job, r.state != .cancelled else { return false }
         job = nil
         held = false

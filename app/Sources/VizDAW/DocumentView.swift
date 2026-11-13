@@ -120,7 +120,7 @@ private struct InterchangeSheets: ViewModifier {
             .sheet(
                 isPresented: Binding(
                     get: { model.merge.presented && !ControlChannel.active },
-                    set: { model.merge.presented = $0 })
+                    set: { model.merge.setPresented($0, channelActive: ControlChannel.active) })
             ) {
                 MergeSheet(merge: model.merge)
             }

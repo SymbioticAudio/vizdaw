@@ -344,6 +344,52 @@ import VizDAWCore
         #expect(!MergeModel.heldHelp.isEmpty)
     }
 
+    /// Final review 1: a Hold job already Done on its first poll is the
+    /// sheet's, not dropped.
+    @Test func aHoldDoneInTheFirstPollIsHeld() async throws {
+        let (m, f) = try document()
+        f.jobStartState = .done
+        let g = m.merge
+        g.begin(path: Self.path, info: info())
+        await g.settle()
+        #expect(g.job == 12001 && g.held, "held, so Cancel can let it go")
+        g.cancel()
+        #expect(f.cancelledMerges == [12001])
+    }
+
+    /// Final review 2: the binding's false under the control channel is not
+    /// a dismissal; a real one is Cancel.
+    @Test func aChannelActiveFalseDoesNotCancel() async throws {
+        let (m, f, g, job) = try await held()
+        defer { withExtendedLifetime(m) {} }
+        g.setPresented(false, channelActive: true)
+        #expect(g.shown && g.held && f.cancelledMerges.isEmpty)
+        g.setPresented(false, channelActive: false)
+        #expect(!g.shown && f.cancelledMerges == [job])
+    }
+
+    /// Final review 3: a third file is refused with a status line; the
+    /// second is not replaced.
+    @Test func aThirdMergeIsRefusedNotReplacing() async throws {
+        let (m, _, g, _) = try await held()
+        g.begin(path: "/tmp/second.dawproject", info: info())
+        g.begin(path: "/tmp/third.dawproject", info: info())
+        #expect(m.editor.status?.contains("merge is waiting") == true)
+        g.cancel()
+        #expect(g.path == "/tmp/second.dawproject")
+    }
+
+    /// Final review 4: a Hold job the core ends as Cancelled leaves a sentence.
+    @Test func aCancelledHoldShowsASentence() async throws {
+        let (m, f) = try document()
+        let g = m.merge
+        g.begin(path: Self.path, info: info())
+        await g.settle()
+        let job = try #require(g.job)
+        end(f, m, job, .cancelled)
+        #expect(g.job == nil && !g.held && g.error?.isEmpty == false)
+    }
+
     /// A merge waits for a running job the core would refuse it beside.
     @Test func aMergeWaitsForARunningExport() async throws {
         let (m, f) = try document()
