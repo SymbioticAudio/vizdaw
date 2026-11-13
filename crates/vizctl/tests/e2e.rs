@@ -4294,7 +4294,8 @@ fn dawproject_round_trip_over_the_channel() {
         };
         for p in rd.flatten().map(|e| e.path()) {
             out.push(p.clone());
-            if p.is_dir() {
+            // lstat: a link is listed, never followed.
+            if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
                 walk_quiet(&p, out);
             }
         }

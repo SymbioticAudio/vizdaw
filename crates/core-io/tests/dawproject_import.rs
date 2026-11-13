@@ -13,7 +13,7 @@ use core_io::dawproject::import::{
 };
 use core_io::dawproject::package::{
     AudioSource, DpPackage, ODD_RATE, RECORD_UNREADABLE, SONG_INFO_UNREADABLE,
-    debug_take_external_stats, external_files_note, open,
+    debug_take_external_stats, open,
 };
 use core_io::dawproject::plugins::PlistCodec;
 use core_io::limits::PackageLimits;
@@ -1328,17 +1328,14 @@ fn opening_never_looks_at_external_files() {
         None,
     );
     let info = pkg.info();
-    assert_eq!(info.external_files, 1);
+    assert_eq!(info.audio_files, 2);
+    let outside = pkg
+        .audio()
+        .iter()
+        .filter(|a| matches!(a.source, AudioSource::External(_)))
+        .count();
+    assert_eq!(outside, 1);
     assert_eq!(debug_take_external_stats(), 0, "open and info stat nothing");
-    assert_eq!(
-        external_files_note(info.external_files).as_deref(),
-        Some("1 external audio file (checked when you import)")
-    );
-    assert_eq!(
-        external_files_note(3).as_deref(),
-        Some("3 external audio files (checked when you import)")
-    );
-    assert_eq!(external_files_note(0), None);
 
     // The confirmed import's size check is where they are looked at.
     let outside = dir.path().join("o.wav");

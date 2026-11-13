@@ -10,7 +10,7 @@ import Testing
     /// The owner's list, then (plan 6d Task 13) DAWproject's origin and the
     /// other readers and converters its README lists.
     static let pattern =
-        #"\b(Opcode|Studio Vision|SVP|Logic|Apple|Midas|Soundcraft|Steinberg|Cubase|NI|Native Instruments|Komplete|Kontrol|Microsoft|Bitwig|PreSonus|Studio One|Cubasis|VST Live|n-Track|DawVert|ProjectConverter|Cockos|Reaper)\b"#
+        #"\b(Opcode|Studio Vision|SVP|Logic|Apple|Midas|Soundcraft|Steinberg|Cubase|NI|Native Instruments|Komplete|Kontrol|Microsoft|Ableton|ROLI|Bitwig|PreSonus|Studio One|Cubasis|VST Live|n-Track|DawVert|ProjectConverter|Cockos|Reaper)\b"#
     /// The one listed exception: a smoke-run plug-in reference, never shown.
     static let smokeLine = #"vendor: "Apple""#
 

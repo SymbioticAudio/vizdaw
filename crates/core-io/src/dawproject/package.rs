@@ -63,19 +63,6 @@ const CANCEL_EVERY: usize = 65_536;
 /// writes the head's three fields first).
 const RECORD_HEAD_BYTES: usize = 64 * 1024;
 
-/// The line the app shows before an import for the files outside the
-/// package, which are not looked at until the import is confirmed; `None`
-/// for none.
-pub fn external_files_note(n: u32) -> Option<String> {
-    match n {
-        0 => None,
-        1 => Some("1 external audio file (checked when you import)".to_owned()),
-        n => Some(format!(
-            "{n} external audio files (checked when you import)"
-        )),
-    }
-}
-
 #[cfg(feature = "test-hooks")]
 thread_local! {
     static EXTERNAL_STATS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -120,9 +107,6 @@ pub struct DpInfo {
     pub tracks: u32,
     /// Distinct audio files.
     pub audio_files: u32,
-    /// How many of them are outside the package (not looked at before the
-    /// import: see [`external_files_note`]).
-    pub external_files: u32,
     /// Where it came from.
     pub ret: ReturnInfo,
 }
@@ -685,13 +669,6 @@ impl DpPackage {
             sample_rate,
             tracks: self.ret.tracks,
             audio_files: u32::try_from(self.audio.len()).unwrap_or(u32::MAX),
-            external_files: u32::try_from(
-                self.audio
-                    .iter()
-                    .filter(|a| matches!(a.source, AudioSource::External(_)))
-                    .count(),
-            )
-            .unwrap_or(u32::MAX),
             ret: self.ret.clone(),
         }
     }

@@ -22,6 +22,8 @@ const NAMES: &[&str] = &[
     "Komplete",
     "Kontrol",
     "Microsoft",
+    "Ableton",
+    "ROLI",
     // DAWproject's origin and the other readers and converters its README
     // lists (plan 6d Task 13).
     "Bitwig",

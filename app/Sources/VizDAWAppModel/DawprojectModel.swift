@@ -140,8 +140,9 @@ public final class DawprojectModel {
         return document.jobs.contains { ForDawModel.blocking.contains($0.kind) || ForDawModel.mediaJobs.contains($0.kind) }
     }
 
-    /// The Save panel's answer (which has confirmed replacing: `replace`):
-    /// exports to `path`, or keeps the request until the running job ends.
+    /// Exports to `path`, or keeps the request until the running job ends.
+    /// `replace` is true only when the Save panel confirmed replacing a file
+    /// that was there: `confirmed(path:)` works it out and calls this.
     public func start(path: String, replace: Bool) {
         guard let req = request(path: path, replace: replace) else {
             checkError = "No sequence is shown."

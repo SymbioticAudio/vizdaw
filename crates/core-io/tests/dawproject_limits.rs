@@ -1344,7 +1344,7 @@ fn external_media() {
             .iter()
             .all(|a| matches!(a.source, AudioSource::External(_)))
     );
-    assert_eq!(pkg.info().external_files, 4);
+    assert_eq!(pkg.info().audio_files, 4);
     // `needed_bytes` runs on a detached thread: a FIFO opened for reading
     // would block for ever, and this must fail instead of hanging (a scoped
     // thread would be joined, and the test would hang on it).
