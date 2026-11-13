@@ -704,7 +704,16 @@ impl Unit {
     }
 
     /// Restores a state from [`Unit::save_state`].
+    /// A binary list is sized by `plist::written_size` first (final review
+    /// follow-up): one whose shared objects would expand past
+    /// `plist::MAX_PLIST_BYTES` when the unit reads it is refused unread.
     pub(crate) fn load_state(&self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.starts_with(b"bplist00") {
+            let cap = crate::plist::MAX_PLIST_BYTES as u64;
+            if crate::plist::written_size(bytes, cap)? > cap {
+                return Err("the state would be too large read out".to_owned());
+            }
+        }
         let data = CFData::from_bytes(bytes);
         // SAFETY: `data` is valid; null format and error pointers.
         let plist = unsafe {

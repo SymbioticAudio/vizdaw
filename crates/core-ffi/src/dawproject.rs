@@ -823,6 +823,21 @@ pub fn audio_longer_than_it_says(file: &str) -> String {
     format!("The audio file {file} holds more audio than it says, so the import stopped.")
 }
 
+/// The import's failure when a file that gives no length converts past
+/// [`UNKNOWN_LENGTH_CAP`] while the free space cannot be read.
+pub fn audio_too_long_to_convert(file: &str) -> String {
+    format!(
+        "The audio file {file} gives no length and converts to more than 4 GB, so the import stopped."
+    )
+}
+
+/// The most one converted file that gives no length may take when the
+/// free space cannot be read (final review follow-up).
+const UNKNOWN_LENGTH_CAP: u64 = 4 << 30;
+/// The check's refusal at [`UNKNOWN_LENGTH_CAP`], worded per file by
+/// [`Halt::of`].
+const NO_LENGTH_TOO_LONG: &str = "no length, past the cap";
+
 /// Why converting one audio file ended without its media.
 enum Halt {
     /// The job was cancelled.
@@ -841,6 +856,9 @@ impl Halt {
             MediaError::Cancelled => Halt::Cancelled,
             MediaError::Refused(s) if s == core_media::import::LONGER_THAN_PROBED => {
                 Halt::Refused(audio_longer_than_it_says(file))
+            }
+            MediaError::Refused(s) if s == NO_LENGTH_TOO_LONG => {
+                Halt::Refused(audio_too_long_to_convert(file))
             }
             MediaError::Refused(s) => Halt::Refused(s),
             e => Halt::Offline(e.to_string()),
@@ -962,6 +980,8 @@ fn external_file(p: &Path) -> Result<PathBuf, String> {
     }
 }
 
+use crate::record::LOW_DISK_STOP;
+
 /// The bytes the free-space check allows each converted file beyond its
 /// samples (its header and chunks).
 const CAF_HEADROOM: u64 = 64 * 1024;
@@ -1016,19 +1036,37 @@ fn import_body(
     for (k, a) in pkg.audio().iter().enumerate() {
         let mut each = |f: f32| set(0.1 + 0.8 * (k as f32 + f.clamp(0.0, 1.0)) / n);
         let mut convert = |from: &Path, copy: u64, converted: &mut bool| {
-            let mut room = |info: &core_media::import::SourceInfo, budget: u64| {
-                let need = budget
+            // The free space, read once per file (the disk's own count then
+            // holds what earlier files took; the test hook's does not).
+            let mut free_now: Option<Option<u64>> = None;
+            let mut room = |info: &core_media::import::SourceInfo, reach: u64| {
+                let need = reach
                     .saturating_mul(u64::from(info.channels))
                     .saturating_mul(u64::from(depth))
                     .saturating_add(CAF_HEADROOM.saturating_mul(u64::from(info.channels)));
-                let left = match job.free {
+                let left = *free_now.get_or_insert_with(|| match job.free {
                     Some(f) => Some(f.saturating_sub(used).saturating_sub(copy)),
                     None => crate::record::free_bytes(&job.root),
-                };
-                if left.is_some_and(|f| need > f) {
-                    return Err(MediaError::Refused(not_enough_space_to_import(need)));
+                });
+                if info.frames > 0 {
+                    // A known length: the whole budget must fit.
+                    if left.is_some_and(|f| need > f) {
+                        return Err(MediaError::Refused(not_enough_space_to_import(need)));
+                    }
+                    return Ok(());
                 }
-                Ok(())
+                // No length (final review follow-up): bounded by the disk,
+                // keeping the recorder's stop reserve free; with no free
+                // space to go by, by a fixed cap per file.
+                match left {
+                    Some(f) if need.saturating_add(LOW_DISK_STOP) > f => Err(MediaError::Refused(
+                        not_enough_space_to_import(need.saturating_add(LOW_DISK_STOP)),
+                    )),
+                    None if need > UNKNOWN_LENGTH_CAP => {
+                        Err(MediaError::Refused(NO_LENGTH_TOO_LONG.to_owned()))
+                    }
+                    _ => Ok(()),
+                }
             };
             let r = import_checked(
                 importer,

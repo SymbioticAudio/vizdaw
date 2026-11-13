@@ -1507,21 +1507,26 @@ fn import_as_new_project() {
             .iter()
             .all(|n| n.expression.len() == 2)
     );
-    // The regions, online, with the source's audio; B's crossfade.
-    let hash = core_media::caf::hash_file(&p.pkg.join("Media/stereo.caf")).unwrap();
-    let (ra, ri) = (&a.tracks[1].regions, &i.tracks[1].regions);
-    assert_eq!(ri.len(), 2);
-    for (x, y) in ra.iter().zip(ri) {
-        assert_eq!(
-            (x.tick, x.offset, x.length, x.fade_in, x.crossfade),
-            (y.tick, y.offset, y.length, y.fade_in, y.crossfade)
-        );
-        assert_eq!(y.media_hash.as_deref(), Some(hash.as_str()));
+    // The regions, online, with the source's audio; B's crossfade. macOS
+    // only: converting the audio needs the system importer, which Linux
+    // CI lacks (as 6c's crossfade convert test).
+    #[cfg(target_os = "macos")]
+    {
+        let hash = core_media::caf::hash_file(&p.pkg.join("Media/stereo.caf")).unwrap();
+        let (ra, ri) = (&a.tracks[1].regions, &i.tracks[1].regions);
+        assert_eq!(ri.len(), 2);
+        for (x, y) in ra.iter().zip(ri) {
+            assert_eq!(
+                (x.tick, x.offset, x.length, x.fade_in, x.crossfade),
+                (y.tick, y.offset, y.length, y.fade_in, y.crossfade)
+            );
+            assert_eq!(y.media_hash.as_deref(), Some(hash.as_str()));
+        }
+        assert!(!ri[0].crossfade && ri[1].crossfade);
+        let media = t.s.media().unwrap();
+        assert_eq!(media.len(), 1);
+        assert!(media.iter().all(|m| m.offline.is_none()), "{media:?}");
     }
-    assert!(!ri[0].crossfade && ri[1].crossfade);
-    let media = t.s.media().unwrap();
-    assert_eq!(media.len(), 1);
-    assert!(media.iter().all(|m| m.offline.is_none()), "{media:?}");
     // The maps, markers and song info.
     assert_eq!(i.tempo, a.tempo);
     assert!(i.tempo.iter().any(|p| p.2), "the ramp");
@@ -1818,12 +1823,13 @@ fn import_rechecks_the_space_from_the_probe() {
     assert_eq!(j.state, JobStateRow::Done, "{j:?}");
 }
 
-/// Final review I1: a conversion stops at its frame budget (the probe's
-/// frames at the project rate plus a second): a FLAC whose header gives
-/// no length decodes far past it, so the import stops and leaves nothing.
+/// Final review follow-up: a FLAC whose header gives no length (the
+/// probe says 0 frames) imports in full when the disk has room, and is
+/// stopped, leaving nothing, when it has not (the recorder's stop reserve
+/// stays free).
 #[cfg(target_os = "macos")]
 #[test]
-fn import_stops_a_file_longer_than_it_says() {
+fn a_file_with_no_length_is_bounded_by_the_disk() {
     let _g = serial();
     let t = target();
     let dir = t.dir.path().join("src");
@@ -1839,14 +1845,25 @@ fn import_stops_a_file_longer_than_it_says() {
             ("audio/a.flac", &flac_of_unknown_length(30)),
         ],
     );
+    // Room for what the file says (about 1.2 MB), not for its first
+    // second beside the 100 MiB reserve: refused, nothing left.
+    t.s.debug_free_bytes(Some(2_000_000)).unwrap();
     let j = import(&t, &path);
     assert_eq!(j.state, JobStateRow::Failed, "{j:?}");
     assert_eq!(
         j.message.as_deref(),
-        Some(vizdaw_ffi::dawproject::audio_longer_than_it_says("a.flac").as_str())
+        Some("Not enough free space to import this file (it needs 106 MB).")
     );
     assert!(media_files(&t.pkg).is_empty(), "{:?}", media_files(&t.pkg));
     assert!(t.s.lanes(first_seq(&t.s).0).unwrap().is_empty());
+    // Room: all 30 blocks of 4096 frames come in.
+    t.s.debug_free_bytes(Some(10 << 30)).unwrap();
+    let j = import(&t, &path);
+    t.s.debug_free_bytes(None).unwrap();
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    let doc = doc_of(&t.s);
+    let lengths: Vec<u64> = doc.media().values().map(|m| m.length_frames).collect();
+    assert_eq!(lengths, [30 * 4096]);
 }
 
 /// Ruling 18: what is not a DAWproject file version 1, or leaves the

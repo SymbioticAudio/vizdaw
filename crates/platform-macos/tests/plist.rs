@@ -179,3 +179,16 @@ fn export_refuses_malformed_binary_lists_without_reading_them() {
         assert!(to_xml(&list).is_err(), "{list:?}");
     }
 }
+
+/// Final review follow-up: a stored state that is a binary DAG bomb is
+/// refused before the unit reads it, quickly, and the unit keeps working.
+#[test]
+fn a_unit_refuses_a_bomb_state_unread() {
+    let mut a = au::load(DELAY, 48_000.0, 512).unwrap();
+    let start = std::time::Instant::now();
+    let err = a.load_state(&dag_bomb(40)).unwrap_err();
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    assert!(err.to_string().contains("too large"), "{err}");
+    let good = a.save_state().unwrap();
+    a.load_state(&good).unwrap();
+}

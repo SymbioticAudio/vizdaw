@@ -371,8 +371,10 @@ pub fn import_reserved(
     )
 }
 
-/// A check of a probe and its [`frame_budget`] before a conversion
-/// writes anything ([`import_checked`]).
+/// A check that a conversion may reach a number of frames at the project
+/// rate ([`import_checked`]): with a known length, once, with its
+/// [`frame_budget`], before anything is written; with none, before and
+/// then each second ahead of the decoder.
 pub type ProbeCheck<'a> = dyn FnMut(&SourceInfo, u64) -> Result<(), MediaError> + 'a;
 
 /// The refusal ([`MediaError::Refused`]) when a decoder delivers more
@@ -382,7 +384,12 @@ pub const LONGER_THAN_PROBED: &str = "the file holds more audio than it says";
 /// The most frames a conversion of `info` to `rate` may deliver: the
 /// probe's frames at `rate`, plus 1 % or one second, whichever is more (a
 /// resampler's rounding). A rate that is not positive counts no frames.
-pub fn frame_budget(info: &SourceInfo, rate: u32) -> u64 {
+/// `None` when the probe gives no length (0 frames, as a FLAC whose header
+/// leaves it out): the caller's check then bounds it as it goes.
+pub fn frame_budget(info: &SourceInfo, rate: u32) -> Option<u64> {
+    if info.frames == 0 {
+        return None;
+    }
     let rate64 = u64::from(rate);
     let at_rate = if info.sample_rate.is_finite() && info.sample_rate > 0.0 {
         let f = (info.frames as f64 * f64::from(rate) / info.sample_rate).ceil();
@@ -391,14 +398,17 @@ pub fn frame_budget(info: &SourceInfo, rate: u32) -> u64 {
     } else {
         0
     };
-    at_rate.saturating_add((at_rate / 100).max(rate64))
+    Some(at_rate.saturating_add((at_rate / 100).max(rate64)))
 }
 
 /// [`import_reserved`] for a source that is not trusted (plan 6d final
 /// review I1): `check` gets the probe and its [`frame_budget`] before
 /// anything is written, and may refuse; a decoder that delivers more than
-/// the budget is stopped with [`LONGER_THAN_PROBED`]. Either way nothing
-/// this import wrote is left.
+/// the budget is stopped with [`LONGER_THAN_PROBED`]. A probe with no
+/// length has no budget: `check` is asked before anything is written for
+/// one second, then again each time the decoder is about to pass the
+/// frames last allowed, for one second more, and its refusal stops the
+/// conversion. Either way nothing this import wrote is left.
 #[allow(clippy::too_many_arguments)]
 pub fn import_checked(
     importer: &dyn MediaImporter,
@@ -441,13 +451,21 @@ fn import_within(
     if info.channels == 0 {
         return Err(MediaError::Unsupported("a file with no channels".into()));
     }
-    let budget = match check {
-        Some(check) => {
-            let b = frame_budget(&info, format.sample_rate);
-            check(&info, b)?;
-            Some(b)
-        }
-        None => None,
+    // `budget`: a hard cap; `ahead`: the check asked as the decoder goes,
+    // with the frames allowed so far.
+    let step = u64::from(format.sample_rate).max(1);
+    let (budget, mut ahead) = match check {
+        Some(check) => match frame_budget(&info, format.sample_rate) {
+            Some(b) => {
+                check(&info, b)?;
+                (Some(b), None)
+            }
+            None => {
+                check(&info, step)?;
+                (None, Some((check, step)))
+            }
+        },
+        None => (None, None),
     };
     let incoming = package.join(INCOMING_DIR);
     std::fs::create_dir_all(&incoming)?;
@@ -482,8 +500,15 @@ fn import_within(
                 return Err(MediaError::Cancelled);
             }
             let frames = (chunk.len() / ch) as u64;
-            if budget.is_some_and(|b| done.saturating_add(frames) > b) {
+            let reach = done.saturating_add(frames);
+            if budget.is_some_and(|b| reach > b) {
                 return Err(MediaError::Refused(LONGER_THAN_PROBED.into()));
+            }
+            if let Some((check, allowed)) = ahead.as_mut()
+                && reach > *allowed
+            {
+                *allowed = reach.saturating_add(step);
+                check(&info, *allowed)?;
             }
             if split {
                 for (k, lane) in lanes.iter_mut().enumerate() {
@@ -899,15 +924,16 @@ mod tests {
             channels: 1,
             frames,
         };
-        assert_eq!(frame_budget(&info(48_000.0, 1000), 48_000), 49_000);
-        assert_eq!(frame_budget(&info(8_000.0, 8_000), 48_000), 96_000);
+        assert_eq!(frame_budget(&info(48_000.0, 1000), 48_000), Some(49_000));
+        assert_eq!(frame_budget(&info(8_000.0, 8_000), 48_000), Some(96_000));
         assert_eq!(
             frame_budget(&info(48_000.0, 48_000_000), 48_000),
-            48_480_000
+            Some(48_480_000)
         );
-        assert_eq!(frame_budget(&info(0.0, 1000), 48_000), 48_000);
-        assert_eq!(frame_budget(&info(f64::NAN, 1000), 48_000), 48_000);
-        assert_eq!(frame_budget(&info(1.0, u64::MAX), 48_000), u64::MAX);
+        assert_eq!(frame_budget(&info(0.0, 1000), 48_000), Some(48_000));
+        assert_eq!(frame_budget(&info(48_000.0, 0), 48_000), None);
+        assert_eq!(frame_budget(&info(f64::NAN, 1000), 48_000), Some(48_000));
+        assert_eq!(frame_budget(&info(1.0, u64::MAX), 48_000), Some(u64::MAX));
     }
 
     /// Final review I1: a decoder that delivers more than its probe said
@@ -942,6 +968,44 @@ mod tests {
         };
         let got = checked(&near, pkg.path(), &mut |_, _| Ok(())).unwrap();
         assert_eq!(got[0].length_frames, 100_500);
+    }
+
+    /// Final review follow-up: a probe with no length has no frame cap;
+    /// the check is asked a second ahead as the decoder goes, and its
+    /// refusal stops the conversion with nothing left.
+    #[test]
+    fn a_probe_with_no_length_is_checked_as_it_goes() {
+        let pkg = package();
+        let unknown = Liar {
+            inner: Fake {
+                channels: 2,
+                frames: 200_000,
+                cancel_after: None,
+            },
+            says: 0,
+        };
+        let mut asked = Vec::new();
+        let got = checked(&unknown, pkg.path(), &mut |_, reach| {
+            asked.push(reach);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got[0].length_frames, 200_000);
+        assert_eq!(asked[0], 48_000);
+        assert!(asked.windows(2).all(|w| w[1] > w[0]), "{asked:?}");
+        assert!(*asked.last().unwrap() >= 200_000, "{asked:?}");
+        assert_eq!(listing(pkg.path()).1, Vec::<String>::new());
+        // Refused past 100 000 frames: stopped, nothing left.
+        let pkg = package();
+        let r = checked(&unknown, pkg.path(), &mut |_, reach| {
+            if reach > 100_000 {
+                Err(MediaError::Refused("no room".into()))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(r, Err(MediaError::Refused("no room".into())));
+        assert_eq!(listing(pkg.path()), (vec![], vec![]));
     }
 
     /// Final review I1: the check sees the probe before anything is
