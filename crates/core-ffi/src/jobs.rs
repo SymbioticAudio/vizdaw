@@ -37,6 +37,8 @@ pub enum JobKindRow {
     ExportDawproject,
     /// Import a DAWproject file as a new project (plan 6d L1).
     ImportProject,
+    /// Merge a returning DAWproject file into the project (plan 6e Task 8).
+    MergeDawproject,
 }
 
 /// Where a job is.
@@ -75,6 +77,10 @@ pub struct JobRow {
     /// The absolute paths an export put in place (plan 6a).
     #[uniffi(default)]
     pub written: Vec<String>,
+    /// What a DAWproject merge does (plan 6e Task 8): set on a Done
+    /// merge job of any step.
+    #[uniffi(default = None)]
+    pub merge: Option<crate::dawproject::MergePreviewRow>,
 }
 
 /// Where imported audio goes.
@@ -177,6 +183,16 @@ pub enum Work {
         /// The mapped import (boxed: it is large), or why there is none
         /// (`"Cancelled"`: it was cancelled).
         result: Result<Box<core_io::dawproject::import::DpImport>, String>,
+    },
+    /// A DAWproject merge (plan 6e Task 8): the media it made (removed
+    /// unless the merged history keeps it) and the merge.
+    MergeDawproject {
+        /// `(audio file name, the items it became)` per file converted,
+        /// in order.
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// The merge (boxed: it is large), or why there is none
+        /// (`"Cancelled"`: it was cancelled).
+        result: Result<Box<crate::dawproject::Merged>, String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,
@@ -389,5 +405,6 @@ pub fn row(
         created,
         report: None,
         written: Vec::new(),
+        merge: None,
     }
 }

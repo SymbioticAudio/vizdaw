@@ -252,6 +252,21 @@ pub(crate) struct Inner {
     /// failed (test hook).
     #[cfg(feature = "test-hooks")]
     dawproject_capture_fails: bool,
+    /// A merge between its preview and Merge (plan 6e Ruling 12): it
+    /// counts as a running interchange and media job until
+    /// `confirm_merge`, `cancel_merge` or close.
+    held_merge: Option<HeldMerge>,
+}
+
+/// A held merge (plan 6e Task 8): its job, the merged history and the
+/// media its job converted.
+struct HeldMerge {
+    /// The merge job's ID.
+    job: u64,
+    /// The merge.
+    merged: Box<crate::dawproject::Merged>,
+    /// What its job converted (removed unless the swapped history keeps it).
+    files: ImportFiles,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -376,6 +391,7 @@ impl Inner {
             dawproject_free: None,
             #[cfg(feature = "test-hooks")]
             dawproject_capture_fails: false,
+            held_merge: None,
         }
     }
 
@@ -488,10 +504,15 @@ impl Inner {
             JobKindRow::ExportProject,
             JobKindRow::ExportDawproject,
             JobKindRow::ImportProject,
+            JobKindRow::MergeDawproject,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
             });
+        }
+        // A held merge's media is in `Media/` (plan 6e Ruling 12).
+        if self.held_merge.is_some() {
+            return Err(merge_held_busy());
         }
         Ok(())
     }
@@ -3371,6 +3392,8 @@ impl Session {
             for w in inner.jobs.shutdown() {
                 discard(&root, w, &keep);
             }
+            // A held merge and its media go (plan 6e Task 8).
+            drop_held_merge(&mut inner, self.id);
             // The bounce's plugin copies go with it (pre-flight I2).
             if let Some((_, token)) = inner.bounce_copies.take() {
                 plugins::end_bounce(token);
@@ -4251,6 +4274,7 @@ impl Drop for Session {
                     crate::jobs::JobKindRow::ExportProject,
                     crate::jobs::JobKindRow::ExportDawproject,
                     crate::jobs::JobKindRow::ImportProject,
+                    crate::jobs::JobKindRow::MergeDawproject,
                 ])
             {
                 let root = inner.root(self.id);
@@ -4259,6 +4283,8 @@ impl Drop for Session {
                     discard(&root, w, &keep);
                 }
             }
+            // A held merge's media goes with it (plan 6e Task 8).
+            drop_held_merge(&mut inner, self.id);
         }
         release_packages(self.id);
         if let Some(k) = key {
@@ -4321,8 +4347,8 @@ pub(crate) fn discard(
             .flatten()
             .map(|i| i.path)
             .collect(),
-        // What a DAWproject import converted (plan 6d Task 10).
-        Work::ImportProject { files, .. } => files
+        // What a DAWproject import or merge converted (plans 6d, 6e).
+        Work::ImportProject { files, .. } | Work::MergeDawproject { files, .. } => files
             .into_iter()
             .filter_map(|(_, r)| r.ok())
             .flatten()
@@ -4458,6 +4484,11 @@ impl Session {
                 Work::ImportProject { files, result } => {
                     let r = apply_dawproject_work(inner, &root, id, kind, files, result);
                     changed |= r.state == JobStateRow::Done;
+                    r
+                }
+                Work::MergeDawproject { files, result } => {
+                    let (r, swapped) = apply_merge_work(inner, &root, id, kind, files, result);
+                    changed |= swapped;
                     r
                 }
                 Work::ExportMidi { result, written } => {
@@ -4620,18 +4651,7 @@ fn apply_dawproject_work(
             r
         }
         Err(e) => {
-            let keep = inner.kept();
-            // Overviews it built for audio no history state holds go too.
-            let hashes: std::collections::BTreeSet<String> =
-                inner.named_media().into_values().flatten().collect();
-            for f in files.into_iter().filter_map(|(_, r)| r.ok()).flatten() {
-                remove_unkept(root, &f.path, &keep);
-                if !hashes.contains(&f.content_hash)
-                    && let Some(at) = core_media::overview::Overview::path(root, &f.content_hash)
-                {
-                    let _ = std::fs::remove_file(at);
-                }
-            }
+            remove_job_media(inner, root, files);
             match e {
                 VizError::Model { message } if message == crate::for_daw::CANCELLED => {
                     row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
@@ -4649,6 +4669,140 @@ fn apply_dawproject_work(
                 ),
             }
         }
+    }
+}
+
+/// Removes the media a DAWproject import or merge job converted that no
+/// history state references, with the overviews built for audio no state
+/// holds.
+fn remove_job_media(inner: &Inner, root: &Path, files: ImportFiles) {
+    let keep = inner.kept();
+    let hashes: std::collections::BTreeSet<String> =
+        inner.named_media().into_values().flatten().collect();
+    let mut folders = std::collections::BTreeSet::new();
+    for f in files.into_iter().filter_map(|(_, r)| r.ok()).flatten() {
+        remove_unkept(root, &f.path, &keep);
+        if !hashes.contains(&f.content_hash)
+            && let Some(at) = core_media::overview::Overview::path(root, &f.content_hash)
+        {
+            let _ = std::fs::remove_file(&at);
+            folders.extend(at.parent().map(Path::to_path_buf));
+        }
+    }
+    // The overviews' folder goes too when the job made it and left it
+    // empty (a folder holding a file stays).
+    for dir in folders {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// `Busy` while a merge waits between its preview and Merge.
+fn merge_held_busy() -> VizError {
+    VizError::Busy {
+        message: "Finish or cancel the merge waiting to be confirmed.".into(),
+    }
+}
+
+/// Drops the held merge, if any, and the media its job converted.
+fn drop_held_merge(inner: &mut Inner, id: u64) {
+    if let Some(h) = inner.held_merge.take() {
+        let root = inner.root(id);
+        remove_job_media(inner, &root, h.files);
+        crate::dawproject::remove_empty_incoming(&root);
+    }
+}
+
+/// The swap (plan 6e Ruling 12): when the project is still what the merge
+/// was made from (its present serial, its present document's referenced
+/// plug-in states and its project ID), the merged history replaces the
+/// session's and the report is the interchange report; the media nothing
+/// references then goes. Otherwise `Model` [`crate::dawproject::CHANGED_SINCE`]
+/// and the merge's media goes. The caller reloads the host on `Ok`.
+fn swap_merge(
+    inner: &mut Inner,
+    root: &Path,
+    merged: Box<crate::dawproject::Merged>,
+    files: ImportFiles,
+) -> Result<crate::interchange::ReportRow, VizError> {
+    let mut merged = merged;
+    let now = crate::dawproject::MergeBase::of(&inner.history);
+    let history = merged.history.take().filter(|_| now == merged.base);
+    let Some(history) = history else {
+        remove_job_media(inner, root, files);
+        return Err(VizError::Model {
+            message: crate::dawproject::CHANGED_SINCE.into(),
+        });
+    };
+    inner.history = history;
+    // Serials of the replaced history's later steps name nothing now.
+    inner.last_step = None;
+    inner.surfaces.tempo_step = None;
+    let report = crate::dawproject::merged_report(&merged);
+    inner.interchange_report = Some(report.clone());
+    remove_job_media(inner, root, files);
+    Ok(report)
+}
+
+/// Applies a finished DAWproject merge job (plan 6e Task 8): Preview is
+/// Done with its preview and report, its media removed; Hold is Done with
+/// its preview and kept as the held merge (a held one before it is
+/// dropped); Apply swaps ([`swap_merge`]). A failure or cancel removes its
+/// media. Answers the row and whether the history was swapped.
+fn apply_merge_work(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    kind: crate::jobs::JobKindRow,
+    files: ImportFiles,
+    result: Result<Box<crate::dawproject::Merged>, String>,
+) -> (crate::jobs::JobRow, bool) {
+    use crate::dawproject::MergeStepRow;
+    use crate::jobs::{JobStateRow, row};
+    let merged = match result {
+        Ok(m) => m,
+        Err(why) => {
+            remove_job_media(inner, root, files);
+            let r = if why == crate::for_daw::CANCELLED {
+                row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
+            } else {
+                row(id, kind, JobStateRow::Failed, Some(why), vec![], vec![])
+            };
+            return (r, false);
+        }
+    };
+    let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+    r.merge = Some(merged.preview.clone());
+    match merged.step {
+        MergeStepRow::Preview => {
+            remove_job_media(inner, root, files);
+            r.report = Some(crate::dawproject::merged_report(&merged));
+            (r, false)
+        }
+        MergeStepRow::Hold => {
+            if let Some(old) = inner.held_merge.take() {
+                remove_job_media(inner, root, old.files);
+            }
+            inner.held_merge = Some(HeldMerge {
+                job: id,
+                merged,
+                files,
+            });
+            (r, false)
+        }
+        MergeStepRow::Apply => match swap_merge(inner, root, merged, files) {
+            Ok(report) => {
+                r.report = Some(report);
+                (r, true)
+            }
+            Err(e) => {
+                let mut f = row(id, kind, JobStateRow::Failed, None, vec![], vec![]);
+                f.message = Some(match e {
+                    VizError::Model { message } => message,
+                    e => e.to_string(),
+                });
+                (f, false)
+            }
+        },
     }
 }
 
@@ -9663,6 +9817,150 @@ impl Session {
         })
     }
 
+    /// Starts merging the returning DAWproject file `req.path` into this
+    /// project (plan 6e Task 8; spec §7.8; Rulings 2, 12, 13): the job ID;
+    /// `job` reports it (kind `MergeDawproject`) with its preview (`merge`)
+    /// and, for Preview and Apply, its report. Preview changes nothing;
+    /// Hold keeps the merged history and its media until `confirm_merge`
+    /// or `cancel_merge`; Apply swaps it in at once, one undo step "Merge
+    /// DAWproject". `Busy` while recording, inside an open edit, while an
+    /// interchange or media job is unapplied, or while a merge is held.
+    /// `Model` at once for path text refused, a `date` that is not
+    /// "YYYY-MM-DD" and a `snapshot` that is not an export ID. Before the
+    /// job it looks at the disk only for `file_path`'s lstat and the
+    /// plug-in capture (as `export_dawproject` does); every refusal of the
+    /// file fails the job with its sentence.
+    pub fn merge_dawproject(
+        &self,
+        req: crate::dawproject::DawprojectMergeRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            // The catalog's lock is not taken under the session's.
+            let installed = crate::dawproject::installed();
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let path =
+                crate::interchange::file_path(&req.path, crate::dawproject::DAWPROJECT_FILE)?;
+            crate::dawproject::check_date(&req.date)?;
+            crate::dawproject::check_snapshot(req.snapshot.as_deref())?;
+            // Ours' plug-in states are current (Ruling 10), with no step.
+            self.capture_for_export(&mut inner)?;
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.dawproject_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::dawproject::MergeJob {
+                io: crate::dawproject::ImportJob {
+                    path,
+                    root: inner.root(self.id),
+                    format: inner.doc().settings().format,
+                    reserved: inner.reserved_names(),
+                    installed,
+                    cancel_at,
+                    free,
+                },
+                history: inner.history.clone(),
+                base: crate::dawproject::MergeBase::of(&inner.history),
+                req,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::MergeDawproject,
+                crate::dawproject::merge_job(job),
+            )
+        })
+    }
+
+    /// Merge (Ruling 12): swaps in the held merge of job `job` when the
+    /// project has not changed since its preview, and answers its report
+    /// (also the interchange report). `Model` "no merge is waiting" for any
+    /// other job; `Busy` while recording or inside an open edit (the hold
+    /// stays); `Model` "The project changed after the preview; preview the
+    /// merge again." when it changed (an undo step, or a plug-in capture
+    /// with none), and the hold and its media are dropped.
+    pub fn confirm_merge(&self, job: u64) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            // A Hold job that finished becomes the held merge first.
+            self.apply_jobs_after_edit(&mut inner);
+            if !inner.held_merge.as_ref().is_some_and(|h| h.job == job) {
+                return Err(VizError::Model {
+                    message: crate::dawproject::NO_MERGE_WAITING.into(),
+                });
+            }
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                return Err(recording_busy());
+            }
+            if inner.history.in_transaction() || inner.edit_label.is_some() {
+                return Err(edit_open_busy());
+            }
+            let Some(held) = inner.held_merge.take() else {
+                return Err(VizError::Model {
+                    message: crate::dawproject::NO_MERGE_WAITING.into(),
+                });
+            };
+            let root = inner.root(self.id);
+            let report = swap_merge(&mut inner, &root, held.merged, held.files);
+            crate::dawproject::remove_empty_incoming(&root);
+            let report = report?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.news.doc_changed = true;
+            inner.news.media_changed = true;
+            Ok(report)
+        })
+    }
+
+    /// Cancel (Ruling 12): drops the held merge of job `job` and the media
+    /// its job converted. `Model` "no merge is waiting" for any other job
+    /// (a running merge is cancelled with `cancel_job`).
+    pub fn cancel_merge(&self, job: u64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            // A Hold job that finished becomes the held merge first.
+            self.apply_jobs_after_edit(&mut inner);
+            if !inner.held_merge.as_ref().is_some_and(|h| h.job == job) {
+                return Err(VizError::Model {
+                    message: crate::dawproject::NO_MERGE_WAITING.into(),
+                });
+            }
+            drop_held_merge(&mut inner, self.id);
+            Ok(())
+        })
+    }
+
+    /// The project's snapshots (Ruling 13): newest first, at most 10, each
+    /// with its export's ID, time and track count; a damaged one, or one
+    /// of another project, is left out. Reads every snapshot file: call it
+    /// off the main thread.
+    pub fn dawproject_snapshots(&self) -> Result<Vec<crate::dawproject::SnapshotRow>, VizError> {
+        ffi_guard(|| {
+            let (root, id) = {
+                let inner = lock(&self.inner);
+                (
+                    inner.root(self.id),
+                    inner.doc().settings().project_id.clone(),
+                )
+            };
+            Ok(crate::dawproject::snapshot_rows(&root, id.as_deref()))
+        })
+    }
+
+    /// The project's ID (stamped by its first DAWproject export), if any.
+    pub fn project_id(&self) -> Result<Option<String>, VizError> {
+        ffi_guard(|| Ok(lock(&self.inner).doc().settings().project_id.clone()))
+    }
+
+    /// Whether the project keeps the snapshot of export `export_id` (Ruling
+    /// 13's open match): one lstat; false for a malformed ID.
+    pub fn has_snapshot(&self, export_id: String) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let root = lock(&self.inner).root(self.id);
+            Ok(crate::dawproject::has_snapshot(&root, &export_id))
+        })
+    }
+
     /// The file name a DAWproject export of sequence `seq` suggests:
     /// "<Song>.dawproject" (the song title, else the sequence's name, made
     /// safe). `Model` for an unknown sequence.
@@ -9726,10 +10024,15 @@ impl Session {
             JobKindRow::ExportProject,
             JobKindRow::ExportDawproject,
             JobKindRow::ImportProject,
+            JobKindRow::MergeDawproject,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the running import, export or bounce to finish.".into(),
             });
+        }
+        // A held merge counts as running (plan 6e Ruling 12).
+        if inner.held_merge.is_some() {
+            return Err(merge_held_busy());
         }
         Ok(())
     }

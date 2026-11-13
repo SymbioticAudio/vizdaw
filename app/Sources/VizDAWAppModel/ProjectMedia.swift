@@ -29,6 +29,7 @@ extension ProjectBanner {
         case .exportProject: "Exporting for another DAW…"
         case .exportDawproject: "Exporting DAWproject…"
         case .importProject: "Importing DAWproject…"
+        case .mergeDawproject: "Merging DAWproject…"
         }
     }
 
@@ -45,6 +46,7 @@ extension ProjectBanner {
         case .exportProject: "Export Failed"
         case .exportDawproject: "DAWproject Export Failed"
         case .importProject: "DAWproject Import Failed"
+        case .mergeDawproject: "DAWproject Merge Failed"
         }
     }
 }

@@ -1571,6 +1571,7 @@ fn report_json(r: &crate::interchange::ReportRow) -> Value {
                 ReportKindRow::Changed => "changed",
                 ReportKindRow::LeftOut => "left_out",
                 ReportKindRow::Note => "note",
+                ReportKindRow::Conflict => "conflict",
             },
             "what": i.what, "count": i.count, "details": i.details,
         })).collect::<Vec<_>>(),

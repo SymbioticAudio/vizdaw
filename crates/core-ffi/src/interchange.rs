@@ -34,6 +34,8 @@ pub enum ReportKindRow {
     LeftOut,
     /// Worth knowing; nothing was lost.
     Note,
+    /// Changed both here and in the other DAW (a merge, plan 6e Ruling 15).
+    Conflict,
 }
 
 /// One kind of thing that happened, with how often and where.
@@ -249,9 +251,7 @@ pub(crate) fn report_row(r: &Report, verb: &str) -> ReportRow {
             .iter()
             .map(|i| ReportItemRow {
                 kind: match i.kind {
-                    // A placeholder until plan 6e Task 8 adds
-                    // `ReportKindRow::Conflict`.
-                    ItemKind::Conflict => ReportKindRow::Note,
+                    ItemKind::Conflict => ReportKindRow::Conflict,
                     ItemKind::Changed => ReportKindRow::Changed,
                     ItemKind::LeftOut => ReportKindRow::LeftOut,
                     ItemKind::Note => ReportKindRow::Note,

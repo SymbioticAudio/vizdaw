@@ -24,10 +24,13 @@ public struct ChannelChoice: Equatable, Identifiable, Sendable {
 /// The report's wording, shared by the sheet, Copy and Save as Text (plan 6a
 /// Task 9). Reports say "track", never "lane".
 public enum ReportText {
-    /// The groups in the order "Changed", "Left out", "Notes"; empty ones
-    /// are omitted.
+    /// The groups in the order "Changed", "Left out", "Notes", then a
+    /// merge's "Conflicts" (plan 6e Task 8; Task 10 moves them first);
+    /// empty ones are omitted.
     public static func groups(_ r: ReportRow) -> [(title: String, items: [ReportItemRow])] {
-        let order: [(String, ReportKindRow)] = [("Changed", .changed), ("Left out", .leftOut), ("Notes", .note)]
+        let order: [(String, ReportKindRow)] = [
+            ("Changed", .changed), ("Left out", .leftOut), ("Notes", .note), ("Conflicts", .conflict),
+        ]
         return order.compactMap { title, kind in
             let items = r.items.filter { $0.kind == kind }
             return items.isEmpty ? nil : (title, items)

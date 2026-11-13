@@ -797,6 +797,9 @@ pub struct DawprojectInfoRow {
     /// The export it came from: its record's, else its song info's export
     /// line's.
     pub export_id: Option<String>,
+    /// The project it came from: its record head's (plan 6e Task 8).
+    #[uniffi(default = None)]
+    pub project_id: Option<String>,
 }
 
 /// Import a DAWproject file into this (new, empty) project.
@@ -886,6 +889,7 @@ pub(crate) fn info(text: &str) -> Result<DawprojectInfoRow, VizError> {
             .as_ref()
             .map(|r| r.export_id.clone())
             .or_else(|| i.ret.export_id.clone()),
+        project_id: i.ret.record.as_ref().map(|r| r.project_id.clone()),
     })
 }
 
@@ -996,9 +1000,59 @@ fn import_body(
     progress: &AtomicU32,
     cancel: &AtomicBool,
 ) -> Result<Box<core_io::dawproject::import::DpImport>, Stop> {
-    use core_io::dawproject::import::{ImportEnv, MediaSource, map};
-    use core_io::dawproject::package::{AudioSource, open};
+    use core_io::dawproject::import::{ImportEnv, map};
+    use core_io::dawproject::package::open;
     use core_io::limits::PackageLimits;
+    let stage = |n: u32| {
+        if job.cancel_at == Some(n) {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    };
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    // 1. Open.
+    let pkg = open(&job.path, &PackageLimits::default(), cancel)?;
+    stage(5);
+    if cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    progress.store(0.1f32.to_bits(), Ordering::Relaxed);
+    // 2–3. The free space and the audio.
+    let media = read_and_convert(job, &pkg, importer, files, progress, cancel)?;
+    // 4. The plan.
+    let has =
+        |f: core_model::mixer::PluginFormat, id: &str| job.installed.contains(&(f, id.to_owned()));
+    let env = ImportEnv {
+        installed: &has,
+        plist: plist(),
+        rate: job.format.sample_rate,
+        ids: None,
+    };
+    let imp = map(&pkg, &media, &env, cancel)?;
+    stage(8);
+    if cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    Ok(Box::new(imp))
+}
+
+/// The media each audio file of `pkg` became, by its key.
+type MediaMap = BTreeMap<usize, core_io::dawproject::import::MediaSource>;
+
+/// 6d's import after its open (stages 6–7), for the import and the merge:
+/// the free-space check (external files are looked at only now), then
+/// each audio file extracted and converted into `job.root`'s `Media/`.
+/// Converted media goes into `files` as it is made, so the caller can
+/// remove it whatever happens. Progress runs from 0.1 to 0.9.
+fn read_and_convert(
+    job: &ImportJob,
+    pkg: &core_io::dawproject::package::DpPackage,
+    importer: &dyn core_media::import::MediaImporter,
+    files: &mut ImportFiles,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<MediaMap, Stop> {
+    use core_io::dawproject::import::MediaSource;
+    use core_io::dawproject::package::AudioSource;
     use core_media::MediaError;
     use core_media::import::{INCOMING_DIR, import_checked};
     let stage = |n: u32| {
@@ -1008,21 +1062,14 @@ fn import_body(
     };
     let cancelled = || cancel.load(Ordering::Relaxed);
     let set = |f: f32| progress.store(f.to_bits(), Ordering::Relaxed);
-    // 1. Open.
-    let pkg = open(&job.path, &PackageLimits::default(), cancel)?;
-    stage(5);
-    if cancelled() {
-        return Err(Stop::Cancelled);
-    }
-    set(0.1);
-    // 2. The free space (external files are looked at only now).
+    // The free space.
     let depth = u32::try_from(job.format.depth.bytes()).unwrap_or(u32::MAX);
     let need = pkg.needed_bytes(depth, cancel)?;
     let free = job.free.or_else(|| crate::record::free_bytes(&job.root));
     if free.is_some_and(|f| need > f) {
         return Err(Stop::Failed(not_enough_space_to_import(need)));
     }
-    // 3. The audio. Each file is checked again once probed (final review
+    // The audio. Each file is checked again once probed (final review
     // I1): the file's own duration is not trusted, so the space its
     // conversion may take, at the probe's frame budget, must still be
     // free; and the conversion stops at that budget.
@@ -1152,21 +1199,7 @@ fn import_body(
         }
     }
     set(0.9);
-    // 4. The plan.
-    let has =
-        |f: core_model::mixer::PluginFormat, id: &str| job.installed.contains(&(f, id.to_owned()));
-    let env = ImportEnv {
-        installed: &has,
-        plist: plist(),
-        rate: job.format.sample_rate,
-        ids: None,
-    };
-    let imp = map(&pkg, &media, &env, cancel)?;
-    stage(8);
-    if cancelled() {
-        return Err(Stop::Cancelled);
-    }
-    Ok(Box::new(imp))
+    Ok(media)
 }
 
 /// The import job: every step inside `catch_unwind`. Whatever it
@@ -1187,6 +1220,7 @@ pub(crate) fn import_job(
         let ran = catch_unwind(AssertUnwindSafe(|| {
             import_body(&job, importer.as_ref(), &mut files, progress, cancel)
         }));
+        remove_empty_incoming(&job.root);
         progress.store(1f32.to_bits(), Ordering::Relaxed);
         let result = match ran {
             Ok(Ok(imp)) => Ok(imp),
@@ -1195,6 +1229,462 @@ pub(crate) fn import_job(
             Err(p) => Err(format!("internal error: {}", panic_message(p.as_ref()))),
         };
         Work::ImportProject { files, result }
+    }
+}
+
+/// Removes `<root>/Media/.incoming` when it is empty (backlog row
+/// "DAWproject import clean-up"): every import and merge job ends with
+/// it, after a caught panic too. A folder that still holds a file stays.
+pub(crate) fn remove_empty_incoming(root: &Path) {
+    let _ = std::fs::remove_dir(root.join(core_media::import::INCOMING_DIR));
+}
+
+// ---- the merge (plan 6e Task 8) ----
+
+/// How far a merge job goes (Ruling 12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MergeStepRow {
+    /// Compute the plan and report; keep nothing, change nothing.
+    Preview,
+    /// Merge into a copy of the history and keep it, with its media, until
+    /// `confirm_merge` or `cancel_merge` (the sheet).
+    Hold,
+    /// Merge and swap it in at once (the control channel).
+    Apply,
+}
+
+/// Merge a returning DAWproject file into this project.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DawprojectMergeRequestRow {
+    /// The file (absolute).
+    pub path: String,
+    /// The export to compare with, when the file lost its export ID (an
+    /// export ID).
+    pub snapshot: Option<String>,
+    /// How far to go.
+    pub step: MergeStepRow,
+    /// The app's local date, "YYYY-MM-DD": it names conflict takes
+    /// ("Returned <date>", Ruling 6).
+    pub date: String,
+}
+
+/// What a merge does (Ruling 15), before it is applied.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MergePreviewRow {
+    /// Units taken from the other DAW, or the same on both sides.
+    pub applied: u32,
+    /// Units kept as they are here.
+    pub kept: u32,
+    /// Things the other DAW added.
+    pub added: u32,
+    /// Things the other DAW removed.
+    pub removed: u32,
+    /// Units in conflict.
+    pub conflicts: u32,
+    /// One line per conflict, in order.
+    pub conflict_lines: Vec<String>,
+    /// "Merged: <a> applied, …", or "Nothing to merge: …".
+    pub summary: String,
+    /// The export the file came from.
+    pub export_id: String,
+    /// When it was exported, in Unix seconds.
+    pub exported_at: u64,
+}
+
+/// One snapshot the project keeps (Ruling 13).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotRow {
+    /// The export's ID.
+    pub export_id: String,
+    /// When it was exported, in Unix seconds.
+    pub exported_at: u64,
+    /// The tracks it exported.
+    pub tracks: u32,
+}
+
+/// The refusal of a file whose record names another project, or whose
+/// export this project has no snapshot of (Ruling 13).
+pub const NOT_FROM_HERE: &str = "This file was not exported from that project.";
+/// The refusal of a file that did not come from VizDAW.
+pub const NOT_FROM_VIZDAW: &str =
+    "This file did not come from VizDAW, so it can't be merged; open it as a new project.";
+/// The refusal of a merge whose project changed after its preview (Ruling
+/// 12, Review Focus 3).
+pub const CHANGED_SINCE: &str = "The project changed after the preview; preview the merge again.";
+/// The refusal of a `confirm_merge` or `cancel_merge` for a job that is
+/// not the held merge.
+pub const NO_MERGE_WAITING: &str = "no merge is waiting";
+/// The refusal of a merge date that is not "YYYY-MM-DD".
+pub const BAD_DATE: &str = "the merge date must be YYYY-MM-DD";
+
+/// `secs` since 1970 as "yyyy-mm-dd hh:mm UTC".
+fn utc_minute(secs: u64) -> String {
+    let day = secs % 86_400;
+    format!(
+        "{} {:02}:{:02} UTC",
+        core_io::dawproject::merge::text::utc_date(secs),
+        day / 3_600,
+        day % 3_600 / 60
+    )
+}
+
+/// Ruling 13's refusal of a file with no export ID, naming `rows` (at most
+/// [`KEEP_SNAPSHOTS`]): "This file lost its export ID; give `snapshot`,
+/// one of: <id> (<yyyy-mm-dd hh:mm UTC>, <n> tracks), …". With none,
+/// [`NOT_FROM_HERE`].
+pub fn needs_snapshot(rows: &[SnapshotRow]) -> String {
+    if rows.is_empty() {
+        return NOT_FROM_HERE.to_owned();
+    }
+    let list: Vec<String> = rows
+        .iter()
+        .take(KEEP_SNAPSHOTS)
+        .map(|r| {
+            let tracks = if r.tracks == 1 { "track" } else { "tracks" };
+            format!(
+                "{} ({}, {} {tracks})",
+                r.export_id,
+                utc_minute(r.exported_at),
+                r.tracks
+            )
+        })
+        .collect();
+    format!(
+        "This file lost its export ID; give `snapshot`, one of: {}",
+        list.join(", ")
+    )
+}
+
+/// Refuses a merge date that is not "YYYY-MM-DD" (ASCII digits).
+pub(crate) fn check_date(date: &str) -> Result<(), VizError> {
+    let b = date.as_bytes();
+    let ok = b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            _ => c.is_ascii_digit(),
+        });
+    if ok { Ok(()) } else { Err(model(BAD_DATE)) }
+}
+
+/// Refuses a `snapshot` that is not an export ID.
+pub(crate) fn check_snapshot(snapshot: Option<&str>) -> Result<(), VizError> {
+    match snapshot {
+        Some(s) if !core_model::document::check_project_id(s) => Err(model(
+            "`snapshot` must be an export ID (36 lowercase hex characters and hyphens)",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The tracks a snapshot exported: its lanes when it knows them (a split
+/// track is one), else its projection's tracks.
+fn snapshot_tracks(s: &core_io::dawproject::record::Snapshot) -> u32 {
+    let n = match &s.identity {
+        Some(id) => id
+            .tracks
+            .iter()
+            .map(|t| t.lane)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        None => s.projection.tracks.len(),
+    };
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// The project's snapshots (`<root>/Interchange/<uuid>.json` that read
+/// whole and are `project_id`'s), newest first (by their export time, then
+/// their file's), at most [`KEEP_SNAPSHOTS`]. Reads every snapshot file:
+/// off the main thread. None without a project ID.
+pub(crate) fn snapshot_rows(root: &Path, project_id: Option<&str>) -> Vec<SnapshotRow> {
+    use core_io::dawproject::record::read_snapshot_file;
+    let Some(project_id) = project_id else {
+        return Vec::new();
+    };
+    let mut found: Vec<(u64, std::time::SystemTime, SnapshotRow)> =
+        snapshots_in(&root.join(SNAPSHOT_DIR))
+            .into_iter()
+            .filter_map(|(time, name)| {
+                let id = name.strip_suffix(".json")?;
+                let s = read_snapshot_file(root, id).ok()??;
+                (s.project_id == project_id).then(|| {
+                    let row = SnapshotRow {
+                        export_id: s.export_id.clone(),
+                        exported_at: s.exported_at,
+                        tracks: snapshot_tracks(&s),
+                    };
+                    (s.exported_at, time, row)
+                })
+            })
+            .collect();
+    found.sort_by(|a, b| (b.0, b.1, &b.2.export_id).cmp(&(a.0, a.1, &a.2.export_id)));
+    found
+        .into_iter()
+        .take(KEEP_SNAPSHOTS)
+        .map(|(_, _, r)| r)
+        .collect()
+}
+
+/// Whether `<root>/Interchange/<export_id>.json` is a regular file: one
+/// lstat; false for a malformed ID.
+pub(crate) fn has_snapshot(root: &Path, export_id: &str) -> bool {
+    core_model::document::check_project_id(export_id)
+        && std::fs::symlink_metadata(root.join(SNAPSHOT_DIR).join(format!("{export_id}.json")))
+            .is_ok_and(|m| m.is_file())
+}
+
+/// What the project was when a merge job started (Ruling 12): the swap
+/// happens only while it still is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeBase {
+    /// `History::present_serial()`.
+    pub serial: u64,
+    /// The present document's `referenced_states()` (a step-free capture
+    /// changes them).
+    pub states: BTreeSet<core_model::ids::StateBlobId>,
+    /// The project's ID.
+    pub project_id: Option<String>,
+}
+
+impl MergeBase {
+    /// `h`'s present.
+    pub(crate) fn of(h: &core_model::history::History) -> MergeBase {
+        MergeBase {
+            serial: h.present_serial(),
+            states: h.doc().referenced_states(),
+            project_id: h.doc().settings().project_id.clone(),
+        }
+    }
+}
+
+/// Everything the merge job needs (all of it owned: it runs on its
+/// thread).
+pub(crate) struct MergeJob {
+    /// The file, the media root, the format, the reserved names, the
+    /// plug-ins installed and the test hooks, as an import has them
+    /// (stages 5–8 as the import's; 9 planned, 10 applied).
+    pub io: ImportJob,
+    /// A clone of the session's history at spawn: the plan is made against
+    /// its document and the merge applied to it.
+    pub history: core_model::history::History,
+    /// What the project was at spawn.
+    pub base: MergeBase,
+    /// The request.
+    pub req: DawprojectMergeRequestRow,
+}
+
+/// A finished merge job: the preview, the report, the step and, for Hold
+/// and Apply, the merged history and the project it was made from.
+#[derive(Debug)]
+pub struct Merged {
+    /// The counts and conflict lines.
+    pub preview: MergePreviewRow,
+    /// The report (its summary counts are not the merge's: see
+    /// [`merged_report`]).
+    pub report: Report,
+    /// The step asked for.
+    pub step: MergeStepRow,
+    /// The merged history (Hold and Apply).
+    pub history: Option<core_model::history::History>,
+    /// What the project was at spawn.
+    pub base: MergeBase,
+}
+
+/// The merge's report row (Ruling 15): `report_row(.., "Merged")` with the
+/// preview's summary.
+pub(crate) fn merged_report(m: &Merged) -> crate::interchange::ReportRow {
+    let mut r = crate::interchange::report_row(&m.report, "Merged");
+    r.summary.clone_from(&m.preview.summary);
+    r
+}
+
+/// The merge job's body (Rulings 2, 12, 13): the merge, or how it stopped.
+/// Converted media goes into `files` as it is made.
+fn merge_body(
+    job: &MergeJob,
+    importer: &dyn core_media::import::MediaImporter,
+    files: &mut ImportFiles,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Box<Merged>, Stop> {
+    use core_io::dawproject::import::{ImportEnv, map};
+    use core_io::dawproject::merge::apply::{CANCELLED, LABEL, apply_merge_until};
+    use core_io::dawproject::merge::decide::plan;
+    use core_io::dawproject::merge::text::summary;
+    use core_io::dawproject::merge::theirs::theirs;
+    use core_io::dawproject::package::open;
+    use core_io::dawproject::record::read_snapshot_file;
+    use core_io::limits::PackageLimits;
+    use core_model::error::ModelError;
+    let stage = |n: u32| {
+        if job.io.cancel_at == Some(n) {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    };
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    let failed = |s: &str| Stop::Failed(s.to_owned());
+    // 1. Open.
+    let pkg = open(&job.io.path, &PackageLimits::default(), cancel)?;
+    stage(5);
+    if cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    progress.store(0.1f32.to_bits(), Ordering::Relaxed);
+    // 2. The export. A hand file first, so it never gets the snapshot
+    // sentence.
+    let ret = &pkg.ret;
+    if !ret.from_vizdaw() {
+        return Err(failed(NOT_FROM_VIZDAW));
+    }
+    let ours = job.base.project_id.as_deref();
+    if let Some(r) = &ret.record
+        && Some(r.project_id.as_str()) != ours
+    {
+        return Err(failed(NOT_FROM_HERE));
+    }
+    let named = ret
+        .record
+        .as_ref()
+        .map(|r| r.export_id.clone())
+        .or_else(|| ret.export_id.clone());
+    let chosen = named.is_none();
+    let export_id = match (named, job.req.snapshot.as_ref()) {
+        (Some(n), Some(s)) if n != *s => return Err(failed(NOT_FROM_HERE)),
+        (Some(n), _) => n,
+        (None, Some(s)) => s.clone(),
+        (None, None) => {
+            return Err(Stop::Failed(needs_snapshot(&snapshot_rows(
+                &job.io.root,
+                ours,
+            ))));
+        }
+    };
+    // 3. The snapshot: this project's own (its Interchange folder, its
+    // project ID), never one the file points elsewhere to.
+    let snap = match read_snapshot_file(&job.io.root, &export_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => return Err(failed(NOT_FROM_HERE)),
+        Err(e) => return Err(Stop::Failed(e.to_string())),
+    };
+    if Some(snap.project_id.as_str()) != ours {
+        return Err(failed(NOT_FROM_HERE));
+    }
+    // Ruling 2: the file's XML IDs are identities only when its record
+    // head names this snapshot's export and project. The record alone is
+    // never the proof: the snapshot was found through this project.
+    let trusted = ret
+        .record
+        .as_ref()
+        .is_some_and(|r| r.export_id == snap.export_id && r.project_id == snap.project_id);
+    // 4. The free space and the audio (stages 6–7).
+    let media = read_and_convert(&job.io, &pkg, importer, files, progress, cancel)?;
+    // 5. The mapping.
+    let has = |f: core_model::mixer::PluginFormat, id: &str| {
+        job.io.installed.contains(&(f, id.to_owned()))
+    };
+    let env = ImportEnv {
+        installed: &has,
+        plist: plist(),
+        rate: job.io.format.sample_rate,
+        ids: trusted.then_some(&snap.ids),
+    };
+    let imp = map(&pkg, &media, &env, cancel)?;
+    drop(pkg);
+    stage(8);
+    if cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    // 6. Theirs and the plan.
+    let th = theirs(imp, job.io.format, snap.origin, cancel)?;
+    let (export_id, exported_at) = (snap.export_id.clone(), snap.exported_at);
+    let plan = plan(snap, th, job.history.doc(), chosen, cancel)?;
+    stage(9);
+    if cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    let p = &plan.preview;
+    let preview = MergePreviewRow {
+        applied: p.applied,
+        kept: p.kept,
+        added: p.added,
+        removed: p.removed,
+        conflicts: p.conflicts,
+        conflict_lines: p.conflict_lines.clone(),
+        summary: summary(p),
+        export_id,
+        exported_at,
+    };
+    // 7. The merge, in one transaction on the copy.
+    let (report, history) = match job.req.step {
+        MergeStepRow::Preview => (plan.report.clone(), None),
+        MergeStepRow::Hold | MergeStepRow::Apply => {
+            let mut h = job.history.clone();
+            h.begin(LABEL).map_err(|e| Stop::Failed(e.to_string()))?;
+            let mut report = Report::default();
+            let ran = catch_unwind(AssertUnwindSafe(|| {
+                apply_merge_until(&mut h, &plan, &job.req.date, &mut report, cancel)
+            }));
+            match ran {
+                Ok(Ok(())) => h.commit().map_err(|e| Stop::Failed(e.to_string()))?,
+                Ok(Err(ModelError::Invalid { reason })) if reason == CANCELLED => {
+                    let _ = h.abort();
+                    return Err(Stop::Cancelled);
+                }
+                Ok(Err(e)) => {
+                    let _ = h.abort();
+                    return Err(Stop::Failed(e.to_string()));
+                }
+                Err(p) => {
+                    let _ = h.abort();
+                    return Err(Stop::Failed(format!(
+                        "internal error: {}",
+                        panic_message(p.as_ref())
+                    )));
+                }
+            }
+            stage(10);
+            if cancelled() {
+                return Err(Stop::Cancelled);
+            }
+            (report, Some(h))
+        }
+    };
+    progress.store(1f32.to_bits(), Ordering::Relaxed);
+    Ok(Box::new(Merged {
+        preview,
+        report,
+        step: job.req.step,
+        history,
+        base: job.base.clone(),
+    }))
+}
+
+/// The merge job: every parse, mapping, plan and apply inside
+/// `catch_unwind`. Whatever it converted is returned with the result, so
+/// the session removes it when the merge is not kept.
+pub(crate) fn merge_job(
+    job: MergeJob,
+) -> impl FnOnce(&AtomicU32, &AtomicBool) -> Work + Send + 'static {
+    move |progress, cancel| {
+        let mut files = ImportFiles::new();
+        if cancel.load(Ordering::Relaxed) {
+            return Work::MergeDawproject {
+                files,
+                result: Err(crate::for_daw::CANCELLED.to_owned()),
+            };
+        }
+        let importer = crate::media::importer();
+        let ran = catch_unwind(AssertUnwindSafe(|| {
+            merge_body(&job, importer.as_ref(), &mut files, progress, cancel)
+        }));
+        remove_empty_incoming(&job.io.root);
+        progress.store(1f32.to_bits(), Ordering::Relaxed);
+        let result = match ran {
+            Ok(Ok(m)) => Ok(m),
+            Ok(Err(Stop::Cancelled)) => Err(crate::for_daw::CANCELLED.to_owned()),
+            Ok(Err(Stop::Failed(why))) => Err(why),
+            Err(p) => Err(format!("internal error: {}", panic_message(p.as_ref()))),
+        };
+        Work::MergeDawproject { files, result }
     }
 }
 

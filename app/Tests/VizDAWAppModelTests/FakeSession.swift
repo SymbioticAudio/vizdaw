@@ -856,6 +856,52 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         dawprojectImports.append(req)
         return interchangeJob(.importProject, 11000, dawprojectImports.count)
     }
+    /// DAWproject merges (plan 6e Task 8): what each method was called
+    /// with (merge job IDs from 12 001), with settable answers.
+    var dawprojectMerges: [DawprojectMergeRequestRow] = []
+    var mergeError: VizError?
+    var confirmedMerges: [UInt64] = []
+    var confirmMergeAnswer: Result<ReportRow, VizError> = .success(
+        ReportRow(summary: "Merged: 0 applied, 0 kept, 0 added, 0 removed, 0 in conflict", items: []))
+    var cancelledMerges: [UInt64] = []
+    var cancelMergeError: VizError?
+    var snapshotCalls = 0
+    var snapshotsAnswer: Result<[SnapshotRow], VizError> = .success([])
+    var projectIdCalls = 0
+    var projectIdAnswer: String?
+    var hasSnapshotAsked: [String] = []
+    var hasSnapshotAnswer: (@Sendable (String) -> Bool) = { _ in false }
+    func mergeDawproject(req: DawprojectMergeRequestRow) throws -> UInt64 {
+        if let e = mergeError { throw e }
+        try interchangeIdle()
+        dawprojectMerges.append(req)
+        return interchangeJob(.mergeDawproject, 12000, dawprojectMerges.count)
+    }
+    func confirmMerge(job: UInt64) throws -> ReportRow {
+        confirmedMerges.append(job)
+        return try confirmMergeAnswer.get()
+    }
+    func cancelMerge(job: UInt64) throws {
+        cancelledMerges.append(job)
+        if let e = cancelMergeError { throw e }
+    }
+    func dawprojectSnapshots() throws -> [SnapshotRow] {
+        interchangeLock.lock()
+        snapshotCalls += 1
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return try snapshotsAnswer.get()
+    }
+    func projectId() throws -> String? {
+        projectIdCalls += 1
+        return projectIdAnswer
+    }
+    func hasSnapshot(exportId: String) throws -> Bool {
+        interchangeLock.lock()
+        hasSnapshotAsked.append(exportId)
+        interchangeLock.unlock()
+        return hasSnapshotAnswer(exportId)
+    }
     func dawprojectInfo(path: String) throws -> DawprojectInfoRow {
         interchangeLock.lock()
         dawprojectInfoPaths.append(path)

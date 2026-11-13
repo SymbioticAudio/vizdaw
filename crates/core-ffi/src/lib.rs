@@ -88,7 +88,8 @@ pub use control::{
     control_command_ids, control_element_check, control_host_busy, control_wait_met,
 };
 pub use dawproject::{
-    DawprojectExportRequestRow, DawprojectImportRequestRow, DawprojectInfoRow, RegionGainRow,
+    DawprojectExportRequestRow, DawprojectImportRequestRow, DawprojectInfoRow,
+    DawprojectMergeRequestRow, MergePreviewRow, MergeStepRow, RegionGainRow, SnapshotRow,
 };
 pub use drum::{
     DrumBandKindRow, DrumBandRow, DrumCellRow, DrumEdit, DrumGridLayoutRow, DrumGridSettingsRow,
