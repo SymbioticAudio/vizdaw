@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod aaf;
 pub mod generators;
 pub mod merge;
 pub mod package;

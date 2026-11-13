@@ -1,5 +1,6 @@
 //! Limits on hostile input (spec §6.5). Every reader takes a [`Limits`];
-//! a package reader also takes a [`PackageLimits`].
+//! a package reader also takes a [`PackageLimits`], an AAF reader an
+//! [`AafLimits`].
 
 /// Largest MIDI file read, in bytes (§6.5).
 pub const MAX_MIDI_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -151,6 +152,63 @@ impl Default for PackageLimits {
             max_tree_bytes: MAX_XML_TREE_BYTES,
             max_import_tracks: MAX_IMPORT_TRACKS,
             max_import_buses: MAX_IMPORT_BUSES,
+        }
+    }
+}
+
+/// Most objects one AAF file may hold; more is refused (plan 6f Ruling 13).
+pub const MAX_AAF_OBJECTS: usize = 1_000_000;
+/// Deepest strong-reference nesting below the AAF root object; deeper is
+/// refused (plan 6f Ruling 13).
+pub const MAX_REF_DEPTH: usize = 64;
+/// Largest `properties` stream of one AAF object, in bytes; a larger one
+/// leaves its object out (plan 6f Ruling 13).
+pub const MAX_PROPERTIES_BYTES: u64 = 1024 * 1024;
+/// Most entries in one AAF index stream; more leaves the property out
+/// (plan 6f Ruling 13).
+pub const MAX_INDEX_ENTRIES: usize = 1_000_000;
+/// Longest chain of AAF mobs one clip may follow, walked with a visited set
+/// (plan 6f Ruling 13).
+pub const MAX_MOB_CHAIN: usize = 16;
+/// Most control points in one AAF curve (plan 6f Ruling 13).
+pub const MAX_CONTROL_POINTS: usize = 100_000;
+
+/// The limits an AAF reader applies (plan 6f Ruling 13); tests lower them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AafLimits {
+    /// Most objects in the file.
+    pub max_objects: usize,
+    /// Deepest strong-reference nesting below the root object.
+    pub max_depth: usize,
+    /// Largest `properties` stream of one object, in bytes.
+    pub max_properties_bytes: u64,
+    /// Most entries in one index stream.
+    pub max_index_entries: usize,
+    /// Longest mob chain one clip may follow.
+    pub max_mob_chain: usize,
+    /// Most control points in one curve.
+    pub max_control_points: usize,
+    /// Longest single text, in bytes.
+    pub max_text_bytes: usize,
+    /// Most audio tracks the file may give.
+    pub max_import_tracks: usize,
+    /// Most bytes the object store (and the read that builds it) holds,
+    /// counted as objects are read.
+    pub max_model_bytes: usize,
+}
+
+impl Default for AafLimits {
+    fn default() -> Self {
+        Self {
+            max_objects: MAX_AAF_OBJECTS,
+            max_depth: MAX_REF_DEPTH,
+            max_properties_bytes: MAX_PROPERTIES_BYTES,
+            max_index_entries: MAX_INDEX_ENTRIES,
+            max_mob_chain: MAX_MOB_CHAIN,
+            max_control_points: MAX_CONTROL_POINTS,
+            max_text_bytes: MAX_TEXT_BYTES,
+            max_import_tracks: MAX_IMPORT_TRACKS,
+            max_model_bytes: MAX_MODEL_BYTES,
         }
     }
 }
