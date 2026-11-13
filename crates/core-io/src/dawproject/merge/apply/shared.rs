@@ -80,6 +80,11 @@ pub(super) struct Gained {
     pub key: Key,
     /// It as a top-level event of the track.
     pub spec: EventSpec,
+    /// Theirs' file channel, when the import gave it no channel of its
+    /// own: written into a used sequence's track, it plays there on that
+    /// track's destination, so it gets the channel unless that is where
+    /// the track plays it (plan 6e Task 11).
+    pub file: Option<u8>,
 }
 
 /// One change inside use `use_ev`.
@@ -494,6 +499,10 @@ fn pass_edits(
             && let Ok((ev, _)) = doc.event(EventId(r))
         {
             spec.dest = ev.dest;
+        }
+        if let Some(f) = g.file {
+            let home = super::dest_home(doc, spec.dest.or(lane.midi_dest));
+            spec.group_channel = (f != home).then_some((0, f));
         }
         passes.entry(k).or_default().adds.push(Rel {
             lane: li,

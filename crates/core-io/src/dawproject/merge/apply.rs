@@ -66,7 +66,7 @@ use core_model::document::{DestKind, Document};
 use core_model::error::ModelError;
 use core_model::event::{EventBody, EventSpec};
 use core_model::history::History;
-use core_model::ids::{AnyId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
+use core_model::ids::{AnyId, DestId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::meter::{Meter, MeterEntry, MeterMap};
 use core_model::mixer::{AuxSend, Output, ParamId, PluginRef};
 use core_model::selection::ViewFilter;
@@ -584,14 +584,30 @@ fn rename(h: &mut History, cx: &Cx<'_>, lane: u64, o: usize, t: usize) -> Result
 /// own on: its destination's (0 for a plug-in, or with none, as the
 /// projection reads it).
 fn home_channel(doc: &Document, seq: SeqId, lane: u64) -> u8 {
-    doc.lane(seq, LaneId(lane))
-        .ok()
-        .and_then(|l| l.midi_dest)
-        .and_then(|d| doc.instruments().get(&d))
+    dest_home(
+        doc,
+        doc.lane(seq, LaneId(lane)).ok().and_then(|l| l.midi_dest),
+    )
+}
+
+/// The channel destination `dest` plays an event without a channel of its
+/// own on (0 for a plug-in, or with none).
+fn dest_home(doc: &Document, dest: Option<DestId>) -> u8 {
+    dest.and_then(|d| doc.instruments().get(&d))
         .map_or(0, |d| match d.kind {
             DestKind::MidiEndpoint { channel, .. } => channel,
             DestKind::PluginInstrument { .. } => 0,
         })
+}
+
+/// `ch` (theirs' file channel for played event `at`) when the import gave
+/// the event no channel of its own: wherever it is written it must play
+/// there ([`shared::Gained::file`]).
+fn file_of(cx: &Cx<'_>, at: &EventAt, ch: Option<u8>) -> Option<u8> {
+    let (e, _) = cx.th.doc.event(EventId(at.event)).ok()?;
+    (e.group_channel.is_none() && e.body.is_midi())
+        .then_some(ch)
+        .flatten()
 }
 
 /// The channel of a [`PTrack::midi`] text ("<kind> <channel> …").
@@ -747,6 +763,7 @@ fn edit_notes(
         let (n, at) = (tt.notes_played.get(j)?, ti.notes.get(j)?);
         Some(shared::Gained {
             tick: raw(n.tick),
+            file: file_of(cx, at, Some(n.channel)),
             key: shared::Key::Note(n.clone()),
             spec: theirs_spec(
                 cx,
@@ -834,6 +851,7 @@ fn edit_notes(
                 )
                 .map(|spec| shared::Gained {
                     tick: raw(m.0),
+                    file: file_of(cx, at, midi_channel(&m.1)),
                     key: shared::Key::Midi,
                     spec,
                 }),
@@ -1164,6 +1182,7 @@ fn edit_regions(
                     ours: lost,
                     theirs: Some(shared::Gained {
                         tick: raw(r.tick),
+                        file: None,
                         key: shared::Key::Region(r.clone()),
                         spec,
                     }),

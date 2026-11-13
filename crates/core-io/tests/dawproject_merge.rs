@@ -5441,6 +5441,9 @@ stripped!(
     the_demo_songs_own_export_merges_nothing,
     a_drum_tracks_main_channel_theirs_changes_lands,
     a_drum_tracks_note_channel_and_program_theirs_changes_land,
+    an_external_destinations_mix_is_not_theirs_change,
+    a_volume_cc_theirs_changes_lands,
+    an_edit_inside_a_use_plays_on_the_channel_theirs_has,
 );
 
 /// Task 7 fix round (review Minor): every test of this file runs in the
@@ -5580,6 +5583,188 @@ fn a_drum_tracks_main_channel_theirs_changes_lands() {
     let (channels, midi) = played_channels(h.doc(), seq, "Drums");
     assert_eq!(channels, vec![2; 12]);
     assert!(midi.is_empty(), "{midi:?}");
+    let once = to_json(h.doc()).unwrap();
+    let again = plan_of(&t, &path, h.doc());
+    assert!(
+        again.decisions.iter().all(|d| d.outcome == Outcome::Same),
+        "{:#?}",
+        again.decisions
+    );
+    let (h2, _) = apply_on(h.doc(), &again);
+    assert_eq!(h2.undo_depth(), 0);
+    assert_eq!(to_json(h2.doc()).unwrap(), once);
+}
+
+/// A project whose track plays an external MIDI destination on channel 3
+/// with a MIDI mix (volume 100, pan 40): the export writes the mix as CC 7
+/// and CC 10 at file time 0.
+fn external_mix() -> (Document, SeqId) {
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "port:Out 1", 2).unwrap();
+    b.run(Command::Routing(RoutingCmd::SetMidiMix {
+        dest: synth,
+        mix: core_model::document::MidiMix {
+            volume: Some(100),
+            pan: Some(40),
+            mute: false,
+        },
+    }))
+    .unwrap();
+    let (seq, lane) = b.sequence("Song", "Synth", Some(synth)).unwrap();
+    b.notes(seq, lane, &[(0, 60, 0x8000, Q), (Q, 62, 0x8000, Q)])
+        .unwrap();
+    (b.finish(), seq)
+}
+
+/// The controller points on the file's track `name` for CC `cc`.
+fn cc_points<'a>(p: &'a mut DpProject, name: &str, cc: i32) -> &'a mut DpPoints {
+    let id = track_id(p, name);
+    let lanes = p.arrangement.as_mut().unwrap().lanes.as_mut().unwrap();
+    for item in &mut lanes.items {
+        if let DpTimeline::Lanes(l) = item
+            && l.head.track.as_deref() == Some(id.as_str())
+        {
+            for inner in &mut l.items {
+                if let DpTimeline::Points(x) = inner
+                    && x.target.expression == Some(DpExpression::ChannelController)
+                    && x.target.controller == Some(cc)
+                {
+                    return x;
+                }
+            }
+        }
+    }
+    panic!("no CC {cc} points on {name}")
+}
+
+/// The decisions on the external track's notes and MIDI events.
+fn notes_decisions(p: &MergePlan) -> Vec<&Decision> {
+    p.decisions
+        .iter()
+        .filter(|d| d.unit == Unit::Notes)
+        .collect()
+}
+
+/// An external destination's MIDI mix: the CC 7 and CC 10 the export
+/// writes come back as events, and are not theirs' change to the track.
+#[test]
+fn an_external_destinations_mix_is_not_theirs_change() {
+    let (doc, seq) = external_mix();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        assert_eq!(cc_points(p, "Synth", 7).points.len(), 1);
+        assert_eq!(cc_points(p, "Synth", 10).points.len(), 1);
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    assert!(notes_decisions(&p).is_empty(), "{:#?}", p.decisions);
+}
+
+/// Ruling 6 with an external destination: its own unchanged export merges
+/// to nothing. Ignored: the import plays an external destination's track
+/// on the built-in synth, whose strip comes back as "Built-in Synth", so
+/// the strip's name reads as theirs' change (Task 11 core fix round 2
+/// finding; needs a ruling).
+#[test]
+#[ignore = "plan 6e Task 11 finding: an external destination's strip comes back named for the built-in synth"]
+fn an_external_destinations_own_export_merges_nothing() {
+    let (doc, seq) = external_mix();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |_, _| {});
+    let p = plan_of(&t, &path, &t.base_doc);
+    assert_eq!(summary(&p.preview), NOTHING, "{:#?}", p.decisions);
+    let (h, _) = apply_on(&t.base_doc, &p);
+    assert_eq!(h.undo_depth(), 0);
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
+}
+
+/// Theirs changes the external destination's volume CC at file time 0:
+/// a real change, so it lands as a CC 7 event; merging again leaves the
+/// track's events alone (the strip's name, see the ignored test above, is
+/// decided again each time).
+#[test]
+fn a_volume_cc_theirs_changes_lands() {
+    let (doc, seq) = external_mix();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        let x = cc_points(p, "Synth", 7);
+        x.points[0].value = DpPointValue::Real(0.5, None);
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    let notes = notes_decisions(&p);
+    assert_eq!(notes.len(), 1, "{:#?}", p.decisions);
+    assert_eq!(notes[0].outcome, Outcome::Theirs);
+    let (h, _) = apply_on(&t.base_doc, &p);
+    let (_, midi) = played_channels(h.doc(), seq, "Synth");
+    assert_eq!(midi.len(), 1, "{midi:?}");
+    assert_eq!(midi[0].0, 0);
+    assert!(midi[0].1.starts_with("cc 2 7 "), "{midi:?}");
+    let again = plan_of(&t, &path, h.doc());
+    let notes = notes_decisions(&again);
+    assert!(
+        notes.iter().all(|d| d.outcome == Outcome::Same),
+        "{:#?}",
+        again.decisions
+    );
+    let (h2, _) = apply_on(h.doc(), &again);
+    assert_eq!(played_channels(h2.doc(), seq, "Synth").1, midi);
+}
+
+/// A use whose sequence's track plays on another channel than the track
+/// that uses it: "Song"'s track "Drums" (on channel 10) plays "Beat",
+/// whose track "Kit" is on a piano (channel 1) with every note on channel
+/// 10 of its own.
+fn drums_through_a_use() -> (Document, SeqId) {
+    let mut b = Builder::new();
+    let drums = b.dest("Drums", "builtin:synth", 9).unwrap();
+    let piano = b.dest("Piano", "builtin:synth", 0).unwrap();
+    let (beat, kit) = b.sequence("Beat", "Kit", Some(piano)).unwrap();
+    let specs = [(0, 36), (Q, 38), (2 * Q, 36), (3 * Q, 38)]
+        .into_iter()
+        .map(|(tick, key)| {
+            let mut e = EventSpec::new(Tick(tick), EventBody::note(key, 0x9000, Tick(Q / 4)));
+            e.group_channel = Some((0, 9));
+            e
+        })
+        .collect();
+    b.events(beat, kit, specs).unwrap();
+    let (song, lane) = b.sequence("Song", "Drums", Some(drums)).unwrap();
+    b.reference(song, lane, 0, beat, 1, 0).unwrap();
+    (b.finish(), song)
+}
+
+/// Theirs moves a note inside the use: the edit is written into "Beat"'s
+/// track and plays on channel 10 there, as theirs has it, not on that
+/// track's piano channel.
+#[test]
+fn an_edit_inside_a_use_plays_on_the_channel_theirs_has() {
+    let (doc, seq) = drums_through_a_use();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        let notes = notes_on(p, "Drums");
+        assert_eq!(notes.len(), 4);
+        for n in notes.into_iter().filter(|n| n.time == 1.0) {
+            n.time = 1.5;
+        }
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    assert_eq!(
+        p.preview,
+        MergePreview {
+            applied: 1,
+            ..MergePreview::default()
+        },
+        "{:#?}",
+        p.decisions
+    );
+    let (h, _) = apply_on(&t.base_doc, &p);
+    let song = projection(h.doc(), seq).unwrap();
+    let played: Vec<(i64, u8)> = song.tracks[0]
+        .notes_played
+        .iter()
+        .map(|n| (n.tick - song.origin, n.channel))
+        .collect();
+    assert!(played.contains(&(Q * 3 / 2, 9)), "{played:?}");
+    assert!(played.iter().all(|(_, c)| *c == 9), "{played:?}");
     let once = to_json(h.doc()).unwrap();
     let again = plan_of(&t, &path, h.doc());
     assert!(

@@ -535,13 +535,14 @@ fn held(
     Ok((theirs, lines))
 }
 
-/// Theirs without the program changes the export wrote from base's
-/// instruments' default patches (plan 6e Task 11): the import brings each
-/// in as an event at file time 0, which base and ours do not have. Each of
+/// Theirs without the program changes and MIDI mix (CC 7 and 10) the
+/// export wrote from base's destinations' own settings (plan 6e Task 11):
+/// the import brings each in as an event at file time 0, which base and
+/// ours do not have. Each of
 /// a matched track's base [`TrackIds::patches`] takes out one event of
 /// theirs with its text at tick 0 (from the projection and the identity
-/// alike); any other program change, or one at another program or
-/// channel, stays theirs' and is compared as usual.
+/// alike); any other program change or controller, or one at another
+/// value or channel, stays theirs' and is compared as usual.
 fn without_patches(theirs: &mut Theirs, m: &Matches, base_ids: &[TrackIds]) {
     for r in &m.tracks {
         let (Some(b), Some(t)) = (r.base, r.theirs) else {

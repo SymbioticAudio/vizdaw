@@ -319,6 +319,19 @@ pub(super) fn written_patch(d: &Destination) -> Option<WrittenPatch> {
     ))
 }
 
+/// An external destination's MIDI mix as the export writes it: each set
+/// controller (CC 7 volume, then CC 10 pan) and its normalised value, on
+/// [`dest_channel`] at time 0.
+pub(super) fn written_mix(d: &Destination) -> Vec<(u8, f64)> {
+    if !d.kind.is_external() {
+        return Vec::new();
+    }
+    [(7, d.midi_mix.volume), (10, d.midi_mix.pan)]
+        .into_iter()
+        .filter_map(|(cc, v)| Some((cc, norm7(v?))))
+        .collect()
+}
+
 /// The destinations whose default patch and MIDI mix start track part
 /// `p`'s points (Ruling 13): its track's, and every one its MIDI events
 /// play on; none for an audio part. The snapshot's
@@ -1198,12 +1211,8 @@ impl Arr<'_, '_, '_, '_, '_> {
             if let Some((_, program, bank)) = written_patch(d) {
                 patch_points(&mut map, ch, 0.0, program, bank);
             }
-            if d.kind.is_external() {
-                for (cc, v) in [(7, d.midi_mix.volume), (10, d.midi_mix.pan)] {
-                    if let Some(v) = v {
-                        push_point(&mut map, (0, ch, cc), hold(0.0, norm7(v)));
-                    }
-                }
+            for (cc, v) in written_mix(d) {
+                push_point(&mut map, (0, ch, i32::from(cc)), hold(0.0, v));
             }
         }
         map

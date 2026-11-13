@@ -7,12 +7,12 @@
 //! the VizDAW object it came from.
 
 use super::export::{Layout, RegionGain, Ticker, layout};
-use super::export_timeline::{patched_dests, use_span, written_patch};
+use super::export_timeline::{dest_channel, patched_dests, use_span, written_mix, written_patch};
 use super::import::file_channel;
 use super::units::swatch_hex;
 use crate::IoError;
 use crate::limits::{MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ENTRIES, MAX_XML_NODES};
-use core_model::automation::AutomationTarget;
+use core_model::automation::{AutomationTarget, to_u32};
 use core_model::document::{Document, check_project_id};
 use core_model::event::{EventBody, PerNoteKind};
 use core_model::ids::{EventId, LaneId, SeqId};
@@ -168,9 +168,9 @@ pub struct TrackIds {
     /// holds the notes).
     #[serde(deserialize_with = "counted")]
     pub uses: Vec<UseAt>,
-    /// The default patches the export wrote at file time 0 on the track
-    /// (its destinations', 6d Ruling 13), as [`PTrack::midi`] texts. None
-    /// in snapshots made before plan 6e Task 11.
+    /// The default patches and MIDI mix the export wrote at file time 0
+    /// on the track (its destinations', 6d Ruling 13), as [`PTrack::midi`]
+    /// texts. None in snapshots made before plan 6e Task 11.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -836,15 +836,23 @@ fn program_text(ch: u8, program: u8, bank: Option<(u8, u8)>) -> String {
     }
 }
 
-/// The default patches the export writes at file time 0 on track part `p`
-/// ([`TrackIds::patches`]).
+/// The default patches and MIDI mix the export writes at file time 0 on
+/// track part `p` ([`TrackIds::patches`]), as the import brings them back.
 fn patches_of(l: &Layout<'_>, p: &super::export::Part<'_>) -> Vec<String> {
-    patched_dests(l, p)
+    let mut out = Vec::new();
+    for d in patched_dests(l, p)
         .iter()
         .filter_map(|d| l.doc.instruments().get(d))
-        .filter_map(written_patch)
-        .map(|(ch, program, bank)| program_text(ch, program, bank))
-        .collect()
+    {
+        if let Some((ch, program, bank)) = written_patch(d) {
+            out.push(program_text(ch, program, bank));
+        }
+        let ch = dest_channel(d);
+        for (cc, v) in written_mix(d) {
+            out.push(format!("cc {ch} {cc} {}", to_u32(v)));
+        }
+    }
+    out
 }
 
 /// A MIDI event other than a note, as the projection spells it; `None` for
