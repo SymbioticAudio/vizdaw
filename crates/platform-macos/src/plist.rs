@@ -88,12 +88,14 @@ fn convert(
 }
 
 /// A property list as an XML property list (`XMLFormat_v1_0`): XML, or a
-/// binary list (`bplist00`) whose [`written_size`] is within
+/// binary list (`bplist`, any version byte) whose [`written_size`] is within
 /// [`MAX_PLIST_BYTES`]. Anything else is refused.
 pub fn to_xml(plist: &[u8]) -> Result<Vec<u8>, String> {
     sized(plist)?;
     let xml = CFPropertyListFormat::XMLFormat_v1_0;
-    if plist.starts_with(b"bplist00") {
+    if plist.starts_with(b"bplist") {
+        // CF reads any `bplist0?` as version 0 (final re-review N1): every
+        // binary list is sized, whatever its version byte.
         let cap = MAX_PLIST_BYTES as u64;
         if written_size(plist, cap)? > cap {
             return Err(WRITES_TOO_LARGE.to_owned());
@@ -128,6 +130,9 @@ pub fn to_binary(plist: &[u8]) -> Result<Vec<u8>, String> {
 /// Each object's share of the written size beyond its payload (an XML
 /// element's tags and indent).
 const PER_OBJECT: u64 = 32;
+/// The XML declaration, DOCTYPE and `<plist>` element CF writes around
+/// the top object (about 180 bytes).
+const XML_FRAME: u64 = 256;
 /// A size slot's mark for an object on the walk's path.
 const ON_PATH: u64 = u64::MAX;
 
@@ -153,6 +158,7 @@ struct Bplist<'a> {
 /// start.
 struct Object {
     own: u64,
+    lines: u64,
     start: usize,
     refs: usize,
 }
@@ -213,18 +219,25 @@ impl<'a> Bplist<'a> {
         let marker = *self.bytes.get(at)?;
         let (kind, nibble) = (marker >> 4, marker & 0x0F);
         let room = u64::try_from(self.table - at).ok()?;
-        let leaf = |own| Object {
+        let leaf = |own, lines| Object {
             own,
+            lines,
             start: 0,
             refs: 0,
         };
         match kind {
-            // Data and strings (UTF-16 in two-byte units), written as up to
-            // twice their bytes (base64, escapes).
-            0x4..=0x7 => {
+            // Data: base64 (4/3) in lines of 27 bytes, each its own
+            // indented line, between two tag lines.
+            0x4 => {
+                let (n, _) = self.count_at(at, nibble)?;
+                (n <= room).then(|| leaf(n.saturating_mul(2), n / 27 + 3))
+            }
+            // Strings (UTF-16 in two-byte units): every byte may be an
+            // escape (`&amp;` is 5).
+            0x5..=0x7 => {
                 let (n, _) = self.count_at(at, nibble)?;
                 let n = if kind == 0x6 { n.checked_mul(2)? } else { n };
-                (n <= room).then(|| leaf(n.saturating_mul(2)))
+                (n <= room).then(|| leaf(n.saturating_mul(5), 1))
             }
             // Arrays and sets: n references; dictionaries: n keys and n
             // values.
@@ -236,12 +249,13 @@ impl<'a> Bplist<'a> {
                 }
                 Some(Object {
                     own: 0,
+                    lines: 2,
                     start,
                     refs: usize::try_from(n).ok()?,
                 })
             }
             // Numbers, dates, booleans and UIDs: a few bytes each.
-            _ => Some(leaf(16)),
+            _ => Some(leaf(16, 1)),
         }
     }
 
@@ -253,9 +267,11 @@ impl<'a> Bplist<'a> {
     }
 }
 
-/// An estimate of the bytes a binary property list (`bplist00`) writes out
-/// to, counting every path through shared objects: each object
-/// [`PER_OBJECT`] bytes plus twice its payload. It reads the list itself,
+/// An estimate, from above, of the bytes a binary property list (`bplist`,
+/// any version byte) writes out to as XML, counting every path through
+/// shared objects: each object [`PER_OBJECT`] bytes plus its payload as
+/// CF writes it (data twice, strings five times for escapes), and every
+/// line it takes indented one tab per nesting level. It reads the list itself,
 /// in time and memory linear in its size, and stops once the count passes
 /// `cap`. Malformed lists, lists of more than [`MAX_PLIST_OBJECTS`],
 /// references past the object count and cycles are refused.
@@ -264,21 +280,25 @@ pub fn written_size(plist: &[u8], cap: u64) -> Result<u64, String> {
     if list.count > MAX_PLIST_OBJECTS {
         return Err(TOO_LARGE.to_owned());
     }
-    // Each object's size once known; 0 not yet seen; ON_PATH on the path.
-    let mut size = vec![0u64; list.count];
+    // Each object's bytes, lines and indent at depth 0, once known (bytes
+    // 0: not yet seen; ON_PATH: on the path). At depth d an object writes
+    // `bytes + indent + lines × d`.
+    let mut bytes = vec![0u64; list.count];
+    let mut lines = vec![0u64; list.count];
+    let mut indent = vec![0u64; list.count];
     // The path: an object and the next of its references to visit.
     let mut path: Vec<(usize, Object, usize)> = Vec::new();
     let first = list.object(top).ok_or(MALFORMED)?;
-    *size.get_mut(top).ok_or(MALFORMED)? = ON_PATH;
+    *bytes.get_mut(top).ok_or(MALFORMED)? = ON_PATH;
     path.push((top, first, 0));
     while let Some((i, o, k)) = path.last_mut() {
         if *k < o.refs {
             let r = list.reference(o, *k).ok_or(MALFORMED)?;
             *k += 1;
-            match size.get(r).copied() {
+            match bytes.get(r).copied() {
                 Some(0) => {
                     let child = list.object(r).ok_or(MALFORMED)?;
-                    *size.get_mut(r).ok_or(MALFORMED)? = ON_PATH;
+                    *bytes.get_mut(r).ok_or(MALFORMED)? = ON_PATH;
                     path.push((r, child, 0));
                 }
                 Some(ON_PATH) | None => return Err(MALFORMED.to_owned()),
@@ -286,17 +306,34 @@ pub fn written_size(plist: &[u8], cap: u64) -> Result<u64, String> {
             }
             continue;
         }
-        let mut total = o.own.saturating_add(PER_OBJECT);
+        let (mut b, mut l, mut n) = (o.own.saturating_add(PER_OBJECT), o.lines, 0u64);
         for j in 0..o.refs {
             let r = list.reference(o, j).ok_or(MALFORMED)?;
-            total = total.saturating_add(size.get(r).copied().ok_or(MALFORMED)?);
+            let (cb, cl) = (
+                bytes.get(r).copied().ok_or(MALFORMED)?,
+                lines.get(r).copied().ok_or(MALFORMED)?,
+            );
+            b = b.saturating_add(cb);
+            l = l.saturating_add(cl);
+            // The child sits one level in: each of its lines one tab more.
+            n = n
+                .saturating_add(indent.get(r).copied().ok_or(MALFORMED)?)
+                .saturating_add(cl);
         }
+        let total = b.saturating_add(n).saturating_add(XML_FRAME);
         if total > cap {
             return Ok(total);
         }
         let i = *i;
-        *size.get_mut(i).ok_or(MALFORMED)? = total;
+        // Never the path mark, even saturated.
+        *bytes.get_mut(i).ok_or(MALFORMED)? = b.min(ON_PATH - 1);
+        *lines.get_mut(i).ok_or(MALFORMED)? = l;
+        *indent.get_mut(i).ok_or(MALFORMED)? = n;
         path.pop();
     }
-    size.get(top).copied().ok_or_else(|| MALFORMED.to_owned())
+    let (b, n) = (
+        bytes.get(top).copied().ok_or(MALFORMED)?,
+        indent.get(top).copied().ok_or(MALFORMED)?,
+    );
+    Ok(b.saturating_add(n).saturating_add(XML_FRAME))
 }

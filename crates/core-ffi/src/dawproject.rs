@@ -1049,7 +1049,9 @@ fn import_body(
                     None => crate::record::free_bytes(&job.root),
                 });
                 if info.frames > 0 {
-                    // A known length: the whole budget must fit.
+                    // A known length: the whole budget must fit, keeping
+                    // the same reserve free (final re-review O2).
+                    let need = need.saturating_add(LOW_DISK_STOP);
                     if left.is_some_and(|f| need > f) {
                         return Err(MediaError::Refused(not_enough_space_to_import(need)));
                     }

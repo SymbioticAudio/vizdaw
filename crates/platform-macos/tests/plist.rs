@@ -103,9 +103,11 @@ fn the_bomb_is_a_property_list() {
     let xml = to_xml(&dag_bomb(3)).unwrap();
     let text = String::from_utf8(xml).unwrap();
     assert_eq!(text.matches("<array/>").count(), 8, "{text}");
-    // Every path counts: the dictionary 32, the key 32 + 2, and arrays
-    // 32 + 2 × the next (32, 96, 224, 480).
-    assert_eq!(written_size(&dag_bomb(3), u64::MAX), Ok(546));
+    // Every path counts, and the estimate is at or above what CF writes.
+    let small = dag_bomb(3);
+    let est = written_size(&small, u64::MAX).unwrap();
+    let real = to_xml(&small).unwrap().len() as u64;
+    assert!(est >= real, "{est} < {real}");
     // The deep one stops counting past the cap.
     let n = written_size(&dag_bomb(40), 1 << 20).unwrap();
     assert!(n > 1 << 20 && n < 1 << 22, "{n}");
@@ -191,4 +193,91 @@ fn a_unit_refuses_a_bomb_state_unread() {
     assert!(err.to_string().contains("too large"), "{err}");
     let good = a.save_state().unwrap();
     a.load_state(&good).unwrap();
+}
+
+/// `bplist`, then `version`, then the rest of `list` (the version byte is
+/// not one CF checks: final re-review N1).
+fn versioned(list: &[u8], version: &[u8; 2]) -> Vec<u8> {
+    let mut v = list.to_vec();
+    v[6..8].copy_from_slice(version);
+    v
+}
+
+/// Final re-review N1: CF reads any `bplist0?` header, so every guard
+/// sizes or refuses every binary list, whatever its version byte.
+#[test]
+fn every_binary_version_is_guarded() {
+    for version in [b"01", b"0Z"] {
+        let bomb = versioned(&dag_bomb(40), version);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            to_binary(&bomb).unwrap_err(),
+            "the settings are not an XML property list"
+        );
+        assert_eq!(
+            to_xml(&bomb).unwrap_err(),
+            "the settings would be too large written out"
+        );
+        let mut a = au::load(DELAY, 48_000.0, 512).unwrap();
+        let err = a.load_state(&bomb).unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        // A shallow one is a list CF reads, sized like version 00's.
+        let small = versioned(&dag_bomb(3), version);
+        assert_eq!(
+            written_size(&small, u64::MAX),
+            written_size(&dag_bomb(3), u64::MAX)
+        );
+        assert!(to_xml(&small).is_ok());
+    }
+}
+
+/// A binary list with two-byte offsets and references holding `objects`
+/// (whose references the caller writes in two bytes), object 0 at the top.
+fn bplist_wide(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"bplist00".to_vec();
+    let mut offsets = Vec::new();
+    for o in objects {
+        offsets.extend_from_slice(&u16::try_from(out.len()).unwrap().to_be_bytes());
+        out.extend_from_slice(o);
+    }
+    let table = out.len();
+    out.extend_from_slice(&offsets);
+    out.extend_from_slice(&[0; 6]);
+    out.extend_from_slice(&[2, 2]);
+    out.extend_from_slice(&(objects.len() as u64).to_be_bytes());
+    out.extend_from_slice(&0u64.to_be_bytes());
+    out.extend_from_slice(&(table as u64).to_be_bytes());
+    out
+}
+
+/// Final re-review N2: CF indents each line one tab per level and escapes
+/// `&`, `<` and `>`, so the estimate counts both: a 500-deep chain, and a
+/// string of escapes, are estimated at or above what CF writes.
+#[test]
+fn the_estimate_covers_indents_and_escapes() {
+    // {k: A0}, Ai = [Ai+1], 500 deep, the last empty.
+    let depth = 500u16;
+    let mut objects = vec![vec![0xD1, 0, 1, 0, 2], vec![0x51, b'k']];
+    for i in 0..depth {
+        let next = (3 + i).to_be_bytes();
+        objects.push(vec![0xA1, next[0], next[1]]);
+    }
+    objects.push(vec![0xA0]);
+    let chain = bplist_wide(&objects);
+    let real = to_xml(&chain).unwrap().len() as u64;
+    let est = written_size(&chain, u64::MAX).unwrap();
+    assert!(real > 200_000, "{real}");
+    assert!(est >= real, "{est} < {real}");
+    // {k: "&<>…"} (100 bytes) and {k: data(300)}.
+    let mut string = vec![0x5F, 0x10, 100];
+    string.extend(std::iter::repeat_n(b'&', 100));
+    let mut data = vec![0x4F, 0x11, 0x01, 0x2C];
+    data.extend(std::iter::repeat_n(0u8, 300));
+    for value in [string, data] {
+        let list = bplist_wide(&[vec![0xD1, 0, 1, 0, 2], vec![0x51, b'k'], value]);
+        let real = to_xml(&list).unwrap().len() as u64;
+        let est = written_size(&list, u64::MAX).unwrap();
+        assert!(est >= real, "{est} < {real}");
+    }
 }

@@ -1807,14 +1807,15 @@ fn import_rechecks_the_space_from_the_probe() {
             ("audio/a.wav", &wav8(100_000)),
         ],
     );
-    // The file's own numbers need about 0.5 MB; the conversion about 2.
+    // The file's own numbers need about 0.5 MB; the conversion about 2,
+    // and the 100 MiB reserve stays free.
     t.s.debug_free_bytes(Some(1_000_000)).unwrap();
     let j = import(&t, &path);
     t.s.debug_free_bytes(None).unwrap();
     assert_eq!(j.state, JobStateRow::Failed, "{j:?}");
     assert_eq!(
         j.message.as_deref(),
-        Some("Not enough free space to import this file (it needs 3 MB).")
+        Some("Not enough free space to import this file (it needs 107 MB).")
     );
     assert!(media_files(&t.pkg).is_empty(), "{:?}", media_files(&t.pkg));
     assert!(t.s.lanes(first_seq(&t.s).0).unwrap().is_empty());
