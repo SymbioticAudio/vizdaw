@@ -234,3 +234,143 @@ fn an_autosave_loads_with_the_packages_blobs() {
     assert!(core_model::file::load_autosave(&pkg, &pkg.join("Autosave/none.json")).is_err());
     std::fs::remove_dir_all(&pkg).unwrap();
 }
+
+/// `pad()` plus an insert on master (returned) whose state is blob `a`
+/// and whose overlay is `{3: 0.5}`, as history.
+fn with_insert(a: &[u8]) -> (History, PluginInstanceId) {
+    use core_model::ids::AnyId;
+    use core_model::mixer::PluginRef;
+    let d = pad();
+    let master = d.mixer().master();
+    let applied = apply(
+        &d,
+        &Command::Mixer(MixerCmd::AddInsert {
+            strip: master,
+            index: None,
+            plugin: PluginRef::from_legacy("au:fx"),
+        }),
+    )
+    .unwrap();
+    let Some(AnyId::Plugin(slot)) = applied.report.created.first().copied() else {
+        panic!("no insert created");
+    };
+    let mut h = History::new(applied.doc);
+    h.capture_state(slot, a).unwrap();
+    h.execute(
+        &Command::Mixer(MixerCmd::SetPluginParams {
+            slot,
+            params: vec![(ParamId(3), 0.5)],
+        }),
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    (h, slot)
+}
+
+fn overlay(doc: &Document, slot: PluginInstanceId) -> Vec<(ParamId, f64)> {
+    let s = doc.plugin_slot(slot).unwrap();
+    s.params.iter().map(|(k, v)| (*k, *v)).collect()
+}
+
+fn set_state(slot: PluginInstanceId, bytes: &[u8]) -> Command {
+    Command::Mixer(MixerCmd::SetPluginState {
+        slot,
+        bytes: std::sync::Arc::from(bytes),
+    })
+}
+
+/// Plan 6e Ruling 10: theirs' state goes in as one undo step.
+#[test]
+fn set_plugin_state_is_one_undoable_step() {
+    let (mut h, slot) = with_insert(b"state-A");
+    let f = ViewFilter::default();
+    let depth = h.undo_depth();
+    h.execute(&set_state(slot, b"state-B"), &f).unwrap();
+    assert_eq!(h.undo_depth(), depth + 1, "one step");
+    assert_eq!(h.undo_label(), Some("Set Plugin Settings"));
+    let b = blob_id(b"state-B");
+    assert_eq!(h.doc().plugin_slot(slot).unwrap().state, Some(b));
+    assert!(overlay(h.doc(), slot).is_empty(), "the overlay is cleared");
+    assert_eq!(h.doc().state_blob(b), Some(&b"state-B"[..]));
+    assert_eq!(
+        h.doc().state_blob(blob_id(b"state-A")),
+        None,
+        "the old blob is no longer referenced"
+    );
+    assert!(h.doc().missing_states().is_empty());
+    h.undo().unwrap();
+    let a = blob_id(b"state-A");
+    assert_eq!(h.doc().plugin_slot(slot).unwrap().state, Some(a));
+    assert_eq!(overlay(h.doc(), slot), vec![(ParamId(3), 0.5)]);
+    assert_eq!(h.doc().state_blob(a), Some(&b"state-A"[..]));
+    h.redo().unwrap();
+    assert_eq!(h.doc().plugin_slot(slot).unwrap().state, Some(b));
+    assert!(overlay(h.doc(), slot).is_empty());
+    assert_eq!(h.doc().state_blob(b), Some(&b"state-B"[..]));
+}
+
+/// Hostile input: an unknown slot and empty bytes are refused, and the
+/// document is unchanged.
+#[test]
+fn set_plugin_state_refuses() {
+    use core_model::error::ModelError;
+    let (h, slot) = with_insert(b"state-A");
+    let before = h.doc().clone();
+    for cmd in [
+        set_state(PluginInstanceId(9_999), b"x"),
+        set_state(PluginInstanceId(u64::MAX), b"x"),
+        set_state(slot, b""),
+    ] {
+        let _: ModelError = apply(&before, &cmd).unwrap_err();
+        let mut h2 = History::new(before.clone());
+        assert!(h2.execute(&cmd, &ViewFilter::default()).is_err());
+        assert_eq!(h2.doc(), &before, "unchanged");
+        assert_eq!(h2.undo_depth(), 0, "no step");
+    }
+}
+
+/// It works on an instrument destination's own slot and on an EQ slot.
+#[test]
+fn set_plugin_state_reaches_instrument_and_eq_slots() {
+    use core_model::ids::AnyId;
+    use core_model::mixer::PluginRef;
+    let d = pad();
+    let master = d.mixer().master();
+    let applied = apply(
+        &d,
+        &Command::Mixer(MixerCmd::SetEq {
+            strip: master,
+            plugin: Some(PluginRef::from_legacy("au:eq")),
+        }),
+    )
+    .unwrap();
+    let eq = applied
+        .report
+        .created
+        .iter()
+        .find_map(|x| match x {
+            AnyId::Plugin(p) => Some(*p),
+            _ => None,
+        })
+        .unwrap();
+    let mut h = History::new(applied.doc);
+    let f = ViewFilter::default();
+    let inst = PluginInstanceId(0);
+    h.execute(&set_state(inst, b"synth"), &f).unwrap();
+    h.execute(&set_state(eq, b"curve"), &f).unwrap();
+    assert_eq!(
+        h.doc().plugin_slot(inst).unwrap().state,
+        Some(blob_id(b"synth"))
+    );
+    assert_eq!(
+        h.doc().plugin_slot(eq).unwrap().state,
+        Some(blob_id(b"curve"))
+    );
+    assert_eq!(h.doc().state_blob(blob_id(b"synth")), Some(&b"synth"[..]));
+    assert_eq!(h.doc().state_blob(blob_id(b"curve")), Some(&b"curve"[..]));
+    h.undo().unwrap();
+    assert!(h.doc().plugin_slot(eq).unwrap().state.is_none());
+    assert_eq!(h.doc().state_blob(blob_id(b"curve")), None);
+    h.undo().unwrap();
+    assert!(h.doc().plugin_slot(inst).unwrap().state.is_none());
+}

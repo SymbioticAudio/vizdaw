@@ -59,6 +59,21 @@ pub fn capture_keeping(
     keep: &BTreeMap<ParamId, f64>,
 ) -> Result<(Document, StateBlobId)> {
     let mut d = doc.clone();
+    let id = store(&mut d, slot, bytes, keep)?;
+    Ok((d, id))
+}
+
+/// Stores `bytes` as blob [`blob_id`]`(bytes)`, points `slot` at it, sets
+/// its overlay to `keep` (finite values only) and drops the blobs no slot
+/// points at any more. Shared by [`capture_keeping`] (no undo step) and
+/// `MixerCmd::SetPluginState` (an undo step, plan 6e Ruling 10). On an
+/// unknown slot `d` is unchanged.
+pub(crate) fn store(
+    d: &mut Document,
+    slot: PluginInstanceId,
+    bytes: &[u8],
+    keep: &BTreeMap<ParamId, f64>,
+) -> Result<StateBlobId> {
     let id = blob_id(bytes);
     let s = d.slot_mut(slot)?;
     s.state = Some(id);
@@ -68,17 +83,17 @@ pub fn capture_keeping(
         .map(|(k, v)| (*k, *v))
         .collect();
     d.states_mut().insert(id, Arc::from(bytes));
-    let keep = d.referenced_states();
+    let referenced = d.referenced_states();
     let stale: Vec<StateBlobId> = d
         .states_mut()
         .keys()
-        .filter(|k| !keep.contains(k))
+        .filter(|k| !referenced.contains(k))
         .copied()
         .collect();
     for k in stale {
         d.states_mut().remove(&k);
     }
-    Ok((d, id))
+    Ok(id)
 }
 
 /// Blob IDs a `project.json` text references (every `state` field of an

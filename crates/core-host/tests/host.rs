@@ -756,6 +756,33 @@ fn an_undo_past_the_first_capture_restores_the_loaded_values() {
     drop(engine);
 }
 
+/// Plan 6e Ruling 10: an undoable `SetPluginState` reaches the running
+/// plugin on `sync`, and so does its undo.
+#[test]
+fn sync_loads_a_changed_state_and_the_undone_one() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    hist.capture_state(id, b"0=0.25;").unwrap();
+    host.sync(hist.doc());
+    assert_eq!(script.held(GAIN), 0.25);
+    run(
+        &mut hist,
+        MixerCmd::SetPluginState {
+            slot: id,
+            bytes: Arc::from(&b"0=0.75;"[..]),
+        },
+    );
+    host.sync(hist.doc());
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.75);
+    hist.undo().unwrap();
+    host.sync(hist.doc());
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.25, "the undone state is loaded again");
+    drop(engine);
+}
+
 #[test]
 fn unpaired_gesture_events_still_become_gestures() {
     let (hist, song, id, mut host, script) = with_fake();
