@@ -7,7 +7,7 @@ gets its own brainstorm → spec → plan when picked up.
 
 Versions are year-based (`26.0.0`, `27.x`). Rows below are named by their Feature column.
 
-**26.0.0 (1.0).** Sub-projects 6 (import and export) and 8 (producer copilot), then:
+**26.0.0 (1.0).** Sub-projects 6 (import and export; OMF import moved to 27.1.0, owner 2026-11-13) and 8 (producer copilot), then:
 - VST3 hosting (also needed for Linux and Windows).
 - Recording and devices: Count-in survives a device rebuild; Input devices keyed by UID; Two count-in clicks in one block after a latency drop.
 - Responsiveness: Input pickers' MIDI source list off the main thread; Arm's engine claim off the session lock.
@@ -17,7 +17,7 @@ Versions are year-based (`26.0.0`, `27.x`). Rows below are named by their Featur
 - **Release gate:** when 26.0 is feature complete, a whole-project review on Fable 5.2 (owner, 2026-11-11) before release.
 - Dropped at 1.0 (older pre-release builds only): A pre-5e build names a project with automation modes Corrupt; A pre-5f build names a project with learn maps Corrupt; A pre-5f-4 build sets a surfaces.json with a Kontrol aside.
 
-**27.1.0.** Everything else not listed above or below: the pro features (loudness metering, MIDNAM patch names, OSC, linked fader groups and VCAs, CLAP presets, Broadcast-WAV metadata, scroll-wheel control, a customisable transport bar), the audio editor rows, Low Latency Mode and live MIDI without compensation delay, the control-surface and Kontrol MK3 rows, the MPE leftovers, the engine edge cases, and the creative rows (Euclidean, aleatoric, generative audio, fugue sequencing, live looping, Mutable Instruments DSP, a built-in VizDAW EQ). Also the Linux app (owner, 2026-11-11: "I'm eager personally to start trying Linux for my music stuff"); its first step, moving `VizDAWAppModel` into Rust, can start early because it also serves the Mac app. The owner may still split this into several releases.
+**27.1.0.** OMF import (plan 6h, moved from 1.0 by the owner on 2026-11-13; AAF covers the same need). Everything else not listed above or below: the pro features (loudness metering, MIDNAM patch names, OSC, linked fader groups and VCAs, CLAP presets, Broadcast-WAV metadata, scroll-wheel control, a customisable transport bar), the audio editor rows, Low Latency Mode and live MIDI without compensation delay, the control-surface and Kontrol MK3 rows, the MPE leftovers, the engine edge cases, and the creative rows (Euclidean, aleatoric, generative audio, fugue sequencing, live looping, Mutable Instruments DSP, a built-in VizDAW EQ). Also the Linux app (owner, 2026-11-11: "I'm eager personally to start trying Linux for my music stuff"); its first step, moving `VizDAWAppModel` into Rust, can start early because it also serves the Mac app. The owner may still split this into several releases.
 
 **Later.** One cross-platform interface, and Windows (2.0); open-firmware hardware modules as controllers or standalone hosts.
 
