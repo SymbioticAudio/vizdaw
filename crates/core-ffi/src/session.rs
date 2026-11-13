@@ -426,6 +426,11 @@ impl Inner {
         for p in self.recorded_keep() {
             refs.entry(p).or_insert(None);
         }
+        // A held merge's media is the merged history's (plan 6e Task 8
+        // review I1): kept until Merge or Cancel.
+        for p in self.held_merge_files() {
+            refs.entry(p).or_insert(None);
+        }
         // Edit copies while the project is open (plan 5f-3 Ruling 3):
         // `abs` is absolute, retention's paths package-relative; a copy in
         // another package (after Save As) is not this package's.
@@ -438,6 +443,17 @@ impl Inner {
             crate::retention::trash(dir.as_deref(), p)
         });
         self.news.problems.extend(out.problems);
+    }
+
+    /// The package-relative files the held merge's job converted.
+    fn held_merge_files(&self) -> Vec<String> {
+        self.held_merge
+            .iter()
+            .flat_map(|h| h.files.iter())
+            .filter_map(|(_, r)| r.as_ref().ok())
+            .flatten()
+            .map(|i| i.path.clone())
+            .collect()
     }
 
     /// Writes `package`'s keep file from the kept takes (plan 5c Task 10);
@@ -1856,6 +1872,14 @@ impl Session {
                     message: "Wait for the import or conversion to finish, then save.".into(),
                 });
             }
+            // A held merge's media is under the current root (plan 6e
+            // Task 8 review I1).
+            if inner.held_merge.is_some() {
+                return Err(VizError::Busy {
+                    message: "Merge or cancel the merge waiting to be confirmed, then save as."
+                        .into(),
+                });
+            }
             // A copy written without the lock lands under the old root
             // (plan 5f-3 review M1).
             if inner.edits_writing > 0 {
@@ -3252,7 +3276,8 @@ impl Session {
     /// `project.xml` is in the partial; 4 the partial is synced, before the
     /// rename; import: 5 the file is opened; 6 its first entry is
     /// extracted; 7 its first audio file is converted; 8 it is mapped;
-    /// None: never).
+    /// merge: 5–8 as the import, 9 it is planned, 10 it is applied, 11
+    /// inside the apply, at its first check; None: never).
     pub fn debug_dawproject_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
         ffi_guard(|| {
             lock(&self.inner).dawproject_cancel_at = stage;
@@ -3399,6 +3424,9 @@ impl Session {
                 plugins::end_bounce(token);
             }
             inner.overviews.shutdown();
+            // No job or overview writer is left (review I2): the empty
+            // shared folders the imports and merges made go now.
+            crate::dawproject::remove_empty_media_folders(&root);
             if let Some(p) = inner.path.clone() {
                 // The jobs were shut down and their files removed above,
                 // and the overview worker has stopped. Under the save
@@ -4679,21 +4707,17 @@ fn remove_job_media(inner: &Inner, root: &Path, files: ImportFiles) {
     let keep = inner.kept();
     let hashes: std::collections::BTreeSet<String> =
         inner.named_media().into_values().flatten().collect();
-    let mut folders = std::collections::BTreeSet::new();
     for f in files.into_iter().filter_map(|(_, r)| r.ok()).flatten() {
         remove_unkept(root, &f.path, &keep);
         if !hashes.contains(&f.content_hash)
             && let Some(at) = core_media::overview::Overview::path(root, &f.content_hash)
         {
-            let _ = std::fs::remove_file(&at);
-            folders.extend(at.parent().map(Path::to_path_buf));
+            let _ = std::fs::remove_file(at);
         }
     }
-    // The overviews' folder goes too when the job made it and left it
-    // empty (a folder holding a file stays).
-    for dir in folders {
-        let _ = std::fs::remove_dir(dir);
-    }
+    // Only files: the shared folders (`Media/.incoming`,
+    // `Media/.overviews`) other jobs and the overview worker write into
+    // stay until close (review I2).
 }
 
 /// `Busy` while a merge waits between its preview and Merge.
@@ -4708,7 +4732,6 @@ fn drop_held_merge(inner: &mut Inner, id: u64) {
     if let Some(h) = inner.held_merge.take() {
         let root = inner.root(id);
         remove_job_media(inner, &root, h.files);
-        crate::dawproject::remove_empty_incoming(&root);
     }
 }
 
@@ -4787,6 +4810,21 @@ fn apply_merge_work(
                 merged,
                 files,
             });
+            (r, false)
+        }
+        // Never while recording, as `confirm_merge` (review M1).
+        MergeStepRow::Apply
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() =>
+        {
+            remove_job_media(inner, root, files);
+            let r = row(
+                id,
+                kind,
+                JobStateRow::Failed,
+                Some(crate::dawproject::CHANGED_SINCE.into()),
+                vec![],
+                vec![],
+            );
             (r, false)
         }
         MergeStepRow::Apply => match swap_merge(inner, root, merged, files) {
@@ -9844,8 +9882,15 @@ impl Session {
                 crate::interchange::file_path(&req.path, crate::dawproject::DAWPROJECT_FILE)?;
             crate::dawproject::check_date(&req.date)?;
             crate::dawproject::check_snapshot(req.snapshot.as_deref())?;
-            // Ours' plug-in states are current (Ruling 10), with no step.
-            self.capture_for_export(&mut inner)?;
+            // Ours' plug-in states are current (Ruling 10), with no step; a
+            // capture that failed is said as a Save's is (review M6).
+            let uncaptured = self.capture_for_export(&mut inner)?;
+            for (slot, why) in uncaptured {
+                if let Some(e) = why {
+                    let line = format!("{}: state not saved ({e})", slot_name(inner.doc(), slot));
+                    inner.news.problems.push(line);
+                }
+            }
             #[cfg(feature = "test-hooks")]
             let (cancel_at, free) = (inner.dawproject_cancel_at.take(), inner.dawproject_free);
             #[cfg(not(feature = "test-hooks"))]
@@ -9900,9 +9945,7 @@ impl Session {
                 });
             };
             let root = inner.root(self.id);
-            let report = swap_merge(&mut inner, &root, held.merged, held.files);
-            crate::dawproject::remove_empty_incoming(&root);
-            let report = report?;
+            let report = swap_merge(&mut inner, &root, held.merged, held.files)?;
             inner.version += 1;
             inner.reload_host(self.id);
             self.mark(&mut inner);

@@ -1220,7 +1220,6 @@ pub(crate) fn import_job(
         let ran = catch_unwind(AssertUnwindSafe(|| {
             import_body(&job, importer.as_ref(), &mut files, progress, cancel)
         }));
-        remove_empty_incoming(&job.root);
         progress.store(1f32.to_bits(), Ordering::Relaxed);
         let result = match ran {
             Ok(Ok(imp)) => Ok(imp),
@@ -1232,11 +1231,13 @@ pub(crate) fn import_job(
     }
 }
 
-/// Removes `<root>/Media/.incoming` when it is empty (backlog row
-/// "DAWproject import clean-up"): every import and merge job ends with
-/// it, after a caught panic too. A folder that still holds a file stays.
-pub(crate) fn remove_empty_incoming(root: &Path) {
+/// Removes `<root>/Media/.incoming` and `<root>/Media/.overviews` when
+/// they are empty (backlog row "DAWproject import clean-up"). Only at
+/// close, once no job and no overview worker can write into them (Task 8
+/// review I2); a folder that holds a file stays.
+pub(crate) fn remove_empty_media_folders(root: &Path) {
     let _ = std::fs::remove_dir(root.join(core_media::import::INCOMING_DIR));
+    let _ = std::fs::remove_dir(root.join(core_media::overview::DIR));
 }
 
 // ---- the merge (plan 6e Task 8) ----
@@ -1391,6 +1392,9 @@ fn snapshot_tracks(s: &core_io::dawproject::record::Snapshot) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// The most snapshot files [`snapshot_rows`] reads.
+const MAX_SNAPSHOT_READS: usize = 4 * KEEP_SNAPSHOTS;
+
 /// The project's snapshots (`<root>/Interchange/<uuid>.json` that read
 /// whole and are `project_id`'s), newest first (by their export time, then
 /// their file's), at most [`KEEP_SNAPSHOTS`]. Reads every snapshot file:
@@ -1400,22 +1404,26 @@ pub(crate) fn snapshot_rows(root: &Path, project_id: Option<&str>) -> Vec<Snapsh
     let Some(project_id) = project_id else {
         return Vec::new();
     };
-    let mut found: Vec<(u64, std::time::SystemTime, SnapshotRow)> =
-        snapshots_in(&root.join(SNAPSHOT_DIR))
-            .into_iter()
-            .filter_map(|(time, name)| {
-                let id = name.strip_suffix(".json")?;
-                let s = read_snapshot_file(root, id).ok()??;
-                (s.project_id == project_id).then(|| {
-                    let row = SnapshotRow {
-                        export_id: s.export_id.clone(),
-                        exported_at: s.exported_at,
-                        tracks: snapshot_tracks(&s),
-                    };
-                    (s.exported_at, time, row)
-                })
+    // A folder stuffed by hand costs at most `MAX_SNAPSHOT_READS` reads
+    // (review M5): the newest files by modification time.
+    let mut candidates = snapshots_in(&root.join(SNAPSHOT_DIR));
+    candidates.sort_by(|a, b| b.cmp(a));
+    candidates.truncate(MAX_SNAPSHOT_READS);
+    let mut found: Vec<(u64, std::time::SystemTime, SnapshotRow)> = candidates
+        .into_iter()
+        .filter_map(|(time, name)| {
+            let id = name.strip_suffix(".json")?;
+            let s = read_snapshot_file(root, id).ok()??;
+            (s.project_id == project_id).then(|| {
+                let row = SnapshotRow {
+                    export_id: s.export_id.clone(),
+                    exported_at: s.exported_at,
+                    tracks: snapshot_tracks(&s),
+                };
+                (s.exported_at, time, row)
             })
-            .collect();
+        })
+        .collect();
     found.sort_by(|a, b| (b.0, b.1, &b.2.export_id).cmp(&(a.0, a.1, &a.2.export_id)));
     found
         .into_iter()
@@ -1461,7 +1469,8 @@ impl MergeBase {
 pub(crate) struct MergeJob {
     /// The file, the media root, the format, the reserved names, the
     /// plug-ins installed and the test hooks, as an import has them
-    /// (stages 5–8 as the import's; 9 planned, 10 applied).
+    /// (stages 5–8 as the import's; 9 planned, 10 applied, 11 inside the
+    /// apply).
     pub io: ImportJob,
     /// A clone of the session's history at spawn: the plan is made against
     /// its document and the merge applied to it.
@@ -1495,6 +1504,22 @@ pub(crate) fn merged_report(m: &Merged) -> crate::interchange::ReportRow {
     let mut r = crate::interchange::report_row(&m.report, "Merged");
     r.summary.clone_from(&m.preview.summary);
     r
+}
+
+/// The job's cancel flag as `apply_merge_until` asks it; with `trip` it
+/// sets the flag at the first check (the stage-11 test hook).
+struct TripAt<'a> {
+    cancel: &'a AtomicBool,
+    trip: bool,
+}
+
+impl core_io::dawproject::merge::apply::Stop for TripAt<'_> {
+    fn stopped(&self) -> bool {
+        if self.trip {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+        self.cancel.load(Ordering::Relaxed)
+    }
 }
 
 /// The merge job's body (Rulings 2, 12, 13): the merge, or how it stopped.
@@ -1620,8 +1645,14 @@ fn merge_body(
             let mut h = job.history.clone();
             h.begin(LABEL).map_err(|e| Stop::Failed(e.to_string()))?;
             let mut report = Report::default();
+            // Stage 11 (test hook): the cancel lands inside the apply, at
+            // its first check (review M2).
+            let inside = TripAt {
+                cancel,
+                trip: job.io.cancel_at == Some(11),
+            };
             let ran = catch_unwind(AssertUnwindSafe(|| {
-                apply_merge_until(&mut h, &plan, &job.req.date, &mut report, cancel)
+                apply_merge_until(&mut h, &plan, &job.req.date, &mut report, &inside)
             }));
             match ran {
                 Ok(Ok(())) => h.commit().map_err(|e| Stop::Failed(e.to_string()))?,
@@ -1676,7 +1707,6 @@ pub(crate) fn merge_job(
         let ran = catch_unwind(AssertUnwindSafe(|| {
             merge_body(&job, importer.as_ref(), &mut files, progress, cancel)
         }));
-        remove_empty_incoming(&job.io.root);
         progress.store(1f32.to_bits(), Ordering::Relaxed);
         let result = match ran {
             Ok(Ok(m)) => Ok(m),

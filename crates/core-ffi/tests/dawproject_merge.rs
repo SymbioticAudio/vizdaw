@@ -145,7 +145,21 @@ fn failed_with(j: &JobRow, message: &str) {
 /// once the overview worker is idle.
 fn media_listing(p: &Project) -> Vec<String> {
     idle_until(&p.s, |s| s.debug_overviews_idle());
-    listing(&p.pkg.join("Media"))
+    without_empty_folders(listing(&p.pkg.join("Media")))
+}
+
+/// `all` without the folders that hold nothing: the shared folders
+/// (`.incoming`, `.overviews`) stay, emptied, until close (review I2).
+fn without_empty_folders(all: Vec<String>) -> Vec<String> {
+    all.iter()
+        .filter(|f| {
+            !f.ends_with('/')
+                || all
+                    .iter()
+                    .any(|g| g.len() > f.len() && g.starts_with(f.as_str()))
+        })
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------- the returned file
@@ -939,7 +953,8 @@ fn project_id_is_read() {
 
 // ---------------------------------------------------------------- cancel and busy
 
-/// Lessons: a cancel before the run and after each of stages 5–10 leaves
+/// Lessons: a cancel before the run, after each of stages 5–10 and inside
+/// the apply (11) leaves
 /// `Media/`, `Media/.incoming/` and the document as they were.
 #[test]
 fn cancel_at_every_stage_leaves_media_unchanged() {
@@ -960,7 +975,8 @@ fn cancel_at_every_stage_leaves_media_unchanged() {
     assert_eq!(wait_job(&p.s, id).state, JobStateRow::Cancelled);
     assert_eq!(media_listing(&p), before);
     assert_eq!(p.s.debug_document_json(), doc);
-    for stage in 5..=10 {
+    // 11: inside the apply, at its first check (review M2).
+    for stage in 5..=11 {
         p.s.debug_free_bytes(None).unwrap();
         p.s.debug_dawproject_cancel_at(Some(stage)).unwrap();
         let j = merge(&p.s, mreq(&file, MergeStepRow::Apply));
@@ -1212,4 +1228,105 @@ fn merge_state_reaches_the_plugin() {
     idle_until(&p.s, |s| (value(s) - 0.75).abs() < 1e-9);
     p.s.undo().unwrap();
     idle_until(&p.s, |s| (value(s) - 0.25).abs() < 1e-9);
+}
+
+/// Review I1: a Save while a merge is held keeps its media, so the merge
+/// confirmed after it has no offline audio; Save As waits for the hold.
+#[cfg(target_os = "macos")]
+#[test]
+fn saving_keeps_a_held_merge_whole() {
+    let _g = serial();
+    let p = merge_project();
+    let file = with_new_audio(&exported(&p));
+    let before = media_listing(&p);
+    let j = merge(&p.s, mreq(&file, MergeStepRow::Hold));
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    let held = media_listing(&p);
+    // The new audio, and the copies of the audio theirs kept (removed at
+    // Merge: the matched regions keep ours').
+    let new: Vec<String> = held
+        .iter()
+        .filter(|f| f.ends_with(".caf") && !before.contains(*f))
+        .cloned()
+        .collect();
+    assert!(new.contains(&"new.caf".to_owned()), "{held:?}");
+    let new = ["new.caf".to_owned()];
+    // Save As is Busy and keeps the hold.
+    let elsewhere = p.dir.path().join("Q.vizdaw");
+    assert!(matches!(
+        p.s.save_as(text(&elsewhere)),
+        Err(VizError::Busy { .. })
+    ));
+    assert!(!elsewhere.exists());
+    // Save keeps the held media.
+    p.s.save().unwrap();
+    for f in held
+        .iter()
+        .filter(|f| !before.contains(*f) && !f.starts_with('.'))
+    {
+        assert!(p.pkg.join("Media").join(f).exists(), "{f} kept on Save");
+    }
+    p.s.confirm_merge(j.id).unwrap();
+    p.s.recheck_media().unwrap();
+    idle_until(&p.s, |s| s.debug_overviews_idle());
+    let media = p.s.media().unwrap();
+    assert!(media.iter().all(|m| m.offline.is_none()), "{media:?}");
+    assert!(
+        media.iter().any(|m| m.path == format!("Media/{}", new[0])),
+        "{media:?}"
+    );
+    // After Merge, Save As works again.
+    p.s.save_as(text(&elsewhere)).unwrap();
+}
+
+/// Review M1: an Apply that finishes while recording is not swapped in.
+#[test]
+fn apply_never_swaps_while_recording() {
+    let _g = serial();
+    let p = merge_project_with(true);
+    let file = returned(&exported(&p), Strip::Nothing, &[], three_edits);
+    p.s.debug_hold_jobs(true).unwrap();
+    let id =
+        p.s.merge_dawproject(mreq(&file, MergeStepRow::Apply))
+            .unwrap();
+    p.s.record(
+        p.seq,
+        RecordSpecRow {
+            replace: true,
+            punch: None,
+            looped: false,
+            count_in_bars: 0,
+            pre_roll_bars: 0,
+            passes_as_takes: true,
+        },
+    )
+    .unwrap();
+    let until = Instant::now() + common::wait_limit();
+    while !p.s.record_state().unwrap().recording {
+        assert!(Instant::now() < until, "recording did not start");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let doc = p.s.debug_document_json();
+    p.s.debug_hold_jobs(false).unwrap();
+    let j = wait_job(&p.s, id);
+    failed_with(&j, CHANGED_SINCE);
+    assert_eq!(p.s.debug_document_json(), doc);
+    p.s.stop().unwrap();
+}
+
+/// Review M3: Ruling 13's sentence, typed from the plan.
+#[test]
+fn needs_snapshot_names_each_snapshot() {
+    let row = |n: u8, tracks: u32| SnapshotRow {
+        export_id: format!("00000000-0000-4000-8000-00000000000{n}"),
+        exported_at: 1_700_000_000,
+        tracks,
+    };
+    assert_eq!(
+        needs_snapshot(&[row(1, 3), row(2, 1)]),
+        "This file lost its export ID; give `snapshot`, one of: \
+         00000000-0000-4000-8000-000000000001 (2023-11-14 22:13 UTC, 3 tracks), \
+         00000000-0000-4000-8000-000000000002 (2023-11-14 22:13 UTC, 1 track)"
+    );
+    assert_eq!(needs_snapshot(&[]), NOT_FROM_HERE);
 }

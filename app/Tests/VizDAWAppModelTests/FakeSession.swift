@@ -878,11 +878,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return interchangeJob(.mergeDawproject, 12000, dawprojectMerges.count)
     }
     func confirmMerge(job: UInt64) throws -> ReportRow {
+        interchangeLock.lock()
         confirmedMerges.append(job)
+        interchangeLock.unlock()
         return try confirmMergeAnswer.get()
     }
     func cancelMerge(job: UInt64) throws {
+        interchangeLock.lock()
         cancelledMerges.append(job)
+        interchangeLock.unlock()
         if let e = cancelMergeError { throw e }
     }
     func dawprojectSnapshots() throws -> [SnapshotRow] {
@@ -893,7 +897,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return try snapshotsAnswer.get()
     }
     func projectId() throws -> String? {
+        interchangeLock.lock()
         projectIdCalls += 1
+        interchangeLock.unlock()
         return projectIdAnswer
     }
     func hasSnapshot(exportId: String) throws -> Bool {
