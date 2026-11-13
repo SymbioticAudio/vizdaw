@@ -661,7 +661,8 @@ const EXPORT_MIDI_CLIP_PARAMS: &[ParamSpec] = &[
     },
 ];
 
-/// `file.import_dawproject` (plan 6d Task 11): a DAWproject file as a new project.
+/// `file.import_dawproject` (plan 6d Task 11): a DAWproject file as a new
+/// project, or merged into the project it came from (plan 6e Task 9).
 const IMPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
     ParamSpec {
         name: "path",
@@ -671,9 +672,27 @@ const IMPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
     },
     ParamSpec {
         name: "mode",
-        kind: ParamKind::Choice(&["new"]),
+        kind: ParamKind::Choice(&["new", "merge"]),
         required: false,
-        help: "new (default): the file opens as a new project.",
+        help: "new: open the file as a new project; merge: merge it into the project it came from. Needed when the file came from VizDAW.",
+    },
+    ParamSpec {
+        name: "project",
+        kind: ParamKind::Path("vizdaw"),
+        required: false,
+        help: "For merge: the project the file came from, when it is not open (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "snapshot",
+        kind: ParamKind::Text,
+        required: false,
+        help: "For merge: the export the file came from (an export ID), when the file lost its own.",
+    },
+    ParamSpec {
+        name: "preview",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "For merge: return the merge preview and change nothing.",
     },
 ];
 
@@ -1453,12 +1472,26 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         params: IMPORT_DAWPROJECT_PARAMS,
-        dialogs: &[DialogSpec {
-            name: "Open",
-            when: "always",
-            always: true,
-            answered_by: &["path"],
-        }],
+        dialogs: &[
+            DialogSpec {
+                name: "Open",
+                when: "always",
+                always: true,
+                answered_by: &["path"],
+            },
+            DialogSpec {
+                name: "Return",
+                when: "the file came from VizDAW and no mode",
+                always: false,
+                answered_by: &["mode"],
+            },
+            DialogSpec {
+                name: "Open",
+                when: "merge with no matching open project",
+                always: false,
+                answered_by: &["project"],
+            },
+        ],
         ..cmd("file.import_dawproject", "File", "DAWproject…", None, true)
     },
     CommandSpec {

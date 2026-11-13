@@ -178,6 +178,10 @@ public final class DocumentStore {
     /// R2); a closed one is removed.
     private var recentKey: [UUID] = []
 
+    /// Documents in the order they were made or opened (closed ones are
+    /// removed).
+    private var added: [UUID] = []
+
     /// Documents closed this launch; their windows adopt no other.
     private var closedIDs: Set<UUID> = []
 
@@ -371,6 +375,26 @@ public final class DocumentStore {
         return documents.first { (try? $0.value.session.path()).flatMap { $0 }.map(Self.canonical) == want }?.key
     }
 
+    /// Open documents, the most recently active first: those whose window
+    /// was key, most recent first, then the rest, newest first.
+    private var byActivity: [UUID] {
+        let keyed = recentKey.filter { documents[$0] != nil }
+        return keyed + added.reversed().filter { documents[$0] != nil && !keyed.contains($0) }
+    }
+
+    /// The most recently active open document whose project ID is `id` (nil for nil).
+    public func documentID(forProjectID id: String?) -> UUID? {
+        guard let id else { return nil }
+        return byActivity.first { (try? documents[$0]?.session.projectId()) == id }
+    }
+
+    /// The most recently active open document holding snapshot `exportID` (nil for nil).
+    /// Each ask is one lstat in the core (plan 6e Task 8).
+    public func documentHolding(exportID: String?) -> UUID? {
+        guard let exportID else { return nil }
+        return byActivity.first { (try? documents[$0]?.session.hasSnapshot(exportId: exportID)) == true }
+    }
+
     private static func canonical(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
     }
@@ -440,6 +464,7 @@ public final class DocumentStore {
         if panelFocus == id { panelFocus = nil }
         if keyWindow?.doc == id { keyWindow = nil }
         recentKey.removeAll { $0 == id }
+        added.removeAll { $0 == id }
         mixers.removeValue(forKey: id)?.endOpenDrag()
         mixerAlerted.remove(id)
         // Plugin windows detach their editors before the session goes.
@@ -470,6 +495,7 @@ public final class DocumentStore {
             let id = UUID()
             didMake?(id, model)
             documents[id] = model
+            added.append(id)
             model.mixerProvider = { [weak self] in self?.mixer(id) }
             return id
         } catch {

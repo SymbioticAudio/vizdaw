@@ -4326,7 +4326,7 @@ fn dawproject_round_trip_over_the_channel() {
     assert!(e.message.contains("Save"), "{e:?}");
     let e = app.call_err(
         "command.run",
-        json!({"id": "file.import_dawproject", "params": {"path": file, "mode": "merge"}, "window": w}),
+        json!({"id": "file.import_dawproject", "params": {"path": file, "mode": "fuse"}, "window": w}),
     );
     assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
     assert!(!file.exists());
@@ -4385,7 +4385,7 @@ fn dawproject_round_trip_over_the_channel() {
     // Back in as a new project: its window, the demo's tracks and the note.
     let r = app.call(
         "command.run",
-        json!({"id": "file.import_dawproject", "params": {"path": file}, "window": w}),
+        json!({"id": "file.import_dawproject", "params": {"path": file, "mode": "new"}, "window": w}),
     );
     assert!(r["doc"].is_string() && r["doc"] != demo["doc"], "{r}");
     assert!(r["window"].is_i64(), "the new project's window: {r}");

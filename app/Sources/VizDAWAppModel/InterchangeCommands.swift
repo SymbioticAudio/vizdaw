@@ -18,6 +18,13 @@ import VizDAWCore
 /// on the main thread either: a `new_project` import's first read and a
 /// `dry_run` are `.pending` until their detached work ends (final review
 /// I2, M4).
+///
+/// `file.import_dawproject` (plan 6e Task 9): a file from VizDAW with no
+/// `mode` is `dialog_required` "Return"; `mode` merge goes into `project`,
+/// else the open project the file came from, else `dialog_required` "Open"
+/// naming `project`. A `snapshot` that is not an export ID's shape, `project`
+/// already open or not a folder, and merge parameters for a new project are
+/// `invalid_params` before any session call.
 @MainActor
 public enum InterchangeCommands {
     public static let importMidi = "file.import_midi", exportMidi = "file.export_midi"
@@ -309,6 +316,66 @@ public enum InterchangeCommands {
         }
     }
 
+    /// Whether `text` has an export ID's shape: 36 characters, each a
+    /// lowercase hex digit or a hyphen (the core checks the rest).
+    static func isExportIDShape(_ text: String) -> Bool {
+        text.utf8.count == 36 && text.utf8.allSatisfy { (0x30...0x39).contains($0) || (0x61...0x66).contains($0) || $0 == 0x2D }
+    }
+
+    /// Whether `path` is a folder, by one lstat (a symbolic link is not).
+    private static func isFolder(_ path: String) -> Bool {
+        var st = stat()
+        return lstat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR
+    }
+
+    /// `file.import_dawproject` with `mode` merge, once the file is read
+    /// (plan 6e Task 9): into `project` (opened as `file.open` opens it),
+    /// else the open project the file came from, else the "Open" dialog.
+    /// A project this command opened goes again if the merge is refused
+    /// before its job, or (by `jobEnded`) by it, while untouched.
+    private static func mergeDawproject(
+        _ path: String, info: DawprojectInfoRow, args: [ControlArg], store: DocumentStore
+    ) -> ControlOutcome {
+        let id = importDawproject
+        let target: UUID
+        var opened = false
+        if let project = args.text("project") {
+            guard store.documentID(forPath: project) == nil else {
+                return .failed(.of(.invalidParams, "\(id): `project` is already open; leave out project to merge into it."))
+            }
+            guard isFolder(project) else {
+                return .failed(.of(.invalidParams, "\(id): `project` is not a VizDAW project."))
+            }
+            let outcome = ControlOpen.open(
+                path: project, answers: RecoveryAnswersRow(plugins: nil, restoreAutosave: nil), store: store,
+                command: id)
+            guard case .opened(_, let doc) = outcome else { return outcome }
+            target = doc
+            opened = true
+        } else {
+            guard
+                let found = store.documentID(forProjectID: info.projectId)
+                    ?? store.documentHolding(exportID: info.exportId)
+            else { return .failed(.dialog("Open", "project")) }
+            target = found
+        }
+        guard let m = store.model(target) else { return .failed(.of(.noDocument, "\(id): the project closed.")) }
+        let req = DawprojectMergeRequestRow(
+            path: path, snapshot: args.text("snapshot"), step: (args.flag("preview") ?? false) ? .preview : .apply,
+            date: MergeDate.today())
+        if opened { madeProjects.insert(target) }
+        do {
+            return .job(command: id, doc: target, job: try m.session.mergeDawproject(req: req))
+        } catch {
+            // Refused before a job started (e.g. Busy): nothing was done in it.
+            if opened {
+                madeProjects.remove(target)
+                if !m.canUndo { store.close(target) }
+            }
+            return .failed(.thrown(error, "DAWproject Merge Failed"))
+        }
+    }
+
     /// A dry run's answer, computed off the main thread (final review M4).
     private static func dryRun(
         _ id: String, _ docID: UUID, _ m: DocumentModel, _ check: @escaping @Sendable () throws -> ReportRow
@@ -417,14 +484,38 @@ public enum InterchangeCommands {
             }
         case importDawproject:
             guard let path, !path.isEmpty else { return .failed(.dialog("Open", "path")) }
+            let mode = args.text("mode")
+            // `project`, `snapshot` and `preview` mean nothing to a new project.
+            let mergeOnly = ["project", "snapshot", "preview"].first { name in args.contains { $0.name == name } }
+            if mode == "new", let name = mergeOnly {
+                return .failed(.of(.invalidParams, "\(id): `\(name)` is for mode merge."))
+            }
+            if let snapshot = args.text("snapshot"), !isExportIDShape(snapshot) {
+                return .failed(.of(.invalidParams, "\(id): `snapshot` is an export ID (36 lowercase hex digits and hyphens)."))
+            }
             // The core reads the file first, off the main thread (L8): a
             // refusal makes no project.
             let read = store.dawprojectInfo
             return .pending(
                 PendingOutcome({ Result { try read(path) } }) { info in
+                    let row: DawprojectInfoRow
                     switch info {
                     case .failure(let error): return .failed(.thrown(error, "Import Failed"))
-                    case .success(let row):
+                    case .success(let r): row = r
+                    }
+                    switch mode {
+                    case nil where row.fromVizdaw:
+                        return .failed(.dialog("Return", "mode"))
+                    case "merge":
+                        guard row.fromVizdaw else {
+                            return .failed(
+                                .of(.invalidParams, "\(importDawproject): `mode` merge needs a file that came from VizDAW."))
+                        }
+                        return mergeDawproject(path, info: row, args: args, store: store)
+                    default:
+                        if let name = mergeOnly {
+                            return .failed(.of(.invalidParams, "\(importDawproject): `\(name)` is for mode merge."))
+                        }
                         return importDawprojectIntoNewProject(path, rate: row.sampleRate, store: store)
                     }
                 })
@@ -446,5 +537,18 @@ public enum InterchangeCommands {
         default:
             return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }
+    }
+}
+
+/// The date a merge's request carries (plan 6e Task 9; Task 10's sheet too).
+public enum MergeDate {
+    /// "yyyy-MM-dd", POSIX locale, current time zone: the request's `date`.
+    public static func today(_ now: Date = Date(), _ zone: TimeZone = .current) -> String {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = zone
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: now)
     }
 }

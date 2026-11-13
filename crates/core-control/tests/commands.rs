@@ -780,6 +780,10 @@ mod fuzz {
             Just("on"),
             Just("name"),
             Just("pitches"),
+            Just("mode"),
+            Just("project"),
+            Just("snapshot"),
+            Just("preview"),
         ]
         .prop_map(str::to_string)
     }
@@ -2618,6 +2622,10 @@ fn dawproject_commands_check_their_params() {
             "file.import_dawproject",
             json!({ "path": "/x/a.dawproject", "mode": "new" }),
         ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "mode": "merge" }),
+        ),
     ] {
         assert!(
             matches!(
@@ -2630,7 +2638,7 @@ fn dawproject_commands_check_their_params() {
     for (id, params) in [
         (
             "file.import_dawproject",
-            json!({ "path": "/x/a.dawproject", "mode": "merge" }),
+            json!({ "path": "/x/a.dawproject", "mode": "fuse" }),
         ),
         (
             "file.import_dawproject",
@@ -2664,4 +2672,68 @@ fn dawproject_commands_check_their_params() {
     let (code, message) = err("command.run", run("file.import_dawproject", json!({})));
     assert_eq!(code, ErrorCode::DialogRequired);
     assert!(message.contains("Open"), "{message}");
+}
+
+/// Plan 6e Task 9: the merge parameters of `file.import_dawproject`
+/// validate; each hostile value is `invalid_params` naming its parameter.
+#[test]
+fn merge_params_validate() {
+    let run = |params: Value| json!({ "id": "file.import_dawproject", "params": params });
+    let good = json!({
+        "mode": "merge",
+        "path": "/x/a.dawproject",
+        "project": "/x/a.vizdaw",
+        "snapshot": "0f8b6f8e-3c1a-4d2e-9b7a-5e6f7a8b9c0d",
+        "preview": true,
+    });
+    assert!(matches!(
+        ok("command.run", run(good.clone())),
+        Command::CommandRun { .. }
+    ));
+    for (name, value) in [
+        ("mode", json!("fuse")),
+        ("project", json!("a.vizdaw")),
+        ("project", json!("/x/a.dawproject")),
+        ("preview", json!("yes")),
+        ("extra", json!(1)),
+    ] {
+        let mut params = good.clone();
+        params[name] = value.clone();
+        let (code, message) = err("command.run", run(params));
+        assert_eq!(code, ErrorCode::InvalidParams, "{name} {value}");
+        assert!(message.contains(name), "{name}: {message}");
+    }
+}
+
+/// Plan 6e Task 9: the command's help lists the "Return" dialog, answered
+/// by `mode`, and the merge's "Open", answered by `project`.
+#[test]
+fn help_names_the_return_dialog() {
+    let list = registry::list_json();
+    let import = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "file.import_dawproject")
+        .unwrap();
+    let dialogs = import["dialogs"].as_array().unwrap();
+    assert!(
+        dialogs
+            .iter()
+            .any(|d| d["name"] == "Return" && d["answered_by"] == json!(["mode"])),
+        "{dialogs:?}"
+    );
+    assert!(
+        dialogs
+            .iter()
+            .any(|d| d["name"] == "Open" && d["answered_by"] == json!(["project"])),
+        "{dialogs:?}"
+    );
+    let names: Vec<&str> = import["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert_eq!(names, ["path", "mode", "project", "snapshot", "preview"]);
 }

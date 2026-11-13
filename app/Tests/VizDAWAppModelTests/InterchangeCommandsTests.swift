@@ -612,4 +612,253 @@ import VizDAWCore
         #expect(s.documents.count == before && fresh.dawprojectImports.isEmpty)
         #expect(made.count == 1 && made.allSatisfy { !InterchangeCommands.madeProject($0) && s.model($0) == nil })
     }
+
+    // MARK: merge (plan 6e Task 9)
+
+    static let pid = "0f8b6f8e-3c1a-4d2e-9b7a-5e6f7a8b9c0d"
+    static let eid = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+    /// The store reads `info` for any path (off the main actor).
+    func answering(_ s: DocumentStore, _ f: FakeSession, _ info: DawprojectInfoRow) {
+        f.dawprojectInfoAnswer = .success(info)
+        s.dawprojectInfo = { try f.dawprojectInfo(path: $0) }
+    }
+
+    func vizdawInfo(project: String? = pid, export: String? = eid) -> DawprojectInfoRow {
+        DawprojectInfoRow(
+            sampleRate: 48_000, tracks: 2, audioFiles: 0, fromVizdaw: true, exportId: export, projectId: project)
+    }
+
+    func mergeCalls(_ fakes: FakeSession...) -> Int { fakes.reduce(0) { $0 + $1.dawprojectMerges.count } }
+
+    /// A second open document backed by `fake`.
+    func add(_ s: DocumentStore, _ fake: FakeSession) throws -> UUID {
+        s.makeProject = { _ in fake }
+        return try #require(s.newProject(ProjectFormatRow(sampleRate: 48_000, depth: .int24)))
+    }
+
+    let file: (String, ControlValue) = ("path", .text(value: "/tmp/back.dawproject"))
+    let merge: (String, ControlValue) = ("mode", .text(value: "merge"))
+
+    @Test func fromVizdawWithoutModeAsksForReturn() async throws {
+        let (s, id, m, f) = try demo()
+        answering(s, f, vizdawInfo())
+        var made = 0
+        s.makeProject = { _ in
+            made += 1
+            return FakeSession([])
+        }
+        let before = s.documents.count
+        let d = failure(await settled(run(InterchangeCommands.importDawproject, [file], m, s, id)))
+        #expect(d?.code == .dialogRequired && d?.dialog == "Return" && d?.message.contains("`mode`") == true)
+        #expect(made == 0 && s.documents.count == before)
+        #expect(dawprojectCalls(f) == 0 && mergeCalls(f) == 0 && f.checkOnMain == [false])
+    }
+
+    @Test func modeNewStillMakesAProject() async throws {
+        let (s, id, m, f) = try demo()
+        let fresh = FakeSession([seq(9, "New", topLevel: true)])
+        s.makeProject = { _ in fresh }
+        answering(s, f, vizdawInfo())
+        let o = await settled(
+            run(InterchangeCommands.importDawproject, [file, ("mode", .text(value: "new"))], m, s, id))
+        guard case .job(let command, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(command == "file.import_dawproject" && doc != id && s.model(doc) != nil)
+        #expect(fresh.dawprojectImports.map(\.path) == ["/tmp/back.dawproject"] && mergeCalls(f, fresh) == 0)
+        #expect(InterchangeCommands.madeProject(doc))
+        InterchangeCommands.jobEnded(doc, failed: false, store: s) { s.close($0) }
+    }
+
+    @Test func mergeWithoutAMatchAsksForOpen() async throws {
+        let (s, id, m, f) = try demo()
+        f.projectIdAnswer = "99999999-9999-4999-8999-999999999999"
+        answering(s, f, vizdawInfo())
+        let d = failure(await settled(run(InterchangeCommands.importDawproject, [file, merge], m, s, id)))
+        #expect(d?.code == .dialogRequired && d?.dialog == "Open" && d?.message.contains("`project`") == true)
+        #expect(mergeCalls(f) == 0 && f.hasSnapshotAsked == [Self.eid])
+    }
+
+    @Test func mergeFindsTheOpenProjectByIDThenBySnapshot() async throws {
+        let (s, id, m, f) = try demo()
+        let byID = demoFake()
+        byID.projectIdAnswer = Self.pid
+        let bySnapshot = demoFake()
+        let eid = Self.eid
+        bySnapshot.hasSnapshotAnswer = { $0 == eid }
+        let a = try add(s, byID)
+        let b = try add(s, bySnapshot)
+        // The snapshot holder is the most recently active: the ID still wins.
+        s.focusDocument(b, window: UUID())
+        answering(s, f, vizdawInfo())
+        let o = await settled(run(InterchangeCommands.importDawproject, [file, merge], m, s, id))
+        guard case .job(let command, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(command == "file.import_dawproject" && doc == a)
+        let today = MergeDate.today()
+        #expect(
+            byID.dawprojectMerges
+                == [DawprojectMergeRequestRow(path: "/tmp/back.dawproject", snapshot: nil, step: .apply, date: today)])
+        #expect(mergeCalls(f, bySnapshot) == 0 && !InterchangeCommands.madeProject(a))
+        // A record with no project ID: the snapshot holder.
+        answering(s, f, vizdawInfo(project: nil))
+        let o2 = await settled(run(InterchangeCommands.importDawproject, [file, merge], m, s, id))
+        guard case .job(_, let doc2, _) = o2 else { Issue.record("not a job: \(o2)"); return }
+        #expect(doc2 == b && bySnapshot.dawprojectMerges.map(\.step) == [.apply])
+        #expect(bySnapshot.dawprojectMerges.first?.path == "/tmp/back.dawproject")
+        #expect(bySnapshot.dawprojectMerges.first?.date == today && byID.dawprojectMerges.count == 1)
+        // `snapshot` is passed through.
+        answering(s, f, vizdawInfo())
+        let given: (String, ControlValue) = ("snapshot", .text(value: Self.eid))
+        _ = await settled(run(InterchangeCommands.importDawproject, [file, merge, given], m, s, id))
+        #expect(byID.dawprojectMerges.last?.snapshot == Self.eid)
+    }
+
+    @Test func previewSendsPreviewAndChangesNothing() async throws {
+        let (s, id, m, f) = try demo()
+        f.projectIdAnswer = Self.pid
+        answering(s, f, vizdawInfo())
+        let o = await settled(
+            run(InterchangeCommands.importDawproject, [file, merge, ("preview", .flag(value: true))], m, s, id))
+        guard case .job(_, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(doc == id && f.dawprojectMerges.map(\.step) == [.preview])
+        #expect(f.confirmedMerges.isEmpty && f.dawprojectImports.isEmpty && !m.canUndo)
+    }
+
+    @Test func mergeIntoAProjectPathOpensIt() async throws {
+        let dir = try TestSupportDir.subfolder("merge-open")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let package = dir.appendingPathComponent("Song.vizdaw")
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        var opened: [String] = []
+        var fakes: [FakeSession] = []
+        let f = demoFake()
+        let s = DocumentStore(
+            makeEmpty: { FakeSession([]) }, makeDemo: { f },
+            open: { path in
+                opened.append(path)
+                let o = demoFake()
+                fakes.append(o)
+                return o
+            })
+        defer { s.closeAll() }
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        answering(s, f, vizdawInfo())
+        let project: (String, ControlValue) = ("project", .text(value: package.path))
+        let o = await settled(run(InterchangeCommands.importDawproject, [file, merge, project], m, s, id))
+        guard case .job(_, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(opened == [package.path] && doc != id && s.model(doc) != nil)
+        #expect(fakes.first?.dawprojectMerges.map(\.step) == [.apply] && mergeCalls(f) == 0)
+        #expect(InterchangeCommands.madeProject(doc), "the channel shows its window")
+        // A refused job closes it again.
+        InterchangeCommands.jobEnded(doc, failed: true, store: s) { s.close($0) }
+        #expect(s.model(doc) == nil && s.documents.count == 1)
+        // Refused before its job: closed at once.
+        let before = s.documents.count
+        let busy = VizError.Busy(message: "Wait for the running import, export or bounce to finish.")
+        let refusing = DocumentStore(
+            makeEmpty: { FakeSession([]) }, makeDemo: { f },
+            open: { _ in
+                let o = demoFake()
+                o.mergeError = busy
+                return o
+            })
+        defer { refusing.closeAll() }
+        let rid = try #require(refusing.newDemo())
+        let rm = try #require(refusing.model(rid))
+        answering(refusing, f, vizdawInfo())
+        let r = failure(await settled(run(InterchangeCommands.importDawproject, [file, merge, project], rm, refusing, rid)))
+        #expect(r?.code == .busy && refusing.documents.count == 1 && s.documents.count == before)
+    }
+
+    /// Hostile merge arguments are `invalid_params` naming the command and
+    /// the parameter, with no session call (as 6d's S7: `run` directly).
+    @Test func mergeRefusesHostileArguments() async throws {
+        let dir = try TestSupportDir.subfolder("merge-hostile")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let package = dir.appendingPathComponent("Open.vizdaw")
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        let link = dir.appendingPathComponent("Link.vizdaw")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: package)
+        let plain = dir.appendingPathComponent("x.vizdaw")
+        try Data("not a package".utf8).write(to: plain)
+        var opened = 0
+        let f = demoFake()
+        f.savedPath = package.path
+        f.projectIdAnswer = Self.pid
+        let s = DocumentStore(
+            makeEmpty: { FakeSession([]) }, makeDemo: { f },
+            open: { _ in
+                opened += 1
+                return demoFake()
+            })
+        defer { s.closeAll() }
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        func go(_ args: [(String, ControlValue)]) async -> ControlFailure? {
+            failure(
+                await settled(
+                    InterchangeCommands.run(
+                        InterchangeCommands.importDawproject, args: args.map { ControlArg(name: $0.0, value: $0.1) },
+                        id, m, store: s)))
+        }
+        func expectInvalid(_ r: ControlFailure?, _ param: String) {
+            #expect(r?.code == .invalidParams, "\(param): \(String(describing: r))")
+            #expect(r?.message.contains("file.import_dawproject") == true && r?.message.contains("`\(param)`") == true)
+        }
+        // Not from VizDAW.
+        answering(s, f, DawprojectInfoRow(sampleRate: 48_000, tracks: 1, audioFiles: 0, fromVizdaw: false, exportId: nil))
+        let notOurs = await go([file, merge])
+        expectInvalid(notOurs, "mode")
+        #expect(
+            notOurs?.message == "file.import_dawproject: `mode` merge needs a file that came from VizDAW.")
+        answering(s, f, vizdawInfo())
+        // Already open, through a symlink.
+        let open = await go([file, merge, ("project", .text(value: link.path))])
+        expectInvalid(open, "project")
+        #expect(open?.message == "file.import_dawproject: `project` is already open; leave out project to merge into it.")
+        // Not a package.
+        let notPackage = await go([file, merge, ("project", .text(value: plain.path))])
+        expectInvalid(notPackage, "project")
+        #expect(notPackage?.message == "file.import_dawproject: `project` is not a VizDAW project.")
+        let missing = await go([file, merge, ("project", .text(value: dir.appendingPathComponent("gone.vizdaw").path))])
+        expectInvalid(missing, "project")
+        // A snapshot that is not an export ID's shape (the core checks the
+        // rest: 36 lowercase hex digits and hyphens pass here).
+        for bad in [
+            "x", "", "0F8B6F8E-3C1A-4D2E-9B7A-5E6F7A8B9C0D", Self.pid + " ", Self.pid + "0",
+            "../../../../../../../../../../../../../etc/passwd", "0f8b6f8e\u{0}3c1a-4d2e-9b7a-5e6f7a8b9c0d",
+            "0f8b6f8e-3c1a-4d2e-9b7a-5e6f7a8b9c0\u{0301}", String(repeating: "é", count: 36),
+        ] {
+            expectInvalid(await go([file, merge, ("snapshot", .text(value: bad))]), "snapshot")
+        }
+        // Merge parameters with mode new.
+        for extra: (String, ControlValue) in [
+            ("project", .text(value: package.path)), ("snapshot", .text(value: Self.eid)), ("preview", .flag(value: true)),
+        ] {
+            expectInvalid(await go([file, ("mode", .text(value: "new")), extra]), extra.0)
+        }
+        // Merge parameters with no mode, on a file not from VizDAW.
+        answering(s, f, DawprojectInfoRow(sampleRate: 48_000, tracks: 1, audioFiles: 0, fromVizdaw: false, exportId: nil))
+        expectInvalid(await go([file, ("preview", .flag(value: false))]), "preview")
+        #expect(mergeCalls(f) == 0 && dawprojectCalls(f) == 0 && opened == 0 && s.documents.count == 1)
+    }
+
+    @Test func mergeWhileTheTargetRecordsIsBusy() async throws {
+        let (s, id, m, f) = try demo()
+        f.projectIdAnswer = Self.pid
+        f.mergeError = VizError.Busy(message: "Finish or cancel the merge waiting to be confirmed.")
+        answering(s, f, vizdawInfo())
+        let r = failure(await settled(run(InterchangeCommands.importDawproject, [file, merge], m, s, id)))
+        #expect(r?.code == .busy && r?.message == "Finish or cancel the merge waiting to be confirmed.")
+        #expect(s.model(id) != nil, "an open project the command did not open stays")
+    }
+
+    @Test func todayIsLocalISO() throws {
+        // 2026-11-13 20:00 UTC.
+        let instant = Date(timeIntervalSince1970: 1_794_600_000)
+        let utc = try #require(TimeZone(identifier: "UTC"))
+        let ahead = try #require(TimeZone(secondsFromGMT: 14 * 3600))
+        #expect(MergeDate.today(instant, utc) == "2026-11-13")
+        #expect(MergeDate.today(instant, ahead) == "2026-11-14")
+    }
 }
