@@ -530,9 +530,11 @@ struct Claims {
     lanes: Claim<(u64, bool)>,
     strips: Claim<u64>,
     slots: Claim<u64>,
-    /// Each event named: the plan track of its clips and the pass of the
-    /// last of them (its [`TagKind::Pass`]; `None` for a clip of no pass).
-    events: HashMap<u64, (usize, Option<u64>)>,
+    /// Each event named: the plan track of its clips, the pass of the
+    /// last of them (its [`TagKind::Pass`]; `None` for a clip of no pass)
+    /// and the number of the `Clips` container of the first claim when it
+    /// is on a pass chain.
+    events: HashMap<u64, (usize, Option<u64>, Option<usize>)>,
     markers: HashSet<u64>,
     ignored: usize,
 }

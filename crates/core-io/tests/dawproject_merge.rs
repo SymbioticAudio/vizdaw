@@ -3181,6 +3181,23 @@ fn a_renamed_track_and_a_moved_marker() {
         vec![(0, "Verse".to_owned()), (2 * BAR + Q, "Chorus".to_owned())]
     );
     assert!(rules::validate(h.doc()).is_empty());
+    // Task 7 fix round (review I3): the same file merged again adds no
+    // marker. Without tags, ours' moved Chorus is an echo of theirs' new
+    // one (matching.rs), not base's Chorus moved here.
+    let depth = h.undo_depth();
+    let json = to_json(h.doc()).unwrap();
+    let again = plan_of(&t, &path, h.doc());
+    assert!(
+        again
+            .decisions
+            .iter()
+            .all(|d| matches!(d.outcome, Outcome::Same | Outcome::Ours)),
+        "{:#?}",
+        again.decisions
+    );
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), depth, "no step");
+    assert_eq!(to_json(h.doc()).unwrap(), json, "no marker added");
 }
 
 /// Task 7 carry-over (Task 6b re-review): the apply (and so the preview's
@@ -3217,6 +3234,105 @@ fn a_cancelled_apply_stops_and_aborts_cleanly() {
         &AtomicBool::new(true),
     );
     assert!(matches!(r, Err(core_io::IoError::Cancelled)));
+}
+
+/// Stops at its `at`-th check (counting from 1); never when `at` is 0.
+struct StopAt {
+    at: usize,
+    seen: std::cell::Cell<usize>,
+}
+
+impl core_io::dawproject::merge::apply::Stop for StopAt {
+    fn stopped(&self) -> bool {
+        let n = self.seen.get().saturating_add(1);
+        self.seen.set(n);
+        self.at != 0 && n >= self.at
+    }
+}
+
+/// Task 7 fix round (review Minor, cancel): a cancel at any of the apply's
+/// checks, from the first to the last (after the edits of every step but
+/// the deletions), stops it; aborting then leaves the project unchanged.
+#[test]
+fn a_merge_cancelled_partway_aborts_to_ours() {
+    use core_io::dawproject::merge::apply::{CANCELLED, apply_merge_until};
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    // Every step has work: a bus and a track added (steps 1 and 2), a
+    // note moved (3), a level (4), and Keys deleted (6).
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let r = h
+            .execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq: i.seq,
+                    name: "Lead".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let lead = created(&r, |id| match id {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        });
+        add_note(h, i.seq, lead, 0, 72);
+        run(
+            h,
+            Command::Mixer(MixerCmd::AddBus {
+                name: "Hall".into(),
+                index: None,
+            }),
+        );
+        set_gain(h, i.bass_strip, -3.0);
+        set_pitch(h, i.keys_note, 63);
+        run(
+            h,
+            Command::Lane(LaneCmd::Remove {
+                seq: i.seq,
+                lane: i.keys,
+            }),
+        );
+    });
+    let th = theirs_doc(&t, &theirs_doc_);
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
+    assert!(p.decisions.len() >= 4, "{:#?}", p.decisions);
+    let before = to_json(&t.base_doc).unwrap();
+    // The checks an uncancelled run makes.
+    let count = StopAt {
+        at: 0,
+        seen: std::cell::Cell::new(0),
+    };
+    let mut h = History::new(t.base_doc.clone());
+    h.begin(LABEL).unwrap();
+    apply_merge_until(&mut h, &p, DATE, &mut Report::default(), &count).expect("applies");
+    h.abort().unwrap();
+    let checks = count.seen.get();
+    // At least one check per decision in each of steps 3, 4 and 6.
+    assert!(
+        checks >= 3 * p.decisions.len(),
+        "{checks} checks for {} decisions",
+        p.decisions.len()
+    );
+    let mut changed = 0;
+    for at in 1..=checks {
+        let stop = StopAt {
+            at,
+            seen: std::cell::Cell::new(0),
+        };
+        let mut h = History::new(t.base_doc.clone());
+        h.begin(LABEL).unwrap();
+        let e = apply_merge_until(&mut h, &p, DATE, &mut Report::default(), &stop)
+            .expect_err("cancelled");
+        assert!(e.to_string().contains(CANCELLED), "check {at}: {e}");
+        if to_json(h.doc()).unwrap() != before {
+            changed += 1;
+        }
+        h.abort().unwrap();
+        assert_eq!(to_json(h.doc()).unwrap(), before, "check {at}");
+        assert_eq!(h.undo_depth(), 0, "check {at}");
+    }
+    // Most cancels stop a merge that had already changed something.
+    assert!(changed > checks / 2, "{changed} of {checks}");
 }
 
 /// Task 6 carry-over: theirs moves region C inside "Clip" (its only use,
@@ -3535,6 +3651,7 @@ stripped!(
     a_faster_tempo_keeps_theirs_crossfades,
     a_moved_crossfaded_region_keeps_its_crossfade,
     a_renamed_track_and_a_moved_marker,
+    a_merge_cancelled_partway_aborts_to_ours,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,
     both_changed_notes_become_an_alternate_take,
@@ -3581,3 +3698,25 @@ stripped!(
     a_use_on_an_inactive_take_counts_as_elsewhere,
     an_edit_that_would_change_a_sequence_length_makes_private_copies,
 );
+
+/// Task 7 fix round (review Minor): every test of this file runs in the
+/// stripped variants too, so a new test cannot be left out of the list.
+#[test]
+fn every_test_runs_stripped() {
+    let src = include_str!("dawproject_merge.rs");
+    let at = src.rfind("\nstripped!(").expect("the list");
+    let list: std::collections::BTreeSet<&str> = src[at..]
+        .split(['(', ')', ',', '\n', ' ', ';'])
+        .filter(|w| !w.is_empty() && *w != "stripped!" && !w.starts_with('/'))
+        .collect();
+    let mut missing = Vec::new();
+    let mut rest = src;
+    while let Some(i) = rest.find("#[test]\nfn ") {
+        rest = &rest[i + "#[test]\nfn ".len()..];
+        let name = rest.split('(').next().unwrap_or_default();
+        if name != "every_test_runs_stripped" && !list.contains(name) {
+            missing.push(name.to_owned());
+        }
+    }
+    assert!(missing.is_empty(), "not in `stripped!`: {missing:?}");
+}

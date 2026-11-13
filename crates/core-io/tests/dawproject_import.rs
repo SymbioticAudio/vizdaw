@@ -2006,6 +2006,35 @@ mod origins {
             let n = item(&t.a.report, ItemKind::Note, TAGS_IGNORED).map_or(0, |i| i.count);
             assert_eq!(n, ignored, "{what}");
         }
+        // Task 7 fix round (review I1): claims are per track, so a copy of
+        // the use's passes in a second clip container on the same track is
+        // ignored and counted, though it is on its own container's chain.
+        let lane = |clips: &[(u32, &str)]| -> String {
+            let s: String = clips
+                .iter()
+                .map(|(at, c)| {
+                    format!(
+                        r#"<Clip time="{at}" duration="1" comment="{c}"><Notes><Note time="0" duration="0.5" channel="0" key="60" vel="0.5"/></Notes></Clip>"#
+                    )
+                })
+                .collect();
+            format!(r#"<Clips track="ta">{s}</Clips>"#)
+        };
+        let passes = [(0, "vz:e5 vz:p0"), (8, "vz:e5 vz:p1")];
+        let xml = project_xml(
+            r#"<Track id="ta" name="A" comment="vz:t1" contentType="notes"/>"#,
+            &format!(
+                r#"<Lanes timeUnit="beats"><Lanes track="ta">{}{}</Lanes></Lanes>"#,
+                lane(&passes),
+                lane(&passes)
+            ),
+        );
+        let pkg = small(dir.path(), &xml, None);
+        let t = tagged(&pkg, &BTreeMap::new(), None);
+        let fives = t.origins.events.values().filter(|v| **v == 5).count();
+        assert_eq!(fives, 2, "a copy of the passes in a second container");
+        let n = item(&t.a.report, ItemKind::Note, TAGS_IGNORED).map_or(0, |i| i.count);
+        assert_eq!(n, 2, "a copy of the passes in a second container");
     }
 
     /// Task 7 carry-over (Task 2 re-review): 6d's plain import of a file

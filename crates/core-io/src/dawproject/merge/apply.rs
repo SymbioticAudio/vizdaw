@@ -108,16 +108,31 @@ pub fn apply_merge(
 /// What a cancelled [`apply_merge_until`] answers.
 pub const CANCELLED: &str = "the merge was cancelled";
 
+/// What [`apply_merge_until`] asks, at each of its checks, whether to stop.
+/// A job's cancel flag is one; a test can stop at a chosen check.
+pub trait Stop {
+    /// Whether to stop now.
+    fn stopped(&self) -> bool;
+}
+
+impl Stop for AtomicBool {
+    fn stopped(&self) -> bool {
+        self.load(Ordering::Relaxed)
+    }
+}
+
 /// [`apply_merge`], stopping with [`CANCELLED`] (a `ModelError`) when
-/// `cancel` is set, looked at before each matched track's decision and
-/// each track's edit, so `decide::plan`'s dry run and a merge job can stop
-/// midway (Task 7). The caller aborts its transaction.
+/// `cancel` is set, looked at before each step, each added bus or track
+/// batch, each plug-in state, each matched track's decision, each track's
+/// edit and conflict take, each strip decision and each deletion, so
+/// `decide::plan`'s dry run and a merge job can stop midway (Task 7). The
+/// caller aborts its transaction.
 pub fn apply_merge_until(
     h: &mut History,
     plan: &MergePlan,
     date: &str,
     report: &mut Report,
-    cancel: &AtomicBool,
+    cancel: &dyn Stop,
 ) -> Result<(), ModelError> {
     let seq = SeqId(plan.base.seq);
     let (raw, ids) =
@@ -127,6 +142,7 @@ pub fn apply_merge_until(
     let mut out = Out::default();
 
     // 1. The buses theirs added.
+    cx.stop()?;
     let mut buses = cx.matched_buses();
     let mut states = Vec::new();
     let added_buses: Vec<(usize, usize)> = cx
@@ -144,6 +160,7 @@ pub fn apply_merge_until(
         }
     }
     // 2. The tracks theirs added (a split track is one).
+    cx.stop()?;
     let added_tracks: BTreeSet<usize> = cx
         .decided(|u| *u == Unit::Track, Outcome::Added)
         .into_iter()
@@ -156,24 +173,29 @@ pub fn apply_merge_until(
         // master instead and makes no send to it (`decide` lists both).
         let absent = cx.deleted_buses();
         let added = apply_tracks(h, &cx.th.imp, seq, &which, &mut buses, &absent)?;
+        cx.stop()?;
         arrange_tracks(h, &cx.th.imp, seq, &which, &added, cx.origin, &mut lines)?;
         states.extend(added.states.iter().cloned());
         out.report.merge(lines);
     }
     for (slot, bytes) in states {
+        cx.stop()?;
         run(h, Command::Mixer(MixerCmd::SetPluginState { slot, bytes }))?;
     }
 
     // 3. Matched tracks.
     tracks(h, &cx, date, &mut out)?;
     // 4. Strips.
+    cx.stop()?;
     strips(h, &cx)?;
     // 5. Markers, maps and song info.
+    cx.stop()?;
     markers(h, &cx)?;
     maps(h, &cx)?;
     // Theirs' crossfades placed in step 3, against theirs' tempo map now.
     reflag(h, &out.flagged)?;
     // 6. Deletions.
+    cx.stop()?;
     deletions(h, &cx)?;
 
     let counts = report.summary;
@@ -250,13 +272,13 @@ struct Cx<'a> {
     /// snapshot.
     refine: bool,
     /// Set to stop ([`apply_merge_until`]).
-    cancel: &'a AtomicBool,
+    cancel: &'a dyn Stop,
 }
 
 impl<'a> Cx<'a> {
     /// [`CANCELLED`] once `cancel` is set.
     fn stop(&self) -> Result<(), ModelError> {
-        if self.cancel.load(Ordering::Relaxed) {
+        if self.cancel.stopped() {
             Err(ModelError::invalid(CANCELLED))
         } else {
             Ok(())
@@ -269,7 +291,7 @@ impl<'a> Cx<'a> {
         normal: &'a Projection,
         ids: &'a Identity,
         seq: SeqId,
-        cancel: &'a AtomicBool,
+        cancel: &'a dyn Stop,
     ) -> Cx<'a> {
         let th = &plan.theirs;
         let mut srow = [
@@ -524,6 +546,7 @@ fn tracks(h: &mut History, cx: &Cx<'_>, date: &str, out: &mut Out) -> Result<(),
     out.copies.extend(shared.copies);
     out.elsewhere.extend(shared.elsewhere);
     for (lane, parts) in takes {
+        cx.stop()?;
         conflict_take(h, cx, lane, &parts, date, out)?;
     }
     Ok(())
@@ -1304,35 +1327,8 @@ fn apply_edit(
         )?;
         // A new region crossfading into one of ours that stays loses its
         // flag (the model's rule for a lone copy, plan 6c); theirs has the
-        // crossfade, so it is set again (Task 7).
-        let made: Vec<EventId> = r
-            .created
-            .iter()
-            .filter_map(|i| match i {
-                AnyId::Event(e) => Some(*e),
-                _ => None,
-            })
-            .collect();
-        if made.len() == edit.insert.len() {
-            for (event, spec) in made.into_iter().zip(edit.insert) {
-                if crossfaded(&spec) {
-                    out.flagged.push((event, spec.clone()));
-                }
-                let lost = crossfaded(&spec)
-                    && h.doc().event(event).is_ok_and(|(e, _)| {
-                        !matches!(
-                            e.body,
-                            EventBody::AudioRegion {
-                                crossfade: true,
-                                ..
-                            }
-                        )
-                    });
-                if lost {
-                    run(h, Command::Event(EventCmd::Replace { event, spec }))?;
-                }
-            }
-        }
+        // crossfade, so [`reflag`] sets it again (Task 7).
+        flag_made(&r, &edit.insert, &mut out.flagged)?;
     }
     for (event, spec) in replaced {
         let now = h.doc().event(event).ok().map(|(e, _)| {
@@ -1351,6 +1347,41 @@ fn apply_edit(
 
 /// Sets again each of `flagged`'s crossfades a later command settled away
 /// (a region placed before the tempo map it was cut for, Task 7).
+/// Records each crossfaded region of `specs` that the insert `r` made, for
+/// [`reflag`]. The insert makes one event per spec, in order; anything
+/// else is refused rather than skipped (Task 7 fix round 1).
+fn flag_made(
+    r: &CmdReport,
+    specs: &[EventSpec],
+    flagged: &mut Vec<(EventId, EventSpec)>,
+) -> Result<(), ModelError> {
+    let made: Vec<EventId> = r
+        .created
+        .iter()
+        .filter_map(|i| match i {
+            AnyId::Event(e) => Some(*e),
+            _ => None,
+        })
+        .collect();
+    if made.len() != specs.len() {
+        return Err(ModelError::invalid(
+            "the merge's insert made a different number of events",
+        ));
+    }
+    for (event, spec) in made.into_iter().zip(specs) {
+        if matches!(
+            spec.body,
+            EventBody::AudioRegion {
+                crossfade: true,
+                ..
+            }
+        ) {
+            flagged.push((event, spec.clone()));
+        }
+    }
+    Ok(())
+}
+
 fn reflag(h: &mut History, flagged: &[(EventId, EventSpec)]) -> Result<(), ModelError> {
     for (event, spec) in flagged {
         let lost = h.doc().event(*event).is_ok_and(|(e, _)| {
@@ -1548,19 +1579,7 @@ fn conflict_take(
         )?;
         // Theirs' crossfades in the take, set again once the tempo map is
         // theirs ([`reflag`]).
-        let made = r.created.iter().filter_map(|i| match i {
-            AnyId::Event(e) => Some(*e),
-            _ => None,
-        });
-        out.flagged.extend(made.zip(specs).filter(|(_, s)| {
-            matches!(
-                s.body,
-                EventBody::AudioRegion {
-                    crossfade: true,
-                    ..
-                }
-            )
-        }));
+        flag_made(&r, &specs, &mut out.flagged)?;
     }
     run(
         h,
@@ -1601,6 +1620,7 @@ fn strips(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
     // projection's order.
     let mut slots: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
     for d in &cx.plan.decisions {
+        cx.stop()?;
         // A `DeletedHere` output (theirs aimed at a bus ours deleted) runs
         // nothing: ours' output stays as it is (VizDAW wins).
         if d.outcome != Outcome::Theirs {
@@ -2006,6 +2026,7 @@ fn deletions(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
         }
     }
     for (lane, parts) in gone {
+        cx.stop()?;
         let whole = parts.len() == lane_rows(cx, lane).len()
             && parts.iter().all(|(_, o)| *o == Outcome::Removed);
         if whole {
@@ -2034,6 +2055,7 @@ fn deletions(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
         }
     }
     for d in &cx.plan.decisions {
+        cx.stop()?;
         if d.unit == Unit::Bus
             && d.outcome == Outcome::Removed
             && let Some(strip) = cx

@@ -459,15 +459,15 @@ pub fn vizdaw_only(doc: &Document, seq: SeqId) -> String {
     vizdaw_only_except(doc, seq, &Except::default())
 }
 
-/// What [`vizdaw_only_except`] leaves out: what a merge changes by design.
+/// What [`vizdaw_only_except`] leaves out: what a merge changes by design,
+/// each checked on its own by the caller.
 #[derive(Debug, Clone, Default)]
 pub struct Except {
-    /// The sequences the exported one plays through its uses (Ruling 8
-    /// edits them, or makes private copies of them).
+    /// Sequences the exported one plays through its uses that the merge
+    /// edited, or made as private copies (Ruling 8).
     pub seqs: std::collections::BTreeSet<SeqId>,
-    /// Whether to leave out the inactive takes named "Returned …" (the
-    /// conflict takes a merge adds, Ruling 6).
-    pub returned_takes: bool,
+    /// The conflict takes the merge added (Ruling 6).
+    pub takes: std::collections::BTreeSet<core_model::ids::TakeId>,
 }
 
 /// Every sequence `seq` plays through its tracks' active takes, nested
@@ -511,7 +511,7 @@ pub fn vizdaw_only_except(doc: &Document, seq: SeqId, except: &Except) -> String
                 .takes
                 .iter()
                 .filter(|t| t.id != l.active_take)
-                .filter(|t| !(except.returned_takes && t.name.starts_with("Returned ")))
+                .filter(|t| !except.takes.contains(&t.id))
                 .collect();
             let has = !inactive.is_empty()
                 || !l.input_fx.is_empty()

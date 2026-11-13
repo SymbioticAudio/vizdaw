@@ -79,6 +79,8 @@ impl<'p> Tl<'_, '_, 'p> {
         let track = self.track_of(top.head.track.as_deref()).flatten();
         let mut stack: Vec<(&'p DpTimeline, Frame, Option<usize>)> =
             top.items.iter().rev().map(|t| (t, frame, track)).collect();
+        // Each `Clips` container's number, for the pass chains' claims.
+        let mut container = 0usize;
         while let Some((t, f, track)) = stack.pop() {
             self.tick()?;
             if self.budget == 0 {
@@ -97,10 +99,12 @@ impl<'p> Tl<'_, '_, 'p> {
                 }
                 DpTimeline::Clips(c) => {
                     let chains = pass_chains(&c.clips);
+                    container = container.saturating_add(1);
                     for (k, clip) in c.clips.iter().enumerate() {
                         self.tick()?;
+                        let chain = chains.get(&k).map(|&on| (container, on));
                         match track {
-                            Some(i) => self.top_clip(clip, &f, i, chains.get(&k).copied())?,
+                            Some(i) => self.top_clip(clip, &f, i, chain)?,
                             None => self.left_out(NO_TRACK),
                         }
                     }
@@ -114,14 +118,15 @@ impl<'p> Tl<'_, '_, 'p> {
     /// A clip on track `track`'s top level: a candidate for sharing, or
     /// straight onto the track.
     ///
-    /// `chain`: for a clip with an event and a pass tag, whether it is on
-    /// its use's chain of passes in its container ([`pass_chains`]).
+    /// `chain`: for a clip with an event and a pass tag, its container's
+    /// number and whether it is on its use's chain of passes in that
+    /// container ([`pass_chains`]).
     pub(super) fn top_clip(
         &mut self,
         c: &'p DpClip,
         f: &Frame,
         track: usize,
-        chain: Option<bool>,
+        chain: Option<(usize, bool)>,
     ) -> Result<(), IoError> {
         let n = match self.clips.get_mut(track) {
             Some(k) => {
@@ -137,7 +142,10 @@ impl<'p> Tl<'_, '_, 'p> {
         // order (`use_clips`). A clip's first pass tag counts; any other is
         // ignored and counted. Within one container the passes must rise
         // with time ([`pass_chains`]): a copy of a pass off that chain is
-        // ignored and counted wherever it sits in the file.
+        // ignored and counted wherever it sits in the file. Claims are per
+        // track, so the chain counts only in the container that made the
+        // use's first claim: a copy of the passes in another container on
+        // the same track is ignored and counted.
         let comment = c.named.comment.as_deref();
         let passes: Vec<u64> = comment
             .map(|c| strip_tags(c).1)
@@ -159,17 +167,25 @@ impl<'p> Tl<'_, '_, 'p> {
         }
         let tag = named.map(|n| n.number()).filter(|&n| {
             let claims = &mut self.cx.claims;
-            if pass.is_some() && chain == Some(false) {
+            if pass.is_some() && chain.is_some_and(|(_, on)| !on) {
                 claims.ignored = claims.ignored.saturating_add(1);
                 return false;
             }
+            let here = chain.map(|(k, _)| k);
             match claims.events.get_mut(&n) {
                 None => {
-                    claims.events.insert(n, (track, pass));
+                    claims.events.insert(n, (track, pass, here));
                     true
                 }
-                Some((t, last @ Some(_)))
-                    if *t == track && (pass > *last || (chain == Some(true) && pass.is_some())) =>
+                Some((t, last @ Some(_), k))
+                    if *t == track
+                        && pass.is_some()
+                        && match (*k, here) {
+                            // The chain of the claiming container: on it,
+                            // whatever its file order.
+                            (Some(k), Some(h)) => k == h,
+                            _ => pass > *last,
+                        } =>
                 {
                     *last = (*last).max(pass);
                     true
