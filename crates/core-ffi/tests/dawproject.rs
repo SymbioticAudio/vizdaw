@@ -1708,6 +1708,7 @@ fn import_not_enough_space_refuses() {
 }
 
 /// An 8-bit mono WAV at 8 kHz holding `frames` frames of silence.
+#[cfg(target_os = "macos")]
 fn wav8(frames: u32) -> Vec<u8> {
     let mut w = b"RIFF".to_vec();
     w.extend_from_slice(&(36 + frames).to_le_bytes());
@@ -1727,6 +1728,7 @@ fn wav8(frames: u32) -> Vec<u8> {
 
 /// A mono 16-bit 48 kHz FLAC of `blocks` silent blocks of 4096 frames
 /// (verbatim subframes) whose header gives no length (total samples 0).
+#[cfg(target_os = "macos")]
 fn flac_of_unknown_length(blocks: u8) -> Vec<u8> {
     fn crc8(b: &[u8]) -> u8 {
         b.iter().fold(0u8, |mut c, x| {
