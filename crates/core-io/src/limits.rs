@@ -49,6 +49,12 @@ pub const MAX_ENTRY_NAME_BYTES: usize = 1024;
 pub const MAX_XML_RATIO: u64 = 200;
 /// Largest `project.xml`, unpacked, in bytes (§6.5).
 pub const MAX_PROJECT_XML_BYTES: u64 = 256 * 1024 * 1024;
+/// Most bytes the parse of `project.xml` holds at once: its text plus its
+/// tree, so the tree may use at most
+/// `min(MAX_XML_TREE_BYTES, MAX_PARSE_BYTES − text length)` (final review:
+/// a text near [`MAX_PROJECT_XML_BYTES`] is mostly white space or comments,
+/// which carry nothing).
+pub const MAX_PARSE_BYTES: usize = 256 * 1024 * 1024;
 /// Largest `metadata.xml`, unpacked, in bytes (§6.5).
 pub const MAX_METADATA_XML_BYTES: u64 = 1024 * 1024;
 /// Largest `vizdaw/record.json`, unpacked, in bytes (§6.5).
@@ -66,8 +72,10 @@ pub const MAX_XML_NODES: usize = 4_000_000;
 pub const MAX_XML_TREE_BYTES: usize = 128 * 1024 * 1024;
 /// Most bytes one DAWproject read holds at once in all, counted as it
 /// grows: the XML tree plus the typed model built from it, then (the tree
-/// dropped) the model plus the ID check. With the XML text, which is outside
-/// it, a read stays within 256 MiB for XML under 64 MiB.
+/// dropped) the model plus the ID check. The XML text is outside it, but is
+/// dropped before the model is built, and while it is held it counts
+/// against [`MAX_PARSE_BYTES`] with the tree, so a read stays within about
+/// 256 MiB whatever the text's size.
 pub const MAX_MODEL_BYTES: usize = 192 * 1024 * 1024;
 /// Most attributes on one XML element (§6.5).
 pub const MAX_XML_ATTRS: usize = 64;

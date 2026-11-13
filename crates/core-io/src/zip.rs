@@ -284,7 +284,10 @@ impl ZipReader {
 
     /// Inflates `e` (CRC and size verified). Refused with `TOO_LARGE` past `max` bytes (S12), and,
     /// with `ratio`, when declared or actual size / compressed > ratio.
-    /// The buffer grows to at most `min(max, declared) + 64 KiB`.
+    /// The buffer grows to at most `min(max, declared) + 64 KiB`. With
+    /// `ratio`, the declared size (by then checked against `max` and the
+    /// ratio of the real packed bytes) is reserved once at the first chunk,
+    /// so the buffer does not double past need (final review M4).
     pub fn read(
         &self,
         e: &EntryInfo,
@@ -294,11 +297,16 @@ impl ZipReader {
     ) -> Result<Vec<u8>, IoError> {
         let cap =
             usize::try_from(max.min(e.size).saturating_add(CHUNK as u64)).unwrap_or(usize::MAX);
+        let declared = usize::try_from(max.min(e.size)).unwrap_or(usize::MAX);
         let mut out = Vec::new();
         self.stream(e, Some(max), ratio, cancel, &mut |chunk| {
             let need = out.len().saturating_add(chunk.len());
             if need > out.capacity() {
-                let want = out.capacity().saturating_mul(2).clamp(need, cap.max(need));
+                let want = if out.capacity() == 0 && ratio.is_some() {
+                    declared.max(need)
+                } else {
+                    out.capacity().saturating_mul(2).clamp(need, cap.max(need))
+                };
                 out.try_reserve_exact(want.saturating_sub(out.len()))
                     .map_err(|_| IoError::Refused(TOO_LARGE.to_owned()))?;
             }

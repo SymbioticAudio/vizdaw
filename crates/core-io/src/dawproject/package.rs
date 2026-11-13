@@ -219,7 +219,14 @@ pub fn open(
         Some(limits.max_ratio),
         cancel,
     )?;
-    let tree = Tree::parse(&text, limits, cancel)?;
+    // The text and the tree share one parse budget.
+    let parse = PackageLimits {
+        max_tree_bytes: limits
+            .max_tree_bytes
+            .min(crate::limits::MAX_PARSE_BYTES.saturating_sub(text.len())),
+        ..*limits
+    };
+    let tree = Tree::parse(&text, &parse, cancel)?;
     drop(text);
     let project = project_of(tree, &mut report)?;
     stop(cancel)?;

@@ -906,6 +906,58 @@ fn xml_tree_bytes() {
 }
 
 #[test]
+fn the_text_counts_against_the_parse_budget() {
+    // Final review: the text and the tree share one 256 MiB parse budget,
+    // and the text's buffer is reserved once, so a read at the full text
+    // size peaks at about 256 MiB. Comments fill the text: they carry
+    // nothing and the tree does not hold them.
+    let dir = tempfile::tempdir().unwrap();
+    let full = limits::MAX_PROJECT_XML_BYTES as usize - MIB;
+    let padded = |body: &str| {
+        let head =
+            format!("<Project version=\"1.0\"><Application name=\"t\" version=\"1\"/>{body}<!--");
+        let tail = "--></Project>";
+        let fill = full - head.len() - tail.len();
+        let mut s = String::with_capacity(full);
+        s.push_str(&head);
+        s.extend(std::iter::repeat_n(' ', fill));
+        s.push_str(tail);
+        assert_eq!(s.len(), full);
+        s
+    };
+    let bound = limits::MAX_PARSE_BYTES + 16 * MIB;
+    // Mostly comment, a small tree: it reads.
+    let text = padded("");
+    let path = stored(dir.path(), "Quiet", &[("project.xml", text.as_bytes())]);
+    drop(text);
+    let (r, seen) = measure(|| open_with(&path, &PackageLimits::default()).map(|_| ()));
+    println!(
+        "{} MiB of comment: peak {} MiB",
+        full / MIB,
+        seen.peak / MIB
+    );
+    r.expect("a small tree in a large text reads");
+    assert!(seen.peak < bound, "peak {} MiB", seen.peak / MIB);
+    std::fs::remove_file(&path).unwrap();
+    // A tree that fits on its own (4 000 000 nodes, as in `xml_tree_bytes`)
+    // but not beside the text: refused, within the budget.
+    let nodes = "<a/>".repeat(limits::MAX_XML_NODES - 8);
+    let text = padded(&nodes);
+    drop(nodes);
+    let path = stored(dir.path(), "Loud", &[("project.xml", text.as_bytes())]);
+    drop(text);
+    let (r, seen) = measure(|| open_with(&path, &PackageLimits::default()));
+    println!(
+        "{} MiB with 4M nodes: peak {} MiB",
+        full / MIB,
+        seen.peak / MIB
+    );
+    assert!(refused(r).contains("too many parts"));
+    assert!(seen.peak < bound, "peak {} MiB", seen.peak / MIB);
+    assert_eq!(limits::MAX_PARSE_BYTES, 256 * MIB);
+}
+
+#[test]
 fn xml_tree_bytes_while_growing() {
     // CDATA text is out of sight of the pass that sizes the tree, so its
     // arena and text table grow as the parse goes. A growing table holds

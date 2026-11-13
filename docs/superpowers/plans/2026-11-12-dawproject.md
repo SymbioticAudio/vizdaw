@@ -403,7 +403,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - entry names of at most 1 024 bytes;
     - `project.xml` at most 256 MiB; `metadata.xml` at most 1 MiB; `vizdaw/record.json` at most 256 MiB; a state file at most 64 MiB;
     - XML at most 200:1, by declared and by actual inflated size;
-    - XML depth 256; 4 000 000 nodes and 128 MiB of tree (arena and nodes, counted as they grow; past either, "it has too many parts"); 64 attributes per element. So a parse holds at most the XML text (256 MiB) plus 128 MiB, and the hostile-case budget is "under 2 s and 256 MiB" for fuzz cases, whose XML is under 64 MiB (L7);
+    - XML depth 256; 4 000 000 nodes and 128 MiB of tree (arena and nodes, counted as they grow; past either, "it has too many parts"); 64 attributes per element. So a parse holds at most the XML text plus its tree, which share one 256 MiB budget (`MAX_PARSE_BYTES`: the tree gets at most `min(128 MiB, 256 MiB − text)`, final review), and the hostile-case budget is "under 2 s and 256 MiB" for fuzz cases, whose XML is under 64 MiB (L7);
     - attribute and text values at most 64 KiB (`MAX_TEXT_BYTES`);
     - numbers at most 64 characters;
     - timeline nesting (clips in clips, warps, note children, reference chains) at most 16.
