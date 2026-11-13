@@ -221,6 +221,13 @@ fn apply_mix(
     Ok(made)
 }
 
+/// Records the effects of `mix` that VizDAW cannot host, against `strip`.
+fn unhosted(strip: StripId, mix: &Mix, o: &mut Origins) {
+    if !mix.unhosted.is_empty() {
+        o.unhosted.insert(strip, mix.unhosted.clone());
+    }
+}
+
 /// Records the origins of the slots `apply_mix` made from `mix`.
 fn slot_origins(mix: &Mix, made: &MixSlots, o: &mut Origins) {
     if let (Some(id), Some(tag)) = (made.eq, mix.eq.as_ref().and_then(|s| s.tag)) {
@@ -435,6 +442,7 @@ pub fn apply_tagged(
                 false,
                 &mut states,
             )?;
+            unhosted(strip, &t.mix, &mut origins);
             if first.is_none() {
                 if let Some(tag) = t.strip_tag {
                     origins.strips.insert(strip, tag);
@@ -468,6 +476,7 @@ pub fn apply_tagged(
     if let (Some(mix), Some(_)) = (&plan.builtin, builtin) {
         let strip = strip_of(h, StripKind::BuiltinSynth)?;
         let made = apply_mix(h, strip, mix, &buses, false, false, &mut states)?;
+        unhosted(strip, mix, &mut origins);
         slot_origins(mix, &made, &mut origins);
         plugins = plugins.saturating_add(slots(mix));
         for ti in on_builtin {
@@ -481,12 +490,14 @@ pub fn apply_tagged(
         if let Some(tag) = b.tag {
             origins.strips.insert(id, tag);
         }
+        unhosted(id, &b.mix, &mut origins);
         slot_origins(&b.mix, &made, &mut origins);
         placed.buses.push((id, made));
         plugins = plugins.saturating_add(slots(&b.mix));
     }
     let master = h.doc().mixer().master();
     let made = apply_mix(h, master, &plan.master, &buses, true, true, &mut states)?;
+    unhosted(master, &plan.master, &mut origins);
     slot_origins(&plan.master, &made, &mut origins);
     placed.master = (master, made);
     plugins = plugins.saturating_add(slots(&plan.master));

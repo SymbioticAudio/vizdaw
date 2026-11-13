@@ -23,7 +23,9 @@
 //!
 //! [`Projection`]: super::record::Projection
 
+pub mod decide;
 pub mod matching;
+pub mod text;
 pub mod theirs;
 
 use super::export::RegionGain;

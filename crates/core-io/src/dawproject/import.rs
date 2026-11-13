@@ -118,6 +118,10 @@ pub struct Origins {
     pub markers: Vec<Option<u64>>,
     /// Each new plug-in slot: its `vz:d` / `vz:q` instance there.
     pub slots: BTreeMap<PluginInstanceId, u64>,
+    /// Each new strip whose file channel named effects VizDAW cannot host
+    /// here (VST plug-ins, or ones not installed): their names (plan 6e
+    /// Ruling 10).
+    pub unhosted: BTreeMap<StripId, Vec<String>>,
 }
 
 /// A mapped import: what [`apply`] will do, and the report so far (the
@@ -294,6 +298,9 @@ struct Mix {
     sends: Vec<SendPlan>,
     eq: Option<SlotPlan>,
     inserts: Vec<SlotPlan>,
+    /// The effects the file names that VizDAW cannot host here (VST
+    /// plug-ins, or ones not installed), by name (plan 6e Ruling 10).
+    unhosted: Vec<String>,
 }
 
 impl Mix {
@@ -312,6 +319,7 @@ impl Mix {
         Mix {
             eq: self.eq.as_ref().map(SlotPlan::untagged),
             inserts: self.inserts.iter().map(SlotPlan::untagged).collect(),
+            unhosted: Vec::new(),
             ..self.clone()
         }
     }
@@ -1586,6 +1594,9 @@ impl<'a, 'p> Cx<'a, 'p> {
                             strip_tags(c).1.iter().any(|(k, _)| *k == TagKind::Eq)
                         });
                         if let Some(slot) = self.slot(d)? {
+                            if !(self.env.installed)(slot.plugin.format, &slot.plugin.id) {
+                                mix.unhosted.push(name.clone());
+                            }
                             let at = if eq_tag && mix.eq.is_none() {
                                 mix.eq = Some(slot);
                                 timeline::SlotAt::Eq
@@ -1599,6 +1610,7 @@ impl<'a, 'p> Cx<'a, 'p> {
                         }
                     }
                     DpDeviceKind::Vst2 | DpDeviceKind::Vst3 => {
+                        mix.unhosted.push(name.clone());
                         self.add(ItemKind::LeftOut, VST, Some(name));
                     }
                     kind => self.builtin_device(BUILTIN_EFFECTS, kind, owner, &d.settings),

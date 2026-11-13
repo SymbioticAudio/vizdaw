@@ -314,6 +314,19 @@ fn parse(xml: &str) -> Tree {
     .expect("parses")
 }
 
+/// `xml` (a project.xml) read back as a project.
+pub fn project_of(xml: &str) -> DpProject {
+    read_project(&parse(xml), &mut Report::default()).expect("reads")
+}
+
+/// `doc`'s `seq` as the harness exports it, read back: its project and
+/// metadata (to move parts of it into a returned file).
+pub fn exported(doc: &Document, seq: SeqId) -> (DpProject, DpMetaData) {
+    let x = trip(doc, seq).export;
+    let metadata = read_metadata(&parse(&x.metadata_xml), &mut Report::default());
+    (project_of(&x.project_xml), metadata)
+}
+
 static RETURNS: AtomicUsize = AtomicUsize::new(0);
 
 /// The returned file: `t.export`'s project.xml and metadata.xml read back,
