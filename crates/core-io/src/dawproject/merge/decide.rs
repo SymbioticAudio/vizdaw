@@ -40,6 +40,12 @@
 //!   own length or with play quantize (the reason is in the detail): the
 //!   export's tick transform has no inverse. Theirs' notes and regions on
 //!   such a track are a take conflict instead ([`text::CONFLICT_TAKE`]);
+//! - theirs' curves on sends and plug-in parameters when the file was
+//!   matched without VizDAW's tags (a track or strip paired by name or
+//!   order, [`text::CURVES_UNMATCHED`]): ours' stay as they are (Task 7
+//!   case B rulings);
+//! - theirs' curves whose strip, send or plug-in ours does not hold
+//!   ([`text::missing_target`]);
 //! - theirs' instrument swap ([`Unit::Instrument`]);
 //! - a device state theirs dropped (no command clears one).
 //!
@@ -1574,10 +1580,21 @@ impl<'a> Decider<'a> {
                 (None, None) => true,
                 _ => false,
             };
+            let what = format!("Track '{name}': {} automation", target_kind(target));
+            // Task 7 case B rulings: matched by name or order, a send's or
+            // plug-in's curve may be another's; theirs' change is listed and
+            // ours' curve stays as it is.
+            if self.unmatched_curve(row, target) {
+                if !eq(&v[0], &v[1]) {
+                    let what = format!("{what} ({})", text::CURVES_UNMATCHED);
+                    self.plain.insert(self.out.len());
+                    self.push_not_applied(Unit::Automation(target.clone()), row, what, None, None);
+                }
+                continue;
+            }
             let Some(out) = outcome_of(&v, eq) else {
                 continue;
             };
-            let what = format!("Track '{name}': {} automation", target_kind(target));
             let [_, theirs, ours] = v.map(|x| Some(text::points(x.map_or(0, |p| p.len()))));
             let unit = Unit::Automation(target.clone());
             if let Some(why) = why
@@ -1634,6 +1651,32 @@ impl<'a> Decider<'a> {
                 self.not_applied.insert(at);
             }
         }
+    }
+
+    /// Whether curve `key` of track row `row` drives a send or a plug-in
+    /// parameter while the file was matched without VizDAW's tags: the
+    /// track or a strip of the key paired by name or order (Task 7 case B
+    /// rulings).
+    fn unmatched_curve(&self, row: usize, key: &str) -> bool {
+        let words: Vec<&str> = key.split(' ').collect();
+        let by_guess = |r: Option<&Matched>| {
+            r.is_some_and(|r| matches!(r.by, MatchedBy::Name | MatchedBy::Order))
+        };
+        let strip = |i: usize| {
+            words
+                .get(i)
+                .and_then(|w| w.parse::<usize>().ok())
+                .is_some_and(|k| by_guess(self.m.strips.get(k)))
+        };
+        match words.first().copied() {
+            Some("send") => {}
+            Some("param") => {}
+            _ => return false,
+        }
+        self.m.heuristic
+            || by_guess(self.m.tracks.get(row))
+            || strip(1)
+            || (words.first() == Some(&"send") && strip(2))
     }
 
     /// Why ours' lane of ours track `o` has ticks the export transformed

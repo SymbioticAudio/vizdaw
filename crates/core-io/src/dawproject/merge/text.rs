@@ -37,7 +37,8 @@ pub const ADDED_BOTH: &str =
 /// new track for a parameter its target track already automates in the
 /// file (detail [`doubled_curve`], as it is), a curve whose strip, send
 /// or plug-in this project does not hold (the reason in the detail's
-/// part, [`missing_target`]). Notes and regions
+/// part, [`missing_target`]), a send's or plug-in's curve in a file
+/// matched without VizDAW's tags ([`CURVES_UNMATCHED`], as it is). Notes and regions
 /// on such a track go under [`CONFLICT_TAKE`] instead. Detail
 /// [`conflict_setting`].
 pub const NOT_APPLIED: &str =
@@ -159,6 +160,13 @@ pub fn doubled_curve(added: &str, param: &str, target: &str) -> String {
         "Track '{added}': its {param} curve for track '{target}', which already has one in the file"
     )
 }
+
+/// The reason in a [`NOT_APPLIED`] curve's detail when the file was
+/// matched without VizDAW's tags (Task 7 case B rulings): "Track 'Bass':
+/// send level automation (the file has no VizDAW tags, so automation on
+/// sends and plug-ins is not matched)".
+pub const CURVES_UNMATCHED: &str =
+    "the file has no VizDAW tags, so automation on sends and plug-ins is not matched";
 
 /// The reason in a [`NOT_APPLIED`] curve's `what` when ours has nothing
 /// for it to drive (Task 7 fix round 6): "Track 'Bass': send level

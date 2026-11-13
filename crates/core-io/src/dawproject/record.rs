@@ -923,6 +923,17 @@ pub(super) fn project_with_identity(
             automation: Vec::new(),
         };
         let mut automation: BTreeMap<String, Curve> = BTreeMap::new();
+        // A split track's audio part's strip, by its channel.
+        let audio_chan = l
+            .parts
+            .iter()
+            .find(|x| x.split && x.audio && x.lane.id == p.lane.id)
+            .map(|x| x.chan);
+        let drives_audio = |t: AutomationTarget| {
+            l.target(pi, t)
+                .map(|(c, _)| c)
+                .is_some_and(|c| Some(c) == audio_chan)
+        };
         for r in l.played.get(&p.lane.id).map_or(&[][..], Vec::as_slice) {
             ticker.tick()?;
             let at = EventAt {
@@ -966,6 +977,11 @@ pub(super) fn project_with_identity(
                     });
                 }
                 EventBody::AudioRegion { .. } => {}
+                // A split track's curve belongs to the part whose strip it
+                // drives (Task 7 case B rulings): the audio part's own, else
+                // the notes part.
+                EventBody::Automation { target, .. }
+                    if p.split && p.audio != drives_audio(*target) => {}
                 _ if p.audio && p.split => {}
                 EventBody::Note {
                     pitch,

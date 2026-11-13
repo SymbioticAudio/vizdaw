@@ -1617,6 +1617,89 @@ fn case_b_a_send_curve_decided_theirs_lands_or_is_listed() {
     );
 }
 
+/// Task 7 case B rulings, the committed seed `cc 6053a3ad…7d27`: untagged,
+/// so theirs' delete and rename pair tracks by order, and ours' new note
+/// splits the audio track that sends to the bus. Its curves belong to the
+/// part that drives them (the audio part), on both sides, and a send's
+/// curve in a file matched without tags is listed, never merged: a second
+/// merge adds nothing.
+#[test]
+fn case_b_rulings_split_track_send_curve_untagged() {
+    let plain = || StripSpec {
+        gain: 0,
+        pan: 0,
+        mute: false,
+        solo: false,
+        colour: None,
+        send: None,
+        insert: None,
+        state: None,
+    };
+    let note_track = || NoteTrack {
+        strip: plain(),
+        quantize: None,
+        notes: vec![NoteSpec {
+            tick: 0,
+            pitch: 0,
+            velocity: 1,
+            release: 0,
+            duration: 1,
+            channel: None,
+            expression: vec![],
+        }],
+        midi: vec![],
+        automation: vec![],
+    };
+    let s = Spec {
+        notes: vec![note_track(), note_track()],
+        audio: vec![
+            AudioTrack {
+                strip: plain(),
+                slots: vec![Slot::Plain {
+                    offset: 0,
+                    length: 480,
+                    gain: 0.0,
+                    fade_in: (0, 0),
+                    fade_out: (0, 0),
+                    name: None,
+                    muted: false,
+                    wide: false,
+                }],
+                automation: vec![],
+            },
+            AudioTrack {
+                strip: StripSpec {
+                    send: Some((0, false, false)),
+                    ..plain()
+                },
+                slots: vec![Slot::Pair {
+                    fade: 480,
+                    shape: 0,
+                }],
+                automation: vec![(Auto::Send, vec![(0, 0.0)])],
+            },
+        ],
+        bus: Some(plain()),
+        master_gain: 0,
+        meter: (2, 4),
+        change: None,
+        tempo: vec![(0, 30, false)],
+        pickup_beats: 0,
+        markers: vec![],
+        info: vec![],
+        gain: false,
+    };
+    check_script(
+        &s,
+        &[
+            TheirEdit::DeleteTrack(2800),
+            TheirEdit::Rename(20951, "Aa".to_owned()),
+        ],
+        &[OurEdit::AddNote(11391, 0, 24)],
+        Strip::Both,
+    );
+}
+
 // ---------------------------------------------------------------- hostile records
 
 /// The plan for package bytes `bytes` (a return of `t`) against `ours`,

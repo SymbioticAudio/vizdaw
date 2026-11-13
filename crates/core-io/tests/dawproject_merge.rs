@@ -3068,6 +3068,19 @@ fn a_new_tracks_curve_on_a_level_its_track_already_automates_is_listed() {
     assert_eq!(to_json(h.doc()).unwrap(), json);
 }
 
+/// Whether this test's files are matched without VizDAW's tags (by name
+/// and order), so a send's or plug-in's curve is listed, never merged
+/// (Task 7 case B rulings).
+fn guessed() -> bool {
+    strip() == Strip::Both
+}
+
+/// The `NOT_APPLIED` line for a curve of `what` in a file matched without
+/// VizDAW's tags.
+fn unmatched(what: &str) -> String {
+    format!("{what} ({})", text::CURVES_UNMATCHED)
+}
+
 /// The send-level points of `strip`'s send to `to` in `doc`, by tick.
 fn send_points(doc: &Document, seq: SeqId, strip: StripId, to: StripId) -> Vec<(i64, f64)> {
     let Some(k) = doc
@@ -3149,13 +3162,36 @@ fn a_curve_on_a_send_theirs_adds_lands_with_it() {
     let keys = keys_strip(&o, seq);
     assert!(send_points(&o, seq, keys, i.reverb).is_empty());
     let p = plan_doc(&t, &theirs_doc_, &o);
-    let curve = p
-        .decisions
-        .iter()
-        .find(|d| matches!(d.unit, Unit::Automation(_)))
-        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
-    assert_eq!(curve.what, "Track 'Keys': send level automation");
-    assert_eq!(curve.outcome, Outcome::Theirs);
+    let what = "Track 'Keys': send level automation";
+    // Matched without tags, the curve is listed and lands nothing.
+    let line = unmatched(what);
+    let curve_is = |p: &MergePlan| {
+        let curve = p
+            .decisions
+            .iter()
+            .find(|d| matches!(d.unit, Unit::Automation(_)))
+            .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+        if guessed() {
+            assert_eq!(curve.what, line);
+            assert_eq!(curve.outcome, Outcome::Conflict);
+            assert_eq!(
+                item(&p.report, ItemKind::Conflict, NOT_APPLIED).details,
+                vec![line.clone()]
+            );
+        } else {
+            assert_eq!(curve.what, what);
+        }
+    };
+    curve_is(&p);
+    if !guessed() {
+        assert_eq!(
+            p.decisions
+                .iter()
+                .find(|d| matches!(d.unit, Unit::Automation(_)))
+                .map(|d| d.outcome),
+            Some(Outcome::Theirs)
+        );
+    }
     assert!(
         p.decisions
             .iter()
@@ -3169,11 +3205,13 @@ fn a_curve_on_a_send_theirs_adds_lands_with_it() {
         "{:#?}",
         report.items
     );
-    assert!(!has(&report, NOT_APPLIED), "{:#?}", report.items);
-    assert_eq!(
-        send_points(h.doc(), seq, keys, i.reverb),
+    assert_eq!(has(&report, NOT_APPLIED), guessed(), "{:#?}", report.items);
+    let landed = if guessed() {
+        Vec::new()
+    } else {
         vec![(BAR, 0.5), (2 * BAR, 0.25)]
-    );
+    };
+    assert_eq!(send_points(h.doc(), seq, keys, i.reverb), landed);
     assert!(rules::validate(h.doc()).is_empty());
     // Merging again adds nothing.
     let (depth, json) = (h.undo_depth(), to_json(h.doc()).unwrap());
@@ -3185,11 +3223,15 @@ fn a_curve_on_a_send_theirs_adds_lands_with_it() {
         &never(),
     )
     .expect("plans");
+    if guessed() {
+        curve_is(&again);
+    }
     assert!(
-        again
-            .decisions
-            .iter()
-            .all(|d| d.outcome == Outcome::Same || d.outcome == Outcome::Ours),
+        again.decisions.iter().all(|d| match d.outcome {
+            Outcome::Same | Outcome::Ours => true,
+            Outcome::Conflict => guessed() && d.what == line,
+            _ => false,
+        }),
         "{:#?}",
         again.decisions
     );
@@ -3235,8 +3277,13 @@ fn a_curve_on_a_send_ours_removed_is_listed() {
             }),
         );
     });
-    let line = "Track 'Bass': send level automation (its send to 'Reverb' is not in this \
-                project): here 0 points, there 2 points";
+    let line = if guessed() {
+        unmatched("Track 'Bass': send level automation")
+    } else {
+        "Track 'Bass': send level automation (its send to 'Reverb' is not in this project): \
+         here 0 points, there 2 points"
+            .to_owned()
+    };
     let check = |p: &MergePlan| {
         let curve = p
             .decisions
@@ -3362,8 +3409,13 @@ fn a_curve_on_a_plugin_ours_swapped_is_listed() {
         );
     });
     let bass = ids(&t).bass_strip;
-    let line = "Track 'Bass': plug-in parameter automation (its plug-in is not in this \
-                project): here 0 points, there 2 points";
+    let line = if guessed() {
+        unmatched("Track 'Bass': plug-in parameter automation")
+    } else {
+        "Track 'Bass': plug-in parameter automation (its plug-in is not in this project): \
+         here 0 points, there 2 points"
+            .to_owned()
+    };
     let check = |p: &MergePlan| {
         let curve = p
             .decisions
@@ -3444,21 +3496,38 @@ fn a_curve_on_a_plugin_theirs_adds_lands_and_merges_twice_to_nothing() {
             .any(|d| unit(&d.unit) && d.outcome == Outcome::Theirs)
     };
     assert!(theirs(|u| *u == Unit::Devices), "{:#?}", p.decisions);
-    assert!(
-        theirs(|u| matches!(u, Unit::Automation(_))),
-        "{:#?}",
-        p.decisions
-    );
+    // Matched without tags, the curve is listed and lands nothing.
+    let line = unmatched("Track 'Keys': plug-in parameter automation");
+    let listed = |p: &MergePlan| {
+        assert_eq!(
+            item(&p.report, ItemKind::Conflict, NOT_APPLIED).details,
+            vec![line.clone()]
+        );
+    };
+    if guessed() {
+        listed(&p);
+    } else {
+        assert!(
+            theirs(|u| matches!(u, Unit::Automation(_))),
+            "{:#?}",
+            p.decisions
+        );
+    }
     let (h, report) = apply_on(&o, &p);
     assert!(
         !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
         "{:#?}",
         report.items
     );
-    assert!(!has(&report, NOT_APPLIED), "{:#?}", report.items);
+    assert_eq!(has(&report, NOT_APPLIED), guessed(), "{:#?}", report.items);
+    let landed = if guessed() {
+        Vec::new()
+    } else {
+        vec![(BAR, 0.5), (2 * BAR, 0.25)]
+    };
     assert_eq!(
         param_points(h.doc(), seq, keys, "org.example.Delay"),
-        vec![(BAR, 0.5), (2 * BAR, 0.25)]
+        landed
     );
     assert!(rules::validate(h.doc()).is_empty());
     // Merging again finds the curve the same and adds nothing.
@@ -3471,16 +3540,202 @@ fn a_curve_on_a_plugin_theirs_adds_lands_and_merges_twice_to_nothing() {
         &never(),
     )
     .expect("plans");
+    if guessed() {
+        listed(&again);
+    }
     assert!(
-        again
-            .decisions
-            .iter()
-            .all(|d| d.outcome == Outcome::Same || d.outcome == Outcome::Ours),
+        again.decisions.iter().all(|d| match d.outcome {
+            Outcome::Same | Outcome::Ours => true,
+            Outcome::Conflict => guessed() && d.what == line,
+            _ => false,
+        }),
         "{:#?}",
         again.decisions
     );
     let (h, _) = apply_history(h, &again, DATE);
     assert_eq!(h.undo_depth(), depth);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
+/// Task 7 case B rulings: theirs removes Bass's send to Reverb (its first
+/// send; a second goes to "Delay"), both automated. When the strip step
+/// removes the send, every curve on it goes in the same transaction and
+/// Delay's curve moves down with its send, so no curve drives another
+/// send; in every mode (matched without tags, the Reverb curve is listed
+/// and still goes with its send). Merging again changes nothing.
+#[test]
+fn a_removed_sends_curves_go_with_it_and_never_drive_another() {
+    let (mut doc, seq) = fixture();
+    let delay = {
+        let mut h = History::new(doc.clone());
+        let bass = lane(h.doc(), seq, "Bass").id;
+        let dest = lane(h.doc(), seq, "Bass").midi_dest.unwrap();
+        let strip = h
+            .doc()
+            .mixer()
+            .find_kind(StripKind::Instrument(dest))
+            .unwrap();
+        let r = h
+            .execute(
+                &Command::Mixer(MixerCmd::AddBus {
+                    name: "Delay".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let delay = created(&r, |id| match id {
+            AnyId::Strip(s) => Some(*s),
+            _ => None,
+        });
+        run(
+            &mut h,
+            Command::Mixer(MixerCmd::AddSend {
+                strip,
+                send: AuxSend {
+                    target: delay,
+                    level_db: -6.0,
+                    pre_fader: false,
+                    enabled: true,
+                },
+            }),
+        );
+        let point = |i: u16, tick: i64, value: f64| {
+            EventSpec::new(
+                Tick(tick),
+                EventBody::Automation {
+                    target: AutomationTarget::SendLevel(strip, SendIndex(i)),
+                    value,
+                },
+            )
+        };
+        run(
+            &mut h,
+            Command::Event(EventCmd::Insert {
+                seq,
+                lane: bass,
+                events: vec![
+                    point(0, BAR, 0.5),
+                    point(0, 2 * BAR, 0.25),
+                    point(1, BAR, 0.75),
+                    point(1, 3 * BAR, 0.125),
+                ],
+            }),
+        );
+        doc = h.doc().clone();
+        delay
+    };
+    let t = trip(&doc, seq);
+    let i = ids(&t);
+    // Theirs as another DAW returns it: the send and its curve gone,
+    // Delay's curve on Delay's send.
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let mut gone = Vec::new();
+        let mut moved = Vec::new();
+        for e in lane(h.doc(), i.seq, "Bass")
+            .active()
+            .unwrap()
+            .events
+            .values()
+        {
+            if let EventBody::Automation {
+                target: AutomationTarget::SendLevel(s, k),
+                value,
+            } = e.body
+                && s == i.bass_strip
+            {
+                if k.0 == 0 {
+                    gone.push(e.id);
+                } else {
+                    let mut spec = e.spec();
+                    spec.body = EventBody::Automation {
+                        target: AutomationTarget::SendLevel(s, SendIndex(0)),
+                        value,
+                    };
+                    moved.push((e.id, spec));
+                }
+            }
+        }
+        run(h, Command::Event(EventCmd::Delete { events: gone }));
+        for (event, spec) in moved {
+            run(h, Command::Event(EventCmd::Replace { event, spec }));
+        }
+        run(
+            h,
+            Command::Mixer(MixerCmd::RemoveSend {
+                strip: i.bass_strip,
+                index: 0,
+            }),
+        );
+    });
+    let o = t.base_doc.clone();
+    assert_eq!(
+        send_points(&o, seq, i.bass_strip, delay),
+        vec![(BAR, 0.75), (3 * BAR, 0.125)]
+    );
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    assert!(
+        p.decisions
+            .iter()
+            .any(|d| matches!(d.unit, Unit::Send(_)) && d.outcome == Outcome::Theirs),
+        "{:#?}",
+        p.decisions
+    );
+    let line = unmatched("Track 'Bass': send level automation");
+    if guessed() {
+        assert_eq!(
+            item(&p.report, ItemKind::Conflict, NOT_APPLIED).details,
+            vec![line.clone()]
+        );
+    }
+    let (h, _) = apply_on(&o, &p);
+    let bass_sends: Vec<StripId> = h
+        .doc()
+        .mixer()
+        .strip(i.bass_strip)
+        .unwrap()
+        .sends
+        .iter()
+        .map(|s| s.target)
+        .collect();
+    assert_eq!(bass_sends, vec![delay]);
+    assert_eq!(
+        send_points(h.doc(), seq, i.bass_strip, delay),
+        vec![(BAR, 0.75), (3 * BAR, 0.125)],
+        "Delay's curve stays on Delay's send"
+    );
+    let on_bass: usize = h
+        .doc()
+        .sequences()
+        .values()
+        .flat_map(|s| s.lanes.iter())
+        .flat_map(|l| l.takes.iter())
+        .flat_map(|tk| tk.events.values())
+        .filter(|e| {
+            matches!(
+                e.body,
+                EventBody::Automation {
+                    target: AutomationTarget::SendLevel(s, _),
+                    ..
+                } if s == i.bass_strip
+            )
+        })
+        .count();
+    assert_eq!(on_bass, 2, "only Delay's two points drive a send of Bass");
+    assert_eq!(h.undo_depth(), 1);
+    assert!(rules::validate(h.doc()).is_empty());
+    // Merging again changes nothing.
+    let json = to_json(h.doc()).unwrap();
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), 1, "{:#?}", again.decisions);
     assert_eq!(to_json(h.doc()).unwrap(), json);
 }
 
@@ -4640,6 +4895,7 @@ stripped!(
     a_curve_on_a_send_theirs_adds_lands_with_it,
     a_curve_on_a_send_ours_removed_is_listed,
     a_curve_on_a_plugin_ours_swapped_is_listed,
+    a_removed_sends_curves_go_with_it_and_never_drive_another,
     a_curve_on_a_plugin_theirs_adds_lands_and_merges_twice_to_nothing,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,

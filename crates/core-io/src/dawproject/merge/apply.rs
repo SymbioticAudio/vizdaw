@@ -1872,10 +1872,59 @@ fn send(
             strip,
             send: aux(s),
         },
-        (None, Some(index)) => MixerCmd::RemoveSend { strip, index },
+        (None, Some(index)) => {
+            send_curves_follow(h, strip, index)?;
+            MixerCmd::RemoveSend { strip, index }
+        }
         (None, None) => return Ok(()),
     };
     run(h, Command::Mixer(cmd))?;
+    Ok(())
+}
+
+/// Before `strip`'s send `index` is removed (Task 7 case B rulings):
+/// every curve on it goes, and each curve on a later send of the strip
+/// is moved down one, so no curve ever drives another send. In every
+/// sequence and take of the project.
+fn send_curves_follow(h: &mut History, strip: StripId, index: usize) -> Result<(), ModelError> {
+    let mut gone = Vec::new();
+    let mut moved = Vec::new();
+    for s in h.doc().sequences().values() {
+        for e in s
+            .lanes
+            .iter()
+            .flat_map(|l| l.takes.iter())
+            .flat_map(|t| t.events.values())
+        {
+            let EventBody::Automation {
+                target: AutomationTarget::SendLevel(on, i),
+                value,
+            } = e.body
+            else {
+                continue;
+            };
+            let k = usize::from(i.0);
+            if on != strip || k < index {
+                continue;
+            }
+            if k == index {
+                gone.push(e.id);
+            } else {
+                let mut spec = e.spec();
+                spec.body = EventBody::Automation {
+                    target: AutomationTarget::SendLevel(on, SendIndex(i.0.saturating_sub(1))),
+                    value,
+                };
+                moved.push((e.id, spec));
+            }
+        }
+    }
+    if !gone.is_empty() {
+        run(h, Command::Event(EventCmd::Delete { events: gone }))?;
+    }
+    for (event, spec) in moved {
+        run(h, Command::Event(EventCmd::Replace { event, spec }))?;
+    }
     Ok(())
 }
 
