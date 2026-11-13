@@ -143,6 +143,7 @@ fn env<'a>(installed: &'a dyn Fn(PluginFormat, &str) -> bool) -> ImportEnv<'a> {
         installed,
         plist: &FakePlist,
         rate: 48_000,
+        ids: None,
     }
 }
 
@@ -1453,5 +1454,426 @@ fn a_hostile_count_of_tracks_is_refused_at_once() {
             "peak {} MiB",
             seen.peak >> 20
         );
+    }
+}
+
+// ---------------------------------------------------------------- origins (plan 6e Task 2)
+
+mod origins {
+    use super::*;
+    use crate::common::merge;
+    use crate::common::package::{TestPlist, write_package};
+    use core_engine::fixtures::Q;
+    use core_io::dawproject::export::{
+        ClipRule, DpExport, ExportEnv, ExportOptions, RegionGain, export,
+    };
+    use core_io::dawproject::import::{Origins, TAGS_IGNORED, apply_tagged};
+    use core_io::dawproject::record::{ObjectRef, read_snapshot};
+    use core_media::import::Imported;
+    use core_model::document::DestKind;
+    use core_model::event::EventBody;
+    use core_model::ids::{EventId, LaneId};
+    use core_model::time::Tick;
+
+    const PROJECT: &str = "00000000-0000-4000-8000-000000000001";
+    const EXPORT: &str = "00000000-0000-4000-8000-0000000000e1";
+
+    /// Task 1's fixture exported.
+    fn exported() -> (Document, SeqId, DpExport) {
+        let (doc, seq) = merge::fixture();
+        let o = ExportOptions {
+            seq,
+            region_gain: RegionGain::Apply,
+            clips: ClipRule::SilenceGap(Tick(4 * Q)),
+            left_out: Default::default(),
+        };
+        let env = ExportEnv {
+            plist: &TestPlist,
+            app_version: "1.2.3",
+            project_id: PROJECT,
+            export_id: EXPORT,
+            exported_at: 1_700_000_000,
+        };
+        let x = export(&doc, &o, &env, &AtomicBool::new(false)).expect("exports");
+        (doc, seq, x)
+    }
+
+    /// The export's IDs, as the snapshot holds them.
+    fn ids_of(x: &DpExport) -> BTreeMap<String, ObjectRef> {
+        read_snapshot(x.snapshot_json.as_bytes())
+            .expect("reads")
+            .ids
+    }
+
+    /// Each audio file of `pkg` as the original media item of `doc`.
+    fn media_of(doc: &Document, x: &DpExport, pkg: &DpPackage) -> BTreeMap<usize, MediaSource> {
+        let mut media = BTreeMap::new();
+        for a in pkg.audio() {
+            let AudioSource::Entry(entry) = &a.source else {
+                panic!("an exported file is outside the package")
+            };
+            let file = x.audio.iter().find(|f| &f.entry == entry).unwrap();
+            let item = doc.media().get(&file.media).unwrap();
+            media.insert(
+                a.key,
+                MediaSource::Online(vec![Imported {
+                    path: format!("Media/{}.caf", a.name),
+                    name: file.name.clone(),
+                    original_name: item.name.clone(),
+                    channels: item.channels,
+                    sample_rate: item.sample_rate,
+                    length_frames: item.length_frames,
+                    content_hash: item.content_hash.clone().unwrap_or_default(),
+                    clipped: 0,
+                }]),
+            );
+        }
+        media
+    }
+
+    struct Tagged {
+        a: Applied,
+        origins: Origins,
+    }
+
+    /// Maps `pkg` with `ids` trusted and applies it to a new project with
+    /// [`apply_tagged`].
+    fn tagged(
+        pkg: &DpPackage,
+        media: &BTreeMap<usize, MediaSource>,
+        ids: Option<&BTreeMap<String, ObjectRef>>,
+    ) -> Tagged {
+        let env = ImportEnv { ids, ..env(&yes) };
+        let imp = map(pkg, media, &env, &AtomicBool::new(false)).expect("maps");
+        let (doc, seq) = new_doc();
+        let mut h = History::new(doc);
+        let mut report = Report::default();
+        h.begin("Import DAWproject").unwrap();
+        let (states, origins) = apply_tagged(&mut h, &imp, seq, &mut report).expect("applies");
+        h.commit().unwrap();
+        Tagged {
+            a: Applied {
+                h,
+                seq,
+                report,
+                states,
+            },
+            origins,
+        }
+    }
+
+    /// The package of `x`, its project.xml changed by `edit`.
+    fn package_of(dir: &Path, x: &DpExport, edit: impl Fn(&str) -> String) -> DpPackage {
+        let mut x = x.clone();
+        x.project_xml = edit(&x.project_xml);
+        open_ok(&write_package(dir, "Return", &x))
+    }
+
+    fn lane_of(doc: &Document, seq: SeqId, name: &str) -> Lane {
+        doc.sequence(seq)
+            .unwrap()
+            .lanes
+            .iter()
+            .find(|l| l.name == name)
+            .unwrap_or_else(|| panic!("no track {name}"))
+            .clone()
+    }
+
+    /// The events of `l`'s active take that `keep` picks, by tick.
+    fn events(l: &Lane, keep: impl Fn(&EventBody) -> bool) -> Vec<EventId> {
+        let mut v: Vec<(i64, EventId)> = l
+            .active()
+            .unwrap()
+            .events
+            .values()
+            .filter(|e| keep(&e.body))
+            .map(|e| (e.tick.0, e.id))
+            .collect();
+        v.sort();
+        v.into_iter().map(|(_, e)| e).collect()
+    }
+
+    fn is_use(b: &EventBody) -> bool {
+        matches!(b, EventBody::Reference { .. })
+    }
+
+    fn is_region(b: &EventBody) -> bool {
+        matches!(b, EventBody::AudioRegion { .. })
+    }
+
+    fn instrument_slot(doc: &Document, l: &Lane) -> PluginInstanceId {
+        match &doc.instruments()[&l.midi_dest.unwrap()].kind {
+            DestKind::PluginInstrument { slot } => slot.id,
+            k => panic!("not a plug-in instrument: {k:?}"),
+        }
+    }
+
+    fn bus_strip(doc: &Document, name: &str) -> StripId {
+        doc.mixer()
+            .strips()
+            .values()
+            .find(|s| s.kind == StripKind::Bus && s.name == name)
+            .map(|s| s.id)
+            .unwrap()
+    }
+
+    #[test]
+    fn origins_follow_the_tags() {
+        let (doc, seq, x) = exported();
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_of(dir.path(), &x, str::to_owned);
+        let t = tagged(&pkg, &media_of(&doc, &x, &pkg), None);
+        lacks(&t.a.report, TAGS_IGNORED);
+        let new = t.a.h.doc();
+        let o = &t.origins;
+
+        let (bass, keys) = (lane_of(&doc, seq, "Bass"), lane_of(&doc, seq, "Keys"));
+        let nb = lane_of(new, t.a.seq, "Bass");
+        let nk = lane_of(new, t.a.seq, "Keys");
+        let na = lane_of(new, t.a.seq, "Keys audio");
+        assert_eq!(
+            o.lanes,
+            BTreeMap::from([
+                (nb.id, (bass.id.0, false)),
+                (nk.id, (keys.id.0, false)),
+                (na.id, (keys.id.0, true)),
+            ])
+        );
+
+        let m = doc.mixer();
+        let base_strip = |k: StripKind| m.find_kind(k).unwrap().0;
+        let nm = new.mixer();
+        let new_strip = |k: StripKind| nm.find_kind(k).unwrap();
+        assert_eq!(
+            o.strips,
+            BTreeMap::from([
+                (
+                    new_strip(StripKind::Instrument(nb.midi_dest.unwrap())),
+                    base_strip(StripKind::Instrument(bass.midi_dest.unwrap()))
+                ),
+                (
+                    new_strip(StripKind::Instrument(nk.midi_dest.unwrap())),
+                    base_strip(StripKind::Instrument(keys.midi_dest.unwrap()))
+                ),
+                (
+                    new_strip(StripKind::AudioPath(na.audio_out.unwrap())),
+                    base_strip(StripKind::AudioPath(keys.audio_out.unwrap()))
+                ),
+                (bus_strip(new, "Reverb"), bus_strip(&doc, "Reverb").0),
+            ])
+        );
+
+        // The two uses and the two regions, each to its own.
+        let mut want = BTreeMap::new();
+        for (n, b) in events(&nb, is_use).into_iter().zip(events(&bass, is_use)) {
+            want.insert(n, b.0);
+        }
+        for (n, b) in events(&na, is_region)
+            .into_iter()
+            .zip(events(&keys, is_region))
+        {
+            want.insert(n, b.0);
+        }
+        assert_eq!(want.len(), 4, "two uses and two regions");
+        assert_eq!(o.events, want);
+
+        assert_eq!(o.markers, vec![Some(0), Some(1)]);
+
+        let bass_strip = m
+            .strip(
+                m.find_kind(StripKind::Instrument(bass.midi_dest.unwrap()))
+                    .unwrap(),
+            )
+            .unwrap();
+        let new_bass_strip = nm
+            .strip(
+                nm.find_kind(StripKind::Instrument(nb.midi_dest.unwrap()))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            o.slots,
+            BTreeMap::from([
+                (instrument_slot(new, &nb), instrument_slot(&doc, &bass).0),
+                (instrument_slot(new, &nk), instrument_slot(&doc, &keys).0),
+                (new_bass_strip.inserts[0].id, bass_strip.inserts[0].id.0),
+            ])
+        );
+    }
+
+    #[test]
+    fn trusted_ids_win_over_tags() {
+        let (doc, seq, x) = exported();
+        let (bass, keys) = (lane_of(&doc, seq, "Bass"), lane_of(&doc, seq, "Keys"));
+        let (tb, tk) = (format!("vz:t{}", bass.id.0), format!("vz:t{}", keys.id.0));
+        // The Bass track's comment and the Keys track's swapped. The Keys
+        // track comes before its audio part, which keeps its tag.
+        let swap = |xml: &str| {
+            let (cb, ck) = (format!(r#"comment="{tb}""#), format!(r#"comment="{tk}""#));
+            assert_eq!(xml.matches(&cb).count(), 1);
+            assert_eq!(
+                xml.matches(&ck).count(),
+                2,
+                "the Keys track and its audio part"
+            );
+            xml.replacen(&ck, "\u{0}", 1)
+                .replace(&cb, &ck)
+                .replace('\u{0}', &cb)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_of(dir.path(), &x, swap);
+        let media = media_of(&doc, &x, &pkg);
+        let ids = ids_of(&x);
+        let lanes = |o: &Origins, new: &Document, s: SeqId| -> Vec<(u64, bool)> {
+            ["Bass", "Keys", "Keys audio"]
+                .iter()
+                .map(|n| o.lanes[&lane_of(new, s, n).id])
+                .collect()
+        };
+
+        let t = tagged(&pkg, &media, Some(&ids));
+        assert_eq!(
+            lanes(&t.origins, t.a.h.doc(), t.a.seq),
+            vec![(bass.id.0, false), (keys.id.0, false), (keys.id.0, true)],
+            "the IDs win"
+        );
+        lacks(&t.a.report, TAGS_IGNORED);
+
+        let t = tagged(&pkg, &media, None);
+        assert_eq!(
+            lanes(&t.origins, t.a.h.doc(), t.a.seq),
+            vec![(keys.id.0, false), (bass.id.0, false), (keys.id.0, true)],
+            "the tags, swapped"
+        );
+    }
+
+    /// The hostile file: hostile tags and IDs, and `clips` one-note clips
+    /// on track A all tagged `vz:e5`.
+    fn hostile(clips: usize) -> String {
+        let structure = concat!(
+            r#"<Track id="ta" name="A" comment="vz:t1" contentType="notes"/>"#,
+            r#"<Track id="tb" name="B" comment="vz:t1" contentType="notes"/>"#,
+            r#"<Track id="tc" name="C" comment="vz:t999" contentType="notes"/>"#,
+            r#"<Track id="td" name="D" comment="vz:s3" contentType="notes"/>"#,
+            r#"<Track id="t1" name="E" contentType="notes"/>"#,
+        );
+        let mut s = String::with_capacity(clips * 160);
+        for i in 0..clips {
+            s.push_str(&format!(
+                r#"<Clip time="{i}" duration="1" comment="vz:e5"><Notes><Note time="0" duration="0.5" channel="0" key="60" vel="0.5"/></Notes></Clip>"#
+            ));
+        }
+        let arrangement =
+            format!(r#"<Lanes timeUnit="beats"><Clips track="ta">{s}</Clips></Lanes>"#);
+        project_xml(structure, &arrangement)
+    }
+
+    #[test]
+    fn hostile_tags_are_ignored_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = hostile(10_000);
+        let path = package_as(
+            dir.path(),
+            "Hostile",
+            &[("project.xml", project.as_bytes())],
+            false,
+        );
+        let pkg = open_ok(&path);
+        let ids = BTreeMap::from([(
+            "t1".to_owned(),
+            ObjectRef {
+                kind: "strip".into(),
+                id: 1,
+                slot: None,
+                index: None,
+            },
+        )]);
+        let start = std::time::Instant::now();
+        let t = tagged(&pkg, &BTreeMap::new(), Some(&ids));
+        let took = start.elapsed();
+        let o = &t.origins;
+        let new = t.a.h.doc();
+        let id = |n: &str| -> LaneId { lane_of(new, t.a.seq, n).id };
+
+        assert_eq!(o.lanes.values().filter(|(l, _)| *l == 1).count(), 1);
+        assert_eq!(o.lanes.get(&id("A")), Some(&(1, false)));
+        assert_eq!(o.lanes.get(&id("C")), Some(&(999, false)), "kept as named");
+        for n in ["B", "D", "E"] {
+            assert_eq!(o.lanes.get(&id(n)), None, "track {n}");
+        }
+        assert!(o.lanes.values().all(|(l, _)| *l != 3), "{:?}", o.lanes);
+        assert!(
+            o.strips.values().all(|s| *s != 3 && *s != 1),
+            "{:?}",
+            o.strips
+        );
+
+        let fives: Vec<EventId> = o
+            .events
+            .iter()
+            .filter(|(_, v)| **v == 5)
+            .map(|(e, _)| *e)
+            .collect();
+        assert_eq!(fives.len(), 1, "{} events map to 5", fives.len());
+        assert_eq!(o.events.len(), 1);
+        let a = lane_of(new, t.a.seq, "A");
+        let firstclip = a
+            .active()
+            .unwrap()
+            .events
+            .values()
+            .min_by_key(|e| e.tick)
+            .unwrap();
+        assert_eq!(firstclip.tick, Tick(0));
+        assert_eq!(fives[0], firstclip.id, "the first clip's note");
+
+        let i = item(&t.a.report, ItemKind::Note, TAGS_IGNORED)
+            .unwrap_or_else(|| panic!("no '{TAGS_IGNORED}' in {:#?}", t.a.report.items));
+        assert_eq!(i.count, 10_002);
+        assert!(took.as_secs_f64() < 2.0, "{took:?}");
+    }
+
+    #[test]
+    fn apply_still_matches_6d() {
+        let dir = tempfile::tempdir().unwrap();
+        let (doc, _, x) = exported();
+        let returned = package_of(dir.path(), &x, str::to_owned);
+        let media = media_of(&doc, &x, &returned);
+        let mut cases: Vec<(String, DpPackage, BTreeMap<usize, MediaSource>)> = vec![
+            ("hand_other".into(), hand_other(dir.path()), BTreeMap::new()),
+            ("export".into(), returned, media),
+        ];
+        for (name, project) in [
+            ("many_notes", many_notes(100)),
+            ("hostile", hostile(50)),
+            (
+                "clap",
+                project_xml(
+                    &(clap_track("A", "a", "vz:t3 lead", "mc")
+                        + &clap_track("B", "b", "vz:t3", "mc")),
+                    "",
+                ),
+            ),
+        ] {
+            let pkg = small(dir.path(), &project, None);
+            cases.push((name.into(), pkg, BTreeMap::new()));
+        }
+        for (name, pkg, media) in cases {
+            let imp = map(&pkg, &media, &env(&yes), &AtomicBool::new(false)).expect("maps");
+            let run = |tagged: bool| {
+                let (doc, seq) = new_doc();
+                let mut h = History::new(doc);
+                let mut report = Report::default();
+                h.begin("Import DAWproject").unwrap();
+                let states = if tagged {
+                    apply_tagged(&mut h, &imp, seq, &mut report).unwrap().0
+                } else {
+                    apply(&mut h, &imp, seq, &mut report).unwrap()
+                };
+                h.commit().unwrap();
+                (h.doc().clone(), report, states)
+            };
+            assert_eq!(run(false), run(true), "{name}");
+        }
     }
 }

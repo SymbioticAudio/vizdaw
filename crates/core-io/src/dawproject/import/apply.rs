@@ -221,6 +221,18 @@ fn apply_mix(
     Ok(made)
 }
 
+/// Records the origins of the slots `apply_mix` made from `mix`.
+fn slot_origins(mix: &Mix, made: &MixSlots, o: &mut Origins) {
+    if let (Some(id), Some(tag)) = (made.eq, mix.eq.as_ref().and_then(|s| s.tag)) {
+        o.slots.insert(id, tag);
+    }
+    for (id, plan) in made.inserts.iter().zip(&mix.inserts) {
+        if let Some(tag) = plan.tag {
+            o.slots.insert(*id, tag);
+        }
+    }
+}
+
 /// The plug-in slots `mix` makes.
 fn slots(mix: &Mix) -> u64 {
     u64::try_from(mix.inserts.len())
@@ -244,6 +256,21 @@ pub fn apply(
     seq: SeqId,
     report: &mut Report,
 ) -> Result<SlotStates, ModelError> {
+    apply_tagged(h, imp, seq, report).map(|(states, _)| states)
+}
+
+/// [`apply`], with what each new object was in the project the file came
+/// from, as its trusted XML IDs, else its tags, named it (plan 6e Task 2).
+/// A track's first own strip and that strip's slots take its channel's and
+/// devices' origins; a strip made twice from one channel (a track with
+/// notes and audio) takes them once.
+pub fn apply_tagged(
+    h: &mut History,
+    imp: &DpImport,
+    seq: SeqId,
+    report: &mut Report,
+) -> Result<(SlotStates, Origins), ModelError> {
+    let mut origins = Origins::default();
     let doc = h.doc();
     doc.sequence(seq)?;
     if doc.sequences().values().any(|s| !s.lanes.is_empty()) {
@@ -318,6 +345,9 @@ pub fn apply(
         .ok_or_else(|| ModelError::invalid("no track was created"))?;
         lanes = lanes.saturating_add(1);
         placed.lanes.push(lane);
+        if let Some(tag) = t.tag {
+            origins.lanes.insert(lane, tag);
+        }
         let mut owned: Vec<StripId> = Vec::new();
         let mut dest_of = None;
         let mut instrument = None;
@@ -341,6 +371,9 @@ pub fn apply(
                 let id = created_plugin(&r)?;
                 instrument = Some(id);
                 dest_of = Some(dest);
+                if let Some(tag) = slot.tag {
+                    origins.slots.insert(id, tag);
+                }
                 if let Some(st) = &slot.state {
                     states.push((id, Arc::clone(st)));
                 }
@@ -402,6 +435,12 @@ pub fn apply(
                 false,
                 &mut states,
             )?;
+            if first.is_none() {
+                if let Some(tag) = t.strip_tag {
+                    origins.strips.insert(strip, tag);
+                }
+                slot_origins(&t.mix, &made, &mut origins);
+            }
             first.get_or_insert((strip, made));
             plugins = plugins.saturating_add(slots(&t.mix));
         }
@@ -429,6 +468,7 @@ pub fn apply(
     if let (Some(mix), Some(_)) = (&plan.builtin, builtin) {
         let strip = strip_of(h, StripKind::BuiltinSynth)?;
         let made = apply_mix(h, strip, mix, &buses, false, false, &mut states)?;
+        slot_origins(mix, &made, &mut origins);
         plugins = plugins.saturating_add(slots(mix));
         for ti in on_builtin {
             if let Some(s) = placed.strips.get_mut(ti) {
@@ -438,11 +478,16 @@ pub fn apply(
     }
     for (b, id) in plan.buses.iter().zip(buses.clone()) {
         let made = apply_mix(h, id, &b.mix, &buses, true, false, &mut states)?;
+        if let Some(tag) = b.tag {
+            origins.strips.insert(id, tag);
+        }
+        slot_origins(&b.mix, &made, &mut origins);
         placed.buses.push((id, made));
         plugins = plugins.saturating_add(slots(&b.mix));
     }
     let master = h.doc().mixer().master();
     let made = apply_mix(h, master, &plan.master, &buses, true, true, &mut states)?;
+    slot_origins(&plan.master, &made, &mut origins);
     placed.master = (master, made);
     plugins = plugins.saturating_add(slots(&plan.master));
 
@@ -484,7 +529,8 @@ pub fn apply(
             }),
         )?;
     }
-    apply_arranged(h, plan, seq, &placed, report)?;
+    origins.markers = plan.marker_tags.clone();
+    apply_arranged(h, plan, seq, &placed, report, &mut origins)?;
     cover_last_event(h, seq, report)?;
     let s = &mut report.summary;
     s.tracks = s.tracks.saturating_add(lanes);
@@ -493,7 +539,7 @@ pub fn apply(
         .saturating_add(u64::try_from(plan.markers.len()).unwrap_or(u64::MAX));
     s.plugins = s.plugins.saturating_add(plugins);
     s.tempo_map = true;
-    Ok(states)
+    Ok((states, origins))
 }
 
 // ---------------------------------------------------------------- the arrangement
@@ -545,13 +591,15 @@ fn created_id<T>(r: &CmdReport, f: impl Fn(&AnyId) -> Option<T>) -> Result<T, Mo
 
 /// Applies the arrangement once the structure and the maps are in place
 /// (so regions and crossfades see the tempo map): the media items, the new
-/// sequences, then each track's events in one insert.
+/// sequences, then each track's events in one insert (each new event's
+/// origin from its item's tag).
 fn apply_arranged(
     h: &mut History,
     plan: &Plan,
     seq: SeqId,
     placed: &Applied,
     report: &mut Report,
+    origins: &mut Origins,
 ) -> Result<(), ModelError> {
     let arr = &plan.arranged;
     let run = |h: &mut History, cmd: Command| h.execute(&cmd, &ViewFilter::default());
@@ -651,6 +699,7 @@ fn apply_arranged(
             continue;
         }
         let mut specs = Vec::with_capacity(items.len());
+        let mut tags: Vec<Option<u64>> = Vec::with_capacity(items.len());
         for it in items {
             let (body, group_channel) = match &it.body {
                 Body::Midi(b, gc) => (b.clone(), *gc),
@@ -717,6 +766,7 @@ fn apply_arranged(
                 mute: it.mute,
                 body,
             });
+            tags.push(it.tag);
         }
         notes = notes.saturating_add(count_notes(specs.iter().map(|e| &e.body)));
         let r = run(
@@ -728,6 +778,15 @@ fn apply_arranged(
             }),
         )?;
         settled(&r, report);
+        let made = r.created.iter().filter_map(|id| match id {
+            AnyId::Event(e) => Some(*e),
+            _ => None,
+        });
+        for (e, tag) in made.zip(tags) {
+            if let Some(tag) = tag {
+                origins.events.insert(e, tag);
+            }
+        }
     }
     let s = &mut report.summary;
     s.notes = s.notes.saturating_add(notes);

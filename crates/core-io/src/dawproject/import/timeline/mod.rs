@@ -237,6 +237,9 @@ pub(super) struct Item {
     pub(super) tick: Tick,
     pub(super) mute: bool,
     pub(super) body: Body,
+    /// Its top-level clip's `vz:e` (the event it was where the file came
+    /// from), when that clip was the first to name it.
+    pub(super) tag: Option<u64>,
 }
 
 /// A new sequence: one track on track `track`'s destination.
@@ -295,6 +298,9 @@ struct Frame {
     /// The innermost named clip's name, in `Tl::clip_names`.
     name: Option<usize>,
     muted: bool,
+    /// The top-level clip's `vz:e`, for what it places straight on its
+    /// track.
+    tag: Option<u64>,
 }
 
 impl Frame {
@@ -309,6 +315,7 @@ impl Frame {
             fades: None,
             name: None,
             muted: false,
+            tag: None,
         }
     }
 
@@ -353,6 +360,8 @@ struct Ev {
     ch: u8,
     mute: bool,
     body: EventBody,
+    /// Its top-level clip's `vz:e` ([`Item::tag`]); `None` inside a pass.
+    tag: Option<u64>,
 }
 
 /// A region on its way to a track.
@@ -367,6 +376,7 @@ struct Reg {
     /// Left out: it would start over [`MAX_SOUNDING`] regions.
     dropped: bool,
     plan: RegionPlan,
+    tag: Option<u64>,
 }
 
 /// An automation point on its way to a track (`None`: the automation
@@ -380,6 +390,7 @@ struct AutoEv<'p> {
     mute: bool,
     at: AutoAt,
     value: f64,
+    tag: Option<u64>,
 }
 
 /// What makes clips share.
@@ -408,6 +419,8 @@ struct Cand<'p> {
     total: i64,
     looped: bool,
     mute: bool,
+    /// Its `vz:e` ([`Item::tag`]).
+    tag: Option<u64>,
 }
 
 /// A new sequence before its channels are known.

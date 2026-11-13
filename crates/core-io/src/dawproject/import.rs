@@ -37,12 +37,13 @@ mod apply;
 mod maps;
 mod timeline;
 
-pub use apply::apply;
+pub use apply::{apply, apply_tagged};
 use maps::clean_name;
 pub use timeline::*;
 
 use super::package::{DpPackage, Roles, TrackRole, is_bus};
 use super::plugins::PlistCodec;
+use super::record::ObjectRef;
 use super::schema::*;
 use super::units::{
     EXPORT_LINE, TagKind, db_of_linear, nearest_swatch, pan_of_normalized, strip_tags,
@@ -55,7 +56,7 @@ use core_model::command::{
 use core_model::document::{DestKind, MAX_INFO_BYTES, SongInfo};
 use core_model::error::ModelError;
 use core_model::history::History;
-use core_model::ids::{AnyId, DestId, LaneId, PluginInstanceId, SeqId, StripId};
+use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
 use core_model::mixer::{
     AuxSend, BUILTIN_SYNTH_REF, GAIN_FLOOR_DB, GAIN_MAX_DB, Output, PluginFormat, PluginRef,
@@ -66,7 +67,7 @@ use core_model::selection::ViewFilter;
 use core_model::sequence::Marker;
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::{PPQ, Tick};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -94,6 +95,26 @@ pub struct ImportEnv<'a> {
     pub plist: &'a dyn PlistCodec,
     /// The new project's sample rate.
     pub rate: u32,
+    /// The file's XML IDs and what each stood for, when they are trusted
+    /// as identities (plan 6e Ruling 2: the record's head names the
+    /// snapshot's export); `None` reads tags alone.
+    pub ids: Option<&'a BTreeMap<String, ObjectRef>>,
+}
+
+/// What each new object was in the project the file came from, as the
+/// file's trusted XML IDs, else its `vz:` tags, name it ([`apply_tagged`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Origins {
+    /// Each new track: (its lane there, whether it is the audio part).
+    pub lanes: BTreeMap<LaneId, (u64, bool)>,
+    /// Each new strip: its strip there.
+    pub strips: BTreeMap<StripId, u64>,
+    /// Each new top-level event: its clip's `vz:e` (the event there).
+    pub events: BTreeMap<EventId, u64>,
+    /// Per new marker, in order: its `vz:m` index.
+    pub markers: Vec<Option<u64>>,
+    /// Each new plug-in slot: its `vz:d` / `vz:q` instance there.
+    pub slots: BTreeMap<PluginInstanceId, u64>,
 }
 
 /// A mapped import: what [`apply`] will do, and the report so far (the
@@ -160,6 +181,10 @@ pub const SHARED_SYNTH: &str = "Mixer settings of tracks that share the built-in
 /// Left out: effects and sends of tracks with neither notes nor audio (by
 /// track).
 pub const NO_STRIP: &str = "Mixer settings of tracks with no instrument or audio";
+/// Note: tags or trusted IDs that named nothing, the wrong kind, or a part
+/// already named (a count).
+pub const TAGS_IGNORED: &str =
+    "Tags in the file that named nothing or named one part twice (ignored)";
 /// Note (Ruling 16): the file came from VizDAW.
 pub const FROM_VIZDAW: &str =
     "This file came from a VizDAW project; it was opened as a new project";
@@ -223,6 +248,17 @@ struct SlotPlan {
     plugin: PluginRef,
     bypass: bool,
     state: Option<Arc<[u8]>>,
+    /// The instance it was in the project the file came from.
+    tag: Option<u64>,
+}
+
+impl SlotPlan {
+    fn untagged(&self) -> SlotPlan {
+        SlotPlan {
+            tag: None,
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -256,6 +292,16 @@ impl Mix {
             ..self.clone()
         }
     }
+
+    /// The same settings with no slot's origin, for comparing two
+    /// tracks' settings.
+    fn untagged(&self) -> Mix {
+        Mix {
+            eq: self.eq.as_ref().map(SlotPlan::untagged),
+            inserts: self.inserts.iter().map(SlotPlan::untagged).collect(),
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -278,12 +324,19 @@ struct TrackPlan {
     /// Mute and solo kept on the track rather than its strips (it shares
     /// the built-in synth's strip).
     flags: Option<(bool, bool)>,
+    /// The lane (and whether the audio part) it was where the file came
+    /// from.
+    tag: Option<(u64, bool)>,
+    /// The strip its first own strip was there.
+    strip_tag: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct BusPlan {
     name: String,
     mix: Mix,
+    /// The strip it was where the file came from.
+    tag: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,6 +346,8 @@ struct Plan {
     tempo: TempoMap,
     meter: MeterMap,
     markers: Vec<Marker>,
+    /// Each marker's `vz:m` index, parallel to `markers`.
+    marker_tags: Vec<Option<u64>>,
     buses: Vec<BusPlan>,
     master: Mix,
     builtin: Option<Mix>,
@@ -432,6 +487,47 @@ struct Cx<'a, 'p> {
     /// Each send's channel and its index among the strip's sends, by send
     /// ID (`usize::MAX` once a loop cut it).
     send_at: HashMap<&'p str, (&'p str, usize)>,
+    /// What the tags and trusted IDs have named so far.
+    claims: Claims,
+}
+
+/// What the file's tags and trusted IDs have named so far, per map, and how
+/// many were ignored ([`TAGS_IGNORED`]).
+#[derive(Debug, Default)]
+struct Claims {
+    lanes: HashSet<(u64, bool)>,
+    strips: HashSet<u64>,
+    events: HashSet<u64>,
+    markers: HashSet<u64>,
+    slots: HashSet<u64>,
+    ignored: usize,
+}
+
+/// What an element names: by its trusted XML ID (the kind the map gives)
+/// or by a tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Named {
+    Id(String, u64),
+    Tag(TagKind, u64),
+}
+
+impl Named {
+    fn number(&self) -> u64 {
+        match self {
+            Named::Id(_, n) | Named::Tag(_, n) => *n,
+        }
+    }
+}
+
+/// Whether `key` is the first to claim its object in `set`; a later claim
+/// is counted in `ignored`.
+fn first<K: std::hash::Hash + Eq>(set: &mut HashSet<K>, ignored: &mut usize, key: K) -> bool {
+    if set.insert(key) {
+        true
+    } else {
+        *ignored = ignored.saturating_add(1);
+        false
+    }
 }
 
 /// Maps `pkg` to a plan for [`apply`]. Looks at `cancel` before any work and
@@ -458,6 +554,7 @@ pub fn map(
         chan_track: HashMap::new(),
         dev_slot: HashMap::new(),
         send_at: HashMap::new(),
+        claims: Claims::default(),
     };
     let p = &pkg.project;
     if p.dropped_text > 0 {
@@ -475,7 +572,8 @@ pub fn map(
         info: SongInfo::default(),
         tempo,
         meter,
-        markers,
+        markers: markers.iter().map(|(m, _)| m.clone()).collect(),
+        marker_tags: markers.iter().map(|(_, t)| *t).collect(),
         buses: Vec::new(),
         master: Mix::default(),
         builtin: None,
@@ -491,6 +589,10 @@ pub fn map(
     plan.info = info;
     if pkg.ret.from_vizdaw() {
         cx.report.add(ItemKind::Note, FROM_VIZDAW, None);
+    }
+    if cx.claims.ignored > 0 {
+        let n = cx.claims.ignored;
+        cx.add_n(ItemKind::Note, TAGS_IGNORED, n);
     }
     stop(cancel)?;
     Ok(DpImport {
@@ -564,6 +666,60 @@ impl<'a, 'p> Cx<'a, 'p> {
         if !strip_tags(c).0.is_empty() {
             self.add(ItemKind::LeftOut, COLOURS_AND_COMMENTS, Some(place()));
         }
+    }
+
+    /// What an element names. Its trusted XML ID wins when the ID map
+    /// holds it with one of `kinds` (another kind is ignored and counted);
+    /// else its comment's first tag of one of `tags`. Every other tag in the
+    /// comment is ignored and counted. The caller counts a second claim on
+    /// one object.
+    fn named(
+        &mut self,
+        id: Option<&str>,
+        kinds: &[&str],
+        comment: Option<&str>,
+        tags: &[TagKind],
+    ) -> Option<Named> {
+        let mut by_tag = None;
+        if let Some(c) = comment {
+            for (k, n) in strip_tags(c).1 {
+                if by_tag.is_none() && tags.contains(&k) {
+                    by_tag = Some(Named::Tag(k, n));
+                } else {
+                    self.claims.ignored = self.claims.ignored.saturating_add(1);
+                }
+            }
+        }
+        let by_id = match (self.env.ids, id) {
+            (Some(ids), Some(id)) => match ids.get(id) {
+                Some(r) if kinds.contains(&r.kind.as_str()) => {
+                    Some(Named::Id(r.kind.clone(), r.id))
+                }
+                Some(_) => {
+                    self.claims.ignored = self.claims.ignored.saturating_add(1);
+                    None
+                }
+                None => None,
+            },
+            _ => None,
+        };
+        by_id.or(by_tag)
+    }
+
+    /// The strip a channel names (a plain channel's ID names none), when it
+    /// is the first to name it.
+    fn strip_named(&mut self, c: &DpChannel) -> Option<u64> {
+        let named = self.named(
+            c.named.id.as_deref(),
+            &["strip", "channel"],
+            c.named.comment.as_deref(),
+            &[TagKind::Strip],
+        )?;
+        if matches!(&named, Named::Id(k, _) if k == "channel") {
+            return None;
+        }
+        let n = named.number();
+        first(&mut self.claims.strips, &mut self.claims.ignored, n).then_some(n)
     }
 
     /// The swatch nearest `hex` (Changed unless exact); a malformed colour
@@ -728,6 +884,7 @@ impl<'a, 'p> Cx<'a, 'p> {
             BusPlan {
                 name: String::new(),
                 mix: Mix::default(),
+                tag: None,
             };
             buses
         ];
@@ -799,8 +956,9 @@ impl<'a, 'p> Cx<'a, 'p> {
                                     .or(t.channel.as_ref().and_then(|c| c.named.color.as_deref())),
                             );
                             self.comment(t.named.comment.as_deref(), || format!("track '{name}'"));
+                            let tag = t.channel.as_deref().and_then(|c| self.strip_named(c));
                             if let Some(slot) = plan.buses.get_mut(b) {
-                                *slot = BusPlan { name, mix };
+                                *slot = BusPlan { name, mix, tag };
                             }
                         }
                         TrackRole::Content => {
@@ -821,8 +979,9 @@ impl<'a, 'p> Cx<'a, 'p> {
                             self.name(Some(&name), || format!("Bus {}", b.saturating_add(1)));
                         let mut mix = self.mix(c, &name, Out::Master, false, None)?;
                         mix.colour = self.colour(c.named.color.as_deref());
+                        let tag = self.strip_named(c);
                         if let Some(slot) = plan.buses.get_mut(b) {
-                            *slot = BusPlan { name, mix };
+                            *slot = BusPlan { name, mix, tag };
                         }
                     } else {
                         self.add(ItemKind::LeftOut, VCA, None);
@@ -844,6 +1003,19 @@ impl<'a, 'p> Cx<'a, 'p> {
         let name = self.name(t.named.name.as_deref(), || format!("Track {n}"));
         self.comment(t.named.comment.as_deref(), || format!("track '{name}'"));
         let channel = t.channel.as_deref();
+        // The audio part of a track: audio and no notes (a split track's
+        // second half, or an audio track).
+        let audio_part =
+            t.content.contains(&DpContentType::Audio) && !t.content.contains(&DpContentType::Notes);
+        let tag = self
+            .named(
+                t.named.id.as_deref(),
+                &["track"],
+                t.named.comment.as_deref(),
+                &[TagKind::Track],
+            )
+            .map(|n| (n.number(), audio_part))
+            .filter(|&key| first(&mut self.claims.lanes, &mut self.claims.ignored, key));
         let devices = channel.map_or(&[][..], |c| c.devices.as_slice());
         let first = devices
             .iter()
@@ -911,16 +1083,21 @@ impl<'a, 'p> Cx<'a, 'p> {
                     })
                 }
                 Some(b)
-                    if *b
+                    if b.untagged()
                         == Mix {
                             colour: None,
-                            ..settings.clone()
+                            ..settings.untagged()
                         } => {}
                 Some(_) => self.add(ItemKind::LeftOut, SHARED_SYNTH, Some(name.clone())),
             }
         } else if !owns && channel.is_some_and(|c| !c.devices.is_empty() || !c.sends.is_empty()) {
             self.add(ItemKind::LeftOut, NO_STRIP, Some(name.clone()));
         }
+        let strip_tag = if owns {
+            channel.and_then(|c| self.strip_named(c))
+        } else {
+            None
+        };
         Ok(TrackPlan {
             name,
             dest_name,
@@ -928,6 +1105,8 @@ impl<'a, 'p> Cx<'a, 'p> {
             audio,
             mix,
             flags,
+            tag,
+            strip_tag,
         })
     }
 
@@ -1025,6 +1204,15 @@ impl<'a, 'p> Cx<'a, 'p> {
         if !(self.env.installed)(format, id) {
             self.add(ItemKind::Note, NOT_INSTALLED, Some(name.clone()));
         }
+        let tag = self
+            .named(
+                d.named.id.as_deref(),
+                &["device"],
+                d.named.comment.as_deref(),
+                &[TagKind::Device, TagKind::Eq],
+            )
+            .map(|n| n.number())
+            .filter(|&n| first(&mut self.claims.slots, &mut self.claims.ignored, n));
         let state = match &d.state {
             None => None,
             Some(f) if f.external => {
@@ -1054,6 +1242,7 @@ impl<'a, 'p> Cx<'a, 'p> {
             },
             bypass: d.enabled.as_ref().and_then(|e| e.value) == Some(false),
             state,
+            tag,
         }))
     }
 

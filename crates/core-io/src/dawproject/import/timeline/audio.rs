@@ -245,6 +245,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 rate,
                 negative,
                 dropped: false,
+                tag: f.tag,
                 plan: RegionPlan {
                     media: m,
                     source_offset,

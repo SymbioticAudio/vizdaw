@@ -125,6 +125,15 @@ impl<'p> Tl<'_, '_, 'p> {
             }
             None => 0,
         };
+        // The event it names: the first clip to name one keeps it.
+        let tag = self
+            .cx
+            .named(None, &[], c.named.comment.as_deref(), &[TagKind::Event])
+            .map(|n| n.number())
+            .filter(|&n| first(&mut self.cx.claims.events, &mut self.cx.claims.ignored, n));
+        let mut tf = *f;
+        tf.tag = tag;
+        let f = &tf;
         let content = self.content_of(c);
         // The timeline it plays, when clips share it.
         let shared = c.reference.as_deref().or_else(|| {
@@ -152,6 +161,7 @@ impl<'p> Tl<'_, '_, 'p> {
         // One pass.
         let mut pf = *f;
         pf.muted = false;
+        pf.tag = None;
         let Some(mut fr) = self.one_pass(c, &pf) else {
             return Ok(());
         };
@@ -197,6 +207,7 @@ impl<'p> Tl<'_, '_, 'p> {
             total,
             looped,
             mute: f.muted || c.enable == Some(false),
+            tag,
         });
         Ok(())
     }
@@ -312,6 +323,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 fades,
                 name,
                 muted: f.muted || c.enable == Some(false),
+                tag: f.tag,
             },
             start,
             start_s: self.clock.secs(start),

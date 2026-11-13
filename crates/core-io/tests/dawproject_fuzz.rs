@@ -199,6 +199,7 @@ fn attempt(path: &Path) -> Result<(), IoError> {
             installed: &installed,
             plist: &TestPlist,
             rate: 48_000,
+            ids: None,
         },
         &never,
     )?;

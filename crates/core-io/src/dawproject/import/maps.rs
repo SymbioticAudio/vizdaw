@@ -197,7 +197,10 @@ impl Cx<'_, '_> {
         Ok((tempo, meter))
     }
 
-    pub(super) fn markers(&mut self, tempo: &TempoMap) -> Result<Vec<Marker>, IoError> {
+    pub(super) fn markers(
+        &mut self,
+        tempo: &TempoMap,
+    ) -> Result<Vec<(Marker, Option<u64>)>, IoError> {
         let Some(a) = self.pkg.project.arrangement.as_ref() else {
             return Ok(Vec::new());
         };
@@ -212,11 +215,15 @@ impl Cx<'_, '_> {
                 self.add(ItemKind::LeftOut, COLOURS_AND_COMMENTS, Some(name.clone()));
             }
             self.comment(m.named.comment.as_deref(), || format!("marker '{name}'"));
+            let tag = self
+                .named(None, &[], m.named.comment.as_deref(), &[TagKind::Marker])
+                .map(|n| n.number())
+                .filter(|&n| first(&mut self.claims.markers, &mut self.claims.ignored, n));
             if let Some(tick) = self.time(m.time, unit, tempo) {
-                out.push(Marker { tick, name });
+                out.push((Marker { tick, name }, tag));
             }
         }
-        out.sort_by_key(|m| m.tick);
+        out.sort_by_key(|(m, _)| m.tick);
         Ok(out)
     }
 

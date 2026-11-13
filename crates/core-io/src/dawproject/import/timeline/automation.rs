@@ -141,6 +141,7 @@ impl<'p> Tl<'_, '_, 'p> {
                     mute: f.muted,
                     at,
                     value: v0,
+                    tag: f.tag,
                 });
             }
             let hold = matches!(pt.value, DpPointValue::Real(_, Some(DpInterpolation::Hold)));
@@ -152,6 +153,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 mute: f.muted,
                 at,
                 value,
+                tag: f.tag,
             });
         }
         if held {

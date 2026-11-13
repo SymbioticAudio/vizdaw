@@ -17,6 +17,8 @@ impl<'p> Tl<'_, '_, 'p> {
                 audio,
                 mix: Mix::default(),
                 flags: None,
+                tag: None,
+                strip_tag: None,
             });
         }
         let n = plan.tracks.len();
@@ -123,6 +125,7 @@ impl<'p> Tl<'_, '_, 'p> {
                         tick: Tick(e.tick),
                         mute: e.mute,
                         body: Body::Midi(e.body, gc(m, e.ch)),
+                        tag: e.tag,
                     });
                 }
             }
@@ -150,6 +153,7 @@ impl<'p> Tl<'_, '_, 'p> {
                     tick: Tick(r.tick),
                     mute: r.mute,
                     body: Body::Region(r.plan),
+                    tag: r.tag,
                 });
             }
         }
@@ -242,6 +246,7 @@ impl<'p> Tl<'_, '_, 'p> {
                         at: a.at,
                         value: a.value,
                     },
+                    tag: a.tag,
                 });
             }
         }
@@ -273,6 +278,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 let mut e = Ev {
                     tick: tick.saturating_add(c.tick),
                     mute: e.mute || c.mute,
+                    tag: c.tag,
                     ..e.clone()
                 };
                 if let EventBody::Note { duration, .. } = &mut e.body
@@ -343,6 +349,7 @@ impl<'p> Tl<'_, '_, 'p> {
                         v.extend(c.pass.iter().map(|e| Ev {
                             tick: e.tick.saturating_add(c.tick),
                             mute: e.mute || c.mute,
+                            tag: c.tag,
                             ..e.clone()
                         }));
                     }
@@ -419,6 +426,7 @@ impl<'p> Tl<'_, '_, 'p> {
                                 length,
                                 loop_count,
                             },
+                            tag: c.tag,
                         });
                     }
                 }

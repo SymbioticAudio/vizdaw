@@ -284,6 +284,7 @@ fn mapped(
             installed: &yes,
             plist: &NoPlist,
             rate: 48_000,
+            ids: None,
         },
         &AtomicBool::new(false),
     )

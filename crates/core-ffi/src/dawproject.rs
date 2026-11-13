@@ -1159,6 +1159,7 @@ fn import_body(
         installed: &has,
         plist: plist(),
         rate: job.format.sample_rate,
+        ids: None,
     };
     let imp = map(&pkg, &media, &env, cancel)?;
     stage(8);

@@ -64,6 +64,7 @@ impl<'p> Tl<'_, '_, 'p> {
                     tick: start,
                     ch,
                     mute: f.muted,
+                    tag: f.tag,
                     body: EventBody::Note {
                         pitch,
                         velocity,
@@ -175,6 +176,7 @@ impl<'p> Tl<'_, '_, 'p> {
                                 tick: start.saturating_add(offset),
                                 ch,
                                 mute: f.muted,
+                                tag: f.tag,
                                 body: EventBody::PolyPressure { pitch, value },
                             },
                         );
@@ -338,6 +340,7 @@ impl<'p> Tl<'_, '_, 'p> {
                     // No channel: the track's main one (filled in later).
                     ch: ch.unwrap_or(u8::MAX),
                     mute: f.muted,
+                    tag: f.tag,
                     body,
                 },
             );
