@@ -1276,18 +1276,28 @@ impl Session {
         let captured = plugins::with(self.id, |p| {
             let Some(p) = p else { return Vec::new() };
             gone.into_iter()
-                // A placeholder has nothing to capture; its saved state
-                // stays in the document.
-                .filter_map(|id| {
+                .map(|id| {
                     let mine = core_model::automation::slot_params(&riding, id);
-                    p.capture_with(&mut scratch, id, &mine)
-                        .ok()
-                        .map(|blob| (id, blob))
+                    (id, p.capture_with(&mut scratch, id, &mine))
                 })
                 .collect::<Vec<_>>()
         })?;
         let mut inner = lock(&self.inner);
-        for (id, blob) in captured {
+        for (id, captured) in captured {
+            let blob = match captured {
+                Ok(blob) => blob,
+                // A placeholder has nothing to capture; its saved state
+                // stays in the document.
+                Err(core_host::HostError::NotFound(_)) => continue,
+                // Reported like a save's capture failure (plan 6e Task 3
+                // re-review: a refused store, e.g. a blob collision); the
+                // document keeps the state it had.
+                Err(e) => {
+                    let line = format!("{}: state not saved ({e})", slot_name(inner.doc(), id));
+                    inner.news.problems.push(line);
+                    continue;
+                }
+            };
             if let Some(bytes) = scratch.doc().state_blob(blob) {
                 // The overlay the capture kept (Task 9b), as in `scratch`.
                 inner

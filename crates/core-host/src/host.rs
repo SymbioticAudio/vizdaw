@@ -453,6 +453,16 @@ impl PluginHost {
         }
     }
 
+    /// The state bytes last loaded into running instance `id`, as the
+    /// host holds them (a sync that finds equal bytes in another copy
+    /// keeps that copy, so the next sync compares pointers).
+    pub fn applied_state_bytes(&self, id: PluginInstanceId) -> Option<Arc<[u8]>> {
+        match &self.slots.get(&id)?.state {
+            State::Live(l) => l.applied_bytes.clone(),
+            _ => None,
+        }
+    }
+
     /// Why slot `id` has no instance, if it has none.
     pub fn failure(&self, id: PluginInstanceId) -> Option<&str> {
         match self.slots.get(&id).map(|s| &s.state) {
@@ -1619,11 +1629,18 @@ fn flush_gesture(id: PluginInstanceId, l: &mut Live, out: &mut Vec<Gesture>) {
 }
 
 /// Whether the wanted state's bytes are the ones `l` last loaded, for
-/// equal blob IDs (plan 6e Task 3 fix round 1). The document shares its
-/// blobs, so this is a pointer test except after a hash collision.
-fn same_bytes(want: &Want, l: &Live) -> bool {
+/// equal blob IDs (plan 6e Task 3 fix round 1): different bytes (a hash
+/// collision) are loaded again. Equal bytes in another copy (a document
+/// loaded or restored separately) are kept as `l`'s, so the next sync is
+/// a pointer test, not a byte compare of up to `MAX_STATE_BYTES`.
+fn same_bytes(want: &Want, l: &mut Live) -> bool {
     match (&want.state, &l.applied_bytes) {
-        (Some((_, w)), Some(a)) => Arc::ptr_eq(w, a) || w[..] == a[..],
+        (Some((_, w)), Some(a)) if Arc::ptr_eq(w, a) => true,
+        (Some((_, w)), Some(a)) if w[..] == a[..] => {
+            l.applied_bytes = Some(w.clone());
+            true
+        }
+        (Some(_), Some(_)) => false,
         _ => true,
     }
 }

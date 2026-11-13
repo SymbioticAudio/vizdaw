@@ -819,6 +819,46 @@ fn sync_reloads_a_state_whose_id_is_the_same_but_bytes_differ() {
     drop(engine);
 }
 
+/// Task 3 re-review: a document with the same state under another copy
+/// (here a save and load of it) is not loaded again, and the host keeps
+/// the new copy, so the next sync is a pointer test, not a byte compare.
+#[test]
+fn equal_state_bytes_in_another_copy_are_not_reloaded_and_the_copy_is_kept() {
+    use core_model::state::blob_id;
+    let (mut hist, song, id, mut host, script) = with_fake();
+    let (mut engine, _be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    hist.capture_state(id, b"0=0.25;").unwrap();
+    host.sync(hist.doc());
+    assert_eq!(script.held(GAIN), 0.25);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let pkg = std::env::temp_dir().join(format!(
+        "vizdaw-host-copy-{}-{nanos}.vizdaw",
+        std::process::id()
+    ));
+    core_model::file::save(hist.doc(), &pkg).unwrap();
+    let copy = core_model::file::load(&pkg);
+    let _ = std::fs::remove_dir_all(&pkg);
+    let copy = copy.unwrap();
+    let a = blob_id(b"0=0.25;");
+    let theirs = copy.state_arc(a).unwrap();
+    let ours = hist.doc().state_arc(a).unwrap();
+    assert!(
+        !Arc::ptr_eq(&theirs, &ours),
+        "another copy of the same bytes"
+    );
+    // The plugin's own value moves; a reload would put 0.25 back.
+    script.held.lock().unwrap().insert(GAIN, 0.5);
+    host.sync(&copy);
+    assert_eq!(script.held(GAIN), 0.5, "equal bytes: not reloaded");
+    let applied = host.applied_state_bytes(id).unwrap();
+    assert!(Arc::ptr_eq(&applied, &theirs), "the copy is kept");
+    drop(engine);
+}
+
 #[test]
 fn unpaired_gesture_events_still_become_gestures() {
     let (hist, song, id, mut host, script) = with_fake();
