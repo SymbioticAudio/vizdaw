@@ -2210,3 +2210,60 @@ fn offline_regions_conflict_take_is_not_made_twice() {
         vec!["Keys: take \u{201c}Returned 2026-11-13\u{201d}".to_owned()]
     );
 }
+
+/// Coordinator ruling on fix round 1's concern 2: Keys plays into bus
+/// "Sub" (base and ours); theirs moves it to Reverb, which ours deleted.
+/// VizDAW wins: Keys still plays into Sub, listed under `DELETED_HERE`.
+#[test]
+fn matched_output_to_a_bus_deleted_here_keeps_ours() {
+    let (doc, seq) = fixture();
+    let doc = changed(&doc, |h| {
+        let r = h
+            .execute(
+                &Command::Mixer(MixerCmd::AddBus {
+                    name: "Sub".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let sub = created(&r, |id| match id {
+            AnyId::Strip(s) => Some(*s),
+            _ => None,
+        });
+        let keys = keys_strip(h.doc(), seq);
+        run(
+            h,
+            Command::Mixer(MixerCmd::SetOutput {
+                strip: keys,
+                output: core_model::mixer::Output::Bus(sub),
+            }),
+        );
+    });
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let keys = keys_strip(h.doc(), i.seq);
+        run(
+            h,
+            Command::Mixer(MixerCmd::SetOutput {
+                strip: keys,
+                output: core_model::mixer::Output::Bus(i.reverb),
+            }),
+        );
+    });
+    let o = reverb_deleted(&t);
+    let before = o.mixer().strip(keys_strip(&o, seq)).unwrap().output;
+    assert!(matches!(before, core_model::mixer::Output::Bus(_)));
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    assert_eq!(p.preview.applied, 0, "{:#?}", p.decisions);
+    assert_eq!(
+        item(&p.report, ItemKind::Conflict, DELETED_HERE).details,
+        vec!["Strip 'Keys': output to 'Reverb'".to_owned()]
+    );
+    let (h, _) = apply_on(&o, &p);
+    let keys = h.doc().mixer().strip(keys_strip(h.doc(), seq)).unwrap();
+    assert_eq!(keys.output, before, "ours' output stays");
+    assert!(!has_bus(h.doc(), "Reverb"));
+    assert_eq!(h.undo_depth(), 0);
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&o).unwrap());
+}

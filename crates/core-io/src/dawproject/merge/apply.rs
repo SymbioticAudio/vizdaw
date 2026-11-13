@@ -1210,9 +1210,9 @@ fn strips(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
     // projection's order.
     let mut slots: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
     for d in &cx.plan.decisions {
-        let output_gone =
-            d.outcome == Outcome::DeletedHere && d.unit == Unit::Strip(StripField::Output);
-        if d.outcome != Outcome::Theirs && !output_gone {
+        // A `DeletedHere` output (theirs aimed at a bus ours deleted) runs
+        // nothing: ours' output stays as it is (VizDAW wins).
+        if d.outcome != Outcome::Theirs {
             continue;
         }
         let Some(r) = cx.m_strip(d.row).copied() else {
@@ -1224,20 +1224,6 @@ fn strips(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
         let (Some(strip), Some(ts)) = (cx.ours_strip_at(o), cx.th.projection.strips.get(t)) else {
             continue;
         };
-        if output_gone {
-            // Theirs plays into a bus ours deleted: the master.
-            let master = h.doc().mixer().master();
-            if h.doc().mixer().strip(strip)?.output != Output::Master && strip != master {
-                run(
-                    h,
-                    Command::Mixer(MixerCmd::SetOutput {
-                        strip,
-                        output: Output::Master,
-                    }),
-                )?;
-            }
-            continue;
-        }
         let slot_of = |i: usize| -> Option<u64> {
             match slots.get(&o) {
                 Some(v) => v.get(i).copied(),

@@ -45,8 +45,9 @@
 //! - a device state theirs dropped (no command clears one).
 //!
 //! A send or output theirs aims at a bus ours deleted is
-//! [`Outcome::DeletedHere`]: the send is not made and the output goes to
-//! the master.
+//! [`Outcome::DeletedHere`]: the send is not made; a matched strip keeps
+//! ours' output as it is, and a new track's or bus's plays into the
+//! master (it has no output of ours).
 //!
 //! **Ruling 10.** A strip whose devices theirs changed while the file
 //! named effects VizDAW cannot host (VST plug-ins, ones not installed)
@@ -1564,7 +1565,7 @@ impl<'a> Decider<'a> {
                 .filter(|k| self.deleted_here(*k));
             let unit = Unit::Strip(StripField::Output);
             match gone {
-                // Theirs plays into a bus ours deleted: the master.
+                // Theirs plays into a bus ours deleted: ours' output stays.
                 Some(k) if out == Outcome::Theirs => {
                     let to = self.strip_label(k).replacen("Strip ", "", 1);
                     self.push(
