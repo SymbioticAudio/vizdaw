@@ -275,6 +275,75 @@ import VizDAWCore
         #expect(s.alert == nil && m.alert == nil)
     }
 
+    /// Task 11: a merge queued behind a confirmed one begins while the
+    /// first one's report is open. The window shows one sheet at a time,
+    /// so the merge sheet waits for the report; a dismissal written back
+    /// meanwhile (a sheet SwiftUI did not present) is not Cancel.
+    @Test func aQueuedMergeWaitsForTheReportSheet() async throws {
+        let (m, f, g, _) = try await held()
+        #expect(g.presented)
+        g.begin(path: "/tmp/second.dawproject", info: info())
+        await g.settle()
+        f.confirmMergeAnswer = .success(ReportRow(summary: "Merged: 1 applied, 0 kept, 0 added, 0 removed, 0 in conflict", items: []))
+        g.confirm()
+        #expect(m.interchange.reportShown && g.shown && g.path == "/tmp/second.dawproject")
+        #expect(!g.presented, "the report first")
+        let second = try #require(g.job)
+        g.presented = false
+        #expect(g.shown && g.job == second && f.cancelled.isEmpty && f.cancelledMerges.isEmpty, "not cancelled")
+        m.interchange.reportShown = false
+        #expect(g.presented, "then the merge sheet")
+        // Its own dismissal is Cancel.
+        g.presented = false
+        #expect(!g.shown && f.cancelled == [second])
+    }
+
+    /// Task 11: the sheet's list selects; Preview starts the Hold job with
+    /// the selected export (nothing before).
+    @Test func previewTakesTheSelectedSnapshot() async throws {
+        let (m, f) = try document()
+        f.snapshotsAnswer = .success([SnapshotRow(exportId: Self.other, exportedAt: 1_800_000_500, tracks: 3)])
+        let g = m.merge
+        g.begin(path: Self.path, info: info(export: nil))
+        await g.settle()
+        #expect(g.selectedSnapshot == Self.other, "the newest is selected")
+        g.selectedSnapshot = nil
+        g.previewSelected()
+        #expect(f.dawprojectMerges.isEmpty)
+        g.selectedSnapshot = Self.other
+        g.previewSelected()
+        #expect(f.dawprojectMerges.map(\.snapshot) == [Self.other] && g.running)
+    }
+
+    /// Task 11: after the core let the hold go (the project changed),
+    /// Preview Again starts a new Hold job for the same file and snapshot.
+    @Test func previewAgainAfterTheProjectChanged() async throws {
+        let (m, f, g, _) = try await held()
+        #expect(!g.canPreviewAgain)
+        f.confirmMergeAnswer = .failure(VizError.Model(message: "The project changed after the preview; preview the merge again."))
+        g.confirm()
+        #expect(g.canPreviewAgain && !g.canMerge)
+        g.previewAgain()
+        #expect(f.dawprojectMerges.count == 2 && f.dawprojectMerges.last?.path == Self.path)
+        #expect(g.error == nil && g.running && !g.canPreviewAgain && g.preview == nil)
+        let job = try #require(g.job)
+        end(f, m, job, .done, merge: Self.previewRow)
+        #expect(g.canMerge)
+    }
+
+    /// Task 11: while a merge is held, a format change waits (Project
+    /// Settings' OK is unavailable then) and so does Relink.
+    @Test func aHeldMergeBlocksAFormatChangeAndRelink() async throws {
+        let (m, _, _, _) = try await held()
+        let settings = m.projectSettings
+        settings.load()
+        #expect(!settings.formatBlocked, "no format change")
+        settings.rate = settings.rate == 48_000 ? 44_100 : 48_000
+        #expect(settings.formatBlocked)
+        #expect(m.media.relinkBlocked, "Relink waits too")
+        #expect(!MergeModel.heldHelp.isEmpty)
+    }
+
     /// A merge waits for a running job the core would refuse it beside.
     @Test func aMergeWaitsForARunningExport() async throws {
         let (m, f) = try document()

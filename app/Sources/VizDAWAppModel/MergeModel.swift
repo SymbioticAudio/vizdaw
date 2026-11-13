@@ -57,6 +57,9 @@ public final class MergeModel {
             start(snapshot: id)
         }
     }
+    /// The export selected in the sheet's list (the newest when it is
+    /// listed); Preview chooses it (`previewSelected`).
+    public var selectedSnapshot: String?
     /// The held merge's preview: the counts line and the conflict lines.
     public private(set) var preview: MergePreviewRow?
     /// The core's sentence for the last refusal (job, confirm or listing).
@@ -84,6 +87,51 @@ public final class MergeModel {
     /// Merge is available: a preview is held.
     public var canMerge: Bool { held && preview != nil }
 
+    /// The tooltip of what a held merge holds back (Convert, a format
+    /// change, Relink; Task 11).
+    public static let heldHelp = "Finish or cancel the DAWproject merge waiting to be confirmed first."
+
+    /// What the window presents (Task 11). A window shows one sheet at a
+    /// time, so the merge sheet waits while another of the document's
+    /// sheets is up (the report of the merge before it, above all). A
+    /// dismissal written back meanwhile is not Cancel: only the presented
+    /// sheet's own dismissal (Escape, the window's close) is.
+    public var presented: Bool {
+        get { shown && !otherSheetShown }
+        set {
+            if !newValue, otherSheetShown { return }
+            shown = newValue
+        }
+    }
+
+    /// Another of the document's sheets is up.
+    private var otherSheetShown: Bool {
+        guard let document else { return false }
+        return document.interchange.reportShown || document.interchange.importShown
+            || document.interchange.exportShown || document.dawproject.shown || document.forDaw.shown
+            || document.bounce.shown || document.projectSettings.shown
+    }
+
+    /// Preview in the snapshot list: the selected export is chosen, which
+    /// starts the Hold job.
+    public func previewSelected() {
+        guard let id = selectedSnapshot else { return }
+        chosenSnapshot = id
+    }
+
+    /// The core let the hold go after the preview (the project changed):
+    /// the sheet offers to preview the same file again.
+    public var canPreviewAgain: Bool { shown && job == nil && !waiting && !held && preview != nil }
+
+    /// Preview Again: a new Hold job for the same file (and the snapshot
+    /// chosen, if any).
+    public func previewAgain() {
+        guard canPreviewAgain else { return }
+        preview = nil
+        error = nil
+        start(snapshot: chosenSnapshot)
+    }
+
     // MARK: Begin
 
     /// Shows the sheet for `path`. Without an export ID, the project's
@@ -106,6 +154,7 @@ public final class MergeModel {
         shown = true
         quiet = false
         snapshots = []
+        selectedSnapshot = nil
         preview = nil
         error = nil
         held = false
@@ -139,6 +188,7 @@ public final class MergeModel {
             start(snapshot: nil)
         case .success(let rows):
             snapshots = rows
+            selectedSnapshot = rows.first?.exportId
         case .failure(let failure):
             error = InterchangeModel.message(failure)
         }

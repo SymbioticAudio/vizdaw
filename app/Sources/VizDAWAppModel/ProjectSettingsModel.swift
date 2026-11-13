@@ -56,6 +56,10 @@ public final class ProjectSettingsModel {
 
     public var format: ProjectFormatRow { ProjectFormatRow(sampleRate: rate, depth: depth) }
 
+    /// The format changed while a DAWproject merge is held: the core
+    /// refuses the conversion beside it, so OK waits (plan 6e Task 11).
+    public var formatBlocked: Bool { format != loadedFormat && (document?.mergeHeld ?? false) }
+
     /// File › Project Settings…: loads, then shows the sheet.
     public func show() {
         load()

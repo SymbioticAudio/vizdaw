@@ -60,6 +60,9 @@ struct ProjectSettingsSheet: View {
                     settings.apply()
                 }
                 .keyboardShortcut(.defaultAction)
+                // A held merge holds a format change back (plan 6e Task 11).
+                .disabled(settings.formatBlocked)
+                .help(settings.formatBlocked ? MergeModel.heldHelp : "")
             }
         }
         .padding(theme.spacing.l)

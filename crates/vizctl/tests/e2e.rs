@@ -4418,3 +4418,115 @@ fn dawproject_round_trip_over_the_channel() {
     assert_eq!(again["report"], imported, "{again}");
     app.quit();
 }
+
+/// README 291–299 through the channel (plan 6e Task 11): a file from
+/// VizDAW without `mode` is `dialog_required` "Return"; hostile merge calls
+/// are refused and open nothing; a preview and a merge of the project's own
+/// unchanged export find nothing to merge, add no undo step and open no
+/// window; `file.interchange_report` gives the merge's report; and 6d's
+/// path (`mode: "new"`) still makes a new project.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn dawproject_merge_over_the_channel() {
+    use core_control::ErrorCode;
+    const NOTHING: &str = "Nothing to merge: the file matches the project.";
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let tracks = doc["lanes"].as_array().unwrap().len();
+    assert!(tracks > 0, "{doc}");
+    let project = home.join("demo.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": project}, "window": w}),
+    );
+    assert!(project.join("project.json").is_file());
+    let file = home.join("demo.dawproject");
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": file}, "window": w}),
+    );
+    let summary = r["report"]["summary"].as_str().unwrap_or_default();
+    assert!(summary.starts_with("Exported"), "{r}");
+    let windows = window_numbers(&mut app);
+
+    // A file from VizDAW needs `mode`; hostile merge calls are refused.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.import_dawproject", "params": {"path": file}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Return"), "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.import_dawproject",
+               "params": {"path": file, "mode": "merge", "snapshot": "x"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    assert!(e.message.contains("snapshot"), "names `snapshot`: {e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.import_dawproject",
+               "params": {"path": file, "mode": "merge", "project": project}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "already open: {e:?}");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no refused call opened a sheet, a panel or a window"
+    );
+
+    // A preview: the file matches the project; nothing changes.
+    let before = app.call("state.get", json!({"target": "document", "window": w}));
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_dawproject",
+               "params": {"path": file, "mode": "merge", "preview": true}, "window": w}),
+    );
+    assert_eq!(r["report"]["summary"], NOTHING, "{r}");
+    let after = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(after["undo"], before["undo"], "the preview added no step");
+
+    // The merge: the same summary, no undo step, no window.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_dawproject",
+               "params": {"path": file, "mode": "merge"}, "window": w}),
+    );
+    assert_eq!(r["report"]["summary"], NOTHING, "{r}");
+    let merged = r["report"].clone();
+    let after = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(
+        after["undo"], before["undo"],
+        "nothing to merge adds no step"
+    );
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "the merge opened nothing"
+    );
+
+    // Its report is the window's last.
+    let again = app.call(
+        "command.run",
+        json!({"id": "file.interchange_report", "window": w}),
+    );
+    assert_eq!(again["report"], merged, "{again}");
+
+    // 6d's path still works: a new project with the demo's tracks.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_dawproject", "params": {"path": file, "mode": "new"}, "window": w}),
+    );
+    assert!(r["window"].is_i64(), "the new project's window: {r}");
+    let now = window_numbers(&mut app);
+    assert_eq!(now.len(), windows.len() + 1, "{now:?}");
+    let made = app.call(
+        "state.get",
+        json!({"target": "document", "window": r["window"]}),
+    );
+    assert_eq!(made["lanes"].as_array().unwrap().len(), tracks, "{made}");
+    app.quit();
+}

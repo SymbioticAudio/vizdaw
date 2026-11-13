@@ -2594,8 +2594,8 @@ store (`DawprojectModelTests`, `InterchangeCommandsTests`) and the e2e
      leaves the old file; Replace writes the new one.
 285. Start a bounce, then export a DAWproject. The sheet says it is waiting
      and exports when the bounce ends.
-286. File › Import Project › DAWproject… with the file from 283. A new
-     untitled window opens, with:
+286. File › Import Project › DAWproject… with the file from 283. The prompt
+     of 292 appears; choose New Project. A new untitled window opens, with:
      - the tracks, regions with their fade lengths and the crossfade's X;
      - notes with per-note expression in the Piano Roll;
      - the tempo ramp, markers, levels, sends and automation.
@@ -2603,7 +2603,8 @@ store (`DawprojectModelTests`, `InterchangeCommandsTests`) and the e2e
      Edit › Undo is unavailable. The report says "This file came from a
      VizDAW project".
 287. Double-click the `.dawproject` in Finder, and drop it on the Dock icon.
-     Each does what 286 does. If another installed app owns `.dawproject`,
+     Each does what 286 does, through the same prompt. If another installed
+     app owns `.dawproject`,
      double-click may open that app instead: use File › Import Project ›
      DAWproject… or File › Open… then.
 288. Import a file whose instrument is not installed. The track's instrument
@@ -2622,3 +2623,66 @@ store (`DawprojectModelTests`, `InterchangeCommandsTests`) and the e2e
   sends and automation;
 - export a DAWproject back from it and import that into VizDAW as a new
   project; check what arrived against the report.
+
+### DAWproject merge (plan 6e)
+
+By eye; matching, the merge rules, applying, shared sequences, hostile
+records and the edit-script properties are tested (`core-io`'s
+`dawproject_merge*.rs`), the job, its preview, hold and apply, snapshots and
+cancelling at every stage (`core-ffi/tests/dawproject_merge.rs`), the sheet's
+model, the prompt's store and the channel's parameters (`MergeModelTests`,
+`DocumentStoreTests`, `InterchangeCommandsTests`) and the e2e
+`dawproject_merge_over_the_channel`.
+
+Over the channel, `file.import_dawproject` with `mode: "merge"` and
+`preview` leaves open a project the command itself opened through
+`project`. A project opened through `project` that asks a recovery question
+can't answer it there: open it first with `file.open`, then merge without
+`project`.
+
+291. Make the demo files: `VIZDAW_MERGE_DEMO=<an empty folder> cargo test -p
+     core-ffi --test dawproject_merge write_merge_demo -- --ignored` (the
+     folder must exist and be outside `~/Library`). It writes `Merge
+     Demo.vizdaw`, `Returned.dawproject` and `Other.dawproject` there and
+     prints their paths. Open `Merge Demo.vizdaw`. "Drums" and "Keys" play a
+     test instrument that is not installed, so they show its placeholder;
+     the merge keeps it.
+292. File › Import Project › DAWproject… with `Returned.dawproject`. The
+     prompt says "This DAWproject came from a VizDAW project.", names the
+     open project ("It matches “Merge Demo”, which is open."), and offers
+     New Project, Merge With Existing Project… and Cancel. Cancel does
+     nothing.
+293. Again, and choose New Project: a new untitled window opens, as in 286.
+294. Again, and choose Merge With Existing Project…: the project's window
+     shows the Merge DAWproject sheet, with "Reading the file…" and then the
+     counts line and two conflicts under "Conflicts (VizDAW's version is
+     kept)": the "Drums" level and the "Keys" notes. Cancel leaves the
+     project and Edit › Undo's label unchanged.
+295. Merge: the note moved, the "Bass" level changed and the "Bridge" marker
+     arrived. "Drums" keeps its level. "Keys" has a take "Returned <today>"
+     that is not active. The report opens titled "Merge Report", with
+     "Conflicts" first. The keyboard slot, the input effect and the second
+     sequence are still there.
+296. Edit › Undo Merge DAWproject restores everything from 295 in one step;
+     Redo brings it back.
+297. Close the project. Drop `Returned.dawproject` on the Dock icon: the
+     prompt says no project is open ("Merge it into the project it came
+     from, or open it as a new project."). Merge With Existing Project…
+     shows an Open panel; choose `Merge Demo.vizdaw`; it opens and the sheet
+     follows.
+298. Merge the same file a second time. The sheet lists the same two
+     conflicts and nothing added or removed. After Merge, "Keys" has no
+     second "Returned" take, and Edit › Undo's label is what it was before
+     (Ruling 6: nothing ran). While a merge waits for Merge or Cancel,
+     Convert, a format change in Project Settings and Relink are
+     unavailable, with a tooltip saying why.
+299. Open `Other.dawproject` from the demo folder (a file from another
+     source): no prompt; it opens as a new project.
+
+**Owner check (manual, only the owner can do; spec §12, 6e's part):**
+- export the demo song;
+- open it in the DAW you use that reads DAWproject; move a note, change a
+  level and add a marker there; export a DAWproject back;
+- merge it into the original. Check that the three edits arrived and that
+  keyboard slots, input effects and other sequences are still there;
+- undo the merge.

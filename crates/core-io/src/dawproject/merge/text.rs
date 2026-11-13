@@ -59,14 +59,14 @@ pub const LOOPS_UNROLLED: &str = "Looped uses edited on some passes became notes
 /// Ruling 3), replaced by what they play (Task 6b fix round 1). Detail:
 /// "Track '<track>': use of '<sequence>'".
 pub const USES_AS_NOTES: &str = "Uses of a sequence turned into the notes they play";
-
-// ---------------------------------------------------------------- Left out
-
 /// Changed: the automation of sends ours kept to a bus the other DAW
 /// removed, removed with those sends (Task 7 case B re-review, N2).
 /// Detail: "Strip '<strip>': send to '<bus>'".
 pub const SEND_CURVES_GONE: &str =
     "Automation of sends to buses the other DAW removed (removed with the sends)";
+
+// ---------------------------------------------------------------- Left out
+
 /// Left out: devices theirs replaced with plug-ins VizDAW cannot host
 /// (Ruling 10). Detail: the plug-in's name.
 pub const VST_KEPT: &str =

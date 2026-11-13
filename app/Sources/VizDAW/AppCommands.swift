@@ -119,7 +119,8 @@ struct AppCommands: Commands {
                 .disabled(doc?.interchange.report == nil)
                 Button("Relink Media…") { doc?.media.relinkShown = true }
                     .keyboardShortcut(KeyMenu.shortcut("media.relink"))
-                    .disabled(doc?.media.relinkable.isEmpty ?? true)
+                    // A held merge holds Relink back (plan 6e Task 11).
+                    .disabled((doc?.media.relinkable.isEmpty ?? true) || (doc?.mergeHeld ?? false))
             }
             CommandGroup(replacing: .undoRedo) {
                 Button(doc?.undoTitle ?? "Undo") { doc?.undo() }
@@ -528,6 +529,62 @@ enum StoreAlerts {
             alert.informativeText = item.message
             alert.addButton(withTitle: "OK")
             alert.runModal()
+        }
+    }
+}
+
+/// The return prompt (plan 6e Ruling 14): a DAWproject file from VizDAW
+/// asks whether it opens as a new project or merges into the project it
+/// came from. Store-level, as `StoreAlerts`: it watches
+/// `DocumentStore.returnPrompt` and answers `answerReturn`. The prompt is
+/// only for files the user opened (the channel's `file.open` refuses a
+/// `.dawproject`; `file.import_dawproject` answers `dialog_required`
+/// "Return"); one that arrives while the channel is active shows nothing,
+/// is noted and is answered Cancel.
+@MainActor
+enum ReturnPrompts {
+    /// Shows any pending prompt, then re-arms on the next change.
+    static func watch(_ store: DocumentStore) {
+        withObservationTracking {
+            _ = store.returnPrompt
+        } onChange: {
+            DispatchQueue.main.async { watch(store) }
+        }
+        DispatchQueue.main.async { present(store) }
+    }
+
+    /// Set while a prompt is up: a re-armed `present` that runs inside the
+    /// modal loop leaves the queue to the loop already showing it.
+    private static var presenting = false
+
+    private static func present(_ store: DocumentStore) {
+        guard !presenting else { return }
+        presenting = true
+        defer { presenting = false }
+        while let prompt = store.returnPrompt {
+            if ControlChannel.active {
+                ControlChannel.note(
+                    AlertItem(
+                        title: "DAWproject Not Merged",
+                        message: "A DAWproject from VizDAW was opened; it was not merged."))
+                store.answerReturn(.cancel)
+                continue
+            }
+            let alert = NSAlert()
+            alert.messageText = "This DAWproject came from a VizDAW project."
+            alert.informativeText =
+                prompt.matchName.map { "It matches \u{201c}\($0)\u{201d}, which is open." }
+                ?? "Merge it into the project it came from, or open it as a new project."
+            alert.addButton(withTitle: "New Project")
+            alert.addButton(withTitle: "Merge With Existing Project…")
+            alert.addButton(withTitle: "Cancel")
+            let choice: ReturnChoice
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: choice = .newProject
+            case .alertSecondButtonReturn: choice = .merge
+            default: choice = .cancel
+            }
+            store.answerReturn(choice)
         }
     }
 }

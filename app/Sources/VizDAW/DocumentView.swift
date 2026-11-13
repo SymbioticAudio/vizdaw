@@ -112,6 +112,18 @@ private struct InterchangeSheets: ViewModifier {
             ) {
                 ProjectSettingsSheet(settings: model.projectSettings, editor: model.editor)
             }
+            // The return prompt's second page (plan 6e Task 11), as the
+            // DAWproject sheet: only for what the user opened, never under
+            // the control channel. It waits while another sheet is up
+            // (`MergeModel.presented`), so a queued merge is never
+            // cancelled by a sheet SwiftUI did not show.
+            .sheet(
+                isPresented: Binding(
+                    get: { model.merge.presented && !ControlChannel.active },
+                    set: { model.merge.presented = $0 })
+            ) {
+                MergeSheet(merge: model.merge)
+            }
     }
 }
 

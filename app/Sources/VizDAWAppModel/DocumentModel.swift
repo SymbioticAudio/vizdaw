@@ -228,7 +228,9 @@ public final class DocumentModel {
     /// A merge is held between its preview and Merge or Cancel: the core
     /// refuses Save As, the media jobs and the interchange jobs beside it
     /// (plan 6e Ruling 12), so they wait or are refused before they start.
-    public var mergeHeld: Bool { mergeModel?.held ?? false }
+    /// Read through `merge` (made on first use) so a view that asks before
+    /// any merge still observes the hold when it starts.
+    public var mergeHeld: Bool { merge.held }
 
     /// The document is closing (`DocumentStore.close`, before the session
     /// closes): a held merge ends quietly and nothing queued starts

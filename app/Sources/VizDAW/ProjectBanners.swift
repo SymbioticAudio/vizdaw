@@ -32,11 +32,15 @@ struct ProjectBanners: View {
                 Text("\(count) media file\(count == 1 ? " is" : "s are") not in the project format (\(label)) and stay silent.")
                 Spacer()
                 Button("Convert \(count) File\(count == 1 ? "" : "s")") { model.convertMedia() }
+                    .disabled(model.mergeHeld)
+                    .help(model.mergeHeld ? MergeModel.heldHelp : "")
             case .rateMismatch(let device, let project):
                 AppIcon.muted.image
                 Text("The audio device runs at \(Self.khz(device)); this project is \(Self.khz(Double(project))). Audio regions are muted.")
                 Spacer()
                 Button("Change Project Rate to \(Self.khz(device))") { model.changeRateToDevice() }
+                    .disabled(model.mergeHeld)
+                    .help(model.mergeHeld ? MergeModel.heldHelp : "")
             case .diskTooSlow:
                 AppIcon.diskSlow.image
                 Text("Disk too slow: some audio played as silence.")

@@ -5459,3 +5459,29 @@ fn every_test_runs_stripped() {
     }
     assert!(missing.is_empty(), "not in `stripped!`: {missing:?}");
 }
+
+/// Ruling 6 on the demo song (plan 6e Task 11, found by the e2e
+/// `dawproject_merge_over_the_channel`): merging a sequence's own unchanged
+/// export finds nothing to merge. Each of the demo's sequences plays the
+/// built-in synth on channel 10 ("Built-in Drums", with a program), which
+/// the import moves onto the instrument's channel; the merge then reads the
+/// drums' notes (and a program change) as changed there.
+#[test]
+#[ignore = "plan 6e Task 11 finding: a track on a destination channel other than 1 is not idempotent"]
+fn the_demo_songs_own_export_merges_nothing() {
+    let doc = core_engine::fixtures::demo_document().unwrap();
+    for seq in doc.sequences().keys().copied().collect::<Vec<_>>() {
+        let t = trip(&doc, seq);
+        let path = return_file(&t, Strip::Nothing, |_, _| {});
+        let p = plan_of(&t, &path, &t.base_doc);
+        assert_eq!(
+            summary(&p.preview),
+            NOTHING,
+            "{seq:?}: {:?}",
+            p.decisions
+                .iter()
+                .filter(|d| d.outcome != Outcome::Same)
+                .collect::<Vec<_>>()
+        );
+    }
+}

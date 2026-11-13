@@ -4,8 +4,8 @@ import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
-/// The import and export report (spec §6.3, §9; plan 6a Task 10): the
-/// summary line, then Changed, Left out and Notes with counts and
+/// The import, export and merge report (spec §6.3, §9; plan 6a Task 10):
+/// the summary line, then Conflicts, Changed, Left out and Notes with counts and
 /// disclosure rows naming tracks and bars; Copy, Save as Text… and, for an
 /// export, Show in Finder. Wording from `ReportText`, shared with Copy.
 struct ReportSheet: View {
@@ -37,8 +37,7 @@ struct ReportSheet: View {
                                     }
                                     .padding(.leading, theme.spacing.m)
                                 } label: {
-                                    Text("\(g.title) (\(g.items.reduce(0) { $0 + $1.count }))")
-                                        .font(theme.type.body.font.weight(.semibold))
+                                    GroupTitle(title: g.title, count: g.items.reduce(0) { $0 + $1.count })
                                 }
                                 .accessibilityLabel("\(g.title), \(g.items.reduce(0) { $0 + $1.count })")
                             }
@@ -70,10 +69,12 @@ struct ReportSheet: View {
         .frame(width: 520)
     }
 
-    /// The core's summary starts "Imported" or "Exported".
+    /// The core's summary starts "Imported", "Exported" or "Merged", or
+    /// is "Nothing to merge…" (plan 6e Task 11).
     private var title: String {
         let summary = interchange.report?.summary ?? ""
         if !interchange.written.isEmpty || summary.hasPrefix("Exported") { return "Export Report" }
+        if summary.hasPrefix("Merged") || summary.hasPrefix("Nothing to merge") { return "Merge Report" }
         return summary.hasPrefix("Imported") ? "Import Report" : "Report"
     }
 
@@ -90,6 +91,26 @@ struct ReportSheet: View {
             try text.write(toFile: path, atomically: true, encoding: .utf8)
         } catch {
             NSAlert(error: error).runModal()
+        }
+    }
+}
+
+/// A group's title and count. A merge's "Conflicts" (plan 6e Ruling 15),
+/// listed first, carries the warning icon and colour: VizDAW's version
+/// was kept there.
+private struct GroupTitle: View {
+    @Environment(\.symbioticTheme) private var theme
+    let title: String
+    let count: UInt64
+
+    var body: some View {
+        if title == "Conflicts" {
+            AppIcon.warning.label("\(title) (\(count))")
+                .font(theme.type.body.font.weight(.semibold))
+                .foregroundStyle(theme.state.warning.color)
+        } else {
+            Text("\(title) (\(count))")
+                .font(theme.type.body.font.weight(.semibold))
         }
     }
 }

@@ -172,6 +172,21 @@ extension Panels {
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
+    /// The return prompt's Merge With Existing Project… when no open
+    /// project matches (plan 6e Ruling 13): the `.vizdaw` package to merge
+    /// into, chosen as `Panels.chooseProject()` chooses one.
+    static func chooseProjectToMerge() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 }
+        panel.prompt = "Merge"
+        panel.message = "Choose the VizDAW project this DAWproject came from."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
     /// Where the DAWproject export writes; `name` is the core's
     /// (`dawprojectName`). The panel itself confirms a replace, so a chosen
     /// path is sent with `replace` (the old file stays until the new one is

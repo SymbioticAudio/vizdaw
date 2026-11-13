@@ -1346,3 +1346,209 @@ fn needs_snapshot_names_each_snapshot() {
     );
     assert_eq!(needs_snapshot(&[]), NOT_FROM_HERE);
 }
+
+// ---------------------------------------------------------------- the README's demo
+
+/// The test instrument the demo's "Drums" and "Keys" play, each on its own
+/// strip (the built-in synth's strip is shared by every track on it).
+const DEMO_SYNTH: &str = "vizdaw.test.synth4";
+
+/// The demo's note track `name` in `d`'s sequence `seq`.
+fn demo_lane(d: &Document, seq: u64, name: &str) -> core_model::lane::Lane {
+    let s = d.sequence(core_model::ids::SeqId(seq)).unwrap();
+    s.lanes.iter().find(|l| l.name == name).unwrap().clone()
+}
+
+/// The README's merge demo (checks 291–299; plan 6e Task 11). Runs only
+/// with `VIZDAW_MERGE_DEMO=<dir>`, an empty existing folder outside
+/// `~/Library`, and writes there:
+///
+/// - `Merge Demo.vizdaw`: "Song" with note tracks "Bass" (the built-in
+///   synth), "Drums" and "Keys" (the test instrument), an input effect on
+///   "Bass" and a second sequence "Riff" on keyboard slot "a", exported
+///   once and then changed here: "Drums" to −3 dB and the pitch of "Keys"'
+///   first note;
+/// - `Returned.dawproject`: that export as the other DAW sends it back,
+///   with "Bass"' first note moved, "Bass"' level and "Drums"' level
+///   changed, the notes of "Keys" moved, and a marker "Bridge" added, so
+///   the merge has two conflicts ("Drums"' level, "Keys"' notes);
+/// - `Other.dawproject`: 6d's hand-written file from another DAW.
+///
+/// It previews the merge to check the conflicts, then prints the paths.
+#[test]
+#[ignore = "writes the README's merge demo; needs VIZDAW_MERGE_DEMO=<an empty folder>"]
+fn write_merge_demo() {
+    use core_engine::fixtures::Builder;
+    use core_model::command::SequenceCmd;
+    use core_model::input_fx::{InputFx, InputFxKind};
+    use core_model::sequence::KeySlot;
+    use vizdaw_ffi::EventEdit;
+
+    let Some(dir) = std::env::var_os("VIZDAW_MERGE_DEMO") else {
+        eprintln!("write_merge_demo: set VIZDAW_MERGE_DEMO to an empty folder");
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    assert!(dir.is_absolute(), "VIZDAW_MERGE_DEMO must be absolute");
+    let dir = dir
+        .canonicalize()
+        .expect("VIZDAW_MERGE_DEMO must be an existing folder");
+    assert!(dir.is_dir(), "VIZDAW_MERGE_DEMO must be a folder");
+    assert!(
+        std::fs::read_dir(&dir).unwrap().next().is_none(),
+        "VIZDAW_MERGE_DEMO must be empty"
+    );
+    if let Some(home) = std::env::var_os("HOME") {
+        let library = Path::new(&home).join("Library");
+        let library = library.canonicalize().unwrap_or(library);
+        assert!(
+            !dir.starts_with(&library),
+            "VIZDAW_MERGE_DEMO must be outside ~/Library"
+        );
+    }
+    let _g = serial();
+    let work = tempfile::tempdir().unwrap();
+
+    // The project.
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, bass) = b.sequence("Song", "Bass", Some(synth)).unwrap();
+    let (drum_dest, _) = b
+        .plugin_dest("Drum Synth", plugin(DEMO_SYNTH, "Test Synth 4-Out"))
+        .unwrap();
+    let drums = b.lane(seq, "Drums", Some(drum_dest)).unwrap();
+    let (keys_dest, _) = b
+        .plugin_dest("Keys Synth", plugin(DEMO_SYNTH, "Test Synth 4-Out"))
+        .unwrap();
+    let keys = b.lane(seq, "Keys", Some(keys_dest)).unwrap();
+    b.notes(seq, bass, &[(0, 36, 0x8000, Q), (2 * Q, 43, 0x8000, Q)])
+        .unwrap();
+    b.notes(
+        seq,
+        drums,
+        &[
+            (0, 36, 0x8000, Q / 2),
+            (Q, 38, 0x8000, Q / 2),
+            (2 * Q, 36, 0x8000, Q / 2),
+            (3 * Q, 38, 0x8000, Q / 2),
+        ],
+    )
+    .unwrap();
+    b.notes(
+        seq,
+        keys,
+        &[(0, 60, 0x8000, 2 * Q), (2 * Q, 64, 0x8000, 2 * Q)],
+    )
+    .unwrap();
+    b.run(Command::Lane(LaneCmd::SetInputFx {
+        seq,
+        lane: bass,
+        chain: vec![InputFx {
+            kind: InputFxKind::Transpose { semitones: 2 },
+            bypass: false,
+        }],
+    }))
+    .unwrap();
+    let (riff, riff_lane) = b.sequence("Riff", "Riff", Some(synth)).unwrap();
+    b.notes(riff, riff_lane, &[(0, 48, 0x8000, Q), (Q, 51, 0x8000, Q)])
+        .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetKeyboardSlot {
+        seq: riff,
+        slot: Some(KeySlot {
+            key: "a".into(),
+            modifiers: 0,
+        }),
+    }))
+    .unwrap();
+    let pkg = dir.join("Merge Demo.vizdaw");
+    core_model::file::save(&b.finish(), &pkg).unwrap();
+    let s = Session::open(text(&pkg)).unwrap();
+    s.debug_set_trash_dir(Some(text(&work.path().join("Trash"))));
+    s.debug_free_bytes(None).unwrap();
+    s.debug_dawproject_capture_fails(false).unwrap();
+    idle_until(&s, |s| {
+        let slots = s.plugin_slots().unwrap();
+        slots.len() >= 2
+            && slots
+                .iter()
+                .all(|r| r.status == vizdaw_ffi::SlotStatus::Live)
+    });
+
+    // Exported, then changed here after the export.
+    let export_path = work.path().join("Merge Demo.dawproject");
+    export(&s, req(seq.0, &export_path));
+    let d = doc_of(&s);
+    let drum_strip = d
+        .mixer()
+        .find_kind(StripKind::Instrument(drum_dest))
+        .unwrap();
+    s.set_gain(drum_strip.0, -3.0).unwrap();
+    let keys_first = demo_lane(&d, seq.0, "Keys")
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .find(|e| e.tick == Tick(0))
+        .unwrap()
+        .id;
+    s.edit(
+        EditCommand::Event {
+            edit: EventEdit::SetPitch {
+                events: vec![keys_first.0],
+                pitch: 62,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    s.save().unwrap();
+
+    // The file as the other DAW sends it back.
+    let back = returned(&export_path, Strip::Nothing, &[], |p, _| {
+        let bass = track_id(p, "Bass");
+        let Some(DpTimeline::Notes(n)) = clips(p, &bass)[0].content.as_deref_mut() else {
+            panic!("Bass' clip holds notes")
+        };
+        n.notes[0].time = 0.5;
+        half_level(p, "Bass");
+        let drums = track(p, "Drums").channel.as_mut().unwrap();
+        drums.volume.as_mut().unwrap().value = Some(0.25);
+        let keys = track_id(p, "Keys");
+        let Some(DpTimeline::Notes(n)) = clips(p, &keys)[0].content.as_deref_mut() else {
+            panic!("Keys' clip holds notes")
+        };
+        n.notes[1].time = 3.0;
+        add_marker(p);
+    });
+    let returned_path = dir.join("Returned.dawproject");
+    std::fs::copy(&back, &returned_path).unwrap();
+
+    // A file from another DAW: 6d's hand fixture, packaged.
+    let other_path = dir.join("Other.dawproject");
+    let mut w = ZipWriter::new(std::fs::File::create(&other_path).unwrap());
+    for (entry, file) in [
+        ("project.xml", "hand_other.project.xml"),
+        ("metadata.xml", "hand_other.metadata.xml"),
+    ] {
+        let bytes = std::fs::read(format!("{FIXTURES}/{file}")).unwrap();
+        w.add(entry, EntryMethod::Deflated, &bytes).unwrap();
+    }
+    w.finish().unwrap();
+
+    // The merge the README describes: two conflicts, nothing changed yet.
+    let j = merge(&s, mreq(&returned_path, MergeStepRow::Preview));
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    let m = j.merge.expect("the preview");
+    assert_eq!(m.conflicts, 2, "{m:?}");
+    assert_eq!(m.added, 1, "the marker: {m:?}");
+    assert!(m.applied >= 2, "the note and the level: {m:?}");
+    let lines = m.conflict_lines.join("\n");
+    assert!(lines.contains("Drums") && lines.contains("Keys"), "{lines}");
+    s.close().unwrap();
+
+    println!("{}", m.summary);
+    println!("{lines}");
+    for p in [&pkg, &returned_path, &other_path] {
+        println!("{}", p.display());
+    }
+}

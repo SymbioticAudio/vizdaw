@@ -186,6 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         StoreAlerts.watch(appStore)
+        ReturnPrompts.watch(appStore)
+        appStore.chooseMergeProject = Panels.chooseProjectToMerge
         AppSetup.recoverUntitled()
         KeyMonitor.start()
         AppSetup.startScan()
