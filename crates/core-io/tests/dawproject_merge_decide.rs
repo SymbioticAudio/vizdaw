@@ -1648,3 +1648,82 @@ fn an_audio_channel_renamed_there_is_theirs() {
     });
     assert_eq!(decided(&plan_of(&t, &nameless, &t.base_doc)), vec![]);
 }
+
+#[test]
+fn an_audio_track_merged_before_is_the_same_whatever_its_channel_name() {
+    // Theirs' channel is "Stems"; the merge adds the track's strip named
+    // after the track ("Extra"), as the import does. Merging the file
+    // again changes nothing.
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let mut there = History::new(t.base_doc.clone());
+    let strip = add_audio_track(&mut there, seq, "Extra");
+    run(
+        &mut there,
+        Command::Mixer(MixerCmd::RenameStrip {
+            strip,
+            name: "Stems".into(),
+        }),
+    );
+    let path = returned_as(&t, there.doc());
+    let mut here = History::new(t.base_doc.clone());
+    add_audio_track(&mut here, seq, "Extra");
+    let p = plan_of(&t, &path, here.doc());
+    assert_eq!(
+        decided(&p),
+        vec![of(Unit::Track, Outcome::Same, "Track 'Extra'")]
+    );
+    assert!(!has(&p.report, ADDED_BOTH));
+    assert_eq!(p.preview.conflicts, 0);
+}
+
+#[test]
+fn a_notes_track_added_on_both_sides_with_no_notes_there_is_ours() {
+    // No "0 notes" take: theirs has nothing to give.
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let ids = ids(&t);
+    let mut there = History::new(t.base_doc.clone());
+    let dest = there.doc().lane(seq, ids.keys).unwrap().midi_dest;
+    let r = there
+        .execute(
+            &Command::Lane(LaneCmd::Add {
+                seq,
+                name: "New".into(),
+                index: None,
+            }),
+            &ViewFilter::default(),
+        )
+        .unwrap();
+    let lane = r
+        .created
+        .iter()
+        .find_map(|i| match i {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        })
+        .unwrap();
+    run(
+        &mut there,
+        Command::Lane(LaneCmd::SetDest { seq, lane, dest }),
+    );
+    let path = returned_as(&t, there.doc());
+    let mut here = History::new(there.doc().clone());
+    run(
+        &mut here,
+        Command::Event(EventCmd::Insert {
+            seq,
+            lane,
+            events: vec![core_model::event::EventSpec::new(
+                Tick(0),
+                core_model::event::EventBody::note(62, 0x8000, Tick(PPQ)),
+            )],
+        }),
+    );
+    let p = plan_of(&t, &path, here.doc());
+    assert_eq!(
+        decided(&p),
+        vec![of(Unit::Track, Outcome::Ours, "Track 'New'")]
+    );
+    assert_eq!(p.preview.conflicts, 0);
+}

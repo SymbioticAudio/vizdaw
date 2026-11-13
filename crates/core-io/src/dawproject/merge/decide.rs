@@ -888,12 +888,21 @@ impl<'a> Decider<'a> {
     /// Whether track `x` and track `y` (on two sides) carry the same
     /// content: name, notes, regions, automation and their strips.
     fn track_eq(&self, x: (Side, usize), y: (Side, usize)) -> bool {
-        self.track_eq_with(x, y, true)
+        self.track_eq_with(x, y, true, false)
     }
 
     /// [`Self::track_eq`], the notes and MIDI events compared only when
-    /// `with_notes`.
-    fn track_eq_with(&self, x: (Side, usize), y: (Side, usize), with_notes: bool) -> bool {
+    /// `with_notes`. For `twins` (a track new on both sides) the name of a
+    /// strip theirs made for an audio track is not compared: the merge
+    /// adds that strip named after its track, as the import does, so ours'
+    /// copy of a track merged before never has the file's channel name.
+    fn track_eq_with(
+        &self,
+        x: (Side, usize),
+        y: (Side, usize),
+        with_notes: bool,
+        twins: bool,
+    ) -> bool {
         let (Some(a), Some(b)) = (self.track_of(x.0, x.1), self.track_of(y.0, y.1)) else {
             return false;
         };
@@ -906,7 +915,7 @@ impl<'a> Decider<'a> {
                     .all(|((ka, a), (kb, b))| ka == kb && curve_eq(a, b))
         };
         let strips = match (a.strip, b.strip) {
-            (Some(sa), Some(sb)) => self.strip_eq((x.0, sa), (y.0, sb)),
+            (Some(sa), Some(sb)) => self.strip_eq_with((x.0, sa), (y.0, sb), !twins),
             (None, None) => true,
             _ => false,
         };
@@ -956,13 +965,14 @@ impl<'a> Decider<'a> {
     /// A track new on both sides with one name and type (`pair_twins`):
     /// equal, `Same` (the same file merged before). Otherwise ours stays.
     /// A notes track's differing notes are a `Notes` conflict, so theirs
-    /// becomes the alternate take as in any notes conflict (Ruling 6);
+    /// becomes the alternate take as in any notes conflict (Ruling 6),
+    /// unless theirs has no notes (then only ours' notes differ: `Ours`);
     /// anything else that differs, or any difference on an audio track,
     /// is a `Track` conflict listed under `text::ADDED_BOTH`.
     fn twin_track(&mut self, row: usize, name: &str, t: usize, o: usize) {
         let whole = format!("Track '{name}'");
         let (x, y) = ((Side::Theirs, t), (Side::Ours, o));
-        if self.track_eq(x, y) {
+        if self.track_eq_with(x, y, true, true) {
             self.push(Unit::Track, row, Outcome::Same, whole);
             return;
         }
@@ -970,14 +980,21 @@ impl<'a> Decider<'a> {
         else {
             return;
         };
-        let take = !tt.audio && !notes_eq(ot, tt);
+        let rest_same = self.track_eq_with(x, y, false, true);
+        // Theirs with no notes has no take to give: ours' notes are kept.
+        let empty = tt.notes_played.is_empty() && tt.midi.is_empty();
+        if !tt.audio && empty && rest_same {
+            self.push(Unit::Track, row, Outcome::Ours, whole);
+            return;
+        }
+        let take = !tt.audio && !empty && !notes_eq(ot, tt);
         if take {
             let notes_of = |x: &PTrack| count(x.notes_played.len(), "note", "notes");
             let what = format!("Track '{name}': notes");
             let (ours, theirs) = (Some(notes_of(ot)), Some(notes_of(tt)));
             self.push_with(Unit::Notes, row, Outcome::Conflict, what, ours, theirs);
         }
-        if !take || !self.track_eq_with(x, y, false) {
+        if !take || !rest_same {
             self.push(Unit::Track, row, Outcome::Conflict, whole);
         }
     }
@@ -1176,6 +1193,13 @@ impl<'a> Decider<'a> {
     /// Whether two strips carry the same settings (a strip theirs made for
     /// an audio track by the file's channel name, when it gave one).
     fn strip_eq(&self, x: (Side, usize), y: (Side, usize)) -> bool {
+        self.strip_eq_with(x, y, true)
+    }
+
+    /// [`Self::strip_eq`]; without `audio_names`, the name of a strip theirs
+    /// made for an audio track is not compared.
+    fn strip_eq_with(&self, x: (Side, usize), y: (Side, usize), audio_names: bool) -> bool {
+        let skip_name = !audio_names && (self.audio_path(x.0, x.1) || self.audio_path(y.0, y.1));
         let (Some(a), Some(b)) = (self.strip_of(x.0, x.1), self.strip_of(y.0, y.1)) else {
             return false;
         };
@@ -1195,10 +1219,11 @@ impl<'a> Decider<'a> {
             && a.mute == b.mute
             && a.solo == b.solo
             && a.colour == b.colour
-            && match (self.strip_name(x.0, x.1), self.strip_name(y.0, y.1)) {
-                (Some(p), Some(q)) => p == q,
-                _ => true,
-            }
+            && (skip_name
+                || match (self.strip_name(x.0, x.1), self.strip_name(y.0, y.1)) {
+                    (Some(p), Some(q)) => p == q,
+                    _ => true,
+                })
             && out(x.0, a) == out(y.0, b)
             && sends
             && devices
