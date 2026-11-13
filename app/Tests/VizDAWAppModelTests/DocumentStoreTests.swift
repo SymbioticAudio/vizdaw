@@ -160,7 +160,9 @@ extension DocumentStoreTests {
         #expect(s.open(path: "/tmp/a.dawproject") == nil)
         #expect(s.open(path: "/tmp/B.DAWPROJECT") == nil)
         await s.settle()
-        #expect(box.made.map { $0.dawprojectImports.map(\.path) } == [["/tmp/a.dawproject"], ["/tmp/B.DAWPROJECT"]])
+        // The two opens read their info on detached tasks, so either may finish first.
+        #expect(Set(box.made.flatMap { $0.dawprojectImports.map(\.path) }) == ["/tmp/a.dawproject", "/tmp/B.DAWPROJECT"])
+        #expect(box.made.allSatisfy { $0.dawprojectImports.count == 1 })
         #expect(s.documents.count == 2 && s.alert == nil)
         #expect(InterchangeModel.isDawproject("/x/y.DawProject") && !InterchangeModel.isDawproject("/x/y.zip"))
         #expect(s.open(path: "/tmp/a.zip") == nil)
