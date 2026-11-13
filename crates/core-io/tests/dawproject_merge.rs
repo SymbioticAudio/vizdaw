@@ -5442,6 +5442,7 @@ stripped!(
     a_drum_tracks_main_channel_theirs_changes_lands,
     a_drum_tracks_note_channel_and_program_theirs_changes_land,
     an_external_destinations_mix_is_not_theirs_change,
+    an_external_destinations_own_export_merges_nothing,
     a_volume_cc_theirs_changes_lands,
     an_edit_inside_a_use_plays_on_the_channel_theirs_has,
 );
@@ -5660,12 +5661,10 @@ fn an_external_destinations_mix_is_not_theirs_change() {
 }
 
 /// Ruling 6 with an external destination: its own unchanged export merges
-/// to nothing. Ignored: the import plays an external destination's track
-/// on the built-in synth, whose strip comes back as "Built-in Synth", so
-/// the strip's name reads as theirs' change (Task 11 core fix round 2
-/// finding; needs a ruling).
+/// to nothing. The import plays its track on the built-in synth, whose
+/// strip it names itself: that name is never theirs' change (Task 11
+/// ruling).
 #[test]
-#[ignore = "plan 6e Task 11 finding: an external destination's strip comes back named for the built-in synth"]
 fn an_external_destinations_own_export_merges_nothing() {
     let (doc, seq) = external_mix();
     let t = trip(&doc, seq);
@@ -5678,9 +5677,8 @@ fn an_external_destinations_own_export_merges_nothing() {
 }
 
 /// Theirs changes the external destination's volume CC at file time 0:
-/// a real change, so it lands as a CC 7 event; merging again leaves the
-/// track's events alone (the strip's name, see the ignored test above, is
-/// decided again each time).
+/// a real change, so it lands as a CC 7 event; merging again adds
+/// nothing.
 #[test]
 fn a_volume_cc_theirs_changes_lands() {
     let (doc, seq) = external_mix();
@@ -5690,23 +5688,30 @@ fn a_volume_cc_theirs_changes_lands() {
         x.points[0].value = DpPointValue::Real(0.5, None);
     });
     let p = plan_of(&t, &path, &t.base_doc);
-    let notes = notes_decisions(&p);
-    assert_eq!(notes.len(), 1, "{:#?}", p.decisions);
-    assert_eq!(notes[0].outcome, Outcome::Theirs);
+    assert_eq!(
+        p.preview,
+        MergePreview {
+            applied: 1,
+            ..MergePreview::default()
+        },
+        "{:#?}",
+        p.decisions
+    );
     let (h, _) = apply_on(&t.base_doc, &p);
     let (_, midi) = played_channels(h.doc(), seq, "Synth");
     assert_eq!(midi.len(), 1, "{midi:?}");
     assert_eq!(midi[0].0, 0);
     assert!(midi[0].1.starts_with("cc 2 7 "), "{midi:?}");
+    let once = to_json(h.doc()).unwrap();
     let again = plan_of(&t, &path, h.doc());
-    let notes = notes_decisions(&again);
     assert!(
-        notes.iter().all(|d| d.outcome == Outcome::Same),
+        again.decisions.iter().all(|d| d.outcome == Outcome::Same),
         "{:#?}",
         again.decisions
     );
     let (h2, _) = apply_on(h.doc(), &again);
-    assert_eq!(played_channels(h2.doc(), seq, "Synth").1, midi);
+    assert_eq!(h2.undo_depth(), 0);
+    assert_eq!(to_json(h2.doc()).unwrap(), once);
 }
 
 /// A use whose sequence's track plays on another channel than the track

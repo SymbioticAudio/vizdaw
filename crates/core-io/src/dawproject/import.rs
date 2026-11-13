@@ -71,7 +71,7 @@ use core_model::selection::ViewFilter;
 use core_model::sequence::Marker;
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::{PPQ, Tick};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -130,6 +130,11 @@ pub struct Origins {
     /// their own were on, its main channel ([`MAIN_CHANNEL`], plan 6e
     /// Task 11).
     pub main_channels: BTreeMap<LaneId, u8>,
+    /// The strips whose name the import gives, not the file: the built-in
+    /// synth's shared strip, which the tracks on the built-in synth play
+    /// through (theirs' own, or standing in for an external destination
+    /// or an instrument it could not make; plan 6e Task 11).
+    pub fallback_strips: BTreeSet<StripId>,
 }
 
 /// A mapped import: what [`apply`] will do, and the report so far (the

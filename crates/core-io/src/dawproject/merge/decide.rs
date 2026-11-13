@@ -2044,6 +2044,19 @@ impl<'a> Decider<'a> {
     /// Strip `i`'s name on side `s`. For a strip theirs made for an audio
     /// track, the file's channel name (`Origins::channel_names`); `None`
     /// when the file gave none, which counts as unchanged.
+    /// Whether strip `i` of side `s` is one the import fell back on
+    /// ([`Origins::fallback_strips`]): its name is the import's, not the
+    /// file's, so it is never compared (Task 11 ruling).
+    fn fallback(&self, s: Side, i: usize) -> bool {
+        s == Side::Theirs
+            && self
+                .theirs_strips
+                .strips
+                .get(i)
+                .and_then(|x| x.strip)
+                .is_some_and(|id| self.theirs_origins.fallback_strips.contains(&StripId(id)))
+    }
+
     fn strip_name(&self, s: Side, i: usize) -> Option<&'a str> {
         if !self.audio_path(s, i) {
             return self.strip_of(s, i).map(|x| x.name.as_str());
@@ -2064,7 +2077,9 @@ impl<'a> Decider<'a> {
     /// [`Self::strip_eq`]; without `audio_names`, the name of a strip theirs
     /// made for an audio track is not compared.
     fn strip_eq_with(&self, x: (Side, usize), y: (Side, usize), audio_names: bool) -> bool {
-        let skip_name = !audio_names && (self.audio_path(x.0, x.1) || self.audio_path(y.0, y.1));
+        let skip_name = !audio_names && (self.audio_path(x.0, x.1) || self.audio_path(y.0, y.1))
+            || self.fallback(x.0, x.1)
+            || self.fallback(y.0, y.1);
         let (Some(a), Some(b)) = (self.strip_of(x.0, x.1), self.strip_of(y.0, y.1)) else {
             return false;
         };
@@ -2219,8 +2234,10 @@ impl<'a> Decider<'a> {
         // import could not make (a VST one, or one not installed) plays the
         // built-in synth, whose strip the import names: that name is not
         // the file's either (Task 7).
-        let substitute =
-            self.instruments(Side::Theirs, t) == 0 && self.instruments(Side::Base, b) > 0;
+        // Nor is the name of the built-in synth's strip the import falls
+        // back on (Task 11 ruling): it is not theirs' to change.
+        let substitute = self.fallback(Side::Theirs, t)
+            || self.instruments(Side::Theirs, t) == 0 && self.instruments(Side::Base, b) > 0;
         let theirs_name = if substitute {
             bs.name.as_str()
         } else {

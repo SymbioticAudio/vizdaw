@@ -738,6 +738,7 @@ pub(crate) fn apply_tracks(
     }
     if builtin.is_some() {
         let strip = strip_of(h, StripKind::BuiltinSynth)?;
+        origins.fallback_strips.insert(strip);
         let made = match (&plan.builtin, builtin_new) {
             (Some(mix), true) => {
                 let made = apply_mix(h, strip, mix, buses, false, false, &mut states)?;
