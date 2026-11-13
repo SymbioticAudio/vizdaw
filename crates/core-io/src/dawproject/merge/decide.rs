@@ -242,12 +242,16 @@ pub fn plan(
     let ours_side = projection_with_identity(ours, seq)?;
     let b = normalised(&base.projection, &base);
     let o = normalised(&ours_side.0, &base);
-    let (theirs, settled) = held(theirs, &b, &o, ours, seq, base.origin)?;
-    stop(cancel)?;
+    // Matching reads no region, so it runs on theirs as imported; `held`
+    // then needs it to tell which of theirs' tracks have regions as base's.
     let mut matches = match_all(&base, &theirs, &ours_side, cancel)?;
     stop(cancel)?;
     pair_twins(&mut matches, &theirs.projection, &o);
     let base_ids = base_track_ids(&b, base.identity.as_ref());
+    let untouched = untouched_regions(&matches, (&b, &base_ids), &theirs);
+    let (mut theirs, settled) = held(theirs, &b, &o, ours, seq, base.origin, &untouched)?;
+    rehome_curves(&mut theirs, &matches);
+    stop(cancel)?;
     let ours_origins = self_origins(&ours_side.1);
     let mut d = Decider {
         p: [&b, &theirs.projection, &o],
@@ -354,15 +358,25 @@ pub fn plan(
 /// projected again; every decision then judges theirs' regions as they will
 /// be, so the same file merged again finds them the same. Answers the
 /// model's settle lines, by region.
+///
+/// Only tracks whose regions theirs changed are held (Task 7 fix round 4,
+/// N1): a track of `untouched` (theirs' regions as imported are base's)
+/// keeps them as imported, in the projection and in the scratch project,
+/// so ours' tempo never makes theirs look edited. If the settled project
+/// cannot be lined up with theirs (a track or region count differs, or an
+/// untouched track cannot be given back), theirs is answered unchanged:
+/// the projection and the scratch project change together or not at all.
 fn held(
-    mut theirs: Theirs,
+    theirs: Theirs,
     b: &Projection,
     o: &Projection,
     ours: &Document,
     seq: SeqId,
     origin: i64,
+    untouched: &BTreeSet<usize>,
 ) -> Result<(Theirs, Vec<(EventId, String)>), IoError> {
-    use core_model::command::{Command, SequenceCmd};
+    use core_model::command::{Command, EventCmd, SequenceCmd};
+    use core_model::event::EventSpec;
     use core_model::history::History;
     use core_model::selection::ViewFilter;
     use core_model::tempo::{Bpm, TempoMap, TempoPoint};
@@ -373,7 +387,8 @@ fn held(
         .projection
         .tracks
         .iter()
-        .any(|x| x.regions.iter().any(|r| r.crossfade));
+        .enumerate()
+        .any(|(i, x)| !untouched.contains(&i) && x.regions.iter().any(|r| r.crossfade));
     if theirs_lands || tempo_eq(&o.tempo, t) || !crossfades {
         return Ok((theirs, Vec::new()));
     }
@@ -423,17 +438,181 @@ fn held(
             lines.extend(r.settled);
         }
     }
+    // The untouched tracks' events as imported, again: under theirs' own
+    // map the scratch project held them before, so it holds them now.
+    let mine: BTreeSet<u64> = untouched
+        .iter()
+        .filter_map(|&i| theirs.identity.tracks.get(i))
+        .flat_map(|ids| {
+            let lane = theirs
+                .doc
+                .lane(theirs.seq, LaneId(ids.lane))
+                .ok()
+                .into_iter()
+                .flat_map(|l| l.takes.iter())
+                .flat_map(|t| t.events.values().map(|e| e.id.0));
+            ids.regions
+                .iter()
+                .flat_map(|at| [at.event, at.top])
+                .chain(lane)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for &id in &mine {
+        let (Ok((was, _)), Ok((now, _))) =
+            (theirs.doc.event(EventId(id)), h.doc().event(EventId(id)))
+        else {
+            continue;
+        };
+        if was == now {
+            continue;
+        }
+        let spec = EventSpec {
+            tick: was.tick,
+            dest: was.dest,
+            group_channel: was.group_channel,
+            mute: was.mute,
+            body: was.body.clone(),
+        };
+        let cmd = Command::Event(EventCmd::Replace {
+            event: EventId(id),
+            spec,
+        });
+        if h.execute(&cmd, &ViewFilter::default()).is_err() {
+            return Ok((theirs, Vec::new()));
+        }
+    }
+    lines.retain(|(e, _)| !mine.contains(&e.0));
     let (raw, _) = projection_with_identity(h.doc(), theirs.seq)?;
     let now = returned(&raw, origin);
-    if now.tracks.len() == theirs.projection.tracks.len() {
-        for (t, n) in theirs.projection.tracks.iter_mut().zip(&now.tracks) {
-            if t.regions.len() == n.regions.len() {
-                t.regions.clone_from(&n.regions);
-            }
-        }
+    // Both change, or neither (fix round 4).
+    let lined_up = now.tracks.len() == theirs.projection.tracks.len()
+        && theirs
+            .projection
+            .tracks
+            .iter()
+            .zip(&now.tracks)
+            .enumerate()
+            .all(|(i, (t, n))| {
+                if untouched.contains(&i) {
+                    t.regions == n.regions
+                } else {
+                    t.regions.len() == n.regions.len()
+                }
+            });
+    if !lined_up {
+        return Ok((theirs, Vec::new()));
+    }
+    let mut theirs = theirs;
+    for (t, n) in theirs.projection.tracks.iter_mut().zip(now.tracks) {
+        t.regions = n.regions;
     }
     theirs.doc = h.doc().clone();
     Ok((theirs, lines))
+}
+
+/// Moves each curve of a track new in theirs (added, or new on both sides)
+/// that drives another track's strip, one no new track plays through, to
+/// that track: it is theirs' automation for that track, decided by the
+/// rule table as any other (Task 7 fix round 4, automation case A). The
+/// apply's arrangement of the added tracks then leaves it out
+/// (`import::apply::arrange_tracks`, a strip it did not place), and a
+/// second merge, where the track is new on both sides, finds it without
+/// that curve, as ours holds it.
+fn rehome_curves(theirs: &mut Theirs, m: &Matches) {
+    let added: BTreeSet<usize> = m
+        .tracks
+        .iter()
+        .filter_map(|r| match (r.base, r.theirs) {
+            (None, Some(t)) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let tracks = &theirs.projection.tracks;
+    let added_strips: BTreeSet<usize> =
+        added.iter().filter_map(|&t| tracks.get(t)?.strip).collect();
+    let owner = |c: usize| {
+        (!added_strips.contains(&c))
+            .then(|| {
+                tracks
+                    .iter()
+                    .enumerate()
+                    .find(|(i, x)| x.strip == Some(c) && !added.contains(i))
+                    .map(|(i, _)| i)
+            })
+            .flatten()
+    };
+    let mut moves: Vec<(usize, usize, usize)> = Vec::new();
+    for &a in &added {
+        let Some(t) = tracks.get(a) else { continue };
+        for (k, (target, _)) in t.automation.iter().enumerate() {
+            let c = target
+                .split(' ')
+                .nth(1)
+                .and_then(|c| c.parse::<usize>().ok());
+            if let Some(to) = c.and_then(owner) {
+                moves.push((a, k, to));
+            }
+        }
+    }
+    // Back to front, so each index still names its curve.
+    for &(a, k, to) in moves.iter().rev() {
+        let p = &mut theirs.projection.tracks;
+        let i = &mut theirs.identity.tracks;
+        if k >= p.get(a).map_or(0, |x| x.automation.len())
+            || k >= i.get(a).map_or(0, |x| x.automation.len())
+        {
+            continue;
+        }
+        let curve = p.get_mut(a).map(|x| x.automation.remove(k));
+        let ats = i.get_mut(a).map(|x| x.automation.remove(k));
+        if let (Some(curve), Some(ats), Some(pt), Some(it)) = (
+            curve,
+            ats,
+            p.get_mut(to),
+            i.get_mut(to).map(|x| &mut x.automation),
+        ) {
+            pt.automation.push(curve);
+            it.push(ats);
+        }
+    }
+}
+
+/// Theirs' tracks whose regions, as imported, are their base track's
+/// (the same set, as [`Decider::regions_eq`] compares them): theirs did
+/// not change them, whatever the tempo map the merge leaves (fix round 4).
+fn untouched_regions(
+    m: &Matches,
+    (b, base_ids): (&Projection, &[TrackIds]),
+    theirs: &Theirs,
+) -> BTreeSet<usize> {
+    m.tracks
+        .iter()
+        .filter_map(|r| {
+            let (bi, ti) = (r.base?, r.theirs?);
+            let (bt, bids) = (b.tracks.get(bi)?, base_ids.get(bi)?);
+            let tt = theirs.projection.tracks.get(ti)?;
+            let tids = theirs.identity.tracks.get(ti)?;
+            same_regions((bt, bids), (tt, tids, &theirs.origins)).then_some(ti)
+        })
+        .collect()
+}
+
+/// Whether the regions of two track parts are the same set: `b`'s are
+/// paired with `a`'s by tag (through `b`'s origins), then media and
+/// position, and each pair is the same region.
+fn same_regions(a: (&PTrack, &TrackIds), b: (&PTrack, &TrackIds, &Origins)) -> bool {
+    let (at, bt) = (a.0, b.0);
+    if at.regions.len() != bt.regions.len() {
+        return false;
+    }
+    regions(a, b).iter().all(|p| match *p {
+        (Some(i), Some(j)) => match (at.regions.get(i), bt.regions.get(j)) {
+            (Some(r), Some(s)) => same_region(r, s),
+            _ => false,
+        },
+        _ => false,
+    })
 }
 
 /// [`held`]'s settle lines, each under the import's line for crossfades it
@@ -1079,15 +1258,7 @@ impl<'a> Decider<'a> {
         } else {
             self.ours_origins
         };
-        regions((a, aids), (b, bids, origins))
-            .iter()
-            .all(|p| match *p {
-                (Some(i), Some(j)) => match (a.regions.get(i), b.regions.get(j)) {
-                    (Some(r), Some(s)) => same_region(r, s),
-                    _ => false,
-                },
-                _ => false,
-            })
+        same_regions((a, aids), (b, bids, origins))
     }
 
     /// Track `i` of side `s`'s automation, each target with its strip as

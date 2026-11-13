@@ -31,12 +31,12 @@ use core_io::dawproject::merge::apply::{LABEL, apply_merge};
 use core_io::dawproject::merge::decide::{MergePlan, Outcome, plan};
 use core_io::dawproject::merge::matching::notes as pair_notes;
 use core_io::dawproject::merge::text;
-use core_io::dawproject::merge::theirs::theirs;
+use core_io::dawproject::merge::theirs::{Theirs, theirs};
 use core_io::dawproject::merge::{FRAMES, LEVEL_DB, NOTE_TICKS, PAN, normalised};
 use core_io::dawproject::package::{RECORD_UNREADABLE, open};
 use core_io::dawproject::record::{
     Identity, ObjectRef, PRegion, PStrip, PTrack, Projection, SNAPSHOT_DAMAGED, Snapshot,
-    SnapshotLimits, projection_with_identity, read_snapshot, read_snapshot_with,
+    SnapshotLimits, projection_with_identity, read_snapshot, read_snapshot_with, returned,
 };
 use core_io::dawproject::{
     DpChannel, DpClip, DpMarker, DpNamed, DpNote, DpProject, DpStructureItem, DpTimeline, DpTrack,
@@ -486,7 +486,10 @@ fn our_edit() -> impl Strategy<Value = OurEdit> {
         (any::<u16>(), any::<bool>()).prop_map(|(i, m)| OurEdit::Mute(i, m)),
         (any::<u16>(), name()).prop_map(|(i, n)| OurEdit::Rename(i, n)),
         (0u8..=128, name()).prop_map(|(t, n)| OurEdit::AddMarker(t, n)),
-        (40u16..=240).prop_map(OurEdit::Tempo),
+        // Below about 20 BPM the generator's crossfaded pairs (a beat
+        // apart, three seconds long) no longer overlap: ours' tempo then
+        // settles ours' own crossfades (Task 7 fix round 4, N1).
+        prop_oneof![40u16..=240, 8u16..=24].prop_map(OurEdit::Tempo),
         any::<u16>().prop_map(OurEdit::RemoveTrack),
     ]
 }
@@ -886,6 +889,52 @@ fn part_differs(a: &PTrack, sa: &Side, b: &PTrack, sb: &Side, strips: bool) -> b
     a.name != b.name || !notes_same(a, b) || !regions_same(a, b) || (strips && strip())
 }
 
+/// Theirs' regions as the model holds them under `merged`'s tempo map:
+/// theirs' scratch project set to that map (in theirs' frame, ticks less
+/// `origin`), then given its own back, projected. A crossfaded pair that
+/// map cannot hold loses its flag or has its fade in shortened (plan 6c);
+/// everything else is as imported.
+fn held_in(theirs: &Theirs, merged: &Document, seq: SeqId, origin: i64) -> Projection {
+    let map = &merged.sequence(seq).expect("merged sequence").tempo;
+    let mut points: Vec<TempoPoint> = map
+        .points()
+        .iter()
+        .filter(|p| p.tick.0 > origin)
+        .map(|p| TempoPoint {
+            tick: Tick(p.tick.0 - origin),
+            ..*p
+        })
+        .collect();
+    let at = map.points().iter().rev().find(|p| p.tick.0 <= origin);
+    points.insert(
+        0,
+        TempoPoint {
+            tick: Tick(0),
+            bpm: Bpm((map.bpm_at(Tick(origin)) * 1000.0).round() as u32),
+            ramp: at.is_some_and(|p| p.ramp),
+        },
+    );
+    let to = TempoMap::new(points).expect("a map");
+    let back = theirs
+        .doc
+        .sequence(theirs.seq)
+        .expect("theirs")
+        .tempo
+        .clone();
+    let mut h = History::new(theirs.doc.clone());
+    for tempo in [to, back] {
+        let _ = h.execute(
+            &Command::Sequence(SequenceCmd::SetTempo {
+                seq: theirs.seq,
+                tempo,
+            }),
+            &ViewFilter::default(),
+        );
+    }
+    let (p, _) = projection_with_identity(h.doc(), theirs.seq).expect("projects");
+    returned(&p, origin)
+}
+
 /// The owner rules (spec §7.8, §15), from base, theirs' file and ours
 /// alone, never from the plan's decisions: an edit made only by theirs
 /// lands (a take on a transformed track); where both changed a setting,
@@ -893,12 +942,17 @@ fn part_differs(a: &PTrack, sa: &Side, b: &PTrack, sb: &Side, strips: bool) -> b
 /// track's notes or regions, ours stays and a "Returned <date>" take
 /// holds theirs'; every item theirs changed that the merge did not take
 /// has its own line.
+///
+/// `theirs` is the import as it came, never the plan's view of it (fix
+/// round 4): what theirs changed is judged on it. `held` is theirs'
+/// regions as the merged tempo map holds them ([`held_in`]): what lands,
+/// and what a take holds, is compared with these.
 #[allow(clippy::too_many_arguments)]
 fn owner_rules(
     t: &Trip,
     did: &TheirsDid,
     strip: Strip,
-    theirs: &Projection,
+    [theirs, held]: [&Projection; 2],
     ours: &Document,
     merged: &Document,
     report: &Report,
@@ -951,6 +1005,8 @@ fn owner_rules(
     );
     let theirs_part: BTreeMap<(u64, bool), &PTrack> =
         kept.iter().copied().zip(&theirs.tracks).collect();
+    let held_part: BTreeMap<(u64, bool), &PTrack> =
+        kept.iter().copied().zip(&held.tracks).collect();
     // Without the record and tags, tracks pair by name, then order (Task
     // 4 ruling): a script that renames a track and deletes another, or
     // names that repeat, pair by order, not identity. Those rows are left
@@ -1019,19 +1075,22 @@ fn owner_rules(
                             "{w}: ours stays"
                         );
                     };
-                    if same(bt, tt) || (!same(bt, ot) && same(ot, tt)) {
+                    // Changed by theirs: judged as imported. What lands
+                    // is theirs as the merged tempo map holds it.
+                    let ht = held_part.get(key).copied().unwrap_or(tt);
+                    if same(bt, tt) || (!same(bt, ot) && same(ot, ht)) {
                         stays();
                     } else if same(bt, ot) && !transformed {
                         let lands = if regions {
-                            regions_same(mt, tt)
+                            regions_same(mt, ht)
                         } else {
-                            same(mt, tt)
+                            same(mt, ht)
                         };
-                        assert!(lands, "{w}: theirs' change lands\n{}", diff(mt, tt));
+                        assert!(lands, "{w}: theirs' change lands\n{}", diff(mt, ht));
                     } else {
                         stays();
                         e.takes.insert(lane);
-                        takes.push((lane, key.1, regions, tt.clone()));
+                        takes.push((lane, key.1, regions, ht.clone()));
                     }
                 }
                 if !shared(bt.strip)
@@ -1413,11 +1472,14 @@ fn check_script(s: &Spec, theirs_script: &[TheirEdit], ours_script: &[OurEdit], 
     let problems = validate(h.doc());
     assert!(problems.is_empty(), "{problems:?}");
     vizdaw_only_kept(&p, &ours, h.doc());
+    // Theirs as imported, never the plan's own view of it (fix round 4).
+    let raw = theirs_of(&t, &path);
+    let held = held_in(&raw, h.doc(), seq, t.snapshot.origin);
     owner_rules(
         &t,
         &did,
         strip,
-        &p.theirs.projection,
+        [&raw.projection, &held],
         &ours,
         h.doc(),
         &report,

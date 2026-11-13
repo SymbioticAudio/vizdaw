@@ -807,14 +807,33 @@ pub(crate) fn arrange_tracks(
 // ---------------------------------------------------------------- the arrangement
 
 /// The model target of `at` on the applied structure; `None` when that
-/// part was not made.
-fn target_of(h: &History, at: AutoAt, placed: &Applied) -> Option<AutomationTarget> {
+/// part was not made. A track on the built-in synth that was not placed
+/// (a merge adds some tracks only) drives the built-in synth's strip when
+/// a placed track plays through it (plan 6e Task 7 fix round 4).
+fn target_of(h: &History, plan: &Plan, at: AutoAt, placed: &Applied) -> Option<AutomationTarget> {
+    let builtin = |i: usize| {
+        plan.tracks
+            .get(i)
+            .is_some_and(|t| t.midi == Some(Midi::Builtin))
+    };
     let strip = |s: StripAt| -> Option<(StripId, &MixSlots)> {
         match s {
             StripAt::Track(i) => placed
                 .strips
                 .get(i)
                 .and_then(Option::as_ref)
+                .or_else(|| {
+                    builtin(i)
+                        .then(|| {
+                            placed
+                                .strips
+                                .iter()
+                                .enumerate()
+                                .find(|(j, x)| x.is_some() && builtin(*j))
+                                .and_then(|(_, x)| x.as_ref())
+                        })
+                        .flatten()
+                })
                 .map(|(id, m)| (*id, m)),
             StripAt::Bus(b) => placed.buses.get(&b).map(|(id, m)| (*id, m)),
             StripAt::Master => Some((placed.master.0, &placed.master.1)),
@@ -867,6 +886,19 @@ struct Arrange {
 }
 
 impl Arrange {
+    /// Whether `at` drives a track's strip that this merge does not add
+    /// (an import adds every track: never).
+    fn drives_another(&self, at: AutoAt) -> bool {
+        let strip = match at {
+            AutoAt::Fader(s) | AutoAt::Pan(s) | AutoAt::Mute(s) => s,
+            AutoAt::Send(s, _) | AutoAt::Param(s, _, _) => s,
+        };
+        match (strip, &self.which) {
+            (StripAt::Track(i), Some(which)) => !which.contains(&i),
+            _ => false,
+        }
+    }
+
     fn all() -> Arrange {
         Arrange {
             which: None,
@@ -1087,8 +1119,14 @@ fn apply_arranged(
                     )
                 }
                 Body::Auto { at, value } => {
-                    let Some(target) = target_of(h, *at, placed) else {
-                        report.add(ItemKind::LeftOut, UNPLACED, None);
+                    let Some(target) = target_of(h, plan, *at, placed) else {
+                        // A merge's added track driving a track it does
+                        // not add: the merge decides that curve as theirs'
+                        // automation for that track (plan 6e Task 7 fix
+                        // round 4, `merge::decide`'s `rehome_curves`).
+                        if !arrange.drives_another(*at) {
+                            report.add(ItemKind::LeftOut, UNPLACED, None);
+                        }
                         continue;
                     };
                     points = points.saturating_add(1);

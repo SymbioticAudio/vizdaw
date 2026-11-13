@@ -2694,6 +2694,238 @@ fn a_track_theirs_adds_with_a_crossfade_ours_tempo_cannot_hold() {
     merges_twice_to_nothing(&t, &theirs_doc_, h);
 }
 
+/// Task 7 fix round 4 (N1): theirs is the unedited export; ours sets 25
+/// BPM, under which Keys' own pair no longer overlaps, and adds a region
+/// on Keys at 16 Q. Theirs never touched Keys' regions, so ours' tempo
+/// must not make them look edited: no conflict, no take, no crossfade
+/// line, and merging again adds nothing.
+#[test]
+fn ours_tempo_never_makes_theirs_untouched_regions_look_edited() {
+    use core_io::dawproject::import::CROSSFADES_PLAIN;
+    use core_model::tempo::{Bpm, TempoMap};
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let theirs_doc_ = t.base_doc.clone();
+    let o = ours(&t, |h, i| {
+        run(
+            h,
+            Command::Sequence(SequenceCmd::SetTempo {
+                seq: i.seq,
+                tempo: TempoMap::constant(Bpm::whole(25)).unwrap(),
+            }),
+        );
+        let media = *h.doc().media().keys().next().unwrap();
+        run(
+            h,
+            Command::Event(EventCmd::Insert {
+                seq: i.seq,
+                lane: i.keys,
+                events: vec![region(media, 16 * Q)],
+            }),
+        );
+    });
+    assert!(
+        !keys_fades(&o, seq).iter().any(|f| f.1),
+        "ours' tempo cleared Keys' crossfade"
+    );
+    let takes = |d: &Document| lane(d, seq, "Keys").takes.len();
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    assert_eq!(p.preview.conflicts, 0, "{:#?}", p.decisions);
+    assert!(
+        p.decisions
+            .iter()
+            .all(|d| matches!(d.outcome, Outcome::Ours | Outcome::Same)),
+        "{:#?}",
+        p.decisions
+    );
+    let (h, report) = apply_on(&o, &p);
+    assert_eq!(takes(h.doc()), takes(&o), "no take");
+    assert!(!has(&report, CROSSFADES_PLAIN), "{:#?}", report.items);
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&o).unwrap());
+    merges_twice_to_nothing(&t, &theirs_doc_, h);
+}
+
+/// Theirs adds track "Ctl" (one note) whose automation drives Bass's
+/// level; with `ours_too`, ours draws its own Bass level curve first.
+fn a_new_track_driving_bass(ours_too: bool) -> (Trip, Document, Document) {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let point = |strip: StripId, tick: i64, value: f64| {
+        EventSpec::new(
+            Tick(tick),
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(strip),
+                value,
+            },
+        )
+    };
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let r = h
+            .execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq: i.seq,
+                    name: "Ctl".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let ctl = created(&r, |id| match id {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        });
+        let note = EventSpec::new(
+            Tick(0),
+            EventBody::Note {
+                pitch: 64,
+                velocity: 0x8000,
+                release_velocity: 0x8000,
+                duration: Tick(Q),
+                attribute: None,
+                per_note: Default::default(),
+            },
+        );
+        run(
+            h,
+            Command::Event(EventCmd::Insert {
+                seq: i.seq,
+                lane: ctl,
+                events: vec![
+                    note,
+                    point(i.bass_strip, 0, 0.5),
+                    point(i.bass_strip, BAR, 0.25),
+                ],
+            }),
+        );
+    });
+    let o = ours(&t, |h, i| {
+        if ours_too {
+            run(
+                h,
+                Command::Event(EventCmd::Insert {
+                    seq: i.seq,
+                    lane: i.bass,
+                    events: vec![
+                        point(i.bass_strip, 0, 0.75),
+                        point(i.bass_strip, 2 * BAR, 1.0),
+                    ],
+                }),
+            );
+        }
+    });
+    (t, theirs_doc_, o)
+}
+
+/// Bass's level automation in `doc`, wherever its points are: (tick,
+/// value), in order.
+fn bass_level_points(doc: &Document, t: &Trip) -> Vec<(i64, f64)> {
+    let strip = ids(t).bass_strip;
+    let mut out: Vec<(i64, f64)> = doc
+        .sequence(t.seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .filter_map(|l| l.active())
+        .flat_map(|tk| tk.events.values())
+        .filter_map(|e| match e.body {
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(s),
+                value,
+            } if s == strip => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out
+}
+
+/// Task 7 fix round 4 (automation case A): a track theirs adds carries a
+/// curve on Bass's level. Its target is found among every track, not only
+/// the added ones: it is theirs' Bass level automation, which only theirs
+/// changed, so it lands. Nothing is left out, and merging again adds
+/// nothing and reports no conflict.
+#[test]
+fn a_new_tracks_curve_on_an_existing_tracks_level_lands() {
+    let (t, theirs_doc_, o) = a_new_track_driving_bass(false);
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    assert_eq!(p.preview.conflicts, 0, "{:#?}", p.decisions);
+    let curve = p
+        .decisions
+        .iter()
+        .find(|d| matches!(d.unit, Unit::Automation(_)))
+        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+    assert_eq!(curve.outcome, Outcome::Theirs);
+    assert_eq!(curve.what, "Track 'Bass': level automation");
+    let (h, report) = apply_on(&o, &p);
+    assert!(
+        !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
+        "{:#?}",
+        report.items
+    );
+    assert_eq!(
+        bass_level_points(h.doc(), &t),
+        vec![(0, 0.5), (BAR, 0.25)],
+        "theirs' curve drives Bass"
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+    merges_twice_to_nothing(&t, &theirs_doc_, h);
+}
+
+/// Task 7 fix round 4 (automation case A): as above, but ours drew its
+/// own Bass level curve. Both changed it: ours stays, listed as a
+/// conflict, and merging again adds nothing.
+#[test]
+fn a_new_tracks_curve_on_a_level_ours_changed_keeps_ours() {
+    let (t, theirs_doc_, o) = a_new_track_driving_bass(true);
+    let before = bass_level_points(&o, &t);
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    let curve = p
+        .decisions
+        .iter()
+        .find(|d| matches!(d.unit, Unit::Automation(_)))
+        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+    assert_eq!(curve.outcome, Outcome::Conflict);
+    assert_eq!(p.preview.conflicts, 1, "{:#?}", p.decisions);
+    assert_eq!(
+        p.preview.conflict_lines,
+        vec!["Track 'Bass': level automation: here 2 points, there 2 points".to_owned()]
+    );
+    let (h, report) = apply_on(&o, &p);
+    assert!(
+        !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
+        "{:#?}",
+        report.items
+    );
+    assert_eq!(bass_level_points(h.doc(), &t), before, "ours stays");
+    assert!(rules::validate(h.doc()).is_empty());
+    // Merging again finds the same conflict, and the new track the same,
+    // and changes nothing.
+    let (depth, json) = (h.undo_depth(), to_json(h.doc()).unwrap());
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    let outcomes: Vec<(&Unit, Outcome)> = again
+        .decisions
+        .iter()
+        .map(|d| (&d.unit, d.outcome))
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![
+            (&Unit::Automation("fader 0".into()), Outcome::Conflict),
+            (&Unit::Track, Outcome::Same),
+        ]
+    );
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), depth);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
 /// Task 7 fix round 2 (layout 2, from the 4096 run's seed): theirs sets
 /// 450 BPM, so Keys' regions (in beats in the file) come back shorter.
 /// Placed under ours' 120 BPM before the tempo map is theirs, the pair
@@ -3843,6 +4075,9 @@ stripped!(
     theirs_crossfade_that_ours_tempo_cannot_hold_is_listed_and_merges_twice_to_nothing,
     a_crossfade_shortened_before_theirs_tempo_lands_is_set_again,
     a_track_theirs_adds_with_a_crossfade_ours_tempo_cannot_hold,
+    ours_tempo_never_makes_theirs_untouched_regions_look_edited,
+    a_new_tracks_curve_on_an_existing_tracks_level_lands,
+    a_new_tracks_curve_on_a_level_ours_changed_keeps_ours,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,
     both_changed_notes_become_an_alternate_take,

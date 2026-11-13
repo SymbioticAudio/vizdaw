@@ -1346,8 +1346,6 @@ fn apply_edit(
     Ok(())
 }
 
-/// Sets again each of `flagged`'s crossfades a later command settled away
-/// (a region placed before the tempo map it was cut for, Task 7).
 /// Records each crossfaded region of `specs` that the insert `r` made, for
 /// [`reflag`]. The insert makes one event per spec, in order; anything
 /// else is refused rather than skipped (Task 7 fix round 1).
@@ -1383,6 +1381,8 @@ fn flag_made(
     Ok(())
 }
 
+/// Sets again each of `flagged`'s crossfades a later command settled away
+/// (a region placed before the tempo map it was cut for, Task 7).
 fn reflag(h: &mut History, flagged: &[(EventId, EventSpec)]) -> Result<(), ModelError> {
     let fade = |b: &EventBody| match b {
         EventBody::AudioRegion {
