@@ -34,6 +34,7 @@
 //! a constant (or, when it names something, a function) here.
 
 mod apply;
+pub(crate) mod builder;
 mod maps;
 mod timeline;
 

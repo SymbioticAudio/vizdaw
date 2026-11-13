@@ -1104,18 +1104,18 @@ fn apply_arranged(
                         continue;
                     };
                     regions = regions.saturating_add(1);
-                    let fade = |n: u64| Fade {
+                    let fade = |n: u64, shape: FadeShape| Fade {
                         length_frames: n,
-                        shape: FadeShape::Linear,
+                        shape,
                     };
                     (
                         EventBody::AudioRegion {
                             media: m,
                             source_offset: r.source_offset,
                             length: r.length,
-                            gain_db: 0.0,
-                            fade_in: fade(r.fade_in),
-                            fade_out: fade(r.fade_out),
+                            gain_db: r.gain_db,
+                            fade_in: fade(r.fade_in, r.fade_in_shape),
+                            fade_out: fade(r.fade_out, r.fade_out_shape),
                             name: r.name.clone(),
                             crossfade: r.crossfade,
                         },

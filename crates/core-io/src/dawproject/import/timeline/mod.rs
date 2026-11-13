@@ -43,11 +43,13 @@ mod scenes;
 mod share;
 mod walk;
 
+pub(super) use audio::media_plans;
+
 use super::*;
 use crate::limits::{Limits, MAX_TIMELINE_NESTING};
 use clock::Clock;
 use core_model::automation::{fader_norm, from_u32, to_u32};
-use core_model::event::{EventBody, EventSpec, LoopCount, PerNoteCtl, PerNoteKind};
+use core_model::event::{EventBody, EventSpec, FadeShape, LoopCount, PerNoteCtl, PerNoteKind};
 use core_model::mixer::ParamId;
 use core_model::rules::MAX_LOOPS;
 use std::collections::HashSet;
@@ -226,6 +228,12 @@ pub(super) struct RegionPlan {
     pub(super) fade_out: u64,
     pub(super) name: Option<String>,
     pub(super) crossfade: bool,
+    /// The fade-in's shape (6d's mapping: linear; plan 6f Ruling 10).
+    pub(super) fade_in_shape: FadeShape,
+    /// The fade-out's shape (6d's mapping: linear).
+    pub(super) fade_out_shape: FadeShape,
+    /// The region's gain in dB (6d's mapping: 0).
+    pub(super) gain_db: f32,
 }
 
 /// What a placed item is.
@@ -276,6 +284,36 @@ pub(super) struct MediaPlan {
     pub(super) frames: u64,
     pub(super) hash: Option<String>,
     pub(super) original: String,
+}
+
+/// The media items a mapping makes, shared by DAWproject's and AAF's
+/// (plan 6f Ruling 10): the items, each file's items by its key, every
+/// media path in lower case (each online item's, then the offline ones
+/// made) and the next number to try for an offline path, by its stem in
+/// lower case.
+#[derive(Debug, Clone, Default)]
+pub(super) struct MediaBook {
+    pub(super) media: Vec<MediaPlan>,
+    pub(super) media_at: HashMap<usize, Vec<usize>>,
+    pub(super) paths: HashSet<String>,
+    pub(super) path_next: HashMap<String, u32>,
+}
+
+impl MediaBook {
+    /// An empty book, knowing the paths of `sources`' online items.
+    pub(super) fn new(sources: &BTreeMap<usize, MediaSource>) -> MediaBook {
+        MediaBook {
+            paths: sources
+                .values()
+                .flat_map(|s| match s {
+                    MediaSource::Online(items) => items.as_slice(),
+                    _ => &[],
+                })
+                .map(|it| it.path.to_lowercase())
+                .collect(),
+            ..MediaBook::default()
+        }
+    }
 }
 
 /// The arrangement's part of the plan.
@@ -521,14 +559,8 @@ struct Tl<'c, 'a, 'p> {
     pass: Vec<Ev>,
     /// The pass held audio or automation (so the clip is not shared).
     pass_other: bool,
-    media: Vec<MediaPlan>,
-    media_at: HashMap<usize, Vec<usize>>,
-    /// Every media path of the import, in lower case: each online item's,
-    /// then the offline ones made.
-    paths: HashSet<String>,
-    /// The next number to try for an offline path, by its stem in lower
-    /// case.
-    path_next: HashMap<String, u32>,
+    /// The media items made so far ([`media_plans`]).
+    book: MediaBook,
     /// The names of clips holding audio.
     clip_names: Vec<String>,
 }
@@ -578,17 +610,7 @@ impl<'a, 'p> Cx<'a, 'p> {
             slots: Vec::new(),
             pass: Vec::new(),
             pass_other: false,
-            media: Vec::new(),
-            media_at: HashMap::new(),
-            paths: sources
-                .values()
-                .flat_map(|s| match s {
-                    MediaSource::Online(items) => items.as_slice(),
-                    _ => &[],
-                })
-                .map(|it| it.path.to_lowercase())
-                .collect(),
-            path_next: HashMap::new(),
+            book: MediaBook::new(sources),
             clip_names: Vec::new(),
             sources,
             cx: self,

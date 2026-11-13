@@ -12,6 +12,8 @@
 //!   decoders of the values we read.
 //! - [`timeline`]: the composition read into a neutral form (slots, clips,
 //!   fades, gain, pan, markers, timecode) and the audio files it plays.
+//! - [`import`]: a composition mapped onto 6d's import plan, its L/R pairs
+//!   joined, and applied with the MIDI file beside it.
 //!
 //! The storage layout follows the public AAF Low-Level Container
 //! Specification. Writers' habits were checked against pyaaf2
@@ -21,5 +23,6 @@
 //! [`AafLimits`]: crate::limits::AafLimits
 
 pub mod dict;
+pub mod import;
 pub mod store;
 pub mod timeline;

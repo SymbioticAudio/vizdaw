@@ -2,6 +2,7 @@
 //! (Ruling 10).
 
 use super::*;
+use crate::dawproject::package::{AudioRef, AudioSource};
 
 impl<'p> Tl<'_, '_, 'p> {
     /// Lists warps that stretch time (Ruling 4: the audio is placed
@@ -25,90 +26,18 @@ impl<'p> Tl<'_, '_, 'p> {
     // ---- audio
 
     /// The plan's media items for audio file `key`, one per channel part;
-    /// made on first use (Ruling 19).
+    /// made on first use (Ruling 19, [`media_plans`]).
     pub(super) fn media_for(&mut self, key: usize) -> Vec<usize> {
-        if let Some(v) = self.media_at.get(&key) {
-            return v.clone();
-        }
-        let Some(aref) = self.cx.pkg.audio().get(key).cloned() else {
+        let pkg = self.cx.pkg;
+        let Some(aref) = pkg.audio().get(key) else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        let why = match self.sources.get(&key) {
-            Some(MediaSource::Online(items)) if !items.is_empty() => {
-                for it in items {
-                    self.media.push(MediaPlan {
-                        path: it.path.clone(),
-                        name: it.name.clone(),
-                        rate: it.sample_rate,
-                        channels: it.channels,
-                        frames: it.length_frames,
-                        hash: Some(it.content_hash.clone()),
-                        original: it.original_name.clone(),
-                    });
-                    out.push(self.media.len() - 1);
-                }
-                None
-            }
-            Some(MediaSource::Offline { why }) => Some(why.clone()),
-            _ => Some("it was not read".to_owned()),
-        };
-        if let Some(why) = why {
-            self.cx.add(
-                ItemKind::Note,
-                OFFLINE,
-                Some(format!("{}: {why}", aref.name)),
-            );
-            if aref.sample_rate > 0 && aref.channels > 0 && aref.frames > 0 {
-                let path = self.offline_path(&aref.name);
-                let original = match &aref.source {
-                    crate::dawproject::package::AudioSource::Entry(p) => p.clone(),
-                    crate::dawproject::package::AudioSource::External(p) => {
-                        p.to_string_lossy().into_owned()
-                    }
-                    crate::dawproject::package::AudioSource::Offline(_) => aref.name.clone(),
-                };
-                let original = original
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or_default()
-                    .to_owned();
-                self.media.push(MediaPlan {
-                    path,
-                    name: aref.name.clone(),
-                    rate: aref.sample_rate,
-                    channels: aref.channels,
-                    frames: aref.frames,
-                    hash: None,
-                    original,
-                });
-                out.push(self.media.len() - 1);
-            }
-        }
-        self.media_at.insert(key, out.clone());
-        out
-    }
-
-    /// `Media/<name>.caf`, made safe ([`crate::names::safe_part`], with
-    /// `\` mapped too, which a media path may not hold) and unique among
-    /// the import's items, online ones included, ignoring case (as the
-    /// disk does).
-    pub(super) fn offline_path(&mut self, name: &str) -> String {
-        // Room for ".caf" and " <n>".
-        const RESERVE: usize = ".caf".len() + " 4294967295".len();
-        let stem = crate::names::safe_part(&name.replace('\\', "-"), RESERVE);
-        let key = stem.to_lowercase();
-        let mut path = format!("Media/{stem}.caf");
-        // The next number to try for this stem, so many files of one name
-        // stay linear.
-        let mut n = self.path_next.get(&key).copied().unwrap_or(2);
-        while self.paths.contains(&path.to_lowercase()) {
-            path = format!("Media/{stem} {n}.caf");
-            n = n.saturating_add(1);
-        }
-        self.path_next.insert(key, n);
-        self.paths.insert(path.to_lowercase());
-        path
+        media_plans(
+            &mut self.book,
+            aref,
+            self.sources.get(&key),
+            &mut self.cx.report,
+        )
     }
 
     pub(super) fn audio(&mut self, a: &'p DpAudio, f: &Frame, to: To) -> Result<(), IoError> {
@@ -136,7 +65,7 @@ impl<'p> Tl<'_, '_, 'p> {
             return Ok(());
         };
         let items = self.media_for(key);
-        let Some(first) = items.first().and_then(|i| self.media.get(*i)).cloned() else {
+        let Some(first) = items.first().and_then(|i| self.book.media.get(*i)).cloned() else {
             return Ok(());
         };
         let rate = f64::from(first.rate.max(1));
@@ -255,6 +184,9 @@ impl<'p> Tl<'_, '_, 'p> {
                     fade_out,
                     name: f.name.and_then(|i| self.clip_names.get(i)).cloned(),
                     crossfade: false,
+                    fade_in_shape: FadeShape::Linear,
+                    fade_out_shape: FadeShape::Linear,
+                    gain_db: 0.0,
                 },
             });
         }
@@ -359,4 +291,96 @@ impl<'p> Tl<'_, '_, 'p> {
         }
         Ok(())
     }
+}
+
+impl MediaBook {
+    /// `Media/<name>.caf`, made safe ([`crate::names::safe_part`], with
+    /// `\` mapped too, which a media path may not hold) and unique among
+    /// the import's items, online ones included, ignoring case (as the
+    /// disk does).
+    pub(super) fn offline_path(&mut self, name: &str) -> String {
+        // Room for ".caf" and " <n>".
+        const RESERVE: usize = ".caf".len() + " 4294967295".len();
+        let stem = crate::names::safe_part(&name.replace('\\', "-"), RESERVE);
+        let key = stem.to_lowercase();
+        let mut path = format!("Media/{stem}.caf");
+        // The next number to try for this stem, so many files of one name
+        // stay linear.
+        let mut n = self.path_next.get(&key).copied().unwrap_or(2);
+        while self.paths.contains(&path.to_lowercase()) {
+            path = format!("Media/{stem} {n}.caf");
+            n = n.saturating_add(1);
+        }
+        self.path_next.insert(key, n);
+        self.paths.insert(path.to_lowercase());
+        path
+    }
+}
+
+/// The media items for audio file `aref`, one per channel part, made in
+/// `book` on first use (Ruling 19): `source`'s converted items, else (it
+/// was not read; [`OFFLINE`], with why) one offline item at a unique path
+/// in `Media/`, for relinking, when the file says its rate, channels and
+/// length. DAWproject's and AAF's mappings share it (plan 6f Ruling 10).
+pub(in crate::dawproject::import) fn media_plans(
+    book: &mut MediaBook,
+    aref: &AudioRef,
+    source: Option<&MediaSource>,
+    report: &mut Report,
+) -> Vec<usize> {
+    if let Some(v) = book.media_at.get(&aref.key) {
+        return v.clone();
+    }
+    let mut out = Vec::new();
+    let why = match source {
+        Some(MediaSource::Online(items)) if !items.is_empty() => {
+            for it in items {
+                book.media.push(MediaPlan {
+                    path: it.path.clone(),
+                    name: it.name.clone(),
+                    rate: it.sample_rate,
+                    channels: it.channels,
+                    frames: it.length_frames,
+                    hash: Some(it.content_hash.clone()),
+                    original: it.original_name.clone(),
+                });
+                out.push(book.media.len() - 1);
+            }
+            None
+        }
+        Some(MediaSource::Offline { why }) => Some(why.clone()),
+        _ => Some("it was not read".to_owned()),
+    };
+    if let Some(why) = why {
+        report.add(
+            ItemKind::Note,
+            OFFLINE,
+            Some(format!("{}: {why}", aref.name)),
+        );
+        if aref.sample_rate > 0 && aref.channels > 0 && aref.frames > 0 {
+            let path = book.offline_path(&aref.name);
+            let original = match &aref.source {
+                AudioSource::Entry(p) => p.clone(),
+                AudioSource::External(p) => p.to_string_lossy().into_owned(),
+                AudioSource::Offline(_) => aref.name.clone(),
+            };
+            let original = original
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            book.media.push(MediaPlan {
+                path,
+                name: aref.name.clone(),
+                rate: aref.sample_rate,
+                channels: aref.channels,
+                frames: aref.frames,
+                hash: None,
+                original,
+            });
+            out.push(book.media.len() - 1);
+        }
+    }
+    book.media_at.insert(aref.key, out.clone());
+    out
 }

@@ -113,6 +113,17 @@ const CLIP_COST: usize = 8;
 /// The 44-byte WAV header's length.
 const WAV_HEADER: usize = 44;
 
+/// The shape an interpolation definition names (none: linear).
+fn shape_of_interp(interp: Option<Auid>) -> Shape {
+    match interp {
+        None => Shape::Linear,
+        Some(i) if i == def::INTERPOLATION_DEF_LINEAR => Shape::Linear,
+        Some(i) if i == def::INTERPOLATION_DEF_POWER => Shape::Power,
+        Some(i) if i == def::INTERPOLATION_DEF_LOG => Shape::Log,
+        Some(_) => Shape::Other,
+    }
+}
+
 /// The refusal for more audio slots than an import builds.
 fn too_many_tracks(limit: usize) -> IoError {
     IoError::Refused(format!(
@@ -121,9 +132,10 @@ fn too_many_tracks(limit: usize) -> IoError {
 }
 
 /// A fade's shape: the interpolation read (Ruling 5 maps it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Shape {
     /// `InterpolationDef_Linear` (or a linear-amplitude `FadeType`).
+    #[default]
     Linear,
     /// `InterpolationDef_Power` (or a linear-power `FadeType`).
     Power,
@@ -178,6 +190,12 @@ pub struct Curve {
     /// The points of a varying curve: (edit units from the slot's start,
     /// value).
     pub points: Vec<(i64, f64)>,
+    /// A varying curve's interpolation (`Linear` when it names none, and
+    /// for a constant); `Constant` reads as [`Shape::Other`] with `step`.
+    pub shape: Shape,
+    /// True when a varying curve's interpolation is `Constant`: each value
+    /// holds until the next point.
+    pub step: bool,
 }
 
 /// One audio slot: a track.
@@ -995,7 +1013,7 @@ impl Rd<'_> {
             return match indirect_ratio(self.prop(p, pid::CONSTANT_VALUE_VALUE)) {
                 Some(v) => Curve {
                     constant: Some(v),
-                    points: Vec::new(),
+                    ..Curve::default()
                 },
                 None => {
                     self.report.add(ItemKind::LeftOut, BAD_VALUES, None);
@@ -1025,9 +1043,12 @@ impl Rd<'_> {
                 _ => self.report.add(ItemKind::LeftOut, BAD_VALUES, None),
             }
         }
+        let interp = weak_id(self.prop(p, pid::VARYING_VALUE_INTERPOLATION));
         Curve {
             constant: None,
             points,
+            shape: shape_of_interp(interp),
+            step: interp == Some(def::INTERPOLATION_DEF_CONSTANT),
         }
     }
 
@@ -1064,13 +1085,7 @@ impl Rd<'_> {
             .and_then(|g| self.param(g, def::PARAMETER_DEF_LEVEL))
             .filter(|p| self.class(*p) == Some(class::VARYING_VALUE))
             .and_then(|p| weak_id(self.prop(p, pid::VARYING_VALUE_INTERPOLATION)));
-        match interp {
-            None => Shape::Linear,
-            Some(i) if i == def::INTERPOLATION_DEF_LINEAR => Shape::Linear,
-            Some(i) if i == def::INTERPOLATION_DEF_POWER => Shape::Power,
-            Some(i) if i == def::INTERPOLATION_DEF_LOG => Shape::Log,
-            Some(_) => Shape::Other,
-        }
+        shape_of_interp(interp)
     }
 
     /// A segment flattened into pieces, with an explicit stack.

@@ -188,7 +188,7 @@ impl<'p> Tl<'_, '_, 'p> {
         Ok(Arranged {
             items,
             seqs: out,
-            media: self.media,
+            media: self.book.media,
             main,
         })
     }
