@@ -78,6 +78,15 @@ mod shared;
 /// The merge's one undo step.
 pub const LABEL: &str = "Merge DAWproject";
 
+/// The Ruling 8 lines only an apply knows; `decide::plan` lists them in the
+/// preview from a dry run of [`apply_merge`].
+pub(super) const APPLIED_LINES: [&str; 4] = [
+    text::PRIVATE_COPIES,
+    text::LOOPS_UNROLLED,
+    text::USES_AS_NOTES,
+    text::SHARED_ELSEWHERE,
+];
+
 /// Inside the caller's open transaction on the project `plan` was made
 /// against: carries out each decision (Rulings 5–11), then merges the
 /// plan's report into `report`.
@@ -146,12 +155,18 @@ pub fn apply_merge(
     deletions(h, &cx)?;
 
     let counts = report.summary;
-    report.merge(plan.report.clone());
+    // The plan's report holds the preview's dry run of these lines
+    // (`decide::plan`); this apply lists them as it made them.
+    let mut planned = plan.report.clone();
+    planned
+        .items
+        .retain(|i| !APPLIED_LINES.contains(&i.what.as_str()));
+    report.merge(planned);
     for d in out.takes {
         report.add(ItemKind::Conflict, text::CONFLICT_TAKE, Some(d));
     }
-    for d in out.unrolled {
-        report.add(ItemKind::Changed, text::LOOPS_UNROLLED, Some(d));
+    for (what, d) in out.unrolled {
+        report.add(ItemKind::Changed, what, Some(d));
     }
     for d in out.copies {
         report.add(ItemKind::Changed, text::PRIVATE_COPIES, Some(d));
@@ -175,8 +190,9 @@ fn run(h: &mut History, cmd: Command) -> Result<CmdReport, ModelError> {
 struct Out {
     /// [`text::conflict_take`] details.
     takes: Vec<String>,
-    /// [`text::LOOPS_UNROLLED`] details.
-    unrolled: Vec<String>,
+    /// [`text::LOOPS_UNROLLED`] and [`text::USES_AS_NOTES`] lines, with
+    /// their details.
+    unrolled: Vec<(&'static str, String)>,
     /// [`text::PRIVATE_COPIES`] details.
     copies: Vec<String>,
     /// [`text::SHARED_ELSEWHERE`] details.
@@ -360,6 +376,9 @@ struct LaneEdit {
     gone_in_uses: BTreeSet<(u64, u64, i64)>,
     /// Uses replaced by what they play.
     unroll: BTreeSet<u64>,
+    /// Those of them whose passes were edited differently (listed under
+    /// [`text::LOOPS_UNROLLED`]; the others under [`text::USES_AS_NOTES`]).
+    looped: BTreeSet<u64>,
     insert: Vec<EventSpec>,
     /// Top-level regions edited in place (`EventCmd::Replace`), so they
     /// keep their events (Task 6 fix round 2).
@@ -1184,8 +1203,13 @@ fn apply_edit(
                         .unwrap_or_default(),
                     _ => String::new(),
                 };
+                let what = if edit.looped.contains(u) {
+                    text::LOOPS_UNROLLED
+                } else {
+                    text::USES_AS_NOTES
+                };
                 out.unrolled
-                    .push(format!("Track '{}': use of '{used}'", l.name));
+                    .push((what, format!("Track '{}': use of '{used}'", l.name)));
             }
         }
     }

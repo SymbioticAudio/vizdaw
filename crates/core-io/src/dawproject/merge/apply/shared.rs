@@ -18,21 +18,27 @@
 //! (`unroll`, [`text::LOOPS_UNROLLED`]).
 //!
 //! **Each sequence:** when every exported use of it has the same edit
-//! (and the export plays it inside no use of another sequence), the edit
-//! goes into the sequence once ([`text::SHARED_ELSEWHERE`] when
-//! it is also used outside the merged sequence). Otherwise each use with
+//! (the export plays it inside no use of another sequence, and the edit
+//! leaves an unlocked sequence's length as it is), the edit goes into the
+//! sequence once ([`text::SHARED_ELSEWHERE`] when it is also used outside
+//! the export: a keyboard slot, another sequence, an inactive take or a
+//! track the export leaves out). Otherwise each use with
 //! an edit gets `ReferenceCmd::MakePrivateCopy`, then its edit
-//! ([`text::PRIVATE_COPIES`]). A paired event is edited in place
+//! ([`text::PRIVATE_COPIES`]); a copy whose edit changed its unlocked
+//! length is locked to the length its use played. A looped use whose
+//! passes differ is listed under [`text::LOOPS_UNROLLED`], any other
+//! unrolled use under [`text::USES_AS_NOTES`]. A paired event is edited in place
 //! (`EventCmd::Replace`), so it keeps its event.
 //!
 //! [`text::LOOPS_UNROLLED`]: super::text::LOOPS_UNROLLED
 //! [`text::SHARED_ELSEWHERE`]: super::text::SHARED_ELSEWHERE
 //! [`text::PRIVATE_COPIES`]: super::text::PRIVATE_COPIES
+//! [`text::USES_AS_NOTES`]: super::text::USES_AS_NOTES
 
 use super::{Cx, LaneEdit, lane_rows, run};
 use crate::dawproject::merge::decide::{same_note, same_region, ticks_near, used_elsewhere};
 use crate::dawproject::record::{EventAt, PNote, PRegion, UseAt};
-use core_model::command::{Command, EventCmd, ReferenceCmd};
+use core_model::command::{Command, EventCmd, ReferenceCmd, SequenceCmd};
 use core_model::document::Document;
 use core_model::error::ModelError;
 use core_model::event::{EventBody, EventSpec, LoopCount};
@@ -40,7 +46,7 @@ use core_model::history::History;
 use core_model::ids::{AnyId, EventId, SeqId};
 use core_model::lane::Lane;
 use core_model::query::{reference_span, seq_length};
-use core_model::sequence::Sequence;
+use core_model::sequence::{SeqLength, Sequence};
 use core_model::time::Tick;
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::discriminant;
@@ -289,8 +295,8 @@ impl Edit {
 enum Took {
     /// One edit, the same on every pass.
     Edit(Edit),
-    /// Replaced by what theirs plays.
-    Unroll,
+    /// Replaced by what theirs plays, and why.
+    Unroll(Why),
 }
 
 /// Whether a sequence's track plays its events where they are.
@@ -323,9 +329,44 @@ fn in_seq<'d>(
     Some((i, &ev.body, target.lanes.get(i)?))
 }
 
-/// Use `u`'s changes as one edit of its sequence, or `None` when it must
-/// be unrolled.
-fn took(doc: &Document, cx: &Cx<'_>, u: &UseAt, changes: &[Change]) -> Option<Edit> {
+/// Why a use is unrolled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// A looped use's passes were edited differently
+    /// ([`text::LOOPS_UNROLLED`](super::text::LOOPS_UNROLLED)).
+    Passes,
+    /// Its edit cannot be played the same from its sequence
+    /// ([`text::USES_AS_NOTES`](super::text::USES_AS_NOTES)).
+    Cannot,
+}
+
+/// Use `u`'s changes as one edit of its sequence, or why it must be
+/// unrolled.
+fn took(doc: &Document, cx: &Cx<'_>, u: &UseAt, changes: &[Change]) -> Result<Edit, Why> {
+    let (passes, played) = pass_edits(doc, cx, u, changes).ok_or(Why::Cannot)?;
+    let differ = if played > 1 { Why::Passes } else { Why::Cannot };
+    if i64::try_from(passes.len()).map_err(|_| Why::Cannot)? != played {
+        return Err(differ);
+    }
+    let mut each = passes.into_values();
+    let mut first = each.next().ok_or(Why::Cannot)?;
+    if !each.all(|p| p.same(&first)) {
+        return Err(differ);
+    }
+    let target = doc.sequence(SeqId(u.seq)).map_err(|_| Why::Cannot)?;
+    moves(doc, target, &mut first);
+    Ok(first)
+}
+
+/// Use `u`'s changes as an edit per played pass, with the number of
+/// passes that play; `None` when an edit cannot be played the same from
+/// the sequence.
+fn pass_edits(
+    doc: &Document,
+    cx: &Cx<'_>,
+    u: &UseAt,
+    changes: &[Change],
+) -> Option<(BTreeMap<i64, Edit>, i64)> {
     let (e, _) = doc.event(EventId(u.event)).ok()?;
     let EventBody::Reference {
         seq: s,
@@ -462,16 +503,44 @@ fn took(doc: &Document, cx: &Cx<'_>, u: &UseAt, changes: &[Change]) -> Option<Ed
             replaces,
         });
     }
-    if i64::try_from(passes.len()).ok()? != played {
-        return None;
+    Some((passes, played))
+}
+
+/// Whether `edit` written into sequence `s` would change its length (an
+/// unlocked sequence's is derived from its events' ends), which would
+/// change every pass of every use of it.
+fn changes_length(doc: &Document, s: SeqId, edit: &Edit) -> bool {
+    let Ok(seq) = doc.sequence(s) else {
+        return true;
+    };
+    if matches!(seq.length, SeqLength::Locked(_)) {
+        return false;
     }
-    let mut each = passes.into_values();
-    let mut first = each.next()?;
-    if !each.all(|p| p.same(&first)) {
-        return None;
+    let mut h = History::new(doc.clone());
+    if edit_seq(&mut h, s, edit, None).is_err() {
+        return true;
     }
-    moves(doc, target, &mut first);
-    Some(first)
+    seq_length(h.doc(), s).ok() != seq_length(doc, s).ok()
+}
+
+/// The sequences used by a reference the export does not play: on an
+/// inactive take, a track the export leaves out, or another sequence.
+fn used_unexported(doc: &Document, exported: &BTreeMap<u64, UseAt>) -> BTreeSet<SeqId> {
+    let mut out = BTreeSet::new();
+    for s in doc.sequences().values() {
+        for l in &s.lanes {
+            for t in &l.takes {
+                for e in t.events.values() {
+                    if let EventBody::Reference { seq, .. } = e.body
+                        && !exported.contains_key(&e.id.0)
+                    {
+                        out.insert(seq);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Pairs the notes `edit` deletes with the ones it adds of the same key on
@@ -593,13 +662,15 @@ pub(super) fn resolve(doc: &Document, cx: &Cx<'_>, edits: &mut [(u64, LaneEdit)]
     }
     let mut took_: BTreeMap<u64, Took> = BTreeMap::new();
     for (u, (_, changes)) in &changed {
-        let t = all
-            .get(u)
-            .and_then(|at| took(doc, cx, at, changes))
-            .map_or(Took::Unroll, Took::Edit);
+        let t = match all.get(u).map(|at| took(doc, cx, at, changes)) {
+            Some(Ok(e)) => Took::Edit(e),
+            Some(Err(w)) => Took::Unroll(w),
+            None => Took::Unroll(Why::Cannot),
+        };
         took_.insert(*u, t);
     }
-    let elsewhere = used_elsewhere(doc, cx.seq);
+    let mut elsewhere = used_elsewhere(doc, cx.seq);
+    elsewhere.extend(used_unexported(doc, &all));
     let nested = nested(doc, cx, &all);
     for (s, uses) in &by_seq {
         if !uses.iter().any(|u| changed.contains_key(u)) {
@@ -616,8 +687,11 @@ pub(super) fn resolve(doc: &Document, cx: &Cx<'_>, edits: &mut [(u64, LaneEdit)]
         let first = each.first().copied().flatten();
         // A sequence that also plays inside another exported use would
         // change what that use plays: never edited itself.
+        // Nor one whose length the edit would change (Task 6b fix round 1).
         let uniform = !nested.contains(&s)
-            && first.is_some_and(|f| each.iter().all(|e| e.is_some_and(|e| e.same(f))));
+            && first.is_some_and(|f| {
+                each.iter().all(|e| e.is_some_and(|e| e.same(f))) && !changes_length(doc, s, f)
+            });
         match first {
             Some(f) if uniform => {
                 out.edits.push(SeqEdit::Direct(s, f.clone()));
@@ -641,13 +715,16 @@ pub(super) fn resolve(doc: &Document, cx: &Cx<'_>, edits: &mut [(u64, LaneEdit)]
     }
     // The uses to unroll go back to their lanes.
     for (u, (k, changes)) in changed {
-        if !matches!(took_.get(&u), Some(Took::Unroll)) {
+        let Some(Took::Unroll(why)) = took_.get(&u) else {
             continue;
-        }
+        };
         let Some((_, e)) = edits.get_mut(k) else {
             continue;
         };
         e.unroll.insert(u);
+        if *why == Why::Passes {
+            e.looped.insert(u);
+        }
         for c in changes {
             if let Some(l) = c.ours {
                 e.delete(&l.at, l.tick);
@@ -691,8 +768,26 @@ pub(super) fn write(h: &mut History, shared: &Shared) -> Result<(), ModelError> 
                     })
                     .ok_or_else(|| ModelError::invalid("no private copy was made"))?;
                 let after = events_of(h.doc().sequence(copy)?);
+                if after.len() != before.len() {
+                    return Err(ModelError::invalid(
+                        "the private copy differs from its sequence",
+                    ));
+                }
                 let map: BTreeMap<u64, u64> = before.into_iter().zip(after).collect();
+                let length = h.doc().sequence(*s)?.length;
+                let was = seq_length(h.doc(), *s)?;
                 edit_seq(h, copy, edit, Some(&map))?;
+                // An unlocked copy whose edit would change its length is
+                // locked to the length its use played (fix round 1).
+                if !matches!(length, SeqLength::Locked(_)) && seq_length(h.doc(), copy)? != was {
+                    run(
+                        h,
+                        Command::Sequence(SequenceCmd::SetLength {
+                            seq: copy,
+                            length: SeqLength::Locked(was),
+                        }),
+                    )?;
+                }
             }
         }
     }

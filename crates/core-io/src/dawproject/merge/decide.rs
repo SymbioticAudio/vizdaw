@@ -215,8 +215,10 @@ pub struct MergePlan {
     pub preview: MergePreview,
     /// The import's lines (without `import::FROM_VIZDAW`) and the merge's
     /// own: [`text::MERGED`], the matching notes, the settings in conflict,
-    /// the deletions and the plug-ins kept. The alternate takes, private
-    /// copies and unrolled loops are listed when the merge is applied.
+    /// the deletions and the plug-ins kept, and (from a dry run of the
+    /// apply, Ruling 8) the private copies, the uses unrolled and the edits
+    /// that play elsewhere. The alternate takes are listed when the merge
+    /// is applied.
     pub report: Report,
 }
 
@@ -322,14 +324,53 @@ pub fn plan(
         }
     }
     let decisions = d.out;
-    Ok(MergePlan {
+    let mut plan = MergePlan {
         base,
         theirs,
         matches,
         decisions,
         preview,
         report,
-    })
+    };
+    stop(cancel)?;
+    let lines = dry_run(&plan, ours);
+    plan.report.merge(lines);
+    stop(cancel)?;
+    Ok(plan)
+}
+
+/// The Ruling 8 lines (private copies, uses unrolled, edits that play
+/// elsewhere) `plan`'s merge would list, from a dry run of the apply on a
+/// clone of `ours` (Task 6b fix round 1), so the preview lists what the
+/// merge will. Only edits inside uses make them: without a `Theirs` notes,
+/// regions or curve decision there is nothing to run. A failing dry run
+/// lists nothing (the real apply reports the failure).
+fn dry_run(plan: &MergePlan, ours: &Document) -> Report {
+    let mut out = Report::default();
+    let edits = plan.decisions.iter().any(|d| {
+        d.outcome == Outcome::Theirs
+            && matches!(d.unit, Unit::Notes | Unit::Regions | Unit::Automation(_))
+    });
+    if !edits {
+        return out;
+    }
+    let mut h = core_model::history::History::new(ours.clone());
+    let mut report = Report::default();
+    if h.begin(super::apply::LABEL).is_err()
+        || super::apply::apply_merge(&mut h, plan, "0000-00-00", &mut report).is_err()
+    {
+        return out;
+    }
+    for i in report
+        .items
+        .into_iter()
+        .filter(|i| super::apply::APPLIED_LINES.contains(&i.what.as_str()))
+    {
+        for d in i.details {
+            out.add(i.kind, &i.what, Some(d));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------- sides

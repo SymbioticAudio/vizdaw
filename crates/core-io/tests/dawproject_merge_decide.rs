@@ -19,7 +19,7 @@ use core_io::dawproject::merge::decide::{
 use core_io::dawproject::merge::text::{
     self, ADDED_BOTH, BY_NAME, CONFLICT_SETTING, CONFLICT_TAKE, DELETED_HERE, DELETED_THERE,
     KEPT_EMPTY, LINES, LOOPS_UNROLLED, MERGED, NOT_APPLIED, NOTHING, OLD_EXPORT, PRIVATE_COPIES,
-    SEQUENCE_GONE, SHARED_ELSEWHERE, SNAPSHOT_CHOSEN, TAKE_PARTS, VST_KEPT, summary,
+    SEQUENCE_GONE, SHARED_ELSEWHERE, SNAPSHOT_CHOSEN, TAKE_PARTS, USES_AS_NOTES, VST_KEPT, summary,
 };
 use core_io::dawproject::merge::theirs::{Theirs, theirs};
 use core_io::dawproject::package::open;
@@ -1219,6 +1219,7 @@ fn report_lines_are_listed() {
         (NOT_APPLIED, ItemKind::Conflict),
         (PRIVATE_COPIES, ItemKind::Changed),
         (LOOPS_UNROLLED, ItemKind::Changed),
+        (USES_AS_NOTES, ItemKind::Changed),
         (VST_KEPT, ItemKind::LeftOut),
         (MERGED, ItemKind::Note),
         (BY_NAME, ItemKind::Note),
@@ -1229,7 +1230,7 @@ fn report_lines_are_listed() {
     ] {
         assert_eq!(kind_of(what), kind, "{what}");
     }
-    assert_eq!(LINES.len(), 16);
+    assert_eq!(LINES.len(), 17);
 
     let mut reports: Vec<Report> = Vec::new();
     let (doc, seq) = fixture();
@@ -1349,12 +1350,14 @@ fn report_lines_are_listed() {
     // The import's own note that the file came from VizDAW is replaced.
     for r in &reports {
         assert!(!has(r, core_io::dawproject::import::FROM_VIZDAW));
-        // The take, the private copies, the unrolled loops and the shared
-        // edits are listed when the merge is applied (Tasks 6 and 6b).
+        // The take is listed when the merge is applied (Task 6); none of
+        // these cases edits inside a use, so the preview's dry run (Task 6b
+        // fix round 1) lists no Ruling 8 line.
         for later in [
             CONFLICT_TAKE,
             PRIVATE_COPIES,
             LOOPS_UNROLLED,
+            USES_AS_NOTES,
             SHARED_ELSEWHERE,
         ] {
             assert!(!has(r, later), "{later}");

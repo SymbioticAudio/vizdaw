@@ -45,11 +45,15 @@ pub const NOT_APPLIED: &str =
 /// the sequence, "Sequence '<name>'".
 pub const PRIVATE_COPIES: &str =
     "Uses of a shared sequence edited differently became private copies";
-/// Changed: looped uses edited on some passes (Ruling 8), and any other
-/// use whose edit the sequence cannot play the same (a nested use's, or
-/// any use with a format-1 snapshot, Ruling 3). Detail: "Track
-/// '<track>': use of '<sequence>'".
+/// Changed: looped uses whose passes the other DAW edited differently
+/// (Ruling 8). Detail: "Track '<track>': use of '<sequence>'".
 pub const LOOPS_UNROLLED: &str = "Looped uses edited on some passes became notes";
+/// Changed: other uses whose edit their sequence cannot play the same (a
+/// nested use's, an inner track with its own loop, length or play
+/// quantize, an automation curve's, any use with a format-1 snapshot,
+/// Ruling 3), replaced by what they play (Task 6b fix round 1). Detail:
+/// "Track '<track>': use of '<sequence>'".
+pub const USES_AS_NOTES: &str = "Uses of a sequence turned into the notes they play";
 
 // ---------------------------------------------------------------- Left out
 
@@ -95,7 +99,7 @@ pub const SEQUENCE_GONE: &str =
 
 /// Every report line above with the group it goes in, for the app's
 /// grouping and the tests.
-pub const LINES: [(&str, ItemKind); 16] = [
+pub const LINES: [(&str, ItemKind); 17] = [
     (CONFLICT_TAKE, ItemKind::Conflict),
     (CONFLICT_SETTING, ItemKind::Conflict),
     (KEPT_EMPTY, ItemKind::Conflict),
@@ -105,6 +109,7 @@ pub const LINES: [(&str, ItemKind); 16] = [
     (NOT_APPLIED, ItemKind::Conflict),
     (PRIVATE_COPIES, ItemKind::Changed),
     (LOOPS_UNROLLED, ItemKind::Changed),
+    (USES_AS_NOTES, ItemKind::Changed),
     (VST_KEPT, ItemKind::LeftOut),
     (MERGED, ItemKind::Note),
     (BY_NAME, ItemKind::Note),
