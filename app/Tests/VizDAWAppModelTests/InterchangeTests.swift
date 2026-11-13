@@ -182,6 +182,33 @@ import VizDAWCore
         #expect(!plain.lowercased().contains("lane"))
     }
 
+    /// A merge's report (plan 6e Ruling 15): "Conflicts" first, then
+    /// "Changed", "Left out" and "Notes", on the sheet and in the text.
+    @Test func conflictsComeFirst() {
+        let r = ReportRow(
+            summary: "Merged: 1 applied, 0 kept, 0 added, 0 removed, 1 in conflict",
+            items: [
+                ReportItemRow(kind: .note, what: "A note", count: 1, details: []),
+                ReportItemRow(kind: .leftOut, what: "Left", count: 1, details: []),
+                ReportItemRow(kind: .changed, what: "Changed", count: 1, details: []),
+                ReportItemRow(kind: .conflict, what: "Drums: level changed in both", count: 1, details: []),
+            ])
+        #expect(ReportText.groups(r).map(\.title) == ["Conflicts", "Changed", "Left out", "Notes"])
+        #expect(
+            ReportText.plain(r)
+                == """
+                Merged: 1 applied, 0 kept, 0 added, 0 removed, 1 in conflict
+                Conflicts
+                  Drums: level changed in both
+                Changed
+                  Changed
+                Left out
+                  Left
+                Notes
+                  A note
+                """)
+    }
+
     @Test func reportCommandNeverOpensTheSheet() throws {
         let f = demoFake()
         f.lastReport = ReportRow(

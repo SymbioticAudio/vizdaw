@@ -13,6 +13,31 @@ public struct TornFocus: Equatable, Sendable {
     }
 }
 
+/// A DAWproject file that came from VizDAW, waiting for the return
+/// prompt's answer (plan 6e Rulings 13, 14).
+public struct ReturnPrompt: Equatable, Sendable {
+    /// The file (absolute).
+    public let path: String
+    /// Its header, as the core read it.
+    public let info: DawprojectInfoRow
+    /// The open project it came from (its project ID, else a snapshot of
+    /// its export), the most recently active when several match.
+    public let match: UUID?
+    /// That project's name, which the prompt shows.
+    public let matchName: String?
+
+    public init(path: String, info: DawprojectInfoRow, match: UUID?, matchName: String?) {
+        self.path = path
+        self.info = info
+        self.match = match
+        self.matchName = matchName
+    }
+}
+
+/// The return prompt's buttons: "New Project", "Merge With Existing
+/// Project…" and "Cancel".
+public enum ReturnChoice: Sendable { case newProject, merge, cancel }
+
 /// The open documents, one per window, keyed by the window's value.
 @Observable
 @MainActor
@@ -46,6 +71,20 @@ public final class DocumentStore {
     public var dawprojectInfo: @Sendable (String) throws -> DawprojectInfoRow = {
         try VizDAWCore.dawprojectInfo(path: $0)
     }
+
+    /// A file from VizDAW waiting for the return prompt's answer (plan 6e
+    /// Task 10). `openDawproject` sets it for the UI's opens (File › Open,
+    /// Import Project ▸ DAWproject…, Finder, the Dock); the app's
+    /// `ReturnPrompts` shows it, and under the control channel shows
+    /// nothing and answers Cancel. A second file read meanwhile waits its
+    /// turn.
+    public private(set) var returnPrompt: ReturnPrompt?
+    /// Prompts waiting behind `returnPrompt`, oldest first.
+    @ObservationIgnored private var queuedPrompts: [ReturnPrompt] = []
+
+    /// Asks for the project to merge into when no open project matches: an
+    /// Open panel the app sets (nil, or the panel's Cancel: nothing).
+    @ObservationIgnored public var chooseMergeProject: (() -> String?)?
 
     /// Opens in flight (`openDawproject`), so tests can wait for them.
     @ObservationIgnored private var opening: [Int: Task<Void, Never>] = [:]
@@ -318,7 +357,8 @@ public final class DocumentStore {
 
     /// Starts opening `path` and returns at once (L8): a detached task
     /// calls `dawprojectInfo` (no document or session needed), then on the
-    /// main actor makes a project at the file's rate and starts
+    /// main actor a file from VizDAW sets `returnPrompt` and waits for
+    /// `answerReturn` (plan 6e); any other makes a project at the file's rate and starts
     /// `importDawproject`; its window opens (`enqueue`). A refusal makes no
     /// project and alerts "Import Failed"; a job that fails or is cancelled
     /// on a still-untouched project closes it (as `openMidi`).
@@ -333,6 +373,8 @@ public final class DocumentStore {
         }
     }
 
+    /// The file was read: one from VizDAW asks first (`returnPrompt`); any
+    /// other makes its project at once.
     private func dawprojectRead(_ path: String, _ info: Result<DawprojectInfoRow, any Error>) {
         let row: DawprojectInfoRow
         switch info {
@@ -341,6 +383,52 @@ public final class DocumentStore {
             return
         case .success(let r): row = r
         }
+        guard !row.fromVizdaw else {
+            // One lstat per open document at most (`documentHolding`).
+            let match = documentID(forProjectID: row.projectId) ?? documentHolding(exportID: row.exportId)
+            let prompt = ReturnPrompt(
+                path: path, info: row, match: match, matchName: match.flatMap { documents[$0]?.snapshot.title })
+            if returnPrompt == nil { returnPrompt = prompt } else { queuedPrompts.append(prompt) }
+            return
+        }
+        importAsNewProject(path, row)
+    }
+
+    /// The return prompt's answer. New Project: 6d's path (a project at
+    /// the file's rate imports it). Merge: into the open match, else the
+    /// project `chooseMergeProject` picks (nil: nothing), found open or
+    /// opened, whose window comes forward with the merge sheet. Cancel:
+    /// nothing. The next waiting prompt, if any, follows.
+    public func answerReturn(_ choice: ReturnChoice) {
+        guard let p = returnPrompt else { return }
+        returnPrompt = queuedPrompts.isEmpty ? nil : queuedPrompts.removeFirst()
+        switch choice {
+        case .cancel:
+            return
+        case .newProject:
+            importAsNewProject(p.path, p.info)
+        case .merge:
+            let target: UUID
+            if let match = p.match, documents[match] != nil {
+                target = match
+                activate?(match)
+            } else {
+                guard let project = chooseMergeProject?() else { return }
+                if let already = documentID(forPath: project) {
+                    target = already
+                    activate?(already)
+                } else {
+                    guard let opened = open(path: project) else { return }
+                    target = opened
+                    enqueue(opened)
+                }
+            }
+            documents[target]?.merge.begin(path: p.path, info: p.info)
+        }
+    }
+
+    /// 6d's open: a project at the file's rate imports `path`.
+    private func importAsNewProject(_ path: String, _ row: DawprojectInfoRow) {
         guard let id = newProject(ProjectFormatRow(sampleRate: row.sampleRate, depth: defaultFormat.depth)),
             let model = documents[id]
         else { return }

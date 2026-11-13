@@ -137,6 +137,7 @@ public final class DocumentModel {
     @ObservationIgnored private var interchangeModel: InterchangeModel?
     @ObservationIgnored private var forDawModel: ForDawModel?
     @ObservationIgnored private var dawprojectModel: DawprojectModel?
+    @ObservationIgnored private var mergeModel: MergeModel?
     @ObservationIgnored private var projectSettingsModel: ProjectSettingsModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
@@ -214,6 +215,27 @@ public final class DocumentModel {
         let m = DawprojectModel(document: self)
         dawprojectModel = m
         return m
+    }
+
+    /// The Merge DAWproject sheet (plan 6e Task 10), made once.
+    public var merge: MergeModel {
+        if let m = mergeModel { return m }
+        let m = MergeModel(document: self)
+        mergeModel = m
+        return m
+    }
+
+    /// A merge is held between its preview and Merge or Cancel: the core
+    /// refuses Save As, the media jobs and the interchange jobs beside it
+    /// (plan 6e Ruling 12), so they wait or are refused before they start.
+    public var mergeHeld: Bool { mergeModel?.held ?? false }
+
+    /// The held merge ended (Merge, Cancel, or the core let it go): what
+    /// waited for it goes, as when a blocking job ends.
+    func holdEnded() {
+        interchange.blockingEnded()
+        forDaw.jobEnded()
+        dawproject.jobEnded()
     }
 
     /// Set by the store for a project it made to open a MIDI or DAWproject
@@ -823,6 +845,9 @@ public final class DocumentModel {
             if untitled { return .refused(RecordModel.saveUntitledWhileRecording) }
             return .save
         }
+        // Plan 6e Task 8 review I1: the core refuses Save As while a merge
+        // is held; the panel never opens for it.
+        if mergeHeld, forceAs || untitled { return .refused(MergeModel.saveAsWhileHeld) }
         return forceAs || untitled ? .panel : .save
     }
 

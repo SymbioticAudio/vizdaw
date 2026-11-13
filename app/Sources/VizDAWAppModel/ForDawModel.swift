@@ -10,8 +10,11 @@ import VizDAWCore
 @MainActor
 public final class ForDawModel: AudioFormatChoices {
     /// Jobs the core cannot run an export beside; also what holds back
-    /// dropped MIDI files while one is listed.
-    public static let blocking: Set<JobKindRow> = [.bounce, .importMidi, .exportMidi, .exportProject, .exportDawproject, .importProject]
+    /// dropped MIDI files while one is listed. A held merge blocks them too
+    /// (`DocumentModel.mergeHeld`, plan 6e Ruling 12).
+    public static let blocking: Set<JobKindRow> = [
+        .bounce, .importMidi, .exportMidi, .exportProject, .exportDawproject, .importProject, .mergeDawproject,
+    ]
     /// Jobs that change the media "Add to project" would add to.
     static let mediaJobs: Set<JobKindRow> = [.format, .convert, .relink, .externalEdit]
 
@@ -182,9 +185,10 @@ public final class ForDawModel: AudioFormatChoices {
     /// Whether a job the export cannot run beside is listed.
     private func blocked(by request: ForDawRequestRow) -> Bool {
         guard let document else { return false }
-        return document.jobs.contains {
-            Self.blocking.contains($0.kind) || (request.addToProject && Self.mediaJobs.contains($0.kind))
-        }
+        return document.mergeHeld
+            || document.jobs.contains {
+                Self.blocking.contains($0.kind) || (request.addToProject && Self.mediaJobs.contains($0.kind))
+            }
     }
 
     /// Exports into `folder`, or keeps the request until the running job

@@ -889,11 +889,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         interchangeLock.unlock()
         if let e = cancelMergeError { throw e }
     }
+    /// Holds `dawprojectSnapshots` until released (plan 6e Task 10).
+    var snapshotsHold: DispatchSemaphore?
     func dawprojectSnapshots() throws -> [SnapshotRow] {
         interchangeLock.lock()
         snapshotCalls += 1
         checkOnMain.append(Thread.isMainThread)
+        let hold = snapshotsHold
         interchangeLock.unlock()
+        hold?.wait()
         return try snapshotsAnswer.get()
     }
     func projectId() throws -> String? {
@@ -982,7 +986,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         jobRows[id] = JobRow(id: id, kind: .format, progress: 1, state: .done, message: nil, problems: [], created: [])
         return id
     }
+    /// Thrown by `convertMedia` when set (a held merge's Busy, plan 6e Task 10).
+    var mediaJobError: VizError?
     func convertMedia() throws -> UInt64 {
+        if let e = mediaJobError { throw e }
         conversions += 1
         info.mismatched = 0
         let id = UInt64(2000 + conversions)

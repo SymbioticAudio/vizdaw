@@ -24,12 +24,11 @@ public struct ChannelChoice: Equatable, Identifiable, Sendable {
 /// The report's wording, shared by the sheet, Copy and Save as Text (plan 6a
 /// Task 9). Reports say "track", never "lane".
 public enum ReportText {
-    /// The groups in the order "Changed", "Left out", "Notes", then a
-    /// merge's "Conflicts" (plan 6e Task 8; Task 10 moves them first);
-    /// empty ones are omitted.
+    /// The groups in the order "Conflicts" (a merge's, plan 6e Ruling 15),
+    /// "Changed", "Left out", "Notes"; empty ones are omitted.
     public static func groups(_ r: ReportRow) -> [(title: String, items: [ReportItemRow])] {
         let order: [(String, ReportKindRow)] = [
-            ("Changed", .changed), ("Left out", .leftOut), ("Notes", .note), ("Conflicts", .conflict),
+            ("Conflicts", .conflict), ("Changed", .changed), ("Left out", .leftOut), ("Notes", .note),
         ]
         return order.compactMap { title, kind in
             let items = r.items.filter { $0.kind == kind }
@@ -113,6 +112,14 @@ public final class InterchangeModel {
         guard let r = job.report else { return }
         report = r
         written = job.kind == .exportMidi || job.kind == .exportProject || job.kind == .exportDawproject ? job.written : []
+        reportShown = true
+    }
+
+    /// A merge's report (Merge in the merge sheet, plan 6e Task 10): shown
+    /// as an import's is, with nothing written.
+    func show(_ r: ReportRow) {
+        report = r
+        written = []
         reportShown = true
     }
 
@@ -246,7 +253,7 @@ public final class InterchangeModel {
         guard let document, !startingDrops else { return }
         startingDrops = true
         defer { startingDrops = false }
-        while dropJob == nil, !dropQueue.isEmpty,
+        while dropJob == nil, !dropQueue.isEmpty, !document.mergeHeld,
             !document.jobs.contains(where: { ForDawModel.blocking.contains($0.kind) })
         {
             let req = dropQueue.removeFirst()

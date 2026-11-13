@@ -137,7 +137,8 @@ public final class DawprojectModel {
     /// Whether a job the core refuses an export beside (`Busy`) is listed.
     private var blocked: Bool {
         guard let document else { return false }
-        return document.jobs.contains { ForDawModel.blocking.contains($0.kind) || ForDawModel.mediaJobs.contains($0.kind) }
+        return document.mergeHeld
+            || document.jobs.contains { ForDawModel.blocking.contains($0.kind) || ForDawModel.mediaJobs.contains($0.kind) }
     }
 
     /// Exports to `path`, or keeps the request until the running job ends.

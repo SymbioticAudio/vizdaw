@@ -843,6 +843,54 @@ import VizDAWCore
         #expect(mergeCalls(f) == 0 && dawprojectCalls(f) == 0 && opened == 0 && s.documents.count == 1)
     }
 
+    /// Task 9 review carry-over: a `mode` that is neither "new" nor "merge"
+    /// is refused, never taken as a new project, even on a file not from
+    /// VizDAW; a relative `project` is refused before any lookup or open.
+    @Test func unknownModeAndRelativeProjectAreRefused() async throws {
+        var opened = 0
+        let f = demoFake()
+        f.projectIdAnswer = Self.pid
+        var made = 0
+        let s = DocumentStore(
+            makeEmpty: { FakeSession([]) }, makeDemo: { f },
+            open: { _ in
+                opened += 1
+                return demoFake()
+            })
+        defer { s.closeAll() }
+        let id = try #require(s.newDemo())
+        s.makeProject = { _ in
+            made += 1
+            return FakeSession([])
+        }
+        let m = try #require(s.model(id))
+        func go(_ args: [(String, ControlValue)]) async -> ControlFailure? {
+            failure(
+                await settled(
+                    InterchangeCommands.run(
+                        InterchangeCommands.importDawproject, args: args.map { ControlArg(name: $0.0, value: $0.1) },
+                        id, m, store: s)))
+        }
+        for info in [
+            DawprojectInfoRow(sampleRate: 48_000, tracks: 1, audioFiles: 0, fromVizdaw: false, exportId: nil),
+            vizdawInfo(),
+        ] {
+            answering(s, f, info)
+            for bad in ["fuse", "", "New", "MERGE", " merge", "new\u{0}", "merge\u{0301}"] {
+                let r = await go([file, ("mode", .text(value: bad))])
+                #expect(r?.code == .invalidParams, "\(bad.debugDescription): \(String(describing: r))")
+                #expect(r?.message == "file.import_dawproject: `mode` is new or merge.")
+            }
+        }
+        answering(s, f, vizdawInfo())
+        for rel in ["Open.vizdaw", "./Open.vizdaw", "../x/Open.vizdaw", "~/Open.vizdaw", ""] {
+            let r = await go([file, merge, ("project", .text(value: rel))])
+            #expect(r?.code == .invalidParams, "\(rel.debugDescription): \(String(describing: r))")
+            #expect(r?.message == "file.import_dawproject: `project` must be an absolute path.")
+        }
+        #expect(mergeCalls(f) == 0 && dawprojectCalls(f) == 0 && opened == 0 && made == 0 && s.documents.count == 1)
+    }
+
     @Test func mergeWhileTheTargetRecordsIsBusy() async throws {
         let (s, id, m, f) = try demo()
         f.projectIdAnswer = Self.pid

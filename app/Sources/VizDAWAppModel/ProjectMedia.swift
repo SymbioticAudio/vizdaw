@@ -114,7 +114,15 @@ extension DocumentModel {
             pollJobs()
             return id
         } catch {
-            if let failure { failure(error) } else { alert = AlertItem(error, title: title) }
+            if let failure {
+                failure(error)
+            } else if mergeHeld, case .Busy(let message) = error as? VizError {
+                // A held merge refuses it (plan 6e Ruling 12): the core's
+                // sentence on the status line, never a Busy alert.
+                editor.status = message
+            } else {
+                alert = AlertItem(error, title: title)
+            }
             return nil
         }
     }
@@ -163,17 +171,21 @@ extension DocumentModel {
                 if r.kind == .importMidi || r.kind == .importProject { openedFile = nil }
                 forDaw.jobDone(r)
                 dawproject.jobDone(r)
+                // A Done Hold job is a preview, not a report (plan 6e).
+                merge.jobDone(r)
             case .failed(let message):
                 if r.state == .cancelled {
                     forDaw.jobDone(r)
                     dawproject.jobDone(r)
+                    merge.jobDone(r)
                 }
                 if r.kind == .importMidi || r.kind == .importProject, openedFile != nil {
                     // Open made this project for the file: the store closes it.
                     openFailure = .some(r.state == .cancelled ? nil : message)
                 } else if r.state != .cancelled, !(r.kind == .exportMidi && interchange.jobFailed(r, message: message)),
                     !(r.kind == .exportProject && forDaw.jobFailed(r, message: message)),
-                    !(r.kind == .exportDawproject && dawproject.jobFailed(r, message: message))
+                    !(r.kind == .exportDawproject && dawproject.jobFailed(r, message: message)),
+                    !(r.kind == .mergeDawproject && merge.jobFailed(r, message: message))
                 {
                     alert = AlertItem(title: ProjectBanner.failureTitle(r.kind), message: message)
                 }
@@ -197,6 +209,7 @@ extension DocumentModel {
             if ForDawModel.blocking.contains(r.kind) { interchange.blockingEnded() }
             forDaw.jobEnded()
             dawproject.jobEnded()
+            merge.jobEnded()
         }
     }
 

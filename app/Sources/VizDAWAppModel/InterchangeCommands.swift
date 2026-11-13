@@ -22,9 +22,10 @@ import VizDAWCore
 /// `file.import_dawproject` (plan 6e Task 9): a file from VizDAW with no
 /// `mode` is `dialog_required` "Return"; `mode` merge goes into `project`,
 /// else the open project the file came from, else `dialog_required` "Open"
-/// naming `project`. A `snapshot` that is not an export ID's shape, `project`
-/// already open or not a folder, and merge parameters for a new project are
-/// `invalid_params` before any session call.
+/// naming `project`. A `mode` other than "new" or "merge", a `snapshot` that
+/// is not an export ID's shape, a `project` that is relative, already open or
+/// not a folder, and merge parameters for a new project are `invalid_params`
+/// before any session call (Task 10 for the mode and the relative path).
 @MainActor
 public enum InterchangeCommands {
     public static let importMidi = "file.import_midi", exportMidi = "file.export_midi"
@@ -485,6 +486,13 @@ public enum InterchangeCommands {
         case importDawproject:
             guard let path, !path.isEmpty else { return .failed(.dialog("Open", "path")) }
             let mode = args.text("mode")
+            // Task 9 review: an unknown mode is refused, never taken as new.
+            if let mode, mode != "new", mode != "merge" {
+                return .failed(.of(.invalidParams, "\(id): `mode` is new or merge."))
+            }
+            if let project = args.text("project"), !project.hasPrefix("/") {
+                return .failed(.of(.invalidParams, "\(id): `project` must be an absolute path."))
+            }
             // `project`, `snapshot` and `preview` mean nothing to a new project.
             let mergeOnly = ["project", "snapshot", "preview"].first { name in args.contains { $0.name == name } }
             if mode == "new", let name = mergeOnly {
@@ -513,6 +521,7 @@ public enum InterchangeCommands {
                         }
                         return mergeDawproject(path, info: row, args: args, store: store)
                     default:
+                        // nil (a file not from VizDAW) or "new": checked above.
                         if let name = mergeOnly {
                             return .failed(.of(.invalidParams, "\(importDawproject): `\(name)` is for mode merge."))
                         }

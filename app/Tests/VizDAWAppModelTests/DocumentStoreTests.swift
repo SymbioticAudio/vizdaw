@@ -183,6 +183,212 @@ extension DocumentStoreTests {
     }
 }
 
+/// The return prompt's state (plan 6e Task 10; Rulings 13, 14): a file
+/// that came from VizDAW asks before anything is made; New Project is 6d's
+/// path, Merge goes to the open match or a chosen project, Cancel does
+/// nothing.
+extension DocumentStoreTests {
+    static let pid = "0f8b6f8e-3c1a-4d2e-9b7a-5e6f7a8b9c0d"
+    static let eid = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+    func returned(project: String? = pid, export: String? = eid) -> DawprojectInfoRow {
+        DawprojectInfoRow(
+            sampleRate: 44_100, tracks: 2, audioFiles: 0, fromVizdaw: true, exportId: export, projectId: project)
+    }
+
+    /// `dawStore` whose `open` makes running-job fakes (logged in `opened`).
+    func returnStore() -> (DocumentStore, DawBox, FakeSession, OpenBox) {
+        let (s, box, info) = dawStore {
+            let f = FakeSession([seq(9, "New", topLevel: true)])
+            f.jobStartState = .running
+            return f
+        }
+        let opens = OpenBox()
+        let t = DocumentStore(
+            makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() },
+            open: { path in
+                let f = demoFake()
+                f.jobStartState = .running
+                f.savedPath = path
+                opens.paths.append(path)
+                opens.made.append(f)
+                return f
+            })
+        t.makeProject = s.makeProject
+        t.dawprojectInfo = s.dawprojectInfo
+        info.dawprojectInfoAnswer = .success(returned())
+        return (t, box, info, opens)
+    }
+
+    final class OpenBox {
+        var paths: [String] = []
+        var made: [FakeSession] = []
+    }
+
+    /// An open project whose ID is `pid`, named "Song".
+    func openMatch(_ s: DocumentStore) throws -> (UUID, FakeSession) {
+        let (id, f) = try openProject(s, "/tmp/Song.vizdaw")
+        f.projectIdAnswer = Self.pid
+        return (id, f)
+    }
+
+    func openProject(_ s: DocumentStore, _ path: String) throws -> (UUID, FakeSession) {
+        let id = try #require(s.open(path: path))
+        let m = try #require(s.model(id))
+        let f = try #require(m.session as? FakeSession)
+        f.snap.title = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        m.apply(f.snap)
+        return (id, f)
+    }
+
+    func noCalls(_ fakes: [FakeSession]) -> Bool {
+        fakes.allSatisfy { $0.dawprojectImports.isEmpty && $0.dawprojectMerges.isEmpty }
+    }
+
+    @Test func aFileFromVizdawPromptsInsteadOfOpening() async throws {
+        let (s, box, info, opens) = returnStore()
+        s.openDawproject("/tmp/back.dawproject")
+        await s.settle()
+        #expect(
+            s.returnPrompt
+                == ReturnPrompt(path: "/tmp/back.dawproject", info: returned(), match: nil, matchName: nil))
+        #expect(box.made.isEmpty && s.documents.isEmpty && s.pending.isEmpty && opens.paths.isEmpty && s.alert == nil)
+        #expect(info.checkOnMain == [false], "the file was read off the main actor")
+        // A plain file still makes its project at once.
+        info.dawprojectInfoAnswer = .success(
+            DawprojectInfoRow(sampleRate: 48_000, tracks: 1, audioFiles: 0, fromVizdaw: false, exportId: nil))
+        s.answerReturn(.cancel)
+        s.openDawproject("/tmp/plain.dawproject")
+        await s.settle()
+        #expect(s.returnPrompt == nil && box.made.count == 1)
+        #expect(box.made.first?.dawprojectImports == [DawprojectImportRequestRow(path: "/tmp/plain.dawproject")])
+    }
+
+    @Test func thePromptNamesTheOpenMatch() async throws {
+        let (s, _, _, _) = returnStore()
+        _ = try openProject(s, "/tmp/Other.vizdaw")
+        let (id, _) = try openMatch(s)
+        s.openDawproject("/tmp/back.dawproject")
+        await s.settle()
+        let p = try #require(s.returnPrompt)
+        #expect(p.match == id && p.matchName == "Song")
+        // Matched by snapshot when no open project has its ID.
+        let (t, _, _, _) = returnStore()
+        let (byExport, g) = try openProject(t, "/tmp/Kept.vizdaw")
+        let eid = Self.eid
+        g.hasSnapshotAnswer = { $0 == eid }
+        t.openDawproject("/tmp/back.dawproject")
+        await t.settle()
+        #expect(t.returnPrompt?.match == byExport && t.returnPrompt?.matchName == "Kept")
+    }
+
+    @Test func newProjectAnswerOpensAsSixD() async throws {
+        let (s, box, _, _) = returnStore()
+        s.defaultFormat = ProjectFormatRow(sampleRate: 96_000, depth: .int16)
+        let (_, match) = try openMatch(s)
+        s.openDawproject("/tmp/back.dawproject")
+        await s.settle()
+        s.answerReturn(.newProject)
+        #expect(s.returnPrompt == nil)
+        #expect(box.formats == [ProjectFormatRow(sampleRate: 44_100, depth: .int16)])
+        let fresh = try #require(box.made.first)
+        #expect(fresh.dawprojectImports == [DawprojectImportRequestRow(path: "/tmp/back.dawproject")])
+        #expect(box.made.count == 1 && match.dawprojectMerges.isEmpty && s.pending.count == 1)
+    }
+
+    @Test func mergeAnswerGoesToTheMatch() async throws {
+        let (s, box, _, opens) = returnStore()
+        let (id, match) = try openMatch(s)
+        var activated: [UUID] = []
+        s.activate = { activated.append($0) }
+        s.openDawproject("/tmp/back.dawproject")
+        await s.settle()
+        s.answerReturn(.merge)
+        let m = try #require(s.model(id))
+        await m.merge.settle()
+        #expect(s.returnPrompt == nil && m.merge.shown && m.merge.path == "/tmp/back.dawproject")
+        #expect(
+            match.dawprojectMerges
+                == [DawprojectMergeRequestRow(path: "/tmp/back.dawproject", snapshot: nil, step: .hold, date: MergeDate.today())])
+        #expect(activated == [id], "the project's window comes to the front")
+        #expect(box.made.isEmpty && opens.paths == ["/tmp/Song.vizdaw"])
+    }
+
+    @Test func mergeWithoutAMatchAsksForAProject() async throws {
+        let (s, box, _, opens) = returnStore()
+        var asked = 0
+        s.chooseMergeProject = {
+            asked += 1
+            return "/tmp/Chosen.vizdaw"
+        }
+        s.openDawproject("/tmp/back.dawproject")
+        await s.settle()
+        s.answerReturn(.merge)
+        #expect(asked == 1 && opens.paths == ["/tmp/Chosen.vizdaw"])
+        let id = try #require(s.documentID(forPath: "/tmp/Chosen.vizdaw"))
+        let m = try #require(s.model(id))
+        await m.merge.settle()
+        #expect(m.merge.shown && s.pending == [id], "the opened project's window opens")
+        #expect(opens.made.first?.dawprojectMerges.map(\.step) == [.hold] && box.made.isEmpty)
+        // Already open: found, not opened again.
+        s.openDawproject("/tmp/back2.dawproject")
+        await s.settle()
+        let first = try #require(m.merge.job)
+        m.merge.cancel()
+        let g = try #require(opens.made.first)
+        g.jobRows[first] = JobRow(
+            id: first, kind: .mergeDawproject, progress: 1, state: .cancelled, message: nil, problems: [], created: [])
+        m.pollJobs()
+        s.answerReturn(.merge)
+        await m.merge.settle()
+        #expect(asked == 2 && opens.paths == ["/tmp/Chosen.vizdaw"])
+        #expect(opens.made.first?.dawprojectMerges.map(\.path) == ["/tmp/back.dawproject", "/tmp/back2.dawproject"])
+        // The panel cancelled: nothing.
+        s.chooseMergeProject = {
+            asked += 1
+            return nil
+        }
+        s.openDawproject("/tmp/back3.dawproject")
+        await s.settle()
+        s.answerReturn(.merge)
+        #expect(asked == 3 && s.returnPrompt == nil && opens.paths.count == 1 && s.documents.count == 1)
+        #expect(opens.made.first?.dawprojectMerges.count == 2 && s.alert == nil)
+    }
+
+    @Test func cancelAnswerDoesNothing() async throws {
+        let (s, box, _, opens) = returnStore()
+        let (_, match) = try openMatch(s)
+        var asked = 0
+        s.chooseMergeProject = {
+            asked += 1
+            return "/tmp/Chosen.vizdaw"
+        }
+        s.openDawproject("/tmp/back.dawproject")
+        await s.settle()
+        s.answerReturn(.cancel)
+        #expect(s.returnPrompt == nil && box.made.isEmpty && opens.paths == ["/tmp/Song.vizdaw"] && asked == 0)
+        #expect(noCalls([match]) && s.documents.count == 1 && s.alert == nil)
+        // An answer with no prompt does nothing either.
+        s.answerReturn(.merge)
+        s.answerReturn(.newProject)
+        #expect(box.made.isEmpty && noCalls([match]) && asked == 0)
+    }
+
+    /// A second file read while a prompt shows waits its turn (never dropped).
+    @Test func promptsQueue() async throws {
+        let (s, _, _, _) = returnStore()
+        s.openDawproject("/tmp/one.dawproject")
+        await s.settle()
+        s.openDawproject("/tmp/two.dawproject")
+        await s.settle()
+        #expect(s.returnPrompt?.path == "/tmp/one.dawproject")
+        s.answerReturn(.cancel)
+        #expect(s.returnPrompt?.path == "/tmp/two.dawproject")
+        s.answerReturn(.cancel)
+        #expect(s.returnPrompt == nil)
+    }
+}
+
 /// A hostile DAWproject through the real library (offline audio, a
 /// temporary support folder): names from the file reach the report sheet
 /// cleaned by the core (control characters and bidirectional overrides
