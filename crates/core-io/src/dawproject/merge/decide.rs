@@ -333,7 +333,8 @@ pub fn plan(
         report,
     };
     stop(cancel)?;
-    let lines = dry_run(&plan, ours);
+    let lines = dry_run(&plan, ours, cancel);
+    stop(cancel)?;
     plan.report.merge(lines);
     stop(cancel)?;
     Ok(plan)
@@ -344,8 +345,10 @@ pub fn plan(
 /// clone of `ours` (Task 6b fix round 1), so the preview lists what the
 /// merge will. Only edits inside uses make them: without a `Theirs` notes,
 /// regions or curve decision there is nothing to run. A failing dry run
-/// lists nothing (the real apply reports the failure).
-fn dry_run(plan: &MergePlan, ours: &Document) -> Report {
+/// lists nothing (the real apply reports the failure); `cancel` stops it
+/// midway (and `plan` then answers `Cancelled`). Each line keeps the real
+/// apply's count, past the details it keeps (Task 7).
+fn dry_run(plan: &MergePlan, ours: &Document, cancel: &AtomicBool) -> Report {
     let mut out = Report::default();
     let edits = plan.decisions.iter().any(|d| {
         d.outcome == Outcome::Theirs
@@ -357,19 +360,15 @@ fn dry_run(plan: &MergePlan, ours: &Document) -> Report {
     let mut h = core_model::history::History::new(ours.clone());
     let mut report = Report::default();
     if h.begin(super::apply::LABEL).is_err()
-        || super::apply::apply_merge(&mut h, plan, "0000-00-00", &mut report).is_err()
+        || super::apply::apply_merge_until(&mut h, plan, "0000-00-00", &mut report, cancel).is_err()
     {
         return out;
     }
-    for i in report
+    out.items = report
         .items
         .into_iter()
         .filter(|i| super::apply::APPLIED_LINES.contains(&i.what.as_str()))
-    {
-        for d in i.details {
-            out.add(i.kind, &i.what, Some(d));
-        }
-    }
+        .collect();
     out
 }
 
@@ -1588,8 +1587,17 @@ impl<'a> Decider<'a> {
             colour_text,
         );
         // Theirs' name of an audio track's strip is the file's channel
-        // name; none given counts as base's.
-        let theirs_name = self.strip_name(Side::Theirs, t).unwrap_or(bs.name.as_str());
+        // name; none given counts as base's. A track whose instrument the
+        // import could not make (a VST one, or one not installed) plays the
+        // built-in synth, whose strip the import names: that name is not
+        // the file's either (Task 7).
+        let substitute =
+            self.instruments(Side::Theirs, t) == 0 && self.instruments(Side::Base, b) > 0;
+        let theirs_name = if substitute {
+            bs.name.as_str()
+        } else {
+            self.strip_name(Side::Theirs, t).unwrap_or(bs.name.as_str())
+        };
         self.three(
             Unit::Strip(StripField::Name),
             row,

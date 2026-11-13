@@ -7,8 +7,10 @@
 
 mod common;
 
-use common::merge::{Strip, Trip, fixture, return_file, theirs_of, trip, vizdaw_only};
-use common::package::{TestPlist, media_of, package_bytes};
+use common::merge::{
+    Strip, Trip, fixture, return_file, stripped_package, theirs_of, trip, vizdaw_only,
+};
+use common::package::{TestPlist, media_of};
 use core_engine::fixtures::{BAR, Builder, Q};
 use core_io::dawproject::import::{FROM_VIZDAW, ImportEnv, MediaSource, map};
 use core_io::dawproject::merge::apply::{LABEL, apply_merge};
@@ -37,6 +39,7 @@ use core_model::lane::{Lane, LaneInput, MonitorMode, QuantizeSpec};
 use core_model::learn::{LearnKind, LearnMap, LearnMode, LearnSource};
 use core_model::mixer::{AuxSend, PluginSlot, StripKind};
 use core_model::mpe::MpeConfig;
+use core_model::rules;
 use core_model::selection::ViewFilter;
 use core_model::sequence::{KeySlot, Marker, SeqLength};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
@@ -117,7 +120,7 @@ fn plan_of(t: &Trip, path: &Path, ours: &Document) -> MergePlan {
         t.snapshot.clone(),
         theirs_of(t, path),
         ours,
-        false,
+        chosen(),
         &never(),
     )
     .expect("plans")
@@ -126,18 +129,30 @@ fn plan_of(t: &Trip, path: &Path, ours: &Document) -> MergePlan {
 static DOCS: AtomicUsize = AtomicUsize::new(0);
 
 /// Theirs as the other DAW would return `doc` (an edited copy of
-/// `t.base_doc`): `doc` exported with the harness's IDs, packaged with its
-/// record (which names `t`'s export), opened and mapped with the
-/// snapshot's IDs trusted.
+/// `t.base_doc`): `doc` exported with the harness's IDs, packaged as the
+/// test's [`strip()`] says (with its record, which names `t`'s export,
+/// unless stripped), opened and mapped with the snapshot's IDs trusted when
+/// the record is there.
 fn theirs_doc(t: &Trip, doc: &Document) -> Theirs {
+    theirs_with(t, doc, |_| {})
+}
+
+/// [`theirs_doc`], with the media a conversion made changed by `media`.
+fn theirs_with(
+    t: &Trip,
+    doc: &Document,
+    tweak: impl FnOnce(&mut std::collections::BTreeMap<usize, MediaSource>),
+) -> Theirs {
     let x = trip(doc, t.seq).export;
     let n = DOCS.fetch_add(1, Ordering::Relaxed);
     let path = t.dir.path().join(format!("Doc {n}.dawproject"));
-    std::fs::write(&path, package_bytes(&x).expect("packages")).expect("writes");
+    std::fs::write(&path, stripped_package(&x, strip())).expect("writes");
     let pkg = open(&path, &PackageLimits::default(), &never()).expect("opens");
-    let media = media_of(&pkg, &x, doc);
+    let mut media = media_of(&pkg, &x, doc);
+    tweak(&mut media);
     let installed = |_: core_model::mixer::PluginFormat, _: &str| true;
     let format = t.base_doc.settings().format;
+    let trusted = pkg.ret.record.is_some();
     let imp = map(
         &pkg,
         &media,
@@ -145,7 +160,7 @@ fn theirs_doc(t: &Trip, doc: &Document) -> Theirs {
             installed: &installed,
             plist: &TestPlist,
             rate: format.sample_rate,
-            ids: Some(&t.snapshot.ids),
+            ids: trusted.then_some(&t.snapshot.ids),
         },
         &never(),
     )
@@ -160,7 +175,7 @@ fn plan_doc(t: &Trip, doc: &Document, ours: &Document) -> MergePlan {
         t.snapshot.clone(),
         theirs_doc(t, doc),
         ours,
-        false,
+        chosen(),
         &never(),
     )
     .expect("plans")
@@ -177,6 +192,15 @@ fn apply_history(mut h: History, plan: &MergePlan, date: &str) -> (History, Repo
     h.begin(LABEL).expect("begins");
     apply_merge(&mut h, plan, date, &mut report).expect("applies");
     h.commit().expect("commits");
+    if chosen() {
+        // The heuristic path, with the snapshot chosen (Task 7).
+        assert!(has(&report, text::SNAPSHOT_CHOSEN), "{:#?}", report.items);
+        assert!(
+            has(&report, text::BY_NAME) || has(&report, text::OLD_EXPORT),
+            "{:#?}",
+            report.items
+        );
+    }
     (h, report)
 }
 
@@ -399,7 +423,7 @@ fn theirs_only_edits_are_applied() {
     let (doc, seq) = fixture();
     let t = trip(&doc, seq);
     let i = ids(&t);
-    let path = return_file(&t, Strip::Nothing, |p, _| owners_check(p));
+    let path = return_file(&t, strip(), |p, _| owners_check(p));
     let p = plan_of(&t, &path, &t.base_doc);
     assert_eq!(
         p.preview,
@@ -458,7 +482,7 @@ fn ours_only_edits_are_kept() {
     let (doc, seq) = fixture();
     let t = trip(&doc, seq);
     let i = ids(&t);
-    let path = return_file(&t, Strip::Nothing, |p, _| set_db(p, "c1", -3.0));
+    let path = return_file(&t, strip(), |p, _| set_db(p, "c1", -3.0));
     let o = ours(&t, |h, i| {
         run(
             h,
@@ -481,7 +505,7 @@ fn ours_only_edits_are_kept() {
 
 /// Theirs moves Bass's first note a beat; ours raises it to key 38.
 fn notes_conflict(t: &Trip) -> (std::path::PathBuf, Document) {
-    let path = return_file(t, Strip::Nothing, |p, _| move_bass_note(p, 1.0));
+    let path = return_file(t, strip(), |p, _| move_bass_note(p, 1.0));
     let o = ours(t, |h, i| set_pitch(h, i.bass_note, 38));
     (path, o)
 }
@@ -540,7 +564,7 @@ fn take_names_count_up_on_the_same_day() {
     let once = h.doc().clone();
 
     // Other conflicting notes, the same day.
-    let second = return_file(&t, Strip::Nothing, |p, _| first_note(p, "t0").key = 40);
+    let second = return_file(&t, strip(), |p, _| first_note(p, "t0").key = 40);
     let (h, report) = apply_history(h, &plan_of(&t, &second, &once), DATE);
     let bass = h.doc().lane(seq, i.bass).unwrap();
     assert_eq!(bass.takes.len(), 3);
@@ -568,7 +592,7 @@ fn both_changed_settings_keep_ours_and_list_theirs() {
     let (doc, seq) = fixture();
     let t = trip(&doc, seq);
     let i = ids(&t);
-    let path = return_file(&t, Strip::Nothing, |p, _| set_db(p, "c1", -3.0));
+    let path = return_file(&t, strip(), |p, _| set_db(p, "c1", -3.0));
     let o = ours(&t, |h, i| set_gain(h, i.bass_strip, -9.0));
     let p = plan_of(&t, &path, &o);
     let h0 = History::new(o.clone());
@@ -597,7 +621,7 @@ fn deletions_follow_the_table() {
     };
 
     // Deleted there, untouched here: gone.
-    let path = return_file(&t, Strip::Nothing, |p, _| keys_gone(p));
+    let path = return_file(&t, strip(), |p, _| keys_gone(p));
     let p = plan_of(&t, &path, &t.base_doc);
     let (h, _) = apply_on(&t.base_doc, &p);
     assert!(!has_lane(h.doc(), seq, "Keys"));
@@ -611,7 +635,7 @@ fn deletions_follow_the_table() {
     assert!(notes_of(keys).contains(&(0, 62)));
 
     // Deleted here, edited there: still deleted.
-    let path = return_file(&t, Strip::Nothing, |p, _| first_note(p, "t1").key = 64);
+    let path = return_file(&t, strip(), |p, _| first_note(p, "t1").key = 64);
     let o = ours(&t, |h, i| {
         run(
             h,
@@ -667,7 +691,7 @@ fn deleted_track_with_vizdaw_only_state_is_kept_empty() {
     };
     let t = trip(&doc, seq);
     let i = ids(&t);
-    let path = return_file(&t, Strip::Nothing, |p, _| remove_track(p, "t0"));
+    let path = return_file(&t, strip(), |p, _| remove_track(p, "t0"));
     let p = plan_of(&t, &path, &t.base_doc);
     let before = t.base_doc.lane(seq, i.bass).unwrap().clone();
     let (h, report) = apply_on(&t.base_doc, &p);
@@ -942,10 +966,14 @@ fn vizdaw_only_state_is_byte_equal() {
     let t = trip(&doc, seq);
     let theirs = change_everything(&t, &t.base_doc);
     let p = plan_doc(&t, &theirs, &t.base_doc);
+    // Without tags a marker moved by more than a tick ("Chorus") is new
+    // plus deleted (Ruling 4: by tag, else name and tick).
     assert!(
-        p.decisions
-            .iter()
-            .all(|d| matches!(d.outcome, Outcome::Theirs | Outcome::Added)),
+        p.decisions.iter().all(|d| match d.outcome {
+            Outcome::Theirs | Outcome::Added => true,
+            Outcome::Removed => !tagged() && d.unit == Unit::Marker,
+            _ => false,
+        }),
         "{:#?}",
         p.decisions
     );
@@ -974,14 +1002,14 @@ fn one_undo_restores_the_project_exactly() {
     let (doc, seq) = fixture();
     let t = trip(&doc, seq);
     // The owner's check.
-    let path = return_file(&t, Strip::Nothing, |p, _| owners_check(p));
+    let path = return_file(&t, strip(), |p, _| owners_check(p));
     let p = plan_of(&t, &path, &t.base_doc);
     let (mut h, _) = apply_on(&t.base_doc, &p);
     h.undo().unwrap();
     assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
 
     // A notes conflict, a setting conflict and theirs-only edits.
-    let path = return_file(&t, Strip::Nothing, |p, _| {
+    let path = return_file(&t, strip(), |p, _| {
         owners_check(p);
         set_db(p, "c1", -3.0);
     });
@@ -1081,7 +1109,7 @@ fn new_tracks_and_buses_are_added_as_an_import_would() {
     });
     let th = theirs_doc(&t, &theirs_doc_);
     let import = th.projection.clone();
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     assert_eq!(p.preview.added, 2, "{:#?}", p.decisions);
     let (h, _) = apply_on(&t.base_doc, &p);
     let merged = rounded(projection(h.doc(), seq).unwrap());
@@ -1254,7 +1282,7 @@ fn plugin_state_from_theirs_is_one_step() {
 fn nothing_to_merge_adds_no_step() {
     let (doc, seq) = fixture();
     let t = trip(&doc, seq);
-    let path = return_file(&t, Strip::Nothing, |_, _| {});
+    let path = return_file(&t, strip(), |_, _| {});
     // Ours has a step of its own before the merge.
     let mut h = History::new(t.base_doc.clone());
     set_gain(&mut h, ids(&t).bass_strip, -6.0);
@@ -1275,7 +1303,7 @@ fn merging_the_same_file_twice_changes_nothing_the_second_time() {
     let t = trip(&doc, seq);
     let i = ids(&t);
     // The owner's check, and the notes conflict on Bass.
-    let path = return_file(&t, Strip::Nothing, |p, _| owners_check(p));
+    let path = return_file(&t, strip(), |p, _| owners_check(p));
     let o = ours(&t, |h, i| set_pitch(h, i.bass_note, 38));
     let (h, _) = apply_on(&o, &plan_of(&t, &path, &o));
     let once = h.doc().clone();
@@ -1341,7 +1369,7 @@ fn edits_inside_a_use_play_as_theirs() {
     let want = played(&th.projection);
     // The riff plays once at bar 2 and twice from bar 4.
     assert_eq!(want.iter().filter(|n| n.1 == 41).count(), 3);
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let (h, _) = apply_on(&t.base_doc, &p);
     assert_eq!(played(&projection(h.doc(), seq).unwrap()), want);
     // Keys is untouched.
@@ -1451,7 +1479,7 @@ fn third_note<'a>(p: &'a mut DpProject, name: &str) -> &'a mut DpNote {
 /// the take "Returned 2026-11-13", listed under `CONFLICT_TAKE`.
 fn transformed_track_keeps_ours(doc: Document, seq: SeqId) {
     let t = trip(&doc, seq);
-    let path = return_file(&t, Strip::Nothing, |p, _| third_note(p, "Loop").key = 64);
+    let path = return_file(&t, strip(), |p, _| third_note(p, "Loop").key = 64);
     let p = plan_of(&t, &path, &t.base_doc);
     let notes = p
         .decisions
@@ -1646,7 +1674,7 @@ fn channel<'a>(p: &'a mut DpProject, id: &str) -> &'a mut core_io::dawproject::D
 fn instrument_swap_is_kept_and_listed() {
     let (doc, seq) = fixture();
     let t = trip(&doc, seq);
-    let path = return_file(&t, Strip::Nothing, |p, _| {
+    let path = return_file(&t, strip(), |p, _| {
         let d = channel(p, "c1")
             .devices
             .iter_mut()
@@ -1679,6 +1707,40 @@ fn instrument_swap_is_kept_and_listed() {
     assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
 }
 
+/// Task 7 carry-over (Task 5 hand-off): theirs swaps Bass's instrument for
+/// a VST3 one. VizDAW hosts no VST3: ours keeps its instrument, the swap is
+/// listed under `NOT_APPLIED`, and the merge makes no step.
+#[test]
+fn instrument_swapped_for_a_vst3_is_kept_and_listed() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        let d = channel(p, "c1")
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id.as_deref() == Some("org.example.Bass"))
+            .expect("the instrument");
+        d.kind = core_io::dawproject::DpDeviceKind::Vst3;
+        d.device_id = Some("ABCDEF0123456789ABCDEF0123456789".into());
+        d.device_name = "Other Synth".into();
+        d.named.comment = None;
+        d.state = None;
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    assert_eq!(p.preview.applied, 0, "{:#?} {:#?}", p.decisions, p.report);
+    let i = item(&p.report, ItemKind::Conflict, NOT_APPLIED);
+    assert_eq!(i.details.len(), 1, "{:?}", i.details);
+    assert!(
+        i.details[0].starts_with("Strip 'Bass': instrument: here org.example.Bass, there "),
+        "{:?}",
+        i.details
+    );
+    let (h, report) = apply_on(&t.base_doc, &p);
+    assert!(has(&report, NOT_APPLIED));
+    assert_eq!(h.undo_depth(), 0);
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
+}
+
 /// I3: theirs drops Comp's state. No command clears one: ours stays,
 /// listed under `NOT_APPLIED`, and nothing counts as applied.
 #[test]
@@ -1689,7 +1751,7 @@ fn dropped_state_is_kept_and_listed() {
     h.capture_state(comp, b"ours").unwrap();
     let doc = h.doc().clone();
     let t = trip(&doc, seq);
-    let path = return_file(&t, Strip::Nothing, |p, _| {
+    let path = return_file(&t, strip(), |p, _| {
         let d = channel(p, "c1")
             .devices
             .iter_mut()
@@ -1983,8 +2045,12 @@ fn region_at(doc: &Document, e: EventId) -> (i64, MediaId, f32) {
 fn untouched_regions_and_uses_keep_their_events() {
     let (doc, seq, [a, b, u]) = regions_fixture();
     let t = trip(&doc, seq);
+    if !tagged() {
+        // Only the tags pair resampled, renamed audio.
+        return same_resampled_file_twice(&t, &moved(&t, &[a], BAR), "Keys", &[]);
+    }
     let th = theirs_resampled(&t, &moved(&t, &[a], BAR));
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     assert!(
         p.decisions
             .iter()
@@ -2012,37 +2078,18 @@ fn untouched_regions_and_uses_keep_their_events() {
 /// DAW: every converted file has another content hash and name, so only
 /// the `vz:e` tags pair its regions with ours'.
 fn theirs_resampled(t: &Trip, doc: &Document) -> Theirs {
-    let x = trip(doc, t.seq).export;
-    let n = DOCS.fetch_add(1, Ordering::Relaxed);
-    let path = t.dir.path().join(format!("Doc {n}.dawproject"));
-    std::fs::write(&path, package_bytes(&x).expect("packages")).expect("writes");
-    let pkg = open(&path, &PackageLimits::default(), &never()).expect("opens");
-    let mut media = media_of(&pkg, &x, doc);
-    for m in media.values_mut() {
-        if let MediaSource::Online(items) = m {
-            for i in items {
-                i.content_hash = format!("{}-resampled", i.content_hash);
-                i.name = format!("{} resampled", i.name);
-                i.original_name = format!("{} resampled", i.original_name);
-                i.path = i.path.replace(".caf", " resampled.caf");
+    theirs_with(t, doc, |media| {
+        for m in media.values_mut() {
+            if let MediaSource::Online(items) = m {
+                for i in items {
+                    i.content_hash = format!("{}-resampled", i.content_hash);
+                    i.name = format!("{} resampled", i.name);
+                    i.original_name = format!("{} resampled", i.original_name);
+                    i.path = i.path.replace(".caf", " resampled.caf");
+                }
             }
         }
-    }
-    let installed = |_: core_model::mixer::PluginFormat, _: &str| true;
-    let format = t.base_doc.settings().format;
-    let imp = map(
-        &pkg,
-        &media,
-        &ImportEnv {
-            installed: &installed,
-            plist: &TestPlist,
-            rate: format.sample_rate,
-            ids: Some(&t.snapshot.ids),
-        },
-        &never(),
-    )
-    .expect("maps");
-    theirs(imp, format, t.snapshot.origin, &never()).expect("theirs")
+    })
 }
 
 /// I5: after a merge that moved A, a second file from the same export
@@ -2053,6 +2100,10 @@ fn theirs_resampled(t: &Trip, doc: &Document) -> Theirs {
 fn second_merge_pairs_regions_by_their_original_events() {
     let (doc, seq, [a, b, _]) = regions_fixture();
     let t = trip(&doc, seq);
+    if !tagged() {
+        // Only the tags pair resampled, renamed audio.
+        return same_resampled_file_twice(&t, &moved(&t, &[a, b], BAR), "Keys", &[]);
+    }
     let (h, _) = apply_on(
         &t.base_doc,
         &plan_doc(&t, &moved(&t, &[a], BAR), &t.base_doc),
@@ -2062,7 +2113,7 @@ fn second_merge_pairs_regions_by_their_original_events() {
     assert_eq!(ours_gain, -4.0);
 
     let second = theirs_resampled(&t, &moved(&t, &[a, b], BAR));
-    let p = plan(t.snapshot.clone(), second, &once, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), second, &once, chosen(), &never()).expect("plans");
     assert!(
         p.decisions
             .iter()
@@ -2093,7 +2144,7 @@ fn second_merge_pairs_regions_by_their_original_events() {
 fn an_error_midway_then_abort_restores_the_project() {
     let (doc, seq) = fixture();
     let t = trip(&doc, seq);
-    let path = return_file(&t, Strip::Nothing, |p, _| owners_check(p));
+    let path = return_file(&t, strip(), |p, _| owners_check(p));
     let mut p = plan_of(&t, &path, &t.base_doc);
     p.theirs.projection.tempo.clear();
     p.decisions.push(Decision {
@@ -2125,32 +2176,13 @@ fn an_error_midway_then_abort_restores_the_project() {
 /// `doc` returned as `theirs_doc` does, every audio file offline in the
 /// scratch import (no content hash).
 fn theirs_offline(t: &Trip, doc: &Document) -> Theirs {
-    let x = trip(doc, t.seq).export;
-    let n = DOCS.fetch_add(1, Ordering::Relaxed);
-    let path = t.dir.path().join(format!("Doc {n}.dawproject"));
-    std::fs::write(&path, package_bytes(&x).expect("packages")).expect("writes");
-    let pkg = open(&path, &PackageLimits::default(), &never()).expect("opens");
-    let mut media = media_of(&pkg, &x, doc);
-    for m in media.values_mut() {
-        *m = MediaSource::Offline {
-            why: "unreadable".into(),
-        };
-    }
-    let installed = |_: core_model::mixer::PluginFormat, _: &str| true;
-    let format = t.base_doc.settings().format;
-    let imp = map(
-        &pkg,
-        &media,
-        &ImportEnv {
-            installed: &installed,
-            plist: &TestPlist,
-            rate: format.sample_rate,
-            ids: Some(&t.snapshot.ids),
-        },
-        &never(),
-    )
-    .expect("maps");
-    theirs(imp, format, t.snapshot.origin, &never()).expect("theirs")
+    theirs_with(t, doc, |media| {
+        for m in media.values_mut() {
+            *m = MediaSource::Offline {
+                why: "unreadable".into(),
+            };
+        }
+    })
 }
 
 /// M1: a regions conflict whose new region's media is offline in the
@@ -2187,7 +2219,7 @@ fn offline_regions_conflict_take_is_not_made_twice() {
         t.snapshot.clone(),
         theirs_offline(&t, &theirs_doc_),
         &o,
-        false,
+        chosen(),
         &never(),
     )
     .expect("plans");
@@ -2206,7 +2238,7 @@ fn offline_regions_conflict_take_is_not_made_twice() {
         t.snapshot.clone(),
         theirs_offline(&t, &theirs_doc_),
         &once,
-        false,
+        chosen(),
         &never(),
     )
     .expect("plans");
@@ -2304,13 +2336,18 @@ fn kept(h: &History, seq: SeqId, track: &str) -> Kept {
 /// again: the second merge makes no step, no take and no media item, and
 /// the project is byte-identical. The regions theirs changed keep their
 /// events (`changed`).
+///
+/// Without tags (the stripped variants) nothing pairs resampled, renamed
+/// audio (Ruling 4: by tag, else media plus position), so each of theirs'
+/// regions is new plus deleted and keeps no event of ours; the second
+/// merge still adds nothing.
 fn same_resampled_file_twice(t: &Trip, theirs_doc_: &Document, track: &str, changed: &[EventId]) {
     let seq = t.seq;
     let p = plan(
         t.snapshot.clone(),
         theirs_resampled(t, theirs_doc_),
         &t.base_doc,
-        false,
+        chosen(),
         &never(),
     )
     .expect("plans");
@@ -2322,7 +2359,8 @@ fn same_resampled_file_twice(t: &Trip, theirs_doc_: &Document, track: &str, chan
         p.decisions
     );
     let (h, _) = apply_on(&t.base_doc, &p);
-    for e in changed {
+    assert!(rules::validate(h.doc()).is_empty());
+    for e in changed.iter().filter(|_| tagged()) {
         assert!(h.doc().event(*e).is_ok(), "{e:?} keeps its event");
     }
     let once = kept(&h, seq, track);
@@ -2330,7 +2368,7 @@ fn same_resampled_file_twice(t: &Trip, theirs_doc_: &Document, track: &str, chan
         t.snapshot.clone(),
         theirs_resampled(t, theirs_doc_),
         h.doc(),
-        false,
+        chosen(),
         &never(),
     )
     .expect("plans");
@@ -2387,6 +2425,20 @@ fn trimmed(doc: &Document, e: EventId) -> Document {
     })
 }
 
+/// Whether `e` is still crossfaded in `doc`; without tags (where `e` came
+/// back as a new region), whether some region of "Keys" is.
+fn crossfaded(doc: &Document, seq: SeqId, e: EventId) -> bool {
+    if tagged() {
+        return crossfade_of(doc, e);
+    }
+    lane(doc, seq, "Keys")
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .any(|ev| crossfade_of(doc, ev.id))
+}
+
 fn crossfade_of(doc: &Document, e: EventId) -> bool {
     matches!(
         doc.event(e).unwrap().0.body,
@@ -2408,12 +2460,12 @@ fn crossfaded_pair_with_its_earlier_member_changed_merges_twice_to_nothing() {
         t.snapshot.clone(),
         theirs_resampled(&t, &trimmed(&t.base_doc, first)),
         &t.base_doc,
-        false,
+        chosen(),
         &never(),
     )
     .unwrap();
     let (h, report) = apply_on(&t.base_doc, &p);
-    assert!(crossfade_of(h.doc(), second));
+    assert!(crossfaded(h.doc(), seq, second));
     assert!(!has(&report, core_io::dawproject::import::CROSSFADES_PLAIN));
 }
 
@@ -2427,12 +2479,102 @@ fn crossfaded_pair_with_its_later_member_changed_merges_twice_to_nothing() {
         t.snapshot.clone(),
         theirs_resampled(&t, &trimmed(&t.base_doc, second)),
         &t.base_doc,
-        false,
+        chosen(),
         &never(),
     )
     .unwrap();
     let (h, _) = apply_on(&t.base_doc, &p);
-    assert!(crossfade_of(h.doc(), second));
+    assert!(crossfaded(h.doc(), seq, second));
+}
+
+/// Task 7 (found by the edit scripts): theirs moves the later region of
+/// Keys' crossfaded pair a beat later, still crossfading. Without tags the
+/// moved region is new (its old place deleted): inserted beside the pair's
+/// earlier region, which stays, it keeps its crossfade.
+#[test]
+fn a_moved_crossfaded_region_keeps_its_crossfade() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let [_, second] = keys_regions(&t.base_doc, seq);
+    let p = plan_doc(&t, &moved(&t, &[second], Q), &t.base_doc);
+    let (h, _) = apply_on(&t.base_doc, &p);
+    let regions: Vec<(i64, bool)> = lane(h.doc(), seq, "Keys")
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::AudioRegion { crossfade, .. } => Some((e.tick.0, crossfade)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(regions, vec![(0, false), (2 * Q, true)]);
+    assert!(rules::validate(h.doc()).is_empty());
+    merges_twice_to_nothing(&t, &moved(&t, &[second], Q), h);
+}
+
+/// Task 7 (found by the edit scripts): theirs sets the tempo to 600 BPM,
+/// so Keys' regions (in beats in the file) come back shorter. They are
+/// placed before the tempo map is: under ours' 120 BPM the pair no longer
+/// overlaps, so its crossfade is settled away, then set again once the
+/// tempo is theirs. Merged twice, nothing more happens.
+#[test]
+fn a_faster_tempo_keeps_theirs_crossfades() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        p.tempo.as_mut().expect("a tempo").value = Some(600.0);
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    let (h, _) = apply_on(&t.base_doc, &p);
+    let flags: Vec<bool> = lane(h.doc(), seq, "Keys")
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::AudioRegion { crossfade, .. } => Some(crossfade),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![false, true]);
+    assert!(rules::validate(h.doc()).is_empty());
+    let json = to_json(h.doc()).unwrap();
+    let again = plan_of(&t, &path, h.doc());
+    let (h2, _) = apply_on(h.doc(), &again);
+    assert_eq!(h2.undo_depth(), 0, "{:#?}", again.decisions);
+    assert_eq!(to_json(h2.doc()).unwrap(), json);
+}
+
+/// Task 7: as above, with ours' first Keys region trimmed, so the regions
+/// conflict: theirs' pair goes on the take "Returned 2026-11-13", which
+/// keeps its crossfade, so the same file merged again finds the take.
+#[test]
+fn a_faster_tempo_keeps_theirs_crossfades_on_the_take() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let [first, _] = keys_regions(&t.base_doc, seq);
+    let ours = trimmed(&t.base_doc, first);
+    let path = return_file(&t, strip(), |p, _| {
+        p.tempo.as_mut().expect("a tempo").value = Some(600.0);
+    });
+    let p = plan_of(&t, &path, &ours);
+    let (h, _) = apply_on(&ours, &p);
+    let returned = take(lane(h.doc(), seq, "Keys"), "Returned 2026-11-13");
+    let flags: Vec<bool> = returned
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::AudioRegion { crossfade, .. } => Some(crossfade),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![false, true]);
+    let json = to_json(h.doc()).unwrap();
+    let again = plan_of(&t, &path, h.doc());
+    let (h2, _) = apply_on(h.doc(), &again);
+    assert_eq!(h2.undo_depth(), 0, "{:#?}", again.decisions);
+    assert_eq!(to_json(h2.doc()).unwrap(), json);
 }
 
 /// Minor: theirs moves region A on a track with its own length. The
@@ -2487,7 +2629,7 @@ fn plan_doc_any(t: &Trip, doc: &Document, ours: &Document) -> MergePlan {
         t.snapshot.clone(),
         theirs_doc(t, doc),
         ours,
-        false,
+        chosen(),
         &never(),
     )
     .expect("plans")
@@ -2656,8 +2798,8 @@ fn with_second_use(doc: Document, seq: SeqId, loops: u32, transpose: i8) -> Docu
 }
 
 /// The Ruling 8 lines of `r` (private copies, uses unrolled, edits that
-/// play elsewhere), with their details.
-fn applied_lines(r: &Report) -> Vec<(ItemKind, String, Vec<String>)> {
+/// play elsewhere), with their counts and details.
+fn applied_lines(r: &Report) -> Vec<(ItemKind, String, u64, Vec<String>)> {
     r.items
         .iter()
         .filter(|i| {
@@ -2669,7 +2811,7 @@ fn applied_lines(r: &Report) -> Vec<(ItemKind, String, Vec<String>)> {
             ]
             .contains(&i.what.as_str())
         })
-        .map(|i| (i.kind, i.what.clone(), i.details.clone()))
+        .map(|i| (i.kind, i.what.clone(), i.count, i.details.clone()))
         .collect()
 }
 
@@ -2691,7 +2833,7 @@ fn merges_twice_to_nothing(t: &Trip, theirs_doc_: &Document, h: History) {
         t.snapshot.clone(),
         theirs_doc(t, theirs_doc_),
         h.doc(),
-        false,
+        chosen(),
         &never(),
     )
     .expect("plans");
@@ -2733,7 +2875,7 @@ fn shared_sequence_edited_the_same_way_edits_the_sequence() {
     let theirs_doc_ = changed(&t.base_doc, |h| move_riff_note(h, riff, 1, Q / 2));
     let th = theirs_doc(&t, &theirs_doc_);
     let want = played_on(&th.projection, 0);
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let (h, report) = apply_on(&t.base_doc, &p);
     preview_lists_them(&p, &report);
     assert_eq!(h.undo_depth(), 1, "one undo step");
@@ -2781,7 +2923,7 @@ fn shared_uses_edited_differently_become_private_copies() {
     });
     let th = theirs_doc(&t, &theirs_doc_);
     let want = played_on(&th.projection, 0);
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let (h, report) = apply_on(&t.base_doc, &p);
     preview_lists_them(&p, &report);
 
@@ -2842,7 +2984,7 @@ fn looped_use_edited_on_one_pass_becomes_notes() {
     let th = theirs_doc(&t, &theirs_doc_);
     let want = played_on(&th.projection, 0);
     assert!(want.contains(&(at + 2 * BAR + Q + Q / 2, 43)));
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let (h, report) = apply_on(&t.base_doc, &p);
     preview_lists_them(&p, &report);
     assert!(!has(&report, text::USES_AS_NOTES));
@@ -2885,7 +3027,7 @@ fn a_transposed_use_takes_its_edit_untransposed() {
     let theirs_doc_ = changed(&t.base_doc, |h| move_riff_note(h, riff, 0, Q / 2));
     let th = theirs_doc(&t, &theirs_doc_);
     let want = played_on(&th.projection, 0);
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let (h, report) = apply_on(&t.base_doc, &p);
 
     assert_eq!(seq_keys(h.doc(), riff), vec![(Q / 2, 40), (Q, 43)]);
@@ -2928,7 +3070,7 @@ fn format_one_snapshots_merge_uses_as_notes() {
     });
     let th = theirs_doc(&t, &theirs_doc_);
     let want = played_on(&th.projection, 0);
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     assert!(has(&p.report, text::OLD_EXPORT));
     let (h, report) = apply_on(&t.base_doc, &p);
 
@@ -2950,6 +3092,133 @@ fn format_one_snapshots_merge_uses_as_notes() {
     merges_twice_to_nothing(&t, &theirs_doc_, h);
 }
 
+/// Task 7 carry-over (Task 6b re-review): with more uses than a line
+/// keeps details for, the preview counts them all, as the merge's report
+/// does. A format-1 snapshot turns each of the 52 uses theirs edited into
+/// notes.
+#[test]
+fn preview_counts_past_the_details_kept() {
+    use core_io::limits::MAX_DETAILS;
+    let uses = MAX_DETAILS + 2;
+    let mut b = Builder::new();
+    let (dest, _) = b
+        .plugin_dest("Bass Synth", common::merge::clap("org.example.Bass"))
+        .unwrap();
+    let (seq, bass) = b.sequence("Song", "Bass", Some(dest)).unwrap();
+    let (riff, rl) = b.sequence("Riff", "Riff", Some(dest)).unwrap();
+    b.notes(riff, rl, &[(0, 40, 0x8000, Q), (Q, 43, 0x9000, Q)])
+        .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq: riff,
+        length: SeqLength::Locked(Tick(BAR)),
+    }))
+    .unwrap();
+    for k in 0..uses {
+        b.reference(seq, bass, i64::try_from(k).unwrap() * BAR, riff, 1, 0)
+            .unwrap();
+    }
+    let doc = b.finish();
+    let mut t = trip(&doc, seq);
+    t.snapshot.format = 1;
+    t.snapshot.identity = None;
+    let theirs_doc_ = changed(&t.base_doc, |h| move_riff_note(h, riff, 1, Q / 2));
+    let th = theirs_doc(&t, &theirs_doc_);
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
+    let (_, report) = apply_on(&t.base_doc, &p);
+    let real = item(&report, ItemKind::Changed, text::USES_AS_NOTES);
+    assert_eq!(real.count, u64::try_from(uses).unwrap());
+    assert_eq!(real.details.len(), MAX_DETAILS);
+    preview_lists_them(&p, &report);
+}
+
+/// Task 7: theirs renames "Bass" to "Low" and moves marker "Chorus" by a
+/// beat. With its tags or trusted IDs the track is renamed and the marker
+/// moved. Without either, a renamed track still pairs by order (the only
+/// note track left of its kind) and is renamed, but the marker, matched by
+/// name and tick, is new plus deleted (Ruling 4), which lands it at the
+/// same place.
+#[test]
+fn a_renamed_track_and_a_moved_marker() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        tracks(p)
+            .find(|x| x.named.name.as_deref() == Some("Bass"))
+            .expect("Bass")
+            .named
+            .name = Some("Low".into());
+        p.arrangement
+            .as_mut()
+            .expect("an arrangement")
+            .markers
+            .iter_mut()
+            .find(|m| m.named.name.as_deref() == Some("Chorus"))
+            .expect("Chorus")
+            .time += 1.0;
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    let markers: Vec<Outcome> = p
+        .decisions
+        .iter()
+        .filter(|d| d.unit == Unit::Marker)
+        .map(|d| d.outcome)
+        .collect();
+    if tagged() {
+        assert_eq!(markers, vec![Outcome::Theirs], "{:#?}", p.decisions);
+    } else {
+        assert_eq!(
+            markers,
+            vec![Outcome::Removed, Outcome::Added],
+            "{:#?}",
+            p.decisions
+        );
+    }
+    let (h, _) = apply_on(&t.base_doc, &p);
+    assert!(has_lane(h.doc(), seq, "Low"), "renamed");
+    assert!(!has_lane(h.doc(), seq, "Bass"));
+    assert_eq!(
+        markers_of(h.doc(), seq),
+        vec![(0, "Verse".to_owned()), (2 * BAR + Q, "Chorus".to_owned())]
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+}
+
+/// Task 7 carry-over (Task 6b re-review): the apply (and so the preview's
+/// dry run of it) stops at its next track once cancelled; aborting then
+/// restores the project.
+#[test]
+fn a_cancelled_apply_stops_and_aborts_cleanly() {
+    use core_io::dawproject::merge::apply::{CANCELLED, apply_merge_until};
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| owners_check(p));
+    let p = plan_of(&t, &path, &t.base_doc);
+    let before = to_json(&t.base_doc).unwrap();
+    let mut h = History::new(t.base_doc.clone());
+    h.begin(LABEL).unwrap();
+    let e = apply_merge_until(
+        &mut h,
+        &p,
+        DATE,
+        &mut Report::default(),
+        &AtomicBool::new(true),
+    )
+    .expect_err("cancelled");
+    assert!(e.to_string().contains(CANCELLED), "{e}");
+    h.abort().unwrap();
+    assert_eq!(to_json(h.doc()).unwrap(), before);
+
+    // A plan cancelled from the start answers so.
+    let r = plan(
+        t.snapshot.clone(),
+        theirs_of(&t, &path),
+        &t.base_doc,
+        chosen(),
+        &AtomicBool::new(true),
+    );
+    assert!(matches!(r, Err(core_io::IoError::Cancelled)));
+}
+
 /// Task 6 carry-over: theirs moves region C inside "Clip" (its only use,
 /// at bar 5). The region is edited in Clip, in place: it keeps its event
 /// and ours' media, and the use stays a use (nothing unrolled).
@@ -2966,8 +3235,13 @@ fn a_changed_region_inside_a_use_edits_its_sequence() {
         .next()
         .unwrap()
         .id;
+    if !tagged() {
+        // Only the tags pair resampled, renamed audio: the use's region is
+        // new plus deleted, so the use becomes theirs' region.
+        return same_resampled_file_twice(&t, &moved(&t, &[c], Q), "Keys", &[]);
+    }
     let th = theirs_resampled(&t, &moved(&t, &[c], Q));
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let media_before = t.base_doc.media().len();
     let (h, report) = apply_on(&t.base_doc, &p);
 
@@ -3046,7 +3320,7 @@ fn a_sequence_played_inside_another_use_is_not_edited_itself() {
     let th = theirs_doc(&t, &theirs_doc_);
     let want = played_on(&th.projection, 0);
     assert!(want.contains(&(5 * BAR + Q + Q / 2, 43)), "{want:?}");
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let (h, report) = apply_on(&t.base_doc, &p);
 
     assert_eq!(played_on(&projection(h.doc(), seq).unwrap(), 0), want);
@@ -3125,7 +3399,7 @@ fn a_use_on_an_inactive_take_counts_as_elsewhere() {
     let theirs_doc_ = changed(&t.base_doc, |h| move_riff_note(h, riff, 1, Q / 2));
     let th = theirs_doc(&t, &theirs_doc_);
     let want = played_on(&th.projection, 0);
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let (h, report) = apply_on(&t.base_doc, &p);
 
     assert_eq!(seq_keys(h.doc(), riff), vec![(0, 40), (Q + Q / 2, 43)]);
@@ -3182,7 +3456,7 @@ fn an_edit_that_would_change_a_sequence_length_makes_private_copies() {
     });
     let th = theirs_doc(&t, &theirs_doc_);
     let want = played_on(&th.projection, 0);
-    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, chosen(), &never()).expect("plans");
     let (h, report) = apply_on(&t.base_doc, &p);
 
     assert_eq!(seq_notes(h.doc(), riff), seq_notes(&t.base_doc, riff));
@@ -3205,3 +3479,105 @@ fn an_edit_that_would_change_a_sequence_length_makes_private_copies() {
     preview_lists_them(&p, &report);
     merges_twice_to_nothing(&t, &theirs_doc_, h);
 }
+
+// ---------------------------------------------------------------- stripped variants (Task 7)
+
+thread_local! {
+    /// What this test's returned files lose ([`with_strip`]).
+    static STRIP: std::cell::Cell<Strip> = const { std::cell::Cell::new(Strip::Nothing) };
+}
+
+/// What this test's returned files lose: [`Strip::Nothing`] for the plain
+/// tests, else the variant's.
+fn strip() -> Strip {
+    STRIP.with(std::cell::Cell::get)
+}
+
+/// Whether the user chose the snapshot: the file lost its export ID
+/// ([`Strip::Both`]).
+fn chosen() -> bool {
+    strip() == Strip::Both
+}
+
+/// Whether the file still has its `vz:` tags.
+fn tagged() -> bool {
+    matches!(strip(), Strip::Nothing | Strip::Record)
+}
+
+/// Runs `test` with its returned files stripped as `s` says.
+fn with_strip(s: Strip, test: fn()) {
+    STRIP.with(|c| c.set(s));
+    test();
+    // Only for checks after the test (its thread ends with it).
+    STRIP.with(|c| c.set(Strip::Nothing));
+}
+
+/// Every test above, once per [`Strip`] other than `Nothing` (spec §12:
+/// the same cases without the record, without the tags, and without both,
+/// with the snapshot chosen). Where a case relies on a tag the test says
+/// so, per case.
+macro_rules! stripped {
+    ($($name:ident),* $(,)?) => {
+        mod without_record {
+            $( #[test] fn $name() { super::with_strip(super::Strip::Record, super::$name) } )*
+        }
+        mod without_tags {
+            $( #[test] fn $name() { super::with_strip(super::Strip::Tags, super::$name) } )*
+        }
+        mod without_either {
+            $( #[test] fn $name() { super::with_strip(super::Strip::Both, super::$name) } )*
+        }
+    };
+}
+
+stripped!(
+    a_faster_tempo_keeps_theirs_crossfades_on_the_take,
+    a_faster_tempo_keeps_theirs_crossfades,
+    a_moved_crossfaded_region_keeps_its_crossfade,
+    a_renamed_track_and_a_moved_marker,
+    theirs_only_edits_are_applied,
+    ours_only_edits_are_kept,
+    both_changed_notes_become_an_alternate_take,
+    take_names_count_up_on_the_same_day,
+    both_changed_settings_keep_ours_and_list_theirs,
+    deletions_follow_the_table,
+    deleted_track_with_vizdaw_only_state_is_kept_empty,
+    vizdaw_only_state_is_byte_equal,
+    one_undo_restores_the_project_exactly,
+    new_tracks_and_buses_are_added_as_an_import_would,
+    crossfaded_pair_added_in_one_insert,
+    plugin_state_from_theirs_is_one_step,
+    nothing_to_merge_adds_no_step,
+    merging_the_same_file_twice_changes_nothing_the_second_time,
+    edits_inside_a_use_play_as_theirs,
+    looped_track_edit_becomes_a_take,
+    own_length_track_edit_becomes_a_take,
+    play_quantized_track_edit_becomes_a_take,
+    device_list_and_slot_changes_on_one_strip_all_land,
+    instrument_swap_is_kept_and_listed,
+    instrument_swapped_for_a_vst3_is_kept_and_listed,
+    dropped_state_is_kept_and_listed,
+    send_and_output_to_a_bus_deleted_here_are_listed,
+    new_track_needing_a_bus_deleted_here_plays_into_the_master,
+    untouched_regions_and_uses_keep_their_events,
+    second_merge_pairs_regions_by_their_original_events,
+    an_error_midway_then_abort_restores_the_project,
+    offline_regions_conflict_take_is_not_made_twice,
+    matched_output_to_a_bus_deleted_here_keeps_ours,
+    a_moved_region_merged_twice_from_resampled_audio_adds_nothing,
+    crossfaded_pair_with_its_earlier_member_changed_merges_twice_to_nothing,
+    crossfaded_pair_with_its_later_member_changed_merges_twice_to_nothing,
+    regions_on_a_track_with_its_own_length_become_a_take,
+    automation_on_a_track_with_its_own_length_is_listed_with_the_reason,
+    shared_sequence_edited_the_same_way_edits_the_sequence,
+    shared_uses_edited_differently_become_private_copies,
+    looped_use_edited_on_one_pass_becomes_notes,
+    a_transposed_use_takes_its_edit_untransposed,
+    format_one_snapshots_merge_uses_as_notes,
+    preview_counts_past_the_details_kept,
+    a_cancelled_apply_stops_and_aborts_cleanly,
+    a_changed_region_inside_a_use_edits_its_sequence,
+    a_sequence_played_inside_another_use_is_not_edited_itself,
+    a_use_on_an_inactive_take_counts_as_elsewhere,
+    an_edit_that_would_change_a_sequence_length_makes_private_copies,
+);

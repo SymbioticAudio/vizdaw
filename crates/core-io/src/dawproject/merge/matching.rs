@@ -25,7 +25,7 @@ use crate::IoError;
 use crate::dawproject::import::Origins;
 use crate::dawproject::record::{EventAt, Identity, PTrack, Projection, Snapshot, TrackIds};
 use core_model::ids::{EventId, LaneId, StripId};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How two rows were found to be one thing.
@@ -436,12 +436,14 @@ fn match_strips(
 
 /// Markers by name and tick (±[`NOTE_TICKS`]) among the unmatched, each
 /// base marker taking the first; then, when `moved`, by name alone, in
-/// order.
+/// order, never taking one of `echoes` (ours' markers that are theirs'
+/// unmatched new ones, merged before: they pair with those, Task 7).
 fn markers_by_name(
     base: &[(i64, String)],
     other: &[(i64, String)],
     by: MatchedBy,
     moved: bool,
+    echoes: &HashSet<usize>,
     pairs: &mut Pairs,
 ) {
     let mut free: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -473,9 +475,9 @@ fn markers_by_name(
                 continue;
             }
             if let Some(cands) = free.get_mut(name.as_str())
-                && !cands.is_empty()
+                && let Some(i) = cands.iter().position(|o| !echoes.contains(o))
             {
-                let o = cands.remove(0);
+                let o = cands.remove(i);
                 pairs.pair(b, o, by);
             }
         }
@@ -499,7 +501,37 @@ fn match_markers(
             tb.pair(b, o, trusted);
         }
     }
-    markers_by_name(&base.markers, &tp.markers, MatchedBy::Name, false, &mut tb);
+    markers_by_name(
+        &base.markers,
+        &tp.markers,
+        MatchedBy::Name,
+        false,
+        &HashSet::new(),
+        &mut tb,
+    );
+    // Ours' markers equal (name, and tick within `NOTE_TICKS`) to one of
+    // theirs that matched no base marker: the same file merged before
+    // added them. A moved marker of ours is never one of them, so the
+    // second merge sees them as added on both sides.
+    let mut new_theirs: HashMap<&str, Vec<i64>> = HashMap::new();
+    for (t, (tick, name)) in tp.markers.iter().enumerate() {
+        if tb.other_free(t) {
+            new_theirs.entry(name.as_str()).or_default().push(*tick);
+        }
+    }
+    let echoes: HashSet<usize> = ours
+        .markers
+        .iter()
+        .enumerate()
+        .filter(|(_, (tick, name))| {
+            new_theirs.get(name.as_str()).is_some_and(|ticks| {
+                ticks
+                    .iter()
+                    .any(|t| t.abs_diff(*tick) <= NOTE_TICKS.unsigned_abs())
+            })
+        })
+        .map(|(o, _)| o)
+        .collect();
 
     let mut ob = Pairs::new(base.markers.len(), ours.markers.len());
     // Ours' markers have no identity; with a format-2 snapshot they are
@@ -510,7 +542,7 @@ fn match_markers(
     } else {
         MatchedBy::Name
     };
-    markers_by_name(&base.markers, &ours.markers, by, true, &mut ob);
+    markers_by_name(&base.markers, &ours.markers, by, true, &echoes, &mut ob);
     (tb, ob)
 }
 

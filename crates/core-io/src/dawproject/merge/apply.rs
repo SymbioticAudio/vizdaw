@@ -12,7 +12,9 @@
 //!    one command), then the conflict takes (Ruling 6);
 //! 4. strips: fields, sends, devices, bypass, state;
 //! 5. the markers (one `SetMarkers`), the tempo map, the meter map and the
-//!    song info (one `SetInfo`);
+//!    song info (one `SetInfo`), then theirs' crossfades a step settled
+//!    away set again (a region placed before the tempo map it was cut for,
+//!    or crossfading into a region of ours that stays);
 //! 6. deletions last (Ruling 7).
 //!
 //! `Same`, `Ours`, setting conflicts, parts added on both sides, a
@@ -72,6 +74,7 @@ use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::Tick;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod shared;
 
@@ -99,11 +102,28 @@ pub fn apply_merge(
     date: &str,
     report: &mut Report,
 ) -> Result<(), ModelError> {
+    apply_merge_until(h, plan, date, report, &AtomicBool::new(false))
+}
+
+/// What a cancelled [`apply_merge_until`] answers.
+pub const CANCELLED: &str = "the merge was cancelled";
+
+/// [`apply_merge`], stopping with [`CANCELLED`] (a `ModelError`) when
+/// `cancel` is set, looked at before each matched track's decision and
+/// each track's edit, so `decide::plan`'s dry run and a merge job can stop
+/// midway (Task 7). The caller aborts its transaction.
+pub fn apply_merge_until(
+    h: &mut History,
+    plan: &MergePlan,
+    date: &str,
+    report: &mut Report,
+    cancel: &AtomicBool,
+) -> Result<(), ModelError> {
     let seq = SeqId(plan.base.seq);
     let (raw, ids) =
         projection_with_identity(h.doc(), seq).map_err(|e| ModelError::invalid(e.to_string()))?;
     let normal = normalised(&raw, &plan.base);
-    let mut cx = Cx::new(plan, &raw, &normal, &ids, seq);
+    let mut cx = Cx::new(plan, &raw, &normal, &ids, seq, cancel);
     let mut out = Out::default();
 
     // 1. The buses theirs added.
@@ -151,6 +171,8 @@ pub fn apply_merge(
     // 5. Markers, maps and song info.
     markers(h, &cx)?;
     maps(h, &cx)?;
+    // Theirs' crossfades placed in step 3, against theirs' tempo map now.
+    reflag(h, &out.flagged)?;
     // 6. Deletions.
     deletions(h, &cx)?;
 
@@ -199,6 +221,10 @@ struct Out {
     elsewhere: Vec<String>,
     /// Lines from adding theirs' new tracks and placing their automation.
     report: Report,
+    /// The regions placed as theirs crossfaded, with their specs: a later
+    /// step (the tempo map) may settle their flag away, so it is set again
+    /// last (Task 7).
+    flagged: Vec<(EventId, EventSpec)>,
 }
 
 /// The plan and ours, as the merge reads them.
@@ -223,15 +249,27 @@ struct Cx<'a> {
     /// Whether edits inside uses are refined (Ruling 8): a format-2
     /// snapshot.
     refine: bool,
+    /// Set to stop ([`apply_merge_until`]).
+    cancel: &'a AtomicBool,
 }
 
 impl<'a> Cx<'a> {
+    /// [`CANCELLED`] once `cancel` is set.
+    fn stop(&self) -> Result<(), ModelError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(ModelError::invalid(CANCELLED))
+        } else {
+            Ok(())
+        }
+    }
+
     fn new(
         plan: &'a MergePlan,
         raw: &'a Projection,
         normal: &'a Projection,
         ids: &'a Identity,
         seq: SeqId,
+        cancel: &'a AtomicBool,
     ) -> Cx<'a> {
         let th = &plan.theirs;
         let mut srow = [
@@ -269,6 +307,7 @@ impl<'a> Cx<'a> {
             theirs_buses: bus_of_strip(&th.doc),
             new_strips: BTreeMap::new(),
             refine: plan.base.identity.is_some(),
+            cancel,
         }
     }
 
@@ -422,6 +461,7 @@ fn tracks(h: &mut History, cx: &Cx<'_>, date: &str, out: &mut Out) -> Result<(),
     // Per lane, ours' rows whose notes or regions conflict.
     let mut takes: Vec<(u64, Vec<(usize, Unit)>)> = Vec::new();
     for d in &cx.plan.decisions {
+        cx.stop()?;
         let take = d.outcome == Outcome::Conflict && matches!(d.unit, Unit::Notes | Unit::Regions);
         let theirs = d.outcome == Outcome::Theirs
             && matches!(
@@ -477,6 +517,7 @@ fn tracks(h: &mut History, cx: &Cx<'_>, date: &str, out: &mut Out) -> Result<(),
     // use plays its sequence as it was), then the sequences.
     let shared = shared::resolve(h.doc(), cx, &mut edits);
     for (lane, edit) in edits {
+        cx.stop()?;
         apply_edit(h, cx, lane, edit, out)?;
     }
     shared::write(h, &shared)?;
@@ -1246,15 +1287,52 @@ fn apply_edit(
         )?;
     }
     let replaced = std::mem::take(&mut edit.replace);
+    out.flagged.extend(
+        replaced
+            .iter()
+            .filter(|(_, s)| crossfaded(s))
+            .map(|(e, s)| (*e, s.clone())),
+    );
     if !edit.insert.is_empty() {
-        run(
+        let r = run(
             h,
             Command::Event(EventCmd::Insert {
                 seq: cx.seq,
                 lane: LaneId(lane),
-                events: edit.insert,
+                events: edit.insert.clone(),
             }),
         )?;
+        // A new region crossfading into one of ours that stays loses its
+        // flag (the model's rule for a lone copy, plan 6c); theirs has the
+        // crossfade, so it is set again (Task 7).
+        let made: Vec<EventId> = r
+            .created
+            .iter()
+            .filter_map(|i| match i {
+                AnyId::Event(e) => Some(*e),
+                _ => None,
+            })
+            .collect();
+        if made.len() == edit.insert.len() {
+            for (event, spec) in made.into_iter().zip(edit.insert) {
+                if crossfaded(&spec) {
+                    out.flagged.push((event, spec.clone()));
+                }
+                let lost = crossfaded(&spec)
+                    && h.doc().event(event).is_ok_and(|(e, _)| {
+                        !matches!(
+                            e.body,
+                            EventBody::AudioRegion {
+                                crossfade: true,
+                                ..
+                            }
+                        )
+                    });
+                if lost {
+                    run(h, Command::Event(EventCmd::Replace { event, spec }))?;
+                }
+            }
+        }
     }
     for (event, spec) in replaced {
         let now = h.doc().event(event).ok().map(|(e, _)| {
@@ -1266,6 +1344,32 @@ fn apply_edit(
         });
         if now.is_some_and(|x| x != (true, true, true)) {
             run(h, Command::Event(EventCmd::Replace { event, spec }))?;
+        }
+    }
+    Ok(())
+}
+
+/// Sets again each of `flagged`'s crossfades a later command settled away
+/// (a region placed before the tempo map it was cut for, Task 7).
+fn reflag(h: &mut History, flagged: &[(EventId, EventSpec)]) -> Result<(), ModelError> {
+    for (event, spec) in flagged {
+        let lost = h.doc().event(*event).is_ok_and(|(e, _)| {
+            !matches!(
+                e.body,
+                EventBody::AudioRegion {
+                    crossfade: true,
+                    ..
+                }
+            )
+        });
+        if lost {
+            run(
+                h,
+                Command::Event(EventCmd::Replace {
+                    event: *event,
+                    spec: spec.clone(),
+                }),
+            )?;
         }
     }
     Ok(())
@@ -1434,14 +1538,29 @@ fn conflict_take(
         }),
     )?;
     if !specs.is_empty() {
-        run(
+        let r = run(
             h,
             Command::Event(EventCmd::Insert {
                 seq,
                 lane,
-                events: specs,
+                events: specs.clone(),
             }),
         )?;
+        // Theirs' crossfades in the take, set again once the tempo map is
+        // theirs ([`reflag`]).
+        let made = r.created.iter().filter_map(|i| match i {
+            AnyId::Event(e) => Some(*e),
+            _ => None,
+        });
+        out.flagged.extend(made.zip(specs).filter(|(_, s)| {
+            matches!(
+                s.body,
+                EventBody::AudioRegion {
+                    crossfade: true,
+                    ..
+                }
+            )
+        }));
     }
     run(
         h,

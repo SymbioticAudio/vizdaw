@@ -1973,6 +1973,31 @@ mod origins {
                 2,
                 1,
             ),
+            // Task 7 carry-over (Task 2 re-review): a copy of pass 2 dragged
+            // back between passes 0 and 1, so it comes between them in the
+            // file too. Passes rise with time: the real passes keep the use.
+            (
+                "a backward copy of a pass",
+                vec![
+                    (0, Some("vz:e5 vz:p0")),
+                    (4, Some("vz:e5 vz:p2")),
+                    (8, Some("vz:e5 vz:p1")),
+                    (16, Some("vz:e5 vz:p2")),
+                ],
+                3,
+                1,
+            ),
+            (
+                "a later copy of a pass, first in the file",
+                vec![
+                    (20, Some("vz:e5 vz:p2")),
+                    (0, Some("vz:e5 vz:p0")),
+                    (8, Some("vz:e5 vz:p1")),
+                    (16, Some("vz:e5 vz:p2")),
+                ],
+                3,
+                1,
+            ),
         ] {
             let pkg = small(dir.path(), &clips_of(&clips), None);
             let t = tagged(&pkg, &BTreeMap::new(), None);
@@ -1981,6 +2006,33 @@ mod origins {
             let n = item(&t.a.report, ItemKind::Note, TAGS_IGNORED).map_or(0, |i| i.count);
             assert_eq!(n, ignored, "{what}");
         }
+    }
+
+    /// Task 7 carry-over (Task 2 re-review): 6d's plain import of a file
+    /// whose use is split into one clip per pass (`vz:p` tags) plays as
+    /// exported, and counts no tag as ignored.
+    #[test]
+    fn a_plain_import_of_a_split_use_file_plays_as_exported() {
+        use core_io::dawproject::import::FROM_VIZDAW;
+        use core_io::dawproject::record::projection;
+        let (doc, seq) = merge::shared_fixture();
+        let x = export_of(&doc, seq);
+        assert!(x.project_xml.contains(" vz:p1"), "the use is split");
+        let dir = tempfile::tempdir().unwrap();
+        let a = imported(&package_of(dir.path(), &x, str::to_owned), &yes);
+        lacks(&a.report, TAGS_IGNORED);
+        has(&a.report, ItemKind::Note, FROM_VIZDAW);
+        let before = projection(&doc, seq).unwrap();
+        let after = projection(a.h.doc(), a.seq).unwrap();
+        let played = |p: &core_io::dawproject::record::Projection| {
+            let t = p.tracks.iter().find(|t| t.name == "Loop").expect("Loop");
+            t.notes_played
+                .iter()
+                .map(|n| (n.tick, n.pitch, n.duration))
+                .collect::<Vec<_>>()
+        };
+        assert!(played(&before).len() > 2, "{:?}", played(&before));
+        assert_eq!(played(&after), played(&before));
     }
 
     /// Two note tracks tagged `vz:t1` and `vz:t2` on channels `ids` with
@@ -2082,5 +2134,9 @@ mod origins {
             .unwrap_or_else(|| panic!("no '{TAGS_IGNORED}' in {:#?}", t.a.report.items));
         assert_eq!(i.count, 10_002);
         assert!(took.as_secs_f64() < 2.0, "{took:?}");
+
+        // Task 2 review Minor 5: the line means something only to a merge,
+        // so 6d's plain import does not show it.
+        lacks(&imported(&pkg, &yes).report, TAGS_IGNORED);
     }
 }

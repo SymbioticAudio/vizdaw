@@ -31,6 +31,47 @@ use core_model::query::{PathStep, ResolvedEvent, seq_length};
 use core_model::time::{BarBeatUnit, Tick};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// How a reference use plays, as the export writes its clips (and the
+/// snapshot's `UseAt` records it): one pass's length, the number of
+/// passes, and the length of them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct UseSpan {
+    /// One pass, in ticks (at least 1).
+    pub pass: i64,
+    /// How many passes it plays (at least 1).
+    pub passes: i64,
+    /// All of them, in ticks.
+    pub total: i64,
+}
+
+/// The [`UseSpan`] of a use of `target` with its own `length` and
+/// `loop_count`: a counted use plays its length that many times; a filling
+/// use plays its length once, in passes of the sequence's length.
+pub(super) fn use_span(
+    doc: &core_model::document::Document,
+    target: core_model::ids::SeqId,
+    length: Option<Tick>,
+    loop_count: LoopCount,
+) -> UseSpan {
+    let b = seq_length(doc, target).map_or(0, |t| t.0).max(1);
+    let use_len = length.map_or(b, |t| t.0).max(1);
+    match loop_count {
+        LoopCount::Count(n) => {
+            let n = i64::from(n.max(1));
+            UseSpan {
+                pass: use_len,
+                passes: n,
+                total: use_len.saturating_mul(n),
+            }
+        }
+        LoopCount::Fill => UseSpan {
+            pass: b,
+            passes: use_len.saturating_add(b - 1) / b,
+            total: use_len,
+        },
+    }
+}
+
 // ---------------------------------------------------------------- the report
 
 /// Left out: muted notes (a count), as `midi_out::source` counts them.
@@ -631,18 +672,11 @@ impl Arr<'_, '_, '_, '_, '_> {
         let (name, pickup) = l.doc.sequence(target).map_or((String::new(), 0), |s| {
             (s.name.clone(), s.start_offset.0.max(0))
         });
-        let b = seq_length(l.doc, target).map_or(0, |t| t.0).max(1);
-        let use_len = use_len.map_or(b, |t| t.0).max(1);
-        let (iter_len, count, total) = match loop_count {
-            LoopCount::Count(n) => {
-                let n = i64::from(n.max(1));
-                (use_len, n, use_len.saturating_mul(n))
-            }
-            LoopCount::Fill => {
-                let n = use_len.saturating_add(b - 1) / b;
-                (b, n, use_len)
-            }
-        };
+        let UseSpan {
+            pass: iter_len,
+            passes: count,
+            total,
+        } = use_span(l.doc, target, use_len, loop_count);
         // The track's own loop repeats the use: one clip per pass of it.
         let period = match lane.length {
             Some(t) if lane.looped && t.0 > 0 => Some(t.0),

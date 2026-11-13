@@ -331,7 +331,8 @@ static RETURNS: AtomicUsize = AtomicUsize::new(0);
 
 /// The returned file: `t.export`'s project.xml and metadata.xml read back,
 /// edited as the other DAW would (`edit`), written again and packaged in
-/// `t.dir`; `strip` takes out the record, the tags, or both.
+/// `t.dir`; `strip` takes out the record, the tags, or both and the export
+/// line ([`stripped_package`]).
 pub fn return_file(
     t: &Trip,
     strip: Strip,
@@ -344,14 +345,42 @@ pub fn return_file(
     let mut x = t.export.clone();
     x.project_xml = write_project(&project);
     x.metadata_xml = write_metadata(&metadata);
+    let n = RETURNS.fetch_add(1, Ordering::Relaxed);
+    let path = t.dir.path().join(format!("Return {n}.dawproject"));
+    std::fs::write(&path, stripped_package(&x, strip)).expect("writes");
+    path
+}
+
+/// `meta` without the export line its comment ends with.
+pub fn without_export_line(meta: &mut DpMetaData) {
+    use core_io::dawproject::units::EXPORT_LINE;
+    if let Some(c) = meta.fields.last_mut() {
+        if let Some(text) = c.take() {
+            let kept: Vec<&str> = text
+                .split('\n')
+                .filter(|l| !l.starts_with(EXPORT_LINE))
+                .collect();
+            let kept = kept.join("\n");
+            *c = (!kept.is_empty()).then_some(kept);
+        }
+    }
+}
+
+/// `x` packaged as `strip` says: without the tags ([`Strip::Tags`]), the
+/// record ([`Strip::Record`]), or both and the metadata's export line
+/// ([`Strip::Both`]: the file lost its export ID).
+pub fn stripped_package(x: &DpExport, strip: Strip) -> Vec<u8> {
+    let mut x = x.clone();
     if matches!(strip, Strip::Tags | Strip::Both) {
         x.project_xml = without_tags(&x.project_xml);
     }
+    if strip == Strip::Both {
+        let mut meta = read_metadata(&parse(&x.metadata_xml), &mut Report::default());
+        without_export_line(&mut meta);
+        x.metadata_xml = write_metadata(&meta);
+    }
     let record = matches!(strip, Strip::Nothing | Strip::Tags);
-    let n = RETURNS.fetch_add(1, Ordering::Relaxed);
-    let path = t.dir.path().join(format!("Return {n}.dawproject"));
-    std::fs::write(&path, package_bytes_with(&x, record).expect("packages")).expect("writes");
-    path
+    package_bytes_with(&x, record).expect("packages")
 }
 
 /// The file at `path` as a project of its own: opened, mapped (media from
@@ -427,6 +456,43 @@ pub fn hostile(clips: usize, lane: u64, event: u64) -> String {
 /// format; the templates. Control surfaces live in the app's preferences,
 /// not the project, so there is nothing of theirs here to compare.
 pub fn vizdaw_only(doc: &Document, seq: SeqId) -> String {
+    vizdaw_only_except(doc, seq, &Except::default())
+}
+
+/// What [`vizdaw_only_except`] leaves out: what a merge changes by design.
+#[derive(Debug, Clone, Default)]
+pub struct Except {
+    /// The sequences the exported one plays through its uses (Ruling 8
+    /// edits them, or makes private copies of them).
+    pub seqs: std::collections::BTreeSet<SeqId>,
+    /// Whether to leave out the inactive takes named "Returned …" (the
+    /// conflict takes a merge adds, Ruling 6).
+    pub returned_takes: bool,
+}
+
+/// Every sequence `seq` plays through its tracks' active takes, nested
+/// uses included.
+pub fn played_sequences(doc: &Document, seq: SeqId) -> std::collections::BTreeSet<SeqId> {
+    use core_model::event::EventBody;
+    let mut out = std::collections::BTreeSet::new();
+    let mut todo = vec![seq];
+    while let Some(s) = todo.pop() {
+        let Ok(sq) = doc.sequence(s) else { continue };
+        for l in &sq.lanes {
+            for e in l.active().into_iter().flat_map(|t| t.events.values()) {
+                if let EventBody::Reference { seq: used, .. } = e.body {
+                    if out.insert(used) {
+                        todo.push(used);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// [`vizdaw_only`], without what `except` names.
+pub fn vizdaw_only_except(doc: &Document, seq: SeqId, except: &Except) -> String {
     use core_model::automation::AutomationMode;
     use serde_json::{Value, json};
     let mut others = Vec::new();
@@ -434,12 +500,19 @@ pub fn vizdaw_only(doc: &Document, seq: SeqId) -> String {
     let mut slot = Value::Null;
     for s in doc.sequences().values() {
         if s.id != seq {
-            others.push(serde_json::to_value(s).expect("serialises"));
+            if !except.seqs.contains(&s.id) {
+                others.push(serde_json::to_value(s).expect("serialises"));
+            }
             continue;
         }
         slot = serde_json::to_value(&s.keyboard_slot).expect("serialises");
         for l in &s.lanes {
-            let inactive: Vec<_> = l.takes.iter().filter(|t| t.id != l.active_take).collect();
+            let inactive: Vec<_> = l
+                .takes
+                .iter()
+                .filter(|t| t.id != l.active_take)
+                .filter(|t| !(except.returned_takes && t.name.starts_with("Returned ")))
+                .collect();
             let has = !inactive.is_empty()
                 || !l.input_fx.is_empty()
                 || l.input.is_some()

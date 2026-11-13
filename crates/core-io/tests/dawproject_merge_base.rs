@@ -15,7 +15,7 @@ use core_io::dawproject::record::{
     SNAPSHOT_FORMAT, Snapshot, SnapshotLimits, UseAt, as_returned, read_snapshot,
     read_snapshot_file, read_snapshot_with, returned,
 };
-use core_io::limits::{MAX_SNAPSHOT_BYTES, MAX_XML_NODES};
+use core_io::limits::{MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ENTRIES, MAX_XML_NODES};
 use core_io::report::{ItemKind, Report};
 use core_model::document::{DestKind, Document};
 use core_model::event::EventBody;
@@ -310,6 +310,7 @@ fn snapshot_limits() {
     let limits = SnapshotLimits {
         max_bytes: 4096,
         max_ids: 100,
+        ..SnapshotLimits::default()
     };
     // Exactly at the size limit, padded in an ID; then one byte over.
     let base = small(BTreeMap::from([("a".to_owned(), object())])).len();
@@ -342,9 +343,10 @@ fn snapshot_limits() {
 
     let d = SnapshotLimits::default();
     assert_eq!(
-        (d.max_bytes, d.max_ids),
-        (MAX_SNAPSHOT_BYTES, MAX_XML_NODES)
+        (d.max_bytes, d.max_ids, d.max_entries),
+        (MAX_SNAPSHOT_BYTES, MAX_XML_NODES, MAX_SNAPSHOT_ENTRIES)
     );
+    assert_eq!(MAX_SNAPSHOT_ENTRIES, 2 * MAX_XML_NODES);
     assert_eq!(MAX_SNAPSHOT_BYTES, 256 << 20);
 
     // The project's file: missing, regular, a link, a folder, a FIFO.
@@ -374,6 +376,81 @@ fn snapshot_limits() {
         .unwrap();
     assert!(made.success());
     damaged(read_snapshot_file(root.path(), EXPORT));
+}
+
+/// Task 7 carry-over (Task 1 review): the project's `Interchange` folder
+/// is lstat'ed too, so a link there is refused as the write side refuses
+/// it, even when it leads to a good snapshot.
+#[test]
+fn a_linked_interchange_folder_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::write(
+        elsewhere.join(format!("{EXPORT}.json")),
+        small(BTreeMap::new()),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.path().join("Interchange")).unwrap();
+    damaged(read_snapshot_file(root.path(), EXPORT));
+
+    // A file where the folder should be.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("Interchange"), b"{}").unwrap();
+    damaged(read_snapshot_file(root.path(), EXPORT));
+}
+
+/// `small(..)` with `n` empty song-info entries (`""`), each 3 bytes of
+/// JSON and a 24-byte `Option<String>` once parsed.
+fn with_info(n: usize) -> Vec<u8> {
+    let mut v: serde_json::Value = serde_json::from_slice(&small(BTreeMap::new())).unwrap();
+    v["projection"]["info"] = serde_json::Value::Array(vec![serde_json::json!(""); n]);
+    serde_json::to_vec(&v).unwrap()
+}
+
+/// Task 7 carry-over (Task 1 review): every list entry of the projection
+/// and the identity counts against `max_entries` while parsing, so a
+/// hostile snapshot of tiny entries is refused before it is built.
+#[test]
+fn snapshot_list_entries_are_counted() {
+    let limits = SnapshotLimits {
+        max_entries: 1_000,
+        ..SnapshotLimits::default()
+    };
+    assert!(read_snapshot_with(&with_info(1_000), &limits).is_ok());
+    damaged(read_snapshot_with(&with_info(1_001), &limits));
+
+    // Nested lists count too: a curve's points, an identity's per-curve
+    // lists.
+    let mut v: serde_json::Value = serde_json::from_slice(&small(BTreeMap::new())).unwrap();
+    v["projection"]["tracks"] = serde_json::json!([{
+        "name": "T", "notes": true, "audio": false, "strip": null,
+        "notes_played": [], "midi": [], "regions": [],
+        "automation": [["fader", vec![serde_json::json!([0, 0.5]); 1_000]]],
+    }]);
+    v["identity"]["tracks"] = serde_json::json!([{
+        "lane": 1, "notes": [], "midi": [], "regions": [], "uses": [],
+        "automation": [vec![serde_json::json!({"event": 1, "top": 1}); 1_000]],
+    }]);
+    damaged(read_snapshot_with(
+        &serde_json::to_vec(&v).unwrap(),
+        &limits,
+    ));
+    let roomy = SnapshotLimits {
+        max_entries: 2_004,
+        ..SnapshotLimits::default()
+    };
+    assert!(read_snapshot_with(&serde_json::to_vec(&v).unwrap(), &roomy).is_ok());
+
+    // 300 000 entries (900 KB) at a 10 000 budget: refused while small.
+    let hostile = with_info(300_000);
+    let limits = SnapshotLimits {
+        max_entries: 10_000,
+        ..SnapshotLimits::default()
+    };
+    let (r, seen) = measure(|| read_snapshot_with(&hostile, &limits));
+    damaged(r);
+    assert!(seen.peak < 2 * 1024 * KIB, "peak {} bytes", seen.peak);
 }
 
 // ---------------------------------------------------------------- normalisers

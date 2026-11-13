@@ -299,14 +299,19 @@ fn slots(mix: &Mix) -> u64 {
 /// and solo), the synth's, the buses' and the master's settings, then the
 /// tempo and meter maps, the markers, the sequence's name and the song
 /// info, then the arrangement ([`apply_arranged`]). Merges the
-/// import's report into `report` and fills its summary.
+/// import's report, without [`TAGS_IGNORED`](super::TAGS_IGNORED) (a
+/// merge's line), into `report` and fills its summary.
 pub fn apply(
     h: &mut History,
     imp: &DpImport,
     seq: SeqId,
     report: &mut Report,
 ) -> Result<SlotStates, ModelError> {
-    apply_tagged(h, imp, seq, report).map(|(states, _)| states)
+    let states = apply_tagged(h, imp, seq, report).map(|(states, _)| states)?;
+    // Tags matter only to a merge (Task 2 review Minor 5): a plain import
+    // does not list the ones it ignored.
+    report.items.retain(|i| i.what != super::TAGS_IGNORED);
+    Ok(states)
 }
 
 /// [`apply`], with what each new object was in the project the file came

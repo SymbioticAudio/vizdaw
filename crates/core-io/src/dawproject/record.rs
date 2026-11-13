@@ -7,15 +7,16 @@
 //! the VizDAW object it came from.
 
 use super::export::{Layout, RegionGain, Ticker, layout};
+use super::export_timeline::use_span;
 use super::units::swatch_hex;
 use crate::IoError;
-use crate::limits::{MAX_SNAPSHOT_BYTES, MAX_XML_NODES};
+use crate::limits::{MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ENTRIES, MAX_XML_NODES};
 use core_model::automation::AutomationTarget;
 use core_model::document::{Document, check_project_id};
-use core_model::event::{EventBody, LoopCount, PerNoteKind};
+use core_model::event::{EventBody, PerNoteKind};
 use core_model::ids::SeqId;
 use core_model::mixer::PluginFormat;
-use core_model::query::{ResolvedEvent, seq_length};
+use core_model::query::ResolvedEvent;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -138,8 +139,10 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     /// One per [`Projection::tracks`] entry.
+    #[serde(deserialize_with = "counted")]
     pub tracks: Vec<TrackIds>,
     /// One per [`Projection::strips`] entry.
+    #[serde(deserialize_with = "counted")]
     pub strips: Vec<StripIds>,
 }
 
@@ -149,15 +152,20 @@ pub struct TrackIds {
     /// The track (both halves of a split track name it).
     pub lane: u64,
     /// One per [`PTrack::notes_played`] entry.
+    #[serde(deserialize_with = "counted")]
     pub notes: Vec<EventAt>,
     /// One per [`PTrack::midi`] entry.
+    #[serde(deserialize_with = "counted")]
     pub midi: Vec<EventAt>,
     /// One per [`PTrack::regions`] entry.
+    #[serde(deserialize_with = "counted")]
     pub regions: Vec<EventAt>,
     /// One per [`PTrack::automation`] curve, one per point of it.
+    #[serde(deserialize_with = "counted_lists")]
     pub automation: Vec<Vec<EventAt>>,
     /// The track's top-level reference uses, by tick (on the half that
     /// holds the notes).
+    #[serde(deserialize_with = "counted")]
     pub uses: Vec<UseAt>,
 }
 
@@ -194,6 +202,7 @@ pub struct StripIds {
     /// The strip it is (or a copy of); none for a plain channel.
     pub strip: Option<u64>,
     /// The plug-in instances, in [`PStrip::devices`] order.
+    #[serde(deserialize_with = "counted")]
     pub devices: Vec<u64>,
 }
 
@@ -205,6 +214,9 @@ pub struct SnapshotLimits {
     pub max_bytes: usize,
     /// Most `ids` entries.
     pub max_ids: usize,
+    /// Most list entries in the projection and identity together, nested
+    /// lists included, counted while parsing.
+    pub max_entries: usize,
 }
 
 impl Default for SnapshotLimits {
@@ -212,6 +224,7 @@ impl Default for SnapshotLimits {
         SnapshotLimits {
             max_bytes: MAX_SNAPSHOT_BYTES,
             max_ids: MAX_XML_NODES,
+            max_entries: MAX_SNAPSHOT_ENTRIES,
         }
     }
 }
@@ -220,15 +233,101 @@ thread_local! {
     /// The most `ids` a snapshot parsed on this thread may hold:
     /// [`read_snapshot_with`]'s, else [`MAX_XML_NODES`].
     static MAX_IDS: Cell<usize> = const { Cell::new(MAX_XML_NODES) };
+    /// The list entries a snapshot parsed on this thread may still hold:
+    /// set by [`read_snapshot_with`], else unbounded.
+    static ENTRIES_LEFT: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
-/// Restores [`MAX_IDS`] when dropped.
-struct MaxIds(usize);
+/// Restores [`MAX_IDS`] and [`ENTRIES_LEFT`] when dropped.
+struct Budgets {
+    ids: usize,
+    entries: usize,
+}
 
-impl Drop for MaxIds {
-    fn drop(&mut self) {
-        MAX_IDS.with(|m| m.set(self.0));
+impl Budgets {
+    fn arm(limits: &SnapshotLimits) -> Budgets {
+        Budgets {
+            ids: MAX_IDS.with(|m| m.replace(limits.max_ids)),
+            entries: ENTRIES_LEFT.with(|m| m.replace(limits.max_entries)),
+        }
     }
+}
+
+impl Drop for Budgets {
+    fn drop(&mut self) {
+        MAX_IDS.with(|m| m.set(self.ids));
+        ENTRIES_LEFT.with(|m| m.set(self.entries));
+    }
+}
+
+/// A list whose every entry is counted against [`ENTRIES_LEFT`] as it is
+/// parsed (plan 6e Task 7: a snapshot of tiny entries would otherwise grow
+/// about 8× in memory).
+#[derive(Debug, Clone, PartialEq)]
+struct Counted<T>(Vec<T>);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Counted<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, SeqAccess, Visitor};
+        use std::marker::PhantomData;
+
+        struct List<T>(PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for List<T> {
+            type Value = Vec<T>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::new();
+                while let Some(v) = seq.next_element::<T>()? {
+                    // Entries nested in `v` came off the budget while it
+                    // was parsed; this one comes off what is left.
+                    let left = ENTRIES_LEFT.with(Cell::get);
+                    if left == 0 {
+                        return Err(A::Error::custom("too many list entries"));
+                    }
+                    ENTRIES_LEFT.with(|m| m.set(left - 1));
+                    out.push(v);
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_seq(List(PhantomData)).map(Counted)
+    }
+}
+
+/// A list field, counted ([`Counted`]).
+fn counted<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Counted::<T>::deserialize(d).map(|c| c.0)
+}
+
+/// A list of lists, both levels counted ([`Counted`]).
+fn counted_lists<'de, D, T>(d: D) -> Result<Vec<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Counted::<Counted<T>>::deserialize(d).map(|c| c.0.into_iter().map(|l| l.0).collect())
+}
+
+/// One automation curve: its target and (tick, value) points.
+type NamedCurve = (String, Vec<(i64, f64)>);
+
+/// Automation curves, their points counted too ([`Counted`]).
+fn counted_curves<'de, D>(d: D) -> Result<Vec<NamedCurve>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Counted::<(String, Counted<(i64, f64)>)>::deserialize(d)
+        .map(|c| c.0.into_iter().map(|(t, p)| (t, p.0)).collect())
 }
 
 /// `ids`, refused at the entry past [`MAX_IDS`].
@@ -266,8 +365,9 @@ where
 }
 
 /// Reads a snapshot: at most `max_bytes` (checked before parsing), JSON,
-/// format 1 or 2, UUID project and export IDs, at most `max_ids` IDs
-/// (counted while parsing), a known region-gain word, and an identity
+/// format 1 or 2, UUID project and export IDs, at most `max_ids` IDs and
+/// `max_entries` list entries (both counted while parsing), a known
+/// region-gain word, and an identity
 /// parallel to the projection (Ruling 17). A format 1 snapshot has neither
 /// a region gain nor an identity; every strip index is in range. Anything
 /// else is [`SNAPSHOT_DAMAGED`].
@@ -277,7 +377,7 @@ pub fn read_snapshot_with(bytes: &[u8], limits: &SnapshotLimits) -> Result<Snaps
         return Err(damaged());
     }
     let snap: Snapshot = {
-        let _restore = MaxIds(MAX_IDS.with(|m| m.replace(limits.max_ids)));
+        let _restore = Budgets::arm(limits);
         serde_json::from_slice(bytes).map_err(|_| damaged())?
     };
     if well_formed(&snap) {
@@ -334,9 +434,11 @@ fn parallel(p: &Projection, id: &Identity) -> bool {
             .all(|(x, i)| x.devices.len() == i.devices.len())
 }
 
-/// `<root>/Interchange/<export id>.json`: lstat (a regular file, else
-/// `Ok(None)` for missing), at most `MAX_SNAPSHOT_BYTES + 1` bytes read,
-/// then [`read_snapshot`]. A link, a folder or a FIFO there, or a snapshot
+/// `<root>/Interchange/<export id>.json`: lstat of the folder (a real
+/// folder, as the write side requires, else `Ok(None)` for missing) and of
+/// the file (a regular file, else `Ok(None)` for missing), at most `MAX_SNAPSHOT_BYTES + 1` bytes read,
+/// then [`read_snapshot`]. A link or a file in place of the folder, a link,
+/// a folder or a FIFO in place of the file, or a snapshot
 /// of another export, is [`SNAPSHOT_DAMAGED`]; an `export_id` that is not
 /// a UUID names no snapshot.
 pub fn read_snapshot_file(root: &Path, export_id: &str) -> Result<Option<Snapshot>, IoError> {
@@ -344,7 +446,14 @@ pub fn read_snapshot_file(root: &Path, export_id: &str) -> Result<Option<Snapsho
     if !check_project_id(export_id) {
         return Ok(None);
     }
-    let path = root.join(SNAPSHOT_DIR).join(format!("{export_id}.json"));
+    let dir = root.join(SNAPSHOT_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(damaged()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(crate::io_err(&dir, "read", &e)),
+    }
+    let path = dir.join(format!("{export_id}.json"));
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -497,17 +606,23 @@ pub fn returned(theirs: &Projection, origin: i64) -> Projection {
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Projection {
     /// The exported tracks (a split track is two).
+    #[serde(deserialize_with = "counted")]
     pub tracks: Vec<PTrack>,
     /// The exported channels, in the structure's order: the tracks', then
     /// buses and submixes, then the master.
+    #[serde(deserialize_with = "counted")]
     pub strips: Vec<PStrip>,
     /// The tempo map: tick, milli-BPM, ramp.
+    #[serde(deserialize_with = "counted")]
     pub tempo: Vec<(i64, u32, bool)>,
     /// The meter map: tick, numerator, denominator.
+    #[serde(deserialize_with = "counted")]
     pub meter: Vec<(i64, u8, u8)>,
     /// The markers: tick, name.
+    #[serde(deserialize_with = "counted")]
     pub markers: Vec<(i64, String)>,
     /// The 13 song-info fields.
+    #[serde(deserialize_with = "counted")]
     pub info: Vec<Option<String>>,
     /// The tick at file time 0.
     pub origin: i64,
@@ -525,12 +640,16 @@ pub struct PTrack {
     /// Its channel in [`Projection::strips`].
     pub strip: Option<usize>,
     /// The notes it plays.
+    #[serde(deserialize_with = "counted")]
     pub notes_played: Vec<PNote>,
     /// Its other MIDI events: tick, "<kind> <channel> <number> <value>".
+    #[serde(deserialize_with = "counted")]
     pub midi: Vec<(i64, String)>,
     /// Its regions.
+    #[serde(deserialize_with = "counted")]
     pub regions: Vec<PRegion>,
     /// Its automation: target, then (tick, value) points.
+    #[serde(deserialize_with = "counted_curves")]
     pub automation: Vec<(String, Vec<(i64, f64)>)>,
 }
 
@@ -550,6 +669,7 @@ pub struct PNote {
     /// Its length.
     pub duration: i64,
     /// Its per-note values the route carries: kind, offset, value.
+    #[serde(deserialize_with = "counted")]
     pub expression: Vec<(String, i64, u32)>,
 }
 
@@ -603,8 +723,10 @@ pub struct PStrip {
     /// The strip it plays into.
     pub output: Option<usize>,
     /// Its sends: target strip, level in dB, pre-fader, enabled.
+    #[serde(deserialize_with = "counted")]
     pub sends: Vec<(usize, f64, bool, bool)>,
     /// Its devices: format, plug-in ID, bypass, state hash.
+    #[serde(deserialize_with = "counted")]
     pub devices: Vec<(String, String, bool, Option<u64>)>,
 }
 
@@ -693,18 +815,8 @@ fn uses_of(l: &Layout<'_>, p: &super::export::Part<'_>) -> Vec<UseAt> {
                 return None;
             };
             // As the export writes the use's clips.
-            let b = seq_length(l.doc, seq).map_or(0, |t| t.0).max(1);
-            let use_len = length.map_or(b, |t| t.0).max(1);
-            let (passes, total) = match loop_count {
-                LoopCount::Count(n) => {
-                    let n = n.max(1);
-                    (n, use_len.saturating_mul(i64::from(n)))
-                }
-                LoopCount::Fill => {
-                    let n = use_len.saturating_add(b - 1) / b;
-                    (u32::try_from(n).unwrap_or(u32::MAX), use_len)
-                }
-            };
+            let span = use_span(l.doc, seq, length, loop_count);
+            let (passes, total) = (u32::try_from(span.passes).unwrap_or(u32::MAX), span.total);
             let tick = e.tick.0.saturating_add(lane.play_shift.0);
             Some(UseAt {
                 event: e.id.0,

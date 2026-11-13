@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod generators;
 pub mod merge;
 pub mod package;
 pub mod rawzip_builder;

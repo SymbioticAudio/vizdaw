@@ -96,10 +96,11 @@ impl<'p> Tl<'_, '_, 'p> {
                     }
                 }
                 DpTimeline::Clips(c) => {
-                    for clip in &c.clips {
+                    let chains = pass_chains(&c.clips);
+                    for (k, clip) in c.clips.iter().enumerate() {
                         self.tick()?;
                         match track {
-                            Some(i) => self.top_clip(clip, &f, i)?,
+                            Some(i) => self.top_clip(clip, &f, i, chains.get(&k).copied())?,
                             None => self.left_out(NO_TRACK),
                         }
                     }
@@ -112,11 +113,15 @@ impl<'p> Tl<'_, '_, 'p> {
 
     /// A clip on track `track`'s top level: a candidate for sharing, or
     /// straight onto the track.
+    ///
+    /// `chain`: for a clip with an event and a pass tag, whether it is on
+    /// its use's chain of passes in its container ([`pass_chains`]).
     pub(super) fn top_clip(
         &mut self,
         c: &'p DpClip,
         f: &Frame,
         track: usize,
+        chain: Option<bool>,
     ) -> Result<(), IoError> {
         let n = match self.clips.get_mut(track) {
             Some(k) => {
@@ -130,7 +135,9 @@ impl<'p> Tl<'_, '_, 'p> {
         // export writes a use its track's loop splits as one clip per pass,
         // each with `pass_comment(use, pass)`, the passes rising in file
         // order (`use_clips`). A clip's first pass tag counts; any other is
-        // ignored and counted.
+        // ignored and counted. Within one container the passes must rise
+        // with time ([`pass_chains`]): a copy of a pass off that chain is
+        // ignored and counted wherever it sits in the file.
         let comment = c.named.comment.as_deref();
         let passes: Vec<u64> = comment
             .map(|c| strip_tags(c).1)
@@ -152,13 +159,19 @@ impl<'p> Tl<'_, '_, 'p> {
         }
         let tag = named.map(|n| n.number()).filter(|&n| {
             let claims = &mut self.cx.claims;
+            if pass.is_some() && chain == Some(false) {
+                claims.ignored = claims.ignored.saturating_add(1);
+                return false;
+            }
             match claims.events.get_mut(&n) {
                 None => {
                     claims.events.insert(n, (track, pass));
                     true
                 }
-                Some((t, last @ Some(_))) if *t == track && pass > *last => {
-                    *last = pass;
+                Some((t, last @ Some(_)))
+                    if *t == track && (pass > *last || (chain == Some(true) && pass.is_some())) =>
+                {
+                    *last = (*last).max(pass);
                     true
                 }
                 Some(_) => {
@@ -568,4 +581,60 @@ impl<'p> Tl<'_, '_, 'p> {
             }
         }
     }
+}
+
+/// For each clip of `clips` with an event tag and a pass tag
+/// (`vz:e<use> vz:p<pass>`, the first of each), whether it is on its use's
+/// chain: the longest run of that use's clips whose passes rise strictly
+/// with their time, the earliest clip of a pass kept on a tie. The export
+/// writes a use's passes so; a copy of a pass the other DAW made lies off
+/// the chain (plan 6e Task 7). Keyed by index in `clips`.
+pub(super) fn pass_chains(clips: &[DpClip]) -> HashMap<usize, bool> {
+    let mut uses: HashMap<u64, Vec<(f64, usize, u64)>> = HashMap::new();
+    for (k, c) in clips.iter().enumerate() {
+        let Some(comment) = c.named.comment.as_deref() else {
+            continue;
+        };
+        let tags = strip_tags(comment).1;
+        let first = |kind: TagKind| tags.iter().find(|(t, _)| *t == kind).map(|(_, n)| *n);
+        if let (Some(event), Some(pass)) = (first(TagKind::Event), first(TagKind::Pass)) {
+            uses.entry(event).or_default().push((c.time, k, pass));
+        }
+    }
+    let mut out = HashMap::new();
+    for (_, mut clips) in uses {
+        clips.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        // Patience sorting: `tops[i]` ends the best chain of length i + 1.
+        let mut tops: Vec<usize> = Vec::new();
+        let mut parent: Vec<Option<usize>> = vec![None; clips.len()];
+        for (i, &(_, _, pass)) in clips.iter().enumerate() {
+            let at = tops.partition_point(|&j| clips.get(j).is_some_and(|c| c.2 < pass));
+            if tops
+                .get(at)
+                .and_then(|&j| clips.get(j))
+                .is_some_and(|c| c.2 == pass)
+            {
+                // An earlier clip of this pass ends a chain as long.
+                continue;
+            }
+            if let Some(p) = parent.get_mut(i) {
+                *p = at.checked_sub(1).and_then(|b| tops.get(b).copied());
+            }
+            match tops.get_mut(at) {
+                Some(t) => *t = i,
+                None => tops.push(i),
+            }
+        }
+        for c in &clips {
+            out.insert(c.1, false);
+        }
+        let mut next = tops.last().copied();
+        while let Some(i) = next {
+            if let Some(c) = clips.get(i) {
+                out.insert(c.1, true);
+            }
+            next = parent.get(i).copied().flatten();
+        }
+    }
+    out
 }
