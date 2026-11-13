@@ -128,16 +128,21 @@ pub enum TagKind {
     Device,
     /// A plug-in instance in the EQ slot (`q`).
     Eq,
+    /// Beside a use's [`TagKind::Event`] on each clip of a use its track's
+    /// loop splits: the pass of the loop the clip plays in (`p`), so the
+    /// clips' passes rise in time order ([`pass_comment`]).
+    Pass,
 }
 
 impl TagKind {
-    const ALL: [TagKind; 6] = [
+    const ALL: [TagKind; 7] = [
         TagKind::Track,
         TagKind::Strip,
         TagKind::Event,
         TagKind::Marker,
         TagKind::Device,
         TagKind::Eq,
+        TagKind::Pass,
     ];
 
     fn letter(self) -> char {
@@ -148,6 +153,7 @@ impl TagKind {
             TagKind::Marker => 'm',
             TagKind::Device => 'd',
             TagKind::Eq => 'q',
+            TagKind::Pass => 'p',
         }
     }
 }
@@ -159,13 +165,24 @@ pub fn copy_channel_id(strip: u64, lane: u64) -> String {
     format!("c{strip}t{lane}")
 }
 
-/// The strip a [`copy_channel_id`] copies; `None` for any other ID.
-pub fn copied_strip(id: &str) -> Option<u64> {
-    let (strip, lane) = id.strip_prefix('c')?.split_once('t')?;
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    (digits(strip) && digits(lane)).then_some(())?;
-    lane.parse::<u64>().ok()?;
-    strip.parse().ok()
+/// The (strip, track) of a [`copy_channel_id`]; `None` for any other ID.
+pub fn copied_channel(id: &str) -> Option<(u64, u64)> {
+    let (x, y) = id.strip_prefix('c')?.split_once('t')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+    if !(digits(x) && digits(y)) {
+        return None;
+    }
+    Some((x.parse().ok()?, y.parse().ok()?))
+}
+
+/// The comment of the clip of pass `pass` of reference use `event`, one of
+/// the clips a looping track splits it into: `vz:e<event> vz:p<pass>`.
+pub fn pass_comment(event: u64, pass: u64) -> String {
+    format!(
+        "{} {}",
+        tag(TagKind::Event, event),
+        tag(TagKind::Pass, pass)
+    )
 }
 
 /// The tag `vz:<letter><id>`.

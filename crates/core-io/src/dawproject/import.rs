@@ -48,7 +48,8 @@ use super::schema::*;
 #[cfg(doc)]
 use super::units::copy_channel_id;
 use super::units::{
-    EXPORT_LINE, TagKind, copied_strip, db_of_linear, nearest_swatch, pan_of_normalized, strip_tags,
+    EXPORT_LINE, TagKind, copied_channel, db_of_linear, nearest_swatch, pan_of_normalized,
+    strip_tags,
 };
 use crate::IoError;
 use crate::report::{ItemKind, Report};
@@ -491,8 +492,8 @@ struct Cx<'a, 'p> {
     send_at: HashMap<&'p str, (&'p str, usize)>,
     /// What the tags and trusted IDs have named so far.
     claims: Claims,
-    /// The shared strip the channel being mapped copies
-    /// ([`copied_strip`]), for its devices' claims.
+    /// The shared strip the track channel being mapped copies
+    /// ([`Cx::copy_of`]), for its strip's and devices' claims.
     copy: Option<u64>,
 }
 
@@ -500,16 +501,76 @@ struct Cx<'a, 'p> {
 /// many were ignored ([`TAGS_IGNORED`]).
 #[derive(Debug, Default)]
 struct Claims {
-    lanes: HashSet<(u64, bool)>,
-    /// Each strip named, with the shared strip its first channel copies.
-    strips: HashMap<u64, Option<u64>>,
-    /// Each event named: the plan track of its clips and where the last of
-    /// them ends.
-    events: HashMap<u64, (usize, i64)>,
+    /// Tracks, by (lane, audio part).
+    lanes: Claim<(u64, bool)>,
+    strips: Claim<u64>,
+    slots: Claim<u64>,
+    /// Each event named: the plan track of its clips and the pass of the
+    /// last of them (its [`TagKind::Pass`]; `None` for a clip of no pass).
+    events: HashMap<u64, (usize, Option<u64>)>,
     markers: HashSet<u64>,
-    /// Each slot named, with the shared strip its first channel copies.
-    slots: HashMap<u64, Option<u64>>,
     ignored: usize,
+}
+
+/// One map's claims. Trusted IDs reserve their objects before any tag
+/// claims one ([`Cx::reserve`]): by the element's ID, with the shared strip
+/// its channel copies. Then each element claims in file order; the first
+/// keeps the object (with the shared strip its channel copies).
+#[derive(Debug)]
+struct Claim<K> {
+    reserved: HashMap<K, (String, Option<u64>)>,
+    taken: HashMap<K, Option<u64>>,
+}
+
+impl<K> Default for Claim<K> {
+    fn default() -> Self {
+        Claim {
+            reserved: HashMap::new(),
+            taken: HashMap::new(),
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq> Claim<K> {
+    /// Reserves `key` for the element `id` (the first to ask keeps it).
+    fn reserve(&mut self, key: K, id: &str, copy: Option<u64>) {
+        self.reserved.entry(key).or_insert((id.to_owned(), copy));
+    }
+
+    /// Whether the element `id`, naming `key` `by` from a channel copying
+    /// shared strip `copy`, keeps it. A reserved object goes only to its
+    /// trusted ID (or a copy of the same shared strip, also by ID); an
+    /// object already claimed only to a copy of the same shared strip, as
+    /// the export writes one per track ([`copy_channel_id`]). Any other
+    /// claim is counted in `ignored`.
+    fn take(
+        &mut self,
+        key: K,
+        by: &Named,
+        id: Option<&str>,
+        copy: Option<u64>,
+        ignored: &mut usize,
+    ) -> bool {
+        let copies = |c: &Option<u64>| copy.is_some() && *c == copy;
+        if let Some((rid, rcopy)) = self.reserved.get(&key) {
+            let mine = matches!(by, Named::Id(..)) && (id == Some(rid.as_str()) || copies(rcopy));
+            if !mine {
+                *ignored = ignored.saturating_add(1);
+                return false;
+            }
+        }
+        match self.taken.get(&key) {
+            None => {
+                self.taken.insert(key, copy);
+                true
+            }
+            Some(c) if copies(c) => true,
+            Some(_) => {
+                *ignored = ignored.saturating_add(1);
+                false
+            }
+        }
+    }
 }
 
 /// What an element names: by its trusted XML ID (the kind the map gives)
@@ -536,29 +597,6 @@ fn first<K: std::hash::Hash + Eq>(set: &mut HashSet<K>, ignored: &mut usize, key
     } else {
         *ignored = ignored.saturating_add(1);
         false
-    }
-}
-
-/// Whether a claim on `n` from a channel copying shared strip `copy` keeps
-/// it: the first claim does, and so does a later one when both channels
-/// are copies of the same shared strip (the export writes one per track,
-/// [`copy_channel_id`]). Any other later claim is counted in `ignored`.
-fn first_or_copy(
-    map: &mut HashMap<u64, Option<u64>>,
-    ignored: &mut usize,
-    n: u64,
-    copy: Option<u64>,
-) -> bool {
-    match map.get(&n) {
-        None => {
-            map.insert(n, copy);
-            true
-        }
-        Some(c) if copy.is_some() && *c == copy => true,
-        Some(_) => {
-            *ignored = ignored.saturating_add(1);
-            false
-        }
     }
 }
 
@@ -596,6 +634,7 @@ pub fn map(
     if pkg.metadata.dropped_text > 0 {
         cx.add_n(ItemKind::LeftOut, TEXT_DROPPED, pkg.metadata.dropped_text);
     }
+    cx.reserve()?;
     let (tempo, meter) = cx.maps()?;
     let markers = cx.markers(&tempo)?;
     cx.timelines()?;
@@ -713,9 +752,25 @@ impl<'a, 'p> Cx<'a, 'p> {
         comment: Option<&str>,
         tags: &[TagKind],
     ) -> Option<Named> {
+        self.named_beside(id, kinds, comment, tags, &[])
+    }
+
+    /// [`Cx::named`], with tags of the kinds in `beside` (read by the
+    /// caller) neither chosen nor counted.
+    fn named_beside(
+        &mut self,
+        id: Option<&str>,
+        kinds: &[&str],
+        comment: Option<&str>,
+        tags: &[TagKind],
+        beside: &[TagKind],
+    ) -> Option<Named> {
         let mut by_tag = None;
         if let Some(c) = comment {
             for (k, n) in strip_tags(c).1 {
+                if beside.contains(&k) {
+                    continue;
+                }
                 if by_tag.is_none() && tags.contains(&k) {
                     by_tag = Some(Named::Tag(k, n));
                 } else {
@@ -740,10 +795,11 @@ impl<'a, 'p> Cx<'a, 'p> {
     }
 
     /// The strip a channel names (a plain channel's ID names none), when it
-    /// is the first to name it.
-    fn strip_named(&mut self, c: &DpChannel) -> Option<u64> {
+    /// keeps it; `copy` is the shared strip it copies ([`Cx::copy_of`]).
+    fn strip_named(&mut self, c: &DpChannel, copy: Option<u64>) -> Option<u64> {
+        let id = c.named.id.as_deref();
         let named = self.named(
-            c.named.id.as_deref(),
+            id,
             &["strip", "channel"],
             c.named.comment.as_deref(),
             &[TagKind::Strip],
@@ -752,13 +808,95 @@ impl<'a, 'p> Cx<'a, 'p> {
             return None;
         }
         let n = named.number();
-        let copy = c
-            .named
-            .id
-            .as_deref()
-            .and_then(copied_strip)
-            .filter(|s| *s == n);
-        first_or_copy(&mut self.claims.strips, &mut self.claims.ignored, n, copy).then_some(n)
+        let copy = copy.filter(|s| *s == n);
+        let claims = &mut self.claims;
+        claims
+            .strips
+            .take(n, &named, id, copy, &mut claims.ignored)
+            .then_some(n)
+    }
+
+    /// The strip a channel names, without claiming or counting anything:
+    /// its trusted ID's, else its first strip tag.
+    fn peek_strip(&self, c: &DpChannel) -> Option<u64> {
+        let by_id = self
+            .env
+            .ids
+            .zip(c.named.id.as_deref())
+            .and_then(|(ids, id)| ids.get(id))
+            .filter(|r| r.kind == "strip")
+            .map(|r| r.id);
+        by_id.or_else(|| {
+            let (_, tags) = strip_tags(c.named.comment.as_deref()?);
+            tags.into_iter()
+                .find(|(k, _)| *k == TagKind::Strip)
+                .map(|(_, n)| n)
+        })
+    }
+
+    /// The shared strip track `lane`'s channel `c` is a copy of: its ID is
+    /// [`copy_channel_id`]`(s, lane)` and it names strip `s`.
+    fn copy_of(&self, c: &DpChannel, lane: Option<u64>) -> Option<u64> {
+        let (s, l) = copied_channel(c.named.id.as_deref()?)?;
+        (Some(l) == lane && self.peek_strip(c) == Some(s)).then_some(s)
+    }
+
+    /// Pass one (plan 6e Task 2, I1): every track, strip and slot a trusted
+    /// ID names is reserved for that element before any tag claims.
+    fn reserve(&mut self) -> Result<(), IoError> {
+        let Some(ids) = self.env.ids else {
+            return Ok(());
+        };
+        let p = &self.pkg.project;
+        let mut tracks: Vec<&'p DpTrack> = Vec::new();
+        let mut chans: Vec<&'p DpChannel> = Vec::new();
+        for item in &p.structure {
+            match item {
+                DpStructureItem::Track(t) => tracks.push(t),
+                DpStructureItem::Channel(c) => chans.push(c),
+            }
+        }
+        // Depth first, in file order.
+        tracks.reverse();
+        let mut order: Vec<&'p DpTrack> = Vec::new();
+        while let Some(t) = tracks.pop() {
+            self.tick()?;
+            order.push(t);
+            tracks.extend(t.children.iter().rev());
+        }
+        let kind = |id: Option<&str>, k: &str| {
+            id.and_then(|id| ids.get(id))
+                .filter(|r| r.kind == k)
+                .map(|r| r.id)
+        };
+        let all = order
+            .iter()
+            .map(|t| (Some(*t), t.channel.as_deref()))
+            .chain(chans.iter().map(|c| (None, Some(*c))));
+        for (t, c) in all {
+            self.tick()?;
+            if let Some(t) = t
+                && let (Some(id), Some(n)) =
+                    (t.named.id.as_deref(), kind(t.named.id.as_deref(), "track"))
+            {
+                let audio = t.content.contains(&DpContentType::Audio)
+                    && !t.content.contains(&DpContentType::Notes);
+                self.claims.lanes.reserve((n, audio), id, None);
+            }
+            let Some(c) = c else { continue };
+            let cid = c.named.id.as_deref();
+            let copy = cid.and_then(copied_channel).map(|(s, _)| s);
+            if let (Some(id), Some(n)) = (cid, kind(cid, "strip")) {
+                self.claims.strips.reserve(n, id, copy.filter(|s| *s == n));
+            }
+            for d in &c.devices {
+                let did = d.named.id.as_deref();
+                if let (Some(id), Some(n)) = (did, kind(did, "device")) {
+                    self.claims.slots.reserve(n, id, copy);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The swatch nearest `hex` (Changed unless exact); a malformed colour
@@ -995,7 +1133,7 @@ impl<'a, 'p> Cx<'a, 'p> {
                                     .or(t.channel.as_ref().and_then(|c| c.named.color.as_deref())),
                             );
                             self.comment(t.named.comment.as_deref(), || format!("track '{name}'"));
-                            let tag = t.channel.as_deref().and_then(|c| self.strip_named(c));
+                            let tag = t.channel.as_deref().and_then(|c| self.strip_named(c, None));
                             if let Some(slot) = plan.buses.get_mut(b) {
                                 *slot = BusPlan { name, mix, tag };
                             }
@@ -1018,7 +1156,7 @@ impl<'a, 'p> Cx<'a, 'p> {
                             self.name(Some(&name), || format!("Bus {}", b.saturating_add(1)));
                         let mut mix = self.mix(c, &name, Out::Master, false, None)?;
                         mix.colour = self.colour(c.named.color.as_deref());
-                        let tag = self.strip_named(c);
+                        let tag = self.strip_named(c, None);
                         if let Some(slot) = plan.buses.get_mut(b) {
                             *slot = BusPlan { name, mix, tag };
                         }
@@ -1042,22 +1180,27 @@ impl<'a, 'p> Cx<'a, 'p> {
         let name = self.name(t.named.name.as_deref(), || format!("Track {n}"));
         self.comment(t.named.comment.as_deref(), || format!("track '{name}'"));
         let channel = t.channel.as_deref();
-        self.copy = channel
-            .and_then(|c| c.named.id.as_deref())
-            .and_then(copied_strip);
         // The audio part of a track: audio and no notes (a split track's
         // second half, or an audio track).
         let audio_part =
             t.content.contains(&DpContentType::Audio) && !t.content.contains(&DpContentType::Notes);
+        let id = t.named.id.as_deref();
         let tag = self
             .named(
-                t.named.id.as_deref(),
+                id,
                 &["track"],
                 t.named.comment.as_deref(),
                 &[TagKind::Track],
             )
-            .map(|n| (n.number(), audio_part))
-            .filter(|&key| first(&mut self.claims.lanes, &mut self.claims.ignored, key));
+            .and_then(|named| {
+                let key = (named.number(), audio_part);
+                let claims = &mut self.claims;
+                claims
+                    .lanes
+                    .take(key, &named, id, None, &mut claims.ignored)
+                    .then_some(key)
+            });
+        self.copy = channel.and_then(|c| self.copy_of(c, tag.map(|(l, _)| l)));
         let devices = channel.map_or(&[][..], |c| c.devices.as_slice());
         let first = devices
             .iter()
@@ -1136,7 +1279,8 @@ impl<'a, 'p> Cx<'a, 'p> {
             self.add(ItemKind::LeftOut, NO_STRIP, Some(name.clone()));
         }
         let strip_tag = if owns {
-            channel.and_then(|c| self.strip_named(c))
+            let copy = self.copy;
+            channel.and_then(|c| self.strip_named(c, copy))
         } else {
             None
         };
@@ -1247,17 +1391,22 @@ impl<'a, 'p> Cx<'a, 'p> {
         if !(self.env.installed)(format, id) {
             self.add(ItemKind::Note, NOT_INSTALLED, Some(name.clone()));
         }
+        let did = d.named.id.as_deref();
         let tag = self
             .named(
-                d.named.id.as_deref(),
+                did,
                 &["device"],
                 d.named.comment.as_deref(),
                 &[TagKind::Device, TagKind::Eq],
             )
-            .map(|n| n.number())
-            .filter(|&n| {
+            .and_then(|named| {
+                let n = named.number();
                 let copy = self.copy;
-                first_or_copy(&mut self.claims.slots, &mut self.claims.ignored, n, copy)
+                let claims = &mut self.claims;
+                claims
+                    .slots
+                    .take(n, &named, did, copy, &mut claims.ignored)
+                    .then_some(n)
             });
         let state = match &d.state {
             None => None,

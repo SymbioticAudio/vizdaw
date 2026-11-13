@@ -246,7 +246,9 @@ impl<'p> Tl<'_, '_, 'p> {
                         at: a.at,
                         value: a.value,
                     },
-                    tag: a.tag,
+                    // Automation names no event of the project it came
+                    // from.
+                    tag: None,
                 });
             }
         }

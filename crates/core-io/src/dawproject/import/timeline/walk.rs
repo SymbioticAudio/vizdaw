@@ -126,40 +126,47 @@ impl<'p> Tl<'_, '_, 'p> {
             None => 0,
         };
         // The event it names: the first clip to name one keeps it, and so
-        // do the clips after it on the same track that each start where
-        // the one before ends or later (the export writes a use one clip
-        // per pass of its track's loop, in time order, `use_clips`).
-        let start = self.at(f, c.time).unwrap_or(i64::MIN);
-        let end = c
-            .duration
-            .and_then(|d| self.at(f, c.time + d))
-            .unwrap_or(start)
-            .max(start);
-        let tag = self
+        // do the later clips of that use's passes on the same track: the
+        // export writes a use its track's loop splits as one clip per pass,
+        // each with `pass_comment(use, pass)`, the passes rising in file
+        // order (`use_clips`). A clip's first pass tag counts; any other is
+        // ignored and counted.
+        let comment = c.named.comment.as_deref();
+        let passes: Vec<u64> = comment
+            .map(|c| strip_tags(c).1)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| *k == TagKind::Pass)
+            .map(|(_, p)| p)
+            .collect();
+        if let Some(extra) = passes.len().checked_sub(1) {
+            self.cx.claims.ignored = self.cx.claims.ignored.saturating_add(extra);
+        }
+        let pass = passes.first().copied();
+        let named = self
             .cx
-            .named(None, &[], c.named.comment.as_deref(), &[TagKind::Event])
-            .map(|n| n.number())
-            .filter(|&n| {
-                let claims = &mut self.cx.claims;
-                match claims.events.get_mut(&n) {
-                    None => {
-                        claims.events.insert(n, (track, end));
-                        true
-                    }
-                    Some((t, last)) if *t == track => {
-                        let follows = start >= *last;
-                        *last = (*last).max(end);
-                        if !follows {
-                            claims.ignored = claims.ignored.saturating_add(1);
-                        }
-                        follows
-                    }
-                    Some(_) => {
-                        claims.ignored = claims.ignored.saturating_add(1);
-                        false
-                    }
+            .named_beside(None, &[], comment, &[TagKind::Event], &[TagKind::Pass]);
+        if named.is_none() && pass.is_some() {
+            // A pass of no use.
+            self.cx.claims.ignored = self.cx.claims.ignored.saturating_add(1);
+        }
+        let tag = named.map(|n| n.number()).filter(|&n| {
+            let claims = &mut self.cx.claims;
+            match claims.events.get_mut(&n) {
+                None => {
+                    claims.events.insert(n, (track, pass));
+                    true
                 }
-            });
+                Some((t, last @ Some(_))) if *t == track && pass > *last => {
+                    *last = pass;
+                    true
+                }
+                Some(_) => {
+                    claims.ignored = claims.ignored.saturating_add(1);
+                    false
+                }
+            }
+        });
         let mut tf = *f;
         tf.tag = tag;
         let f = &tf;

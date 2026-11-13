@@ -18,7 +18,7 @@
 
 use super::export::{AudioFile, ClipRule, Layout, LeftOutAudio, Part, RegionGain, Ticker};
 use super::schema::*;
-use super::units::{TagKind, beats, linear_gain, tag};
+use super::units::{TagKind, beats, linear_gain, pass_comment, tag};
 use crate::IoError;
 use crate::midi_out;
 use crate::report::{ItemKind, Report};
@@ -587,9 +587,9 @@ impl Arr<'_, '_, '_, '_, '_> {
 
     /// The clips of reference use `id` (`event` on track `p`): one per pass
     /// of the track's loop, looped when every pass of the use is the same.
-    /// Each carries the use's tag; the import takes the clips of one track
-    /// that each start at or after the end of the one before as one use's
-    /// passes (`import::timeline`'s `top_clip`).
+    /// Each carries the use's tag; when there are several, each carries
+    /// [`pass_comment`]`(use, k)`, which the import reads to take them as one
+    /// use (`import::timeline`'s `top_clip`).
     fn use_clips(
         &mut self,
         p: &Part<'_>,
@@ -659,6 +659,7 @@ impl Arr<'_, '_, '_, '_, '_> {
             passes.entry(k).or_default().push(r);
         }
         let muted = l.muted.contains(&id);
+        let split = passes.len() > 1;
         for (k, evs) in passes {
             let base = period.map_or(0, |per| per.saturating_mul(k));
             let lt = first.saturating_add(base);
@@ -708,11 +709,16 @@ impl Arr<'_, '_, '_, '_, '_> {
                     ),
                 )
             };
+            let pass = u64::try_from(k).unwrap_or(0);
             clip.1.named = DpNamed {
                 id: None,
                 name: (!name.is_empty()).then(|| name.clone()),
                 color: None,
-                comment: Some(tag(TagKind::Event, id.0)),
+                comment: Some(if split {
+                    pass_comment(id.0, pass)
+                } else {
+                    tag(TagKind::Event, id.0)
+                }),
             };
             if muted {
                 clip.1.enable = Some(false);

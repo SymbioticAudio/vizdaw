@@ -390,7 +390,6 @@ struct AutoEv<'p> {
     mute: bool,
     at: AutoAt,
     value: f64,
-    tag: Option<u64>,
 }
 
 /// What makes clips share.

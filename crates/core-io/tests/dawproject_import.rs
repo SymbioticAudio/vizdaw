@@ -1457,6 +1457,78 @@ fn a_hostile_count_of_tracks_is_refused_at_once() {
     }
 }
 
+/// The files the 6d golden import (`import_6d_golden.json`) records.
+fn golden_cases(dir: &Path) -> Vec<(&'static str, DpPackage)> {
+    vec![
+        ("hand_other", hand_other(dir)),
+        ("many_notes", small(dir, &many_notes(100), None)),
+        (
+            "clap_tags",
+            small(
+                dir,
+                &project_xml(
+                    &(clap_track("A", "a", "vz:t3 lead", "mc")
+                        + &clap_track("B", "b", "vz:t3 vz:s9", "mc")),
+                    "",
+                ),
+                None,
+            ),
+        ),
+        ("hostile", small(dir, &golden_hostile(), None)),
+    ]
+}
+
+/// Tagged clips and tracks, duplicated and of the wrong kind.
+fn golden_hostile() -> String {
+    let structure = concat!(
+        r#"<Track id="ta" name="A" comment="vz:t1" contentType="notes"/>"#,
+        r#"<Track id="tb" name="B" comment="vz:t1" contentType="notes"/>"#,
+        r#"<Track id="td" name="D" comment="vz:s3" contentType="notes"/>"#,
+    );
+    let mut s = String::new();
+    for i in 0..50 {
+        s.push_str(&format!(
+            r#"<Clip time="{}" duration="1" comment="vz:e5"><Notes><Note time="0" duration="0.5" channel="0" key="60" vel="0.5"/></Notes></Clip>"#,
+            i
+        ));
+    }
+    let arrangement = format!(r#"<Lanes timeUnit="beats"><Clips track="ta">{s}</Clips></Lanes>"#);
+    project_xml(structure, &arrangement)
+}
+
+/// One case's import: its projection and its report's lines.
+fn golden_of(pkg: &DpPackage) -> serde_json::Value {
+    let a = imported(pkg, &yes);
+    let p = core_io::dawproject::record::projection(a.h.doc(), a.seq).expect("projects");
+    let lines: Vec<String> = a
+        .report
+        .items
+        .iter()
+        .map(|i| format!("{:?} {} x{} {:?}", i.kind, i.what, i.count, i.details))
+        .collect();
+    serde_json::json!({ "projection": p, "report": lines })
+}
+
+/// The import of each golden case is the one 6d made (generated at 2d89a24),
+/// apart from the new tags line.
+#[test]
+fn untagged_behaviour_matches_6d() {
+    let want: serde_json::Value =
+        serde_json::from_slice(&fixture("import_6d_golden.json")).expect("the golden file");
+    let dir = tempfile::tempdir().unwrap();
+    for (name, pkg) in golden_cases(dir.path()) {
+        let mut got = golden_of(&pkg);
+        if let Some(lines) = got["report"].as_array_mut() {
+            lines.retain(|l| {
+                !l.as_str()
+                    .unwrap_or("")
+                    .contains(core_io::dawproject::import::TAGS_IGNORED)
+            });
+        }
+        assert_eq!(got, want[name], "{name}");
+    }
+}
+
 // ---------------------------------------------------------------- origins (plan 6e Task 2)
 
 mod origins {
@@ -1734,7 +1806,7 @@ mod origins {
         assert_eq!(x.project_xml.matches(&strip_tag).count(), 2, "two copies");
         let lp = lane_of(&doc, seq, "Loop");
         let use_id = events(&lp, is_use)[0];
-        let use_tag = format!(r#"comment="vz:e{}""#, use_id.0);
+        let use_tag = format!(r#"comment="vz:e{} vz:p"#, use_id.0);
         assert!(
             x.project_xml.matches(&use_tag).count() > 1,
             "one clip per pass"
@@ -1822,8 +1894,8 @@ mod origins {
     }
 
     /// The hostile file: hostile tags and IDs, and `clips` one-note clips
-    /// on track A all tagged `vz:e5`, each starting before the one before
-    /// it ends (so they are not one use's passes).
+    /// on track A all tagged `vz:e5` (with no pass IDs, so they are not
+    /// one use's passes).
     fn hostile(clips: usize) -> String {
         let structure = concat!(
             r#"<Track id="ta" name="A" comment="vz:t1" contentType="notes"/>"#,
@@ -1842,6 +1914,154 @@ mod origins {
         let arrangement =
             format!(r#"<Lanes timeUnit="beats"><Clips track="ta">{s}</Clips></Lanes>"#);
         project_xml(structure, &arrangement)
+    }
+
+    fn track_ref(id: u64) -> ObjectRef {
+        ObjectRef {
+            kind: "track".into(),
+            id,
+            slot: None,
+            index: None,
+        }
+    }
+
+    #[test]
+    fn trusted_ids_reserve_before_tags_claim() {
+        // The other DAW duplicated track 5: the copy, above the original,
+        // has a new ID and the original's comment.
+        let dir = tempfile::tempdir().unwrap();
+        let structure = concat!(
+            r#"<Track id="x1" name="Bass copy" comment="vz:t5" contentType="notes"/>"#,
+            r#"<Track id="t5" name="Bass" comment="vz:t5" contentType="notes"/>"#,
+        );
+        let pkg = small(dir.path(), &project_xml(structure, ""), None);
+        let ids = BTreeMap::from([("t5".to_owned(), track_ref(5))]);
+        let t = tagged(&pkg, &BTreeMap::new(), Some(&ids));
+        let new = t.a.h.doc();
+        let id = |n: &str| lane_of(new, t.a.seq, n).id;
+        assert_eq!(t.origins.lanes.get(&id("Bass")), Some(&(5, false)));
+        assert_eq!(t.origins.lanes.get(&id("Bass copy")), None);
+        let i = item(&t.a.report, ItemKind::Note, TAGS_IGNORED).expect("the copy's tag is counted");
+        assert_eq!(i.count, 1);
+
+        // Without trusted IDs, the first tag keeps it.
+        let t = tagged(&pkg, &BTreeMap::new(), None);
+        let new = t.a.h.doc();
+        let id = |n: &str| lane_of(new, t.a.seq, n).id;
+        assert_eq!(t.origins.lanes.get(&id("Bass copy")), Some(&(5, false)));
+        assert_eq!(t.origins.lanes.get(&id("Bass")), None);
+    }
+
+    /// Track "A" (`vz:t1`) with a one-note clip at each of `clips`: (beat,
+    /// its comment, else `vz:e5`).
+    fn clips_of(clips: &[(u32, Option<&str>)]) -> String {
+        let s: String = clips
+            .iter()
+            .map(|(at, id)| {
+                let comment = id.unwrap_or("vz:e5");
+                format!(
+                    r#"<Clip time="{at}" duration="1" comment="{comment}"><Notes><Note time="0" duration="0.5" channel="0" key="60" vel="0.5"/></Notes></Clip>"#
+                )
+            })
+            .collect();
+        project_xml(
+            r#"<Track id="ta" name="A" comment="vz:t1" contentType="notes"/>"#,
+            &format!(r#"<Lanes timeUnit="beats"><Clips track="ta">{s}</Clips></Lanes>"#),
+        )
+    }
+
+    #[test]
+    fn only_the_exports_passes_share_a_use() {
+        let dir = tempfile::tempdir().unwrap();
+        for (what, clips, kept, ignored) in [
+            (
+                "a duplicate later on, not overlapping",
+                vec![(0, None), (8, None)],
+                1,
+                1,
+            ),
+            (
+                "one use's passes",
+                vec![
+                    (0, Some("vz:e5 vz:p0")),
+                    (8, Some("vz:e5 vz:p1")),
+                    (16, Some("vz:e5 vz:p3")),
+                ],
+                3,
+                0,
+            ),
+            (
+                "a duplicate of a pass",
+                vec![
+                    (0, Some("vz:e5 vz:p0")),
+                    (8, Some("vz:e5 vz:p1")),
+                    (16, None),
+                ],
+                2,
+                1,
+            ),
+            (
+                "passes out of order",
+                vec![(0, Some("vz:e5 vz:p1")), (8, Some("vz:e5 vz:p0"))],
+                1,
+                1,
+            ),
+            (
+                "a pass of no use",
+                vec![(0, Some("vz:e5 vz:p0")), (8, Some("vz:p1"))],
+                1,
+                1,
+            ),
+            (
+                "two pass tags",
+                vec![(0, Some("vz:e5 vz:p0")), (8, Some("vz:e5 vz:p1 vz:p2"))],
+                2,
+                1,
+            ),
+        ] {
+            let pkg = small(dir.path(), &clips_of(&clips), None);
+            let t = tagged(&pkg, &BTreeMap::new(), None);
+            let fives = t.origins.events.values().filter(|v| **v == 5).count();
+            assert_eq!(fives, kept, "{what}");
+            let n = item(&t.a.report, ItemKind::Note, TAGS_IGNORED).map_or(0, |i| i.count);
+            assert_eq!(n, ignored, "{what}");
+        }
+    }
+
+    /// Two note tracks tagged `vz:t1` and `vz:t2` on channels `ids` with
+    /// the strip tag `vz:s<strip>`, each playing an instrument tagged
+    /// `vz:d7`.
+    fn copies(ids: [&str; 2], strip: u64) -> String {
+        let track = |n: usize, id: &str| {
+            format!(
+                r#"<Track id="x{n}" name="T{n}" comment="vz:t{n}" contentType="notes"><Channel id="{id}" role="regular" destination="mc" comment="vz:s{strip}"><Devices><ClapPlugin id="{id}d7" comment="vz:d7" deviceID="org.example.p" deviceName="P" deviceRole="instrument"/></Devices></Channel></Track>"#
+            )
+        };
+        project_xml(&(track(1, ids[0]) + &track(2, ids[1])), "")
+    }
+
+    #[test]
+    fn only_the_exports_copies_share_a_strip() {
+        let dir = tempfile::tempdir().unwrap();
+        for (what, ids, strip, ignored) in [
+            ("copies of strip 5", ["c5t1", "c5t2"], 5, 0),
+            ("a copy for another track", ["c5t1", "c5t9"], 5, 2),
+            ("copies naming another strip", ["c5t1", "c5t2"], 6, 2),
+            ("channels that are not copies", ["a", "b"], 5, 2),
+        ] {
+            let pkg = small(dir.path(), &copies(ids, strip), None);
+            let t = tagged(&pkg, &BTreeMap::new(), None);
+            let n = item(&t.a.report, ItemKind::Note, TAGS_IGNORED).map_or(0, |i| i.count);
+            assert_eq!(n, ignored, "{what}");
+            let want = if ignored == 0 { 2 } else { 1 };
+            assert_eq!(
+                t.origins.strips.len(),
+                want,
+                "{what}: {:?}",
+                t.origins.strips
+            );
+            assert_eq!(t.origins.slots.len(), want, "{what}: {:?}", t.origins.slots);
+        }
     }
 
     #[test]
@@ -1907,49 +2127,5 @@ mod origins {
             .unwrap_or_else(|| panic!("no '{TAGS_IGNORED}' in {:#?}", t.a.report.items));
         assert_eq!(i.count, 10_002);
         assert!(took.as_secs_f64() < 2.0, "{took:?}");
-    }
-
-    #[test]
-    fn apply_still_matches_6d() {
-        let dir = tempfile::tempdir().unwrap();
-        let (doc, _, x) = exported();
-        let returned = package_of(dir.path(), &x, str::to_owned);
-        let media = media_of(&doc, &x, &returned);
-        let mut cases: Vec<(String, DpPackage, BTreeMap<usize, MediaSource>)> = vec![
-            ("hand_other".into(), hand_other(dir.path()), BTreeMap::new()),
-            ("export".into(), returned, media),
-        ];
-        for (name, project) in [
-            ("many_notes", many_notes(100)),
-            ("hostile", hostile(50)),
-            (
-                "clap",
-                project_xml(
-                    &(clap_track("A", "a", "vz:t3 lead", "mc")
-                        + &clap_track("B", "b", "vz:t3", "mc")),
-                    "",
-                ),
-            ),
-        ] {
-            let pkg = small(dir.path(), &project, None);
-            cases.push((name.into(), pkg, BTreeMap::new()));
-        }
-        for (name, pkg, media) in cases {
-            let imp = map(&pkg, &media, &env(&yes), &AtomicBool::new(false)).expect("maps");
-            let run = |tagged: bool| {
-                let (doc, seq) = new_doc();
-                let mut h = History::new(doc);
-                let mut report = Report::default();
-                h.begin("Import DAWproject").unwrap();
-                let states = if tagged {
-                    apply_tagged(&mut h, &imp, seq, &mut report).unwrap().0
-                } else {
-                    apply(&mut h, &imp, seq, &mut report).unwrap()
-                };
-                h.commit().unwrap();
-                (h.doc().clone(), report, states)
-            };
-            assert_eq!(run(false), run(true), "{name}");
-        }
     }
 }
