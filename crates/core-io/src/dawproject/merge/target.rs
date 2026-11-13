@@ -157,12 +157,21 @@ pub(crate) fn key(
         None => *w = format!("{w}@{tag}"),
     };
     if words.first().is_some_and(|w| w == "send") {
+        // The send's target, and which send to it this is (a strip may
+        // send to one strip twice).
         let to = c
             .zip(words.get(2).and_then(|i| i.parse::<usize>().ok()))
-            .and_then(|(c, i)| strips.get(c)?.sends.get(i).map(|s| s.0))
-            .and_then(&row);
+            .and_then(|(c, i)| {
+                let sends = &strips.get(c)?.sends;
+                let to = sends.get(i)?.0;
+                Some((to, sends.iter().take(i).filter(|x| x.0 == to).count()))
+            });
         if let Some(w) = words.get_mut(2) {
-            mark(w, to);
+            match to.and_then(|(to, n)| Some((row(to)?, n))) {
+                Some((k, 0)) => *w = k.to_string(),
+                Some((k, n)) => *w = format!("{k}#{n}"),
+                None => *w = format!("{w}@{tag}"),
+            }
         }
     }
     if words.first().is_some_and(|w| w == "param") {
@@ -193,8 +202,13 @@ pub(crate) trait Holds {
     type Slot;
     /// Ours' strip for row `row`.
     fn strip(&self, row: usize) -> Option<Self::Strip>;
-    /// Strip `from`'s send to strip `to`, each with its row.
-    fn send(&self, from: (usize, Self::Strip), to: (usize, Self::Strip)) -> Option<Self::Send>;
+    /// Strip `from`'s `n`-th send to strip `to`, each with its row.
+    fn send(
+        &self,
+        from: (usize, Self::Strip),
+        to: (usize, Self::Strip),
+        n: usize,
+    ) -> Option<Self::Send>;
     /// Strip `strip`'s (of row `row`) slot for theirs' device `at`.
     fn slot(&self, strip: (usize, Self::Strip), at: &PluginAt) -> Option<Self::Slot>;
 }
@@ -233,10 +247,13 @@ pub(crate) fn resolve<H: Holds>(key: &str, ours: &H) -> Result<Landing<H>, Missi
         Some("pan") => Ok(Landing::Pan(strip)),
         Some("mute") => Ok(Landing::Mute(strip)),
         Some("send") => {
-            let to = n(2).ok_or(Missing::Send(None))?;
+            let (to, k) = words
+                .get(2)
+                .and_then(|w| send_word(w))
+                .ok_or(Missing::Send(None))?;
             let target = ours.strip(to).ok_or(Missing::Send(Some(to)))?;
             let send = ours
-                .send((row, strip), (to, target))
+                .send((row, strip), (to, target), k)
                 .ok_or(Missing::Send(Some(to)))?;
             Ok(Landing::Send(strip, send))
         }
@@ -253,5 +270,14 @@ pub(crate) fn resolve<H: Holds>(key: &str, ours: &H) -> Result<Landing<H>, Missi
             Ok(Landing::Param(slot, q))
         }
         _ => Err(Missing::Strip),
+    }
+}
+
+/// A send key's target word ("3", or "3#1" for the second send to row
+/// 3): the target's row and which send to it.
+pub(crate) fn send_word(w: &str) -> Option<(usize, usize)> {
+    match w.split_once('#') {
+        Some((to, n)) => Some((to.parse().ok()?, n.parse().ok()?)),
+        None => Some((w.parse().ok()?, 0)),
     }
 }

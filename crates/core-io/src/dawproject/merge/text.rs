@@ -62,6 +62,11 @@ pub const USES_AS_NOTES: &str = "Uses of a sequence turned into the notes they p
 
 // ---------------------------------------------------------------- Left out
 
+/// Changed: the automation of sends ours kept to a bus the other DAW
+/// removed, removed with those sends (Task 7 case B re-review, N2).
+/// Detail: "Strip '<strip>': send to '<bus>'".
+pub const SEND_CURVES_GONE: &str =
+    "Automation of sends to buses the other DAW removed (removed with the sends)";
 /// Left out: devices theirs replaced with plug-ins VizDAW cannot host
 /// (Ruling 10). Detail: the plug-in's name.
 pub const VST_KEPT: &str =
@@ -104,7 +109,7 @@ pub const SEQUENCE_GONE: &str =
 
 /// Every report line above with the group it goes in, for the app's
 /// grouping and the tests.
-pub const LINES: [(&str, ItemKind); 17] = [
+pub const LINES: [(&str, ItemKind); 18] = [
     (CONFLICT_TAKE, ItemKind::Conflict),
     (CONFLICT_SETTING, ItemKind::Conflict),
     (KEPT_EMPTY, ItemKind::Conflict),
@@ -115,6 +120,7 @@ pub const LINES: [(&str, ItemKind); 17] = [
     (PRIVATE_COPIES, ItemKind::Changed),
     (LOOPS_UNROLLED, ItemKind::Changed),
     (USES_AS_NOTES, ItemKind::Changed),
+    (SEND_CURVES_GONE, ItemKind::Changed),
     (VST_KEPT, ItemKind::LeftOut),
     (MERGED, ItemKind::Note),
     (BY_NAME, ItemKind::Note),

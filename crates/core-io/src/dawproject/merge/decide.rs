@@ -257,6 +257,11 @@ pub fn plan(
     let base_ids = base_track_ids(&b, base.identity.as_ref());
     let untouched = untouched_regions(&matches, (&b, &base_ids), &theirs);
     let (mut theirs, settled) = held(theirs, &b, &o, ours, seq, base.origin, &untouched)?;
+    split_curves(
+        &mut theirs,
+        &matches,
+        [(&b, &base_ids), (&o, &ours_side.1.tracks)],
+    );
     let doubled = rehome_curves(&mut theirs, &matches);
     stop(cancel)?;
     let ours_origins = self_origins(&ours_side.1);
@@ -528,6 +533,73 @@ fn held(
     Ok((theirs, lines))
 }
 
+/// Theirs' curves on a split track's notes part that drive its audio
+/// part's strip, moved to the audio part (Task 7 case B re-review, N1).
+/// The file holds a split track's curves on its notes track and the
+/// import makes the two halves two tracks; base and ours project such a
+/// curve on the audio part (`record`), so theirs must too. Two of theirs'
+/// tracks are the halves of one split track when they match the notes and
+/// the audio part of one lane of base or ours.
+fn split_curves(theirs: &mut Theirs, m: &Matches, sides: [(&Projection, &[TrackIds]); 2]) {
+    let halves = |r: &Matched, side: usize| if side == 0 { r.base } else { r.ours };
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for rn in &m.tracks {
+        for ra in &m.tracks {
+            let (Some(tn), Some(ta)) = (rn.theirs, ra.theirs) else {
+                continue;
+            };
+            if tn == ta {
+                continue;
+            }
+            let split = sides.iter().zip(0..).any(|((p, ids), side)| {
+                let (Some(n), Some(a)) = (halves(rn, side), halves(ra, side)) else {
+                    return false;
+                };
+                let lane = |i: usize| ids.get(i).map(|x| x.lane);
+                lane(n).is_some()
+                    && lane(n) == lane(a)
+                    && p.tracks.get(n).is_some_and(|x| !x.audio)
+                    && p.tracks.get(a).is_some_and(|x| x.audio)
+            });
+            if split {
+                pairs.push((tn, ta));
+            }
+        }
+    }
+    for (tn, ta) in pairs {
+        let p = &mut theirs.projection.tracks;
+        let i = &mut theirs.identity.tracks;
+        let Some(strip) = p.get(ta).and_then(|x| x.strip) else {
+            continue;
+        };
+        let drives = |name: &str| {
+            name.split(' ').nth(1).and_then(|c| c.parse::<usize>().ok()) == Some(strip)
+        };
+        let (Some(pn), Some(inn)) = (p.get(tn), i.get(tn)) else {
+            continue;
+        };
+        if pn.automation.len() != inn.automation.len() {
+            continue;
+        }
+        let mut moved = Vec::new();
+        for k in (0..pn.automation.len()).rev() {
+            if pn.automation.get(k).is_some_and(|(n, _)| drives(n)) {
+                moved.push(k);
+            }
+        }
+        for k in moved {
+            let curve = p.get_mut(tn).map(|x| x.automation.remove(k));
+            let ats = i.get_mut(tn).map(|x| x.automation.remove(k));
+            if let (Some(c), Some(a), Some(pt), Some(it)) =
+                (curve, ats, p.get_mut(ta), i.get_mut(ta))
+            {
+                pt.automation.push(c);
+                it.automation.push(a);
+            }
+        }
+    }
+}
+
 /// Moves each curve of a track new in theirs (added, or new on both sides)
 /// that drives another track's strip, one no new track plays through, to
 /// that track: it is theirs' automation for that track, decided by the
@@ -705,9 +777,12 @@ fn held_lines(
 /// apply's count, past the details it keeps (Task 7).
 fn dry_run(plan: &MergePlan, ours: &Document, cancel: &AtomicBool) -> Report {
     let mut out = Report::default();
+    // A bus removed may take ours' send curves with it
+    // (`text::SEND_CURVES_GONE`).
     let edits = plan.decisions.iter().any(|d| {
-        d.outcome == Outcome::Theirs
-            && matches!(d.unit, Unit::Notes | Unit::Regions | Unit::Automation(_))
+        (d.outcome == Outcome::Theirs
+            && matches!(d.unit, Unit::Notes | Unit::Regions | Unit::Automation(_)))
+            || (d.outcome == Outcome::Removed && d.unit == Unit::Bus)
     });
     if !edits {
         return out;
@@ -1162,15 +1237,24 @@ impl Holds for Leaves<'_, '_> {
         (ours || (r.ours.is_none() && d.decided(&Unit::Bus, row, Outcome::Added))).then_some(())
     }
 
-    fn send(&self, (row, _): (usize, ()), (to, _): (usize, ())) -> Option<()> {
+    fn send(&self, (row, _): (usize, ()), (to, _): (usize, ()), n: usize) -> Option<()> {
         let d = self.0;
         let r = d.m.strips.get(row)?;
         let sends_to = |s: Side, i: usize| {
-            d.strip_of(s, i)
-                .is_some_and(|st| st.sends.iter().any(|x| d.skey(s, x.0) == Some(to)))
+            d.strip_of(s, i).is_some_and(|st| {
+                st.sends
+                    .iter()
+                    .filter(|x| d.skey(s, x.0) == Some(to))
+                    .count()
+                    > n
+            })
         };
         let held = match r.ours {
-            Some(o) => sends_to(Side::Ours, o) || d.decided(&Unit::Send(to), row, Outcome::Theirs),
+            // The strip step adds or edits only the first send to a target.
+            Some(o) => {
+                sends_to(Side::Ours, o)
+                    || (n == 0 && d.decided(&Unit::Send(to), row, Outcome::Theirs))
+            }
             // An added bus comes with its own mix.
             None => r.theirs.is_some_and(|t| sends_to(Side::Theirs, t)),
         };
@@ -1665,8 +1749,8 @@ impl<'a> Decider<'a> {
         let strip = |i: usize| {
             words
                 .get(i)
-                .and_then(|w| w.parse::<usize>().ok())
-                .is_some_and(|k| by_guess(self.m.strips.get(k)))
+                .and_then(|w| target::send_word(w))
+                .is_some_and(|(k, _)| by_guess(self.m.strips.get(k)))
         };
         match words.first().copied() {
             Some("send") => {}

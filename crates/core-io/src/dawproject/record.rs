@@ -982,7 +982,9 @@ pub(super) fn project_with_identity(
                 // the notes part.
                 EventBody::Automation { target, .. }
                     if p.split && p.audio != drives_audio(*target) => {}
-                _ if p.audio && p.split => {}
+                // The audio half holds only its regions and the curves that
+                // drive its own strip (above).
+                _ if p.audio && p.split && !matches!(r.body, EventBody::Automation { .. }) => {}
                 EventBody::Note {
                     pitch,
                     velocity,

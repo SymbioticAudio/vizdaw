@@ -19,7 +19,8 @@ use core_io::dawproject::merge::decide::{
 use core_io::dawproject::merge::text::{
     self, ADDED_BOTH, BY_NAME, CONFLICT_SETTING, CONFLICT_TAKE, DELETED_HERE, DELETED_THERE,
     KEPT_EMPTY, LINES, LOOPS_UNROLLED, MERGED, NOT_APPLIED, NOTHING, OLD_EXPORT, PRIVATE_COPIES,
-    SEQUENCE_GONE, SHARED_ELSEWHERE, SNAPSHOT_CHOSEN, TAKE_PARTS, USES_AS_NOTES, VST_KEPT, summary,
+    SEND_CURVES_GONE, SEQUENCE_GONE, SHARED_ELSEWHERE, SNAPSHOT_CHOSEN, TAKE_PARTS, USES_AS_NOTES,
+    VST_KEPT, summary,
 };
 use core_io::dawproject::merge::theirs::{Theirs, theirs};
 use core_io::dawproject::package::open;
@@ -1220,6 +1221,7 @@ fn report_lines_are_listed() {
         (PRIVATE_COPIES, ItemKind::Changed),
         (LOOPS_UNROLLED, ItemKind::Changed),
         (USES_AS_NOTES, ItemKind::Changed),
+        (SEND_CURVES_GONE, ItemKind::Changed),
         (VST_KEPT, ItemKind::LeftOut),
         (MERGED, ItemKind::Note),
         (BY_NAME, ItemKind::Note),
@@ -1230,7 +1232,7 @@ fn report_lines_are_listed() {
     ] {
         assert_eq!(kind_of(what), kind, "{what}");
     }
-    assert_eq!(LINES.len(), 17);
+    assert_eq!(LINES.len(), 18);
 
     let mut reports: Vec<Report> = Vec::new();
     let (doc, seq) = fixture();

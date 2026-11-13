@@ -84,7 +84,8 @@ pub const LABEL: &str = "Merge DAWproject";
 
 /// The Ruling 8 lines only an apply knows; `decide::plan` lists them in the
 /// preview from a dry run of [`apply_merge`].
-pub(super) const APPLIED_LINES: [&str; 4] = [
+pub(super) const APPLIED_LINES: [&str; 5] = [
+    text::SEND_CURVES_GONE,
     text::PRIVATE_COPIES,
     text::LOOPS_UNROLLED,
     text::USES_AS_NOTES,
@@ -199,7 +200,7 @@ pub fn apply_merge_until(
     reflag(h, &out.flagged)?;
     // 6. Deletions.
     cx.stop()?;
-    deletions(h, &cx)?;
+    deletions(h, &cx, &mut out)?;
 
     let counts = report.summary;
     // The plan's report holds the preview's dry run of these lines
@@ -1150,9 +1151,19 @@ impl target::Holds for Now<'_, '_> {
         self.cx.ours_strip_of_row(row)
     }
 
-    fn send(&self, (_, from): (usize, StripId), (_, to): (usize, StripId)) -> Option<SendIndex> {
+    fn send(
+        &self,
+        (_, from): (usize, StripId),
+        (_, to): (usize, StripId),
+        n: usize,
+    ) -> Option<SendIndex> {
         let strip = self.doc.mixer().strip(from).ok()?;
-        let k = strip.sends.iter().position(|x| x.target == to)?;
+        let (k, _) = strip
+            .sends
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.target == to)
+            .nth(n)?;
         Some(SendIndex(u16::try_from(k).ok()?))
     }
 
@@ -1886,7 +1897,8 @@ fn send(
 /// every curve on it goes, and each curve on a later send of the strip
 /// is moved down one, so no curve ever drives another send. In every
 /// sequence and take of the project.
-fn send_curves_follow(h: &mut History, strip: StripId, index: usize) -> Result<(), ModelError> {
+/// Answers whether any curve was on it.
+fn send_curves_follow(h: &mut History, strip: StripId, index: usize) -> Result<bool, ModelError> {
     let mut gone = Vec::new();
     let mut moved = Vec::new();
     for s in h.doc().sequences().values() {
@@ -1919,13 +1931,14 @@ fn send_curves_follow(h: &mut History, strip: StripId, index: usize) -> Result<(
             }
         }
     }
-    if !gone.is_empty() {
+    let had = !gone.is_empty();
+    if had {
         run(h, Command::Event(EventCmd::Delete { events: gone }))?;
     }
     for (event, spec) in moved {
         run(h, Command::Event(EventCmd::Replace { event, spec }))?;
     }
-    Ok(())
+    Ok(had)
 }
 
 fn same_plugin(a: &PluginRef, b: &PluginRef) -> bool {
@@ -2144,7 +2157,7 @@ fn maps(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
 /// removed; one holding what the file cannot carry, or a split track's
 /// part whose other part stays, is emptied of what the file carries. A
 /// bus is removed.
-fn deletions(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
+fn deletions(h: &mut History, cx: &Cx<'_>, out: &mut Out) -> Result<(), ModelError> {
     let mut gone: Vec<(u64, Vec<(usize, Outcome)>)> = Vec::new();
     for d in &cx.plan.decisions {
         if d.unit != Unit::Track || !matches!(d.outcome, Outcome::Removed | Outcome::KeptEmpty) {
@@ -2199,6 +2212,27 @@ fn deletions(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
                 .and_then(|r| r.ours)
                 .and_then(|o| cx.ours_strip_at(o))
         {
+            // The bus's removal drops every send to it: their curves go
+            // first, and the later sends' move down (Task 7 case B
+            // re-review, N2). A send ours kept is listed.
+            let bus = h.doc().mixer().strip(strip)?.name.clone();
+            let mut sends: Vec<(StripId, String, usize)> = Vec::new();
+            for st in h.doc().mixer().strips().values() {
+                for (k, x) in st.sends.iter().enumerate().rev() {
+                    if x.target == strip {
+                        sends.push((st.id, st.name.clone(), k));
+                    }
+                }
+            }
+            for (from, name, k) in sends {
+                if send_curves_follow(h, from, k)? {
+                    out.report.add(
+                        ItemKind::Changed,
+                        text::SEND_CURVES_GONE,
+                        Some(format!("Strip '{name}': send to '{bus}'")),
+                    );
+                }
+            }
             run(h, Command::Mixer(MixerCmd::RemoveBus { strip }))?;
         }
     }

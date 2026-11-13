@@ -3739,6 +3739,496 @@ fn a_removed_sends_curves_go_with_it_and_never_drive_another() {
     assert_eq!(to_json(h.doc()).unwrap(), json);
 }
 
+/// Keys' audio part's strip (its audio path) in `doc`.
+fn keys_audio_strip(doc: &Document, seq: SeqId) -> StripId {
+    let path = lane(doc, seq, "Keys").audio_out.expect("an audio path");
+    doc.mixer().find_kind(StripKind::AudioPath(path)).unwrap()
+}
+
+/// The fader points of `strip` in `doc`, by tick.
+fn fader_points(doc: &Document, seq: SeqId, strip: StripId) -> Vec<(i64, f64)> {
+    let mut out: Vec<(i64, f64)> = doc
+        .sequence(seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .filter_map(|l| l.active())
+        .flat_map(|tk| tk.events.values())
+        .filter_map(|e| match e.body {
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(s),
+                value,
+            } if s == strip => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out
+}
+
+/// The fixture with a fader curve on Keys' audio part's strip, on Keys
+/// (a split track: notes and crossfaded regions).
+fn with_keys_audio_curve() -> (Document, SeqId, StripId) {
+    let (doc, seq) = fixture();
+    let mut h = History::new(doc);
+    let keys = lane(h.doc(), seq, "Keys").id;
+    let strip = keys_audio_strip(h.doc(), seq);
+    let point = |tick: i64, value: f64| {
+        EventSpec::new(
+            Tick(tick),
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(strip),
+                value,
+            },
+        )
+    };
+    run(
+        &mut h,
+        Command::Event(EventCmd::Insert {
+            seq,
+            lane: keys,
+            events: vec![point(0, 0.9), point(BAR, 0.9)],
+        }),
+    );
+    (h.doc().clone(), seq, strip)
+}
+
+/// Task 7 case B re-review, N1 (the reviewer's probe): a split track's
+/// curve that drives its audio part's strip is projected on the audio
+/// part, once.
+#[test]
+fn a_split_tracks_audio_strip_curve_is_on_its_audio_part() {
+    let (doc, seq, _) = with_keys_audio_curve();
+    let p = projection(&doc, seq).unwrap();
+    let audio = p
+        .tracks
+        .iter()
+        .find(|t| t.name == "Keys audio")
+        .expect("Keys' audio part");
+    let notes = p.tracks.iter().find(|t| t.name == "Keys").unwrap();
+    let c = audio.strip.unwrap();
+    let key = format!("fader {c}");
+    let on = |t: &PTrack| t.automation.iter().filter(|(n, _)| *n == key).count();
+    assert_eq!(on(audio), 1, "{:?}", audio.automation);
+    assert_eq!(on(notes), 0, "{:?}", notes.automation);
+    let curve = &audio.automation.iter().find(|(n, _)| *n == key).unwrap().1;
+    assert_eq!(curve.len(), 2);
+}
+
+/// Task 7 case B re-review, N1: theirs edits the curve on Keys' audio
+/// strip (Keys is split). It lands as theirs' points exactly, ours' not
+/// left beside them, and merging again changes nothing.
+#[test]
+fn theirs_edit_of_a_split_tracks_audio_strip_curve_replaces_ours() {
+    let (doc, seq, _) = with_keys_audio_curve();
+    let t = trip(&doc, seq);
+    let strip = keys_audio_strip(&t.base_doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let events: Vec<(EventId, EventSpec)> = lane(h.doc(), i.seq, "Keys")
+            .active()
+            .unwrap()
+            .events
+            .values()
+            .filter(|e| {
+                matches!(e.body, EventBody::Automation {
+                    target: AutomationTarget::StripFader(s), ..
+                } if s == strip)
+            })
+            .map(|e| {
+                let mut spec = e.spec();
+                let value = if e.tick.0 == 0 { 0.5 } else { 0.25 };
+                spec.body = EventBody::Automation {
+                    target: AutomationTarget::StripFader(strip),
+                    value,
+                };
+                (e.id, spec)
+            })
+            .collect();
+        assert_eq!(events.len(), 2);
+        for (event, spec) in events {
+            run(h, Command::Event(EventCmd::Replace { event, spec }));
+        }
+    });
+    let o = t.base_doc.clone();
+    assert_eq!(fader_points(&o, seq, strip), vec![(0, 0.9), (BAR, 0.9)]);
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    let curves: Vec<&Decision> = p
+        .decisions
+        .iter()
+        .filter(|d| matches!(d.unit, Unit::Automation(_)))
+        .collect();
+    assert_eq!(curves.len(), 1, "{:#?}", p.decisions);
+    assert_eq!(curves[0].outcome, Outcome::Theirs, "{:#?}", p.decisions);
+    assert_eq!(curves[0].what, "Track 'Keys audio': level automation");
+    let (h, report) = apply_on(&o, &p);
+    assert!(
+        !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
+        "{:#?}",
+        report.items
+    );
+    assert_eq!(
+        fader_points(h.doc(), seq, strip),
+        vec![(0, 0.5), (BAR, 0.25)],
+        "theirs' points exactly, not doubled"
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+    // Merging again changes nothing.
+    let (depth, json) = (h.undo_depth(), to_json(h.doc()).unwrap());
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    assert!(
+        !again
+            .decisions
+            .iter()
+            .any(|d| matches!(d.unit, Unit::Automation(_)) && d.outcome != Outcome::Same),
+        "{:#?}",
+        again.decisions
+    );
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), depth);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
+/// Task 7 case B re-review, N2: Bass sends to Reverb (0), Delay (1) and
+/// Echo (2), each automated. Theirs removes the Reverb bus; ours changed
+/// Bass's Reverb send and its curve, so both are kept until the bus goes.
+/// The bus's removal drops the send: its curve goes with it in the same
+/// transaction, listed, and Delay's and Echo's curves move down with
+/// their sends, so none drives another send. Merging again changes
+/// nothing.
+#[test]
+fn a_removed_buses_send_curves_go_with_it_and_never_drive_another() {
+    let (mut doc, seq) = fixture();
+    let (delay, echo) = {
+        let mut h = History::new(doc.clone());
+        let bass = lane(h.doc(), seq, "Bass").id;
+        let dest = lane(h.doc(), seq, "Bass").midi_dest.unwrap();
+        let strip = h
+            .doc()
+            .mixer()
+            .find_kind(StripKind::Instrument(dest))
+            .unwrap();
+        let bus = |h: &mut History, name: &str| {
+            let r = h
+                .execute(
+                    &Command::Mixer(MixerCmd::AddBus {
+                        name: name.into(),
+                        index: None,
+                    }),
+                    &ViewFilter::default(),
+                )
+                .unwrap();
+            let b = created(&r, |id| match id {
+                AnyId::Strip(s) => Some(*s),
+                _ => None,
+            });
+            run(
+                h,
+                Command::Mixer(MixerCmd::AddSend {
+                    strip,
+                    send: AuxSend {
+                        target: b,
+                        level_db: -6.0,
+                        pre_fader: false,
+                        enabled: true,
+                    },
+                }),
+            );
+            b
+        };
+        let delay = bus(&mut h, "Delay");
+        let echo = bus(&mut h, "Echo");
+        let point = |i: u16, tick: i64, value: f64| {
+            EventSpec::new(
+                Tick(tick),
+                EventBody::Automation {
+                    target: AutomationTarget::SendLevel(strip, SendIndex(i)),
+                    value,
+                },
+            )
+        };
+        run(
+            &mut h,
+            Command::Event(EventCmd::Insert {
+                seq,
+                lane: bass,
+                events: vec![
+                    point(0, BAR, 0.5),
+                    point(1, BAR, 0.75),
+                    point(1, 3 * BAR, 0.125),
+                    point(2, 2 * BAR, 0.375),
+                ],
+            }),
+        );
+        doc = h.doc().clone();
+        (delay, echo)
+    };
+    let t = trip(&doc, seq);
+    let i = ids(&t);
+    // Theirs as another DAW returns it: Reverb and its curve gone, the
+    // other curves on their sends.
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let mut gone = Vec::new();
+        let mut moved = Vec::new();
+        for e in lane(h.doc(), i.seq, "Bass")
+            .active()
+            .unwrap()
+            .events
+            .values()
+        {
+            if let EventBody::Automation {
+                target: AutomationTarget::SendLevel(s, k),
+                value,
+            } = e.body
+                && s == i.bass_strip
+            {
+                if k.0 == 0 {
+                    gone.push(e.id);
+                } else {
+                    let mut spec = e.spec();
+                    spec.body = EventBody::Automation {
+                        target: AutomationTarget::SendLevel(s, SendIndex(k.0 - 1)),
+                        value,
+                    };
+                    moved.push((e.id, spec));
+                }
+            }
+        }
+        run(h, Command::Event(EventCmd::Delete { events: gone }));
+        for (event, spec) in moved {
+            run(h, Command::Event(EventCmd::Replace { event, spec }));
+        }
+        run(h, Command::Mixer(MixerCmd::RemoveBus { strip: i.reverb }));
+    });
+    let o = ours(&t, |h, i| {
+        run(
+            h,
+            Command::Mixer(MixerCmd::EditSend {
+                strip: i.bass_strip,
+                index: 0,
+                send: AuxSend {
+                    target: i.reverb,
+                    level_db: -4.0,
+                    pre_fader: false,
+                    enabled: true,
+                },
+            }),
+        );
+        run(
+            h,
+            Command::Event(EventCmd::Insert {
+                seq: i.seq,
+                lane: i.bass,
+                events: vec![EventSpec::new(
+                    Tick(2 * BAR),
+                    EventBody::Automation {
+                        target: AutomationTarget::SendLevel(i.bass_strip, SendIndex(0)),
+                        value: 0.25,
+                    },
+                )],
+            }),
+        );
+    });
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    assert!(
+        p.decisions
+            .iter()
+            .any(|d| d.unit == Unit::Bus && d.outcome == Outcome::Removed),
+        "{:#?}",
+        p.decisions
+    );
+    let bass_name = o.mixer().strip(i.bass_strip).unwrap().name.clone();
+    let line = format!("Strip '{bass_name}': send to 'Reverb'");
+    assert_eq!(
+        item(&p.report, ItemKind::Changed, text::SEND_CURVES_GONE).details,
+        vec![line.clone()],
+        "the preview lists it"
+    );
+    let (h, report) = apply_on(&o, &p);
+    assert_eq!(
+        item(&report, ItemKind::Changed, text::SEND_CURVES_GONE).details,
+        vec![line]
+    );
+    let sends: Vec<StripId> = h
+        .doc()
+        .mixer()
+        .strip(i.bass_strip)
+        .unwrap()
+        .sends
+        .iter()
+        .map(|s| s.target)
+        .collect();
+    assert_eq!(sends, vec![delay, echo]);
+    assert_eq!(
+        send_points(h.doc(), seq, i.bass_strip, delay),
+        vec![(BAR, 0.75), (3 * BAR, 0.125)]
+    );
+    assert_eq!(
+        send_points(h.doc(), seq, i.bass_strip, echo),
+        vec![(2 * BAR, 0.375)]
+    );
+    let on_bass = h
+        .doc()
+        .sequences()
+        .values()
+        .flat_map(|s| s.lanes.iter())
+        .flat_map(|l| l.takes.iter())
+        .flat_map(|tk| tk.events.values())
+        .filter(|e| {
+            matches!(e.body, EventBody::Automation {
+                target: AutomationTarget::SendLevel(s, _), ..
+            } if s == i.bass_strip)
+        })
+        .count();
+    assert_eq!(
+        on_bass, 3,
+        "only Delay's and Echo's points drive Bass's sends"
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+    // Merging again changes nothing.
+    let (depth, json) = (h.undo_depth(), to_json(h.doc()).unwrap());
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), depth, "{:#?}", again.decisions);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
+/// Task 7 case B re-review (Minor): Bass sends to Reverb twice, both
+/// automated. Theirs edits the second send's curve; it lands on the second
+/// send alone (the key names the target and which send to it), and
+/// merging again changes nothing.
+#[test]
+fn a_curve_on_a_second_send_to_one_bus_keeps_its_send() {
+    let (mut doc, seq) = fixture();
+    let point = |strip: StripId, i: u16, tick: i64, value: f64| {
+        EventSpec::new(
+            Tick(tick),
+            EventBody::Automation {
+                target: AutomationTarget::SendLevel(strip, SendIndex(i)),
+                value,
+            },
+        )
+    };
+    {
+        let mut h = History::new(doc.clone());
+        let bass = lane(h.doc(), seq, "Bass").id;
+        let dest = lane(h.doc(), seq, "Bass").midi_dest.unwrap();
+        let strip = h
+            .doc()
+            .mixer()
+            .find_kind(StripKind::Instrument(dest))
+            .unwrap();
+        let reverb = h.doc().mixer().strip(strip).unwrap().sends[0].target;
+        run(
+            &mut h,
+            Command::Mixer(MixerCmd::AddSend {
+                strip,
+                send: AuxSend {
+                    target: reverb,
+                    level_db: -3.0,
+                    pre_fader: true,
+                    enabled: true,
+                },
+            }),
+        );
+        run(
+            &mut h,
+            Command::Event(EventCmd::Insert {
+                seq,
+                lane: bass,
+                events: vec![point(strip, 0, BAR, 0.5), point(strip, 1, BAR, 0.75)],
+            }),
+        );
+        doc = h.doc().clone();
+    }
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let e = lane(h.doc(), i.seq, "Bass")
+            .active()
+            .unwrap()
+            .events
+            .values()
+            .find(|e| {
+                matches!(
+                    e.body,
+                    EventBody::Automation {
+                        target: AutomationTarget::SendLevel(_, SendIndex(1)),
+                        ..
+                    }
+                )
+            })
+            .unwrap()
+            .id;
+        run(
+            h,
+            Command::Event(EventCmd::Replace {
+                event: e,
+                spec: point(i.bass_strip, 1, BAR, 0.125),
+            }),
+        );
+    });
+    let o = t.base_doc.clone();
+    let i = ids(&t);
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    let curves: Vec<&Decision> = p
+        .decisions
+        .iter()
+        .filter(|d| matches!(d.unit, Unit::Automation(_)))
+        .collect();
+    assert_eq!(curves.len(), 1, "{:#?}", p.decisions);
+    let (h, _) = apply_on(&o, &p);
+    let at = |k: u16| -> Vec<(i64, f64)> {
+        h.doc()
+            .sequence(seq)
+            .unwrap()
+            .lanes
+            .iter()
+            .filter_map(|l| l.active())
+            .flat_map(|tk| tk.events.values())
+            .filter_map(|e| match e.body {
+                EventBody::Automation {
+                    target: AutomationTarget::SendLevel(s, SendIndex(x)),
+                    value,
+                } if s == i.bass_strip && x == k => Some((e.tick.0, value)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(at(0), vec![(BAR, 0.5)], "the first send's curve stays");
+    let second = if guessed() { 0.75 } else { 0.125 };
+    assert_eq!(at(1), vec![(BAR, second)]);
+    if guessed() {
+        assert_eq!(curves[0].outcome, Outcome::Conflict);
+    } else {
+        assert_eq!(curves[0].outcome, Outcome::Theirs);
+    }
+    let (depth, json) = (h.undo_depth(), to_json(h.doc()).unwrap());
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), depth, "{:#?}", again.decisions);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
 /// Task 7 fix round 2 (layout 2, from the 4096 run's seed): theirs sets
 /// 450 BPM, so Keys' regions (in beats in the file) come back shorter.
 /// Placed under ours' 120 BPM before the tempo map is theirs, the pair
@@ -4896,6 +5386,10 @@ stripped!(
     a_curve_on_a_send_ours_removed_is_listed,
     a_curve_on_a_plugin_ours_swapped_is_listed,
     a_removed_sends_curves_go_with_it_and_never_drive_another,
+    theirs_edit_of_a_split_tracks_audio_strip_curve_replaces_ours,
+    a_split_tracks_audio_strip_curve_is_on_its_audio_part,
+    a_removed_buses_send_curves_go_with_it_and_never_drive_another,
+    a_curve_on_a_second_send_to_one_bus_keeps_its_send,
     a_curve_on_a_plugin_theirs_adds_lands_and_merges_twice_to_nothing,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,
