@@ -2546,6 +2546,105 @@ fn a_faster_tempo_keeps_theirs_crossfades() {
     assert_eq!(to_json(h2.doc()).unwrap(), json);
 }
 
+/// Keys' regions on `doc`'s active take: (tick, crossfade, fade-in frames).
+fn keys_fades(doc: &Document, seq: SeqId) -> Vec<(i64, bool, u64)> {
+    lane(doc, seq, "Keys")
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match &e.body {
+            EventBody::AudioRegion {
+                crossfade, fade_in, ..
+            } => Some((e.tick.0, *crossfade, fade_in.length_frames)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Task 7 fix round 2 (layout 1, ours' tempo kept): theirs moves Keys'
+/// second region a beat later; ours sets 60 BPM. Under ours' tempo theirs'
+/// pair no longer overlaps, so the model clears its crossfade. The merge
+/// judges theirs' regions as the model holds them there: the change is
+/// listed with the model's own line, and merging again finds it the same.
+#[test]
+fn theirs_crossfade_that_ours_tempo_cannot_hold_is_listed_and_merges_twice_to_nothing() {
+    use core_io::dawproject::import::CROSSFADES_PLAIN;
+    use core_model::tempo::{Bpm, TempoMap};
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let [_, second] = keys_regions(&t.base_doc, seq);
+    let theirs_doc_ = moved(&t, &[second], Q);
+    let o = ours(&t, |h, i| {
+        run(
+            h,
+            Command::Sequence(SequenceCmd::SetTempo {
+                seq: i.seq,
+                tempo: TempoMap::constant(Bpm::whole(60)).unwrap(),
+            }),
+        )
+    });
+    assert!(keys_fades(&o, seq)[1].1, "ours' own pair still fits");
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    let (h, report) = apply_on(&o, &p);
+    assert_eq!(
+        keys_fades(h.doc(), seq)
+            .iter()
+            .map(|f| (f.0, f.1))
+            .collect::<Vec<_>>(),
+        vec![(0, false), (2 * Q, false)]
+    );
+    let line = item(&report, ItemKind::Changed, CROSSFADES_PLAIN);
+    assert_eq!(line.count, 1, "{:#?}", report.items);
+    assert!(
+        line.details[0].starts_with("Crossfade removed"),
+        "{:?}",
+        line.details
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+    merges_twice_to_nothing(&t, &theirs_doc_, h);
+}
+
+/// Task 7 fix round 2 (layout 2, from the 4096 run's seed): theirs sets
+/// 450 BPM, so Keys' regions (in beats in the file) come back shorter.
+/// Placed under ours' 120 BPM before the tempo map is theirs, the pair
+/// overlaps less than its fade in, which the model shortens; once the
+/// tempo is theirs the fade in is set again as theirs has it.
+#[test]
+fn a_crossfade_shortened_before_theirs_tempo_lands_is_set_again() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        p.tempo.as_mut().expect("a tempo").value = Some(450.0);
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    let theirs: Vec<(i64, bool, u64)> = p
+        .theirs
+        .projection
+        .tracks
+        .iter()
+        .find(|x| x.audio)
+        .expect("Keys' audio")
+        .regions
+        .iter()
+        .map(|r| (r.tick, r.crossfade, r.fade_in))
+        .collect();
+    assert!(theirs[1].1 && theirs[1].2 > 0, "{theirs:?}");
+    let (h, report) = apply_on(&t.base_doc, &p);
+    let merged: Vec<(bool, u64)> = keys_fades(h.doc(), seq)
+        .iter()
+        .map(|f| (f.1, f.2))
+        .collect();
+    let want: Vec<(bool, u64)> = theirs.iter().map(|f| (f.1, f.2)).collect();
+    assert_eq!(merged, want, "{:#?}", report.items);
+    assert!(rules::validate(h.doc()).is_empty());
+    let json = to_json(h.doc()).unwrap();
+    let again = plan_of(&t, &path, h.doc());
+    let (h2, _) = apply_on(h.doc(), &again);
+    assert_eq!(h2.undo_depth(), 0, "{:#?}", again.decisions);
+    assert_eq!(to_json(h2.doc()).unwrap(), json);
+}
+
 /// Task 7: as above, with ours' first Keys region trimmed, so the regions
 /// conflict: theirs' pair goes on the take "Returned 2026-11-13", which
 /// keeps its crossfade, so the same file merged again finds the take.
@@ -3652,6 +3751,8 @@ stripped!(
     a_moved_crossfaded_region_keeps_its_crossfade,
     a_renamed_track_and_a_moved_marker,
     a_merge_cancelled_partway_aborts_to_ours,
+    theirs_crossfade_that_ours_tempo_cannot_hold_is_listed_and_merges_twice_to_nothing,
+    a_crossfade_shortened_before_theirs_tempo_lands_is_set_again,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,
     both_changed_notes_become_an_alternate_take,

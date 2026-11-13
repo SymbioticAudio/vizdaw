@@ -60,7 +60,7 @@ use crate::IoError;
 use crate::dawproject::import::{Origins, VST};
 use crate::dawproject::record::{
     EventAt, Identity, PNote, PRegion, PStrip, PTrack, Projection, Snapshot, StripIds, TrackIds,
-    projection_with_identity,
+    projection_with_identity, returned,
 };
 use crate::dawproject::units::nearest_swatch;
 use crate::report::{ItemKind, Report};
@@ -240,10 +240,12 @@ pub fn plan(
         return Err(IoError::Refused(text::SEQUENCE_GONE.to_owned()));
     }
     let ours_side = projection_with_identity(ours, seq)?;
-    let mut matches = match_all(&base, &theirs, &ours_side, cancel)?;
-    stop(cancel)?;
     let b = normalised(&base.projection, &base);
     let o = normalised(&ours_side.0, &base);
+    let (theirs, settled) = held(theirs, &b, &o, ours, seq, base.origin)?;
+    stop(cancel)?;
+    let mut matches = match_all(&base, &theirs, &ours_side, cancel)?;
+    stop(cancel)?;
     pair_twins(&mut matches, &theirs.projection, &o);
     let base_ids = base_track_ids(&b, base.identity.as_ref());
     let ours_origins = self_origins(&ours_side.1);
@@ -324,6 +326,7 @@ pub fn plan(
         }
     }
     let decisions = d.out;
+    held_lines(&settled, &theirs, &matches, &decisions, &mut report);
     let mut plan = MergePlan {
         base,
         theirs,
@@ -338,6 +341,140 @@ pub fn plan(
     plan.report.merge(lines);
     stop(cancel)?;
     Ok(plan)
+}
+
+/// Theirs as the model will hold it in the merged layout (Task 7 fix
+/// round 2). When the tempo map the merge leaves is ours' (theirs did not
+/// change it, or both did and ours is kept) and differs from theirs',
+/// theirs' crossfaded pairs may overlap less there, or not at all: the
+/// model's crossfade rules (plan 6c) then shorten their fades in or clear
+/// their flags as it places them. So theirs' scratch project is settled
+/// under ours' map (in theirs' frame: ticks less `origin`), then given its
+/// own map back (a settled fade is never lengthened), and its regions are
+/// projected again; every decision then judges theirs' regions as they will
+/// be, so the same file merged again finds them the same. Answers the
+/// model's settle lines, by region.
+fn held(
+    mut theirs: Theirs,
+    b: &Projection,
+    o: &Projection,
+    ours: &Document,
+    seq: SeqId,
+    origin: i64,
+) -> Result<(Theirs, Vec<(EventId, String)>), IoError> {
+    use core_model::command::{Command, SequenceCmd};
+    use core_model::history::History;
+    use core_model::selection::ViewFilter;
+    use core_model::tempo::{Bpm, TempoMap, TempoPoint};
+    use core_model::time::Tick;
+    let t = &theirs.projection.tempo;
+    let theirs_lands = !tempo_eq(&b.tempo, t) && tempo_eq(&b.tempo, &o.tempo);
+    let crossfades = theirs
+        .projection
+        .tracks
+        .iter()
+        .any(|x| x.regions.iter().any(|r| r.crossfade));
+    if theirs_lands || tempo_eq(&o.tempo, t) || !crossfades {
+        return Ok((theirs, Vec::new()));
+    }
+    let refused = |e: core_model::error::ModelError| IoError::Refused(e.to_string());
+    let map = &ours.sequence(seq).map_err(refused)?.tempo;
+    let mut points: Vec<TempoPoint> = map
+        .points()
+        .iter()
+        .filter(|p| p.tick.0 > origin)
+        .map(|p| TempoPoint {
+            tick: Tick(p.tick.0.saturating_sub(origin)),
+            ..*p
+        })
+        .collect();
+    let held_at = map.points().iter().rev().find(|p| p.tick.0 <= origin);
+    let bpm = map.bpm_at(Tick(origin)) * 1000.0;
+    let bpm = if bpm.is_finite() && bpm > 0.0 {
+        Bpm(bpm.round().min(f64::from(u32::MAX)) as u32)
+    } else {
+        Bpm::whole(120)
+    };
+    points.insert(
+        0,
+        TempoPoint {
+            tick: Tick(0),
+            bpm,
+            ramp: held_at.is_some_and(|p| p.ramp),
+        },
+    );
+    let Ok(to) = TempoMap::new(points) else {
+        return Ok((theirs, Vec::new()));
+    };
+    let back = theirs
+        .doc
+        .sequence(theirs.seq)
+        .map_err(refused)?
+        .tempo
+        .clone();
+    let mut h = History::new(theirs.doc.clone());
+    let mut lines = Vec::new();
+    for tempo in [to, back] {
+        let cmd = Command::Sequence(SequenceCmd::SetTempo {
+            seq: theirs.seq,
+            tempo,
+        });
+        if let Ok(r) = h.execute(&cmd, &ViewFilter::default()) {
+            lines.extend(r.settled);
+        }
+    }
+    let (raw, _) = projection_with_identity(h.doc(), theirs.seq)?;
+    let now = returned(&raw, origin);
+    if now.tracks.len() == theirs.projection.tracks.len() {
+        for (t, n) in theirs.projection.tracks.iter_mut().zip(&now.tracks) {
+            if t.regions.len() == n.regions.len() {
+                t.regions.clone_from(&n.regions);
+            }
+        }
+    }
+    theirs.doc = h.doc().clone();
+    Ok((theirs, lines))
+}
+
+/// [`held`]'s settle lines, each under the import's line for crossfades it
+/// could not keep (`import::CROSSFADES_PLAIN`), for the regions the merge
+/// takes from theirs: on a track whose regions are theirs or a conflict
+/// take, or a track theirs added.
+fn held_lines(
+    settled: &[(EventId, String)],
+    theirs: &Theirs,
+    matches: &Matches,
+    decisions: &[Decision],
+    report: &mut Report,
+) {
+    for (event, line) in settled {
+        let Some(t) = theirs
+            .identity
+            .tracks
+            .iter()
+            .position(|x| x.regions.iter().any(|r| r.event == event.0))
+        else {
+            continue;
+        };
+        let Some(row) = matches.tracks.iter().position(|m| m.theirs == Some(t)) else {
+            continue;
+        };
+        let taken = decisions.iter().any(|d| {
+            d.row == row
+                && match d.unit {
+                    Unit::Regions => matches!(d.outcome, Outcome::Theirs | Outcome::Conflict),
+                    Unit::Track => d.outcome == Outcome::Added,
+                    _ => false,
+                }
+        });
+        if taken {
+            report.add(
+                ItemKind::Changed,
+                crate::dawproject::import::CROSSFADES_PLAIN,
+                Some(line.clone()),
+            );
+        }
+    }
 }
 
 /// The Ruling 8 lines (private copies, uses unrolled, edits that play

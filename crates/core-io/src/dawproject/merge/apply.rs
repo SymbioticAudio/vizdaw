@@ -1383,16 +1383,27 @@ fn flag_made(
 }
 
 fn reflag(h: &mut History, flagged: &[(EventId, EventSpec)]) -> Result<(), ModelError> {
+    let fade = |b: &EventBody| match b {
+        EventBody::AudioRegion {
+            crossfade: true,
+            fade_in,
+            ..
+        } => Some(fade_in.length_frames),
+        _ => None,
+    };
     for (event, spec) in flagged {
-        let lost = h.doc().event(*event).is_ok_and(|(e, _)| {
-            !matches!(
-                e.body,
-                EventBody::AudioRegion {
-                    crossfade: true,
-                    ..
-                }
-            )
-        });
+        // Its flag cleared, or its fade in shortened, under an earlier
+        // step's tempo map (Task 7 fix round 2): set again as theirs has
+        // it; the model keeps what the final layout can hold.
+        let want = fade(&spec.body);
+        let lost = h
+            .doc()
+            .event(*event)
+            .is_ok_and(|(e, _)| match (fade(&e.body), want) {
+                (None, _) => true,
+                (Some(now), Some(w)) => now < w,
+                (Some(_), None) => false,
+            });
         if lost {
             run(
                 h,

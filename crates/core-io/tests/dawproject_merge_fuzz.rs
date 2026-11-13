@@ -28,7 +28,7 @@ use core_io::IoError;
 use core_io::dawproject::export::RegionGain;
 use core_io::dawproject::import::{ImportEnv, MediaSource, TAGS_IGNORED, map};
 use core_io::dawproject::merge::apply::{LABEL, apply_merge};
-use core_io::dawproject::merge::decide::{MergePlan, Outcome, Unit, plan};
+use core_io::dawproject::merge::decide::{MergePlan, Outcome, plan};
 use core_io::dawproject::merge::matching::notes as pair_notes;
 use core_io::dawproject::merge::text;
 use core_io::dawproject::merge::theirs::theirs;
@@ -589,40 +589,33 @@ fn diff(a: &PTrack, b: &PTrack) -> String {
 }
 
 /// Two regions are the same without their media hash, gain and file stem
-/// (Ruling 11); when `no_xfade`, also without the crossfade flag and, on a
-/// crossfaded region, its fade in (the overlap it fills).
-fn region_same_but(a: &PRegion, b: &PRegion, no_xfade: bool) -> bool {
-    let fade = no_xfade && (a.crossfade || b.crossfade);
+/// (Ruling 11).
+fn region_same(a: &PRegion, b: &PRegion) -> bool {
     ticks_near(a.tick, b.tick)
         && frames_near(a.offset, b.offset)
         && frames_near(a.length, b.length)
-        && (fade || frames_near(a.fade_in, b.fade_in))
+        && frames_near(a.fade_in, b.fade_in)
         && frames_near(a.fade_out, b.fade_out)
         && a.muted == b.muted
         && a.name == b.name
-        && (no_xfade || a.crossfade == b.crossfade)
+        && a.crossfade == b.crossfade
 }
 
 /// The regions of two track parts are the same set.
 fn regions_same(a: &PTrack, b: &PTrack) -> bool {
-    regions_same_but(a, b, false)
-}
-
-/// [`regions_same`], compared as [`region_same_but`] says.
-fn regions_same_but(a: &PTrack, b: &PTrack, no_xfade: bool) -> bool {
     if a.regions.len() != b.regions.len() {
         return false;
     }
     let mut free: Vec<&PRegion> = b.regions.iter().collect();
-    a.regions.iter().all(
-        |x| match free.iter().position(|y| region_same_but(x, y, no_xfade)) {
+    a.regions
+        .iter()
+        .all(|x| match free.iter().position(|y| region_same(x, y)) {
             Some(i) => {
                 free.swap_remove(i);
                 true
             }
             None => false,
-        },
-    )
+        })
 }
 
 fn tempo_same(a: &[(i64, u32, bool)], b: &[(i64, u32, bool)]) -> bool {
@@ -850,11 +843,6 @@ fn owner_rules(
     let shared =
         |i: Option<usize>| i.is_some() && base.p.tracks.iter().filter(|t| t.strip == i).count() > 1;
 
-    // Theirs' crossfaded pairs placed under a tempo map other than
-    // theirs (ours changed it and kept it) may not overlap there: the
-    // model then cannot flag them (a known limit, see Task 7's report,
-    // fix round 1), so the flags are not compared.
-    let no_xfade = !tempo_same(&m.p.tempo, &theirs.tempo);
     let mut e = Expected::default();
     let mut takes: Vec<(u64, bool, bool, PTrack)> = Vec::new();
     for (bt, key) in base.p.tracks.iter().zip(&keys) {
@@ -909,7 +897,7 @@ fn owner_rules(
                         stays();
                     } else if same(bt, ot) && !transformed {
                         let lands = if regions {
-                            regions_same_but(mt, tt, no_xfade)
+                            regions_same(mt, tt)
                         } else {
                             same(mt, tt)
                         };
@@ -1000,7 +988,7 @@ fn owner_rules(
         let part = take.part((*lane, *audio)).expect("the take's part");
         if *regions {
             assert!(
-                regions_same_but(part, tt, no_xfade),
+                regions_same(part, tt),
                 "track {lane}: the take holds theirs' regions"
             );
         } else {
@@ -1223,9 +1211,8 @@ fn vizdaw_only_kept(p: &MergePlan, ours: &Document, merged: &Document) {
                     assert!(notes_same(part, tt), "track {}: the take's notes", lane.0);
                 }
                 if !part.regions.is_empty() {
-                    let no_xfade = !tempo_same(&m.p.tempo, &p.theirs.projection.tempo);
                     assert!(
-                        regions_same_but(part, tt, no_xfade),
+                        regions_same(part, tt),
                         "track {}: the take's regions",
                         lane.0
                     );
@@ -1315,11 +1302,9 @@ fn check_script(s: &Spec, theirs_script: &[TheirEdit], ours_script: &[OurEdit], 
         &never(),
     )
     .expect("plans again");
-    if !lost_crossfades_only(&again, h.doc()) {
-        let (h2, _) = merged(h.doc(), &again);
-        assert_eq!(h2.undo_depth(), 0, "{:#?}", again.decisions);
-        assert_eq!(to_json(h2.doc()).unwrap(), after, "{:#?}", again.decisions);
-    }
+    let (h2, _) = merged(h.doc(), &again);
+    assert_eq!(h2.undo_depth(), 0, "{:#?}", again.decisions);
+    assert_eq!(to_json(h2.doc()).unwrap(), after, "{:#?}", again.decisions);
 
     // One undo gives ours back exactly.
     if after != before {
@@ -1334,65 +1319,6 @@ fn check_script(s: &Spec, theirs_script: &[TheirEdit], ours_script: &[OurEdit], 
             "a merge that changes nothing adds no step"
         );
     }
-}
-
-/// Whether every unit `again` (a second merge of the same file) would
-/// change, other than conflicts on other units (no command, or a take the
-/// first merge made), is a track's regions (or the conflict take the first
-/// merge made of them) that equal theirs but for crossfades, under a tempo
-/// map other than theirs. A crossfaded pair of theirs whose overlap differs
-/// under the merged tempo is shortened or loses its flag (6c's rule), so it
-/// comes back on each merge. Known open issue (Task 7 fix round 1 report);
-/// this is the only exception to "merging twice adds nothing", and it is
-/// this narrow.
-fn lost_crossfades_only(again: &MergePlan, doc: &Document) -> bool {
-    let Some(m) = Side::of(doc, &again.base) else {
-        return false;
-    };
-    let theirs = &again.theirs.projection;
-    if tempo_same(&m.p.tempo, &theirs.tempo) {
-        return false;
-    }
-    let mut any = false;
-    for d in &again.decisions {
-        // These run no command (a notes conflict's take is there).
-        if matches!(
-            d.outcome,
-            Outcome::Same | Outcome::Ours | Outcome::DeletedThere | Outcome::DeletedHere
-        ) || (d.outcome == Outcome::Conflict && d.unit != Unit::Regions)
-        {
-            continue;
-        }
-        let Some(r) = again.matches.tracks.get(d.row) else {
-            return false;
-        };
-        let (Some(o), Some(t)) = (r.ours, r.theirs) else {
-            return false;
-        };
-        let (Some(ot), Some(tt)) = (m.p.tracks.get(o), theirs.tracks.get(t)) else {
-            return false;
-        };
-        if d.unit != Unit::Regions || regions_same(ot, tt) {
-            return false;
-        }
-        // Ours' regions, or for a conflict a take the first merge made.
-        let near = |x: &PTrack| !regions_same(x, tt) && regions_same_but(x, tt, true);
-        let lane = m.ids.tracks.get(o).map_or(0, |i| i.lane);
-        let seq = SeqId(again.base.seq);
-        let in_take = d.outcome == Outcome::Conflict
-            && doc.lane(seq, LaneId(lane)).is_ok_and(|l| {
-                l.takes.iter().filter(|k| k.id != l.active_take).any(|k| {
-                    take_side(doc, &again.base, LaneId(lane), k.id)
-                        .part((lane, ot.audio))
-                        .is_some_and(near)
-                })
-            });
-        if !near(ot) && !in_take {
-            return false;
-        }
-        any = true;
-    }
-    any
 }
 
 fn strips() -> impl Strategy<Value = Strip> {
