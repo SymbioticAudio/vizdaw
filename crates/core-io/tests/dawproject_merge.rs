@@ -2926,6 +2926,148 @@ fn a_new_tracks_curve_on_a_level_ours_changed_keeps_ours() {
     assert_eq!(to_json(h.doc()).unwrap(), json);
 }
 
+/// Task 7 fix round 5 (N2): base has a Bass level curve on Bass's own
+/// track; theirs adds "Ctl" with more points on Bass's level. The file
+/// then holds two curves for one parameter, which cannot be merged
+/// safely: Ctl's is not applied and is listed, Bass's own curve follows
+/// the rule table (theirs left it as base had it, so no decision), and a
+/// second merge lists the same line and changes nothing.
+#[test]
+fn a_new_tracks_curve_on_a_level_its_track_already_automates_is_listed() {
+    let (mut doc, seq) = fixture();
+    let point = |strip: StripId, tick: i64, value: f64| {
+        EventSpec::new(
+            Tick(tick),
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(strip),
+                value,
+            },
+        )
+    };
+    {
+        let mut h = History::new(doc.clone());
+        let l = lane(h.doc(), seq, "Bass");
+        let (id, dest) = (l.id, l.midi_dest.unwrap());
+        let strip = h
+            .doc()
+            .mixer()
+            .find_kind(StripKind::Instrument(dest))
+            .unwrap();
+        run(
+            &mut h,
+            Command::Event(EventCmd::Insert {
+                seq,
+                lane: id,
+                events: vec![point(strip, 0, 0.9), point(strip, 4 * BAR, 0.1)],
+            }),
+        );
+        doc = h.doc().clone();
+    }
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let r = h
+            .execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq: i.seq,
+                    name: "Ctl".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let ctl = created(&r, |id| match id {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        });
+        let note = EventSpec::new(
+            Tick(0),
+            EventBody::Note {
+                pitch: 64,
+                velocity: 0x8000,
+                release_velocity: 0x8000,
+                duration: Tick(Q),
+                attribute: None,
+                per_note: Default::default(),
+            },
+        );
+        run(
+            h,
+            Command::Event(EventCmd::Insert {
+                seq: i.seq,
+                lane: ctl,
+                events: vec![
+                    note,
+                    point(i.bass_strip, BAR, 0.5),
+                    point(i.bass_strip, 2 * BAR, 0.25),
+                ],
+            }),
+        );
+    });
+    let o = t.base_doc.clone();
+    let before = bass_level_points(&o, &t);
+    assert_eq!(before, vec![(0, 0.9), (4 * BAR, 0.1)]);
+    let line = "Track 'Ctl': its level curve for track 'Bass', which already has one in the file";
+    let check = |p: &MergePlan| {
+        let outcomes: Vec<(&Unit, Outcome)> =
+            p.decisions.iter().map(|d| (&d.unit, d.outcome)).collect();
+        assert!(
+            !p.decisions
+                .iter()
+                .any(|d| d.what.starts_with("Track 'Bass'")),
+            "Bass level follows the rule table: theirs' own curve is base's: {:#?}",
+            p.decisions
+        );
+        assert_eq!(outcomes.len(), 2, "{:#?}", p.decisions);
+        assert!(outcomes.contains(&(&Unit::Automation(line.into()), Outcome::Conflict)));
+        assert_eq!(
+            item(&p.report, ItemKind::Conflict, NOT_APPLIED).details,
+            vec![line.to_owned()]
+        );
+        assert_eq!(p.preview.conflict_lines, vec![line.to_owned()]);
+    };
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    check(&p);
+    assert!(
+        p.decisions
+            .iter()
+            .any(|d| d.unit == Unit::Track && d.outcome == Outcome::Added)
+    );
+    let (h, report) = apply_on(&o, &p);
+    assert!(
+        !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
+        "{:#?}",
+        report.items
+    );
+    assert_eq!(
+        bass_level_points(h.doc(), &t),
+        before,
+        "Bass keeps its curve"
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+    // Merging again lists the same line and changes nothing.
+    let (depth, json) = (h.undo_depth(), to_json(h.doc()).unwrap());
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    check(&again);
+    assert!(
+        again
+            .decisions
+            .iter()
+            .any(|d| d.unit == Unit::Track && d.outcome == Outcome::Same),
+        "{:#?}",
+        again.decisions
+    );
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), depth);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
 /// Task 7 fix round 2 (layout 2, from the 4096 run's seed): theirs sets
 /// 450 BPM, so Keys' regions (in beats in the file) come back shorter.
 /// Placed under ours' 120 BPM before the tempo map is theirs, the pair
@@ -4078,6 +4220,7 @@ stripped!(
     ours_tempo_never_makes_theirs_untouched_regions_look_edited,
     a_new_tracks_curve_on_an_existing_tracks_level_lands,
     a_new_tracks_curve_on_a_level_ours_changed_keeps_ours,
+    a_new_tracks_curve_on_a_level_its_track_already_automates_is_listed,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,
     both_changed_notes_become_an_alternate_take,

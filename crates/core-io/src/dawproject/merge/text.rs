@@ -33,7 +33,9 @@ pub const ADDED_BOTH: &str =
 /// (Task 6 fix rounds 1 and 2): an automation curve on a track that plays
 /// its own loop, its own length or with play quantize (the reason in the
 /// detail's part: "Track 'X': level automation (the track plays its own
-/// loop)"), an instrument swap, a plug-in state dropped. Notes and regions
+/// loop)"), an instrument swap, a plug-in state dropped, a curve on a
+/// new track for a parameter its target track already automates in the
+/// file (detail [`doubled_curve`], as it is). Notes and regions
 /// on such a track go under [`CONFLICT_TAKE`] instead. Detail
 /// [`conflict_setting`].
 pub const NOT_APPLIED: &str =
@@ -144,6 +146,16 @@ pub fn conflict_take(track: &str, take: &str) -> String {
 /// [`CONFLICT_SETTING`]'s detail: "<what>: here <ours>, there <theirs>".
 pub fn conflict_setting(what: &str, ours: &str, theirs: &str) -> String {
     format!("{what}: here {ours}, there {theirs}")
+}
+
+/// [`NOT_APPLIED`]'s detail for a curve on a track the other DAW added
+/// that drives a parameter its target track already automates in the
+/// file (Task 7 fix round 5): "Track 'Ctl': its level curve for track
+/// 'Bass', which already has one in the file".
+pub fn doubled_curve(added: &str, param: &str, target: &str) -> String {
+    format!(
+        "Track '{added}': its {param} curve for track '{target}', which already has one in the file"
+    )
 }
 
 /// `secs` since 1970 as a UTC date, `yyyy-mm-dd` (days to the civil

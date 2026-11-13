@@ -250,7 +250,7 @@ pub fn plan(
     let base_ids = base_track_ids(&b, base.identity.as_ref());
     let untouched = untouched_regions(&matches, (&b, &base_ids), &theirs);
     let (mut theirs, settled) = held(theirs, &b, &o, ours, seq, base.origin, &untouched)?;
-    rehome_curves(&mut theirs, &matches);
+    let doubled = rehome_curves(&mut theirs, &matches);
     stop(cancel)?;
     let ours_origins = self_origins(&ours_side.1);
     let mut d = Decider {
@@ -263,6 +263,7 @@ pub fn plan(
         base_strips: base.identity.as_ref(),
         theirs_doc: &theirs.doc,
         not_applied: BTreeSet::new(),
+        plain: BTreeSet::new(),
         m: &matches,
         skey: strip_keys(
             &matches,
@@ -295,6 +296,14 @@ pub fn plan(
     for row in 0..matches.tracks.len() {
         stop(cancel)?;
         d.track(row);
+        let Some(t) = matches.tracks.get(row).and_then(|r| r.theirs) else {
+            continue;
+        };
+        for (_, what) in doubled.iter().filter(|(a, _)| *a == t) {
+            d.plain.insert(d.out.len());
+            let unit = Unit::Automation(what.clone());
+            d.push_not_applied(unit, row, what.clone(), None, None);
+        }
     }
     stop(cancel)?;
     for row in 0..matches.strips.len() {
@@ -518,8 +527,11 @@ fn held(
 /// apply's arrangement of the added tracks then leaves it out
 /// (`import::apply::arrange_tracks`, a strip it did not place), and a
 /// second merge, where the track is new on both sides, finds it without
-/// that curve, as ours holds it.
-fn rehome_curves(theirs: &mut Theirs, m: &Matches) {
+/// that curve, as ours holds it. A curve whose target track already has
+/// one for that parameter in the file is taken off the new track and not
+/// moved; each is answered (theirs' track, its [`text::doubled_curve`]
+/// line) for [`text::NOT_APPLIED`].
+fn rehome_curves(theirs: &mut Theirs, m: &Matches) -> Vec<(usize, String)> {
     let added: BTreeSet<usize> = m
         .tracks
         .iter()
@@ -542,7 +554,13 @@ fn rehome_curves(theirs: &mut Theirs, m: &Matches) {
             })
             .flatten()
     };
-    let mut moves: Vec<(usize, usize, usize)> = Vec::new();
+    // A curve for a parameter its track already automates in the file
+    // is not moved: two curves for one parameter cannot be merged safely
+    // (fix round 5). It is listed instead, and the track's own curve is
+    // decided as any other.
+    let mut moves: Vec<(usize, usize, Option<usize>)> = Vec::new();
+    let mut doubled: Vec<(usize, String)> = Vec::new();
+    let mut moved: BTreeSet<(usize, &str)> = BTreeSet::new();
     for &a in &added {
         let Some(t) = tracks.get(a) else { continue };
         for (k, (target, _)) in t.automation.iter().enumerate() {
@@ -550,8 +568,19 @@ fn rehome_curves(theirs: &mut Theirs, m: &Matches) {
                 .split(' ')
                 .nth(1)
                 .and_then(|c| c.parse::<usize>().ok());
-            if let Some(to) = c.and_then(owner) {
-                moves.push((a, k, to));
+            let Some(to) = c.and_then(owner) else {
+                continue;
+            };
+            let Some(tt) = tracks.get(to) else { continue };
+            let has = tt.automation.iter().any(|(x, _)| x == target);
+            if has || !moved.insert((to, target.as_str())) {
+                doubled.push((
+                    a,
+                    text::doubled_curve(&t.name, target_kind(target), &tt.name),
+                ));
+                moves.push((a, k, None));
+            } else {
+                moves.push((a, k, Some(to)));
             }
         }
     }
@@ -566,6 +595,7 @@ fn rehome_curves(theirs: &mut Theirs, m: &Matches) {
         }
         let curve = p.get_mut(a).map(|x| x.automation.remove(k));
         let ats = i.get_mut(a).map(|x| x.automation.remove(k));
+        let Some(to) = to else { continue };
         if let (Some(curve), Some(ats), Some(pt), Some(it)) = (
             curve,
             ats,
@@ -576,6 +606,7 @@ fn rehome_curves(theirs: &mut Theirs, m: &Matches) {
             it.push(ats);
         }
     }
+    doubled
 }
 
 /// Theirs' tracks whose regions, as imported, are their base track's
@@ -1116,6 +1147,8 @@ struct Decider<'a> {
     /// The decisions (by index in `out`) theirs changed and the merge does
     /// not apply: listed under `text::NOT_APPLIED`.
     not_applied: BTreeSet<usize>,
+    /// Of those, the ones listed by their `what` alone (no values).
+    plain: BTreeSet<usize>,
     m: &'a Matches,
     /// Per side, each strip's row in `m.strips`.
     skey: [Vec<Option<usize>>; 3],
@@ -2230,11 +2263,15 @@ impl<'a> Decider<'a> {
                     if take {
                         p.conflict_lines.push(d.what.clone());
                     } else if self.not_applied.contains(&at) {
-                        let line = text::conflict_setting(
-                            &d.what,
-                            d.ours.as_deref().unwrap_or("none"),
-                            d.theirs.as_deref().unwrap_or("none"),
-                        );
+                        let line = if self.plain.contains(&at) {
+                            d.what.clone()
+                        } else {
+                            text::conflict_setting(
+                                &d.what,
+                                d.ours.as_deref().unwrap_or("none"),
+                                d.theirs.as_deref().unwrap_or("none"),
+                            )
+                        };
                         report.add(ItemKind::Conflict, text::NOT_APPLIED, Some(line.clone()));
                         p.conflict_lines.push(line);
                     } else if part {
