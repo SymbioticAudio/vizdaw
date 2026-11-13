@@ -21,7 +21,9 @@ use core_io::dawproject::merge::text::{
 use core_io::dawproject::merge::theirs::{Theirs, theirs};
 use core_io::dawproject::package::open;
 use core_io::dawproject::record::{PStrip, PTrack, Projection, projection};
-use core_io::dawproject::{DpClip, DpMarker, DpNamed, DpNote, DpProject, DpTimeline};
+use core_io::dawproject::{
+    DpClip, DpExpression, DpMarker, DpNamed, DpNote, DpPointValue, DpPoints, DpProject, DpTimeline,
+};
 use core_io::limits::PackageLimits;
 use core_io::report::{ItemKind, Report};
 use core_model::automation::{AutomationMode, AutomationTarget, SendIndex};
@@ -5436,6 +5438,9 @@ stripped!(
     a_sequence_played_inside_another_use_is_not_edited_itself,
     a_use_on_an_inactive_take_counts_as_elsewhere,
     an_edit_that_would_change_a_sequence_length_makes_private_copies,
+    the_demo_songs_own_export_merges_nothing,
+    a_drum_tracks_main_channel_theirs_changes_lands,
+    a_drum_tracks_note_channel_and_program_theirs_changes_land,
 );
 
 /// Task 7 fix round (review Minor): every test of this file runs in the
@@ -5462,17 +5467,16 @@ fn every_test_runs_stripped() {
 
 /// Ruling 6 on the demo song (plan 6e Task 11, found by the e2e
 /// `dawproject_merge_over_the_channel`): merging a sequence's own unchanged
-/// export finds nothing to merge. Each of the demo's sequences plays the
-/// built-in synth on channel 10 ("Built-in Drums", with a program), which
-/// the import moves onto the instrument's channel; the merge then reads the
-/// drums' notes (and a program change) as changed there.
+/// export finds nothing to merge, adds no step and leaves the project
+/// byte-identical. Each of the demo's sequences plays the built-in synth on
+/// channel 10 ("Built-in Drums", with a program), which the import moves
+/// onto the instrument's channel, with the program as an event.
 #[test]
-#[ignore = "plan 6e Task 11 finding: a track on a destination channel other than 1 is not idempotent"]
 fn the_demo_songs_own_export_merges_nothing() {
     let doc = core_engine::fixtures::demo_document().unwrap();
     for seq in doc.sequences().keys().copied().collect::<Vec<_>>() {
         let t = trip(&doc, seq);
-        let path = return_file(&t, Strip::Nothing, |_, _| {});
+        let path = return_file(&t, strip(), |_, _| {});
         let p = plan_of(&t, &path, &t.base_doc);
         assert_eq!(
             summary(&p.preview),
@@ -5483,5 +5487,146 @@ fn the_demo_songs_own_export_merges_nothing() {
                 .filter(|d| d.outcome != Outcome::Same)
                 .collect::<Vec<_>>()
         );
+        let (h, _) = apply_on(&t.base_doc, &p);
+        assert_eq!(h.undo_depth(), 0, "{seq:?}");
+        assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
+        assert_eq!(
+            projection(h.doc(), seq).unwrap(),
+            projection(&t.base_doc, seq).unwrap()
+        );
     }
+}
+
+/// The demo's "Beat": one track, "Drums", on the built-in synth on
+/// channel 10 with a program.
+fn demo_beat() -> (Document, SeqId) {
+    let doc = core_engine::fixtures::demo_document().unwrap();
+    let seq = doc
+        .sequences()
+        .values()
+        .find(|s| s.name == "Beat")
+        .map(|s| s.id)
+        .expect("Beat");
+    (doc, seq)
+}
+
+/// Every note of the file's track `name`.
+fn notes_on<'a>(p: &'a mut DpProject, name: &str) -> Vec<&'a mut DpNote> {
+    let id = track_id(p, name);
+    clips(p, &id)
+        .iter_mut()
+        .filter_map(|c| match c.content.as_deref_mut() {
+            Some(DpTimeline::Notes(n)) => Some(n.notes.iter_mut()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// The program-change points on the file's track `name`.
+fn program_points<'a>(p: &'a mut DpProject, name: &str) -> &'a mut DpPoints {
+    let id = track_id(p, name);
+    let lanes = p.arrangement.as_mut().unwrap().lanes.as_mut().unwrap();
+    for item in &mut lanes.items {
+        if let DpTimeline::Lanes(l) = item
+            && l.head.track.as_deref() == Some(id.as_str())
+        {
+            for inner in &mut l.items {
+                if let DpTimeline::Points(x) = inner
+                    && x.target.expression == Some(DpExpression::ProgramChange)
+                {
+                    return x;
+                }
+            }
+        }
+    }
+    panic!("no program points on {name}")
+}
+
+/// The channels `name`'s notes play on, and its other MIDI events.
+fn played_channels(doc: &Document, seq: SeqId, name: &str) -> (Vec<u8>, Vec<(i64, String)>) {
+    let p = projection(doc, seq).unwrap();
+    let t = p.tracks.iter().find(|t| t.name == name).expect("the track");
+    (
+        t.notes_played.iter().map(|n| n.channel).collect(),
+        t.midi.clone(),
+    )
+}
+
+/// Theirs moves every note of a channel-10 track to channel 3 (the
+/// instrument's program stays on channel 10): its main channel changed, so
+/// the change lands, and merging again adds nothing.
+#[test]
+fn a_drum_tracks_main_channel_theirs_changes_lands() {
+    let (doc, seq) = demo_beat();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        for n in notes_on(p, "Drums") {
+            assert_eq!(n.channel, 9);
+            n.channel = 2;
+        }
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    assert_eq!(
+        p.preview,
+        MergePreview {
+            applied: 1,
+            ..MergePreview::default()
+        },
+        "{:#?}",
+        p.decisions
+    );
+    let (h, _) = apply_on(&t.base_doc, &p);
+    let (channels, midi) = played_channels(h.doc(), seq, "Drums");
+    assert_eq!(channels, vec![2; 12]);
+    assert!(midi.is_empty(), "{midi:?}");
+    let once = to_json(h.doc()).unwrap();
+    let again = plan_of(&t, &path, h.doc());
+    assert!(
+        again.decisions.iter().all(|d| d.outcome == Outcome::Same),
+        "{:#?}",
+        again.decisions
+    );
+    let (h2, _) = apply_on(h.doc(), &again);
+    assert_eq!(h2.undo_depth(), 0);
+    assert_eq!(to_json(h2.doc()).unwrap(), once);
+}
+
+/// Theirs moves one note of a channel-10 track to channel 6 and changes
+/// the instrument's program to 6: both land as the other DAW wrote them.
+#[test]
+fn a_drum_tracks_note_channel_and_program_theirs_changes_land() {
+    let (doc, seq) = demo_beat();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, strip(), |p, _| {
+        notes_on(p, "Drums")[0].channel = 5;
+        let x = program_points(p, "Drums");
+        assert_eq!(x.points.len(), 1);
+        x.points[0].value = DpPointValue::Integer(5);
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    assert_eq!(
+        p.preview,
+        MergePreview {
+            applied: 1,
+            ..MergePreview::default()
+        },
+        "{:#?}",
+        p.decisions
+    );
+    let (h, _) = apply_on(&t.base_doc, &p);
+    let (channels, midi) = played_channels(h.doc(), seq, "Drums");
+    assert_eq!(channels.iter().filter(|c| **c == 5).count(), 1);
+    assert_eq!(channels.iter().filter(|c| **c == 9).count(), 11);
+    assert_eq!(midi, vec![(0, "program 9 5 none".to_owned())]);
+    let once = to_json(h.doc()).unwrap();
+    let again = plan_of(&t, &path, h.doc());
+    assert!(
+        again.decisions.iter().all(|d| d.outcome == Outcome::Same),
+        "{:#?}",
+        again.decisions
+    );
+    let (h2, _) = apply_on(h.doc(), &again);
+    assert_eq!(h2.undo_depth(), 0);
+    assert_eq!(to_json(h2.doc()).unwrap(), once);
 }

@@ -98,6 +98,20 @@ pub const EXPRESSION_PAST_END: &str = "Note expression past the end of its note"
 /// Changed: a track's notes on its main channel, when that is not the
 /// first, play on its instrument's channel (by track).
 pub const MAIN_CHANNEL: &str = "Notes on a track's main channel play on its instrument's channel";
+
+/// The channel an event on file channel `ch` of a track whose main channel
+/// is `main` ([`MAIN_CHANNEL`]) is given: none on the main channel (it
+/// plays on the instrument's channel), else its own. `u8::MAX` (no channel
+/// in the file) is none too.
+pub(crate) fn own_channel(main: u8, ch: u8) -> Option<(u8, u8)> {
+    (ch != u8::MAX && ch != main).then_some((0, ch))
+}
+
+/// The file channel of an event the import gave channel `own` on a track
+/// whose main channel is `main`: [`own_channel`] undone (plan 6e Task 11).
+pub(crate) fn file_channel(main: u8, own: Option<(u8, u8)>) -> u8 {
+    own.map_or(main, |g| g.1)
+}
 /// Changed: fades longer than their region.
 pub const FADES_CUT: &str = "Fades longer than their clip were shortened";
 /// Left out: fades of a clip that holds clips.
@@ -271,6 +285,8 @@ pub(super) struct Arranged {
     pub(super) items: Vec<Vec<Item>>,
     pub(super) seqs: Vec<SeqPlan>,
     pub(super) media: Vec<MediaPlan>,
+    /// Each plan track's main channel ([`MAIN_CHANNEL`]).
+    pub(super) main: Vec<u8>,
 }
 
 /// A clip's fades, in `unit`.

@@ -23,7 +23,7 @@ use crate::IoError;
 use crate::midi_out;
 use crate::report::{ItemKind, Report};
 use core_model::automation::{AutomationTarget, FULL_SCALE, fader_db, switch_on};
-use core_model::document::DestKind;
+use core_model::document::{DestKind, Destination};
 use core_model::event::{Event, EventBody, FadeShape, LoopCount, PerNoteKind};
 use core_model::ids::{DestId, EventId, MediaId};
 use core_model::meter::MeterMap;
@@ -296,6 +296,53 @@ fn push_point(map: &mut BTreeMap<PointsKey, DpPoints>, key: PointsKey, p: DpPoin
         .push(p);
 }
 
+/// The channel the export writes a destination's events and default patch
+/// on: an endpoint's, 0 for a plug-in.
+pub(super) fn dest_channel(d: &Destination) -> u8 {
+    match &d.kind {
+        DestKind::MidiEndpoint { channel, .. } => channel & 0x0F,
+        DestKind::PluginInstrument { .. } => 0,
+    }
+}
+
+/// A default patch as written: channel, program and bank (MSB, LSB).
+pub(super) type WrittenPatch = (u8, u8, Option<(u8, u8)>);
+
+/// A destination's default patch as the export writes it: its channel
+/// ([`dest_channel`]), program and bank, 7 bits each.
+pub(super) fn written_patch(d: &Destination) -> Option<WrittenPatch> {
+    let patch = d.default_patch?;
+    Some((
+        dest_channel(d),
+        patch.program & 0x7F,
+        patch.bank.map(|(msb, lsb)| (msb & 0x7F, lsb & 0x7F)),
+    ))
+}
+
+/// The destinations whose default patch and MIDI mix start track part
+/// `p`'s points (Ruling 13): its track's, and every one its MIDI events
+/// play on; none for an audio part. The snapshot's
+/// [`TrackIds::patches`](super::record::TrackIds::patches) are theirs too
+/// (plan 6e Task 11).
+pub(super) fn patched_dests(l: &Layout<'_>, p: &Part<'_>) -> BTreeSet<DestId> {
+    let mut dests = BTreeSet::new();
+    if p.audio {
+        return dests;
+    }
+    dests.extend(p.lane.midi_dest);
+    for r in l.played.get(&p.lane.id).map_or(&[][..], Vec::as_slice) {
+        match &r.body {
+            EventBody::AudioRegion { .. }
+            | EventBody::Automation { .. }
+            | EventBody::Text { .. }
+            | EventBody::SysEx { .. }
+            | EventBody::Reference { .. } => {}
+            _ => dests.extend(r.dest),
+        }
+    }
+    dests
+}
+
 /// A default patch as points at `time`: the bank as CC 0 and 32, then the
 /// program.
 fn patch_points(
@@ -404,7 +451,6 @@ impl Arr<'_, '_, '_, '_, '_> {
         let mut use_at: BTreeMap<EventId, usize> = BTreeMap::new();
         let mut regions: Vec<Ev<'_>> = Vec::new();
         let mut autos: Vec<Ev<'_>> = Vec::new();
-        let mut dests: BTreeSet<DestId> = BTreeSet::new();
         // The played notes carry the play quantize of the track (or used
         // sequence's track) they are on, as `flatten` applies it.
         let mut quantized = false;
@@ -429,7 +475,6 @@ impl Arr<'_, '_, '_, '_, '_> {
                 EventBody::SysEx { .. } => self.report.add(ItemKind::LeftOut, SYSEX, None),
                 EventBody::Reference { .. } => {}
                 _ => {
-                    dests.extend(r.dest);
                     self.transposed(&r.path);
                     if !quantized && matches!(r.body, EventBody::Note { .. }) {
                         quantized = r.path.last().is_some_and(|s| {
@@ -491,9 +536,8 @@ impl Arr<'_, '_, '_, '_, '_> {
             }));
         }
         if !p.audio {
-            dests.extend(p.lane.midi_dest);
             items.extend(
-                self.patch_and_mix(&dests)
+                self.patch_and_mix(&patched_dests(l, p))
                     .into_values()
                     .map(DpTimeline::Points),
             );
@@ -1150,12 +1194,9 @@ impl Arr<'_, '_, '_, '_, '_> {
     fn patch_and_mix(&self, dests: &BTreeSet<DestId>) -> BTreeMap<PointsKey, DpPoints> {
         let mut map = BTreeMap::new();
         for d in dests.iter().filter_map(|d| self.l.doc.instruments().get(d)) {
-            let ch = match &d.kind {
-                DestKind::MidiEndpoint { channel, .. } => i32::from(channel & 0x0F),
-                DestKind::PluginInstrument { .. } => 0,
-            };
-            if let Some(patch) = d.default_patch {
-                patch_points(&mut map, ch, 0.0, patch.program, patch.bank);
+            let ch = i32::from(dest_channel(d));
+            if let Some((_, program, bank)) = written_patch(d) {
+                patch_points(&mut map, ch, 0.0, program, bank);
             }
             if d.kind.is_external() {
                 for (cc, v) in [(7, d.midi_mix.volume), (10, d.midi_mix.pan)] {

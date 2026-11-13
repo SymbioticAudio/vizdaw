@@ -25,7 +25,7 @@ use common::merge::{
 };
 use common::package::{TestPlist, package_bytes};
 use common::{CountingAlloc, cases, measure};
-use core_engine::fixtures::Q;
+use core_engine::fixtures::{Builder, Q};
 use core_io::IoError;
 use core_io::dawproject::export::RegionGain;
 use core_io::dawproject::import::{ImportEnv, MediaSource, TAGS_IGNORED, map};
@@ -38,7 +38,8 @@ use core_io::dawproject::merge::{FRAMES, LEVEL_DB, NOTE_TICKS, PAN, normalised};
 use core_io::dawproject::package::{RECORD_UNREADABLE, open};
 use core_io::dawproject::record::{
     Identity, ObjectRef, PRegion, PStrip, PTrack, Projection, SNAPSHOT_DAMAGED, Snapshot,
-    SnapshotLimits, projection_with_identity, read_snapshot, read_snapshot_with, returned,
+    SnapshotLimits, on_file_channels, projection_with_identity, read_snapshot, read_snapshot_with,
+    returned,
 };
 use core_io::dawproject::{
     DpChannel, DpClip, DpMarker, DpNamed, DpNote, DpProject, DpStructureItem, DpTimeline, DpTrack,
@@ -46,7 +47,7 @@ use core_io::dawproject::{
 use core_io::limits::PackageLimits;
 use core_io::report::{ItemKind, Report};
 use core_model::command::{Command, EventCmd, LaneCmd, MixerCmd, SequenceCmd};
-use core_model::document::Document;
+use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec};
 use core_model::file::to_json;
 use core_model::history::History;
@@ -933,8 +934,21 @@ fn held_in(theirs: &Theirs, merged: &Document, seq: SeqId, origin: i64) -> Proje
             &ViewFilter::default(),
         );
     }
-    let (p, _) = projection_with_identity(h.doc(), theirs.seq).expect("projects");
-    returned(&p, origin)
+    let (p, ids) = projection_with_identity(h.doc(), theirs.seq).expect("projects");
+    let mut p = returned(&p, origin);
+    on_file_channels(&mut p, &ids, h.doc(), &theirs.origins.main_channels);
+    p
+}
+
+/// `t` without one MIDI event at tick 0 per text of `patches` (base's
+/// default patches, which the export writes and the import brings in as
+/// events; plan 6e Task 11).
+fn without_patches(t: &mut PTrack, patches: &[String]) {
+    for p in patches {
+        if let Some(k) = t.midi.iter().position(|m| m.0 == 0 && m.1 == *p) {
+            t.midi.remove(k);
+        }
+    }
 }
 
 /// The owner rules (spec §7.8, §15), from base, theirs' file and ours
@@ -1005,6 +1019,24 @@ fn owner_rules(
         theirs.tracks.len(),
         "theirs' tracks are base's, then its own"
     );
+    // Theirs as base is compared with: without the programs the export
+    // wrote from base's default patches (plan 6e Task 11).
+    let unpatched = |p: &Projection| {
+        let mut p = p.clone();
+        for (key, t) in kept.iter().zip(&mut p.tracks) {
+            if let Some((_, i)) = base
+                .p
+                .tracks
+                .iter()
+                .zip(&base.ids.tracks)
+                .find(|(b, i)| i.lane == key.0 && b.audio == key.1)
+            {
+                without_patches(t, &i.patches);
+            }
+        }
+        p
+    };
+    let (theirs, held) = (&unpatched(theirs), &unpatched(held));
     let theirs_part: BTreeMap<(u64, bool), &PTrack> =
         kept.iter().copied().zip(&theirs.tracks).collect();
     let held_part: BTreeMap<(u64, bool), &PTrack> =
@@ -1425,8 +1457,99 @@ fn merged(doc: &Document, p: &MergePlan) -> (History, Report) {
     (h, report)
 }
 
+/// A channel-10 drum track (plan 6e Task 11): the built-in synth on
+/// channel 10 with a default program (and bank), its notes on channel 10
+/// but for a few on channels of their own.
+#[derive(Debug, Clone)]
+struct Drums {
+    program: u8,
+    bank: Option<(u8, u8)>,
+    /// Tick (in eighths), key, and a channel of its own.
+    notes: Vec<(i64, u8, Option<u8>)>,
+}
+
+fn drums() -> impl Strategy<Value = Drums> {
+    (
+        0u8..128,
+        proptest::option::of((0u8..128, 0u8..128)),
+        proptest::collection::vec(
+            (
+                0i64..32,
+                35u8..60,
+                proptest::option::weighted(0.25, 0u8..16),
+            ),
+            1..12,
+        ),
+    )
+        .prop_map(|(program, bank, mut notes)| {
+            notes.sort_by_key(|n| (n.0, n.1));
+            notes.dedup_by_key(|n| (n.0, n.1));
+            // Channel 10 has more notes than any other.
+            let total = notes.len();
+            let mut own = 0;
+            for n in &mut notes {
+                if n.2.is_some() {
+                    own += 1;
+                    if own * 2 >= total {
+                        n.2 = None;
+                    }
+                }
+            }
+            Drums {
+                program,
+                bank,
+                notes,
+            }
+        })
+}
+
+/// `doc` with the track `d` added to `seq`.
+fn with_drums(doc: Document, seq: SeqId, d: &Drums) -> Document {
+    let mut b = Builder::from_doc(doc);
+    let dest = b
+        .dest_kind(
+            "Built-in Drums",
+            DestKind::MidiEndpoint {
+                endpoint_ref: "builtin:synth".into(),
+                group: 0,
+                channel: 9,
+            },
+            Some(Patch {
+                program: d.program,
+                bank: d.bank,
+            }),
+        )
+        .unwrap();
+    let lane = b.lane(seq, "Drums", Some(dest)).unwrap();
+    let specs = d
+        .notes
+        .iter()
+        .map(|&(at, key, ch)| {
+            let mut e = EventSpec::new(Tick(at * Q / 2), EventBody::note(key, 0x9000, Tick(Q / 4)));
+            e.group_channel = ch.map(|c| (0, c));
+            e
+        })
+        .collect();
+    b.events(seq, lane, specs).unwrap();
+    b.finish()
+}
+
 fn check_script(s: &Spec, theirs_script: &[TheirEdit], ours_script: &[OurEdit], strip: Strip) {
+    check_drums_script(s, None, theirs_script, ours_script, strip);
+}
+
+fn check_drums_script(
+    s: &Spec,
+    drums: Option<&Drums>,
+    theirs_script: &[TheirEdit],
+    ours_script: &[OurEdit],
+    strip: Strip,
+) {
     let (doc, seq) = build(s);
+    let doc = match drums {
+        Some(d) => with_drums(doc, seq, d),
+        None => doc,
+    };
     let gain = if s.gain {
         RegionGain::Apply
     } else {
@@ -1534,8 +1657,9 @@ proptest! {
         theirs_script in proptest::collection::vec(their_edit(), 0..=8),
         ours_script in proptest::collection::vec(our_edit(), 0..=8),
         strip in strips(),
+        drums in proptest::option::weighted(0.3, drums()),
     ) {
-        check_script(&s, &theirs_script, &ours_script, strip);
+        check_drums_script(&s, drums.as_ref(), &theirs_script, &ours_script, strip);
     }
 }
 

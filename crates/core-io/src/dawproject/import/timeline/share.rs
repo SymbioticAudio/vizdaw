@@ -115,7 +115,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 self.cx.add(ItemKind::Changed, MAIN_CHANNEL, Some(detail));
             }
         }
-        let gc = |main: u8, ch: u8| (ch != u8::MAX && ch != main).then_some((0, ch));
+        let gc = own_channel;
 
         for (t, v) in self.evs.iter_mut().enumerate() {
             pair_banks(v, &mut || self.cx.tick())?;
@@ -189,6 +189,7 @@ impl<'p> Tl<'_, '_, 'p> {
             items,
             seqs: out,
             media: self.media,
+            main,
         })
     }
 

@@ -126,6 +126,10 @@ pub struct Origins {
     /// Each new audio track's output-path strip: the file's channel name
     /// (the import names the path after the track; plan 6e Task 5).
     pub channel_names: BTreeMap<StripId, String>,
+    /// Each new track: the file channel its events without a channel of
+    /// their own were on, its main channel ([`MAIN_CHANNEL`], plan 6e
+    /// Task 11).
+    pub main_channels: BTreeMap<LaneId, u8>,
 }
 
 /// A mapped import: what [`apply`] will do, and the report so far (the

@@ -3,7 +3,7 @@
 use crate::IoError;
 use crate::dawproject::import::{DpImport, FROM_VIZDAW, Origins, SlotStates, apply_tagged};
 use crate::dawproject::record::{
-    EventAt, Identity, Projection, projection_with_identity, returned,
+    EventAt, Identity, Projection, on_file_channels, projection_with_identity, returned,
 };
 use crate::report::Report;
 use core_model::command::{Command, LaneCmd, SequenceCmd, SettingsCmd};
@@ -103,7 +103,8 @@ fn kept_ids(before: &[(i64, f64)], ids: &[EventAt], after: &[(i64, f64)]) -> Vec
 /// project at `format`, captures each of its states into it
 /// (`History::capture_state`, as 6d's round trip does, so device state
 /// hashes are `blob_id`s), then projects it (`projection_with_identity`,
-/// then `returned(.., origin)`, `origin` the snapshot's). The report drops
+/// then `returned(.., origin)`, `origin` the snapshot's, then
+/// `on_file_channels`, so its events are on the file's channels). The report drops
 /// `import::FROM_VIZDAW`. Looks at `cancel` before each stage.
 pub fn theirs(
     imp: DpImport,
@@ -127,7 +128,8 @@ pub fn theirs(
     stop(cancel)?;
     let doc = h.doc().clone();
     let (raw, mut identity) = projection_with_identity(&doc, seq)?;
-    let projection = returned(&raw, origin);
+    let mut projection = returned(&raw, origin);
+    on_file_channels(&mut projection, &identity, &doc, &origins.main_channels);
     for ((before, after), ids) in raw
         .tracks
         .iter()

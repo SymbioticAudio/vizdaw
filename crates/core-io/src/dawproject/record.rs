@@ -7,14 +7,15 @@
 //! the VizDAW object it came from.
 
 use super::export::{Layout, RegionGain, Ticker, layout};
-use super::export_timeline::use_span;
+use super::export_timeline::{patched_dests, use_span, written_patch};
+use super::import::file_channel;
 use super::units::swatch_hex;
 use crate::IoError;
 use crate::limits::{MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ENTRIES, MAX_XML_NODES};
 use core_model::automation::AutomationTarget;
 use core_model::document::{Document, check_project_id};
 use core_model::event::{EventBody, PerNoteKind};
-use core_model::ids::SeqId;
+use core_model::ids::{EventId, LaneId, SeqId};
 use core_model::mixer::PluginFormat;
 use core_model::query::ResolvedEvent;
 use serde::{Deserialize, Serialize};
@@ -167,6 +168,15 @@ pub struct TrackIds {
     /// holds the notes).
     #[serde(deserialize_with = "counted")]
     pub uses: Vec<UseAt>,
+    /// The default patches the export wrote at file time 0 on the track
+    /// (its destinations', 6d Ruling 13), as [`PTrack::midi`] texts. None
+    /// in snapshots made before plan 6e Task 11.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "counted"
+    )]
+    pub patches: Vec<String>,
 }
 
 /// An event, and the top-level event it plays through (itself, or its
@@ -602,6 +612,52 @@ pub fn returned(theirs: &Projection, origin: i64) -> Projection {
     p
 }
 
+/// `text` (a [`PTrack::midi`] text, "<kind> <channel> …") on channel `ch`.
+fn on_channel(text: &str, ch: u8) -> String {
+    let mut parts = text.splitn(3, ' ');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(kind), Some(_), Some(rest)) => format!("{kind} {ch} {rest}"),
+        _ => text.to_owned(),
+    }
+}
+
+/// Theirs' projection with its notes and MIDI events back on the file's
+/// channels (plan 6e Task 11), so that it compares like with like with
+/// base and ours: an import plays a track's main channel on its
+/// instrument's channel ([`MAIN_CHANNEL`](super::import::MAIN_CHANNEL)),
+/// so each event of theirs that has no channel of its own goes back on its
+/// track's main channel (`mains`, the import's
+/// [`Origins::main_channels`](super::import::Origins::main_channels), by
+/// the track's lane in `doc`); an event with a channel of its own keeps
+/// it. `ids` is theirs' identity, parallel to `p`.
+pub fn on_file_channels(
+    p: &mut Projection,
+    ids: &Identity,
+    doc: &Document,
+    mains: &BTreeMap<LaneId, u8>,
+) {
+    let own = |at: &EventAt| {
+        doc.event(EventId(at.event))
+            .ok()
+            .map(|(e, _)| e.group_channel)
+    };
+    for (t, ti) in p.tracks.iter_mut().zip(&ids.tracks) {
+        let Some(&main) = mains.get(&LaneId(ti.lane)) else {
+            continue;
+        };
+        for (n, at) in t.notes_played.iter_mut().zip(&ti.notes) {
+            if let Some(g) = own(at) {
+                n.channel = file_channel(main, g);
+            }
+        }
+        for (m, at) in t.midi.iter_mut().zip(&ti.midi) {
+            if let Some(g) = own(at) {
+                m.1 = on_channel(&m.1, file_channel(main, g));
+            }
+        }
+    }
+}
+
 /// What the route carries (§7.1), ID-free: tracks in order, strips by index.
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Projection {
@@ -768,6 +824,29 @@ fn per_note_kind(k: PerNoteKind) -> Option<String> {
     }
 }
 
+/// A program change (with its bank, MSB × 128 + LSB) as the projection
+/// spells it.
+fn program_text(ch: u8, program: u8, bank: Option<(u8, u8)>) -> String {
+    match bank {
+        Some((msb, lsb)) => format!(
+            "program {ch} {program} {}",
+            u32::from(msb) * 128 + u32::from(lsb)
+        ),
+        None => format!("program {ch} {program} none"),
+    }
+}
+
+/// The default patches the export writes at file time 0 on track part `p`
+/// ([`TrackIds::patches`]).
+fn patches_of(l: &Layout<'_>, p: &super::export::Part<'_>) -> Vec<String> {
+    patched_dests(l, p)
+        .iter()
+        .filter_map(|d| l.doc.instruments().get(d))
+        .filter_map(written_patch)
+        .map(|(ch, program, bank)| program_text(ch, program, bank))
+        .collect()
+}
+
 /// A MIDI event other than a note, as the projection spells it; `None` for
 /// what the route does not carry.
 fn midi_text(r: &ResolvedEvent) -> Option<String> {
@@ -777,13 +856,7 @@ fn midi_text(r: &ResolvedEvent) -> Option<String> {
         EventBody::PitchBend { value } => format!("pitch_bend {ch} 0 {value}"),
         EventBody::ChannelPressure { value } => format!("channel_pressure {ch} 0 {value}"),
         EventBody::PolyPressure { pitch, value } => format!("poly_pressure {ch} {pitch} {value}"),
-        EventBody::Program { program, bank } => match bank {
-            Some((msb, lsb)) => format!(
-                "program {ch} {program} {}",
-                u32::from(*msb) * 128 + u32::from(*lsb)
-            ),
-            None => format!("program {ch} {program} none"),
-        },
+        EventBody::Program { program, bank } => program_text(ch, *program, *bank),
         _ => return None,
     })
 }
@@ -910,6 +983,7 @@ pub(super) fn project_with_identity(
         let mut ids = TrackIds {
             lane: p.lane.id.0,
             uses: uses_of(l, p),
+            patches: patches_of(l, p),
             ..TrackIds::default()
         };
         let mut t = PTrack {

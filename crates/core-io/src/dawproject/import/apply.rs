@@ -1069,6 +1069,9 @@ fn apply_arranged(
         let Some(lane) = placed.lanes.get(ti).copied().flatten() else {
             continue;
         };
+        if let Some(m) = arr.main.get(ti) {
+            origins.main_channels.insert(lane, *m);
+        }
         if items.is_empty() {
             continue;
         }

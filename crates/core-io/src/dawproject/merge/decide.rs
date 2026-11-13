@@ -249,12 +249,14 @@ pub fn plan(
     let ours_side = projection_with_identity(ours, seq)?;
     let b = normalised(&base.projection, &base);
     let o = normalised(&ours_side.0, &base);
+    let mut theirs = theirs;
     // Matching reads no region, so it runs on theirs as imported; `held`
     // then needs it to tell which of theirs' tracks have regions as base's.
     let mut matches = match_all(&base, &theirs, &ours_side, cancel)?;
     stop(cancel)?;
     pair_twins(&mut matches, &theirs.projection, &o);
     let base_ids = base_track_ids(&b, base.identity.as_ref());
+    without_patches(&mut theirs, &matches, &base_ids);
     let untouched = untouched_regions(&matches, (&b, &base_ids), &theirs);
     let (mut theirs, settled) = held(theirs, &b, &o, ours, seq, base.origin, &untouched)?;
     split_curves(
@@ -531,6 +533,46 @@ fn held(
     }
     theirs.doc = h.doc().clone();
     Ok((theirs, lines))
+}
+
+/// Theirs without the program changes the export wrote from base's
+/// instruments' default patches (plan 6e Task 11): the import brings each
+/// in as an event at file time 0, which base and ours do not have. Each of
+/// a matched track's base [`TrackIds::patches`] takes out one event of
+/// theirs with its text at tick 0 (from the projection and the identity
+/// alike); any other program change, or one at another program or
+/// channel, stays theirs' and is compared as usual.
+fn without_patches(theirs: &mut Theirs, m: &Matches, base_ids: &[TrackIds]) {
+    for r in &m.tracks {
+        let (Some(b), Some(t)) = (r.base, r.theirs) else {
+            continue;
+        };
+        let Some(patches) = base_ids.get(b).map(|i| &i.patches) else {
+            continue;
+        };
+        let (Some(tt), Some(ti)) = (
+            theirs.projection.tracks.get_mut(t),
+            theirs.identity.tracks.get_mut(t),
+        ) else {
+            continue;
+        };
+        if patches.is_empty() || tt.midi.len() != ti.midi.len() {
+            continue;
+        }
+        let mut left: Vec<&str> = patches.iter().map(String::as_str).collect();
+        let keep: Vec<bool> = tt
+            .midi
+            .iter()
+            .map(|(tick, text)| {
+                let at = left.iter().position(|p| *tick == 0 && *p == text.as_str());
+                at.map(|k| left.remove(k)).is_none()
+            })
+            .collect();
+        let mut k = keep.iter();
+        tt.midi.retain(|_| k.next().copied().unwrap_or(true));
+        let mut k = keep.iter();
+        ti.midi.retain(|_| k.next().copied().unwrap_or(true));
+    }
 }
 
 /// Theirs' curves on a split track's notes part that drive its audio

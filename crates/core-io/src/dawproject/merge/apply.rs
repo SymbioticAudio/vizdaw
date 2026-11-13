@@ -62,7 +62,7 @@ use core_model::automation::{AutomationTarget, SendIndex};
 use core_model::command::{
     Command, EventCmd, LaneCmd, MediaCmd, MixerCmd, Report as CmdReport, SequenceCmd, SettingsCmd,
 };
-use core_model::document::Document;
+use core_model::document::{DestKind, Document};
 use core_model::error::ModelError;
 use core_model::event::{EventBody, EventSpec};
 use core_model::history::History;
@@ -580,35 +580,65 @@ fn rename(h: &mut History, cx: &Cx<'_>, lane: u64, o: usize, t: usize) -> Result
     Ok(())
 }
 
+/// The channel ours' track `lane` plays an event without a channel of its
+/// own on: its destination's (0 for a plug-in, or with none, as the
+/// projection reads it).
+fn home_channel(doc: &Document, seq: SeqId, lane: u64) -> u8 {
+    doc.lane(seq, LaneId(lane))
+        .ok()
+        .and_then(|l| l.midi_dest)
+        .and_then(|d| doc.instruments().get(&d))
+        .map_or(0, |d| match d.kind {
+            DestKind::MidiEndpoint { channel, .. } => channel,
+            DestKind::PluginInstrument { .. } => 0,
+        })
+}
+
+/// The channel of a [`PTrack::midi`] text ("<kind> <channel> …").
+fn midi_channel(text: &str) -> Option<u8> {
+    text.split(' ').nth(1)?.parse().ok()
+}
+
 /// Theirs' played event `at` at projected tick `tick` (theirs' frame) as
-/// a spec for ours, `pitch` a note's played key.
+/// a spec for ours, `pitch` a note's played key. `ch`: the file channel
+/// it is on (theirs' projection's, `record::on_file_channels`) and the
+/// channel ours' track plays an event without one on ([`home_channel`]).
+/// An event the import gave no channel of its own (it was on its track's
+/// main channel) gets that file channel when ours' track would play it on
+/// another (plan 6e Task 11).
 fn theirs_spec(
     cx: &Cx<'_>,
     at: &EventAt,
     tick: i64,
     pitch: Option<u8>,
     shift: i64,
+    ch: Option<(u8, u8)>,
 ) -> Option<EventSpec> {
     let (e, _) = cx.th.doc.event(EventId(at.event)).ok()?;
     let mut body = e.body.clone();
     if let (Some(p), EventBody::Note { pitch: q, .. }) = (pitch, &mut body) {
         *q = p;
     }
+    let group_channel = match (e.group_channel, ch) {
+        (None, Some((file, home))) if body.is_midi() && file != home => Some((0, file)),
+        (g, _) => g,
+    };
     Some(EventSpec {
         tick: cx.to_ours(tick, shift),
         dest: None,
-        group_channel: e.group_channel,
+        group_channel,
         mute: false,
         body,
     })
 }
 
 /// Theirs track `t`'s notes `which` picks, as ours' specs, flattened as
-/// they play.
+/// they play; `home` is [`home_channel`]'s.
 fn theirs_notes(
     cx: &Cx<'_>,
     t: usize,
     shift: i64,
+    home: u8,
     which: impl Fn(usize) -> bool,
 ) -> Vec<EventSpec> {
     let (Some(tt), Some(ti)) = (cx.th.projection.tracks.get(t), cx.th.identity.tracks.get(t))
@@ -620,12 +650,28 @@ fn theirs_notes(
         .zip(&ti.notes)
         .enumerate()
         .filter(|(j, _)| which(*j))
-        .filter_map(|(_, (n, at))| theirs_spec(cx, at, n.tick, Some(n.pitch), shift))
+        .filter_map(|(_, (n, at))| {
+            theirs_spec(
+                cx,
+                at,
+                n.tick,
+                Some(n.pitch),
+                shift,
+                Some((n.channel, home)),
+            )
+        })
         .collect()
 }
 
-/// Theirs track `t`'s MIDI events `which` picks, as ours' specs.
-fn theirs_midi(cx: &Cx<'_>, t: usize, shift: i64, which: impl Fn(usize) -> bool) -> Vec<EventSpec> {
+/// Theirs track `t`'s MIDI events `which` picks, as ours' specs; `home`
+/// is [`home_channel`]'s.
+fn theirs_midi(
+    cx: &Cx<'_>,
+    t: usize,
+    shift: i64,
+    home: u8,
+    which: impl Fn(usize) -> bool,
+) -> Vec<EventSpec> {
     let (Some(tt), Some(ti)) = (cx.th.projection.tracks.get(t), cx.th.identity.tracks.get(t))
     else {
         return Vec::new();
@@ -635,7 +681,10 @@ fn theirs_midi(cx: &Cx<'_>, t: usize, shift: i64, which: impl Fn(usize) -> bool)
         .zip(&ti.midi)
         .enumerate()
         .filter(|(j, _)| which(*j))
-        .filter_map(|(_, (m, at))| theirs_spec(cx, at, m.0, None, shift))
+        .filter_map(|(_, (m, at))| {
+            let ch = midi_channel(&m.1).map(|c| (c, home));
+            theirs_spec(cx, at, m.0, None, shift, ch)
+        })
         .collect()
 }
 
@@ -682,6 +731,7 @@ fn edit_notes(
         return;
     };
     let owners = cx.refine.then(|| shared::Owners::new(doc, cx, lane, t));
+    let home = home_channel(doc, cx.seq, lane);
     let raw = |tick: i64| tick.saturating_add(cx.origin);
     let ours_of = |at: &EventAt| owners.as_ref().and_then(|w| w.of_ours(at));
     let theirs_of = |at: &EventAt, tick: i64| {
@@ -698,7 +748,14 @@ fn edit_notes(
         Some(shared::Gained {
             tick: raw(n.tick),
             key: shared::Key::Note(n.clone()),
-            spec: theirs_spec(cx, at, n.tick, Some(n.pitch), shift)?,
+            spec: theirs_spec(
+                cx,
+                at,
+                n.tick,
+                Some(n.pitch),
+                shift,
+                Some((n.channel, home)),
+            )?,
         })
     };
     let mut add = BTreeSet::new();
@@ -743,7 +800,7 @@ fn edit_notes(
         }
     }
     edit.insert
-        .extend(theirs_notes(cx, t, shift, |j| add.contains(&j)));
+        .extend(theirs_notes(cx, t, shift, home, |j| add.contains(&j)));
     let (lone_o, lone_t) = midi_unpaired(&ot.midi, &tt.midi);
     for i in lone_o {
         let (Some(at), Some(m)) = (oi.midi.get(i), ot.midi.get(i)) else {
@@ -767,7 +824,15 @@ fn edit_notes(
             Some(u) => edit.inside.push(shared::Change {
                 use_ev: u,
                 ours: None,
-                theirs: theirs_spec(cx, at, m.0, None, shift).map(|spec| shared::Gained {
+                theirs: theirs_spec(
+                    cx,
+                    at,
+                    m.0,
+                    None,
+                    shift,
+                    midi_channel(&m.1).map(|c| (c, home)),
+                )
+                .map(|spec| shared::Gained {
                     tick: raw(m.0),
                     key: shared::Key::Midi,
                     spec,
@@ -779,7 +844,7 @@ fn edit_notes(
         }
     }
     edit.insert
-        .extend(theirs_midi(cx, t, shift, |j| top.contains(&j)));
+        .extend(theirs_midi(cx, t, shift, home, |j| top.contains(&j)));
 }
 
 /// Ours' media for theirs' scratch media item `m`: ours' item of the same
@@ -881,7 +946,7 @@ fn theirs_region_specs(
         if !which(j) {
             continue;
         }
-        let Some(mut s) = theirs_spec(cx, at, r.tick, None, shift) else {
+        let Some(mut s) = theirs_spec(cx, at, r.tick, None, shift, None) else {
             continue;
         };
         s.mute = r.muted;
@@ -1612,8 +1677,9 @@ fn conflict_take(
             let Some(t) = theirs_of(*o) else { continue };
             match unit {
                 Unit::Notes => {
-                    specs.extend(theirs_notes(cx, t, shift, |_| true));
-                    specs.extend(theirs_midi(cx, t, shift, |_| true));
+                    let home = home_channel(h.doc(), cx.seq, lane);
+                    specs.extend(theirs_notes(cx, t, shift, home, |_| true));
+                    specs.extend(theirs_midi(cx, t, shift, home, |_| true));
                 }
                 Unit::Regions => match theirs_regions(h, cx, (*o, t), shift, add, |_| true)? {
                     Some(r) => specs.extend(r),
