@@ -53,6 +53,7 @@
 //! keeps ours ([`Outcome::Ours`]), listed under [`text::VST_KEPT`].
 
 use super::matching::{Matched, MatchedBy, Matches, match_all, notes, regions};
+use super::target::{self, Holds, Missing};
 use super::text;
 use super::theirs::Theirs;
 use super::{LEVEL_DB, NOTE_TICKS, PAN, VALUE, normalised};
@@ -309,6 +310,7 @@ pub fn plan(
     for row in 0..matches.strips.len() {
         d.strip(row);
     }
+    d.unplaced_curves();
     stop(cancel)?;
     for row in 0..matches.markers.len() {
         d.marker(row);
@@ -737,6 +739,10 @@ enum Side {
     Ours = 2,
 }
 
+// `target::key`'s marks are these sides'.
+const _: () =
+    assert!(Side::Theirs as usize == target::THEIRS && Side::Ours as usize == target::OURS);
+
 /// An event no project has: what a format-1 base's regions are "tagged"
 /// with, so only their media and position match them (Ruling 3).
 const NO_EVENT: EventAt = EventAt {
@@ -1127,6 +1133,49 @@ fn target_kind(target: &str) -> &'static str {
 
 // ---------------------------------------------------------------- the decider
 
+/// Ours as the merge leaves it, for [`target::resolve`]: ours' strips and
+/// the buses theirs adds (step 1); ours' sends and those the strip step
+/// adds (a [`Unit::Send`] decided [`Outcome::Theirs`]), and an added bus's
+/// own; ours' devices.
+struct Leaves<'d, 'a>(&'d Decider<'a>);
+
+impl Holds for Leaves<'_, '_> {
+    type Strip = ();
+    type Send = ();
+    type Slot = ();
+
+    fn strip(&self, row: usize) -> Option<()> {
+        let d = self.0;
+        let r = d.m.strips.get(row)?;
+        let ours = r
+            .ours
+            .and_then(|o| d.ours_strips.strips.get(o))
+            .is_some_and(|s| s.strip.is_some());
+        (ours || (r.ours.is_none() && d.decided(&Unit::Bus, row, Outcome::Added))).then_some(())
+    }
+
+    fn send(&self, (row, _): (usize, ()), (to, _): (usize, ())) -> Option<()> {
+        let d = self.0;
+        let r = d.m.strips.get(row)?;
+        let sends_to = |s: Side, i: usize| {
+            d.strip_of(s, i)
+                .is_some_and(|st| st.sends.iter().any(|x| d.skey(s, x.0) == Some(to)))
+        };
+        let held = match r.ours {
+            Some(o) => sends_to(Side::Ours, o) || d.decided(&Unit::Send(to), row, Outcome::Theirs),
+            // An added bus comes with its own mix.
+            None => r.theirs.is_some_and(|t| sends_to(Side::Theirs, t)),
+        };
+        held.then_some(())
+    }
+
+    fn slot(&self, row: usize, device: usize) -> Option<()> {
+        let d = self.0;
+        let o = d.m.strips.get(row)?.ours?;
+        d.ours_strips.strips.get(o)?.devices.get(device).map(|_| ())
+    }
+}
+
 /// A send's level, pre-fader and enabled.
 type Send = (f64, bool, bool);
 
@@ -1194,6 +1243,13 @@ impl<'a> Decider<'a> {
 
     fn strip_of(&self, s: Side, i: usize) -> Option<&'a PStrip> {
         self.side(s).strips.get(i)
+    }
+
+    /// Whether `unit` of row `row` is decided `outcome`.
+    fn decided(&self, unit: &Unit, row: usize, outcome: Outcome) -> bool {
+        self.out
+            .iter()
+            .any(|d| d.row == row && d.outcome == outcome && d.unit == *unit)
     }
 
     fn skey(&self, s: Side, i: usize) -> Option<usize> {
@@ -1294,26 +1350,16 @@ impl<'a> Decider<'a> {
         same_regions((a, aids), (b, bids, origins))
     }
 
-    /// Track `i` of side `s`'s automation, each target with its strip as
-    /// a row of `m.strips`.
+    /// Track `i` of side `s`'s automation, each by its [`target::key`].
     fn curves(&self, s: Side, i: usize) -> BTreeMap<String, &'a [(i64, f64)]> {
         let mut out = BTreeMap::new();
         let Some(t) = self.track_of(s, i) else {
             return out;
         };
+        let strips = &self.side(s).strips;
         for (target, points) in &t.automation {
-            let mut words: Vec<String> = target.split(' ').map(str::to_owned).collect();
-            let key = words
-                .get(1)
-                .and_then(|c| c.parse::<usize>().ok())
-                .and_then(|c| self.skey(s, c));
-            match (key, words.get_mut(1)) {
-                (Some(k), Some(w)) => *w = k.to_string(),
-                // A strip on this side only: no other side has the curve.
-                (None, Some(w)) => *w = format!("{w}@{}", s as usize),
-                _ => {}
-            }
-            out.entry(words.join(" ")).or_insert(points.as_slice());
+            let key = target::key(target, s as usize, |c| self.skey(s, c), strips);
+            out.entry(key).or_insert(points.as_slice());
         }
         out
     }
@@ -1515,6 +1561,51 @@ impl<'a> Decider<'a> {
                 self.push_not_applied(unit, row, what, ours, theirs);
             } else {
                 self.push_with(unit, row, out, what, ours, theirs);
+            }
+        }
+    }
+
+    /// Theirs' curves decided [`Outcome::Theirs`] whose target ours, as
+    /// the merge leaves it, does not hold (Task 7 fix round 6, automation
+    /// case B): each becomes a [`text::NOT_APPLIED`] conflict, the reason
+    /// in its `what`, and the apply runs nothing for it. The same
+    /// [`target::resolve`] places the others in the apply. A curve theirs
+    /// deleted needs no target: ours' points go.
+    fn unplaced_curves(&mut self) {
+        let mut unplaced = Vec::new();
+        for (at, d) in self.out.iter().enumerate() {
+            let Unit::Automation(key) = &d.unit else {
+                continue;
+            };
+            if d.outcome != Outcome::Theirs || self.not_applied.contains(&at) {
+                continue;
+            }
+            let Some(t) = self.m.tracks.get(d.row).and_then(|r| r.theirs) else {
+                continue;
+            };
+            if !self.curves(Side::Theirs, t).contains_key(key) {
+                continue;
+            }
+            if let Err(why) = target::resolve(key, &Leaves(self)) {
+                let part = match why {
+                    Missing::Strip => "strip".to_owned(),
+                    Missing::Send(to) => {
+                        let to = to.map(|k| self.strip_label(k));
+                        match to.as_deref().map(|l| l.trim_start_matches("Strip ")) {
+                            Some(l) if !l.is_empty() => format!("send to {l}"),
+                            _ => "send".to_owned(),
+                        }
+                    }
+                    Missing::Plugin => "plug-in".to_owned(),
+                };
+                unplaced.push((at, text::missing_target(&part)));
+            }
+        }
+        for (at, why) in unplaced {
+            if let Some(d) = self.out.get_mut(at) {
+                d.outcome = Outcome::Conflict;
+                d.what = format!("{} ({why})", d.what);
+                self.not_applied.insert(at);
             }
         }
     }

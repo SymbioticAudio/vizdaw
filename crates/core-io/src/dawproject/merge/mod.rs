@@ -26,6 +26,7 @@
 pub mod apply;
 pub mod decide;
 pub mod matching;
+mod target;
 pub mod text;
 pub mod theirs;
 

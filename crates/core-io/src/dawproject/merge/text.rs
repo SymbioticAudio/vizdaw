@@ -35,7 +35,9 @@ pub const ADDED_BOTH: &str =
 /// detail's part: "Track 'X': level automation (the track plays its own
 /// loop)"), an instrument swap, a plug-in state dropped, a curve on a
 /// new track for a parameter its target track already automates in the
-/// file (detail [`doubled_curve`], as it is). Notes and regions
+/// file (detail [`doubled_curve`], as it is), a curve whose strip, send
+/// or plug-in this project does not hold (the reason in the detail's
+/// part, [`missing_target`]). Notes and regions
 /// on such a track go under [`CONFLICT_TAKE`] instead. Detail
 /// [`conflict_setting`].
 pub const NOT_APPLIED: &str =
@@ -156,6 +158,13 @@ pub fn doubled_curve(added: &str, param: &str, target: &str) -> String {
     format!(
         "Track '{added}': its {param} curve for track '{target}', which already has one in the file"
     )
+}
+
+/// The reason in a [`NOT_APPLIED`] curve's `what` when ours has nothing
+/// for it to drive (Task 7 fix round 6): "Track 'Bass': send level
+/// automation (its send to 'Bus' is not in this project)".
+pub fn missing_target(part: &str) -> String {
+    format!("its {part} is not in this project")
 }
 
 /// `secs` since 1970 as a UTC date, `yyyy-mm-dd` (days to the civil

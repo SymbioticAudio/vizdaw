@@ -16,7 +16,9 @@
 
 mod common;
 
-use common::generators::{Spec, build, spec};
+use common::generators::{
+    AudioTrack, Auto, NoteSpec, NoteTrack, Slot, Spec, StripSpec, build, spec,
+};
 use common::merge::{
     Except, Strip, Trip, fixture, played_sequences, return_file, shared_fixture, stripped_package,
     theirs_of, trip, trip_with, vizdaw_only_except,
@@ -1535,6 +1537,84 @@ proptest! {
     ) {
         check_script(&s, &theirs_script, &ours_script, strip);
     }
+}
+
+/// Case B (Task 7 fix round 6), the committed seed `cc 6354fffc…a990`:
+/// untagged, so a rename and a delete pair theirs' tracks with ours by
+/// order. Theirs' send-level curve then targets a send ours' paired strip
+/// does not hold; it must never be decided Theirs and then not land.
+#[test]
+fn case_b_a_send_curve_decided_theirs_lands_or_is_listed() {
+    let plain = || StripSpec {
+        gain: 0,
+        pan: 0,
+        mute: false,
+        solo: false,
+        colour: None,
+        send: None,
+        insert: None,
+        state: None,
+    };
+    let slot = || Slot::Plain {
+        offset: 0,
+        length: 480,
+        gain: 0.0,
+        fade_in: (0, 0),
+        fade_out: (0, 0),
+        name: None,
+        muted: false,
+        wide: false,
+    };
+    let s = Spec {
+        notes: vec![NoteTrack {
+            strip: plain(),
+            quantize: None,
+            notes: vec![NoteSpec {
+                tick: 0,
+                pitch: 0,
+                velocity: 1,
+                release: 0,
+                duration: 1,
+                channel: None,
+                expression: vec![],
+            }],
+            midi: vec![],
+            automation: vec![],
+        }],
+        audio: vec![
+            AudioTrack {
+                strip: plain(),
+                slots: vec![slot()],
+                automation: vec![],
+            },
+            AudioTrack {
+                strip: StripSpec {
+                    send: Some((0, false, false)),
+                    ..plain()
+                },
+                slots: vec![slot()],
+                automation: vec![(Auto::Send, vec![(168_960, 0.0)])],
+            },
+        ],
+        bus: Some(plain()),
+        master_gain: 0,
+        meter: (2, 4),
+        change: None,
+        tempo: vec![(0, 30, false)],
+        pickup_beats: 0,
+        markers: vec![],
+        info: vec![],
+        gain: false,
+    };
+    check_script(
+        &s,
+        &[
+            TheirEdit::Rename(8714, "Aa".to_owned()),
+            TheirEdit::DeleteTrack(25181),
+        ],
+        &[],
+        Strip::Both,
+    );
 }
 
 // ---------------------------------------------------------------- hostile records

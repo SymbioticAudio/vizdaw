@@ -24,7 +24,7 @@ use core_io::dawproject::record::{PStrip, PTrack, Projection, projection};
 use core_io::dawproject::{DpClip, DpMarker, DpNamed, DpNote, DpProject, DpTimeline};
 use core_io::limits::PackageLimits;
 use core_io::report::{ItemKind, Report};
-use core_model::automation::{AutomationMode, AutomationTarget};
+use core_model::automation::{AutomationMode, AutomationTarget, SendIndex};
 use core_model::command::{
     AudioCmd, Command, CrossfadeLength, EventCmd, LaneCmd, MixerCmd, ReferenceCmd, RoutingCmd,
     SequenceCmd, SettingsCmd,
@@ -3068,6 +3068,223 @@ fn a_new_tracks_curve_on_a_level_its_track_already_automates_is_listed() {
     assert_eq!(to_json(h.doc()).unwrap(), json);
 }
 
+/// The send-level points of `strip`'s send to `to` in `doc`, by tick.
+fn send_points(doc: &Document, seq: SeqId, strip: StripId, to: StripId) -> Vec<(i64, f64)> {
+    let Some(k) = doc
+        .mixer()
+        .strip(strip)
+        .unwrap()
+        .sends
+        .iter()
+        .position(|s| s.target == to)
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<(i64, f64)> = doc
+        .sequence(seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .filter_map(|l| l.active())
+        .flat_map(|tk| tk.events.values())
+        .filter_map(|e| match e.body {
+            EventBody::Automation {
+                target: AutomationTarget::SendLevel(s, i),
+                value,
+            } if s == strip && usize::from(i.0) == k => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out
+}
+
+/// Theirs' send-level curve on Keys' lane, for Keys' send `index`.
+fn send_curve(h: &mut History, seq: SeqId, keys: LaneId, strip: StripId, index: u16) {
+    let point = |tick: i64, value: f64| {
+        EventSpec::new(
+            Tick(tick),
+            EventBody::Automation {
+                target: AutomationTarget::SendLevel(strip, SendIndex(index)),
+                value,
+            },
+        )
+    };
+    run(
+        h,
+        Command::Event(EventCmd::Insert {
+            seq,
+            lane: keys,
+            events: vec![point(BAR, 0.5), point(2 * BAR, 0.25)],
+        }),
+    );
+}
+
+/// Task 7 fix round 6 (automation case B): theirs adds a send from Keys
+/// to Reverb and a curve on its level. The curve is decided Theirs and
+/// lands although the send is only made by the strip step, after the
+/// track edits; nothing is left out, and merging again adds nothing.
+#[test]
+fn a_curve_on_a_send_theirs_adds_lands_with_it() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let strip = keys_strip(h.doc(), i.seq);
+        run(
+            h,
+            Command::Mixer(MixerCmd::AddSend {
+                strip,
+                send: AuxSend {
+                    target: i.reverb,
+                    level_db: -12.0,
+                    pre_fader: false,
+                    enabled: true,
+                },
+            }),
+        );
+        send_curve(h, i.seq, i.keys, strip, 0);
+    });
+    let o = t.base_doc.clone();
+    let i = ids(&t);
+    let keys = keys_strip(&o, seq);
+    assert!(send_points(&o, seq, keys, i.reverb).is_empty());
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    let curve = p
+        .decisions
+        .iter()
+        .find(|d| matches!(d.unit, Unit::Automation(_)))
+        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+    assert_eq!(curve.what, "Track 'Keys': send level automation");
+    assert_eq!(curve.outcome, Outcome::Theirs);
+    assert!(
+        p.decisions
+            .iter()
+            .any(|d| matches!(d.unit, Unit::Send(_)) && d.outcome == Outcome::Theirs),
+        "{:#?}",
+        p.decisions
+    );
+    let (h, report) = apply_on(&o, &p);
+    assert!(
+        !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
+        "{:#?}",
+        report.items
+    );
+    assert!(!has(&report, NOT_APPLIED), "{:#?}", report.items);
+    assert_eq!(
+        send_points(h.doc(), seq, keys, i.reverb),
+        vec![(BAR, 0.5), (2 * BAR, 0.25)]
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+    // Merging again adds nothing.
+    let (depth, json) = (h.undo_depth(), to_json(h.doc()).unwrap());
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    assert!(
+        again
+            .decisions
+            .iter()
+            .all(|d| d.outcome == Outcome::Same || d.outcome == Outcome::Ours),
+        "{:#?}",
+        again.decisions
+    );
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), depth);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
+/// Task 7 fix round 6 (automation case B): theirs automates Bass's send
+/// to Reverb, which ours removed. Ours has no send for the curve to
+/// drive, so it is listed under `NOT_APPLIED` with the reason, never
+/// decided Theirs; the merge runs nothing, and merging again lists the
+/// same line and changes nothing.
+#[test]
+fn a_curve_on_a_send_ours_removed_is_listed() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let point = |tick: i64, value: f64| {
+            EventSpec::new(
+                Tick(tick),
+                EventBody::Automation {
+                    target: AutomationTarget::SendLevel(i.bass_strip, SendIndex(0)),
+                    value,
+                },
+            )
+        };
+        run(
+            h,
+            Command::Event(EventCmd::Insert {
+                seq: i.seq,
+                lane: i.bass,
+                events: vec![point(BAR, 0.5), point(2 * BAR, 0.25)],
+            }),
+        );
+    });
+    let o = ours(&t, |h, i| {
+        run(
+            h,
+            Command::Mixer(MixerCmd::RemoveSend {
+                strip: i.bass_strip,
+                index: 0,
+            }),
+        );
+    });
+    let line = "Track 'Bass': send level automation (its send to 'Reverb' is not in this \
+                project): here 0 points, there 2 points";
+    let check = |p: &MergePlan| {
+        let curve = p
+            .decisions
+            .iter()
+            .find(|d| matches!(d.unit, Unit::Automation(_)))
+            .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+        assert_eq!(curve.outcome, Outcome::Conflict, "{:#?}", p.decisions);
+        assert_eq!(
+            item(&p.report, ItemKind::Conflict, NOT_APPLIED).details,
+            vec![line.to_owned()]
+        );
+        assert!(p.preview.conflict_lines.contains(&line.to_owned()));
+        assert!(
+            !p.decisions.iter().any(|d| d.outcome == Outcome::Theirs),
+            "{:#?}",
+            p.decisions
+        );
+    };
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    check(&p);
+    let json = to_json(&o).unwrap();
+    let (h, report) = apply_on(&o, &p);
+    assert_eq!(h.undo_depth(), 0, "the merge runs nothing");
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+    assert!(
+        !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
+        "{:#?}",
+        report.items
+    );
+    assert_eq!(
+        item(&report, ItemKind::Conflict, NOT_APPLIED).details,
+        vec![line.to_owned()]
+    );
+    // Merging again lists the same line and changes nothing.
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    check(&again);
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), 0);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
 /// Task 7 fix round 2 (layout 2, from the 4096 run's seed): theirs sets
 /// 450 BPM, so Keys' regions (in beats in the file) come back shorter.
 /// Placed under ours' 120 BPM before the tempo map is theirs, the pair
@@ -4221,6 +4438,8 @@ stripped!(
     a_new_tracks_curve_on_an_existing_tracks_level_lands,
     a_new_tracks_curve_on_a_level_ours_changed_keeps_ours,
     a_new_tracks_curve_on_a_level_its_track_already_automates_is_listed,
+    a_curve_on_a_send_theirs_adds_lands_with_it,
+    a_curve_on_a_send_ours_removed_is_listed,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,
     both_changed_notes_become_an_alternate_take,
