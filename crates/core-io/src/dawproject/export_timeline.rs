@@ -72,6 +72,10 @@ pub const NESTED_MUTED: &str =
     "Muted regions and uses inside a used sequence were not written (they do not play)";
 /// Note: transposed reference uses (a count).
 pub const TRANSPOSED: &str = "Transposed uses of a sequence were written as played";
+/// Changed (final review I2): the notes of tracks, or of sequences they
+/// use, that play quantized were written where they play (by track); the
+/// file has no play quantize.
+pub const PLAY_QUANTIZED: &str = "Play quantize was applied to the notes";
 
 // ---------------------------------------------------------------- the API
 
@@ -360,6 +364,9 @@ impl Arr<'_, '_, '_, '_, '_> {
         let mut regions: Vec<Ev<'_>> = Vec::new();
         let mut autos: Vec<Ev<'_>> = Vec::new();
         let mut dests: BTreeSet<DestId> = BTreeSet::new();
+        // The played notes carry the play quantize of the track (or used
+        // sequence's track) they are on, as `flatten` applies it.
+        let mut quantized = false;
         for r in events {
             self.ticker.tick()?;
             // What a muted use holds is written in its disabled clip (MIDI,
@@ -383,6 +390,15 @@ impl Arr<'_, '_, '_, '_, '_> {
                 _ => {
                     dests.extend(r.dest);
                     self.transposed(&r.path);
+                    if !quantized && matches!(r.body, EventBody::Note { .. }) {
+                        quantized = r.path.last().is_some_and(|s| {
+                            l.doc
+                                .sequence(s.seq)
+                                .ok()
+                                .and_then(|q| q.lane(s.lane))
+                                .is_some_and(|x| x.play_quantize.is_some())
+                        });
+                    }
                     match r.path.first() {
                         Some(step) if r.path.len() > 1 => {
                             let i = *use_at.entry(step.event).or_insert_with(|| {
@@ -399,6 +415,11 @@ impl Arr<'_, '_, '_, '_, '_> {
             }
         }
 
+        if quantized {
+            let name = p.lane.name.clone();
+            self.report
+                .add(ItemKind::Changed, PLAY_QUANTIZED, Some(name));
+        }
         let mut clips: Vec<(i64, DpClip)> = Vec::new();
         self.rule_clips(&top, &mut clips)?;
         // The track's reference events, looked up once.

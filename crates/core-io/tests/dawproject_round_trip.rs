@@ -31,6 +31,7 @@ use core_model::command::{Command, LaneCmd, SequenceCmd};
 use core_model::document::Document;
 use core_model::history::History;
 use core_model::ids::{AnyId, SeqId};
+use core_model::lane::QuantizeSpec;
 use core_model::mixer::PluginFormat;
 use core_model::selection::ViewFilter;
 use core_model::time::Tick;
@@ -1278,6 +1279,8 @@ enum Midi {
 #[derive(Debug, Clone)]
 struct NoteTrack {
     strip: StripSpec,
+    /// Play quantize (grid, strength), final review I2.
+    quantize: Option<QuantizeSpec>,
     notes: Vec<NoteSpec>,
     midi: Vec<(i64, Midi)>,
     automation: Vec<(Auto, Vec<(i64, f64)>)>,
@@ -1438,8 +1441,10 @@ fn note_track_spec(pickup: i64) -> impl Strategy<Value = NoteTrack> {
                 expression,
             },
         );
+    let grids = [Q / 4, Q / 3, Q / 2, Q];
     (
         strip_spec(true, true),
+        proptest::option::weighted(0.3, (0usize..grids.len(), 1u8..=100)),
         proptest::collection::vec(note, 1..16),
         proptest::collection::vec((-pickup..24 * Q, midi()), 0..8),
         automation(vec![
@@ -1450,18 +1455,22 @@ fn note_track_spec(pickup: i64) -> impl Strategy<Value = NoteTrack> {
             Auto::Param,
         ]),
     )
-        .prop_map(|(strip, notes, midi, automation)| {
+        .prop_map(move |(strip, quantize, notes, midi, automation)| {
+            let quantize = quantize.map(|(g, s)| QuantizeSpec::grid(Tick(grids[g]), s));
+            // Where a note plays: quantized as playback does.
+            let at = |t: i64| quantize.as_ref().map_or(t, |q| q.apply(Tick(t)).0);
             let mut notes = notes;
             notes.sort_by_key(|n| n.tick);
-            // No two notes of a pitch overlap; offsets stay inside notes;
-            // each expression kind once per offset; the track's main
-            // channel (0) has more notes than any other.
+            // No two notes of a pitch overlap where they play; offsets stay
+            // inside notes; each expression kind once per offset; the
+            // track's main channel (0) has more notes than any other.
             let mut free: BTreeMap<u8, i64> = BTreeMap::new();
             notes.retain(|n| {
-                if free.get(&n.pitch).is_some_and(|f| *f > n.tick) {
+                let t = at(n.tick);
+                if free.get(&n.pitch).is_some_and(|f| *f > t) {
                     return false;
                 }
-                free.insert(n.pitch, n.tick + n.duration);
+                free.insert(n.pitch, t + n.duration);
                 true
             });
             for n in &mut notes {
@@ -1495,6 +1504,7 @@ fn note_track_spec(pickup: i64) -> impl Strategy<Value = NoteTrack> {
             });
             NoteTrack {
                 strip,
+                quantize,
                 notes,
                 midi,
                 automation,
@@ -1729,6 +1739,14 @@ fn build(s: &Spec) -> (Document, SeqId) {
             }
             Some(q) => b.lane(q, &name, Some(dest)).unwrap(),
         };
+        if let (Some(q), Some(seq)) = (&t.quantize, seq) {
+            b.run(Command::Lane(LaneCmd::SetPlayQuantize {
+                seq,
+                lane,
+                quantize: Some(q.clone()),
+            }))
+            .unwrap();
+        }
         let strip = b.strip_of(StripKind::Instrument(dest)).unwrap();
         mix(&mut b, strip, &t.strip);
         if let (Some(bus), Some((db, pre, enabled))) = (bus, t.strip.send) {
@@ -1975,7 +1993,10 @@ fn gain_of(s: &Spec) -> RegionGain {
 /// import's only the "from VizDAW" note.
 #[track_caller]
 fn only_expected(s: &Spec, t: &Trip) {
-    use core_io::dawproject::export::{CROSSFADES, FADE_SHAPES, MIDI_GROUPS, REGION_GAIN};
+    use core_io::dawproject::export::{
+        CROSSFADES, FADE_SHAPES, MIDI_GROUPS, PLAY_QUANTIZED, REGION_GAIN,
+    };
+    let quantized = s.notes.iter().any(|t| t.quantize.is_some());
     let groups = s
         .notes
         .iter()
@@ -1999,6 +2020,7 @@ fn only_expected(s: &Spec, t: &Trip) {
             (ItemKind::Changed, w) if w == MIDI_GROUPS => groups,
             (ItemKind::Changed, w) if w == FADE_SHAPES => shapes,
             (ItemKind::Changed, w) if w == CROSSFADES => pairs,
+            (ItemKind::Changed, w) if w == PLAY_QUANTIZED => quantized,
             (ItemKind::LeftOut, w) if w == REGION_GAIN => gains,
             (ItemKind::Note, w) if w.starts_with("The song starts before bar 1") => {
                 s.pickup_beats > 0

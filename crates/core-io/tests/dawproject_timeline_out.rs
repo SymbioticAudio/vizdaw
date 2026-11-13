@@ -940,6 +940,7 @@ fn what_is_left_out_on_the_timeline() {
         TRANSPOSED,
         UNPLACED_AUTOMATION,
         NESTED_MUTED,
+        core_io::dawproject::export::PLAY_QUANTIZED,
     ] {
         assert!(
             r.items.iter().all(|i| i.what != what),
@@ -1489,4 +1490,58 @@ fn a_use_cut_by_the_song_end_ends_there() {
         );
         assert_eq!(points(&c[0]), want_points, "{song_len}");
     }
+}
+
+/// Final review I2: a track's play quantize is written into its notes
+/// (as they play), with one Changed line; play shift too.
+#[test]
+fn play_quantize_is_written_as_played() {
+    use core_io::dawproject::export::PLAY_QUANTIZED;
+    use core_model::command::LaneCmd;
+    use core_model::lane::QuantizeSpec;
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", BUILTIN_SYNTH_REF, 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    // Off the sixteenth grid: a little late, a little early.
+    b.notes(
+        seq,
+        keys,
+        &[(Q / 4 + 10, 60, 0x8000, Q / 8), (Q - 7, 62, 0x8000, Q / 8)],
+    )
+    .unwrap();
+    let plain = b.finish();
+    let raw = read_back(&run(&plain, seq));
+    let times = |p: &DpProject| -> Vec<f64> {
+        clips(p, &format!("t{}", keys.0))
+            .iter()
+            .flat_map(|c| notes_of(c).into_iter().map(move |n| c.time + n.time))
+            .collect()
+    };
+    let q = |t: i64| t as f64 / Q as f64;
+    assert_eq!(times(&raw), [q(Q / 4 + 10), q(Q - 7)]);
+    assert_eq!(
+        count(&run(&plain, seq).report, ItemKind::Changed, PLAY_QUANTIZED),
+        0
+    );
+
+    let set = Command::Lane(LaneCmd::SetPlayQuantize {
+        seq,
+        lane: keys,
+        quantize: Some(QuantizeSpec::grid(Tick(Q / 4), 100)),
+    });
+    let doc = core_model::command::apply(&plain, &set).unwrap().doc;
+    let x = run(&doc, seq);
+    validates(&x);
+    assert_eq!(times(&read_back(&x)), [q(Q / 4), q(Q)]);
+    let line = item(&x.report, ItemKind::Changed, PLAY_QUANTIZED);
+    assert_eq!(line.details, ["Keys"]);
+    // Half strength moves each note half way (7 ticks early: 3, as
+    // playback rounds).
+    let set = Command::Lane(LaneCmd::SetPlayQuantize {
+        seq,
+        lane: keys,
+        quantize: Some(QuantizeSpec::grid(Tick(Q / 4), 50)),
+    });
+    let doc = core_model::command::apply(&plain, &set).unwrap().doc;
+    assert_eq!(times(&read_back(&run(&doc, seq))), [q(Q / 4 + 5), q(Q - 4)]);
 }
