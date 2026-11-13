@@ -56,3 +56,39 @@ pub fn read_regular(path: &Path, max: u64) -> Result<Vec<u8>, IoError> {
     }
     Ok(out)
 }
+
+/// True for text that names a URL (`scheme://…`) rather than a file
+/// (6d Ruling 19). Files are read only from paths.
+pub fn is_url(s: &str) -> bool {
+    s.contains("://")
+}
+
+/// 6d Ruling 19: the file an external path names, when it may be read:
+/// not a URL ([`is_url`]), and a regular file, following one link at
+/// most. Never written. The error is the reason, as a sentence fragment.
+pub fn external_file(p: &Path) -> Result<std::path::PathBuf, String> {
+    if is_url(&p.to_string_lossy()) {
+        return Err(URL_NOT_FILE.into());
+    }
+    let why = |e: std::io::Error| e.to_string();
+    let m = std::fs::symlink_metadata(p).map_err(why)?;
+    let (real, m) = if m.file_type().is_symlink() {
+        let to = std::fs::read_link(p).map_err(why)?;
+        let to = match p.parent() {
+            Some(dir) if to.is_relative() => dir.join(to),
+            _ => to,
+        };
+        let m = std::fs::symlink_metadata(&to).map_err(why)?;
+        (to, m)
+    } else {
+        (p.to_path_buf(), m)
+    };
+    if m.is_file() {
+        Ok(real)
+    } else {
+        Err("it is not a regular file".into())
+    }
+}
+
+/// Why a URL is not read.
+pub const URL_NOT_FILE: &str = "it is a URL, not a file";

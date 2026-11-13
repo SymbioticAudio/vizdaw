@@ -1064,6 +1064,21 @@ impl AafReader {
         max: u64,
         cancel: &AtomicBool,
     ) -> Result<u64, IoError> {
+        self.copy_stream_after(obj, name, &[], to, max, cancel)
+    }
+
+    /// [`AafReader::copy_stream`], with `prefix` written first (a header
+    /// the stream lacks). `max` bounds the stream, not the prefix; the
+    /// count returned includes both.
+    pub fn copy_stream_after(
+        &self,
+        obj: ObjId,
+        name: &str,
+        prefix: &[u8],
+        to: &Path,
+        max: u64,
+        cancel: &AtomicBool,
+    ) -> Result<u64, IoError> {
         let path = self.stream_path(obj, name)?;
         let mut c = self.cfb.lock().map_err(|_| refused(DAMAGED))?;
         let len = match c.entry(&path) {
@@ -1082,7 +1097,10 @@ impl AafReader {
             .open(to)
             .map_err(|e| crate::io_err(to, "created", &e))?;
         let copied = catch_unwind(AssertUnwindSafe(|| {
+            out.write_all(prefix)
+                .map_err(|e| crate::io_err(to, "written", &e))?;
             copy(&mut c, &path, &mut out, to, max, cancel)
+                .map(|n| n.saturating_add(prefix.len() as u64))
         }))
         .unwrap_or_else(|_| Err(refused(DAMAGED)));
         drop(out);

@@ -120,6 +120,73 @@ pub enum AudioSource {
     /// absolute against the package's folder when relative. It may be
     /// anywhere, or a URL; the import job checks it before reading.
     External(PathBuf),
+    /// Audio that will not be read (an AAF's MXF essence, a URL, a file
+    /// that cannot be found): why, as a sentence fragment. It becomes
+    /// offline media; it is never extracted.
+    Offline(String),
+}
+
+/// A file whose audio an import reads: a DAWproject package or an AAF.
+/// The import job sizes, extracts and converts through this.
+pub trait AudioPackage {
+    /// The audio files, each with its key.
+    fn audio(&self) -> &[AudioRef];
+    /// The bytes an import writes (see [`DpPackage::needed_bytes`]).
+    fn needed_bytes(&self, depth_bytes: u32, cancel: &AtomicBool) -> Result<u64, IoError>;
+    /// Streams `a`'s bytes into the new file `to`, returning the bytes
+    /// written; an external or offline file is refused.
+    fn extract(&self, a: &AudioRef, to: &Path, cancel: &AtomicBool) -> Result<u64, IoError>;
+}
+
+impl AudioPackage for DpPackage {
+    fn audio(&self) -> &[AudioRef] {
+        DpPackage::audio(self)
+    }
+    fn needed_bytes(&self, depth_bytes: u32, cancel: &AtomicBool) -> Result<u64, IoError> {
+        DpPackage::needed_bytes(self, depth_bytes, cancel)
+    }
+    fn extract(&self, a: &AudioRef, to: &Path, cancel: &AtomicBool) -> Result<u64, IoError> {
+        DpPackage::extract(self, a, to, cancel)
+    }
+}
+
+/// Ruling 17's rate of `rates` (one per audio element or file): the one
+/// most have among the project rates; a tie goes to 48 kHz when it is one
+/// of the tied, else to the higher rate; with none at a project rate,
+/// 48 kHz.
+pub(crate) fn majority_rate(rates: impl Iterator<Item = u32>) -> u32 {
+    let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
+    for r in rates.filter(|r| AudioFormat::RATES.contains(r)) {
+        let n = counts.entry(r).or_insert(0);
+        *n = n.saturating_add(1);
+    }
+    let best = counts.values().copied().max().unwrap_or(0);
+    let tied: Vec<u32> = counts
+        .iter()
+        .filter(|(_, n)| **n == best)
+        .map(|(r, _)| *r)
+        .collect();
+    if tied.is_empty() || tied.contains(&DEFAULT_RATE) {
+        DEFAULT_RATE
+    } else {
+        tied.iter().copied().max().unwrap_or(DEFAULT_RATE)
+    }
+}
+
+/// The per-file cost [`DpPackage::needed_bytes`] counts: the copy (when
+/// `copied`) plus one converted copy, its frames × channels ×
+/// `depth_bytes`, at least `size` × 4.
+pub(crate) fn needed_for(a: &AudioRef, size: u64, copied: bool, depth_bytes: u32) -> u64 {
+    let caf = a
+        .frames
+        .saturating_mul(u64::from(a.channels))
+        .saturating_mul(u64::from(depth_bytes))
+        .max(size.saturating_mul(4));
+    if copied {
+        size.saturating_add(caf)
+    } else {
+        caf
+    }
 }
 
 /// One audio file the project uses.
@@ -553,8 +620,8 @@ fn audio_name(path: &str, key: usize) -> String {
 
 /// The size of an external file the import may read: a regular file, not
 /// a URL (Ruling 19).
-fn external_size(p: &Path) -> Option<u64> {
-    if p.to_string_lossy().contains("://") {
+pub(crate) fn external_size(p: &Path) -> Option<u64> {
+    if crate::read::is_url(&p.to_string_lossy()) {
         return None;
     }
     #[cfg(feature = "test-hooks")]
@@ -649,22 +716,7 @@ impl DpPackage {
     /// the tied, else to the higher rate; with none at a project rate, 48 kHz
     /// (and `open` noted [`ODD_RATE`]).
     pub fn info(&self) -> DpInfo {
-        let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
-        for r in self.rates.iter().filter(|r| AudioFormat::RATES.contains(r)) {
-            let n = counts.entry(*r).or_insert(0);
-            *n = n.saturating_add(1);
-        }
-        let best = counts.values().copied().max().unwrap_or(0);
-        let tied: Vec<u32> = counts
-            .iter()
-            .filter(|(_, n)| **n == best)
-            .map(|(r, _)| *r)
-            .collect();
-        let sample_rate = if tied.is_empty() || tied.contains(&DEFAULT_RATE) {
-            DEFAULT_RATE
-        } else {
-            tied.iter().copied().max().unwrap_or(DEFAULT_RATE)
-        };
+        let sample_rate = majority_rate(self.rates.iter().copied());
         DpInfo {
             sample_rate,
             tracks: self.ret.tracks,
@@ -701,17 +753,11 @@ impl DpPackage {
             let size = match &a.source {
                 AudioSource::Entry(name) => self.zip.find(name).map(|e| e.size),
                 AudioSource::External(p) => external_size(p),
+                AudioSource::Offline(_) => None,
             };
             let Some(size) = size else { continue };
-            if matches!(a.source, AudioSource::Entry(_)) {
-                total = total.saturating_add(size);
-            }
-            let caf = a
-                .frames
-                .saturating_mul(u64::from(a.channels))
-                .saturating_mul(u64::from(depth_bytes))
-                .max(size.saturating_mul(4));
-            total = total.saturating_add(caf);
+            let copied = matches!(a.source, AudioSource::Entry(_));
+            total = total.saturating_add(needed_for(a, size, copied, depth_bytes));
         }
         Ok(total)
     }
@@ -729,6 +775,7 @@ impl DpPackage {
                 "{} is outside the package; it is read where it is",
                 core_media::export::display_name(p)
             ))),
+            AudioSource::Offline(why) => Err(IoError::Refused(format!("{}: {why}", a.name))),
         }
     }
 

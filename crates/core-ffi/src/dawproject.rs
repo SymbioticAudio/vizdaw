@@ -957,33 +957,6 @@ fn extracted_name(entry: &str) -> String {
     )
 }
 
-/// Ruling 19: the file an external path names, when it may be read: not
-/// a URL (`scheme://`), and a regular file, following one link at most.
-/// Never written.
-fn external_file(p: &Path) -> Result<PathBuf, String> {
-    if p.to_string_lossy().contains("://") {
-        return Err("it is a URL, not a file".into());
-    }
-    let why = |e: std::io::Error| e.to_string();
-    let m = std::fs::symlink_metadata(p).map_err(why)?;
-    let (real, m) = if m.file_type().is_symlink() {
-        let to = std::fs::read_link(p).map_err(why)?;
-        let to = match p.parent() {
-            Some(dir) if to.is_relative() => dir.join(to),
-            _ => to,
-        };
-        let m = std::fs::symlink_metadata(&to).map_err(why)?;
-        (to, m)
-    } else {
-        (p.to_path_buf(), m)
-    };
-    if m.is_file() {
-        Ok(real)
-    } else {
-        Err("it is not a regular file".into())
-    }
-}
-
 use crate::record::LOW_DISK_STOP;
 
 /// The bytes the free-space check allows each converted file beyond its
@@ -1169,12 +1142,13 @@ fn read_and_convert(
                     }
                 }
             }
-            AudioSource::External(p) => match external_file(p) {
+            AudioSource::External(p) => match core_io::read::external_file(p) {
                 Ok(real) => {
                     convert(&real, 0, &mut converted).map_err(|e| Halt::of(e, &display_name(p)))
                 }
                 Err(why) => Err(Halt::Offline(why)),
             },
+            AudioSource::Offline(why) => Err(Halt::Offline(why.clone())),
         };
         match r {
             Err(Halt::Cancelled) => return Err(Stop::Cancelled),

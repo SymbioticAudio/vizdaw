@@ -10,6 +10,8 @@
 //!   [`store::DAMAGED`].
 //! - [`dict`]: the class, property and definition IDs we use, and the
 //!   decoders of the values we read.
+//! - [`timeline`]: the composition read into a neutral form (slots, clips,
+//!   fades, gain, pan, markers, timecode) and the audio files it plays.
 //!
 //! The storage layout follows the public AAF Low-Level Container
 //! Specification. Writers' habits were checked against pyaaf2
@@ -20,3 +22,4 @@
 
 pub mod dict;
 pub mod store;
+pub mod timeline;

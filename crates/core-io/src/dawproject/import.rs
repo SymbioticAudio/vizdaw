@@ -39,7 +39,7 @@ mod timeline;
 
 pub(crate) use apply::{add_buses_with_mix, apply_tracks, arrange_tracks, bus_of_strip};
 pub use apply::{apply, apply_tagged};
-use maps::clean_name;
+pub(crate) use maps::clean_name;
 pub use timeline::*;
 
 use super::package::{DpPackage, Roles, TrackRole, is_bus};

@@ -372,6 +372,34 @@ pub mod class {
         0x0000,
         [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x06, 0x01, 0x01],
     );
+    /// `EssenceGroup` (Object Specification, the EssenceGroup class table).
+    pub const ESSENCE_GROUP: Auid = Auid::from_fields(
+        0x0d010101,
+        0x0101,
+        0x0500,
+        [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x06, 0x01, 0x01],
+    );
+    /// `NestedScope` (Object Specification, the NestedScope class table).
+    pub const NESTED_SCOPE: Auid = Auid::from_fields(
+        0x0d010101,
+        0x0101,
+        0x0b00,
+        [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x06, 0x01, 0x01],
+    );
+    /// `ScopeReference` (Object Specification, the ScopeReference class table).
+    pub const SCOPE_REFERENCE: Auid = Auid::from_fields(
+        0x0d010101,
+        0x0101,
+        0x0d00,
+        [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x06, 0x01, 0x01],
+    );
+    /// `Selector` (Object Specification, the Selector class table).
+    pub const SELECTOR: Auid = Auid::from_fields(
+        0x0d010101,
+        0x0101,
+        0x0e00,
+        [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x06, 0x01, 0x01],
+    );
 }
 
 /// Property IDs, named `<CLASS>_<PROPERTY>`.
@@ -694,6 +722,14 @@ pub mod pid {
     pub const META_DICTIONARY_CLASS_DEFINITIONS: u16 = 0x0003;
     /// `MetaDictionary::TypeDefinitions` (Object Specification, the MetaDictionary class table).
     pub const META_DICTIONARY_TYPE_DEFINITIONS: u16 = 0x0004;
+    /// `EssenceGroup::Choices`.
+    pub const ESSENCE_GROUP_CHOICES: u16 = 0x0501;
+    /// `NestedScope::Slots`.
+    pub const NESTED_SCOPE_SLOTS: u16 = 0x0c01;
+    /// `Selector::Selected`.
+    pub const SELECTOR_SELECTED: u16 = 0x0f01;
+    /// `Selector::Alternates`.
+    pub const SELECTOR_ALTERNATES: u16 = 0x0f02;
 }
 
 /// Definition AUIDs (the plan's table, checked against the model tables
@@ -833,6 +869,21 @@ pub mod def {
         0x0100,
         0x0000,
         [0x06, 0x0e, 0x2b, 0x34, 0x04, 0x01, 0x01, 0x05],
+    );
+    /// `DataDef_Picture` (read only: its slots are left out).
+    pub const DATA_DEF_PICTURE: Auid = Auid::from_fields(
+        0x01030202,
+        0x0100,
+        0x0000,
+        [0x06, 0x0e, 0x2b, 0x34, 0x04, 0x01, 0x01, 0x01],
+    );
+    /// `Usage_TopLevel`, a `CompositionMob`'s `UsageCode` (checked against
+    /// pyaaf2's `model/typedefs.py` at the pinned commit).
+    pub const USAGE_TOP_LEVEL: Auid = Auid::from_fields(
+        0x0d010102,
+        0x0101,
+        0x0700,
+        [0x06, 0x0e, 0x2b, 0x34, 0x04, 0x01, 0x01, 0x01],
     );
 }
 

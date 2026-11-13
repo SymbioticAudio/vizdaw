@@ -66,6 +66,7 @@ impl<'p> Tl<'_, '_, 'p> {
                     crate::dawproject::package::AudioSource::External(p) => {
                         p.to_string_lossy().into_owned()
                     }
+                    crate::dawproject::package::AudioSource::Offline(_) => aref.name.clone(),
                 };
                 let original = original
                     .rsplit(['/', '\\'])

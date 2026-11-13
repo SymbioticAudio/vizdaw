@@ -295,7 +295,7 @@ pub(super) fn cut_to(s: &str, max: usize) -> (&str, bool) {
 /// `raw` as a track, bus, marker or sequence name: control and zero-width
 /// characters dropped (as `core_model::lane::valid_name` wants), trimmed,
 /// cut to [`MAX_INFO_BYTES`]; and whether it was cut.
-pub(super) fn clean_name(raw: &str) -> (String, bool) {
+pub(crate) fn clean_name(raw: &str) -> (String, bool) {
     let bad =
         |c: char| c.is_control() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}');
     let mut out = String::new();
