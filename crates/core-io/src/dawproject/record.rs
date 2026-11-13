@@ -576,6 +576,11 @@ pub struct PRegion {
     pub crossfade: bool,
     /// Its gain, in dB.
     pub gain_db: f32,
+    /// Its media's name: the stem of the file it came from (plan 6e
+    /// Ruling 4 matches by it when a region has no content hash). Absent
+    /// in snapshots made before 6e's fix round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stem: Option<String>,
 }
 
 /// One exported channel.
@@ -832,6 +837,11 @@ pub(super) fn project_with_identity(
                     t.regions.push(PRegion {
                         tick,
                         media_hash: doc.media().get(media).and_then(|m| m.content_hash.clone()),
+                        stem: doc
+                            .media()
+                            .get(media)
+                            .map(|m| m.name.clone())
+                            .filter(|n| !n.is_empty()),
                         offset: *source_offset,
                         length: *length,
                         fade_in: fade_in.length_frames,

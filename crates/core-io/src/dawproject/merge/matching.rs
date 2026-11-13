@@ -11,6 +11,7 @@
 //!   same name and order rules.
 //! - **Strips.** With their track, else the master with the master, else
 //!   buses by ID or `vz:s` tag (theirs) or strip (ours), else by name.
+//!   Only strips of one role (a track's, a bus, the master) are matched.
 //! - **Markers.** By `vz:m` index, else by name and tick (±[`NOTE_TICKS`]).
 //! - **Notes** ([`notes`]) and **regions** ([`regions`]), within a matched
 //!   track part.
@@ -42,6 +43,9 @@ pub enum MatchedBy {
     /// Ours by its lane, strip or place in the project (the snapshot's
     /// identity).
     Lane,
+    /// Not matched: the row is on one side only (or a base row on neither
+    /// other side).
+    Unmatched,
 }
 
 impl MatchedBy {
@@ -54,6 +58,7 @@ impl MatchedBy {
             MatchedBy::Tag => 2,
             MatchedBy::Name => 3,
             MatchedBy::Order => 4,
+            MatchedBy::Unmatched => 5,
         }
     }
 }
@@ -62,7 +67,7 @@ impl MatchedBy {
 ///
 /// `by` is the less certain of the base↔theirs and base↔ours pairings
 /// (a [`MatchedBy::Lane`] pairing never lowers it). A row matched to
-/// nothing has `by: Id`, which then means nothing.
+/// nothing has `by: Unmatched`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Matched {
     /// The base row.
@@ -84,7 +89,8 @@ pub struct Matches {
     pub strips: Vec<Matched>,
     /// Rows of [`Projection::markers`].
     pub markers: Vec<Matched>,
-    /// Some track was matched by name or order (`text::BY_NAME`).
+    /// The file lost its track tags (no track matched by ID or tag), and
+    /// some track was matched by name or order (`text::BY_NAME`).
     pub heuristic: bool,
 }
 
@@ -139,7 +145,7 @@ fn combine(theirs: &Pairs, ours: &Pairs) -> Vec<Matched> {
             .into_iter()
             .flatten()
             .max_by_key(|by| by.doubt())
-            .unwrap_or(MatchedBy::Id);
+            .unwrap_or(MatchedBy::Unmatched);
         out.push(Matched {
             base: Some(b),
             theirs: t.map(|x| x.0),
@@ -153,7 +159,7 @@ fn combine(theirs: &Pairs, ours: &Pairs) -> Vec<Matched> {
                 base: None,
                 theirs: Some(i),
                 ours: None,
-                by: MatchedBy::Id,
+                by: MatchedBy::Unmatched,
             });
         }
     }
@@ -163,7 +169,7 @@ fn combine(theirs: &Pairs, ours: &Pairs) -> Vec<Matched> {
                 base: None,
                 theirs: None,
                 ours: Some(i),
-                by: MatchedBy::Id,
+                by: MatchedBy::Unmatched,
             });
         }
     }
@@ -220,6 +226,8 @@ fn rows_by_lane(p: &Projection, ids: &Identity) -> HashMap<(u64, bool), usize> {
     out
 }
 
+/// Tracks of both pairings, and whether the file lost its tags (no track
+/// matched by ID or tag).
 fn match_tracks(
     base: &Projection,
     base_ids: Option<&Identity>,
@@ -227,22 +235,29 @@ fn match_tracks(
     trusted: MatchedBy,
     ours: &Projection,
     ours_ids: &Identity,
-) -> (Pairs, Pairs) {
+) -> (Pairs, Pairs, bool) {
     let mut tb = Pairs::new(base.tracks.len(), theirs.projection.tracks.len());
     if let Some(ids) = base_ids {
         let rows = rows_by_lane(base, ids);
-        for (o, (t, id)) in theirs
-            .projection
-            .tracks
-            .iter()
-            .zip(&theirs.identity.tracks)
-            .enumerate()
-        {
-            let Some((lane, _)) = theirs.origins.lanes.get(&LaneId(id.lane)) else {
-                continue;
-            };
-            if let Some(&b) = rows.get(&(*lane, t.audio)) {
-                tb.pair(b, o, trusted);
+        // Rows whose origin names their own part first, so a hostile
+        // origin naming the other part never wins over the real one.
+        for exact in [true, false] {
+            for (o, (t, id)) in theirs
+                .projection
+                .tracks
+                .iter()
+                .zip(&theirs.identity.tracks)
+                .enumerate()
+            {
+                let Some((lane, audio)) = theirs.origins.lanes.get(&LaneId(id.lane)) else {
+                    continue;
+                };
+                if (*audio == t.audio) != exact {
+                    continue;
+                }
+                if let Some(&b) = rows.get(&(*lane, t.audio)) {
+                    tb.pair(b, o, trusted);
+                }
             }
         }
     }
@@ -263,7 +278,7 @@ fn match_tracks(
         }
         None => by_name_then_order(&base.tracks, &ours.tracks, true, &mut ob),
     }
-    (tb, ob)
+    (tb, ob, lost)
 }
 
 /// The strips of the tracks `tracks` paired, paired with the tracks' `by`.
@@ -278,9 +293,62 @@ fn strips_with_tracks(base: &Projection, other: &Projection, tracks: &Pairs, str
     }
 }
 
-/// Strips no track of `p` plays through.
+/// Strips a track of `p` plays through.
 fn track_strips(p: &Projection) -> BTreeSet<usize> {
     p.tracks.iter().filter_map(|t| t.strip).collect()
+}
+
+/// What a strip is for: only strips of one role are ever one thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Track,
+    Bus,
+    Master,
+}
+
+/// Each strip's [`Role`] in `p`.
+fn roles(p: &Projection) -> Vec<Role> {
+    let tracks = track_strips(p);
+    p.strips
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            if s.role == "master" {
+                Role::Master
+            } else if tracks.contains(&i) {
+                Role::Track
+            } else {
+                Role::Bus
+            }
+        })
+        .collect()
+}
+
+/// Buses by their strip: `origin(o)` names the base strip ID of `other`'s
+/// strip `o`. Only a bus pairs with a bus here: track strips pair with
+/// their tracks and the master with the master, so a bus that names a
+/// track's strip (or a track's channel that names a bus) stays unmatched,
+/// and is new there.
+fn buses_by_id(
+    base: &Projection,
+    ids: &Identity,
+    other: &Projection,
+    origin: impl Fn(usize) -> Option<u64>,
+    by: MatchedBy,
+    strips: &mut Pairs,
+) {
+    let rows = strips_by_id(ids);
+    let (br, or) = (roles(base), roles(other));
+    for (o, role) in or.iter().enumerate() {
+        if *role != Role::Bus {
+            continue;
+        }
+        if let Some(&b) = origin(o).and_then(|s| rows.get(&s))
+            && br.get(b) == Some(&Role::Bus)
+        {
+            strips.pair(b, o, by);
+        }
+    }
 }
 
 /// The master with the master.
@@ -342,15 +410,11 @@ fn match_strips(
     };
     masters(base, tp, master_by, &mut tb);
     if let Some(ids) = base_ids {
-        let rows = strips_by_id(ids);
-        for (o, id) in theirs.identity.strips.iter().enumerate() {
-            let origin = id
-                .strip
-                .and_then(|s| theirs.origins.strips.get(&StripId(s)));
-            if let Some(b) = origin.and_then(|s| rows.get(s)) {
-                tb.pair(*b, o, trusted);
-            }
-        }
+        let origin = |o: usize| {
+            let id = theirs.identity.strips.get(o)?.strip?;
+            theirs.origins.strips.get(&StripId(id)).copied()
+        };
+        buses_by_id(base, ids, tp, origin, trusted, &mut tb);
     }
     buses_by_name(base, tp, &mut tb);
 
@@ -358,12 +422,9 @@ fn match_strips(
     strips_with_tracks(base, ours, tracks.1, &mut ob);
     match base_ids {
         Some(ids) => {
-            let rows = strips_by_id(ids);
-            for (o, id) in ours_ids.strips.iter().enumerate() {
-                if let Some(b) = id.strip.and_then(|s| rows.get(&s)) {
-                    ob.pair(*b, o, MatchedBy::Lane);
-                }
-            }
+            masters(base, ours, MatchedBy::Lane, &mut ob);
+            let origin = |o: usize| ours_ids.strips.get(o)?.strip;
+            buses_by_id(base, ids, ours, origin, MatchedBy::Lane, &mut ob);
         }
         None => {
             masters(base, ours, MatchedBy::Name, &mut ob);
@@ -441,6 +502,9 @@ fn match_markers(
     markers_by_name(&base.markers, &tp.markers, MatchedBy::Name, false, &mut tb);
 
     let mut ob = Pairs::new(base.markers.len(), ours.markers.len());
+    // Ours' markers have no identity; with a format-2 snapshot they are
+    // labelled `Lane` (the project's own) only so that they never make a
+    // row's `by` less certain than theirs' pairing.
     let by = if format_two {
         MatchedBy::Lane
     } else {
@@ -472,13 +536,15 @@ pub fn match_all(
     } else {
         MatchedBy::Tag
     };
-    let (tt, ot) = match_tracks(&b, base_ids, theirs, trusted, &o, &ours.1);
+    let (tt, ot, lost) = match_tracks(&b, base_ids, theirs, trusted, &o, &ours.1);
     stop(cancel)?;
     let (ts, os) = match_strips(&b, base_ids, theirs, trusted, &o, &ours.1, (&tt, &ot));
     stop(cancel)?;
     let (tm, om) = match_markers(&b, base_ids.is_some(), theirs, trusted, &o);
     stop(cancel)?;
-    let heuristic = tt.any(|by| matches!(by, MatchedBy::Name | MatchedBy::Order));
+    // In a file that kept its tags, a new track that took a deleted one's
+    // name is not the file losing them (`BY_NAME`).
+    let heuristic = lost && tt.any(|by| matches!(by, MatchedBy::Name | MatchedBy::Order));
     Ok(Matches {
         tracks: combine(&tt, &ot),
         strips: combine(&ts, &os),
@@ -506,19 +572,61 @@ fn pair_list(partner: &[Option<usize>], b_len: usize) -> Vec<(Option<usize>, Opt
     out
 }
 
+/// Free rows of one side keyed by (tick, length, index), for lookups
+/// within the tolerances in O(log n).
+#[derive(Default)]
+struct Near(BTreeSet<(i64, u64, usize)>);
+
+impl Near {
+    fn insert(&mut self, tick: i64, len: u64, i: usize) {
+        self.0.insert((tick, len, i));
+    }
+
+    fn remove(&mut self, tick: i64, len: u64, i: usize) {
+        self.0.remove(&(tick, len, i));
+    }
+
+    /// The first free row at `tick` (the tick itself first, then one
+    /// before, then one after; within [`NOTE_TICKS`]) whose length is
+    /// within `len_tol` of `len`, the lowest length then index first.
+    /// At most `2 * NOTE_TICKS + 1` range lookups.
+    fn find(&self, tick: i64, len: u64, len_tol: u64) -> Option<(i64, u64, usize)> {
+        let mut ticks = vec![tick];
+        for d in 1..=NOTE_TICKS {
+            ticks.push(tick.saturating_sub(d));
+            ticks.push(tick.saturating_add(d));
+        }
+        let lo = len.saturating_sub(len_tol);
+        let hi = len.saturating_add(len_tol);
+        ticks.into_iter().find_map(|t| {
+            self.0
+                .range((t, lo, 0)..=(t, hi, usize::MAX))
+                .next()
+                .copied()
+        })
+    }
+}
+
+/// A note's length as a key (a negative length, which no note has, is 0).
+fn note_len(d: i64) -> u64 {
+    u64::try_from(d).unwrap_or(0)
+}
+
 /// Within matched rows: pairs of (base or ours, theirs) note indices.
 ///
 /// Two notes are one when their pitch and channel are equal and their
 /// starts and lengths are within [`NOTE_TICKS`]. Greedy in (tick, pitch)
-/// order: each of `a`'s notes takes `b`'s first unpaired note (by tick)
-/// within the tolerances. O(n log n): `b`'s notes are kept per (pitch,
-/// channel) in a sorted set and looked up by tick range.
+/// order: each of `a`'s notes takes an unpaired note of `b` within the
+/// tolerances, at its own tick first. `b`'s notes are kept per (pitch,
+/// channel) in a set sorted by (tick, length), so each lookup is a few
+/// range queries: O(n log n) whatever the notes, never O(n²).
 pub fn notes(a: &PTrack, b: &PTrack) -> Vec<(Option<usize>, Option<usize>)> {
-    let mut free: HashMap<(u8, u8), BTreeSet<(i64, usize)>> = HashMap::new();
+    let tol = NOTE_TICKS.unsigned_abs();
+    let mut free: HashMap<(u8, u8), Near> = HashMap::new();
     for (j, n) in b.notes_played.iter().enumerate() {
         free.entry((n.pitch, n.channel))
             .or_default()
-            .insert((n.tick, j));
+            .insert(n.tick, note_len(n.duration), j);
     }
     let mut order: Vec<usize> = (0..a.notes_played.len()).collect();
     order.sort_by_key(|&i| a.notes_played.get(i).map(|n| (n.tick, n.pitch, i)));
@@ -530,24 +638,22 @@ pub fn notes(a: &PTrack, b: &PTrack) -> Vec<(Option<usize>, Option<usize>)> {
         let Some(set) = free.get_mut(&(n.pitch, n.channel)) else {
             continue;
         };
-        let lo = (n.tick.saturating_sub(NOTE_TICKS), 0);
-        let hi = (n.tick.saturating_add(NOTE_TICKS), usize::MAX);
-        let found = set
-            .range(lo..=hi)
-            .find(|(_, j)| {
-                b.notes_played
-                    .get(*j)
-                    .is_some_and(|m| m.duration.abs_diff(n.duration) <= NOTE_TICKS.unsigned_abs())
-            })
-            .copied();
-        if let Some(key) = found {
-            set.remove(&key);
+        if let Some((t, l, j)) = set.find(n.tick, note_len(n.duration), tol) {
+            set.remove(t, l, j);
             if let Some(p) = partner.get_mut(i) {
-                *p = Some(key.1);
+                *p = Some(j);
             }
         }
     }
     pair_list(&partner, b.notes_played.len())
+}
+
+/// What a region's media is known by: its content hash, else its media's
+/// name (the stem of the file it came from).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum MediaKey {
+    Hash(String),
+    Stem(String),
 }
 
 /// Within matched rows: pairs of (base or ours, theirs) region indices.
@@ -559,90 +665,140 @@ pub fn notes(a: &PTrack, b: &PTrack) -> Vec<(Option<usize>, Option<usize>)> {
 ///    region, with its tick within [`NOTE_TICKS`] and its length within
 ///    [`FRAMES`];
 /// 2. by tag alone, in order (a moved clip);
-/// 3. by media and position: the same content hash (or either side has
-///    none: offline, or a copy with gain applied), the tick within
+/// 3. by media and position (Ruling 4): the same content hash when both
+///    have one, else the same media stem when both have one (an `Apply`
+///    copy with gain, or offline media, has no hash); a region with
+///    neither in common is never paired by position. Then the tick within
 ///    [`NOTE_TICKS`] and the length within [`FRAMES`].
+///
+/// Every pass looks rows up in sorted sets: O(n log n), never O(n²).
 pub fn regions(
     a: (&PTrack, &TrackIds),
     b: (&PTrack, &TrackIds, &Origins),
 ) -> Vec<(Option<usize>, Option<usize>)> {
     let (at, aids) = a;
     let (bt, bids, origins) = b;
-    let near = |i: usize, j: usize| -> bool {
-        match (at.regions.get(i), bt.regions.get(j)) {
-            (Some(x), Some(y)) => {
-                x.tick.abs_diff(y.tick) <= NOTE_TICKS.unsigned_abs()
-                    && x.length.abs_diff(y.length) <= FRAMES
-            }
-            _ => false,
-        }
-    };
     let mut partner: Vec<Option<usize>> = vec![None; at.regions.len()];
     let mut taken = vec![false; bt.regions.len()];
+    let take = |partner: &mut [Option<usize>], taken: &mut [bool], i: usize, j: usize| {
+        if let Some(p) = partner.get_mut(i) {
+            *p = Some(j);
+        }
+        if let Some(t) = taken.get_mut(j) {
+            *t = true;
+        }
+    };
 
-    // `a`'s regions by their top event.
-    let mut by_top: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, id) in aids.regions.iter().enumerate().take(at.regions.len()) {
-        by_top.entry(id.top).or_default().push(i);
+    // 1 and 2: `a`'s free regions per top event, by position and in order.
+    let mut near_top: HashMap<u64, Near> = HashMap::new();
+    let mut order_top: HashMap<u64, BTreeSet<usize>> = HashMap::new();
+    for (i, (r, id)) in at.regions.iter().zip(&aids.regions).enumerate() {
+        near_top
+            .entry(id.top)
+            .or_default()
+            .insert(r.tick, r.length, i);
+        order_top.entry(id.top).or_default().insert(i);
     }
     let tag_of = |j: usize| -> Option<u64> {
         let top = bids.regions.get(j)?.top;
         origins.events.get(&EventId(top)).copied()
     };
-    for exact in [true, false] {
-        for j in 0..bt.regions.len() {
-            if taken.get(j).copied().unwrap_or(true) {
-                continue;
-            }
-            let Some(cands) = tag_of(j).and_then(|t| by_top.get(&t)) else {
-                continue;
-            };
-            let found = cands
-                .iter()
-                .copied()
-                .find(|&i| matches!(partner.get(i), Some(None)) && (!exact || near(i, j)));
-            if let Some(i) = found {
-                if let Some(p) = partner.get_mut(i) {
-                    *p = Some(j);
-                }
-                if let Some(t) = taken.get_mut(j) {
-                    *t = true;
-                }
-            }
+    let drop_a = |near_top: &mut HashMap<u64, Near>,
+                  order_top: &mut HashMap<u64, BTreeSet<usize>>,
+                  top: u64,
+                  i: usize| {
+        if let Some(r) = at.regions.get(i)
+            && let Some(n) = near_top.get_mut(&top)
+        {
+            n.remove(r.tick, r.length, i);
+        }
+        if let Some(o) = order_top.get_mut(&top) {
+            o.remove(&i);
+        }
+    };
+    for (j, y) in bt.regions.iter().enumerate() {
+        let Some(tag) = tag_of(j) else { continue };
+        let found = near_top
+            .get(&tag)
+            .and_then(|n| n.find(y.tick, y.length, FRAMES));
+        if let Some((_, _, i)) = found {
+            drop_a(&mut near_top, &mut order_top, tag, i);
+            take(&mut partner, &mut taken, i, j);
+        }
+    }
+    for j in 0..bt.regions.len() {
+        if taken.get(j).copied().unwrap_or(true) {
+            continue;
+        }
+        let Some(tag) = tag_of(j) else { continue };
+        let found = order_top.get(&tag).and_then(|o| o.first().copied());
+        if let Some(i) = found {
+            drop_a(&mut near_top, &mut order_top, tag, i);
+            take(&mut partner, &mut taken, i, j);
         }
     }
 
-    // By media and position.
-    let mut free: BTreeSet<(i64, usize)> = BTreeSet::new();
-    for (j, r) in bt.regions.iter().enumerate() {
-        if !taken.get(j).copied().unwrap_or(true) {
-            free.insert((r.tick, j));
+    // 3: theirs' free regions per media key. A region with a hash is
+    // under its hash and its stem; `Stem` buckets of hashed regions are
+    // only for an `a` region with no hash.
+    let mut by_key: HashMap<MediaKey, Near> = HashMap::new();
+    let mut by_bare_stem: HashMap<&str, Near> = HashMap::new();
+    for (j, y) in bt.regions.iter().enumerate() {
+        if taken.get(j).copied().unwrap_or(true) {
+            continue;
+        }
+        if let Some(h) = &y.media_hash {
+            by_key
+                .entry(MediaKey::Hash(h.clone()))
+                .or_default()
+                .insert(y.tick, y.length, j);
+        }
+        if let Some(st) = &y.stem {
+            by_key
+                .entry(MediaKey::Stem(st.clone()))
+                .or_default()
+                .insert(y.tick, y.length, j);
+            if y.media_hash.is_none() {
+                by_bare_stem
+                    .entry(st.as_str())
+                    .or_default()
+                    .insert(y.tick, y.length, j);
+            }
         }
     }
     for (i, r) in at.regions.iter().enumerate() {
         if !matches!(partner.get(i), Some(None)) {
             continue;
         }
-        let lo = (r.tick.saturating_sub(NOTE_TICKS), 0);
-        let hi = (r.tick.saturating_add(NOTE_TICKS), usize::MAX);
-        let found = free
-            .range(lo..=hi)
-            .find(|(_, j)| {
-                bt.regions.get(*j).is_some_and(|y| {
-                    let media = match (&r.media_hash, &y.media_hash) {
-                        (Some(x), Some(y)) => x == y,
-                        _ => true,
-                    };
-                    media && near(i, *j)
-                })
-            })
-            .copied();
-        if let Some(key) = found {
-            free.remove(&key);
-            if let Some(p) = partner.get_mut(i) {
-                *p = Some(key.1);
+        let found = match (&r.media_hash, &r.stem) {
+            (Some(h), stem) => by_key
+                .get(&MediaKey::Hash(h.clone()))
+                .and_then(|n| n.find(r.tick, r.length, FRAMES))
+                .or_else(|| {
+                    let st = stem.as_deref()?;
+                    by_bare_stem.get(st)?.find(r.tick, r.length, FRAMES)
+                }),
+            (None, Some(st)) => by_key
+                .get(&MediaKey::Stem(st.clone()))
+                .and_then(|n| n.find(r.tick, r.length, FRAMES)),
+            (None, None) => None,
+        };
+        let Some((_, _, j)) = found else { continue };
+        let Some(y) = bt.regions.get(j) else { continue };
+        if let Some(h) = &y.media_hash
+            && let Some(n) = by_key.get_mut(&MediaKey::Hash(h.clone()))
+        {
+            n.remove(y.tick, y.length, j);
+        }
+        if let Some(st) = &y.stem {
+            if let Some(n) = by_key.get_mut(&MediaKey::Stem(st.clone())) {
+                n.remove(y.tick, y.length, j);
+            }
+            if let Some(n) = by_bare_stem.get_mut(st.as_str()) {
+                n.remove(y.tick, y.length, j);
             }
         }
+        take(&mut partner, &mut taken, i, j);
     }
     pair_list(&partner, bt.regions.len())
 }

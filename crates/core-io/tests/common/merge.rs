@@ -343,16 +343,15 @@ pub fn return_file(
 
 /// The file at `path` as a project of its own: opened, mapped (media from
 /// [`media_of`], at the project's rate as a conversion would make them;
-/// the snapshot's IDs trusted when the file's record names its export),
+/// the snapshot's IDs trusted when the file's record names its export and
+/// its project),
 /// then [`theirs`].
 pub fn theirs_of(t: &Trip, path: &Path) -> Theirs {
     let pkg = open(path, &PackageLimits::default(), &AtomicBool::new(false)).expect("opens");
     let media = media_of(&pkg, &t.export, &t.base_doc);
-    let trusted = pkg
-        .ret
-        .record
-        .as_ref()
-        .is_some_and(|r| r.export_id == t.snapshot.export_id);
+    let trusted = pkg.ret.record.as_ref().is_some_and(|r| {
+        r.export_id == t.snapshot.export_id && r.project_id == t.snapshot.project_id
+    });
     let installed = |_: PluginFormat, _: &str| true;
     let format = t.base_doc.settings().format;
     let imp = map(

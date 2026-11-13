@@ -422,6 +422,7 @@ fn region(tick: i64, hash: Option<&str>, gain_db: f32) -> PRegion {
         name: None,
         crossfade: false,
         gain_db,
+        stem: None,
     }
 }
 

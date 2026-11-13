@@ -10,7 +10,7 @@ use common::merge::{
 };
 use common::package::TestPlist;
 use core_engine::fixtures::{BAR, Builder};
-use core_io::dawproject::import::{ImportEnv, map};
+use core_io::dawproject::import::{ImportEnv, Origins, map};
 use core_io::dawproject::merge::matching::{
     Matched, MatchedBy, Matches, match_all, notes, regions,
 };
@@ -18,7 +18,7 @@ use core_io::dawproject::merge::theirs::{Theirs, theirs};
 use core_io::dawproject::merge::{FRAMES, LEVEL_DB, normalised};
 use core_io::dawproject::package::open;
 use core_io::dawproject::record::{
-    Identity, ObjectRef, PNote, PTrack, Projection, projection_with_identity,
+    Identity, ObjectRef, PNote, PRegion, PTrack, Projection, TrackIds, projection_with_identity,
 };
 use core_io::dawproject::{DpClip, DpProject, DpStructureItem, DpTimeline, DpTrack, DpUnit};
 use core_io::limits::PackageLimits;
@@ -176,6 +176,10 @@ fn clips<'a>(p: &'a mut DpProject, id: &str) -> &'a mut Vec<DpClip> {
     panic!("no clips on {id}")
 }
 
+/// A region that does not survive the 44.1 kHz grid (found by scanning).
+const OFFSET: u64 = 0;
+const LENGTH: u64 = 1_028;
+
 /// One beat in ticks.
 const BEAT: f64 = PPQ as f64;
 
@@ -266,6 +270,21 @@ fn tracks_match_by_tag_then_name_then_order() {
     each_once(&t, &th, &m);
     all_tracks_by(&m, MatchedBy::Name);
     assert!(m.heuristic);
+
+    // A tagged file whose new track took a deleted track's name and type
+    // still has its tags: no `BY_NAME`.
+    let (th, m) = matched(
+        &t,
+        &return_file(&t, Strip::Record, |p, _| {
+            track(p, "Bass").named.comment = None;
+        }),
+    );
+    each_once(&t, &th, &m);
+    assert_eq!(
+        of_base(&m.tracks, base_track(&t, "Bass")).by,
+        MatchedBy::Name
+    );
+    assert!(!m.heuristic);
 
     let renamed = return_file(&t, Strip::Both, |p, _| {
         for (i, tr) in tracks(p).enumerate() {
@@ -674,9 +693,16 @@ fn at_44k(clip: &mut DpClip) {
     }
 }
 
-#[test]
-fn audio_at_another_rate_matches_within_a_frame() {
-    // A region whose length is no whole number of 44.1 kHz frames.
+/// The fixture with a region of `length` frames from `offset` in a media
+/// item of `offset + length` frames, exported, sent back at 44 100 Hz
+/// without its tags, and matched: each pair's (base, theirs) region.
+fn at_another_rate(
+    offset: u64,
+    length: u64,
+) -> Vec<(
+    core_io::dawproject::record::PRegion,
+    core_io::dawproject::record::PRegion,
+)> {
     let (doc, seq) = fixture();
     let mut b = Builder::from_doc(doc);
     let keys = b
@@ -688,23 +714,13 @@ fn audio_at_another_rate_matches_within_a_frame() {
         .find(|l| l.name == "Keys")
         .unwrap()
         .id;
-    let odd = media(&mut b, "odd", 33_333, 2);
+    let odd = media(&mut b, "odd", offset + length, 2);
     let none = Fade {
         length_frames: 0,
         shape: FadeShape::Linear,
     };
-    b.region(
-        seq,
-        keys,
-        4 * BAR,
-        odd,
-        1_001,
-        33_333 - 1_001,
-        0.0,
-        none,
-        none,
-    )
-    .unwrap();
+    b.region(seq, keys, 4 * BAR, odd, offset, length, 0.0, none, none)
+        .unwrap();
     let doc = b.finish();
     assert_eq!(doc.settings().format.sample_rate, 48_000);
     let t = trip(&doc, seq);
@@ -716,15 +732,36 @@ fn audio_at_another_rate_matches_within_a_frame() {
     let (th, m) = matched(&t, &path);
     each_once(&t, &th, &m);
     let got = region_pairs(&t, &th, &m, "Keys audio");
-    assert_eq!(got.len(), 3);
+    assert_eq!(got.len(), 3, "{got:?}");
     assert!(complete(&got), "{got:?}");
     let b = base_track(&t, "Keys audio");
     let ti = of_base(&m.tracks, b).theirs.unwrap();
-    for (x, y) in got {
-        let x = &t.snapshot.projection.tracks[b].regions[x.unwrap()];
-        let y = &th.projection.tracks[ti].regions[y.unwrap()];
+    got.into_iter()
+        .map(|(x, y)| {
+            (
+                t.snapshot.projection.tracks[b].regions[x.unwrap()].clone(),
+                th.projection.tracks[ti].regions[y.unwrap()].clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn audio_at_another_rate_matches_within_a_frame() {
+    // OFFSET and LENGTH do not survive the 44.1 kHz grid: the region comes
+    // back one frame shorter, and still matches.
+    let pairs = at_another_rate(OFFSET, LENGTH);
+    for (x, y) in &pairs {
         assert!(x.length.abs_diff(y.length) <= FRAMES, "{x:?} vs {y:?}");
     }
+    assert_eq!(
+        pairs
+            .iter()
+            .filter(|(x, y)| x.length == y.length + 1)
+            .count(),
+        1,
+        "{pairs:?}"
+    );
 }
 
 #[test]
@@ -855,9 +892,13 @@ fn hostile_tags_never_match_twice() {
     let start = std::time::Instant::now();
     let untrusted = theirs_of(&t, &path);
     let trusted = theirs_trusting(&t, &path, &t.snapshot.ids);
-    for th in [untrusted, trusted] {
+    for (th, winner) in [(untrusted, "A"), (trusted, "E")] {
         let m = match_all(&t.snapshot, &th, &ours_of(&t), &never()).expect("matches");
         each_once(&t, &th, &m);
+        // The first tag wins without trust; the trusted ID wins with it.
+        let r = of_base(&m.tracks, base_track(&t, "Bass"));
+        assert_eq!(r.theirs, Some(theirs_track(&th, winner)), "{winner}");
+        assert!(!m.heuristic, "the file kept tags");
         let nb = normalised(&t.snapshot.projection, &t.snapshot);
         for r in &m.tracks {
             let (Some(b), Some(ti)) = (r.base, r.theirs) else {
@@ -921,4 +962,213 @@ fn harness_strips_what_it_says() {
         r#"comment="""#
     );
     assert_eq!(merge::without_tags("a vz:e3 b vz:x"), "a b vz:x");
+}
+
+#[test]
+fn notes_on_one_pitch_and_tick_are_not_quadratic() {
+    // The reviewer's shape: 50 000 notes on one pitch at one tick, whose
+    // lengths never match, so nothing pairs and nothing may be scanned
+    // twice.
+    let a = part((0..50_000).map(|_| note(0, 60, 10)).collect());
+    let b = part((0..50_000).map(|_| note(0, 60, 100)).collect());
+    let start = std::time::Instant::now();
+    let got = notes(&a, &b);
+    let took = start.elapsed();
+    assert_eq!(got.len(), 100_000);
+    assert!(got.iter().all(|(x, y)| x.is_none() || y.is_none()));
+    // Linear work takes well under 100 ms in debug; quadratic takes minutes.
+    assert!(took.as_secs_f64() < 2.0, "{took:?}");
+}
+
+fn region(tick: i64, length: u64, hash: Option<&str>, stem: Option<&str>) -> PRegion {
+    PRegion {
+        tick,
+        media_hash: hash.map(str::to_owned),
+        offset: 0,
+        length,
+        fade_in: 0,
+        fade_out: 0,
+        muted: false,
+        name: None,
+        crossfade: false,
+        gain_db: 0.0,
+        stem: stem.map(str::to_owned),
+    }
+}
+
+fn audio_part(regions: Vec<PRegion>) -> PTrack {
+    PTrack {
+        name: "Audio".into(),
+        notes: false,
+        audio: true,
+        strip: None,
+        notes_played: Vec::new(),
+        midi: Vec::new(),
+        regions,
+        automation: Vec::new(),
+    }
+}
+
+/// `regions` on two untagged parts.
+fn untagged(a: &PTrack, b: &PTrack) -> Vec<(Option<usize>, Option<usize>)> {
+    let none = TrackIds::default();
+    regions((a, &none), (b, &none, &Origins::default()))
+}
+
+#[test]
+fn regions_without_a_hash_match_by_file_stem() {
+    // Base: a region with gain under `Apply` (no hash), and an offline one.
+    let a = audio_part(vec![
+        region(0, 1_000, None, Some("loop")),
+        region(5_000, 1_000, None, Some("kit")),
+        region(9_000, 1_000, None, None),
+    ]);
+    let b = audio_part(vec![
+        // Its gain copy: another hash, the same stem.
+        region(0, 1_000, Some("hash-loop@-6"), Some("loop")),
+        // Other media at the same place.
+        region(5_000, 1_000, None, Some("snare")),
+        // Nothing known about either: never a wildcard.
+        region(9_000, 1_000, None, None),
+    ]);
+    assert_eq!(
+        untagged(&a, &b),
+        vec![
+            (Some(0), Some(0)),
+            (Some(1), None),
+            (Some(2), None),
+            (None, Some(1)),
+            (None, Some(2)),
+        ]
+    );
+    // Two hashes decide, whatever the stems say.
+    let a = audio_part(vec![region(0, 1_000, Some("h1"), Some("loop"))]);
+    let b = audio_part(vec![region(0, 1_000, Some("h2"), Some("loop"))]);
+    assert_eq!(untagged(&a, &b), vec![(Some(0), None), (None, Some(0))]);
+    let b = audio_part(vec![region(1, 1_001, Some("h1"), Some("other"))]);
+    assert_eq!(untagged(&a, &b), vec![(Some(0), Some(0))]);
+    // A hashed base region and an offline theirs one go by the stem.
+    let b = audio_part(vec![region(0, 1_000, None, Some("loop"))]);
+    assert_eq!(untagged(&a, &b), vec![(Some(0), Some(0))]);
+}
+
+#[test]
+fn regions_on_one_tick_are_not_quadratic() {
+    let n = 50_000;
+    let a = audio_part(
+        (0..n)
+            .map(|_| region(0, 10, Some("h"), Some("s")))
+            .collect(),
+    );
+    let b = audio_part(
+        (0..n)
+            .map(|_| region(0, 100, Some("h"), Some("s")))
+            .collect(),
+    );
+    let start = std::time::Instant::now();
+    let got = untagged(&a, &b);
+    let took = start.elapsed();
+    assert_eq!(got.len(), 2 * n);
+    assert!(took.as_secs_f64() < 2.0, "{took:?}");
+}
+
+#[test]
+fn a_bus_never_takes_a_tracks_strip() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let base = &t.snapshot.projection;
+    let bass_strip = base.tracks[base_track(&t, "Bass")].strip.unwrap();
+    let reverb = base.strips.iter().position(|s| s.name == "Reverb").unwrap();
+    // The other DAW deleted Bass and renamed the bus, which now carries
+    // Bass's strip tag.
+    let path = return_file(&t, Strip::Record, |p, _| {
+        p.structure.retain(
+            |i| !matches!(i, DpStructureItem::Track(t) if t.named.name.as_deref() == Some("Bass")),
+        );
+        clips(p, "t0").clear();
+        let r = track(p, "Reverb");
+        r.named.name = Some("Hall".into());
+        let c = r.channel.as_mut().unwrap();
+        c.named.name = Some("Hall".into());
+        c.named.comment = Some("vz:s1".into());
+    });
+    let (th, m) = matched(&t, &path);
+    each_once(&t, &th, &m);
+    let hall = th
+        .projection
+        .strips
+        .iter()
+        .position(|s| s.name == "Hall")
+        .unwrap();
+    assert_eq!(
+        of_base(&m.strips, bass_strip).theirs,
+        None,
+        "Bass's strip is deleted there"
+    );
+    assert_eq!(
+        of_base(&m.strips, reverb).theirs,
+        None,
+        "Reverb is deleted there"
+    );
+    let new = m.strips.iter().find(|r| r.theirs == Some(hall)).unwrap();
+    assert_eq!(
+        (new.base, new.by),
+        (None, MatchedBy::Unmatched),
+        "Hall is new"
+    );
+}
+
+#[test]
+fn a_new_track_never_takes_a_bus() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let base = &t.snapshot.projection;
+    let reverb = base.strips.iter().position(|s| s.name == "Reverb").unwrap();
+    // A new audio track, above the bus, whose channel carries the bus's tag.
+    let path = return_file(&t, Strip::Record, |p, _| {
+        let mut new = track(p, "Keys audio").clone();
+        new.named.id = Some("tnew".into());
+        new.named.name = Some("New".into());
+        new.named.comment = None;
+        let c = new.channel.as_mut().unwrap();
+        c.named.id = Some("cnew".into());
+        c.named.name = Some("New".into());
+        c.named.comment = Some("vz:s4".into());
+        for param in [
+            c.mute.as_deref_mut().map(|m| &mut m.named),
+            c.pan.as_deref_mut().map(|m| &mut m.named),
+            c.volume.as_deref_mut().map(|m| &mut m.named),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            param.id = None;
+        }
+        let at = p
+            .structure
+            .iter()
+            .position(|i| matches!(i, DpStructureItem::Track(t) if t.named.name.as_deref() == Some("Reverb")))
+            .unwrap();
+        p.structure.insert(at, DpStructureItem::Track(new));
+    });
+    let (th, m) = matched(&t, &path);
+    each_once(&t, &th, &m);
+    let new_track = theirs_track(&th, "New");
+    let new_strip = th.projection.tracks[new_track].strip.unwrap();
+    assert_eq!(th.projection.strips[new_strip].name, "New");
+    let row = m
+        .strips
+        .iter()
+        .find(|r| r.theirs == Some(new_strip))
+        .unwrap();
+    assert_eq!(
+        row.base, None,
+        "the new track's strip is new: {:?}",
+        m.strips
+    );
+    let r = of_base(&m.strips, reverb);
+    assert_eq!(
+        th.projection.strips[r.theirs.expect("the bus")].name,
+        "Reverb"
+    );
 }
