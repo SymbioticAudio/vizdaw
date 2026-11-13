@@ -119,9 +119,12 @@ pub struct Origins {
     /// Each new plug-in slot: its `vz:d` / `vz:q` instance there.
     pub slots: BTreeMap<PluginInstanceId, u64>,
     /// Each new strip whose file channel named effects VizDAW cannot host
-    /// here (VST plug-ins, or ones not installed): their names (plan 6e
-    /// Ruling 10).
-    pub unhosted: BTreeMap<StripId, Vec<String>>,
+    /// here (VST plug-ins, or ones not installed): their names, with the
+    /// plug-in ID of one not installed (plan 6e Ruling 10).
+    pub unhosted: BTreeMap<StripId, Vec<(String, Option<String>)>>,
+    /// Each new audio track's output-path strip: the file's channel name
+    /// (the import names the path after the track; plan 6e Task 5).
+    pub channel_names: BTreeMap<StripId, String>,
 }
 
 /// A mapped import: what [`apply`] will do, and the report so far (the
@@ -299,8 +302,9 @@ struct Mix {
     eq: Option<SlotPlan>,
     inserts: Vec<SlotPlan>,
     /// The effects the file names that VizDAW cannot host here (VST
-    /// plug-ins, or ones not installed), by name (plan 6e Ruling 10).
-    unhosted: Vec<String>,
+    /// plug-ins, or ones not installed): name, and plug-in ID for one not
+    /// installed (plan 6e Ruling 10).
+    unhosted: Vec<(String, Option<String>)>,
 }
 
 impl Mix {
@@ -350,6 +354,8 @@ struct TrackPlan {
     tag: Option<(u64, bool)>,
     /// The strip its first own strip was there.
     strip_tag: Option<u64>,
+    /// Its channel's own name in the file, when it has one.
+    channel_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1304,6 +1310,9 @@ impl<'a, 'p> Cx<'a, 'p> {
             None
         };
         self.copy = None;
+        let channel_name = channel
+            .and_then(|c| c.named.name.clone())
+            .filter(|n| !n.trim().is_empty());
         Ok(TrackPlan {
             name,
             dest_name,
@@ -1313,6 +1322,7 @@ impl<'a, 'p> Cx<'a, 'p> {
             flags,
             tag,
             strip_tag,
+            channel_name,
         })
     }
 
@@ -1595,7 +1605,8 @@ impl<'a, 'p> Cx<'a, 'p> {
                         });
                         if let Some(slot) = self.slot(d)? {
                             if !(self.env.installed)(slot.plugin.format, &slot.plugin.id) {
-                                mix.unhosted.push(name.clone());
+                                mix.unhosted
+                                    .push((name.clone(), Some(slot.plugin.id.clone())));
                             }
                             let at = if eq_tag && mix.eq.is_none() {
                                 mix.eq = Some(slot);
@@ -1610,7 +1621,7 @@ impl<'a, 'p> Cx<'a, 'p> {
                         }
                     }
                     DpDeviceKind::Vst2 | DpDeviceKind::Vst3 => {
-                        mix.unhosted.push(name.clone());
+                        mix.unhosted.push((name.clone(), None));
                         self.add(ItemKind::LeftOut, VST, Some(name));
                     }
                     kind => self.builtin_device(BUILTIN_EFFECTS, kind, owner, &d.settings),

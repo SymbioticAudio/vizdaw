@@ -19,6 +19,7 @@ impl<'p> Tl<'_, '_, 'p> {
                 flags: None,
                 tag: None,
                 strip_tag: None,
+                channel_name: None,
             });
         }
         let n = plan.tracks.len();

@@ -429,7 +429,11 @@ pub fn apply_tagged(
                     output: Some(out),
                 }),
             )?;
-            owned.push(strip_of(h, StripKind::AudioPath(out))?);
+            let path = strip_of(h, StripKind::AudioPath(out))?;
+            if let Some(n) = &t.channel_name {
+                origins.channel_names.insert(path, n.clone());
+            }
+            owned.push(path);
         }
         let mut first: Option<(StripId, MixSlots)> = None;
         for strip in owned {

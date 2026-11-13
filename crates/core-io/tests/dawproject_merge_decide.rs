@@ -17,9 +17,9 @@ use core_io::dawproject::merge::decide::{
     Decision, MergePlan, MergePreview, Outcome, StripField, Unit, plan,
 };
 use core_io::dawproject::merge::text::{
-    self, BY_NAME, CONFLICT_SETTING, CONFLICT_TAKE, DELETED_HERE, DELETED_THERE, KEPT_EMPTY, LINES,
-    LOOPS_UNROLLED, MERGED, NOTHING, OLD_EXPORT, PRIVATE_COPIES, SEQUENCE_GONE, SHARED_ELSEWHERE,
-    SNAPSHOT_CHOSEN, TAKE_PARTS, VST_KEPT, summary,
+    self, ADDED_BOTH, BY_NAME, CONFLICT_SETTING, CONFLICT_TAKE, DELETED_HERE, DELETED_THERE,
+    KEPT_EMPTY, LINES, LOOPS_UNROLLED, MERGED, NOTHING, OLD_EXPORT, PRIVATE_COPIES, SEQUENCE_GONE,
+    SHARED_ELSEWHERE, SNAPSHOT_CHOSEN, TAKE_PARTS, VST_KEPT, summary,
 };
 use core_io::dawproject::merge::theirs::{Theirs, theirs};
 use core_io::dawproject::package::open;
@@ -30,14 +30,15 @@ use core_io::dawproject::{
 use core_io::limits::PackageLimits;
 use core_io::report::{ItemKind, Report};
 use core_model::command::{
-    AudioCmd, Command, EventCmd, LaneCmd, MixerCmd, SequenceCmd, SettingsCmd,
+    AudioCmd, Command, EventCmd, LaneCmd, MixerCmd, RoutingCmd, SequenceCmd, SettingsCmd,
 };
 use core_model::document::{Document, SongInfo};
 use core_model::history::History;
-use core_model::ids::{EventId, LaneId, SeqId, StripId};
+use core_model::ids::{AnyId, EventId, LaneId, SeqId, StripId};
 use core_model::lane::MonitorMode;
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
 use core_model::mixer::PluginFormat;
+use core_model::mixer::StripKind;
 use core_model::selection::ViewFilter;
 use core_model::sequence::Marker;
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
@@ -61,6 +62,8 @@ struct Ids {
     keys: LaneId,
     bass_strip: StripId,
     keys_strip: StripId,
+    /// Keys audio's strip ("Audio 1").
+    audio_strip: StripId,
     reverb: StripId,
     /// Bass's first note (tick 0, key 36).
     bass_note: EventId,
@@ -77,6 +80,7 @@ fn ids(t: &Trip) -> Ids {
         keys: LaneId(i.tracks[1].lane),
         bass_strip: strip(0),
         keys_strip: strip(1),
+        audio_strip: strip(2),
         reverb: strip(3),
         bass_note: EventId(i.tracks[0].notes[0].event),
         keys_region: EventId(i.tracks[2].regions[0].event),
@@ -900,7 +904,11 @@ fn vst_replacement_is_kept_and_listed() {
         vec![of(Unit::Devices, Outcome::Ours, "Strip 'Bass': plug-ins")]
     );
     let kept = item(&p.report, ItemKind::LeftOut, VST_KEPT);
-    assert_eq!(kept.details, vec!["Fancy Comp"]);
+    assert_eq!(kept.details, vec!["Strip 'Bass': Fancy Comp"]);
+    assert!(
+        !has(&p.report, core_io::dawproject::import::VST),
+        "listed once, under VST_KEPT"
+    );
     assert_eq!(p.preview.kept, 1);
 }
 
@@ -1207,6 +1215,7 @@ fn report_lines_are_listed() {
         (KEPT_EMPTY, ItemKind::Conflict),
         (DELETED_THERE, ItemKind::Conflict),
         (DELETED_HERE, ItemKind::Conflict),
+        (ADDED_BOTH, ItemKind::Conflict),
         (PRIVATE_COPIES, ItemKind::Changed),
         (LOOPS_UNROLLED, ItemKind::Changed),
         (VST_KEPT, ItemKind::LeftOut),
@@ -1219,7 +1228,7 @@ fn report_lines_are_listed() {
     ] {
         assert_eq!(kind_of(what), kind, "{what}");
     }
-    assert_eq!(LINES.len(), 14);
+    assert_eq!(LINES.len(), 15);
 
     let mut reports: Vec<Report> = Vec::new();
     let (doc, seq) = fixture();
@@ -1313,7 +1322,11 @@ fn report_lines_are_listed() {
         (KEPT_EMPTY, ItemKind::Conflict, Some("Track 'Keys audio'")),
         (DELETED_THERE, ItemKind::Conflict, Some("Bus 'Reverb'")),
         (DELETED_HERE, ItemKind::Conflict, Some("Marker 'Verse'")),
-        (VST_KEPT, ItemKind::LeftOut, Some("Fancy Comp")),
+        (
+            VST_KEPT,
+            ItemKind::LeftOut,
+            Some("Strip 'Bass': Fancy Comp"),
+        ),
         (merged.as_str(), ItemKind::Note, None),
         (BY_NAME, ItemKind::Note, None),
         (SNAPSHOT_CHOSEN, ItemKind::Note, None),
@@ -1380,4 +1393,258 @@ fn values_are_written_as_the_app_shows_them() {
         }),
         "Merged: 0 applied, 0 kept, 0 added, 0 removed, 1 in conflict"
     );
+}
+
+// ---------------------------------------------------------------- fix round 1
+
+/// Adds audio track `name` with an output path of its own; its strip.
+fn add_audio_track(h: &mut History, seq: SeqId, name: &str) -> StripId {
+    let r = h
+        .execute(
+            &Command::Routing(RoutingCmd::AddOutput {
+                name: name.into(),
+                reference: "hw:1".into(),
+            }),
+            &ViewFilter::default(),
+        )
+        .unwrap();
+    let out = r
+        .created
+        .iter()
+        .find_map(|i| match i {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .unwrap();
+    let r = h
+        .execute(
+            &Command::Lane(LaneCmd::Add {
+                seq,
+                name: name.into(),
+                index: None,
+            }),
+            &ViewFilter::default(),
+        )
+        .unwrap();
+    let lane = r
+        .created
+        .iter()
+        .find_map(|i| match i {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        })
+        .unwrap();
+    run(
+        h,
+        Command::Lane(LaneCmd::SetOutput {
+            seq,
+            lane,
+            output: Some(out),
+        }),
+    );
+    h.doc()
+        .mixer()
+        .strips()
+        .iter()
+        .find(|(_, s)| s.kind == StripKind::AudioPath(out))
+        .map(|(id, _)| *id)
+        .unwrap()
+}
+
+/// The returned file is `doc`'s export (its project and metadata), as
+/// the other DAW would write a project it was given.
+fn returned_as(t: &Trip, doc: &Document) -> PathBuf {
+    let (project, metadata) = exported(doc, t.seq);
+    return_file(t, Strip::Nothing, move |p, m| {
+        *p = project;
+        *m = metadata;
+    })
+}
+
+#[test]
+fn parts_added_on_both_sides_under_one_name() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+
+    // Equal: the same file merged before adds nothing.
+    let mut extra = History::new(t.base_doc.clone());
+    let path_strip = add_audio_track(&mut extra, seq, "Extra");
+    let there = returned_as(&t, extra.doc());
+    let p = plan_of(&t, &there, extra.doc());
+    assert_eq!(
+        decided(&p),
+        vec![of(Unit::Track, Outcome::Same, "Track 'Extra'")]
+    );
+
+    // An audio track that differs: ours stays, theirs is listed.
+    set_gain(&mut extra, path_strip, -3.0);
+    let p = plan_of(&t, &there, extra.doc());
+    assert_eq!(
+        decided(&p),
+        vec![of(Unit::Track, Outcome::Conflict, "Track 'Extra'")]
+    );
+    assert_eq!(
+        item(&p.report, ItemKind::Conflict, ADDED_BOTH).details,
+        vec!["Track 'Extra'"]
+    );
+    assert_eq!(
+        p.preview,
+        MergePreview {
+            conflicts: 1,
+            conflict_lines: vec!["Track 'Extra'".to_owned()],
+            ..MergePreview::default()
+        }
+    );
+
+    // A notes track that differs: its notes are a notes conflict (theirs
+    // becomes the alternate take), and the rest is listed.
+    let path = return_file(&t, Strip::Nothing, |p, _| {
+        add_new_parts(p);
+        p.structure.retain(
+            |i| !matches!(i, DpStructureItem::Track(t) if t.named.id.as_deref() == Some("bnew")),
+        );
+        remove_marker(p, "Bridge");
+    });
+    let o = ours(&t, |h, ids| {
+        let dest = h.doc().lane(ids.seq, ids.keys).unwrap().midi_dest;
+        let r = h
+            .execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq: ids.seq,
+                    name: "New".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let lane = r
+            .created
+            .iter()
+            .find_map(|i| match i {
+                AnyId::Lane(l) => Some(*l),
+                _ => None,
+            })
+            .unwrap();
+        run(
+            h,
+            Command::Lane(LaneCmd::SetDest {
+                seq: ids.seq,
+                lane,
+                dest,
+            }),
+        );
+    });
+    let p = plan_of(&t, &path, &o);
+    assert_eq!(
+        decided(&p),
+        vec![
+            of(Unit::Notes, Outcome::Conflict, "Track 'New': notes"),
+            of(Unit::Track, Outcome::Conflict, "Track 'New'"),
+        ]
+    );
+    let notes = decision(&p, &Unit::Notes);
+    assert_eq!(notes.ours.as_deref(), Some("0 notes"));
+    assert_eq!(notes.theirs.as_deref(), Some("1 note"));
+    assert!(p.decisions.iter().all(|d| d.outcome != Outcome::Ours));
+
+    // A bus that differs.
+    let path = return_file(&t, Strip::Nothing, |p, _| {
+        add_new_parts(p);
+        remove_track(p, "tnew");
+        remove_marker(p, "Bridge");
+    });
+    let o = ours(&t, |h, _| {
+        let r = h
+            .execute(
+                &Command::Mixer(MixerCmd::AddBus {
+                    name: "Hall".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let hall = r
+            .created
+            .iter()
+            .find_map(|i| match i {
+                AnyId::Strip(s) => Some(*s),
+                _ => None,
+            })
+            .unwrap();
+        set_gain(h, hall, -3.0);
+    });
+    let p = plan_of(&t, &path, &o);
+    assert_eq!(
+        decided(&p),
+        vec![of(Unit::Bus, Outcome::Conflict, "Bus 'Hall'")]
+    );
+    assert_eq!(
+        item(&p.report, ItemKind::Conflict, ADDED_BOTH).details,
+        vec!["Bus 'Hall'"]
+    );
+}
+
+#[test]
+fn an_audio_channel_renamed_there_is_theirs() {
+    // The import names an audio track's strip after the track; theirs'
+    // name for it is the file's channel name.
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let renamed = || {
+        return_file(&t, Strip::Nothing, |p, _| {
+            channel(p, "c3").named.name = Some("Loops".into());
+        })
+    };
+    let p = plan_of(&t, &renamed(), &t.base_doc);
+    assert_eq!(
+        decided(&p),
+        vec![of(
+            Unit::Strip(StripField::Name),
+            Outcome::Theirs,
+            "Strip 'Keys audio': name"
+        )]
+    );
+    let d = decision(&p, &Unit::Strip(StripField::Name));
+    assert_eq!(
+        (d.ours.as_deref(), d.theirs.as_deref()),
+        (Some("Audio 1"), Some("Loops"))
+    );
+
+    let here = ours(&t, |h, ids| {
+        run(
+            h,
+            Command::Mixer(MixerCmd::RenameStrip {
+                strip: ids.audio_strip,
+                name: "Stems".into(),
+            }),
+        )
+    });
+    let p = plan_of(&t, &renamed(), &here);
+    assert_eq!(
+        decided(&p),
+        vec![of(
+            Unit::Strip(StripField::Name),
+            Outcome::Conflict,
+            "Strip 'Keys audio': name"
+        )]
+    );
+    assert_eq!(
+        item(&p.report, ItemKind::Conflict, CONFLICT_SETTING).details,
+        vec!["Strip 'Keys audio': name: here Stems, there Loops"]
+    );
+
+    // Ours alone renamed it: kept. A channel with no name is no change.
+    let p = plan_of(&t, &return_file(&t, Strip::Nothing, |_, _| {}), &here);
+    assert_eq!(
+        decided(&p),
+        vec![of(
+            Unit::Strip(StripField::Name),
+            Outcome::Ours,
+            "Strip 'Keys audio': name"
+        )]
+    );
+    let nameless = return_file(&t, Strip::Nothing, |p, _| {
+        channel(p, "c3").named.name = None;
+    });
+    assert_eq!(decided(&plan_of(&t, &nameless, &t.base_doc)), vec![]);
 }

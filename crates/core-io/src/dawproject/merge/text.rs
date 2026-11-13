@@ -24,6 +24,10 @@ pub const KEPT_EMPTY: &str =
 pub const DELETED_THERE: &str = "Parts the other DAW deleted that were changed here (kept)";
 /// Conflicts: parts ours deleted that theirs changed. Detail: the part.
 pub const DELETED_HERE: &str = "Parts deleted here that the other DAW changed (left deleted)";
+/// Conflicts: parts added here and in the other DAW under one name, that
+/// differ (Task 5 fix round 1). Detail: the part.
+pub const ADDED_BOTH: &str =
+    "Parts added here and in the other DAW under the same name (kept as they are here)";
 
 // ---------------------------------------------------------------- Changed
 
@@ -78,12 +82,13 @@ pub const SEQUENCE_GONE: &str =
 
 /// Every report line above with the group it goes in, for the app's
 /// grouping and the tests.
-pub const LINES: [(&str, ItemKind); 14] = [
+pub const LINES: [(&str, ItemKind); 15] = [
     (CONFLICT_TAKE, ItemKind::Conflict),
     (CONFLICT_SETTING, ItemKind::Conflict),
     (KEPT_EMPTY, ItemKind::Conflict),
     (DELETED_THERE, ItemKind::Conflict),
     (DELETED_HERE, ItemKind::Conflict),
+    (ADDED_BOTH, ItemKind::Conflict),
     (PRIVATE_COPIES, ItemKind::Changed),
     (LOOPS_UNROLLED, ItemKind::Changed),
     (VST_KEPT, ItemKind::LeftOut),

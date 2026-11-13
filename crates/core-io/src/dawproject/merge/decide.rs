@@ -29,20 +29,20 @@
 //! its row in [`Matches::strips`]); a strip's level, pan, mute, solo,
 //! colour, name and output, each send (by target), its device list
 //! (formats and IDs, in order), and each device's bypass and state; each
-//! marker; the tempo map; the meter map; each song-info field. The name
-//! of a strip theirs made for an audio track is not a unit: the import
-//! names it after the track, so the file does not carry it.
+//! marker; the tempo map; the meter map; each song-info field. The import
+//! names an audio track's strip after the track, so theirs' name for it is
+//! the file's channel name (`Origins::channel_names`).
 //!
 //! **Ruling 10.** A strip whose devices theirs changed while the file
 //! named effects VizDAW cannot host (VST plug-ins, ones not installed)
 //! keeps ours ([`Outcome::Ours`]), listed under [`text::VST_KEPT`].
 
-use super::matching::{Matched, Matches, match_all, notes, regions};
+use super::matching::{Matched, MatchedBy, Matches, match_all, notes, regions};
 use super::text;
 use super::theirs::Theirs;
 use super::{LEVEL_DB, NOTE_TICKS, PAN, VALUE, normalised};
 use crate::IoError;
-use crate::dawproject::import::Origins;
+use crate::dawproject::import::{Origins, VST};
 use crate::dawproject::record::{
     EventAt, Identity, PNote, PRegion, PStrip, PTrack, Projection, Snapshot, TrackIds,
     projection_with_identity,
@@ -219,10 +219,11 @@ pub fn plan(
         return Err(IoError::Refused(text::SEQUENCE_GONE.to_owned()));
     }
     let ours_side = projection_with_identity(ours, seq)?;
-    let matches = match_all(&base, &theirs, &ours_side, cancel)?;
+    let mut matches = match_all(&base, &theirs, &ours_side, cancel)?;
     stop(cancel)?;
     let b = normalised(&base.projection, &base);
     let o = normalised(&ours_side.0, &base);
+    pair_twins(&mut matches, &theirs.projection, &o);
     let base_ids = base_track_ids(&b, base.identity.as_ref());
     let ours_origins = self_origins(&ours_side.1);
     let mut d = Decider {
@@ -260,20 +261,17 @@ pub fn plan(
         vst: Vec::new(),
     };
     d.strip_labels = d.labels();
-    let mut twins = d.track_twins();
     for row in 0..matches.tracks.len() {
         stop(cancel)?;
-        d.track(row, &mut twins);
+        d.track(row);
     }
     stop(cancel)?;
-    let mut twins = d.bus_twins();
     for row in 0..matches.strips.len() {
-        d.strip(row, &mut twins);
+        d.strip(row);
     }
     stop(cancel)?;
-    let mut twins = d.marker_twins();
     for row in 0..matches.markers.len() {
-        d.marker(row, &mut twins);
+        d.marker(row);
     }
     d.maps();
     d.info();
@@ -293,8 +291,12 @@ pub fn plan(
     for lane in take_parts {
         report.add(ItemKind::Note, text::TAKE_PARTS, Some(lane));
     }
-    for name in std::mem::take(&mut d.vst) {
-        report.add(ItemKind::LeftOut, text::VST_KEPT, Some(name));
+    for (detail, vst) in std::mem::take(&mut d.vst) {
+        report.add(ItemKind::LeftOut, text::VST_KEPT, Some(detail));
+        // `VST_KEPT` lists it; the import's own line need not.
+        if let Some(name) = vst {
+            drop_detail(&mut report, ItemKind::LeftOut, VST, &name);
+        }
     }
     let decisions = d.out;
     Ok(MergePlan {
@@ -397,13 +399,8 @@ fn used_elsewhere(doc: &Document, seq: SeqId) -> BTreeSet<SeqId> {
     out
 }
 
-/// The ours-only rows a theirs-only row may be (ours already holds a
-/// new part of its key: the same file merged before), first come, and
-/// those taken.
-struct Twins<K> {
-    free: HashMap<K, VecDeque<usize>>,
-    taken: BTreeSet<usize>,
-}
+/// Ours-only rows by key, first come.
+struct Twins<K>(HashMap<K, VecDeque<usize>>);
 
 impl<K: Hash + Eq> Twins<K> {
     fn new(rows: impl Iterator<Item = (K, usize)>) -> Twins<K> {
@@ -411,38 +408,113 @@ impl<K: Hash + Eq> Twins<K> {
         for (k, i) in rows {
             free.entry(k).or_default().push_back(i);
         }
-        Twins {
-            free,
-            taken: BTreeSet::new(),
-        }
+        Twins(free)
     }
 
     /// The first free row of key `k`, now taken.
     fn take(&mut self, k: &K) -> Option<usize> {
-        let i = self.free.get_mut(k)?.pop_front()?;
-        self.taken.insert(i);
-        Some(i)
+        self.0.get_mut(k)?.pop_front()
     }
 }
 
-/// The ours-only markers by name, then (tick, row); and those taken.
-#[derive(Default)]
-struct MarkerTwins {
-    free: HashMap<String, BTreeSet<(i64, usize)>>,
-    taken: BTreeSet<usize>,
+/// Joins `rows`' theirs-only rows with the ours-only rows `key` pairs them
+/// with (first come), and drops the ours-only rows so taken. `match_all`
+/// puts every ours-only row last, so no other row moves.
+fn join_twins<K: Hash + Eq>(
+    rows: &mut Vec<Matched>,
+    key_t: impl Fn(usize) -> Option<K>,
+    key_o: impl Fn(usize) -> Option<K>,
+) {
+    let mut twins = Twins::new(
+        rows.iter()
+            .filter_map(|r| match (r.base, r.theirs, r.ours) {
+                (None, None, Some(o)) => Some((key_o(o)?, o)),
+                _ => None,
+            }),
+    );
+    let mut taken = BTreeSet::new();
+    for r in rows.iter_mut() {
+        if let (None, Some(t), None) = (r.base, r.theirs, r.ours)
+            && let Some(o) = key_t(t).and_then(|k| twins.take(&k))
+        {
+            r.ours = Some(o);
+            r.by = MatchedBy::Name;
+            taken.insert(o);
+        }
+    }
+    rows.retain(
+        |r| !matches!((r.base, r.theirs, r.ours), (None, None, Some(o)) if taken.contains(&o)),
+    );
 }
 
-impl MarkerTwins {
-    /// The first free marker named `name` within [`NOTE_TICKS`] of
-    /// `tick`, now taken.
-    fn take(&mut self, name: &str, tick: i64) -> Option<usize> {
-        let set = self.free.get_mut(name)?;
-        let lo = (tick.saturating_sub(NOTE_TICKS), 0);
-        let hi = (tick.saturating_add(NOTE_TICKS), usize::MAX);
-        let found = set.range(lo..=hi).next().copied()?;
-        set.remove(&found);
-        self.taken.insert(found.1);
-        Some(found.1)
+/// Pairs the parts new on both sides that are one by name (the same
+/// file merged before, or the same name chosen twice): a track by name
+/// and type, a bus by name and role, a marker by name and tick (within
+/// [`NOTE_TICKS`]). Done before any decision, so a paired row is one row.
+fn pair_twins(m: &mut Matches, t: &Projection, o: &Projection) {
+    let track_key = |p: &Projection, i: usize| p.tracks.get(i).map(|x| (x.name.clone(), x.audio));
+    join_twins(&mut m.tracks, |i| track_key(t, i), |i| track_key(o, i));
+    let (tt, ot) = (track_strips(t), track_strips(o));
+    let bus_key = |p: &Projection, tracks: &BTreeSet<usize>, i: usize| {
+        let s = p.strips.get(i)?;
+        (!tracks.contains(&i) && s.role != "master").then(|| (s.name.clone(), s.role.clone()))
+    };
+    join_twins(
+        &mut m.strips,
+        |i| bus_key(t, &tt, i),
+        |i| bus_key(o, &ot, i),
+    );
+    // Markers by name, then the nearest free tick.
+    let mut free: HashMap<&str, BTreeSet<(i64, usize)>> = HashMap::new();
+    for r in &m.markers {
+        if let (None, None, Some(i)) = (r.base, r.theirs, r.ours)
+            && let Some(x) = o.markers.get(i)
+        {
+            free.entry(x.1.as_str()).or_default().insert((x.0, i));
+        }
+    }
+    let mut taken = BTreeSet::new();
+    for r in &mut m.markers {
+        let (None, Some(i), None) = (r.base, r.theirs, r.ours) else {
+            continue;
+        };
+        let Some(x) = t.markers.get(i) else { continue };
+        let Some(set) = free.get_mut(x.1.as_str()) else {
+            continue;
+        };
+        let lo = (x.0.saturating_sub(NOTE_TICKS), 0);
+        let hi = (x.0.saturating_add(NOTE_TICKS), usize::MAX);
+        if let Some(found) = set.range(lo..=hi).next().copied() {
+            set.remove(&found);
+            r.ours = Some(found.1);
+            r.by = MatchedBy::Name;
+            taken.insert(found.1);
+        }
+    }
+    m.markers.retain(
+        |r| !matches!((r.base, r.theirs, r.ours), (None, None, Some(o)) if taken.contains(&o)),
+    );
+}
+
+/// Takes one `detail` out of `report`'s item `what`, with its count.
+fn drop_detail(report: &mut Report, kind: ItemKind, what: &str, detail: &str) {
+    let Some(at) = report
+        .items
+        .iter()
+        .position(|i| i.kind == kind && i.what == what)
+    else {
+        return;
+    };
+    let Some(item) = report.items.get_mut(at) else {
+        return;
+    };
+    let Some(d) = item.details.iter().position(|d| d == detail) else {
+        return;
+    };
+    item.details.remove(d);
+    item.count = item.count.saturating_sub(1);
+    if item.count == 0 {
+        report.items.remove(at);
     }
 }
 
@@ -665,8 +737,9 @@ struct Decider<'a> {
     /// Each row of `m.strips`' label ("Strip 'Bass'").
     strip_labels: Vec<String>,
     out: Vec<Decision>,
-    /// The names for `text::VST_KEPT`.
-    vst: Vec<String>,
+    /// The details for `text::VST_KEPT`, each with the name the import
+    /// listed under `import::VST` (a VST plug-in's).
+    vst: Vec<(String, Option<String>)>,
 }
 
 impl<'a> Decider<'a> {
@@ -815,6 +888,12 @@ impl<'a> Decider<'a> {
     /// Whether track `x` and track `y` (on two sides) carry the same
     /// content: name, notes, regions, automation and their strips.
     fn track_eq(&self, x: (Side, usize), y: (Side, usize)) -> bool {
+        self.track_eq_with(x, y, true)
+    }
+
+    /// [`Self::track_eq`], the notes and MIDI events compared only when
+    /// `with_notes`.
+    fn track_eq_with(&self, x: (Side, usize), y: (Side, usize), with_notes: bool) -> bool {
         let (Some(a), Some(b)) = (self.track_of(x.0, x.1), self.track_of(y.0, y.1)) else {
             return false;
         };
@@ -831,10 +910,14 @@ impl<'a> Decider<'a> {
             (None, None) => true,
             _ => false,
         };
-        a.name == b.name && notes_eq(a, b) && self.regions_eq(x, y) && curves && strips
+        a.name == b.name
+            && (!with_notes || notes_eq(a, b))
+            && self.regions_eq(x, y)
+            && curves
+            && strips
     }
 
-    fn track(&mut self, row: usize, twins: &mut Twins<(String, bool)>) {
+    fn track(&mut self, row: usize) {
         let Some(r) = self.m.tracks.get(row).copied() else {
             return;
         };
@@ -863,44 +946,39 @@ impl<'a> Decider<'a> {
             (Some(_), None, None) => {
                 self.push(Unit::Track, row, Outcome::Same, whole);
             }
-            (None, Some(t), None) => {
-                let out = self.added_track(t, twins);
-                self.push(Unit::Track, row, out, whole);
-            }
-            (None, None, Some(o)) if !twins.taken.contains(&o) => {
-                self.push(Unit::Track, row, Outcome::Ours, whole);
-            }
+            (None, Some(_), None) => self.push(Unit::Track, row, Outcome::Added, whole),
+            (None, None, Some(_)) => self.push(Unit::Track, row, Outcome::Ours, whole),
+            (None, Some(t), Some(o)) => self.twin_track(row, &name, t, o),
             _ => {}
         }
     }
 
-    /// The ours-only tracks by name and type.
-    fn track_twins(&self) -> Twins<(String, bool)> {
-        Twins::new(
-            self.m
-                .tracks
-                .iter()
-                .filter_map(|r| match (r.base, r.theirs, r.ours) {
-                    (None, None, Some(o)) => {
-                        let t = self.track_of(Side::Ours, o)?;
-                        Some(((t.name.clone(), t.audio), o))
-                    }
-                    _ => None,
-                }),
-        )
-    }
-
-    /// Theirs' new track `t`: when ours has a new track of its name and
-    /// type that no earlier one took (the same file merged before), `Same`
-    /// if they are equal and `Ours` if not; else `Added`.
-    fn added_track(&self, t: usize, twins: &mut Twins<(String, bool)>) -> Outcome {
-        let Some(x) = self.track_of(Side::Theirs, t) else {
-            return Outcome::Added;
+    /// A track new on both sides with one name and type (`pair_twins`):
+    /// equal, `Same` (the same file merged before). Otherwise ours stays.
+    /// A notes track's differing notes are a `Notes` conflict, so theirs
+    /// becomes the alternate take as in any notes conflict (Ruling 6);
+    /// anything else that differs, or any difference on an audio track,
+    /// is a `Track` conflict listed under `text::ADDED_BOTH`.
+    fn twin_track(&mut self, row: usize, name: &str, t: usize, o: usize) {
+        let whole = format!("Track '{name}'");
+        let (x, y) = ((Side::Theirs, t), (Side::Ours, o));
+        if self.track_eq(x, y) {
+            self.push(Unit::Track, row, Outcome::Same, whole);
+            return;
+        }
+        let (Some(tt), Some(ot)) = (self.track_of(Side::Theirs, t), self.track_of(Side::Ours, o))
+        else {
+            return;
         };
-        match twins.take(&(x.name.clone(), x.audio)) {
-            Some(o) if self.track_eq((Side::Theirs, t), (Side::Ours, o)) => Outcome::Same,
-            Some(_) => Outcome::Ours,
-            None => Outcome::Added,
+        let take = !tt.audio && !notes_eq(ot, tt);
+        if take {
+            let notes_of = |x: &PTrack| count(x.notes_played.len(), "note", "notes");
+            let what = format!("Track '{name}': notes");
+            let (ours, theirs) = (Some(notes_of(ot)), Some(notes_of(tt)));
+            self.push_with(Unit::Notes, row, Outcome::Conflict, what, ours, theirs);
+        }
+        if !take || !self.track_eq_with(x, y, false) {
+            self.push(Unit::Track, row, Outcome::Conflict, whole);
         }
     }
 
@@ -1081,8 +1159,22 @@ impl<'a> Decider<'a> {
         s == Side::Theirs && self.audio_paths.contains(&i)
     }
 
-    /// Whether two strips carry the same settings (without the name of a
-    /// strip theirs made for an audio track).
+    /// Strip `i`'s name on side `s`. For a strip theirs made for an audio
+    /// track, the file's channel name (`Origins::channel_names`); `None`
+    /// when the file gave none, which counts as unchanged.
+    fn strip_name(&self, s: Side, i: usize) -> Option<&'a str> {
+        if !self.audio_path(s, i) {
+            return self.strip_of(s, i).map(|x| x.name.as_str());
+        }
+        let id = self.theirs_strips.strips.get(i)?.strip?;
+        self.theirs_origins
+            .channel_names
+            .get(&StripId(id))
+            .map(String::as_str)
+    }
+
+    /// Whether two strips carry the same settings (a strip theirs made for
+    /// an audio track by the file's channel name, when it gave one).
     fn strip_eq(&self, x: (Side, usize), y: (Side, usize)) -> bool {
         let (Some(a), Some(b)) = (self.strip_of(x.0, x.1), self.strip_of(y.0, y.1)) else {
             return false;
@@ -1103,7 +1195,10 @@ impl<'a> Decider<'a> {
             && a.mute == b.mute
             && a.solo == b.solo
             && a.colour == b.colour
-            && (a.name == b.name || self.audio_path(x.0, x.1) || self.audio_path(y.0, y.1))
+            && match (self.strip_name(x.0, x.1), self.strip_name(y.0, y.1)) {
+                (Some(p), Some(q)) => p == q,
+                _ => true,
+            }
             && out(x.0, a) == out(y.0, b)
             && sends
             && devices
@@ -1129,7 +1224,7 @@ impl<'a> Decider<'a> {
         })
     }
 
-    fn strip(&mut self, row: usize, twins: &mut Twins<(String, String)>) {
+    fn strip(&mut self, row: usize) {
         let Some(r) = self.m.strips.get(row).copied() else {
             return;
         };
@@ -1156,38 +1251,21 @@ impl<'a> Decider<'a> {
                 })
             }
             (Some(_), None, None) => Some(Outcome::Same),
-            (None, Some(t), None) => {
-                let twin = self
-                    .strip_of(Side::Theirs, t)
-                    .and_then(|x| twins.take(&(x.name.clone(), x.role.clone())));
-                Some(match twin {
-                    Some(o) if self.strip_eq((Side::Theirs, t), (Side::Ours, o)) => Outcome::Same,
-                    Some(_) => Outcome::Ours,
-                    None => Outcome::Added,
+            (None, Some(_), None) => Some(Outcome::Added),
+            (None, None, Some(_)) => Some(Outcome::Ours),
+            // New on both sides under one name (`pair_twins`).
+            (None, Some(t), Some(o)) => {
+                Some(if self.strip_eq((Side::Theirs, t), (Side::Ours, o)) {
+                    Outcome::Same
+                } else {
+                    Outcome::Conflict
                 })
             }
-            (None, None, Some(o)) => (!twins.taken.contains(&o)).then_some(Outcome::Ours),
             _ => None,
         };
         if let Some(out) = out {
             self.push(Unit::Bus, row, out, name);
         }
-    }
-
-    /// The ours-only buses by name and role.
-    fn bus_twins(&self) -> Twins<(String, String)> {
-        Twins::new(
-            self.m
-                .strips
-                .iter()
-                .filter_map(|r| match (r.base, r.theirs, r.ours) {
-                    (None, None, Some(o)) if !self.is_track_strip(r) => {
-                        let s = self.strip_of(Side::Ours, o)?;
-                        Some(((s.name.clone(), s.role.clone()), o))
-                    }
-                    _ => None,
-                }),
-        )
     }
 
     fn strip_units(&mut self, row: usize, [b, t, o]: [usize; 3]) {
@@ -1241,16 +1319,17 @@ impl<'a> Decider<'a> {
             |x, y| x == y,
             colour_text,
         );
-        if !self.audio_path(Side::Theirs, t) {
-            self.three(
-                Unit::Strip(StripField::Name),
-                row,
-                what("name"),
-                all.map(|s| s.name.clone()),
-                |x, y| x == y,
-                |x| x.clone(),
-            );
-        }
+        // Theirs' name of an audio track's strip is the file's channel
+        // name; none given counts as base's.
+        let theirs_name = self.strip_name(Side::Theirs, t).unwrap_or(bs.name.as_str());
+        self.three(
+            Unit::Strip(StripField::Name),
+            row,
+            what("name"),
+            [bs.name.as_str(), theirs_name, os.name.as_str()],
+            |x, y| x == y,
+            |x| (*x).to_owned(),
+        );
         let outputs = [(Side::Base, bs), (Side::Theirs, ts), (Side::Ours, os)]
             .map(|(s, p)| p.output.map(|i| (self.skey(s, i), self.label_of(s, i))));
         self.three(
@@ -1299,10 +1378,21 @@ impl<'a> Decider<'a> {
             .and_then(|s| s.strip)
             .and_then(|id| self.theirs_origins.unhosted.get(&StripId(id)));
         let [db, dt, dov] = &devices;
-        match unhosted {
-            // Ruling 10: theirs' list changed while the file named effects
-            // VizDAW cannot host here: ours stays, listed.
-            Some(names) if db != dt => {
+        // Ruling 10: effects the file names that VizDAW cannot host, other
+        // than ones base already had.
+        let new_unhosted: Vec<&(String, Option<String>)> = unhosted
+            .map(|v| {
+                v.iter()
+                    .filter(|(_, id)| {
+                        id.as_ref()
+                            .is_none_or(|id| !bs.devices.iter().any(|d| &d.1 == id))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        match new_unhosted {
+            // Theirs' list changed and names them: ours stays, listed.
+            names if !names.is_empty() && db != dt => {
                 let (ours, theirs) = (Some(devices_text(dov)), Some(devices_text(dt)));
                 self.push_with(
                     Unit::Devices,
@@ -1312,7 +1402,10 @@ impl<'a> Decider<'a> {
                     ours,
                     theirs,
                 );
-                self.vst.extend(names.iter().cloned());
+                for (name, id) in names {
+                    let vst = id.is_none().then(|| name.clone());
+                    self.vst.push((format!("{label}: {name}"), vst));
+                }
             }
             _ => self.three(
                 Unit::Devices,
@@ -1364,20 +1457,7 @@ impl<'a> Decider<'a> {
         format!("{} at bar {}", m.1, self.bar(s, m.0))
     }
 
-    /// The ours-only markers by name and tick.
-    fn marker_twins(&self) -> MarkerTwins {
-        let mut twins = MarkerTwins::default();
-        for r in &self.m.markers {
-            if let (None, None, Some(o)) = (r.base, r.theirs, r.ours)
-                && let Some(m) = self.marker_of(Side::Ours, o)
-            {
-                twins.free.entry(m.1.clone()).or_default().insert((m.0, o));
-            }
-        }
-        twins
-    }
-
-    fn marker(&mut self, row: usize, twins: &mut MarkerTwins) {
+    fn marker(&mut self, row: usize) {
         let Some(r) = self.m.markers.get(row).copied() else {
             return;
         };
@@ -1422,16 +1502,16 @@ impl<'a> Decider<'a> {
                 }
             }
             (Some(_), None, None) => Outcome::Same,
-            // The same file merged before: ours already has it.
-            (None, Some(t), None) => match twins.take(&t.1, t.0) {
-                Some(_) => Outcome::Same,
-                None => Outcome::Added,
-            },
-            (None, None, Some(_)) => {
-                if r.ours.is_some_and(|o| twins.taken.contains(&o)) {
-                    return;
+            (None, Some(_), None) => Outcome::Added,
+            (None, None, Some(_)) => Outcome::Ours,
+            // New on both sides with one name and tick (`pair_twins`):
+            // the same file merged before.
+            (None, Some(t), Some(o)) => {
+                if eq(t, o) {
+                    Outcome::Same
+                } else {
+                    Outcome::Conflict
                 }
-                Outcome::Ours
             }
             _ => return,
         };
@@ -1500,6 +1580,13 @@ impl<'a> Decider<'a> {
         let bump = |n: &mut u32| *n = n.saturating_add(1);
         for d in &self.out {
             let take = matches!(d.unit, Unit::Notes | Unit::Regions);
+            // A part new on both sides (`pair_twins`); a marker on all three
+            // sides is a setting.
+            let part = match d.unit {
+                Unit::Track | Unit::Bus => true,
+                Unit::Marker => self.m.markers.get(d.row).is_some_and(|r| r.base.is_none()),
+                _ => false,
+            };
             match d.outcome {
                 Outcome::Theirs | Outcome::Same => bump(&mut p.applied),
                 Outcome::Ours => bump(&mut p.kept),
@@ -1508,6 +1595,9 @@ impl<'a> Decider<'a> {
                 Outcome::Conflict => {
                     bump(&mut p.conflicts);
                     if take {
+                        p.conflict_lines.push(d.what.clone());
+                    } else if part {
+                        report.add(ItemKind::Conflict, text::ADDED_BOTH, Some(d.what.clone()));
                         p.conflict_lines.push(d.what.clone());
                     } else {
                         let line = text::conflict_setting(
