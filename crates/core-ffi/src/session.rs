@@ -1851,6 +1851,19 @@ impl Session {
         ffi_guard(|| Ok(lock(&self.inner).save_after_pass))
     }
 
+    /// Why Save As would be refused before its panel opens: the sentence
+    /// while a merge is held (plan 6e Task 10 fix round 1), else nil. A
+    /// model-only check under the lock; no I/O.
+    pub fn save_as_refusal(&self) -> Result<Option<String>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            Ok(inner
+                .held_merge
+                .as_ref()
+                .map(|_| crate::dawproject::SAVE_AS_HELD.to_string()))
+        })
+    }
+
     /// Saves to `path` (`.vizdaw` appended if missing) and makes it the
     /// current path.
     /// `Busy` while an import or conversion has not been applied: its
@@ -1876,8 +1889,7 @@ impl Session {
             // Task 8 review I1).
             if inner.held_merge.is_some() {
                 return Err(VizError::Busy {
-                    message: "Merge or cancel the merge waiting to be confirmed, then save as."
-                        .into(),
+                    message: crate::dawproject::SAVE_AS_HELD.into(),
                 });
             }
             // A copy written without the lock lands under the old root
@@ -4821,7 +4833,7 @@ fn apply_merge_work(
                 id,
                 kind,
                 JobStateRow::Failed,
-                Some(crate::dawproject::CHANGED_SINCE.into()),
+                Some(crate::dawproject::RECORDING_APPLY.into()),
                 vec![],
                 vec![],
             );

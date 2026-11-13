@@ -889,6 +889,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         interchangeLock.unlock()
         if let e = cancelMergeError { throw e }
     }
+    /// What `saveAsRefusal` answers (the core's sentence while a merge is
+    /// held; plan 6e Task 10 fix round 1).
+    var saveAsRefusalAnswer: String?
+    func saveAsRefusal() throws -> String? { saveAsRefusalAnswer }
     /// Holds `dawprojectSnapshots` until released (plan 6e Task 10).
     var snapshotsHold: DispatchSemaphore?
     func dawprojectSnapshots() throws -> [SnapshotRow] {

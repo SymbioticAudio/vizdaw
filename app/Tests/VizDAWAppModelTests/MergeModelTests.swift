@@ -86,6 +86,10 @@ import VizDAWCore
         #expect(g.snapshots == rows && g.shown)
         #expect(f.snapshotCalls == 1 && f.checkOnMain == [false], "the list was read off the main actor")
         #expect(f.dawprojectMerges.isEmpty && g.job == nil, "no job before a snapshot is chosen")
+        // Another file while the choice waits: it waits too (review m6).
+        g.begin(path: "/tmp/second.dawproject", info: info())
+        await g.settle()
+        #expect(g.path == Self.path && g.snapshots == rows && f.snapshotCalls == 1)
         g.chosenSnapshot = Self.eid
         await g.settle()
         #expect(
@@ -193,13 +197,15 @@ import VizDAWCore
     @Test func aHeldMergeQueuesWhatItBlocks() async throws {
         let (m, f, g, _) = try await held()
         #expect(m.mergeHeld)
-        // Save As is refused before the panel, as while recording.
-        guard case .refused(let why) = m.saveAction(forceAs: true) else {
-            Issue.record("Save As not refused")
-            return
-        }
-        #expect(why == MergeModel.saveAsWhileHeld)
+        // Save As is refused before the panel, as while recording, with the
+        // core's sentence (fix round 1: Swift keeps no copy).
+        let sentence = "Finish or cancel the merge waiting to be confirmed, then save as."
+        f.saveAsRefusalAnswer = sentence
+        #expect(m.saveAction(forceAs: true) == .refused(sentence))
         #expect(m.saveAction(forceAs: false) == .save, "a titled project's Save goes on")
+        f.savedPath = nil
+        #expect(m.saveAction(forceAs: false) == .refused(sentence), "an untitled Save needs Save As")
+        f.savedPath = "/tmp/Song.vizdaw"
         // An export waits.
         m.dawproject.shown = true
         await m.dawproject.settle()
@@ -233,6 +239,40 @@ import VizDAWCore
         m.pollJobs()
         #expect(!g.waiting && f.dawprojectMerges.map(\.path) == [Self.path, "/tmp/second.dawproject"] && g.running)
         #expect(m.alert == nil)
+    }
+
+    /// Review I1: closing the document during a hold ends it quietly. The
+    /// queued export and merge never start, whatever the sheet's binding
+    /// does as the window goes.
+    @Test func closingDuringAHoldStartsNothing() async throws {
+        let f = demoFake()
+        f.jobStartState = .running
+        f.projectIdAnswer = Self.pid
+        f.savedPath = "/tmp/Song.vizdaw"
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        let g = m.merge
+        g.begin(path: Self.path, info: info())
+        await g.settle()
+        let job = try #require(g.job)
+        end(f, m, job, .done, merge: Self.previewRow)
+        #expect(m.mergeHeld)
+        m.dawproject.shown = true
+        await m.dawproject.settle()
+        m.dawproject.start(path: "/tmp/out.dawproject", replace: false)
+        g.begin(path: "/tmp/second.dawproject", info: info())
+        #expect(m.dawproject.waiting && f.dawprojectExports.isEmpty && f.dawprojectMerges.count == 1)
+        s.close(id)
+        #expect(!g.shown && !g.held && g.job == nil && !g.waiting && !m.mergeHeld)
+        // The sheet's binding writes back as the window tears down.
+        g.shown = false
+        g.cancel()
+        g.confirm()
+        m.pollJobs()
+        #expect(f.dawprojectExports.isEmpty && f.dawprojectMerges.count == 1, "nothing started")
+        #expect(f.cancelledMerges.isEmpty && f.confirmedMerges.isEmpty, "closing let the core drop the hold")
+        #expect(s.alert == nil && m.alert == nil)
     }
 
     /// A merge waits for a running job the core would refuse it beside.

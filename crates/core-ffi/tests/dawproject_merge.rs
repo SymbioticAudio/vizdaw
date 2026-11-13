@@ -30,7 +30,9 @@ use core_model::time::Tick;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use vizdaw_ffi::dawproject::{CHANGED_SINCE, NOT_FROM_HERE, NOT_FROM_VIZDAW, needs_snapshot};
+use vizdaw_ffi::dawproject::{
+    CHANGED_SINCE, NOT_FROM_HERE, NOT_FROM_VIZDAW, RECORDING_APPLY, needs_snapshot,
+};
 use vizdaw_ffi::{
     DawprojectMergeRequestRow, EditCommand, JobKindRow, JobRow, JobStateRow, LaneEdit,
     MergeStepRow, RecordSpecRow, ReportKindRow, ReportRow, SequenceEdit, Session, SnapshotRow,
@@ -494,11 +496,18 @@ fn hold_then_confirm() {
     let p = merge_project();
     let file = returned(&exported(&p), Strip::Nothing, &[], three_edits);
     let doc = p.s.debug_document_json();
+    assert_eq!(p.s.save_as_refusal().unwrap(), None);
     let j = merge(&p.s, mreq(&file, MergeStepRow::Hold));
     assert_eq!(j.state, JobStateRow::Done, "{j:?}");
     assert!(j.merge.is_some());
     assert_eq!(p.s.debug_document_json(), doc, "nothing changed yet");
+    // Task 10 fix round 1: the app asks before the Save panel.
+    assert_eq!(
+        p.s.save_as_refusal().unwrap().as_deref(),
+        Some("Finish or cancel the merge waiting to be confirmed, then save as.")
+    );
     let report = p.s.confirm_merge(j.id).unwrap();
+    assert_eq!(p.s.save_as_refusal().unwrap(), None);
     assert_eq!(
         report.summary,
         "Merged: 2 applied, 0 kept, 1 added, 0 removed, 0 in conflict"
@@ -1253,10 +1262,13 @@ fn saving_keeps_a_held_merge_whole() {
     let new = ["new.caf".to_owned()];
     // Save As is Busy and keeps the hold.
     let elsewhere = p.dir.path().join("Q.vizdaw");
-    assert!(matches!(
-        p.s.save_as(text(&elsewhere)),
-        Err(VizError::Busy { .. })
-    ));
+    match p.s.save_as(text(&elsewhere)) {
+        Err(VizError::Busy { message }) => {
+            assert_eq!(message, vizdaw_ffi::dawproject::SAVE_AS_HELD);
+            assert_eq!(p.s.save_as_refusal().unwrap(), Some(message));
+        }
+        other => panic!("{other:?}"),
+    }
     assert!(!elsewhere.exists());
     // Save keeps the held media.
     p.s.save().unwrap();
@@ -1309,7 +1321,11 @@ fn apply_never_swaps_while_recording() {
     let doc = p.s.debug_document_json();
     p.s.debug_hold_jobs(false).unwrap();
     let j = wait_job(&p.s, id);
-    failed_with(&j, CHANGED_SINCE);
+    failed_with(&j, RECORDING_APPLY);
+    assert_eq!(
+        RECORDING_APPLY, "Stop recording, then merge again.",
+        "typed from the ruling"
+    );
     assert_eq!(p.s.debug_document_json(), doc);
     p.s.stop().unwrap();
 }

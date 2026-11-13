@@ -84,20 +84,17 @@ public final class MergeModel {
     /// Merge is available: a preview is held.
     public var canMerge: Bool { held && preview != nil }
 
-    /// The Save As refusal while a merge is held, shown before the Save
-    /// panel as `RecordModel.saveAsWhileRecording` is (the core refuses it
-    /// with the same sentence).
-    public static let saveAsWhileHeld = "Merge or cancel the merge waiting to be confirmed, then save as."
-
     // MARK: Begin
 
     /// Shows the sheet for `path`. Without an export ID, the project's
     /// snapshots are listed off the main actor and the preview starts once
     /// one is chosen (at once, with none to choose: the core's refusal says
     /// why); otherwise the Hold job starts. While another merge runs or is
-    /// held, this one waits for it.
+    /// held, or while the sheet shows another file (its snapshot list, its
+    /// refusal), this one waits for it.
     public func begin(path: String, info: DawprojectInfoRow) {
-        if job != nil || waiting {
+        guard document != nil else { return }
+        if job != nil || waiting || shown {
             next = (path, info)
             return
         }
@@ -210,6 +207,7 @@ public final class MergeModel {
         guard let document else { return }
         if let job {
             if held {
+                // Its only refusal is "no merge is waiting": no hold is left.
                 try? document.session.cancelMerge(job: job)
             } else if running {
                 abandoned.insert(job)
@@ -237,6 +235,24 @@ public final class MergeModel {
         }
     }
 
+    /// The document is closing (`DocumentStore.close`, before its session
+    /// closes, which drops the hold): everything ends quietly. Nothing
+    /// queued starts, nothing is sent, and the model lets the document go,
+    /// so a sheet binding written back as the window goes does nothing.
+    func documentClosed() {
+        generation += 1
+        next = nil
+        kept = nil
+        waiting = false
+        job = nil
+        held = false
+        abandoned = []
+        quiet = true
+        shown = false
+        quiet = false
+        document = nil
+    }
+
     // MARK: The job
 
     /// A merge job ended Done or Cancelled (`pollJobs`): the Hold job's
@@ -245,7 +261,8 @@ public final class MergeModel {
     func jobDone(_ r: JobRow) {
         guard r.kind == .mergeDawproject else { return }
         if abandoned.remove(r.id) != nil {
-            // Cancelled too late: the core holds it; let it go.
+            // Cancelled too late: the core holds it; let it go ("no merge
+            // is waiting" means it is already gone).
             if r.state == .done, let document { try? document.session.cancelMerge(job: r.id) }
             return
         }

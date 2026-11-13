@@ -263,6 +263,9 @@ public final class InterchangeModel {
         }
     }
 
+    /// The document is closing: dropped files still waiting never start.
+    func documentClosing() { dropQueue.removeAll() }
+
     /// `startJob` polls, which ends in `startNextDrop` again.
     @ObservationIgnored private var startingDrops = false
 

@@ -230,6 +230,16 @@ public final class DocumentModel {
     /// (plan 6e Ruling 12), so they wait or are refused before they start.
     public var mergeHeld: Bool { mergeModel?.held ?? false }
 
+    /// The document is closing (`DocumentStore.close`, before the session
+    /// closes): a held merge ends quietly and nothing queued starts
+    /// (plan 6e Task 10 review I1).
+    func documentClosing() {
+        mergeModel?.documentClosed()
+        dawprojectModel?.cancelWaiting()
+        forDawModel?.cancelWaiting()
+        interchangeModel?.documentClosing()
+    }
+
     /// The held merge ended (Merge, Cancel, or the core let it go): what
     /// waited for it goes, as when a blocking job ends.
     func holdEnded() {
@@ -846,8 +856,9 @@ public final class DocumentModel {
             return .save
         }
         // Plan 6e Task 8 review I1: the core refuses Save As while a merge
-        // is held; the panel never opens for it.
-        if mergeHeld, forceAs || untitled { return .refused(MergeModel.saveAsWhileHeld) }
+        // is held; the panel never opens for it, and the sentence is the
+        // core's (Task 10 fix round 1).
+        if forceAs || untitled, let why = (try? session.saveAsRefusal()) ?? nil { return .refused(why) }
         return forceAs || untitled ? .panel : .save
     }
 

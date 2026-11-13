@@ -558,6 +558,9 @@ public final class DocumentStore {
         // Plugin windows detach their editors before the session goes.
         willClose?(id)
         if let doc = documents.removeValue(forKey: id) {
+            // A held merge ends quietly; nothing queued starts (plan 6e
+            // Task 10 review I1). The session's close drops the hold.
+            doc.documentClosing()
             // A note an editor sounds (a press on a closing piano roll) ends.
             doc.editor.auditionOffAll()
             // No list outlives its document (none keeps MIDI input running).

@@ -1312,6 +1312,12 @@ pub const NOT_FROM_VIZDAW: &str =
 /// The refusal of a merge whose project changed after its preview (Ruling
 /// 12, Review Focus 3).
 pub const CHANGED_SINCE: &str = "The project changed after the preview; preview the merge again.";
+/// The failure of an Apply job that ends while recording (plan 6e Task 8
+/// review M1; Task 10 fix round 1 wording).
+pub const RECORDING_APPLY: &str = "Stop recording, then merge again.";
+/// Save As's refusal while a merge is held (plan 6e Task 8 review I1; Task
+/// 10 fix round 1 wording).
+pub const SAVE_AS_HELD: &str = "Finish or cancel the merge waiting to be confirmed, then save as.";
 /// The refusal of a `confirm_merge` or `cancel_merge` for a job that is
 /// not the held merge.
 pub const NO_MERGE_WAITING: &str = "no merge is waiting";
