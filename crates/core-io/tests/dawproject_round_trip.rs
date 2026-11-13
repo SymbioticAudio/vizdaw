@@ -15,18 +15,17 @@
 
 mod common;
 
-use common::package::{TestPlist, write_package};
+use common::package::{TestPlist, copy_hash, media_of, write_package};
 use common::xmllint::schema_check;
 use core_engine::fixtures::{BAR, Builder, Q};
 use core_io::dawproject::export::{
     ClipRule, DpExport, ExportEnv, ExportOptions, RegionGain, export,
 };
-use core_io::dawproject::import::{ImportEnv, MediaSource, apply, map};
-use core_io::dawproject::package::{AudioSource, open};
+use core_io::dawproject::import::{ImportEnv, apply, map};
+use core_io::dawproject::package::open;
 use core_io::dawproject::record::{Projection, as_returned, projection, returned};
 use core_io::limits::PackageLimits;
 use core_io::report::{ItemKind, Report};
-use core_media::import::Imported;
 use core_model::command::{Command, LaneCmd, SequenceCmd};
 use core_model::document::Document;
 use core_model::history::History;
@@ -102,15 +101,6 @@ fn new_project() -> (Document, SeqId) {
     (h.doc().clone(), seq)
 }
 
-/// The content hash of a copy of `hash` with `gain_db` applied.
-fn copy_hash(hash: &str, gain_db: f32) -> String {
-    if gain_db == 0.0 {
-        hash.to_owned()
-    } else {
-        format!("{hash}@{gain_db}")
-    }
-}
-
 /// Exports `doc`, checks the export against the schema, writes the package,
 /// opens and maps it (each entry's media the original item, or its gain
 /// copy) and applies it to a new project at the same rate.
@@ -133,32 +123,7 @@ fn trip_without_schema(doc: &Document, o: &ExportOptions) -> Trip {
     let dir = tempfile::tempdir().unwrap();
     let path = write_package(dir.path(), "Trip", &x);
     let pkg = open(&path, &PackageLimits::default(), &AtomicBool::new(false)).expect("opens");
-    let mut media = BTreeMap::new();
-    for a in pkg.audio() {
-        let AudioSource::Entry(entry) = &a.source else {
-            panic!("an exported file is outside the package")
-        };
-        let file = x
-            .audio
-            .iter()
-            .find(|f| &f.entry == entry)
-            .unwrap_or_else(|| panic!("no audio file {entry}"));
-        let item = doc.media().get(&file.media).expect("the media item");
-        let hash = item.content_hash.clone().unwrap_or_default();
-        media.insert(
-            a.key,
-            MediaSource::Online(vec![Imported {
-                path: format!("Media/{}.caf", a.name),
-                name: file.name.clone(),
-                original_name: item.name.clone(),
-                channels: item.channels,
-                sample_rate: item.sample_rate,
-                length_frames: item.length_frames,
-                content_hash: copy_hash(&hash, file.gain_db),
-                clipped: 0,
-            }]),
-        );
-    }
+    let media = media_of(&pkg, &x, doc);
     let installed = |_: PluginFormat, _: &str| true;
     let imp = map(
         &pkg,

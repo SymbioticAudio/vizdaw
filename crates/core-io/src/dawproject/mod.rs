@@ -6,6 +6,7 @@
 pub mod export;
 mod export_timeline;
 pub mod import;
+pub mod merge;
 pub mod package;
 pub mod plugins;
 pub mod record;

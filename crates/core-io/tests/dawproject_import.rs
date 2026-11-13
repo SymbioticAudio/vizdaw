@@ -1534,14 +1534,13 @@ fn untagged_behaviour_matches_6d() {
 mod origins {
     use super::*;
     use crate::common::merge;
-    use crate::common::package::{TestPlist, write_package};
+    use crate::common::package::{TestPlist, media_of, write_package};
     use core_engine::fixtures::Q;
     use core_io::dawproject::export::{
         ClipRule, DpExport, ExportEnv, ExportOptions, RegionGain, export,
     };
     use core_io::dawproject::import::{Origins, TAGS_IGNORED, apply_tagged};
     use core_io::dawproject::record::{ObjectRef, read_snapshot};
-    use core_media::import::Imported;
     use core_model::document::DestKind;
     use core_model::event::EventBody;
     use core_model::ids::{EventId, LaneId};
@@ -1593,32 +1592,6 @@ mod origins {
         read_snapshot(x.snapshot_json.as_bytes())
             .expect("reads")
             .ids
-    }
-
-    /// Each audio file of `pkg` as the original media item of `doc`.
-    fn media_of(doc: &Document, x: &DpExport, pkg: &DpPackage) -> BTreeMap<usize, MediaSource> {
-        let mut media = BTreeMap::new();
-        for a in pkg.audio() {
-            let AudioSource::Entry(entry) = &a.source else {
-                panic!("an exported file is outside the package")
-            };
-            let file = x.audio.iter().find(|f| &f.entry == entry).unwrap();
-            let item = doc.media().get(&file.media).unwrap();
-            media.insert(
-                a.key,
-                MediaSource::Online(vec![Imported {
-                    path: format!("Media/{}.caf", a.name),
-                    name: file.name.clone(),
-                    original_name: item.name.clone(),
-                    channels: item.channels,
-                    sample_rate: item.sample_rate,
-                    length_frames: item.length_frames,
-                    content_hash: item.content_hash.clone().unwrap_or_default(),
-                    clipped: 0,
-                }]),
-            );
-        }
-        media
     }
 
     struct Tagged {
@@ -1712,7 +1685,7 @@ mod origins {
         let (doc, seq, x) = exported();
         let dir = tempfile::tempdir().unwrap();
         let pkg = package_of(dir.path(), &x, str::to_owned);
-        let t = tagged(&pkg, &media_of(&doc, &x, &pkg), None);
+        let t = tagged(&pkg, &media_of(&pkg, &x, &doc), None);
         lacks(&t.a.report, TAGS_IGNORED);
         let new = t.a.h.doc();
         let o = &t.origins;
@@ -1868,7 +1841,7 @@ mod origins {
         };
         let dir = tempfile::tempdir().unwrap();
         let pkg = package_of(dir.path(), &x, swap);
-        let media = media_of(&doc, &x, &pkg);
+        let media = media_of(&pkg, &x, &doc);
         let ids = ids_of(&x);
         let lanes = |o: &Origins, new: &Document, s: SeqId| -> Vec<(u64, bool)> {
             ["Bass", "Keys", "Keys audio"]
@@ -1893,27 +1866,9 @@ mod origins {
         );
     }
 
-    /// The hostile file: hostile tags and IDs, and `clips` one-note clips
-    /// on track A all tagged `vz:e5` (with no pass IDs, so they are not
-    /// one use's passes).
+    /// The hostile file (shared with the merge tests).
     fn hostile(clips: usize) -> String {
-        let structure = concat!(
-            r#"<Track id="ta" name="A" comment="vz:t1" contentType="notes"/>"#,
-            r#"<Track id="tb" name="B" comment="vz:t1" contentType="notes"/>"#,
-            r#"<Track id="tc" name="C" comment="vz:t999" contentType="notes"/>"#,
-            r#"<Track id="td" name="D" comment="vz:s3" contentType="notes"/>"#,
-            r#"<Track id="t1" name="E" contentType="notes"/>"#,
-        );
-        let mut s = String::with_capacity(clips * 160);
-        for i in 0..clips {
-            s.push_str(&format!(
-                r#"<Clip time="{}" duration="1" comment="vz:e5"><Notes><Note time="0" duration="0.5" channel="0" key="60" vel="0.5"/></Notes></Clip>"#,
-                i as f64 / 2.0
-            ));
-        }
-        let arrangement =
-            format!(r#"<Lanes timeUnit="beats"><Clips track="ta">{s}</Clips></Lanes>"#);
-        project_xml(structure, &arrangement)
+        merge::hostile(clips, 1, 5)
     }
 
     fn track_ref(id: u64) -> ObjectRef {

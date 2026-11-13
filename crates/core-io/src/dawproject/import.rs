@@ -127,6 +127,16 @@ pub struct DpImport {
     /// What reading and mapping changed, left out or noted.
     pub report: Report,
     plan: Plan,
+    trusted: bool,
+}
+
+impl DpImport {
+    /// Whether the mapping trusted the file's XML IDs
+    /// ([`ImportEnv::ids`]), so its [`Origins`] are identities rather than
+    /// tags alone (plan 6e Task 4).
+    pub fn ids_trusted(&self) -> bool {
+        self.trusted
+    }
 }
 
 /// The new plug-in slots with the state each is to capture, as [`apply`]
@@ -670,6 +680,7 @@ pub fn map(
     Ok(DpImport {
         report: cx.report,
         plan,
+        trusted: env.ids.is_some(),
     })
 }
 
