@@ -462,3 +462,93 @@ fn cancel_stops_the_read() {
         Err(IoError::Cancelled)
     ));
 }
+
+/// A root whose `n` properties of `form` all name the index `name`, which
+/// is `index`.
+fn sharing(p: &Path, n: u16, form: u16, name: &str, index: Vec<u8>) {
+    let entries: Vec<(u16, u16, Vec<u8>)> = (1..=n).map(|pid| (pid, form, utf16z(name))).collect();
+    let index_path = format!("/{name} index");
+    raw_file(
+        p,
+        &[
+            ("/properties", Some(props(&entries))),
+            (&index_path, Some(index)),
+        ],
+    );
+}
+
+#[test]
+fn shared_indexes_are_read_once() {
+    let dir = tempfile::tempdir().unwrap();
+    const PROPS: u16 = 60_000;
+    const KEYS: u32 = 100_000;
+
+    // 60 000 strong vectors naming one index of 100 000 keys: read once,
+    // the rest listed (before the fix: 6·10⁹ children).
+    let p = dir.path().join("strong.aaf");
+    let mut idx = KEYS.to_le_bytes().to_vec();
+    idx.extend_from_slice(&KEYS.to_le_bytes());
+    idx.extend_from_slice(&u32::MAX.to_le_bytes());
+    for k in 0..KEYS {
+        idx.extend_from_slice(&k.to_le_bytes());
+    }
+    sharing(&p, PROPS, 0x32, "a", idx);
+    let start = std::time::Instant::now();
+    let (r, seen) = measure(|| open(&p));
+    let r = r.unwrap();
+    assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+    assert!(seen.peak < 64 * MIB, "peak {} bytes", seen.peak);
+    let root = &r.store().objects[0];
+    assert_eq!(root.props.len(), 1);
+    // 59 999 shared, and the one read names 100 000 missing storages.
+    assert_eq!(unreadable(&r), u64::from(PROPS) - 1 + u64::from(KEYS));
+
+    // The same with weak vectors: one index of 100 000 ids.
+    let p = dir.path().join("weak.aaf");
+    let mut idx = KEYS.to_le_bytes().to_vec();
+    idx.extend_from_slice(&[0, 0, 0x01, 0x1b, 16]);
+    for k in 0..KEYS {
+        idx.extend_from_slice(&[k as u8; 16]);
+    }
+    sharing(&p, PROPS, 0x12, "w", idx);
+    let (r, seen) = measure(|| open(&p));
+    let r = r.unwrap();
+    assert!(seen.peak < 64 * MIB, "peak {} bytes", seen.peak);
+    let root = &r.store().objects[0];
+    assert_eq!(root.props.len(), 1);
+    assert!(matches!(root.props.get(&1), Some(Prop::WeakVec(v)) if v.len() == KEYS as usize));
+    assert_eq!(unreadable(&r), u64::from(PROPS) - 1);
+}
+
+#[test]
+fn huge_index_counts_are_charged_first() {
+    let dir = tempfile::tempdir().unwrap();
+    const N: u32 = 1_000_000;
+    let limits = AafLimits {
+        max_model_bytes: 8 * MIB,
+        ..AafLimits::default()
+    };
+
+    // A weak index whose count fits its stream and the entry limit, but
+    // whose references would pass the budget: refused before they exist.
+    let p = dir.path().join("weak.aaf");
+    let mut idx = N.to_le_bytes().to_vec();
+    idx.extend_from_slice(&[0, 0, 0x01, 0x1b, 1]);
+    idx.resize(idx.len() + N as usize, 7);
+    sharing(&p, 1, 0x12, "w", idx);
+    let start = std::time::Instant::now();
+    let (r, seen) = measure(|| AafReader::open(&p, &limits, &no()));
+    assert_eq!(refusal(r), core_io::aaf::store::TOO_LARGE);
+    assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    assert!(seen.peak < 2 * MIB, "peak {} bytes", seen.peak);
+
+    // The same for a strong vector's keys.
+    let p = dir.path().join("strong.aaf");
+    let mut idx = N.to_le_bytes().to_vec();
+    idx.extend_from_slice(&[0; 8]);
+    idx.resize(idx.len() + 4 * N as usize, 0);
+    sharing(&p, 1, 0x32, "a", idx);
+    let (r, seen) = measure(|| AafReader::open(&p, &limits, &no()));
+    assert_eq!(refusal(r), core_io::aaf::store::TOO_LARGE);
+    assert!(seen.peak < 2 * MIB, "peak {} bytes", seen.peak);
+}

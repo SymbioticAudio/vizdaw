@@ -420,8 +420,12 @@ struct Walk<'a> {
     objects: Vec<Obj>,
     stack: Vec<Pending>,
     seen: HashSet<String>,
+    /// The index streams the current object's properties have used: each
+    /// is read once, so properties sharing one cannot multiply its cost.
+    indexes: HashSet<String>,
     queued: usize,
     bytes: usize,
+    cancel: &'a AtomicBool,
 }
 
 impl Walk<'_> {
@@ -429,6 +433,28 @@ impl Walk<'_> {
         let (d, _) = crate::text::sanitize(detail.as_bytes(), &crate::limits::Limits::default());
         self.report
             .add(ItemKind::LeftOut, UNREADABLE_PARTS, Some(d));
+    }
+
+    /// [`spend`](Self::spend) for the walk's inner steps: a refusal of
+    /// the whole file.
+    fn charge(&mut self, n: usize) -> Result<(), Bad> {
+        self.spend(n).map_err(Bad::File)
+    }
+
+    fn cancelled(&self) -> Result<(), Bad> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(Bad::File(IoError::Cancelled));
+        }
+        Ok(())
+    }
+
+    /// Claims index stream `ip` for the current object; a second claim is
+    /// a damaged property.
+    fn claim(&mut self, ip: &str) -> Result<(), String> {
+        if !self.indexes.insert(ip.to_uppercase()) {
+            return Err("shares an index with another property".into());
+        }
+        Ok(())
     }
 
     fn spend(&mut self, n: usize) -> Result<(), IoError> {
@@ -526,7 +552,9 @@ impl Walk<'_> {
             path: path.to_string(),
         };
         let mut kids = Vec::new();
+        self.indexes.clear();
         for (pid, form, len) in entries {
+            self.cancelled()?;
             let Some(v) = b.take(usize::from(len)) else {
                 return Err(Bad::Part(format!("{path}: short properties")));
             };
@@ -583,10 +611,15 @@ impl Walk<'_> {
                 if !valid_name(&base) {
                     return Err(bad("has a bad name"));
                 }
-                let keys = self
-                    .strong_index(path, &base, form == form::STRONG_SET)
-                    .map_err(|w| bad(&w))?;
+                let keys = match self.strong_index(path, &base, form == form::STRONG_SET) {
+                    Ok(k) => k,
+                    Err(Bad::Part(w)) => return Err(bad(&w)),
+                    Err(e) => return Err(e),
+                };
                 for (pos, k) in keys.iter().enumerate() {
+                    if pos % 4096 == 0 {
+                        self.cancelled()?;
+                    }
                     kids.push(Child {
                         pid,
                         pos,
@@ -620,7 +653,11 @@ impl Walk<'_> {
                 if !valid_name(&n) {
                     return Err(bad("has a bad name"));
                 }
-                let refs = self.weak_index(path, &n).map_err(|w| bad(&w))?;
+                let refs = match self.weak_index(path, &n) {
+                    Ok(r) => r,
+                    Err(Bad::Part(w)) => return Err(bad(&w)),
+                    Err(e) => return Err(e),
+                };
                 Ok(if form == form::WEAK_SET {
                     Prop::WeakSet(refs)
                 } else {
@@ -633,17 +670,40 @@ impl Walk<'_> {
 
     /// The local keys of the strong vector or set `base` in the storage
     /// at `path`.
-    fn strong_index(&mut self, path: &str, base: &str, set: bool) -> Result<Vec<u32>, String> {
+    /// Its cost (the index read, and per key a child, its name and its
+    /// slot) is charged before anything is allocated.
+    fn strong_index(&mut self, path: &str, base: &str, set: bool) -> Result<Vec<u32>, Bad> {
         let ip = child_path(path, &format!("{base} index"));
+        self.claim(&ip).map_err(Bad::Part)?;
+        let per_key = std::mem::size_of::<Child>()
+            .saturating_add(std::mem::size_of::<ObjId>())
+            .saturating_add(std::mem::size_of::<u32>())
+            .saturating_add(base.len())
+            .saturating_add(10);
+        let keys = self.strong_keys(&ip, set, per_key).map_err(|e| match e {
+            Ok(why) => Bad::Part(why),
+            Err(file) => Bad::File(file),
+        })?;
+        Ok(keys)
+    }
+
+    /// The keys of index `ip`; `Err(Ok(why))` leaves the property out,
+    /// `Err(Err(e))` refuses the file.
+    fn strong_keys(
+        &mut self,
+        ip: &str,
+        set: bool,
+        per_key: usize,
+    ) -> Result<Vec<u32>, Result<String, IoError>> {
+        let part = |s: &str| Ok(s.to_string());
         let head_len: u64 = if set { 15 } else { 12 };
-        let (head, len) =
-            read_head(self.c, &ip, head_len).map_err(|_| "has no index".to_string())?;
+        let (head, len) = read_head(self.c, ip, head_len).map_err(|_| part("has no index"))?;
         let mut b = Bytes(&head);
-        let count = b.u32().ok_or("has a short index")?;
+        let count = b.u32().ok_or_else(|| part("has a short index"))?;
         let _ = (b.u32(), b.u32());
         let size = if set {
-            let _key_pid = b.u16().ok_or("has a short index")?;
-            u64::from(b.u8().ok_or("has a short index")?)
+            let _key_pid = b.u16().ok_or_else(|| part("has a short index"))?;
+            u64::from(b.u8().ok_or_else(|| part("has a short index"))?)
         } else {
             0
         };
@@ -651,15 +711,20 @@ impl Walk<'_> {
         let need = u64::from(count)
             .checked_mul(entry)
             .and_then(|n| n.checked_add(head_len))
-            .ok_or("has an index too long for its stream")?;
-        if usize::try_from(count).map_or(true, |c| c > self.limits.max_index_entries) {
-            return Err("has too many entries".into());
-        }
+            .ok_or_else(|| part("has an index too long for its stream"))?;
+        let Some(n) = usize::try_from(count)
+            .ok()
+            .filter(|c| *c <= self.limits.max_index_entries)
+        else {
+            return Err(part("has too many entries"));
+        };
         if need > len {
-            return Err("has an index too long for its stream".into());
+            return Err(part("has an index too long for its stream"));
         }
-        let (all, _) =
-            read_head(self.c, &ip, need).map_err(|_| "has an unreadable index".to_string())?;
+        self.spend(usize::try_from(need).unwrap_or(usize::MAX))
+            .and_then(|()| self.spend(n.saturating_mul(per_key)))
+            .map_err(Err)?;
+        let (all, _) = read_head(self.c, ip, need).map_err(|_| part("has an unreadable index"))?;
         let body = all
             .get(usize::try_from(head_len).unwrap_or(usize::MAX)..)
             .unwrap_or(&[]);
@@ -677,35 +742,48 @@ impl Walk<'_> {
 
     /// The entries of the weak vector or set whose index is `<name> index`
     /// in the storage at `path`.
-    fn weak_index(&mut self, path: &str, name: &str) -> Result<Vec<WeakRef>, String> {
+    /// Its cost (the index read, and per entry a reference and its id) is
+    /// charged before anything is allocated.
+    fn weak_index(&mut self, path: &str, name: &str) -> Result<Vec<WeakRef>, Bad> {
+        let part = |s: &str| Bad::Part(s.to_string());
         let ip = child_path(path, &format!("{name} index"));
-        let (head, len) = read_head(self.c, &ip, 9).map_err(|_| "has no index".to_string())?;
+        self.claim(&ip).map_err(Bad::Part)?;
+        let (head, len) = read_head(self.c, &ip, 9).map_err(|_| part("has no index"))?;
         let mut b = Bytes(&head);
         let (Some(count), Some(table_index), Some(id_pid), Some(size)) =
             (b.u32(), b.u16(), b.u16(), b.u8())
         else {
-            return Err("has a short index".into());
+            return Err(part("has a short index"));
         };
         // An empty identification would let the count outgrow the stream.
         if size == 0 && count > 0 {
-            return Err("has empty identifications".into());
+            return Err(part("has empty identifications"));
         }
         let need = u64::from(count)
             .checked_mul(u64::from(size))
             .and_then(|n| n.checked_add(9))
-            .ok_or("has an index too long for its stream")?;
-        if usize::try_from(count).map_or(true, |c| c > self.limits.max_index_entries) {
-            return Err("has too many entries".into());
-        }
+            .ok_or_else(|| part("has an index too long for its stream"))?;
+        let Some(n) = usize::try_from(count)
+            .ok()
+            .filter(|c| *c <= self.limits.max_index_entries)
+        else {
+            return Err(part("has too many entries"));
+        };
         if need > len {
-            return Err("has an index too long for its stream".into());
+            return Err(part("has an index too long for its stream"));
         }
-        let (all, _) =
-            read_head(self.c, &ip, need).map_err(|_| "has an unreadable index".to_string())?;
-        let body = all.get(9..).unwrap_or(&[]);
-        let mut refs = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
         let size = usize::from(size);
-        for i in 0..usize::try_from(count).unwrap_or(0) {
+        // An id's heap block is at least a pointer's size.
+        let per_entry = std::mem::size_of::<WeakRef>().saturating_add(size.max(8));
+        self.charge(usize::try_from(need).unwrap_or(usize::MAX))?;
+        self.charge(n.saturating_mul(per_entry))?;
+        let (all, _) = read_head(self.c, &ip, need).map_err(|_| part("has an unreadable index"))?;
+        let body = all.get(9..).unwrap_or(&[]);
+        let mut refs = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 4096 == 0 {
+                self.cancelled()?;
+            }
             let id = body
                 .get(i.saturating_mul(size)..i.saturating_add(1).saturating_mul(size))
                 .unwrap_or(&[]);
@@ -731,14 +809,12 @@ fn prop_cost(p: &Prop) -> usize {
         Prop::Data(d) => d.len(),
         Prop::Stream(s) => s.len(),
         Prop::Weak(w) => w.id.len(),
-        Prop::Strong(_) => 0,
-        Prop::StrongVec(v) | Prop::StrongSet(v) => {
-            v.len().saturating_mul(std::mem::size_of::<ObjId>())
-        }
-        Prop::WeakVec(v) | Prop::WeakSet(v) => v.iter().fold(0usize, |n, w| {
-            n.saturating_add(std::mem::size_of::<WeakRef>())
-                .saturating_add(w.id.len())
-        }),
+        // Vectors and sets were charged as their index was read.
+        Prop::Strong(_)
+        | Prop::StrongVec(_)
+        | Prop::StrongSet(_)
+        | Prop::WeakVec(_)
+        | Prop::WeakSet(_) => 0,
     })
 }
 
@@ -763,8 +839,10 @@ fn read_store(
             slot: None,
         }],
         seen: HashSet::new(),
+        indexes: HashSet::new(),
         queued: 1,
         bytes: 0,
+        cancel,
     };
     if w.queued > limits.max_objects {
         return Err(refused(TOO_MANY_OBJECTS));
@@ -797,7 +875,10 @@ fn read_store(
             fill(&mut w.objects, parent, pid, pos, id);
         }
         // Queued in reverse, so the stack pops them in file order.
-        for k in kids.iter().rev() {
+        for (i, k) in kids.iter().rev().enumerate() {
+            if i % 4096 == 0 && cancel.load(Ordering::Relaxed) {
+                return Err(IoError::Cancelled);
+            }
             let _ = w.queue(&path, &k.name, p.depth, (id, k.pid, k.pos))?;
         }
     }
