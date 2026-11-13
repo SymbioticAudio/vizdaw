@@ -23,7 +23,7 @@ use core_io::dawproject::export::{
 };
 use core_io::dawproject::import::{ImportEnv, MediaSource, apply, map};
 use core_io::dawproject::package::{AudioSource, open};
-use core_io::dawproject::record::{Projection, projection};
+use core_io::dawproject::record::{Projection, as_returned, projection, returned};
 use core_io::limits::PackageLimits;
 use core_io::report::{ItemKind, Report};
 use core_media::import::Imported;
@@ -207,58 +207,50 @@ fn near(a: f64, b: f64, what: &str) {
     assert!((a - b).abs() <= EPS, "{what}: {a} vs {b}");
 }
 
-/// Asserts that `imported` is `original` within the tolerances. `gain` is
-/// the export's region-gain option; `copies` the hashes of the gain copies
-/// the mapping gave the regions.
+/// Asserts that `imported` is `original` within the tolerances, after the
+/// merge's normalisers put both in the file's frame (plan 6e Ruling 1).
+/// `gain` is the export's region-gain option. Under `Apply` each region
+/// with gain must come back with its gain copy's hash; that hash is then
+/// cleared, as `as_returned` clears the original's.
 #[track_caller]
 fn same(original: &Projection, imported: &Projection, gain: RegionGain) {
-    let shift = -original.origin;
     assert_eq!(imported.origin, 0, "an import has no pickup");
-    assert_eq!(original.info, imported.info, "song info");
-    assert_eq!(
-        original
-            .markers
-            .iter()
-            .map(|(t, n)| (t + shift, n.clone()))
-            .collect::<Vec<_>>(),
-        imported.markers,
-        "markers"
-    );
-    // The import has no pickup: what plays before the original's tick 0 is
-    // its own first (held) entries. The map from there on is compared; a
-    // value held across that tick counts as an entry on it.
-    // A ramp on the last point leads nowhere, so it is not compared.
-    let ends_flat = |mut v: Vec<(i64, u32, bool)>| {
-        if let Some(last) = v.last_mut() {
-            last.2 = false;
+    let origin = original.origin;
+    let mut theirs = returned(imported, origin);
+    if gain == RegionGain::Apply {
+        assert_eq!(original.tracks.len(), theirs.tracks.len(), "tracks");
+        for (a, b) in original.tracks.iter().zip(&mut theirs.tracks) {
+            assert_eq!(
+                a.regions.len(),
+                b.regions.len(),
+                "track '{}': regions",
+                a.name
+            );
+            for (r, s) in a.regions.iter().zip(&mut b.regions) {
+                if r.gain_db != 0.0 {
+                    assert_eq!(
+                        s.media_hash,
+                        r.media_hash.as_ref().map(|h| copy_hash(h, r.gain_db)),
+                        "track '{}': a region's gain copy",
+                        a.name
+                    );
+                    s.media_hash = None;
+                }
+            }
         }
-        v
-    };
-    assert_eq!(
-        ends_flat(
-            original
-                .tempo
-                .iter()
-                .map(|(t, b, r)| (t + shift, *b, *r))
-                .collect()
-        ),
-        ends_flat(from_tick(
-            &imported.tempo,
-            shift,
-            |p| p.0,
-            |p, at| (at, p.1, p.2)
-        )),
-        "tempo map"
-    );
-    assert_eq!(
-        original
-            .meter
-            .iter()
-            .map(|(t, n, d)| (t + shift, *n, *d))
-            .collect::<Vec<_>>(),
-        from_tick(&imported.meter, shift, |p| p.0, |p, at| (at, p.1, p.2)),
-        "meter map"
-    );
+    }
+    assert_projection_eq(&as_returned(original, origin, gain), &theirs);
+}
+
+/// Asserts that two projections in the same frame are equal within the
+/// tolerances.
+#[track_caller]
+fn assert_projection_eq(original: &Projection, imported: &Projection) {
+    assert_eq!(original.origin, imported.origin, "origin");
+    assert_eq!(original.info, imported.info, "song info");
+    assert_eq!(original.markers, imported.markers, "markers");
+    assert_eq!(original.tempo, imported.tempo, "tempo map");
+    assert_eq!(original.meter, imported.meter, "meter map");
     assert_eq!(original.strips.len(), imported.strips.len(), "strips");
     for (i, (a, b)) in original.strips.iter().zip(&imported.strips).enumerate() {
         let at = format!("strip {i} '{}'", a.name);
@@ -285,88 +277,19 @@ fn same(original: &Projection, imported: &Projection, gain: RegionGain) {
             (b.notes, b.audio, b.strip),
             "{at}"
         );
-        // A note's expression is a set: the order the document holds it in
-        // is not part of what is carried.
-        let moved = |n: &core_io::dawproject::record::PNote, by: i64| {
-            let mut n = n.clone();
-            n.tick += by;
-            n.expression.sort_by(|x, y| (x.1, &x.0).cmp(&(y.1, &y.0)));
-            n
-        };
-        assert_eq!(
-            a.notes_played
-                .iter()
-                .map(|n| moved(n, shift))
-                .collect::<Vec<_>>(),
-            b.notes_played
-                .iter()
-                .map(|n| moved(n, 0))
-                .collect::<Vec<_>>(),
-            "{at}: notes"
-        );
-        assert_eq!(
-            a.midi
-                .iter()
-                .map(|(t, m)| (t + shift, m.clone()))
-                .collect::<Vec<_>>(),
-            b.midi,
-            "{at}: MIDI events"
-        );
-        assert_eq!(a.regions.len(), b.regions.len(), "{at}: regions");
-        for (r, s) in a.regions.iter().zip(&b.regions) {
-            let mut want = r.clone();
-            want.tick += shift;
-            match gain {
-                RegionGain::Apply => {
-                    want.media_hash = want.media_hash.map(|h| copy_hash(&h, r.gain_db));
-                    want.gain_db = 0.0;
-                }
-                RegionGain::LeaveOut => want.gain_db = 0.0,
-            }
-            assert_eq!(&want, s, "{at}: region");
-        }
+        assert_eq!(a.notes_played, b.notes_played, "{at}: notes");
+        assert_eq!(a.midi, b.midi, "{at}: MIDI events");
+        assert_eq!(a.regions, b.regions, "{at}: regions");
         assert_eq!(a.automation.len(), b.automation.len(), "{at}: automation");
         for ((na, pa), (nb, pb)) in a.automation.iter().zip(&b.automation) {
             assert_eq!(na, nb, "{at}: automation target");
-            let pb = without_holds(pb);
             assert_eq!(pa.len(), pb.len(), "{at}: {na} points");
-            for ((ta, va), (tb, vb)) in pa.iter().zip(&pb) {
-                assert_eq!(ta + shift, *tb, "{at}: {na} tick");
+            for ((ta, va), (tb, vb)) in pa.iter().zip(pb) {
+                assert_eq!(ta, tb, "{at}: {na} tick");
                 near(*va, *vb, &format!("{at}: {na}"));
             }
         }
     }
-}
-
-/// The entries of a map from tick `at` on; the entry in force there counts
-/// as one on it.
-fn from_tick<T: Copy>(
-    map: &[T],
-    at: i64,
-    tick: impl Fn(&T) -> i64,
-    on: impl Fn(&T, i64) -> T,
-) -> Vec<T> {
-    let mut out: Vec<T> = map.iter().filter(|p| tick(p) >= at).copied().collect();
-    if out.first().is_none_or(|p| tick(p) > at)
-        && let Some(held) = map.iter().rev().find(|p| tick(p) < at)
-    {
-        out.insert(0, on(held, at));
-    }
-    out
-}
-
-/// `points` without the one-tick hold points the import adds after a step.
-fn without_holds(points: &[(i64, f64)]) -> Vec<(i64, f64)> {
-    let mut out: Vec<(i64, f64)> = Vec::new();
-    for p in points {
-        if let Some(last) = out.last() {
-            if p.0 == last.0 + 1 && p.1 == last.1 {
-                continue;
-            }
-        }
-        out.push(*p);
-    }
-    out
 }
 
 /// The trip's projections: the original's and the imported one's.

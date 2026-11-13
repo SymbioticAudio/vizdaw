@@ -175,7 +175,7 @@ pub fn export(
     let slots = device_slots(&layout);
     stop(cancel)?;
     let metadata_xml = write_metadata(&metadata(doc, env.export_id));
-    let projection = record::project(&layout, cancel)?;
+    let (projection, identity) = record::project_with_identity(&layout, cancel)?;
     stop(cancel)?;
     let json = core_model::file::to_json(doc).map_err(unwritable)?;
     stop(cancel)?;
@@ -184,7 +184,7 @@ pub fn export(
     stop(cancel)?;
     let seq = o.seq.0;
     let snapshot = Snapshot {
-        format: record::FORMAT,
+        format: record::SNAPSHOT_FORMAT,
         project_id: env.project_id.to_owned(),
         export_id: env.export_id.to_owned(),
         exported_at: env.exported_at,
@@ -192,6 +192,14 @@ pub fn export(
         origin: layout.origin,
         ids: ids.clone(),
         projection,
+        region_gain: Some(
+            match o.region_gain {
+                RegionGain::Apply => "apply",
+                RegionGain::LeaveOut => "leave_out",
+            }
+            .to_owned(),
+        ),
+        identity: Some(identity),
     };
     let snapshot_json = serde_json::to_string(&snapshot).map_err(unwritable)?;
     drop(snapshot);

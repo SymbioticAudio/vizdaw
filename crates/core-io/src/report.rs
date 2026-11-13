@@ -5,6 +5,9 @@ use crate::limits::MAX_DETAILS;
 /// How an item affected the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
+    /// Both sides of a merge changed it; the project's side was kept (plan
+    /// 6e Ruling 15).
+    Conflict,
     /// The result differs from the input.
     Changed,
     /// Something in the input is not in the result.
@@ -53,7 +56,7 @@ pub struct Summary {
 pub struct Report {
     /// What the result holds.
     pub summary: Summary,
-    /// What was changed, left out or noted.
+    /// What was in conflict, changed, left out or noted.
     pub items: Vec<Item>,
 }
 
@@ -148,10 +151,11 @@ impl Report {
     }
 
     /// The report as text, as the report sheet's Copy gives it: the summary
-    /// line, then the groups "Changed", "Left out" and "Notes" (empty ones
-    /// omitted), each item as `"  <what>"` or `"  <what> (<count>)"` with
-    /// its details as `"    <detail>"` and, after them, `"    and N more"`
-    /// when it happened more often than it has details. With no
+    /// line, then the groups "Conflicts", "Changed", "Left out" and "Notes"
+    /// (empty ones omitted), each item as `"  <what>"` or
+    /// `"  <what> (<count>)"` with its details as `"    <detail>"` and,
+    /// after them, `"    and N more"` when it happened more often than it
+    /// has details. With no
     /// items: the summary, then "Everything transferred.". No newline at
     /// the end.
     pub fn plain(&self, verb: &str) -> String {
@@ -161,6 +165,7 @@ impl Report {
             return lines.join("\n");
         }
         for (title, kind) in [
+            ("Conflicts", ItemKind::Conflict),
             ("Changed", ItemKind::Changed),
             ("Left out", ItemKind::LeftOut),
             ("Notes", ItemKind::Note),

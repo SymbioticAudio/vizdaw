@@ -59,6 +59,9 @@ pub const MAX_PARSE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_METADATA_XML_BYTES: u64 = 1024 * 1024;
 /// Largest `vizdaw/record.json`, unpacked, in bytes (§6.5).
 pub const MAX_RECORD_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest snapshot (`Interchange/<export id>.json`) a merge reads, in
+/// bytes (plan 6e Ruling 17).
+pub const MAX_SNAPSHOT_BYTES: usize = 256 << 20;
 /// Largest plug-in state entry, unpacked, in bytes (§6.5).
 pub const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
 /// Most bytes of plug-in state one import holds at once, all states

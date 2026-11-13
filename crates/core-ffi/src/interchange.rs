@@ -249,6 +249,9 @@ pub(crate) fn report_row(r: &Report, verb: &str) -> ReportRow {
             .iter()
             .map(|i| ReportItemRow {
                 kind: match i.kind {
+                    // A placeholder until plan 6e Task 8 adds
+                    // `ReportKindRow::Conflict`.
+                    ItemKind::Conflict => ReportKindRow::Note,
                     ItemKind::Changed => ReportKindRow::Changed,
                     ItemKind::LeftOut => ReportKindRow::LeftOut,
                     ItemKind::Note => ReportKindRow::Note,

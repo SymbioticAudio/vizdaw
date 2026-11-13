@@ -12,7 +12,7 @@ use core_io::dawproject::export::{
     export, file_name,
 };
 use core_io::dawproject::plugins::{NoPlist, PlistCodec, state_entry};
-use core_io::dawproject::record::{ObjectRef, Record, Snapshot, projection};
+use core_io::dawproject::record::{ObjectRef, Record, SNAPSHOT_FORMAT, Snapshot, projection};
 use core_io::dawproject::schema::*;
 use core_io::dawproject::units::{
     EXPORT_LINE, TagKind, beats, db_of_linear, linear_gain, nearest_swatch, pan_normalized,
@@ -844,7 +844,7 @@ fn tags_and_record() {
     assert_eq!(rec.document, want);
 
     let snap: Snapshot = serde_json::from_str(&x.snapshot_json).unwrap();
-    assert_eq!(snap.format, 1);
+    assert_eq!(snap.format, SNAPSHOT_FORMAT);
     assert_eq!(snap.export_id, "E1");
     assert_eq!(snap.ids, rec.ids);
     assert_eq!(snap.origin, 0);

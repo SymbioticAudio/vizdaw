@@ -6,17 +6,21 @@
 //! holds the [`Projection`] of what was exported. Both map every XML ID to
 //! the VizDAW object it came from.
 
-use super::export::{Layout, Ticker, layout};
+use super::export::{Layout, RegionGain, Ticker, layout};
 use super::units::swatch_hex;
 use crate::IoError;
+use crate::limits::{MAX_SNAPSHOT_BYTES, MAX_XML_NODES};
 use core_model::automation::AutomationTarget;
-use core_model::document::Document;
-use core_model::event::{EventBody, PerNoteKind};
+use core_model::document::{Document, check_project_id};
+use core_model::event::{EventBody, LoopCount, PerNoteKind};
 use core_model::ids::SeqId;
 use core_model::mixer::PluginFormat;
-use core_model::query::ResolvedEvent;
+use core_model::query::{ResolvedEvent, seq_length};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 /// The record's package entry.
@@ -25,8 +29,14 @@ pub const RECORD_ENTRY: &str = "vizdaw/record.json";
 pub const SNAPSHOT_DIR: &str = "Interchange";
 /// How many snapshots a project keeps.
 pub const KEEP_SNAPSHOTS: usize = 10;
-/// The record's and the snapshot's format.
+/// The record's format (and 6d's snapshots').
 pub const FORMAT: u32 = 1;
+/// The snapshot format an export writes (plan 6e Ruling 3); formats 1 and
+/// 2 are read.
+pub const SNAPSHOT_FORMAT: u32 = 2;
+/// The refusal of a snapshot that cannot be read (plan 6e Ruling 17).
+pub const SNAPSHOT_DAMAGED: &str =
+    "The project's copy of that export is damaged, so the file can't be merged.";
 
 /// The VizDAW object an XML ID stands for. Every ID the export writes has
 /// one. `kind` and what `id` (and `slot`, `index`) name:
@@ -97,7 +107,7 @@ pub struct RecordHead {
 /// `Interchange/<export id>.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// [`FORMAT`].
+    /// [`SNAPSHOT_FORMAT`] (or 6d's [`FORMAT`]).
     pub format: u32,
     /// The project's ID.
     pub project_id: String,
@@ -109,10 +119,378 @@ pub struct Snapshot {
     pub seq: u64,
     /// The tick at file time 0.
     pub origin: i64,
-    /// XML ID → VizDAW object.
+    /// XML ID → VizDAW object; at most the reader's `max_ids` entries,
+    /// counted while parsing.
+    #[serde(deserialize_with = "bounded_ids")]
     pub ids: BTreeMap<String, ObjectRef>,
     /// What was exported.
     pub projection: Projection,
+    /// The export's region-gain option: "apply" or "leave_out" (format 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region_gain: Option<String>,
+    /// Who each projection row is (format 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
+}
+
+/// Who each projection row is in the project it was taken from, parallel to
+/// the projection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    /// One per [`Projection::tracks`] entry.
+    pub tracks: Vec<TrackIds>,
+    /// One per [`Projection::strips`] entry.
+    pub strips: Vec<StripIds>,
+}
+
+/// The identities behind one [`PTrack`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackIds {
+    /// The track (both halves of a split track name it).
+    pub lane: u64,
+    /// One per [`PTrack::notes_played`] entry.
+    pub notes: Vec<EventAt>,
+    /// One per [`PTrack::midi`] entry.
+    pub midi: Vec<EventAt>,
+    /// One per [`PTrack::regions`] entry.
+    pub regions: Vec<EventAt>,
+    /// One per [`PTrack::automation`] curve, one per point of it.
+    pub automation: Vec<Vec<EventAt>>,
+    /// The track's top-level reference uses, by tick (on the half that
+    /// holds the notes).
+    pub uses: Vec<UseAt>,
+}
+
+/// An event, and the top-level event it plays through (itself, or its
+/// reference use).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventAt {
+    /// The source event.
+    pub event: u64,
+    /// The exported sequence's event it plays through.
+    pub top: u64,
+}
+
+/// One top-level reference use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseAt {
+    /// The reference event.
+    pub event: u64,
+    /// The sequence it uses.
+    pub seq: u64,
+    /// Where it starts playing (the track's play shift included).
+    pub tick: i64,
+    /// Where its last pass ends.
+    pub end: i64,
+    /// Its transpose.
+    pub transpose: i8,
+    /// How many passes it plays.
+    pub passes: u32,
+}
+
+/// The identities behind one [`PStrip`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StripIds {
+    /// The strip it is (or a copy of); none for a plain channel.
+    pub strip: Option<u64>,
+    /// The plug-in instances, in [`PStrip::devices`] order.
+    pub devices: Vec<u64>,
+}
+
+/// The limits a snapshot is read under (tests lower them, as 6d's
+/// `record_size` lowers `max_record`).
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotLimits {
+    /// Largest snapshot, in bytes.
+    pub max_bytes: usize,
+    /// Most `ids` entries.
+    pub max_ids: usize,
+}
+
+impl Default for SnapshotLimits {
+    fn default() -> Self {
+        SnapshotLimits {
+            max_bytes: MAX_SNAPSHOT_BYTES,
+            max_ids: MAX_XML_NODES,
+        }
+    }
+}
+
+thread_local! {
+    /// The most `ids` a snapshot parsed on this thread may hold:
+    /// [`read_snapshot_with`]'s, else [`MAX_XML_NODES`].
+    static MAX_IDS: Cell<usize> = const { Cell::new(MAX_XML_NODES) };
+}
+
+/// Restores [`MAX_IDS`] when dropped.
+struct MaxIds(usize);
+
+impl Drop for MaxIds {
+    fn drop(&mut self) {
+        MAX_IDS.with(|m| m.set(self.0));
+    }
+}
+
+/// `ids`, refused at the entry past [`MAX_IDS`].
+fn bounded_ids<'de, D>(d: D) -> Result<BTreeMap<String, ObjectRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, MapAccess, Visitor};
+
+    struct Ids(usize);
+
+    impl<'de> Visitor<'de> for Ids {
+        type Value = BTreeMap<String, ObjectRef>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of XML IDs")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if out.len() >= self.0 {
+                    return Err(A::Error::custom("too many IDs"));
+                }
+                let value = map.next_value::<ObjectRef>()?;
+                if out.insert(key, value).is_some() {
+                    return Err(A::Error::custom("an ID twice"));
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    d.deserialize_map(Ids(MAX_IDS.with(Cell::get)))
+}
+
+/// Reads a snapshot: at most `max_bytes` (checked before parsing), JSON,
+/// format 1 or 2, UUID project and export IDs, at most `max_ids` IDs
+/// (counted while parsing), a known region-gain word, and an identity
+/// parallel to the projection (Ruling 17). A format 1 snapshot has neither
+/// a region gain nor an identity; every strip index is in range. Anything
+/// else is [`SNAPSHOT_DAMAGED`].
+pub fn read_snapshot_with(bytes: &[u8], limits: &SnapshotLimits) -> Result<Snapshot, IoError> {
+    let damaged = || IoError::Refused(SNAPSHOT_DAMAGED.to_owned());
+    if bytes.len() > limits.max_bytes {
+        return Err(damaged());
+    }
+    let snap: Snapshot = {
+        let _restore = MaxIds(MAX_IDS.with(|m| m.replace(limits.max_ids)));
+        serde_json::from_slice(bytes).map_err(|_| damaged())?
+    };
+    if well_formed(&snap) {
+        Ok(snap)
+    } else {
+        Err(damaged())
+    }
+}
+
+/// [`read_snapshot_with`] at the default limits.
+pub fn read_snapshot(bytes: &[u8]) -> Result<Snapshot, IoError> {
+    read_snapshot_with(bytes, &SnapshotLimits::default())
+}
+
+/// Whether a parsed snapshot holds together (see [`read_snapshot_with`]).
+fn well_formed(s: &Snapshot) -> bool {
+    let p = &s.projection;
+    let n = p.strips.len();
+    let strips_ok = p.tracks.iter().all(|t| t.strip.is_none_or(|i| i < n))
+        && p.strips
+            .iter()
+            .all(|x| x.output.is_none_or(|i| i < n) && x.sends.iter().all(|send| send.0 < n));
+    let ids_ok = check_project_id(&s.project_id) && check_project_id(&s.export_id);
+    let extras_ok = match s.format {
+        FORMAT => s.region_gain.is_none() && s.identity.is_none(),
+        SNAPSHOT_FORMAT => {
+            s.region_gain
+                .as_deref()
+                .is_none_or(|g| matches!(g, "apply" | "leave_out"))
+                && s.identity.as_ref().is_none_or(|id| parallel(p, id))
+        }
+        _ => false,
+    };
+    strips_ok && ids_ok && extras_ok
+}
+
+/// Whether `id` has one entry per row of `p`.
+fn parallel(p: &Projection, id: &Identity) -> bool {
+    id.tracks.len() == p.tracks.len()
+        && id.strips.len() == p.strips.len()
+        && p.tracks.iter().zip(&id.tracks).all(|(t, i)| {
+            t.notes_played.len() == i.notes.len()
+                && t.midi.len() == i.midi.len()
+                && t.regions.len() == i.regions.len()
+                && t.automation.len() == i.automation.len()
+                && t.automation
+                    .iter()
+                    .zip(&i.automation)
+                    .all(|((_, pts), at)| pts.len() == at.len())
+        })
+        && p.strips
+            .iter()
+            .zip(&id.strips)
+            .all(|(x, i)| x.devices.len() == i.devices.len())
+}
+
+/// `<root>/Interchange/<export id>.json`: lstat (a regular file, else
+/// `Ok(None)` for missing), at most `MAX_SNAPSHOT_BYTES + 1` bytes read,
+/// then [`read_snapshot`]. A link, a folder or a FIFO there, or a snapshot
+/// of another export, is [`SNAPSHOT_DAMAGED`]; an `export_id` that is not
+/// a UUID names no snapshot.
+pub fn read_snapshot_file(root: &Path, export_id: &str) -> Result<Option<Snapshot>, IoError> {
+    let damaged = || IoError::Refused(SNAPSHOT_DAMAGED.to_owned());
+    if !check_project_id(export_id) {
+        return Ok(None);
+    }
+    let path = root.join(SNAPSHOT_DIR).join(format!("{export_id}.json"));
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(crate::io_err(&path, "read", &e)),
+    };
+    if !meta.is_file() {
+        return Err(damaged());
+    }
+    let file = std::fs::File::open(&path).map_err(|e| crate::io_err(&path, "opened", &e))?;
+    // The path may have been swapped since the check above. (A FIFO
+    // swapped in can still block the open: `std` has no non-blocking one.)
+    if !file
+        .metadata()
+        .map_err(|e| crate::io_err(&path, "read", &e))?
+        .is_file()
+    {
+        return Err(damaged());
+    }
+    let probe = u64::try_from(MAX_SNAPSHOT_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::new();
+    file.take(probe)
+        .read_to_end(&mut bytes)
+        .map_err(|e| crate::io_err(&path, "read", &e))?;
+    let snap = read_snapshot(&bytes)?;
+    if snap.export_id != export_id {
+        return Err(damaged());
+    }
+    Ok(Some(snap))
+}
+
+// ---------------------------------------------------------------- normalisers
+
+/// The last point of a tempo map without its ramp (a ramp there leads
+/// nowhere).
+fn ends_flat(mut v: Vec<(i64, u32, bool)>) -> Vec<(i64, u32, bool)> {
+    if let Some(last) = v.last_mut() {
+        last.2 = false;
+    }
+    v
+}
+
+/// `n`'s per-note values as a set: by offset, then kind.
+fn sorted_expression(n: &mut PNote) {
+    n.expression
+        .sort_by(|x, y| (x.1, &x.0, x.2).cmp(&(y.1, &y.0, y.2)));
+}
+
+/// `p` as an unchanged file exported with pickup `origin` brings it back
+/// (Ruling 1); for base and ours. Every tick is shifted by `-origin`, the
+/// last tempo point is flat, each note's expression is sorted and each
+/// region's gain is 0. Under [`RegionGain::Apply`] a region with gain has
+/// no media hash: its audio comes back as a new copy (Ruling 11). The
+/// result's origin is 0.
+pub fn as_returned(p: &Projection, origin: i64, region_gain: RegionGain) -> Projection {
+    let by = |t: i64| t.saturating_sub(origin);
+    let tracks = p
+        .tracks
+        .iter()
+        .map(|t| {
+            let mut t = t.clone();
+            for n in &mut t.notes_played {
+                n.tick = by(n.tick);
+                sorted_expression(n);
+            }
+            for m in &mut t.midi {
+                m.0 = by(m.0);
+            }
+            for r in &mut t.regions {
+                r.tick = by(r.tick);
+                if region_gain == RegionGain::Apply && r.gain_db != 0.0 {
+                    r.media_hash = None;
+                }
+                r.gain_db = 0.0;
+            }
+            for (_, points) in &mut t.automation {
+                for pt in points {
+                    pt.0 = by(pt.0);
+                }
+            }
+            t
+        })
+        .collect();
+    Projection {
+        tracks,
+        strips: p.strips.clone(),
+        tempo: ends_flat(p.tempo.iter().map(|&(t, b, r)| (by(t), b, r)).collect()),
+        meter: p.meter.iter().map(|&(t, n, d)| (by(t), n, d)).collect(),
+        markers: p.markers.iter().map(|(t, n)| (by(*t), n.clone())).collect(),
+        info: p.info.clone(),
+        origin: 0,
+    }
+}
+
+/// The entries of a map from tick `at` on; the entry in force there counts
+/// as one on it (as an import without a pickup plays it).
+fn from_tick<T: Copy>(
+    map: &[T],
+    at: i64,
+    tick: impl Fn(&T) -> i64,
+    on: impl Fn(&T, i64) -> T,
+) -> Vec<T> {
+    let mut out: Vec<T> = map.iter().filter(|p| tick(p) >= at).copied().collect();
+    if out.first().is_none_or(|p| tick(p) > at)
+        && let Some(held) = map.iter().rev().find(|p| tick(p) < at)
+    {
+        out.insert(0, on(held, at));
+    }
+    out
+}
+
+/// `points` without the one-tick hold points an import adds after a step:
+/// a point one tick after the last kept one, with its value.
+fn without_holds(points: &[(i64, f64)]) -> Vec<(i64, f64)> {
+    let mut out: Vec<(i64, f64)> = Vec::new();
+    for p in points {
+        if let Some(last) = out.last()
+            && p.0 == last.0.saturating_add(1)
+            && p.1 == last.1
+        {
+            continue;
+        }
+        out.push(*p);
+    }
+    out
+}
+
+/// A returning file's projection in the same frame as [`as_returned`]'s
+/// (Ruling 1): the tempo and meter maps from tick `-origin` on, no hold
+/// points, the last tempo point flat and each note's expression sorted.
+/// Region hashes are left as they are.
+pub fn returned(theirs: &Projection, origin: i64) -> Projection {
+    let at = 0i64.saturating_sub(origin);
+    let mut p = theirs.clone();
+    for t in &mut p.tracks {
+        for n in &mut t.notes_played {
+            sorted_expression(n);
+        }
+        for (_, points) in &mut t.automation {
+            *points = without_holds(points);
+        }
+    }
+    p.tempo = ends_flat(from_tick(&theirs.tempo, at, |x| x.0, |x, t| (t, x.1, x.2)));
+    p.meter = from_tick(&theirs.meter, at, |x| x.0, |x, t| (t, x.1, x.2));
+    p
 }
 
 /// What the route carries (§7.1), ID-free: tracks in order, strips by index.
@@ -233,6 +611,17 @@ pub fn projection(doc: &Document, seq: SeqId) -> Result<Projection, IoError> {
     project(&l, &never)
 }
 
+/// [`projection`], with who each of its rows is.
+pub fn projection_with_identity(
+    doc: &Document,
+    seq: SeqId,
+) -> Result<(Projection, Identity), IoError> {
+    let never = AtomicBool::new(false);
+    let mut scratch = crate::report::Report::default();
+    let l = layout(doc, seq, &mut scratch, &never)?;
+    project_with_identity(&l, &never)
+}
+
 fn role_text(r: super::schema::DpMixerRole) -> &'static str {
     use super::schema::DpMixerRole::*;
     match r {
@@ -274,6 +663,67 @@ fn midi_text(r: &ResolvedEvent) -> Option<String> {
 
 /// The projection of a layout.
 pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection, IoError> {
+    project_with_identity(l, cancel).map(|(p, _)| p)
+}
+
+/// The top-level reference uses of track part `p` (none on a split
+/// track's audio half), by tick.
+fn uses_of(l: &Layout<'_>, p: &super::export::Part<'_>) -> Vec<UseAt> {
+    if p.audio && p.split {
+        return Vec::new();
+    }
+    let lane = p.lane;
+    let mut out: Vec<UseAt> = lane
+        .active()
+        .into_iter()
+        .flat_map(|t| t.events.values())
+        .filter_map(|e| {
+            let EventBody::Reference {
+                seq,
+                length,
+                loop_count,
+                transpose,
+            } = e.body
+            else {
+                return None;
+            };
+            // As the export writes the use's clips.
+            let b = seq_length(l.doc, seq).map_or(0, |t| t.0).max(1);
+            let use_len = length.map_or(b, |t| t.0).max(1);
+            let (passes, total) = match loop_count {
+                LoopCount::Count(n) => {
+                    let n = n.max(1);
+                    (n, use_len.saturating_mul(i64::from(n)))
+                }
+                LoopCount::Fill => {
+                    let n = use_len.saturating_add(b - 1) / b;
+                    (u32::try_from(n).unwrap_or(u32::MAX), use_len)
+                }
+            };
+            let tick = e.tick.0.saturating_add(lane.play_shift.0);
+            Some(UseAt {
+                event: e.id.0,
+                seq: seq.0,
+                tick,
+                end: tick.saturating_add(total),
+                transpose,
+                passes,
+            })
+        })
+        .collect();
+    out.sort_by_key(|u| (u.tick, u.event));
+    out
+}
+
+/// One automation curve's points and who each point is.
+type Curve = (Vec<(i64, f64)>, Vec<EventAt>);
+
+/// The projection of a layout and who each of its rows is, from one walk:
+/// each row's identity is pushed where the row is.
+pub(super) fn project_with_identity(
+    l: &Layout<'_>,
+    cancel: &AtomicBool,
+) -> Result<(Projection, Identity), IoError> {
     let doc = l.doc;
     let s = l.seq;
     let by_id: BTreeMap<&str, usize> = l
@@ -284,6 +734,14 @@ pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection,
         .collect();
     let index = |id: &str| by_id.get(id).copied();
 
+    let strip_ids: Vec<StripIds> = l
+        .chans
+        .iter()
+        .map(|c| StripIds {
+            strip: c.strip.map(|s| s.id.0),
+            devices: c.slots().iter().map(|(slot, _, _)| slot.id.0).collect(),
+        })
+        .collect();
     let strips = l
         .chans
         .iter()
@@ -330,7 +788,13 @@ pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection,
 
     let mut ticker = Ticker::new(cancel);
     let mut tracks = Vec::new();
+    let mut track_ids = Vec::new();
     for (pi, p) in l.parts.iter().enumerate() {
+        let mut ids = TrackIds {
+            lane: p.lane.id.0,
+            uses: uses_of(l, p),
+            ..TrackIds::default()
+        };
         let mut t = PTrack {
             name: p.name(),
             notes: !p.audio,
@@ -341,9 +805,13 @@ pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection,
             regions: Vec::new(),
             automation: Vec::new(),
         };
-        let mut automation: BTreeMap<String, Vec<(i64, f64)>> = BTreeMap::new();
+        let mut automation: BTreeMap<String, Curve> = BTreeMap::new();
         for r in l.played.get(&p.lane.id).map_or(&[][..], Vec::as_slice) {
             ticker.tick()?;
+            let at = EventAt {
+                event: r.path.last().map_or(0, |x| x.event.0),
+                top: r.path.first().map_or(0, |x| x.event.0),
+            };
             // What a muted reference use holds does not play.
             if r.path.len() > 1 && r.path.first().is_some_and(|x| l.muted.contains(&x.event)) {
                 continue;
@@ -359,19 +827,22 @@ pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection,
                     fade_out,
                     name,
                     crossfade,
-                } if p.audio => t.regions.push(PRegion {
-                    tick,
-                    media_hash: doc.media().get(media).and_then(|m| m.content_hash.clone()),
-                    offset: *source_offset,
-                    length: *length,
-                    fade_in: fade_in.length_frames,
-                    fade_out: fade_out.length_frames,
-                    muted: r.path.len() == 1
-                        && r.path.last().is_some_and(|x| l.muted.contains(&x.event)),
-                    name: name.clone(),
-                    crossfade: *crossfade,
-                    gain_db: *gain_db,
-                }),
+                } if p.audio => {
+                    ids.regions.push(at);
+                    t.regions.push(PRegion {
+                        tick,
+                        media_hash: doc.media().get(media).and_then(|m| m.content_hash.clone()),
+                        offset: *source_offset,
+                        length: *length,
+                        fade_in: fade_in.length_frames,
+                        fade_out: fade_out.length_frames,
+                        muted: r.path.len() == 1
+                            && r.path.last().is_some_and(|x| l.muted.contains(&x.event)),
+                        name: name.clone(),
+                        crossfade: *crossfade,
+                        gain_db: *gain_db,
+                    });
+                }
                 EventBody::AudioRegion { .. } => {}
                 _ if p.audio && p.split => {}
                 EventBody::Note {
@@ -381,18 +852,21 @@ pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection,
                     duration,
                     per_note,
                     ..
-                } => t.notes_played.push(PNote {
-                    tick,
-                    pitch: *pitch,
-                    channel: r.group_channel.map_or(0, |g| g.1),
-                    velocity: *velocity,
-                    release: *release_velocity,
-                    duration: duration.0,
-                    expression: per_note
-                        .iter()
-                        .filter_map(|c| Some((per_note_kind(c.kind)?, c.offset.0, c.value)))
-                        .collect(),
-                }),
+                } => {
+                    ids.notes.push(at);
+                    t.notes_played.push(PNote {
+                        tick,
+                        pitch: *pitch,
+                        channel: r.group_channel.map_or(0, |g| g.1),
+                        velocity: *velocity,
+                        release: *release_velocity,
+                        duration: duration.0,
+                        expression: per_note
+                            .iter()
+                            .filter_map(|c| Some((per_note_kind(c.kind)?, c.offset.0, c.value)))
+                            .collect(),
+                    });
+                }
                 EventBody::Automation { target, value } => {
                     let Some((c, d)) = l.target(pi, *target) else {
                         continue;
@@ -407,15 +881,26 @@ pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection,
                         }
                         _ => continue,
                     };
-                    automation.entry(name).or_default().push((tick, *value));
+                    let curve = automation.entry(name).or_default();
+                    curve.0.push((tick, *value));
+                    curve.1.push(at);
                 }
-                _ => t.midi.extend(midi_text(r).map(|m| (tick, m))),
+                _ => {
+                    if let Some(m) = midi_text(r) {
+                        t.midi.push((tick, m));
+                        ids.midi.push(at);
+                    }
+                }
             }
         }
-        t.automation = automation.into_iter().collect();
+        for (name, (points, at)) in automation {
+            t.automation.push((name, points));
+            ids.automation.push(at);
+        }
         tracks.push(t);
+        track_ids.push(ids);
     }
-    Ok(Projection {
+    let projection = Projection {
         tracks,
         strips,
         tempo: s
@@ -437,5 +922,12 @@ pub(super) fn project(l: &Layout<'_>, cancel: &AtomicBool) -> Result<Projection,
             .collect(),
         info: doc.settings().info.fields().into_iter().cloned().collect(),
         origin: l.origin,
-    })
+    };
+    Ok((
+        projection,
+        Identity {
+            tracks: track_ids,
+            strips: strip_ids,
+        },
+    ))
 }
