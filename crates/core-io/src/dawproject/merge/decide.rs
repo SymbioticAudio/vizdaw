@@ -36,11 +36,10 @@
 //! **Not applied** (Task 6 fix round 1), listed under
 //! [`text::NOT_APPLIED`] as [`Outcome::Conflict`]s, so none counts as
 //! applied:
-//! - theirs' notes, regions or automation on a track that plays with its
-//!   own loop, length or play quantize: the export's tick transform has
-//!   no inverse, so theirs' notes and regions become the conflict take
-//!   (a take conflict, [`text::CONFLICT_TAKE`]) and theirs' curves are
-//!   listed;
+//! - theirs' automation curves on a track that plays its own loop, its
+//!   own length or with play quantize (the reason is in the detail): the
+//!   export's tick transform has no inverse. Theirs' notes and regions on
+//!   such a track are a take conflict instead ([`text::CONFLICT_TAKE`]);
 //! - theirs' instrument swap ([`Unit::Instrument`]);
 //! - a device state theirs dropped (no command clears one).
 //!
@@ -1072,7 +1071,8 @@ impl<'a> Decider<'a> {
         // the export's tick transform has no inverse, so a change of
         // theirs is a take conflict (notes, regions) or not applied
         // (automation), never edits (Task 6 fix round 1, C1).
-        let fixed = self.transformed(o);
+        let why = self.transformed(o);
+        let fixed = why.is_some();
         let take = |out: Outcome| match out {
             Outcome::Theirs if fixed => Outcome::Conflict,
             out => out,
@@ -1127,7 +1127,10 @@ impl<'a> Decider<'a> {
             let what = format!("Track '{name}': {} automation", target_kind(target));
             let [_, theirs, ours] = v.map(|x| Some(text::points(x.map_or(0, |p| p.len()))));
             let unit = Unit::Automation(target.clone());
-            if fixed && out == Outcome::Theirs {
+            if let Some(why) = why
+                && out == Outcome::Theirs
+            {
+                let what = format!("{what} (the track plays {why})");
                 self.push_not_applied(unit, row, what, ours, theirs);
             } else {
                 self.push_with(unit, row, out, what, ours, theirs);
@@ -1135,13 +1138,23 @@ impl<'a> Decider<'a> {
         }
     }
 
-    /// Whether ours' lane of ours track `o` plays with its own loop,
-    /// length or play quantize: what the export did to its ticks cannot be
-    /// undone (a play shift can, and is).
-    fn transformed(&self, o: usize) -> bool {
-        self.ids_of(Side::Ours, o)
-            .and_then(|ids| self.ours_doc.lane(self.seq, LaneId(ids.lane)).ok())
-            .is_some_and(|l| l.looped || l.length.is_some() || l.play_quantize.is_some())
+    /// Why ours' lane of ours track `o` has ticks the export transformed
+    /// beyond undoing ("its own loop", "its own length", "with play
+    /// quantize"); `None` when it has not (a play shift can be undone, and
+    /// is).
+    fn transformed(&self, o: usize) -> Option<&'static str> {
+        let l = self
+            .ids_of(Side::Ours, o)
+            .and_then(|ids| self.ours_doc.lane(self.seq, LaneId(ids.lane)).ok())?;
+        if l.looped {
+            Some("its own loop")
+        } else if l.play_quantize.is_some() {
+            Some("with play quantize")
+        } else if l.length.is_some() {
+            Some("its own length")
+        } else {
+            None
+        }
     }
 
     /// Ruling 7: whether ours' lane of ours track `o` holds what the file

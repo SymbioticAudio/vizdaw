@@ -341,6 +341,9 @@ struct LaneEdit {
     /// Uses replaced by what they play (Task 6b's seam).
     unroll: BTreeSet<u64>,
     insert: Vec<EventSpec>,
+    /// Top-level regions edited in place (`EventCmd::Replace`), so they
+    /// keep their events (Task 6 fix round 2).
+    replace: Vec<(EventId, EventSpec)>,
 }
 
 impl LaneEdit {
@@ -651,6 +654,19 @@ fn theirs_regions(
     add: bool,
     which: impl Fn(usize) -> bool,
 ) -> Result<Option<Vec<EventSpec>>, ModelError> {
+    Ok(theirs_region_specs(h, cx, (o, t), shift, add, which)?
+        .map(|v| v.into_iter().map(|(_, s)| s).collect()))
+}
+
+/// [`theirs_regions`], each spec with its theirs region index.
+fn theirs_region_specs(
+    h: &mut History,
+    cx: &Cx<'_>,
+    (o, t): (usize, usize),
+    shift: i64,
+    add: bool,
+    which: impl Fn(usize) -> bool,
+) -> Result<Option<Vec<(usize, EventSpec)>>, ModelError> {
     let (Some(tt), Some(ti)) = (cx.th.projection.tracks.get(t), cx.th.identity.tracks.get(t))
     else {
         return Ok(Some(Vec::new()));
@@ -691,7 +707,7 @@ fn theirs_regions(
                 None => return Ok(None),
             },
         }
-        out.push(s);
+        out.push((j, s));
     }
     Ok(Some(out))
 }
@@ -819,20 +835,37 @@ fn edit_regions(
         .filter(|&p| changed.get(p).copied().unwrap_or(true))
         .map(|p| groups.find(p))
         .collect();
+    // A paired top-level region is edited in place, keeping its event (so
+    // the same file merged again pairs it by its tag); anything else is
+    // deleted (a region inside a use unrolls it) and theirs' inserted.
     let mut add = BTreeSet::new();
+    let mut in_place: BTreeMap<usize, EventId> = BTreeMap::new();
     for (p, &(i, j)) in pairs.iter().enumerate() {
         if !dirty.contains(&groups.find(p)) {
             continue;
         }
-        if let Some(at) = i.and_then(|i| oi.regions.get(i)) {
-            edit.delete(at);
+        let at = i.and_then(|i| oi.regions.get(i));
+        match (at, j) {
+            (Some(at), Some(j)) if at.event == at.top => {
+                in_place.insert(j, EventId(at.event));
+            }
+            _ => {
+                if let Some(at) = at {
+                    edit.delete(at);
+                }
+            }
         }
         if let Some(j) = j {
             add.insert(j);
         }
     }
-    if let Some(specs) = theirs_regions(h, cx, (o, t), shift, true, |j| add.contains(&j))? {
-        edit.insert.extend(specs);
+    if let Some(specs) = theirs_region_specs(h, cx, (o, t), shift, true, |j| add.contains(&j))? {
+        for (j, spec) in specs {
+            match in_place.get(&j) {
+                Some(e) => edit.replace.push((*e, spec)),
+                None => edit.insert.push(spec),
+            }
+        }
     }
     Ok(())
 }
@@ -986,6 +1019,31 @@ fn apply_edit(
             }),
         )?;
     }
+    // Regions edited in place: partners first, crossfaded ones after, so
+    // each crossfade is checked against its partner's new place; then the
+    // inserts; then any crossfade an intermediate step settled is set
+    // again, now that every region is where theirs has it.
+    let crossfaded = |s: &EventSpec| {
+        matches!(
+            s.body,
+            EventBody::AudioRegion {
+                crossfade: true,
+                ..
+            }
+        )
+    };
+    edit.replace
+        .sort_by_key(|(e, s)| (crossfaded(s), s.tick, *e));
+    for (event, spec) in &edit.replace {
+        run(
+            h,
+            Command::Event(EventCmd::Replace {
+                event: *event,
+                spec: spec.clone(),
+            }),
+        )?;
+    }
+    let replaced = std::mem::take(&mut edit.replace);
     if !edit.insert.is_empty() {
         run(
             h,
@@ -995,6 +1053,18 @@ fn apply_edit(
                 events: edit.insert,
             }),
         )?;
+    }
+    for (event, spec) in replaced {
+        let now = h.doc().event(event).ok().map(|(e, _)| {
+            (
+                e.tick == spec.tick,
+                e.mute == spec.mute,
+                e.body == spec.body,
+            )
+        });
+        if now.is_some_and(|x| x != (true, true, true)) {
+            run(h, Command::Event(EventCmd::Replace { event, spec }))?;
+        }
     }
     Ok(())
 }

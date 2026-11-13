@@ -30,9 +30,12 @@ pub const ADDED_BOTH: &str =
     "Parts added here and in the other DAW under the same name (kept as they are here)";
 
 /// Conflicts: changes the other DAW made that the merge does not apply
-/// (Task 6 fix round 1): edits on a track that plays with its own loop,
-/// length or play quantize, an instrument swap, a plug-in state dropped.
-/// Detail [`conflict_setting`].
+/// (Task 6 fix rounds 1 and 2): an automation curve on a track that plays
+/// its own loop, its own length or with play quantize (the reason in the
+/// detail's part: "Track 'X': level automation (the track plays its own
+/// loop)"), an instrument swap, a plug-in state dropped. Notes and regions
+/// on such a track go under [`CONFLICT_TAKE`] instead. Detail
+/// [`conflict_setting`].
 pub const NOT_APPLIED: &str =
     "Changes the other DAW made that VizDAW does not apply (kept as they are here)";
 

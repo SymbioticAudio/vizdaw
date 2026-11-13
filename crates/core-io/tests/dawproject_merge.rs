@@ -1973,13 +1973,17 @@ fn region_at(doc: &Document, e: EventId) -> (i64, MediaId, f32) {
     }
 }
 
-/// I5: theirs moves region A only. B and the use of "Clip" keep their
-/// events (the use is still a use), and nothing is unrolled.
+/// I5 (fix round 2, ruling 1): theirs moves region A only, and its audio
+/// comes back resampled (other hashes and names), so only the `vz:e`
+/// tags pair regions: the region inside the use by its own event. A is
+/// edited in place; B and the use of "Clip" keep their events, the use is
+/// still a use with ours' media, and nothing is unrolled.
 #[test]
 fn untouched_regions_and_uses_keep_their_events() {
     let (doc, seq, [a, b, u]) = regions_fixture();
     let t = trip(&doc, seq);
-    let p = plan_doc(&t, &moved(&t, &[a], BAR), &t.base_doc);
+    let th = theirs_resampled(&t, &moved(&t, &[a], BAR));
+    let p = plan(t.snapshot.clone(), th, &t.base_doc, false, &never()).expect("plans");
     assert!(
         p.decisions
             .iter()
@@ -1988,12 +1992,16 @@ fn untouched_regions_and_uses_keep_their_events() {
         p.decisions
     );
     let before_b = region_at(&t.base_doc, b);
+    let media_before = t.base_doc.media().len();
     let (h, report) = apply_on(&t.base_doc, &p);
     assert_eq!(region_at(h.doc(), b), before_b, "B keeps its event");
     let keys = lane(h.doc(), seq, "Keys").active().unwrap();
     let use_ = keys.events.values().find(|e| e.id == u).expect("the use");
     assert!(matches!(use_.body, EventBody::Reference { .. }));
-    assert!(h.doc().event(a).is_err(), "A was replaced");
+    let (tick_a, media_a, _) = region_at(h.doc(), a);
+    assert_eq!(tick_a, BAR, "A is edited in place");
+    assert_eq!(media_a, region_at(&t.base_doc, a).1, "ours' media");
+    assert_eq!(h.doc().media().len(), media_before, "no media added");
     let ticks: Vec<i64> = keys.events.values().map(|e| e.tick.0).collect();
     assert_eq!(ticks, vec![BAR, 2 * BAR, 4 * BAR]);
     assert!(!has(&report, text::LOOPS_UNROLLED));
@@ -2266,4 +2274,286 @@ fn matched_output_to_a_bus_deleted_here_keeps_ours() {
     assert!(!has_bus(h.doc(), "Reverb"));
     assert_eq!(h.undo_depth(), 0);
     assert_eq!(to_json(h.doc()).unwrap(), to_json(&o).unwrap());
+}
+
+// ------------------------------------------------- fix round 2
+
+/// What a second merge of the same file must leave alone: the document
+/// (JSON), the undo label and depth, the takes and the media.
+struct Kept {
+    json: String,
+    label: Option<String>,
+    depth: usize,
+    takes: usize,
+    media: usize,
+}
+
+fn kept(h: &History, seq: SeqId, track: &str) -> Kept {
+    Kept {
+        json: to_json(h.doc()).unwrap(),
+        label: h.undo_label().map(str::to_owned),
+        depth: h.undo_depth(),
+        takes: lane(h.doc(), seq, track).takes.len(),
+        media: h.doc().media().len(),
+    }
+}
+
+/// Ruling 2: `theirs_doc_` (an edited copy of `t.base_doc`), returned with
+/// its audio resampled, merged into the export, then the same file merged
+/// again: the second merge makes no step, no take and no media item, and
+/// the project is byte-identical. The regions theirs changed keep their
+/// events (`changed`).
+fn same_resampled_file_twice(t: &Trip, theirs_doc_: &Document, track: &str, changed: &[EventId]) {
+    let seq = t.seq;
+    let p = plan(
+        t.snapshot.clone(),
+        theirs_resampled(t, theirs_doc_),
+        &t.base_doc,
+        false,
+        &never(),
+    )
+    .expect("plans");
+    assert!(
+        p.decisions
+            .iter()
+            .any(|d| d.unit == Unit::Regions && d.outcome == Outcome::Theirs),
+        "{:#?}",
+        p.decisions
+    );
+    let (h, _) = apply_on(&t.base_doc, &p);
+    for e in changed {
+        assert!(h.doc().event(*e).is_ok(), "{e:?} keeps its event");
+    }
+    let once = kept(&h, seq, track);
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_resampled(t, theirs_doc_),
+        h.doc(),
+        false,
+        &never(),
+    )
+    .expect("plans");
+    assert!(
+        again
+            .decisions
+            .iter()
+            .all(|d| matches!(d.outcome, Outcome::Same | Outcome::Ours)),
+        "{:#?}",
+        again.decisions
+    );
+    let (h, _) = apply_history(h, &again, DATE);
+    let twice = kept(&h, seq, track);
+    assert_eq!(twice.label, once.label, "no step");
+    assert_eq!(twice.depth, once.depth, "no step");
+    assert_eq!(twice.takes, once.takes, "no take");
+    assert_eq!(twice.media, once.media, "no media item");
+    assert_eq!(twice.json, once.json, "byte-identical");
+}
+
+#[test]
+fn a_moved_region_merged_twice_from_resampled_audio_adds_nothing() {
+    let (doc, seq, [a, _, _]) = regions_fixture();
+    let t = trip(&doc, seq);
+    same_resampled_file_twice(&t, &moved(&t, &[a], BAR), "Keys", &[a]);
+}
+
+/// The fixture's Keys regions: the earlier one, and the later one
+/// crossfaded into it.
+fn keys_regions(doc: &Document, seq: SeqId) -> [EventId; 2] {
+    let ids: Vec<EventId> = lane(doc, seq, "Keys")
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter(|e| matches!(e.body, EventBody::AudioRegion { .. }))
+        .map(|e| e.id)
+        .collect();
+    [ids[0], ids[1]]
+}
+
+/// `doc` with region `e` trimmed by 12 000 frames at its end (it still
+/// overlaps its partner).
+fn trimmed(doc: &Document, e: EventId) -> Document {
+    changed(doc, |h| {
+        run(
+            h,
+            Command::Audio(AudioCmd::Trim {
+                event: e,
+                front_frames: 0,
+                back_frames: 12_000,
+            }),
+        )
+    })
+}
+
+fn crossfade_of(doc: &Document, e: EventId) -> bool {
+    matches!(
+        doc.event(e).unwrap().0.body,
+        EventBody::AudioRegion {
+            crossfade: true,
+            ..
+        }
+    )
+}
+
+#[test]
+fn crossfaded_pair_with_its_earlier_member_changed_merges_twice_to_nothing() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let [first, second] = keys_regions(&t.base_doc, seq);
+    same_resampled_file_twice(&t, &trimmed(&t.base_doc, first), "Keys", &[first, second]);
+    // The crossfade survived the merge.
+    let p = plan(
+        t.snapshot.clone(),
+        theirs_resampled(&t, &trimmed(&t.base_doc, first)),
+        &t.base_doc,
+        false,
+        &never(),
+    )
+    .unwrap();
+    let (h, report) = apply_on(&t.base_doc, &p);
+    assert!(crossfade_of(h.doc(), second));
+    assert!(!has(&report, core_io::dawproject::import::CROSSFADES_PLAIN));
+}
+
+#[test]
+fn crossfaded_pair_with_its_later_member_changed_merges_twice_to_nothing() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let [first, second] = keys_regions(&t.base_doc, seq);
+    same_resampled_file_twice(&t, &trimmed(&t.base_doc, second), "Keys", &[first, second]);
+    let p = plan(
+        t.snapshot.clone(),
+        theirs_resampled(&t, &trimmed(&t.base_doc, second)),
+        &t.base_doc,
+        false,
+        &never(),
+    )
+    .unwrap();
+    let (h, _) = apply_on(&t.base_doc, &p);
+    assert!(crossfade_of(h.doc(), second));
+}
+
+/// Minor: theirs moves region A on a track with its own length. The
+/// regions are a take conflict: ours' track is untouched and theirs' A is
+/// on the take "Returned 2026-11-13".
+#[test]
+fn regions_on_a_track_with_its_own_length_become_a_take() {
+    let (doc, seq, [a, _, _]) = regions_fixture();
+    let doc = changed(&doc, |h| {
+        let keys = lane(h.doc(), seq, "Keys").id;
+        run(
+            h,
+            Command::Lane(LaneCmd::SetLength {
+                seq,
+                lane: keys,
+                length: Some(Tick(8 * BAR)),
+                looped: false,
+                locked: false,
+            }),
+        )
+    });
+    let t = trip(&doc, seq);
+    let p = plan_doc_any(&t, &moved(&t, &[a], BAR), &t.base_doc);
+    let d = p
+        .decisions
+        .iter()
+        .find(|d| d.unit == Unit::Regions)
+        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+    assert_eq!(d.outcome, Outcome::Conflict);
+    assert_eq!(p.preview.applied, 0);
+    let before = lane(&t.base_doc, seq, "Keys").clone();
+    let (h, report) = apply_on(&t.base_doc, &p);
+    let after = lane(h.doc(), seq, "Keys");
+    assert_eq!(after.active(), before.active());
+    let returned = take(after, "Returned 2026-11-13");
+    assert!(
+        returned
+            .events
+            .values()
+            .any(|e| e.tick.0 == BAR && matches!(e.body, EventBody::AudioRegion { .. })),
+        "{returned:#?}"
+    );
+    assert_eq!(
+        item(&report, ItemKind::Conflict, CONFLICT_TAKE).details,
+        vec!["Keys: take \u{201c}Returned 2026-11-13\u{201d}".to_owned()]
+    );
+}
+
+/// `plan_doc` for a project other than the fixture.
+fn plan_doc_any(t: &Trip, doc: &Document, ours: &Document) -> MergePlan {
+    plan(
+        t.snapshot.clone(),
+        theirs_doc(t, doc),
+        ours,
+        false,
+        &never(),
+    )
+    .expect("plans")
+}
+
+/// Minor: theirs adds a level curve to "Loop", a track with its own
+/// length. It is not applied: listed under `NOT_APPLIED` with the reason.
+#[test]
+fn automation_on_a_track_with_its_own_length_is_listed_with_the_reason() {
+    let notes = [(0, 60), (BAR, 60)];
+    let (doc, seq) = with_loop_track(&notes, |h, seq, lane| {
+        run(
+            h,
+            Command::Lane(LaneCmd::SetLength {
+                seq,
+                lane,
+                length: Some(Tick(6 * BAR)),
+                looped: false,
+                locked: false,
+            }),
+        )
+    });
+    let t = trip(&doc, seq);
+    let theirs_doc_ = changed(&t.base_doc, |h| {
+        let l = lane(h.doc(), seq, "Loop");
+        let (id, dest) = (l.id, l.midi_dest.unwrap());
+        let strip = h
+            .doc()
+            .mixer()
+            .find_kind(StripKind::Instrument(dest))
+            .unwrap();
+        let point = |tick: i64, value: f64| {
+            EventSpec::new(
+                Tick(tick),
+                EventBody::Automation {
+                    target: AutomationTarget::StripFader(strip),
+                    value,
+                },
+            )
+        };
+        run(
+            h,
+            Command::Event(EventCmd::Insert {
+                seq,
+                lane: id,
+                events: vec![point(0, 0.5), point(BAR, 0.25)],
+            }),
+        );
+    });
+    let p = plan_doc_any(&t, &theirs_doc_, &t.base_doc);
+    let d = p
+        .decisions
+        .iter()
+        .find(|d| matches!(d.unit, Unit::Automation(_)))
+        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+    assert_eq!(d.outcome, Outcome::Conflict);
+    assert_eq!(p.preview.applied, 0, "{:#?}", p.decisions);
+    let detail = &item(&p.report, ItemKind::Conflict, NOT_APPLIED).details;
+    assert_eq!(
+        detail,
+        &vec![
+            "Track 'Loop': level automation (the track plays its own length): \
+             here 0 points, there 2 points"
+                .to_owned()
+        ]
+    );
+    let (h, _) = apply_on(&t.base_doc, &p);
+    assert_eq!(h.undo_depth(), 0);
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
 }

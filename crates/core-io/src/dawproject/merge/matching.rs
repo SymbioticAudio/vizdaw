@@ -23,7 +23,7 @@ use super::theirs::Theirs;
 use super::{FRAMES, NOTE_TICKS, normalised};
 use crate::IoError;
 use crate::dawproject::import::Origins;
-use crate::dawproject::record::{Identity, PTrack, Projection, Snapshot, TrackIds};
+use crate::dawproject::record::{EventAt, Identity, PTrack, Projection, Snapshot, TrackIds};
 use core_model::ids::{EventId, LaneId, StripId};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -668,8 +668,10 @@ enum MediaKey {
 ///
 /// 1. by tag and position: `b`'s region whose clip's `vz:e` (its top
 ///    event's origin in `b`'s [`Origins`]) is the top event of `a`'s
-///    region, with its tick within [`NOTE_TICKS`] and its length within
-///    [`FRAMES`];
+///    region, or, for a region `a` plays through a reference use, its own
+///    event (the export tags such a clip with the region inside the use,
+///    the use giving the position), with its tick within [`NOTE_TICKS`]
+///    and its length within [`FRAMES`];
 /// 2. by tag alone, in order (a moved clip);
 /// 3. by media and position (Ruling 4): the same content hash when both
 ///    have one, else the same media stem when both have one (an `Apply`
@@ -695,15 +697,23 @@ pub fn regions(
         }
     };
 
-    // 1 and 2: `a`'s free regions per top event, by position and in order.
+    // 1 and 2: `a`'s free regions per tag they answer to (the top event,
+    // and for a region inside a use also its own), by position and in
+    // order.
+    let keys = |id: &EventAt| -> Vec<u64> {
+        if id.event == id.top {
+            vec![id.top]
+        } else {
+            vec![id.top, id.event]
+        }
+    };
     let mut near_top: HashMap<u64, Near> = HashMap::new();
     let mut order_top: HashMap<u64, BTreeSet<usize>> = HashMap::new();
     for (i, (r, id)) in at.regions.iter().zip(&aids.regions).enumerate() {
-        near_top
-            .entry(id.top)
-            .or_default()
-            .insert(r.tick, r.length, i);
-        order_top.entry(id.top).or_default().insert(i);
+        for k in keys(id) {
+            near_top.entry(k).or_default().insert(r.tick, r.length, i);
+            order_top.entry(k).or_default().insert(i);
+        }
     }
     let tag_of = |j: usize| -> Option<u64> {
         let top = bids.regions.get(j)?.top;
@@ -711,15 +721,17 @@ pub fn regions(
     };
     let drop_a = |near_top: &mut HashMap<u64, Near>,
                   order_top: &mut HashMap<u64, BTreeSet<usize>>,
-                  top: u64,
                   i: usize| {
-        if let Some(r) = at.regions.get(i)
-            && let Some(n) = near_top.get_mut(&top)
-        {
-            n.remove(r.tick, r.length, i);
-        }
-        if let Some(o) = order_top.get_mut(&top) {
-            o.remove(&i);
+        let (Some(r), Some(id)) = (at.regions.get(i), aids.regions.get(i)) else {
+            return;
+        };
+        for k in keys(id) {
+            if let Some(n) = near_top.get_mut(&k) {
+                n.remove(r.tick, r.length, i);
+            }
+            if let Some(o) = order_top.get_mut(&k) {
+                o.remove(&i);
+            }
         }
     };
     for (j, y) in bt.regions.iter().enumerate() {
@@ -728,7 +740,7 @@ pub fn regions(
             .get(&tag)
             .and_then(|n| n.find(y.tick, y.length, FRAMES));
         if let Some((_, _, i)) = found {
-            drop_a(&mut near_top, &mut order_top, tag, i);
+            drop_a(&mut near_top, &mut order_top, i);
             take(&mut partner, &mut taken, i, j);
         }
     }
@@ -739,7 +751,7 @@ pub fn regions(
         let Some(tag) = tag_of(j) else { continue };
         let found = order_top.get(&tag).and_then(|o| o.first().copied());
         if let Some(i) = found {
-            drop_a(&mut near_top, &mut order_top, tag, i);
+            drop_a(&mut near_top, &mut order_top, i);
             take(&mut partner, &mut taken, i, j);
         }
     }
