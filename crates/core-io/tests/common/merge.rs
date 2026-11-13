@@ -417,3 +417,69 @@ pub fn hostile(clips: usize, lane: u64, event: u64) -> String {
 </Project>"#
     )
 }
+
+/// What a merge always keeps from ours (spec §7.8's keep list), as JSON,
+/// for a project merged into sequence `seq`: every other sequence (with
+/// its keyboard slot), `seq`'s keyboard slot, and per track of `seq` that
+/// has any: its inactive takes, input effects, input (with `return_of`)
+/// and monitoring, MPE input settings and drum rows; each strip's
+/// automation mode other than the default; the MIDI-learn maps; the audio
+/// format; the templates. Control surfaces live in the app's preferences,
+/// not the project, so there is nothing of theirs here to compare.
+pub fn vizdaw_only(doc: &Document, seq: SeqId) -> String {
+    use core_model::automation::AutomationMode;
+    use serde_json::{Value, json};
+    let mut others = Vec::new();
+    let mut lanes = Vec::new();
+    let mut slot = Value::Null;
+    for s in doc.sequences().values() {
+        if s.id != seq {
+            others.push(serde_json::to_value(s).expect("serialises"));
+            continue;
+        }
+        slot = serde_json::to_value(&s.keyboard_slot).expect("serialises");
+        for l in &s.lanes {
+            let inactive: Vec<_> = l.takes.iter().filter(|t| t.id != l.active_take).collect();
+            let has = !inactive.is_empty()
+                || !l.input_fx.is_empty()
+                || l.input.is_some()
+                || !l.monitor.is_auto()
+                || l.mpe.is_some()
+                || l.drum.is_some();
+            if has {
+                lanes.push(json!({
+                    "lane": l.id.0,
+                    "inactive_takes": serde_json::to_value(&inactive).expect("serialises"),
+                    "input_fx": serde_json::to_value(&l.input_fx).expect("serialises"),
+                    "input": serde_json::to_value(&l.input).expect("serialises"),
+                    "monitor": serde_json::to_value(l.monitor).expect("serialises"),
+                    "mpe": serde_json::to_value(l.mpe).expect("serialises"),
+                    "drum": serde_json::to_value(&l.drum).expect("serialises"),
+                }));
+            }
+        }
+    }
+    let modes: Vec<Value> = doc
+        .mixer()
+        .strips()
+        .values()
+        .filter(|s| s.automation != AutomationMode::default())
+        .map(|s| {
+            json!([
+                s.id.0,
+                serde_json::to_value(s.automation).expect("serialises")
+            ])
+        })
+        .collect();
+    let settings = doc.settings();
+    serde_json::to_string_pretty(&json!({
+        "other_sequences": others,
+        "keyboard_slot": slot,
+        "tracks": lanes,
+        "automation_modes": modes,
+        "learn": serde_json::to_value(&settings.learn).expect("serialises"),
+        "format": serde_json::to_value(settings.format).expect("serialises"),
+        "templates": serde_json::to_value(&settings.templates).expect("serialises"),
+    }))
+    .expect("serialises")
+}

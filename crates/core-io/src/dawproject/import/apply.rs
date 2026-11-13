@@ -1,13 +1,14 @@
 //! Applying a mapped import to a new project.
 
-use super::timeline::{AutoAt, Body, CROSSFADES_PLAIN, SlotAt, StripAt, UNPLACED};
+use super::timeline::{AutoAt, Body, CROSSFADES_PLAIN, MediaPlan, SlotAt, StripAt, UNPLACED};
 use super::*;
 use core_model::automation::{AutomationTarget, SendIndex, target_exists};
 use core_model::command::{EventCmd, MediaCmd};
-use core_model::document::MediaOrigin;
+use core_model::document::{Document, MediaOrigin};
 use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
 use core_model::ids::MediaId;
 use core_model::sequence::SeqLength;
+use std::collections::BTreeSet;
 
 /// Locks `seq`'s length when its derived length would leave an event out.
 ///
@@ -80,15 +81,57 @@ pub(super) struct MixSlots {
 }
 
 /// What the arrangement needs of the applied structure: each plan track's
-/// track, destination, strip and slots, the buses' and the master's.
+/// track, destination, strip and slots (`None` for a track not made), the
+/// buses' and the master's.
 pub(super) struct Applied {
-    pub(super) lanes: Vec<LaneId>,
+    pub(super) lanes: Vec<Option<LaneId>>,
     pub(super) dests: Vec<Option<DestId>>,
     /// The strip automation of the track drives, and its slots.
     pub(super) strips: Vec<Option<(StripId, MixSlots)>>,
     pub(super) instruments: Vec<Option<PluginInstanceId>>,
-    pub(super) buses: Vec<(StripId, MixSlots)>,
+    /// By plan bus.
+    pub(super) buses: BTreeMap<usize, (StripId, MixSlots)>,
     pub(super) master: (StripId, MixSlots),
+}
+
+impl Applied {
+    /// Nothing placed yet, for `n` plan tracks.
+    fn new(n: usize, master: StripId) -> Applied {
+        Applied {
+            lanes: vec![None; n],
+            dests: vec![None; n],
+            strips: vec![None; n],
+            instruments: vec![None; n],
+            buses: BTreeMap::new(),
+            master: (master, MixSlots::default()),
+        }
+    }
+}
+
+/// The slots `strip` already has, as `apply_mix` would have made them (no
+/// planned sends).
+fn existing_slots(h: &History, strip: StripId) -> MixSlots {
+    h.doc()
+        .mixer()
+        .strip(strip)
+        .map(|s| MixSlots {
+            eq: s.eq.as_ref().map(|e| e.id),
+            inserts: s.inserts.iter().map(|i| i.id).collect(),
+            sends: Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// What [`apply_tracks`] made: the new slots' states, the origins and the
+/// placement the arrangement needs ([`arrange_tracks`]).
+pub(crate) struct Added {
+    /// Each new plug-in slot with a state, and its state.
+    pub(crate) states: SlotStates,
+    /// What each new object was where the file came from.
+    pub(crate) origins: Origins,
+    placed: Applied,
+    lanes: u64,
+    plugins: u64,
 }
 
 fn strip_of(h: &History, kind: StripKind) -> Result<StripId, ModelError> {
@@ -104,7 +147,7 @@ fn apply_mix(
     h: &mut History,
     strip: StripId,
     mix: &Mix,
-    buses: &[StripId],
+    buses: &BTreeMap<usize, StripId>,
     flags: bool,
     master: bool,
     states: &mut SlotStates,
@@ -147,7 +190,7 @@ fn apply_mix(
     }
     if !master {
         if let Out::Bus(b) = mix.output
-            && let Some(bus) = buses.get(b).copied()
+            && let Some(bus) = buses.get(&b).copied()
         {
             run(
                 h,
@@ -158,7 +201,7 @@ fn apply_mix(
             )?;
         }
         for s in &mix.sends {
-            let Some(target) = buses.get(s.bus).copied() else {
+            let Some(target) = buses.get(&s.bus).copied() else {
                 made.sends.push(None);
                 continue;
             };
@@ -277,7 +320,6 @@ pub fn apply_tagged(
     seq: SeqId,
     report: &mut Report,
 ) -> Result<(SlotStates, Origins), ModelError> {
-    let mut origins = Origins::default();
     let doc = h.doc();
     doc.sequence(seq)?;
     if doc.sequences().values().any(|s| !s.lanes.is_empty()) {
@@ -285,15 +327,108 @@ pub fn apply_tagged(
     }
     report.merge(imp.report.clone());
     let plan = &imp.plan;
-    let mut states = Vec::new();
-    let mut plugins = 0u64;
+    let mut buses = BTreeMap::new();
+    add_buses(h, imp, 0..plan.buses.len(), &mut buses)?;
+    let all: Vec<usize> = (0..plan.tracks.len()).collect();
+    // Every bus is made: `apply_tracks` adds none and sets no bus's mix.
+    let Added {
+        mut states,
+        mut origins,
+        mut placed,
+        lanes,
+        mut plugins,
+    } = apply_tracks(h, imp, seq, &all, &mut buses, report)?;
+    for (b, bp) in plan.buses.iter().enumerate() {
+        let Some(id) = buses.get(&b).copied() else {
+            continue;
+        };
+        let made = apply_mix(h, id, &bp.mix, &buses, true, false, &mut states)?;
+        if let Some(tag) = bp.tag {
+            origins.strips.insert(id, tag);
+        }
+        unhosted(id, &bp.mix, &mut origins);
+        slot_origins(&bp.mix, &made, &mut origins);
+        placed.buses.insert(b, (id, made));
+        plugins = plugins.saturating_add(slots(&bp.mix));
+    }
+    let master = h.doc().mixer().master();
+    let made = apply_mix(h, master, &plan.master, &buses, true, true, &mut states)?;
+    unhosted(master, &plan.master, &mut origins);
+    slot_origins(&plan.master, &made, &mut origins);
+    placed.master = (master, made);
+    plugins = plugins.saturating_add(slots(&plan.master));
 
-    let mut buses = Vec::with_capacity(plan.buses.len());
-    for b in &plan.buses {
+    run(
+        h,
+        Command::Sequence(SequenceCmd::SetTempo {
+            seq,
+            tempo: plan.tempo.clone(),
+        }),
+    )?;
+    run(
+        h,
+        Command::Sequence(SequenceCmd::SetMeter {
+            seq,
+            meter: plan.meter.clone(),
+        }),
+    )?;
+    if !plan.markers.is_empty() {
+        run(
+            h,
+            Command::Sequence(SequenceCmd::SetMarkers {
+                seq,
+                markers: plan.markers.iter().cloned().collect(),
+            }),
+        )?;
+    }
+    run(
+        h,
+        Command::Sequence(SequenceCmd::Rename {
+            seq,
+            name: plan.name.clone(),
+        }),
+    )?;
+    if !plan.info.is_empty() {
+        run(
+            h,
+            Command::Settings(SettingsCmd::SetInfo {
+                info: plan.info.clone(),
+            }),
+        )?;
+    }
+    origins.markers = plan.marker_tags.clone();
+    apply_arranged(h, plan, seq, &placed, report, &mut origins, &Arrange::all())?;
+    cover_last_event(h, seq, report)?;
+    let s = &mut report.summary;
+    s.tracks = s.tracks.saturating_add(lanes);
+    s.markers = s
+        .markers
+        .saturating_add(u64::try_from(plan.markers.len()).unwrap_or(u64::MAX));
+    s.plugins = s.plugins.saturating_add(plugins);
+    s.tempo_map = true;
+    Ok((states, origins))
+}
+
+/// Adds plan buses `which` (in order) that `buses` does not hold yet, with
+/// no settings, into `buses`.
+fn add_buses(
+    h: &mut History,
+    imp: &DpImport,
+    which: impl IntoIterator<Item = usize>,
+    buses: &mut BTreeMap<usize, StripId>,
+) -> Result<Vec<usize>, ModelError> {
+    let mut made = Vec::new();
+    for b in which {
+        let Some(bp) = imp.plan.buses.get(b) else {
+            continue;
+        };
+        if buses.contains_key(&b) {
+            continue;
+        }
         let r = run(
             h,
             Command::Mixer(MixerCmd::AddBus {
-                name: b.name.clone(),
+                name: bp.name.clone(),
                 index: None,
             }),
         )?;
@@ -302,41 +437,151 @@ pub fn apply_tagged(
             _ => None,
         })
         .ok_or_else(|| ModelError::invalid("no bus was created"))?;
-        buses.push(id);
+        buses.insert(b, id);
+        made.push(b);
     }
+    Ok(made)
+}
+
+/// The plan buses a strip with `mix` plays into or sends to, directly or
+/// through other buses.
+fn buses_needed<'m>(imp: &DpImport, mixes: impl IntoIterator<Item = &'m Mix>) -> BTreeSet<usize> {
+    fn direct(mix: &Mix) -> impl Iterator<Item = usize> + '_ {
+        let out = match mix.output {
+            Out::Bus(b) => Some(b),
+            Out::Master => None,
+        };
+        out.into_iter().chain(mix.sends.iter().map(|s| s.bus))
+    }
+    let mut seen = BTreeSet::new();
+    let mut todo: Vec<usize> = mixes.into_iter().flat_map(direct).collect();
+    while let Some(b) = todo.pop() {
+        if b < imp.plan.buses.len() && seen.insert(b) {
+            if let Some(bp) = imp.plan.buses.get(b) {
+                todo.extend(direct(&bp.mix));
+            }
+        }
+    }
+    seen
+}
+
+/// Adds the buses `imp` describes and then sets their settings, for the
+/// plan buses `which` that `buses` does not hold (a merge's new buses,
+/// plan 6e Ruling 9). New slots with a state join `states`.
+pub(crate) fn add_buses_with_mix(
+    h: &mut History,
+    imp: &DpImport,
+    which: &[usize],
+    buses: &mut BTreeMap<usize, StripId>,
+    states: &mut SlotStates,
+) -> Result<(), ModelError> {
+    let made = add_buses(h, imp, which.iter().copied(), buses)?;
+    for b in made {
+        let (Some(bp), Some(id)) = (imp.plan.buses.get(b), buses.get(&b).copied()) else {
+            continue;
+        };
+        apply_mix(h, id, &bp.mix, buses, true, false, states)?;
+    }
+    Ok(())
+}
+
+/// The plan bus each of `imp`'s buses became in the project `apply` made
+/// from it: its buses in the order they were made.
+pub(crate) fn bus_of_strip(doc: &Document) -> BTreeMap<StripId, usize> {
+    let mut ids: Vec<StripId> = doc
+        .mixer()
+        .strips()
+        .values()
+        .filter(|s| s.kind == StripKind::Bus)
+        .map(|s| s.id)
+        .collect();
+    ids.sort_by_key(|s| s.0);
+    ids.into_iter().enumerate().map(|(i, s)| (s, i)).collect()
+}
+
+/// Inside the caller's open transaction: adds plan tracks `which` (with
+/// their destinations or plug-in instruments, output paths, strips'
+/// settings and devices) and the buses they need to a project that may
+/// already have tracks (plan 6e Ruling 9); [`apply`] calls it for all.
+///
+/// `buses` maps plan buses to the project's strips; a bus a track needs
+/// that it does not hold is added (with its settings) and joins it. A
+/// track on the built-in synth uses the project's built-in synth when it
+/// has one; only a synth made here gets the plan's synth settings. The
+/// tracks' events are [`arrange_tracks`]'.
+pub(crate) fn apply_tracks(
+    h: &mut History,
+    imp: &DpImport,
+    seq: SeqId,
+    which: &[usize],
+    buses: &mut BTreeMap<usize, StripId>,
+    report: &mut Report,
+) -> Result<Added, ModelError> {
+    // The structure adds no line of its own: the mapping's lines are the
+    // caller's to merge (`apply_tagged` merges them once), and the events'
+    // are `arrange_tracks`'.
+    let _ = &report;
+    let plan = &imp.plan;
+    h.doc().sequence(seq)?;
+    let chosen: Vec<(usize, &TrackPlan)> = which
+        .iter()
+        .filter_map(|&i| plan.tracks.get(i).map(|t| (i, t)))
+        .collect();
+    let mut states = Vec::new();
+    let mut origins = Origins::default();
+    let mut plugins = 0u64;
+    let needed = buses_needed(
+        imp,
+        chosen.iter().map(|(_, t)| &t.mix).chain(
+            chosen
+                .iter()
+                .any(|(_, t)| t.midi == Some(Midi::Builtin))
+                .then_some(plan.builtin.as_ref())
+                .flatten(),
+        ),
+    );
+    let new_buses = add_buses(h, imp, needed, buses)?;
 
     let mut builtin: Option<DestId> = None;
-    if plan.tracks.iter().any(|t| t.midi == Some(Midi::Builtin)) {
-        let r = run(
-            h,
-            Command::Routing(RoutingCmd::AddDestination {
-                name: BUILTIN_NAME.to_owned(),
-                kind: DestKind::MidiEndpoint {
-                    endpoint_ref: BUILTIN_SYNTH_REF.to_owned(),
-                    group: 0,
-                    channel: 0,
-                },
-                default_patch: None,
-            }),
-        )?;
-        builtin = created(&r, |id| match id {
-            AnyId::Dest(d) => Some(*d),
-            _ => None,
-        });
+    let mut builtin_new = false;
+    if chosen.iter().any(|(_, t)| t.midi == Some(Midi::Builtin)) {
+        builtin = h
+            .doc()
+            .instruments()
+            .values()
+            .find(|d| d.kind.is_builtin_synth())
+            .map(|d| d.id);
+        if builtin.is_none() {
+            let r = run(
+                h,
+                Command::Routing(RoutingCmd::AddDestination {
+                    name: BUILTIN_NAME.to_owned(),
+                    kind: DestKind::MidiEndpoint {
+                        endpoint_ref: BUILTIN_SYNTH_REF.to_owned(),
+                        group: 0,
+                        channel: 0,
+                    },
+                    default_patch: None,
+                }),
+            )?;
+            builtin = created(&r, |id| match id {
+                AnyId::Dest(d) => Some(*d),
+                _ => None,
+            });
+            builtin_new = builtin.is_some();
+        }
     }
 
     let mut lanes = 0u64;
-    let mut placed = Applied {
-        lanes: Vec::with_capacity(plan.tracks.len()),
-        dests: Vec::with_capacity(plan.tracks.len()),
-        strips: Vec::with_capacity(plan.tracks.len()),
-        instruments: Vec::with_capacity(plan.tracks.len()),
-        buses: Vec::new(),
-        master: (h.doc().mixer().master(), MixSlots::default()),
-    };
+    let master = h.doc().mixer().master();
+    let mut placed = Applied::new(plan.tracks.len(), master);
+    placed.master.1 = existing_slots(h, master);
+    for (&b, &id) in buses.iter() {
+        placed.buses.insert(b, (id, existing_slots(h, id)));
+    }
     // Tracks on the built-in synth, whose strip comes later.
     let mut on_builtin: Vec<usize> = Vec::new();
-    for (ti, t) in plan.tracks.iter().enumerate() {
+    for &(ti, t) in &chosen {
         let r = run(
             h,
             Command::Lane(LaneCmd::Add {
@@ -351,7 +596,9 @@ pub fn apply_tagged(
         })
         .ok_or_else(|| ModelError::invalid("no track was created"))?;
         lanes = lanes.saturating_add(1);
-        placed.lanes.push(lane);
+        if let Some(slot) = placed.lanes.get_mut(ti) {
+            *slot = Some(lane);
+        }
         if let Some(tag) = t.tag {
             origins.lanes.insert(lane, tag);
         }
@@ -441,7 +688,7 @@ pub fn apply_tagged(
                 h,
                 strip,
                 &t.mix,
-                &buses,
+                buses,
                 t.flags.is_none(),
                 false,
                 &mut states,
@@ -459,9 +706,15 @@ pub fn apply_tagged(
         if first.is_none() && t.midi == Some(Midi::Builtin) {
             on_builtin.push(ti);
         }
-        placed.strips.push(first);
-        placed.dests.push(dest_of);
-        placed.instruments.push(instrument);
+        if let Some(s) = placed.strips.get_mut(ti) {
+            *s = first;
+        }
+        if let Some(d) = placed.dests.get_mut(ti) {
+            *d = dest_of;
+        }
+        if let Some(i) = placed.instruments.get_mut(ti) {
+            *i = instrument;
+        }
         if let Some((mute, solo)) = t.flags
             && (mute || solo)
         {
@@ -477,84 +730,68 @@ pub fn apply_tagged(
             )?;
         }
     }
-    if let (Some(mix), Some(_)) = (&plan.builtin, builtin) {
+    if builtin.is_some() {
         let strip = strip_of(h, StripKind::BuiltinSynth)?;
-        let made = apply_mix(h, strip, mix, &buses, false, false, &mut states)?;
-        unhosted(strip, mix, &mut origins);
-        slot_origins(mix, &made, &mut origins);
-        plugins = plugins.saturating_add(slots(mix));
+        let made = match (&plan.builtin, builtin_new) {
+            (Some(mix), true) => {
+                let made = apply_mix(h, strip, mix, buses, false, false, &mut states)?;
+                unhosted(strip, mix, &mut origins);
+                slot_origins(mix, &made, &mut origins);
+                plugins = plugins.saturating_add(slots(mix));
+                made
+            }
+            _ => existing_slots(h, strip),
+        };
         for ti in on_builtin {
             if let Some(s) = placed.strips.get_mut(ti) {
                 *s = Some((strip, made.clone()));
             }
         }
     }
-    for (b, id) in plan.buses.iter().zip(buses.clone()) {
-        let made = apply_mix(h, id, &b.mix, &buses, true, false, &mut states)?;
-        if let Some(tag) = b.tag {
-            origins.strips.insert(id, tag);
-        }
-        unhosted(id, &b.mix, &mut origins);
-        slot_origins(&b.mix, &made, &mut origins);
-        placed.buses.push((id, made));
-        plugins = plugins.saturating_add(slots(&b.mix));
+    for b in new_buses {
+        let (Some(bp), Some(id)) = (plan.buses.get(b), buses.get(&b).copied()) else {
+            continue;
+        };
+        let made = apply_mix(h, id, &bp.mix, buses, true, false, &mut states)?;
+        placed.buses.insert(b, (id, made));
     }
-    let master = h.doc().mixer().master();
-    let made = apply_mix(h, master, &plan.master, &buses, true, true, &mut states)?;
-    unhosted(master, &plan.master, &mut origins);
-    slot_origins(&plan.master, &made, &mut origins);
-    placed.master = (master, made);
-    plugins = plugins.saturating_add(slots(&plan.master));
+    Ok(Added {
+        states,
+        origins,
+        placed,
+        lanes,
+        plugins,
+    })
+}
 
-    run(
+/// Inside the caller's open transaction, after [`apply_tracks`] made
+/// `added`'s tracks: their events, `shift` ticks later than the file
+/// places them (a merge's pickup, plan 6e Ruling 1), with the media and
+/// sequences they use. A media item reuses one of the project's with the
+/// same content hash (Ruling 9).
+pub(crate) fn arrange_tracks(
+    h: &mut History,
+    imp: &DpImport,
+    seq: SeqId,
+    which: &[usize],
+    added: &Added,
+    shift: i64,
+    report: &mut Report,
+) -> Result<(), ModelError> {
+    let mut origins = Origins::default();
+    let arrange = Arrange {
+        which: Some(which.iter().copied().collect()),
+        shift,
+    };
+    apply_arranged(
         h,
-        Command::Sequence(SequenceCmd::SetTempo {
-            seq,
-            tempo: plan.tempo.clone(),
-        }),
-    )?;
-    run(
-        h,
-        Command::Sequence(SequenceCmd::SetMeter {
-            seq,
-            meter: plan.meter.clone(),
-        }),
-    )?;
-    if !plan.markers.is_empty() {
-        run(
-            h,
-            Command::Sequence(SequenceCmd::SetMarkers {
-                seq,
-                markers: plan.markers.iter().cloned().collect(),
-            }),
-        )?;
-    }
-    run(
-        h,
-        Command::Sequence(SequenceCmd::Rename {
-            seq,
-            name: plan.name.clone(),
-        }),
-    )?;
-    if !plan.info.is_empty() {
-        run(
-            h,
-            Command::Settings(SettingsCmd::SetInfo {
-                info: plan.info.clone(),
-            }),
-        )?;
-    }
-    origins.markers = plan.marker_tags.clone();
-    apply_arranged(h, plan, seq, &placed, report, &mut origins)?;
-    cover_last_event(h, seq, report)?;
-    let s = &mut report.summary;
-    s.tracks = s.tracks.saturating_add(lanes);
-    s.markers = s
-        .markers
-        .saturating_add(u64::try_from(plan.markers.len()).unwrap_or(u64::MAX));
-    s.plugins = s.plugins.saturating_add(plugins);
-    s.tempo_map = true;
-    Ok((states, origins))
+        &imp.plan,
+        seq,
+        &added.placed,
+        report,
+        &mut origins,
+        &arrange,
+    )
 }
 
 // ---------------------------------------------------------------- the arrangement
@@ -569,7 +806,7 @@ fn target_of(h: &History, at: AutoAt, placed: &Applied) -> Option<AutomationTarg
                 .get(i)
                 .and_then(Option::as_ref)
                 .map(|(id, m)| (*id, m)),
-            StripAt::Bus(b) => placed.buses.get(b).map(|(id, m)| (*id, m)),
+            StripAt::Bus(b) => placed.buses.get(&b).map(|(id, m)| (*id, m)),
             StripAt::Master => Some((placed.master.0, &placed.master.1)),
         }
     };
@@ -604,10 +841,66 @@ fn created_id<T>(r: &CmdReport, f: impl Fn(&AnyId) -> Option<T>) -> Result<T, Mo
         .ok_or_else(|| ModelError::invalid("the part was not created"))
 }
 
+/// Which tracks' events [`apply_arranged`] applies, and where.
+struct Arrange {
+    /// The plan tracks (`None`: all, with every media item and sequence
+    /// made in order, as an import makes them).
+    which: Option<BTreeSet<usize>>,
+    /// Ticks added to each track item's tick.
+    shift: i64,
+}
+
+impl Arrange {
+    fn all() -> Arrange {
+        Arrange {
+            which: None,
+            shift: 0,
+        }
+    }
+
+    fn has(&self, track: usize) -> bool {
+        self.which.as_ref().is_none_or(|w| w.contains(&track))
+    }
+}
+
+/// The media item for plan media `m`: with `reuse`, the project's item of
+/// the same content hash when it has one; else a new one.
+fn media_item(h: &mut History, m: &MediaPlan, reuse: bool) -> Result<MediaId, ModelError> {
+    if reuse
+        && let Some(hash) = &m.hash
+        && let Some(found) = h
+            .doc()
+            .media()
+            .values()
+            .find(|x| x.content_hash.as_ref() == Some(hash))
+    {
+        return Ok(found.id);
+    }
+    let r = h.execute(
+        &Command::Media(MediaCmd::Add {
+            path: m.path.clone(),
+            sample_rate: m.rate,
+            channels: m.channels,
+            length_frames: m.frames,
+            content_hash: m.hash.clone(),
+            name: Some(m.name.clone()),
+            origin: Some(MediaOrigin::Imported {
+                original_name: m.original.clone(),
+            }),
+        }),
+        &ViewFilter::default(),
+    )?;
+    created_id(&r, |id| match id {
+        AnyId::Media(m) => Some(*m),
+        _ => None,
+    })
+}
+
 /// Applies the arrangement once the structure and the maps are in place
 /// (so regions and crossfades see the tempo map): the media items, the new
 /// sequences, then each track's events in one insert (each new event's
-/// origin from its item's tag).
+/// origin from its item's tag). With `arrange.which`, only those tracks',
+/// with only the media and sequences they use.
 fn apply_arranged(
     h: &mut History,
     plan: &Plan,
@@ -615,33 +908,47 @@ fn apply_arranged(
     placed: &Applied,
     report: &mut Report,
     origins: &mut Origins,
+    arrange: &Arrange,
 ) -> Result<(), ModelError> {
     let arr = &plan.arranged;
     let run = |h: &mut History, cmd: Command| h.execute(&cmd, &ViewFilter::default());
     let (mut notes, mut regions, mut points) = (0u64, 0u64, 0u64);
-    let mut media: Vec<MediaId> = Vec::with_capacity(arr.media.len());
-    for m in &arr.media {
-        let r = run(
-            h,
-            Command::Media(MediaCmd::Add {
-                path: m.path.clone(),
-                sample_rate: m.rate,
-                channels: m.channels,
-                length_frames: m.frames,
-                content_hash: m.hash.clone(),
-                name: Some(m.name.clone()),
-                origin: Some(MediaOrigin::Imported {
-                    original_name: m.original.clone(),
-                }),
-            }),
-        )?;
-        media.push(created_id(&r, |id| match id {
-            AnyId::Media(m) => Some(*m),
-            _ => None,
-        })?);
+    let subset = arrange.which.is_some();
+    // What the chosen tracks use.
+    let mut used_media = BTreeSet::new();
+    let mut used_seqs = BTreeSet::new();
+    for (ti, items) in arr.items.iter().enumerate() {
+        if !arrange.has(ti) {
+            continue;
+        }
+        for it in items {
+            match &it.body {
+                Body::Region(r) => {
+                    used_media.insert(r.media);
+                }
+                Body::Use { seq: k, .. } => {
+                    used_seqs.insert(*k);
+                }
+                _ => {}
+            }
+        }
     }
-    let mut seqs: Vec<SeqId> = Vec::with_capacity(arr.seqs.len());
-    for s in &arr.seqs {
+    let mut media: Vec<Option<MediaId>> = Vec::with_capacity(arr.media.len());
+    let mut made_media = 0u64;
+    for (k, m) in arr.media.iter().enumerate() {
+        if subset && !used_media.contains(&k) {
+            media.push(None);
+            continue;
+        }
+        media.push(Some(media_item(h, m, subset)?));
+        made_media = made_media.saturating_add(1);
+    }
+    let mut seqs: Vec<Option<SeqId>> = Vec::with_capacity(arr.seqs.len());
+    for (k, s) in arr.seqs.iter().enumerate() {
+        if subset && !used_seqs.contains(&k) {
+            seqs.push(None);
+            continue;
+        }
         let r = run(
             h,
             Command::Sequence(SequenceCmd::New {
@@ -704,10 +1011,13 @@ fn apply_arranged(
             )?;
             settled(&r, report);
         }
-        seqs.push(id);
+        seqs.push(Some(id));
     }
     for (ti, items) in arr.items.iter().enumerate() {
-        let Some(lane) = placed.lanes.get(ti).copied() else {
+        if !arrange.has(ti) {
+            continue;
+        }
+        let Some(lane) = placed.lanes.get(ti).copied().flatten() else {
             continue;
         };
         if items.is_empty() {
@@ -723,7 +1033,7 @@ fn apply_arranged(
                     length,
                     loop_count,
                 } => {
-                    let Some(&target) = seqs.get(*k) else {
+                    let Some(target) = seqs.get(*k).copied().flatten() else {
                         continue;
                     };
                     (
@@ -737,7 +1047,7 @@ fn apply_arranged(
                     )
                 }
                 Body::Region(r) => {
-                    let Some(&m) = media.get(r.media) else {
+                    let Some(m) = media.get(r.media).copied().flatten() else {
                         continue;
                     };
                     regions = regions.saturating_add(1);
@@ -775,7 +1085,7 @@ fn apply_arranged(
                 }
             };
             specs.push(EventSpec {
-                tick: it.tick,
+                tick: Tick(it.tick.0.saturating_add(arrange.shift)),
                 dest: None,
                 group_channel,
                 mute: it.mute,
@@ -807,9 +1117,7 @@ fn apply_arranged(
     s.notes = s.notes.saturating_add(notes);
     s.regions = s.regions.saturating_add(regions);
     s.automation_points = s.automation_points.saturating_add(points);
-    s.audio_files = s
-        .audio_files
-        .saturating_add(u64::try_from(media.len()).unwrap_or(u64::MAX));
+    s.audio_files = s.audio_files.saturating_add(made_media);
     Ok(())
 }
 

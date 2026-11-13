@@ -23,6 +23,7 @@
 //!
 //! [`Projection`]: super::record::Projection
 
+pub mod apply;
 pub mod decide;
 pub mod matching;
 pub mod text;

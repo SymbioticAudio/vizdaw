@@ -525,7 +525,7 @@ fn track_strips(p: &Projection) -> BTreeSet<usize> {
 
 // ---------------------------------------------------------------- tolerances
 
-fn ticks_near(a: i64, b: i64) -> bool {
+pub(super) fn ticks_near(a: i64, b: i64) -> bool {
     (i128::from(a) - i128::from(b)).abs() <= i128::from(NOTE_TICKS)
 }
 
@@ -559,7 +559,7 @@ fn value_eq(a: f64, b: f64) -> bool {
     (a - b).abs() <= VALUE
 }
 
-fn same_note(a: &PNote, b: &PNote) -> bool {
+pub(super) fn same_note(a: &PNote, b: &PNote) -> bool {
     a.velocity == b.velocity && a.release == b.release && a.expression == b.expression
 }
 
