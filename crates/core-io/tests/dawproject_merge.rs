@@ -37,7 +37,7 @@ use core_model::ids::{AnyId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, 
 use core_model::input_fx::{InputFx, InputFxKind};
 use core_model::lane::{Lane, LaneInput, MonitorMode, QuantizeSpec};
 use core_model::learn::{LearnKind, LearnMap, LearnMode, LearnSource};
-use core_model::mixer::{AuxSend, PluginSlot, StripKind};
+use core_model::mixer::{AuxSend, ParamId, PluginSlot, StripKind};
 use core_model::mpe::MpeConfig;
 use core_model::rules;
 use core_model::selection::ViewFilter;
@@ -3285,6 +3285,205 @@ fn a_curve_on_a_send_ours_removed_is_listed() {
     assert_eq!(to_json(h.doc()).unwrap(), json);
 }
 
+/// The points of every parameter-7 curve on a slot of plug-in `plugin`
+/// on `strip` in `doc`, by tick.
+fn param_points(doc: &Document, seq: SeqId, strip: StripId, plugin: &str) -> Vec<(i64, f64)> {
+    let slots: Vec<PluginInstanceId> = doc
+        .mixer()
+        .strip(strip)
+        .unwrap()
+        .inserts
+        .iter()
+        .filter(|s| s.plugin.id == plugin)
+        .map(|s| s.id)
+        .collect();
+    let mut out: Vec<(i64, f64)> = doc
+        .sequence(seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .filter_map(|l| l.active())
+        .flat_map(|tk| tk.events.values())
+        .filter_map(|e| match e.body {
+            EventBody::Automation {
+                target: AutomationTarget::PluginParam(s, ParamId(7)),
+                value,
+            } if slots.contains(&s) => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out
+}
+
+/// Theirs' parameter-7 curve on `slot`, on `lane`.
+fn param_curve(h: &mut History, seq: SeqId, lane: LaneId, slot: PluginInstanceId) {
+    let point = |tick: i64, value: f64| {
+        EventSpec::new(
+            Tick(tick),
+            EventBody::Automation {
+                target: AutomationTarget::PluginParam(slot, ParamId(7)),
+                value,
+            },
+        )
+    };
+    run(
+        h,
+        Command::Event(EventCmd::Insert {
+            seq,
+            lane,
+            events: vec![point(BAR, 0.5), point(2 * BAR, 0.25)],
+        }),
+    );
+}
+
+/// Task 7 case B follow-up: theirs automates Bass's Comp; ours swapped
+/// that slot for another plug-in (`org.example.Comp2`, in Comp's place).
+/// A curve is found by its slot's plug-in, never its place, so it does not
+/// land on Comp2's parameter: it is listed under `NOT_APPLIED` with the
+/// reason, the merge runs nothing, and merging again lists the same line
+/// and changes nothing.
+#[test]
+fn a_curve_on_a_plugin_ours_swapped_is_listed() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        param_curve(h, i.seq, i.bass, i.comp);
+    });
+    let o = ours(&t, |h, i| {
+        run(h, Command::Mixer(MixerCmd::RemoveInsert { slot: i.comp }));
+        run(
+            h,
+            Command::Mixer(MixerCmd::AddInsert {
+                strip: i.bass_strip,
+                index: Some(0),
+                plugin: common::merge::clap("org.example.Comp2"),
+            }),
+        );
+    });
+    let bass = ids(&t).bass_strip;
+    let line = "Track 'Bass': plug-in parameter automation (its plug-in is not in this \
+                project): here 0 points, there 2 points";
+    let check = |p: &MergePlan| {
+        let curve = p
+            .decisions
+            .iter()
+            .find(|d| matches!(d.unit, Unit::Automation(_)))
+            .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+        assert_eq!(curve.outcome, Outcome::Conflict, "{:#?}", p.decisions);
+        assert_eq!(
+            item(&p.report, ItemKind::Conflict, NOT_APPLIED).details,
+            vec![line.to_owned()]
+        );
+        assert!(p.preview.conflict_lines.contains(&line.to_owned()));
+        assert!(
+            !p.decisions.iter().any(|d| d.outcome == Outcome::Theirs),
+            "{:#?}",
+            p.decisions
+        );
+    };
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    check(&p);
+    let json = to_json(&o).unwrap();
+    let (h, report) = apply_on(&o, &p);
+    assert_eq!(h.undo_depth(), 0, "the merge runs nothing");
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+    assert!(param_points(h.doc(), seq, bass, "org.example.Comp2").is_empty());
+    assert!(
+        !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
+        "{:#?}",
+        report.items
+    );
+    // Merging again lists the same line and changes nothing.
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    check(&again);
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), 0);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
+/// Task 7 case B follow-up: theirs adds `org.example.Delay` to Keys'
+/// strip and automates it. The device change lands in the strip step,
+/// after the track edits; the curve is placed after it, on the slot the
+/// step made. Nothing is left out, and merging again adds nothing.
+#[test]
+fn a_curve_on_a_plugin_theirs_adds_lands_and_merges_twice_to_nothing() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let strip = keys_strip(h.doc(), i.seq);
+        let r = h
+            .execute(
+                &Command::Mixer(MixerCmd::AddInsert {
+                    strip,
+                    index: None,
+                    plugin: common::merge::clap("org.example.Delay"),
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let slot = created(&r, |id| match id {
+            AnyId::Plugin(p) => Some(*p),
+            _ => None,
+        });
+        param_curve(h, i.seq, i.keys, slot);
+    });
+    let o = t.base_doc.clone();
+    let keys = keys_strip(&o, seq);
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    let theirs = |unit: fn(&Unit) -> bool| {
+        p.decisions
+            .iter()
+            .any(|d| unit(&d.unit) && d.outcome == Outcome::Theirs)
+    };
+    assert!(theirs(|u| *u == Unit::Devices), "{:#?}", p.decisions);
+    assert!(
+        theirs(|u| matches!(u, Unit::Automation(_))),
+        "{:#?}",
+        p.decisions
+    );
+    let (h, report) = apply_on(&o, &p);
+    assert!(
+        !report.items.iter().any(|i| i.kind == ItemKind::LeftOut),
+        "{:#?}",
+        report.items
+    );
+    assert!(!has(&report, NOT_APPLIED), "{:#?}", report.items);
+    assert_eq!(
+        param_points(h.doc(), seq, keys, "org.example.Delay"),
+        vec![(BAR, 0.5), (2 * BAR, 0.25)]
+    );
+    assert!(rules::validate(h.doc()).is_empty());
+    // Merging again finds the curve the same and adds nothing.
+    let (depth, json) = (h.undo_depth(), to_json(h.doc()).unwrap());
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_doc(&t, &theirs_doc_),
+        h.doc(),
+        chosen(),
+        &never(),
+    )
+    .expect("plans");
+    assert!(
+        again
+            .decisions
+            .iter()
+            .all(|d| d.outcome == Outcome::Same || d.outcome == Outcome::Ours),
+        "{:#?}",
+        again.decisions
+    );
+    let (h, _) = apply_history(h, &again, DATE);
+    assert_eq!(h.undo_depth(), depth);
+    assert_eq!(to_json(h.doc()).unwrap(), json);
+}
+
 /// Task 7 fix round 2 (layout 2, from the 4096 run's seed): theirs sets
 /// 450 BPM, so Keys' regions (in beats in the file) come back shorter.
 /// Placed under ours' 120 BPM before the tempo map is theirs, the pair
@@ -4440,6 +4639,8 @@ stripped!(
     a_new_tracks_curve_on_a_level_its_track_already_automates_is_listed,
     a_curve_on_a_send_theirs_adds_lands_with_it,
     a_curve_on_a_send_ours_removed_is_listed,
+    a_curve_on_a_plugin_ours_swapped_is_listed,
+    a_curve_on_a_plugin_theirs_adds_lands_and_merges_twice_to_nothing,
     theirs_only_edits_are_applied,
     ours_only_edits_are_kept,
     both_changed_notes_become_an_alternate_take,

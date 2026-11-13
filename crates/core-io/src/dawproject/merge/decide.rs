@@ -53,7 +53,7 @@
 //! keeps ours ([`Outcome::Ours`]), listed under [`text::VST_KEPT`].
 
 use super::matching::{Matched, MatchedBy, Matches, match_all, notes, regions};
-use super::target::{self, Holds, Missing};
+use super::target::{self, Holds, Missing, PluginAt};
 use super::text;
 use super::theirs::Theirs;
 use super::{LEVEL_DB, NOTE_TICKS, PAN, VALUE, normalised};
@@ -1136,7 +1136,9 @@ fn target_kind(target: &str) -> &'static str {
 /// Ours as the merge leaves it, for [`target::resolve`]: ours' strips and
 /// the buses theirs adds (step 1); ours' sends and those the strip step
 /// adds (a [`Unit::Send`] decided [`Outcome::Theirs`]), and an added bus's
-/// own; ours' devices.
+/// own; ours' device slots, held to the slot theirs' came from
+/// ([`target::pick`]), or theirs' device list where it lands
+/// ([`Unit::Devices`] decided [`Outcome::Theirs`]).
 struct Leaves<'d, 'a>(&'d Decider<'a>);
 
 impl Holds for Leaves<'_, '_> {
@@ -1169,11 +1171,35 @@ impl Holds for Leaves<'_, '_> {
         held.then_some(())
     }
 
-    fn slot(&self, row: usize, device: usize) -> Option<()> {
+    fn slot(&self, (row, _): (usize, ()), at: &PluginAt) -> Option<()> {
         let d = self.0;
-        let o = d.m.strips.get(row)?.ours?;
-        d.ours_strips.strips.get(o)?.devices.get(device).map(|_| ())
+        let r = d.m.strips.get(row)?;
+        let (o, t) = (r.ours?, r.theirs?);
+        let (os, ts) = (d.strip_of(Side::Ours, o)?, d.strip_of(Side::Theirs, t)?);
+        let (oi, ti) = (d.ours_strips.strips.get(o)?, d.theirs_strips.strips.get(t)?);
+        if d.decided(&Unit::Devices, row, Outcome::Theirs) {
+            // The strip step gives ours theirs' list (ours' instrument
+            // stays): the slot it makes for theirs' device.
+            let keep = os.devices.len().saturating_sub(own_devices(d.ours_doc, oi));
+            let skip = ts
+                .devices
+                .len()
+                .saturating_sub(own_devices(d.theirs_doc, ti));
+            let after = target::landed(&os.devices, keep, &ts.devices, skip);
+            let ids: Vec<u64> = (0..after.len() as u64).collect();
+            return target::find(&after, &ids, at).map(|_| ());
+        }
+        let origin = target::origin_of(ts, ti, d.theirs_origins, at);
+        target::pick(&os.devices, &oi.devices, at, origin).map(|_| ())
     }
+}
+
+/// How many of a strip's devices are its own (EQ slot and inserts, after
+/// its track's instrument), in `doc`.
+fn own_devices(doc: &Document, ids: &StripIds) -> usize {
+    ids.strip
+        .and_then(|s| doc.mixer().strip(StripId(s)).ok())
+        .map_or(0, |s| s.eq.iter().count() + s.inserts.len())
 }
 
 /// A send's level, pre-fader and enabled.

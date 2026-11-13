@@ -47,7 +47,7 @@
 use super::decide::{MergePlan, Outcome, StripField, Unit, same_note, same_region, ticks_near};
 use super::matching::{Matched, notes, regions};
 use super::normalised;
-use super::target::{self, Landing};
+use super::target::{self, Landing, PluginAt};
 use super::text;
 use super::theirs::Theirs;
 use crate::dawproject::import::{
@@ -250,8 +250,8 @@ struct Out {
     /// step (the tempo map) may settle their flag away, so it is set again
     /// last (Task 7).
     flagged: Vec<(EventId, EventSpec)>,
-    /// Theirs' curves step 3 could not place yet (their send is made by
-    /// the strip step): lane, key and points in ours' ticks.
+    /// Theirs' curves step 3 could not place yet (their send or device is
+    /// made by the strip step): lane, key and points in ours' ticks.
     late: Vec<Late>,
 }
 
@@ -1132,10 +1132,13 @@ fn curve_key(cx: &Cx<'_>, side: usize, target: &str) -> String {
     target::key(target, tag, row, strips)
 }
 
-/// Ours as the apply has it so far, for [`target::resolve`].
+/// Ours as the apply has it so far, for [`target::resolve`]: in step 3
+/// (`after` none) ours' devices as the merge found them; after the strip
+/// step, `doc` projected again.
 struct Now<'d, 'a> {
     doc: &'d Document,
     cx: &'d Cx<'a>,
+    after: Option<&'d (Projection, Identity)>,
 }
 
 impl target::Holds for Now<'_, '_> {
@@ -1153,16 +1156,51 @@ impl target::Holds for Now<'_, '_> {
         Some(SendIndex(u16::try_from(k).ok()?))
     }
 
-    fn slot(&self, row: usize, device: usize) -> Option<PluginInstanceId> {
-        let o = self.cx.m_strip(row)?.ours?;
-        let id = self.cx.ids.strips.get(o)?.devices.get(device)?;
-        Some(PluginInstanceId(*id))
+    fn slot(&self, (row, strip): (usize, StripId), at: &PluginAt) -> Option<PluginInstanceId> {
+        let cx = self.cx;
+        let lands = cx
+            .plan
+            .decisions
+            .iter()
+            .any(|d| d.row == row && d.unit == Unit::Devices && d.outcome == Outcome::Theirs);
+        let (devices, ids) = match self.after {
+            // Theirs' device list lands in the strip step: its slots then.
+            None if lands => return None,
+            None => {
+                let o = cx.m_strip(row)?.ours?;
+                (
+                    &cx.raw.strips.get(o)?.devices,
+                    &cx.ids.strips.get(o)?.devices,
+                )
+            }
+            Some((p, i)) => {
+                let k = i.strips.iter().position(|s| s.strip == Some(strip.0))?;
+                (&p.strips.get(k)?.devices, &i.strips.get(k)?.devices)
+            }
+        };
+        let origin = if lands {
+            None
+        } else {
+            let t = cx.m_strip(row)?.theirs?;
+            let (ts, ti) = (
+                cx.th.projection.strips.get(t)?,
+                cx.th.identity.strips.get(t)?,
+            );
+            target::origin_of(ts, ti, &cx.th.origins, at)
+        };
+        target::pick(devices, ids, at, origin).map(PluginInstanceId)
     }
 }
 
-/// Curve `key`'s target in ours as `doc` has it.
-fn ours_target(doc: &Document, cx: &Cx<'_>, key: &str) -> Option<AutomationTarget> {
-    Some(match target::resolve(key, &Now { doc, cx }).ok()? {
+/// Curve `key`'s target in ours as `doc` has it (`after`: projected again
+/// after the strip step).
+fn ours_target(
+    doc: &Document,
+    cx: &Cx<'_>,
+    key: &str,
+    after: Option<&(Projection, Identity)>,
+) -> Option<AutomationTarget> {
+    Some(match target::resolve(key, &Now { doc, cx, after }).ok()? {
         Landing::Fader(s) => AutomationTarget::StripFader(s),
         Landing::Pan(s) => AutomationTarget::StripPan(s),
         Landing::Mute(s) => AutomationTarget::StripMute(s),
@@ -1220,9 +1258,10 @@ fn edit_curve(
                 _ => None,
             })
             .collect();
-        match ours_target(doc, cx, key) {
+        match ours_target(doc, cx, key, None) {
             Some(mapped) => edit.insert.extend(curve_specs(mapped, &points)),
-            // A send the strip step makes (`decide` resolved it there).
+            // A send or device the strip step makes (`decide` resolved it
+            // there).
             None => {
                 if let Some(lane) = cx.ids.tracks.get(o).map(|x| x.lane) {
                     out.late.push((lane, key.to_owned(), points));
@@ -1247,13 +1286,19 @@ fn curve_specs(target: AutomationTarget, points: &[(Tick, f64)]) -> Vec<EventSpe
 }
 
 /// Step 4b: the curves of step 3 whose target the strip step made (a
-/// send theirs added), one insert per curve; one ours still cannot hold
+/// send theirs added, or theirs' device list), one insert per curve; one ours still cannot hold
 /// is listed under `UNPLACED` (`decide` resolves it the same way, so it
 /// lists such a curve as not applied first).
 fn late_curves(h: &mut History, cx: &Cx<'_>, out: &mut Out) -> Result<(), ModelError> {
-    for (lane, key, points) in std::mem::take(&mut out.late) {
+    let late = std::mem::take(&mut out.late);
+    if late.is_empty() {
+        return Ok(());
+    }
+    let after = projection_with_identity(h.doc(), cx.seq)
+        .map_err(|e| ModelError::invalid(e.to_string()))?;
+    for (lane, key, points) in late {
         cx.stop()?;
-        let Some(mapped) = ours_target(h.doc(), cx, &key) else {
+        let Some(mapped) = ours_target(h.doc(), cx, &key, Some(&after)) else {
             out.report.add(ItemKind::LeftOut, UNPLACED, None);
             continue;
         };
