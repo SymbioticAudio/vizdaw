@@ -48,17 +48,20 @@ Build on what 6d built. Read it; do not re-plan it. Names changed during 6d's ex
   - `import::timeline` (`Arranged`, `Item`, `RegionPlan`);
   - `units` (`TagKind`, `tag`, `strip_tags`, `EXPORT_LINE`);
   - `export` (`export`, `ExportOptions`, `RegionGain`, `DpExport.snapshot_json`, `Layout`, `Part`).
-- `core-io`'s tests: `common::package` (`write_package`, `package_bytes`, `TestPlist`), `dawproject_round_trip.rs` (`same`, `copy_hash`, `without_holds`, `from_tick`, the proptest generators), `schema::{read_project, write_project, write_metadata}`.
+- `core-io`'s tests: `common::package` (`write_package`, `package_bytes`, which always writes the record, `TestPlist`), `common::{measure, cases}`, `dawproject_round_trip.rs` (`same`, `copy_hash`, `without_holds`, `from_tick`, `trip_without_schema`'s fake media, and the proptest generators `spec()` and `build`, all private to that file), `schema::{read_project, read_metadata, write_project, write_metadata}`.
 - `core-ffi`:
-  - `dawproject.rs` (`info`, `installed`, `ImportJob`, `import_body`, `import_job`, `keep_snapshot`, `keep_snapshots`, `snapshot_name`, `snapshots_in`, `DAWPROJECT_FILE`, `plist()`);
-  - `session.rs` (`import_dawproject`, `apply_dawproject_work`, `apply_dawproject_import`, `interchange_idle`, `media_jobs_idle`, `remove_unkept`, `kept`, `reserved_names`, `root`, the snapshot capture in `export_dawproject`);
+  - `dawproject.rs` (`info`, `installed`, `ImportJob`, `import_body` with its stages 5 opened, 6 first entry extracted, 7 first file converted, 8 mapped, `import_job`, `keep_snapshot` (the export job writes the snapshot file with it), `keep_snapshots`, `snapshot_name`, `snapshots_in`, `DAWPROJECT_FILE`, `plist()`);
+  - `session.rs` (`import_dawproject`, `apply_dawproject_work`, `apply_dawproject_import`, `interchange_idle`, `Inner::media_jobs_idle`, the free function `remove_unkept`, `kept`, `reserved_names`, `root`, and `capture_for_export`, the live plug-in capture in `export_dawproject`);
+  - `lib.rs` (the free function `dawproject_info`);
+  - its tests: 6d's fixtures (`serial`, `project_with`, `project`, `wait_job`, `listing`, the CLAP setup of `clap_state_round_trips`) are private to `tests/dawproject.rs` until Task 8 moves them.
   - `interchange.rs` (`file_path`, `io_error`, `report_row`, `ReportRow`, `ReportKindRow`);
   - `jobs.rs` (`JobKindRow`, `JobRow`, `Work`).
-- `core-model`: `History::{begin, commit, abort, execute, present_serial, capture_state_keeping, undo}`, `LaneCmd::{AddTake, SetActiveTake, Remove, Rename}`, `ReferenceCmd::MakePrivateCopy`, `EventCmd::{Insert, Delete}`, `AudioCmd::*`, `MixerCmd::*`, `SequenceCmd::{SetTempo, SetMeter, SetMarkers}`, `SettingsCmd::SetInfo`, `state::blob_id`.
+- `core-model`: `History::{begin, commit, abort, execute, present_serial, capture_state, capture_state_keeping, undo, undo_label}`, `LaneCmd::{AddTake (adds an empty take and makes it active), SetActiveTake, Remove, Rename}`, `ReferenceCmd::MakePrivateCopy`, `EventCmd::{Insert, Delete}`, `AudioCmd::*`, `MixerCmd::*` (labels from `MixerCmd::name()`), `SequenceCmd::{SetTempo, SetMeter, SetMarkers}`, `SettingsCmd::SetInfo`, `MediaCmd::Add`, `state::{blob_id, capture_keeping}`, `rules::validate` (a `Vec<String>` of problems), `report::Report` (its `summary` is a `Summary` of counts; `summary_line(verb)` and `plain(verb)` make the text).
 - Swift:
-  - `DocumentStore.openDawproject`, `dawprojectInfo`, `closeIfUntouched`, `documentID(forPath:)` and `StoreAlerts`;
-  - `InterchangeCommands` (`importDawproject`, `importDawprojectIntoNewProject`, `madeProjects`);
-  - `DawprojectModel` (its detached-task and generation pattern), `ReportText`, `ReportSheet`, `ProjectPanels` and `FakeSession`.
+  - `DocumentStore.openDawproject` (reached from `open(path:)`, so from the UI and from the channel's `file.open`), `dawprojectInfo`, `closeIfUntouched` (private), `documentID(forPath:)`;
+  - in the app target, `AppCommands.swift`'s `StoreAlerts` (started in `VizDAWApp.swift`) and `Panels.chooseProject()`, and `ProjectPanels.swift`'s `extension Panels`;
+  - `InterchangeCommands` (`importDawproject`, `importDawprojectIntoNewProject`, `madeProjects`), `ControlOpen.open` (how `file.open` opens a project under the channel);
+  - `DawprojectModel` (its detached-task and generation pattern, `jobDone`/`jobFailed`), `ProjectMedia.swift`'s job loop, `ReportText`, `ReportSheet`, `ControlChannel.note(_: AlertItem)` and `FakeSession`.
 
 ## Global Constraints
 
@@ -68,7 +71,7 @@ Every task's requirements include these.
   - Every command runs after `export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools` and `cd /Users/lattawb/workspace/vizdaw`.
   - Swift goes only through `scripts/build-ffi.sh` (after any FFI change), `scripts/swift.sh build|test` and `scripts/make-app.sh`. Never run `swift`, `xcodebuild` or `xcrun` directly.
 - **Branch and commits.**
-  - Branch `sp6-import`, at `ed475c1` with plans 6a–6d finished, then this plan's commit. Never switch branches, never push.
+  - Branch `sp6-import`, at `ed475c1` with plans 6a–6d finished, then this plan's commits. Never switch branches, never push.
   - Commit at the end of every task by explicit paths (never `git add -A`). Never commit `.superpowers/`, `.DS_Store` or generated FFI (`app/Sources/VizDAWCore/vizdaw_ffi.swift`, `app/Sources/vizdaw_ffiFFI/include/`, `target/ffi/`, `dist/`).
   - `Cargo.lock` does not change: this plan adds no dependency.
   - Every message ends with the executing session's own attribution lines: its harness's `Co-Authored-By` line naming the model actually running, then the session line, e.g.
@@ -91,9 +94,10 @@ Every task's requirements include these.
   - Tests never open real audio or MIDI and never trigger the microphone prompt or TCC. They never touch `~/Library` (the real `~/Library/Application Support/VizDAW` included), preferences, the Trash or devices.
   - Use temp folders (`tempfile`), `Session::debug_set_trash_dir`, `MemoryDefaults()`, the e2e's throwaway home and fakes only.
   - Every `core-ffi` test file calls `vizdaw_ffi::host::force_offline()` through its `serial` helper. Every Swift suite that touches the real library sets `TestSupportDir` first, as 6d's suites do, and `SupportDirScanTests` passes.
+  - **Audio conversion is macOS-only.** On Linux `media::importer()` is the CAF importer, so a package's WAVs do not convert there. A `core-ffi` test that needs converted audio (new media in `Media/`, its listing or hashes) is `#[cfg(target_os = "macos")]`, as 6d's are. `core-io` tests never convert: their media are fake `Imported` items (`common::package::media_of`). Every AU state in a `core-io` test goes through `TestPlist`; `core-ffi` tests use the CLAP test plug-in.
 - **Programmatic calls open nothing.**
   - Control-channel commands and programmatic calls never open dialogs, sheets, alerts, menus, panels or windows.
-  - The return prompt, the Open panel for a project and `MergeSheet` open only for files the user opened from the UI (File › Open, Import Project ▸ DAWproject…, Finder, the Dock).
+  - The return prompt, the Open panel for a project and `MergeSheet` open only for files the user opened from the UI (File › Open, Import Project ▸ DAWproject…, Finder, the Dock). The channel's `file.open` also reaches `openDawproject`; under `ControlChannel.active` the prompt shows nothing and answers Cancel (Task 11).
   - A channel merge into a `project` path opens that project as a document, as `file.open` does under the channel, and as 6d's channel import makes a document. That is the command's result, not a prompt.
 - **Hostile input.**
   - The returning file, its record, its tags and the project's snapshots are all hostile (§6.5).
@@ -105,7 +109,7 @@ Every task's requirements include these.
 - **One undo step.**
   - Every edit a merge makes is inside one history transaction labelled `merge::LABEL` ("Merge DAWproject"), so Edit shows "Undo Merge DAWproject".
   - The live plug-in capture before it is the existing step-free capture, as Save does.
-  - A merge that changes nothing adds no step.
+  - A merge that changes nothing adds no step. `Same`, `Ours` and setting conflicts run no command, so merging the same file twice adds no step (Ruling 6).
 - **Nothing dropped silently.** Every item a merge does not take from theirs gets a report line and a test that names the line's exact `what`: conflicts, kept deletions, VST replacements, tags ignored, and loops unrolled.
 - **Swift 6.1.**
   - Generated bindings compile in Swift 5 mode. App modules and tests compile in Swift 6 mode with no new warnings.
@@ -124,7 +128,7 @@ Every task's requirements include these.
     - `merge_dawproject` checks only text and the model before it spawns. It has the same two carve-outs as `export_dawproject`: `file_path`'s lstat, and the live plug-in capture. `has_snapshot` is one lstat. Say so in Task 8's report.
   - **Cancel is tested** at every stage of the merge job (Task 8) and in the sheet (Task 10).
   - **One interchange job at a time.**
-    - `MergeDawproject` joins `interchange_idle`'s pending kinds and `ForDawModel.blocking`.
+    - `MergeDawproject` joins `interchange_idle`'s pending kinds, `Inner::media_jobs_idle`'s (it converts into the project format, as `ImportProject` does) and `ForDawModel.blocking`.
     - A held merge (between preview and Merge) counts as running.
   - **Imports insert a crossfaded pair in one command** (backlog, 6c F22). The merge's added and replaced regions follow the rule.
 - **UniFFI changes** (Task 8 only). Every new field on an existing record is `#[uniffi(default)]` or `#[uniffi(default = None)]`:
@@ -135,11 +139,12 @@ Every task's requirements include these.
 
   `FakeSession` gains each method, with logs and settable answers.
 
-  Every Swift `switch` over `JobKindRow` or `ReportKindRow`, and every `==`/`contains` chain on job kinds, gains the new case:
+  Every Swift `switch` over `JobKindRow` or `ReportKindRow`, and every `==`/`contains` chain on job kinds, gains the new case, or says why not:
   - `ProjectMedia.swift` `jobText` ("Merging DAWproject…") and `failureTitle` ("DAWproject Merge Failed");
+  - `ProjectMedia.swift`'s job loop (~160–174): a merge is *not* added to the `interchange.jobEnded` chain (a Done Hold job is a preview, not a report). It goes to `merge.jobDone(r)` and `merge.jobFailed(r, message:)` beside `dawproject`'s (Task 10; until then, Task 8 leaves the loop unchanged);
   - `ControlChannel.swift` (~167);
   - `ControlCommands.swift` (~77, ~87: a finished merge answers `.ok(status: report.summary)`);
-  - `Interchange.swift` (`jobFailed`, `ReportText.groups`).
+  - `Interchange.swift`'s `ReportText.groups` (`.conflict`, Task 10; Task 8 groups it under "Conflicts" so the switch compiles). `InterchangeModel.jobFailed` is the MIDI export's and is not changed.
 - **Control channel.** The registry stays at 175 commands (6e adds parameters, not commands), and `everyRegisteredMenuCommandHasAHandler` passes.
 - **Each task ends green.**
   - Always:
@@ -182,9 +187,9 @@ These are the five failure modes a person is most likely to hit, most likely fir
    - Examples: an edit over the control channel, a recording started, an undo while the sheet shows.
    - Expected:
      - Merge is refused with "The project changed after the preview; preview the merge again.", and nothing is applied;
-     - recording refuses with `busy`;
+     - Merge while recording or inside an open edit answers `busy`, and the hold is kept;
      - the held media is removed on Cancel or on close.
-   - Pinned by `confirm_after_an_edit_is_refused`, `confirm_while_recording_is_busy` and `closing_drops_a_held_merge` (Task 8), and `aRefusedConfirmShowsTheSentence` (Task 10).
+   - Pinned by `confirm_after_an_edit_is_refused`, `confirm_while_busy_keeps_the_hold` and `closing_drops_a_held_merge` (Task 8), and `aRefusedConfirmShowsTheSentence` (Task 10).
 4. **Edits on both sides near each other.**
    - Examples:
      - ours deleted a track that theirs edited;
@@ -196,13 +201,13 @@ These are the five failure modes a person is most likely to hit, most likely fir
      - VizDAW wins every one, and each is listed under Conflicts or Changed;
      - VizDAW-only state is byte-equal afterwards;
      - one undo restores the project exactly.
-   - Pinned by `ours_deleted_theirs_changed_stays_deleted` (Task 5), and by `deleted_track_with_vizdaw_only_state_is_kept_empty`, `both_changed_notes_become_an_alternate_take`, `shared_uses_edited_differently_become_private_copies` and `looped_use_edited_on_one_pass_becomes_notes` (Task 6).
+   - Pinned by `ours_deleted_theirs_changed_stays_deleted` (Task 5), by `deleted_track_with_vizdaw_only_state_is_kept_empty` and `both_changed_notes_become_an_alternate_take` (Task 6), and by `shared_uses_edited_differently_become_private_copies` and `looped_use_edited_on_one_pass_becomes_notes` (Task 6b).
 5. **A hostile or damaged return, or a damaged snapshot.**
    - Examples:
      - `vz:t999` naming no track, `vz:s3` on a `Track`, one tag on two tracks, 10 000 tags;
      - a record whose `export_id` names no snapshot;
      - a snapshot that is truncated, has format 7, or holds identity lists that do not line up with its projection;
-     - a snapshot over 256 MiB.
+     - a snapshot over 256 MiB, or an `ids` map over `MAX_XML_NODES` entries (tested at lowered limits, as 6d's `record_size` is, with the constants asserted).
    - Expected: refused with one sentence, or merged with the bad items treated as new or unmatched and listed. Never a panic, never `Internal`, each case under 2 s and 256 MiB.
    - Pinned by `hostile_tags_never_match_twice` (Task 4), `read_snapshot_refuses_damage` and `snapshot_limits` (Task 1), and `merge_fuzz.rs` and `hostile_records` (Task 7).
 
@@ -211,11 +216,12 @@ These are the five failure modes a person is most likely to hit, most likely fir
 These are this plan's decisions where the spec leaves a choice. Each names its cost if wrong.
 
 1. **The three sides are projections.**
-   - Base is the snapshot's `Projection`. Theirs is `projection` of the file imported into a scratch project. Ours is `projection` of the live document. All three are for the snapshot's `seq`.
-   - Before any comparison, base goes through `record::as_returned` and theirs through `record::returned`:
-     - `as_returned` gives what an unchanged file brings back: ticks shifted by `-origin`, the maps from tick 0 with the last ramp flat, region gain 0, and no media hash for a region with gain under `Apply` (its audio comes back as a new copy, Ruling 11);
-     - `returned` drops the import's hold points and sorts each note's expression.
-   - Task 1 moves this logic out of the round-trip test's `same`. That test then asserts `as_returned(projection(doc)) ≈ returned(projection(import(export(doc))))`, so 6d's whole proptest proves the normalisers.
+   - Base is the snapshot's `Projection`. Theirs is `projection` of the file imported into a scratch project (its own sequence). Ours is `projection` of the live document. Base and ours are for the snapshot's `seq`.
+   - Before any comparison, all three are put in the file's frame, with `origin` the snapshot's:
+     - base and ours go through `record::as_returned(p, origin, gain)`, which gives what an unchanged file brings back. Ticks are shifted by `-origin`, the last tempo ramp is flat, each note's expression is sorted and region gain is 0. A region with gain under `Apply` has no media hash, since its audio comes back as a new copy (Ruling 11);
+     - theirs goes through `record::returned(p, origin)`. It cuts the tempo and meter maps to tick `-origin` on (the entry in force there counts as one on it, as `from_tick` does), drops the import's hold points (a point one tick after the last kept one, with its value, as `without_holds` does), makes the last ramp flat and sorts each note's expression.
+   - Theirs' ticks go back into ours' frame by adding `origin` when applied.
+   - Task 1 moves this logic out of the round-trip test's `same`. That test then asserts `as_returned(projection(doc), origin, gain) ≈ returned(projection(import(export(doc))), origin)`, so 6d's whole proptest proves the normalisers.
    - *Cost if wrong:* one normaliser; every decision rests on it.
 2. **The record contributes only its head** (`RecordHead`, as 6d reads it).
    - The snapshot is the base and holds the ID map. `record.document` is never read: ours is the authority for VizDAW-only state (§7.8 "always keeps from ours").
@@ -273,6 +279,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 6. **The conflict take.**
    - `LaneCmd::AddTake` named `"Returned <date>"`, then theirs' version of each conflicting part, flattened as it plays: notes, MIDI events, and regions with their crossfade pairs in one `EventCmd::Insert`. Then `LaneCmd::SetActiveTake` back to ours' take. Ours stays the active take.
    - `<date>` is the request's `date` (`YYYY-MM-DD`, the app's local date; Task 8 checks the form). A second take of that name on the track gets " (2)", " (3)", ….
+   - **No duplicate takes.** When an inactive take of the track already holds theirs' version of the part (equal within the tolerances), no take is added. The conflict is listed again with that take's name. So merging the same file twice adds no take (Review Focus 2), and " (2)" names a *different* conflicting version on the same day.
    - The take holds only the parts in conflict. If ours' notes and theirs' notes conflict on a split track, the take holds theirs' notes only; a Note says so (`text::TAKE_PARTS`).
    - *Cost if wrong:* what the take holds.
 7. **Deletions.**
@@ -303,12 +310,13 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 11. **Region gain and media of matched regions stay ours.**
     - The file has no clip gain: 6d writes it into the audio or leaves it out, and its import sets 0. So theirs' gain is never a change.
     - A matched region keeps ours' media item. Theirs' converted copy is used only for regions theirs added, and unused copies are removed after the merge.
+    - So regions are compared without `media_hash` and `gain_db`; the hash is used only to match (Ruling 4). A region whose audio went offline in the scratch import (a Linux test, an unreadable file) is then no change.
     - *Cost if wrong:* a region whose audio the other DAW really replaced keeps ours (§7.8 lists "audio clips", not their content).
 12. **The job and its steps.**
     - `MergeStepRow::Preview` computes the plan and report, keeps nothing and changes nothing (`preview: true`).
     - `Hold` keeps the merged history and its media until `confirm_merge(job)` or `cancel_merge(job)` (the sheet).
     - `Apply` swaps at once (the channel without `preview`).
-    - The plan and the merge run on the job thread against a clone of the history taken at spawn. The swap happens only if `History::present_serial()` is unchanged, else "The project changed after the preview; preview the merge again." So the swap is O(1) on the main thread. This also absorbs backlog row "the import applies on the main thread" (M8) for merges.
+    - The plan and the merge run on the job thread against a clone of the history taken at spawn. The swap happens only if `History::present_serial()` is unchanged, and the present document's `referenced_states()` and `settings().project_id` equal those at spawn. Otherwise it answers "The project changed after the preview; preview the merge again." Step-free changes (a Save's or autosave's plug-in capture, a project-ID stamp) change no serial. So the swap is O(1) on the main thread, plus one set comparison. This also absorbs backlog row "the import applies on the main thread" (M8) for merges.
     - *Cost if wrong:* a refused confirm after an edit; the user previews again.
 13. **Which project, and which snapshot.**
     - **The open match:** a document whose `project_id` equals the record's. Else, when the file has an export ID (record or metadata line), one that `has_snapshot(export_id)`. When several match, the most recently active.
@@ -332,14 +340,15 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 15. **The report.**
     - `ItemKind::Conflict` and `ReportKindRow::Conflict` are new. The sheet's groups are "Conflicts", "Changed", "Left out", "Notes".
     - The summary is `text::summary(&MergePreview)`: "Merged: <a> applied, <k> kept, <n> added, <r> removed, <c> in conflict". With nothing to do, it is "Nothing to merge: the file matches the project."
-    - The import's own lines (Changed/Left out from the mapping) are merged into the report as 6d's.
+    - `core_io::report::Report.summary` holds counts, not text. So `core-ffi` builds the merge's `ReportRow` as `report_row(&report, "Merged")` with its `summary` replaced by `text::summary(&preview)` (Task 8).
+    - The import's own lines (Changed, Left out and Notes from the mapping) are merged into the report as 6d's, except `import::FROM_VIZDAW` ("…; it was opened as a new project"), which `text::MERGED` replaces.
     - *Cost if wrong:* wording.
 16. **When the prompt appears** stays 6d's `ReturnInfo::from_vizdaw`: a record, an export line, or `vz:t` tags on at least half the tracks. The spec says "most"; at exactly half, 6d prompts.
     - Over the channel, a file from VizDAW without `mode` now answers `dialog_required` "Return" (spec §10). 6d's control tests and e2e, which import their own export with no `mode`, gain `mode: "new"` (Tasks 9, 11).
     - *Cost if wrong:* one comparison.
 17. **Limits** (constants in `limits.rs`):
-    - `MAX_SNAPSHOT_BYTES` = 256 MiB, read through the same bounded `read` as the record;
-    - a snapshot's or record's `ids` at most `MAX_XML_NODES` entries;
+    - `MAX_SNAPSHOT_BYTES` = 256 MiB. The record is a ZIP entry read by `ZipReader::read`, but the snapshot is a project file, so `record::read_snapshot_file` checks it with lstat (a regular file) and reads at most `MAX_SNAPSHOT_BYTES + 1` bytes;
+    - a snapshot's `ids` at most `MAX_XML_NODES` entries, counted while parsing, so one over is refused before the map is built (the record's `ids` are never read, Ruling 2);
     - `identity` lists equal in length to the projection's, else the snapshot is damaged;
     - at most `KEEP_SNAPSHOTS` snapshots listed.
 
@@ -352,12 +361,13 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 
 **Files:**
 - Modify:
-  - `crates/core-io/src/report.rs` (`ItemKind::Conflict`, its count and order: Conflict first);
+  - `crates/core-io/src/report.rs` (`ItemKind::Conflict`; `Report::plain` lists a "Conflicts" group first);
   - `crates/core-io/src/limits.rs` (`MAX_SNAPSHOT_BYTES`);
   - `crates/core-io/src/dawproject/record.rs`;
   - `crates/core-io/src/dawproject/export.rs` (the snapshot it builds, ~line 186);
   - `crates/core-io/tests/dawproject_round_trip.rs` (`same` uses the normalisers);
-  - every `match` over `ItemKind` in the workspace (`core-ffi/src/interchange.rs`'s `report_row` maps it to a placeholder until Task 8; say so).
+  - `crates/core-io/tests/dawproject_export.rs` (6d's `snap.format == 1` at ~line 847 becomes `SNAPSHOT_FORMAT`);
+  - every `match` over `ItemKind` in the workspace (only `core-ffi/src/interchange.rs`'s `report_row`, which maps it to `ReportKindRow::Note` as a placeholder until Task 8; say so).
 - Create: `crates/core-io/tests/common/merge.rs` (`fixture() -> (Document, SeqId)`; Task 4 adds the harness), and add it to `tests/common/mod.rs`
 - Test: `crates/core-io/tests/dawproject_merge_base.rs`
 
@@ -379,19 +389,32 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   pub struct UseAt { pub event: u64, pub seq: u64, pub tick: i64, pub end: i64, pub transpose: i8, pub passes: u32 }
   pub struct StripIds { pub strip: Option<u64>, pub devices: Vec<u64> }   // devices: slot IDs, in PStrip.devices order
   pub fn projection_with_identity(doc: &Document, seq: SeqId) -> Result<(Projection, Identity), IoError>;
-  /// Reads a snapshot: size, JSON, format 1|2, UUID IDs, ids count, identity lengths (Ruling 17).
+  /// The limits a snapshot is read under (tests lower them, as 6d's `record_size` lowers `max_record`).
+  #[derive(Debug, Clone, Copy)] pub struct SnapshotLimits { pub max_bytes: usize, pub max_ids: usize }
+  impl Default for SnapshotLimits { /* MAX_SNAPSHOT_BYTES, MAX_XML_NODES */ }
+  /// Reads a snapshot: size, JSON, format 1|2, UUID IDs, ids count (while parsing), identity lengths (Ruling 17).
+  pub fn read_snapshot_with(bytes: &[u8], limits: &SnapshotLimits) -> Result<Snapshot, IoError>;
+  /// `read_snapshot_with` at the default limits.
   pub fn read_snapshot(bytes: &[u8]) -> Result<Snapshot, IoError>;
-  /// Base as an unchanged file brings it back (Ruling 1).
-  pub fn as_returned(base: &Projection, region_gain: RegionGain) -> Projection;
-  /// A returning file's projection without what the import adds (hold points; expression order).
-  pub fn returned(theirs: &Projection) -> Projection;
+  /// `<root>/Interchange/<export id>.json`: lstat (a regular file, else `Ok(None)` for missing),
+  /// at most `MAX_SNAPSHOT_BYTES + 1` bytes read, then `read_snapshot`.
+  pub fn read_snapshot_file(root: &Path, export_id: &str) -> Result<Option<Snapshot>, IoError>;
+  /// `p` as an unchanged file exported with pickup `origin` brings it back (Ruling 1); for base and ours.
+  pub fn as_returned(p: &Projection, origin: i64, region_gain: RegionGain) -> Projection;
+  /// A returning file's projection in the same frame (Ruling 1): maps from `-origin`, no hold points,
+  /// last ramp flat, expression sorted.
+  pub fn returned(theirs: &Projection, origin: i64) -> Projection;
   pub const SNAPSHOT_DAMAGED: &str = "The project's copy of that export is damaged, so the file can't be merged.";
   ```
-  - `as_returned` sets `media_hash = None` on a region with gain under `Apply`, and `returned` leaves theirs' hashes as they are. Matching then pairs such a region by tag or position (Task 4), and its media is never compared (Ruling 11). The round-trip test keeps its own `copy_hash` assertion on the side for those regions.
-  - `export` writes `SNAPSHOT_FORMAT`, `region_gain` and `identity` (from the same layout as the projection).
+  - `as_returned` sets `media_hash = None` on a region with gain under `Apply`, and `returned` leaves theirs' hashes as they are. Matching then pairs such a region by tag or position (Task 4). No region's media is ever compared (Ruling 11).
+  - `export` writes `SNAPSHOT_FORMAT`, `region_gain` and `identity`, all from the one walk of the layout that makes the projection.
 
 - [ ] **Step 1: Write the failing tests** in `dawproject_merge_base.rs`:
-  - `snapshot_round_trips_with_identity`: a `core_engine::fixtures::Builder` document with two tracks, one shared sequence used twice, a crossfaded pair, a send and a plug-in insert (Tasks 2 and 4–6 reuse it as `common::merge::fixture()`, added here) → export → `read_snapshot(snapshot_json)`:
+  - `snapshot_round_trips_with_identity`: a `core_engine::fixtures::Builder` document (Tasks 2 and 4–6b reuse it as `common::merge::fixture()`, added here) → export → `read_snapshot(snapshot_json)`. The document has:
+    - two tracks, "Bass" (notes, its strip at −6 dB) and "Keys", one of them split with audio;
+    - one shared sequence used twice, a crossfaded pair, a send to a bus, a plug-in insert and two markers.
+
+    Expected:
     - `format == 2` and `region_gain == Some("apply")`;
     - `identity.tracks[i].lane` is each part's lane;
     - each `notes[j].top` is the use event for notes inside a use;
@@ -404,13 +427,17 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `project_id: "x"`;
     - `identity.tracks` one shorter than `projection.tracks`;
     - a `TrackIds.notes` one longer than its track's `notes_played`.
-  - `snapshot_limits`: at `MAX_SNAPSHOT_BYTES` (built with padding in `ids` under `common::measure`) reads; one byte over is refused before parsing (allocation under 1 MiB). `ids` at `MAX_XML_NODES` reads; one more is refused.
+  - `snapshot_limits`, under `common::measure` at lowered limits (`max_bytes: 4096`, `max_ids: 100`):
+    - a snapshot of exactly 4 096 bytes (padded in `ids`) reads, and 4 097 bytes is refused before parsing (allocation under 64 KiB);
+    - 100 `ids` read, and 101 are refused while parsing (allocation under 64 KiB);
+    - `SnapshotLimits::default()` is `(MAX_SNAPSHOT_BYTES, MAX_XML_NODES)`, and `MAX_SNAPSHOT_BYTES == 256 << 20`;
+    - `read_snapshot_file` on a missing file gives `Ok(None)`, and on a link, a folder or a FIFO gives `SNAPSHOT_DAMAGED`.
   - `as_returned_shifts_the_pickup_and_flattens_the_last_ramp`: a hand `Projection` with `origin = -3840`, a tempo ramp on its last point and a region with `gain_db = -6` → hand-typed expected values for `Apply` and `LeaveOut`.
-  - `returned_drops_hold_points`: automation `[(0, 0.2), (99, 0.2), (100, 0.8)]` from a `hold` import → `[(0, 0.2), (100, 0.8)]`.
-  - `ItemKind::Conflict` sorts first in `Report::items` grouping: a report with one of each kind lists Conflict, Changed, Left out, Note.
-  - In `dawproject_round_trip.rs`, `same(original, imported, gain)` becomes `assert_projection_eq(&as_returned(original, gain), &returned(imported))`, the existing comparisons on two normalised projections. Every existing round-trip test and the proptest still pass.
+  - `returned_drops_hold_points`: automation `[(0, 0.2), (1, 0.2), (2, 0.8)]` (the point a `hold` import adds at tick 1) → `[(0, 0.2), (2, 0.8)]`. A tempo map `[(0, 90 000, false), (3840, 120 000, true)]` with `origin = -3840` → `[(3840, 120 000, false)]`.
+  - `conflicts_come_first_in_plain`: a report with one item of each kind → `plain("Merged")` lists "Conflicts", "Changed", "Left out", "Notes" in that order.
+  - In `dawproject_round_trip.rs`, `same(original, imported, gain)` becomes `assert_projection_eq(&as_returned(original, original.origin, gain), &returned(imported, original.origin))`. It runs the existing comparisons on the two normalised projections. Under `Apply`, the existing `copy_hash` check on each region with gain runs first, and then those regions' hashes are cleared on the imported side. Every existing round-trip test and the proptest still pass.
 - [ ] **Step 2: Run** `cargo test -p core-io --test dawproject_merge_base`. Expected: FAIL (`SNAPSHOT_FORMAT`, `read_snapshot`, `as_returned` not defined).
-- [ ] **Step 3: Implement** the items above. `projection_with_identity` walks the layout the way `project` does, pushing an ID at each push of a projection row, so the two stay parallel. `project` is unchanged.
+- [ ] **Step 3: Implement** the items above. One walk makes both: `project` becomes `project_with_identity(l, cancel) -> (Projection, Identity)`, pushing an ID at each push of a projection row so the two stay parallel. `project` returns its `.0`, so its output is unchanged and the walk is never written twice.
 - [ ] **Step 4: Run** `cargo test --workspace` and both clippies. Expected: PASS (about +7 Rust).
 - [ ] **Step 5: Commit** `feat(io): DAWproject snapshot format 2 with identities, its bounded reader and the return normalisers (plan 6e Task 1)`.
 
@@ -418,8 +445,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 
 **Files:**
 - Modify:
-  - `crates/core-io/src/dawproject/import.rs` (`ImportEnv.ids`, `Origins`, the tags on `TrackPlan`/`BusPlan`, `TAGS_IGNORED`);
-  - `import/timeline/mod.rs` (`Item.tag`, markers' tags);
+  - `crates/core-io/src/dawproject/import.rs` (`ImportEnv.ids`, `Origins`, the tags on `TrackPlan`/`BusPlan`/`SlotPlan`, `TAGS_IGNORED`);
+  - `import/timeline/mod.rs` (`Item.tag`);
+  - `import/maps.rs` (`markers`: each marker's tag);
   - `import/apply.rs` (`apply_tagged`; `apply` calls it and drops the origins);
   - every `ImportEnv { .. }` literal (add `ids: None`).
 - Test: `crates/core-io/tests/dawproject_import.rs` (new cases)
@@ -452,14 +480,15 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 - [ ] **Step 1: Write the failing tests:**
   - `origins_follow_the_tags`: our export of Task 1's fixture → `map` → `apply_tagged` into a new project. `origins.lanes` maps each new lane to its source lane (the split part's flag true), `strips` each strip, `events` the use and each region, `markers` `[Some(0), Some(1)]`, and `slots` the insert.
   - `trusted_ids_win_over_tags`: the same file with its `Track` comments swapped between two tracks, with the record's ids passed in `env.ids` → origins follow the IDs. Without `env.ids` → they follow the (swapped) tags.
-  - `hostile_tags_are_ignored_and_counted`: a hand file with `vz:t999` (no such lane is fine here: it is kept as named, and matching decides), `vz:s3` on a `Track`, the same `vz:t1` on two tracks, an ID `t1` mapped to `kind: "strip"` in `env.ids`, and 10 000 tagged empty clips:
+  - `hostile_tags_are_ignored_and_counted`: a hand file with `vz:t999` (no such lane is fine here: it is kept as named, and matching decides), `vz:s3` on a `Track`, the same `vz:t1` on two tracks, an ID `t1` mapped to `kind: "strip"` in `env.ids`, and 10 000 one-note clips on one track, all tagged `vz:e5`:
     - exactly one lane maps to 1;
     - the wrong kinds are absent;
-    - the report has `TAGS_IGNORED` with the count 3 plus the clips past the first per object;
+    - exactly one event maps to 5 (the first clip's);
+    - the report has `TAGS_IGNORED` with the count 10 002 (the wrong-kind tag, the second `vz:t1`, the wrong-kind ID, and the 9 999 later clips);
     - the case runs under 2 s.
   - `apply_still_matches_6d`: `apply` and `apply_tagged` give equal documents for every fixture in `dawproject_import.rs`.
 - [ ] **Step 2: Run** `cargo test -p core-io --test dawproject_import`. Expected: FAIL.
-- [ ] **Step 3: Implement** the items above. The mapping records each element's tags beside its plan entry (`TrackPlan.tag`, `BusPlan.tag`, `Item.tag`, the marker list, `SlotPlan.tag`); `apply_tagged` fills `Origins` from the IDs each command reports.
+- [ ] **Step 3: Implement** the items above. The mapping records each element's tags beside its plan entry (`TrackPlan.tag`, `BusPlan.tag`, `Item.tag`, the marker list `maps.rs` makes, `SlotPlan.tag`). `apply_tagged` fills `Origins` from the IDs each command reports.
 - [ ] **Step 4: Run** `cargo test -p core-io` and both clippies. Expected: PASS (about +4 Rust).
 - [ ] **Step 5: Commit** `feat(io): DAWproject import keeps the origins its tags and trusted IDs name (plan 6e Task 2)`.
 
@@ -467,8 +496,8 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 
 **Files:**
 - Modify:
-  - `crates/core-model/src/command/mixer.rs` (the variant, its label "Set Plug-in Settings", its apply);
-  - `crates/core-model/src/state.rs` (share `capture_keeping`'s blob store);
+  - `crates/core-model/src/command/mixer.rs` (the variant, its label in `MixerCmd::name()`, "Set Plugin Settings", as the other plug-in labels say "Plugin", and its apply);
+  - `crates/core-model/src/state.rs` (factor `capture_keeping`'s store into a `pub(crate)` function on `&mut Document`, which both use);
   - `crates/core-model/tests/mixer_commands.rs` (`arb_cmd` gains it).
 - Test: `crates/core-model/tests/plugin_state.rs` (new cases), `crates/core-host/tests/host.rs` (one case)
 
@@ -487,7 +516,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `set_plugin_state_refuses`: an unknown slot and empty bytes give `ModelError`, and the document is unchanged.
     - It works on an instrument destination's slot and on an EQ slot.
   - `mixer_commands.rs`: `arb_cmd` includes `SetPluginState` with 0–64 random bytes; the existing undo property passes.
-  - `host.rs`: `sync_loads_a_changed_state_and_the_undone_one`, with the existing fake format: after `sync(doc_with_B)` the fake instance's `load_state` saw B; after `sync(doc_with_A)` it saw A.
+  - `host.rs`: `sync_loads_a_changed_state_and_the_undone_one`, with the existing fake format (its `load_state` reads `k=v;` text into the script's `held`). State A is `0=0.25;` and B is `0=0.75;`. After `SetPluginState(B)` and `sync`, `held[0] == 0.75`; after undo and `sync`, `held[0] == 0.25`.
 - [ ] **Step 2: Run** `cargo test -p core-model --test plugin_state` and `cargo test -p core-host --test host sync_loads`. Expected: FAIL.
 - [ ] **Step 3: Implement** the variant; its apply reuses `state::capture_keeping`'s store with an empty keep map, as a command.
 - [ ] **Step 4: Run** `cargo test -p core-model -p core-host` and both clippies. Expected: PASS (about +4 Rust).
@@ -501,7 +530,10 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - `merge/theirs.rs`;
   - `merge/matching.rs`;
   - `crates/core-io/tests/dawproject_merge_match.rs`.
-- Modify: `crates/core-io/src/dawproject/mod.rs` (`pub mod merge;`), `crates/core-io/tests/common/merge.rs` (the harness below, used by Tasks 4–7).
+- Modify:
+  - `crates/core-io/src/dawproject/mod.rs` (`pub mod merge;`);
+  - `crates/core-io/tests/common/merge.rs` (the harness below, used by Tasks 4–7);
+  - `crates/core-io/tests/common/package.rs`: `package_bytes_with(x, record: bool)` (`package_bytes` calls it with `true`), and `media_of(pkg, x, doc)`, the fake `Imported` per audio entry moved out of `dawproject_round_trip.rs`'s `trip_without_schema`, which then calls it. One copy.
 
 **Interfaces:**
 - Consumes: Tasks 1–2.
@@ -513,10 +545,14 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   // merge/theirs.rs
   /// The returning file as a project of its own.
   pub struct Theirs { pub doc: Document, pub seq: SeqId, pub projection: Projection, pub identity: Identity,
-                      pub origins: Origins, pub states: SlotStates, pub report: Report }
-  /// Applies `imp` (with `apply_tagged`) to a new empty project at `format`, then projects it
-  /// (`projection_with_identity`, then `returned`).
-  pub fn theirs(imp: &DpImport, format: AudioFormat, cancel: &AtomicBool) -> Result<Theirs, IoError>;
+                      pub origins: Origins, pub states: SlotStates, pub report: Report,
+                      /// The mapped import, kept for `apply_tracks` (Task 6).
+                      pub imp: DpImport }
+  /// Applies `imp` (with `apply_tagged`, in one transaction) to a new empty project at `format`,
+  /// captures each of `states` into it (`History::capture_state`, as 6d's round trip does, so
+  /// device state hashes are `blob_id`s), then projects it (`projection_with_identity`, then
+  /// `returned(.., origin)`, `origin` the snapshot's). The report drops `import::FROM_VIZDAW`.
+  pub fn theirs(imp: DpImport, format: AudioFormat, origin: i64, cancel: &AtomicBool) -> Result<Theirs, IoError>;
   // merge/matching.rs
   #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum MatchedBy { Id, Tag, Name, Order, Lane }
   /// Indices into the three projections' rows (`None`: not on that side).
@@ -532,26 +568,30 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   pub fn regions(a: (&PTrack, &TrackIds), b: (&PTrack, &TrackIds, &Origins)) -> Vec<(Option<usize>, Option<usize>)>;
   ```
   - Base↔ours is `Lane` by `identity` (format 2), else Ruling 4's name and order rules. Theirs↔base follows Ruling 4. Each row appears in exactly one `Matched`.
+  - `match_all` and `plan` (Task 5) compare normalised sides (Ruling 1): base and ours through `as_returned(.., base.origin, gain)`, theirs as `theirs` gives it.
   - `notes` pairs greedily in (tick, pitch) order: each base note takes the first unpaired theirs note within the tolerances. It is O(n log n) through a sort, never O(n²) on a 50 000-note part.
 - **Test harness** (`tests/common/merge.rs`, written whole):
   ```rust
   pub struct Trip { pub base_doc: Document, pub seq: SeqId, pub export: DpExport, pub snapshot: Snapshot, pub dir: TempDir }
   pub fn trip(doc: &Document, seq: SeqId) -> Trip;                       // export with TestPlist and fixed IDs
   /// The returned file: `export`'s project.xml and metadata.xml read with `read_project`/`read_metadata`,
-  /// edited as the other DAW would, written back, packaged; `strip` removes the record, the tags, or both.
-  pub fn returned(t: &Trip, strip: Strip, edit: impl FnOnce(&mut DpProject, &mut DpMetaData)) -> PathBuf;
+  /// edited as the other DAW would, written back, packaged (`package_bytes_with`); `strip` removes
+  /// the record, the tags, or both. Named so it never clashes with `record::returned`.
+  pub fn return_file(t: &Trip, strip: Strip, edit: impl FnOnce(&mut DpProject, &mut DpMetaData)) -> PathBuf;
   #[derive(Clone, Copy)] pub enum Strip { Nothing, Record, Tags, Both }
-  /// open → map (with the snapshot's ids when the record matches) → `theirs`.
+  /// open → map (media from `common::package::media_of`, at the project's rate as a conversion
+  /// would make them; the snapshot's ids when the record matches) → `theirs`.
   pub fn theirs_of(t: &Trip, path: &Path) -> Theirs;
   ```
+  - No audio is converted: an "audio at another rate" case changes the file's `Audio@sampleRate` and clip times, and its fake media stay at the project's rate.
 
 - [ ] **Step 1: Write the failing tests** in `dawproject_merge_match.rs`:
-  - `unchanged_file_matches_everything`: `returned(.., Strip::Nothing, |_, _| {})` → every track, strip and marker matched on all three sides `by: Id`. Every `notes` and `regions` pair is complete. `heuristic == false`.
+  - `unchanged_file_matches_everything`: `return_file(.., Strip::Nothing, |_, _| {})` → every track, strip and marker matched on all three sides `by: Id`. Every `notes` and `regions` pair is complete. `heuristic == false`. Every theirs device's state hash equals base's.
   - `tracks_match_by_tag_then_name_then_order`: `Strip::Record` → `by: Tag`. `Strip::Both` → `by: Name`. `Strip::Both` with every track renamed → `by: Order`.
   - `renamed_and_reordered_tracks_match_by_order` (Review Focus 1): `Strip::Both`, two audio tracks swapped and renamed "Audio 1"/"Audio 2" → each matched to its base by order of type, with no unmatched rows. `heuristic` is true.
   - `ids_are_ignored_without_the_record`: a hand file (application "Fixture") whose `Track`s have IDs `t1`, `t2` naming other lanes → matched by name, not ID.
   - `split_tracks_match_their_parts`: a track with notes and audio comes back as two parts → each part matched to its own base row.
-  - `strips_follow_their_tracks_and_buses_match_by_tag_then_name`.
+  - `strips_follow_their_tracks_and_buses_match_by_tag_then_name`: each track's strip is matched with its track, with the track's `by`. The fixture's bus is matched `by: Id` with `Strip::Nothing`, `by: Tag` with `Strip::Record`, and `by: Name` with `Strip::Both`. A bus renamed under `Strip::Both` is new plus deleted.
   - `markers_match_by_tag_then_name_and_tick`: with tags stripped, a marker moved by 1 tick still matches, one moved by 2 is new plus deleted.
   - `notes_match_within_a_tick`: a note moved by 1 tick pairs; by 2 ticks it is unpaired on both sides. A 50 000-note part pairs in under 1 s.
   - `regions_match_by_tag_then_media_and_position`, and `audio_at_another_rate_matches_within_a_frame` (Review Focus 1): the returned file's audio rewritten at 44 100 Hz for a 48 000 Hz project, stripped of tags → the regions pair, with lengths within `FRAMES`.
@@ -567,6 +607,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 
 **Files:**
 - Create: `crates/core-io/src/dawproject/merge/decide.rs`, `merge/text.rs`, `crates/core-io/tests/dawproject_merge_decide.rs`
+- Modify: `crates/core-io/src/dawproject/merge/mod.rs` (`pub mod decide; pub mod text;`)
 
 **Interfaces:**
 - Consumes: Task 4.
@@ -590,8 +631,11 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   pub struct MergePlan { pub base: Snapshot, pub theirs: Theirs, pub matches: Matches,
                          pub decisions: Vec<Decision>, pub preview: MergePreview, pub report: Report }
   /// Decides every unit (Rulings 5, 7, 11). Units unchanged on both sides make no decision.
-  pub fn plan(base: Snapshot, theirs: Theirs, ours: &Document, cancel: &AtomicBool) -> Result<MergePlan, IoError>;
+  /// `chosen`: the user chose the snapshot (the file lost its export ID), so the report notes
+  /// `SNAPSHOT_CHOSEN`. `Refused(SEQUENCE_GONE)` when `ours` no longer has the snapshot's sequence.
+  pub fn plan(base: Snapshot, theirs: Theirs, ours: &Document, chosen: bool, cancel: &AtomicBool) -> Result<MergePlan, IoError>;
   ```
+  - Regions are compared without `media_hash` and `gain_db` (Ruling 11).
   - **Counting:**
     - `applied` counts `Theirs` and `Same`; `kept` counts `Ours`; `added` counts `Added`; `removed` counts `Removed`;
     - `conflicts` counts `Conflict`, `KeptEmpty`, `DeletedThere` and `DeletedHere`;
@@ -608,44 +652,49 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
       - `LOOPS_UNROLLED` "Looped uses edited on some passes became notes".
     - **Left out:** `VST_KEPT` "Plug-ins the other DAW replaced with ones VizDAW cannot host (kept as they are here)", detail the plug-in name.
     - **Notes:**
-      - `MERGED` "This file was merged into the project it came from (the export of <yyyy-mm-dd>)";
+      - `MERGED` "This file was merged into the project it came from (the export of <yyyy-mm-dd>)", the date in UTC from `exported_at`;
       - `BY_NAME` "The file lost VizDAW's track tags; tracks were matched by name and order";
       - `SNAPSHOT_CHOSEN` "The file lost its export ID; it was compared with the export you chose";
       - `OLD_EXPORT` "This export was made before merging existed; tracks were matched by name and order";
       - `SHARED_ELSEWHERE` "Edits to shared sequences also play where they are used outside the merged sequence", detail the sequence;
       - `TAKE_PARTS` "An alternate take holds only the other DAW's changed part of a track".
-    - The summaries: `NOTHING` "Nothing to merge: the file matches the project.", and `pub fn summary(p: &MergePreview) -> String` → "Merged: <a> applied, <k> kept, <n> added, <r> removed, <c> in conflict".
+    - The summaries: `NOTHING` "Nothing to merge: the file matches the project.", and `pub fn summary(p: &MergePreview) -> String` → "Merged: <a> applied, <k> kept, <n> added, <r> removed, <c> in conflict", or `NOTHING` when every count is 0.
+    - The refusal `SEQUENCE_GONE` "The sequence this file was exported from is no longer in the project."
     - Values in `ours`/`theirs` text are formatted as the app shows them: "−6.0 dB", "C", "on"/"off", "120 BPM at bar 1; 140 BPM at bar 17", or for a curve "12 points".
 
-- [ ] **Step 1: Write the failing tests** in `dawproject_merge_decide.rs`. Each builds a `Trip`, edits theirs through `returned(..)` and ours through `History` commands on a copy of `base_doc`, then calls `plan`. One test per rule-table row, each for a strip level, a track's notes and a marker:
+- [ ] **Step 1: Write the failing tests** in `dawproject_merge_decide.rs`. Each builds a `Trip` of `common::merge::fixture()`, whose "Bass" strip is at −6 dB. It edits theirs through `return_file(..)` and ours through `History` commands on a copy of `base_doc`, then calls `plan`. One test per rule-table row, each for a strip level, a track's notes and a marker:
   - `theirs_changed_ours_unchanged_is_theirs`;
   - `ours_changed_theirs_unchanged_is_ours`;
   - `both_changed_the_same_way_is_applied_once` (`Same`, counted in `applied`);
-  - `both_changed_differently_is_a_conflict`: the notes give `Conflict` with `what` "Track 'Bass': notes"; the level gives `Conflict` with ours "−6.0 dB" and theirs "−3.0 dB";
+  - `both_changed_differently_is_a_conflict`: the notes give `Conflict` with `what` "Track 'Bass': notes"; the level (ours −9 dB, theirs −3 dB) gives `Conflict` with ours "−9.0 dB" and theirs "−3.0 dB";
   - `deleted_there_unchanged_here_is_removed`;
   - `deleted_there_changed_here_is_kept` (`DeletedThere`);
   - `ours_deleted_theirs_changed_stays_deleted` (Review Focus 4, `DeletedHere`);
   - `new_there_is_added`.
 
   Further tests:
-  - `nothing_changed_decides_nothing`: `decisions` is empty and `report.summary == NOTHING`.
+  - `nothing_changed_decides_nothing`: `decisions` is empty, `preview == MergePreview::default()` and `summary(&preview) == NOTHING`.
+  - `a_deleted_sequence_is_refused`: ours deletes the exported sequence → `Refused(SEQUENCE_GONE)`.
   - `levels_within_tolerance_are_unchanged`: theirs' level is +0.04 dB → no decision; +0.06 dB → `Theirs`.
-  - `region_gain_is_never_theirs` (Ruling 11): base gain −6 dB under `Apply` and `LeaveOut` → no region decision.
+  - `region_gain_is_never_theirs` (Ruling 11): base gain −6 dB under `Apply` and `LeaveOut` → no region decision. Theirs' region pointing at offline media (no hash) → no region decision either.
   - `vst_replacement_is_kept_and_listed`: theirs swaps the insert for a `Vst3Plugin` → `Ours` on `Devices`, and `VST_KEPT` with the plug-in's name.
   - `song_info_merges_field_by_field`: theirs changes the title, ours the artist → two decisions, both applied or kept, no conflict.
   - `tempo_and_meter_are_whole_maps`: both change different tempo points → one `Conflict` on `Tempo`.
-  - `preview_counts`: a mixed case with every outcome → the hand-typed `MergePreview` (applied 3, kept 2, added 1, removed 1, conflicts 4) and `conflict_lines` in order. `summary` gives "Merged: 3 applied, 2 kept, 1 added, 1 removed, 4 in conflict".
+  - `preview_counts`: a mixed case with each of the nine outcomes once, plus a second `Theirs` and a second `Ours`. That gives the hand-typed `MergePreview`: applied 3 (two `Theirs`, one `Same`), kept 2, added 1, removed 1, conflicts 4 (`Conflict`, `KeptEmpty`, `DeletedThere`, `DeletedHere`), with `conflict_lines` in order. `summary` gives "Merged: 3 applied, 2 kept, 1 added, 1 removed, 4 in conflict".
   - `report_lines_are_listed`: every `text` constant above appears in some test's report, with its kind (Conflicts, Changed, Left out, Note).
 - [ ] **Step 2: Run** `cargo test -p core-io --test dawproject_merge_decide`. Expected: FAIL.
-- [ ] **Step 3: Implement** `plan`: normalise (Ruling 1), match (Task 4), then for each unit compare base→theirs and base→ours within the tolerances and pick the table's outcome. The deletion keep rule (Ruling 7) reads the lane in `ours`.
-- [ ] **Step 4: Run** `cargo test -p core-io` and both clippies. Expected: PASS (about +16 Rust).
+- [ ] **Step 3: Implement** `plan`: normalise base and ours (Ruling 1; theirs comes normalised), match (Task 4), then for each unit compare base→theirs and base→ours within the tolerances and pick the table's outcome. The deletion keep rule (Ruling 7) reads the lane in `ours`.
+- [ ] **Step 4: Run** `cargo test -p core-io` and both clippies. Expected: PASS (about +17 Rust).
 - [ ] **Step 5: Commit** `feat(io): DAWproject merge decisions, preview and report lines (plan 6e Task 5)`.
 
 ### Task 6: `merge::apply`: the plan as commands, in one transaction
 
 **Files:**
 - Create: `crates/core-io/src/dawproject/merge/apply.rs`, `crates/core-io/tests/dawproject_merge.rs`
-- Modify: `crates/core-io/src/dawproject/import/apply.rs` (factor `apply_tracks` out of `apply`, Ruling 9; `apply`'s behaviour is unchanged)
+- Modify:
+  - `crates/core-io/src/dawproject/merge/mod.rs` (`pub mod apply;`);
+  - `crates/core-io/src/dawproject/import/apply.rs` (factor `apply_tracks` out of `apply`, Ruling 9; `apply`'s behaviour is unchanged);
+  - `crates/core-io/tests/common/merge.rs` (`vizdaw_only`, below).
 
 **Interfaces:**
 - Consumes: Tasks 3–5.
@@ -653,8 +702,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   ```rust
   pub const LABEL: &str = "Merge DAWproject";
   /// Inside the caller's open transaction on the project `plan` was made against: carries out
-  /// each decision (Rulings 5–11), then merges the plan's report into `report` and sets its
-  /// summary. `date` names conflict takes ("Returned <date>").
+  /// each decision (Rulings 5–7, 9–11; Ruling 8's shared uses are Task 6b), then merges the
+  /// plan's report into `report`. `report.summary` keeps its counts; the merge's summary line is
+  /// `text::summary(&plan.preview)` (Ruling 15). `date` names conflict takes ("Returned <date>").
   pub fn apply_merge(h: &mut History, plan: &MergePlan, date: &str, report: &mut Report) -> Result<(), ModelError>;
   // import/apply.rs
   /// Adds plan tracks `which` (with their destinations, paths, strips and devices) and the
@@ -670,57 +720,78 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     5. markers, tempo, meter, song info;
     6. deletions last.
   - Theirs' new slots get their state through `SetPluginState` inside the transaction, not `capture_state`.
-  - A merge with no decisions runs no command.
+  - A merge with no decisions runs no command. `Same`, `Ours`, setting `Conflict`s and a conflict whose take already exists (Ruling 6) run no command either.
   - Converted media no region uses are left for the caller to remove.
 
 - [ ] **Step 1: Write the failing tests** in `dawproject_merge.rs`. Each applies the plan inside `begin(LABEL)`…`commit()` on a `History` of ours, then checks the result:
-  - `theirs_only_edits_are_applied`: the owner's check, done in the file: a note moved 1 beat, the "Bass" strip's level changed from −6 to −3 dB, and a marker "Bridge" added at bar 9. All three are in ours; nothing else changed; `undo_label() == Some("Merge DAWproject")`.
+  - `theirs_only_edits_are_applied`: the owner's check, done in the file: a note moved 1 beat, the "Bass" strip's level changed from −6 to −3 dB, and a marker "Bridge" added at bar 9. All three are in ours; nothing else changed; `undo_label() == Some("Merge DAWproject")`. The preview is 2 applied, 1 added. The report holds `MERGED` and not `import::FROM_VIZDAW`.
   - `ours_only_edits_are_kept`: ours renamed a track and added a note after the export → both are still there.
   - `both_changed_notes_become_an_alternate_take`:
     - the lane has a new take "Returned 2026-11-13" holding theirs' notes;
     - ours' take is still active and unchanged;
     - the report's Conflicts holds `CONFLICT_TAKE` with "Bass: take “Returned 2026-11-13”".
-  - `take_names_count_up_on_the_same_day`: the same conflict merged twice on one date → "Returned 2026-11-13 (2)".
-  - `both_changed_settings_keep_ours_and_list_theirs`.
+  - `take_names_count_up_on_the_same_day`: after that merge, a second returned file with *other* conflicting notes is merged on the same date → its take is "Returned 2026-11-13 (2)". The first file merged again adds no take (Ruling 6).
+  - `both_changed_settings_keep_ours_and_list_theirs`: ours −9 dB, theirs −3 dB on "Bass" → the strip stays at −9 dB. The report's Conflicts holds `CONFLICT_SETTING` with the detail "Strip 'Bass': level: here −9.0 dB, there −3.0 dB". With no other decision, the merge adds no undo step.
   - `deletions_follow_the_table`: a theirs-deleted untouched track is gone. A theirs-deleted track ours edited stays. An ours-deleted track theirs edited is still deleted.
   - `deleted_track_with_vizdaw_only_state_is_kept_empty` (Review Focus 4): input effects and an inactive take on a theirs-deleted track → the lane stays, its active take is empty, its inactive take and input effects are intact, and `KEPT_EMPTY` names it.
   - `vizdaw_only_state_is_byte_equal`: `common::merge::vizdaw_only(&doc)` serialises §7.8's keep list (other sequences, keyboard slots, inactive takes, input effects, inputs and monitoring, `return_of`, MPE input settings, drum rows, automation modes, MIDI learn, surfaces, the audio format, templates) to JSON. It is byte-equal before and after a merge that changes every carried thing.
   - `one_undo_restores_the_project_exactly`: after the merge in `theirs_only_edits_are_applied` and the conflict cases, one `undo` → `file::to_json(doc)` equals the pre-merge JSON.
-  - `shared_sequence_edited_the_same_way_edits_the_sequence`: theirs moves the same note in both uses → one edit in the shared sequence, no new sequence, plus `SHARED_ELSEWHERE` when a keyboard slot uses it.
-  - `shared_uses_edited_differently_become_private_copies`: only the second use edited → it now points at a new sequence named by `MakePrivateCopy`; the first use and the original sequence are unchanged; `PRIVATE_COPIES` names the sequence.
-  - `looped_use_edited_on_one_pass_becomes_notes`: a 4-pass use with a note moved in pass 3 → the use is gone, theirs' notes are on the track, `LOOPS_UNROLLED` is listed, and the notes play exactly as theirs' projection.
   - `new_tracks_and_buses_are_added_as_an_import_would`: theirs adds a note track on a CLAP instrument and a bus with a send to it → the projection of ours' new track equals the 6d import of the same parts.
   - `crossfaded_pair_added_in_one_insert`: theirs adds two overlapping clips with covering fades → one crossfade in ours (6c F22).
   - `plugin_state_from_theirs_is_one_step`: theirs' insert state bytes differ → the slot's blob is theirs', and undo brings ours back.
   - `nothing_to_merge_adds_no_step` (Review Focus 2): an unchanged file → no command; `undo_label()` is what it was; the summary is `NOTHING`.
-  - `merging_the_same_file_twice_changes_nothing_the_second_time` (Review Focus 2): merge, then `plan` again against the result → only `Same` and `Ours` decisions; applying adds no step, no note, no marker and no take.
+  - `merging_the_same_file_twice_changes_nothing_the_second_time` (Review Focus 2): the edits of `theirs_only_edits_are_applied` plus the notes conflict of `both_changed_notes_become_an_alternate_take` are merged; then `plan` runs again against the result. The decisions are only `Same`, `Ours` and the same notes `Conflict`, whose take already exists. Applying adds no step, no note, no marker and no take.
 - [ ] **Step 2: Run** `cargo test -p core-io --test dawproject_merge`. Expected: FAIL.
-- [ ] **Step 3: Implement** `apply_merge` and the `apply_tracks` factoring. Run `cargo test -p core-io --test dawproject_import --test dawproject_round_trip` to see 6d unchanged.
-- [ ] **Step 4: Run** `cargo test -p core-io` and both clippies. Expected: PASS (about +17 Rust).
+- [ ] **Step 3: Implement** `apply_merge` (without Ruling 8: a use's notes count as the track's notes until Task 6b) and the `apply_tracks` factoring. Run `cargo test -p core-io --test dawproject_import --test dawproject_round_trip` to see 6d unchanged.
+- [ ] **Step 4: Run** `cargo test -p core-io` and both clippies. Expected: PASS (about +15 Rust).
 - [ ] **Step 5: Commit** `feat(io): DAWproject merge applied as one transaction (plan 6e Task 6)`.
+
+### Task 6b: `merge::apply`: shared sequences and looped uses (Ruling 8)
+
+Split from Task 6 so each task stays one review: Ruling 8 is the riskiest part of the apply.
+
+**Files:**
+- Modify: `crates/core-io/src/dawproject/merge/apply.rs`, `merge/decide.rs` (attributing theirs' notes to uses), `crates/core-io/tests/dawproject_merge.rs`
+
+**Interfaces:**
+- Consumes: Task 6; `Identity`'s `UseAt` (Task 1).
+- Produces: no new public items. `apply_merge` carries out Ruling 8 for format-2 snapshots. Format 1 keeps Task 6's behaviour (Ruling 3).
+
+- [ ] **Step 1: Write the failing tests** in `dawproject_merge.rs`:
+  - `shared_sequence_edited_the_same_way_edits_the_sequence`: theirs moves the same note in both uses → one edit in the shared sequence, no new sequence, plus `SHARED_ELSEWHERE` when a keyboard slot uses it.
+  - `shared_uses_edited_differently_become_private_copies`: only the second use edited → it now points at a new sequence named by `MakePrivateCopy`; the first use and the original sequence are unchanged; `PRIVATE_COPIES` names the sequence.
+  - `looped_use_edited_on_one_pass_becomes_notes`: a 4-pass use with a note moved in pass 3 → the use is gone, theirs' notes are on the track, `LOOPS_UNROLLED` is listed, and the notes play exactly as theirs' projection.
+  - `a_transposed_use_takes_its_edit_untransposed`: a use transposed +2 with a note moved there → the sequence's note moves, at its untransposed pitch.
+  - `format_one_snapshots_merge_uses_as_notes` (Ruling 3): the same edit with a format-1 snapshot → `OLD_EXPORT` is listed and no private copy is made.
+- [ ] **Step 2: Run** `cargo test -p core-io --test dawproject_merge shared looped transposed format_one`. Expected: FAIL.
+- [ ] **Step 3: Implement** Ruling 8.
+- [ ] **Step 4: Run** `cargo test -p core-io` and both clippies. Expected: PASS (about +5 Rust).
+- [ ] **Step 5: Commit** `feat(io): DAWproject merge into shared sequences and looped uses (plan 6e Task 6b)`.
 
 ### Task 7: Merge tests without the record or tags, edit-script properties, hostile records and fuzz
 
 **Files:**
-- Create: `crates/core-io/tests/dawproject_merge_fuzz.rs`
-- Modify: `crates/core-io/tests/dawproject_merge.rs` (the stripped variants), `crates/core-io/tests/common/merge.rs`
+- Create:
+  - `crates/core-io/tests/dawproject_merge_fuzz.rs`;
+  - `crates/core-io/tests/common/generators.rs`: 6d's round-trip strategies (`spec()` and the ones it uses) and `build`, moved out of `dawproject_round_trip.rs`, which then uses them from there. One copy.
+- Modify: `crates/core-io/tests/dawproject_merge.rs` (the stripped variants), `crates/core-io/tests/common/merge.rs`, `crates/core-io/tests/common/mod.rs`, `crates/core-io/tests/dawproject_round_trip.rs`
 
 **Interfaces:**
-- Consumes: Tasks 1–6.
+- Consumes: Tasks 1–6b.
 
 - [ ] **Step 1: Write the failing tests:**
-  - **Stripped variants** (§12): every Task 6 case runs for each `Strip` value. `Strip::Both` also drops the metadata export line and passes the snapshot explicitly (the user chose it), so the report holds `SNAPSHOT_CHOSEN` and `BY_NAME`. The expected document is the same for all four except where the case relies on a tag; those exceptions are named per case:
+  - **Stripped variants** (§12): every Task 6 and 6b case runs for each `Strip` value. `Strip::Both` also drops the metadata export line and passes the snapshot explicitly (`plan(.., chosen: true, ..)`: the user chose it), so the report holds `SNAPSHOT_CHOSEN` and `BY_NAME`. The expected document is the same for all four except where the case relies on a tag; those exceptions are named per case:
     - a renamed track becomes new plus deleted;
     - a marker moved by more than a tick becomes new plus deleted.
   - `edit_scripts_never_panic_validate_and_undo_once` (proptest, `common::cases(64)`):
-    - random documents from 6d's round-trip generators;
+    - random documents from 6d's round-trip generators (`common::generators`);
     - a random script of 0–8 edits applied to theirs (on the `DpProject`: move, add or delete notes and clips, change volume, pan or mute, rename, add or move markers, change tempo, delete tracks);
     - another applied to ours (as commands);
     - a random `Strip`.
 
     Check that:
     - `plan` and `apply_merge` never panic and never return `Internal`;
-    - the result validates (`core_model::rules::validate` or the crate's equivalent);
+    - the result validates (`core_model::rules::validate(doc).is_empty()`);
     - the preview counts equal the decisions;
     - one undo gives back ours exactly;
     - `vizdaw_only` is byte-equal.
@@ -729,10 +800,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - snapshot `ids` pointing at a lane that no longer exists in ours (it is treated as deleted here);
     - ids pointing at the wrong kind (ignored, `TAGS_IGNORED`);
     - two ids naming one lane (the first wins);
-    - a 4 000 000-entry ids map (reads, under 2 s);
-    - one entry more (`SNAPSHOT_DAMAGED`).
-  - `merge_fuzz.rs`: byte damage (flip, insert, delete, truncate) on three returned packages from Task 6's cases, and on their snapshot JSON (`VIZDAW_FUZZ_CASES`, default 256). Each case is refused or merges with a report: never a panic, never `Internal`, under 2 s and 256 MiB (`common::measure`).
-- [ ] **Step 2: Run** `cargo test -p core-io --test dawproject_merge --test dawproject_merge_fuzz`. Expected: FAIL where a variant exposes a gap (fix in Tasks 4–6's code; say which in the report). If every new test passes at once, say so and show one mutation that makes `edit_scripts…` fail.
+    - a huge ids map, at lowered limits through `read_snapshot_with` (`max_ids: 1 000`): 1 000 entries read and merge, and 1 001 are `SNAPSHOT_DAMAGED`. The real limit is Task 1's asserted constant: a 4 000 000-entry map is about 600 MB as a `BTreeMap`, past this case's 256 MiB bound.
+  - `merge_fuzz.rs`: byte damage (flip, insert, delete, truncate) on three returned packages built with the harness from Task 6's cases, and on their snapshot JSON (`VIZDAW_FUZZ_CASES`, default 256). Each case is refused or merges with a report: never a panic, never `Internal`, under 2 s and 256 MiB (`common::measure`).
+- [ ] **Step 2: Run** `cargo test -p core-io --test dawproject_merge --test dawproject_merge_fuzz`. Expected: FAIL where a variant exposes a gap (fix in Tasks 4–6b's code; say which in the report). If every new test passes at once, say so and show one mutation that makes `edit_scripts…` fail.
 - [ ] **Step 3: Fix** what the runs find.
 - [ ] **Step 4: Run** `cargo test --workspace` and both clippies. Expected: PASS (about +60 Rust, counting variants).
 - [ ] **Step 5: Commit** `test(io): DAWproject merge without record or tags, edit-script properties, hostile records and fuzz (plan 6e Task 7)`.
@@ -741,17 +811,18 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 
 **Files:**
 - Modify:
-  - `crates/core-ffi/src/dawproject.rs` (requests, rows, `merge_body`, `merge_job`, `snapshot_rows`, sentences; factor 6d's `import_body` stages 5–7 into `read_and_convert`, used by both);
+  - `crates/core-ffi/src/dawproject.rs` (requests, rows, `merge_body`, `merge_job`, `snapshot_rows`, sentences). 6d's `import_body` after its open (the free-space check, extraction and conversion: stages 6–7) is factored into `read_and_convert(job, pkg, importer, files, progress, cancel)`, which both bodies call. Each job closure removes an empty `Media/.incoming` when its body ends, after a caught panic too;
   - `src/jobs.rs` (`JobKindRow::MergeDawproject`, `Work::MergeDawproject`, `JobRow.merge`);
   - `src/interchange.rs` (`ReportKindRow::Conflict`, `report_row`);
-  - `src/session.rs` (the methods, `held_merge`, `apply_jobs`' arm, `interchange_idle`'s kinds, close);
+  - `src/session.rs` (the methods, `held_merge`, `apply_jobs`' arm, `interchange_idle`'s and `Inner::media_jobs_idle`'s kinds, close);
   - `src/lib.rs` (exports);
+  - `crates/core-ffi/tests/dawproject.rs` and a new `crates/core-ffi/tests/common/dawproject.rs` (`#![allow(dead_code)]`, added to `common/mod.rs`). 6d's fixtures (`serial`, `project_with`, `project`, `wait_job`, `idle_until`, `listing`, `text`, `req`, the CLAP setup of `clap_state_round_trips`) move there, so both test files use one copy;
   - `app/Tests/VizDAWAppModelTests/FakeSession.swift`;
   - the Swift `switch`es named in Global Constraints.
 - Test: `crates/core-ffi/tests/dawproject_merge.rs`
 
 **Interfaces:**
-- Consumes: Tasks 1–7; 6d's `info`, `installed`, `plist()`, the live capture in `export_dawproject`.
+- Consumes: Tasks 1–7; 6d's `info`, `installed`, `plist()`, and `capture_for_export` (the live capture in `export_dawproject`).
 - Produces:
   ```rust
   #[derive(uniffi::Enum)] pub enum MergeStepRow { Preview, Hold, Apply }
@@ -782,15 +853,18 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `file_path(.., DAWPROJECT_FILE)`;
     - `date` matches `^\d{4}-\d{2}-\d{2}$` (else `Model` "the merge date must be YYYY-MM-DD");
     - `snapshot` is `None` or a project ID (`check_project_id`), else `Model` naming `snapshot`;
-    - captures every slot's live state (the export's carve-out);
-    - spawns with `history.clone()`, `present_serial()`, the root, the format, `reserved_names()`, `installed()`, the project ID, the request, and the 6d test hooks (`dawproject_cancel_at`, `dawproject_free`).
+    - captures every slot's live state (`capture_for_export`, the export's carve-out);
+    - spawns with `history.clone()`, `present_serial()`, the present document's `referenced_states()` and project ID (for the swap check, Ruling 12), the root, the format, `reserved_names()`, `installed()`, the request, and the 6d test hooks (`dawproject_cancel_at`, `dawproject_free`).
   - **The job** (inside `catch_unwind`; stages, for `debug_dawproject_cancel_at`):
     1. `open` (stage 5 after);
-    2. **the export:** the record head's export ID, else the metadata line's, else `req.snapshot`. With none → `needs_snapshot(snapshot rows)`. A record or line naming a different export than a given `req.snapshot` → `NOT_FROM_HERE`. A record head whose `project_id` differs from the project's → `NOT_FROM_HERE`. A file that is not `from_vizdaw` → `NOT_FROM_VIZDAW`;
-    3. `<root>/Interchange/<export id>.json` (lstat, a regular file) → `read(MAX_SNAPSHOT_BYTES)` → `read_snapshot`. Missing → `NOT_FROM_HERE`; damaged → `SNAPSHOT_DAMAGED`; its `project_id` differs from the project's → `NOT_FROM_HERE`;
+    2. **the export**, in this order:
+       - a file that is not `from_vizdaw` → `NOT_FROM_VIZDAW` (first, so a hand file never gets the snapshot sentence);
+       - a record head whose `project_id` differs from the project's → `NOT_FROM_HERE`;
+       - the export ID is the record head's, else the metadata line's, else `req.snapshot`. A record or line naming a different export than a given `req.snapshot` → `NOT_FROM_HERE`. With none → `needs_snapshot(snapshot rows)`;
+    3. `record::read_snapshot_file(root, export_id)`. Missing (`None`) → `NOT_FROM_HERE`; damaged → `SNAPSHOT_DAMAGED`; its `project_id` differs from the project's → `NOT_FROM_HERE`;
     4. `read_and_convert` (6d's free-space check, extract and convert; stages 6–7);
     5. `map` with `env.ids = Some(&snapshot.ids)` only when the record head names this export (stage 8 after);
-    6. `merge::theirs`, then `merge::plan` against the cloned history's document (stage 9 after);
+    6. `merge::theirs(imp, format, snapshot.origin, ..)`, then `merge::plan` against the cloned history's document, `chosen` when the export ID came from `req.snapshot` (stage 9 after). `SEQUENCE_GONE` fails the job;
     7. for `Hold` and `Apply`: `begin(LABEL)`, `apply_merge` (in `catch_unwind`), `commit` (stage 10 after).
 
     Returns `Work::MergeDawproject { files, result: Result<Box<Merged>, String> }`, where `Merged` holds the preview, the report, the step and, for `Hold`/`Apply`, the merged `History` and the serial.
@@ -799,37 +873,45 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `Apply` → the swap (below), Done with the report;
     - `Hold` → Done with `merge` set, kept in `inner.held_merge`.
 
-    The **swap** happens only when `present_serial()` equals the job's; otherwise the job is Failed with `CHANGED_SINCE`. Then `inner.history = merged`, `last_step` and `surfaces.tempo_step` cleared, the host synced, `interchange_report` set with verb "Merged", and the files no history state references removed (`remove_unkept`). This absorbs backlog row "DAWproject import clean-up": an empty `.incoming` is removed after every merge, and on a panic too.
+    The **swap** happens only when `present_serial()`, `referenced_states()` and the project ID equal the job's (Ruling 12); otherwise the job is Failed with `CHANGED_SINCE`. Then:
+    - `inner.history = merged`;
+    - `last_step` and `surfaces.tempo_step` are cleared and the host is synced;
+    - `interchange_report` is set to `report_row(&report, "Merged")` with its `summary` replaced by `text::summary(&preview)`, and `JobRow.report` holds the same row;
+    - the files no history state references are removed (`remove_unkept`).
+
+    The job closure's `.incoming` clean-up absorbs part of backlog row "DAWproject import clean-up". An empty `.incoming` is removed after every import or merge job, and after a panic too.
   - **`confirm_merge(job)`:** `Model` "no merge is waiting" for any other job. `Busy` while recording or in an open edit (the hold stays). The swap as above: on `CHANGED_SINCE` the hold and its files are dropped.
   - **`cancel_merge`, closing the session and a newer merge** drop the hold and remove its files.
 
-- [ ] **Step 1: Write the failing tests** in `core-ffi/tests/dawproject_merge.rs`. The fixture is 6d's `project()` saved as a package, exported; the returned file is edited with `core-io`'s schema reader and writer, as Task 4's harness does:
-  - `merge_applies_theirs_in_one_step`: `Apply` → Done, report summary "Merged: 3 applied, 0 kept, 0 added, 0 removed, 0 in conflict", the three edits in `debug_document_json`, `snapshot().undo_label == Some("Merge DAWproject")`; `undo` → the pre-merge JSON.
+- [ ] **Step 1: Write the failing tests** in `core-ffi/tests/dawproject_merge.rs`. The fixture is 6d's `project()` (from `common::dawproject`) saved as a package and exported. The returned file is edited with `core-io`'s schema reader and writer, as Task 4's harness does. Tests marked (macOS) need converted audio and are `#[cfg(target_os = "macos")]`:
+  - `merge_applies_theirs_in_one_step`: theirs moves a note, changes a strip's level and adds a marker. `Apply` → Done, with the report summary "Merged: 2 applied, 0 kept, 1 added, 0 removed, 0 in conflict" (a new marker is `Added`) and the three edits in `debug_document_json`. `snapshot().undo_label == Some("Merge DAWproject")`; `undo` → the pre-merge JSON.
   - `preview_changes_nothing`: `Preview` → `JobRow.merge` with the counts. The document JSON, the undo label and `Media/` listings are unchanged; there is no hold.
   - `hold_then_confirm`: `Hold` → Done with `merge` set. Nothing has changed yet; `confirm_merge(job)` → the report, and the document changed as `Apply` would.
-  - `hold_then_cancel_removes_its_media`: the returned file adds a region with new audio. After `cancel_merge` the `Media/` listing is as before.
+  - `hold_then_cancel_removes_its_media` (macOS): the returned file adds a region with new audio. After `Hold` the new media file is in `Media/`; after `cancel_merge` the `Media/` listing is as before.
   - `confirm_after_an_edit_is_refused` (Review Focus 3): `Hold`, then a rename → `confirm_merge` is `Model` `CHANGED_SINCE`, nothing applied, the hold gone.
-  - `confirm_while_recording_is_busy`: recording (6d's fake) → `Busy`; after stopping, `confirm_merge` works.
-  - `closing_drops_a_held_merge`: `Hold`, then `close` → the `Media/.incoming` and new media are gone.
+  - `a_step_free_capture_also_refuses` (CLAP test plug-in, as `merge_state_reaches_the_plugin`): `Hold`, then the running plug-in's parameter is changed in the instance and `export_dawproject_check` runs on the host's thread, which captures the new state with no undo step → `confirm_merge` is `CHANGED_SINCE`.
+  - `confirm_while_busy_keeps_the_hold`: `Hold`, then recording (6d's offline armed track) → `confirm_merge` is `Busy`. Inside `begin_edit` → `Busy`. After `end_edit` with no command (no step), `confirm_merge` gives the report and the document changed as `Apply` would.
+  - `closing_drops_a_held_merge` (macOS): `Hold` with new audio, then `close` → the `Media/.incoming` folder and the new media are gone.
   - `refusals_name_their_reason`, each Failed with the sentence:
     - another project's file (`NOT_FROM_HERE`);
     - the snapshot file deleted (`NOT_FROM_HERE`);
     - the snapshot truncated (`SNAPSHOT_DAMAGED`);
     - a hand "Fixture" file (`NOT_FROM_VIZDAW`);
     - a file with record and metadata line stripped and no `snapshot` → `needs_snapshot` naming the project's one snapshot with its date and track count;
-    - a `snapshot` naming another export than the record's (`NOT_FROM_HERE`).
+    - a `snapshot` naming another export than the record's (`NOT_FROM_HERE`);
+    - the exported sequence deleted here (`SEQUENCE_GONE`).
   - `chosen_snapshot_merges_a_stripped_file`: as above with `snapshot` → Done, with `SNAPSHOT_CHOSEN` and `BY_NAME` in the report.
   - `untitled_project_merges_from_its_temp_root`: export from an unsaved project, merge back into it → Done.
   - `snapshots_list_newest_first`: three exports → three `SnapshotRow`s, newest first, with track counts. `has_snapshot` is true for each, false for an unknown UUID and for `"../x"`.
   - `project_id_is_read`: saved project → `Some(id)`; `info(path)` of its export → `project_id` equal.
   - `cancel_at_every_stage_leaves_media_unchanged`: a cancel before the run, and at stages 5–10, each Cancelled. `Media/` and `Media/.incoming/` listings are unchanged, and so is the document JSON (each clears `debug_free_bytes` first).
-  - `busy_states_refuse`: recording, an open edit, a running export, a Convert job, and a held merge each make `merge_dawproject` `Busy`.
+  - `busy_states_refuse`: recording, an open edit, a running export, a Convert job, and a held merge each make `merge_dawproject` `Busy`; a running merge makes a Convert job `Busy`.
   - `hostile_requests`: 6d's path list (empty, relative, a directory, a FIFO, `/dev/zero`, a symlink loop, over 4 KiB, NUL, non-UTF-8), `date` "13/11/2026" and "", and `snapshot` "x" and 4 KiB of `a`. Each is `Model` or `Io`, never `Internal`. `confirm_merge(999)` and `cancel_merge(999)` give `Model`.
   - `conflict_rows_reach_swift`: a merge with a conflict → `report.items` holds a `ReportKindRow::Conflict` row with `CONFLICT_SETTING`.
   - `merge_state_reaches_the_plugin` (CLAP test plug-in, 6d's `clap_state_round_trips` setup): theirs sets parameter 0 to 0.75 → after the merge `debug_plugin_param(slot, 0) == 0.75`; after undo it reads the pre-merge value.
 - [ ] **Step 2: Run** `cargo test -p core-ffi --test dawproject_merge`. Expected: FAIL.
-- [ ] **Step 3: Implement** the items above, then `scripts/build-ffi.sh`. Add the Swift `switch` arms (`.mergeDawproject`; `.conflict` grouped as "Conflicts"). `FakeSession` gains the six methods with settable answers and logs.
-- [ ] **Step 4: Run** `cargo test --workspace`, `cargo clippy -p core-ffi --lib -- -D warnings`, both clippies, `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: PASS (about +18 Rust).
+- [ ] **Step 3: Implement** the items above, then `scripts/build-ffi.sh`. Add the Swift `switch` arms (`.mergeDawproject`; `.conflict` grouped as "Conflicts"). `FakeSession` gains the six methods with settable answers and logs. Move 6d's fixtures first and run `cargo test -p core-ffi --test dawproject` to see 6d unchanged.
+- [ ] **Step 4: Run** `cargo test --workspace`, `cargo clippy -p core-ffi --lib -- -D warnings`, both clippies (the Linux one sees the macOS-only tests gated), `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: PASS (about +20 Rust on macOS, 2 fewer on Linux).
 - [ ] **Step 5: Commit** `feat(ffi): DAWproject merge job with preview, hold and apply; snapshots and conflict rows (plan 6e Task 8)`.
 
 ### Task 9: The control channel: `mode`, `project`, `snapshot` and `preview` on `file.import_dawproject`
@@ -856,16 +938,19 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - "Return" ("the file came from VizDAW and no mode"; answered by `mode`);
     - "Open" ("merge with no matching open project"; answered by `project`).
   - **Swift, the `run` case:**
-    1. no `path` → `.dialog("Open", "path")`;
+    1. no `path` → `.failed(.dialog("Open", "path"))`;
     2. otherwise `.pending` reads `dawprojectInfo` off the main actor, then:
-       - `from_vizdaw` with no `mode` → `.dialog("Return", "mode")`;
+       - `from_vizdaw` with no `mode` → `.failed(.dialog("Return", "mode"))`;
        - `mode: merge` on a file not from VizDAW → `.failed(.of(.invalidParams, "file.import_dawproject: `mode` merge needs a file that came from VizDAW."))`;
        - `new` → 6d's `importDawprojectIntoNewProject`.
     3. **merge:**
-       - a `snapshot` that is not 36 lowercase hex-and-hyphen characters → `invalid_params` naming `snapshot`;
-       - the target is `project` when given. If its canonical path is an open document → `invalid_params` "file.import_dawproject: `project` is already open; leave out project to merge into it.". Otherwise it is opened through `store.open(path:)`; an alert there is `.failed(.alert)`.
-       - without `project`: `store.documentID(forProjectID: info.projectId)` ?? `store.documentHolding(exportID: info.exportId)` ?? `.dialog("Open", "project")`;
-       - then `.job(command:, doc: target, job: session.mergeDawproject(req: … step: preview ? .preview : .apply, date: MergeModel.today()))`.
+       - a `snapshot` that is not 36 lowercase hex-and-hyphen characters → `invalid_params` naming `snapshot`. This is a parameter-shape check before any session call, as `ppq`'s is in this file; the core's `check_project_id` still refuses on its own;
+       - the target is `project` when given:
+         - if its canonical path is an open document → `invalid_params` "file.import_dawproject: `project` is already open; leave out project to merge into it.";
+         - if it is not a folder (one lstat) → `invalid_params` "file.import_dawproject: `project` is not a VizDAW project.";
+         - otherwise it is opened as `file.open` opens it, with `ControlOpen.open(path:answers:store:command:)`, so its recovery questions answer as `dialog_required`. Any outcome other than `.opened` is returned as it is;
+       - without `project`: `store.documentID(forProjectID: info.projectId)` ?? `store.documentHolding(exportID: info.exportId)` ?? `.failed(.dialog("Open", "project"))`;
+       - then `.job(command:, doc: target, job: session.mergeDawproject(req: … step: preview ? .preview : .apply, date: MergeDate.today()))`.
     4. A project the command opened is closed again if the merge is refused before or by its job and it is untouched (`madeProjects`, as 6d's new projects).
   - ```swift
     // DocumentStore
@@ -873,6 +958,11 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     public func documentID(forProjectID id: String?) -> UUID?
     /// The most recently active open document holding snapshot `exportID` (nil for nil).
     public func documentHolding(exportID: String?) -> UUID?
+    // InterchangeCommands.swift (Task 10's MergeModel uses it too)
+    public enum MergeDate {
+        /// "yyyy-MM-dd", POSIX locale, current time zone: the request's `date`.
+        public static func today(_ now: Date = Date(), _ zone: TimeZone = .current) -> String
+    }
     ```
 
 - [ ] **Step 1: Write the failing tests.**
@@ -893,10 +983,11 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
       - `project` that is not a package (a plain file named `x.vizdaw`);
       - `snapshot` "x".
     - `mergeWhileTheTargetRecordsIsBusy`: the fake's `mergeDawproject` throws `Busy` → `busy`.
+    - `todayIsLocalISO`: `MergeDate.today` of a fixed `Date` in a fixed time zone → "2026-11-13", and the same instant in a zone a day ahead → "2026-11-14".
     - `everyRegisteredMenuCommandHasAHandler` passes.
 - [ ] **Step 2: Run** `cargo test -p core-control` and `scripts/swift.sh test --filter InterchangeCommands`. Expected: FAIL.
 - [ ] **Step 3: Implement** the items above.
-- [ ] **Step 4: Run** `cargo test -p core-control`, both clippies, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: PASS (registry 175; about +3 Rust, +9 Swift).
+- [ ] **Step 4: Run** `cargo test -p core-control`, both clippies, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: PASS (registry 175; about +3 Rust, +10 Swift).
 - [ ] **Step 5: Commit** `feat(control): merge parameters and the Return dialog on file.import_dawproject (plan 6e Task 9)`.
 
 ### Task 10: The app's model: the return prompt's state, `MergeModel` and the Conflicts group
@@ -906,6 +997,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 - Modify:
   - `app/Sources/VizDAWAppModel/DocumentStore.swift` (`returnPrompt`, `answerReturn`, `chooseMergeProject`; `dawprojectRead` routes a from-VizDAW file to the prompt);
   - `DocumentModel.swift` (lazy `merge`, as `dawproject`);
+  - `ProjectMedia.swift` (the job loop routes a `.mergeDawproject` row to `merge.jobDone(r)` and `merge.jobFailed(r, message:)`, beside `dawproject`'s; never to `interchange.jobEnded`);
   - `ForDawModel.swift` (`blocking` gains `.mergeDawproject`);
   - `Interchange.swift` (`ReportText.groups`: "Conflicts" first);
   - `app/Tests/VizDAWAppModelTests/DocumentStoreTests.swift`, `InterchangeTests.swift`.
@@ -920,7 +1012,9 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   }
   public enum ReturnChoice: Sendable { case newProject, merge, cancel }
   // DocumentStore
-  public private(set) var returnPrompt: ReturnPrompt?   // set only by UI opens (openDawproject); the app shows it
+  // Set by `openDawproject` for a file from VizDAW: the UI's opens, and the channel's `file.open`
+  // (through `open(path:)`), for which the app's `ReturnPrompts` shows nothing and answers Cancel.
+  public private(set) var returnPrompt: ReturnPrompt?
   /// New Project: 6d's path. Merge: into `match`, else `chooseMergeProject()` (an Open panel the app sets;
   /// nil → nothing), opened with `open(path:)` or found open, then `merge.begin`. Cancel: nothing.
   public func answerReturn(_ choice: ReturnChoice)
@@ -940,10 +1034,12 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
       public func confirm()            // confirmMerge(job:) → InterchangeModel.report shows the report; closes
       public func cancel()             // cancels a running job or cancelMerge(job:); closes
       public func settle() async
-      public static func today(_ now: Date = Date()) -> String   // "yyyy-MM-dd", POSIX locale, current time zone
+      func jobDone(_ job: JobRow)                          // from ProjectMedia's loop
+      func jobFailed(_ job: JobRow, message: String) -> Bool
   }
   ```
-  - `MergeModel` follows `DawprojectModel`: detached reads with a generation counter, and its job watched through the document's job polling. A Done job with `merge` sets `preview`; a Failed one sets `error`.
+  - `MergeModel` follows `DawprojectModel`: detached reads with a generation counter, and its job watched through the document's job polling. A Done job with `merge` sets `preview`; a Failed one sets `error`. The request's `date` is `MergeDate.today()` (Task 9).
+  - With no export ID and an empty snapshot list, `begin` still sends the Hold job with no snapshot. Its failure carries the core's sentence (`needs_snapshot` of none, `NOT_FROM_HERE`), so Swift never builds it.
 
 - [ ] **Step 1: Write the failing tests.**
   - `DocumentStoreTests`:
@@ -952,15 +1048,15 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - `newProjectAnswerOpensAsSixD`: `.newProject` → one `newProject` at the info's rate and one `importDawproject`.
     - `mergeAnswerGoesToTheMatch`: `.merge` → the match's `merge.shown` is true and one `mergeDawproject(step: .hold)` was sent.
     - `mergeWithoutAMatchAsksForAProject`: `chooseMergeProject` returns a path → one open of it, then `begin` on it; returning nil → nothing.
-    - `cancelAnswerDoesNothing`.
+    - `cancelAnswerDoesNothing`: `.cancel` → `returnPrompt` is nil, and no `newProject`, `open`, `importDawproject` or `mergeDawproject` call was made.
   - `MergeModelTests`:
     - `previewArrivesFromTheHeldJob`: the fake's job ends Done with a `MergePreviewRow` → `preview` set, `running` false.
     - `aLostExportIDListsSnapshotsOffTheMainActor`: info `exportId: nil` → `snapshots` filled after `settle()`, no job sent. Setting `chosenSnapshot` → one `mergeDawproject` with that snapshot.
-    - `noSnapshotsShowsTheSentence`: an empty list → `error` is the core's `NOT_FROM_HERE` sentence (from the fake's settable answer), and Merge is unavailable.
+    - `noSnapshotsShowsTheSentence`: an empty list → one `mergeDawproject` with no snapshot. The fake's job fails with its settable message (the core's `NOT_FROM_HERE`), `error` is that message, and Merge is unavailable.
     - `confirmShowsTheReport`: → one `confirmMerge(job:)`; `document.interchange.report` is the returned row; `shown` false.
     - `aRefusedConfirmShowsTheSentence` (Review Focus 3): `confirmMerge` throws "The project changed after the preview; preview the merge again." → `error` is that text and the sheet stays.
     - `cancelSendsCancelMerge`: with a held job → one `cancelMerge(job:)`. With a running job → one cancel of it.
-    - `todayIsLocalISO`: a fixed `Date` and time zone → "2026-11-13".
+    - `aDoneHoldDoesNotOpenTheReport`: the Hold job ends Done → `document.interchange.reportShown` stays false.
   - `InterchangeTests`: `conflictsComeFirst`: a report with every kind → groups "Conflicts", "Changed", "Left out", "Notes"; `plain` lists them in that order.
 - [ ] **Step 2: Run** `scripts/swift.sh test --filter Merge`, `--filter DocumentStore` and `--filter Interchange`. Expected: FAIL.
 - [ ] **Step 3: Implement** the items above.
@@ -972,12 +1068,13 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 **Files:**
 - Create: `app/Sources/VizDAW/MergeSheet.swift`
 - Modify:
-  - `app/Sources/VizDAW/AppCommands.swift` (`ReturnPrompts.watch`, beside `StoreAlerts`);
-  - `app/Sources/VizDAW/ProjectPanels.swift` (`chooseProjectToMerge()`, an Open panel for `.vizdaw` packages through 6b's panel helper; set as `store.chooseMergeProject` at launch);
-  - `app/Sources/VizDAW/DocumentView.swift` (the sheet's presentation);
-  - `app/Sources/VizDAW/ReportSheet.swift` (the "Conflicts" group's look);
+  - `app/Sources/VizDAW/AppCommands.swift` (`ReturnPrompts`, beside `StoreAlerts`);
+  - `app/Sources/VizDAW/ProjectPanels.swift` (`Panels.chooseProjectToMerge()` in its `extension Panels`: an Open panel for `.vizdaw` packages, set up as `Panels.chooseProject()` sets up its package choice);
+  - `app/Sources/VizDAW/VizDAWApp.swift` (at launch, beside `StoreAlerts.watch(appStore)`: `ReturnPrompts.watch(appStore)` and `appStore.chooseMergeProject = Panels.chooseProjectToMerge`);
+  - `app/Sources/VizDAW/DocumentView.swift` (the sheet's presentation, as `DawprojectSheet`'s);
+  - `app/Sources/VizDAW/ReportSheet.swift` (the "Conflicts" group's look; the title "Merge Report" when the summary starts "Merged" or is "Nothing to merge…", as it reads "Imported" and "Exported" now);
   - `crates/core-ffi/tests/dawproject_merge.rs` (`write_merge_demo`, ignored);
-  - `crates/vizctl/tests/e2e.rs` (6d's `dawproject_round_trip_over_the_channel` passes `mode: "new"` in step 5 and uses `mode: "fuse"` in step 2, Ruling 16; a new test);
+  - `crates/vizctl/tests/e2e.rs`. In 6d's `dawproject_round_trip_over_the_channel`, the hostile call with `mode: "merge"` becomes `mode: "fuse"`, and the import back as a new project passes `mode: "new"` (Ruling 16). A new test is added;
   - `app/README.md`, `docs/feature-backlog.md`.
 
 **Interfaces:**
@@ -986,7 +1083,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - **`ReturnPrompts`** (`@MainActor enum`):
     - watches `store.returnPrompt` as `StoreAlerts` watches `store.alert`;
     - shows an `NSAlert` with Ruling 14's texts and the buttons in that order, then calls `store.answerReturn`;
-    - under `ControlChannel.active` it shows nothing, calls `ControlChannel.note` with "A DAWproject from VizDAW was opened; it was not merged" and answers `.cancel`.
+    - under `ControlChannel.active` it shows nothing, calls `ControlChannel.note(AlertItem(title: "DAWproject Not Merged", message: "A DAWproject from VizDAW was opened; it was not merged."))` and answers `.cancel`.
   - **`MergeSheet`:**
     - title "Merge DAWproject";
     - while running, "Reading the file…" with a progress bar and Cancel;
@@ -998,20 +1095,21 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     Theme tokens; every control accessibility-labelled.
 
 - [ ] **Step 1: Write the e2e** `dawproject_merge_over_the_channel` (`#[ignore = "needs a window server and VIZDAW_E2E_APP"]`, throwaway home, offline):
-  1. `app.new_demo`; `file.save_as {path: <home>/demo.vizdaw}`; `file.export_dawproject {path: <home>/demo.dawproject}` → Done.
+  1. `command.run` `file.create_demo` (as 6d's e2e starts); `file.save_as {path: <home>/demo.vizdaw}`; `file.export_dawproject {path: <home>/demo.dawproject}` → Done.
   2. `file.import_dawproject {path}` → `dialog_required` "Return". With `mode: "merge", snapshot: "x"` → `InvalidParams` naming `snapshot`. With `mode: "merge", project: <home>/demo.vizdaw` → `InvalidParams` (already open). `window_numbers` is unchanged after them.
-  3. `{path, mode: "merge", preview: true}` → the job's report summary is "Nothing to merge: the file matches the project.". `state.get document`'s undo label is unchanged.
+  3. `{path, mode: "merge", preview: true}` → the job's report summary is "Nothing to merge: the file matches the project.". `state.get document`'s `undo` is unchanged.
   4. `{path, mode: "merge"}` → Done, the same summary, no new undo step, no new window.
   5. `file.interchange_report` returns that report.
   6. `{path, mode: "new"}` → a new window with the demo's track count (6d's path still works).
-- [ ] **Step 2: Add the merge demo writer** `write_merge_demo` (`#[ignore]`, runs only with `VIZDAW_MERGE_DEMO=<dir>`, which must be an empty existing folder outside `~/Library`). It writes `<dir>/Merge Demo.vizdaw` (Task 8's fixture with a keyboard slot, an input effect and a second sequence) and `<dir>/Returned.dawproject`:
+- [ ] **Step 2: Add the merge demo writer** `write_merge_demo` (`#[ignore]`, runs only with `VIZDAW_MERGE_DEMO=<dir>`, which must be an empty existing folder outside `~/Library`). It writes `<dir>/Merge Demo.vizdaw` and `<dir>/Returned.dawproject`. The project is built for it, since 6d's `project()` has only "Mono" and "Stereo". It has note tracks "Bass", "Drums" and "Keys", a keyboard slot, an input effect and a second sequence, and is saved through a `Session` as Task 8's fixture is. The returned file has:
   - a note moved;
   - the "Bass" level changed;
   - a marker "Bridge" added;
   - a level conflict on "Drums" and a notes conflict on "Keys" (the project changes them after the export).
 
   It also writes `<dir>/Other.dawproject`, 6d's hand fixture `hand_other` packaged, and prints the three paths. Run it once to see it work.
-- [ ] **Step 3: Add README checks 291–299** after 290, under "### DAWproject merge (plan 6e)". Start with a line naming the tests that cover the rest:
+- [ ] **Step 3: Amend README checks 286 and 287.** A VizDAW export now prompts. 286 becomes: "… with the file from 283. The prompt of 292 appears; choose New Project. A new untitled window opens, with: …". 287 does what 286 does, through the same prompt.
+- [ ] **Step 3b: Add README checks 291–299** after 290, under "### DAWproject merge (plan 6e)". Start with a line naming the tests that cover the rest:
   - `core-io`'s `dawproject_merge*.rs`;
   - `core-ffi/tests/dawproject_merge.rs`;
   - `MergeModelTests`, `DocumentStoreTests`, `InterchangeCommandsTests`;
@@ -1025,7 +1123,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
   - 295: Merge: the note moved, the "Bass" level changed and the "Bridge" marker arrived. "Drums" keeps its level. "Keys" has a take "Returned <today>" that is not active. The report opens with "Conflicts" first. The keyboard slot, the input effect and the second sequence are still there.
   - 296: Edit › Undo Merge DAWproject restores everything from 295 in one step; Redo brings it back.
   - 297: Close the project. Drop `Returned.dawproject` on the Dock icon: the prompt says no project is open. Merge With Existing Project… shows an Open panel; choose `Merge Demo.vizdaw`; it opens and the sheet follows.
-  - 298: Merge the same file a second time: the sheet's counts show nothing applied again, and no new take appears.
+  - 298: Merge the same file a second time. The sheet lists the same two conflicts and nothing added or removed. After Merge, "Keys" has no second "Returned" take, and Edit › Undo's label is what it was before (Ruling 6: nothing ran).
   - 299: Open `Other.dawproject` from the demo folder (a file from another source): no prompt; it opens as a new project.
   - **Owner check (manual, only the owner can do; spec §12, 6e's part):**
     - export the demo song;
@@ -1040,7 +1138,7 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
     - "DAWproject merge: format 1 snapshots" (Ruling 3: drop the heuristic base path once no format-1 snapshots remain).
   - **Absorbed 6d rows:**
     - in "DAWproject: the import applies on the main thread", append "Plan 6e: merges build their history on the job thread and swap it in (Ruling 12); the new-project import still applies on the main thread";
-    - in "DAWproject import clean-up", append "Plan 6e: the shared read-and-convert stage removes an empty `.incoming` after every job and after a panic".
+    - in "DAWproject import clean-up", append "Plan 6e: the import and merge job closures remove an empty `.incoming` after every job, a caught panic included (Task 8)".
 - [ ] **Step 5: Run all the gates:**
   - `cargo fmt --all -- --check`;
   - both clippies and `cargo clippy -p core-ffi --lib -- -D warnings`;
@@ -1057,17 +1155,18 @@ These are this plan's decisions where the spec leaves a choice. Each names its c
 - **Spec coverage (6e's row of §13):**
   - **The prompt** (§7.8, §9; owner) → Ruling 14, Tasks 10–11. **When it appears** → Ruling 16, 6d's `from_vizdaw`.
   - **Finding the project:** the open match, the Open panel, refusals and the snapshot list → Ruling 13 and Tasks 8–10.
-  - **Matching:** tracks and strips by tag, record ID, name and order; notes within a tick; clips by tag or media plus position; markers; automation; maps; song info; shared sequences → Rulings 4 and 8, Tasks 2, 4 and 6.
-  - **The merge rules table,** every row → Ruling 5 and Task 5; applied → Task 6. **Owner: VizDAW wins** → Rulings 5–6.
+  - **Matching:** tracks and strips by tag, record ID, name and order; notes within a tick; clips by tag or media plus position; markers; automation; maps; song info; shared sequences → Rulings 4 and 8, Tasks 2, 4, 6 and 6b.
+  - **The merge rules table,** every row → Ruling 5 and Task 5; applied → Tasks 6 and 6b. **Owner: VizDAW wins** → Rulings 5–6.
   - **What a merge takes and always keeps** → Rulings 5, 10 and 11, Task 6's `vizdaw_only_state_is_byte_equal`.
   - **One undo step, one batch, staged media** → Ruling 12, Global Constraints, Tasks 6 and 8.
   - **The preview page** → Rulings 12 and 14, Tasks 8, 10 and 11. **The Conflicts group** → Ruling 15, Tasks 1, 8 and 10.
   - **AAF does not merge:** nothing to build here.
   - **§6.1 merge row** → Task 8. **§6.2** jobs and staging → Task 8. **§6.3** → Ruling 15. **§6.5** → Ruling 17, Tasks 1 and 7.
   - **§10:** `mode`, `project`, `snapshot`, `preview`, `dialog_required` "Return" and "Open", every listed hostile case → Task 9 (with Task 8's core refusals).
-  - **§11** → each refusal sentence. **§12 Merge (6e):** three-way tests, stripped variants, proptest edit scripts, hostile records → Tasks 5–7; the e2e, README checks and owner check → Task 11.
+  - **§11** → each refusal sentence. **§12 Merge (6e):** three-way tests, stripped variants, proptest edit scripts, hostile records → Tasks 5–7 (with 6b); the e2e, README checks and owner check → Task 11.
 - **Deliberately not here:** the AAF and OMF routes (6f, 6h), Multi-Q and its `Equalizer` mapping (6g), single-note conflicts, and merging replaced audio (backlog rows, Task 11).
-- **Names are consistent across tasks:** every name used in a later task is one an earlier task's Interfaces block produces (checked: `Identity`, `TrackIds`, `EventAt`, `UseAt`, `StripIds`, `Origins`, `apply_tagged`, `Theirs`, `Matched`, `Matches`, `MatchedBy`, `MergePlan`, `MergePreview`, `Decision`, `Outcome`, `Unit`, `apply_merge`, `LABEL`, `MergeStepRow`, `DawprojectMergeRequestRow`, `MergePreviewRow`, `SnapshotRow`, `ReturnPrompt`, `ReturnChoice`, `MergeModel`).
+- **Names are consistent across tasks:** every name used in a later task is one an earlier task's Interfaces block produces (checked: `Identity`, `TrackIds`, `EventAt`, `UseAt`, `StripIds`, `Origins`, `apply_tagged`, `Theirs`, `Matched`, `Matches`, `MatchedBy`, `MergePlan`, `MergePreview`, `Decision`, `Outcome`, `Unit`, `apply_merge`, `LABEL`, `MergeStepRow`, `DawprojectMergeRequestRow`, `MergePreviewRow`, `SnapshotRow`, `SnapshotLimits`, `read_snapshot_with`, `read_snapshot_file`, `SEQUENCE_GONE`, `return_file`, `media_of`, `package_bytes_with`, `common::generators`, `common::dawproject` (core-ffi), `MergeDate`, `ReturnPrompt`, `ReturnChoice`, `MergeModel`). Task 9 defines `MergeDate` because its run case needs the date before Task 10 makes `MergeModel`.
+- **Pre-flight (2026-11-12):** checked against the tree at `d2538ad`; the mismatches and problems it found are fixed in this text (`.superpowers/sdd/2026-11-13-dawproject-merge/preflight.md`).
 - **Review Focus:** each line names its tests in the owning task.
 - **Spec conflicts and questions for the owner.** Owner answers (2026-11-13): items 2 and 4 confirmed as ruled. Items 1, 3 and 5 are the controller's calls (the keep list wins; the file cannot carry gain; 6d's threshold kept).
   1. Ruling 7: a track the other DAW deleted is kept, emptied, when it holds what the file cannot carry. The spec's table says "Removed", but its keep list says inactive takes and input effects always stay.
