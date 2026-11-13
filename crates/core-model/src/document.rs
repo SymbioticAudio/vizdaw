@@ -583,6 +583,12 @@ impl Document {
         self.states.get(&id).map(|b| &b[..])
     }
 
+    /// State blob `id` as stored, when loaded: shared, not copied, so a
+    /// reader can tell the same bytes by pointer.
+    pub fn state_arc(&self, id: StateBlobId) -> Option<Arc<[u8]>> {
+        self.states.get(&id).cloned()
+    }
+
     /// Every blob a plugin slot points at.
     pub fn referenced_states(&self) -> BTreeSet<StateBlobId> {
         let insts = self.instruments.values().filter_map(|d| match &d.kind {

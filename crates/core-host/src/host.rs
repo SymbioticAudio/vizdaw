@@ -121,9 +121,7 @@ impl Want {
         Want {
             plugin: slot.plugin.clone(),
             instrument,
-            state: slot
-                .state
-                .and_then(|id| doc.state_blob(id).map(|b| (id, Arc::from(b)))),
+            state: slot.state.and_then(|id| doc.state_arc(id).map(|b| (id, b))),
             params: slot.params.iter().map(|(k, v)| (*k, *v)).collect(),
         }
     }
@@ -155,6 +153,9 @@ struct Live {
     processor: Option<usize>,
     /// The state blob last loaded into it.
     applied_state: Option<StateBlobId>,
+    /// Its bytes: a blob whose ID is unchanged but whose bytes differ (a
+    /// hash collision from a hostile file) is loaded again, not skipped.
+    applied_bytes: Option<Arc<[u8]>>,
     /// Parameter values before the overlay (to restore when an overlay
     /// entry goes away, e.g. on undo).
     base: BTreeMap<ParamId, f64>,
@@ -942,6 +943,7 @@ impl PluginHost {
             active: false,
             processor: None,
             applied_state: None,
+            applied_bytes: None,
             base: BTreeMap::new(),
             defaults: None,
             sent: BTreeMap::new(),
@@ -953,7 +955,10 @@ impl PluginHost {
         // State first, then the overlay (spec §4).
         if let Some((sid, bytes)) = &want.state {
             match live.inst.load_state(bytes) {
-                Ok(()) => live.applied_state = Some(*sid),
+                Ok(()) => {
+                    live.applied_state = Some(*sid);
+                    live.applied_bytes = Some(bytes.clone());
+                }
                 Err(e) => r.rejected_state.push((id, e.to_string())),
             }
         }
@@ -1382,6 +1387,7 @@ impl PluginHost {
             .capture_state_keeping(id, &bytes, &keep)
             .map_err(|e| HostError::StateRejected(e.to_string()))?;
         live.applied_state = Some(blob);
+        live.applied_bytes = history.doc().state_arc(blob);
         // The overlay, and values the document had not caught up with, are
         // now part of the state; a kept parameter's are not.
         let sent = std::mem::take(&mut live.sent);
@@ -1391,7 +1397,7 @@ impl PluginHost {
         // The document's overlay; as sent, so `apply_want` leaves what the
         // plugin plays alone.
         live.sent.clone_from(&keep);
-        want.state = history.doc().state_blob(blob).map(|b| (blob, Arc::from(b)));
+        want.state = history.doc().state_arc(blob).map(|b| (blob, b));
         want.params = keep;
         Ok(blob)
     }
@@ -1612,6 +1618,16 @@ fn flush_gesture(id: PluginInstanceId, l: &mut Live, out: &mut Vec<Gesture>) {
     }
 }
 
+/// Whether the wanted state's bytes are the ones `l` last loaded, for
+/// equal blob IDs (plan 6e Task 3 fix round 1). The document shares its
+/// blobs, so this is a pointer test except after a hash collision.
+fn same_bytes(want: &Want, l: &Live) -> bool {
+    match (&want.state, &l.applied_bytes) {
+        (Some((_, w)), Some(a)) => Arc::ptr_eq(w, a) || w[..] == a[..],
+        _ => true,
+    }
+}
+
 /// Brings a running instance in line with what the document wants: a new
 /// state blob is loaded (an undo past a capture; no blob restores the
 /// values it was loaded with), then overlay values that changed are sent
@@ -1622,11 +1638,12 @@ fn flush_gesture(id: PluginInstanceId, l: &mut Live, out: &mut Vec<Gesture>) {
 /// 15).
 fn apply_want(l: &mut Live, want: &Want) {
     let want_state = want.state.as_ref().map(|(id, _)| *id);
-    if want_state != l.applied_state {
+    if want_state != l.applied_state || !same_bytes(want, l) {
         match &want.state {
             Some((sid, bytes)) => {
                 if l.inst.load_state(bytes).is_ok() {
                     l.applied_state = Some(*sid);
+                    l.applied_bytes = Some(bytes.clone());
                     l.base = current_values(l.inst.as_mut());
                     l.sent.clear();
                     l.pending.clear();
@@ -1645,6 +1662,7 @@ fn apply_want(l: &mut Live, want: &Want) {
                     }
                     if all {
                         l.applied_state = None;
+                        l.applied_bytes = None;
                         l.base = defaults;
                         l.pending.clear();
                     }

@@ -170,6 +170,8 @@ pub enum MixerCmd {
     /// Set a plug-in instance's saved settings, with undo (plan 6e Ruling 10): the blob
     /// `state::blob_id(bytes)` is stored, the slot points at it, and its parameter overlay is
     /// cleared. Refused for an unknown slot or empty bytes; placeholder slots are allowed.
+    /// Also refused over `state::MAX_STATE_BYTES`, or when another blob already has that
+    /// ID with other bytes (a hash collision; nothing is overwritten).
     SetPluginState {
         /// The instance (an insert, an EQ or an instrument's own slot).
         slot: PluginInstanceId,
@@ -383,7 +385,11 @@ pub(crate) fn apply(d: &mut Document, cmd: &MixerCmd, r: &mut Report) -> Result<
             if bytes.is_empty() {
                 return Err(ModelError::invalid("plugin settings are empty"));
             }
-            crate::state::store(d, *slot, bytes, &BTreeMap::new())?;
+            let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if len > crate::state::MAX_STATE_BYTES {
+                return Err(ModelError::range("plugin settings bytes", len));
+            }
+            crate::state::store(d, *slot, bytes.clone(), &BTreeMap::new())?;
         }
         MixerCmd::SetColour { strip, colour } => {
             d.mixer_mut().strip_mut(*strip)?.colour = *colour;

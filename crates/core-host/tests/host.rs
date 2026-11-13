@@ -783,6 +783,42 @@ fn sync_loads_a_changed_state_and_the_undone_one() {
     drop(engine);
 }
 
+/// Task 3 fix round 1: a document whose blob keeps its ID but holds other
+/// bytes (a hash collision, made here by editing a saved package's blob
+/// file) is loaded again; the host does not skip it on the ID alone.
+#[test]
+fn sync_reloads_a_state_whose_id_is_the_same_but_bytes_differ() {
+    use core_model::state::{blob_file_name, blob_id};
+    let (mut hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    hist.capture_state(id, b"0=0.25;").unwrap();
+    host.sync(hist.doc());
+    assert_eq!(script.held(GAIN), 0.25);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let pkg = std::env::temp_dir().join(format!(
+        "vizdaw-host-collide-{}-{nanos}.vizdaw",
+        std::process::id()
+    ));
+    core_model::file::save(hist.doc(), &pkg).unwrap();
+    let a = blob_id(b"0=0.25;");
+    std::fs::write(pkg.join("PluginState").join(blob_file_name(a)), b"0=0.75;").unwrap();
+    let tampered = core_model::file::load(&pkg);
+    let _ = std::fs::remove_dir_all(&pkg);
+    let tampered = tampered.unwrap();
+    assert_eq!(tampered.plugin_slot(id).unwrap().state, Some(a));
+    host.sync(&tampered);
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.75, "same ID, other bytes: reloaded");
+    // Back to the first document: reloaded again.
+    host.sync(hist.doc());
+    assert_eq!(script.held(GAIN), 0.25);
+    drop(engine);
+}
+
 #[test]
 fn unpaired_gesture_events_still_become_gestures() {
     let (hist, song, id, mut host, script) = with_fake();

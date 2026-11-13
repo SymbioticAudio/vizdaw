@@ -303,10 +303,66 @@ fn set_plugin_state_is_one_undoable_step() {
     assert_eq!(h.doc().plugin_slot(slot).unwrap().state, Some(a));
     assert_eq!(overlay(h.doc(), slot), vec![(ParamId(3), 0.5)]);
     assert_eq!(h.doc().state_blob(a), Some(&b"state-A"[..]));
+    assert!(h.doc().missing_states().is_empty());
     h.redo().unwrap();
     assert_eq!(h.doc().plugin_slot(slot).unwrap().state, Some(b));
     assert!(overlay(h.doc(), slot).is_empty());
     assert_eq!(h.doc().state_blob(b), Some(&b"state-B"[..]));
+    assert!(h.doc().missing_states().is_empty());
+}
+
+/// Hostile input (Task 3 fix round 1): a blob ID already held with other
+/// bytes is a hash collision. The command is refused, and the slot that
+/// holds the blob keeps its bytes. The collision is made by a package
+/// whose blob file was edited (load trusts the file name).
+#[test]
+fn set_plugin_state_refuses_a_colliding_blob() {
+    let (h, insert) = with_insert(b"state-A");
+    let pkg = temp_package("collide");
+    save(h.doc(), &pkg).unwrap();
+    let a = blob_id(b"state-A");
+    let file = pkg.join("PluginState").join(blob_file_name(a));
+    std::fs::write(&file, b"other bytes").unwrap();
+    let tampered = load(&pkg).unwrap();
+    let _ = std::fs::remove_dir_all(&pkg);
+    assert_eq!(tampered.state_blob(a), Some(&b"other bytes"[..]));
+    // The instrument's slot asks for bytes whose ID is `a`.
+    let cmd = set_state(PluginInstanceId(0), b"state-A");
+    let _: core_model::error::ModelError = apply(&tampered, &cmd).unwrap_err();
+    let mut h2 = History::new(tampered.clone());
+    assert!(h2.execute(&cmd, &ViewFilter::default()).is_err());
+    assert_eq!(h2.doc(), &tampered, "unchanged");
+    assert_eq!(h2.undo_depth(), 0, "no step");
+    assert_eq!(h2.doc().plugin_slot(insert).unwrap().state, Some(a));
+    assert_eq!(h2.doc().state_blob(a), Some(&b"other bytes"[..]));
+    // Without the edit the same ID holds the same bytes: no collision, and
+    // both slots share the blob.
+    let same = apply(h.doc(), &set_state(PluginInstanceId(0), b"state-A")).unwrap();
+    assert_eq!(same.doc.state_blob(a), Some(&b"state-A"[..]));
+    assert_eq!(same.doc.plugin_slot(insert).unwrap().state, Some(a));
+}
+
+/// Hostile input (Task 3 fix round 1): a state is at most
+/// `MAX_STATE_BYTES`, the import's per-state cap.
+#[test]
+fn set_plugin_state_caps_the_size() {
+    use core_model::state::MAX_STATE_BYTES;
+    assert_eq!(MAX_STATE_BYTES, 64 * 1024 * 1024);
+    let (h, slot) = with_insert(b"state-A");
+    let cap = usize::try_from(MAX_STATE_BYTES).unwrap();
+    let big: std::sync::Arc<[u8]> = vec![7u8; cap + 1].into();
+    let over = Command::Mixer(MixerCmd::SetPluginState {
+        slot,
+        bytes: big.clone(),
+    });
+    let _: core_model::error::ModelError = apply(h.doc(), &over).unwrap_err();
+    let at = Command::Mixer(MixerCmd::SetPluginState {
+        slot,
+        bytes: big[..cap].into(),
+    });
+    let d = apply(h.doc(), &at).unwrap().doc;
+    let id = d.plugin_slot(slot).unwrap().state.unwrap();
+    assert_eq!(d.state_blob(id).map(<[u8]>::len), Some(cap));
 }
 
 /// Hostile input: an unknown slot and empty bytes are refused, and the

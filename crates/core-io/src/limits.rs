@@ -62,8 +62,9 @@ pub const MAX_RECORD_BYTES: u64 = 256 * 1024 * 1024;
 /// Largest snapshot (`Interchange/<export id>.json`) a merge reads, in
 /// bytes (plan 6e Ruling 17).
 pub const MAX_SNAPSHOT_BYTES: usize = 256 << 20;
-/// Largest plug-in state entry, unpacked, in bytes (§6.5).
-pub const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest plug-in state entry, unpacked, in bytes (§6.5). Shared with
+/// `MixerCmd::SetPluginState`'s cap (plan 6e Task 3).
+pub const MAX_STATE_BYTES: u64 = core_model::state::MAX_STATE_BYTES;
 /// Most bytes of plug-in state one import holds at once, all states
 /// together (states shared by several plug-ins count once).
 pub const MAX_STATE_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
