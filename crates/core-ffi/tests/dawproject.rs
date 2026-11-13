@@ -1773,6 +1773,70 @@ fn import_refused_files() {
     );
 }
 
+/// Final review C1: an AU state that is a binary property list (here a
+/// few hundred bytes whose shared arrays would write out terabytes) is
+/// refused before it is converted: the import ends at once with the
+/// plug-in in place, no settings, and a Left out line saying why.
+#[cfg(target_os = "macos")]
+#[test]
+fn binary_au_state_is_refused_unconverted() {
+    let _g = serial();
+    let t = target();
+    let dir = t.dir.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    // `{k: A0}`, each `Ai = [Ai+1, Ai+1]`, 40 deep (bplist00, one-byte
+    // offsets and references).
+    let mut bomb = b"bplist00".to_vec();
+    let mut offsets = Vec::new();
+    let mut objects = vec![vec![0xD1u8, 1, 2], vec![0x51, b'k']];
+    for i in 0..40u8 {
+        objects.push(vec![0xA2, 3 + i, 3 + i]);
+    }
+    objects.push(vec![0xA0]);
+    for o in &objects {
+        offsets.push(u8::try_from(bomb.len()).unwrap());
+        bomb.extend_from_slice(o);
+    }
+    let table = bomb.len() as u64;
+    bomb.extend_from_slice(&offsets);
+    bomb.extend_from_slice(&[0, 0, 0, 0, 0, 0, 1, 1]);
+    bomb.extend_from_slice(&(objects.len() as u64).to_be_bytes());
+    bomb.extend_from_slice(&0u64.to_be_bytes());
+    bomb.extend_from_slice(&table.to_be_bytes());
+    assert!(bomb.len() < 1024);
+    let project = audio_project(&[]).replace(
+        r#"<Channel id="ac" role="regular" destination="mc"/>"#,
+        r#"<Channel id="ac" role="regular" destination="mc"><Devices><AuPlugin id="d1" name="Delay" deviceID="aufx/dely/xmpl" deviceName="Delay" deviceRole="audioFX"><State path="plugins/d.aupreset"/></AuPlugin></Devices></Channel>"#,
+    );
+    assert!(project.contains("AuPlugin"));
+    let path = zip_of(
+        &dir,
+        "Bomb",
+        &[
+            ("project.xml", project.as_bytes()),
+            ("plugins/d.aupreset", &bomb),
+        ],
+    );
+    let start = std::time::Instant::now();
+    let j = import(&t, &path);
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    let report = j.report.expect("a report");
+    assert_eq!(
+        details(
+            &report,
+            ReportKindRow::LeftOut,
+            core_io::dawproject::import::PLUGIN_SETTINGS
+        ),
+        ["Delay: the settings are not an XML property list"]
+    );
+    let doc = doc_of(&t.s);
+    let slots: Vec<_> = doc.mixer().inserts().map(|(_, _, p)| p.clone()).collect();
+    assert_eq!(slots.len(), 1, "{slots:?}");
+    assert_eq!(slots[0].plugin.id, "aufx/dely/xmpl");
+    assert_eq!(slots[0].state, None);
+}
+
 /// Ruling 17: a project with tracks is refused at once.
 #[test]
 fn into_a_project_with_tracks_is_refused() {
