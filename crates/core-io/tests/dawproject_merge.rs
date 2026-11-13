@@ -9,12 +9,12 @@ mod common;
 
 use common::merge::{Strip, Trip, fixture, return_file, theirs_of, trip, vizdaw_only};
 use common::package::{TestPlist, media_of, package_bytes};
-use core_engine::fixtures::{BAR, Q};
-use core_io::dawproject::import::{FROM_VIZDAW, ImportEnv, map};
+use core_engine::fixtures::{BAR, Builder, Q};
+use core_io::dawproject::import::{FROM_VIZDAW, ImportEnv, MediaSource, map};
 use core_io::dawproject::merge::apply::{LABEL, apply_merge};
-use core_io::dawproject::merge::decide::{MergePlan, MergePreview, Outcome, Unit, plan};
+use core_io::dawproject::merge::decide::{Decision, MergePlan, MergePreview, Outcome, Unit, plan};
 use core_io::dawproject::merge::text::{
-    self, CONFLICT_SETTING, CONFLICT_TAKE, KEPT_EMPTY, NOTHING, summary,
+    self, CONFLICT_SETTING, CONFLICT_TAKE, DELETED_HERE, KEPT_EMPTY, NOT_APPLIED, NOTHING, summary,
 };
 use core_io::dawproject::merge::theirs::{Theirs, theirs};
 use core_io::dawproject::package::open;
@@ -33,12 +33,12 @@ use core_model::file::to_json;
 use core_model::history::History;
 use core_model::ids::{AnyId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::input_fx::{InputFx, InputFxKind};
-use core_model::lane::{Lane, LaneInput, MonitorMode};
+use core_model::lane::{Lane, LaneInput, MonitorMode, QuantizeSpec};
 use core_model::learn::{LearnKind, LearnMap, LearnMode, LearnSource};
 use core_model::mixer::{AuxSend, PluginSlot, StripKind};
 use core_model::mpe::MpeConfig;
 use core_model::selection::ViewFilter;
-use core_model::sequence::{KeySlot, Marker};
+use core_model::sequence::{KeySlot, Marker, SeqLength};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::Tick;
 use std::path::Path;
@@ -1347,5 +1347,866 @@ fn edits_inside_a_use_play_as_theirs() {
     assert_eq!(
         projection(h.doc(), seq).unwrap().tracks[1..],
         projection(&t.base_doc, seq).unwrap().tracks[1..]
+    );
+}
+
+// ------------------------------------------------- fix round 1
+
+/// The fixture, its sequence locked to eight bars, with a track "Loop" on
+/// CLAP instrument "Loop Synth" (`org.example.Loop`) holding `notes`
+/// (tick, key), then shaped by `shape` (its own loop, length or play
+/// quantize).
+fn with_loop_track(
+    notes: &[(i64, u8)],
+    shape: impl FnOnce(&mut History, SeqId, LaneId),
+) -> (Document, SeqId) {
+    let (doc, seq) = fixture();
+    let mut h = History::new(doc);
+    let r = h
+        .execute(
+            &Command::Routing(RoutingCmd::AddDestination {
+                name: "Loop Synth".into(),
+                kind: DestKind::PluginInstrument {
+                    slot: PluginSlot::new(
+                        PluginInstanceId(0),
+                        common::merge::clap("org.example.Loop"),
+                    ),
+                },
+                default_patch: None,
+            }),
+            &ViewFilter::default(),
+        )
+        .unwrap();
+    let dest = created(&r, |id| match id {
+        AnyId::Dest(d) => Some(*d),
+        _ => None,
+    });
+    let r = h
+        .execute(
+            &Command::Lane(LaneCmd::Add {
+                seq,
+                name: "Loop".into(),
+                index: None,
+            }),
+            &ViewFilter::default(),
+        )
+        .unwrap();
+    let lp = created(&r, |id| match id {
+        AnyId::Lane(l) => Some(*l),
+        _ => None,
+    });
+    run(
+        &mut h,
+        Command::Lane(LaneCmd::SetDest {
+            seq,
+            lane: lp,
+            dest: Some(dest),
+        }),
+    );
+    for &(tick, key) in notes {
+        add_note(&mut h, seq, lp, tick, key);
+    }
+    run(
+        &mut h,
+        Command::Sequence(SequenceCmd::SetLength {
+            seq,
+            length: SeqLength::Locked(Tick(8 * BAR)),
+        }),
+    );
+    shape(&mut h, seq, lp);
+    (h.doc().clone(), seq)
+}
+
+/// The XML ID of the track named `name`.
+fn track_id(p: &mut DpProject, name: &str) -> String {
+    tracks(p)
+        .find(|t| t.named.name.as_deref() == Some(name))
+        .and_then(|t| t.named.id.clone())
+        .unwrap_or_else(|| panic!("no track {name}"))
+}
+
+/// The third note (by time) of the file's track `name`.
+fn third_note<'a>(p: &'a mut DpProject, name: &str) -> &'a mut DpNote {
+    let id = track_id(p, name);
+    let mut at: Vec<(f64, usize, usize)> = Vec::new();
+    for (c, clip) in clips(p, &id).iter().enumerate() {
+        if let Some(DpTimeline::Notes(n)) = clip.content.as_deref() {
+            for (k, note) in n.notes.iter().enumerate() {
+                at.push((clip.time + note.time, c, k));
+            }
+        }
+    }
+    at.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (_, c, k) = at[2];
+    match clips(p, &id)[c].content.as_deref_mut() {
+        Some(DpTimeline::Notes(n)) => &mut n.notes[k],
+        _ => unreachable!(),
+    }
+}
+
+/// C1: theirs changes one played note of "Loop" (its third, on the third
+/// pass when it loops). The export's tick transform has no inverse, so
+/// ours' notes stay as they are on every pass and theirs' version becomes
+/// the take "Returned 2026-11-13", listed under `CONFLICT_TAKE`.
+fn transformed_track_keeps_ours(doc: Document, seq: SeqId) {
+    let t = trip(&doc, seq);
+    let path = return_file(&t, Strip::Nothing, |p, _| third_note(p, "Loop").key = 64);
+    let p = plan_of(&t, &path, &t.base_doc);
+    let notes = p
+        .decisions
+        .iter()
+        .find(|d| d.unit == Unit::Notes)
+        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+    assert_eq!(notes.outcome, Outcome::Conflict, "{notes:?}");
+    assert_eq!(notes.what, "Track 'Loop': notes");
+    assert_eq!(p.preview.applied, 0, "{:?}", p.preview);
+
+    let loop_of = |doc: &Document| lane(doc, seq, "Loop").clone();
+    let played = |doc: &Document| -> Vec<(i64, u8)> {
+        let pr = projection(doc, seq).unwrap();
+        let tr = pr.tracks.iter().find(|t| t.name == "Loop").unwrap();
+        tr.notes_played.iter().map(|n| (n.tick, n.pitch)).collect()
+    };
+    let before = loop_of(&t.base_doc);
+    let (h, report) = apply_on(&t.base_doc, &p);
+    let after = loop_of(h.doc());
+    assert_eq!(after.active_take, before.active_take);
+    assert_eq!(after.active(), before.active());
+    assert_eq!(played(h.doc()), played(&t.base_doc), "every pass is ours'");
+    assert!(!played(h.doc()).iter().any(|n| n.1 == 64));
+    let returned = take(&after, "Returned 2026-11-13");
+    assert!(
+        returned
+            .events
+            .values()
+            .any(|e| matches!(e.body, EventBody::Note { pitch: 64, .. })),
+        "{returned:?}"
+    );
+    assert_eq!(
+        item(&report, ItemKind::Conflict, CONFLICT_TAKE).details,
+        vec!["Loop: take \u{201c}Returned 2026-11-13\u{201d}".to_owned()]
+    );
+    assert_eq!(h.undo_label(), Some(LABEL));
+}
+
+#[test]
+fn looped_track_edit_becomes_a_take() {
+    // One note, looped every bar: it plays on eight passes.
+    let (doc, seq) = with_loop_track(&[(0, 60)], |h, seq, lane| {
+        run(
+            h,
+            Command::Lane(LaneCmd::SetLength {
+                seq,
+                lane,
+                length: Some(Tick(BAR)),
+                looped: true,
+                locked: false,
+            }),
+        )
+    });
+    transformed_track_keeps_ours(doc, seq);
+}
+
+#[test]
+fn own_length_track_edit_becomes_a_take() {
+    let notes = [(0, 60), (BAR, 60), (2 * BAR, 60), (3 * BAR, 60)];
+    let (doc, seq) = with_loop_track(&notes, |h, seq, lane| {
+        run(
+            h,
+            Command::Lane(LaneCmd::SetLength {
+                seq,
+                lane,
+                length: Some(Tick(6 * BAR)),
+                looped: false,
+                locked: false,
+            }),
+        )
+    });
+    transformed_track_keeps_ours(doc, seq);
+}
+
+#[test]
+fn play_quantized_track_edit_becomes_a_take() {
+    let notes = [
+        (0, 60),
+        (BAR + 100, 60),
+        (2 * BAR + 200, 60),
+        (3 * BAR + 300, 60),
+    ];
+    let (doc, seq) = with_loop_track(&notes, |h, seq, lane| {
+        run(
+            h,
+            Command::Lane(LaneCmd::SetPlayQuantize {
+                seq,
+                lane,
+                quantize: Some(QuantizeSpec::grid(Tick(Q), 50)),
+            }),
+        )
+    });
+    transformed_track_keeps_ours(doc, seq);
+}
+
+/// The fixture with inserts `org.example.Gate` and `org.example.Lim`
+/// after Bass's Comp; the slots of Comp, Gate and Lim.
+fn with_three_inserts() -> (Document, SeqId, [PluginInstanceId; 3]) {
+    let (doc, seq) = fixture();
+    let t0 = trip(&doc, seq);
+    let strip = ids(&t0).bass_strip;
+    let mut h = History::new(doc);
+    for id in ["org.example.Gate", "org.example.Lim"] {
+        run(
+            &mut h,
+            Command::Mixer(MixerCmd::AddInsert {
+                strip,
+                index: None,
+                plugin: common::merge::clap(id),
+            }),
+        );
+    }
+    let ins: Vec<PluginInstanceId> = h
+        .doc()
+        .mixer()
+        .strip(strip)
+        .unwrap()
+        .inserts
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    (h.doc().clone(), seq, [ins[0], ins[1], ins[2]])
+}
+
+/// I2: theirs replaces Gate (a `Devices` change from the second insert)
+/// and changes Comp's state (before it) and Lim's bypass (after it).
+#[test]
+fn device_list_and_slot_changes_on_one_strip_all_land() {
+    let (doc, seq, [comp, gate, lim]) = with_three_inserts();
+    let t = trip(&doc, seq);
+    let strip = ids(&t).bass_strip;
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, _| {
+        h.capture_state(comp, b"comp theirs").unwrap();
+        run(h, Command::Mixer(MixerCmd::RemoveInsert { slot: gate }));
+        run(
+            h,
+            Command::Mixer(MixerCmd::AddInsert {
+                strip,
+                index: Some(1),
+                plugin: common::merge::clap("org.example.Gate2"),
+            }),
+        );
+        run(
+            h,
+            Command::Mixer(MixerCmd::SetBypass {
+                slot: lim,
+                bypass: true,
+            }),
+        );
+    });
+    let p = plan_doc(&t, &theirs_doc_, &t.base_doc);
+    for unit in [Unit::Devices, Unit::State(1), Unit::Bypass(3)] {
+        assert!(
+            p.decisions
+                .iter()
+                .any(|d| d.unit == unit && d.outcome == Outcome::Theirs),
+            "{unit:?}: {:#?}",
+            p.decisions
+        );
+    }
+    let (h, _) = apply_on(&t.base_doc, &p);
+    let s = h.doc().mixer().strip(strip).unwrap();
+    let names: Vec<&str> = s.inserts.iter().map(|x| x.plugin.id.as_str()).collect();
+    assert_eq!(
+        names,
+        ["org.example.Comp", "org.example.Gate2", "org.example.Lim"]
+    );
+    let comp_now = &s.inserts[0];
+    assert_eq!(comp_now.id, comp, "Comp is kept");
+    let blob = h
+        .doc()
+        .state_blob(comp_now.state.unwrap())
+        .unwrap()
+        .to_vec();
+    assert_eq!(blob, b"comp theirs");
+    assert!(s.inserts[2].bypass, "Lim's bypass is theirs");
+    assert!(!s.inserts[1].bypass);
+    assert_eq!(h.undo_label(), Some(LABEL));
+}
+
+/// The channel with XML ID `id`.
+fn channel<'a>(p: &'a mut DpProject, id: &str) -> &'a mut core_io::dawproject::DpChannel {
+    tracks(p)
+        .filter_map(|t| t.channel.as_deref_mut())
+        .find(|c| c.named.id.as_deref() == Some(id))
+        .unwrap_or_else(|| panic!("no channel {id}"))
+}
+
+/// I3: theirs swaps Bass's instrument. VizDAW's is kept, listed under
+/// `NOT_APPLIED` with both, and nothing counts as applied.
+#[test]
+fn instrument_swap_is_kept_and_listed() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, Strip::Nothing, |p, _| {
+        let d = channel(p, "c1")
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id.as_deref() == Some("org.example.Bass"))
+            .expect("the instrument");
+        d.device_id = Some("org.example.Other".into());
+        d.device_name = "Other Synth".into();
+        d.named.comment = None;
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    let d = p
+        .decisions
+        .iter()
+        .find(|d| d.unit == Unit::Instrument)
+        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+    assert_eq!(d.outcome, Outcome::Conflict);
+    assert!(
+        p.decisions.iter().all(|d| d.unit != Unit::Devices),
+        "{:#?}",
+        p.decisions
+    );
+    assert_eq!(p.preview.applied, 0, "{:?}", p.preview);
+    assert_eq!(
+        item(&p.report, ItemKind::Conflict, NOT_APPLIED).details,
+        vec!["Strip 'Bass': instrument: here org.example.Bass, there org.example.Other".to_owned()]
+    );
+    let (h, report) = apply_on(&t.base_doc, &p);
+    assert!(has(&report, NOT_APPLIED));
+    assert_eq!(h.undo_depth(), 0);
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
+}
+
+/// I3: theirs drops Comp's state. No command clears one: ours stays,
+/// listed under `NOT_APPLIED`, and nothing counts as applied.
+#[test]
+fn dropped_state_is_kept_and_listed() {
+    let (doc, seq) = fixture();
+    let comp = ids(&trip(&doc, seq)).comp;
+    let mut h = History::new(doc);
+    h.capture_state(comp, b"ours").unwrap();
+    let doc = h.doc().clone();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, Strip::Nothing, |p, _| {
+        let d = channel(p, "c1")
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id.as_deref() == Some("org.example.Comp"))
+            .expect("Comp");
+        d.state = None;
+    });
+    let p = plan_of(&t, &path, &t.base_doc);
+    let d = p
+        .decisions
+        .iter()
+        .find(|d| matches!(d.unit, Unit::State(_)))
+        .unwrap_or_else(|| panic!("{:#?}", p.decisions));
+    assert_eq!(d.outcome, Outcome::Conflict);
+    assert_eq!(p.preview.applied, 0, "{:?}", p.preview);
+    let hash = t.snapshot.projection.strips[0].devices[1]
+        .3
+        .expect("a state");
+    assert_eq!(
+        item(&p.report, ItemKind::Conflict, NOT_APPLIED).details,
+        vec![format!(
+            "Strip 'Bass': settings of org.example.Comp: here settings {hash:016x}, there none"
+        )]
+    );
+    let (h, _) = apply_on(&t.base_doc, &p);
+    assert_eq!(h.undo_depth(), 0);
+    let slot = h.doc().plugin_slot(comp).unwrap();
+    assert_eq!(h.doc().state_blob(slot.state.unwrap()).unwrap(), b"ours");
+}
+
+/// Ours: the exported document with bus "Reverb" deleted.
+fn reverb_deleted(t: &Trip) -> Document {
+    ours(t, |h, i| {
+        run(h, Command::Mixer(MixerCmd::RemoveBus { strip: i.reverb }))
+    })
+}
+
+fn keys_strip(doc: &Document, seq: SeqId) -> StripId {
+    let dest = lane(doc, seq, "Keys").midi_dest.unwrap();
+    doc.mixer().find_kind(StripKind::Instrument(dest)).unwrap()
+}
+
+fn has_bus(doc: &Document, name: &str) -> bool {
+    doc.mixer()
+        .strips()
+        .values()
+        .any(|s| s.kind == StripKind::Bus && s.name == name)
+}
+
+/// I3: theirs gives Keys a send to Reverb and plays it into Reverb, which
+/// ours deleted: no send is made, Keys plays into the master, and both are
+/// listed under `DELETED_HERE`.
+#[test]
+fn send_and_output_to_a_bus_deleted_here_are_listed() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let keys = keys_strip(h.doc(), i.seq);
+        run(
+            h,
+            Command::Mixer(MixerCmd::AddSend {
+                strip: keys,
+                send: AuxSend {
+                    target: i.reverb,
+                    level_db: -12.0,
+                    pre_fader: false,
+                    enabled: true,
+                },
+            }),
+        );
+        run(
+            h,
+            Command::Mixer(MixerCmd::SetOutput {
+                strip: keys,
+                output: core_model::mixer::Output::Bus(i.reverb),
+            }),
+        );
+    });
+    let o = reverb_deleted(&t);
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    assert_eq!(p.preview.applied, 0, "{:#?}", p.decisions);
+    let mut details = item(&p.report, ItemKind::Conflict, DELETED_HERE)
+        .details
+        .clone();
+    details.sort();
+    assert_eq!(
+        details,
+        vec![
+            "Strip 'Keys': output to 'Reverb'".to_owned(),
+            "Strip 'Keys': send to 'Reverb'".to_owned(),
+        ]
+    );
+    let (h, _) = apply_on(&o, &p);
+    let keys = h.doc().mixer().strip(keys_strip(h.doc(), seq)).unwrap();
+    assert!(keys.sends.is_empty());
+    assert_eq!(keys.output, core_model::mixer::Output::Master);
+    assert!(!has_bus(h.doc(), "Reverb"));
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&o).unwrap());
+}
+
+/// I4: theirs adds a track that plays into Reverb and sends to it; ours
+/// deleted Reverb. The bus is not added back: the track plays into the
+/// master with no send, listed under `DELETED_HERE`.
+#[test]
+fn new_track_needing_a_bus_deleted_here_plays_into_the_master() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let theirs_doc_ = edited(&t, &t.base_doc, |h, i| {
+        let r = h
+            .execute(
+                &Command::Routing(RoutingCmd::AddDestination {
+                    name: "Lead Synth".into(),
+                    kind: DestKind::PluginInstrument {
+                        slot: PluginSlot::new(
+                            PluginInstanceId(0),
+                            common::merge::clap("org.example.Lead"),
+                        ),
+                    },
+                    default_patch: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let dest = created(&r, |id| match id {
+            AnyId::Dest(d) => Some(*d),
+            _ => None,
+        });
+        let r = h
+            .execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq: i.seq,
+                    name: "Lead".into(),
+                    index: None,
+                }),
+                &ViewFilter::default(),
+            )
+            .unwrap();
+        let lead = created(&r, |id| match id {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        });
+        run(
+            h,
+            Command::Lane(LaneCmd::SetDest {
+                seq: i.seq,
+                lane: lead,
+                dest: Some(dest),
+            }),
+        );
+        add_note(h, i.seq, lead, 0, 72);
+        let strip = h
+            .doc()
+            .mixer()
+            .find_kind(StripKind::Instrument(dest))
+            .unwrap();
+        run(
+            h,
+            Command::Mixer(MixerCmd::AddSend {
+                strip,
+                send: AuxSend {
+                    target: i.reverb,
+                    level_db: -8.0,
+                    pre_fader: false,
+                    enabled: true,
+                },
+            }),
+        );
+        run(
+            h,
+            Command::Mixer(MixerCmd::SetOutput {
+                strip,
+                output: core_model::mixer::Output::Bus(i.reverb),
+            }),
+        );
+    });
+    let o = reverb_deleted(&t);
+    let p = plan_doc(&t, &theirs_doc_, &o);
+    assert_eq!(p.preview.added, 1, "{:#?}", p.decisions);
+    let mut details = item(&p.report, ItemKind::Conflict, DELETED_HERE)
+        .details
+        .clone();
+    details.sort();
+    assert_eq!(
+        details,
+        vec![
+            "Strip 'Lead': output to 'Reverb'".to_owned(),
+            "Strip 'Lead': send to 'Reverb'".to_owned(),
+        ]
+    );
+    let (h, _) = apply_on(&o, &p);
+    assert!(has_lane(h.doc(), seq, "Lead"));
+    assert!(
+        !has_bus(h.doc(), "Reverb"),
+        "a bus deleted here stays deleted"
+    );
+    let dest = lane(h.doc(), seq, "Lead").midi_dest.unwrap();
+    let lead = h
+        .doc()
+        .mixer()
+        .strip(
+            h.doc()
+                .mixer()
+                .find_kind(StripKind::Instrument(dest))
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(lead.sends.is_empty());
+    assert_eq!(lead.output, core_model::mixer::Output::Master);
+}
+
+fn no_fade() -> Fade {
+    Fade {
+        length_frames: 0,
+        shape: FadeShape::Linear,
+    }
+}
+
+/// Sequence "Song" with an audio track "Keys": region A of media "loop"
+/// at 0, region B of it at bar 3 with −4 dB of gain, and sequence "Clip"
+/// (region C of media "hit") used at bar 5. The events of A, B and the
+/// use.
+fn regions_fixture() -> (Document, SeqId, [EventId; 3]) {
+    let mut b = Builder::new();
+    let (seq, keys) = b.sequence("Song", "Keys", None).unwrap();
+    let lp = common::merge::media(&mut b, "loop", 48_000, 2);
+    let hit = common::merge::media(&mut b, "hit", 24_000, 2);
+    let a = b
+        .region(seq, keys, 0, lp, 0, 48_000, 0.0, no_fade(), no_fade())
+        .unwrap();
+    let r = b
+        .region(
+            seq,
+            keys,
+            2 * BAR,
+            lp,
+            0,
+            48_000,
+            -4.0,
+            no_fade(),
+            no_fade(),
+        )
+        .unwrap();
+    let (clip, cl) = b.sequence("Clip", "Clip", None).unwrap();
+    b.region(clip, cl, 0, hit, 0, 24_000, 0.0, no_fade(), no_fade())
+        .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq: clip,
+        length: SeqLength::Locked(Tick(BAR)),
+    }))
+    .unwrap();
+    let u = b.reference(seq, keys, 4 * BAR, clip, 1, 0).unwrap();
+    (b.finish(), seq, [a, r, u])
+}
+
+/// `doc` edited by `edit` (for a project other than the fixture).
+fn changed(doc: &Document, edit: impl FnOnce(&mut History)) -> Document {
+    let mut h = History::new(doc.clone());
+    edit(&mut h);
+    h.doc().clone()
+}
+
+/// The doc with events `events` moved `delta` later.
+fn moved(t: &Trip, events: &[EventId], delta: i64) -> Document {
+    changed(&t.base_doc, |h| {
+        run(
+            h,
+            Command::Event(EventCmd::Move {
+                events: events.to_vec(),
+                delta: Tick(delta),
+                to_lane: None,
+            }),
+        )
+    })
+}
+
+/// Region `e`'s (tick, media, gain) in `doc`.
+fn region_at(doc: &Document, e: EventId) -> (i64, MediaId, f32) {
+    let (ev, _) = doc.event(e).unwrap();
+    match ev.body {
+        EventBody::AudioRegion { media, gain_db, .. } => (ev.tick.0, media, gain_db),
+        _ => panic!("not a region"),
+    }
+}
+
+/// I5: theirs moves region A only. B and the use of "Clip" keep their
+/// events (the use is still a use), and nothing is unrolled.
+#[test]
+fn untouched_regions_and_uses_keep_their_events() {
+    let (doc, seq, [a, b, u]) = regions_fixture();
+    let t = trip(&doc, seq);
+    let p = plan_doc(&t, &moved(&t, &[a], BAR), &t.base_doc);
+    assert!(
+        p.decisions
+            .iter()
+            .any(|d| d.unit == Unit::Regions && d.outcome == Outcome::Theirs),
+        "{:#?}",
+        p.decisions
+    );
+    let before_b = region_at(&t.base_doc, b);
+    let (h, report) = apply_on(&t.base_doc, &p);
+    assert_eq!(region_at(h.doc(), b), before_b, "B keeps its event");
+    let keys = lane(h.doc(), seq, "Keys").active().unwrap();
+    let use_ = keys.events.values().find(|e| e.id == u).expect("the use");
+    assert!(matches!(use_.body, EventBody::Reference { .. }));
+    assert!(h.doc().event(a).is_err(), "A was replaced");
+    let ticks: Vec<i64> = keys.events.values().map(|e| e.tick.0).collect();
+    assert_eq!(ticks, vec![BAR, 2 * BAR, 4 * BAR]);
+    assert!(!has(&report, text::LOOPS_UNROLLED));
+}
+
+/// `doc` returned as `theirs_doc` does, its audio "resampled" by the other
+/// DAW: every converted file has another content hash and name, so only
+/// the `vz:e` tags pair its regions with ours'.
+fn theirs_resampled(t: &Trip, doc: &Document) -> Theirs {
+    let x = trip(doc, t.seq).export;
+    let n = DOCS.fetch_add(1, Ordering::Relaxed);
+    let path = t.dir.path().join(format!("Doc {n}.dawproject"));
+    std::fs::write(&path, package_bytes(&x).expect("packages")).expect("writes");
+    let pkg = open(&path, &PackageLimits::default(), &never()).expect("opens");
+    let mut media = media_of(&pkg, &x, doc);
+    for m in media.values_mut() {
+        if let MediaSource::Online(items) = m {
+            for i in items {
+                i.content_hash = format!("{}-resampled", i.content_hash);
+                i.name = format!("{} resampled", i.name);
+                i.original_name = format!("{} resampled", i.original_name);
+                i.path = i.path.replace(".caf", " resampled.caf");
+            }
+        }
+    }
+    let installed = |_: core_model::mixer::PluginFormat, _: &str| true;
+    let format = t.base_doc.settings().format;
+    let imp = map(
+        &pkg,
+        &media,
+        &ImportEnv {
+            installed: &installed,
+            plist: &TestPlist,
+            rate: format.sample_rate,
+            ids: Some(&t.snapshot.ids),
+        },
+        &never(),
+    )
+    .expect("maps");
+    theirs(imp, format, t.snapshot.origin, &never()).expect("theirs")
+}
+
+/// I5: after a merge that moved A, a second file from the same export
+/// (A and B moved, its audio resampled) still pairs B by its original
+/// event: theirs' version (the conflict take) plays B with ours' media
+/// and gain (Ruling 11).
+#[test]
+fn second_merge_pairs_regions_by_their_original_events() {
+    let (doc, seq, [a, b, _]) = regions_fixture();
+    let t = trip(&doc, seq);
+    let (h, _) = apply_on(
+        &t.base_doc,
+        &plan_doc(&t, &moved(&t, &[a], BAR), &t.base_doc),
+    );
+    let once = h.doc().clone();
+    let (_, ours_media, ours_gain) = region_at(&once, b);
+    assert_eq!(ours_gain, -4.0);
+
+    let second = theirs_resampled(&t, &moved(&t, &[a, b], BAR));
+    let p = plan(t.snapshot.clone(), second, &once, false, &never()).expect("plans");
+    assert!(
+        p.decisions
+            .iter()
+            .any(|d| d.unit == Unit::Regions && d.outcome == Outcome::Conflict),
+        "{:#?}",
+        p.decisions
+    );
+    let (h, _) = apply_history(h, &p, DATE);
+    let returned = take(lane(h.doc(), seq, "Keys"), "Returned 2026-11-13");
+    let b_there = returned
+        .events
+        .values()
+        .find(|e| e.tick.0 == 3 * BAR)
+        .unwrap_or_else(|| panic!("{returned:#?}"));
+    match b_there.body {
+        EventBody::AudioRegion { media, gain_db, .. } => {
+            assert_eq!(media, ours_media, "ours' media");
+            assert_eq!(gain_db, ours_gain, "ours' gain");
+        }
+        _ => panic!("not a region"),
+    }
+}
+
+/// M2: an error midway through the merge (an invalid tempo map from
+/// theirs, after the notes, strips and markers ran), then `abort`, leaves
+/// the project exactly as it was.
+#[test]
+fn an_error_midway_then_abort_restores_the_project() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let path = return_file(&t, Strip::Nothing, |p, _| owners_check(p));
+    let mut p = plan_of(&t, &path, &t.base_doc);
+    p.theirs.projection.tempo.clear();
+    p.decisions.push(Decision {
+        unit: Unit::Tempo,
+        row: 0,
+        outcome: Outcome::Theirs,
+        what: "Tempo map".into(),
+        ours: None,
+        theirs: None,
+    });
+    let mut h = History::new(t.base_doc.clone());
+    h.begin(LABEL).unwrap();
+    let r = apply_merge(&mut h, &p, DATE, &mut Report::default());
+    assert!(r.is_err(), "{r:?}");
+    assert_ne!(
+        projection(h.doc(), seq).unwrap(),
+        projection(&t.base_doc, seq).unwrap(),
+        "the edits before the error ran"
+    );
+    h.abort().unwrap();
+    assert_eq!(
+        projection(h.doc(), seq).unwrap(),
+        projection(&t.base_doc, seq).unwrap()
+    );
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&t.base_doc).unwrap());
+    assert_eq!(h.undo_depth(), 0);
+}
+
+/// `doc` returned as `theirs_doc` does, every audio file offline in the
+/// scratch import (no content hash).
+fn theirs_offline(t: &Trip, doc: &Document) -> Theirs {
+    let x = trip(doc, t.seq).export;
+    let n = DOCS.fetch_add(1, Ordering::Relaxed);
+    let path = t.dir.path().join(format!("Doc {n}.dawproject"));
+    std::fs::write(&path, package_bytes(&x).expect("packages")).expect("writes");
+    let pkg = open(&path, &PackageLimits::default(), &never()).expect("opens");
+    let mut media = media_of(&pkg, &x, doc);
+    for m in media.values_mut() {
+        *m = MediaSource::Offline {
+            why: "unreadable".into(),
+        };
+    }
+    let installed = |_: core_model::mixer::PluginFormat, _: &str| true;
+    let format = t.base_doc.settings().format;
+    let imp = map(
+        &pkg,
+        &media,
+        &ImportEnv {
+            installed: &installed,
+            plist: &TestPlist,
+            rate: format.sample_rate,
+            ids: Some(&t.snapshot.ids),
+        },
+        &never(),
+    )
+    .expect("maps");
+    theirs(imp, format, t.snapshot.origin, &never()).expect("theirs")
+}
+
+/// M1: a regions conflict whose new region's media is offline in the
+/// scratch import, merged twice: the second merge finds the take the
+/// first made and adds none.
+#[test]
+fn offline_regions_conflict_take_is_not_made_twice() {
+    let (doc, seq, [a, b, _]) = regions_fixture();
+    let t = trip(&doc, seq);
+    // Theirs adds a region; ours moves B.
+    let theirs_doc_ = changed(&t.base_doc, |h| {
+        let (_, media, _) = region_at(h.doc(), a);
+        let keys = lane(h.doc(), seq, "Keys").id;
+        run(
+            h,
+            Command::Event(EventCmd::Insert {
+                seq,
+                lane: keys,
+                events: vec![region(media, 6 * BAR)],
+            }),
+        );
+    });
+    let o = changed(&t.base_doc, |h| {
+        run(
+            h,
+            Command::Event(EventCmd::Move {
+                events: vec![b],
+                delta: Tick(BAR),
+                to_lane: None,
+            }),
+        )
+    });
+    let p = plan(
+        t.snapshot.clone(),
+        theirs_offline(&t, &theirs_doc_),
+        &o,
+        false,
+        &never(),
+    )
+    .expect("plans");
+    assert!(
+        p.decisions
+            .iter()
+            .any(|d| d.unit == Unit::Regions && d.outcome == Outcome::Conflict),
+        "{:#?}",
+        p.decisions
+    );
+    let (h, _) = apply_on(&o, &p);
+    let once = h.doc().clone();
+    assert_eq!(lane(&once, seq, "Keys").takes.len(), 2);
+    let label = h.undo_label().map(str::to_owned);
+    let again = plan(
+        t.snapshot.clone(),
+        theirs_offline(&t, &theirs_doc_),
+        &once,
+        false,
+        &never(),
+    )
+    .expect("plans");
+    let (h, report) = apply_history(h, &again, DATE);
+    assert_eq!(lane(h.doc(), seq, "Keys").takes.len(), 2);
+    assert_eq!(h.undo_label().map(str::to_owned), label);
+    assert_eq!(to_json(h.doc()).unwrap(), to_json(&once).unwrap());
+    assert_eq!(
+        item(&report, ItemKind::Conflict, CONFLICT_TAKE).details,
+        vec!["Keys: take \u{201c}Returned 2026-11-13\u{201d}".to_owned()]
     );
 }

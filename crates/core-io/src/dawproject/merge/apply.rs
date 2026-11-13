@@ -22,7 +22,16 @@
 //!
 //! **Ticks.** Theirs' projection is in the file's frame; a tick goes back
 //! into ours' by adding the snapshot's origin (Ruling 1), less the
-//! track's play shift (the projection is what plays).
+//! track's play shift (the projection is what plays). A track with its own
+//! loop, length or play quantize has no inverse: `decide` never gives it
+//! theirs' notes, regions or curves as edits (they are a conflict take or
+//! listed), so no edit here is placed through one.
+//!
+//! **Regions** (Ruling 5): only the changed ones are replaced; one that is
+//! the same keeps its event, so a use it plays through stays a use and
+//! the next file's tags still name it. A crossfaded pair is replaced
+//! together. **Devices:** a strip's bypass and state units after a device
+//! list change name the slots the change left.
 //!
 //! **Shared sequences (Ruling 8) are Task 6b's.** Until then a reference
 //! use's notes count as its track's: when theirs changes what plays
@@ -30,7 +39,7 @@
 //! `unroll`, listed under [`text::LOOPS_UNROLLED`]). Task 6b puts the
 //! edit into the sequence, or a private copy, before that fallback.
 
-use super::decide::{MergePlan, Outcome, StripField, Unit, same_note, ticks_near};
+use super::decide::{MergePlan, Outcome, StripField, Unit, same_note, same_region, ticks_near};
 use super::matching::{Matched, notes, regions};
 use super::normalised;
 use super::text;
@@ -109,7 +118,10 @@ pub fn apply_merge(
     if !added_tracks.is_empty() {
         let which: Vec<usize> = added_tracks.into_iter().collect();
         let mut lines = Report::default();
-        let added = apply_tracks(h, &cx.th.imp, seq, &which, &mut buses, &mut lines)?;
+        // A bus ours deleted stays deleted: a new track plays into the
+        // master instead and makes no send to it (`decide` lists both).
+        let absent = cx.deleted_buses();
+        let added = apply_tracks(h, &cx.th.imp, seq, &which, &mut buses, &absent)?;
         arrange_tracks(h, &cx.th.imp, seq, &which, &added, cx.origin, &mut lines)?;
         states.extend(added.states.iter().cloned());
         out.report.merge(lines);
@@ -262,6 +274,17 @@ impl<'a> Cx<'a> {
             .strips
             .iter()
             .filter_map(|r| Some((self.theirs_bus(r.theirs?)?, self.ours_strip_at(r.ours?)?)))
+            .collect()
+    }
+
+    /// The plan buses base and theirs have and ours deleted.
+    fn deleted_buses(&self) -> BTreeSet<usize> {
+        self.plan
+            .matches
+            .strips
+            .iter()
+            .filter(|r| r.base.is_some() && r.ours.is_none())
+            .filter_map(|r| self.theirs_bus(r.theirs?))
             .collect()
     }
 
@@ -577,13 +600,22 @@ fn media_for(
     let Some(item) = cx.th.doc.media().get(&m) else {
         return Ok(None);
     };
-    if let Some(hash) = &item.content_hash
-        && let Some(found) = h
+    // By content hash (Ruling 9); an item without one (offline in the
+    // scratch import) by its path, so the same file merged twice finds
+    // the copy the first merge added.
+    let found = match &item.content_hash {
+        Some(hash) => h
             .doc()
             .media()
             .values()
-            .find(|x| x.content_hash.as_ref() == Some(hash))
-    {
+            .find(|x| x.content_hash.as_ref() == Some(hash)),
+        None => h
+            .doc()
+            .media()
+            .values()
+            .find(|x| x.content_hash.is_none() && x.path == item.path),
+    };
+    if let Some(found) = found {
         return Ok(Some(found.id));
     }
     if !add {
@@ -607,17 +639,17 @@ fn media_for(
     }))
 }
 
-/// Theirs track `t`'s regions as ours' specs: one paired with a region of
-/// ours track `o` keeps ours' media and gain (Ruling 11); another uses
-/// theirs' converted copy (made ours' with `add`). `None` when, without
-/// `add`, some region's media is not ours'.
+/// Theirs track `t`'s regions `which` picks as ours' specs: one paired
+/// with a region of ours track `o` keeps ours' media and gain (Ruling 11);
+/// another uses theirs' converted copy (made ours' with `add`). `None`
+/// when, without `add`, some region's media is not ours'.
 fn theirs_regions(
     h: &mut History,
     cx: &Cx<'_>,
-    o: usize,
-    t: usize,
+    (o, t): (usize, usize),
     shift: i64,
     add: bool,
+    which: impl Fn(usize) -> bool,
 ) -> Result<Option<Vec<EventSpec>>, ModelError> {
     let (Some(tt), Some(ti)) = (cx.th.projection.tracks.get(t), cx.th.identity.tracks.get(t))
     else {
@@ -639,6 +671,9 @@ fn theirs_regions(
     }
     let mut out = Vec::new();
     for (j, (r, at)) in tt.regions.iter().zip(&ti.regions).enumerate() {
+        if !which(j) {
+            continue;
+        }
         let Some(mut s) = theirs_spec(cx, at, r.tick, None, shift) else {
             continue;
         };
@@ -661,8 +696,71 @@ fn theirs_regions(
     Ok(Some(out))
 }
 
-/// Ruling 5: theirs' regions replace the part's, as a set, in the lane's
-/// one insert, so every crossfade is inserted with its partner.
+/// Union-find over the region pairs of [`edit_regions`].
+struct Groups(Vec<usize>);
+
+impl Groups {
+    fn find(&mut self, mut x: usize) -> usize {
+        while let Some(&p) = self.0.get(x) {
+            if p == x {
+                break;
+            }
+            // Path halving.
+            let up = self.0.get(p).copied().unwrap_or(p);
+            if let Some(slot) = self.0.get_mut(x) {
+                *slot = up;
+            }
+            x = p;
+        }
+        x
+    }
+
+    fn join(&mut self, a: usize, b: usize) {
+        let (a, b) = (self.find(a), self.find(b));
+        if let Some(slot) = self.0.get_mut(a) {
+            *slot = b;
+        }
+    }
+}
+
+/// Each flagged region of lane `lane`'s active take in `doc`, with the
+/// region its crossfade crosses.
+fn crossfades(doc: &Document, seq: SeqId, lane: u64) -> Vec<(u64, u64)> {
+    doc.lane(seq, LaneId(lane))
+        .ok()
+        .and_then(|l| l.active())
+        .map(|take| {
+            let flagged: BTreeSet<EventId> = take
+                .events
+                .values()
+                .filter(|e| {
+                    matches!(
+                        e.body,
+                        EventBody::AudioRegion {
+                            crossfade: true,
+                            ..
+                        }
+                    )
+                })
+                .map(|e| e.id)
+                .collect();
+            if flagged.is_empty() {
+                return Vec::new();
+            }
+            core_model::crossfade::overlaps(doc, seq, take)
+                .into_iter()
+                .filter(|(id, _)| flagged.contains(id))
+                .map(|(id, o)| (id.0, o.with.0))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Ruling 5: only the changed regions are replaced (Task 6 fix round 1,
+/// I5). Ours' regions paired with theirs and the same keep their events,
+/// so a reference use they play through stays a use and the next export's
+/// tags still name them. A crossfaded pair is replaced together when
+/// either changes (on either side), in the lane's one insert.
 fn edit_regions(
     h: &mut History,
     cx: &Cx<'_>,
@@ -671,12 +769,69 @@ fn edit_regions(
     t: usize,
     shift: i64,
 ) -> Result<(), ModelError> {
-    if let Some(oi) = cx.ids.tracks.get(o) {
-        for at in &oi.regions {
-            edit.delete(at);
+    let (Some(ot), Some(oi), Some(tt), Some(ti)) = (
+        cx.normal.tracks.get(o),
+        cx.ids.tracks.get(o),
+        cx.th.projection.tracks.get(t),
+        cx.th.identity.tracks.get(t),
+    ) else {
+        return Ok(());
+    };
+    let pairs = regions((ot, oi), (tt, ti, &cx.th.origins));
+    let changed: Vec<bool> = pairs
+        .iter()
+        .map(|&(i, j)| {
+            match (
+                i.and_then(|i| ot.regions.get(i)),
+                j.and_then(|j| tt.regions.get(j)),
+            ) {
+                (Some(a), Some(b)) => !same_region(a, b),
+                _ => true,
+            }
+        })
+        .collect();
+    // Each top-level region's pair, per side.
+    let mut ours_pair: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut theirs_pair: BTreeMap<u64, usize> = BTreeMap::new();
+    for (p, &(i, j)) in pairs.iter().enumerate() {
+        if let Some(at) = i.and_then(|i| oi.regions.get(i))
+            && at.event == at.top
+        {
+            ours_pair.insert(at.event, p);
+        }
+        if let Some(at) = j.and_then(|j| ti.regions.get(j)) {
+            theirs_pair.insert(at.event, p);
         }
     }
-    if let Some(specs) = theirs_regions(h, cx, o, t, shift, true)? {
+    let mut groups = Groups((0..pairs.len()).collect());
+    let sides = [
+        (crossfades(h.doc(), cx.seq, oi.lane), &ours_pair),
+        (crossfades(&cx.th.doc, cx.th.seq, ti.lane), &theirs_pair),
+    ];
+    for (fades, pair) in &sides {
+        for (later, earlier) in fades {
+            if let (Some(&a), Some(&b)) = (pair.get(later), pair.get(earlier)) {
+                groups.join(a, b);
+            }
+        }
+    }
+    let dirty: BTreeSet<usize> = (0..pairs.len())
+        .filter(|&p| changed.get(p).copied().unwrap_or(true))
+        .map(|p| groups.find(p))
+        .collect();
+    let mut add = BTreeSet::new();
+    for (p, &(i, j)) in pairs.iter().enumerate() {
+        if !dirty.contains(&groups.find(p)) {
+            continue;
+        }
+        if let Some(at) = i.and_then(|i| oi.regions.get(i)) {
+            edit.delete(at);
+        }
+        if let Some(j) = j {
+            add.insert(j);
+        }
+    }
+    if let Some(specs) = theirs_regions(h, cx, (o, t), shift, true, |j| add.contains(&j))? {
         edit.insert.extend(specs);
     }
     Ok(())
@@ -955,7 +1110,7 @@ fn conflict_take(
                     specs.extend(theirs_notes(cx, t, shift, |_| true));
                     specs.extend(theirs_midi(cx, t, shift, |_| true));
                 }
-                Unit::Regions => match theirs_regions(h, cx, *o, t, shift, add)? {
+                Unit::Regions => match theirs_regions(h, cx, (*o, t), shift, add, |_| true)? {
                     Some(r) => specs.extend(r),
                     None => return Ok(None),
                 },
@@ -1047,10 +1202,17 @@ fn take_name(doc: &Document, seq: SeqId, lane: u64, date: &str) -> String {
 
 // ---------------------------------------------------------------- strips
 
-/// Step 4: each strip unit theirs changed.
+/// Step 4: each strip unit theirs changed. A strip whose device list
+/// theirs changed has new slots: its bypass and state units then name the
+/// slots `devices` left (Task 6 fix round 1, I2).
 fn strips(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
+    // Ours' strip `o`'s device slots after a `Devices` change, in the
+    // projection's order.
+    let mut slots: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
     for d in &cx.plan.decisions {
-        if d.outcome != Outcome::Theirs {
+        let output_gone =
+            d.outcome == Outcome::DeletedHere && d.unit == Unit::Strip(StripField::Output);
+        if d.outcome != Outcome::Theirs && !output_gone {
             continue;
         }
         let Some(r) = cx.m_strip(d.row).copied() else {
@@ -1061,6 +1223,26 @@ fn strips(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
         };
         let (Some(strip), Some(ts)) = (cx.ours_strip_at(o), cx.th.projection.strips.get(t)) else {
             continue;
+        };
+        if output_gone {
+            // Theirs plays into a bus ours deleted: the master.
+            let master = h.doc().mixer().master();
+            if h.doc().mixer().strip(strip)?.output != Output::Master && strip != master {
+                run(
+                    h,
+                    Command::Mixer(MixerCmd::SetOutput {
+                        strip,
+                        output: Output::Master,
+                    }),
+                )?;
+            }
+            continue;
+        }
+        let slot_of = |i: usize| -> Option<u64> {
+            match slots.get(&o) {
+                Some(v) => v.get(i).copied(),
+                None => cx.ids.strips.get(o)?.devices.get(i).copied(),
+            }
         };
         let cmd = match &d.unit {
             Unit::Strip(StripField::Level) => MixerCmd::SetGain {
@@ -1100,33 +1282,56 @@ fn strips(h: &mut History, cx: &Cx<'_>) -> Result<(), ModelError> {
                 continue;
             }
             Unit::Devices => {
+                let before = h.doc().mixer().strip(strip)?.clone();
                 devices(h, cx, strip, t)?;
+                let after = h.doc().mixer().strip(strip)?;
+                let own = |s: &core_model::mixer::Strip| -> Vec<u64> {
+                    s.eq.iter()
+                        .chain(s.inserts.iter())
+                        .map(|x| x.id.0)
+                        .collect()
+                };
+                let old_own = own(&before);
+                // The instrument (not the strip's own) stays; then the new
+                // EQ slot and inserts.
+                let mut now: Vec<u64> = cx
+                    .ids
+                    .strips
+                    .get(o)
+                    .map(|s| {
+                        s.devices
+                            .iter()
+                            .filter(|id| !old_own.contains(id))
+                            .copied()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                now.extend(own(after));
+                slots.insert(o, now);
                 continue;
             }
             Unit::Bypass(i) => {
-                let (Some(slot), Some(dev)) = (
-                    cx.ids.strips.get(o).and_then(|s| s.devices.get(*i)),
-                    ts.devices.get(*i),
-                ) else {
+                let (Some(slot), Some(dev)) = (slot_of(*i), ts.devices.get(*i)) else {
                     continue;
                 };
                 MixerCmd::SetBypass {
-                    slot: PluginInstanceId(*slot),
+                    slot: PluginInstanceId(slot),
                     bypass: dev.2,
                 }
             }
             Unit::State(i) => {
                 let (Some(slot), Some(from)) = (
-                    cx.ids.strips.get(o).and_then(|s| s.devices.get(*i)),
+                    slot_of(*i),
                     cx.th.identity.strips.get(t).and_then(|s| s.devices.get(*i)),
                 ) else {
                     continue;
                 };
+                // `decide` lists a state theirs dropped (`NOT_APPLIED`).
                 let Some(bytes) = theirs_state(&cx.th.doc, PluginInstanceId(*from)) else {
                     continue;
                 };
                 MixerCmd::SetPluginState {
-                    slot: PluginInstanceId(*slot),
+                    slot: PluginInstanceId(slot),
                     bytes,
                 }
             }

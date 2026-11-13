@@ -33,6 +33,21 @@
 //! names an audio track's strip after the track, so theirs' name for it is
 //! the file's channel name (`Origins::channel_names`).
 //!
+//! **Not applied** (Task 6 fix round 1), listed under
+//! [`text::NOT_APPLIED`] as [`Outcome::Conflict`]s, so none counts as
+//! applied:
+//! - theirs' notes, regions or automation on a track that plays with its
+//!   own loop, length or play quantize: the export's tick transform has
+//!   no inverse, so theirs' notes and regions become the conflict take
+//!   (a take conflict, [`text::CONFLICT_TAKE`]) and theirs' curves are
+//!   listed;
+//! - theirs' instrument swap ([`Unit::Instrument`]);
+//! - a device state theirs dropped (no command clears one).
+//!
+//! A send or output theirs aims at a bus ours deleted is
+//! [`Outcome::DeletedHere`]: the send is not made and the output goes to
+//! the master.
+//!
 //! **Ruling 10.** A strip whose devices theirs changed while the file
 //! named effects VizDAW cannot host (VST plug-ins, ones not installed)
 //! keeps ours ([`Outcome::Ours`]), listed under [`text::VST_KEPT`].
@@ -44,7 +59,7 @@ use super::{LEVEL_DB, NOTE_TICKS, PAN, VALUE, normalised};
 use crate::IoError;
 use crate::dawproject::import::{Origins, VST};
 use crate::dawproject::record::{
-    EventAt, Identity, PNote, PRegion, PStrip, PTrack, Projection, Snapshot, TrackIds,
+    EventAt, Identity, PNote, PRegion, PStrip, PTrack, Projection, Snapshot, StripIds, TrackIds,
     projection_with_identity,
 };
 use crate::dawproject::units::nearest_swatch;
@@ -75,8 +90,12 @@ pub enum Unit {
     Strip(StripField),
     /// A strip's send to a target, the target's row in [`Matches::strips`].
     Send(usize),
-    /// A strip's device list: formats and IDs, in order.
+    /// A strip's device list after its track's instrument: formats and
+    /// IDs, in order.
     Devices,
+    /// A track strip's instrument (format and ID). The merge never changes
+    /// it: theirs' swap is listed under [`text::NOT_APPLIED`].
+    Instrument,
     /// One device's bypass, by its place in base's list.
     Bypass(usize),
     /// One device's state, by its place in base's list.
@@ -232,6 +251,10 @@ pub fn plan(
         theirs_origins: &theirs.origins,
         ours_origins: &ours_origins,
         theirs_strips: &theirs.identity,
+        ours_strips: &ours_side.1,
+        base_strips: base.identity.as_ref(),
+        theirs_doc: &theirs.doc,
+        not_applied: BTreeSet::new(),
         m: &matches,
         skey: strip_keys(
             &matches,
@@ -565,7 +588,7 @@ pub(super) fn same_note(a: &PNote, b: &PNote) -> bool {
 
 /// Two regions are the same without their media hash, gain and file stem
 /// (Ruling 11).
-fn same_region(a: &PRegion, b: &PRegion) -> bool {
+pub(super) fn same_region(a: &PRegion, b: &PRegion) -> bool {
     ticks_near(a.tick, b.tick)
         && frames_near(a.offset, b.offset)
         && frames_near(a.length, b.length)
@@ -624,6 +647,12 @@ fn meter_eq(a: &[(i64, u8, u8)], b: &[(i64, u8, u8)]) -> bool {
         && a.iter()
             .zip(b)
             .all(|(x, y)| ticks_near(x.0, y.0) && x.1 == y.1 && x.2 == y.2)
+}
+
+/// The rule table for values `[base, theirs, ours]` under `eq`.
+fn outcome_of<T>(v: &[T; 3], eq: impl Fn(&T, &T) -> bool) -> Option<Outcome> {
+    let [b, t, o] = v;
+    outcome(eq(b, t), eq(b, o), || eq(t, o))
 }
 
 /// The rule table for a unit present on all three sides, from whether
@@ -722,6 +751,15 @@ struct Decider<'a> {
     theirs_origins: &'a Origins,
     ours_origins: &'a Origins,
     theirs_strips: &'a Identity,
+    /// Ours' strip identities.
+    ours_strips: &'a Identity,
+    /// Base's, when the snapshot has them (format 2).
+    base_strips: Option<&'a Identity>,
+    /// Theirs' scratch project.
+    theirs_doc: &'a Document,
+    /// The decisions (by index in `out`) theirs changed and the merge does
+    /// not apply: listed under `text::NOT_APPLIED`.
+    not_applied: BTreeSet<usize>,
     m: &'a Matches,
     /// Per side, each strip's row in `m.strips`.
     skey: [Vec<Option<usize>>; 3],
@@ -794,6 +832,20 @@ impl<'a> Decider<'a> {
             ours,
             theirs,
         });
+    }
+
+    /// Pushes a [`Outcome::Conflict`] the merge does not apply, listed
+    /// under `text::NOT_APPLIED`.
+    fn push_not_applied(
+        &mut self,
+        unit: Unit,
+        row: usize,
+        what: String,
+        ours: Option<String>,
+        theirs: Option<String>,
+    ) {
+        self.not_applied.insert(self.out.len());
+        self.push_with(unit, row, Outcome::Conflict, what, ours, theirs);
     }
 
     /// Pushes the decision for a unit on all three sides, with its values.
@@ -1015,8 +1067,18 @@ impl<'a> Decider<'a> {
             |x, y| x == y,
             |x| (*x).clone(),
         );
+        // A track that plays with its own loop, length or play quantize:
+        // the export's tick transform has no inverse, so a change of
+        // theirs is a take conflict (notes, regions) or not applied
+        // (automation), never edits (Task 6 fix round 1, C1).
+        let fixed = self.transformed(o);
+        let take = |out: Outcome| match out {
+            Outcome::Theirs if fixed => Outcome::Conflict,
+            out => out,
+        };
         let notes_of = |x: &PTrack| count(x.notes_played.len(), "note", "notes");
         if let Some(out) = outcome(notes_eq(bt, tt), notes_eq(bt, ot), || notes_eq(ot, tt)) {
+            let out = take(out);
             let what = format!("Track '{name}': notes");
             self.push_with(
                 Unit::Notes,
@@ -1034,6 +1096,7 @@ impl<'a> Decider<'a> {
             self.regions_eq((Side::Ours, o), (Side::Theirs, t)),
         );
         if let Some(out) = outcome(rb, ro, || rt) {
+            let out = take(out);
             let what = format!("Track '{name}': regions");
             self.push_with(
                 Unit::Regions,
@@ -1052,19 +1115,32 @@ impl<'a> Decider<'a> {
         let targets: BTreeSet<&String> = curves.iter().flat_map(|c| c.keys()).collect();
         for target in targets {
             let v = curves.each_ref().map(|c| c.get(target).copied());
-            self.three(
-                Unit::Automation(target.clone()),
-                row,
-                format!("Track '{name}': {} automation", target_kind(target)),
-                v,
-                |x, y| match (x, y) {
-                    (Some(a), Some(b)) => curve_eq(a, b),
-                    (None, None) => true,
-                    _ => false,
-                },
-                |x| text::points(x.map_or(0, |p| p.len())),
-            );
+            let eq = |x: &Option<&[(i64, f64)]>, y: &Option<&[(i64, f64)]>| match (x, y) {
+                (Some(a), Some(b)) => curve_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            let Some(out) = outcome_of(&v, eq) else {
+                continue;
+            };
+            let what = format!("Track '{name}': {} automation", target_kind(target));
+            let [_, theirs, ours] = v.map(|x| Some(text::points(x.map_or(0, |p| p.len()))));
+            let unit = Unit::Automation(target.clone());
+            if fixed && out == Outcome::Theirs {
+                self.push_not_applied(unit, row, what, ours, theirs);
+            } else {
+                self.push_with(unit, row, out, what, ours, theirs);
+            }
         }
+    }
+
+    /// Whether ours' lane of ours track `o` plays with its own loop,
+    /// length or play quantize: what the export did to its ticks cannot be
+    /// undone (a play shift can, and is).
+    fn transformed(&self, o: usize) -> bool {
+        self.ids_of(Side::Ours, o)
+            .and_then(|ids| self.ours_doc.lane(self.seq, LaneId(ids.lane)).ok())
+            .is_some_and(|l| l.looped || l.length.is_some() || l.play_quantize.is_some())
     }
 
     /// Ruling 7: whether ours' lane of ours track `o` holds what the file
@@ -1169,6 +1245,113 @@ impl<'a> Decider<'a> {
         })
     }
 
+    /// How many of side `s`'s strip `i`'s devices are its track's
+    /// instrument (0 or 1): the export lists the instrument first, then
+    /// the EQ slot and the inserts (`Chan::slots`). Base's is read in ours'
+    /// project (the same one); a slot ours no longer has counts as ours'
+    /// strip counts.
+    fn instruments(&self, s: Side, i: usize) -> usize {
+        // Whether the first device is the strip's own (EQ or insert), in
+        // `doc`; `None` when there is no device or no such strip.
+        let own = |doc: &Document, ids: &StripIds| -> Option<bool> {
+            let first = *ids.devices.first()?;
+            let Some(strip) = ids.strip else {
+                return Some(false);
+            };
+            let st = doc.mixer().strip(StripId(strip)).ok()?;
+            Some(
+                st.eq
+                    .iter()
+                    .chain(st.inserts.iter())
+                    .any(|x| x.id.0 == first),
+            )
+        };
+        let of = |own: Option<bool>| usize::from(own == Some(false));
+        match s {
+            Side::Ours => of(self
+                .ours_strips
+                .strips
+                .get(i)
+                .and_then(|x| own(self.ours_doc, x))),
+            Side::Theirs => of(self
+                .theirs_strips
+                .strips
+                .get(i)
+                .and_then(|x| own(self.theirs_doc, x))),
+            Side::Base => {
+                let ids = self.base_strips.and_then(|b| b.strips.get(i));
+                if let Some(ids) = ids {
+                    let Some(first) = ids.devices.first() else {
+                        return 0;
+                    };
+                    let known = self
+                        .ours_doc
+                        .plugin_slot(core_model::ids::PluginInstanceId(*first))
+                        .is_some();
+                    if known {
+                        return of(own(self.ours_doc, ids));
+                    }
+                }
+                let r = self.skey(Side::Base, i).and_then(|k| self.m.strips.get(k));
+                match (r.and_then(|r| r.ours), r.and_then(|r| r.theirs)) {
+                    (Some(o), _) => self.instruments(Side::Ours, o),
+                    (None, Some(t)) => self.instruments(Side::Theirs, t),
+                    _ => 0,
+                }
+            }
+        }
+    }
+
+    /// Side `s`'s strip `i`'s devices: its instrument, then the rest.
+    fn split_devices(&self, s: Side, i: usize) -> [Vec<(&'a str, &'a str)>; 2] {
+        let all = self.devices(s, i);
+        let n = self.instruments(s, i);
+        [
+            all.iter().take(n).copied().collect(),
+            all.iter().skip(n).copied().collect(),
+        ]
+    }
+
+    /// Whether row `k` of `m.strips` is a strip ours deleted that base and
+    /// theirs have.
+    fn deleted_here(&self, k: usize) -> bool {
+        self.m
+            .strips
+            .get(k)
+            .is_some_and(|r| r.base.is_some() && r.theirs.is_some() && r.ours.is_none())
+    }
+
+    /// For a strip only theirs has (row `row`, theirs' strip `t`): its
+    /// output and sends to a bus ours deleted, each
+    /// [`Outcome::DeletedHere`] (the send is not made; the output is the
+    /// master).
+    fn aimed_at_deleted(&mut self, row: usize, t: usize) {
+        let Some(ts) = self.strip_of(Side::Theirs, t) else {
+            return;
+        };
+        let label = self.strip_label(row);
+        let to_name = |k: usize| self.strip_label(k).replacen("Strip ", "", 1);
+        let mut found = Vec::new();
+        if let Some(k) = ts.output.and_then(|i| self.skey(Side::Theirs, i))
+            && self.deleted_here(k)
+        {
+            found.push((
+                Unit::Strip(StripField::Output),
+                format!("{label}: output to {}", to_name(k)),
+            ));
+        }
+        for &(to, ..) in &ts.sends {
+            if let Some(k) = self.skey(Side::Theirs, to)
+                && self.deleted_here(k)
+            {
+                found.push((Unit::Send(k), format!("{label}: send to {}", to_name(k))));
+            }
+        }
+        for (unit, what) in found {
+            self.push(unit, row, Outcome::DeletedHere, what);
+        }
+    }
+
     /// Whether strip `i` is one theirs made for an audio track: the import
     /// names an audio track's output path after the track, so the file
     /// does not carry that strip's name.
@@ -1256,6 +1439,11 @@ impl<'a> Decider<'a> {
         if let (Some(b), Some(t), Some(o)) = (r.base, r.theirs, r.ours) {
             self.strip_units(row, [b, t, o]);
             return;
+        }
+        // A strip only theirs has (a new track's or bus's) aimed at a bus
+        // ours deleted (Task 6 fix round 1, I4).
+        if let (None, Some(t), None) = (r.base, r.theirs, r.ours) {
+            self.aimed_at_deleted(row, t);
         }
         // A track's strip exists with its track; the master always does.
         if self.is_track_strip(&r) || self.is_master(&r) {
@@ -1357,21 +1545,41 @@ impl<'a> Decider<'a> {
         );
         let outputs = [(Side::Base, bs), (Side::Theirs, ts), (Side::Ours, os)]
             .map(|(s, p)| p.output.map(|i| (self.skey(s, i), self.label_of(s, i))));
-        self.three(
-            Unit::Strip(StripField::Output),
-            row,
-            what("output"),
-            outputs,
-            |x, y| match (x, y) {
+        let out_eq =
+            |x: &Option<(Option<usize>, String)>, y: &Option<(Option<usize>, String)>| match (x, y)
+            {
                 (Some((Some(a), _)), Some((Some(b), _))) => a == b,
                 (None, None) => true,
                 _ => false,
-            },
-            |x| {
-                x.as_ref()
-                    .map_or_else(|| "none".to_owned(), |(_, l)| l.clone())
-            },
-        );
+            };
+        let out_text = |x: &Option<(Option<usize>, String)>| {
+            x.as_ref()
+                .map_or_else(|| "none".to_owned(), |(_, l)| l.clone())
+        };
+        if let Some(out) = outcome_of(&outputs, out_eq) {
+            let [_, theirs, ours] = &outputs;
+            let gone = theirs
+                .as_ref()
+                .and_then(|(k, _)| *k)
+                .filter(|k| self.deleted_here(*k));
+            let unit = Unit::Strip(StripField::Output);
+            match gone {
+                // Theirs plays into a bus ours deleted: the master.
+                Some(k) if out == Outcome::Theirs => {
+                    let to = self.strip_label(k).replacen("Strip ", "", 1);
+                    self.push(
+                        unit,
+                        row,
+                        Outcome::DeletedHere,
+                        what(&format!("output to {to}")),
+                    );
+                }
+                _ => {
+                    let (o, t) = (Some(out_text(ours)), Some(out_text(theirs)));
+                    self.push_with(unit, row, out, what("output"), o, t);
+                }
+            }
+        }
 
         let sends = [
             self.sends(Side::Base, b),
@@ -1381,21 +1589,42 @@ impl<'a> Decider<'a> {
         let targets: BTreeSet<usize> = sends.iter().flat_map(|s| s.keys().copied()).collect();
         for k in targets {
             let to = self.strip_label(k);
-            self.three(
-                Unit::Send(k),
-                row,
-                what(&format!("send to {}", to.trim_start_matches("Strip "))),
-                sends.each_ref().map(|s| s.get(&k).copied()),
-                send_eq,
-                send_text,
-            );
+            let what = what(&format!("send to {}", to.trim_start_matches("Strip ")));
+            let v = sends.each_ref().map(|s| s.get(&k).copied());
+            let Some(out) = outcome_of(&v, send_eq) else {
+                continue;
+            };
+            let [_, theirs, ours] = &v;
+            // Theirs' send to a bus ours deleted is not made.
+            if self.deleted_here(k)
+                && theirs.is_some()
+                && matches!(out, Outcome::Theirs | Outcome::Conflict)
+            {
+                self.push(Unit::Send(k), row, Outcome::DeletedHere, what);
+            } else {
+                let (o, t) = (Some(send_text(ours)), Some(send_text(theirs)));
+                self.push_with(Unit::Send(k), row, out, what, o, t);
+            }
         }
 
-        let devices = [
-            self.devices(Side::Base, b),
-            self.devices(Side::Theirs, t),
-            self.devices(Side::Ours, o),
+        // The instrument first: the merge never changes it, so theirs' swap
+        // is listed and not applied.
+        let [[ib, db], [it, dt], [io, dov]] = [
+            self.split_devices(Side::Base, b),
+            self.split_devices(Side::Theirs, t),
+            self.split_devices(Side::Ours, o),
         ];
+        let instruments = [ib, it, io];
+        if let Some(out) = outcome_of(&instruments, |x, y| x == y) {
+            let [_, theirs, ours] = &instruments;
+            let (o, t) = (Some(devices_text(ours)), Some(devices_text(theirs)));
+            if out == Outcome::Theirs {
+                self.push_not_applied(Unit::Instrument, row, what("instrument"), o, t);
+            } else {
+                self.push_with(Unit::Instrument, row, out, what("instrument"), o, t);
+            }
+        }
+        let devices = [db, dt, dov];
         let unhosted = self
             .theirs_strips
             .strips
@@ -1461,14 +1690,22 @@ impl<'a> Decider<'a> {
                 |x, y| x == y,
                 |x| text::on_off(*x).to_owned(),
             );
-            self.three(
-                Unit::State(i),
-                row,
-                what(&format!("settings of {plugin}")),
-                v.map(|d| d.and_then(|d| d.3)),
-                |x, y| x == y,
-                |x| x.map_or_else(|| "none".to_owned(), |h| format!("settings {h:016x}")),
-            );
+            let states = v.map(|d| d.and_then(|d| d.3));
+            let Some(out) = outcome_of(&states, |x, y| x == y) else {
+                continue;
+            };
+            let show = |x: &Option<u64>| {
+                x.map_or_else(|| "none".to_owned(), |h| format!("settings {h:016x}"))
+            };
+            let [_, theirs, ours] = &states;
+            let what = what(&format!("settings of {plugin}"));
+            let (o, t) = (Some(show(ours)), Some(show(theirs)));
+            // A state theirs dropped: no command clears one, so ours stays.
+            if out == Outcome::Theirs && theirs.is_none() {
+                self.push_not_applied(Unit::State(i), row, what, o, t);
+            } else {
+                self.push_with(Unit::State(i), row, out, what, o, t);
+            }
         }
     }
 
@@ -1603,7 +1840,7 @@ impl<'a> Decider<'a> {
     fn listed(&self, report: &mut Report) -> (MergePreview, Vec<String>) {
         let mut p = MergePreview::default();
         let bump = |n: &mut u32| *n = n.saturating_add(1);
-        for d in &self.out {
+        for (at, d) in self.out.iter().enumerate() {
             let take = matches!(d.unit, Unit::Notes | Unit::Regions);
             // A part new on both sides (`pair_twins`); a marker on all three
             // sides is a setting.
@@ -1621,6 +1858,14 @@ impl<'a> Decider<'a> {
                     bump(&mut p.conflicts);
                     if take {
                         p.conflict_lines.push(d.what.clone());
+                    } else if self.not_applied.contains(&at) {
+                        let line = text::conflict_setting(
+                            &d.what,
+                            d.ours.as_deref().unwrap_or("none"),
+                            d.theirs.as_deref().unwrap_or("none"),
+                        );
+                        report.add(ItemKind::Conflict, text::NOT_APPLIED, Some(line.clone()));
+                        p.conflict_lines.push(line);
                     } else if part {
                         report.add(ItemKind::Conflict, text::ADDED_BOTH, Some(d.what.clone()));
                         p.conflict_lines.push(d.what.clone());

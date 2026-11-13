@@ -29,6 +29,13 @@ pub const DELETED_HERE: &str = "Parts deleted here that the other DAW changed (l
 pub const ADDED_BOTH: &str =
     "Parts added here and in the other DAW under the same name (kept as they are here)";
 
+/// Conflicts: changes the other DAW made that the merge does not apply
+/// (Task 6 fix round 1): edits on a track that plays with its own loop,
+/// length or play quantize, an instrument swap, a plug-in state dropped.
+/// Detail [`conflict_setting`].
+pub const NOT_APPLIED: &str =
+    "Changes the other DAW made that VizDAW does not apply (kept as they are here)";
+
 // ---------------------------------------------------------------- Changed
 
 /// Changed: shared-sequence uses edited differently (Ruling 8). Detail:
@@ -82,13 +89,14 @@ pub const SEQUENCE_GONE: &str =
 
 /// Every report line above with the group it goes in, for the app's
 /// grouping and the tests.
-pub const LINES: [(&str, ItemKind); 15] = [
+pub const LINES: [(&str, ItemKind); 16] = [
     (CONFLICT_TAKE, ItemKind::Conflict),
     (CONFLICT_SETTING, ItemKind::Conflict),
     (KEPT_EMPTY, ItemKind::Conflict),
     (DELETED_THERE, ItemKind::Conflict),
     (DELETED_HERE, ItemKind::Conflict),
     (ADDED_BOTH, ItemKind::Conflict),
+    (NOT_APPLIED, ItemKind::Conflict),
     (PRIVATE_COPIES, ItemKind::Changed),
     (LOOPS_UNROLLED, ItemKind::Changed),
     (VST_KEPT, ItemKind::LeftOut),

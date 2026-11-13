@@ -337,7 +337,7 @@ pub fn apply_tagged(
         mut placed,
         lanes,
         mut plugins,
-    } = apply_tracks(h, imp, seq, &all, &mut buses, report)?;
+    } = apply_tracks(h, imp, seq, &all, &mut buses, &BTreeSet::new())?;
     for (b, bp) in plan.buses.iter().enumerate() {
         let Some(id) = buses.get(&b).copied() else {
             continue;
@@ -505,7 +505,11 @@ pub(crate) fn bus_of_strip(doc: &Document) -> BTreeMap<StripId, usize> {
 /// already have tracks (plan 6e Ruling 9); [`apply`] calls it for all.
 ///
 /// `buses` maps plan buses to the project's strips; a bus a track needs
-/// that it does not hold is added (with its settings) and joins it. A
+/// that it does not hold is added (with its settings) and joins it,
+/// unless it is `absent` (a bus the project deleted, plan 6e Task 6 fix
+/// round 1): a track then plays into the master and sends nothing to it.
+/// The structure adds no report line: the mapping's lines are the
+/// caller's to merge, and the events' are [`arrange_tracks`]'. A
 /// track on the built-in synth uses the project's built-in synth when it
 /// has one; only a synth made here gets the plan's synth settings. The
 /// tracks' events are [`arrange_tracks`]'.
@@ -515,12 +519,8 @@ pub(crate) fn apply_tracks(
     seq: SeqId,
     which: &[usize],
     buses: &mut BTreeMap<usize, StripId>,
-    report: &mut Report,
+    absent: &BTreeSet<usize>,
 ) -> Result<Added, ModelError> {
-    // The structure adds no line of its own: the mapping's lines are the
-    // caller's to merge (`apply_tagged` merges them once), and the events'
-    // are `arrange_tracks`'.
-    let _ = &report;
     let plan = &imp.plan;
     h.doc().sequence(seq)?;
     let chosen: Vec<(usize, &TrackPlan)> = which
@@ -530,7 +530,7 @@ pub(crate) fn apply_tracks(
     let mut states = Vec::new();
     let mut origins = Origins::default();
     let mut plugins = 0u64;
-    let needed = buses_needed(
+    let mut needed = buses_needed(
         imp,
         chosen.iter().map(|(_, t)| &t.mix).chain(
             chosen
@@ -540,6 +540,7 @@ pub(crate) fn apply_tracks(
                 .flatten(),
         ),
     );
+    needed.retain(|b| !absent.contains(b));
     let new_buses = add_buses(h, imp, needed, buses)?;
 
     let mut builtin: Option<DestId> = None;
