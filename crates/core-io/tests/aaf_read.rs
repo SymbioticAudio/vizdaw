@@ -5,15 +5,19 @@
 
 mod common;
 
+#[global_allocator]
+static ALLOC: common::CountingAlloc = common::CountingAlloc;
+
 use common::aaf::{
     ClipSpec, FileSpec, Fx, MXF_CONTAINER, Media, PICTURE, Seg, SlotKind, SlotSpec, Value, clip,
     file_url, gain, sound, trans, wav_bytes,
 };
+use common::measure;
 use core_io::IoError;
 use core_io::aaf::dict::{class, def};
 use core_io::aaf::timeline::{
-    AafFile, Clip, FROM_VIZDAW, MXF, NO_SOURCE, NON_AUDIO, SELECTED, SEVERAL_COMPOSITIONS, Shape,
-    locate,
+    AafFile, CLIP_PAN, Clip, FROM_VIZDAW, MXF, NO_SOURCE, NON_AUDIO, SELECTED,
+    SEVERAL_COMPOSITIONS, SPANS_SOURCES, Shape, locate,
 };
 use core_io::dawproject::import::NAMES_CUT;
 use core_io::dawproject::package::{AudioPackage, AudioSource};
@@ -509,6 +513,7 @@ fn pcm_essence_gets_a_wav_header() {
         frames: 100,
         media: Media::Pcm(data.clone()),
         container: None,
+        origin: 0,
     });
     fx.comp(
         "P",
@@ -797,4 +802,157 @@ fn reads_local_samples() {
             Err(e) => panic!("{}: {e:?}", p.display()),
         }
     }
+}
+
+fn name_of(f: &AafFile, key: usize) -> &str {
+    &f.audio().iter().find(|a| a.key == key).unwrap().name
+}
+
+/// A master mob whose slot is `seg` (fix round 1, I2).
+fn master(fx: &mut Fx, name: &str, seg: Seg) -> Vec<u8> {
+    let id = fx.new_id();
+    fx.mob(
+        class::MASTER_MOB,
+        &id,
+        name,
+        false,
+        &[sound(1, "", R48, seg)],
+    );
+    id
+}
+
+#[test]
+fn master_slots_play_the_segment_at_the_start() {
+    let mut fx = Fx::new();
+    let (_, a) = fx.file_ids(&FileSpec::wav("A", 48_000, 1, 48_000));
+    let (_, b) = fx.file_ids(&FileSpec::wav("B", 48_000, 1, 48_000));
+    // A leading filler: its length counts.
+    let lead = master(
+        &mut fx,
+        "Lead",
+        Seg::Seq(vec![Seg::Fill(1_000), clip(&a, 1, 0, 5_000)]),
+    );
+    // Two files in a row.
+    let two = master(
+        &mut fx,
+        "Two",
+        Seg::Seq(vec![clip(&a, 1, 0, 1_000), clip(&b, 1, 200, 1_000)]),
+    );
+    fx.comp(
+        "M",
+        true,
+        &[
+            sound(1, "Lead", R48, Seg::Seq(vec![clip(&lead, 1, 1_500, 100)])),
+            sound(2, "Second", R48, Seg::Seq(vec![clip(&two, 1, 1_500, 100)])),
+            sound(3, "Gap", R48, Seg::Seq(vec![clip(&lead, 1, 500, 100)])),
+            sound(4, "Span", R48, Seg::Seq(vec![clip(&two, 1, 900, 200)])),
+        ],
+    );
+    let f = open(&fx);
+    let slots = &f.composition().slots;
+    // Refs are per file mob (named after the master that first played
+    // them): Lead's and Span's clips play file A, Second's plays file B.
+    let lead = &slots[0].clips[0];
+    assert_eq!((name_of(&f, lead.media), lead.source_offset), ("Lead", 500));
+    let second = &slots[1].clips[0];
+    assert_ne!(second.media, lead.media);
+    assert_eq!(second.source_offset, 700);
+    let c = &slots[2].clips[0];
+    assert!(matches!(source_of(&f, c.media), AudioSource::Offline(_)));
+    assert!(has(&f.composition().report, ItemKind::LeftOut, NO_SOURCE));
+    let span = &slots[3].clips[0];
+    assert_eq!((span.media, span.source_offset), (lead.media, 900));
+    assert!(has(
+        &f.composition().report,
+        ItemKind::LeftOut,
+        SPANS_SOURCES
+    ));
+}
+
+#[test]
+fn a_clip_spanning_nothing_lists_no_span() {
+    let mut fx = Fx::new();
+    let (_, a) = fx.file_ids(&FileSpec::wav("A", 48_000, 1, 48_000));
+    let two = master(
+        &mut fx,
+        "Two",
+        Seg::Seq(vec![clip(&a, 1, 0, 1_000), clip(&a, 1, 0, 1_000)]),
+    );
+    fx.comp(
+        "M",
+        true,
+        &[sound(1, "T", R48, Seg::Seq(vec![clip(&two, 1, 100, 900)]))],
+    );
+    let f = open(&fx);
+    assert!(!has(
+        &f.composition().report,
+        ItemKind::LeftOut,
+        SPANS_SOURCES
+    ));
+}
+
+#[test]
+fn clip_pan_is_listed() {
+    let mut fx = Fx::new();
+    let a = fx.file(&FileSpec::wav("A", 48_000, 1, 48_000));
+    let panned = Seg::Op {
+        op: def::OPERATION_DEF_MONO_AUDIO_PAN,
+        param: def::PARAMETER_DEF_PAN,
+        value: Value::Const((1, 4)),
+        input: Box::new(clip(&a, 1, 0, 100)),
+    };
+    fx.comp("P", true, &[sound(1, "T", R48, Seg::Seq(vec![panned]))]);
+    let f = open(&fx);
+    assert_eq!(one_clip(&f).length, 100);
+    assert!(has(&f.composition().report, ItemKind::LeftOut, CLIP_PAN));
+    assert!(f.composition().slots[0].pan.constant.is_none());
+}
+
+#[test]
+fn the_file_slots_origin_adds_to_the_offset() {
+    let mut fx = Fx::new();
+    let a = fx.file(&FileSpec {
+        origin: 2_000,
+        ..FileSpec::wav("A", 48_000, 1, 48_000)
+    });
+    fx.comp(
+        "O",
+        true,
+        &[sound(1, "T", R48, Seg::Seq(vec![clip(&a, 1, 300, 100)]))],
+    );
+    assert_eq!(one_clip(&open(&fx)).source_offset, 2_300);
+}
+
+/// I1: many clips that play one mob whose slot holds a long sequence and
+/// whose name is long cost each clip its chain, not the mob's size.
+#[test]
+fn many_clips_of_one_large_mob_stay_cheap() {
+    const N: usize = 20_000;
+    let mut fx = Fx::new();
+    let (_, a) = fx.file_ids(&FileSpec::wav("A", 48_000, 1, 48_000));
+    let mut segs: Vec<Seg> = (0..N).map(|_| Seg::Fill(1)).collect();
+    segs.push(clip(&a, 1, 0, 1_000));
+    let big = master(&mut fx, &"n".repeat(30_000), Seg::Seq(segs));
+    let clips: Vec<Seg> = (0..N)
+        .map(|i| clip(&big, 1, (N + i % 100) as i64, 10))
+        .collect();
+    fx.comp("Many", true, &[sound(1, "T", R48, Seg::Seq(clips))]);
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("many.aaf");
+    fx.write(&p);
+    let t = std::time::Instant::now();
+    let (f, seen) = measure(|| AafFile::open(&p, None, &AafLimits::default(), &no()));
+    let f = f.unwrap();
+    assert!(t.elapsed().as_secs() < 10, "took {:?}", t.elapsed());
+    assert!(seen.peak < 192 * 1024 * 1024, "peak {}", seen.peak);
+    let cs = &f.composition().slots[0].clips;
+    assert_eq!(cs.len(), N);
+    assert_eq!(cs[5].source_offset, 5);
+    // One name, shared.
+    let n0 = cs[0].name.as_ref().unwrap();
+    assert_eq!(n0.len(), 4_096);
+    assert!(
+        cs.iter()
+            .all(|c| std::sync::Arc::ptr_eq(c.name.as_ref().unwrap(), n0))
+    );
 }

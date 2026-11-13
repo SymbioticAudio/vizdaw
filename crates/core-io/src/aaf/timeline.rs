@@ -22,8 +22,13 @@
 //!
 //! **Source chains** follow `SourceClip`s through `MasterMob`s to the file
 //! `SourceMob`, at most [`AafLimits::max_mob_chain`] mobs with a visited
-//! set; each hop's `StartTime` is in its own slot's edit units, and they
-//! add up to the clip's offset in frames at the media's rate. A clip that
+//! set; each hop's `StartTime` is in its own slot's edit units, counted
+//! from the referenced slot's `Origin`, and they add up to the clip's
+//! offset in frames at the media's rate. In a master slot's sequence the
+//! segment that covers the clip's start is played (fillers count); a clip
+//! that plays past that segment's end is listed ([`SPANS_SOURCES`]). Each
+//! mob and master slot is read once and memoised, so a clip costs its
+//! chain's length, and every clip is charged to the budget. A clip that
 //! plays a sub-`CompositionMob` is replaced by that composition's clips in
 //! its window, their positions and offsets composed. That is the walk's one
 //! recursion: one level per sub-composition, at most
@@ -44,6 +49,7 @@ use crate::read::{URL_NOT_FILE, external_file, is_url};
 use crate::report::{ItemKind, Report};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Why MXF media is offline.
@@ -78,6 +84,11 @@ pub const BAD_RATES: &str = "Tracks whose edit rate could not be read";
 ///
 /// [`AafLimits::max_control_points`]: crate::limits::AafLimits::max_control_points
 pub const POINTS_CUT: &str = "Automation points past 100 000 per curve";
+/// Left out: pan around a clip (VizDAW has no per-region pan).
+pub const CLIP_PAN: &str = "Clip pan (VizDAW has no per-region pan)";
+/// Left out: the part of a clip that plays past the end of the source
+/// segment it starts in (only that segment is played).
+pub const SPANS_SOURCES: &str = "Parts of clips that play past the end of their source";
 /// Left out: components VizDAW does not know (they become gaps).
 pub const UNKNOWN_PARTS: &str = "Parts of the timeline VizDAW does not know";
 /// Refusal: no `CompositionMob` with a sound slot to import.
@@ -97,6 +108,8 @@ const NO_PLACE: &str = "the file does not say where its audio is";
 const DEFAULT_RATE: u32 = 48_000;
 /// How many work units pass between looks at the cancel flag.
 const CANCEL_EVERY: usize = 4096;
+/// Work units one clip held costs: its size against the budget.
+const CLIP_COST: usize = 8;
 /// The 44-byte WAV header's length.
 const WAV_HEADER: usize = 44;
 
@@ -152,8 +165,9 @@ pub struct Clip {
     pub gain: f64,
     /// True when a gain around it varies (`gain` holds its first value).
     pub varying_gain: bool,
-    /// Its name: the name of the mob it plays.
-    pub name: Option<String>,
+    /// Its name: the name of the mob it plays, shared by every clip that
+    /// plays that mob.
+    pub name: Option<Arc<str>>,
 }
 
 /// A track's gain or pan.
@@ -284,6 +298,8 @@ impl AafFile {
             by_file: HashMap::new(),
             missing: HashMap::new(),
             memo: HashMap::new(),
+            mob_info: HashMap::new(),
+            slot_index: HashMap::new(),
         };
         let comp = rd.composition()?;
         let audio = std::mem::take(&mut rd.audio);
@@ -543,13 +559,29 @@ enum Piece {
 
 /// Where a source clip leads.
 enum Target {
-    /// A file `SourceMob`: its key, the channel, and the hops' start times
-    /// (value, edit rate).
-    File(usize, Option<u16>, Vec<(i64, (i32, i32))>, Option<String>),
-    /// A sound slot of a sub-composition, its mob ID and its edit rate.
-    Comp(ObjId, MobId, (i32, i32)),
+    /// A file `SourceMob`: its key, the channel, and the hops' offsets
+    /// (value, edit rate), which add up to the clip's offset.
+    File(usize, Option<u16>, Vec<(i64, (i32, i32))>, Option<Arc<str>>),
+    /// A sound slot of a sub-composition, its mob ID, its edit rate and
+    /// its `Origin`.
+    Comp(ObjId, MobId, (i32, i32), i64),
     /// Nowhere: the ID it named and why.
-    Missing(Vec<u8>, String, Option<String>),
+    Missing(Vec<u8>, String, Option<Arc<str>>),
+}
+
+/// A mob, read once: its class, its slots by `SlotID` (with each sound
+/// slot's position among the sound slots), and its cleaned name.
+struct MobInfo {
+    class: Option<Auid>,
+    slots: HashMap<u64, (ObjId, Option<usize>)>,
+    sound: usize,
+    name: Option<Arc<str>>,
+}
+
+/// A master slot's segments, read once: each clip's (start, end, clip)
+/// in slot edit units, in order; fillers are the gaps between.
+struct SlotIndex {
+    parts: Vec<(i64, i64, ObjId)>,
 }
 
 /// The read's state.
@@ -571,6 +603,10 @@ struct Rd<'a> {
     missing: HashMap<Vec<u8>, usize>,
     /// Sub-composition slots already read, in their own edit units.
     memo: HashMap<ObjId, Vec<Clip>>,
+    /// Mobs already read.
+    mob_info: HashMap<ObjId, Arc<MobInfo>>,
+    /// Master slots already indexed.
+    slot_index: HashMap<ObjId, Arc<SlotIndex>>,
 }
 
 impl Rd<'_> {
@@ -799,11 +835,7 @@ impl Rd<'_> {
                 .iter()
                 .map(|c| match c.channel {
                     Some(_) => 1,
-                    None => self
-                        .audio
-                        .iter()
-                        .find(|a| a.key == c.media)
-                        .map_or(1, |a| a.channels.max(1)),
+                    None => self.audio.get(c.media).map_or(1, |a| a.channels.max(1)),
                 })
                 .max()
                 .unwrap_or(1);
@@ -1063,7 +1095,9 @@ impl Rd<'_> {
                         let (f, var) = self.gain_of(o);
                         g *= f;
                         v |= var;
-                    } else if op != Some(def::OPERATION_DEF_MONO_AUDIO_PAN) {
+                    } else if op == Some(def::OPERATION_DEF_MONO_AUDIO_PAN) {
+                        self.report.add(ItemKind::LeftOut, CLIP_PAN, None);
+                    } else {
                         self.report.add(ItemKind::LeftOut, EFFECTS, None);
                     }
                     match self
@@ -1191,8 +1225,7 @@ impl Rd<'_> {
 
     fn media_rate(&self, key: usize) -> Option<(i32, i32)> {
         self.audio
-            .iter()
-            .find(|a| a.key == key)
+            .get(key)
             .filter(|a| a.sample_rate > 0)
             .map(|a| per_second(a.sample_rate))
     }
@@ -1213,7 +1246,7 @@ impl Rd<'_> {
             .prop(o, pid::SOURCE_CLIP_START_TIME)
             .and_then(dict::i64_at)
             .unwrap_or(0);
-        match self.resolve(o, rate)? {
+        match self.resolve(o, rate, len)? {
             Target::File(key, channel, hops, name) => {
                 let to = self.media_rate(key).unwrap_or(rate);
                 let offset = hops
@@ -1234,15 +1267,15 @@ impl Rd<'_> {
                 };
                 c.fade_in = self.clip_fade(o, pid::SOURCE_CLIP_FADE_IN_LENGTH, rate, to);
                 c.fade_out = self.clip_fade(o, pid::SOURCE_CLIP_FADE_OUT_LENGTH, rate, to);
-                self.tick(1)?;
+                self.tick(CLIP_COST)?;
                 Ok(vec![c])
             }
             Target::Missing(id, why, name) => {
                 self.report.add(ItemKind::LeftOut, NO_SOURCE, Some(why));
                 let end = start.saturating_add(len).max(0);
-                let key = self.missing_ref(id, name.clone(), rate, end);
+                let key = self.missing_ref(id, name.as_deref(), rate, end);
                 let to = self.media_rate(key).unwrap_or(rate);
-                self.tick(1)?;
+                self.tick(CLIP_COST)?;
                 Ok(vec![Clip {
                     start: pos,
                     length: len,
@@ -1257,7 +1290,7 @@ impl Rd<'_> {
                     name,
                 }])
             }
-            Target::Comp(slot, id, sub_rate) => {
+            Target::Comp(slot, id, sub_rate, origin) => {
                 if chain.len() >= self.limits.max_mob_chain || chain.contains(&Some(id)) {
                     self.report.add(
                         ItemKind::LeftOut,
@@ -1281,9 +1314,9 @@ impl Rd<'_> {
                         r
                     }
                 };
-                self.tick(inner.len())?;
-                let ws = rescale(start, rate, sub_rate);
-                let we = rescale(start.saturating_add(len), rate, sub_rate);
+                self.tick(inner.len().saturating_mul(CLIP_COST))?;
+                let ws = rescale(start, rate, sub_rate).saturating_add(origin);
+                let we = ws.saturating_add(rescale(len, rate, sub_rate));
                 let mut out = Vec::new();
                 for mut c in inner {
                     let (cs, ce) = (c.start, c.start.saturating_add(c.length));
@@ -1328,23 +1361,26 @@ impl Rd<'_> {
         Some(Fade { frames, shape })
     }
 
-    /// Follows a `SourceClip` in a slot of `rate` to its file, its
-    /// sub-composition, or nowhere.
-    fn resolve(&mut self, clip: ObjId, rate: (i32, i32)) -> Result<Target, IoError> {
+    /// Follows a `SourceClip` of `len` in a slot of `rate` to its file, its
+    /// sub-composition, or nowhere. Each hop reads its mob and slot from
+    /// the memos, so a clip costs its chain's length, whatever the mobs
+    /// hold.
+    fn resolve(&mut self, clip: ObjId, rate: (i32, i32), len: i64) -> Result<Target, IoError> {
         let mut seen: HashSet<MobId> = HashSet::new();
         let mut hops: Vec<(i64, (i32, i32))> = Vec::new();
         let mut cur = clip;
         let mut cur_rate = rate;
-        let mut top_name: Option<String> = None;
+        let mut len = len;
+        let mut top_name: Option<Arc<str>> = None;
         let mut first = true;
         let mut channel: Option<u16> = None;
         loop {
             self.tick(1)?;
             let raw_id = match self.prop(cur, pid::SOURCE_REFERENCE_SOURCE_ID) {
-                Some(Prop::Data(d)) => d.clone(),
+                Some(Prop::Data(d)) if d.len() == 32 => d.clone(),
                 _ => Vec::new(),
             };
-            let missing = |why: &str, name: &Option<String>| {
+            let missing = |why: &str, name: &Option<Arc<str>>| {
                 Ok(Target::Missing(
                     raw_id.clone(),
                     why.to_owned(),
@@ -1360,52 +1396,43 @@ impl Rd<'_> {
             let Some(&mob) = self.mobs.get(&id) else {
                 return missing("its source is not in the file", &top_name);
             };
+            let info = self.mob_info(mob)?;
             let slot_id = uint(self.prop(cur, pid::SOURCE_REFERENCE_SOURCE_MOB_SLOT_ID));
             let start = self
                 .prop(cur, pid::SOURCE_CLIP_START_TIME)
                 .and_then(dict::i64_at)
                 .unwrap_or(0);
-            hops.push((start, cur_rate));
             if first {
-                let raw = self.text(mob, pid::MOB_NAME);
-                let n = self.name(&raw);
-                top_name = (!n.is_empty()).then_some(n);
+                top_name = info.name.clone();
                 channel = self.channel_ids(cur);
             }
-            let slots = self.list(mob, pid::MOB_SLOTS);
-            let slot = slots
-                .iter()
-                .copied()
-                .find(|s| uint(self.prop(*s, pid::MOB_SLOT_SLOT_ID)) == slot_id);
-            let Some(slot) = slot else {
+            let Some(&(slot, sound_pos)) = slot_id.and_then(|k| info.slots.get(&k)) else {
                 return missing("its source track is not in the file", &top_name);
             };
             let Some(slot_rate) = good_rate(self.slot_rate(slot)) else {
                 return missing("its source track's edit rate could not be read", &top_name);
             };
-            match self.class(mob) {
+            // Positions in a referenced slot count from its Origin.
+            let origin = self
+                .prop(slot, pid::TIMELINE_MOB_SLOT_ORIGIN)
+                .and_then(dict::i64_at)
+                .unwrap_or(0);
+            match info.class {
                 Some(c) if c == class::COMPOSITION_MOB => {
                     if first {
-                        return Ok(Target::Comp(slot, id, slot_rate));
+                        return Ok(Target::Comp(slot, id, slot_rate, origin));
                     }
                     return missing("its source is a composition inside a source", &top_name);
                 }
                 Some(c) if c == class::SOURCE_MOB => {
-                    let sound: Vec<ObjId> = slots
-                        .iter()
-                        .copied()
-                        .filter(|s| self.class(*s) == Some(class::TIMELINE_MOB_SLOT))
-                        .collect();
-                    let key = self.file_ref(mob, id, top_name.clone());
-                    let wide = self
-                        .audio
-                        .iter()
-                        .find(|a| a.key == key)
-                        .is_some_and(|a| a.channels > 1);
-                    if channel.is_none() && wide && sound.len() > 1 {
+                    hops.push((start, cur_rate));
+                    hops.push((origin, slot_rate));
+                    let key = self.file_ref(mob, id, top_name.as_deref());
+                    let wide = self.audio.get(key).is_some_and(|a| a.channels > 1);
+                    if channel.is_none() && wide && info.sound > 1 {
                         let k = uint(self.prop(slot, pid::MOB_SLOT_PHYSICAL_TRACK_NUMBER))
                             .and_then(|n| n.checked_sub(1))
-                            .or_else(|| sound.iter().position(|s| *s == slot).map(|p| p as u64));
+                            .or(sound_pos.map(|p| p as u64));
                         channel = k.and_then(|k| u16::try_from(k).ok());
                     }
                     if !wide {
@@ -1415,14 +1442,108 @@ impl Rd<'_> {
                 }
                 _ => {}
             }
-            // A master mob (or another mob): its slot's clip.
-            let Some(next) = self.inner_clip(slot) else {
-                return missing("its source track plays no clip", &top_name);
+            // A master mob (or another mob): the segment of its slot that
+            // covers the clip's start.
+            let pos = rescale(start, cur_rate, slot_rate).saturating_add(origin);
+            let here = rescale(len, cur_rate, slot_rate);
+            let index = self.slot_index(slot)?;
+            let at = index.parts.partition_point(|p| p.0 <= pos);
+            let part = at
+                .checked_sub(1)
+                .and_then(|i| index.parts.get(i))
+                .filter(|p| pos < p.1)
+                .copied();
+            let Some((p_start, p_end, next)) = part else {
+                return missing("its source track has nothing to play there", &top_name);
             };
+            if pos.saturating_add(here) > p_end {
+                self.report.add(ItemKind::LeftOut, SPANS_SOURCES, None);
+            }
+            hops.push((start, cur_rate));
+            hops.push((origin.saturating_sub(p_start), slot_rate));
             cur = next;
             cur_rate = slot_rate;
+            len = here;
             first = false;
         }
+    }
+
+    /// Mob `mob`, read once (its slots and name), charged to the budget
+    /// by its slot count.
+    fn mob_info(&mut self, mob: ObjId) -> Result<Arc<MobInfo>, IoError> {
+        if let Some(i) = self.mob_info.get(&mob) {
+            return Ok(Arc::clone(i));
+        }
+        let list = self.list(mob, pid::MOB_SLOTS);
+        self.tick(list.len().saturating_add(1))?;
+        let mut slots = HashMap::with_capacity(list.len());
+        let mut sound = 0usize;
+        for sl in list {
+            let pos = (self.class(sl) == Some(class::TIMELINE_MOB_SLOT)).then(|| {
+                sound = sound.saturating_add(1);
+                sound - 1
+            });
+            if let Some(k) = uint(self.prop(sl, pid::MOB_SLOT_SLOT_ID)) {
+                slots.entry(k).or_insert((sl, pos));
+            }
+        }
+        let raw = self.text(mob, pid::MOB_NAME);
+        let n = self.name(&raw);
+        let info = Arc::new(MobInfo {
+            class: self.class(mob),
+            slots,
+            sound,
+            name: (!n.is_empty()).then(|| Arc::from(n)),
+        });
+        self.mob_info.insert(mob, Arc::clone(&info));
+        Ok(info)
+    }
+
+    /// A master slot's clips, read once with an explicit stack: nested
+    /// sequences are flattened, fillers and other components advance the
+    /// position, transitions move it back, and an essence group plays its
+    /// first choice. Charged to the budget by its components.
+    fn slot_index(&mut self, slot: ObjId) -> Result<Arc<SlotIndex>, IoError> {
+        if let Some(i) = self.slot_index.get(&slot) {
+            return Ok(Arc::clone(i));
+        }
+        let mut parts = Vec::new();
+        let mut pos: i64 = 0;
+        let mut stack: Vec<ObjId> = self
+            .strong(slot, pid::MOB_SLOT_SEGMENT)
+            .into_iter()
+            .collect();
+        while let Some(o) = stack.pop() {
+            self.tick(1)?;
+            let len = self.len_of(o);
+            match self.class(o) {
+                Some(c) if c == class::SOURCE_CLIP => {
+                    let end = pos.saturating_add(len);
+                    parts.push((pos, end, o));
+                    pos = end;
+                }
+                Some(c) if c == class::SEQUENCE => {
+                    let kids = self.list(o, pid::SEQUENCE_COMPONENTS);
+                    stack.extend(kids.into_iter().rev());
+                }
+                Some(c) if c == class::ESSENCE_GROUP => {
+                    match self.list(o, pid::ESSENCE_GROUP_CHOICES).first().copied() {
+                        Some(ch) => {
+                            self.report.add(ItemKind::Note, FIRST_CHOICE, None);
+                            stack.push(ch);
+                        }
+                        None => pos = pos.saturating_add(len),
+                    }
+                }
+                Some(c) if c == class::TRANSITION => pos = pos.saturating_sub(len),
+                _ => pos = pos.saturating_add(len),
+            }
+        }
+        // Overlaps (after a transition) keep the later part from its start.
+        parts.sort_by_key(|p| p.0);
+        let index = Arc::new(SlotIndex { parts });
+        self.slot_index.insert(slot, Arc::clone(&index));
+        Ok(index)
     }
 
     /// The one channel a clip's `ChannelIDs` names (1-based), if one.
@@ -1434,41 +1555,12 @@ impl Rd<'_> {
         u16::try_from(u32::from_le_bytes(b).checked_sub(1)?).ok()
     }
 
-    /// The `SourceClip` a master mob's slot plays: its segment, the first
-    /// clip of its sequence, or an essence group's first choice.
-    fn inner_clip(&mut self, slot: ObjId) -> Option<ObjId> {
-        let mut seg = self.strong(slot, pid::MOB_SLOT_SEGMENT)?;
-        for _ in 0..self.limits.max_depth {
-            match self.class(seg)? {
-                c if c == class::SOURCE_CLIP => return Some(seg),
-                c if c == class::SEQUENCE => {
-                    seg = self
-                        .list(seg, pid::SEQUENCE_COMPONENTS)
-                        .into_iter()
-                        .find(|k| {
-                            matches!(self.class(*k), Some(c) if c == class::SOURCE_CLIP
-                                || c == class::ESSENCE_GROUP || c == class::SEQUENCE)
-                        })?;
-                }
-                c if c == class::ESSENCE_GROUP => {
-                    self.report.add(ItemKind::Note, FIRST_CHOICE, None);
-                    seg = self
-                        .list(seg, pid::ESSENCE_GROUP_CHOICES)
-                        .first()
-                        .copied()?;
-                }
-                _ => return None,
-            }
-        }
-        None
-    }
-
     /// The key of the offline ref for clips whose source is missing, one
     /// per ID named.
     fn missing_ref(
         &mut self,
         id: Vec<u8>,
-        name: Option<String>,
+        name: Option<&str>,
         rate: (i32, i32),
         end: i64,
     ) -> usize {
@@ -1488,14 +1580,17 @@ impl Rd<'_> {
             channels: 1,
             sample_rate,
             frames,
-            name: name.unwrap_or_else(|| format!("Missing audio {}", key.saturating_add(1))),
+            name: name.map_or_else(
+                || format!("Missing audio {}", key.saturating_add(1)),
+                str::to_owned,
+            ),
         });
         self.missing.insert(id, key);
         key
     }
 
     /// The key of the file source mob `mob`'s ref, made on first use.
-    fn file_ref(&mut self, mob: ObjId, id: MobId, top_name: Option<String>) -> usize {
+    fn file_ref(&mut self, mob: ObjId, id: MobId, top_name: Option<&str>) -> usize {
         if let Some(k) = self.by_file.get(&id) {
             return *k;
         }
@@ -1543,7 +1638,7 @@ impl Rd<'_> {
         } else {
             String::new()
         };
-        let mut name = top_name.unwrap_or_else(|| self.name(&raw));
+        let mut name = top_name.map_or_else(|| self.name(&raw), str::to_owned);
         if name.is_empty() {
             name = format!("Audio {}", key.saturating_add(1));
         }

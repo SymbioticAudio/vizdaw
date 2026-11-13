@@ -321,6 +321,8 @@ pub struct FileSpec {
     pub media: Media,
     /// The descriptor's `ContainerFormat` (AAF or External when `None`).
     pub container: Option<Auid>,
+    /// The file slots' `Origin`.
+    pub origin: i64,
 }
 
 impl FileSpec {
@@ -334,6 +336,7 @@ impl FileSpec {
             frames,
             media: Media::Wav(wav_bytes(rate, channels, frames as u32)),
             container: None,
+            origin: 0,
         }
     }
 
@@ -347,6 +350,7 @@ impl FileSpec {
             frames,
             media: Media::Url(url.into()),
             container: None,
+            origin: 0,
         }
     }
 }
@@ -1003,12 +1007,35 @@ impl Fx {
     /// embedded, its `EssenceData`) and its `MasterMob`, both with one
     /// slot per channel. Returns the master mob's MobID.
     pub fn file(&mut self, f: &FileSpec) -> Vec<u8> {
+        self.file_ids(f).0
+    }
+
+    /// [`Fx::file`], returning the master mob's and the file mob's IDs.
+    pub fn file_ids(&mut self, f: &FileSpec) -> (Vec<u8>, Vec<u8>) {
         let src_id = self.new_id();
         let rate = (f.rate as i32, 1);
         let src_slots: Vec<SlotSpec> = (1..=u32::from(f.channels))
             .map(|k| sound(k, "", rate, Seg::Fill(f.frames)))
             .collect();
         let src = self.mob(class::SOURCE_MOB, &src_id, &f.name, false, &src_slots);
+        if f.origin != 0 {
+            for sl in self.s.objects[src.0 as usize]
+                .props
+                .get(&pid::MOB_SLOTS)
+                .map(|p| match p {
+                    Prop::StrongVec(v) => v.clone(),
+                    _ => Vec::new(),
+                })
+                .unwrap_or_default()
+            {
+                set(
+                    &mut self.s,
+                    sl,
+                    pid::TIMELINE_MOB_SLOT_ORIGIN,
+                    Prop::Data(f.origin.to_le_bytes().to_vec()),
+                );
+            }
+        }
         let (cls, embedded) = match &f.media {
             Media::Wav(b) => (class::WAVE_DESCRIPTOR, Some(b.clone())),
             Media::Aifc(b) => (class::AIFC_DESCRIPTOR, Some(b.clone())),
@@ -1134,7 +1161,7 @@ impl Fx {
             .map(|k| sound(k, "", rate, clip(&src_id, k, 0, f.frames)))
             .collect();
         self.mob(class::MASTER_MOB, &master_id, &f.name, false, &slots);
-        master_id
+        (master_id, src_id)
     }
 
     /// Writes the file to `path`, the essence streamed in.
