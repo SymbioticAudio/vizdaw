@@ -268,6 +268,7 @@ public enum ControlCommands {
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
+            .union(MixerCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -509,6 +510,8 @@ public enum ControlCommands {
             return TrackCommands.run(id, args: args, doc: docID, m)
         case _ where AutomationCommands.ids.contains(id):
             return AutomationCommands.run(id, args: args, doc: docID, m)
+        case _ where MixerCommands.ids.contains(id):
+            return MixerCommands.run(id, args: args, docID: docID, m)
         case AudioCommands.addMidi:
             return AudioCommands.runAddMidi(args, doc: docID, m)
         case RegionCommands.openExternal, RegionCommands.reloadExternal:

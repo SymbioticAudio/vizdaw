@@ -270,6 +270,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func endEdit() throws -> DocSnapshot { try mixerCall("end") }
     func addBus(name: String) throws -> DocSnapshot { try mixerCall("addBus \(name)") }
+    func newBusFrom(strip: UInt64, name: String) throws -> DocSnapshot {
+        try mixerCall("newBusFrom \(strip) \(name)")
+    }
     func removeBus(strip: UInt64) throws -> DocSnapshot { try mixerCall("removeBus \(strip)") }
     func renameStrip(strip: UInt64, name: String) throws -> DocSnapshot {
         try mixerCall("renameStrip \(strip) \(name)")

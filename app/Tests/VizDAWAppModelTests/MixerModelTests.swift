@@ -126,6 +126,43 @@ import VizDAWCore
         ])
     }
 
+    /// Plan 6g-2 Ruling 8: one naming rule for Add Bus, New Bus and
+    /// `mixer.new_bus`: the lowest free "Bus N" among the buses.
+    @Test func newBusUsesTheAddBusName() throws {
+        #expect(MixerModel.nextBusName([]) == "Bus 1")
+        #expect(MixerModel.nextBusName([BusRow(id: 2, name: "Bus 1"), BusRow(id: 3, name: "Bus 3")]) == "Bus 2")
+        #expect(MixerModel.nextBusName([BusRow(id: 2, name: "Drums")]) == "Bus 1")
+        // Only buses count: a track strip named "Bus 1" does not.
+        let other = mixerFake()
+        other.mixerSnap.strips = [stripRow(1, "Bus 1", kind: .builtinSynth), stripRow(0, "Master", kind: .master)]
+        other.mixerSnap.buses = []
+        let n = try model(other)
+        #expect(MixerModel.nextBusName(n.snapshot.buses) == "Bus 1")
+        n.addBus()
+        #expect(other.calls == ["addBus Bus 1"])
+
+        let f = mixerFake()
+        let m = try model(f)
+        m.newBus(from: 1)
+        #expect(f.calls == ["newBusFrom 1 Bus 2"])
+        #expect(m.document.alert == nil)
+    }
+
+    @Test func aRefusedNewBusAlertsOnce() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        f.mixerError = .Model(message: "Master has no sends.")
+        let before = f.mixerCalls
+        m.newBus(from: 0)
+        #expect(m.document.alert?.title == "New Bus Failed")
+        #expect(m.document.alert?.message == "Master has no sends.")
+        let shown = m.document.alert?.id
+        m.newBus(from: 0)
+        #expect(m.document.alert?.id == shown, "the same alert is not raised twice")
+        #expect(f.mixerCalls > before, "the mixer is refetched")
+        #expect(f.calls.isEmpty)
+    }
+
     @Test func theBrowserPickGoesWhereItWasOpened() throws {
         let f = mixerFake()
         let m = try model(f)

@@ -2680,6 +2680,77 @@ impl Session {
         ffi_guard(|| self.execute(Command::Mixer(MixerCmd::AddBus { name, index: None })))
     }
 
+    /// A bus named `name` (trimmed; blank refused) and a post-fader 0 dB
+    /// send from `strip` to it, one undo step "New Bus" (plan 6g-2 Ruling
+    /// 7). The bus gets the default EQ as any new bus does. Refused for
+    /// master ("Master has no sends.") and an unknown strip; a refusal
+    /// leaves no bus and no step. `Busy` while an edit is open.
+    pub fn new_bus_from(&self, strip: u64, name: String) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return Err(VizError::Model {
+                    message: "A bus needs a name.".into(),
+                });
+            }
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(edit_open_busy());
+            }
+            let source = StripId(strip);
+            inner.doc().mixer().strip(source)?;
+            if source == inner.doc().mixer().master() {
+                return Err(VizError::Model {
+                    message: "Master has no sends.".into(),
+                });
+            }
+            let filter = ViewFilter::default();
+            let h = &mut inner.history;
+            crate::bundled::arm(h);
+            h.begin("New Bus")?;
+            let mut notes = Vec::new();
+            let made = h
+                .execute(
+                    &Command::Mixer(MixerCmd::AddBus { name, index: None }),
+                    &filter,
+                )
+                .and_then(|r| {
+                    notes.extend(r.warnings.iter().cloned());
+                    let bus = r
+                        .created
+                        .iter()
+                        .find_map(|id| match id {
+                            core_model::ids::AnyId::Strip(s) => Some(*s),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            core_model::error::ModelError::invalid("no bus was added")
+                        })?;
+                    h.execute(
+                        &Command::Mixer(MixerCmd::AddSend {
+                            strip: source,
+                            send: AuxSend::new(bus),
+                        }),
+                        &filter,
+                    )
+                });
+            match made {
+                Ok(r) => notes.extend(r.warnings),
+                Err(e) => {
+                    let _ = h.abort();
+                    return Err(e.into());
+                }
+            }
+            h.commit()?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            // The steps' lines reach the app (a default EQ's fallback
+            // note, plan 6g-2 Ruling 4).
+            inner.snapshot_with(notes)
+        })
+    }
+
     /// Removes a bus (outputs to it go to master, sends to it go).
     pub fn remove_bus(&self, strip: u64) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {

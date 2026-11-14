@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        180,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq"
+        181,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -2830,6 +2830,49 @@ fn default_eq_command_checks_its_params() {
         json!({ "plugin": true }),
         json!({ "plugin": "multi-q", "extra": 1 }),
         json!({ "plugin": huge }),
+    ] {
+        let (code, message) = err("command.run", run(params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}: {message}");
+    }
+}
+
+/// Plan 6g-2 Task 3: `mixer.new_bus` takes an optional strip ID and an
+/// optional name; each hostile value is `invalid_params`.
+#[test]
+fn mixer_new_bus_checks_its_params() {
+    let run = |params: Value| json!({ "id": "mixer.new_bus", "params": params });
+    for (params, args) in [
+        (json!({}), vec![]),
+        (
+            json!({ "strip": 3 }),
+            vec![("strip".into(), ArgValue::Int(3))],
+        ),
+        (
+            json!({ "strip": 3, "name": "Drums" }),
+            vec![
+                ("strip".into(), ArgValue::Int(3)),
+                ("name".into(), ArgValue::Text("Drums".into())),
+            ],
+        ),
+    ] {
+        assert_eq!(
+            ok("command.run", run(params)),
+            Command::CommandRun {
+                id: "mixer.new_bus".into(),
+                args,
+                window: None,
+            }
+        );
+    }
+    let huge = "x".repeat(70_000);
+    for params in [
+        json!({ "strip": "3" }),
+        json!({ "strip": -1 }),
+        json!({ "strip": 1e30 }),
+        json!({ "strip": true }),
+        json!({ "name": 5 }),
+        json!({ "name": huge }),
+        json!({ "strip": 3, "extra": 1 }),
     ] {
         let (code, message) = err("command.run", run(params.clone()));
         assert_eq!(code, ErrorCode::InvalidParams, "{params}: {message}");

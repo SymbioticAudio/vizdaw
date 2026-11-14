@@ -306,6 +306,20 @@ const PLUGINS_DEFAULT_EQ_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see the Plugin Manager).",
 }];
 
+/// `mixer.new_bus`'s parameters (plan 6g-2 Ruling 7).
+const MIXER_NEW_BUS_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "strip",
+        "The strip whose new send feeds the bus (see state.get mixer); absent: a bus with no send.",
+    ),
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The bus's name (default: the next free Bus N).",
+    },
+];
+
 /// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
 const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "theme",
@@ -2457,6 +2471,10 @@ pub const COMMANDS: &[CommandSpec] = &[
             None,
             false,
         ))
+    },
+    CommandSpec {
+        params: MIXER_NEW_BUS_PARAMS,
+        ..key_only(cmd("mixer.new_bus", "Mixer", "New Bus", None, true))
     },
 ];
 
