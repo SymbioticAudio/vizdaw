@@ -1,6 +1,6 @@
-//! New audio, instrument and built-in-synth strips get the bundled EQ in
-//! their EQ slot, in the same undo step as the command that made them
-//! (plan 6g Task 3).
+//! Every new strip but master gets the default EQ in its EQ slot, in the
+//! same undo step as the command that made it (plan 6g Task 3, plan 6g-2
+//! Task 1).
 
 use core_model::command::{Command, LaneCmd, MixerCmd, Report, RoutingCmd, SequenceCmd};
 use core_model::document::{DestKind, Document};
@@ -129,7 +129,7 @@ fn assert_filled(h: &History, s: StripId, r: &Report) {
 }
 
 #[test]
-fn only_new_audio_instrument_and_synth_strips() {
+fn every_new_strip_but_master() {
     let mut h = history(Some(mq()));
     let master = h.doc().mixer().master();
 
@@ -163,8 +163,8 @@ fn only_new_audio_instrument_and_synth_strips() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(eq_of(&h, bus), None);
-    assert!(plugins(&r).is_empty());
+    assert_filled(&h, bus, &r);
+    assert_eq!(plugins(&r).len(), 1);
     assert_eq!(eq_of(&h, master), None);
 
     let r = run(
@@ -176,8 +176,9 @@ fn only_new_audio_instrument_and_synth_strips() {
         }),
     );
     let out2 = strip(&h, StripKind::InstrumentOutput(pad, 1));
-    assert_eq!(eq_of(&h, out2), None);
-    assert!(plugins(&r).is_empty());
+    assert_filled(&h, out2, &r);
+    assert_eq!(plugins(&r).len(), 1);
+    assert_eq!(eq_of(&h, master), None);
 
     // Strips that existed before keep their EQ: none, or the user's.
     let mut h = history(None);
@@ -192,6 +193,15 @@ fn only_new_audio_instrument_and_synth_strips() {
             plugin: Some(user_eq()),
         }),
     );
+    let r = run(
+        &mut h,
+        Command::Mixer(MixerCmd::AddBus {
+            name: "Bus 1".into(),
+            index: None,
+        }),
+    );
+    let b1 = first_strip(&r);
+    let master = h.doc().mixer().master();
     h.set_new_strip_eq(Some(mq()));
     let r = add_output(&mut h, "Audio 3");
     let a3 = strip(&h, StripKind::AudioPath(output_of(&r)));
@@ -199,6 +209,72 @@ fn only_new_audio_instrument_and_synth_strips() {
     assert_eq!(eq_of(&h, a2), Some(user_eq()));
     assert_filled(&h, a3, &r);
     assert_eq!(plugins(&r).len(), 1);
+    let r = run(
+        &mut h,
+        Command::Mixer(MixerCmd::AddBus {
+            name: "Bus 2".into(),
+            index: None,
+        }),
+    );
+    assert_filled(&h, first_strip(&r), &r);
+    assert_eq!(eq_of(&h, b1), None);
+    assert_eq!(eq_of(&h, master), None);
+}
+
+fn first_strip(r: &Report) -> StripId {
+    r.created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Strip(x) => Some(*x),
+            _ => None,
+        })
+        .unwrap()
+}
+
+const NOTE: &str = "X is not available, so new channels get Multi-Q.";
+
+fn note_count(r: &Report) -> usize {
+    r.warnings.iter().filter(|w| w.as_str() == NOTE).count()
+}
+
+fn add_bus(h: &mut History, name: &str) -> Report {
+    run(
+        h,
+        Command::Mixer(MixerCmd::AddBus {
+            name: name.into(),
+            index: None,
+        }),
+    )
+}
+
+#[test]
+fn the_note_rides_with_a_fill() {
+    let mut h = history(Some(mq()));
+    h.set_new_strip_eq_note(Some(NOTE.into()));
+    let r = add_bus(&mut h, "Bus 1");
+    assert_eq!(note_count(&r), 1);
+
+    // No new strip: no note.
+    let bus = first_strip(&r);
+    let r = run(
+        &mut h,
+        Command::Mixer(MixerCmd::SetGain {
+            strip: bus,
+            gain_db: -3.0,
+        }),
+    );
+    assert_eq!(note_count(&r), 0);
+
+    // No plug-in: no fill, so no note.
+    h.set_new_strip_eq(None);
+    let r = add_bus(&mut h, "Bus 2");
+    assert_eq!(note_count(&r), 0);
+
+    // A clone keeps the note.
+    h.set_new_strip_eq(Some(mq()));
+    let mut c = h.clone();
+    let r = add_bus(&mut c, "Bus 3");
+    assert_eq!(note_count(&r), 1);
 }
 
 #[test]

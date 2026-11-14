@@ -92,9 +92,9 @@ pub(crate) fn rename_kind(d: &mut Document, kind: StripKind, name: &str) {
 }
 
 /// Fills the EQ slot of each eligible strip `report` created (plan 6g
-/// Rulings 3, 5): an `AudioPath`, `Instrument` or `BuiltinSynth` strip that
-/// still exists and whose slot is still empty (a command that fills its own
-/// EQ keeps it) gets a fresh `plugin` instance with no state or overlay.
+/// Rulings 3, 5; plan 6g-2 Ruling 1): any strip but `Master` that still
+/// exists and whose slot is still empty (a command that fills its own EQ
+/// keeps it) gets a fresh `plugin` instance with no state or overlay.
 /// Each new slot's [`AnyId::Plugin`] is pushed onto `report.created`.
 /// Answers how many it filled.
 pub(crate) fn fill_new_eqs(doc: &mut Document, report: &mut Report, plugin: &PluginRef) -> usize {
@@ -108,13 +108,10 @@ pub(crate) fn fill_new_eqs(doc: &mut Document, report: &mut Report, plugin: &Plu
         .collect();
     let mut filled = 0;
     for id in strips {
-        let eligible = doc.mixer().strip(id).is_ok_and(|s| {
-            s.eq.is_none()
-                && matches!(
-                    s.kind,
-                    StripKind::AudioPath(_) | StripKind::Instrument(_) | StripKind::BuiltinSynth
-                )
-        });
+        let eligible = doc
+            .mixer()
+            .strip(id)
+            .is_ok_and(|s| s.eq.is_none() && s.kind != StripKind::Master);
         if !eligible {
             continue;
         }

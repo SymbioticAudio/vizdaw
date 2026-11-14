@@ -826,9 +826,25 @@ impl Session {
 }
 
 /// A new project's document (plan tracks Ruling 3): `doc` with the
-/// sequence "Sequence 1" and none of its tracks, made without a history
-/// step, so there is nothing to undo and the project is not dirty.
+/// sequence "Sequence 1" and none of its tracks, and master's EQ slot
+/// holding the EQ new channels get, if any (plan 6g-2 Ruling 2), made
+/// without a history step, so there is nothing to undo and the project is
+/// not dirty.
 fn starting_document(doc: Document) -> Result<Document, VizError> {
+    let doc = match crate::bundled::new_strip_eq() {
+        Some(eq) => {
+            let master = doc.mixer().master();
+            core_model::command::apply(
+                &doc,
+                &Command::Mixer(MixerCmd::SetEq {
+                    strip: master,
+                    plugin: Some(eq),
+                }),
+            )?
+            .doc
+        }
+        None => doc,
+    };
     let made = core_model::command::apply(
         &doc,
         &Command::Sequence(SequenceCmd::New {
@@ -4248,7 +4264,16 @@ impl Session {
             let index = crate::tracks::index_below(inner.doc(), seq, after);
             crate::bundled::arm(&mut inner.history);
             inner.history.begin(crate::tracks::new_track_label(kind))?;
-            match crate::tracks::build_track(&mut inner.history, seq, kind, index, monitor) {
+            let mut notes = Vec::new();
+            let built = crate::tracks::build_track(
+                &mut inner.history,
+                seq,
+                kind,
+                index,
+                monitor,
+                &mut notes,
+            );
+            match built {
                 Ok(_) => inner.history.commit()?,
                 Err(e) => {
                     inner.history.abort()?;
@@ -4259,7 +4284,9 @@ impl Session {
             host::clear_input_failure_of(self.id);
             inner.reload_host(self.id);
             self.mark(&mut inner);
-            inner.snapshot()
+            // The step's lines reach the app (a default EQ's fallback
+            // note, plan 6g-2 Ruling 4).
+            inner.snapshot_with(notes)
         })
     }
 

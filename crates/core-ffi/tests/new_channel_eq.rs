@@ -87,20 +87,16 @@ fn doc_of(s: &Session) -> Document {
     core_model::file::from_json(&s.debug_document_json()).unwrap()
 }
 
-/// Every strip of a new project's tracks has Multi-Q, or none has an EQ.
-/// Answers how many strips are not bus or master.
+/// Every strip of a new project has Multi-Q, master included (plan 6g-2
+/// Rulings 1, 2), or none has an EQ. Answers how many strips are not bus
+/// or master.
 fn check_channels(s: &Session, want: Option<&str>) -> usize {
     let mut n = 0;
     for x in strips(s) {
         let name = x.eq.as_ref().map(|e| e.plugin.name.as_str());
-        match x.kind {
-            StripKindRow::AudioPath { .. }
-            | StripKindRow::Instrument { .. }
-            | StripKindRow::BuiltinSynth => {
-                n += 1;
-                assert_eq!(name, want, "{}", x.name);
-            }
-            _ => assert_eq!(name, None, "{}", x.name),
+        assert_eq!(name, want, "{}", x.name);
+        if !matches!(x.kind, StripKindRow::Bus | StripKindRow::Master) {
+            n += 1;
         }
     }
     n
@@ -137,17 +133,13 @@ fn new_tracks_get_multiq() {
     let doc = doc_of(&s);
     let mut filled = 0;
     for x in doc.mixer().strips().values() {
-        if matches!(
-            x.kind,
-            StripKind::AudioPath(_) | StripKind::Instrument(_) | StripKind::BuiltinSynth
-        ) {
-            let eq = x.eq.as_ref().unwrap();
-            assert_eq!(eq.plugin, mq());
-            assert!(eq.state.is_none() && eq.params.is_empty() && !eq.bypass);
-            filled += 1;
-        }
+        let eq = x.eq.as_ref().unwrap();
+        assert_eq!(eq.plugin, mq());
+        assert!(eq.state.is_none() && eq.params.is_empty() && !eq.bypass);
+        filled += 1;
     }
-    assert_eq!(filled, 3);
+    // Three channels and the new project's master (plan 6g-2 Ruling 2).
+    assert_eq!(filled, 4);
     s.close().unwrap();
     debug_clear_multiq();
 }
@@ -367,8 +359,9 @@ fn imports_get_it_unless_they_fill_it() {
         .values()
         .filter(|x| x.eq.as_ref().is_some_and(|e| e.plugin == mq()))
         .count();
-    // "Mono" has no EQ in the file: it keeps the flat default (Ruling 10).
-    assert_eq!(multiqs, 1, "{paths:?}");
+    // "Mono" has no EQ in the file: it keeps the flat default (Ruling 10),
+    // and so does the new project's master (plan 6g-2 Ruling 2).
+    assert_eq!(multiqs, 2, "{paths:?}");
     s.close().unwrap();
     debug_clear_multiq();
 }

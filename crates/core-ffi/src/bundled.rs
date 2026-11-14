@@ -1,6 +1,7 @@
-//! The EQ new channels get (plan 6g Task 3, Rulings 5–8): the bundled
-//! Multi-Q, when the catalog has a usable copy and the "Put an EQ on new
-//! channels" switch is on. Every session History is made by [`history`] and
+//! The EQ new channels get (plan 6g Task 3, Rulings 5–8; plan 6g-2
+//! Rulings 3–5): the user's chosen effect, else the bundled Multi-Q, when
+//! the catalog has a usable copy and the "Put an EQ on new channels"
+//! switch is on. Every session History is made by [`history`] and
 //! armed by [`arm`] before each command that can build strips, so a change
 //! of the switch or of the catalog applies to the next command.
 //!
@@ -8,6 +9,8 @@
 //! of the bundled AU into a Components folder, only when asked.
 
 use crate::error::VizError;
+use crate::snapshot::PluginFormatTag;
+use core_host::PluginKind;
 use core_host::bundled::{MULTIQ_AU_BUNDLE, MULTIQ_CLAP_BUNDLE, MULTIQ_CLAP_ID};
 use core_host::catalog::PluginStatus;
 use core_model::document::Document;
@@ -16,6 +19,7 @@ use core_model::mixer::{PluginFormat, PluginRef};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// "Put an EQ on new channels" (Ruling 8): a machine preference the app
@@ -78,9 +82,142 @@ pub fn multiq() -> Option<PluginRef> {
     })
 }
 
-/// The EQ new strips get now: [`multiq`] when the switch is on.
+/// The user's choice of EQ for new channels (Ruling 5); None: Multi-Q.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct DefaultEqRow {
+    /// AU or CLAP.
+    pub format: PluginFormatTag,
+    /// The plug-in's catalog ID.
+    pub id: String,
+    /// The name the app showed when it was chosen.
+    pub name: String,
+}
+
+/// The choice (plan 6g-2 Ruling 5): a machine preference the app pushes at
+/// launch and on every change; `None`: Multi-Q.
+static CHOSEN: Mutex<Option<DefaultEqRow>> = Mutex::new(None);
+
+/// Sets the EQ new channels get; `None`: Multi-Q. Never fails.
+#[uniffi::export]
+pub fn set_default_eq(choice: Option<DefaultEqRow>) {
+    let _ = crate::guard::ffi_guard(|| {
+        *crate::guard::lock(&CHOSEN) = choice;
+        Ok(())
+    });
+}
+
+/// The EQ chosen for new channels; `None`: Multi-Q. Never fails.
+#[uniffi::export]
+pub fn default_eq() -> Option<DefaultEqRow> {
+    crate::guard::ffi_guard(|| Ok(chosen())).unwrap_or(None)
+}
+
+/// Ruling 4's Settings sentence; None when the choice is usable, unset, or
+/// the switch is off. Never fails.
+#[uniffi::export]
+pub fn default_eq_note() -> Option<String> {
+    crate::guard::ffi_guard(|| {
+        Ok(match resolve() {
+            Resolved::Fallback {
+                name,
+                multiq: Some(_),
+            } => Some(fallback_sentence(&name)),
+            Resolved::Fallback { name, multiq: None } => Some(format!(
+                "{name} is not available, and neither is Multi-Q, so new channels get no EQ."
+            )),
+            _ => None,
+        })
+    })
+    .unwrap_or(None)
+}
+
+fn chosen() -> Option<DefaultEqRow> {
+    crate::guard::lock(&CHOSEN).clone()
+}
+
+/// The longest chosen name a note shows, in characters (Ruling 3).
+const NOTE_NAME_CHARS: usize = 100;
+
+/// `name` cut to [`NOTE_NAME_CHARS`] characters, with "…" when cut.
+fn short_name(name: &str) -> String {
+    let mut short: String = name.chars().take(NOTE_NAME_CHARS).collect();
+    if short.len() < name.len() {
+        short.push('…');
+    }
+    short
+}
+
+fn fallback_sentence(name: &str) -> String {
+    format!("{name} is not available, so new channels get Multi-Q.")
+}
+
+/// What Ruling 3 makes of the switch, the choice and the catalog.
+enum Resolved {
+    /// The switch is off.
+    Off,
+    /// No choice: Multi-Q, if usable.
+    Unset(Option<PluginRef>),
+    /// The chosen plug-in, usable.
+    Chosen(PluginRef),
+    /// The choice is not usable: Multi-Q stands in, if usable.
+    Fallback {
+        /// The chosen plug-in's name, cut.
+        name: String,
+        /// [`multiq`].
+        multiq: Option<PluginRef>,
+    },
+}
+
+/// Ruling 3: nothing is loaded to decide.
+fn resolve() -> Resolved {
+    if !new_channel_eq() {
+        return Resolved::Off;
+    }
+    let Some(choice) = chosen() else {
+        return Resolved::Unset(multiq());
+    };
+    let format = PluginFormat::from(choice.format);
+    let usable = crate::catalog::with(|c| {
+        let e = c.preferred(format, &choice.id)?;
+        let ok = e.kind == Some(PluginKind::Effect)
+            && matches!(
+                c.status_of(e),
+                PluginStatus::Ok | PluginStatus::NotValidated
+            );
+        ok.then(|| e.plugin.clone())
+    });
+    match usable {
+        Some(p) => Resolved::Chosen(p),
+        None => Resolved::Fallback {
+            name: short_name(&choice.name),
+            multiq: multiq(),
+        },
+    }
+}
+
+/// The EQ new strips get now (Ruling 3): none with the switch off; the
+/// chosen plug-in when the catalog says it is a usable effect; else
+/// [`multiq`].
 pub fn new_strip_eq() -> Option<PluginRef> {
-    if new_channel_eq() { multiq() } else { None }
+    eq_and_note().0
+}
+
+/// Ruling 3's note, only when Multi-Q stands in for the choice.
+pub fn fallback_note() -> Option<String> {
+    eq_and_note().1
+}
+
+/// [`new_strip_eq`] and [`fallback_note`], from one look at the catalog.
+fn eq_and_note() -> (Option<PluginRef>, Option<String>) {
+    match resolve() {
+        Resolved::Off => (None, None),
+        Resolved::Unset(p) => (p, None),
+        Resolved::Chosen(p) => (Some(p), None),
+        Resolved::Fallback { name, multiq } => {
+            let note = multiq.is_some().then(|| fallback_sentence(&name));
+            (multiq, note)
+        }
+    }
 }
 
 /// A session History over `doc`, armed ([`arm`]).
@@ -91,10 +228,13 @@ pub fn history(doc: Document) -> History {
 }
 
 /// Tells `h` which EQ the strips its next commands build get
-/// ([`new_strip_eq`]). Takes the catalog's lock (a leaf lock: nothing
-/// under it takes a session's).
+/// ([`new_strip_eq`]) and the note their steps carry ([`fallback_note`]).
+/// Takes the catalog's lock (a leaf lock: nothing under it takes a
+/// session's).
 pub fn arm(h: &mut History) {
-    h.set_new_strip_eq(new_strip_eq());
+    let (eq, note) = eq_and_note();
+    h.set_new_strip_eq(eq);
+    h.set_new_strip_eq_note(note);
 }
 
 /// The name the app shows for the bundled EQ.

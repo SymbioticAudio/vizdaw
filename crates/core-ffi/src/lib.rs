@@ -80,7 +80,8 @@ pub use bounce::{
     BounceSourceRow, BouncedFileRow, ContainerRow, bounce_settings, set_bounce_settings,
 };
 pub use bundled::{
-    bundled_au_present, bundled_eq_name, install_multiq, new_channel_eq, set_new_channel_eq,
+    DefaultEqRow, bundled_au_present, bundled_eq_name, default_eq, default_eq_note, install_multiq,
+    new_channel_eq, set_default_eq, set_new_channel_eq,
 };
 pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,

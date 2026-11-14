@@ -81,9 +81,12 @@ pub struct History {
     group: Option<Group>,
     /// The serial the next step gets.
     next_serial: u64,
-    /// The EQ new audio, instrument and built-in-synth strips get (plan 6g
-    /// Rulings 5, 6); `None`: none.
+    /// The EQ every new strip but master gets (plan 6g Rulings 5, 6; plan
+    /// 6g-2 Ruling 1); `None`: none.
     new_strip_eq: Option<PluginRef>,
+    /// A line added to the warnings of each step whose fill put in at least
+    /// one slot (plan 6g-2 Ruling 4); `None`: none.
+    new_strip_eq_note: Option<String>,
 }
 
 impl History {
@@ -104,14 +107,21 @@ impl History {
             group: None,
             next_serial: 1,
             new_strip_eq: None,
+            new_strip_eq_note: None,
         }
     }
 
-    /// The EQ new audio, instrument and built-in-synth strips get (plan 6g
-    /// Rulings 5, 6); `None`: none. Read by each [`History::execute`];
+    /// The EQ every new strip but master gets (plan 6g Rulings 5, 6; plan
+    /// 6g-2 Ruling 1); `None`: none. Read by each [`History::execute`];
     /// undo and redo restore stored versions and never read it.
     pub fn set_new_strip_eq(&mut self, plugin: Option<PluginRef>) {
         self.new_strip_eq = plugin;
+    }
+
+    /// A line added to the warnings of each step whose fill put in at least
+    /// one slot (6g-2 Ruling 4).
+    pub fn set_new_strip_eq_note(&mut self, note: Option<String>) {
+        self.new_strip_eq_note = note;
     }
 
     /// The EQ new strips get, if any ([`History::set_new_strip_eq`]).
@@ -261,8 +271,10 @@ impl History {
     /// Applies a command. On error nothing changes; a command that changes
     /// nothing adds no undo step. A selection-only
     /// select-and-modify updates the selection without an undo step.
-    /// New audio, instrument and built-in-synth strips the command made get
-    /// [`History::new_strip_eq`] in their EQ slot, in the same step.
+    /// Every new strip but master the command made gets
+    /// [`History::new_strip_eq`] in its EQ slot, in the same step; when at
+    /// least one slot is filled, the note
+    /// ([`History::set_new_strip_eq_note`]) is added to the warnings.
     pub fn execute(&mut self, cmd: &Command, filter: &ViewFilter) -> Result<Report> {
         let mut applied = apply_in(
             &self.present.doc,
@@ -273,7 +285,12 @@ impl History {
             cmd,
         )?;
         if let Some(p) = &self.new_strip_eq {
-            fill_new_eqs(&mut applied.doc, &mut applied.report, p);
+            let filled = fill_new_eqs(&mut applied.doc, &mut applied.report, p);
+            if filled > 0
+                && let Some(note) = &self.new_strip_eq_note
+            {
+                applied.report.warnings.push(note.clone());
+            }
         }
         let selection_only = matches!(cmd, Command::SelectAndModify { modify: None, .. });
         if let Command::SelectAndModify {

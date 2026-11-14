@@ -145,7 +145,11 @@ fn equalizer_import_replaces_the_default() {
     assert_eq!(def.plugin, mq());
     assert!(def.params.is_empty());
 
-    // No orphan default: the only Multi-Q slots are these two.
+    // No orphan default: the only Multi-Q slots are these two and the new
+    // project's master (plan 6g-2 Ruling 2).
+    let master = doc.mixer().strip(doc.mixer().master()).unwrap();
+    let master_eq = master.eq.as_ref().expect("the new project's master EQ");
+    assert_eq!(master_eq.plugin, mq());
     let mut multiqs: Vec<_> = doc
         .mixer()
         .strips()
@@ -155,7 +159,7 @@ fn equalizer_import_replaces_the_default() {
         .map(|slot| slot.id)
         .collect();
     multiqs.sort();
-    let mut want_ids = vec![eq.id, def.id];
+    let mut want_ids = vec![eq.id, def.id, master_eq.id];
     want_ids.sort();
     assert_eq!(multiqs, want_ids);
     for id in multiqs {

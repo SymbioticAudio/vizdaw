@@ -102,10 +102,13 @@ fn next_name(doc: &Document, seq: SeqId, kind: TrackKindRow) -> Result<String, V
     }
 }
 
-fn step(history: &mut History, cmd: Command) -> Result<Report, VizError> {
-    history
+/// Runs `cmd`; its report's warning lines are added to `notes`.
+fn step(history: &mut History, notes: &mut Vec<String>, cmd: Command) -> Result<Report, VizError> {
+    let r = history
         .execute(&cmd, &ViewFilter::default())
-        .map_err(VizError::from)
+        .map_err(VizError::from)?;
+    notes.extend(r.warnings.iter().cloned());
+    Ok(r)
 }
 
 fn created_lane(r: &Report) -> Result<LaneId, VizError> {
@@ -120,12 +123,13 @@ fn created_lane(r: &Report) -> Result<LaneId, VizError> {
 
 /// The first output path in id order, else a new "Audio 1" (`audio:1-2`,
 /// the values Track Synth uses).
-fn output_path(history: &mut History) -> Result<OutputPathId, VizError> {
+fn output_path(history: &mut History, notes: &mut Vec<String>) -> Result<OutputPathId, VizError> {
     if let Some(o) = history.doc().outputs().keys().next() {
         return Ok(*o);
     }
     let r = step(
         history,
+        notes,
         Command::Routing(RoutingCmd::AddOutput {
             name: "Audio 1".into(),
             reference: "audio:1-2".into(),
@@ -142,7 +146,7 @@ fn output_path(history: &mut History) -> Result<OutputPathId, VizError> {
 
 /// The first built-in synth destination in id order, else a new "Built-in
 /// Synth".
-fn synth_dest(history: &mut History) -> Result<DestId, VizError> {
+fn synth_dest(history: &mut History, notes: &mut Vec<String>) -> Result<DestId, VizError> {
     let found = history
         .doc()
         .instruments()
@@ -154,6 +158,7 @@ fn synth_dest(history: &mut History) -> Result<DestId, VizError> {
     }
     let r = step(
         history,
+        notes,
         Command::Routing(RoutingCmd::AddDestination {
             name: "Built-in Synth".into(),
             kind: DestKind::MidiEndpoint {
@@ -177,28 +182,34 @@ fn synth_dest(history: &mut History) -> Result<DestId, VizError> {
 /// existing commands, inside the caller's open transaction (the caller
 /// aborts it on error). Every kind gets the monitor `monitor`; Audio the first input
 /// channel and an output path; Instrument the built-in synth; MIDI the
-/// first external destination, if any. Returns the new lane.
+/// first external destination, if any. Returns the new lane; the steps'
+/// warning lines (a default EQ's fallback note, plan 6g-2 Ruling 4) are
+/// added to `notes`.
 pub(crate) fn build_track(
     history: &mut History,
     seq: SeqId,
     kind: TrackKindRow,
     index: Option<usize>,
     monitor: MonitorMode,
+    notes: &mut Vec<String>,
 ) -> Result<LaneId, VizError> {
     let name = next_name(history.doc(), seq, kind)?;
     let lane = created_lane(&step(
         history,
+        notes,
         Command::Lane(LaneCmd::Add { seq, name, index }),
     )?)?;
     // Every kind takes the "Monitoring for new tracks" default.
     step(
         history,
+        notes,
         Command::Lane(LaneCmd::SetMonitor { seq, lane, monitor }),
     )?;
     match kind {
         TrackKindRow::Audio => {
             step(
                 history,
+                notes,
                 Command::Lane(LaneCmd::SetInput {
                     seq,
                     lane,
@@ -208,15 +219,20 @@ pub(crate) fn build_track(
                     }),
                 }),
             )?;
-            let output = Some(output_path(history)?);
+            let output = Some(output_path(history, notes)?);
             step(
                 history,
+                notes,
                 Command::Lane(LaneCmd::SetOutput { seq, lane, output }),
             )?;
         }
         TrackKindRow::Instrument => {
-            let dest = Some(synth_dest(history)?);
-            step(history, Command::Lane(LaneCmd::SetDest { seq, lane, dest }))?;
+            let dest = Some(synth_dest(history, notes)?);
+            step(
+                history,
+                notes,
+                Command::Lane(LaneCmd::SetDest { seq, lane, dest }),
+            )?;
         }
         TrackKindRow::Midi => {
             let dest = history
@@ -226,13 +242,18 @@ pub(crate) fn build_track(
                 .find(|d| d.kind.is_external())
                 .map(|d| d.id);
             if dest.is_some() {
-                step(history, Command::Lane(LaneCmd::SetDest { seq, lane, dest }))?;
+                step(
+                    history,
+                    notes,
+                    Command::Lane(LaneCmd::SetDest { seq, lane, dest }),
+                )?;
             }
         }
     }
     if kind != TrackKindRow::Audio {
         step(
             history,
+            notes,
             Command::Lane(LaneCmd::SetInput {
                 seq,
                 lane,
