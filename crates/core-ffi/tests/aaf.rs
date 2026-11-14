@@ -687,6 +687,69 @@ fn hostile_requests() {
     );
 }
 
+/// Plan 6f Task 7: 32 byte-damaged copies of a default export (flips,
+/// inserts, deletes and truncations from a fixed seed) each end Done or
+/// Failed through `import_aaf`, never with `internal error:`, and a Failed
+/// one leaves `Media/` as it was. Linux runs it: there the unconverted
+/// WAVs go offline, and Done is allowed.
+#[test]
+fn hostile_files_fail_cleanly() {
+    let _g = serial();
+    let p = project();
+    let (_, folder) = export_aaf(&p.s, areq(p.seq, &p.out));
+    let clean = std::fs::read(folder.join("Song.aaf")).unwrap();
+    // xorshift64, from a fixed seed.
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (mut done, mut failed) = (0, 0);
+    for k in 0..32 {
+        let mut b = clean.clone();
+        for _ in 0..1 + next() % 4 {
+            if b.is_empty() {
+                break;
+            }
+            let at = (next() % b.len() as u64) as usize;
+            match next() % 4 {
+                0 => b[at] ^= (next() % 255 + 1) as u8,
+                1 => b.insert(at, next() as u8),
+                2 => {
+                    b.remove(at);
+                }
+                _ => b.truncate(at),
+            }
+        }
+        let path = dir.path().join(format!("Hostile {k}.aaf"));
+        std::fs::write(&path, &b).unwrap();
+        idle_until(&p.s, |s| s.debug_overviews_idle());
+        let before = media_files(&p.pkg);
+        let j = import_aaf(
+            &p.s,
+            AafImportRequestRow {
+                new_project: false,
+                ..ireq(&path)
+            },
+        );
+        match j.state {
+            JobStateRow::Done => done += 1,
+            JobStateRow::Failed => {
+                failed += 1;
+                let m = j.message.clone().unwrap_or_default();
+                assert!(!m.starts_with("internal error:"), "copy {k}: {m}");
+                idle_until(&p.s, |s| s.debug_overviews_idle());
+                assert_eq!(media_files(&p.pkg), before, "copy {k}: {m}");
+            }
+            _ => panic!("copy {k}: {j:?}"),
+        }
+    }
+    assert_eq!(done + failed, 32);
+}
+
 // ---------------------------------------------------------------- import (macOS: conversion)
 
 /// Spec §12: an export read back by the import job into a fresh project at

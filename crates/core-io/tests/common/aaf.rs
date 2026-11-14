@@ -547,14 +547,15 @@ fn weak(id: Auid) -> Prop {
     })
 }
 
-fn rat(n: i32, d: i32) -> Vec<u8> {
+/// A `Rational` as stored: numerator, then denominator.
+pub fn rat(n: i32, d: i32) -> Vec<u8> {
     let mut v = n.to_le_bytes().to_vec();
     v.extend_from_slice(&d.to_le_bytes());
     v
 }
 
 /// An indirect value: byte order, a type AUID (zeros here), the value.
-fn indirect(v: &[u8]) -> Vec<u8> {
+pub fn indirect(v: &[u8]) -> Vec<u8> {
     let mut out = vec![0x4C];
     out.extend_from_slice(&[0u8; 16]);
     out.extend_from_slice(v);
@@ -1452,4 +1453,857 @@ pub fn agree(a: &Projection, b: &Projection) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- hostile files (Task 7)
+
+impl Fx {
+    /// The file's bytes, written in memory through `AafWriter`.
+    pub fn bytes(&self) -> Vec<u8> {
+        let cur = std::io::Cursor::new(Vec::new());
+        let mut w = core_io::aaf::store::AafWriter::create(cur).unwrap();
+        w.write_store(&self.s).unwrap();
+        for (obj, bytes) in &self.streams {
+            let mut st = w.stream(&self.s, *obj, "Data-2702").unwrap();
+            st.write_all(bytes).unwrap();
+            st.flush().unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    /// The file's bytes through [`raw_write`], with none of `AafWriter`'s
+    /// checks.
+    pub fn raw_bytes(&self) -> Vec<u8> {
+        raw_write(&self.s, &self.streams)
+    }
+}
+
+fn uuid_of(a: Auid) -> uuid::Uuid {
+    let (d1, d2, d3, d4) = a.fields();
+    uuid::Uuid::from_fields(d1, d2, d3, &d4)
+}
+
+/// The last name of a storage path.
+fn last_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or("")
+}
+
+/// The keys a set's index uses, as `AafWriter` looks for them.
+const SET_KEYS: [u16; 4] = [0x4401, 0x2701, 0x1B01, 0x0005];
+
+/// A compound file of `s` written without `AafWriter`'s checks: every
+/// object at its own `path` (a path written twice keeps its first
+/// storage), each strong reference named by its child's last path name,
+/// indexes taking each element's local key from its name, weak indexes
+/// sized by their first entry, and value lengths stored as `u16` whatever
+/// they are. `streams` are each object's `Data-2702`.
+pub fn raw_write(s: &Store, streams: &[(ObjId, Vec<u8>)]) -> Vec<u8> {
+    let cur = std::io::Cursor::new(Vec::new());
+    let mut c = cfb::CompoundFile::create_with_version(cfb::Version::V4, cur).unwrap();
+    let path_of = |id: &ObjId| {
+        s.objects
+            .get(id.0 as usize)
+            .map_or(String::new(), |o| o.path.clone())
+    };
+    for o in &s.objects {
+        if o.path != "/" && c.create_storage(&o.path).is_err() {
+            continue;
+        }
+        let _ = c.set_storage_clsid(&o.path, uuid_of(o.class));
+        let mut entries: Vec<(u16, u16, Vec<u8>)> = Vec::new();
+        for (&p, prop) in &o.props {
+            let base = core_io::aaf::store::ref_name(p);
+            let index_path = core_io::aaf::store::child_path(&o.path, &format!("{base} index"));
+            let entry = match prop {
+                Prop::Data(d) => (0x82, d.clone()),
+                Prop::Strong(id) => (0x22, utf16z(last_name(&path_of(id)))),
+                Prop::StrongVec(v) | Prop::StrongSet(v) => {
+                    let set = matches!(prop, Prop::StrongSet(_));
+                    let n = v.len() as u32;
+                    let mut idx = Vec::new();
+                    idx.extend_from_slice(&n.to_le_bytes());
+                    idx.extend_from_slice(&n.to_le_bytes());
+                    idx.extend_from_slice(&u32::MAX.to_le_bytes());
+                    let key = set
+                        .then(|| {
+                            let first = v.first()?;
+                            SET_KEYS.iter().find_map(|k| match s.prop(*first, *k) {
+                                Some(Prop::Data(d)) => Some((*k, d.len())),
+                                _ => None,
+                            })
+                        })
+                        .flatten();
+                    if set {
+                        let (kp, size) = key.unwrap_or((0, 0));
+                        idx.extend_from_slice(&kp.to_le_bytes());
+                        idx.push(size as u8);
+                    }
+                    for (i, id) in v.iter().enumerate() {
+                        let name = path_of(id);
+                        let local = last_name(&name)
+                            .strip_prefix(&format!("{base}{{"))
+                            .and_then(|r| r.strip_suffix('}'))
+                            .and_then(|k| u32::from_str_radix(k, 16).ok())
+                            .unwrap_or(i as u32);
+                        idx.extend_from_slice(&local.to_le_bytes());
+                        if let Some((kp, size)) = key {
+                            idx.extend_from_slice(&1u32.to_le_bytes());
+                            let mut k = match s.prop(*id, kp) {
+                                Some(Prop::Data(d)) => d.clone(),
+                                _ => Vec::new(),
+                            };
+                            k.resize(size, 0);
+                            idx.extend_from_slice(&k);
+                        }
+                    }
+                    put(&mut c, &index_path, &idx);
+                    (if set { 0x3A } else { 0x32 }, utf16z(&base))
+                }
+                Prop::Weak(w) => {
+                    let mut b = w.table_index.to_le_bytes().to_vec();
+                    b.extend_from_slice(&w.id_pid.to_le_bytes());
+                    b.push(w.id.len() as u8);
+                    b.extend_from_slice(&w.id);
+                    (0x02, b)
+                }
+                Prop::WeakVec(v) | Prop::WeakSet(v) => {
+                    let (ti, kp, size) = v
+                        .first()
+                        .map_or((0, 0, 0), |w| (w.table_index, w.id_pid, w.id.len()));
+                    let mut idx = (v.len() as u32).to_le_bytes().to_vec();
+                    idx.extend_from_slice(&ti.to_le_bytes());
+                    idx.extend_from_slice(&kp.to_le_bytes());
+                    idx.push(size as u8);
+                    for w in v {
+                        idx.extend_from_slice(&w.id);
+                    }
+                    put(&mut c, &index_path, &idx);
+                    let f = if matches!(prop, Prop::WeakSet(_)) {
+                        0x1A
+                    } else {
+                        0x12
+                    };
+                    (f, utf16z(&base))
+                }
+                Prop::Stream(n) => {
+                    let sp = core_io::aaf::store::child_path(&o.path, n);
+                    if !c.is_stream(&sp) {
+                        put(&mut c, &sp, &[]);
+                    }
+                    let mut b = vec![0x55];
+                    b.extend_from_slice(&utf16z(n));
+                    (0x42, b)
+                }
+            };
+            entries.push((p, entry.0, entry.1));
+        }
+        let mut bytes = vec![0x4C, 0x20];
+        bytes.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (p, f, v) in &entries {
+            bytes.extend_from_slice(&p.to_le_bytes());
+            bytes.extend_from_slice(&f.to_le_bytes());
+            bytes.extend_from_slice(&(v.len() as u16).to_le_bytes());
+        }
+        for (_, _, v) in &entries {
+            bytes.extend_from_slice(v);
+        }
+        put(
+            &mut c,
+            &core_io::aaf::store::child_path(&o.path, "properties"),
+            &bytes,
+        );
+    }
+    for (obj, bytes) in streams {
+        let sp = core_io::aaf::store::child_path(&path_of(obj), "Data-2702");
+        put(&mut c, &sp, bytes);
+    }
+    let mut t = vec![0x4C];
+    t.extend_from_slice(&(s.referenced.len() as u16).to_le_bytes());
+    let pids: usize = s.referenced.iter().map(|p| p.len() + 1).sum();
+    t.extend_from_slice(&(pids as u32).to_le_bytes());
+    for p in &s.referenced {
+        for pid in p {
+            t.extend_from_slice(&pid.to_le_bytes());
+        }
+        t.extend_from_slice(&[0, 0]);
+    }
+    put(&mut c, "/referenced properties", &t);
+    c.flush().unwrap();
+    c.into_inner().into_inner()
+}
+
+/// Writes `bytes` as stream `path` of `c`, replacing what was there.
+fn put<F: std::io::Read + Write + std::io::Seek>(
+    c: &mut cfb::CompoundFile<F>,
+    path: &str,
+    bytes: &[u8],
+) {
+    if let Ok(mut st) = c.create_stream(path) {
+        st.write_all(bytes).unwrap();
+        st.flush().unwrap();
+    }
+}
+
+fn open_mem(bytes: Vec<u8>) -> cfb::CompoundFile<std::io::Cursor<Vec<u8>>> {
+    cfb::CompoundFile::open(std::io::Cursor::new(bytes)).unwrap()
+}
+
+/// Every stream of the compound file `bytes`, by path, with its bytes.
+pub fn streams_of(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    use std::io::Read;
+    let mut c = open_mem(bytes.to_vec());
+    let paths: Vec<String> = c
+        .walk()
+        .filter(|e| e.is_stream())
+        .map(|e| e.path().to_string_lossy().into_owned())
+        .collect();
+    paths
+        .into_iter()
+        .map(|p| {
+            let mut b = Vec::new();
+            c.open_stream(&p).unwrap().read_to_end(&mut b).unwrap();
+            (p, b)
+        })
+        .collect()
+}
+
+/// `bytes` with each `(path, new bytes)` stream replaced (or made).
+pub fn with_streams(bytes: Vec<u8>, edits: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut c = open_mem(bytes);
+    for (p, b) in edits {
+        put(&mut c, p, b);
+    }
+    c.flush().unwrap();
+    c.into_inner().into_inner()
+}
+
+/// A `properties` stream's entries: (pid, form, value); `None` when it
+/// does not parse.
+pub fn parse_props(b: &[u8]) -> Option<Vec<(u16, u16, Vec<u8>)>> {
+    let u16_at = |i: usize| Some(u16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?));
+    let n = usize::from(u16_at(2)?);
+    let mut at = 4 + 6 * n;
+    let mut out = Vec::new();
+    for k in 0..n {
+        let (p, f, l) = (
+            u16_at(4 + 6 * k)?,
+            u16_at(6 + 6 * k)?,
+            usize::from(u16_at(8 + 6 * k)?),
+        );
+        out.push((p, f, b.get(at..at + l)?.to_vec()));
+        at += l;
+    }
+    Some(out)
+}
+
+/// The PIDs a soup case may set hostile values on: lengths, positions,
+/// rates, counts, IDs and values.
+pub const POKE_PIDS: [u16; 22] = [
+    pid::COMPONENT_LENGTH,
+    pid::SOURCE_CLIP_START_TIME,
+    pid::SOURCE_CLIP_FADE_IN_LENGTH,
+    pid::SOURCE_CLIP_FADE_OUT_LENGTH,
+    pid::EVENT_POSITION,
+    pid::TIMELINE_MOB_SLOT_ORIGIN,
+    pid::TIMELINE_MOB_SLOT_EDIT_RATE,
+    pid::EVENT_MOB_SLOT_EDIT_RATE,
+    pid::FILE_DESCRIPTOR_SAMPLE_RATE,
+    pid::FILE_DESCRIPTOR_LENGTH,
+    pid::TIMECODE_START,
+    pid::TIMECODE_FPS,
+    pid::TRANSITION_CUT_POINT,
+    pid::CONSTANT_VALUE_VALUE,
+    pid::CONTROL_POINT_TIME,
+    pid::CONTROL_POINT_VALUE,
+    pid::SOUND_DESCRIPTOR_CHANNELS,
+    pid::SOUND_DESCRIPTOR_QUANTIZATION_BITS,
+    pid::MOB_SLOT_SLOT_ID,
+    pid::SOURCE_REFERENCE_SOURCE_MOB_SLOT_ID,
+    pid::SOURCE_REFERENCE_SOURCE_ID,
+    pid::MOB_MOB_ID,
+];
+
+/// A strong reference's hostile name.
+#[derive(Debug, Clone, Copy)]
+pub enum Name {
+    /// `..`
+    Up,
+    /// `.`
+    Dot,
+    /// Empty.
+    Empty,
+    /// `/`
+    Slash,
+    /// `a/b`
+    Nested,
+    /// The object's own `properties` stream.
+    Properties,
+    /// The name another strong reference of the same object uses.
+    Sibling,
+    /// The object's own storage name.
+    Own,
+    /// 40 characters.
+    Long,
+    /// The property's own index stream.
+    Index,
+}
+
+/// An edit to the streams of a written file.
+#[derive(Debug, Clone)]
+pub enum Edit {
+    /// The first strong reference of a `properties` stream renamed.
+    StrongName(proptest::sample::Index, Name),
+    /// An index stream's count set.
+    IndexCount(proptest::sample::Index, u32),
+    /// One 4-byte field after an index stream's header set.
+    IndexKey(proptest::sample::Index, proptest::sample::Index, u32),
+    /// One entry's length in a `properties` stream set.
+    PropLen(proptest::sample::Index, proptest::sample::Index, u16),
+    /// A `properties` stream replaced by 6 bytes claiming 65 535 entries.
+    EntryCount(proptest::sample::Index),
+    /// A `properties` stream marked big-endian.
+    BigEndian(proptest::sample::Index),
+    /// A `properties` stream cut short.
+    Cut(proptest::sample::Index, proptest::sample::Index),
+    /// The referenced-properties table replaced.
+    Referenced(Vec<u8>),
+}
+
+/// An edit to the sectors of a written file, after every [`Edit`].
+#[derive(Debug, Clone)]
+pub enum SectorEdit {
+    /// A used FAT entry pointed at itself or at another used sector.
+    FatLoop(proptest::sample::Index, proptest::sample::Index),
+    /// A directory entry's left, right or child link (0, 1, 2) pointed at
+    /// another entry or itself.
+    DirLink(proptest::sample::Index, u8, proptest::sample::Index),
+    /// A directory entry's stream size.
+    StreamSize(proptest::sample::Index, u64),
+    /// A directory entry's start sector.
+    Start(proptest::sample::Index, u32),
+}
+
+/// One structure-soup case: a small composition built through `Store`
+/// with hostile knobs, written by [`raw_write`], then edited.
+#[derive(Debug, Clone)]
+pub struct Soup {
+    /// Control points on the gain curve around a clip.
+    pub points: usize,
+    /// Sequences nested around that clip (60–70 deep at the top).
+    pub nest: usize,
+    /// Master mobs chained in front of the file's master mob.
+    pub chain: usize,
+    /// Two master mobs that play each other, played by a clip.
+    pub mob_loop: bool,
+    /// The embedded WAV's data chunk claims `u32::MAX` bytes.
+    pub wav_lie: bool,
+    /// Hostile values: (which of [`POKE_PIDS`], which object, value).
+    pub pokes: Vec<(proptest::sample::Index, proptest::sample::Index, Vec<u8>)>,
+    /// A weak reference's table index (past the table).
+    pub weak: Option<(proptest::sample::Index, u16)>,
+    /// Edits to the streams.
+    pub edits: Vec<Edit>,
+    /// Edits to the sectors.
+    pub sectors: Vec<SectorEdit>,
+}
+
+const R48_: (i32, i32) = (48_000, 1);
+
+/// The soup's composition, before pokes.
+pub fn soup_fx(k: &Soup) -> Fx {
+    let mut fx = Fx::new();
+    let mut spec = FileSpec::wav("A", 48_000, 1, 256);
+    if k.wav_lie
+        && let Media::Wav(b) = &mut spec.media
+    {
+        b[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+    }
+    let a = fx.file(&spec);
+    let mut target = a.clone();
+    for _ in 0..k.chain {
+        let id = fx.new_id();
+        fx.mob(
+            class::MASTER_MOB,
+            &id,
+            "Hop",
+            false,
+            &[sound(1, "", R48_, clip(&target, 1, 0, 100))],
+        );
+        target = id;
+    }
+    let mut extra = Vec::new();
+    if k.mob_loop {
+        let (ma, mb) = (fx.new_id(), fx.new_id());
+        fx.mob(
+            class::MASTER_MOB,
+            &ma,
+            "LoopA",
+            false,
+            &[sound(1, "", R48_, clip(&mb, 1, 0, 100))],
+        );
+        fx.mob(
+            class::MASTER_MOB,
+            &mb,
+            "LoopB",
+            false,
+            &[sound(1, "", R48_, clip(&ma, 1, 0, 100))],
+        );
+        extra.push(clip(&ma, 1, 0, 30));
+    }
+    let n = k.points.max(1) as i32;
+    let pts = (0..k.points)
+        .map(|i| ((i as i32, n), (1 + (i % 3) as i32, 2)))
+        .collect();
+    let mut seg = Seg::Op {
+        op: def::OPERATION_DEF_MONO_AUDIO_GAIN,
+        param: def::PARAMETER_DEF_AMPLITUDE,
+        value: Value::Points(pts, def::INTERPOLATION_DEF_LINEAR),
+        input: Box::new(clip(&target, 1, 0, 100)),
+    };
+    for _ in 0..k.nest {
+        seg = Seg::Seq(vec![seg]);
+    }
+    let mut segs = vec![
+        Seg::Fill(10),
+        Seg::Clip(ClipSpec {
+            mob: a.clone(),
+            slot: 1,
+            start: 5,
+            len: 50,
+            fade_in: Some((5, 1)),
+            fade_out: Some((5, 2)),
+        }),
+        trans(10, Some(5)),
+        seg,
+        Seg::Fill(5),
+    ];
+    segs.extend(extra);
+    fx.comp(
+        "Soup",
+        true,
+        &[
+            sound(1, "T", R48_, Seg::Seq(segs)),
+            SlotSpec {
+                id: 2,
+                name: "M".into(),
+                rate: R48_,
+                kind: SlotKind::Markers(vec![(0, "m".into()), (40, "n".into())]),
+            },
+            SlotSpec {
+                id: 3,
+                name: "TC".into(),
+                rate: (25, 1),
+                kind: SlotKind::Timecode(90_000, 25, false),
+            },
+        ],
+    );
+    fx
+}
+
+/// The soup case's file bytes.
+pub fn soup_bytes(k: &Soup) -> Vec<u8> {
+    let mut fx = soup_fx(k);
+    for (p, o, v) in &k.pokes {
+        let p = POKE_PIDS[p.index(POKE_PIDS.len())];
+        let having: Vec<usize> = (0..fx.s.objects.len())
+            .filter(|i| fx.s.objects[*i].props.contains_key(&p))
+            .collect();
+        let at = if having.is_empty() {
+            o.index(fx.s.objects.len())
+        } else {
+            having[o.index(having.len())]
+        };
+        fx.s.objects[at].props.insert(p, Prop::Data(v.clone()));
+    }
+    if let Some((i, table)) = &k.weak {
+        let weak: Vec<(usize, u16)> = (0..fx.s.objects.len())
+            .flat_map(|o| {
+                let s = &fx.s;
+                s.objects[o]
+                    .props
+                    .iter()
+                    .filter(|(_, p)| matches!(p, Prop::Weak(_)))
+                    .map(move |(k, _)| (o, *k))
+            })
+            .collect();
+        if !weak.is_empty() {
+            let (o, p) = weak[i.index(weak.len())];
+            if let Some(Prop::Weak(w)) = fx.s.objects[o].props.get_mut(&p) {
+                w.table_index = *table;
+            }
+        }
+    }
+    let mut bytes = fx.raw_bytes();
+    if !k.edits.is_empty() {
+        bytes = edited(bytes, &k.edits);
+    }
+    for e in &k.sectors {
+        sector_edit(&mut bytes, e);
+    }
+    bytes
+}
+
+/// `bytes` with `edits` made to its streams.
+pub fn edited(bytes: Vec<u8>, edits: &[Edit]) -> Vec<u8> {
+    let mut all = streams_of(&bytes);
+    let props: Vec<usize> = (0..all.len())
+        .filter(|i| all[*i].0.ends_with("/properties"))
+        .collect();
+    let indexes: Vec<usize> = (0..all.len())
+        .filter(|i| all[*i].0.ends_with(" index"))
+        .collect();
+    let mut changed = std::collections::BTreeSet::new();
+    for e in edits {
+        match e {
+            Edit::StrongName(i, name) => {
+                let strong: Vec<usize> = props
+                    .iter()
+                    .copied()
+                    .filter(|k| {
+                        parse_props(&all[*k].1).is_some_and(|es| {
+                            es.iter().any(|(_, f, _)| matches!(f, 0x22 | 0x32 | 0x3A))
+                        })
+                    })
+                    .collect();
+                if strong.is_empty() {
+                    continue;
+                }
+                let k = strong[i.index(strong.len())];
+                let mut es = parse_props(&all[k].1).unwrap();
+                let names: Vec<String> = es
+                    .iter()
+                    .filter(|(_, f, _)| matches!(f, 0x22 | 0x32 | 0x3A))
+                    .map(|(p, _, _)| core_io::aaf::store::ref_name(*p))
+                    .collect();
+                let storage = all[k].0.trim_end_matches("/properties").to_string();
+                let first = es
+                    .iter()
+                    .position(|(_, f, _)| matches!(f, 0x22 | 0x32 | 0x3A))
+                    .unwrap();
+                let new = match name {
+                    Name::Up => "..".to_string(),
+                    Name::Dot => ".".to_string(),
+                    Name::Empty => String::new(),
+                    Name::Slash => "/".to_string(),
+                    Name::Nested => "a/b".to_string(),
+                    Name::Properties => "properties".to_string(),
+                    Name::Sibling => names.get(1).cloned().unwrap_or_else(|| "..".into()),
+                    Name::Own => last_name(&storage).to_string(),
+                    Name::Long => "x".repeat(40),
+                    Name::Index => format!("{} index", names[0]),
+                };
+                es[first].2 = utf16z(&new);
+                all[k].1 = props_raw(&es);
+                changed.insert(k);
+            }
+            Edit::IndexCount(i, n) => {
+                if let Some(&k) = (!indexes.is_empty()).then(|| &indexes[i.index(indexes.len())])
+                    && all[k].1.len() >= 4
+                {
+                    all[k].1[..4].copy_from_slice(&n.to_le_bytes());
+                    changed.insert(k);
+                }
+            }
+            Edit::IndexKey(i, j, v) => {
+                if let Some(&k) = (!indexes.is_empty()).then(|| &indexes[i.index(indexes.len())])
+                    && all[k].1.len() >= 16
+                {
+                    let n = (all[k].1.len() - 12) / 4;
+                    let at = 12 + 4 * j.index(n);
+                    all[k].1[at..at + 4].copy_from_slice(&v.to_le_bytes());
+                    changed.insert(k);
+                }
+            }
+            Edit::PropLen(i, j, len) => {
+                let k = props[i.index(props.len())];
+                let b = &mut all[k].1;
+                let n = b.get(2..4).map_or(0, |c| u16::from_le_bytes([c[0], c[1]]));
+                if n > 0 {
+                    let at = 8 + 6 * j.index(usize::from(n));
+                    if at + 2 <= b.len() {
+                        b[at..at + 2].copy_from_slice(&len.to_le_bytes());
+                        changed.insert(k);
+                    }
+                }
+            }
+            Edit::EntryCount(i) => {
+                let k = props[i.index(props.len())];
+                all[k].1 = vec![0x4C, 0x20, 0xFF, 0xFF, 0, 0];
+                changed.insert(k);
+            }
+            Edit::BigEndian(i) => {
+                let k = props[i.index(props.len())];
+                if let Some(b) = all[k].1.first_mut() {
+                    *b = 0x42;
+                    changed.insert(k);
+                }
+            }
+            Edit::Cut(i, at) => {
+                let k = props[i.index(props.len())];
+                let n = all[k].1.len();
+                all[k].1.truncate(at.index(n + 1));
+                changed.insert(k);
+            }
+            Edit::Referenced(b) => {
+                if let Some(k) = all.iter().position(|(p, _)| p == "/referenced properties") {
+                    all[k].1 = b.clone();
+                    changed.insert(k);
+                }
+            }
+        }
+    }
+    let edits: Vec<(String, Vec<u8>)> = changed.into_iter().map(|k| all[k].clone()).collect();
+    with_streams(bytes, &edits)
+}
+
+/// A `properties` stream of `entries` (little-endian).
+fn props_raw(entries: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
+    props(entries)
+}
+
+/// Where a compound file keeps its FAT entries and directory entries, by
+/// file offset.
+#[derive(Debug, Default)]
+pub struct Layout {
+    /// Each FAT entry's offset, by sector ID.
+    pub fat: Vec<usize>,
+    /// Each directory entry's offset, by stream ID.
+    pub dir: Vec<usize>,
+}
+
+fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// The FAT and directory of the compound file `b` (header DIFAT only).
+pub fn layout(b: &[u8]) -> Layout {
+    let mut out = Layout::default();
+    let Some(shift) = b.get(0x1E..0x20).map(|c| u16::from_le_bytes([c[0], c[1]])) else {
+        return out;
+    };
+    if !(9..=12).contains(&shift) {
+        return out;
+    }
+    let ss = 1usize << shift;
+    let fat_sectors = u32_at(b, 0x2C).unwrap_or(0) as usize;
+    for k in 0..fat_sectors.min(109) {
+        let Some(sid) = u32_at(b, 0x4C + 4 * k).filter(|s| *s < 0xFFFF_FFFA) else {
+            break;
+        };
+        let start = (sid as usize + 1) * ss;
+        for e in 0..ss / 4 {
+            let at = start + 4 * e;
+            if at + 4 > b.len() {
+                break;
+            }
+            out.fat.push(at);
+        }
+    }
+    let mut sid = u32_at(b, 0x30).unwrap_or(u32::MAX);
+    let mut seen = std::collections::HashSet::new();
+    while sid < 0xFFFF_FFFA && seen.insert(sid) {
+        let start = (sid as usize + 1) * ss;
+        for e in 0..ss / 128 {
+            if start + 128 * (e + 1) <= b.len() {
+                out.dir.push(start + 128 * e);
+            }
+        }
+        sid = out
+            .fat
+            .get(sid as usize)
+            .and_then(|at| u32_at(b, *at))
+            .unwrap_or(u32::MAX);
+    }
+    out
+}
+
+/// Makes `e` on the compound file `b`.
+pub fn sector_edit(b: &mut [u8], e: &SectorEdit) {
+    let l = layout(b);
+    let set32 = |b: &mut [u8], at: usize, v: u32| {
+        if let Some(s) = b.get_mut(at..at + 4) {
+            s.copy_from_slice(&v.to_le_bytes());
+        }
+    };
+    let used_dir: Vec<usize> = (0..l.dir.len())
+        .filter(|i| b.get(l.dir[*i] + 0x42).is_some_and(|t| *t != 0))
+        .collect();
+    match e {
+        SectorEdit::FatLoop(i, j) => {
+            let used: Vec<usize> = (0..l.fat.len())
+                .filter(|k| u32_at(b, l.fat[*k]).is_some_and(|v| v < 0xFFFF_FFFA))
+                .collect();
+            if used.is_empty() {
+                return;
+            }
+            let (from, to) = (used[i.index(used.len())], used[j.index(used.len())]);
+            set32(b, l.fat[from], to as u32);
+        }
+        SectorEdit::DirLink(i, field, j) => {
+            if used_dir.is_empty() {
+                return;
+            }
+            let (from, to) = (
+                used_dir[i.index(used_dir.len())],
+                used_dir[j.index(used_dir.len())],
+            );
+            set32(
+                b,
+                l.dir[from] + 0x44 + 4 * usize::from(field % 3),
+                to as u32,
+            );
+        }
+        SectorEdit::StreamSize(i, size) => {
+            if used_dir.is_empty() {
+                return;
+            }
+            let at = l.dir[used_dir[i.index(used_dir.len())]] + 0x78;
+            if let Some(s) = b.get_mut(at..at + 8) {
+                s.copy_from_slice(&size.to_le_bytes());
+            }
+        }
+        SectorEdit::Start(i, sid) => {
+            if used_dir.is_empty() {
+                return;
+            }
+            let at = l.dir[used_dir[i.index(used_dir.len())]] + 0x74;
+            set32(b, at, *sid);
+        }
+    }
+}
+
+/// A hostile value: an `i64` at the edges, a rational with a zero,
+/// negative or `i32::MIN` denominator (bare or indirect), a `u32` at the
+/// edges, or a few random bytes.
+pub fn hostile_value() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+    use proptest::prelude::*;
+    use proptest::sample::select;
+    let nums = vec![i32::MIN, i32::MAX, -1, 0, 1, 48_000];
+    let dens = vec![0, -1, i32::MIN, 1, i32::MAX];
+    prop_oneof![
+        select(vec![
+            i64::MIN,
+            i64::MAX,
+            i64::MIN + 1,
+            -1,
+            0,
+            1 << 40,
+            -(1 << 40),
+            1 << 62
+        ])
+        .prop_map(|v| v.to_le_bytes().to_vec()),
+        (select(nums.clone()), select(dens.clone())).prop_map(|(n, d)| rat(n, d)),
+        (select(nums), select(dens)).prop_map(|(n, d)| indirect(&rat(n, d))),
+        select(vec![0u32, 1, 2, 0xFFFF, 0x8000_0000, u32::MAX])
+            .prop_map(|v| v.to_le_bytes().to_vec()),
+        proptest::collection::vec(any::<u8>(), 0..12),
+    ]
+}
+
+fn edit() -> impl proptest::strategy::Strategy<Value = Edit> {
+    use proptest::prelude::*;
+    use proptest::sample::{Index, select};
+    let names = select(vec![
+        Name::Up,
+        Name::Dot,
+        Name::Empty,
+        Name::Slash,
+        Name::Nested,
+        Name::Properties,
+        Name::Sibling,
+        Name::Own,
+        Name::Long,
+        Name::Index,
+    ]);
+    let counts = prop_oneof![
+        select(vec![0u32, 1, 2, 3, 65_535, 1_000_000, 1_000_001, u32::MAX]),
+        any::<u32>()
+    ];
+    prop_oneof![
+        (any::<Index>(), names).prop_map(|(i, n)| Edit::StrongName(i, n)),
+        (any::<Index>(), counts).prop_map(|(i, n)| Edit::IndexCount(i, n)),
+        (
+            any::<Index>(),
+            any::<Index>(),
+            select(vec![0u32, 1, 7, u32::MAX])
+        )
+            .prop_map(|(i, j, v)| Edit::IndexKey(i, j, v)),
+        (
+            any::<Index>(),
+            any::<Index>(),
+            select(vec![0u16, 1, 0x7FFF, 0xFFFF])
+        )
+            .prop_map(|(i, j, l)| Edit::PropLen(i, j, l)),
+        any::<Index>().prop_map(Edit::EntryCount),
+        any::<Index>().prop_map(Edit::BigEndian),
+        (any::<Index>(), any::<Index>()).prop_map(|(i, j)| Edit::Cut(i, j)),
+        proptest::collection::vec(any::<u8>(), 0..24).prop_map(Edit::Referenced),
+    ]
+}
+
+fn sector() -> impl proptest::strategy::Strategy<Value = SectorEdit> {
+    use proptest::prelude::*;
+    use proptest::sample::{Index, select};
+    prop_oneof![
+        (any::<Index>(), any::<Index>()).prop_map(|(i, j)| SectorEdit::FatLoop(i, j)),
+        (any::<Index>(), 0u8..3, any::<Index>()).prop_map(|(i, f, j)| SectorEdit::DirLink(i, f, j)),
+        (
+            any::<Index>(),
+            prop_oneof![
+                select(vec![0u64, 4095, 4096, 4097, 1 << 32, 1 << 40, u64::MAX]),
+                any::<u64>()
+            ]
+        )
+            .prop_map(|(i, n)| SectorEdit::StreamSize(i, n)),
+        (
+            any::<Index>(),
+            prop_oneof![
+                select(vec![0u32, 1, 0xFFFF_FFFE, 0xFFFF_FFFF]),
+                any::<u32>()
+            ]
+        )
+            .prop_map(|(i, n)| SectorEdit::Start(i, n)),
+    ]
+}
+
+/// The soup's cases. Large control-point counts are rare (each builds
+/// 100 000 objects or more) and drawn only in an optimised build: an
+/// unoptimised one reads 200 000 objects in several seconds, past the
+/// cases' 2 s.
+pub fn soup() -> impl proptest::strategy::Strategy<Value = Soup> {
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::sample::{Index, select};
+    let big = if cfg!(debug_assertions) {
+        vec![1_000usize, 2_000]
+    } else {
+        vec![99_999usize, 100_000, 100_001, 200_000]
+    };
+    (
+        prop_oneof![
+            60 => 0usize..=40,
+            1 => select(big),
+        ],
+        prop_oneof![6 => Just(0usize), 2 => 1usize..8, 2 => 53usize..=63],
+        prop_oneof![4 => Just(0usize), 2 => 1usize..=20],
+        any::<bool>(),
+        prop_oneof![4 => Just(false), 1 => Just(true)],
+        vec((any::<Index>(), any::<Index>(), hostile_value()), 0..4),
+        proptest::option::of((any::<Index>(), select(vec![1u16, 2, 7, 0x7FFF, u16::MAX]))),
+        prop_oneof![2 => Just(Vec::new()), 3 => vec(edit(), 1..=3)],
+        prop_oneof![3 => Just(Vec::new()), 1 => vec(sector(), 1..=2)],
+    )
+        .prop_map(
+            |(points, nest, chain, mob_loop, wav_lie, pokes, weak, edits, sectors)| Soup {
+                points,
+                nest,
+                chain,
+                mob_loop,
+                wav_lie,
+                pokes,
+                weak,
+                edits,
+                sectors,
+            },
+        )
 }
