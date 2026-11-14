@@ -5145,6 +5145,8 @@ fn apply_import_as(
     }
     let single = items.len() == 1 && items.first().is_some_and(|v| v.len() == 1);
     let filter = ViewFilter::default();
+    // Its insert may make the first output path's strip (Ruling 4).
+    crate::bundled::arm(&mut inner.history);
     let h = &mut inner.history;
     let fail = |e: VizError, problems: Vec<String>| {
         for p in &written {
@@ -6126,6 +6128,7 @@ fn recover_into_lanes(
         return Ok((Vec::new(), problems));
     }
     let filter = ViewFilter::default();
+    crate::bundled::arm(&mut inner.history);
     let h = &mut inner.history;
     h.begin("Recover Recordings")?;
     let run = (|| -> Result<(), VizError> {
