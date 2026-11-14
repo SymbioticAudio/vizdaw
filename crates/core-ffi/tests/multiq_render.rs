@@ -10,6 +10,11 @@
 
 #![cfg(target_os = "macos")]
 
+// Each test runs in a child whose home is a temp folder: Multi-Q writes
+// its crash-log folder under `NSHomeDirectory()` on load.
+#[path = "../../core-host/tests/support/temp_home.rs"]
+mod temp_home;
+
 use core_engine::backend::BlockInfo;
 use core_host::clap::ClapFormat;
 use core_host::{LoadRequest, ParamOut, PluginFormat, PluginInstance, ProcessCtx};
@@ -134,12 +139,10 @@ fn mapped(band: DpEqBand) -> Vec<(ParamId, f64)> {
 #[test]
 #[ignore = "needs scripts/build-multiq.sh and VIZDAW_BUNDLED_PLUGINS"]
 fn bundled_multiq_plays_the_mapped_curve() {
+    if !temp_home::in_temp_home("bundled_multiq_plays_the_mapped_curve") {
+        return;
+    }
     vizdaw_ffi::host::force_offline();
-    // Multi-Q may write its settings on load: never into the real home.
-    let home = tempfile::tempdir().unwrap();
-    // SAFETY: this file's only test; nothing else in this process reads
-    // the environment meanwhile.
-    unsafe { std::env::set_var("HOME", home.path()) };
 
     // A bell at 1 kHz, +6 dB, Q 1: band 3, Peaking.
     let bell = mapped(DpEqBand {
@@ -224,11 +227,10 @@ fn bundled_multiq_keeps_its_high_pass_through_a_rate_change() {
     use core_model::command::MixerCmd;
     use core_model::ids::AnyId;
     use std::time::Duration;
+    if !temp_home::in_temp_home("bundled_multiq_keeps_its_high_pass_through_a_rate_change") {
+        return;
+    }
     vizdaw_ffi::host::force_offline();
-    let home = tempfile::tempdir().unwrap();
-    // SAFETY: as in `bundled_multiq_plays_the_mapped_curve`; Rust runs this
-    // file's tests on threads, but both only ever set HOME to a temp dir.
-    unsafe { std::env::set_var("HOME", home.path()) };
 
     let plugin = PluginRef {
         format: Format::Clap,

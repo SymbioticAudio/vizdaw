@@ -6,8 +6,15 @@
 //! `VIZDAW_BUNDLED_PLUGINS=$PWD/target/multiq/out cargo test -p core-host
 //! --test multiq -- --ignored`. With `VIZDAW_MULTIQ_DUMP=<path>` as well,
 //! the dump test writes the table to `<path>` instead of checking it.
+//! Each test runs again in a child process whose `HOME` and
+//! `CFFIXED_USER_HOME` are a temp folder (`support/temp_home.rs`).
 
 #![cfg(target_os = "macos")]
+
+// Each test runs in a child whose home is a temp folder: Multi-Q writes
+// its crash-log folder under `NSHomeDirectory()` on load.
+#[path = "support/temp_home.rs"]
+mod temp_home;
 
 use core_engine::backend::BlockInfo;
 use core_host::clap::{ClapFormat, list_bundle};
@@ -105,6 +112,9 @@ fn param<'a>(params: &'a [ParamInfo], string_id: &str) -> Option<&'a ParamInfo> 
 #[test]
 #[ignore = "needs scripts/build-multiq.sh and VIZDAW_BUNDLED_PLUGINS"]
 fn bundled_multiq_lists_and_loads() {
+    if !temp_home::in_temp_home("bundled_multiq_lists_and_loads") {
+        return;
+    }
     assert_eq!(juce_hash("band1_freq"), 1_472_467_003);
     assert_eq!(juce_hash("band5_gain"), 1_586_997_182);
 
@@ -128,6 +138,9 @@ fn bundled_multiq_lists_and_loads() {
 #[test]
 #[ignore = "needs scripts/build-multiq.sh and VIZDAW_BUNDLED_PLUGINS"]
 fn bundled_multiq_is_flat_by_default() {
+    if !temp_home::in_temp_home("bundled_multiq_is_flat_by_default") {
+        return;
+    }
     let mut inst = load();
     let channels = inst.info().inputs.first().map_or(0, |p| p.channels);
     assert_eq!(channels, 2, "main input is not stereo");
@@ -240,6 +253,9 @@ fn table(params: &[ParamInfo]) -> Value {
 #[test]
 #[ignore = "needs scripts/build-multiq.sh and VIZDAW_BUNDLED_PLUGINS"]
 fn bundled_multiq_dumps_its_parameters() {
+    if !temp_home::in_temp_home("bundled_multiq_dumps_its_parameters") {
+        return;
+    }
     let inst = load();
     let live = table(&inst.info().params);
     match std::env::var_os("VIZDAW_MULTIQ_DUMP") {

@@ -8,6 +8,9 @@
 #![recursion_limit = "256"]
 
 mod common;
+#[cfg(target_os = "macos")]
+#[path = "../../core-host/tests/support/temp_home.rs"]
+mod temp_home;
 
 use core_io::smf::{self, Division, SmfEvent, SmfFile, SmfTrack};
 use core_model::document::Document;
@@ -387,12 +390,12 @@ fn bundled_dir() -> std::path::PathBuf {
 fn bundled_multiq_loads_in_a_new_track() {
     use common::dawproject::idle_until;
     use vizdaw_ffi::SlotStatus;
+    // Multi-Q writes its crash-log folder under `NSHomeDirectory()` on
+    // load: the test runs again in a child whose home is a temp folder.
+    if !temp_home::in_temp_home("bundled_multiq_loads_in_a_new_track") {
+        return;
+    }
     let _g = serial();
-    // Multi-Q may write its settings on load: never into the real home.
-    let home = tempfile::tempdir().unwrap();
-    // SAFETY: the tests of this file run one at a time (`serial`), and
-    // nothing else in this process reads the environment meanwhile.
-    unsafe { std::env::set_var("HOME", home.path()) };
     let clap = bundled_dir().join("Multi-Q.clap");
     assert!(
         clap.exists(),
