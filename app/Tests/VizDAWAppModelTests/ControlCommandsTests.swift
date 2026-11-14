@@ -15,6 +15,11 @@ final class FakeControlHost: ControlHost {
     let keys = KeyBindings(defaults: MemoryDefaults())
     /// The theme preference `ui.theme` sets (plan 7b Task B4).
     let appearance = AppearancePreferences(defaults: MemoryDefaults())
+    /// Settings › Plug-ins `plugins.*` set (plan 6g Task 4); installs go to
+    /// a temp folder through the fake sink.
+    let plugins = PluginSettings(
+        defaults: MemoryDefaults(), sink: FakePluginSettingsSink(),
+        installDestination: FileManager.default.temporaryDirectory.path)
     /// Whether `focus` finds the fields.
     var fieldsShown = true
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {

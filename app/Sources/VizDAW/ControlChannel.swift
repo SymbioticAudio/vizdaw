@@ -665,6 +665,8 @@ final class AppControlHost: ControlHost {
     var keys: KeyBindings { keyBindings }
     /// `ui.theme`'s preference (plan 7b Task B4).
     var appearance: AppearancePreferences { appearancePreferences }
+    /// `plugins.*`'s settings (plan 6g Task 4).
+    var plugins: PluginSettings { pluginSettings }
     var externalEditor: ExternalEditorChoice {
         if ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub" { return .stub }
         return editingPreferences.externalEditor.map { .app($0) } ?? .none

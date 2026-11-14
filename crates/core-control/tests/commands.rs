@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        177,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf"
+        179,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -2806,4 +2806,61 @@ fn help_names_the_return_dialog() {
         .filter_map(|p| p["name"].as_str())
         .collect();
     assert_eq!(names, ["path", "mode", "project", "snapshot", "preview"]);
+}
+
+/// Plan 6g Task 4: the two Settings › Plug-ins commands take flags only;
+/// each hostile value is `invalid_params`.
+#[test]
+fn plugins_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for on in [true, false] {
+        assert_eq!(
+            ok(
+                "command.run",
+                run("plugins.new_channel_eq", json!({ "on": on }))
+            ),
+            Command::CommandRun {
+                id: "plugins.new_channel_eq".into(),
+                args: vec![("on".into(), ArgValue::Flag(on))],
+                window: None,
+            }
+        );
+    }
+    for params in [json!({}), json!({ "replace": true })] {
+        assert!(matches!(
+            ok("command.run", run("plugins.install_multiq", params)),
+            Command::CommandRun { .. }
+        ));
+    }
+    let huge = "x".repeat(70_000);
+    for (id, params) in [
+        ("plugins.new_channel_eq", json!({})),
+        ("plugins.new_channel_eq", json!({ "on": "yes" })),
+        ("plugins.new_channel_eq", json!({ "on": 1 })),
+        ("plugins.new_channel_eq", json!({ "on": true, "extra": 1 })),
+        ("plugins.new_channel_eq", json!({ "on": huge })),
+        ("plugins.new_channel_eq", json!({ "on": "a\0b" })),
+        ("plugins.install_multiq", json!({ "replace": "x" })),
+        ("plugins.install_multiq", json!({ "extra": true })),
+        ("plugins.install_multiq", json!({ "replace": huge })),
+        ("plugins.install_multiq", json!({ "replace": "a\0b" })),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+    let list = registry::list_json();
+    let install = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "plugins.install_multiq")
+        .unwrap();
+    assert!(
+        install["dialogs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["name"] == "Replace" && d["answered_by"] == json!(["replace"])),
+        "{install}"
+    );
 }

@@ -282,6 +282,22 @@ pub const THEME_IDS: &[&str] = &[
 /// The prefix of a user theme's ID (controller ruling R-UT).
 pub const USER_THEME_PREFIX: &str = "user.";
 
+/// `plugins.new_channel_eq`'s parameter (plan 6g Task 4).
+const NEW_CHANNEL_EQ_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "on",
+    kind: ParamKind::Flag,
+    required: true,
+    help: "Put an EQ on new channels (on) or not (off).",
+}];
+
+/// `plugins.install_multiq`'s parameter (plan 6g Task 4).
+const INSTALL_MULTIQ_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "replace",
+    kind: ParamKind::Flag,
+    required: false,
+    help: "Replace a Multi-Q.component already in the Components folder (answers the dialog).",
+}];
+
 /// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
 const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "theme",
@@ -2397,6 +2413,32 @@ pub const COMMANDS: &[CommandSpec] = &[
             answered_by: &["name"],
         }],
         ..cmd("track.rename", "Track", "Rename Track", None, true)
+    },
+    CommandSpec {
+        params: NEW_CHANNEL_EQ_PARAMS,
+        ..key_only(cmd(
+            "plugins.new_channel_eq",
+            "Settings",
+            "Put an EQ on New Channels",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        params: INSTALL_MULTIQ_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Replace",
+            when: "a Multi-Q.component is already in the Components folder",
+            always: false,
+            answered_by: &["replace"],
+        }],
+        ..key_only(cmd(
+            "plugins.install_multiq",
+            "Settings",
+            "Install Multi-Q for Other Apps",
+            None,
+            false,
+        ))
     },
 ];
 
