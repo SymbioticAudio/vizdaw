@@ -8,9 +8,10 @@ import Testing
 @Suite struct NameScanTests {
     static let dirs = ["VizDAW", "VizDAWEditors", "VizDAWAppModel"]
     /// The owner's list, then (plan 6d Task 13) DAWproject's origin and the
-    /// other readers and converters its README lists.
+    /// other readers and converters its README lists, then (plan 6f Task 8)
+    /// the AAF libraries read for behaviour.
     static let pattern =
-        #"\b(Opcode|Studio Vision|SVP|Logic|Apple|Midas|Soundcraft|Steinberg|Cubase|NI|Native Instruments|Komplete|Kontrol|Microsoft|Ableton|ROLI|Bitwig|PreSonus|Studio One|Cubasis|VST Live|n-Track|DawVert|ProjectConverter|Cockos|Reaper)\b"#
+        #"\b(Opcode|Studio Vision|SVP|Logic|Apple|Midas|Soundcraft|Steinberg|Cubase|NI|Native Instruments|Komplete|Kontrol|Microsoft|Ableton|ROLI|Bitwig|PreSonus|Studio One|Cubasis|VST Live|n-Track|DawVert|ProjectConverter|Cockos|Reaper|LibAAF|pyaaf2)\b"#
     /// The one listed exception: a smoke-run plug-in reference, never shown.
     static let smokeLine = #"vendor: "Apple""#
 
@@ -60,11 +61,12 @@ import Testing
         #expect(Self.literals(#"f("x", "NI's")"#) == ["x", "NI's"])
         #expect(Self.literals("let kontrolMk3 = 1").isEmpty)
         for bad in ["NI's keyboard", "NI x", "x NI", "a Kontrol keyboard", "Native Instruments GmbH",
-                    "a Bitwig file", "PreSonus Studio One", "n-Track Studio", "Cockos Reaper"] {
+                    "a Bitwig file", "PreSonus Studio One", "n-Track Studio", "Cockos Reaper",
+                    "read by LibAAF", "pyaaf2 wrote it"] {
             #expect(Self.matches(bad, regex), "\(bad)")
         }
         for clean in ["kontrol_mk3", "KONTROL S88 MK3 DAW", "NIGHT", "a host-integration keyboard",
-                      "VST Left out", "a DAWproject file"] {
+                      "VST Left out", "a DAWproject file", "an AAF file", "Song AAF"] {
             #expect(!Self.matches(clean, regex), "\(clean)")
         }
         // The kept ids still parse, through the path `surface.add` uses.

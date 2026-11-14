@@ -60,6 +60,18 @@ private struct DocumentSheets: ViewModifier {
                 DawprojectSheet(dawproject: model.dawproject, document: model)
             }
             .sheet(
+                isPresented: Binding(
+                    get: { model.aaf.exportShown && !ControlChannel.active }, set: { model.aaf.exportShown = $0 })
+            ) {
+                AafExportSheet(aaf: model.aaf, document: model)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.aaf.importShown && !ControlChannel.active }, set: { model.aaf.importShown = $0 })
+            ) {
+                AafImportSheet(aaf: model.aaf)
+            }
+            .sheet(
                 item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
             ) { _ in
                 TrackSynthSheet(

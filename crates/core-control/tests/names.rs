@@ -36,6 +36,9 @@ const NAMES: &[&str] = &[
     "ProjectConverter",
     "Cockos",
     "Reaper",
+    // The AAF libraries read for behaviour (plan 6f Task 8).
+    "LibAAF",
+    "pyaaf2",
 ];
 
 fn is_word(b: u8) -> bool {
@@ -79,6 +82,8 @@ fn self_check() {
         "PreSonus Studio One",
         "n-Track Studio",
         "Cockos Reaper",
+        "read by LibAAF",
+        "pyaaf2 wrote it",
     ] {
         assert!(third_party_name(bad).is_some(), "must catch {bad:?}");
     }
@@ -92,6 +97,8 @@ fn self_check() {
         "a host-integration keyboard",
         "VST Left out",
         "a DAWproject file",
+        "an AAF file",
+        "Song AAF",
         "",
     ] {
         assert_eq!(third_party_name(clean), None, "must pass {clean:?}");

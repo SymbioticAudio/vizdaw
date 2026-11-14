@@ -200,6 +200,59 @@ extension Panels {
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
+    /// The AAF types: the bundle's imported `org.vizdaw.aaf` and the type
+    /// the system gives the extension (plan 6f Task 8), as `dawprojectTypes`.
+    static var aafTypes: [UTType] {
+        var out: [UTType] = []
+        for t in [UTType("org.vizdaw.aaf"), UTType(filenameExtension: "aaf")].compactMap({ $0 }) where !out.contains(t) {
+            out.append(t)
+        }
+        return out
+    }
+
+    /// File › Import Project › AAF…: the file to import (plan 6f).
+    static func chooseAafToOpen() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = aafTypes
+        panel.prompt = "Import"
+        panel.message = "Choose an AAF file."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// The AAF import sheet's "MIDI file beside it" Choose….
+    static func chooseMidiBesideAaf() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = midiTypes
+        panel.prompt = "Choose"
+        panel.message = "Choose the MIDI file that goes with the AAF file."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// The AAF import sheet's "Look for missing audio in…": a folder to
+    /// read from, so none is made here.
+    static func chooseAafMediaFolder() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose a folder to look for the missing audio files in."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// The folder the AAF export folder goes in (plan 6f; 6b's pattern: the
+    /// sheet comes first). `name` is the core's (`aafFolderName`); a folder
+    /// of that name already there is never replaced.
+    static func chooseAafExportFolder(name: String) -> String? {
+        chooseFolder(prompt: "Export Here", message: "Choose where to put the folder \u{201C}\(name)\u{201D}.")
+    }
+
     /// A folder to write into, one that can be made in the panel (F16).
     private static func chooseFolder(prompt: String, message: String) -> String? {
         let panel = NSOpenPanel()

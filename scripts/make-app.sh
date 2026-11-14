@@ -71,6 +71,12 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
             <key>LSHandlerRank</key><string>Alternate</string>
             <key>LSItemContentTypes</key><array><string>org.vizdaw.dawproject</string></array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>AAF</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>org.vizdaw.aaf</string></array>
+        </dict>
     </array>
     <key>UTExportedTypeDeclarations</key>
     <array>
@@ -104,6 +110,17 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
             <key>UTTypeTagSpecification</key>
             <dict>
                 <key>public.filename-extension</key><array><string>dawproject</string></array>
+            </dict>
+        </dict>
+        <!-- AAF (plan 6f): an interchange format we read and write but do
+             not own. -->
+        <dict>
+            <key>UTTypeIdentifier</key><string>org.vizdaw.aaf</string>
+            <key>UTTypeDescription</key><string>AAF</string>
+            <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>aaf</string></array>
             </dict>
         </dict>
     </array>

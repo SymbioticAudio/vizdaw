@@ -943,11 +943,19 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         aafFolderNames.append(seq)
         return aafFolderNameAnswer
     }
+    /// Holds an AAF check until released; answers it per request (plan 6f
+    /// Task 8).
+    var aafCheckHold: (@Sendable (AafExportRequestRow) -> DispatchSemaphore?)?
+    var aafCheckReply: (@Sendable (AafExportRequestRow) -> ReportRow)?
     func exportAafCheck(req: AafExportRequestRow) throws -> ReportRow {
         interchangeLock.lock()
         aafChecks.append(req)
         checkOnMain.append(Thread.isMainThread)
+        let hold = aafCheckHold
+        let reply = aafCheckReply
         interchangeLock.unlock()
+        hold?(req)?.wait()
+        if let reply { return reply(req) }
         return try aafCheckAnswer.get()
     }
     func exportAaf(req: AafExportRequestRow) throws -> UInt64 {

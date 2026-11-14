@@ -76,6 +76,12 @@ struct AppCommands: Commands {
                     Button(keyBindings.row(InterchangeCommands.importDawproject)?.title ?? "DAWproject…") {
                         if let path = Panels.chooseDawprojectToOpen() { store.openDawproject(path) }
                     }
+                    // With a project open the sheet asks where it goes;
+                    // without one it opens as a new project (plan 6f).
+                    Button(keyBindings.row(InterchangeCommands.importAaf)?.title ?? "AAF…") {
+                        guard let path = Panels.chooseAafToOpen() else { return }
+                        if let doc { doc.aaf.choose(path: path) } else { store.openAaf(path) }
+                    }
                 }
                 Button("Create Demo Project") { show(store.newDemo()) }
                 Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
@@ -102,6 +108,10 @@ struct AppCommands: Commands {
                         doc?.dawproject.shown = true
                     }
                     .help("Most complete: tracks, mix, plug-ins, automation")
+                    Button(keyBindings.row(InterchangeCommands.exportAaf)?.title ?? "AAF…") {
+                        doc?.aaf.exportShown = true
+                    }
+                    .help("Audio, fades and volume; MIDI as MIDI files beside it")
                     Button(keyBindings.row(InterchangeCommands.exportMidi)?.title ?? "MIDI File…") {
                         doc?.interchange.showExport(.smf)
                     }
@@ -463,7 +473,8 @@ enum Panels {
         [UTType.midi] + ["mid", "midi", "smf", "midi2"].compactMap { UTType(filenameExtension: $0) }
     }
 
-    /// A `.vizdaw` package, a MIDI file or a DAWproject file (plan 6d). In
+    /// A `.vizdaw` package, a MIDI file, a DAWproject file (plan 6d) or an
+    /// AAF file (plan 6f). In
     /// the bundle the UTI (a package) makes a project a file; under `swift
     /// run` it looks like a folder. Both are selectable and the store checks
     /// the extension.
@@ -474,9 +485,9 @@ enum Panels {
         panel.treatsFilePackagesAsDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes =
-            [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 } + midiTypes + dawprojectTypes
+            [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 } + midiTypes + dawprojectTypes + aafTypes
         panel.prompt = "Open"
-        panel.message = "Choose a VizDAW project, a MIDI file or a DAWproject file"
+        panel.message = "Choose a VizDAW project, a MIDI file, a DAWproject file or an AAF file"
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 

@@ -297,12 +297,17 @@ public final class DocumentStore {
 
     /// Opens a `.vizdaw` package; a MIDI file (`mid`, `midi`, `smf`,
     /// `midi2`) makes a new project and imports into it (plan 6a Ruling 12);
-    /// a `.dawproject` starts `openDawproject` and answers nil (its project
-    /// comes once the file is read); other paths are refused with an alert.
+    /// a `.dawproject` starts `openDawproject` and an `.aaf` `openAaf`, and
+    /// both answer nil (the project comes once the file is read); other
+    /// paths are refused with an alert.
     public func open(path: String) -> UUID? {
         if InterchangeModel.isMidi(path) { return openMidi(path) }
         if InterchangeModel.isDawproject(path) {
             openDawproject(path)
+            return nil
+        }
+        if InterchangeModel.isAaf(path) {
+            openAaf(path)
             return nil
         }
         guard (path as NSString).pathExtension == "vizdaw" else {
@@ -444,6 +449,48 @@ public final class DocumentStore {
         var failure: (any Error)?
         let req = DawprojectImportRequestRow(path: path)
         model.startJob(.importProject, "Import Failed", failure: { failure = $0 }) { try $0.importDawproject(req: req) }
+        if let failure {
+            close(id)
+            postAlert(AlertItem(failure, title: "Import Failed"))
+            return
+        }
+        // A job that failed at once has already taken the project.
+        if documents[id] != nil { enqueue(id) }
+    }
+
+    /// Starts opening an AAF file and returns at once (plan 6f Task 8), as
+    /// `openDawproject`: a detached task calls `aafInfo`, then on the main
+    /// actor a project at the file's rate imports it with the defaults (a
+    /// new project, the MIDI file beside it, no media folder, pairs
+    /// joined). A refusal makes no project and alerts "Import Failed"; a
+    /// job that fails or is cancelled on a still-untouched project closes it.
+    public func openAaf(_ path: String) {
+        let read = aafInfo
+        openCount += 1
+        let n = openCount
+        opening[n] = Task {
+            let info = await Task.detached { Result { try read(path) } }.value
+            switch info {
+            case .failure(let error):
+                self.postAlert(AlertItem(error, title: "Import Failed"))
+            case .success(let row):
+                self.importAafAsNewProject(
+                    AafImportRequestRow(path: path, newProject: true, midiPath: nil, mediaFolder: nil, joinPairs: true),
+                    rate: row.sampleRate)
+            }
+            self.opening[n] = nil
+        }
+    }
+
+    /// A project at `rate` imports `req` (the open's defaults, or the AAF
+    /// import sheet's choices); its window opens (`enqueue`). As 6d's.
+    func importAafAsNewProject(_ req: AafImportRequestRow, rate: UInt32) {
+        guard let id = newProject(ProjectFormatRow(sampleRate: rate, depth: defaultFormat.depth)),
+            let model = documents[id]
+        else { return }
+        closeIfUntouched(id, model)
+        var failure: (any Error)?
+        model.startJob(.importAaf, "Import Failed", failure: { failure = $0 }) { try $0.importAaf(req: req) }
         if let failure {
             close(id)
             postAlert(AlertItem(failure, title: "Import Failed"))

@@ -175,6 +175,12 @@ public final class InterchangeModel {
         (path as NSString).pathExtension.lowercased() == "dawproject"
     }
 
+    /// Whether Open and drops send `path` to the AAF import
+    /// (`DocumentStore.openAaf`; any case of the extension).
+    public static func isAaf(_ path: String) -> Bool {
+        (path as NSString).pathExtension.lowercased() == "aaf"
+    }
+
     /// Reads `path`, then shows the import sheet; a refusal is the alert
     /// "Import Failed".
     public func beginImport(path: String) {

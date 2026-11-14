@@ -137,6 +137,7 @@ public final class DocumentModel {
     @ObservationIgnored private var interchangeModel: InterchangeModel?
     @ObservationIgnored private var forDawModel: ForDawModel?
     @ObservationIgnored private var dawprojectModel: DawprojectModel?
+    @ObservationIgnored private var aafModel: AafModel?
     @ObservationIgnored private var mergeModel: MergeModel?
     @ObservationIgnored private var projectSettingsModel: ProjectSettingsModel?
     @ObservationIgnored private var recordModel: RecordModel?
@@ -217,6 +218,15 @@ public final class DocumentModel {
         return m
     }
 
+    /// File › Export › AAF… and File › Import Project › AAF… (plan 6f
+    /// Task 8), made once.
+    public var aaf: AafModel {
+        if let m = aafModel { return m }
+        let m = AafModel(document: self)
+        aafModel = m
+        return m
+    }
+
     /// The Merge DAWproject sheet (plan 6e Task 10), made once.
     public var merge: MergeModel {
         if let m = mergeModel { return m }
@@ -238,6 +248,7 @@ public final class DocumentModel {
     func documentClosing() {
         mergeModel?.documentClosed()
         dawprojectModel?.cancelWaiting()
+        aafModel?.cancelWaiting()
         forDawModel?.cancelWaiting()
         interchangeModel?.documentClosing()
     }
@@ -248,10 +259,11 @@ public final class DocumentModel {
         interchange.blockingEnded()
         forDaw.jobEnded()
         dawproject.jobEnded()
+        aaf.jobEnded()
     }
 
-    /// Set by the store for a project it made to open a MIDI or DAWproject
-    /// file: called when that import fails (the message; nil: cancelled) so
+    /// Set by the store for a project it made to open a MIDI, DAWproject or
+    /// AAF file: called when that import fails (the message; nil: cancelled) so
     /// the store can close the project while it is untouched. Cleared once
     /// the job ends.
     @ObservationIgnored var openedFile: ((String?) -> Void)?

@@ -664,6 +664,9 @@ public enum ControlOpen {
         if InterchangeModel.isDawproject(path) {
             return .failed(.of(.invalidParams, "Use file.import_dawproject to open a DAWproject file."))
         }
+        if InterchangeModel.isAaf(path) {
+            return .failed(.of(.invalidParams, "Use file.import_aaf to open an AAF file."))
+        }
         // An open project is never opened twice, and no window is fronted.
         if store.documentID(forPath: path) != nil {
             let name = (path as NSString).lastPathComponent
