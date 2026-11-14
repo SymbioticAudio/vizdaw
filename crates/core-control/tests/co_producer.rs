@@ -703,10 +703,10 @@ fn outward_paths_never_replace() {
         output("file.export_dawproject", &[]),
         Some(Output::NewFile(&["dawproject"]))
     );
-    assert!(matches!(
+    assert_eq!(
         output("file.export_midi_clip", &[]),
-        Some(Output::NewFile(_))
-    ));
+        Some(Output::NewFile(&["midi2"]))
+    );
     for id in [
         "track.new_audio",
         "file.import_midi",
@@ -715,6 +715,60 @@ fn outward_paths_never_replace() {
     ] {
         assert_eq!(output(id, &[]), None, "{id}");
     }
+    // Review I1: a path not in normal form is refused before any link or
+    // "already there" check, since a final `/` or `/.` makes the system
+    // follow a link (a dangling one into a package, or a folder link).
+    let pkg_target = dir.join("pkg_dangle.mid");
+    symlink(package.join("target.mid"), &pkg_target).unwrap();
+    let with = |p: &Path, tail: &str| std::path::PathBuf::from(format!("{}{tail}", p.display()));
+    for (p, rule) in [
+        (with(&pkg_target, "/"), mid),
+        (with(&pkg_target, "/."), mid),
+        (with(&dir.join("new.mid"), "/"), mid),
+        (with(&dir_link, "/"), Output::IntoFolder),
+        (with(&dir_link, "/."), Output::IntoFolder),
+        (with(dir, "/"), Output::IntoFolder),
+        (with(dir, "/./a"), Output::IntoFolder),
+        (with(dir, "//a"), Output::IntoFolder),
+        (with(dir, "/a/../a"), Output::IntoFolder),
+        (with(dir, "/a/../new.mid"), mid),
+        (Path::new("/.").to_path_buf(), Output::IntoFolder),
+        (Path::new("/.").to_path_buf(), mid),
+    ] {
+        let e = check_output(&p, rule).unwrap_err();
+        assert_eq!(
+            e.code,
+            ErrorCode::NotAllowed,
+            "{}: {}",
+            p.display(),
+            e.message
+        );
+        assert!(e.message.contains(&*p.to_string_lossy()), "{}", e.message);
+    }
+    let e = check_output(&with(&pkg_target, "/"), mid).unwrap_err();
+    assert!(e.message.contains("normal form"), "{}", e.message);
+    let e = gate(
+        "command.run",
+        run(
+            "file.export_midi",
+            json!({"path": format!("{}/", pkg_target.display())}),
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotAllowed, "{}", e.message);
+    let e = gate(
+        "command.run",
+        run(
+            "file.export_for_daw",
+            json!({"path": format!("{}/.", dir_link.display())}),
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotAllowed, "{}", e.message);
+    assert!(
+        std::fs::symlink_metadata(package.join("target.mid")).is_err(),
+        "nothing was made in the package"
+    );
     // A link as the folder is refused as a link, whichever rule.
     for (p, rule) in [
         (dir_link.join("new.mid"), mid),

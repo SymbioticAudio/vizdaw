@@ -254,6 +254,10 @@ public enum ControlCommands {
         "file.project_settings", "media.import", "media.convert",
         "media.relink", "media.compact", "media.rename", "window.media_pool",
         "record.set", "record.recover", "lane.set_input", "lane.set_monitor", "midi.inject",
+        // Plan 8a Task 1's two registry ids, handled here only so the
+        // registry and the handlers stay in step; they answer "no handler"
+        // until Task 3 replaces them with their real handlers.
+        "settings.co_producer", "file.open_copy",
     ]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [

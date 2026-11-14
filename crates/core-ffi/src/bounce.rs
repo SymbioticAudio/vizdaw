@@ -416,6 +416,13 @@ pub(crate) fn dest_path(s: &str) -> Result<PathBuf, VizError> {
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(model(format!("{s}: a path with \"..\" is not accepted")));
     }
+    // A final `/` or `/.` makes the write follow a final link, which the
+    // link and "exists" checks would not see (plan 8a review I1).
+    if p.as_os_str() != p.components().collect::<PathBuf>().as_os_str() {
+        return Err(model(format!(
+            "{s}: the path must be in normal form, with no \".\" part, no doubled \"/\" and no \"/\" at the end"
+        )));
+    }
     Ok(p)
 }
 
@@ -1225,6 +1232,38 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plan 8a review I1: an export path not in normal form is refused,
+    /// since a final `/` or `/.` makes the write follow a link (a dangling
+    /// one into a package), which the link and "exists" checks miss.
+    #[test]
+    fn dest_path_refuses_paths_not_in_normal_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let pkg = dir.join("Song.vizdaw");
+        std::fs::create_dir(&pkg).unwrap();
+        let dangle = dir.join("dangle.mid");
+        std::os::unix::fs::symlink(pkg.join("target.mid"), &dangle).unwrap();
+        let d = dir.display();
+        for s in [
+            format!("{}/", dangle.display()),
+            format!("{}/.", dangle.display()),
+            format!("{d}/"),
+            format!("{d}/./x.mid"),
+            format!("{d}//x.mid"),
+            "/.".to_string(),
+        ] {
+            let e = dest_path(&s).unwrap_err();
+            assert!(format!("{e:?}").contains("normal form"), "{s}: {e:?}");
+        }
+        assert_eq!(dest_path(&format!("{d}/x.mid")).unwrap(), dir.join("x.mid"));
+        assert!(dest_path("/").is_ok(), "the root is in normal form");
+        assert!(
+            dest_path(&format!("{d}/a/../x.mid")).is_err(),
+            "`..` stays refused"
+        );
+        assert!(std::fs::symlink_metadata(pkg.join("target.mid")).is_err());
+    }
 
     /// Final review T4-M7 and T2-M4: singular forms for one.
     #[test]

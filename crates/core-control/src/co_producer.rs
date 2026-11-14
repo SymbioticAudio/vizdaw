@@ -19,7 +19,7 @@ use crate::error::{ControlError, ErrorCode};
 use crate::registry::{self, ArgValue, COMMANDS, Class, CommandSpec};
 use crate::request::{Command, StateTarget};
 use serde_json::{Value, json};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 /// The change and remove commands 8a can preview (Ruling 6).
 pub const PREVIEWABLE: &[&str] = &[
@@ -112,6 +112,12 @@ fn refuse(path: &Path, reason: &str) -> ControlError {
     ))
 }
 
+/// Whether `path` is its own components joined again: no trailing `/`,
+/// no `.` part and no doubled `/`.
+pub fn is_normal(path: &Path) -> bool {
+    path.as_os_str() == path.components().collect::<PathBuf>().as_os_str()
+}
+
 /// Whether a component names a `.vizdaw` package, ignoring case as APFS does.
 fn is_package(c: Component<'_>) -> bool {
     match c {
@@ -125,14 +131,23 @@ fn is_package(c: Component<'_>) -> bool {
 /// be an existing directory whose last component is not a link, and its
 /// canonical path must not be inside any `.vizdaw` package. A new file
 /// must not exist (by `symlink_metadata`, so a dangling link counts), and
-/// needs one of the rule's extensions and no leading dot. Relative paths
-/// and `..` are refused. Each refusal is `not_allowed`, naming the path.
+/// needs one of the rule's extensions and no leading dot. Relative paths,
+/// `..` and paths not in normal form ([`is_normal`]) are refused. Each refusal is `not_allowed`, naming the path.
 pub fn check_output(path: &Path, rule: Output) -> Result<(), ControlError> {
     if !path.is_absolute() {
         return Err(refuse(path, "the path must be absolute"));
     }
     if path.components().any(|c| c == Component::ParentDir) {
         return Err(refuse(path, "the path must not hold `..`"));
+    }
+    // Before any link or "already there" check: a final `/` or `/.` makes
+    // the system follow a final link, which `symlink_metadata` and
+    // `parent` would not see (review I1).
+    if !is_normal(path) {
+        return Err(refuse(
+            path,
+            "the path must be in normal form, with no `.` part, no doubled `/` and no `/` at the end",
+        ));
     }
     let folder = match rule {
         Output::NewFile(exts) => {
