@@ -38,7 +38,7 @@
 use crate::IoError;
 use crate::limits::AafLimits;
 use crate::report::{ItemKind, Report};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -368,6 +368,15 @@ const UNSET: ObjId = ObjId(u32::MAX);
 /// [`AafLimits::max_model_bytes`].
 const OBJ_COST: usize = std::mem::size_of::<Obj>() + 64;
 const PROP_COST: usize = std::mem::size_of::<Prop>() + 32;
+/// One node of an object's property map: a B-tree node holds up to 11
+/// entries and is allocated whole, so even one property costs a node.
+const PROPS_NODE: usize = 16 + 11 * (std::mem::size_of::<u16>() + std::mem::size_of::<Prop>());
+/// What `cfb` holds per directory entry, measured (about 230 bytes). It
+/// holds the whole directory from the open, so every entry is counted
+/// before the walk.
+const DIR_ENTRY_COST: usize = 256;
+/// A path's entry in the set of paths already queued, beyond its bytes.
+const SEEN_COST: usize = std::mem::size_of::<String>() + 16;
 
 /// Why one object or property was not read.
 enum Bad {
@@ -404,10 +413,41 @@ fn read_head(c: &mut Cfb, path: &str, n: u64) -> Result<(Vec<u8>, u64), String> 
     Ok((out, len))
 }
 
-/// A pending child: its path, depth, and the slot of its parent's property
-/// it fills (parent, pid, position).
+/// Why [`read_whole`] read nothing.
+enum Whole {
+    /// No such stream.
+    Missing,
+    /// Longer than its limit.
+    TooLarge,
+    /// Unreadable or short: why, with its path.
+    Bad(String),
+}
+
+/// The whole of stream `path`, refused before anything is read when it is
+/// longer than `max`.
+fn read_whole(c: &mut Cfb, path: &str, max: u64) -> Result<Vec<u8>, Whole> {
+    let mut s = c.open_stream(path).map_err(|_| Whole::Missing)?;
+    let len = s.len();
+    if len > max {
+        return Err(Whole::TooLarge);
+    }
+    let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    (&mut s)
+        .take(len)
+        .read_to_end(&mut out)
+        .map_err(|_| Whole::Bad(format!("{path}: unreadable")))?;
+    if (out.len() as u64) < len {
+        return Err(Whole::Bad(format!("{path}: short")));
+    }
+    Ok(out)
+}
+
+/// A pending child: its path, its class (its storage's CLSID, read as it
+/// was queued), its depth, and the slot of its parent's property it fills
+/// (parent, pid, position).
 struct Pending {
     path: String,
+    class: Auid,
     depth: usize,
     slot: Option<(ObjId, u16, usize)>,
 }
@@ -457,6 +497,25 @@ impl Walk<'_> {
         Ok(())
     }
 
+    /// The storages directly in the storage at `path`, by name, with
+    /// their classes, counted against the budget. An object's children are
+    /// found in one walk of its storage rather than each by a lookup from
+    /// the root, whose cost grows with the depth: with the `properties`
+    /// stream's opening, an object costs one such lookup, not four.
+    fn storages(&mut self, path: &str) -> Result<HashMap<String, Auid>, IoError> {
+        let listing: HashMap<String, Auid> = match self.c.read_storage(path) {
+            Ok(entries) => entries
+                .filter(cfb::Entry::is_storage)
+                .map(|e| (e.name().to_string(), Auid::of_uuid(e.clsid())))
+                .collect(),
+            Err(_) => HashMap::new(),
+        };
+        let each = std::mem::size_of::<(String, Auid)>().saturating_add(SEEN_COST);
+        let names: usize = listing.keys().map(String::len).sum();
+        self.spend(listing.len().saturating_mul(each).saturating_add(names))?;
+        Ok(listing)
+    }
+
     fn spend(&mut self, n: usize) -> Result<(), IoError> {
         self.bytes = self.bytes.saturating_add(n);
         if self.bytes > self.limits.max_model_bytes {
@@ -471,6 +530,7 @@ impl Walk<'_> {
     fn queue(
         &mut self,
         parent_path: &str,
+        storages: &HashMap<String, Auid>,
         name: &str,
         depth: usize,
         slot: (ObjId, u16, usize),
@@ -480,10 +540,18 @@ impl Walk<'_> {
             self.left_out(format!("{parent_path}: a reference to {name:?}"));
             return Ok(false);
         }
-        if !self.c.is_storage(&path) {
-            self.left_out(format!("{path}: missing"));
-            return Ok(false);
-        }
+        // A name that differs from its storage's only in case is looked
+        // up the compound file's way.
+        let class = match storages.get(name) {
+            Some(c) => *c,
+            None => match self.c.entry(&path) {
+                Ok(e) if e.is_storage() => Auid::of_uuid(e.clsid()),
+                _ => {
+                    self.left_out(format!("{path}: missing"));
+                    return Ok(false);
+                }
+            },
+        };
         // Names compare without case in a compound file.
         if !self.seen.insert(path.to_uppercase()) {
             self.left_out(format!("{path}: referenced twice"));
@@ -497,9 +565,16 @@ impl Walk<'_> {
         if self.queued > self.limits.max_objects {
             return Err(refused(TOO_MANY_OBJECTS));
         }
-        self.spend(path.len().saturating_add(std::mem::size_of::<Pending>()))?;
+        // The pending entry and its path, and the path's copy in `seen`.
+        self.spend(
+            path.len()
+                .saturating_mul(2)
+                .saturating_add(std::mem::size_of::<Pending>())
+                .saturating_add(SEEN_COST),
+        )?;
         self.stack.push(Pending {
             path,
+            class,
             depth,
             slot: Some(slot),
         });
@@ -508,24 +583,15 @@ impl Walk<'_> {
 
     /// Reads one object's storage into an [`Obj`] (strong references as
     /// [`UNSET`] placeholders) and the children to queue.
-    fn read_obj(&mut self, path: &str) -> Result<(Obj, Vec<Child>), Bad> {
-        let class = self
-            .c
-            .entry(path)
-            .map(|e| Auid::of_uuid(e.clsid()))
-            .map_err(|_| Bad::Part(format!("{path}: missing")))?;
+    fn read_obj(&mut self, path: &str, class: Auid) -> Result<(Obj, Vec<Child>), Bad> {
         let pp = child_path(path, "properties");
-        let len = self
-            .c
-            .entry(&pp)
-            .ok()
-            .filter(cfb::Entry::is_stream)
-            .map(|e| e.len())
-            .ok_or_else(|| Bad::Part(format!("{path}: no properties")))?;
-        if len > self.limits.max_properties_bytes {
-            return Err(Bad::Part(format!("{path}: properties too large")));
-        }
-        let (bytes, _) = read_head(self.c, &pp, len).map_err(Bad::Part)?;
+        let bytes = read_whole(self.c, &pp, self.limits.max_properties_bytes).map_err(|e| {
+            Bad::Part(match e {
+                Whole::Missing => format!("{path}: no properties"),
+                Whole::TooLarge => format!("{path}: properties too large"),
+                Whole::Bad(why) => why,
+            })
+        })?;
         let mut b = Bytes(&bytes);
         let order = b
             .u8()
@@ -818,6 +884,18 @@ fn prop_cost(p: &Prop) -> usize {
     })
 }
 
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    static PANIC_IN_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test hook (`test-hooks` feature only): the next read on this thread
+/// panics as it starts, where a panic inside `cfb` would be caught.
+#[cfg(feature = "test-hooks")]
+pub fn debug_panic_in_next_read() {
+    PANIC_IN_READ.with(|p| p.set(true));
+}
+
 /// Reads the whole store of `c`.
 fn read_store(
     c: &mut Cfb,
@@ -825,9 +903,16 @@ fn read_store(
     cancel: &AtomicBool,
     report: &mut Report,
 ) -> Result<Store, IoError> {
+    #[cfg(feature = "test-hooks")]
+    if PANIC_IN_READ.with(|p| p.replace(false)) {
+        // The hook's whole purpose: a panic where `cfb`'s would be.
+        #[allow(clippy::panic)]
+        std::panic::panic_any("a panic inside the read (test hook)");
+    }
     if !c.is_stream("/properties") {
         return Err(refused(NOT_AAF));
     }
+    let root_class = Auid::of_uuid(c.root_entry().clsid());
     let mut w = Walk {
         c,
         limits,
@@ -835,6 +920,7 @@ fn read_store(
         objects: Vec::new(),
         stack: vec![Pending {
             path: "/".to_string(),
+            class: root_class,
             depth: 0,
             slot: None,
         }],
@@ -847,11 +933,21 @@ fn read_store(
     if w.queued > limits.max_objects {
         return Err(refused(TOO_MANY_OBJECTS));
     }
+    // `cfb` holds every directory entry from the open: they are counted
+    // first, so a file of many entries is refused before the walk.
+    let mut entries = 0usize;
+    for (i, _) in w.c.walk().enumerate() {
+        if i % 4096 == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(IoError::Cancelled);
+        }
+        entries = i.saturating_add(1);
+    }
+    w.spend(entries.saturating_mul(DIR_ENTRY_COST))?;
     while let Some(p) = w.stack.pop() {
         if cancel.load(Ordering::Relaxed) {
             return Err(IoError::Cancelled);
         }
-        let (obj, kids) = match w.read_obj(&p.path) {
+        let (obj, kids) = match w.read_obj(&p.path, p.class) {
             Ok(r) => r,
             Err(Bad::File(e)) => return Err(e),
             // The root itself unreadable: nothing to read below it.
@@ -861,12 +957,13 @@ fn read_store(
                 continue;
             }
         };
-        let cost = obj
-            .props
-            .values()
-            .fold(OBJ_COST.saturating_add(obj.path.len()), |n, p| {
-                n.saturating_add(prop_cost(p))
-            });
+        let nodes = obj.props.len().div_ceil(11);
+        let cost = obj.props.values().fold(
+            OBJ_COST
+                .saturating_add(obj.path.len())
+                .saturating_add(PROPS_NODE.saturating_mul(nodes)),
+            |n, p| n.saturating_add(prop_cost(p)),
+        );
         w.spend(cost)?;
         let id = ObjId(u32::try_from(w.objects.len()).map_err(|_| refused(TOO_MANY_OBJECTS))?);
         let path = obj.path.clone();
@@ -874,12 +971,17 @@ fn read_store(
         if let Some((parent, pid, pos)) = p.slot {
             fill(&mut w.objects, parent, pid, pos, id);
         }
+        let storages = if kids.is_empty() {
+            HashMap::new()
+        } else {
+            w.storages(&path)?
+        };
         // Queued in reverse, so the stack pops them in file order.
         for (i, k) in kids.iter().rev().enumerate() {
             if i % 4096 == 0 && cancel.load(Ordering::Relaxed) {
                 return Err(IoError::Cancelled);
             }
-            let _ = w.queue(&path, &k.name, p.depth, (id, k.pid, k.pos))?;
+            let _ = w.queue(&path, &storages, &k.name, p.depth, (id, k.pid, k.pos))?;
         }
     }
     let mut objects = w.objects;
