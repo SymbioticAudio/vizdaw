@@ -132,6 +132,7 @@ fn trip_without_schema(doc: &Document, o: &ExportOptions) -> Trip {
             plist: &TestPlist,
             rate: 48_000,
             ids: None,
+            eq_plugin: None,
         },
         &AtomicBool::new(false),
     )

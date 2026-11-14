@@ -163,6 +163,7 @@ fn theirs_with(
             plist: &TestPlist,
             rate: format.sample_rate,
             ids: trusted.then_some(&t.snapshot.ids),
+            eq_plugin: None,
         },
         &never(),
     )

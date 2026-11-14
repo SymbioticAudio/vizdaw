@@ -812,6 +812,7 @@ fn theirs_offline(t: &Trip, path: &Path) -> Theirs {
             plist: &TestPlist,
             rate: format.sample_rate,
             ids: Some(&t.snapshot.ids),
+            eq_plugin: None,
         },
         &never(),
     )

@@ -64,8 +64,8 @@ use core_model::history::History;
 use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
 use core_model::mixer::{
-    AuxSend, BUILTIN_SYNTH_REF, GAIN_FLOOR_DB, GAIN_MAX_DB, Output, PluginFormat, PluginRef,
-    PluginSlot, StripKind, Swatch,
+    AuxSend, BUILTIN_SYNTH_REF, GAIN_FLOOR_DB, GAIN_MAX_DB, Output, ParamId, PluginFormat,
+    PluginRef, PluginSlot, StripKind, Swatch,
 };
 use core_model::rules::MAX_TICKS;
 use core_model::selection::ViewFilter;
@@ -104,6 +104,11 @@ pub struct ImportEnv<'a> {
     /// as identities (plan 6e Ruling 2: the record's head names the
     /// snapshot's export); `None` reads tags alone.
     pub ids: Option<&'a BTreeMap<String, ObjectRef>>,
+    /// The bundled EQ when it is usable here (plan 6g Ruling 10): an
+    /// `Equalizer` becomes it, with its bands mapped
+    /// ([`map_equalizer`](super::multiq::map_equalizer)). `None` lists the
+    /// `Equalizer` as 6d does.
+    pub eq_plugin: Option<&'a PluginRef>,
 }
 
 /// What each new object was in the project the file came from, as the
@@ -242,6 +247,17 @@ pub const PLAYS_BUILTIN: &str = "Tracks that play the built-in synth";
 /// Left out: other DAWs' built-in effects; `<kind> on track '<name>'` and
 /// each setting as details.
 pub const BUILTIN_EFFECTS: &str = "Built-in effects on tracks";
+/// Left out (plan 6g Ruling 10): `Equalizer` bands the bundled EQ cannot
+/// hold, or whose values cannot be read (`Equalizer band on track
+/// '<name>': <band> (<why>)`).
+pub const EQ_BANDS: &str = "Equalizer bands that do not fit Multi-Q";
+/// Changed (plan 6g Ruling 10): `Equalizer` values clamped or approximated
+/// to fit the bundled EQ (`Equalizer band on track '<name>', Multi-Q band
+/// <n>: <what>`).
+pub const EQ_CHANGED: &str = "Equalizer values changed to fit Multi-Q";
+/// Left out (plan 6g Ruling 10): an `Equalizer`'s input and output gains
+/// (`Equalizer on track '<name>': <setting>`).
+pub const EQ_GAINS: &str = "Equalizer input and output gains";
 /// Left out: other DAWs' built-in instruments, as [`BUILTIN_EFFECTS`].
 pub const BUILTIN_INSTRUMENTS: &str = "Built-in instruments on tracks";
 /// Left out: instruments after a track's first, or on a bus (`<name> on
@@ -281,6 +297,9 @@ struct SlotPlan {
     state: Option<Arc<[u8]>>,
     /// The instance it was in the project the file came from.
     tag: Option<u64>,
+    /// Values set through the overlay after the slot is made (an
+    /// `Equalizer`'s bands).
+    params: Vec<(ParamId, f64)>,
 }
 
 impl SlotPlan {
@@ -1480,7 +1499,37 @@ impl<'a, 'p> Cx<'a, 'p> {
             bypass: d.enabled.as_ref().and_then(|e| e.value) == Some(false),
             state,
             tag,
+            params: Vec::new(),
         }))
+    }
+
+    /// An `Equalizer` on `owner` as the bundled EQ (Ruling 10), its bands
+    /// mapped and what does not fit listed; `None` when the EQ is not
+    /// usable here.
+    fn equalizer(&mut self, d: &DpDevice, owner: &str) -> Option<SlotPlan> {
+        let plugin = self.env.eq_plugin?;
+        let m = super::multiq::map_equalizer(&d.bands, owner);
+        for line in m.left_out {
+            self.add(ItemKind::LeftOut, EQ_BANDS, Some(line));
+        }
+        for line in m.changed {
+            self.add(ItemKind::Changed, EQ_CHANGED, Some(line));
+        }
+        let place = format!("{} on track '{owner}'", kind_name(d.kind));
+        for s in d
+            .settings
+            .iter()
+            .filter(|s| s.starts_with("InputGain") || s.starts_with("OutputGain"))
+        {
+            self.add(ItemKind::LeftOut, EQ_GAINS, Some(format!("{place}: {s}")));
+        }
+        Some(SlotPlan {
+            plugin: plugin.clone(),
+            bypass: d.enabled.as_ref().and_then(|e| e.value) == Some(false),
+            state: None,
+            tag: None,
+            params: m.params,
+        })
     }
 
     /// A level parameter in dB: linear through `db_of_linear`, decibels as
@@ -1598,6 +1647,14 @@ impl<'a, 'p> Cx<'a, 'p> {
                 enabled: s.enable.as_ref().and_then(|e| e.value).unwrap_or(true),
             });
         }
+        // Ruling 10: an EQ-tagged plug-in takes the EQ slot whatever the
+        // order; otherwise the first `Equalizer` does.
+        let tagged_eq = c.devices.iter().enumerate().any(|(i, d)| {
+            Some(i) != skip
+                && d.role == DpDeviceRole::AudioFx
+                && matches!(d.kind, DpDeviceKind::Au | DpDeviceKind::Clap)
+                && is_eq_tagged(d)
+        });
         for (i, d) in c.devices.iter().enumerate() {
             self.tick()?;
             if Some(i) == skip {
@@ -1613,9 +1670,7 @@ impl<'a, 'p> Cx<'a, 'p> {
                 DpDeviceRole::Analyzer => self.add(ItemKind::LeftOut, ANALYZERS, Some(name)),
                 DpDeviceRole::AudioFx => match d.kind {
                     DpDeviceKind::Au | DpDeviceKind::Clap => {
-                        let eq_tag = d.named.comment.as_deref().is_some_and(|c| {
-                            strip_tags(c).1.iter().any(|(k, _)| *k == TagKind::Eq)
-                        });
+                        let eq_tag = is_eq_tagged(d);
                         if let Some(slot) = self.slot(d)? {
                             if !(self.env.installed)(slot.plugin.format, &slot.plugin.id) {
                                 mix.unhosted
@@ -1637,12 +1692,29 @@ impl<'a, 'p> Cx<'a, 'p> {
                         mix.unhosted.push((name.clone(), None));
                         self.add(ItemKind::LeftOut, VST, Some(name));
                     }
+                    DpDeviceKind::Equalizer if self.env.eq_plugin.is_some() => {
+                        if let Some(slot) = self.equalizer(d, owner) {
+                            if !tagged_eq && mix.eq.is_none() {
+                                mix.eq = Some(slot);
+                            } else {
+                                mix.inserts.push(slot);
+                            }
+                        }
+                    }
                     kind => self.builtin_device(BUILTIN_EFFECTS, kind, owner, &d.settings),
                 },
             }
         }
         Ok(mix)
     }
+}
+
+/// Whether `d`'s comment carries an EQ tag (`vz:q`).
+fn is_eq_tagged(d: &DpDevice) -> bool {
+    d.named
+        .comment
+        .as_deref()
+        .is_some_and(|c| strip_tags(c).1.iter().any(|(k, _)| *k == TagKind::Eq))
 }
 
 /// A pan parameter as −1 … +1: normalised as it is, other units scaled by

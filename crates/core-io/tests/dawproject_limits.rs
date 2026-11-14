@@ -285,6 +285,7 @@ fn mapped(
             plist: &NoPlist,
             rate: 48_000,
             ids: None,
+            eq_plugin: None,
         },
         &AtomicBool::new(false),
     )

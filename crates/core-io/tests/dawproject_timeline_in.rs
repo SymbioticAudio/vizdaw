@@ -97,6 +97,7 @@ fn mapped(pkg: &DpPackage, media: &BTreeMap<usize, MediaSource>) -> DpImport {
         plist: &NoCodec,
         rate: 48_000,
         ids: None,
+        eq_plugin: None,
     };
     map(pkg, media, &env, &AtomicBool::new(false)).expect("maps")
 }
@@ -1257,6 +1258,7 @@ fn long_loops_stop_at_the_limit() {
         plist: &NoCodec,
         rate: 48_000,
         ids: None,
+        eq_plugin: None,
     };
     let got = std::thread::scope(|s| {
         s.spawn(|| {
@@ -1358,6 +1360,7 @@ fn overlapping_region_stacks_are_bounded() {
         plist: &NoCodec,
         rate: 48_000,
         ids: None,
+        eq_plugin: None,
     };
     let flag = AtomicBool::new(false);
     debug_pause_at(&flag, Some(usize::MAX));

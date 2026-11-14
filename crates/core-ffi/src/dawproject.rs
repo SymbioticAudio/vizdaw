@@ -1032,11 +1032,15 @@ fn import_body(
     // 4. The plan.
     let has =
         |f: core_model::mixer::PluginFormat, id: &str| job.installed.contains(&(f, id.to_owned()));
+    // Ruling 10: an `Equalizer` becomes the bundled EQ when it is usable
+    // here, whatever the new-channel switch says.
+    let eq = crate::bundled::multiq();
     let env = ImportEnv {
         installed: &has,
         plist: plist(),
         rate: job.format.sample_rate,
         ids: None,
+        eq_plugin: eq.as_ref(),
     };
     let imp = map(&pkg, &media, &env, cancel)?;
     stage(8);
@@ -1625,11 +1629,13 @@ fn merge_body(
     let has = |f: core_model::mixer::PluginFormat, id: &str| {
         job.io.installed.contains(&(f, id.to_owned()))
     };
+    let eq = crate::bundled::multiq();
     let env = ImportEnv {
         installed: &has,
         plist: plist(),
         rate: job.io.format.sample_rate,
         ids: trusted.then_some(&snap.ids),
+        eq_plugin: eq.as_ref(),
     };
     let imp = map(&pkg, &media, &env, cancel)?;
     drop(pkg);

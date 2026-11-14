@@ -866,6 +866,7 @@ fn theirs_trusting(t: &Trip, path: &Path, ids: &BTreeMap<String, ObjectRef>) -> 
             plist: &TestPlist,
             rate: 48_000,
             ids: Some(ids),
+            eq_plugin: None,
         },
         &never(),
     )

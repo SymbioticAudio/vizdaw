@@ -443,6 +443,7 @@ impl<'a> Rd<'a> {
             enabled: None,
             state: None,
             settings: Vec::new(),
+            bands: Vec::new(),
             other_ids: Vec::new(),
         };
         let mut seen = [false; 3];
@@ -460,6 +461,10 @@ impl<'a> Rd<'a> {
                         self.cap.item::<String>(0);
                         self.cap.text(setting.len());
                         d.settings.push(setting);
+                        if kind == DpDeviceKind::Equalizer && name == "Band" {
+                            let band = self.eq_band(c);
+                            d.bands.push(band);
+                        }
                     } else {
                         self.unknown_element(c);
                     }
@@ -519,6 +524,54 @@ impl<'a> Rd<'a> {
                 self.collect_ids(c, &mut d.other_ids);
             }
         }
+    }
+
+    /// An `Equalizer`'s `Band`, read quietly: its text is already in the
+    /// device's settings, and the mapping lists what it cannot use.
+    fn eq_band(&mut self, n: NodeId) -> DpEqBand {
+        let t = self.t;
+        self.cap.item::<DpEqBand>(0);
+        let real = |c: NodeId| {
+            Some(DpRealParam {
+                named: DpNamed::default(),
+                parameter_id: None,
+                unit: t.attr(c, "unit").and_then(DpUnit::parse)?,
+                value: t.attr(c, "value").and_then(xml::double_or_inf),
+                min: t.attr(c, "min").and_then(xml::double_or_inf),
+                max: t.attr(c, "max").and_then(xml::double_or_inf),
+            })
+        };
+        let mut b = DpEqBand {
+            kind: t.attr(n, "type").and_then(DpEqBandType::parse),
+            order: t.attr(n, "order").and_then(xml::int),
+            freq: None,
+            gain: None,
+            q: None,
+            enabled: None,
+        };
+        let (mut freq, mut gain, mut q, mut enabled) = (false, false, false, false);
+        for c in t.children(n) {
+            match t.name(c) {
+                "Freq" if !freq => {
+                    freq = true;
+                    b.freq = real(c);
+                }
+                "Gain" if !gain => {
+                    gain = true;
+                    b.gain = real(c);
+                }
+                "Q" if !q => {
+                    q = true;
+                    b.q = real(c);
+                }
+                "Enabled" if !enabled => {
+                    enabled = true;
+                    b.enabled = t.attr(c, "value").and_then(xml::boolean);
+                }
+                _ => {}
+            }
+        }
+        b
     }
 
     /// A built-in device's element as one line of text.

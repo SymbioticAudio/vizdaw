@@ -325,6 +325,44 @@ impl DpDeviceKind {
     }
 }
 
+string_enum! {
+    /// The type of an `Equalizer` band (the XSD's `eqBandType`).
+    pub enum DpEqBandType {
+        HighPass = "highPass",
+        LowPass = "lowPass",
+        BandPass = "bandPass",
+        HighShelf = "highShelf",
+        LowShelf = "lowShelf",
+        Bell = "bell",
+        Notch = "notch",
+    }
+}
+
+impl DpEqBandType {
+    /// The XSD's spelling, e.g. `highPass`.
+    pub fn name(self) -> &'static str {
+        self.text()
+    }
+}
+
+/// One `Band` of an `Equalizer`. Every part is optional here: what the
+/// mapping cannot use is listed there, not refused by the reader.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DpEqBand {
+    /// Its `type`; `None` when missing or unknown.
+    pub kind: Option<DpEqBandType>,
+    /// Its `order`.
+    pub order: Option<i32>,
+    /// Its `Freq`.
+    pub freq: Option<DpRealParam>,
+    /// Its `Gain`.
+    pub gain: Option<DpRealParam>,
+    /// Its `Q`.
+    pub q: Option<DpRealParam>,
+    /// Its `Enabled` value.
+    pub enabled: Option<bool>,
+}
+
 /// A file inside the package, or outside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpFileRef {
@@ -362,6 +400,10 @@ pub struct DpDevice {
     /// A built-in device's bands and other settings, as text for the report.
     /// Not written.
     pub settings: Vec<String>,
+    /// An `Equalizer`'s bands, read structurally beside [`DpDevice::settings`]
+    /// (at most as many as settings are kept; empty for other kinds). Not
+    /// written.
+    pub bands: Vec<DpEqBand>,
     /// The IDs of parameters read but not kept (other than real ones, and a
     /// built-in device's settings), so that references to them still resolve.
     pub other_ids: Vec<String>,

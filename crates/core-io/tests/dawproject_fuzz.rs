@@ -200,6 +200,7 @@ fn attempt(path: &Path) -> Result<(), IoError> {
             plist: &TestPlist,
             rate: 48_000,
             ids: None,
+            eq_plugin: None,
         },
         &never,
     )?;

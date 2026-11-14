@@ -1126,6 +1126,7 @@ impl Ctx<'_, '_> {
             enabled: Some(boolean(format!("{id}e"), !slot.bypass)),
             state,
             settings: Vec::new(),
+            bands: Vec::new(),
             other_ids: Vec::new(),
         }
     }

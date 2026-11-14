@@ -234,6 +234,15 @@ fn apply_mix(
         if let Some(s) = &plan.state {
             states.push((id, Arc::clone(s)));
         }
+        if !plan.params.is_empty() {
+            run(
+                h,
+                mixer(MixerCmd::SetPluginParams {
+                    slot: id,
+                    params: plan.params.clone(),
+                }),
+            )?;
+        }
         Ok::<(), ModelError>(())
     };
     if let Some(eq) = &mix.eq {

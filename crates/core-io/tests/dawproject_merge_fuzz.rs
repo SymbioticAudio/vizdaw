@@ -1904,6 +1904,7 @@ fn plan_path(
             plist: &TestPlist,
             rate: format.sample_rate,
             ids: trusted.then_some(&snap.ids),
+            eq_plugin: None,
         },
         &cancel,
     )?;

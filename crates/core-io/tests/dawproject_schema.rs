@@ -280,6 +280,7 @@ fn device(kind: DpDeviceKind, id: &str) -> DpDevice {
             external: true,
         }),
         settings: vec![],
+        bands: vec![],
         other_ids: vec![],
     }
 }

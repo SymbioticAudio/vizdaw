@@ -404,6 +404,7 @@ pub fn theirs_of(t: &Trip, path: &Path) -> Theirs {
             plist: &TestPlist,
             rate: format.sample_rate,
             ids: trusted.then_some(&t.snapshot.ids),
+            eq_plugin: None,
         },
         &AtomicBool::new(false),
     )

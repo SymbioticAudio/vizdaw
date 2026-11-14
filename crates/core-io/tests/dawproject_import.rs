@@ -144,6 +144,7 @@ fn env<'a>(installed: &'a dyn Fn(PluginFormat, &str) -> bool) -> ImportEnv<'a> {
         plist: &FakePlist,
         rate: 48_000,
         ids: None,
+        eq_plugin: None,
     }
 }
 
