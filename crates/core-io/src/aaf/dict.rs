@@ -885,6 +885,14 @@ pub mod def {
         0x0700,
         [0x06, 0x0e, 0x2b, 0x34, 0x04, 0x01, 0x01, 0x01],
     );
+    /// VizDAW's `ProductID` in the `Identification` it writes (Ruling 11):
+    /// a fixed AUID of its own.
+    pub const VIZDAW_PRODUCT_ID: Auid = Auid::from_fields(
+        0x7a1d_a0e5,
+        0x6f61,
+        0x4c3b,
+        [0x9a, 0x2e, 0x56, 0x5a, 0x44, 0x41, 0x57, 0x01],
+    );
 }
 
 /// The bytes of `p` when it is data.

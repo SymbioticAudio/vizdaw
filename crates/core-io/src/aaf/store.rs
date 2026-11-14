@@ -1211,7 +1211,7 @@ impl<W: Read + Write + Seek> AafWriter<W> {
             let mut entries: Vec<(u16, u16, Vec<u8>)> = Vec::with_capacity(o.props.len());
             let mut kids = Vec::new();
             for (&pid, p) in &o.props {
-                let (form, value) = self.write_prop(s, &path, pid, p, &mut kids)?;
+                let (form, value) = self.write_prop(s, id, &path, pid, p, &mut kids)?;
                 entries.push((pid, form, value));
             }
             let mut bytes = vec![0x4C, 0x20];
@@ -1257,6 +1257,7 @@ impl<W: Read + Write + Seek> AafWriter<W> {
     fn write_prop(
         &mut self,
         s: &Store,
+        owner: ObjId,
         path: &str,
         pid: u16,
         p: &Prop,
@@ -1276,17 +1277,23 @@ impl<W: Read + Write + Seek> AafWriter<W> {
                 idx.extend_from_slice(&n.to_le_bytes());
                 idx.extend_from_slice(&n.to_le_bytes());
                 idx.extend_from_slice(&u32::MAX.to_le_bytes());
-                let key = if set { set_key(s, v)? } else { None };
-                if set {
-                    let (kp, size) = key.as_ref().map_or((0, 0), |(kp, keys)| {
-                        (*kp, keys.first().map_or(0, |k: &Vec<u8>| k.len()))
-                    });
+                let class = s.get(owner).map(|o| o.class);
+                let key = if set {
+                    set_key(s, class, pid, v)?
+                } else {
+                    None
+                };
+                if let Some((kp, size, _)) = &key {
                     idx.extend_from_slice(&kp.to_le_bytes());
-                    idx.push(u8::try_from(size).map_err(|_| internal("a set key over 255 bytes"))?);
+                    idx.push(
+                        u8::try_from(*size).map_err(|_| internal("a set key over 255 bytes"))?,
+                    );
+                } else if set {
+                    idx.extend_from_slice(&[0, 0, 0]);
                 }
                 for (i, id) in (0u32..).zip(v) {
                     idx.extend_from_slice(&i.to_le_bytes());
-                    if let Some((_, keys)) = &key {
+                    if let Some((_, _, keys)) = &key {
                         idx.extend_from_slice(&1u32.to_le_bytes());
                         idx.extend_from_slice(keys.get(i as usize).map_or(&[][..], Vec::as_slice));
                     }
@@ -1380,29 +1387,45 @@ impl<W: Read + Write + Seek> AafWriter<W> {
     }
 }
 
-/// A set's key PID and each element's key, in order.
-type SetKey = (u16, Vec<Vec<u8>>);
+/// A set's key PID, its size and each element's key, in order.
+type SetKey = (u16, usize, Vec<Vec<u8>>);
 
-/// A set's key: the first of [`SET_KEYS`] that every element holds as
-/// data of one length, and each element's key. An empty set has none.
-fn set_key(s: &Store, v: &[ObjId]) -> Result<Option<SetKey>, IoError> {
-    if v.is_empty() {
-        return Ok(None);
-    }
-    for kp in SET_KEYS {
-        let keys: Option<Vec<Vec<u8>>> = v
+/// Strong set `pid` of an object of `class`'s key: the PID of the unique
+/// property of its elements' class as the MetaDictionary
+/// ([`metadict::set_key`]) gives it, else the first of [`SET_KEYS`] that
+/// every element holds as data of one length; and each element's key. An
+/// empty set has the MetaDictionary's key, else none. An element without
+/// its key is refused as an internal error.
+fn set_key(
+    s: &Store,
+    class: Option<Auid>,
+    pid: u16,
+    v: &[ObjId],
+) -> Result<Option<SetKey>, IoError> {
+    let keys_of = |kp: u16, size: Option<usize>| -> Option<Vec<Vec<u8>>> {
+        let keys: Vec<Vec<u8>> = v
             .iter()
             .map(|id| match s.prop(*id, kp) {
                 Some(Prop::Data(d)) => Some(d.clone()),
                 _ => None,
             })
-            .collect();
-        if let Some(keys) = keys
-            && keys
-                .iter()
-                .all(|k| Some(k.len()) == keys.first().map(Vec::len))
-        {
-            return Ok(Some((kp, keys)));
+            .collect::<Option<_>>()?;
+        let want = size.or_else(|| keys.first().map(Vec::len))?;
+        keys.iter().all(|k| k.len() == want).then_some(keys)
+    };
+    if let Some((kp, size)) = class.and_then(|c| super::metadict::set_key(c, pid)) {
+        return match keys_of(kp, Some(size)) {
+            Some(keys) => Ok(Some((kp, size, keys))),
+            None => Err(internal("a set element without its key")),
+        };
+    }
+    if v.is_empty() {
+        return Ok(None);
+    }
+    for kp in SET_KEYS {
+        if let Some(keys) = keys_of(kp, None) {
+            let size = keys.first().map_or(0, Vec::len);
+            return Ok(Some((kp, size, keys)));
         }
     }
     Err(internal("a set whose elements have no common key"))

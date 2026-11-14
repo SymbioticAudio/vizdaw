@@ -14,6 +14,11 @@
 //!   fades, gain, pan, markers, timecode) and the audio files it plays.
 //! - [`import`]: a composition mapped onto 6d's import plan, its L/R pairs
 //!   joined, and applied with the MIDI file beside it.
+//! - [`metadict`]: the fixed MetaDictionary every export writes whole,
+//!   generated from the model tables named below (their MIT notice is kept
+//!   there).
+//! - [`export`]: a sequence written as an Edit Protocol composition, with
+//!   the audio to stage and the MIDI file beside it.
 //!
 //! The storage layout follows the public AAF Low-Level Container
 //! Specification. Writers' habits were checked against pyaaf2
@@ -23,6 +28,8 @@
 //! [`AafLimits`]: crate::limits::AafLimits
 
 pub mod dict;
+pub mod export;
 pub mod import;
+pub mod metadict;
 pub mod store;
 pub mod timeline;

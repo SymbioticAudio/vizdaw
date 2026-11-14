@@ -1182,3 +1182,274 @@ impl Fx {
         w.finish().unwrap();
     }
 }
+
+// ---------------------------------------------------------------- exports (Task 4)
+
+/// A PCM WAV file of `frames` frames of silence at `bits` (16 or 24).
+pub fn wav_pcm(rate: u32, channels: u16, frames: u64, bits: u16) -> Vec<u8> {
+    let block = u32::from(channels) * u32::from(bits / 8);
+    let data = u32::try_from(frames).unwrap() * block;
+    let mut v = Vec::new();
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&(36 + data).to_le_bytes());
+    v.extend_from_slice(b"WAVEfmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&channels.to_le_bytes());
+    v.extend_from_slice(&rate.to_le_bytes());
+    v.extend_from_slice(&(rate * block).to_le_bytes());
+    v.extend_from_slice(&(block as u16).to_le_bytes());
+    v.extend_from_slice(&bits.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&data.to_le_bytes());
+    v.resize(44 + data as usize, 0);
+    v
+}
+
+/// Writes export `x` of `doc` as `dir/Song.aaf`, each staged file's essence
+/// a silent WAV of its media item at `bits`; returns the path.
+pub fn write_export(
+    doc: &core_model::document::Document,
+    x: &core_io::aaf::export::AafExport,
+    dir: &Path,
+    bits: u16,
+) -> std::path::PathBuf {
+    let p = dir.join("Song.aaf");
+    let staged = x.audio.clone();
+    let mut essence = |i: usize, w: &mut dyn Write| -> Result<(), core_io::IoError> {
+        let s = &staged[i];
+        let m = doc.media().get(&s.media).unwrap();
+        let ch = if s.channel.is_some() { 1 } else { m.channels };
+        w.write_all(&wav_pcm(m.sample_rate, ch, m.length_frames, bits))
+            .map_err(|e| core_io::IoError::Io(e.to_string()))
+    };
+    core_io::aaf::export::write(
+        x,
+        &p,
+        &mut essence,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .expect("writes");
+    p
+}
+
+/// One region as the round trip compares it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionP {
+    pub tick: i64,
+    pub source_offset: u64,
+    /// Its audible length, in frames: up to where a later region takes
+    /// over (plus that region's crossfade).
+    pub length: u64,
+    pub fade_in: (u64, core_model::event::FadeShape),
+    pub fade_out: (u64, core_model::event::FadeShape),
+    pub gain_db: f32,
+    pub name: Option<String>,
+    pub crossfade: bool,
+}
+
+/// One audio track as the round trip compares it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackP {
+    pub name: String,
+    pub channels: u16,
+    pub regions: Vec<RegionP>,
+    /// The strip's fader in dB, when it has no fader automation.
+    pub fader: Option<f64>,
+    /// The strip's pan, when it has no pan automation.
+    pub pan: Option<f64>,
+    pub fader_points: Vec<(i64, f64)>,
+    pub pan_points: Vec<(i64, f64)>,
+}
+
+/// What the AAF round trip keeps (spec §12): per audio track, its
+/// channels, regions, fader, pan and their points; the markers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Projection {
+    pub tracks: Vec<TrackP>,
+    pub markers: Vec<(i64, String)>,
+}
+
+/// A fade as Ruling 5 brings it back: S-curve becomes linear; no length,
+/// no shape.
+fn shape_back(f: &core_model::event::Fade) -> (u64, core_model::event::FadeShape) {
+    use core_model::event::FadeShape;
+    let s = match f.shape {
+        _ if f.length_frames == 0 => FadeShape::Linear,
+        FadeShape::SCurve => FadeShape::Linear,
+        s => s,
+    };
+    (f.length_frames, s)
+}
+
+/// The projection of sequence `seq` of `doc`: every track with an audio
+/// output, in order; its unmuted regions with their audible lengths (a
+/// region a later one starts inside plays up to that start, plus the later
+/// one's crossfade, and loses its fade-out); its strip's fader and pan.
+pub fn projection(doc: &core_model::document::Document, seq: core_model::ids::SeqId) -> Projection {
+    let end = core_model::query::seq_length(doc, seq).unwrap().0;
+    projection_until(doc, seq, end)
+}
+
+/// [`projection`] with the automation points before `end` (events at or
+/// past a sequence's end do not play).
+pub fn projection_until(
+    doc: &core_model::document::Document,
+    seq: core_model::ids::SeqId,
+    end: i64,
+) -> Projection {
+    use core_model::automation::AutomationTarget;
+    use core_model::event::{EventBody, Fade};
+    use core_model::mixer::StripKind;
+    let s = doc.sequence(seq).unwrap();
+    let clock = s.tempo.clock();
+    let mut tracks = Vec::new();
+    for lane in s.lanes.iter().filter(|l| l.audio_out.is_some()) {
+        let strip = doc
+            .mixer()
+            .find_kind(StripKind::AudioPath(lane.audio_out.unwrap()))
+            .and_then(|id| doc.mixer().strip(id).ok())
+            .unwrap();
+        let events: Vec<_> = lane
+            .active()
+            .map(|t| t.events.values().cloned().collect())
+            .unwrap_or_default();
+        let mut channels = 1;
+        let mut regions: Vec<(RegionP, u32, Fade)> = Vec::new();
+        let (mut fader_points, mut pan_points) = (Vec::new(), Vec::new());
+        for e in &events {
+            match &e.body {
+                EventBody::AudioRegion {
+                    media,
+                    source_offset,
+                    length,
+                    gain_db,
+                    fade_in,
+                    fade_out,
+                    name,
+                    crossfade,
+                } if !e.mute => {
+                    let m = doc.media().get(media).unwrap();
+                    channels = channels.max(m.channels);
+                    regions.push((
+                        RegionP {
+                            tick: e.tick.0,
+                            source_offset: *source_offset,
+                            length: *length,
+                            fade_in: shape_back(fade_in),
+                            fade_out: shape_back(fade_out),
+                            gain_db: *gain_db,
+                            name: name.clone(),
+                            crossfade: *crossfade,
+                        },
+                        m.sample_rate,
+                        *fade_out,
+                    ));
+                }
+                EventBody::Automation { target, value } if e.tick.0 < end => match target {
+                    AutomationTarget::StripFader(st) if *st == strip.id => {
+                        fader_points.push((e.tick.0, *value))
+                    }
+                    AutomationTarget::StripPan(st) if *st == strip.id => {
+                        pan_points.push((e.tick.0, *value))
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        // Audible lengths: the later start takes over.
+        for i in 0..regions.len() {
+            let Some(next) = regions.get(i + 1).map(|r| r.0.clone()) else {
+                continue;
+            };
+            let (r, rate, _) = &mut regions[i];
+            let secs = clock.tick_to_seconds(core_model::time::Tick(next.tick))
+                - clock.tick_to_seconds(core_model::time::Tick(r.tick));
+            let mut until = (secs * f64::from(*rate)).round() as u64;
+            if next.crossfade {
+                until += next.fade_in.0;
+            }
+            if until < r.length {
+                r.length = until;
+                r.fade_out = (0, core_model::event::FadeShape::Linear);
+            }
+        }
+        tracks.push(TrackP {
+            name: lane.name.clone(),
+            channels,
+            regions: regions.into_iter().map(|r| r.0).collect(),
+            fader: fader_points.is_empty().then_some(strip.gain_db),
+            pan: pan_points.is_empty().then_some(strip.pan),
+            fader_points,
+            pan_points,
+        });
+    }
+    Projection {
+        tracks,
+        markers: s
+            .markers
+            .iter()
+            .map(|m| (m.tick.0, m.name.clone()))
+            .collect(),
+    }
+}
+
+/// Whether two projections agree: gains to 0.001 dB, fader and pan values
+/// and points to 1e-9, the rest exactly. `Err` names the first difference.
+pub fn agree(a: &Projection, b: &Projection) -> Result<(), String> {
+    let close = |x: f64, y: f64, tol: f64| (x - y).abs() <= tol || (x.is_infinite() && x == y);
+    if a.markers != b.markers {
+        return Err(format!("markers {:?} != {:?}", a.markers, b.markers));
+    }
+    if a.tracks.len() != b.tracks.len() {
+        return Err(format!(
+            "tracks {:?} != {:?}",
+            a.tracks.iter().map(|t| &t.name).collect::<Vec<_>>(),
+            b.tracks.iter().map(|t| &t.name).collect::<Vec<_>>()
+        ));
+    }
+    for (x, y) in a.tracks.iter().zip(&b.tracks) {
+        let t = &x.name;
+        if (&x.name, x.channels) != (&y.name, y.channels) {
+            return Err(format!(
+                "track {t}: {:?} != {:?}",
+                (&x.name, x.channels),
+                (&y.name, y.channels)
+            ));
+        }
+        if x.regions.len() != y.regions.len() {
+            return Err(format!(
+                "track {t}: regions {:#?} != {:#?}",
+                x.regions, y.regions
+            ));
+        }
+        for (r, q) in x.regions.iter().zip(&y.regions) {
+            let mut r2 = r.clone();
+            r2.gain_db = q.gain_db;
+            if r2 != *q || !close(f64::from(r.gain_db), f64::from(q.gain_db), 0.001) {
+                return Err(format!("track {t}: region {r:#?} != {q:#?}"));
+            }
+        }
+        for (u, v, what) in [(x.fader, y.fader, "fader"), (x.pan, y.pan, "pan")] {
+            match (u, v) {
+                (Some(u), Some(v)) if close(u, v, 1e-9) => {}
+                (None, None) => {}
+                _ => return Err(format!("track {t}: {what} {u:?} != {v:?}")),
+            }
+        }
+        for (u, v, what) in [
+            (&x.fader_points, &y.fader_points, "fader points"),
+            (&x.pan_points, &y.pan_points, "pan points"),
+        ] {
+            let same = u.len() == v.len()
+                && u.iter()
+                    .zip(v)
+                    .all(|(p, q)| p.0 == q.0 && close(p.1, q.1, 1e-9));
+            if !same {
+                return Err(format!("track {t}: {what} {u:?} != {v:?}"));
+            }
+        }
+    }
+    Ok(())
+}
