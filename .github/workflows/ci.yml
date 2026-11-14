@@ -49,6 +49,7 @@ jobs:
           VIZDAW_BUNDLED_PLUGINS=$PWD/target/multiq/out cargo test -p core-host --test multiq -- --ignored
           VIZDAW_BUNDLED_PLUGINS=$PWD/target/multiq/out cargo test -p core-ffi --test new_channel_eq -- --ignored
           VIZDAW_BUNDLED_PLUGINS=$PWD/target/multiq/out cargo test -p core-ffi --test multiq_render -- --ignored
+          VIZDAW_BUNDLED_PLUGINS=$PWD/target/multiq/out cargo test -p platform-macos --test multiq_au -- --ignored
       - name: Big lane read speed (release, spec 4a §3.1)
         if: runner.os == 'macOS'
         run: cargo test --release -p core-ffi --test events lane_events_of_100_000_events_is_fast

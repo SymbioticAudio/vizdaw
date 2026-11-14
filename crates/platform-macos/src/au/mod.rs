@@ -466,6 +466,9 @@ pub struct AuInstance {
     /// What the unit's host callbacks read.
     transport: Arc<HostTransport>,
     callbacks: bool,
+    /// The parameters the host refreshes before a second activation
+    /// ([`PluginInstance::values_to_refresh`]): only the bundled Multi-Q's.
+    refresh: Vec<ParamId>,
     /// Initializations done by `activate` (on the main thread).
     #[cfg(test)]
     main_inits: u32,
@@ -510,6 +513,7 @@ impl AuInstance {
             ready: Some(o.feed),
             transport: o.transport,
             callbacks: o.callbacks,
+            refresh: Vec::new(),
             #[cfg(test)]
             main_inits: 0,
         };
@@ -529,7 +533,37 @@ impl AuInstance {
             .collect();
         me.listener = GestureListener::new(&me.unit, &ids).ok();
         me.writes = Arc::new(HostWrites::new(ids));
+        me.refresh = me.refresh_ids();
         Ok(me)
+    }
+
+    /// The bundled Multi-Q AU's continuous, writable parameters (plan 6g
+    /// final fixes): JUCE's high-pass and low-pass filters come back flat
+    /// when the same instance is initialized again, and only a changed
+    /// value rebuilds them. Every other AU names none, as before: a nudge
+    /// could change another unit's latency and restart it again and again.
+    /// Stepped (indexed or boolean), read-only and meter parameters and
+    /// empty ranges are left out.
+    fn refresh_ids(&self) -> Vec<ParamId> {
+        if self.info.plugin.id != core_host::bundled::MULTIQ_AU_ID {
+            return Vec::new();
+        }
+        self.unit
+            .parameter_ids()
+            .into_iter()
+            .filter(|id| {
+                self.unit
+                    .parameter_info(*id)
+                    .is_some_and(|(_, min, max, _, flags, unit)| {
+                        flags.contains(AudioUnitParameterOptions::Flag_IsWritable)
+                            && flags.contains(AudioUnitParameterOptions::Flag_IsReadable)
+                            && !flags.contains(AudioUnitParameterOptions::Flag_MeterReadOnly)
+                            && !STEPPED_UNITS.contains(&unit)
+                            && max > min
+                    })
+            })
+            .map(|id| ParamId(u64::from(id)))
+            .collect()
     }
 
     fn read_info(&mut self) {
@@ -709,6 +743,10 @@ impl PluginInstance for AuInstance {
             }
         }
         Ok(())
+    }
+
+    fn values_to_refresh(&self) -> Vec<ParamId> {
+        self.refresh.clone()
     }
 
     fn param_value(&mut self, id: ParamId) -> Option<f64> {

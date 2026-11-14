@@ -144,10 +144,11 @@ struct Pending {
 /// Before an inactive instance that was already activated goes active
 /// again (a restart or a new configuration; main thread): the parameters
 /// it names ([`PluginInstance::values_to_refresh`], only the bundled
-/// Multi-Q) are set a step away and back to what it holds, in one call, so
-/// its pass filters, rebuilt only when a value changes, do not come back
-/// flat (plan 6g Task 5; a state save and load did not revive them
-/// reliably). Every other plug-in is left as before.
+/// Multi-Q, CLAP or AU) are set a step away and back to what it holds, in
+/// one call, so its pass filters, rebuilt only when a value changes, do
+/// not come back flat (plan 6g Task 5 and final fixes; a state save and
+/// load did not revive them reliably). Every other plug-in is left as
+/// before.
 fn refresh_values(live: &mut Live) {
     if live.inst.is_active() {
         return;

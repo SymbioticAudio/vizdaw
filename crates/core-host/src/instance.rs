@@ -129,9 +129,9 @@ pub trait PluginInstance {
     /// The parameters the host sets a step away and back before activating
     /// it a second time, so a plug-in that rebuilds its processing only
     /// when a value changes does not come back flat (plan 6g Task 5). Only
-    /// the bundled Multi-Q CLAP names any (its continuous, writable ones):
-    /// a nudge could change another plug-in's latency and restart it again
-    /// and again.
+    /// the bundled Multi-Q names any, as a CLAP or an AU (its continuous,
+    /// writable ones): a nudge could change another plug-in's latency and
+    /// restart it again and again.
     fn values_to_refresh(&self) -> Vec<ParamId> {
         Vec::new()
     }
