@@ -220,9 +220,10 @@ fn install_through_the_export_with_a_bundled_au() {
 #[test]
 fn install_never_targets_the_real_library_in_tests() {
     let _g = serial();
-    // A bundled AU is present, so only the guard can stop the copy.
+    // The bundled folder is empty: the guard must refuse before it looks
+    // for the AU, and if the guard ever broke there would be nothing to
+    // copy into the real Library.
     let bundled = tempfile::tempdir().unwrap();
-    fake_bundle(bundled.path());
     // SAFETY: serialised by `SERIAL`.
     unsafe { std::env::set_var("VIZDAW_BUNDLED_PLUGINS", bundled.path()) };
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
@@ -234,7 +235,7 @@ fn install_never_targets_the_real_library_in_tests() {
     let before_dir = fs::symlink_metadata(&real).is_ok();
 
     let explicit = install_multiq(Some(real.display().to_string()), false);
-    let implicit = install_multiq(None, true);
+    let implicit = install_multiq(None, false);
     // SAFETY: serialised by `SERIAL`.
     unsafe { std::env::remove_var("VIZDAW_BUNDLED_PLUGINS") };
 
