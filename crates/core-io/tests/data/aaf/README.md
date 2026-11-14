@@ -41,7 +41,9 @@ The definition and class IDs come from `core_io::aaf::dict`, which was
 checked against the model tables of pyaaf2
 (<https://github.com/markreidvfx/pyaaf2>, MIT). LibAAF
 (<https://github.com/agfline/LibAAF>) was read for how other applications
-shape their files. No code or file is taken from either.
+shape their files. `core_io::aaf::metadict` is generated from pyaaf2's model
+tables (Ruling 11) and keeps their MIT notice; no other code or file is taken
+from either.
 
 ## `src/aaf/metadict.rs`, generated (Ruling 11)
 
@@ -79,7 +81,9 @@ notice at its top; no pyaaf2 code is ported or run. It was made once, on
 3. `cargo fmt`, then check: every property's type and every class's parent
    is in the tables (asserted by `dict_agrees_with_the_meta_dictionary`),
    every class AUID and PID in `dict.rs` equals its row by name (the same
-   test), and ten rows by hand against the AAF Object Specification v1.1:
+   test), and ten rows by hand against the AAF Object Specification v1.1
+   (for the committed file these ten were checked against `dict.rs` only;
+   the check against the Specification itself is still to do):
    `SourceClip` (its AUID, parent `SourceReference`, `StartTime` 0x1201
    optional), `Mob.MobID` (0x4401, required, unique), `Component.Length`
    (0x0202, optional), `Transition.CutPoint` (0x1802, required),

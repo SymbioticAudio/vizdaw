@@ -633,7 +633,10 @@ fn walk(doc: &Document, o: &AafOptions, cancel: &AtomicBool) -> Result<Walked, I
     let mut curves = BTreeMap::new();
     for st in &used_strips {
         let Ok(strip) = m.strip(*st) else { continue };
-        let (fp, pp) = points.remove(st).unwrap_or_default();
+        let (mut fp, mut pp) = points.remove(st).unwrap_or_default();
+        // Two tracks can share a strip, so their points interleave.
+        fp.sort_by_key(|p| p.0);
+        pp.sort_by_key(|p| p.0);
         let gain = if fp.is_empty() {
             Curve::Constant(linear_gain(strip.gain_db))
         } else {
