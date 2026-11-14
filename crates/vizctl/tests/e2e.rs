@@ -4620,3 +4620,80 @@ fn dawproject_merge_over_the_channel() {
     assert_eq!(made["lanes"].as_array().unwrap().len(), tracks, "{made}");
     app.quit();
 }
+
+/// Plan 6g README steps 310, 313 and 315 through the channel: the app
+/// carries Multi-Q's two bundles, the new-channel switch answers its
+/// status, and "Install Multi-Q for other apps" copies the AU into the
+/// throwaway home's Components folder, asks before replacing, and
+/// replaces when told. Nothing reaches the real `~/Library`. The app
+/// launches with `--no-scan`, so the new-track default is covered by
+/// core-ffi's tests and README step 311, not here.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn multiq_install_and_switch_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+
+    // The bundle holds both Multi-Q builds (step 310).
+    let exe = std::env::var("VIZDAW_E2E_APP").expect("VIZDAW_E2E_APP");
+    let exe = PathBuf::from(exe);
+    let exe = if exe.is_absolute() {
+        exe
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(exe)
+    };
+    let bundle = if exe.extension().is_some_and(|e| e == "app") {
+        exe
+    } else {
+        // `.../VizDAW.app/Contents/MacOS/VizDAW`.
+        exe.ancestors()
+            .nth(3)
+            .expect("the app bundle")
+            .to_path_buf()
+    };
+    for name in ["Multi-Q.clap", "Multi-Q.component"] {
+        let p = bundle.join("Contents/PlugIns").join(name);
+        assert!(p.exists(), "{} is in the app", p.display());
+    }
+
+    // The switch answers its status both ways (step 313).
+    for (on, status) in [(false, "new-channel EQ off"), (true, "new-channel EQ on")] {
+        let r = app.call(
+            "command.run",
+            json!({"id": "plugins.new_channel_eq", "params": {"on": on}}),
+        );
+        assert_eq!(r["status"], status, "{r}");
+    }
+
+    // Install into the throwaway home (step 315).
+    let components = home.join("Library/Audio/Plug-Ins/Components");
+    let target = components.join("Multi-Q.component");
+    let r = app.call(
+        "command.run",
+        json!({"id": "plugins.install_multiq", "params": {}}),
+    );
+    assert_eq!(r["status"], target.display().to_string(), "{r}");
+    assert!(
+        components.is_dir(),
+        "the folder exists in the throwaway home"
+    );
+    assert!(target.exists(), "{}", target.display());
+
+    // A second install asks; replace answers it.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "plugins.install_multiq", "params": {}}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Replace"), "{e:?}");
+    let r = app.call(
+        "command.run",
+        json!({"id": "plugins.install_multiq", "params": {"replace": true}}),
+    );
+    assert_eq!(r["status"], target.display().to_string(), "{r}");
+    assert!(target.exists());
+    app.quit();
+}

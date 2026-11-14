@@ -2722,3 +2722,34 @@ can't answer it there: open it first with `file.open`, then merge without
 - check clip positions to the sample (a click track lines up), fades,
   crossfades, clip gain, volume and pan automation, markers and track names;
 - export an AAF from that DAW and import it into VizDAW.
+
+Plan 6g, Multi-Q (the bundled EQ):
+
+310. In Finder, Show Package Contents on VizDAW.app: `Contents/PlugIns` holds
+     `Multi-Q.clap` and `Multi-Q.component`, and
+     `Contents/Resources/Licences/Multi-Q` holds the licences and `SOURCE.txt`.
+311. First launch after installing (let the plug-in scan finish), then in a
+     new project Track › New Audio Track. The new strip's EQ slot shows
+     "Multi-Q", and clicking it opens Multi-Q's window, flat. Track › New
+     Instrument Track (the built-in synth, one strip per project) does the
+     same. A second audio or instrument track shares that strip and adds no
+     EQ. Add Bus: the bus shows "EQ ＋".
+312. Edit › Undo once: the track and its EQ go together.
+313. Settings › Plug-ins, turn "Put an EQ on new channels" off. In a new
+     project, the first audio track shows "EQ ＋". Turn it back on.
+314. Plugin Manager: disable Multi-Q. A new track shows "EQ ＋", and existing
+     Multi-Q slots show as unavailable, as any disabled plug-in does. Enable
+     it again.
+315. Settings › Plug-ins › "Install Multi-Q for other apps": the status says
+     "Installed in …/Components". Press it again: VizDAW asks to replace it.
+     Cancel: nothing changes.
+316. Import a DAWproject from another DAW whose track has its built-in EQ with
+     a bell and a high-pass. The track's EQ slot is Multi-Q with those bands
+     (open its window). The report lists anything left out.
+317. Export the project as DAWproject and import it back: the Multi-Q EQ and
+     its settings are unchanged.
+
+**Owner check (manual, only the owner can do):**
+- after step 315, open a DAWproject exported from VizDAW in another DAW on
+  this Mac: the track's Multi-Q loads there with the same curve;
+- check the About or licence wording against D1.
