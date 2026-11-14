@@ -4419,6 +4419,96 @@ fn dawproject_round_trip_over_the_channel() {
     app.quit();
 }
 
+/// README 300–309 through the channel (plan 6f Task 9): hostile calls to
+/// both AAF commands are refused and open nothing; the export writes the
+/// "<song> AAF" folder; the import makes a new project with the demo's
+/// audio tracks and the note that the file came from VizDAW, with no
+/// internal error. Only the new project's window appears.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn aaf_round_trip_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo_audio"}));
+    let w = demo["window"].clone();
+    let audio = |d: &Value| {
+        d["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["kind"] == "audio")
+            .count()
+    };
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let tracks = audio(&doc);
+    assert!(tracks > 0, "the demo has an audio track: {doc}");
+    let windows = window_numbers(&mut app);
+    let out = home.join("aaf-out");
+    std::fs::create_dir(&out).unwrap();
+
+    // Hostile calls: no `path` needs the Save dialog; a relative one is
+    // refused; neither opens anything.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_aaf", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Save"), "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_aaf", "params": {"path": "aaf-out"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "a relative path: {e:?}");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no hostile call opened a sheet, a panel or a window"
+    );
+
+    // The export: a folder with the AAF.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_aaf", "params": {"path": out}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    let folder = PathBuf::from(r["written"][0].as_str().unwrap());
+    let aaf = std::fs::read_dir(&folder)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "aaf"))
+        .unwrap_or_else(|| panic!("no .aaf in {folder:?}: {r}"));
+    assert!(aaf.is_file(), "{aaf:?}");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "the export opened nothing"
+    );
+
+    // Back in as a new project: its window, no internal error, the note.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_aaf", "params": {"path": aaf, "new_project": true}, "window": w}),
+    );
+    assert!(r["doc"].is_string() && r["doc"] != demo["doc"], "{r}");
+    assert!(r["window"].is_i64(), "the new project's window: {r}");
+    let report = r["report"].to_string();
+    assert!(
+        report.contains("This file came from VizDAW; AAF files open as new projects"),
+        "{report}"
+    );
+    assert!(!report.contains("internal"), "{report}");
+    let after = window_numbers(&mut app);
+    assert_eq!(after.len(), windows.len() + 1, "{after:?}");
+    let made = app.call(
+        "state.get",
+        json!({"target": "document", "window": r["window"]}),
+    );
+    assert_eq!(audio(&made), tracks, "{made}");
+    app.quit();
+}
+
 /// README 291–299 through the channel (plan 6e Task 11): a file from
 /// VizDAW without `mode` is `dialog_required` "Return"; hostile merge calls
 /// are refused and open nothing; a preview and a merge of the project's own

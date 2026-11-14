@@ -2686,3 +2686,39 @@ can't answer it there: open it first with `file.open`, then merge without
 - merge it into the original. Check that the three edits arrived and that
   keyboard slots, input effects and other sequences are still there;
 - undo the merge.
+
+300. On the demo song, add a send to a bus, an insert, and mute one region.
+     File › Export ▸ AAF…: the sheet shows the options and "What won't
+     transfer", listing the send, the insert and the muted region. Change
+     "Clip gain" off: a line "Clip gain (turned off)" appears.
+301. Export: "<Song> AAF" holds `<Song>.aaf` and `<Song> MIDI.mid`; the report
+     opens with Show in Finder.
+302. Export again: "<Song> AAF 2" appears; the first folder is unchanged.
+303. With "Embed audio" off, export: the folder also holds `Audio/` with
+     numbered WAVs.
+304. File › Import Project ▸ AAF… on `<Song>.aaf`: the sheet names the MIDI
+     file beside it. Import opens a new project whose tracks, regions, fades,
+     crossfade X handle and markers match the demo (less the muted region),
+     with bars in the right place.
+305. The same with "Add to this project" into a project with one track: new
+     tracks appear; Edit › Undo Import AAF removes them in one step.
+306. Move one WAV of the external export elsewhere, then import: its region
+     is offline with Relink…. Import again, choosing that folder under "Look
+     for missing audio in…": it is online.
+307. Import the export made with left and right mono tracks: one stereo track
+     per pair; with "Join…" off, two mono tracks.
+308. Drop `<Song>.aaf` on the Dock icon: a new project opens with it, with no
+     sheet.
+309. Make the demo file: `VIZDAW_AAF_DEMO=<an empty folder> cargo test -p
+     core-io --test aaf_read write_aaf_demo -- --ignored` (the folder must
+     exist and be outside `~/Library`). Import `Other shapes.aaf` from it:
+     the report lists "Picture and other non-audio tracks" and the Selector
+     Note.
+
+**Owner check (manual, only the owner can do; spec §12, 6f's part):**
+- export with the defaults;
+- open the AAF and the MIDI file beside it in each DAW you use that reads
+  AAF;
+- check clip positions to the sample (a click track lines up), fades,
+  crossfades, clip gain, volume and pan automation, markers and track names;
+- export an AAF from that DAW and import it into VizDAW.

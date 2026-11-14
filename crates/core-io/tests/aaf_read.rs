@@ -956,3 +956,72 @@ fn many_clips_of_one_large_mob_stay_cheap() {
             .all(|c| std::sync::Arc::ptr_eq(c.name.as_ref().unwrap(), n0))
     );
 }
+
+/// Writes the README's AAF demo file (step 309): `Other shapes.aaf`, with a
+/// picture slot, a `Selector` and nested gain groups, which the import
+/// reports as "Picture and other non-audio tracks" and the Selector Note.
+/// `VIZDAW_AAF_DEMO` names an existing empty folder outside `~/Library`.
+#[test]
+#[ignore = "writes the README's AAF demo; needs VIZDAW_AAF_DEMO=<an empty folder>"]
+fn write_aaf_demo() {
+    let Some(dir) = std::env::var_os("VIZDAW_AAF_DEMO") else {
+        eprintln!("write_aaf_demo: set VIZDAW_AAF_DEMO to an empty folder");
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    assert!(dir.is_absolute(), "VIZDAW_AAF_DEMO must be absolute");
+    let dir = dir
+        .canonicalize()
+        .expect("VIZDAW_AAF_DEMO must be an existing folder");
+    assert!(dir.is_dir(), "VIZDAW_AAF_DEMO must be a folder");
+    assert!(
+        std::fs::read_dir(&dir).unwrap().next().is_none(),
+        "VIZDAW_AAF_DEMO must be empty"
+    );
+    if let Some(home) = std::env::var_os("HOME") {
+        let library = Path::new(&home).join("Library");
+        let library = library.canonicalize().unwrap_or(library);
+        assert!(
+            !dir.starts_with(&library),
+            "VIZDAW_AAF_DEMO must be outside ~/Library"
+        );
+    }
+
+    let mut fx = Fx::new();
+    let a = fx.file(&FileSpec::wav("Tone A", 48_000, 1, 96_000));
+    let b = fx.file(&FileSpec::wav("Tone B", 48_000, 1, 96_000));
+    fx.comp(
+        "Other shapes",
+        true,
+        &[
+            SlotSpec {
+                id: 1,
+                name: "Picture".into(),
+                rate: (25, 1),
+                kind: SlotKind::Data(PICTURE, Seg::Seq(vec![Seg::Fill(100)])),
+            },
+            sound(
+                2,
+                "Alternatives",
+                R48,
+                Seg::Seq(vec![Seg::Select(
+                    Box::new(clip(&a, 1, 0, 48_000)),
+                    vec![clip(&b, 1, 0, 48_000)],
+                )]),
+            ),
+            sound(
+                3,
+                "Nested gain",
+                R48,
+                Seg::Seq(vec![
+                    Seg::Fill(48_000),
+                    gain(1, 2, gain(1, 2, clip(&b, 1, 0, 48_000))),
+                ]),
+            ),
+        ],
+    );
+    let path = dir.join("Other shapes.aaf");
+    fx.write(&path);
+    assert!(path.is_file());
+    println!("{}", path.display());
+}
