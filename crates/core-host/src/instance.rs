@@ -126,6 +126,13 @@ pub trait PluginInstance {
     fn set_params(&mut self, values: &[(ParamId, f64)]) -> Result<(), HostError>;
     /// A parameter's current value, when the plugin reports one.
     fn param_value(&mut self, id: ParamId) -> Option<f64>;
+    /// Whether the host sets its continuous parameters a step away and
+    /// back before activating it a second time, so a plug-in that rebuilds
+    /// its processing only when a value changes does not come back flat
+    /// (plan 6g Task 5). CLAP instances do; AU ones keep the overlay alone.
+    fn refreshes_values_to_reactivate(&self) -> bool {
+        false
+    }
     /// The plugin's editor, if it has one.
     fn editor(&mut self) -> Option<&mut dyn PluginEditor>;
     /// Main-thread servicing (`host_idle`, 60 Hz): runs callbacks the

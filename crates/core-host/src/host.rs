@@ -141,6 +141,51 @@ struct Pending {
     doc: Option<f64>,
 }
 
+/// Before an inactive instance that was already activated goes active
+/// again (a restart or a new configuration; main thread), when its format
+/// asks for it ([`PluginInstance::refreshes_values_to_reactivate`]): each
+/// continuous parameter it reports is set a step away and back to what it
+/// holds, in one call, so a plug-in that rebuilds its processing only when
+/// a value changes does not come back flat (plan 6g Task 5: the bundled
+/// EQ's pass filters; a state save and load did not revive them reliably).
+/// Stepped parameters (switches, triggers) are left alone. `activate` then
+/// sends only the overlay values it does not hold.
+fn refresh_values(live: &mut Live) {
+    if live.inst.is_active() || !live.inst.refreshes_values_to_reactivate() {
+        return;
+    }
+    let params: Vec<(ParamId, f64, f64)> = live
+        .inst
+        .info()
+        .params
+        .iter()
+        .filter(|p| !p.stepped && p.max > p.min)
+        .map(|p| (p.id, p.min, p.max))
+        .collect();
+    let mut away = Vec::with_capacity(params.len().saturating_mul(2));
+    let mut back = Vec::with_capacity(params.len());
+    for (id, min, max) in params {
+        let Some(v) = live.inst.param_value(id).filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let step = (max - min) * 1e-3;
+        let other = if v + step <= max { v + step } else { v - step };
+        away.push((id, other));
+        back.push((id, v));
+    }
+    if away.is_empty() {
+        return;
+    }
+    away.extend(back);
+    let _ = live.inst.set_params(&away);
+}
+
+/// Whether a plug-in reporting `held` holds `v`: equal to single
+/// precision, as most plug-ins keep their values.
+fn holds(held: f64, v: f64) -> bool {
+    (held - v).abs() <= 1e-6 * v.abs().max(1.0)
+}
+
 /// A live instance and its main-thread ends.
 struct Live {
     inst: Box<dyn PluginInstance>,
@@ -1056,9 +1101,15 @@ impl PluginHost {
             // Unreachable: a slot shelves one processor at a time.
             drop(old);
         }
-        // Values the engine never saw must reach the new processor.
+        // Values the engine never saw must reach the new processor; those
+        // the instance already holds (set before activation) are not sent
+        // again: an unchanged value sent
+        // to the bundled EQ turns its pass filters flat (plan 6g Task 5).
         let sent: Vec<(ParamId, f64)> = live.sent.iter().map(|(k, v)| (*k, *v)).collect();
         for (k, v) in sent {
+            if live.inst.param_value(k).is_some_and(|h| holds(h, v)) {
+                continue;
+            }
             live.params.send(k, v);
         }
         Ok(())
@@ -1106,6 +1157,7 @@ impl PluginHost {
         }
         // A processor comes back only when the engine dropped it: a
         // restart or a new configuration. Activate it again.
+        refresh_values(&mut live);
         match self.activate(id, &mut live, instrument) {
             Ok(()) => {
                 r.reload = true;
@@ -1301,6 +1353,7 @@ impl PluginHost {
             else {
                 continue;
             };
+            refresh_values(&mut live);
             match self.activate(id, &mut live, instrument) {
                 Ok(()) => {
                     self.owed_load = true;

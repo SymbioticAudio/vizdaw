@@ -397,7 +397,7 @@ fn read(b: &DpEqBand) -> Result<Read, &'static str> {
         None => None,
         Some(g) => {
             let Some(v) = g.value else {
-                return Err("its gain has no value");
+                return Err("its gain has no readable value or unit");
             };
             if !v.is_finite() {
                 return Err("its gain is not a finite number");
@@ -427,7 +427,7 @@ fn read(b: &DpEqBand) -> Result<Read, &'static str> {
     let q = match &b.q {
         None => None,
         Some(p) => match p.value {
-            None => None,
+            None => return Err("its Q has no readable value or unit"),
             Some(v) if !v.is_finite() => return Err("its Q is not a finite number"),
             Some(v) if p.unit == DpUnit::Linear => {
                 Some(clamped(v, Q.start, Q.end, "Q", "", &mut changes))

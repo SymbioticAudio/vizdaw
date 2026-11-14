@@ -279,6 +279,10 @@ impl PluginInstance for ClapInstance {
         Ok(())
     }
 
+    fn refreshes_values_to_reactivate(&self) -> bool {
+        true
+    }
+
     fn param_value(&mut self, id: ParamId) -> Option<f64> {
         let params = self.exts().params?;
         params.get_value(&self.inst.plugin_handle(), clap_id(id)?)

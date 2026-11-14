@@ -389,6 +389,12 @@ pub fn stripped_package(x: &DpExport, strip: Strip) -> Vec<u8> {
 /// its project),
 /// then [`theirs`].
 pub fn theirs_of(t: &Trip, path: &Path) -> Theirs {
+    theirs_of_with(t, path, None)
+}
+
+/// [`theirs_of`], mapping an `Equalizer` onto `eq` when given (plan 6g
+/// Task 5).
+pub fn theirs_of_with(t: &Trip, path: &Path, eq: Option<&PluginRef>) -> Theirs {
     let pkg = open(path, &PackageLimits::default(), &AtomicBool::new(false)).expect("opens");
     let media = media_of(&pkg, &t.export, &t.base_doc);
     let trusted = pkg.ret.record.as_ref().is_some_and(|r| {
@@ -404,7 +410,7 @@ pub fn theirs_of(t: &Trip, path: &Path) -> Theirs {
             plist: &TestPlist,
             rate: format.sample_rate,
             ids: trusted.then_some(&t.snapshot.ids),
-            eq_plugin: None,
+            eq_plugin: eq,
         },
         &AtomicBool::new(false),
     )

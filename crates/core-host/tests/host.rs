@@ -337,6 +337,8 @@ struct Script {
     /// Events the instance reports from the main thread (as AU listeners
     /// do) at the next `gestures()`.
     ui: Mutex<VecDeque<ParamEvent>>,
+    /// Every `set_params` call, in order.
+    sets: Mutex<Vec<Vec<(ParamId, f64)>>>,
 }
 
 impl Script {
@@ -483,6 +485,7 @@ impl PluginInstance for FakeInstance {
         Ok(())
     }
     fn set_params(&mut self, values: &[(ParamId, f64)]) -> Result<(), HostError> {
+        self.script.sets.lock().unwrap().push(values.to_vec());
         let mut held = self.script.held.lock().unwrap();
         for (k, v) in values {
             held.insert(*k, *v);
@@ -491,6 +494,9 @@ impl PluginInstance for FakeInstance {
     }
     fn param_value(&mut self, id: ParamId) -> Option<f64> {
         self.script.held.lock().unwrap().get(&id).copied()
+    }
+    fn refreshes_values_to_reactivate(&self) -> bool {
+        true
     }
     fn editor(&mut self) -> Option<&mut dyn PluginEditor> {
         None
@@ -1076,6 +1082,56 @@ fn a_restart_in_the_middle_of_a_gesture_does_not_lose_it() {
     let r = tick(&mut host, &mut engine, &mut be, &hist, song);
     let values: Vec<_> = r.gestures.iter().map(|g| g.values.clone()).collect();
     assert_eq!(values, vec![vec![(GAIN, 0.9)]]);
+    drop(engine);
+}
+
+/// Plan 6g Task 5 fix I2: before an instance is activated a second time
+/// (a restart or a new configuration), each continuous parameter is set a
+/// step away and back to its value in one call, so a plug-in that rebuilds
+/// its filters only on a change (the bundled EQ's pass filters) does not
+/// play flat; the values it holds are kept.
+#[test]
+fn a_reactivated_instance_gets_its_values_set_again() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: id,
+            params: vec![(GAIN, 0.3)],
+        },
+    );
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.3);
+    let before = script.sets.lock().unwrap().len();
+    script.restart.store(true, Ordering::Relaxed);
+    let mut reloaded = false;
+    for _ in 0..500 {
+        let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+        if r.compiled.is_some_and(|c| c.graph.placeholders.is_empty()) && r.restart.is_empty() {
+            reloaded = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(reloaded, "restarted and loaded again");
+    let sets = script.sets.lock().unwrap().clone();
+    assert_eq!(sets.len(), before + 1, "{sets:?}");
+    let last = sets.last().unwrap();
+    assert_eq!(last.len(), 4, "{last:?}");
+    assert!(
+        (last[0].1 - 0.31).abs() < 1e-9 && last[0].0 == GAIN,
+        "{last:?}"
+    );
+    assert!(
+        (last[1].1 - 0.01).abs() < 1e-9 && last[1].0 == OTHER,
+        "{last:?}"
+    );
+    assert_eq!(&last[2..], &[(GAIN, 0.3), (OTHER, 0.0)]);
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.3, "the overlay value is kept");
     drop(engine);
 }
 

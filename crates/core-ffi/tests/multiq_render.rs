@@ -178,3 +178,124 @@ fn bundled_multiq_plays_the_mapped_curve() {
     let g = at(&hp, 250.0);
     assert!((g + 48.0).abs() <= 3.0, "high-pass at 250 Hz: {g:.2} dB");
 }
+
+/// The gain, dB, of `node` for a −18 dBFS sine at `freq` at `rate`, as
+/// [`gain_at`] measures it.
+fn node_gain(node: &mut dyn core_engine::graph::EffectNode, rate: f64, freq: f64) -> f64 {
+    use core_engine::backend::StereoBuf;
+    let amp = 10f64.powf(-18.0 / 20.0);
+    let total = rate as usize;
+    let warm_up = 8192;
+    let (mut sum_in, mut sum_out, mut start) = (0.0f64, 0.0f64, 0usize);
+    let mut io = StereoBuf::new(BLOCK as u32);
+    while start < total {
+        let frames = BLOCK.min(total - start);
+        let sine: Vec<f32> = (start..start + frames)
+            .map(|n| (amp * (std::f64::consts::TAU * freq * n as f64 / rate).sin()) as f32)
+            .collect();
+        io.left[..frames].copy_from_slice(&sine);
+        io.right[..frames].copy_from_slice(&sine);
+        node.process(frames as u32, &mut io, None);
+        for (i, ((x, l), r)) in sine
+            .iter()
+            .zip(io.left.iter())
+            .zip(io.right.iter())
+            .enumerate()
+        {
+            if start + i >= warm_up {
+                sum_in += 2.0 * f64::from(*x).powi(2);
+                sum_out += f64::from(*l).powi(2) + f64::from(*r).powi(2);
+            }
+        }
+        start += frames;
+    }
+    10.0 * (sum_out / sum_in).log10()
+}
+
+/// Plan 6g Task 5 fix I2: a sample-rate change re-activates the same
+/// instance (`PluginHost::reconfigure`); the host round-trips its state
+/// first, so Multi-Q's pass filter still plays (it stayed flat before).
+#[test]
+#[ignore = "needs scripts/build-multiq.sh and VIZDAW_BUNDLED_PLUGINS"]
+fn bundled_multiq_keeps_its_high_pass_through_a_rate_change() {
+    use core_engine::fixtures::Builder;
+    use core_engine::graph::InsertFactory;
+    use core_host::PluginHost;
+    use core_model::command::MixerCmd;
+    use core_model::ids::AnyId;
+    use std::time::Duration;
+    vizdaw_ffi::host::force_offline();
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: as in `bundled_multiq_plays_the_mapped_curve`; Rust runs this
+    // file's tests on threads, but both only ever set HOME to a temp dir.
+    unsafe { std::env::set_var("HOME", home.path()) };
+
+    let plugin = PluginRef {
+        format: Format::Clap,
+        id: "com.dusk-audio.multi-q".into(),
+        name: "Multi-Q".into(),
+        vendor: "Dusk Audio".into(),
+        version: String::new(),
+    };
+    let params = mapped(DpEqBand {
+        kind: Some(DpEqBandType::HighPass),
+        order: Some(4),
+        freq: real(DpUnit::Hertz, 1000.0),
+        gain: None,
+        q: None,
+        enabled: None,
+    });
+    let mut b = Builder::new();
+    let master = b.doc().mixer().master();
+    let r = b
+        .mixer(MixerCmd::SetEq {
+            strip: master,
+            plugin: Some(plugin.clone()),
+        })
+        .unwrap();
+    let id = r
+        .created
+        .iter()
+        .find_map(|x| match x {
+            AnyId::Plugin(p) => Some(*p),
+            _ => None,
+        })
+        .unwrap();
+    b.mixer(MixerCmd::SetPluginParams { slot: id, params })
+        .unwrap();
+    let doc = b.finish();
+    let slot = doc.plugin_slot(id).unwrap().clone();
+
+    let mut host = PluginHost::new(RATE, MAX_FRAMES).unwrap();
+    host.register_path(Format::Clap, &plugin.id, clap_bundle());
+    host.sync(&doc);
+    let r = host.wait_ready(Duration::from_secs(20));
+    assert_eq!(r.loaded, vec![id], "{:?}", r.failed);
+    let mut factory = host.factory();
+    let mut take = |host: &mut PluginHost, rate: f64| {
+        for _ in 0..2000 {
+            host.idle();
+            if let Ok(n) = factory.make(&slot, rate, MAX_FRAMES) {
+                return n;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("Multi-Q is not ready at {rate} Hz")
+    };
+    let mut node = take(&mut host, RATE);
+    let g = node_gain(node.as_mut(), RATE, 500.0);
+    println!("before the rate change, 500 Hz: {g:.2} dB");
+    assert!((g + 24.0).abs() <= 3.0, "before: {g:.2} dB");
+
+    // The rate changes while the engine holds the processor; it comes
+    // back, and the host activates the same instance again.
+    let rate = 44_100.0;
+    host.reconfigure(rate, MAX_FRAMES);
+    drop(node);
+    let mut node = take(&mut host, rate);
+    let g = node_gain(node.as_mut(), rate, 500.0);
+    println!("after the rate change, 500 Hz: {g:.2} dB");
+    assert!((g + 24.0).abs() <= 3.0, "after: {g:.2} dB");
+    drop(node);
+    host.idle();
+}

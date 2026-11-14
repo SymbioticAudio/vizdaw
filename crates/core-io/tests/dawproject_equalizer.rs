@@ -5,7 +5,9 @@
 
 mod common;
 
-use common::merge::{Strip as Stripped, fixture, stripped_package, theirs_of, trip};
+use common::merge::{
+    Strip as Stripped, fixture, stripped_package, theirs_of, theirs_of_with, trip,
+};
 use common::package::{TestPlist, package_bytes};
 use core_engine::fixtures::Builder;
 use core_io::dawproject::import::{
@@ -768,4 +770,90 @@ fn reader_keeps_bands_structurally() {
         "Enabled is read as a bool parameter's value"
     );
     assert_eq!(b[1].kind, None, "an unknown type");
+}
+
+/// Fix round 1 (I1): an `Equalizer` the other DAW added to a channel the
+/// merge matches arrives on our strip with its mapped values.
+#[test]
+fn merge_onto_a_matched_strip_keeps_the_curve() {
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let bass = StripId(
+        t.snapshot.identity.as_ref().expect("format 2").strips[0]
+            .strip
+            .expect("a strip"),
+    );
+    assert!(t.base_doc.mixer().strip(bass).unwrap().eq.is_none());
+    let mut x = t.export.clone();
+    let at = x.project_xml.find("</Devices>").expect("Bass's devices");
+    x.project_xml.insert_str(at, EQ_ONE);
+    let path = t.dir.path().join("Theirs EQ.dawproject");
+    std::fs::write(&path, stripped_package(&x, Stripped::Nothing)).unwrap();
+    let p = plan(
+        t.snapshot.clone(),
+        theirs_of_with(&t, &path, Some(&mq())),
+        &t.base_doc,
+        false,
+        &AtomicBool::new(false),
+    )
+    .expect("plans");
+
+    let mut h = History::new(t.base_doc.clone());
+    let mut report = Report::default();
+    h.begin(LABEL).unwrap();
+    apply_merge(&mut h, &p, "2026-11-13", &mut report).expect("applies");
+    h.commit().unwrap();
+
+    let s = h.doc().mixer().strip(bass).unwrap();
+    let eq = s.eq.as_ref().expect("theirs' EQ on our strip");
+    assert_eq!(eq.plugin, mq());
+    assert!(eq.bypass, "the device's Enabled is false");
+    let bands = [
+        DpEqBand {
+            order: Some(2),
+            ..band(DpEqBandType::HighPass, hz(80.0))
+        },
+        DpEqBand {
+            q: lin(1.0),
+            ..bell(1000.0, 6.0)
+        },
+    ];
+    let want = map_equalizer(&bands, "Bass");
+    assert!(!want.params.is_empty());
+    assert_eq!(overlay(eq), as_map(&want.params), "{report:#?}");
+}
+
+/// Fix round 1 (I3): a `Gain` or `Q` whose unit cannot be read leaves the
+/// band out with a line; it is not imported at its default.
+#[test]
+fn unreadable_gain_or_q_units_leave_the_band_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let xml = project_xml(&audio_track(
+        "t",
+        "T",
+        r#"<Equalizer deviceName="E" deviceRole="audioFX"><Band type="bell"><Freq unit="hertz" value="500"/><Gain unit="db" value="6"/></Band><Band type="bell"><Freq unit="hertz" value="2000"/><Gain unit="decibel" value="3"/><Q unit="lin" value="2"/></Band><Band type="bell"><Freq unit="hertz" value="4000"/><Q unit="linear" value="2"/></Band></Equalizer>"#,
+    ));
+    let pkg = package(dir.path(), &xml);
+    let m = map_equalizer(&file_bands(&pkg, "T")[0], "T");
+    assert_eq!(m.left_out.len(), 2, "{:#?}", m.left_out);
+    assert!(
+        m.left_out[0].starts_with("Equalizer band on track 'T': bell 500 Hz")
+            && m.left_out[0].contains("gain has no readable value or unit"),
+        "{:?}",
+        m.left_out
+    );
+    assert!(
+        m.left_out[1].starts_with("Equalizer band on track 'T': bell 2000 Hz")
+            && m.left_out[1].contains("Q has no readable value or unit"),
+        "{:?}",
+        m.left_out
+    );
+    let b3 = mq_band(&m.bands, 3);
+    assert!(b3.enabled);
+    close(b3.freq, 4000.0);
+    assert_eq!(b3.q, Some(2.0));
+
+    let a = imported(&pkg, Some(&mq()));
+    let lines = item(&a.report, ItemKind::LeftOut, EQ_BANDS).expect("the lines");
+    assert_eq!(lines.details.len(), 2, "{:?}", lines.details);
 }

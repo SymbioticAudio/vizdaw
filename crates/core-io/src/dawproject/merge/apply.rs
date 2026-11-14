@@ -2057,6 +2057,20 @@ fn devices(h: &mut History, cx: &Cx<'_>, strip: StripId, t: usize) -> Result<(),
         if let Some(bytes) = theirs_state(&cx.th.doc, from) {
             run(h, Command::Mixer(MixerCmd::SetPluginState { slot, bytes }))?;
         }
+        // An `Equalizer` theirs mapped onto the bundled EQ is all overlay
+        // (plan 6g Task 5).
+        let params: Vec<(ParamId, f64)> = cx
+            .th
+            .doc
+            .plugin_slot(from)
+            .map(|s| s.params.iter().map(|(k, v)| (*k, *v)).collect())
+            .unwrap_or_default();
+        if !params.is_empty() {
+            run(
+                h,
+                Command::Mixer(MixerCmd::SetPluginParams { slot, params }),
+            )?;
+        }
         Ok(())
     };
     let ours = h.doc().mixer().strip(strip)?.clone();

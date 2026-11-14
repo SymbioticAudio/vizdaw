@@ -531,12 +531,15 @@ impl<'a> Rd<'a> {
     fn eq_band(&mut self, n: NodeId) -> DpEqBand {
         let t = self.t;
         self.cap.item::<DpEqBand>(0);
+        // An element whose unit cannot be read is kept with no value, so the
+        // mapping leaves the band out rather than use a default.
         let real = |c: NodeId| {
+            let unit = t.attr(c, "unit").and_then(DpUnit::parse);
             Some(DpRealParam {
                 named: DpNamed::default(),
                 parameter_id: None,
-                unit: t.attr(c, "unit").and_then(DpUnit::parse)?,
-                value: t.attr(c, "value").and_then(xml::double_or_inf),
+                unit: unit.unwrap_or(DpUnit::Normalized),
+                value: unit.and_then(|_| t.attr(c, "value").and_then(xml::double_or_inf)),
                 min: t.attr(c, "min").and_then(xml::double_or_inf),
                 max: t.attr(c, "max").and_then(xml::double_or_inf),
             })
