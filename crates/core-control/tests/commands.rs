@@ -51,8 +51,20 @@ fn every_command_validates_its_minimal_form() {
         ("app.quit", json!({})),
         ("wait", json!({"condition": "playing"})),
         ("ping", json!({})),
+        ("co_producer.begin", json!({"name": "Set up a drum bus"})),
+        ("co_producer.end", json!({})),
+        ("co_producer.status", json!({})),
+        (
+            "co_producer.preview",
+            json!({"commands": [{"id": "edit.undo"}]}),
+        ),
+        (
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": [{"id": "edit.undo"}]}),
+        ),
     ];
     assert_eq!(minimal.len(), COMMAND_NAMES.len());
+    assert_eq!(COMMAND_NAMES.len(), 18);
     for (cmd, params) in minimal {
         assert!(
             validate(&req(cmd, params.clone())).is_ok(),
@@ -531,8 +543,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        181,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus"
+        183,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -784,6 +796,8 @@ mod fuzz {
             Just("project"),
             Just("snapshot"),
             Just("preview"),
+            Just("commands"),
+            Just("token"),
         ]
         .prop_map(str::to_string)
     }
@@ -2934,4 +2948,68 @@ fn plugins_commands_check_their_params() {
             .any(|d| d["name"] == "Replace" && d["answered_by"] == json!(["replace"])),
         "{install}"
     );
+}
+
+/// Plan 8a Ruling 10: the Co-Producer switch takes a required flag, and
+/// opening a copy always needs its path.
+#[test]
+fn settings_co_producer_and_open_copy_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for on in [true, false] {
+        assert_eq!(
+            ok(
+                "command.run",
+                run("settings.co_producer", json!({ "on": on }))
+            ),
+            Command::CommandRun {
+                id: "settings.co_producer".into(),
+                args: vec![("on".into(), ArgValue::Flag(on))],
+                window: None,
+            }
+        );
+    }
+    let huge = "x".repeat(70_000);
+    for (id, params) in [
+        ("settings.co_producer", json!({})),
+        ("settings.co_producer", json!({ "on": 1 })),
+        ("settings.co_producer", json!({ "on": "true" })),
+        ("settings.co_producer", json!({ "on": huge })),
+        ("settings.co_producer", json!({ "on": "a\0b" })),
+        ("settings.co_producer", json!({ "on": true, "extra": 1 })),
+        ("file.open_copy", json!({ "path": "relative.vizdaw" })),
+        ("file.open_copy", json!({ "path": "/tmp/a.mid" })),
+        ("file.open_copy", json!({ "path": "/tmp/a\0.vizdaw" })),
+        (
+            "file.open_copy",
+            json!({ "path": format!("/{huge}.vizdaw") }),
+        ),
+        ("file.open_copy", json!({ "path": 5 })),
+        (
+            "file.open_copy",
+            json!({ "path": "/tmp/a.vizdaw", "extra": 1 }),
+        ),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+    let (code, message) = err("command.run", run("file.open_copy", json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired, "{message}");
+    assert!(message.contains("\"Open\""), "{message}");
+    assert_eq!(
+        ok(
+            "command.run",
+            run("file.open_copy", json!({ "path": "/tmp/C.vizdaw" }))
+        ),
+        Command::CommandRun {
+            id: "file.open_copy".into(),
+            args: vec![("path".into(), ArgValue::Text("/tmp/C.vizdaw".into()))],
+            window: None,
+        }
+    );
+    let s = registry::find("settings.co_producer").unwrap();
+    assert!(!s.menu_item && !s.document);
+    assert_eq!((s.menu, s.title), ("Settings", "Co-Producer"));
+    let o = registry::find("file.open_copy").unwrap();
+    assert!(o.menu_item && !o.document);
+    assert_eq!((o.menu, o.title), ("File", "Open Co-Producer Copy…"));
 }

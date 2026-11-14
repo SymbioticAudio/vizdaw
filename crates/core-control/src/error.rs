@@ -39,11 +39,14 @@ pub enum ErrorCode {
     ShuttingDown,
     /// A bug: a caught panic or an impossible state.
     Internal,
+    /// The Co-Producer socket does not allow the call (plan 8a Ruling 11),
+    /// or the developer socket was sent a `co_producer.*` command.
+    NotAllowed,
 }
 
 impl ErrorCode {
     /// Every code, in the spec's order.
-    pub const ALL: [ErrorCode; 15] = [
+    pub const ALL: [ErrorCode; 16] = [
         ErrorCode::ParseError,
         ErrorCode::InvalidRequest,
         ErrorCode::UnknownCommand,
@@ -59,6 +62,7 @@ impl ErrorCode {
         ErrorCode::Timeout,
         ErrorCode::ShuttingDown,
         ErrorCode::Internal,
+        ErrorCode::NotAllowed,
     ];
 
     /// The wire string.
@@ -79,6 +83,7 @@ impl ErrorCode {
             ErrorCode::Timeout => "timeout",
             ErrorCode::ShuttingDown => "shutting_down",
             ErrorCode::Internal => "internal",
+            ErrorCode::NotAllowed => "not_allowed",
         }
     }
 
@@ -115,6 +120,11 @@ impl ControlError {
     /// `invalid_params` for command `cmd`.
     pub fn params(cmd: &str, message: impl fmt::Display) -> ControlError {
         ControlError::new(ErrorCode::InvalidParams, format!("{cmd}: {message}"))
+    }
+
+    /// `not_allowed` (plan 8a Ruling 11).
+    pub fn not_allowed(message: impl Into<String>) -> ControlError {
+        ControlError::new(ErrorCode::NotAllowed, message)
     }
 
     /// `dialog_required` naming `dialog` and the parameters that answer it.

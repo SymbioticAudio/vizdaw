@@ -3,7 +3,9 @@
 //! JSON-lines requests and replies, their limits and errors, element IDs
 //! and key strokes (this task); command validation, the menu-command
 //! registry and wait conditions (Task 3); the Unix-socket server and
-//! client (Task 4); key bindings over the registry (plan 4f).
+//! client (Task 4); key bindings over the registry (plan 4f); the
+//! Co-Producer socket's gate, command classes and never-replace path
+//! check (plan 8a, [`co_producer`]).
 //! Platform-neutral Unix code: the app executes what needs its windows.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -19,6 +21,7 @@
 
 pub mod bindings;
 pub mod client;
+pub mod co_producer;
 pub mod element;
 pub mod error;
 pub mod keys;
@@ -32,4 +35,4 @@ pub mod wait;
 pub use error::{ControlError, ErrorCode};
 pub use protocol::{RawRequest, RequestId};
 pub use request::{Command, validate};
-pub use server::{Call, Config, Server, StartError};
+pub use server::{Call, Config, Role, Server, StartError};

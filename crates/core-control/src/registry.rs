@@ -109,6 +109,38 @@ impl KeyContext {
     }
 }
 
+/// What a command does to the composer's work, for the Co-Producer gate
+/// (Co-Producer spec §6.5, plan 8a Ruling 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Class {
+    /// Reads or plays; changes nothing.
+    Read,
+    /// Creates something new.
+    Add,
+    /// Changes something that exists.
+    Change,
+    /// Deletes something.
+    Remove,
+    /// Writes files outside the project, never over one.
+    Outward,
+    /// Never run by Co-Producer.
+    Refused,
+}
+
+impl Class {
+    /// Its name in `commands.list`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Class::Read => "read",
+            Class::Add => "add",
+            Class::Change => "change",
+            Class::Remove => "remove",
+            Class::Outward => "outward",
+            Class::Refused => "refused",
+        }
+    }
+}
+
 /// A command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -138,6 +170,9 @@ pub struct CommandSpec {
     /// another command (plan 7d controller ruling I3): true only for
     /// commands whose defaults came after users had keys files.
     pub yields: bool,
+    /// Its Co-Producer class (plan 8a Ruling 5); [`Class::Refused`] unless
+    /// the entry says otherwise.
+    pub class: Class,
 }
 
 /// What a null [`ParamKind::IntOrNull`] value reaches the app as.
@@ -173,6 +208,7 @@ const fn cmd(
         params: &[],
         dialogs: &[],
         yields: false,
+        class: Class::Refused,
     }
 }
 
@@ -256,9 +292,17 @@ const fn step(
     }
 }
 
-/// A numbered locator's command (plan 4f Ruling 7).
-const fn locator(id: &'static str, title: &'static str, key: &'static str) -> CommandSpec {
-    key_only(cmd(id, "Locators", title, Some(key), true))
+/// A numbered locator's command (plan 4f Ruling 7), of `class`.
+const fn locator(
+    class: Class,
+    id: &'static str,
+    title: &'static str,
+    key: &'static str,
+) -> CommandSpec {
+    CommandSpec {
+        class,
+        ..key_only(cmd(id, "Locators", title, Some(key), true))
+    }
 }
 
 const ON: &[ParamSpec] = &[ParamSpec {
@@ -304,6 +348,22 @@ const PLUGINS_DEFAULT_EQ_PARAMS: &[ParamSpec] = &[ParamSpec {
     kind: ParamKind::Text,
     required: true,
     help: "multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see the Plugin Manager).",
+}];
+
+/// `settings.co_producer`'s parameter (plan 8a Ruling 10).
+const CO_PRODUCER_SWITCH_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "on",
+    kind: ParamKind::Flag,
+    required: true,
+    help: "Turn Co-Producer on (true) or off (false).",
+}];
+
+/// `file.open_copy`'s parameter (plan 8a Ruling 9).
+const OPEN_COPY_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "path",
+    kind: ParamKind::Path("vizdaw"),
+    required: false,
+    help: "The Co-Producer copy to open as a new untitled project (answers the Open dialog).",
 }];
 
 /// `mixer.new_bus`'s parameters (plan 6g-2 Ruling 7).
@@ -1502,6 +1562,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
     ),
     CommandSpec {
+        class: Class::Add,
         params: IMPORT_PARAMS,
         dialogs: &[DialogSpec {
             name: "Open",
@@ -1513,6 +1574,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     cmd("file.close", "File", "Close", Some("⌘W"), true),
     CommandSpec {
+        class: Class::Change,
         params: SAVE_PATH,
         dialogs: &[DialogSpec {
             name: "Save",
@@ -1533,6 +1595,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.save_as", "File", "Save As…", Some("⇧⌘S"), true)
     },
     CommandSpec {
+        class: Class::Change,
         params: FORMAT_PARAMS,
         dialogs: &[DialogSpec {
             name: "Project Settings",
@@ -1549,6 +1612,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Outward,
         params: BOUNCE_PARAMS,
         dialogs: &[DialogSpec {
             name: "Bounce",
@@ -1559,6 +1623,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.bounce", "File", "Bounce…", None, true)
     },
     CommandSpec {
+        class: Class::Add,
         params: IMPORT_MIDI_PARAMS,
         dialogs: &[DialogSpec {
             name: "Open",
@@ -1569,6 +1634,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.import_midi", "File", "Import MIDI File…", None, true)
     },
     CommandSpec {
+        class: Class::Outward,
         params: EXPORT_MIDI_PARAMS,
         dialogs: &[DialogSpec {
             name: "Save",
@@ -1579,6 +1645,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.export_midi", "File", "MIDI File…", None, true)
     },
     CommandSpec {
+        class: Class::Outward,
         params: EXPORT_MIDI_CLIP_PARAMS,
         dialogs: &[DialogSpec {
             name: "Save",
@@ -1595,6 +1662,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Outward,
         params: FOR_DAW_PARAMS,
         dialogs: &[DialogSpec {
             name: "Save",
@@ -1635,6 +1703,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.import_dawproject", "File", "DAWproject…", None, true)
     },
     CommandSpec {
+        class: Class::Outward,
         params: EXPORT_DAWPROJECT_PARAMS,
         dialogs: &[DialogSpec {
             name: "Save",
@@ -1655,6 +1724,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.import_aaf", "File", "AAF…", None, true)
     },
     CommandSpec {
+        class: Class::Outward,
         params: EXPORT_AAF_PARAMS,
         dialogs: &[DialogSpec {
             name: "Save",
@@ -1665,6 +1735,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.export_aaf", "File", "AAF…", None, true)
     },
     CommandSpec {
+        class: Class::Read,
         ..cmd(
             "file.interchange_report",
             "File",
@@ -1674,6 +1745,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Change,
         menu_item: false,
         ..cmd(
             "media.convert",
@@ -1684,6 +1756,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Change,
         params: RELINK_PARAMS,
         dialogs: &[DialogSpec {
             name: "Relink",
@@ -1695,6 +1768,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     key_only(cmd("media.compact", "Media", "Compact Media", None, true)),
     CommandSpec {
+        class: Class::Change,
         params: RENAME_PARAMS,
         dialogs: &[DialogSpec {
             name: "Rename Media",
@@ -1704,8 +1778,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         }],
         ..key_only(cmd("media.rename", "Media", "Rename Media…", None, true))
     },
-    cmd("edit.undo", "Edit", "Undo", Some("⌘Z"), true),
-    cmd("edit.redo", "Edit", "Redo", Some("⇧⌘Z"), true),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("edit.undo", "Edit", "Undo", Some("⌘Z"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("edit.redo", "Edit", "Redo", Some("⇧⌘Z"), true)
+    },
     cmd("window.mixer", "Window", "Mixer", Some("⌥⌘M"), true),
     cmd(
         "window.plugin_manager",
@@ -1801,64 +1881,98 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         true,
     ),
-    cmd(
-        "editors.insert_event",
-        "Editors",
-        "Insert Event",
-        Some("⌘I"),
-        true,
-    ),
-    cmd(
-        "editors.nudge_earlier",
-        "Editors",
-        "Nudge Earlier",
-        Some("⌥←"),
-        true,
-    ),
-    cmd(
-        "editors.nudge_later",
-        "Editors",
-        "Nudge Later",
-        Some("⌥→"),
-        true,
-    ),
-    cmd("editors.nudge_up", "Editors", "Nudge Up", Some("⌥↑"), true),
-    cmd(
-        "editors.nudge_down",
-        "Editors",
-        "Nudge Down",
-        Some("⌥↓"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "editors.insert_event",
+            "Editors",
+            "Insert Event",
+            Some("⌘I"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "editors.nudge_earlier",
+            "Editors",
+            "Nudge Earlier",
+            Some("⌥←"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "editors.nudge_later",
+            "Editors",
+            "Nudge Later",
+            Some("⌥→"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("editors.nudge_up", "Editors", "Nudge Up", Some("⌥↑"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "editors.nudge_down",
+            "Editors",
+            "Nudge Down",
+            Some("⌥↓"),
+            true,
+        )
+    },
     CommandSpec {
         params: ON,
         ..cmd("editors.snap", "Editors", "Snap to Grid", Some("G"), true)
     },
-    cmd(
-        "modify.select_by_rule",
-        "Modify",
-        "Select by Rule…",
-        Some("⌃⌘S"),
-        true,
-    ),
-    cmd(
-        "modify.transpose",
-        "Modify",
-        "Transpose…",
-        Some("⌃⌘T"),
-        true,
-    ),
-    cmd("modify.quantize", "Modify", "Quantize…", Some("⌃⌘U"), true),
-    cmd(
-        "modify.change",
-        "Modify",
-        "Change Values…",
-        Some("⌃⌘M"),
-        true,
-    ),
-    cmd("modify.move", "Modify", "Move…", Some("⌃⌘V"), true),
-    cmd("modify.again", "Modify", "Modify Again", Some("⌃⌘R"), true),
     CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "modify.select_by_rule",
+            "Modify",
+            "Select by Rule…",
+            Some("⌃⌘S"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "modify.transpose",
+            "Modify",
+            "Transpose…",
+            Some("⌃⌘T"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("modify.quantize", "Modify", "Quantize…", Some("⌃⌘U"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "modify.change",
+            "Modify",
+            "Change Values…",
+            Some("⌃⌘M"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("modify.move", "Modify", "Move…", Some("⌃⌘V"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("modify.again", "Modify", "Modify Again", Some("⌃⌘R"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
         params: &[ParamSpec {
             name: "name",
             kind: ParamKind::Text,
@@ -1868,6 +1982,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("modify.template", "Modify", "Templates", None, true)
     },
     CommandSpec {
+        class: Class::Change,
         params: ON,
         ..cmd(
             "modify.exact_mode",
@@ -1877,13 +1992,16 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         )
     },
-    cmd(
-        "sequence.make_reference",
-        "Sequence",
-        "Make Reference from Selection",
-        Some("⌥⌘R"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "sequence.make_reference",
+            "Sequence",
+            "Make Reference from Selection",
+            Some("⌥⌘R"),
+            true,
+        )
+    },
     cmd(
         "sequence.back",
         "Sequence",
@@ -1891,24 +2009,34 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌘["),
         true,
     ),
-    cmd("drum.add_row", "Drum", "Add Drum Row", None, true),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("drum.add_row", "Drum", "Add Drum Row", None, true)
+    },
     CommandSpec {
         params: ON,
         ..cmd("drum.show_velocity", "Drum", "Show Velocity", None, true)
     },
-    cmd(
-        "drum.split_row",
-        "Drum",
-        "Split Row to Own Track",
-        None,
-        true,
-    ),
-    cmd("drum.remove_row", "Drum", "Remove Drum Row", None, true),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "drum.split_row",
+            "Drum",
+            "Split Row to Own Track",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Remove,
+        ..cmd("drum.remove_row", "Drum", "Remove Drum Row", None, true)
+    },
     CommandSpec {
         params: ON,
         ..cmd("drum.timeline", "Drum", "Timeline View", None, true)
     },
     CommandSpec {
+        class: Class::Change,
         params: NORMALIZE_PARAMS,
         dialogs: &[DialogSpec {
             name: "Normalize",
@@ -1918,26 +2046,37 @@ pub const COMMANDS: &[CommandSpec] = &[
         }],
         ..cmd("region.normalize", "Region", "Normalize…", None, true)
     },
-    cmd(
-        "region.fade_in_to_cursor",
-        "Region",
-        "Fade In to Cursor",
-        None,
-        true,
-    ),
-    cmd(
-        "region.fade_out_from_cursor",
-        "Region",
-        "Fade Out from Cursor",
-        None,
-        true,
-    ),
-    cmd("region.remove_fades", "Region", "Remove Fades", None, true),
     CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "region.fade_in_to_cursor",
+            "Region",
+            "Fade In to Cursor",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "region.fade_out_from_cursor",
+            "Region",
+            "Fade Out from Cursor",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Remove,
+        ..cmd("region.remove_fades", "Region", "Remove Fades", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
         params: CROSSFADE_PARAMS,
         ..cmd("region.crossfade", "Region", "Crossfade", None, true)
     },
     CommandSpec {
+        class: Class::Remove,
         params: REMOVE_CROSSFADE_PARAMS,
         ..cmd(
             "region.remove_crossfade",
@@ -1970,54 +2109,80 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         true,
     ),
-    cmd(
-        "transport.play_stop",
-        "Transport",
-        "Play / Stop",
-        Some("Space"),
-        true,
-    ),
-    cmd("transport.stop", "Transport", "Stop", Some("S"), true),
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.play_stop",
+            "Transport",
+            "Play / Stop",
+            Some("Space"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd("transport.stop", "Transport", "Stop", Some("S"), true)
+    },
     // A surface's Play: only starts (plan 5f-1 Ruling 5).
-    key_only(cmd("transport.play", "Transport", "Play", None, true)),
-    cmd(
-        "transport.play_selection",
-        "Transport",
-        "Play Selection",
-        Some("⌥Space"),
-        true,
-    ),
-    cmd(
-        "transport.play_from_selection",
-        "Transport",
-        "Play from Selection",
-        Some("⇧Space"),
-        true,
-    ),
-    cmd(
-        "transport.play_from_edit_in",
-        "Transport",
-        "Play from Edit-In",
-        Some("Y"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Read,
+        ..key_only(cmd("transport.play", "Transport", "Play", None, true))
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.play_selection",
+            "Transport",
+            "Play Selection",
+            Some("⌥Space"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.play_from_selection",
+            "Transport",
+            "Play from Selection",
+            Some("⇧Space"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.play_from_edit_in",
+            "Transport",
+            "Play from Edit-In",
+            Some("Y"),
+            true,
+        )
+    },
     cmd("transport.record", "Transport", "Record", Some("R"), true),
-    cmd("transport.scrub", "Transport", "Scrub", Some("K"), true),
-    cmd(
-        "transport.return_to_start",
-        "Transport",
-        "Return to Start",
-        Some("Return"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Read,
+        ..cmd("transport.scrub", "Transport", "Scrub", Some("K"), true)
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.return_to_start",
+            "Transport",
+            "Return to Start",
+            Some("Return"),
+            true,
+        )
+    },
     // Plan 7d Ruling 4: a click (or the menu, or the channel) steps one
     // bar; the keys are new defaults, so they give way (ruling I3).
     CommandSpec {
+        class: Class::Read,
         extra_keys: &["Keypad-"],
         yields: true,
         ..cmd("transport.rewind", "Transport", "Rewind", Some("⇧,"), true)
     },
     CommandSpec {
+        class: Class::Read,
         extra_keys: &["Keypad+"],
         yields: true,
         ..cmd(
@@ -2028,21 +2193,28 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         )
     },
-    cmd(
-        "transport.previous_marker",
-        "Transport",
-        "Previous Marker",
-        Some(","),
-        true,
-    ),
-    cmd(
-        "transport.next_marker",
-        "Transport",
-        "Next Marker",
-        Some("."),
-        true,
-    ),
     CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.previous_marker",
+            "Transport",
+            "Previous Marker",
+            Some(","),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.next_marker",
+            "Transport",
+            "Next Marker",
+            Some("."),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
         params: ON,
         ..cmd("transport.loop", "Transport", "Loop", Some("L"), true)
     },
@@ -2054,27 +2226,36 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: ON,
         ..cmd("transport.punch", "Transport", "Punch", Some("I"), true)
     },
-    cmd(
-        "transport.go_position",
-        "Transport",
-        "Go to Position Field",
-        Some("P"),
-        true,
-    ),
-    cmd(
-        "transport.go_edit_in",
-        "Transport",
-        "Go to Edit-In Field",
-        Some("E"),
-        true,
-    ),
-    cmd(
-        "transport.go_punch",
-        "Transport",
-        "Go to Punch Fields",
-        Some("U"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.go_position",
+            "Transport",
+            "Go to Position Field",
+            Some("P"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.go_edit_in",
+            "Transport",
+            "Go to Edit-In Field",
+            Some("E"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.go_punch",
+            "Transport",
+            "Go to Punch Fields",
+            Some("U"),
+            true,
+        )
+    },
     cmd(
         "transport.arm_previous",
         "Transport",
@@ -2147,6 +2328,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: SET_INPUT_PARAMS,
         ..key_only(cmd(
             "lane.set_input",
@@ -2157,6 +2339,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: SET_MONITOR_PARAMS,
         ..key_only(cmd(
             "lane.set_monitor",
@@ -2167,6 +2350,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: SET_INPUT_FX_PARAMS,
         ..key_only(cmd(
             "lane.set_input_fx",
@@ -2177,6 +2361,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: SET_MPE_PARAMS,
         ..key_only(cmd("lane.set_mpe", "Track", "Set Track MPE", None, true))
     },
@@ -2185,10 +2370,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..key_only(cmd("midi.inject", "MIDI", "Inject MIDI", None, true))
     },
     CommandSpec {
+        class: Class::Change,
         params: TRACK_SYNTH_PARAMS,
         ..key_only(cmd("lane.track_synth", "Track", "Track Synth", None, true))
     },
     CommandSpec {
+        class: Class::Change,
         params: RETURN_LATENCY_PARAMS,
         ..key_only(cmd(
             "destination.set_return_latency",
@@ -2199,6 +2386,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: MIDI_MIX_PARAMS,
         ..key_only(cmd(
             "destination.set_midi_mix",
@@ -2209,6 +2397,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: DEST_MPE_PARAMS,
         ..key_only(cmd(
             "destination.set_mpe",
@@ -2229,6 +2418,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: ADD_MIDI_PARAMS,
         ..key_only(cmd(
             "destination.add_midi",
@@ -2239,6 +2429,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: AUTOMATION_MODE_PARAMS,
         ..key_only(cmd(
             "automation.set_mode",
@@ -2249,6 +2440,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: AUTOMATION_GESTURE_PARAMS,
         ..key_only(cmd(
             "automation.gesture",
@@ -2258,13 +2450,32 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         ))
     },
-    cmd("automation.mode.off", "Automation", "Off", None, true),
-    cmd("automation.mode.read", "Automation", "Read", None, true),
-    cmd("automation.mode.touch", "Automation", "Touch", None, true),
-    cmd("automation.mode.latch", "Automation", "Latch", None, true),
-    cmd("automation.mode.write", "Automation", "Write", None, true),
-    cmd("automation.mode.trim", "Automation", "Trim", None, true),
     CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.off", "Automation", "Off", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.read", "Automation", "Read", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.touch", "Automation", "Touch", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.latch", "Automation", "Latch", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.write", "Automation", "Write", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.trim", "Automation", "Trim", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
         params: ON,
         ..cmd(
             "automation.suspend",
@@ -2316,36 +2527,36 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: AUDIO_SET_PARAMS,
         ..key_only(cmd("audio.set", "Audio", "Audio Settings", None, false))
     },
-    locator("locator.go_0", "Go to Locator 0", "0"),
-    locator("locator.go_1", "Go to Locator 1", "1"),
-    locator("locator.go_2", "Go to Locator 2", "2"),
-    locator("locator.go_3", "Go to Locator 3", "3"),
-    locator("locator.go_4", "Go to Locator 4", "4"),
-    locator("locator.go_5", "Go to Locator 5", "5"),
-    locator("locator.go_6", "Go to Locator 6", "6"),
-    locator("locator.go_7", "Go to Locator 7", "7"),
-    locator("locator.go_8", "Go to Locator 8", "8"),
-    locator("locator.go_9", "Go to Locator 9", "9"),
-    locator("locator.set_0", "Set Locator 0", "⌥0"),
-    locator("locator.set_1", "Set Locator 1", "⌥1"),
-    locator("locator.set_2", "Set Locator 2", "⌥2"),
-    locator("locator.set_3", "Set Locator 3", "⌥3"),
-    locator("locator.set_4", "Set Locator 4", "⌥4"),
-    locator("locator.set_5", "Set Locator 5", "⌥5"),
-    locator("locator.set_6", "Set Locator 6", "⌥6"),
-    locator("locator.set_7", "Set Locator 7", "⌥7"),
-    locator("locator.set_8", "Set Locator 8", "⌥8"),
-    locator("locator.set_9", "Set Locator 9", "⌥9"),
-    locator("locator.clear_0", "Clear Locator 0", "⌥⇧0"),
-    locator("locator.clear_1", "Clear Locator 1", "⌥⇧1"),
-    locator("locator.clear_2", "Clear Locator 2", "⌥⇧2"),
-    locator("locator.clear_3", "Clear Locator 3", "⌥⇧3"),
-    locator("locator.clear_4", "Clear Locator 4", "⌥⇧4"),
-    locator("locator.clear_5", "Clear Locator 5", "⌥⇧5"),
-    locator("locator.clear_6", "Clear Locator 6", "⌥⇧6"),
-    locator("locator.clear_7", "Clear Locator 7", "⌥⇧7"),
-    locator("locator.clear_8", "Clear Locator 8", "⌥⇧8"),
-    locator("locator.clear_9", "Clear Locator 9", "⌥⇧9"),
+    locator(Class::Read, "locator.go_0", "Go to Locator 0", "0"),
+    locator(Class::Read, "locator.go_1", "Go to Locator 1", "1"),
+    locator(Class::Read, "locator.go_2", "Go to Locator 2", "2"),
+    locator(Class::Read, "locator.go_3", "Go to Locator 3", "3"),
+    locator(Class::Read, "locator.go_4", "Go to Locator 4", "4"),
+    locator(Class::Read, "locator.go_5", "Go to Locator 5", "5"),
+    locator(Class::Read, "locator.go_6", "Go to Locator 6", "6"),
+    locator(Class::Read, "locator.go_7", "Go to Locator 7", "7"),
+    locator(Class::Read, "locator.go_8", "Go to Locator 8", "8"),
+    locator(Class::Read, "locator.go_9", "Go to Locator 9", "9"),
+    locator(Class::Change, "locator.set_0", "Set Locator 0", "⌥0"),
+    locator(Class::Change, "locator.set_1", "Set Locator 1", "⌥1"),
+    locator(Class::Change, "locator.set_2", "Set Locator 2", "⌥2"),
+    locator(Class::Change, "locator.set_3", "Set Locator 3", "⌥3"),
+    locator(Class::Change, "locator.set_4", "Set Locator 4", "⌥4"),
+    locator(Class::Change, "locator.set_5", "Set Locator 5", "⌥5"),
+    locator(Class::Change, "locator.set_6", "Set Locator 6", "⌥6"),
+    locator(Class::Change, "locator.set_7", "Set Locator 7", "⌥7"),
+    locator(Class::Change, "locator.set_8", "Set Locator 8", "⌥8"),
+    locator(Class::Change, "locator.set_9", "Set Locator 9", "⌥9"),
+    locator(Class::Change, "locator.clear_0", "Clear Locator 0", "⌥⇧0"),
+    locator(Class::Change, "locator.clear_1", "Clear Locator 1", "⌥⇧1"),
+    locator(Class::Change, "locator.clear_2", "Clear Locator 2", "⌥⇧2"),
+    locator(Class::Change, "locator.clear_3", "Clear Locator 3", "⌥⇧3"),
+    locator(Class::Change, "locator.clear_4", "Clear Locator 4", "⌥⇧4"),
+    locator(Class::Change, "locator.clear_5", "Clear Locator 5", "⌥⇧5"),
+    locator(Class::Change, "locator.clear_6", "Clear Locator 6", "⌥⇧6"),
+    locator(Class::Change, "locator.clear_7", "Clear Locator 7", "⌥⇧7"),
+    locator(Class::Change, "locator.clear_8", "Clear Locator 8", "⌥⇧8"),
+    locator(Class::Change, "locator.clear_9", "Clear Locator 9", "⌥⇧9"),
     CommandSpec {
         params: KEYS_PATH,
         dialogs: &[DialogSpec {
@@ -2386,6 +2597,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
     )),
     CommandSpec {
+        class: Class::Add,
         params: NEW_TRACK_PARAMS,
         yields: true,
         ..cmd(
@@ -2397,6 +2609,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Add,
         params: NEW_TRACK_PARAMS,
         yields: true,
         ..cmd(
@@ -2408,6 +2621,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Add,
         params: NEW_TRACK_PARAMS,
         yields: true,
         ..cmd(
@@ -2419,14 +2633,17 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Add,
         params: TRACK_PARAMS,
         ..cmd("track.duplicate", "Track", "Duplicate Track", None, true)
     },
     CommandSpec {
+        class: Class::Remove,
         params: TRACK_PARAMS,
         ..cmd("track.delete", "Track", "Delete Track", None, true)
     },
     CommandSpec {
+        class: Class::Change,
         params: TRACK_RENAME_PARAMS,
         dialogs: &[DialogSpec {
             name: "Rename Track",
@@ -2473,8 +2690,37 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Add,
         params: MIXER_NEW_BUS_PARAMS,
         ..key_only(cmd("mixer.new_bus", "Mixer", "New Bus", None, true))
+    },
+    // Plan 8a Ruling 10: the Co-Producer switch, for the e2e.
+    CommandSpec {
+        params: CO_PRODUCER_SWITCH_PARAMS,
+        ..key_only(cmd(
+            "settings.co_producer",
+            "Settings",
+            "Co-Producer",
+            None,
+            false,
+        ))
+    },
+    // Plan 8a Ruling 9: a saved copy opens as a project of its own.
+    CommandSpec {
+        params: OPEN_COPY_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd(
+            "file.open_copy",
+            "File",
+            "Open Co-Producer Copy…",
+            None,
+            false,
+        )
     },
 ];
 
@@ -2629,37 +2875,38 @@ fn kind_json(k: ParamKind) -> Value {
 
 /// The `commands.list` result.
 pub fn list_json() -> Value {
-    let commands: Vec<Value> = COMMANDS
+    let commands: Vec<Value> = COMMANDS.iter().map(command_json).collect();
+    json!({ "commands": commands })
+}
+
+/// One command as `commands.list` gives it, with its Co-Producer class.
+pub fn command_json(c: &CommandSpec) -> Value {
+    let params: Vec<Value> = c
+        .params
         .iter()
-        .map(|c| {
-            let params: Vec<Value> = c
-                .params
-                .iter()
-                .map(|p| {
-                    let mut v = kind_json(p.kind);
-                    if let Some(o) = v.as_object_mut() {
-                        o.insert("name".into(), json!(p.name));
-                        o.insert("required".into(), json!(p.required));
-                        o.insert("help".into(), json!(p.help));
-                    }
-                    v
-                })
-                .collect();
-            let dialogs: Vec<Value> = c
-                .dialogs
-                .iter()
-                .map(|d| json!({"name": d.name, "when": d.when, "answered_by": d.answered_by}))
-                .collect();
-            let keys: Vec<String> = crate::bindings::default_chords(c)
-                .iter()
-                .map(crate::bindings::Chord::text)
-                .collect();
-            json!({
-                "id": c.id, "menu": c.menu, "title": c.title, "shortcut": c.shortcut,
-                "keys": keys, "menu_item": c.menu_item, "context": c.context.name(),
-                "document": c.document, "params": params, "dialogs": dialogs,
-            })
+        .map(|p| {
+            let mut v = kind_json(p.kind);
+            if let Some(o) = v.as_object_mut() {
+                o.insert("name".into(), json!(p.name));
+                o.insert("required".into(), json!(p.required));
+                o.insert("help".into(), json!(p.help));
+            }
+            v
         })
         .collect();
-    json!({ "commands": commands })
+    let dialogs: Vec<Value> = c
+        .dialogs
+        .iter()
+        .map(|d| json!({"name": d.name, "when": d.when, "answered_by": d.answered_by}))
+        .collect();
+    let keys: Vec<String> = crate::bindings::default_chords(c)
+        .iter()
+        .map(crate::bindings::Chord::text)
+        .collect();
+    json!({
+        "id": c.id, "menu": c.menu, "title": c.title, "shortcut": c.shortcut,
+        "keys": keys, "menu_item": c.menu_item, "context": c.context.name(),
+        "document": c.document, "params": params, "dialogs": dialogs,
+        "class": c.class.name(),
+    })
 }

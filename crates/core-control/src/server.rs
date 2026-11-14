@@ -6,8 +6,16 @@
 //! answers with [`Server::reply`]. A call the app does not answer in time
 //! is answered `timeout`; the app's late answer is dropped.
 //!
+//! A server has a [`Role`]. The developer channel (the default) answers
+//! every command but the `co_producer.*` ones, which it refuses with
+//! `not_allowed`. A Co-Producer server (plan 8a) runs every validated call
+//! through [`crate::co_producer::admit`] before it is queued, so a refused
+//! call never reaches the app; it answers `commands.list` with the
+//! Co-Producer's filtered list, and allows one `ui.screenshot` a second.
+//!
 //! Nothing here panics on input: every line becomes a reply.
 
+use crate::co_producer;
 use crate::error::{ControlError, ErrorCode};
 use crate::protocol::{MAX_LINE, RequestId, read_request, reply_line};
 use crate::registry;
@@ -33,6 +41,19 @@ pub const MAX_SOCKET_PATH: usize = 103;
 /// replies and close.
 const STOP_GRACE: Duration = Duration::from_millis(500);
 
+/// Who a server answers (plan 8a Ruling 11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Role {
+    /// The developer control channel: every command but `co_producer.*`.
+    #[default]
+    Developer,
+    /// The Co-Producer socket: only what [`co_producer::admit`] allows.
+    CoProducer,
+}
+
+/// The shortest time between two Co-Producer screenshots.
+pub const SCREENSHOT_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Limits and timeouts.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -47,6 +68,8 @@ pub struct Config {
     /// A reply the client does not read within this is dropped with
     /// the connection.
     pub write_timeout: Duration,
+    /// Which socket this is.
+    pub role: Role,
 }
 
 impl Default for Config {
@@ -57,6 +80,7 @@ impl Default for Config {
             wait_grace: Duration::from_secs(15),
             idle_timeout: Duration::from_secs(300),
             write_timeout: Duration::from_secs(30),
+            role: Role::Developer,
         }
     }
 }
@@ -84,6 +108,8 @@ struct Shared {
     next_token: AtomicU64,
     next_conn: AtomicU64,
     shots: AtomicU64,
+    /// When the Co-Producer last took a screenshot.
+    last_shot: Mutex<Option<Instant>>,
     connections: AtomicUsize,
     stopping: AtomicBool,
     /// Tests: how long a connection waits before writing a reply once
@@ -256,6 +282,7 @@ impl Server {
             next_token: AtomicU64::new(1),
             next_conn: AtomicU64::new(1),
             shots: AtomicU64::new(0),
+            last_shot: Mutex::new(None),
             connections: AtomicUsize::new(0),
             stopping: AtomicBool::new(false),
             #[cfg(test)]
@@ -540,8 +567,17 @@ fn handle(s: &Arc<Shared>, line: &[u8]) -> (Option<RequestId>, Result<Value, Con
         Ok(c) => c,
         Err(e) => return (id, Err(e)),
     };
+    if let Err(e) = gate(s, &raw.cmd, &command) {
+        return (id, Err(e));
+    }
     match command {
-        Command::CommandsList => return (id, Ok(registry::list_json())),
+        Command::CommandsList => {
+            let list = match s.config.role {
+                Role::Developer => registry::list_json(),
+                Role::CoProducer => co_producer::list_json(),
+            };
+            return (id, Ok(list));
+        }
         Command::Ping => return (id, Ok(json!({ "pong": true }))),
         _ => {}
     }
@@ -590,6 +626,32 @@ fn handle(s: &Arc<Shared>, line: &[u8]) -> (Option<RequestId>, Result<Value, Con
     lock(&s.waiting).remove(&token);
     lock(&s.extended).remove(&token);
     (id, outcome)
+}
+
+/// The role's rules for a validated call: the Co-Producer gate and its
+/// screenshot rate, or the developer socket's refusal of `co_producer.*`.
+fn gate(s: &Shared, cmd: &str, command: &Command) -> Result<(), ControlError> {
+    match s.config.role {
+        Role::Developer if command.is_co_producer() => Err(ControlError::not_allowed(format!(
+            "{cmd} is answered only on the Co-Producer socket"
+        ))),
+        Role::Developer => Ok(()),
+        Role::CoProducer => {
+            co_producer::admit(command)?;
+            if matches!(command, Command::UiScreenshot { .. }) {
+                let mut last = lock(&s.last_shot);
+                let now = Instant::now();
+                if last.is_some_and(|t| now.saturating_duration_since(t) < SCREENSHOT_INTERVAL) {
+                    return Err(ControlError::new(
+                        ErrorCode::Busy,
+                        "one screenshot a second: try again shortly",
+                    ));
+                }
+                *last = Some(now);
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

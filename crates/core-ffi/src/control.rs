@@ -977,6 +977,14 @@ fn facts_of(f: WaitFactsRow) -> Facts {
 pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<ControlRequest> {
     Some(match c {
         Command::CommandsList | Command::Ping => return None,
+        // The developer socket refuses these before they are queued
+        // (plan 8a Ruling 11); the Co-Producer socket's rows come with its
+        // server (Task 4).
+        Command::CoProducerBegin { .. }
+        | Command::CoProducerEnd { .. }
+        | Command::CoProducerStatus { .. }
+        | Command::CoProducerPreview { .. }
+        | Command::CoProducerApply { .. } => return None,
         Command::CommandRun { id, args, window } => ControlRequest::RunCommand {
             id,
             args: args
