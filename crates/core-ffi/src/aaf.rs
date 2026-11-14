@@ -148,6 +148,11 @@ pub struct AafInfoRow {
 /// The refusal of an AAF path with another extension.
 pub const NOT_AAF_NAME: &str = "Choose a file ending in .aaf.";
 
+/// The failure of an import into this project whose sequence's tempo map
+/// or file start changed while the job ran (the audio was placed on the
+/// old one).
+pub const TEMPO_CHANGED: &str = "The tempo changed while the AAF was importing. Import it again.";
+
 /// What [`file_path`] calls an AAF file.
 pub(crate) const AAF_FILE: &str = "an AAF file";
 
@@ -509,6 +514,10 @@ pub struct AafImported {
     pub midi: Option<MidiImport>,
     /// Where it lands.
     pub place: AafPlace,
+    /// The tempo map the audio was placed on.
+    pub tempo: core_model::tempo::TempoMap,
+    /// The tick composition position 0 was placed on.
+    pub start: core_model::time::Tick,
 }
 
 impl std::fmt::Debug for AafImported {
@@ -917,6 +926,8 @@ fn import_body(
         imp,
         midi,
         place: job.place,
+        tempo,
+        start,
     }))
 }
 

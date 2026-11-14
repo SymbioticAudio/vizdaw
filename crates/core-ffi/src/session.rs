@@ -5030,6 +5030,16 @@ fn apply_aaf_import(
         inner.last_step = None;
         inner.surfaces.tempo_step = None;
     } else {
+        // The audio was placed on the sequence's map as the job found it;
+        // a tempo or file start changed since (an edit, undo or redo)
+        // would put it out of time with the MIDI file and the project.
+        let s = inner.doc().sequence(a.place.seq)?;
+        let (tempo, start) = core_io::aaf::import::tempo_and_start(a.midi.as_ref(), s, false)?;
+        if tempo != a.tempo || start != a.start {
+            return Err(VizError::Model {
+                message: crate::aaf::TEMPO_CHANGED.into(),
+            });
+        }
         let states = run(&mut inner.history, &mut report)?;
         for (slot, bytes) in &states {
             inner.history.capture_state(*slot, bytes)?;

@@ -775,6 +775,54 @@ fn into_this_project_undoes_in_one_step() {
     }
 }
 
+/// Fix round 1 (review I1): an import into this project whose sequence's
+/// tempo changes while the job runs is refused when it would be applied:
+/// `Media/`, `Media/.incoming/` and the document stay as they were.
+#[test]
+fn a_tempo_change_mid_import_refuses_it() {
+    use vizdaw_ffi::{EditCommand, SequenceEdit, TempoPointRow};
+    let _g = serial();
+    let p = project();
+    let (_, folder) = export_aaf(&p.s, areq(p.seq, &p.out));
+    idle_until(&p.s, |s| s.debug_overviews_idle());
+    let media = media_files(&p.pkg);
+    p.s.debug_hold_jobs(true).unwrap();
+    let id =
+        p.s.import_aaf(AafImportRequestRow {
+            new_project: false,
+            ..ireq(&folder.join("Song.aaf"))
+        })
+        .unwrap();
+    p.s.edit(
+        EditCommand::Sequence {
+            edit: SequenceEdit::SetTempo {
+                seq: p.seq,
+                tempo: vec![TempoPointRow {
+                    tick: 0,
+                    bpm: 90.0,
+                    ramp: false,
+                }],
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let doc = p.s.debug_document_json();
+    p.s.debug_hold_jobs(false).unwrap();
+    let j = wait_job(&p.s, id);
+    assert_eq!(j.state, JobStateRow::Failed, "{j:?}");
+    assert_eq!(j.message.as_deref(), Some(vizdaw_ffi::aaf::TEMPO_CHANGED));
+    assert_eq!(p.s.debug_document_json(), doc);
+    idle_until(&p.s, |s| s.debug_overviews_idle());
+    assert_eq!(media_files(&p.pkg), media);
+    assert!(
+        listing(&p.pkg.join("Media/.incoming"))
+            .iter()
+            .all(|f| f.ends_with('/')),
+        "nothing left in Media/.incoming"
+    );
+}
+
 /// Review Focus 2: an external-audio export with one WAV moved elsewhere
 /// imports that region offline (its item keeps a path to relink); with
 /// `media_folder` naming where it went it is online. MXF media is offline.
