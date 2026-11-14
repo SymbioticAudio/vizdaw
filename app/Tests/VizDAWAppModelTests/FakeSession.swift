@@ -654,6 +654,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         jobCalls += 1
         if jobBusy { throw VizError.Busy(message: "busy") }
         guard let j = jobRows[id] else { throw VizError.Model(message: "unknown job \(id)") }
+        // An ended job is applied when it is read, as the core does.
+        if j.state != .running { unapplied.remove(id) }
         return j
     }
     var cancelled: [UInt64] = []
@@ -678,6 +680,318 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return checkRow
     }
     func bounceResult(job: UInt64) throws -> BounceResultRow? { resultRow }
+
+    // MARK: MIDI files (plan 6a)
+
+    /// What the MIDI calls answer, and what they were called with.
+    var midiInfoRow = MidiFileInfoRow(kind: .smf1, tracks: 0, channels: [], hasTempo: false, mpeFound: false)
+    var midiInfoPaths: [String] = []
+    var midiImports: [MidiImportRequestRow] = []
+    var smfExports: [SmfExportRequestRow] = []
+    var clipExports: [ClipExportRequestRow] = []
+    var smfChecks: [SmfExportRequestRow] = []
+    var clipChecks: [ClipExportRequestRow] = []
+    /// Thrown by every MIDI call that has one set.
+    var interchangeError: VizError?
+    var interchangeCheck = ReportRow(summary: "Exported nothing", items: [])
+    var lastReport: ReportRow?
+    var interchangeReportCalls = 0
+    var song = SongInfoRow(
+        title: nil, artist: nil, album: nil, originalArtist: nil, composer: nil, songwriter: nil,
+        producer: nil, arranger: nil, year: nil, genre: nil, copyright: nil, website: nil, comment: nil)
+    var songInfoSets: [SongInfoRow] = []
+
+    /// MIDI import and export jobs not yet read in an ended state. As the
+    /// core's `interchange_idle`, a new one applies those that ended first
+    /// and is `Busy` while one still runs.
+    var unapplied: Set<UInt64> = []
+    func interchangeIdle() throws {
+        unapplied = unapplied.filter { jobRows[$0]?.state == .running }
+        if !unapplied.isEmpty {
+            throw VizError.Busy(message: "Wait for the running import, export or bounce to finish.")
+        }
+    }
+
+    private func interchangeJob(_ kind: JobKindRow, _ base: UInt64, _ n: Int) -> UInt64 {
+        let id = base + UInt64(n)
+        unapplied.insert(id)
+        jobRows[id] = JobRow(
+            id: id, kind: kind, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
+            message: nil, problems: [], created: [])
+        return id
+    }
+    /// Whether each sheet-side call (`midiFileInfo`, the dry runs) ran on the
+    /// main thread (F12: they must not), and the lock for the detached tasks
+    /// that make them.
+    var checkOnMain: [Bool] = []
+    let interchangeLock = NSLock()
+    /// Holds a dry run until released (`checkHold`'s semaphore); answers it
+    /// per request (`checkReply`).
+    var checkHold: (@Sendable (SmfExportRequestRow) -> DispatchSemaphore?)?
+    var checkReply: (@Sendable (SmfExportRequestRow) -> ReportRow)?
+    func midiFileInfo(path: String) throws -> MidiFileInfoRow {
+        if let e = interchangeError { throw e }
+        interchangeLock.lock()
+        midiInfoPaths.append(path)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return midiInfoRow
+    }
+    func importMidi(req: MidiImportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        midiImports.append(req)
+        return interchangeJob(.importMidi, 6000, midiImports.count)
+    }
+    func exportMidi(req: SmfExportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        smfExports.append(req)
+        return interchangeJob(.exportMidi, 7000, smfExports.count)
+    }
+    func exportMidiCheck(req: SmfExportRequestRow) throws -> ReportRow {
+        if let e = interchangeError { throw e }
+        interchangeLock.lock()
+        smfChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        checkHold?(req)?.wait()
+        return checkReply?(req) ?? interchangeCheck
+    }
+    func exportMidiClip(req: ClipExportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        clipExports.append(req)
+        return interchangeJob(.exportMidi, 8000, clipExports.count)
+    }
+    func exportMidiClipCheck(req: ClipExportRequestRow) throws -> ReportRow {
+        if let e = interchangeError { throw e }
+        interchangeLock.lock()
+        clipChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return interchangeCheck
+    }
+    /// What `exportMidiClipNames` answers (`clipNamesError` is thrown
+    /// instead), and what it was asked.
+    var clipNames = ClipNamesRow(names: [], taken: [])
+    var clipNamesError: VizError?
+    var clipNameRequests: [ClipExportRequestRow] = []
+    func exportMidiClipNames(req: ClipExportRequestRow) throws -> ClipNamesRow {
+        if let e = clipNamesError { throw e }
+        interchangeLock.lock()
+        clipNameRequests.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return clipNames
+    }
+    /// Exports for another DAW (plan 6b): what they were called with, and
+    /// what the check answers (F8).
+    var forDawChecks: [ForDawRequestRow] = []
+    var forDawExports: [ForDawRequestRow] = []
+    var forDawCheckAnswer: Result<ForDawCheckRow, VizError> = .success(ForDawCheckRow(
+        report: ReportRow(summary: "Exported nothing", items: []), folder: "Song for another DAW",
+        files: [], strips: [], start: "Every file starts at bar 1.", frames: 0, warning: nil))
+    func exportForDaw(req: ForDawRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        forDawExports.append(req)
+        return interchangeJob(.exportProject, 9000, forDawExports.count)
+    }
+    /// Holds a for-DAW check until released; answers it per request.
+    var forDawCheckHold: (@Sendable (ForDawRequestRow) -> DispatchSemaphore?)?
+    var forDawCheckReply: (@Sendable (ForDawRequestRow) -> ForDawCheckRow)?
+    func exportForDawCheck(req: ForDawRequestRow) throws -> ForDawCheckRow {
+        interchangeLock.lock()
+        forDawChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        forDawCheckHold?(req)?.wait()
+        if let reply = forDawCheckReply { return reply(req) }
+        return try forDawCheckAnswer.get()
+    }
+    /// DAWproject exports (plan 6d Task 9): what they were called with
+    /// (job IDs from 10 001), what the check answers and the names asked.
+    var dawprojectExports: [DawprojectExportRequestRow] = []
+    var dawprojectChecks: [DawprojectExportRequestRow] = []
+    var dawprojectCheckAnswer: Result<ReportRow, VizError> = .success(
+        ReportRow(summary: "Exported nothing", items: []))
+    var dawprojectNames: [UInt64] = []
+    var dawprojectNameAnswer = "Song.dawproject"
+    func exportDawproject(req: DawprojectExportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        dawprojectExports.append(req)
+        return interchangeJob(.exportDawproject, 10000, dawprojectExports.count)
+    }
+    /// Holds a DAWproject check until released; answers it per request
+    /// (plan 6d Task 12).
+    var dawprojectCheckHold: (@Sendable (DawprojectExportRequestRow) -> DispatchSemaphore?)?
+    var dawprojectCheckReply: (@Sendable (DawprojectExportRequestRow) -> ReportRow)?
+    func exportDawprojectCheck(req: DawprojectExportRequestRow) throws -> ReportRow {
+        interchangeLock.lock()
+        dawprojectChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        dawprojectCheckHold?(req)?.wait()
+        if let reply = dawprojectCheckReply { return reply(req) }
+        return try dawprojectCheckAnswer.get()
+    }
+    func dawprojectName(seq: UInt64) throws -> String {
+        if let e = interchangeError { throw e }
+        dawprojectNames.append(seq)
+        return dawprojectNameAnswer
+    }
+    /// DAWproject imports (plan 6d Task 10): what they were called with
+    /// (job IDs from 11 001). The info read is the free function
+    /// `dawprojectInfo(path:)`; this stand-in for it logs the paths it was
+    /// asked (and whether on the main thread) and gives a settable answer.
+    var dawprojectImports: [DawprojectImportRequestRow] = []
+    var dawprojectInfoPaths: [String] = []
+    var dawprojectInfoAnswer: Result<DawprojectInfoRow, VizError> = .success(
+        DawprojectInfoRow(sampleRate: 48_000, tracks: 0, audioFiles: 0, fromVizdaw: false, exportId: nil))
+    func importDawproject(req: DawprojectImportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        dawprojectImports.append(req)
+        return interchangeJob(.importProject, 11000, dawprojectImports.count)
+    }
+    /// DAWproject merges (plan 6e Task 8): what each method was called
+    /// with (merge job IDs from 12 001), with settable answers.
+    var dawprojectMerges: [DawprojectMergeRequestRow] = []
+    var mergeError: VizError?
+    var confirmedMerges: [UInt64] = []
+    var confirmMergeAnswer: Result<ReportRow, VizError> = .success(
+        ReportRow(summary: "Merged: 0 applied, 0 kept, 0 added, 0 removed, 0 in conflict", items: []))
+    var cancelledMerges: [UInt64] = []
+    var cancelMergeError: VizError?
+    var snapshotCalls = 0
+    var snapshotsAnswer: Result<[SnapshotRow], VizError> = .success([])
+    var projectIdCalls = 0
+    var projectIdAnswer: String?
+    var hasSnapshotAsked: [String] = []
+    var hasSnapshotAnswer: (@Sendable (String) -> Bool) = { _ in false }
+    func mergeDawproject(req: DawprojectMergeRequestRow) throws -> UInt64 {
+        if let e = mergeError { throw e }
+        try interchangeIdle()
+        dawprojectMerges.append(req)
+        return interchangeJob(.mergeDawproject, 12000, dawprojectMerges.count)
+    }
+    func confirmMerge(job: UInt64) throws -> ReportRow {
+        interchangeLock.lock()
+        confirmedMerges.append(job)
+        interchangeLock.unlock()
+        return try confirmMergeAnswer.get()
+    }
+    func cancelMerge(job: UInt64) throws {
+        interchangeLock.lock()
+        cancelledMerges.append(job)
+        interchangeLock.unlock()
+        if let e = cancelMergeError { throw e }
+    }
+    /// What `saveAsRefusal` answers (the core's sentence while a merge is
+    /// held; plan 6e Task 10 fix round 1).
+    var saveAsRefusalAnswer: String?
+    func saveAsRefusal() throws -> String? { saveAsRefusalAnswer }
+    /// Holds `dawprojectSnapshots` until released (plan 6e Task 10).
+    var snapshotsHold: DispatchSemaphore?
+    func dawprojectSnapshots() throws -> [SnapshotRow] {
+        interchangeLock.lock()
+        snapshotCalls += 1
+        checkOnMain.append(Thread.isMainThread)
+        let hold = snapshotsHold
+        interchangeLock.unlock()
+        hold?.wait()
+        return try snapshotsAnswer.get()
+    }
+    func projectId() throws -> String? {
+        interchangeLock.lock()
+        projectIdCalls += 1
+        interchangeLock.unlock()
+        return projectIdAnswer
+    }
+    func hasSnapshot(exportId: String) throws -> Bool {
+        interchangeLock.lock()
+        hasSnapshotAsked.append(exportId)
+        interchangeLock.unlock()
+        return hasSnapshotAnswer(exportId)
+    }
+    func dawprojectInfo(path: String) throws -> DawprojectInfoRow {
+        interchangeLock.lock()
+        dawprojectInfoPaths.append(path)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return try dawprojectInfoAnswer.get()
+    }
+    /// AAF exports and imports (plan 6f Task 5): what each method was
+    /// called with (export job IDs from 13 001, import job IDs from
+    /// 14 001), with settable answers. The info read is the free function
+    /// `aafInfo(path:)`; this stand-in logs the paths it was asked (and
+    /// whether on the main thread) and gives a settable answer.
+    var aafExports: [AafExportRequestRow] = []
+    var aafChecks: [AafExportRequestRow] = []
+    var aafCheckAnswer: Result<ReportRow, VizError> = .success(
+        ReportRow(summary: "Exported nothing", items: []))
+    var aafFolderNames: [UInt64] = []
+    var aafFolderNameAnswer = "Song AAF"
+    var aafImports: [AafImportRequestRow] = []
+    var aafInfoPaths: [String] = []
+    var aafInfoAnswer: Result<AafInfoRow, VizError> = .success(
+        AafInfoRow(sampleRate: 48_000, tracks: 0, audioFiles: 0, offline: 0, fromVizdaw: false, midiBeside: nil))
+    func aafFolderName(seq: UInt64) throws -> String {
+        if let e = interchangeError { throw e }
+        aafFolderNames.append(seq)
+        return aafFolderNameAnswer
+    }
+    /// Holds an AAF check until released; answers it per request (plan 6f
+    /// Task 8).
+    var aafCheckHold: (@Sendable (AafExportRequestRow) -> DispatchSemaphore?)?
+    var aafCheckReply: (@Sendable (AafExportRequestRow) -> ReportRow)?
+    func exportAafCheck(req: AafExportRequestRow) throws -> ReportRow {
+        interchangeLock.lock()
+        aafChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        let hold = aafCheckHold
+        let reply = aafCheckReply
+        interchangeLock.unlock()
+        hold?(req)?.wait()
+        if let reply { return reply(req) }
+        return try aafCheckAnswer.get()
+    }
+    func exportAaf(req: AafExportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        aafExports.append(req)
+        return interchangeJob(.exportAaf, 13000, aafExports.count)
+    }
+    func importAaf(req: AafImportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        aafImports.append(req)
+        return interchangeJob(.importAaf, 14000, aafImports.count)
+    }
+    func aafInfo(path: String) throws -> AafInfoRow {
+        interchangeLock.lock()
+        aafInfoPaths.append(path)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return try aafInfoAnswer.get()
+    }
+    func interchangeReport() throws -> ReportRow? {
+        interchangeReportCalls += 1
+        if let e = interchangeError { throw e }
+        return lastReport
+    }
+    func songInfo() throws -> SongInfoRow {
+        if let e = interchangeError { throw e }
+        return song
+    }
+    func setSongInfo(info: SongInfoRow) throws -> DocSnapshot {
+        if let e = interchangeError { throw e }
+        songInfoSets.append(info)
+        song = info
+        return commandResult()
+    }
 
     // MARK: External sample editor (plan 5f-3)
 
@@ -730,7 +1044,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         jobRows[id] = JobRow(id: id, kind: .format, progress: 1, state: .done, message: nil, problems: [], created: [])
         return id
     }
+    /// Thrown by `convertMedia` when set (a held merge's Busy, plan 6e Task 10).
+    var mediaJobError: VizError?
     func convertMedia() throws -> UInt64 {
+        if let e = mediaJobError { throw e }
         conversions += 1
         info.mismatched = 0
         let id = UInt64(2000 + conversions)

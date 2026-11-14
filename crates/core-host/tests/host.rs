@@ -337,6 +337,13 @@ struct Script {
     /// Events the instance reports from the main thread (as AU listeners
     /// do) at the next `gestures()`.
     ui: Mutex<VecDeque<ParamEvent>>,
+    /// Every `set_params` call, in order.
+    sets: Mutex<Vec<Vec<(ParamId, f64)>>>,
+    /// Whether it names its parameters for a refresh, as the bundled
+    /// Multi-Q does.
+    refresh: AtomicBool,
+    /// Every value its processors received, in order.
+    received: Mutex<Vec<(ParamId, f64)>>,
 }
 
 impl Script {
@@ -428,6 +435,7 @@ impl AudioProcessor for FakeProcessor {
             let mut held = self.script.held.lock().unwrap();
             for c in ctx.params_in {
                 held.insert(c.id, c.value);
+                self.script.received.lock().unwrap().push((c.id, c.value));
             }
         }
         // The user moves the plugin's own controls.
@@ -483,6 +491,7 @@ impl PluginInstance for FakeInstance {
         Ok(())
     }
     fn set_params(&mut self, values: &[(ParamId, f64)]) -> Result<(), HostError> {
+        self.script.sets.lock().unwrap().push(values.to_vec());
         let mut held = self.script.held.lock().unwrap();
         for (k, v) in values {
             held.insert(*k, *v);
@@ -491,6 +500,13 @@ impl PluginInstance for FakeInstance {
     }
     fn param_value(&mut self, id: ParamId) -> Option<f64> {
         self.script.held.lock().unwrap().get(&id).copied()
+    }
+    fn values_to_refresh(&self) -> Vec<ParamId> {
+        if self.script.refresh.load(Ordering::Relaxed) {
+            vec![GAIN, OTHER]
+        } else {
+            Vec::new()
+        }
     }
     fn editor(&mut self) -> Option<&mut dyn PluginEditor> {
         None
@@ -756,6 +772,109 @@ fn an_undo_past_the_first_capture_restores_the_loaded_values() {
     drop(engine);
 }
 
+/// Plan 6e Ruling 10: an undoable `SetPluginState` reaches the running
+/// plugin on `sync`, and so does its undo.
+#[test]
+fn sync_loads_a_changed_state_and_the_undone_one() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    hist.capture_state(id, b"0=0.25;").unwrap();
+    host.sync(hist.doc());
+    assert_eq!(script.held(GAIN), 0.25);
+    run(
+        &mut hist,
+        MixerCmd::SetPluginState {
+            slot: id,
+            bytes: Arc::from(&b"0=0.75;"[..]),
+        },
+    );
+    host.sync(hist.doc());
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.75);
+    hist.undo().unwrap();
+    host.sync(hist.doc());
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.25, "the undone state is loaded again");
+    drop(engine);
+}
+
+/// Task 3 fix round 1: a document whose blob keeps its ID but holds other
+/// bytes (a hash collision, made here by editing a saved package's blob
+/// file) is loaded again; the host does not skip it on the ID alone.
+#[test]
+fn sync_reloads_a_state_whose_id_is_the_same_but_bytes_differ() {
+    use core_model::state::{blob_file_name, blob_id};
+    let (mut hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    hist.capture_state(id, b"0=0.25;").unwrap();
+    host.sync(hist.doc());
+    assert_eq!(script.held(GAIN), 0.25);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let pkg = std::env::temp_dir().join(format!(
+        "vizdaw-host-collide-{}-{nanos}.vizdaw",
+        std::process::id()
+    ));
+    core_model::file::save(hist.doc(), &pkg).unwrap();
+    let a = blob_id(b"0=0.25;");
+    std::fs::write(pkg.join("PluginState").join(blob_file_name(a)), b"0=0.75;").unwrap();
+    let tampered = core_model::file::load(&pkg);
+    let _ = std::fs::remove_dir_all(&pkg);
+    let tampered = tampered.unwrap();
+    assert_eq!(tampered.plugin_slot(id).unwrap().state, Some(a));
+    host.sync(&tampered);
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.75, "same ID, other bytes: reloaded");
+    // Back to the first document: reloaded again.
+    host.sync(hist.doc());
+    assert_eq!(script.held(GAIN), 0.25);
+    drop(engine);
+}
+
+/// Task 3 re-review: a document with the same state under another copy
+/// (here a save and load of it) is not loaded again, and the host keeps
+/// the new copy, so the next sync is a pointer test, not a byte compare.
+#[test]
+fn equal_state_bytes_in_another_copy_are_not_reloaded_and_the_copy_is_kept() {
+    use core_model::state::blob_id;
+    let (mut hist, song, id, mut host, script) = with_fake();
+    let (mut engine, _be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    hist.capture_state(id, b"0=0.25;").unwrap();
+    host.sync(hist.doc());
+    assert_eq!(script.held(GAIN), 0.25);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let pkg = std::env::temp_dir().join(format!(
+        "vizdaw-host-copy-{}-{nanos}.vizdaw",
+        std::process::id()
+    ));
+    core_model::file::save(hist.doc(), &pkg).unwrap();
+    let copy = core_model::file::load(&pkg);
+    let _ = std::fs::remove_dir_all(&pkg);
+    let copy = copy.unwrap();
+    let a = blob_id(b"0=0.25;");
+    let theirs = copy.state_arc(a).unwrap();
+    let ours = hist.doc().state_arc(a).unwrap();
+    assert!(
+        !Arc::ptr_eq(&theirs, &ours),
+        "another copy of the same bytes"
+    );
+    // The plugin's own value moves; a reload would put 0.25 back.
+    script.held.lock().unwrap().insert(GAIN, 0.5);
+    host.sync(&copy);
+    assert_eq!(script.held(GAIN), 0.5, "equal bytes: not reloaded");
+    let applied = host.applied_state_bytes(id).unwrap();
+    assert!(Arc::ptr_eq(&applied, &theirs), "the copy is kept");
+    drop(engine);
+}
+
 #[test]
 fn unpaired_gesture_events_still_become_gestures() {
     let (hist, song, id, mut host, script) = with_fake();
@@ -973,6 +1092,103 @@ fn a_restart_in_the_middle_of_a_gesture_does_not_lose_it() {
     let r = tick(&mut host, &mut engine, &mut be, &hist, song);
     let values: Vec<_> = r.gestures.iter().map(|g| g.values.clone()).collect();
     assert_eq!(values, vec![vec![(GAIN, 0.9)]]);
+    drop(engine);
+}
+
+/// Plan 6g Task 5 fix I2: before an instance is activated a second time
+/// (a restart or a new configuration), each continuous parameter is set a
+/// step away and back to its value in one call, so a plug-in that rebuilds
+/// its filters only on a change (the bundled EQ's pass filters) does not
+/// play flat; the values it holds are kept.
+#[test]
+fn a_reactivated_instance_gets_its_values_set_again() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    script.refresh.store(true, Ordering::Relaxed);
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: id,
+            params: vec![(GAIN, 0.3)],
+        },
+    );
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.3);
+    let before = script.sets.lock().unwrap().len();
+    script.restart.store(true, Ordering::Relaxed);
+    let mut reloaded = false;
+    for _ in 0..500 {
+        let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+        if r.compiled.is_some_and(|c| c.graph.placeholders.is_empty()) && r.restart.is_empty() {
+            reloaded = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(reloaded, "restarted and loaded again");
+    let sets = script.sets.lock().unwrap().clone();
+    assert_eq!(sets.len(), before + 1, "{sets:?}");
+    let last = sets.last().unwrap();
+    assert_eq!(last.len(), 4, "{last:?}");
+    assert!(
+        (last[0].1 - 0.31).abs() < 1e-9 && last[0].0 == GAIN,
+        "{last:?}"
+    );
+    assert!(
+        (last[1].1 - 0.01).abs() < 1e-9 && last[1].0 == OTHER,
+        "{last:?}"
+    );
+    assert_eq!(&last[2..], &[(GAIN, 0.3), (OTHER, 0.0)]);
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.3, "the overlay value is kept");
+    drop(engine);
+}
+
+/// Plan 6g Task 5, fix round 2: a plug-in that names no parameters to
+/// refresh (every one but the bundled Multi-Q) gets no nudge, and its
+/// overlay is sent to the new processor as before.
+#[test]
+fn other_plugins_get_no_refresh_and_their_overlay_again() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: id,
+            params: vec![(GAIN, 0.3)],
+        },
+    );
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.3);
+    let sets_before = script.sets.lock().unwrap().len();
+    script.received.lock().unwrap().clear();
+    script.restart.store(true, Ordering::Relaxed);
+    let mut reloaded = false;
+    for _ in 0..500 {
+        let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+        if r.compiled.is_some_and(|c| c.graph.placeholders.is_empty()) && r.restart.is_empty() {
+            reloaded = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(reloaded, "restarted and loaded again");
+    peak(&mut be, 512);
+    assert_eq!(
+        script.sets.lock().unwrap().len(),
+        sets_before,
+        "no nudge: nothing set while inactive"
+    );
+    assert!(
+        script.received.lock().unwrap().contains(&(GAIN, 0.3)),
+        "the overlay reaches the new processor: {:?}",
+        script.received.lock().unwrap()
+    );
+    assert_eq!(script.held(GAIN), 0.3);
     drop(engine);
 }
 

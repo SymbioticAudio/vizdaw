@@ -37,7 +37,7 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
         observe()
     }
 
-    // MARK: Dropping audio files (spec §10.2; plan 5b Ruling 8)
+    // MARK: Dropping audio and MIDI files (spec §10.2; plan 5b Ruling 8; plan 6a Ruling 12)
 
     public override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         model.seq != nil && !AudioDrop.paths(sender.draggingPasteboard).isEmpty ? .copy : []
@@ -52,13 +52,14 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
     }
 
     /// Imports `paths` dropped at `p`: into the lane of the region under
-    /// it, else the piano roll's edit lane (new lanes without one).
+    /// it, else the piano roll's edit lane (new lanes without one); MIDI
+    /// files through the MIDI import (plan 6a Ruling 12).
     @discardableResult
     func drop(_ paths: [String], at p: CGPoint) -> Bool {
         guard !paths.isEmpty, let seq = model.seq else { return false }
         let lane = RegionStripLayout.dropLane(p, lines: lines(), time: timeAxis, side: side) ?? model.editLane
         let tick = AudioDrop.tick(timeAxis.tick(atX: p.x - side), snap: editor.layout.snap, meter: meter)
-        model.document?.importAudio(
+        model.document?.interchange.importDropped(
             paths: paths, target: ImportTargetRow(seq: seq, lane: lane?.seq == seq ? lane?.lane : nil, tick: tick))
         return true
     }
@@ -368,7 +369,7 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
                 guard r.intersects(bounds) else { continue }
                 // Preflight M8: gain and offline, as in the arrangement.
                 let label = RegionA11y.label(
-                    item.row, name: media?.row(item.row.media)?.name ?? "audio",
+                    item.row, name: RegionA11y.name(item.row, mediaName: media?.row(item.row.media)?.name),
                     laneName: model.row(item.lane)?.name ?? "a track", meter: meter,
                     offline: media?.offline(item.row.media) != nil)
                 items.append(

@@ -8,6 +8,8 @@ use crate::error::{ModelError, Result};
 use crate::ids::{AnyId, DestId, PluginInstanceId, StripId};
 use crate::mixer::{AuxSend, Output, ParamId, PluginRef, PluginSlot, Strip, StripKind, Swatch};
 use crate::mixer_rules::{check_routing, check_strip_values};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Mixer edits.
 #[derive(Debug, Clone, PartialEq)]
@@ -165,6 +167,17 @@ pub enum MixerCmd {
         /// The plugin, or none to empty the slot (refused when empty).
         plugin: Option<PluginRef>,
     },
+    /// Set a plug-in instance's saved settings, with undo (plan 6e Ruling 10): the blob
+    /// `state::blob_id(bytes)` is stored, the slot points at it, and its parameter overlay is
+    /// cleared. Refused for an unknown slot or empty bytes; placeholder slots are allowed.
+    /// Also refused over `state::MAX_STATE_BYTES`, or when another blob already has that
+    /// ID with other bytes (a hash collision; nothing is overwritten).
+    SetPluginState {
+        /// The instance (an insert, an EQ or an instrument's own slot).
+        slot: PluginInstanceId,
+        /// The plug-in's saved settings (not empty).
+        bytes: Arc<[u8]>,
+    },
     /// Set or clear a strip's own colour (plan 7b Ruling 12).
     SetColour {
         /// The strip.
@@ -202,6 +215,7 @@ impl MixerCmd {
                 plugin: Some(_), ..
             } => "Load EQ",
             MixerCmd::SetEq { plugin: None, .. } => "Remove EQ",
+            MixerCmd::SetPluginState { .. } => "Set Plugin Settings",
             MixerCmd::SetColour { .. } => "Set Strip Colour",
         }
     }
@@ -366,6 +380,16 @@ pub(crate) fn apply(d: &mut Document, cmd: &MixerCmd, r: &mut Report) -> Result<
             if let Some(o) = old {
                 r.removed.push(AnyId::Plugin(o.id));
             }
+        }
+        MixerCmd::SetPluginState { slot, bytes } => {
+            if bytes.is_empty() {
+                return Err(ModelError::invalid("plugin settings are empty"));
+            }
+            let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if len > crate::state::MAX_STATE_BYTES {
+                return Err(ModelError::range("plugin settings bytes", len));
+            }
+            crate::state::store(d, *slot, bytes.clone(), &BTreeMap::new())?;
         }
         MixerCmd::SetColour { strip, colour } => {
             d.mixer_mut().strip_mut(*strip)?.colour = *colour;

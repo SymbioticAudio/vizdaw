@@ -282,6 +282,22 @@ pub const THEME_IDS: &[&str] = &[
 /// The prefix of a user theme's ID (controller ruling R-UT).
 pub const USER_THEME_PREFIX: &str = "user.";
 
+/// `plugins.new_channel_eq`'s parameter (plan 6g Task 4).
+const NEW_CHANNEL_EQ_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "on",
+    kind: ParamKind::Flag,
+    required: true,
+    help: "Put an EQ on new channels (on) or not (off).",
+}];
+
+/// `plugins.install_multiq`'s parameter (plan 6g Task 4).
+const INSTALL_MULTIQ_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "replace",
+    kind: ParamKind::Flag,
+    required: false,
+    help: "Replace a Multi-Q.component already in the Components folder (answers the dialog).",
+}];
+
 /// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
 const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "theme",
@@ -484,6 +500,422 @@ const BOUNCE_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `file.import_midi` (plan 6a Task 8): the Open dialog and the import options.
+const IMPORT_MIDI_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The MIDI file (SMF or MIDI Clip File; answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "new_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Import into a new, empty project instead of this one (default false).",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "lane",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Drop onto this track (default: new tracks at the end).",
+    },
+    ParamSpec {
+        name: "tick",
+        kind: ParamKind::Int {
+            min: -(1 << 40),
+            max: 1 << 40,
+        },
+        required: false,
+        help: "Where the file's start goes (negative is 0; default 0).",
+    },
+    ParamSpec {
+        name: "channel_map",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Where each channel plays: JSON [{\"group\":0,\"channel\":9,\"dest\":3}]; dest null makes a new built-in synth. A pair not listed takes its suggestion.",
+    },
+    ParamSpec {
+        name: "split_channels",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Split tracks by channel (default: type 0 files only).",
+    },
+    ParamSpec {
+        name: "mpe",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Decode every track as MPE (default false).",
+    },
+    ParamSpec {
+        name: "use_tempo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Use the file's tempo and meter (default false; always into a sequence without events).",
+    },
+];
+
+/// `file.export_midi` (plan 6a Task 8): a Standard MIDI File.
+const EXPORT_MIDI_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("mid"),
+        required: false,
+        help: "The .mid file to write (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "type",
+        kind: ParamKind::Choice(&["0", "1"]),
+        required: false,
+        help: "0 (one track) or 1 (default).",
+    },
+    ParamSpec {
+        name: "ppq",
+        kind: ParamKind::Choice(&["480", "960", "15360"]),
+        required: false,
+        help: "Ticks per quarter note: 480, 960 (default) or 15360.",
+    },
+    ParamSpec {
+        name: "lanes",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Track IDs, comma-separated (default: every track; see state.get sequence).",
+    },
+    ParamSpec {
+        name: "mpe",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write per-note expression as MPE (default false).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
+/// `file.export_midi_clip` (plan 6a Task 8): MIDI Clip Files, one per track.
+const EXPORT_MIDI_CLIP_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "A file for one track, an existing folder for several (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "lanes",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Track IDs, comma-separated (default: every track; see state.get sequence).",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: 1 << 40,
+        },
+        required: false,
+        help: "The range's first tick for every track (needs `end`; default: the pickup's start).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: 1 << 40,
+        },
+        required: false,
+        help: "The range's end tick, exclusive (default: the sequence's end).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
+/// `file.import_dawproject` (plan 6d Task 11): a DAWproject file as a new
+/// project, or merged into the project it came from (plan 6e Task 9).
+const IMPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("dawproject"),
+        required: false,
+        help: "The .dawproject file to open as a new project (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(&["new", "merge"]),
+        required: false,
+        help: "new: open the file as a new project; merge: merge it into the project it came from. Needed when the file came from VizDAW.",
+    },
+    ParamSpec {
+        name: "project",
+        kind: ParamKind::Path("vizdaw"),
+        required: false,
+        help: "For merge: the project the file came from, when it is not open (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "snapshot",
+        kind: ParamKind::Text,
+        required: false,
+        help: "For merge: the export the file came from (an export ID), when the file lost its own.",
+    },
+    ParamSpec {
+        name: "preview",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "For merge: return the merge preview and change nothing.",
+    },
+];
+
+/// `file.export_dawproject` (plan 6d Task 11): a DAWproject file.
+const EXPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("dawproject"),
+        required: false,
+        help: "The .dawproject file to write (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "region_gain",
+        kind: ParamKind::Choice(&["apply", "leave_out"]),
+        required: false,
+        help: "apply (default): region gain is applied to the exported audio; leave_out: it is left out.",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Return what won't transfer; write nothing.",
+    },
+];
+
+/// `file.import_aaf` (plan 6f Task 6): an AAF file as a new project, or
+/// added to this one.
+const IMPORT_AAF_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("aaf"),
+        required: false,
+        help: "The .aaf file (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "new_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Open the file as a new project (default true); false adds its tracks to this project, timed by its tempo map. One undo step.",
+    },
+    ParamSpec {
+        name: "midi_path",
+        kind: ParamKind::Path("mid"),
+        required: false,
+        help: "The MIDI file with the tempo map and MIDI tracks (default: the one beside the AAF with its name).",
+    },
+    ParamSpec {
+        name: "media_folder",
+        kind: ParamKind::File,
+        required: false,
+        help: "A folder to look in, by file name, for audio the file cannot find.",
+    },
+    ParamSpec {
+        name: "join_pairs",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Join tracks named as left and right into stereo tracks (default true).",
+    },
+];
+
+/// `file.export_aaf` (plan 6f Task 6): an AAF export folder.
+const EXPORT_AAF_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The folder to put the \"<song> AAF\" folder in (answers the Save dialog; needed unless dry_run). An existing export folder is never replaced: the new one is numbered.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "embed",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Embed the audio in the AAF file (default true); false writes it beside the file.",
+    },
+    ParamSpec {
+        name: "depth",
+        kind: ParamKind::Choice(&["16", "24"]),
+        required: false,
+        help: "The audio's bit depth (default 24).",
+    },
+    ParamSpec {
+        name: "stereo",
+        kind: ParamKind::Choice(&["mono_pairs", "stereo"]),
+        required: false,
+        help: "mono_pairs: a stereo track is two mono tracks; stereo: one stereo track.",
+    },
+    ParamSpec {
+        name: "start_tc",
+        kind: ParamKind::Choice(&["00:00:00:00", "01:00:00:00"]),
+        required: false,
+        help: "The timecode the sequence starts at (default 00:00:00:00).",
+    },
+    ParamSpec {
+        name: "fps",
+        kind: ParamKind::Choice(&["24", "25", "29.97df", "30"]),
+        required: false,
+        help: "The timecode frame rate (default 25).",
+    },
+    ParamSpec {
+        name: "clip_gain",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write clip gain (default true).",
+    },
+    ParamSpec {
+        name: "automation",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write fader and pan automation (default true).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Return what won't transfer; write nothing.",
+    },
+];
+
+/// `file.export_for_daw` (plan 6b Task 3): an export folder for another DAW.
+/// It never replaces anything: an existing folder's name gets " 2".
+const FOR_DAW_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The folder to put the export folder in (answers the Save dialog; needed unless dry_run). An existing export folder is never replaced: the new one is numbered.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "strips",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Strip IDs whose stems are written, comma-separated, or none for MIDI files only (default: the usual strips).",
+    },
+    ParamSpec {
+        name: "container",
+        kind: ParamKind::Choice(&["wav", "aiff", "caf"]),
+        required: false,
+        help: "The stems' file type: wav (default), aiff or caf.",
+    },
+    ParamSpec {
+        name: "depth",
+        kind: ParamKind::Choice(&["16", "24", "32f"]),
+        required: false,
+        help: "The stems' bit depth: 16, 24 or 32f (default: the project's).",
+    },
+    ParamSpec {
+        name: "rate",
+        kind: ParamKind::Int {
+            min: 8000,
+            max: 384000,
+        },
+        required: false,
+        help: "The stems' sample rate in Hz (default: the project's).",
+    },
+    ParamSpec {
+        name: "dither",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Dither the stems (default: on at 16 bits only, off at 24; 32f never dithers, whatever this says).",
+    },
+    ParamSpec {
+        name: "add_to_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Add the stems to this project as heard (default false); one undo step.",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
 /// A media item by ID (plan 5b).
 const MEDIA_ID: ParamSpec = ParamSpec {
     name: "media",
@@ -550,6 +982,50 @@ const fn opt_id_param(name: &'static str, help: &'static str) -> ParamSpec {
         ..id_param(name, help)
     }
 }
+
+/// `region.crossfade` (plan 6c Task 5).
+const CROSSFADE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The later region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    ParamSpec {
+        name: "length_ms",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Milliseconds, more than 0, as text (\"12.5\"); default: the whole overlap, at most Settings > Editing's default crossfade.",
+    },
+    ParamSpec {
+        name: "shape",
+        kind: ParamKind::Choice(&["linear", "equal_power", "exponential", "s_curve"]),
+        required: false,
+        help: "The crossfade's shape (default: equal_power).",
+    },
+];
+
+/// `region.remove_crossfade` (plan 6c Task 5).
+const REMOVE_CROSSFADE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The later region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+];
 
 /// `track.new_*` (plan tracks Ruling 5).
 const NEW_TRACK_PARAMS: &[ParamSpec] = &[
@@ -1061,6 +1537,121 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.bounce", "File", "Bounce…", None, true)
     },
     CommandSpec {
+        params: IMPORT_MIDI_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.import_midi", "File", "Import MIDI File…", None, true)
+    },
+    CommandSpec {
+        params: EXPORT_MIDI_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_midi", "File", "MIDI File…", None, true)
+    },
+    CommandSpec {
+        params: EXPORT_MIDI_CLIP_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd(
+            "file.export_midi_clip",
+            "File",
+            "MIDI Clip File…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        params: FOR_DAW_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd(
+            "file.export_for_daw",
+            "File",
+            "For Another DAW…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        params: IMPORT_DAWPROJECT_PARAMS,
+        dialogs: &[
+            DialogSpec {
+                name: "Open",
+                when: "always",
+                always: true,
+                answered_by: &["path"],
+            },
+            DialogSpec {
+                name: "Return",
+                when: "the file came from VizDAW and no mode",
+                always: false,
+                answered_by: &["mode"],
+            },
+            DialogSpec {
+                name: "Open",
+                when: "merge with no matching open project",
+                always: false,
+                answered_by: &["project"],
+            },
+        ],
+        ..cmd("file.import_dawproject", "File", "DAWproject…", None, true)
+    },
+    CommandSpec {
+        params: EXPORT_DAWPROJECT_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_dawproject", "File", "DAWproject…", None, true)
+    },
+    CommandSpec {
+        params: IMPORT_AAF_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.import_aaf", "File", "AAF…", None, true)
+    },
+    CommandSpec {
+        params: EXPORT_AAF_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_aaf", "File", "AAF…", None, true)
+    },
+    CommandSpec {
+        ..cmd(
+            "file.interchange_report",
+            "File",
+            "Last Import or Export Report…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
         menu_item: false,
         ..cmd(
             "media.convert",
@@ -1320,6 +1911,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         true,
     ),
     cmd("region.remove_fades", "Region", "Remove Fades", None, true),
+    CommandSpec {
+        params: CROSSFADE_PARAMS,
+        ..cmd("region.crossfade", "Region", "Crossfade", None, true)
+    },
+    CommandSpec {
+        params: REMOVE_CROSSFADE_PARAMS,
+        ..cmd(
+            "region.remove_crossfade",
+            "Region",
+            "Remove Crossfade",
+            None,
+            true,
+        )
+    },
     CommandSpec {
         params: EXTERNAL_PARAMS,
         dialogs: &[DialogSpec {
@@ -1808,6 +2413,32 @@ pub const COMMANDS: &[CommandSpec] = &[
             answered_by: &["name"],
         }],
         ..cmd("track.rename", "Track", "Rename Track", None, true)
+    },
+    CommandSpec {
+        params: NEW_CHANNEL_EQ_PARAMS,
+        ..key_only(cmd(
+            "plugins.new_channel_eq",
+            "Settings",
+            "Put an EQ on New Channels",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        params: INSTALL_MULTIQ_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Replace",
+            when: "a Multi-Q.component is already in the Components folder",
+            always: false,
+            answered_by: &["replace"],
+        }],
+        ..key_only(cmd(
+            "plugins.install_multiq",
+            "Settings",
+            "Install Multi-Q for Other Apps",
+            None,
+            false,
+        ))
     },
 ];
 

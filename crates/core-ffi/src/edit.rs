@@ -6,12 +6,13 @@
 
 use crate::error::VizError;
 use crate::events::{
-    EventKindRow, EventRow, FadeRow, GroupChannel, MarkerRow, MeterEntryRow, PerNoteKindRow,
-    PerNoteValueRow, TempoPointRow, bad, fade_of, kind_of, loops, per_note_kind, spec,
+    EventKindRow, EventRow, FadeRow, FadeShapeRow, GroupChannel, MarkerRow, MeterEntryRow,
+    PerNoteKindRow, PerNoteValueRow, TempoPointRow, bad, fade_of, kind_of, loops, per_note_kind,
+    shape_of, spec,
 };
 use crate::snapshot::KeySlotRow;
 use core_model::command::{
-    AudioCmd, Command, EventCmd, FadeEdge, LaneCmd, ReferenceCmd, SequenceCmd,
+    AudioCmd, Command, CrossfadeLength, EventCmd, FadeEdge, LaneCmd, ReferenceCmd, SequenceCmd,
 };
 use core_model::ids::{DestId, EventId, LaneId, MediaId, OutputPathId, SeqId, TakeId};
 use core_model::lane::QuantizeSpec;
@@ -767,6 +768,13 @@ pub enum AudioEdit {
         /// Split position.
         at: i64,
     },
+    /// Rename a region (`None` or empty clears the name).
+    SetName {
+        /// The region.
+        event: u64,
+        /// The new name.
+        name: Option<String>,
+    },
     /// Set gain.
     SetGain {
         /// The region.
@@ -798,6 +806,37 @@ pub enum AudioEdit {
     RemoveFades {
         /// The events.
         events: Vec<u64>,
+    },
+    /// Make the region's fade in a crossfade with the region it starts
+    /// inside (plan 6c).
+    Crossfade {
+        /// The later region.
+        event: u64,
+        /// The length.
+        length: CrossfadeLengthRow,
+        /// The shape.
+        shape: FadeShapeRow,
+    },
+    /// Clear a region's crossfade flag; its fade in stays as a plain one.
+    RemoveCrossfade {
+        /// The later region.
+        event: u64,
+    },
+}
+
+/// How long an [`AudioEdit::Crossfade`] is (mirrors
+/// `core_model::command::CrossfadeLength`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CrossfadeLengthRow {
+    /// Exactly this many frames, which must fit.
+    Frames {
+        /// Frames.
+        frames: u64,
+    },
+    /// This many frames, or the room if that is less.
+    UpTo {
+        /// Frames.
+        frames: u64,
     },
 }
 
@@ -1259,6 +1298,10 @@ fn audio_cmd(e: &AudioEdit) -> AudioCmd {
             event: EventId(*event),
             at: Tick(*at),
         },
+        AudioEdit::SetName { event, name } => AudioCmd::SetName {
+            event: EventId(*event),
+            name: name.clone(),
+        },
         AudioEdit::SetGain { event, gain_db } => AudioCmd::SetGain {
             event: EventId(*event),
             gain_db: *gain_db,
@@ -1287,6 +1330,21 @@ fn audio_cmd(e: &AudioEdit) -> AudioCmd {
         },
         AudioEdit::RemoveFades { events } => AudioCmd::RemoveFades {
             events: ids(events),
+        },
+        AudioEdit::Crossfade {
+            event,
+            length,
+            shape,
+        } => AudioCmd::Crossfade {
+            event: EventId(*event),
+            length: match length {
+                CrossfadeLengthRow::Frames { frames } => CrossfadeLength::Frames(*frames),
+                CrossfadeLengthRow::UpTo { frames } => CrossfadeLength::UpTo(*frames),
+            },
+            shape: shape_of(*shape),
+        },
+        AudioEdit::RemoveCrossfade { event } => AudioCmd::RemoveCrossfade {
+            event: EventId(*event),
         },
     }
 }

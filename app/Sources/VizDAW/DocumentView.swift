@@ -14,6 +14,20 @@ struct DocumentView: View {
     var body: some View {
         DocumentShell(model: model, docID: docID)
             .navigationTitle(model.windowTitle)
+            .modifier(DocumentSheets(model: model, docID: docID))
+            .modifier(InterchangeSheets(model: model, docID: docID))
+            .modifier(DocumentAlerts(model: model))
+    }
+}
+
+/// The document's sheets, apart from `DocumentView.body` so the type
+/// checker can handle the chain (one `.sheet` per sheet).
+private struct DocumentSheets: ViewModifier {
+    @Bindable var model: DocumentModel
+    let docID: UUID
+
+    func body(content: Content) -> some View {
+        content
             .sheet(
                 item: Binding(
                     get: { model.editor.referenceDraft }, set: { model.editor.referenceDraft = $0 })
@@ -34,6 +48,30 @@ struct DocumentView: View {
                 BounceSheet(bounce: model.bounce)
             }
             .sheet(
+                isPresented: Binding(
+                    get: { model.forDaw.shown && !ControlChannel.active }, set: { model.forDaw.shown = $0 })
+            ) {
+                ForDawSheet(forDaw: model.forDaw, document: model)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.dawproject.shown && !ControlChannel.active }, set: { model.dawproject.shown = $0 })
+            ) {
+                DawprojectSheet(dawproject: model.dawproject, document: model)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.aaf.exportShown && !ControlChannel.active }, set: { model.aaf.exportShown = $0 })
+            ) {
+                AafExportSheet(aaf: model.aaf, document: model)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.aaf.importShown && !ControlChannel.active }, set: { model.aaf.importShown = $0 })
+            ) {
+                AafImportSheet(aaf: model.aaf)
+            }
+            .sheet(
                 item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
             ) { _ in
                 TrackSynthSheet(
@@ -45,6 +83,68 @@ struct DocumentView: View {
             ) { _ in
                 NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
             }
+    }
+}
+
+/// The MIDI and project sheets (plan 6a), split from `DocumentSheets` to
+/// keep each chain short for the type checker.
+private struct InterchangeSheets: ViewModifier {
+    @Bindable var model: DocumentModel
+    let docID: UUID
+
+    func body(content: Content) -> some View {
+        content
+            // The MIDI sheets and the report open only for what the user
+            // started here, never under the control channel (plan 6a).
+            .sheet(
+                isPresented: Binding(
+                    get: { model.interchange.importShown && !ControlChannel.active },
+                    set: { model.interchange.importShown = $0 })
+            ) {
+                MidiImportSheet(interchange: model.interchange, destinations: appStore.mixer(docID)?.destinations ?? [])
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.interchange.exportShown && !ControlChannel.active },
+                    set: { model.interchange.exportShown = $0 })
+            ) {
+                MidiExportSheet(interchange: model.interchange, document: model)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.interchange.reportShown && !ControlChannel.active },
+                    set: { model.interchange.reportShown = $0 })
+            ) {
+                ReportSheet(interchange: model.interchange)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.projectSettings.shown && !ControlChannel.active },
+                    set: { model.projectSettings.shown = $0 })
+            ) {
+                ProjectSettingsSheet(settings: model.projectSettings, editor: model.editor)
+            }
+            // The return prompt's second page (plan 6e Task 11), as the
+            // DAWproject sheet: only for what the user opened, never under
+            // the control channel. It waits while another sheet is up
+            // (`MergeModel.presented`), so a queued merge is never
+            // cancelled by a sheet SwiftUI did not show.
+            .sheet(
+                isPresented: Binding(
+                    get: { model.merge.presented && !ControlChannel.active },
+                    set: { model.merge.setPresented($0, channelActive: ControlChannel.active) })
+            ) {
+                MergeSheet(merge: model.merge)
+            }
+    }
+}
+
+/// The document's alerts (recovered recordings and the document alert).
+private struct DocumentAlerts: ViewModifier {
+    @Bindable var model: DocumentModel
+
+    func body(content: Content) -> some View {
+        content
             .alert(
                 "Recovered Recordings",
                 isPresented: Binding(
@@ -70,7 +170,7 @@ struct DocumentView: View {
             } message: { item in
                 Text(item.message)
             }
-        }
+    }
 }
 
 /// The transport bar along the top of the window (plan 7a Ruling 9): an

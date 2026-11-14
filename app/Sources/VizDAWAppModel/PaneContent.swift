@@ -83,7 +83,7 @@ extension DocumentModel {
     public func inspectorRows(destinations: [DestRow], strips: [StripRow]) -> [InspectorRow] {
         let region = inspectorRegion
         return Inspector.rows(
-            lane: focusLanes().first, region: region, regionName: media.row(region?.media)?.name,
+            lane: focusLanes().first, region: region, regionName: region?.regionName.flatMap { $0.isEmpty ? nil : $0 } ?? media.row(region?.media)?.name,
             destinations: destinations, strips: strips,
             sampleRate: Double(fileRate(of: editedRegion?.media) ?? projectInfo?.format.sampleRate ?? 0))
     }
@@ -121,12 +121,18 @@ public struct EditedRegion: Equatable, Sendable {
 }
 
 public struct InspectorRow: Equatable, Sendable {
+    /// What the row shows: text, or the region's name, which can be typed
+    /// (plan 6a Task 10).
+    public enum Kind: Equatable, Sendable { case text, regionName }
+
     public let label: String
     public let value: String
+    public let kind: Kind
 
-    public init(label: String, value: String) {
+    public init(label: String, value: String, kind: Kind = .text) {
         self.label = label
         self.value = value
+        self.kind = kind
     }
 }
 
@@ -159,13 +165,21 @@ public enum Inspector {
         }
         if let region {
             out += [
-                InspectorRow(label: "Region", value: regionName ?? "Region"),
+                InspectorRow(label: "Region", value: regionName ?? "Region", kind: .regionName),
                 InspectorRow(label: "Gain", value: String(format: "%.1f dB", region.gainDb)),
-                InspectorRow(label: "Fade In", value: fadeText(region.fadeIn.length, sampleRate)),
+                region.crossfade
+                    ? InspectorRow(label: "Crossfade", value: crossfadeText(region.fadeIn, sampleRate))
+                    : InspectorRow(label: "Fade In", value: fadeText(region.fadeIn.length, sampleRate)),
                 InspectorRow(label: "Fade Out", value: fadeText(region.fadeOut.length, sampleRate)),
             ]
         }
         return out
+    }
+
+    /// A crossfade's length and shape: "10 ms, Equal Power" (plan 6c).
+    private static func crossfadeText(_ fade: FadeRow, _ rate: Double) -> String {
+        let shape = RegionCommands.fadeShapes.first { $0.0 == fade.shape }?.1 ?? "Linear"
+        return "\(fadeText(fade.length, rate)), \(shape)"
     }
 
     private static func fadeText(_ frames: Int64, _ rate: Double) -> String {

@@ -1,6 +1,7 @@
 import AppKit
 import Observation
 import SwiftUI
+import UniformTypeIdentifiers
 import VizDAWAppModel
 import VizDAWCore
 
@@ -65,6 +66,23 @@ struct AppCommands: Commands {
                 }
                 .keyboardShortcut(KeyMenu.shortcut("media.import"))
                 .disabled(doc == nil)
+                Button(keyBindings.row(InterchangeCommands.importMidi)?.title ?? "Import MIDI File…") {
+                    if let doc, let path = Panels.chooseMidi() { doc.interchange.beginImport(path: path) }
+                }
+                .disabled(doc == nil)
+                // A DAWproject file always opens as a new project (plan 6d
+                // Ruling 17), so it needs no open document.
+                Menu("Import Project") {
+                    Button(keyBindings.row(InterchangeCommands.importDawproject)?.title ?? "DAWproject…") {
+                        if let path = Panels.chooseDawprojectToOpen() { store.openDawproject(path) }
+                    }
+                    // With a project open the sheet asks where it goes;
+                    // without one it opens as a new project (plan 6f).
+                    Button(keyBindings.row(InterchangeCommands.importAaf)?.title ?? "AAF…") {
+                        guard let path = Panels.chooseAafToOpen() else { return }
+                        if let doc { doc.aaf.choose(path: path) } else { store.openAaf(path) }
+                    }
+                }
                 Button("Create Demo Project") { show(store.newDemo()) }
                 Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
             }
@@ -78,13 +96,41 @@ struct AppCommands: Commands {
                     .keyboardShortcut(KeyMenu.shortcut("file.save_as"))
                     .disabled(doc == nil)
                 Divider()
-                Button("Project Settings…") { projectSettings() }
+                Button("Project Settings…") { doc?.projectSettings.show() }
                     .disabled(doc == nil)
                 Button("Bounce…") { doc?.bounce.shown = true }
                     .disabled(doc == nil)
+                // Each opens its options sheet; the sheet's Export asks where
+                // (plan 6a Ruling 18).
+                Menu("Export") {
+                    // The most complete export comes first (plan 6d).
+                    Button(keyBindings.row(InterchangeCommands.exportDawproject)?.title ?? "DAWproject…") {
+                        doc?.dawproject.shown = true
+                    }
+                    .help("Most complete: tracks, mix, plug-ins, automation")
+                    Button(keyBindings.row(InterchangeCommands.exportAaf)?.title ?? "AAF…") {
+                        doc?.aaf.exportShown = true
+                    }
+                    .help("Audio, fades and volume; MIDI as MIDI files beside it")
+                    Button(keyBindings.row(InterchangeCommands.exportMidi)?.title ?? "MIDI File…") {
+                        doc?.interchange.showExport(.smf)
+                    }
+                    Button(keyBindings.row(InterchangeCommands.exportClip)?.title ?? "MIDI Clip File…") {
+                        doc?.interchange.showExport(.clip)
+                    }
+                    Button(keyBindings.row(InterchangeCommands.exportForDaw)?.title ?? "For Another DAW…") {
+                        doc?.forDaw.shown = true
+                    }
+                }
+                .disabled(doc == nil)
+                Button(keyBindings.row(InterchangeCommands.report)?.title ?? "Last Import or Export Report…") {
+                    doc?.interchange.showLastReport()
+                }
+                .disabled(doc?.interchange.report == nil)
                 Button("Relink Media…") { doc?.media.relinkShown = true }
                     .keyboardShortcut(KeyMenu.shortcut("media.relink"))
-                    .disabled(doc?.media.relinkable.isEmpty ?? true)
+                    // A held merge holds Relink back (plan 6e Task 11).
+                    .disabled((doc?.media.relinkable.isEmpty ?? true) || (doc?.mergeHeld ?? false))
             }
             CommandGroup(replacing: .undoRedo) {
                 Button(doc?.undoTitle ?? "Undo") { doc?.undo() }
@@ -204,6 +250,19 @@ struct AppCommands: Commands {
             commandItem(RegionCommands.fadeIn, RegionCommands.self)
             commandItem(RegionCommands.fadeOut, RegionCommands.self)
             commandItem(RegionCommands.removeFades, RegionCommands.self)
+            Button(keyBindings.row(RegionCommands.crossfade)?.title ?? "Crossfade") {
+                if let doc {
+                    report(
+                        RegionCommands.crossfade(doc, defaultMs: AppControlHost.shared.crossfadeMs), doc)
+                }
+            }
+            .keyboardShortcut(KeyMenu.shortcut(RegionCommands.crossfade))
+            .disabled(doc.map { !RegionCommands.enabled(RegionCommands.crossfade, $0) } ?? true)
+            Button(keyBindings.row(RegionCommands.removeCrossfade)?.title ?? "Remove Crossfade") {
+                if let doc { report(RegionCommands.removeCrossfade(doc), doc) }
+            }
+            .keyboardShortcut(KeyMenu.shortcut(RegionCommands.removeCrossfade))
+            .disabled(doc.map { !RegionCommands.enabled(RegionCommands.removeCrossfade, $0) } ?? true)
             Divider()
             Button(keyBindings.row(RegionCommands.openExternal)?.title ?? "Open in External Editor") {
                 if let doc { openExternal(doc) }
@@ -387,24 +446,6 @@ struct AppCommands: Commands {
         report(RegionCommands.normalize(peakDb: peak, doc), doc)
     }
 
-    private func projectSettings() {
-        guard let m = doc, let info = m.projectInfo ?? (try? m.session.projectInfo()) else { return }
-        let media = (try? m.session.media()) ?? []
-        let files = media.count
-        let seconds = media.reduce(0.0) { $0 + Double($1.frames) / Double(max($1.sampleRate, 1)) }
-        let minutes = seconds >= 60 ? String(format: "%.0f min", seconds / 60) : String(format: "%.0f s", seconds)
-        let note =
-            files == 0
-            ? "The project has no audio files yet."
-            : "Changing the format converts \(files) audio file\(files == 1 ? "" : "s") (\(minutes) of audio) into new files (one undo step)."
-        guard
-            let f = FormatPanel.run(
-                title: "Project Settings", message: "Format: \(formatLabel(format: info.format)). \(note)",
-                initial: info.format, ok: "Change")
-        else { return }
-        if f != info.format { m.changeFormat(f) }
-    }
-
     private func show(_ id: UUID?) {
         if let id { openWindow(value: id) }
     }
@@ -427,17 +468,38 @@ struct AppCommands: Commands {
 /// Open and save panels.
 @MainActor
 enum Panels {
-    /// A `.vizdaw` package. In the bundle the UTI (a package) makes it a
-    /// file; under `swift run` it looks like a folder. Both are
-    /// selectable and the store checks the extension.
+    /// The MIDI files File › Open and Import MIDI File… take (plan 6a).
+    static var midiTypes: [UTType] {
+        [UTType.midi] + ["mid", "midi", "smf", "midi2"].compactMap { UTType(filenameExtension: $0) }
+    }
+
+    /// A `.vizdaw` package, a MIDI file, a DAWproject file (plan 6d) or an
+    /// AAF file (plan 6f). In
+    /// the bundle the UTI (a package) makes a project a file; under `swift
+    /// run` it looks like a folder. Both are selectable and the store checks
+    /// the extension.
     static func chooseProject() -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.treatsFilePackagesAsDirectories = false
         panel.allowsMultipleSelection = false
+        panel.allowedContentTypes =
+            [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 } + midiTypes + dawprojectTypes + aafTypes
         panel.prompt = "Open"
-        panel.message = "Choose a .vizdaw project"
+        panel.message = "Choose a VizDAW project, a MIDI file, a DAWproject file or an AAF file"
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// File › Import MIDI File…: a Standard MIDI File or a MIDI Clip File.
+    static func chooseMidi() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = midiTypes
+        panel.prompt = "Import"
+        panel.message = "Choose a MIDI file: its tracks are added at the playhead."
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
@@ -478,6 +540,62 @@ enum StoreAlerts {
             alert.informativeText = item.message
             alert.addButton(withTitle: "OK")
             alert.runModal()
+        }
+    }
+}
+
+/// The return prompt (plan 6e Ruling 14): a DAWproject file from VizDAW
+/// asks whether it opens as a new project or merges into the project it
+/// came from. Store-level, as `StoreAlerts`: it watches
+/// `DocumentStore.returnPrompt` and answers `answerReturn`. The prompt is
+/// only for files the user opened (the channel's `file.open` refuses a
+/// `.dawproject`; `file.import_dawproject` answers `dialog_required`
+/// "Return"); one that arrives while the channel is active shows nothing,
+/// is noted and is answered Cancel.
+@MainActor
+enum ReturnPrompts {
+    /// Shows any pending prompt, then re-arms on the next change.
+    static func watch(_ store: DocumentStore) {
+        withObservationTracking {
+            _ = store.returnPrompt
+        } onChange: {
+            DispatchQueue.main.async { watch(store) }
+        }
+        DispatchQueue.main.async { present(store) }
+    }
+
+    /// Set while a prompt is up: a re-armed `present` that runs inside the
+    /// modal loop leaves the queue to the loop already showing it.
+    private static var presenting = false
+
+    private static func present(_ store: DocumentStore) {
+        guard !presenting else { return }
+        presenting = true
+        defer { presenting = false }
+        while let prompt = store.returnPrompt {
+            if ControlChannel.active {
+                ControlChannel.note(
+                    AlertItem(
+                        title: "DAWproject Not Merged",
+                        message: "A DAWproject from VizDAW was opened; it was not merged."))
+                store.answerReturn(.cancel)
+                continue
+            }
+            let alert = NSAlert()
+            alert.messageText = "This DAWproject came from a VizDAW project."
+            alert.informativeText =
+                prompt.matchName.map { "It matches \u{201c}\($0)\u{201d}, which is open." }
+                ?? "Merge it into the project it came from, or open it as a new project."
+            alert.addButton(withTitle: "New Project")
+            alert.addButton(withTitle: "Merge With Existing Project…")
+            alert.addButton(withTitle: "Cancel")
+            let choice: ReturnChoice
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: choice = .newProject
+            case .alertSecondButtonReturn: choice = .merge
+            default: choice = .cancel
+            }
+            store.answerReturn(choice)
         }
     }
 }

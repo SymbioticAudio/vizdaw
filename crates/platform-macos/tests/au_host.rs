@@ -180,3 +180,20 @@ fn au_units_take_offline_render() {
         h.offline_state(delay)
     );
 }
+
+/// Plan 6g final fixes: only the bundled Multi-Q AU names parameters for
+/// the host to refresh before a second activation; any other unit (here
+/// Apple's delay, whose parameters are continuous) gets no nudge.
+#[test]
+fn other_aus_name_no_values_to_refresh() {
+    use core_host::PluginInstance;
+    let inst = platform_macos::au::load("aufx/dely/appl", 48_000.0, 4096).unwrap();
+    assert!(
+        inst.info()
+            .params
+            .iter()
+            .any(|p| !p.stepped && p.max > p.min),
+        "the delay has continuous parameters"
+    );
+    assert!(inst.values_to_refresh().is_empty());
+}

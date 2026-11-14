@@ -28,7 +28,8 @@ public final class ArrangementView: EditorCanvas {
     private var drag: Drag?
     /// A fade or gain handle being dragged (plan 5b Ruling 7).
     private var handleDrag: (hit: RegionHandleHit, from: CGPoint)?
-    /// The gain readout while the gain band is dragged.
+    /// The gain readout while the gain band is dragged, the length while
+    /// a crossfade's X is (plan 6c).
     private var readout: (text: String, at: CGPoint)?
 
     public init(document: DocumentModel) {
@@ -338,12 +339,25 @@ public final class ArrangementView: EditorCanvas {
             fine: modifiers.contains(.shift))
     }
 
+    /// The gain band's ±dB, or the X's "<n> ms" (plan 6c), by the pointer.
     private func showReadout(_ d: (hit: RegionHandleHit, from: CGPoint), to: CGPoint, modifiers: Modifiers) {
-        guard d.hit.handle == .gain else { return }
-        let g = RegionHandles.gain(d.hit.row, dy: to.y - d.from.y, fine: modifiers.contains(.shift))
-        readout = (RegionHandles.gainLabel(g), CGPoint(x: to.x + 12, y: to.y - 20))
+        let text: String
+        switch d.hit.handle {
+        case .gain:
+            text = RegionHandles.gainLabel(
+                RegionHandles.gain(d.hit.row, dy: to.y - d.from.y, fine: modifiers.contains(.shift)))
+        case .crossfade:
+            text = RegionHandles.crossfadeReadout(
+                d.hit.row, dx: to.x - d.from.x, in: d.hit.rect, rate: RegionCommands.sampleRate(of: d.hit.row, document))
+        case .fadeIn, .fadeOut:
+            return
+        }
+        readout = (text, CGPoint(x: to.x + 12, y: to.y - 20))
         overlay.needsDisplay = true
     }
+
+    /// The readout drawn now (tests).
+    var readoutText: String? { readout?.text }
 
     private func clearReadout() {
         guard readout != nil else { return }
@@ -495,7 +509,7 @@ public final class ArrangementView: EditorCanvas {
             copy: d.copy)
     }
 
-    // MARK: Dropping audio files (spec §10.2; plan 5b Ruling 8)
+    // MARK: Dropping audio and MIDI files (spec §10.2; plan 5b Ruling 8; plan 6a Ruling 12)
 
     public override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         seq != nil && !AudioDrop.paths(sender.draggingPasteboard).isEmpty ? .copy : []
@@ -510,7 +524,8 @@ public final class ArrangementView: EditorCanvas {
     }
 
     /// Imports `paths` dropped at `p` (content coordinates): into the lane
-    /// under it, or new lanes below the last one.
+    /// under it, or new lanes below the last one; MIDI files through the
+    /// MIDI import (plan 6a Ruling 12).
     @discardableResult
     func drop(_ paths: [String], at p: CGPoint) -> Bool {
         let keys = lanes
@@ -519,7 +534,7 @@ public final class ArrangementView: EditorCanvas {
                 seq: seq, lanes: keys, row: geometry.row(atY: p.y, count: keys.count), tick: axis.tick(atX: p.x),
                 snap: snap, meter: meter)
         else { return false }
-        document.importAudio(paths: paths, target: target)
+        document.interchange.importDropped(paths: paths, target: target)
         return true
     }
 
@@ -588,7 +603,7 @@ public final class ArrangementView: EditorCanvas {
                 out.append(
                     CanvasAccessibilityItem(
                         label: RegionA11y.label(
-                            r, name: media.row(r.media)?.name ?? "audio", laneName: rows[i].name, meter: meter,
+                            r, name: RegionA11y.name(r, mediaName: media.row(r.media)?.name), laneName: rows[i].name, meter: meter,
                             offline: media.offline(r.media) != nil),
                         frame: rect, selected: editor.isSelected(event: r.id),
                         press: { [weak self] in

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<MetaData>
+  <Title>Other Song</Title>
+  <Artist>An Artist</Artist>
+  <Album>An Album</Album>
+  <OriginalArtist>First Artist</OriginalArtist>
+  <Composer>A Composer</Composer>
+  <Songwriter>A Songwriter</Songwriter>
+  <Producer>A Producer</Producer>
+  <Arranger>An Arranger</Arranger>
+  <Year>2026</Year>
+  <Genre>Rock</Genre>
+  <Copyright>(c) 2026 Someone</Copyright>
+  <Website>https://example.com</Website>
+  <Comment>made here</Comment>
+</MetaData>

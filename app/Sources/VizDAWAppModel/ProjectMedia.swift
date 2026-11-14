@@ -24,6 +24,14 @@ extension ProjectBanner {
         case .convert, .format: "Converting media…"
         case .bounce: "Bouncing…"
         case .externalEdit: "Importing the external edit…"
+        case .importMidi: "Importing the MIDI file…"
+        case .exportMidi: "Exporting MIDI…"
+        case .exportProject: "Exporting for another DAW…"
+        case .exportDawproject: "Exporting DAWproject…"
+        case .importProject: "Importing DAWproject…"
+        case .mergeDawproject: "Merging DAWproject…"
+        case .exportAaf: "Exporting AAF…"
+        case .importAaf: "Importing AAF…"
         }
     }
 
@@ -35,6 +43,14 @@ extension ProjectBanner {
         case .convert, .format: "Conversion Failed"
         case .bounce: "Bounce Failed"
         case .externalEdit: "External Edit Failed"
+        case .importMidi: "MIDI Import Failed"
+        case .exportMidi: "MIDI Export Failed"
+        case .exportProject: "Export Failed"
+        case .exportDawproject: "DAWproject Export Failed"
+        case .importProject: "DAWproject Import Failed"
+        case .mergeDawproject: "DAWproject Merge Failed"
+        case .exportAaf: "AAF Export Failed"
+        case .importAaf: "AAF Import Failed"
         }
     }
 }
@@ -66,8 +82,10 @@ extension DocumentModel {
     }
 
     /// Project Settings: converts every file into `format` (a job).
-    public func changeFormat(_ format: ProjectFormatRow) {
-        startJob(.format, "Project Settings Failed") { try $0.setProjectFormat(format: format) }
+    /// Answers whether the job started (a refusal is an alert).
+    @discardableResult
+    public func changeFormat(_ format: ProjectFormatRow) -> Bool {
+        startJob(.format, "Project Settings Failed") { try $0.setProjectFormat(format: format) } != nil
     }
 
     /// The banner's Convert.
@@ -100,7 +118,15 @@ extension DocumentModel {
             pollJobs()
             return id
         } catch {
-            if let failure { failure(error) } else { alert = AlertItem(error, title: title) }
+            if let failure {
+                failure(error)
+            } else if mergeHeld, case .Busy(let message) = error as? VizError {
+                // A held merge refuses it (plan 6e Ruling 12): the core's
+                // sentence on the status line, never a Busy alert.
+                editor.status = message
+            } else {
+                alert = AlertItem(error, title: title)
+            }
             return nil
         }
     }
@@ -122,28 +148,81 @@ extension DocumentModel {
     /// polling stops once none is left.
     public func pollJobs() {
         var still: [JobRow] = []
+        var openFailure: String??
+        var importsEnded: [JobRow] = []
+        var blockersEnded: [JobRow] = []
         for j in jobs {
             let r: JobRow
             do {
                 r = try session.job(id: j.id)
             } catch {
-                if case .Busy = error as? VizError { still.append(j) }
+                if case .Busy = error as? VizError {
+                    still.append(j)
+                } else {
+                    blockersEnded.append(j)
+                }
                 continue
             }
             switch jobAnswer(r) {
             case .wait:
                 still.append(r)
+                continue
             case .ok:
                 if !r.problems.isEmpty { jobProblems = r.problems }
                 refreshAfterJob()
+                // A MIDI import or export the UI started shows its report.
+                if [.importMidi, .exportMidi, .exportProject, .exportDawproject, .importProject, .exportAaf, .importAaf]
+                    .contains(r.kind)
+                {
+                    interchange.jobEnded(r)
+                }
+                if r.kind == .importMidi || r.kind == .importProject || r.kind == .importAaf { openedFile = nil }
+                forDaw.jobDone(r)
+                dawproject.jobDone(r)
+                aaf.jobDone(r)
+                // A Done Hold job is a preview, not a report (plan 6e).
+                merge.jobDone(r)
             case .failed(let message):
-                if r.state != .cancelled {
+                if r.state == .cancelled {
+                    forDaw.jobDone(r)
+                    dawproject.jobDone(r)
+                    aaf.jobDone(r)
+                    merge.jobDone(r)
+                }
+                if r.kind == .importMidi || r.kind == .importProject || r.kind == .importAaf, openedFile != nil {
+                    // Open made this project for the file: the store closes it.
+                    openFailure = .some(r.state == .cancelled ? nil : message)
+                } else if r.state != .cancelled, !(r.kind == .exportMidi && interchange.jobFailed(r, message: message)),
+                    !(r.kind == .exportProject && forDaw.jobFailed(r, message: message)),
+                    !(r.kind == .exportDawproject && dawproject.jobFailed(r, message: message)),
+                    !(r.kind == .exportAaf && aaf.jobFailed(r, message: message)),
+                    !(r.kind == .mergeDawproject && merge.jobFailed(r, message: message))
+                {
                     alert = AlertItem(title: ProjectBanner.failureTitle(r.kind), message: message)
                 }
                 refreshAfterJob()
             }
+            if r.kind == .importMidi { importsEnded.append(r) }
+            blockersEnded.append(r)
         }
         jobs = still
+        if let failure = openFailure, let hook = openedFile {
+            openedFile = nil
+            hook(failure)
+        }
+        // Dropped files waiting for this one start now (final review I1),
+        // after `jobs` is settled: `startJob` adds to it.
+        for r in importsEnded { interchange.importEnded(r) }
+        // Anything waiting for a job to end (dropped MIDI files, an export)
+        // goes now that the list is settled. A cancelled export keeps the
+        // dropped files queued (F11): only `importEnded` clears them.
+        for r in blockersEnded where ForDawModel.blocking.contains(r.kind) || ForDawModel.mediaJobs.contains(r.kind) {
+            if ForDawModel.blocking.contains(r.kind) { interchange.blockingEnded() }
+            forDaw.jobEnded()
+            dawproject.jobEnded()
+            aaf.jobEnded()
+            merge.jobEnded()
+        }
     }
 
     public func refreshProjectInfo() {

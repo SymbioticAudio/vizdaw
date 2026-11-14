@@ -51,6 +51,12 @@ struct EditingSettingsView: View {
             })
     }
 
+    /// "10 ms", "12.5 ms": one decimal place only when there is one.
+    private static func msText(_ v: Double) -> String {
+        let t = v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+        return "\(t) ms"
+    }
+
     var body: some View {
         Form {
             Section("Nudge in Time") {
@@ -92,6 +98,18 @@ struct EditingSettingsView: View {
                     ForEach(Scale.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .disabled(!scaleSteps.wrappedValue || prefs.nudge.followKeySignature)
+            }
+            // Plan 6c Task 5: Region › Crossfade's length.
+            Section("Crossfades") {
+                Stepper(
+                    value: $prefs.crossfadeMs, in: EditingPreferences.crossfadeRange, step: 1
+                ) {
+                    LabeledContent("Default crossfade") {
+                        Text(Self.msText(prefs.crossfadeMs))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.text.secondary.color)
+                    }
+                }
             }
             // Plan 5f-3 Ruling 5: applications only, chosen with a panel.
             Section("External Sample Editor") {

@@ -230,6 +230,20 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The DAWproject schema's element names that contain the word, and the
+/// one folder whose sources may spell them: the file format's own names,
+/// never text the app shows.
+const FORMAT_ELEMENTS: &[(&str, &str)] = &[("core-io/src/dawproject/schema/", "Lanes")];
+
+/// Whether `lit` in the source at `path` is exactly a DAWproject element
+/// name written by the schema code.
+fn format_element(path: &str, lit: &str) -> bool {
+    let path = path.replace('\\', "/");
+    FORMAT_ELEMENTS
+        .iter()
+        .any(|(dir, name)| lit == *name && path.contains(dir))
+}
+
 #[test]
 fn no_refusal_or_undo_text_says_lane() {
     self_check();
@@ -257,16 +271,30 @@ fn no_refusal_or_undo_text_says_lane() {
         "core-model",
         "core-control",
         "core-engine",
+        "core-io",
         "platform-macos",
     ] {
         rust_files(&root.join(d).join("src"), &mut files);
     }
     assert!(files.len() > 50, "the source directories were found");
+    assert!(format_element(
+        "/x/crates/core-io/src/dawproject/schema/read.rs",
+        "Lanes"
+    ));
+    assert!(!format_element(
+        "/x/crates/core-io/src/dawproject/export.rs",
+        "Lanes"
+    ));
+    assert!(!format_element(
+        "/x/crates/core-io/src/dawproject/schema/read.rs",
+        "Lanes here"
+    ));
     let mut hits = Vec::new();
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
+        let path = f.to_string_lossy();
         for (line, lit) in literals(&text) {
-            if says_lane(&lit) {
+            if says_lane(&lit) && !format_element(&path, &lit) {
                 hits.push(format!("{}:{line}: {lit:?}", f.display()));
             }
         }
@@ -422,4 +450,34 @@ fn plist_strings_say_track() {
         }
     }
     assert!(hits.is_empty(), "{} hits:\n{}", hits.len(), hits.join("\n"));
+}
+
+/// The DAWproject report texts plan 6d added (Tasks 3, 9 and 10), checked
+/// by value as well as by the source scan above, so a text moved into a
+/// generated or test-only place is still checked.
+#[test]
+fn dawproject_report_texts_say_track() {
+    use core_io::dawproject::import::EMPTY_CLIPS;
+    use core_io::dawproject::{UNREADABLE_VALUES, UNWRITABLE_PARTS};
+    use vizdaw_ffi::dawproject::{OFFLINE_AUDIO, TOO_LONG_FOR_WAV, not_captured};
+    let texts = [
+        UNREADABLE_VALUES.to_string(),
+        UNWRITABLE_PARTS.to_string(),
+        OFFLINE_AUDIO.to_string(),
+        TOO_LONG_FOR_WAV.to_string(),
+        EMPTY_CLIPS.to_string(),
+        not_captured("Lead"),
+    ];
+    assert_eq!(texts[0], "Values in the file that could not be read");
+    assert_eq!(texts[1], "Parts the DAWproject file cannot hold");
+    assert_eq!(texts[2], "Offline audio");
+    assert_eq!(texts[3], "Audio too long for a WAV file");
+    assert_eq!(texts[4], "Empty clips");
+    assert_eq!(
+        texts[5],
+        "Plug-in 'Lead' did not give its current settings; its saved settings were written"
+    );
+    for t in &texts {
+        assert!(!says_lane(t), "{t:?} says lane");
+    }
 }

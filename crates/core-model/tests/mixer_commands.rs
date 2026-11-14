@@ -567,9 +567,17 @@ fn arb_cmd() -> impl Strategy<Value = MixerCmd> {
             .prop_map(|(slot, bypass)| MixerCmd::SetBypass { slot, bypass }),
         (slot.clone(), proptest::option::of(strip.clone()))
             .prop_map(|(slot, source)| MixerCmd::SetSidechain { slot, source }),
-        (slot, 0u64..4, -1.0f64..1.0).prop_map(|(slot, p, v)| MixerCmd::SetPluginParams {
-            slot,
-            params: vec![(ParamId(p), v)]
+        (slot.clone(), 0u64..4, -1.0f64..1.0).prop_map(|(slot, p, v)| {
+            MixerCmd::SetPluginParams {
+                slot,
+                params: vec![(ParamId(p), v)],
+            }
+        }),
+        (slot, proptest::collection::vec(any::<u8>(), 0..=64)).prop_map(|(slot, bytes)| {
+            MixerCmd::SetPluginState {
+                slot,
+                bytes: std::sync::Arc::from(bytes),
+            }
         }),
         (strip.clone(), 0usize..8).prop_map(|(strip, index)| MixerCmd::MoveStrip { strip, index }),
         (

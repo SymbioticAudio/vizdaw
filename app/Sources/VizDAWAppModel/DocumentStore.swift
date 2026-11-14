@@ -13,6 +13,31 @@ public struct TornFocus: Equatable, Sendable {
     }
 }
 
+/// A DAWproject file that came from VizDAW, waiting for the return
+/// prompt's answer (plan 6e Rulings 13, 14).
+public struct ReturnPrompt: Equatable, Sendable {
+    /// The file (absolute).
+    public let path: String
+    /// Its header, as the core read it.
+    public let info: DawprojectInfoRow
+    /// The open project it came from (its project ID, else a snapshot of
+    /// its export), the most recently active when several match.
+    public let match: UUID?
+    /// That project's name, which the prompt shows.
+    public let matchName: String?
+
+    public init(path: String, info: DawprojectInfoRow, match: UUID?, matchName: String?) {
+        self.path = path
+        self.info = info
+        self.match = match
+        self.matchName = matchName
+    }
+}
+
+/// The return prompt's buttons: "New Project", "Merge With Existing
+/// Project…" and "Cancel".
+public enum ReturnChoice: Sendable { case newProject, merge, cancel }
+
 /// The open documents, one per window, keyed by the window's value.
 @Observable
 @MainActor
@@ -38,6 +63,40 @@ public final class DocumentStore {
 
     /// Makes a project in a format (set by `live()`; tests set a fake).
     public var makeProject: ((ProjectFormatRow) throws -> any SessionProtocol)?
+
+    /// Reads a DAWproject file's header with no document open (plan 6d L8;
+    /// the core's free function `dawprojectInfo(path:)`; tests set a fake).
+    /// It parses the file: call it off the main thread. Both the UI's open
+    /// and `file.import_dawproject` read through it.
+    public var dawprojectInfo: @Sendable (String) throws -> DawprojectInfoRow = {
+        try VizDAWCore.dawprojectInfo(path: $0)
+    }
+
+    /// Reads an AAF file's header with no document open (plan 6f Task 6; the
+    /// core's free function `aafInfo(path:)`; tests set a fake). It parses
+    /// the file: call it off the main thread. `file.import_aaf` reads
+    /// through it.
+    public var aafInfo: @Sendable (String) throws -> AafInfoRow = {
+        try VizDAWCore.aafInfo(path: $0)
+    }
+
+    /// A file from VizDAW waiting for the return prompt's answer (plan 6e
+    /// Task 10). `openDawproject` sets it for the UI's opens (File › Open,
+    /// Import Project ▸ DAWproject…, Finder, the Dock); the app's
+    /// `ReturnPrompts` shows it, and under the control channel shows
+    /// nothing and answers Cancel. A second file read meanwhile waits its
+    /// turn.
+    public private(set) var returnPrompt: ReturnPrompt?
+    /// Prompts waiting behind `returnPrompt`, oldest first.
+    @ObservationIgnored private var queuedPrompts: [ReturnPrompt] = []
+
+    /// Asks for the project to merge into when no open project matches: an
+    /// Open panel the app sets (nil, or the panel's Cancel: nothing).
+    @ObservationIgnored public var chooseMergeProject: (() -> String?)?
+
+    /// Opens in flight (`openDawproject`), so tests can wait for them.
+    @ObservationIgnored private var opening: [Int: Task<Void, Never>] = [:]
+    @ObservationIgnored private var openCount = 0
 
     /// The app's preferences (in memory in tests; `live()` sets the real
     /// store, which is itself in memory under `VIZDAW_SUPPORT_DIR`).
@@ -166,6 +225,10 @@ public final class DocumentStore {
     /// R2); a closed one is removed.
     private var recentKey: [UUID] = []
 
+    /// Documents in the order they were made or opened (closed ones are
+    /// removed).
+    private var added: [UUID] = []
+
     /// Documents closed this launch; their windows adopt no other.
     private var closedIDs: Set<UUID> = []
 
@@ -232,8 +295,21 @@ public final class DocumentStore {
         return add("Demo Project Failed", make)
     }
 
-    /// Opens a `.vizdaw` package; other paths are refused with an alert.
+    /// Opens a `.vizdaw` package; a MIDI file (`mid`, `midi`, `smf`,
+    /// `midi2`) makes a new project and imports into it (plan 6a Ruling 12);
+    /// a `.dawproject` starts `openDawproject` and an `.aaf` `openAaf`, and
+    /// both answer nil (the project comes once the file is read); other
+    /// paths are refused with an alert.
     public func open(path: String) -> UUID? {
+        if InterchangeModel.isMidi(path) { return openMidi(path) }
+        if InterchangeModel.isDawproject(path) {
+            openDawproject(path)
+            return nil
+        }
+        if InterchangeModel.isAaf(path) {
+            openAaf(path)
+            return nil
+        }
         guard (path as NSString).pathExtension == "vizdaw" else {
             postAlert(AlertItem(
                 title: "Open Failed",
@@ -253,6 +329,182 @@ public final class DocumentStore {
         return add("Open Failed") { try recovery.openWith(path, options) }
     }
 
+    /// The import sheet's Import with "a new project" chosen: the sheet
+    /// closes and a new project imports its file with its choices.
+    public func importAsNewProject(_ sheet: InterchangeModel) -> UUID? {
+        sheet.importShown = false
+        return openMidi(sheet.importPath, like: sheet)
+    }
+
+    /// A new 48 kHz project holding the MIDI file at `path` (with `sheet`'s
+    /// choices, else the defaults); a refusal leaves nothing behind and
+    /// alerts "Import Failed".
+    private func openMidi(_ path: String, like sheet: InterchangeModel? = nil) -> UUID? {
+        guard let id = newProject(ProjectFormatRow(sampleRate: 48_000, depth: defaultFormat.depth)),
+            let model = documents[id]
+        else { return nil }
+        closeIfUntouched(id, model)
+        if let error = model.interchange.importIntoNewProject(path: path, like: sheet) {
+            close(id)
+            postAlert(AlertItem(error, title: "Import Failed"))
+            return nil
+        }
+        // A job that failed at once has already taken the project.
+        return documents[id] == nil ? nil : id
+    }
+
+    /// A job that fails or is cancelled on project `id`, made for a file,
+    /// takes the project with it while it is still untouched; the alert is
+    /// the store's (as the control channel's imports do).
+    private func closeIfUntouched(_ id: UUID, _ model: DocumentModel) {
+        model.openedFile = { [weak self, weak model] message in
+            guard let self, let model else { return }
+            guard !model.canUndo else {
+                if let message { model.alert = AlertItem(title: "Import Failed", message: message) }
+                return
+            }
+            close(id)
+            if let message { postAlert(AlertItem(title: "Import Failed", message: message)) }
+        }
+    }
+
+    /// Starts opening `path` and returns at once (L8): a detached task
+    /// calls `dawprojectInfo` (no document or session needed), then on the
+    /// main actor a file from VizDAW sets `returnPrompt` and waits for
+    /// `answerReturn` (plan 6e); any other makes a project at the file's rate and starts
+    /// `importDawproject`; its window opens (`enqueue`). A refusal makes no
+    /// project and alerts "Import Failed"; a job that fails or is cancelled
+    /// on a still-untouched project closes it (as `openMidi`).
+    public func openDawproject(_ path: String) {
+        let read = dawprojectInfo
+        openCount += 1
+        let n = openCount
+        opening[n] = Task {
+            let info = await Task.detached { Result { try read(path) } }.value
+            self.dawprojectRead(path, info)
+            self.opening[n] = nil
+        }
+    }
+
+    /// The file was read: one from VizDAW asks first (`returnPrompt`); any
+    /// other makes its project at once.
+    private func dawprojectRead(_ path: String, _ info: Result<DawprojectInfoRow, any Error>) {
+        let row: DawprojectInfoRow
+        switch info {
+        case .failure(let error):
+            postAlert(AlertItem(error, title: "Import Failed"))
+            return
+        case .success(let r): row = r
+        }
+        guard !row.fromVizdaw else {
+            // One lstat per open document at most (`documentHolding`).
+            let match = documentID(forProjectID: row.projectId) ?? documentHolding(exportID: row.exportId)
+            let prompt = ReturnPrompt(
+                path: path, info: row, match: match, matchName: match.flatMap { documents[$0]?.snapshot.title })
+            if returnPrompt == nil { returnPrompt = prompt } else { queuedPrompts.append(prompt) }
+            return
+        }
+        importAsNewProject(path, row)
+    }
+
+    /// The return prompt's answer. New Project: 6d's path (a project at
+    /// the file's rate imports it). Merge: into the open match, else the
+    /// project `chooseMergeProject` picks (nil: nothing), found open or
+    /// opened, whose window comes forward with the merge sheet. Cancel:
+    /// nothing. The next waiting prompt, if any, follows.
+    public func answerReturn(_ choice: ReturnChoice) {
+        guard let p = returnPrompt else { return }
+        returnPrompt = queuedPrompts.isEmpty ? nil : queuedPrompts.removeFirst()
+        switch choice {
+        case .cancel:
+            return
+        case .newProject:
+            importAsNewProject(p.path, p.info)
+        case .merge:
+            let target: UUID
+            if let match = p.match, documents[match] != nil {
+                target = match
+                activate?(match)
+            } else {
+                guard let project = chooseMergeProject?() else { return }
+                if let already = documentID(forPath: project) {
+                    target = already
+                    activate?(already)
+                } else {
+                    guard let opened = open(path: project) else { return }
+                    target = opened
+                    enqueue(opened)
+                }
+            }
+            documents[target]?.merge.begin(path: p.path, info: p.info)
+        }
+    }
+
+    /// 6d's open: a project at the file's rate imports `path`.
+    private func importAsNewProject(_ path: String, _ row: DawprojectInfoRow) {
+        guard let id = newProject(ProjectFormatRow(sampleRate: row.sampleRate, depth: defaultFormat.depth)),
+            let model = documents[id]
+        else { return }
+        closeIfUntouched(id, model)
+        var failure: (any Error)?
+        let req = DawprojectImportRequestRow(path: path)
+        model.startJob(.importProject, "Import Failed", failure: { failure = $0 }) { try $0.importDawproject(req: req) }
+        if let failure {
+            close(id)
+            postAlert(AlertItem(failure, title: "Import Failed"))
+            return
+        }
+        // A job that failed at once has already taken the project.
+        if documents[id] != nil { enqueue(id) }
+    }
+
+    /// Starts opening an AAF file and returns at once (plan 6f Task 8), as
+    /// `openDawproject`: a detached task calls `aafInfo`, then on the main
+    /// actor a project at the file's rate imports it with the defaults (a
+    /// new project, the MIDI file beside it, no media folder, pairs
+    /// joined). A refusal makes no project and alerts "Import Failed"; a
+    /// job that fails or is cancelled on a still-untouched project closes it.
+    public func openAaf(_ path: String) {
+        let read = aafInfo
+        openCount += 1
+        let n = openCount
+        opening[n] = Task {
+            let info = await Task.detached { Result { try read(path) } }.value
+            switch info {
+            case .failure(let error):
+                self.postAlert(AlertItem(error, title: "Import Failed"))
+            case .success(let row):
+                self.importAafAsNewProject(
+                    AafImportRequestRow(path: path, newProject: true, midiPath: nil, mediaFolder: nil, joinPairs: true),
+                    rate: row.sampleRate)
+            }
+            self.opening[n] = nil
+        }
+    }
+
+    /// A project at `rate` imports `req` (the open's defaults, or the AAF
+    /// import sheet's choices); its window opens (`enqueue`). As 6d's.
+    func importAafAsNewProject(_ req: AafImportRequestRow, rate: UInt32) {
+        guard let id = newProject(ProjectFormatRow(sampleRate: rate, depth: defaultFormat.depth)),
+            let model = documents[id]
+        else { return }
+        closeIfUntouched(id, model)
+        var failure: (any Error)?
+        model.startJob(.importAaf, "Import Failed", failure: { failure = $0 }) { try $0.importAaf(req: req) }
+        if let failure {
+            close(id)
+            postAlert(AlertItem(failure, title: "Import Failed"))
+            return
+        }
+        // A job that failed at once has already taken the project.
+        if documents[id] != nil { enqueue(id) }
+    }
+
+    /// Waits for every pending open (tests).
+    public func settle() async {
+        while let t = opening.values.first { await t.value }
+    }
+
     /// Brings a document's window to the front (set by the app).
     public var activate: ((UUID) -> Void)?
     /// Every new model, before any window shows it (set by the app: the
@@ -264,6 +516,26 @@ public final class DocumentStore {
     public func documentID(forPath path: String) -> UUID? {
         let want = Self.canonical(path)
         return documents.first { (try? $0.value.session.path()).flatMap { $0 }.map(Self.canonical) == want }?.key
+    }
+
+    /// Open documents, the most recently active first: those whose window
+    /// was key, most recent first, then the rest, newest first.
+    private var byActivity: [UUID] {
+        let keyed = recentKey.filter { documents[$0] != nil }
+        return keyed + added.reversed().filter { documents[$0] != nil && !keyed.contains($0) }
+    }
+
+    /// The most recently active open document whose project ID is `id` (nil for nil).
+    public func documentID(forProjectID id: String?) -> UUID? {
+        guard let id else { return nil }
+        return byActivity.first { (try? documents[$0]?.session.projectId()) == id }
+    }
+
+    /// The most recently active open document holding snapshot `exportID` (nil for nil).
+    /// Each ask is one lstat in the core (plan 6e Task 8).
+    public func documentHolding(exportID: String?) -> UUID? {
+        guard let exportID else { return nil }
+        return byActivity.first { (try? documents[$0]?.session.hasSnapshot(exportId: exportID)) == true }
     }
 
     private static func canonical(_ path: String) -> String {
@@ -335,11 +607,15 @@ public final class DocumentStore {
         if panelFocus == id { panelFocus = nil }
         if keyWindow?.doc == id { keyWindow = nil }
         recentKey.removeAll { $0 == id }
+        added.removeAll { $0 == id }
         mixers.removeValue(forKey: id)?.endOpenDrag()
         mixerAlerted.remove(id)
         // Plugin windows detach their editors before the session goes.
         willClose?(id)
         if let doc = documents.removeValue(forKey: id) {
+            // A held merge ends quietly; nothing queued starts (plan 6e
+            // Task 10 review I1). The session's close drops the hold.
+            doc.documentClosing()
             // A note an editor sounds (a press on a closing piano roll) ends.
             doc.editor.auditionOffAll()
             // No list outlives its document (none keeps MIDI input running).
@@ -365,6 +641,7 @@ public final class DocumentStore {
             let id = UUID()
             didMake?(id, model)
             documents[id] = model
+            added.append(id)
             model.mixerProvider = { [weak self] in self?.mixer(id) }
             return id
         } catch {

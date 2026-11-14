@@ -27,11 +27,16 @@ pub struct DocSnapshot {
     pub redo_label: Option<String>,
     /// Every sequence, in ID order.
     pub sequences: Vec<SeqRow>,
-    /// Problems worth showing (unresolved references).
+    /// Standing problems worth showing (unresolved references): they stay
+    /// while the document has them.
     pub warnings: Vec<String>,
     /// Every lane's revision (spec §3.1): editors refetch a lane's events
     /// only when its revision changed.
     pub lane_revs: Vec<crate::revs::LaneRev>,
+    /// One-shot notes of the edit that made this snapshot (a crossfade
+    /// shortened or dropped; plan 6c), empty for every other snapshot.
+    #[uniffi(default = [])]
+    pub edit_notes: Vec<String>,
 }
 
 /// A keyboard slot: one key plus a modifier bitmask (1 = shift,

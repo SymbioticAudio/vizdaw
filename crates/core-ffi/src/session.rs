@@ -203,6 +203,8 @@ pub(crate) struct Inner {
     bounce_copies: Option<(u64, u64)>,
     /// Finished bounces' files and media, by job (Ruling 10).
     bounce_results: std::collections::BTreeMap<u64, crate::bounce::BounceResultRow>,
+    /// The last MIDI import's or export's report (plan 6a; runtime only).
+    interchange_report: Option<crate::interchange::ReportRow>,
     /// Each region's external-edit copy while the project is open (plan
     /// 5f-3 Ruling 3; runtime only): retention keeps them, close lets them go.
     edits: std::collections::BTreeMap<core_model::ids::EventId, crate::external::EditCopy>,
@@ -213,6 +215,11 @@ pub(crate) struct Inner {
     /// last per lane, waiting to be written back once no recording or edit
     /// is open; a user's own setting of the lane drops its entry.
     mpe_owed: std::collections::BTreeMap<LaneId, Option<core_model::mpe::MpeConfig>>,
+    /// The model's notes (a crossfade shortened or dropped) from the edit
+    /// steps of the open edit, waiting for the snapshot `end_edit` returns
+    /// (plan 6c pre-flight F1). Every other snapshot carries only its own
+    /// command's notes; a conversion's notes live in its job row.
+    last_warnings: Vec<Note>,
     /// Destinations' mix and MPE configuration batches a full engine
     /// command ring refused, oldest first: `idle` sends them again
     /// (final review m4).
@@ -225,6 +232,47 @@ pub(crate) struct Inner {
     /// (test hook).
     #[cfg(feature = "test-hooks")]
     bounce_fail_import_at: Option<u32>,
+    /// The next export for another DAW cancels itself after this stage
+    /// (test hook: 1 after its first MIDI file, 2 after the About file).
+    #[cfg(feature = "test-hooks")]
+    for_daw_cancel_at: Option<u32>,
+    /// The slots running here when the plug-in host was last looked at
+    /// (on load, failure and restart; at each export): a DAWproject check
+    /// on a thread without the host reads it (plan 6d Task 9).
+    live_slots: std::collections::BTreeSet<PluginInstanceId>,
+    /// The next DAWproject export cancels itself after this stage (test
+    /// hook: 1 after the files, 2 after the first WAV, 3 after
+    /// `project.xml`, 4 before the rename).
+    #[cfg(feature = "test-hooks")]
+    dawproject_cancel_at: Option<u32>,
+    /// The free bytes DAWproject and AAF exports and imports assume (test
+    /// hook).
+    #[cfg(feature = "test-hooks")]
+    dawproject_free: Option<u64>,
+    /// The next AAF export or import cancels itself after this stage (test
+    /// hook: export 1 staged, 2 the MIDI file, 3 the `.aaf`; import 5
+    /// opened, 6 first extracted, 7 first converted, 8 joined, 9 mapped).
+    #[cfg(feature = "test-hooks")]
+    aaf_cancel_at: Option<u32>,
+    /// DAWproject exports and checks treat every running slot's capture as
+    /// failed (test hook).
+    #[cfg(feature = "test-hooks")]
+    dawproject_capture_fails: bool,
+    /// A merge between its preview and Merge (plan 6e Ruling 12): it
+    /// counts as a running interchange and media job until
+    /// `confirm_merge`, `cancel_merge` or close.
+    held_merge: Option<HeldMerge>,
+}
+
+/// A held merge (plan 6e Task 8): its job, the merged history and the
+/// media its job converted.
+struct HeldMerge {
+    /// The merge job's ID.
+    job: u64,
+    /// The merge.
+    merged: Box<crate::dawproject::Merged>,
+    /// What its job converted (removed unless the swapped history keeps it).
+    files: ImportFiles,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -277,7 +325,7 @@ impl Inner {
             revs: crate::revs::Revisions::new(&doc),
             edit_label: None,
             editor_layout: None,
-            history: History::new(doc.clone()),
+            history: crate::bundled::history(doc.clone()),
             path,
             clean: doc,
             version: 0,
@@ -330,14 +378,28 @@ impl Inner {
             meters: Default::default(),
             bounce_copies: None,
             bounce_results: Default::default(),
+            interchange_report: None,
             edits: Default::default(),
             edits_writing: 0,
             mpe_owed: Default::default(),
+            last_warnings: Vec::new(),
             mix_owed: Vec::new(),
             #[cfg(feature = "test-hooks")]
             bounce_cancel_at: None,
             #[cfg(feature = "test-hooks")]
             bounce_fail_import_at: None,
+            #[cfg(feature = "test-hooks")]
+            for_daw_cancel_at: None,
+            live_slots: Default::default(),
+            #[cfg(feature = "test-hooks")]
+            dawproject_cancel_at: None,
+            #[cfg(feature = "test-hooks")]
+            dawproject_free: None,
+            #[cfg(feature = "test-hooks")]
+            aaf_cancel_at: None,
+            #[cfg(feature = "test-hooks")]
+            dawproject_capture_fails: false,
+            held_merge: None,
         }
     }
 
@@ -372,6 +434,11 @@ impl Inner {
         for p in self.recorded_keep() {
             refs.entry(p).or_insert(None);
         }
+        // A held merge's media is the merged history's (plan 6e Task 8
+        // review I1): kept until Merge or Cancel.
+        for p in self.held_merge_files() {
+            refs.entry(p).or_insert(None);
+        }
         // Edit copies while the project is open (plan 5f-3 Ruling 3):
         // `abs` is absolute, retention's paths package-relative; a copy in
         // another package (after Save As) is not this package's.
@@ -384,6 +451,17 @@ impl Inner {
             crate::retention::trash(dir.as_deref(), p)
         });
         self.news.problems.extend(out.problems);
+    }
+
+    /// The package-relative files the held merge's job converted.
+    fn held_merge_files(&self) -> Vec<String> {
+        self.held_merge
+            .iter()
+            .flat_map(|h| h.files.iter())
+            .filter_map(|(_, r)| r.as_ref().ok())
+            .flatten()
+            .map(|i| i.path.clone())
+            .collect()
     }
 
     /// Writes `package`'s keep file from the kept takes (plan 5c Task 10);
@@ -422,13 +500,23 @@ impl Inner {
             .collect()
     }
 
+    /// The media a DAWproject export or check writes no audio for (offline
+    /// or too long for a WAV), as of the last media refresh.
+    fn dawproject_left_out(&self) -> core_io::dawproject::export::LeftOutAudio {
+        let offline = self.offline.keys().copied().collect();
+        crate::dawproject::left_out_audio(self.doc(), &offline)
+    }
+
     /// `Busy` while a Format, Convert, Relink, Bounce or External Edit job
     /// has not been applied: each captures the project format and the
     /// items' files when it starts, so another such job may not start
     /// meanwhile (5a Task 11 review Minor 4; preflight M3; a bounce's
     /// streamer reads the media, plan 5f-2 Ruling 9; an external edit
     /// imports in the format it started with and relinks a region, plan
-    /// 5f-3 Ruling 6). An import does not block them.
+    /// 5f-3 Ruling 6; an export for another DAW renders as a bounce does,
+    /// plan 6b Ruling 9; a DAWproject export reads the media, and its
+    /// import converts into the project format, plan 6d). An Import Audio
+    /// job does not block them.
     fn media_jobs_idle(&self) -> Result<(), VizError> {
         use crate::jobs::JobKindRow;
         if self.jobs.pending(&[
@@ -437,10 +525,20 @@ impl Inner {
             JobKindRow::Relink,
             JobKindRow::Bounce,
             JobKindRow::ExternalEdit,
+            JobKindRow::ExportProject,
+            JobKindRow::ExportDawproject,
+            JobKindRow::ImportProject,
+            JobKindRow::MergeDawproject,
+            JobKindRow::ExportAaf,
+            JobKindRow::ImportAaf,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
             });
+        }
+        // A held merge's media is in `Media/` (plan 6e Ruling 12).
+        if self.held_merge.is_some() {
+            return Err(merge_held_busy());
         }
         Ok(())
     }
@@ -623,6 +721,12 @@ impl Inner {
     }
 
     fn snapshot(&mut self) -> Result<DocSnapshot, VizError> {
+        self.snapshot_with(Vec::new())
+    }
+
+    /// [`Inner::snapshot`] whose `edit_notes` are `notes` (the model's
+    /// report lines of the edit that made it).
+    fn snapshot_with(&mut self, notes: Vec<String>) -> Result<DocSnapshot, VizError> {
         self.revs.update(self.history.doc());
         let doc = self.doc();
         Ok(DocSnapshot {
@@ -634,8 +738,47 @@ impl Inner {
             redo_label: self.history.redo_label().map(str::to_string),
             sequences: seq_rows(doc)?,
             warnings: warnings(doc),
+            edit_notes: notes,
         })
     }
+}
+
+/// One edit note: the event it is about (a settled crossfade), if any, and
+/// the line.
+type Note = (Option<core_model::ids::EventId>, String);
+
+/// The report's warning lines as notes.
+fn notes_of(r: core_model::command::Report) -> Vec<Note> {
+    // Each settled entry is used once, so two same-named regions that both
+    // lose their crossfade in one step keep their own ids.
+    let mut settled = r.settled;
+    r.warnings
+        .into_iter()
+        .map(|line| {
+            let id = settled
+                .iter()
+                .position(|(_, l)| *l == line)
+                .map(|i| settled.remove(i).0);
+            (id, line)
+        })
+        .collect()
+}
+
+/// Adds `new` lines to `notes`, one per event: a later line about the same
+/// event replaces the earlier one (the last step decides what is said).
+/// Regions are told apart by id, never by name.
+fn merge_notes(notes: &mut Vec<Note>, new: Vec<Note>) {
+    for n in new {
+        notes.retain(|o| match (o.0, n.0) {
+            (Some(a), Some(b)) => a != b,
+            _ => *o != n,
+        });
+        notes.push(n);
+    }
+}
+
+fn note_lines(notes: Vec<Note>) -> Vec<String> {
+    notes.into_iter().map(|(_, l)| l).collect()
 }
 
 /// "demo" for `/x/demo.vizdaw`, "Untitled" without a path.
@@ -822,6 +965,70 @@ impl Session {
         Ok(all)
     }
 
+    /// Notes which slots run here now (`Inner::live_slots`).
+    fn look_at_slots(&self, inner: &mut Inner) {
+        let all = crate::dawproject::all_slots(inner.doc());
+        let live = plugins::with(self.id, |p| {
+            p.map(|p| {
+                all.iter()
+                    .copied()
+                    .filter(|id| matches!(p.state(*id), Some(core_host::SlotState::Live)))
+                    .collect::<std::collections::BTreeSet<PluginInstanceId>>()
+            })
+        });
+        if let Ok(Some(live)) = live {
+            inner.live_slots = live;
+        }
+    }
+
+    /// Captures every running plug-in's state for a DAWproject export (plan
+    /// 6d Task 9), as [`Session::capture_all`] does for a save; returns the
+    /// slots it could not capture: `None` for those not running here (a
+    /// placeholder, or still loading), else the capture's error. Their
+    /// stored states are used. On a thread without the plug-in host, every
+    /// slot not seen running at the last look is uncaptured.
+    fn capture_for_export(
+        &self,
+        inner: &mut Inner,
+    ) -> Result<crate::dawproject::Uncaptured, VizError> {
+        let riding = inner.riding_params();
+        let all = crate::dawproject::all_slots(inner.doc());
+        let cached = inner.live_slots.clone();
+        let history = &mut inner.history;
+        let (failed, live) = plugins::with(self.id, |p| match p {
+            Some(p) => {
+                let failed = p.capture_all(history, &riding);
+                let live: std::collections::BTreeSet<PluginInstanceId> = all
+                    .iter()
+                    .copied()
+                    .filter(|id| matches!(p.state(*id), Some(core_host::SlotState::Live)))
+                    .collect();
+                (failed, Some(live))
+            }
+            None => (Vec::new(), None),
+        })?;
+        if let Some(l) = &live {
+            inner.live_slots.clone_from(l);
+        }
+        let live = live.unwrap_or(cached);
+        let mut out: crate::dawproject::Uncaptured = all
+            .into_iter()
+            .filter(|id| !live.contains(id))
+            .map(|id| (id, None))
+            .collect();
+        for (id, e) in failed {
+            out.insert(id, Some(e.to_string()));
+        }
+        #[cfg(feature = "test-hooks")]
+        if inner.dawproject_capture_fails {
+            for id in live {
+                out.entry(id)
+                    .or_insert_with(|| Some(crate::dawproject::CAPTURE_FAILS_HOOK.to_owned()));
+            }
+        }
+        Ok(out)
+    }
+
     /// Autosaves (spec §10) a project with a path and unsaved changes,
     /// every [`recovery::autosave_interval`] and right after a plugin
     /// loaded; never inside an open edit (a drag). A busy plugin registry
@@ -854,8 +1061,18 @@ impl Session {
 
     /// Saves to `path`: plugin states captured first (`Busy`, with
     /// nothing written, when a plugin call is on the stack).
+    ///
+    /// A document without a project ID is written with a fresh one, which
+    /// every version of the history then takes once the file is written (a
+    /// failed save leaves none behind, final review M6); not inside an open
+    /// edit, where the next save stamps it (plan 6a Ruling 16, F23). Save
+    /// As keeps it (Ruling T1-a).
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
         let captured = self.capture_all(inner)?;
+        // After the capture: a `Busy` capture leaves the document as it was.
+        let stamp = (inner.doc().settings().project_id.is_none()
+            && !inner.history.in_transaction())
+        .then(crate::project_id::fresh);
         let _g = lock(&SAVE_LOCK);
         let mut refs = inner.history.referenced_media_anywhere();
         // Recordings kept for the recovery offer go with the project
@@ -865,7 +1082,21 @@ impl Session {
         }
         crate::media::copy_media(&refs, &inner.root(self.id), path)?;
         crate::overviews::copy_cache(&refs, &inner.root(self.id), path);
-        file::save(inner.doc(), path)?;
+        match &stamp {
+            Some(id) => file::save(&inner.doc().clone().with_project_id(id), path)?,
+            None => file::save(inner.doc(), path)?,
+        }
+        // The DAWproject snapshots go with the project, pruned (plan 6d
+        // Ruling 16): a failure is news, never a failed save.
+        if let Err(e) = crate::dawproject::keep_snapshots(&inner.root(self.id), path) {
+            inner
+                .news
+                .problems
+                .push(format!("DAWproject merge records not kept: {e}"));
+        }
+        if let Some(id) = &stamp {
+            inner.history.stamp_project_id(id)?;
+        }
         write_windows(path, &inner.windows, inner.editor_layout.as_ref());
         inner.write_kept(path);
         // Reads `project.json` and the autosaves under the save lock
@@ -918,6 +1149,9 @@ impl Session {
             inner.news.doc_changed = true;
         }
         self.sync_loaded_plugins(inner, &r.loaded);
+        if !r.loaded.is_empty() || !r.failed.is_empty() || !r.restart.is_empty() {
+            self.look_at_slots(inner);
+        }
         // A plugin window's moves are gestures too (spec §7.1); the
         // parameters they write as automation are not parameter steps
         // (plan 5e-1 Ruling 15, pre-flight M13).
@@ -991,6 +1225,7 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         let mut inner = lock(&self.inner);
         let h = &mut inner.history;
+        crate::bundled::arm(h);
         h.begin("Add Track")?;
         let made = h.execute(&cmd, filter).and_then(|r| {
             let lane = r
@@ -1034,7 +1269,15 @@ impl Session {
             records_busy(&inner)?;
         }
         let before = inner.doc().clone();
-        inner.history.execute(&cmd, filter)?;
+        // New strips get the EQ the switch and the catalog say now (plan 6g
+        // Ruling 6).
+        crate::bundled::arm(&mut inner.history);
+        let report = inner.history.execute(&cmd, filter)?;
+        // Inside an open edit the notes wait for its end (a drag's last
+        // step decides what is said).
+        if inner.edit_label.is_some() {
+            inner.last_warnings = notes_of(report.clone());
+        }
         inner.version += 1;
         // The user's own MPE setting wins over a controller's MCM still
         // waiting to be written back (plan 5g-2 Task 6 review m1), also
@@ -1057,7 +1300,7 @@ impl Session {
         self.release_vanished(&mut inner);
         self.resync_plugin_automation(&mut inner, Some(&before));
         self.send_mix_changes(&mut inner, &before);
-        inner.snapshot()
+        inner.snapshot_with(report.warnings)
     }
 
     /// Captures the state of every running plugin that `next` (the
@@ -1084,18 +1327,28 @@ impl Session {
         let captured = plugins::with(self.id, |p| {
             let Some(p) = p else { return Vec::new() };
             gone.into_iter()
-                // A placeholder has nothing to capture; its saved state
-                // stays in the document.
-                .filter_map(|id| {
+                .map(|id| {
                     let mine = core_model::automation::slot_params(&riding, id);
-                    p.capture_with(&mut scratch, id, &mine)
-                        .ok()
-                        .map(|blob| (id, blob))
+                    (id, p.capture_with(&mut scratch, id, &mine))
                 })
                 .collect::<Vec<_>>()
         })?;
         let mut inner = lock(&self.inner);
-        for (id, blob) in captured {
+        for (id, captured) in captured {
+            let blob = match captured {
+                Ok(blob) => blob,
+                // A placeholder has nothing to capture; its saved state
+                // stays in the document.
+                Err(core_host::HostError::NotFound(_)) => continue,
+                // Reported like a save's capture failure (plan 6e Task 3
+                // re-review: a refused store, e.g. a blob collision); the
+                // document keeps the state it had.
+                Err(e) => {
+                    let line = format!("{}: state not saved ({e})", slot_name(inner.doc(), id));
+                    inner.news.problems.push(line);
+                    continue;
+                }
+            };
             if let Some(bytes) = scratch.doc().state_blob(blob) {
                 // The overlay the capture kept (Task 9b), as in `scratch`.
                 inner
@@ -1612,6 +1865,19 @@ impl Session {
         ffi_guard(|| Ok(lock(&self.inner).save_after_pass))
     }
 
+    /// Why Save As would be refused before its panel opens: the sentence
+    /// while a merge is held (plan 6e Task 10 fix round 1), else nil. A
+    /// model-only check under the lock; no I/O.
+    pub fn save_as_refusal(&self) -> Result<Option<String>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            Ok(inner
+                .held_merge
+                .as_ref()
+                .map(|_| crate::dawproject::SAVE_AS_HELD.to_string()))
+        })
+    }
+
     /// Saves to `path` (`.vizdaw` appended if missing) and makes it the
     /// current path.
     /// `Busy` while an import or conversion has not been applied: its
@@ -1631,6 +1897,13 @@ impl Session {
             if inner.jobs.busy() {
                 return Err(VizError::Busy {
                     message: "Wait for the import or conversion to finish, then save.".into(),
+                });
+            }
+            // A held merge's media is under the current root (plan 6e
+            // Task 8 review I1).
+            if inner.held_merge.is_some() {
+                return Err(VizError::Busy {
+                    message: crate::dawproject::SAVE_AS_HELD.into(),
                 });
             }
             // A copy written without the lock lands under the old root
@@ -2357,6 +2630,7 @@ impl Session {
             let mut inner = lock(&self.inner);
             inner.history.begin(label.clone())?;
             inner.edit_label = Some(label);
+            inner.last_warnings.clear();
             Ok(())
         })
     }
@@ -2366,6 +2640,10 @@ impl Session {
     pub fn end_edit(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
+            // No edit open: nothing was said since the last one closed.
+            if inner.edit_label.is_none() {
+                inner.last_warnings.clear();
+            }
             // The static gestures' shared edit is theirs to close (plan
             // 5e-1 Ruling 14).
             if inner.history.in_transaction() && inner.static_edit.is_none() {
@@ -2376,7 +2654,8 @@ impl Session {
             self.commit_held(&mut inner);
             self.apply_pending_automation(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
-            inner.snapshot()
+            let notes = note_lines(std::mem::take(&mut inner.last_warnings));
+            inner.snapshot_with(notes)
         })
     }
 
@@ -3008,6 +3287,76 @@ impl Session {
         })
     }
 
+    /// The next export for another DAW cancels itself after `stage` (1:
+    /// its first MIDI file is written; 2: its About file is written, before
+    /// the rename; None: never; plan 6b F6).
+    pub fn debug_for_daw_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).for_daw_cancel_at = stage;
+            Ok(())
+        })
+    }
+
+    /// The next DAWproject export or import cancels itself after `stage`
+    /// (export: 1 its files are made; 2 its first WAV is staged; 3
+    /// `project.xml` is in the partial; 4 the partial is synced, before the
+    /// rename; import: 5 the file is opened; 6 its first entry is
+    /// extracted; 7 its first audio file is converted; 8 it is mapped;
+    /// merge: 5–8 as the import, 9 it is planned, 10 it is applied, 11
+    /// inside the apply, at its first check; None: never).
+    pub fn debug_dawproject_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).dawproject_cancel_at = stage;
+            Ok(())
+        })
+    }
+
+    /// The next AAF export or import cancels itself after `stage` (export:
+    /// 1 its files are staged; 2 the MIDI file is written; 3 the `.aaf` is
+    /// written, before the rename; import: 5 the file is opened; 6 its
+    /// first audio is extracted; 7 its first audio file is converted; 8
+    /// pairs are joined and channels split; 9 it is mapped; None: never).
+    pub fn debug_aaf_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).aaf_cancel_at = stage;
+            Ok(())
+        })
+    }
+
+    /// Parameter `param` of slot `slot` as the running plug-in reports it
+    /// now (test hook; L4). `Model` while the slot is not running.
+    pub fn debug_plugin_param(&self, slot: u64, param: u64) -> Result<f64, VizError> {
+        ffi_guard(|| {
+            plugins::with(self.id, |p| {
+                p.and_then(|p| p.instance(PluginInstanceId(slot)))
+                    .and_then(|i| i.param_value(core_model::mixer::ParamId(param)))
+            })?
+            .ok_or_else(|| VizError::Model {
+                message: format!("slot {slot} is not running, or has no parameter {param}"),
+            })
+        })
+    }
+
+    /// DAWproject exports and imports assume `bytes` free at their
+    /// destination (None: the disk's). It stays set until changed.
+    pub fn debug_free_bytes(&self, bytes: Option<u64>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).dawproject_free = bytes;
+            Ok(())
+        })
+    }
+
+    /// DAWproject exports and checks treat every running plug-in's capture
+    /// as failed (`true`; the error is
+    /// [`CAPTURE_FAILS_HOOK`](crate::dawproject::CAPTURE_FAILS_HOOK)), or
+    /// capture as usual (`false`). It stays set until changed.
+    pub fn debug_dawproject_capture_fails(&self, on: bool) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).dawproject_capture_fails = on;
+            Ok(())
+        })
+    }
+
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
@@ -3106,11 +3455,16 @@ impl Session {
             for w in inner.jobs.shutdown() {
                 discard(&root, w, &keep);
             }
+            // A held merge and its media go (plan 6e Task 8).
+            drop_held_merge(&mut inner, self.id);
             // The bounce's plugin copies go with it (pre-flight I2).
             if let Some((_, token)) = inner.bounce_copies.take() {
                 plugins::end_bounce(token);
             }
             inner.overviews.shutdown();
+            // No job or overview writer is left (review I2): the empty
+            // shared folders the imports and merges made go now.
+            crate::dawproject::remove_empty_media_folders(&root);
             if let Some(p) = inner.path.clone() {
                 // The jobs were shut down and their files removed above,
                 // and the overview worker has stopped. Under the save
@@ -3294,6 +3648,11 @@ impl Session {
     /// hook).
     pub fn debug_input_changes(&self) -> Option<u64> {
         host::debug_input_changes(self.id)
+    }
+
+    /// The document as `project.json` text (test hook, plan 6a).
+    pub fn debug_document_json(&self) -> String {
+        core_model::file::to_json(lock(&self.inner).doc()).unwrap_or_default()
     }
 
     /// True when every job thread has ended, applied or not (test hook).
@@ -3504,13 +3863,19 @@ impl Session {
                 let mut inner = lock(&self.inner);
                 inner.history.begin(label.clone())?;
                 inner.edit_label = Some(label.clone());
+                inner.last_warnings.clear();
             }
             // A panic inside a command must not leave the transaction open:
             // `ffi_guard` alone would report it but keep `edit_label` set.
+            let mut notes = Vec::new();
             let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for (step, c) in core.into_iter().enumerate() {
                     edit_all_hook(&label, step);
                     self.execute_with(c, &filter)?;
+                    merge_notes(
+                        &mut notes,
+                        std::mem::take(&mut lock(&self.inner).last_warnings),
+                    );
                 }
                 Ok::<(), VizError>(())
             }));
@@ -3524,6 +3889,7 @@ impl Session {
             if let Some(e) = failure {
                 let mut inner = lock(&self.inner);
                 inner.edit_label = None;
+                inner.last_warnings.clear();
                 if inner.history.in_transaction() {
                     inner.history.abort()?;
                 }
@@ -3539,7 +3905,7 @@ impl Session {
             inner.version += 1;
             self.commit_held(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
-            let snapshot = inner.snapshot()?;
+            let snapshot = inner.snapshot_with(note_lines(notes))?;
             drop(inner);
             if let Some(seq) = cmds.iter().find_map(crate::edit::claims_engine) {
                 self.claim_for_input(SeqId(seq));
@@ -3572,6 +3938,9 @@ impl Session {
                 inner.history.abort()?;
                 inner.history.begin(label)?;
                 inner.version += 1;
+                // A refused step leaves the rewound document: nothing from
+                // the step before is said about it.
+                inner.last_warnings.clear();
             }
             match self.execute_with(c, &crate::edit::view_filter(filter.as_ref())) {
                 Ok(s) => Ok(s),
@@ -3595,6 +3964,7 @@ impl Session {
                 inner.reload_host(self.id);
             }
             inner.edit_label = None;
+            inner.last_warnings.clear();
             self.commit_held(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
@@ -3839,6 +4209,7 @@ impl Session {
             if inner.history.in_transaction() {
                 return Err(edit_open_busy());
             }
+            crate::bundled::arm(&mut inner.history);
             inner.history.begin("New Sequence from Template")?;
             match crate::templates::build(&mut inner.history, &name, &template) {
                 Ok(_) => inner.history.commit()?,
@@ -3875,6 +4246,7 @@ impl Session {
             records_busy(&inner)?;
             let seq = crate::snapshot::seq_id(inner.doc(), seq)?;
             let index = crate::tracks::index_below(inner.doc(), seq, after);
+            crate::bundled::arm(&mut inner.history);
             inner.history.begin(crate::tracks::new_track_label(kind))?;
             match crate::tracks::build_track(&mut inner.history, seq, kind, index, monitor) {
                 Ok(_) => inner.history.commit()?,
@@ -3960,11 +4332,20 @@ impl Drop for Session {
         // A bounce still running stops first (plan 5f-2 pre-flight I2):
         // its engine holds its plugin copies' processors, which end below;
         // one without copies must not write after its session went (final
-        // review T4-M5).
+        // review T4-M5). So does an export for another DAW, which renders
+        // through one (plan 6b F2).
         {
             let mut inner = lock(&self.inner);
             if inner.bounce_copies.is_some()
-                || inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce])
+                || inner.jobs.pending(&[
+                    crate::jobs::JobKindRow::Bounce,
+                    crate::jobs::JobKindRow::ExportProject,
+                    crate::jobs::JobKindRow::ExportDawproject,
+                    crate::jobs::JobKindRow::ImportProject,
+                    crate::jobs::JobKindRow::MergeDawproject,
+                    crate::jobs::JobKindRow::ExportAaf,
+                    crate::jobs::JobKindRow::ImportAaf,
+                ])
             {
                 let root = inner.root(self.id);
                 let keep = inner.kept();
@@ -3972,6 +4353,8 @@ impl Drop for Session {
                     discard(&root, w, &keep);
                 }
             }
+            // A held merge's media goes with it (plan 6e Task 8).
+            drop_held_merge(&mut inner, self.id);
         }
         release_packages(self.id);
         if let Some(k) = key {
@@ -4027,8 +4410,27 @@ pub(crate) fn discard(
             .flatten()
             .map(|i| i.path)
             .collect(),
+        // The stems it added (plan 6b F1); a folder in place stays.
+        Work::ExportForDaw { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .map(|i| i.path)
+            .collect(),
+        // What a DAWproject import or merge converted (plans 6d, 6e).
+        Work::ImportProject { files, .. }
+        | Work::MergeDawproject { files, .. }
+        | Work::ImportAaf { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .map(|i| i.path)
+            .collect(),
         // What an external edit imported; its copy stays (plan 5f-3).
         Work::ExternalEdit { file, .. } => file.into_iter().flatten().map(|i| i.path).collect(),
+        // An import wrote nothing; an export's files are in place and its
+        // partials already gone (plan 6a).
+        Work::ImportMidi { .. } | Work::ExportMidi { .. } | Work::ExportAaf { .. } => Vec::new(),
         Work::Cancelled => Vec::new(),
     };
     for f in files {
@@ -4128,6 +4530,69 @@ impl Session {
                         ),
                     }
                 }
+                Work::ImportMidi { result, place } => {
+                    let applied = result
+                        .map_err(|message| VizError::Model { message })
+                        .and_then(|imp| apply_midi_import(inner, &imp, place));
+                    match applied {
+                        Ok(report) => {
+                            changed = true;
+                            let report = crate::interchange::report_row(&report, "Imported");
+                            inner.interchange_report = Some(report.clone());
+                            let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+                            r.report = Some(report);
+                            r
+                        }
+                        Err(e) => row(
+                            id,
+                            kind,
+                            JobStateRow::Failed,
+                            Some(e.to_string()),
+                            vec![],
+                            vec![],
+                        ),
+                    }
+                }
+                Work::ImportProject { files, result } => {
+                    let r = apply_dawproject_work(inner, &root, id, kind, files, result);
+                    changed |= r.state == JobStateRow::Done;
+                    r
+                }
+                Work::MergeDawproject { files, result } => {
+                    let (r, swapped) = apply_merge_work(inner, &root, id, kind, files, result);
+                    changed |= swapped;
+                    r
+                }
+                Work::ImportAaf { files, result } => {
+                    let r = apply_aaf_work(inner, &root, id, kind, files, result);
+                    changed |= r.state == JobStateRow::Done;
+                    r
+                }
+                Work::ExportMidi { result, written } | Work::ExportAaf { result, written } => {
+                    let mut r = match result {
+                        Ok(report) => {
+                            let report = crate::interchange::report_row(&report, "Exported");
+                            inner.interchange_report = Some(report.clone());
+                            let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+                            r.report = Some(report);
+                            r
+                        }
+                        Err(why) => row(id, kind, JobStateRow::Failed, Some(why), vec![], vec![]),
+                    };
+                    // A failed job still names what it put in place.
+                    r.written = written;
+                    r
+                }
+                Work::ExportForDaw {
+                    files,
+                    target,
+                    result,
+                    written,
+                } => {
+                    let r = apply_for_daw(inner, &root, id, kind, files, target, result, written);
+                    changed |= !r.created.is_empty();
+                    r
+                }
                 Work::Relink { files } => {
                     let (done, problems) = apply_relink(inner, &root, files);
                     changed |= !done.is_empty();
@@ -4155,8 +4620,12 @@ impl Session {
         }
         // A bounce's plugin copies end with its job, however it ended:
         // applied, failed, cancelled or panicked (plan 5f-2 Ruling 6,
-        // pre-flight I2).
-        if inner.bounce_copies.is_some() && !inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce])
+        // pre-flight I2); so do an export's for another DAW (plan 6b).
+        if inner.bounce_copies.is_some()
+            && !inner.jobs.pending(&[
+                crate::jobs::JobKindRow::Bounce,
+                crate::jobs::JobKindRow::ExportProject,
+            ])
         {
             if let Some((_, token)) = inner.bounce_copies.take() {
                 plugins::end_bounce(token);
@@ -4182,6 +4651,412 @@ impl Session {
     }
 }
 
+/// Applies a parsed MIDI file (plan 6a): into the project as one undo step
+/// "Import MIDI File", or as a new project through a scratch history that
+/// then replaces the session's, leaving nothing to undo (Ruling 6). Into a
+/// sequence without events the file's tempo and meter are used whatever
+/// `use_tempo` says. On an error (or a panic) nothing changes.
+///
+/// A new-project import replaces the whole history: edits made to the
+/// empty project while the job ran (song info, tempo) stay in the document
+/// but lose their undo steps (Ruling 6 accepts this; the app shows the
+/// project only once the import is applied).
+fn apply_midi_import(
+    inner: &mut Inner,
+    imp: &core_io::midi_in::MidiImport,
+    mut place: core_io::midi_in::Placement,
+) -> Result<core_io::report::Report, VizError> {
+    const LABEL: &str = "Import MIDI File";
+    let s = inner.doc().sequence(place.seq)?;
+    place.use_tempo |= s
+        .lanes
+        .iter()
+        .all(|l| l.takes.iter().all(|t| t.events.is_empty()));
+    let mut report = core_io::report::Report::default();
+    let run = |h: &mut History, report: &mut core_io::report::Report| -> Result<(), VizError> {
+        h.begin(LABEL)?;
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            core_io::midi_in::apply(h, imp, &place, report)
+        }));
+        let failed = match applied {
+            Ok(Ok(_)) => return h.commit().map_err(VizError::from),
+            Ok(Err(e)) => VizError::from(e),
+            Err(p) => VizError::Internal {
+                message: crate::guard::panic_message(p.as_ref()),
+            },
+        };
+        let _ = h.abort();
+        Err(failed)
+    };
+    if place.new_project {
+        let mut scratch = crate::bundled::history(inner.doc().clone());
+        run(&mut scratch, &mut report)?;
+        inner.history = crate::bundled::history(scratch.doc().clone());
+        // Serials of the replaced history's steps name nothing now (final
+        // review M8): a later step must not try to amend into them.
+        inner.last_step = None;
+        inner.surfaces.tempo_step = None;
+    } else {
+        crate::bundled::arm(&mut inner.history);
+        run(&mut inner.history, &mut report)?;
+    }
+    Ok(report)
+}
+
+/// Applies a finished DAWproject import (plan 6d Task 10): as a new
+/// project, through a scratch history that then replaces the session's,
+/// leaving nothing to undo (spec §6.1). On `Err` (and a cancel) the media
+/// it converted is removed, with the overviews built for it, and the row is
+/// Failed (Cancelled for a cancel).
+fn apply_dawproject_work(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    kind: crate::jobs::JobKindRow,
+    files: ImportFiles,
+    result: Result<Box<core_io::dawproject::import::DpImport>, String>,
+) -> crate::jobs::JobRow {
+    use crate::jobs::{JobStateRow, row};
+    let applied = result
+        .map_err(|message| VizError::Model { message })
+        .and_then(|imp| apply_dawproject_import(inner, &imp));
+    match applied {
+        Ok(report) => {
+            let report = crate::interchange::report_row(&report, "Imported");
+            inner.interchange_report = Some(report.clone());
+            let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+            r.report = Some(report);
+            r
+        }
+        Err(e) => {
+            remove_job_media(inner, root, files);
+            match e {
+                VizError::Model { message } if message == crate::for_daw::CANCELLED => {
+                    row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
+                }
+                e => row(
+                    id,
+                    kind,
+                    JobStateRow::Failed,
+                    Some(match e {
+                        VizError::Model { message } => message,
+                        e => e.to_string(),
+                    }),
+                    vec![],
+                    vec![],
+                ),
+            }
+        }
+    }
+}
+
+/// Removes the media a DAWproject import or merge job converted that no
+/// history state references, with the overviews built for audio no state
+/// holds.
+fn remove_job_media(inner: &Inner, root: &Path, files: ImportFiles) {
+    let keep = inner.kept();
+    let hashes: std::collections::BTreeSet<String> =
+        inner.named_media().into_values().flatten().collect();
+    for f in files.into_iter().filter_map(|(_, r)| r.ok()).flatten() {
+        remove_unkept(root, &f.path, &keep);
+        if !hashes.contains(&f.content_hash)
+            && let Some(at) = core_media::overview::Overview::path(root, &f.content_hash)
+        {
+            let _ = std::fs::remove_file(at);
+        }
+    }
+    // Only files: the shared folders (`Media/.incoming`,
+    // `Media/.overviews`) other jobs and the overview worker write into
+    // stay until close (review I2).
+}
+
+/// `Busy` while a merge waits between its preview and Merge.
+fn merge_held_busy() -> VizError {
+    VizError::Busy {
+        message: "Finish or cancel the merge waiting to be confirmed.".into(),
+    }
+}
+
+/// Drops the held merge, if any, and the media its job converted.
+fn drop_held_merge(inner: &mut Inner, id: u64) {
+    if let Some(h) = inner.held_merge.take() {
+        let root = inner.root(id);
+        remove_job_media(inner, &root, h.files);
+    }
+}
+
+/// The swap (plan 6e Ruling 12): when the project is still what the merge
+/// was made from (its present serial, its present document's referenced
+/// plug-in states and its project ID), the merged history replaces the
+/// session's and the report is the interchange report; the media nothing
+/// references then goes. Otherwise `Model` [`crate::dawproject::CHANGED_SINCE`]
+/// and the merge's media goes. The caller reloads the host on `Ok`.
+fn swap_merge(
+    inner: &mut Inner,
+    root: &Path,
+    merged: Box<crate::dawproject::Merged>,
+    files: ImportFiles,
+) -> Result<crate::interchange::ReportRow, VizError> {
+    let mut merged = merged;
+    let now = crate::dawproject::MergeBase::of(&inner.history);
+    let history = merged.history.take().filter(|_| now == merged.base);
+    let Some(history) = history else {
+        remove_job_media(inner, root, files);
+        return Err(VizError::Model {
+            message: crate::dawproject::CHANGED_SINCE.into(),
+        });
+    };
+    inner.history = history;
+    crate::bundled::arm(&mut inner.history);
+    // Serials of the replaced history's later steps name nothing now.
+    inner.last_step = None;
+    inner.surfaces.tempo_step = None;
+    let report = crate::dawproject::merged_report(&merged);
+    inner.interchange_report = Some(report.clone());
+    remove_job_media(inner, root, files);
+    Ok(report)
+}
+
+/// Applies a finished DAWproject merge job (plan 6e Task 8): Preview is
+/// Done with its preview and report, its media removed; Hold is Done with
+/// its preview and kept as the held merge (a held one before it is
+/// dropped); Apply swaps ([`swap_merge`]). A failure or cancel removes its
+/// media. Answers the row and whether the history was swapped.
+fn apply_merge_work(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    kind: crate::jobs::JobKindRow,
+    files: ImportFiles,
+    result: Result<Box<crate::dawproject::Merged>, String>,
+) -> (crate::jobs::JobRow, bool) {
+    use crate::dawproject::MergeStepRow;
+    use crate::jobs::{JobStateRow, row};
+    let merged = match result {
+        Ok(m) => m,
+        Err(why) => {
+            remove_job_media(inner, root, files);
+            let r = if why == crate::for_daw::CANCELLED {
+                row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
+            } else {
+                row(id, kind, JobStateRow::Failed, Some(why), vec![], vec![])
+            };
+            return (r, false);
+        }
+    };
+    let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+    r.merge = Some(merged.preview.clone());
+    match merged.step {
+        MergeStepRow::Preview => {
+            remove_job_media(inner, root, files);
+            r.report = Some(crate::dawproject::merged_report(&merged));
+            (r, false)
+        }
+        MergeStepRow::Hold => {
+            if let Some(old) = inner.held_merge.take() {
+                remove_job_media(inner, root, old.files);
+            }
+            inner.held_merge = Some(HeldMerge {
+                job: id,
+                merged,
+                files,
+            });
+            (r, false)
+        }
+        // Never while recording, as `confirm_merge` (review M1).
+        MergeStepRow::Apply
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() =>
+        {
+            remove_job_media(inner, root, files);
+            let r = row(
+                id,
+                kind,
+                JobStateRow::Failed,
+                Some(crate::dawproject::RECORDING_APPLY.into()),
+                vec![],
+                vec![],
+            );
+            (r, false)
+        }
+        MergeStepRow::Apply => match swap_merge(inner, root, merged, files) {
+            Ok(report) => {
+                r.report = Some(report);
+                (r, true)
+            }
+            Err(e) => {
+                let mut f = row(id, kind, JobStateRow::Failed, None, vec![], vec![]);
+                f.message = Some(match e {
+                    VizError::Model { message } => message,
+                    e => e.to_string(),
+                });
+                (f, false)
+            }
+        },
+    }
+}
+
+/// Applies a mapped DAWproject file as a new project (Ruling 17), as
+/// `apply_midi_import`'s new-project path does: a scratch history, one
+/// transaction "Import DAWproject" (a panic or error aborts it), the new
+/// plug-ins' states captured, then the session's history replaced. The
+/// project must have no tracks. On an error nothing changes.
+fn apply_dawproject_import(
+    inner: &mut Inner,
+    imp: &core_io::dawproject::import::DpImport,
+) -> Result<core_io::report::Report, VizError> {
+    const LABEL: &str = "Import DAWproject";
+    let doc = inner.doc();
+    if doc.sequences().values().any(|s| !s.lanes.is_empty()) {
+        return Err(VizError::Model {
+            message: core_io::dawproject::import::NOT_NEW.into(),
+        });
+    }
+    let seq = doc
+        .sequences()
+        .keys()
+        .next()
+        .copied()
+        .ok_or_else(|| VizError::Model {
+            message: "the project has no sequence".into(),
+        })?;
+    let mut report = core_io::report::Report::default();
+    let mut scratch = crate::bundled::history(doc.clone());
+    scratch.begin(LABEL)?;
+    let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        core_io::dawproject::import::apply(&mut scratch, imp, seq, &mut report)
+    }));
+    let states = match applied {
+        Ok(Ok(states)) => {
+            scratch.commit()?;
+            states
+        }
+        Ok(Err(e)) => {
+            let _ = scratch.abort();
+            return Err(e.into());
+        }
+        Err(p) => {
+            let _ = scratch.abort();
+            return Err(VizError::Internal {
+                message: crate::guard::panic_message(p.as_ref()),
+            });
+        }
+    };
+    for (slot, bytes) in &states {
+        scratch.capture_state(*slot, bytes)?;
+    }
+    inner.history = crate::bundled::history(scratch.doc().clone());
+    // Serials of the replaced history's steps name nothing now.
+    inner.last_step = None;
+    inner.surfaces.tempo_step = None;
+    Ok(report)
+}
+
+/// Applies a finished AAF import (plan 6f Task 5), as
+/// [`apply_dawproject_work`] does: on `Err` (and a cancel) the media it
+/// made is removed and the row is Failed (Cancelled for a cancel).
+fn apply_aaf_work(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    kind: crate::jobs::JobKindRow,
+    files: ImportFiles,
+    result: Result<Box<crate::aaf::AafImported>, String>,
+) -> crate::jobs::JobRow {
+    use crate::jobs::{JobStateRow, row};
+    let applied = result
+        .map_err(|message| VizError::Model { message })
+        .and_then(|a| apply_aaf_import(inner, &a));
+    match applied {
+        Ok(report) => {
+            let report = crate::interchange::report_row(&report, "Imported");
+            inner.interchange_report = Some(report.clone());
+            let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+            r.report = Some(report);
+            r
+        }
+        Err(e) => {
+            remove_job_media(inner, root, files);
+            match e {
+                VizError::Model { message } if message == crate::for_daw::CANCELLED => {
+                    row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
+                }
+                e => row(
+                    id,
+                    kind,
+                    JobStateRow::Failed,
+                    Some(match e {
+                        VizError::Model { message } => message,
+                        e => e.to_string(),
+                    }),
+                    vec![],
+                    vec![],
+                ),
+            }
+        }
+    }
+}
+
+/// Applies a mapped AAF file (plan 6f Task 5) by `aaf::import::apply`
+/// inside one transaction "Import AAF" (a panic or error aborts it): as a
+/// new project through a scratch history that then replaces the session's,
+/// leaving nothing to undo (as [`apply_dawproject_import`]); into this
+/// project as one undo step. On an error nothing changes.
+fn apply_aaf_import(
+    inner: &mut Inner,
+    a: &crate::aaf::AafImported,
+) -> Result<core_io::report::Report, VizError> {
+    use core_io::aaf::import::{LABEL, apply};
+    let mut report = core_io::report::Report::default();
+    let run = |h: &mut History,
+               report: &mut core_io::report::Report|
+     -> Result<core_io::dawproject::import::SlotStates, VizError> {
+        h.begin(LABEL)?;
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply(h, &a.imp, a.midi.as_ref(), &a.place, report)
+        }));
+        let failed = match applied {
+            Ok(Ok(states)) => {
+                h.commit()?;
+                return Ok(states);
+            }
+            Ok(Err(e)) => VizError::from(e),
+            Err(p) => VizError::Internal {
+                message: crate::guard::panic_message(p.as_ref()),
+            },
+        };
+        let _ = h.abort();
+        Err(failed)
+    };
+    if a.place.new_project {
+        let mut scratch = crate::bundled::history(inner.doc().clone());
+        let states = run(&mut scratch, &mut report)?;
+        for (slot, bytes) in &states {
+            scratch.capture_state(*slot, bytes)?;
+        }
+        inner.history = crate::bundled::history(scratch.doc().clone());
+        // Serials of the replaced history's steps name nothing now.
+        inner.last_step = None;
+        inner.surfaces.tempo_step = None;
+    } else {
+        // The audio was placed on the sequence's map as the job found it;
+        // a tempo or file start changed since (an edit, undo or redo)
+        // would put it out of time with the MIDI file and the project.
+        let s = inner.doc().sequence(a.place.seq)?;
+        let (tempo, start) = core_io::aaf::import::tempo_and_start(a.midi.as_ref(), s, false)?;
+        if tempo != a.tempo || start != a.start {
+            return Err(VizError::Model {
+                message: crate::aaf::TEMPO_CHANGED.into(),
+            });
+        }
+        crate::bundled::arm(&mut inner.history);
+        let states = run(&mut inner.history, &mut report)?;
+        for (slot, bytes) in &states {
+            inner.history.capture_state(*slot, bytes)?;
+        }
+    }
+    Ok(report)
+}
+
 /// One import job's result per source file: `(file name, the items it
 /// became or why it failed)`.
 type ImportFiles = Vec<(String, Result<Vec<core_media::import::Imported>, String>)>;
@@ -4199,6 +5074,9 @@ struct ImportAs {
     origin: fn(&core_media::import::Imported) -> core_model::document::MediaOrigin,
     /// New lanes are named after their item (else "Audio <n>").
     named_lanes: bool,
+    /// The tick may be as early as the target sequence's pickup start
+    /// (else a negative tick lands at 0).
+    pickup: bool,
 }
 
 impl ImportAs {
@@ -4209,6 +5087,7 @@ impl ImportAs {
             original_name: item.original_name.clone(),
         },
         named_lanes: false,
+        pickup: false,
     };
 
     /// A bounce's "Add to project": `Bounced` items on lanes named after them.
@@ -4216,6 +5095,16 @@ impl ImportAs {
         label: "Bounce",
         origin: |_| core_model::document::MediaOrigin::Bounced,
         named_lanes: true,
+        pickup: false,
+    };
+
+    /// An export's "Add the stems to this project" (plan 6b): `Bounced`
+    /// items on tracks named after them, from the pickup's start.
+    const FOR_DAW: ImportAs = ImportAs {
+        label: "Add Stems",
+        origin: |_| core_model::document::MediaOrigin::Bounced,
+        named_lanes: true,
+        pickup: true,
     };
 
     /// The name of the new lane for `item`, the sequence's `n`th.
@@ -4256,6 +5145,8 @@ fn apply_import_as(
     }
     let single = items.len() == 1 && items.first().is_some_and(|v| v.len() == 1);
     let filter = ViewFilter::default();
+    // Its insert may make the first output path's strip (Ruling 4).
+    crate::bundled::arm(&mut inner.history);
     let h = &mut inner.history;
     let fail = |e: VizError, problems: Vec<String>| {
         for p in &written {
@@ -4317,11 +5208,16 @@ fn apply_import_as(
                         })?
                 }
             };
+            let earliest = if how.pickup {
+                0i64.saturating_sub(h.doc().sequence(seq)?.start_offset.0)
+            } else {
+                0
+            };
             h.execute(
                 &Command::Audio(AudioCmd::Insert {
                     seq,
                     lane,
-                    tick: Tick(t.tick.max(0)),
+                    tick: Tick(t.tick.max(earliest)),
                     media,
                     source_offset: 0,
                     length: item.length_frames,
@@ -4344,6 +5240,60 @@ fn apply_import_as(
             Err(fail(e, problems))
         }
     }
+}
+
+/// Applies a finished export for another DAW (plan 6b Ruling 7, F1): on
+/// `Ok` its folder is in place, kept whatever the "Add" apply does, and
+/// the stems are added as one undo step "Add Stems"; otherwise the
+/// imports are removed and the row is Failed, or Cancelled for a cancel.
+#[allow(clippy::too_many_arguments)]
+fn apply_for_daw(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    kind: crate::jobs::JobKindRow,
+    files: ImportFiles,
+    target: Option<crate::jobs::ImportTargetRow>,
+    result: Result<core_io::report::Report, String>,
+    written: Vec<String>,
+) -> crate::jobs::JobRow {
+    use crate::jobs::{JobStateRow, row};
+    let report = match result {
+        Ok(r) => crate::interchange::report_row(&r, "Exported"),
+        Err(why) => {
+            let keep = inner.kept();
+            for f in files.into_iter().filter_map(|(_, r)| r.ok()).flatten() {
+                remove_unkept(root, &f.path, &keep);
+            }
+            let mut r = if why == crate::for_daw::CANCELLED {
+                row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
+            } else {
+                row(id, kind, JobStateRow::Failed, Some(why), vec![], vec![])
+            };
+            r.written = written;
+            return r;
+        }
+    };
+    inner.interchange_report = Some(report.clone());
+    let applied = if files.is_empty() {
+        Ok((Vec::new(), Vec::new()))
+    } else {
+        apply_import_as(inner, root, files, target, &ImportAs::FOR_DAW)
+    };
+    let mut r = match applied {
+        Ok((created, problems)) => row(id, kind, JobStateRow::Done, None, problems, created),
+        Err((e, problems)) => row(
+            id,
+            kind,
+            JobStateRow::Failed,
+            Some(e.to_string()),
+            problems,
+            vec![],
+        ),
+    };
+    r.report = Some(report);
+    r.written = written;
+    r
 }
 
 /// Applies a finished relink job: one undo step "Relink Media" per item
@@ -4397,7 +5347,9 @@ fn apply_relink(
             sample_rate: f.file.sample_rate,
         });
         match inner.history.execute(&cmd, &ViewFilter::default()) {
-            Ok(_) => {
+            Ok(report) => {
+                // A new rate or length can shorten or drop a crossfade.
+                problems.extend(report.warnings);
                 inner.changed.remove(&m);
                 done.push(m.0);
             }
@@ -4582,14 +5534,19 @@ fn apply_convert(
         }
     };
     match inner.history.execute(&cmd, &ViewFilter::default()) {
-        Ok(_) => Ok((
-            files
-                .iter()
-                .filter(|(_, r)| r.is_ok())
-                .map(|(m, _)| m.0)
-                .collect(),
-            problems,
-        )),
+        Ok(report) => {
+            // The rescale may shorten or drop a crossfade: the user hears of
+            // it in the job's problems (plan 6c pre-flight F1).
+            problems.extend(report.warnings);
+            Ok((
+                files
+                    .iter()
+                    .filter(|(_, r)| r.is_ok())
+                    .map(|(m, _)| m.0)
+                    .collect(),
+                problems,
+            ))
+        }
         Err(e) => {
             remove(&files);
             Err((e.into(), problems))
@@ -5171,6 +6128,7 @@ fn recover_into_lanes(
         return Ok((Vec::new(), problems));
     }
     let filter = ViewFilter::default();
+    crate::bundled::arm(&mut inner.history);
     let h = &mut inner.history;
     h.begin("Recover Recordings")?;
     let run = (|| -> Result<(), VizError> {
@@ -5647,6 +6605,8 @@ impl Session {
             // (plan 5c-2 Ruling 6).
             let mutes = crate::synth::mutes_after(&p, &inner.synth_mutes);
             let automation = p.automation.clone();
+            // A pass with audio may add the first output path.
+            crate::bundled::arm(&mut inner.history);
             match inner
                 .history
                 .execute(&Command::Record(p), &ViewFilter::default())
@@ -5802,6 +6762,8 @@ impl Session {
                 channels,
                 arm_midi,
             });
+            // It may add the first output path.
+            crate::bundled::arm(&mut inner.history);
             inner.history.execute(&cmd, &ViewFilter::default())?;
             inner.version += 1;
             inner.reload_host(self.id);
@@ -8230,6 +9192,7 @@ impl Session {
                 gain_db,
                 fade_in,
                 fade_out,
+                ..
             } = ev.body
             else {
                 return Err(crate::events::bad(&format!(
@@ -8277,12 +9240,13 @@ impl Session {
                 })
                 .collect();
             let lin = 10f32.powf(gain_db / 20.0);
+            let xfades = crate::overviews::crossfades_over(&doc, core_model::ids::EventId(event));
             let gain = |c: usize| -> f32 {
                 let Some(Some((a, b))) = spans.get(c) else {
                     return 0.0;
                 };
                 let r = (a + b) / 2 - source_offset.min((a + b) / 2);
-                lin * crate::overviews::fade_gain(r, length, fade_in, fade_out)
+                lin * crate::overviews::fade_gain(r, length, fade_in, fade_out, &xfades)
             };
             let file = inner.root(self.id).join(&m.path);
             Ok(crate::overviews::columns(
@@ -8325,6 +9289,7 @@ impl Session {
                     gain_db,
                     fade_in,
                     fade_out,
+                    ..
                 } = ev.body
                 else {
                     return Err(crate::events::bad(&format!(
@@ -8340,6 +9305,7 @@ impl Session {
                     gain_db,
                     fade_in,
                     fade_out,
+                    xfades: crate::overviews::crossfades_over(doc, core_model::ids::EventId(event)),
                 }
             };
             Ok(crate::overviews::envelope(
@@ -8641,92 +9607,23 @@ impl Session {
                     message: "A bounce is running.".into(),
                 });
             }
+            if inner
+                .jobs
+                .pending(&[crate::jobs::JobKindRow::ExportProject])
+            {
+                return Err(VizError::Busy {
+                    message: "Wait for the export to finish.".into(),
+                });
+            }
             if req.add_to_project {
                 inner.media_jobs_idle()?;
             }
-            // The live states, as Save captures them (Ruling 6), with the
-            // values the plugins were sent and the document does not have
-            // yet (read first: a capture counts them as saved).
-            // An automated or riding parameter keeps its static value, as a
-            // capture keeps it (final review T4-M2; plan 5e-1 Ruling 15).
-            let slots = mixer::slot_ids(inner.doc());
-            let mut kept = core_model::automation::automated_targets(inner.doc());
-            kept.extend(inner.riding_params());
-            let sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)> = plugins::with(self.id, |p| {
-                p.map(|p| {
-                    slots
-                        .iter()
-                        .map(|id| {
-                            let mut v = p.uncommitted(*id);
-                            v.retain(|(param, _)| !kept.contains(&(*id, *param)));
-                            (*id, v)
-                        })
-                        .filter(|(_, v)| !v.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default()
-            })?;
-            self.capture_all(&mut inner)?;
-            let doc = with_params(inner.doc().clone(), sent);
-            let root = inner.root(self.id);
-            let format = doc.settings().format;
-            let copies = if mixer::slot_ids(&doc).is_empty() {
-                None
-            } else {
-                Some(plugins::start_bounce(
-                    self.id,
-                    &doc,
-                    f64::from(format.sample_rate),
-                    crate::bounce::BLOCK,
-                )?)
-            };
-            let token = copies.as_ref().map(|c| c.token);
-            #[cfg(feature = "test-hooks")]
-            let (cancel_at, fail_import_at) = (
-                inner.bounce_cancel_at.take(),
-                inner
-                    .bounce_fail_import_at
-                    .take()
-                    .and_then(|k| usize::try_from(k).ok()),
-            );
-            #[cfg(not(feature = "test-hooks"))]
-            let (cancel_at, fail_import_at) = (None, None);
-            let job = crate::bounce::Job {
-                problems: plan.offline_sentence().into_iter().collect(),
+            self.spawn_render(
+                &mut inner,
                 plan,
-                media: crate::media::files(&doc, &root, &inner.offline),
-                doc,
-                root,
-                reserved: inner.reserved_names(),
-                format,
-                tail_cap_ms: crate::bounce::bounce_settings().tail_cap_ms,
-                copies: copies.map(|c| crate::bounce::Copies {
-                    factory: c.factory,
-                    ready: c.ready,
-                    problems: c.problems,
-                }),
-                cancel_at,
-                fail_import_at,
-            };
-            let spawned = inner
-                .jobs
-                .spawn(crate::jobs::JobKindRow::Bounce, move |progress, cancel| {
-                    crate::bounce::run(job, progress, cancel)
-                });
-            match spawned {
-                Ok(id) => {
-                    if let Some(t) = token {
-                        inner.bounce_copies = Some((id, t));
-                    }
-                    Ok(id)
-                }
-                Err(e) => {
-                    if let Some(t) = token {
-                        plugins::end_bounce(t);
-                    }
-                    Err(e)
-                }
-            }
+                crate::jobs::JobKindRow::Bounce,
+                crate::bounce::run,
+            )
         })
     }
 
@@ -8764,6 +9661,742 @@ impl Session {
     }
 }
 
+/// MIDI files (plan 6a): import and export jobs, their checks, the last
+/// report and song info.
+#[uniffi::export]
+impl Session {
+    /// What the import sheet shows for the file at `path` (read and parsed
+    /// here, off the session lock; the app calls it off the main actor,
+    /// F12): its kind, tracks, channels with their suggested destinations,
+    /// tempo and MPE. `Model` for a path, file or content refused; `Io` for
+    /// a failed read.
+    pub fn midi_file_info(
+        &self,
+        path: String,
+    ) -> Result<crate::interchange::MidiFileInfoRow, VizError> {
+        ffi_guard(|| {
+            let p = crate::interchange::file_path(&path, crate::interchange::MIDI_FILE)?;
+            let imp = core_io::midi_in::parse_file(
+                &p,
+                &core_io::midi_in::ImportOptions::default(),
+                &core_io::limits::Limits::default(),
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .map_err(crate::interchange::io_error)?;
+            Ok(crate::interchange::file_info(lock(&self.inner).doc(), &imp))
+        })
+    }
+
+    /// Starts importing a MIDI file (plan 6a): the job ID; `job` reports it
+    /// and applies it as one undo step "Import MIDI File" (as a new project,
+    /// Ruling 6, the history is replaced instead: nothing to undo). Every refusal of the request is `Model` with
+    /// nothing read; `Busy` while recording, inside an open edit, and while
+    /// a bounce or another MIDI import or export is unapplied.
+    pub fn import_midi(
+        &self,
+        req: crate::interchange::MidiImportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            // Finished jobs apply first, so the request is checked against
+            // the document the job will land in.
+            self.interchange_idle(&mut inner)?;
+            let plan = crate::interchange::import_plan(inner.doc(), &req)?;
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ImportMidi,
+                crate::interchange::import_job(plan),
+            )
+        })
+    }
+
+    /// Starts a Standard MIDI File export of the document as it is now: the
+    /// job ID. Refusals and `Busy` as `import_midi`; the file is written as
+    /// a partial and renamed into place.
+    pub fn export_midi(
+        &self,
+        req: crate::interchange::SmfExportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            let opts = crate::interchange::smf_options(inner.doc(), &req)?;
+            let dest =
+                crate::interchange::file_dest(&req.path, req.replace, &self.export_roots(&inner))?;
+            let job = crate::interchange::smf_job(inner.doc().clone(), opts, dest, req.replace);
+            inner.jobs.spawn(crate::jobs::JobKindRow::ExportMidi, job)
+        })
+    }
+
+    /// What `export_midi` would report (nothing is written; `path` and
+    /// `replace` are not looked at, F2).
+    pub fn export_midi_check(
+        &self,
+        req: crate::interchange::SmfExportRequestRow,
+    ) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let (doc, opts) = {
+                let inner = lock(&self.inner);
+                let opts = crate::interchange::smf_options(inner.doc(), &req)?;
+                (inner.doc().clone(), opts)
+            };
+            crate::interchange::smf_check(&doc, &opts)
+        })
+    }
+
+    /// Starts a MIDI Clip File export: one file per track (`path` is the
+    /// file for one track, the folder for several, named `NN <track>.midi2`;
+    /// every name is checked first). Refusals and `Busy` as `import_midi`.
+    pub fn export_midi_clip(
+        &self,
+        req: crate::interchange::ClipExportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            let plan = crate::interchange::clip_plan(inner.doc(), &req)?;
+            let dests = crate::interchange::clip_dests(&plan, &req, &self.export_roots(&inner))?;
+            let job = crate::interchange::clip_job(inner.doc().clone(), plan, dests, req.replace);
+            inner.jobs.spawn(crate::jobs::JobKindRow::ExportMidi, job)
+        })
+    }
+
+    /// What `export_midi_clip` would report (nothing is written; `path`
+    /// and `replace` are not looked at, F2).
+    pub fn export_midi_clip_check(
+        &self,
+        req: crate::interchange::ClipExportRequestRow,
+    ) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let (doc, plan) = {
+                let inner = lock(&self.inner);
+                let plan = crate::interchange::clip_plan(inner.doc(), &req)?;
+                (inner.doc().clone(), plan)
+            };
+            crate::interchange::clip_check(&doc, &plan)
+        })
+    }
+
+    /// The files `export_midi_clip` would write for `req` (`path`: the file
+    /// for one track, the folder for several) and which of them already
+    /// exist, a link counting even when it dangles, as the export sees
+    /// them: the app asks about those before passing `replace`. Nothing is
+    /// written; the folder is looked at off the session lock. `Model` for
+    /// an unknown sequence or track, no tracks, an empty, relative or
+    /// otherwise refused path, or (several tracks) a path that is a file.
+    pub fn export_midi_clip_names(
+        &self,
+        req: crate::interchange::ClipExportRequestRow,
+    ) -> Result<crate::interchange::ClipNamesRow, VizError> {
+        ffi_guard(|| {
+            let plan = crate::interchange::clip_plan(lock(&self.inner).doc(), &req)?;
+            crate::interchange::clip_names(&plan, &req)
+        })
+    }
+
+    /// Starts an export for another DAW (plan 6b; spec §7.1, §7.6): the
+    /// job ID. The job writes "<Song> for another DAW" (numbered when
+    /// taken, Ruling 1) in the folder `req.path` and, with
+    /// `add_to_project`, adds the stems as heard in one undo step "Add
+    /// Stems"; `job` reports it, its report and the folder. `Model` at once
+    /// for an unknown sequence, a strip that is unknown, listed twice or
+    /// the master, a format refused, path text refused, and "Add" with no
+    /// strips; every check of the file system runs in the job, which fails
+    /// with its sentence (Ruling 8). `Busy` while recording, inside an open
+    /// edit, while a bounce, a MIDI import or export or another such
+    /// export is unapplied, and with "Add" while a media job is. Apart
+    /// from the media refresh and the plug-in capture `bounce` also makes,
+    /// nothing touches the disk before the job (F13).
+    pub fn export_for_daw(&self, req: crate::for_daw::ForDawRequestRow) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            if req.add_to_project {
+                inner.media_jobs_idle()?;
+            }
+            inner.refresh_media(self.id, false);
+            let c = crate::for_daw::check(inner.doc(), &req, true, &inner.offline)?;
+            let parent = c.parent.ok_or_else(|| VizError::Model {
+                message: "Choose where to export.".into(),
+            })?;
+            let roots = self.export_roots(&inner).to_vec();
+            #[cfg(feature = "test-hooks")]
+            let cancel_at = inner.for_daw_cancel_at.take();
+            #[cfg(not(feature = "test-hooks"))]
+            let cancel_at = None;
+            let layout = c.layout;
+            self.spawn_render(
+                &mut inner,
+                c.plan,
+                crate::jobs::JobKindRow::ExportProject,
+                move |bounce, progress, cancel| {
+                    crate::for_daw::run(
+                        crate::for_daw::ForDawJob {
+                            bounce,
+                            parent,
+                            roots,
+                            layout,
+                            cancel_at,
+                        },
+                        progress,
+                        cancel,
+                    )
+                },
+            )
+        })
+    }
+
+    /// What `export_for_daw` would do with `req`, checked as it checks it
+    /// (Busy aside): "What won't transfer", the folder's name (numbered
+    /// when `req.path` names a folder, looked at with lstat), the files,
+    /// the strips, where the files start, the stems' frames and the
+    /// bounce's warnings. Nothing is written; the folder is looked at and
+    /// the MIDI report rendered off the session lock (F13).
+    pub fn export_for_daw_check(
+        &self,
+        req: crate::for_daw::ForDawRequestRow,
+    ) -> Result<crate::for_daw::ForDawCheckRow, VizError> {
+        ffi_guard(|| {
+            let (doc, c, roots, root) = {
+                let mut inner = lock(&self.inner);
+                inner.refresh_media(self.id, false);
+                let c = crate::for_daw::check(inner.doc(), &req, false, &inner.offline)?;
+                let roots = self.export_roots(&inner).to_vec();
+                (inner.doc().clone(), c, roots, inner.root(self.id))
+            };
+            crate::for_daw::check_row(
+                &doc,
+                &c,
+                &roots,
+                crate::bounce::bounce_settings().tail_cap_ms,
+                core_media::record::free_bytes(&root),
+            )
+        })
+    }
+
+    /// Starts a DAWproject export of sequence `req.seq` (plan 6d Task 9;
+    /// spec §6): the job ID; `job` reports it (kind `ExportDawproject`),
+    /// its report and the file. `Model` at once for an unknown sequence and
+    /// a path refused (not absolute, inside the project, a folder, taken
+    /// without `replace`, not ending in `.dawproject`, a name too long for
+    /// the files made beside it); `Busy` as `export_midi`. Before the job
+    /// it looks at the disk only for the destination's lstat, the media
+    /// refresh and the plug-in capture (as `export_midi` and `bounce`
+    /// do). A project with no ID gets one, with no undo step (Ruling 16).
+    pub fn export_dawproject(
+        &self,
+        req: crate::dawproject::DawprojectExportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let mut opts = crate::dawproject::options(inner.doc(), &req)?;
+            let dest = crate::dawproject::dest(&req.path, req.replace, &self.export_roots(&inner))?;
+            inner.refresh_media(self.id, false);
+            opts.left_out = inner.dawproject_left_out();
+            let uncaptured = self.capture_for_export(&mut inner)?;
+            let project_id = match inner.doc().settings().project_id.clone() {
+                Some(id) => id,
+                None => {
+                    let id = crate::project_id::fresh();
+                    inner.history.stamp_project_id(&id)?;
+                    // The title shows Edited.
+                    inner.news.doc_changed = true;
+                    id
+                }
+            };
+            let exported_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.dawproject_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::dawproject::ExportJob {
+                doc: inner.doc().clone(),
+                opts,
+                dest,
+                replace: req.replace,
+                root: inner.root(self.id),
+                project_id,
+                export_id: crate::project_id::fresh(),
+                exported_at,
+                uncaptured,
+                cancel_at,
+                free,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ExportDawproject,
+                crate::dawproject::job(job),
+            )
+        })
+    }
+
+    /// What `export_dawproject` would report for `req`, checked as it
+    /// checks it (`Busy` and the path aside): the plug-ins are captured
+    /// here, the report is made off the session lock. Nothing is written
+    /// and no project ID is stamped. Offline and over-long audio get the
+    /// job's lines (the same classification).
+    ///
+    /// On the plug-in host's thread every call captures each running
+    /// plug-in's state into the history, as an export does; off it (the
+    /// app's detached check) nothing is captured and the last look at the
+    /// slots is used. A caller on the host's thread (Task 11's control
+    /// channel) should run it off that thread, or accept a capture per
+    /// call.
+    pub fn export_dawproject_check(
+        &self,
+        req: crate::dawproject::DawprojectExportRequestRow,
+    ) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let (doc, opts, uncaptured, will_capture) = {
+                let mut inner = lock(&self.inner);
+                let mut opts = crate::dawproject::options(inner.doc(), &req)?;
+                inner.refresh_media(self.id, false);
+                opts.left_out = inner.dawproject_left_out();
+                let here = plugins::with(self.id, |p| p.is_some())?;
+                let uncaptured = self.capture_for_export(&mut inner)?;
+                // Off the host's thread the job captures what runs now.
+                let will_capture = if here {
+                    std::collections::BTreeSet::new()
+                } else {
+                    inner.live_slots.clone()
+                };
+                (inner.doc().clone(), opts, uncaptured, will_capture)
+            };
+            let report = crate::dawproject::check(&doc, &opts, &uncaptured, &will_capture)?;
+            Ok(crate::interchange::report_row(&report, "Exported"))
+        })
+    }
+
+    /// Starts importing the DAWproject file `req.path` into this project,
+    /// which must have no tracks (plan 6d Task 10; Ruling 17: the app makes
+    /// a new project at `dawproject_info`'s rate first): the job ID; `job`
+    /// reports it (kind `ImportProject`) and its report, and applies it
+    /// with nothing to undo. `Model` at once for path text refused and a
+    /// project with a track; `Busy` as `export_dawproject`, and while a
+    /// media job is unapplied. Nothing is read before the job: every
+    /// refusal of the file fails the job with the reader's sentence.
+    pub fn import_dawproject(
+        &self,
+        req: crate::dawproject::DawprojectImportRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            // The catalog's lock is not taken under the session's.
+            let installed = crate::dawproject::installed();
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let path =
+                crate::interchange::file_path(&req.path, crate::dawproject::DAWPROJECT_FILE)?;
+            if inner
+                .doc()
+                .sequences()
+                .values()
+                .any(|s| !s.lanes.is_empty())
+            {
+                return Err(VizError::Model {
+                    message: core_io::dawproject::import::NOT_NEW.into(),
+                });
+            }
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.dawproject_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::dawproject::ImportJob {
+                path,
+                root: inner.root(self.id),
+                format: inner.doc().settings().format,
+                reserved: inner.reserved_names(),
+                installed,
+                cancel_at,
+                free,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ImportProject,
+                crate::dawproject::import_job(job),
+            )
+        })
+    }
+
+    /// "<Song> AAF", the folder an AAF export of sequence `seq` makes (plan
+    /// 6f Ruling 2; numbered by the job when it is taken). `Model` for an
+    /// unknown sequence.
+    pub fn aaf_folder_name(&self, seq: u64) -> Result<String, VizError> {
+        ffi_guard(|| crate::aaf::folder_name(lock(&self.inner).doc(), seq))
+    }
+
+    /// What `export_aaf` would report for `req` (plan 6f Task 5), checked
+    /// as it checks it (`Busy` and the path aside): the media is refreshed
+    /// here, the report made off the session lock. Nothing is written.
+    pub fn export_aaf_check(
+        &self,
+        req: crate::aaf::AafExportRequestRow,
+    ) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let (doc, opts) = {
+                let mut inner = lock(&self.inner);
+                let mut opts = crate::aaf::options(inner.doc(), &req)?;
+                inner.refresh_media(self.id, false);
+                opts.left_out = inner.dawproject_left_out();
+                (inner.doc().clone(), opts)
+            };
+            crate::aaf::check(&doc, &opts)
+        })
+    }
+
+    /// Starts an AAF export of sequence `req.seq` (plan 6f Task 5; spec
+    /// §7.5): the job ID; `job` reports it (kind `ExportAaf`), its report
+    /// and the folder "<Song> AAF" it put in `req.path` (numbered when
+    /// taken, Ruling 2). `Model` at once for an unknown sequence and path
+    /// text refused; every check of the file system runs in the job, which
+    /// fails with its sentence. `Busy` while recording, inside an open
+    /// edit, while an interchange or media job is unapplied, or while a
+    /// merge is held. Apart from the media refresh nothing touches the disk
+    /// before the job.
+    pub fn export_aaf(&self, req: crate::aaf::AafExportRequestRow) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let mut opts = crate::aaf::options(inner.doc(), &req)?;
+            if req.path.is_empty() {
+                return Err(VizError::Model {
+                    message: "Choose where to export.".into(),
+                });
+            }
+            let parent = crate::bounce::dest_path(&req.path)?;
+            inner.refresh_media(self.id, false);
+            opts.left_out = inner.dawproject_left_out();
+            let modified = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.aaf_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::aaf::ExportJob {
+                doc: inner.doc().clone(),
+                opts,
+                parent,
+                roots: self.export_roots(&inner).to_vec(),
+                root: inner.root(self.id),
+                export_id: crate::project_id::fresh(),
+                modified,
+                cancel_at,
+                free,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ExportAaf,
+                crate::aaf::export_job(job),
+            )
+        })
+    }
+
+    /// Starts importing the AAF file `req.path` (plan 6f Task 5; spec
+    /// §7.5): as a new project into this one, which must have no tracks
+    /// (the app makes it at `aaf_info`'s rate first; nothing to undo), or
+    /// added to this project's first sequence as one undo step "Import
+    /// AAF". The job ID; `job` reports it (kind `ImportAaf`) and its
+    /// report. `Model` at once for path text refused (the AAF's, which
+    /// must end in `.aaf`; `midi_path`'s; `media_folder`'s) and a new
+    /// project on a project with tracks; `Busy` as `export_aaf`. Nothing is
+    /// read before the job: a file or folder refused fails the job with its
+    /// sentence.
+    pub fn import_aaf(&self, req: crate::aaf::AafImportRequestRow) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let path = crate::aaf::aaf_path(&req.path)?;
+            let midi_path = req
+                .midi_path
+                .as_deref()
+                .map(|p| crate::interchange::file_path(p, crate::interchange::MIDI_FILE))
+                .transpose()?;
+            let media_folder = req
+                .media_folder
+                .as_deref()
+                .map(crate::bounce::dest_path)
+                .transpose()?;
+            let doc = inner.doc();
+            if req.new_project && doc.sequences().values().any(|s| !s.lanes.is_empty()) {
+                return Err(VizError::Model {
+                    message: core_io::aaf::import::NOT_NEW_AAF.into(),
+                });
+            }
+            let seq = doc
+                .sequences()
+                .values()
+                .next()
+                .cloned()
+                .ok_or_else(|| VizError::Model {
+                    message: "the project has no sequence".into(),
+                })?;
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.aaf_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::aaf::AafImportJob {
+                io: crate::dawproject::ImportJob {
+                    path,
+                    root: inner.root(self.id),
+                    format: inner.doc().settings().format,
+                    reserved: inner.reserved_names(),
+                    installed: Default::default(),
+                    cancel_at,
+                    free,
+                },
+                midi_path,
+                media_folder,
+                join_pairs: req.join_pairs,
+                place: core_io::aaf::import::AafPlace {
+                    seq: seq.id,
+                    new_project: req.new_project,
+                },
+                seq,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ImportAaf,
+                crate::aaf::import_job(job),
+            )
+        })
+    }
+
+    /// Starts merging the returning DAWproject file `req.path` into this
+    /// project (plan 6e Task 8; spec §7.8; Rulings 2, 12, 13): the job ID;
+    /// `job` reports it (kind `MergeDawproject`) with its preview (`merge`)
+    /// and, for Preview and Apply, its report. Preview changes nothing;
+    /// Hold keeps the merged history and its media until `confirm_merge`
+    /// or `cancel_merge`; Apply swaps it in at once, one undo step "Merge
+    /// DAWproject". `Busy` while recording, inside an open edit, while an
+    /// interchange or media job is unapplied, or while a merge is held.
+    /// `Model` at once for path text refused, a `date` that is not
+    /// "YYYY-MM-DD" and a `snapshot` that is not an export ID. Before the
+    /// job it looks at the disk only for `file_path`'s lstat and the
+    /// plug-in capture (as `export_dawproject` does); every refusal of the
+    /// file fails the job with its sentence.
+    pub fn merge_dawproject(
+        &self,
+        req: crate::dawproject::DawprojectMergeRequestRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            // The catalog's lock is not taken under the session's.
+            let installed = crate::dawproject::installed();
+            let new_strip_eq = crate::bundled::new_strip_eq();
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let path =
+                crate::interchange::file_path(&req.path, crate::dawproject::DAWPROJECT_FILE)?;
+            crate::dawproject::check_date(&req.date)?;
+            crate::dawproject::check_snapshot(req.snapshot.as_deref())?;
+            // Ours' plug-in states are current (Ruling 10), with no step; a
+            // capture that failed is said as a Save's is (review M6).
+            let uncaptured = self.capture_for_export(&mut inner)?;
+            for (slot, why) in uncaptured {
+                if let Some(e) = why {
+                    let line = format!("{}: state not saved ({e})", slot_name(inner.doc(), slot));
+                    inner.news.problems.push(line);
+                }
+            }
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.dawproject_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::dawproject::MergeJob {
+                io: crate::dawproject::ImportJob {
+                    path,
+                    root: inner.root(self.id),
+                    format: inner.doc().settings().format,
+                    reserved: inner.reserved_names(),
+                    installed,
+                    cancel_at,
+                    free,
+                },
+                // Armed, so the strips the merge builds get the EQ (Ruling 6).
+                history: {
+                    let mut h = inner.history.clone();
+                    h.set_new_strip_eq(new_strip_eq);
+                    h
+                },
+                base: crate::dawproject::MergeBase::of(&inner.history),
+                req,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::MergeDawproject,
+                crate::dawproject::merge_job(job),
+            )
+        })
+    }
+
+    /// Merge (Ruling 12): swaps in the held merge of job `job` when the
+    /// project has not changed since its preview, and answers its report
+    /// (also the interchange report). `Model` "no merge is waiting" for any
+    /// other job; `Busy` while recording or inside an open edit (the hold
+    /// stays); `Model` "The project changed after the preview; preview the
+    /// merge again." when it changed (an undo step, or a plug-in capture
+    /// with none), and the hold and its media are dropped.
+    pub fn confirm_merge(&self, job: u64) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            // A Hold job that finished becomes the held merge first.
+            self.apply_jobs_after_edit(&mut inner);
+            if !inner.held_merge.as_ref().is_some_and(|h| h.job == job) {
+                return Err(VizError::Model {
+                    message: crate::dawproject::NO_MERGE_WAITING.into(),
+                });
+            }
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                return Err(recording_busy());
+            }
+            if inner.history.in_transaction() || inner.edit_label.is_some() {
+                return Err(edit_open_busy());
+            }
+            let Some(held) = inner.held_merge.take() else {
+                return Err(VizError::Model {
+                    message: crate::dawproject::NO_MERGE_WAITING.into(),
+                });
+            };
+            let root = inner.root(self.id);
+            let report = swap_merge(&mut inner, &root, held.merged, held.files)?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.news.doc_changed = true;
+            inner.news.media_changed = true;
+            Ok(report)
+        })
+    }
+
+    /// Cancel (Ruling 12): drops the held merge of job `job` and the media
+    /// its job converted. `Model` "no merge is waiting" for any other job
+    /// (a running merge is cancelled with `cancel_job`).
+    pub fn cancel_merge(&self, job: u64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            // A Hold job that finished becomes the held merge first.
+            self.apply_jobs_after_edit(&mut inner);
+            if !inner.held_merge.as_ref().is_some_and(|h| h.job == job) {
+                return Err(VizError::Model {
+                    message: crate::dawproject::NO_MERGE_WAITING.into(),
+                });
+            }
+            drop_held_merge(&mut inner, self.id);
+            Ok(())
+        })
+    }
+
+    /// The project's snapshots (Ruling 13): newest first, at most 10, each
+    /// with its export's ID, time and track count; a damaged one, or one
+    /// of another project, is left out. Reads every snapshot file: call it
+    /// off the main thread.
+    pub fn dawproject_snapshots(&self) -> Result<Vec<crate::dawproject::SnapshotRow>, VizError> {
+        ffi_guard(|| {
+            let (root, id) = {
+                let inner = lock(&self.inner);
+                (
+                    inner.root(self.id),
+                    inner.doc().settings().project_id.clone(),
+                )
+            };
+            Ok(crate::dawproject::snapshot_rows(&root, id.as_deref()))
+        })
+    }
+
+    /// The project's ID (stamped by its first DAWproject export), if any.
+    pub fn project_id(&self) -> Result<Option<String>, VizError> {
+        ffi_guard(|| Ok(lock(&self.inner).doc().settings().project_id.clone()))
+    }
+
+    /// Whether the project keeps the snapshot of export `export_id` (Ruling
+    /// 13's open match): one lstat; false for a malformed ID.
+    pub fn has_snapshot(&self, export_id: String) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let root = lock(&self.inner).root(self.id);
+            Ok(crate::dawproject::has_snapshot(&root, &export_id))
+        })
+    }
+
+    /// The file name a DAWproject export of sequence `seq` suggests:
+    /// "<Song>.dawproject" (the song title, else the sequence's name, made
+    /// safe). `Model` for an unknown sequence.
+    pub fn dawproject_name(&self, seq: u64) -> Result<String, VizError> {
+        ffi_guard(|| {
+            core_io::dawproject::export::file_name(lock(&self.inner).doc(), SeqId(seq))
+                .map_err(crate::interchange::io_error)
+        })
+    }
+
+    /// The report of this document's last MIDI import or export job, if any.
+    pub fn interchange_report(&self) -> Result<Option<crate::interchange::ReportRow>, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            Ok(inner.interchange_report.clone())
+        })
+    }
+
+    /// The project's song info.
+    pub fn song_info(&self) -> Result<crate::interchange::SongInfoRow, VizError> {
+        ffi_guard(|| Ok((&lock(&self.inner).doc().settings().info).into()))
+    }
+
+    /// Sets the song info, one undo step; `Model` for a field the rules
+    /// refuse (over 4 096 bytes, control characters).
+    pub fn set_song_info(
+        &self,
+        info: crate::interchange::SongInfoRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Settings(SettingsCmd::SetInfo {
+                info: info.into(),
+            }))
+        })
+    }
+}
+
+impl Session {
+    /// Where exports may not write: the media root and the scratch package.
+    fn export_roots(&self, inner: &Inner) -> [PathBuf; 2] {
+        [inner.root(self.id), crate::media::scratch_root(self.id)]
+    }
+
+    /// `Busy` while recording, inside an open edit, or while a bounce, a
+    /// MIDI import or export, an export for another DAW or a DAWproject
+    /// export or import is unapplied (finished jobs apply first).
+    fn interchange_idle(&self, inner: &mut Inner) -> Result<(), VizError> {
+        if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+            return Err(recording_busy());
+        }
+        if inner.history.in_transaction() {
+            return Err(edit_open_busy());
+        }
+        self.apply_jobs_after_edit(inner);
+        use crate::jobs::JobKindRow;
+        if inner.jobs.pending(&[
+            JobKindRow::Bounce,
+            JobKindRow::ImportMidi,
+            JobKindRow::ExportMidi,
+            JobKindRow::ExportProject,
+            JobKindRow::ExportDawproject,
+            JobKindRow::ImportProject,
+            JobKindRow::MergeDawproject,
+            JobKindRow::ExportAaf,
+            JobKindRow::ImportAaf,
+        ]) {
+            return Err(VizError::Busy {
+                message: "Wait for the running import, export or bounce to finish.".into(),
+            });
+        }
+        // A held merge counts as running (plan 6e Ruling 12).
+        if inner.held_merge.is_some() {
+            return Err(merge_held_busy());
+        }
+        Ok(())
+    }
+}
+
 /// The external sample editor (plan 5f-3; spec §11).
 #[uniffi::export]
 impl Session {
@@ -8789,6 +10422,7 @@ impl Session {
                     JobKindRow::Format,
                     JobKindRow::Convert,
                     JobKindRow::Relink,
+                    JobKindRow::ExportProject,
                 ]) {
                     return Err(VizError::Busy {
                         message: "Wait for the media job to finish.".into(),
@@ -9138,6 +10772,107 @@ fn with_params(doc: Document, sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)>
 }
 
 impl Session {
+    /// Starts a render job of `kind` for `plan` (a bounce, or an export
+    /// for another DAW whose `body` wraps one): the live plug-in states
+    /// captured into a copy of the document, the plug-in copies started
+    /// (when it renders anything, Ruling 6) and the test hooks taken.
+    fn spawn_render(
+        &self,
+        inner: &mut Inner,
+        plan: crate::bounce::Plan,
+        kind: crate::jobs::JobKindRow,
+        body: impl FnOnce(
+            crate::bounce::Job,
+            &std::sync::atomic::AtomicU32,
+            &std::sync::atomic::AtomicBool,
+        ) -> crate::jobs::Work
+        + Send
+        + 'static,
+    ) -> Result<u64, VizError> {
+        // The live states, as Save captures them (Ruling 6), with the
+        // values the plugins were sent and the document does not have
+        // yet (read first: a capture counts them as saved).
+        // An automated or riding parameter keeps its static value, as a
+        // capture keeps it (final review T4-M2; plan 5e-1 Ruling 15).
+        let slots = mixer::slot_ids(inner.doc());
+        let mut kept = core_model::automation::automated_targets(inner.doc());
+        kept.extend(inner.riding_params());
+        let sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)> = plugins::with(self.id, |p| {
+            p.map(|p| {
+                slots
+                    .iter()
+                    .map(|id| {
+                        let mut v = p.uncommitted(*id);
+                        v.retain(|(param, _)| !kept.contains(&(*id, *param)));
+                        (*id, v)
+                    })
+                    .filter(|(_, v)| !v.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+        })?;
+        self.capture_all(inner)?;
+        let doc = with_params(inner.doc().clone(), sent);
+        let root = inner.root(self.id);
+        let format = doc.settings().format;
+        // MIDI files only render nothing: no copies.
+        let copies = if mixer::slot_ids(&doc).is_empty() || plan.sources() == 0 {
+            None
+        } else {
+            Some(plugins::start_bounce(
+                self.id,
+                &doc,
+                f64::from(format.sample_rate),
+                crate::bounce::BLOCK,
+            )?)
+        };
+        let token = copies.as_ref().map(|c| c.token);
+        #[cfg(feature = "test-hooks")]
+        let (cancel_at, fail_import_at) = (
+            inner.bounce_cancel_at.take(),
+            inner
+                .bounce_fail_import_at
+                .take()
+                .and_then(|k| usize::try_from(k).ok()),
+        );
+        #[cfg(not(feature = "test-hooks"))]
+        let (cancel_at, fail_import_at) = (None, None);
+        let job = crate::bounce::Job {
+            problems: plan.offline_sentence().into_iter().collect(),
+            plan,
+            media: crate::media::files(&doc, &root, &inner.offline),
+            doc,
+            root,
+            reserved: inner.reserved_names(),
+            format,
+            tail_cap_ms: crate::bounce::bounce_settings().tail_cap_ms,
+            copies: copies.map(|c| crate::bounce::Copies {
+                factory: c.factory,
+                ready: c.ready,
+                problems: c.problems,
+            }),
+            cancel_at,
+            fail_import_at,
+        };
+        let spawned = inner
+            .jobs
+            .spawn(kind, move |progress, cancel| body(job, progress, cancel));
+        match spawned {
+            Ok(id) => {
+                if let Some(t) = token {
+                    inner.bounce_copies = Some((id, t));
+                }
+                Ok(id)
+            }
+            Err(e) => {
+                if let Some(t) = token {
+                    plugins::end_bounce(t);
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// `req` checked against the document and this session's media roots.
     fn bounce_plan(
         &self,
@@ -9203,32 +10938,38 @@ impl Session {
             let users = core_model::command::media::regions_using(inner.doc(), id);
             let filter = ViewFilter::default();
             inner.history.begin("Remove Media")?;
-            let run = (|| -> Result<(), VizError> {
+            let run = (|| -> Result<Vec<Note>, VizError> {
+                let mut notes = Vec::new();
                 if !users.is_empty() {
-                    inner
+                    let r = inner
                         .history
                         .execute(&Command::Event(EventCmd::Delete { events: users }), &filter)?;
+                    merge_notes(&mut notes, notes_of(r));
                 }
-                inner.history.execute(
+                let r = inner.history.execute(
                     &Command::Media(MediaCmd::Remove {
                         media: id,
                         replacement: None,
                     }),
                     &filter,
                 )?;
-                Ok(())
+                merge_notes(&mut notes, notes_of(r));
+                Ok(notes)
             })();
-            match run {
-                Ok(()) => inner.history.commit()?,
+            let notes = match run {
+                Ok(notes) => {
+                    inner.history.commit()?;
+                    notes
+                }
                 Err(e) => {
                     inner.history.abort()?;
                     return Err(e);
                 }
-            }
+            };
             inner.version += 1;
             inner.reload_host(self.id);
             self.mark(&mut inner);
-            inner.snapshot()
+            inner.snapshot_with(note_lines(notes))
         })
     }
 
@@ -10010,17 +11751,28 @@ impl Session {
         let filter = ViewFilter::default();
         // Only the same keyboard's gesture is amended (final review T7 m5).
         let amended = match (new_step, unit, inner.surfaces.tempo_step) {
-            (false, Some(u), Some((from, serial))) if from == u => {
-                matches!(inner.history.amend(&cmd, &filter, serial), Ok(Some(_)))
+            (false, Some(u), Some((from, serial))) => {
+                if from == u {
+                    inner.history.amend(&cmd, &filter, serial).ok().flatten()
+                } else {
+                    None
+                }
             }
-            _ => false,
+            _ => None,
         };
-        if !amended {
-            if inner.history.execute(&cmd, &filter).is_err() {
-                return false;
+        // A tempo change moves overlaps in frames: what settle did to a
+        // crossfade reaches the next `idle` as a problem.
+        let report = match amended {
+            Some(r) => r,
+            None => {
+                let Ok(r) = inner.history.execute(&cmd, &filter) else {
+                    return false;
+                };
+                inner.surfaces.tempo_step = unit.map(|u| (u, inner.history.present_serial()));
+                r
             }
-            inner.surfaces.tempo_step = unit.map(|u| (u, inner.history.present_serial()));
-        }
+        };
+        inner.news.problems.extend(report.warnings);
         inner.version += 1;
         inner.news.doc_changed = true;
         inner.reload_host(self.id);

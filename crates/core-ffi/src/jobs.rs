@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 
+/// The stack of a job thread.
+const JOB_STACK_BYTES: usize = 16 << 20;
+
 /// What a job does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum JobKindRow {
@@ -24,6 +27,23 @@ pub enum JobKindRow {
     Bounce,
     /// Import an external edit (plan 5f-3).
     ExternalEdit,
+    /// Import a MIDI file (plan 6a).
+    ImportMidi,
+    /// Export MIDI files (plan 6a).
+    ExportMidi,
+    /// Export the project for another DAW (plan 6b).
+    ExportProject,
+    /// Export a DAWproject file (plan 6d L1).
+    ExportDawproject,
+    /// Import a DAWproject file as a new project (plan 6d L1).
+    ImportProject,
+    /// Merge a returning DAWproject file into the project (plan 6e Task 8).
+    MergeDawproject,
+    /// Export an AAF folder (plan 6f Task 5).
+    ExportAaf,
+    /// Import an AAF file, as a new project or into this one (plan 6f
+    /// Task 5).
+    ImportAaf,
 }
 
 /// Where a job is.
@@ -56,6 +76,16 @@ pub struct JobRow {
     pub problems: Vec<String>,
     /// Media items it created.
     pub created: Vec<u64>,
+    /// What a MIDI import or export did (plan 6a).
+    #[uniffi(default = None)]
+    pub report: Option<crate::interchange::ReportRow>,
+    /// The absolute paths an export put in place (plan 6a).
+    #[uniffi(default)]
+    pub written: Vec<String>,
+    /// What a DAWproject merge does (plan 6e Task 8): set on a Done
+    /// merge job of any step.
+    #[uniffi(default = None)]
+    pub merge: Option<crate::dawproject::MergePreviewRow>,
 }
 
 /// Where imported audio goes.
@@ -118,6 +148,73 @@ pub enum Work {
         /// What the copy became (more than one item: a file wider than
         /// stereo), or why not.
         file: Result<Vec<Imported>, String>,
+    },
+    /// A parsed MIDI file and where it lands (plan 6a), applied as one
+    /// undo step.
+    ImportMidi {
+        /// The file (boxed: it is large), or why it could not be read.
+        result: Result<Box<core_io::midi_in::MidiImport>, String>,
+        /// Where and how it lands.
+        place: core_io::midi_in::Placement,
+    },
+    /// A MIDI or DAWproject export's files (plans 6a, 6d): already in
+    /// place; the row's kind says which export it was.
+    ExportMidi {
+        /// The report, or why the export failed.
+        result: Result<core_io::report::Report, String>,
+        /// The files put in place, in order (also when a later one failed).
+        written: Vec<String>,
+    },
+    /// An export for another DAW (plan 6b Ruling 7, F1): its folder is in
+    /// place on `Ok`; the "Add" imports are applied only then, and
+    /// discarded otherwise.
+    ExportForDaw {
+        /// Per stem: what its "Add" import became (empty without "Add").
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// Where regions go.
+        target: Option<ImportTargetRow>,
+        /// The report, or why the export failed (`"Cancelled"`: it was
+        /// cancelled).
+        result: Result<core_io::report::Report, String>,
+        /// The export folder, once it is in place.
+        written: Vec<String>,
+    },
+    /// A DAWproject import (plan 6d Task 10): the media it made (removed
+    /// unless applied) and the plan.
+    ImportProject {
+        /// `(audio file name, the items it became)` per file converted,
+        /// in order.
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// The mapped import (boxed: it is large), or why there is none
+        /// (`"Cancelled"`: it was cancelled).
+        result: Result<Box<core_io::dawproject::import::DpImport>, String>,
+    },
+    /// A DAWproject merge (plan 6e Task 8): the media it made (removed
+    /// unless the merged history keeps it) and the merge.
+    MergeDawproject {
+        /// `(audio file name, the items it became)` per file converted,
+        /// in order.
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// The merge (boxed: it is large), or why there is none
+        /// (`"Cancelled"`: it was cancelled).
+        result: Result<Box<crate::dawproject::Merged>, String>,
+    },
+    /// An AAF export (plan 6f Task 5): its folder is in place on `Ok`.
+    ExportAaf {
+        /// The report, or why the export failed.
+        result: Result<core_io::report::Report, String>,
+        /// The export folder, once it is in place.
+        written: Vec<String>,
+    },
+    /// An AAF import (plan 6f Task 5): the media it made (removed unless
+    /// applied) and the mapped import.
+    ImportAaf {
+        /// `(audio file name, the items it became)` per file converted,
+        /// joined or split, in order.
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// The mapped import (boxed: it is large), or why there is none
+        /// (`"Cancelled"`: it was cancelled).
+        result: Result<Box<crate::aaf::AafImported>, String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,
@@ -182,6 +279,9 @@ impl Jobs {
         self.unapplied.fetch_add(1, Ordering::SeqCst);
         let thread = std::thread::Builder::new()
             .name(format!("vizdaw-job-{id}"))
+            // A large document's model and export need more than the
+            // default 2 MiB (plan 6d Task 7 carry).
+            .stack_size(JOB_STACK_BYTES)
             .spawn(move || {
                 while held.load(Ordering::Relaxed) && !c.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -325,5 +425,8 @@ pub fn row(
         message,
         problems,
         created,
+        report: None,
+        written: Vec::new(),
+        merge: None,
     }
 }

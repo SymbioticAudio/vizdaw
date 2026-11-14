@@ -62,6 +62,10 @@ public final class DocumentModel {
     /// The edited name (view state lives here: the Command Line Tools
     /// cannot expand SwiftUI's `@State` macro).
     public var renameDraft = ""
+    /// The inspector's Region name as typed, for the region it was typed
+    /// for (plan 6a Task 10); nil when nothing is being typed.
+    /// `name` is the region's name when typing began.
+    public private(set) var regionNameDraft: (event: UInt64, text: String, name: String)?
     /// The fault popover is open.
     public var showsFaults = false
     /// Sidebar sheets and the delete confirmation (plan 4a).
@@ -130,6 +134,12 @@ public final class DocumentModel {
     public internal(set) var overviewVersion = 0
     @ObservationIgnored private var mediaModel: MediaModel?
     @ObservationIgnored private var bounceModel: BounceModel?
+    @ObservationIgnored private var interchangeModel: InterchangeModel?
+    @ObservationIgnored private var forDawModel: ForDawModel?
+    @ObservationIgnored private var dawprojectModel: DawprojectModel?
+    @ObservationIgnored private var aafModel: AafModel?
+    @ObservationIgnored private var mergeModel: MergeModel?
+    @ObservationIgnored private var projectSettingsModel: ProjectSettingsModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
     @ObservationIgnored private var inputFxModel: InputFxModel?
@@ -189,6 +199,88 @@ public final class DocumentModel {
         if let m = bounceModel { return m }
         let m = BounceModel(document: self)
         bounceModel = m
+        return m
+    }
+
+    /// File › Export for Another DAW… (plan 6b), made once.
+    public var forDaw: ForDawModel {
+        if let m = forDawModel { return m }
+        let m = ForDawModel(document: self)
+        forDawModel = m
+        return m
+    }
+
+    /// File › Export as DAWproject… (plan 6d Task 12), made once.
+    public var dawproject: DawprojectModel {
+        if let m = dawprojectModel { return m }
+        let m = DawprojectModel(document: self)
+        dawprojectModel = m
+        return m
+    }
+
+    /// File › Export › AAF… and File › Import Project › AAF… (plan 6f
+    /// Task 8), made once.
+    public var aaf: AafModel {
+        if let m = aafModel { return m }
+        let m = AafModel(document: self)
+        aafModel = m
+        return m
+    }
+
+    /// The Merge DAWproject sheet (plan 6e Task 10), made once.
+    public var merge: MergeModel {
+        if let m = mergeModel { return m }
+        let m = MergeModel(document: self)
+        mergeModel = m
+        return m
+    }
+
+    /// A merge is held between its preview and Merge or Cancel: the core
+    /// refuses Save As, the media jobs and the interchange jobs beside it
+    /// (plan 6e Ruling 12), so they wait or are refused before they start.
+    /// Read through `merge` (made on first use) so a view that asks before
+    /// any merge still observes the hold when it starts.
+    public var mergeHeld: Bool { merge.held }
+
+    /// The document is closing (`DocumentStore.close`, before the session
+    /// closes): a held merge ends quietly and nothing queued starts
+    /// (plan 6e Task 10 review I1).
+    func documentClosing() {
+        mergeModel?.documentClosed()
+        dawprojectModel?.cancelWaiting()
+        aafModel?.cancelWaiting()
+        forDawModel?.cancelWaiting()
+        interchangeModel?.documentClosing()
+    }
+
+    /// The held merge ended (Merge, Cancel, or the core let it go): what
+    /// waited for it goes, as when a blocking job ends.
+    func holdEnded() {
+        interchange.blockingEnded()
+        forDaw.jobEnded()
+        dawproject.jobEnded()
+        aaf.jobEnded()
+    }
+
+    /// Set by the store for a project it made to open a MIDI, DAWproject or
+    /// AAF file: called when that import fails (the message; nil: cancelled) so
+    /// the store can close the project while it is untouched. Cleared once
+    /// the job ends.
+    @ObservationIgnored var openedFile: ((String?) -> Void)?
+
+    /// The MIDI import, export and report sheets (plan 6a), made once.
+    public var interchange: InterchangeModel {
+        if let m = interchangeModel { return m }
+        let m = InterchangeModel(document: self)
+        interchangeModel = m
+        return m
+    }
+
+    /// Project Settings with the song info (plan 6a), made once.
+    public var projectSettings: ProjectSettingsModel {
+        if let m = projectSettingsModel { return m }
+        let m = ProjectSettingsModel(document: self)
+        projectSettingsModel = m
         return m
     }
 
@@ -529,6 +621,57 @@ public final class DocumentModel {
         rename(seq, to: trimmed)
     }
 
+    /// Names region `event` (empty clears the name): one undo step.
+    public func renameRegion(_ event: UInt64, to name: String) {
+        editor.edit(.audio(edit: .setName(event: event, name: name.isEmpty ? nil : name)))
+    }
+
+    /// The Region name field's text for `event`: the draft, else the
+    /// region's own name ("" without one: the field shows the file's name
+    /// as its placeholder).
+    public func regionNameText(_ event: UInt64) -> String {
+        if let d = regionNameDraft, d.event == event { return d.text }
+        guard let r = editedRegion?.row, r.id == event else { return "" }
+        return r.regionName ?? ""
+    }
+
+    public func editRegionName(_ event: UInt64, _ text: String) {
+        if let d = regionNameDraft, d.event == event {
+            regionNameDraft?.text = text
+            return
+        }
+        // Another region's draft is committed first: it never carries over.
+        commitRegionName()
+        let name = editedRegion.flatMap { $0.row.id == event ? $0.row.regionName : nil } ?? ""
+        regionNameDraft = (event, text, name)
+    }
+
+    public func cancelRegionName() { regionNameDraft = nil }
+
+    /// Return in the field: one rename of the region the draft was typed
+    /// for, when the trimmed text differs from its name then (blank clears
+    /// it). A draft whose region was deleted meanwhile goes quietly (final
+    /// review M9).
+    public func commitRegionName() {
+        guard let d = regionNameDraft else { return }
+        regionNameDraft = nil
+        let name = d.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name != d.name, regionExists(d.event) else { return }
+        renameRegion(d.event, to: name)
+    }
+
+    /// Whether event `event` is still in one of the shown sequence's tracks.
+    func regionExists(_ event: UInt64) -> Bool {
+        guard let seq = selectedSeq else { return false }
+        return lanes.contains { l in
+            editor.laneEvents(LaneKey(seq, l.id))?.events.contains { $0.id == event } == true
+        }
+    }
+
+    /// The inspector's region changed or the field went away: the draft
+    /// goes to the region it was typed for.
+    public func regionSelectionChanged() { commitRegionName() }
+
     public func rename(_ seq: UInt64, to name: String) {
         command("Rename Failed") { try $0.renameSequence(seq: seq, name: name) }
     }
@@ -726,6 +869,10 @@ public final class DocumentModel {
             if untitled { return .refused(RecordModel.saveUntitledWhileRecording) }
             return .save
         }
+        // Plan 6e Task 8 review I1: the core refuses Save As while a merge
+        // is held; the panel never opens for it, and the sentence is the
+        // core's (Task 10 fix round 1).
+        if forceAs || untitled, let why = (try? session.saveAsRefusal()) ?? nil { return .refused(why) }
         return forceAs || untitled ? .panel : .save
     }
 
@@ -792,6 +939,9 @@ public final class DocumentModel {
         // mixer refetch prunes the selection then (final review I1).
         if moved && !selectedStrips.isEmpty { _ = try? selectedStripsThatExist() }
         editor.sync(s)
+        // An edit's settle notes (a crossfade shortened or dropped; plan 6c
+        // pre-flight F1) are said on the status line, never silently.
+        if !s.editNotes.isEmpty { editor.status = s.editNotes.joined(separator: " ") }
         if selectedSeq.map({ id in !s.sequences.contains { $0.id == id } }) ?? true {
             selectedSeq = s.sequences.first(where: \.topLevel)?.id ?? s.sequences.first?.id
         }

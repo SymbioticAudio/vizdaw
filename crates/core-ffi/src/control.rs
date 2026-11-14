@@ -207,6 +207,12 @@ pub struct AudioEditorRegionRow {
     pub sample_rate: u32,
     /// Whether the media is offline or unknown.
     pub offline: bool,
+    /// The region's fade in is a crossfade (plan 6c).
+    #[uniffi(default = false)]
+    pub crossfade: bool,
+    /// The region it crosses (the earlier one).
+    #[uniffi(default = None)]
+    pub crossfade_with: Option<u64>,
 }
 
 /// `state.get audio_editor` (plan 7c Ruling 10).
@@ -709,6 +715,22 @@ pub enum ControlResult {
         /// The editors' status line afterwards.
         status: Option<String>,
     },
+    /// `file.import_midi`, `file.export_midi`, `file.export_midi_clip` and
+    /// `file.interchange_report` (plan 6a).
+    Interchange {
+        /// Registry ID.
+        command: String,
+        /// The document it acted on or made.
+        doc: String,
+        /// The window it opened (an import as a new project).
+        window: Option<i64>,
+        /// The undo label afterwards.
+        undo_label: Option<String>,
+        /// What the import or export did (or the check would do).
+        report: Option<crate::interchange::ReportRow>,
+        /// The absolute paths an export put in place.
+        written: Vec<String>,
+    },
     /// `state.get transport`.
     Transport {
         /// Document ID.
@@ -1206,6 +1228,10 @@ fn audio_editor_json(doc: &str, e: &AudioEditorStateRow) -> Value {
             "source_offset": r.source_offset, "length": r.length,
             "media_frames": r.media_frames, "sample_rate": r.sample_rate,
             "offline": r.offline,
+            "crossfade": r.crossfade.then(|| json!({
+                "frames": r.fade_in.length, "shape": fade_shape_text(r.fade_in.shape),
+                "with": r.crossfade_with,
+            })),
         })
     });
     let boxes: serde_json::Map<String, Value> = e
@@ -1270,6 +1296,17 @@ pub fn result_json(r: &ControlResult) -> Value {
             status,
         } => json!({
             "command": command, "doc": doc, "window": window, "undo": undo_label, "status": status,
+        }),
+        ControlResult::Interchange {
+            command,
+            doc,
+            window,
+            undo_label,
+            report,
+            written,
+        } => json!({
+            "command": command, "doc": doc, "window": window, "undo": undo_label,
+            "report": report.as_ref().map(report_json), "written": written,
         }),
         ControlResult::Transport { doc, state } => transport_json(doc, state),
         ControlResult::Media { doc, items } => json!({
@@ -1456,6 +1493,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "mpe": crate::mpe::mpe_json(d.mpe),
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
+            "edit_notes": s.edit_notes,
             "alert": alert.as_ref().map(alert_json),
         }),
         ControlResult::Editor { doc, editor: e } => json!({
@@ -1521,6 +1559,23 @@ pub fn result_json(r: &ControlResult) -> Value {
             elapsed_ms,
         } => json!({ "condition": condition, "elapsed_ms": elapsed_ms }),
     }
+}
+
+/// A report as `{summary, items: [{kind, what, count, details}]}`.
+fn report_json(r: &crate::interchange::ReportRow) -> Value {
+    use crate::interchange::ReportKindRow;
+    json!({
+        "summary": r.summary,
+        "items": r.items.iter().map(|i| json!({
+            "kind": match i.kind {
+                ReportKindRow::Changed => "changed",
+                ReportKindRow::LeftOut => "left_out",
+                ReportKindRow::Note => "note",
+                ReportKindRow::Conflict => "conflict",
+            },
+            "what": i.what, "count": i.count, "details": i.details,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn window_kind(k: WindowKindRow) -> &'static str {

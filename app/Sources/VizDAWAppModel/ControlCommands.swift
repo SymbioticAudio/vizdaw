@@ -15,6 +15,33 @@ public enum ControlOutcome {
     /// A Measure started off the main thread (plan 5d-2 Ruling 6): the app
     /// answers with `SynthCommands.answer` when it ends.
     case measure(doc: UUID, job: MeasureJob)
+    /// Work started off the main thread (a file read, a dry run's render;
+    /// final review I2, M4): the app answers with its outcome once it is
+    /// there, which may itself be a job.
+    case pending(PendingOutcome)
+}
+
+/// A control call's answer computed off the main actor: `work` runs on a
+/// detached task, then `then` makes the outcome on the main actor.
+@MainActor
+public final class PendingOutcome {
+    /// The answer; nil while the work runs.
+    public private(set) var outcome: ControlOutcome?
+    private var task: Task<Void, Never>?
+
+    public init<T: Sendable>(
+        _ work: @escaping @Sendable () -> Result<T, any Error>,
+        then: @escaping @MainActor @Sendable (Result<T, any Error>) -> ControlOutcome
+    ) {
+        let detached = Task.detached { work() }
+        task = Task { @MainActor in
+            let r = await detached.value
+            self.outcome = then(r)
+        }
+    }
+
+    /// Waits until `outcome` is there.
+    public func settle() async { await task?.value }
 }
 
 /// How a job that ended is answered (fix round 1, I-2).
@@ -44,6 +71,15 @@ public enum ControlJobs {
             if j.kind == .bounce {
                 return .ok(status: BounceCommands.status(bounce ?? BounceResultRow(files: [], media: []), problems: j.problems))
             }
+            // A MIDI import or export reports in its summary; what it
+            // created is not media (plan 6a Task 8). An export for another
+            // DAW is one with an export (plan 6b Task 3). A finished merge
+            // answers its summary (plan 6e Task 8).
+            if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject || j.kind == .importProject
+                || j.kind == .mergeDawproject || j.kind == .exportAaf || j.kind == .importAaf
+            {
+                return .ok(status: j.report?.summary)
+            }
             if j.kind != .format, j.created.isEmpty, !j.problems.isEmpty {
                 return .failed(j.problems.joined(separator: "; "))
             }
@@ -51,7 +87,8 @@ public enum ControlJobs {
         case .failed, .cancelled:
             // A bounce that failed after some renames names what is on disk
             // (plan 5f-2 Ruling 12: renamed files stay).
-            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : []
+            let exports: Set<JobKindRow> = [.exportMidi, .exportProject, .exportDawproject, .exportAaf]
+            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : exports.contains(j.kind) ? j.written : []
             let tail = written.isEmpty ? [] : ["already written: " + written.joined(separator: ", ")]
             return .failed(([j.message ?? "the job was cancelled"] + j.problems + tail).joined(separator: "; "))
         }
@@ -151,6 +188,9 @@ public protocol ControlHost: AnyObject {
     /// Opens document `doc`'s media pool window (plan 5b).
     func showMediaPool(_ doc: UUID)
     var nudge: NudgeSettings { get }
+    /// Settings › Editing's default crossfade in milliseconds (plan 6c
+    /// Task 5).
+    var crossfadeMs: Double { get }
     /// The app's key bindings (plan 4f).
     var keys: KeyBindings { get }
     /// Gives a transport field of document `doc`'s window the keyboard
@@ -168,6 +208,8 @@ public protocol ControlHost: AnyObject {
     var externalEditor: ExternalEditorChoice { get }
     /// The app's theme preference (plan 7b Task B4): `ui.theme` sets it.
     var appearance: AppearancePreferences { get }
+    /// Settings › Plug-ins (plan 6g Task 4): `plugins.*` set it.
+    var plugins: PluginSettings { get }
 }
 
 /// Which window's transport fields the P, E and U keys focus (plan 7d
@@ -225,7 +267,7 @@ public enum ControlCommands {
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(InputFxCommands.ids)
-            .union(MpeCommands.ids)
+            .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -269,6 +311,9 @@ public enum ControlCommands {
         case _ where AppearanceCommands.ids.contains(id):
             // App-wide (plan 7b Ruling 11): no document needed.
             return AppearanceCommands.run(args, prefs: host.appearance)
+        case _ where PluginSettingsCommands.ids.contains(id):
+            // App-wide (plan 6g Task 4): no document needed, no dialog.
+            return PluginSettingsCommands.run(id, args: args, settings: host.plugins)
         case _ where SurfaceCommands.ids.contains(id):
             // Process-wide or per document (plan 5f-1 Task 9).
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
@@ -348,6 +393,8 @@ public enum ControlCommands {
                     return .failed(.thrown(error, "Bounce Failed"))
                 }
             }
+        case _ where InterchangeCommands.ids.contains(id):
+            return InterchangeCommands.run(id, args: args, docID, m, store: store)
         case "window.mixer":
             host.showMixer(docID)
         case "window.media_pool":
@@ -472,6 +519,8 @@ public enum ControlCommands {
                 return .failed(.of(.invalidParams, "`peak_db` must be a level from -96 to 0 dB, like \"-0.3\""))
             }
             if let f = failure(RegionCommands.normalize(peakDb: peak, m)) { return f }
+        case RegionCommands.crossfade, RegionCommands.removeCrossfade:
+            return RegionCommands.runChannel(id, args: args, doc: docID, m, defaultMs: host.crossfadeMs)
         case _ where RegionCommands.ids.contains(id):
             if let f = failure(RegionCommands.run(id, m)) { return f }
         case _ where detail[id] != nil:
@@ -615,6 +664,14 @@ public enum ControlOpen {
     public static func open(
         path: String, answers: RecoveryAnswersRow, store: DocumentStore, command: String? = nil
     ) -> ControlOutcome {
+        // The store's DAWproject open runs in the background and opens a
+        // window: the channel has its own command, which answers the job.
+        if InterchangeModel.isDawproject(path) {
+            return .failed(.of(.invalidParams, "Use file.import_dawproject to open a DAWproject file."))
+        }
+        if InterchangeModel.isAaf(path) {
+            return .failed(.of(.invalidParams, "Use file.import_aaf to open an AAF file."))
+        }
         // An open project is never opened twice, and no window is fronted.
         if store.documentID(forPath: path) != nil {
             let name = (path as NSString).lastPathComponent

@@ -45,6 +45,7 @@ private struct SquareBrand: IconProvider {
             .warning, .problem, .info, .mixer, .add, .confirm, .close, .drumGrid, .list, .muted, .loop, .split,
             .empty, .pencil, .diskSlow, .expand, .collapse, .menuDown, .leftPane, .bottomPane, .rightPane,
             .settingsEditing, .settingsAutomation, .settingsSurfaces, .eq, .midiLearn, .instrumentTrack, .midiTrack,
+            .settingsPlugins,
         ]
         let angular: [AppIcon] = [
             .fault, .faultIndicator, .remove, .zoomIn, .zoomOut, .audio, .pianoRoll, .record, .armed, .recording,

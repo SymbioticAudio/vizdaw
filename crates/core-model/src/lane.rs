@@ -1,10 +1,11 @@
 //! Lanes (untyped tracks), takes and drum layouts.
 
+use crate::arc_map::ArcMap;
 use crate::error::ModelError;
 use crate::event::Event;
 use crate::ids::{DestId, DrumRowId, EventId, LaneId, OutputPathId, TakeId};
 use crate::time::Tick;
-use im::{OrdMap, Vector};
+use im::Vector;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A timeline lane holding MIDI events, audio regions or both.
@@ -262,7 +263,7 @@ pub struct Take {
     /// Events ordered by `(tick, id)`. Serialized as an array in that order.
     /// Mutate only through `Document` so the event index stays correct.
     #[serde(with = "events_as_array")]
-    pub events: OrdMap<(Tick, EventId), Event>,
+    pub events: ArcMap<(Tick, EventId), Event>,
 }
 
 impl Take {
@@ -271,7 +272,7 @@ impl Take {
         Take {
             id,
             name: name.into(),
-            events: OrdMap::new(),
+            events: ArcMap::new(),
         }
     }
 }
@@ -280,7 +281,7 @@ mod events_as_array {
     use super::*;
 
     pub fn serialize<S: Serializer>(
-        m: &OrdMap<(Tick, EventId), Event>,
+        m: &ArcMap<(Tick, EventId), Event>,
         s: S,
     ) -> Result<S::Ok, S::Error> {
         s.collect_seq(m.values())
@@ -288,9 +289,9 @@ mod events_as_array {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
-    ) -> Result<OrdMap<(Tick, EventId), Event>, D::Error> {
+    ) -> Result<ArcMap<(Tick, EventId), Event>, D::Error> {
         let v: Vec<Event> = Vec::deserialize(d)?;
-        let mut m = OrdMap::new();
+        let mut m = ArcMap::new();
         for e in v {
             if m.insert(e.key(), e.clone()).is_some() {
                 return Err(serde::de::Error::custom(format!(

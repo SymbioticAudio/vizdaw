@@ -5,7 +5,8 @@ import VizDAWCore
 
 /// The parts of the audio editor's canvas a press can grab (plan 7c Ruling 6).
 public enum AudioEditorHandle: Equatable, Sendable {
-    case gain, fadeIn, fadeOut, start, end
+    /// `crossfade` is a crossfaded region's fade-in corner (plan 6c).
+    case gain, fadeIn, fadeOut, start, end, crossfade
 
     /// The arrangement's handle type; nil for the trim edges.
     public var regionHandle: RegionHandle? {
@@ -13,6 +14,7 @@ public enum AudioEditorHandle: Equatable, Sendable {
         case .gain: .gain
         case .fadeIn: .fadeIn
         case .fadeOut: .fadeOut
+        case .crossfade: .crossfade
         case .start, .end: nil
         }
     }
@@ -64,7 +66,8 @@ public enum AudioEditorGeometry {
 
     /// The drawn handles, in hit order (except below `2 × edgeWidth`: see
     /// `handles`): the fade corners (only when the
-    /// region is at least `RegionHandles.minWidth` wide), the trim edges
+    /// region is at least `RegionHandles.minWidth` wide; a crossfade's
+    /// fade-in corner is `.crossfade`), the trim edges
     /// (`min(edgeWidth, width / 2)` wide, the wave's full height) and the
     /// gain band along the top. Not clipped to the wave.
     public static func drawn(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> [(AudioEditorHandle, CGRect)] {
@@ -72,7 +75,8 @@ public enum AudioEditorGeometry {
         guard rect.width.isFinite, rect.minX.isFinite, rect.width > 0 else { return [] }
         var out: [(AudioEditorHandle, CGRect)] = []
         if rect.width >= RegionHandles.minWidth {
-            for (h, cx) in [(AudioEditorHandle.fadeIn, RegionHandles.fadeInX(r, in: rect)),
+            let first: AudioEditorHandle = r.crossfade ? .crossfade : .fadeIn
+            for (h, cx) in [(first, RegionHandles.fadeInX(r, in: rect)),
                             (.fadeOut, RegionHandles.fadeOutX(r, in: rect))] {
                 out.append((h, CGRect(x: cx - cornerSize / 2, y: rect.minY, width: cornerSize, height: cornerSize)))
             }
@@ -96,7 +100,7 @@ public enum AudioEditorGeometry {
         return ordered.compactMap { h, d in
             var area = d
             switch h {
-            case .fadeIn, .fadeOut: area = d.insetBy(dx: -slack, dy: -slack)
+            case .fadeIn, .fadeOut, .crossfade: area = d.insetBy(dx: -slack, dy: -slack)
             case .start: area = CGRect(x: d.minX - slack, y: d.minY, width: d.width + slack, height: d.height)
             case .end: area = CGRect(x: d.minX, y: d.minY, width: d.width + slack, height: d.height)
             case .gain: if !narrow { area = CGRect(x: d.minX, y: d.minY, width: d.width, height: d.height + gainSlack) }
@@ -107,18 +111,19 @@ public enum AudioEditorGeometry {
     }
 
     /// What a press grabs. When both fade corners reach `p` (the fades
-    /// meet), the nearer corner wins, and at a tie the side of the press.
+    /// meet), the nearer corner wins, and at a tie the side of the press;
+    /// a crossfade's corner counts as the fade in's.
     public static func hit(_ p: CGPoint, row: EventRow, axis: FrameAxis, in wave: CGRect) -> AudioEditorHandle? {
         guard let first = handles(row, axis: axis, in: wave).first(where: { $0.1.contains(p) })?.0 else { return nil }
-        guard first == .fadeIn else { return first }
+        guard first == .fadeIn || first == .crossfade else { return first }
         let d = drawn(row, axis: axis, in: wave)
-        guard let fi = d.first(where: { $0.0 == .fadeIn })?.1, let fo = d.first(where: { $0.0 == .fadeOut })?.1,
+        guard let fi = d.first(where: { $0.0 == first })?.1, let fo = d.first(where: { $0.0 == .fadeOut })?.1,
             handles(row, axis: axis, in: wave).contains(where: { $0.0 == .fadeOut && $0.1.contains(p) })
         else { return first }
         let dIn = abs(p.x - fi.midX)
         let dOut = abs(p.x - fo.midX)
-        if dIn != dOut { return dIn < dOut ? .fadeIn : .fadeOut }
-        return p.x < fi.midX ? .fadeIn : .fadeOut
+        if dIn != dOut { return dIn < dOut ? first : .fadeOut }
+        return p.x < fi.midX ? first : .fadeOut
     }
 
     /// The gesture's (and undo step's) name.
@@ -129,6 +134,7 @@ public enum AudioEditorGeometry {
         case .fadeOut: "Fade Out"
         case .start: "Trim Start"
         case .end: "Trim End"
+        case .crossfade: "Crossfade"
         }
     }
 
@@ -157,7 +163,7 @@ public enum AudioEditorGeometry {
             let low = min(0, -tail)
             let back = min(max(-delta, low), len - 1)
             return back == 0 ? nil : .audio(edit: .trim(event: r.id, frontFrames: 0, backFrames: back))
-        case .gain, .fadeIn, .fadeOut:
+        case .gain, .fadeIn, .fadeOut, .crossfade:
             return nil
         }
     }
@@ -171,7 +177,7 @@ public enum AudioEditorGeometry {
         case .gain:
             guard dy.isFinite else { return nil }
             return RegionHandles.gainCommand(r, dy: dy, fine: fine)
-        case .fadeIn, .fadeOut:
+        case .fadeIn, .fadeOut, .crossfade:
             let rect = regionRect(r, axis: axis, in: wave)
             guard dx.isFinite, rect.width.isFinite, rect.width > 0, let handle = h.regionHandle else { return nil }
             // Beyond twice the region's width the fade is clamped anyway.

@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        166,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe"
+        179,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -780,6 +780,10 @@ mod fuzz {
             Just("on"),
             Just("name"),
             Just("pitches"),
+            Just("mode"),
+            Just("project"),
+            Just("snapshot"),
+            Just("preview"),
         ]
         .prop_map(str::to_string)
     }
@@ -1745,6 +1749,246 @@ fn bounce_commands_check_their_params() {
     assert!(message.contains("Bounce"), "{message}");
 }
 
+/// Plan 6a Task 8: the MIDI import and export commands check their
+/// parameters; the exports' "Save" dialogs are not `always` (F2): a missing
+/// path passes here and the app answers it, so `dry_run` needs none.
+#[test]
+fn interchange_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    let good_runs = [
+        ("file.import_midi", json!({ "path": "/tmp/a.mid" })),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "new_project": true, "seq": 1, "lane": 2, "tick": -(1i64 << 40),
+                    "channel_map": "[{\"group\":0,\"channel\":9,\"dest\":null}]",
+                    "split_channels": false, "mpe": true, "use_tempo": true }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.midi2", "tick": 1i64 << 40 }),
+        ),
+        ("file.export_midi", json!({ "path": "/tmp/a.mid" })),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "replace": true, "seq": 1, "type": "0", "ppq": "15360",
+                    "lanes": "1,2", "mpe": true, "dry_run": true }),
+        ),
+        ("file.export_midi", json!({ "dry_run": true })),
+        ("file.export_midi", json!({})),
+        ("file.export_midi_clip", json!({ "path": "/tmp/a.midi2" })),
+        ("file.export_midi_clip", json!({ "dry_run": true })),
+        ("file.export_midi_clip", json!({})),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/dir", "replace": true, "seq": 1, "lanes": "1", "start": 0, "end": 1i64 << 40 }),
+        ),
+        ("file.interchange_report", json!({})),
+    ];
+    for (id, params) in good_runs {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    let bad_runs = [
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "ppq": "0" }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "ppq": "70000" }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "ppq": 960 }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "type": "2" }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "type": 1 }),
+        ),
+        ("file.export_midi", json!({ "path": "relative.mid" })),
+        ("file.export_midi", json!({ "path": "/tmp/a.midi" })),
+        ("file.export_midi", json!({ "path": "/tmp/a.wav" })),
+        ("file.export_midi", json!({ "path": "/tmp/a\u{0}.mid" })),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "lanes": ["1"] }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "dry_run": "yes" }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "start": 0 }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "extra": 1 }),
+        ),
+        (
+            "file.export_midi",
+            json!({ "path": "/tmp/a.mid", "seq": -1 }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "tick": 1i64 << 41 }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "tick": -(1i64 << 41) }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "lane": -1 }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "lane": i64::MAX }),
+        ),
+        ("file.import_midi", json!({ "path": "relative.mid" })),
+        ("file.import_midi", json!({ "path": "/tmp/a\u{0}.mid" })),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "extra": true }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "dry_run": true }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "mpe": "yes" }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "channel_map": 7 }),
+        ),
+        (
+            "file.import_midi",
+            json!({ "path": "/tmp/a.mid", "channel_map": "x".repeat(10_000) }),
+        ),
+        ("file.export_midi_clip", json!({ "path": "relative.midi2" })),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/a.midi2", "start": -1 }),
+        ),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/a.midi2", "end": (1i64 << 40) + 1 }),
+        ),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/a.midi2", "ppq": "960" }),
+        ),
+        (
+            "file.export_midi_clip",
+            json!({ "path": "/tmp/a.midi2", "extra": 1 }),
+        ),
+        ("file.interchange_report", json!({ "path": "/tmp/a.mid" })),
+    ];
+    for (id, params) in bad_runs {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let (code, message) = err("command.run", run("file.import_midi", json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Open"), "{message}");
+    for id in ["file.export_midi", "file.export_midi_clip"] {
+        let spec = registry::find(id).expect(id);
+        assert_eq!(spec.dialogs.len(), 1, "{id}");
+        let d = &spec.dialogs[0];
+        assert!(
+            d.name == "Save" && !d.always && d.answered_by == ["path"],
+            "{id}"
+        );
+        assert_eq!(d.when, "no path and no dry_run", "{id}");
+    }
+    for id in [
+        "file.import_midi",
+        "file.export_midi",
+        "file.export_midi_clip",
+        "file.interchange_report",
+    ] {
+        let spec = registry::find(id).expect(id);
+        assert!(spec.document && spec.menu == "File", "{id}");
+    }
+    assert!(
+        registry::find("file.interchange_report")
+            .unwrap()
+            .params
+            .is_empty()
+    );
+}
+
+/// Plan 6b Task 3: `file.export_for_daw` checks its parameters; a missing
+/// path passes here and the app answers it (Save, unless `dry_run`).
+#[test]
+fn export_for_daw_checks_its_params() {
+    let run = |params: Value| json!({ "id": "file.export_for_daw", "params": params });
+    let good = [
+        json!({ "path": "/tmp/x" }),
+        json!({ "dry_run": true }),
+        json!({ "path": "/tmp/x", "seq": 1, "strips": "3,5", "container": "aiff", "depth": "16",
+                "rate": 44100, "dither": true, "add_to_project": true, "dry_run": false }),
+        json!({ "path": "/tmp/x", "strips": "none", "container": "caf", "depth": "32f", "rate": 8000 }),
+        json!({ "path": "/tmp/x", "container": "wav", "depth": "24", "rate": 384000 }),
+    ];
+    for params in good {
+        assert!(
+            matches!(
+                ok("command.run", run(params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{params}"
+        );
+    }
+    let bad = [
+        json!({ "path": "/tmp/x", "container": "mp3" }),
+        json!({ "path": "/tmp/x", "depth": "8" }),
+        json!({ "path": "/tmp/x", "depth": 16 }),
+        json!({ "path": "/tmp/x", "rate": 0 }),
+        json!({ "path": "/tmp/x", "rate": 7999 }),
+        json!({ "path": "/tmp/x", "rate": 384001 }),
+        json!({ "path": "/tmp/x", "rate": "44100" }),
+        json!({ "path": "relative" }),
+        json!({ "path": "/tmp/a\u{0}b" }),
+        json!({ "path": "/tmp/x", "seq": -1 }),
+        json!({ "path": "/tmp/x", "strips": ["1"] }),
+        json!({ "path": "/tmp/x", "dither": "yes" }),
+        json!({ "path": "/tmp/x", "replace": true }),
+        json!({ "path": "/tmp/x", "extra": 1 }),
+        json!({ "path": format!("/{}", "x".repeat(100_000)) }),
+        json!({ "path": "/tmp/x", "strips": "1,".repeat(50_000) }),
+        json!({ "path": "/tmp/x", "container": "x".repeat(100_000) }),
+        json!({ "path": "/tmp/x", "depth": "x".repeat(100_000) }),
+    ];
+    for params in bad {
+        let (code, _) = err("command.run", run(params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}");
+    }
+    // No path passes here; the app answers the Save dialog (as for
+    // `file.export_midi`), so the registry must say it will.
+    assert!(matches!(
+        ok("command.run", run(json!({}))),
+        Command::CommandRun { .. }
+    ));
+    let spec = registry::find("file.export_for_daw").expect("registered");
+    assert!(spec.document && spec.menu == "File" && spec.title == "For Another DAW…");
+    assert_eq!(spec.dialogs.len(), 1);
+    let d = &spec.dialogs[0];
+    assert!(d.name == "Save" && !d.always && d.answered_by == ["path"]);
+    assert_eq!(d.when, "no path and no dry_run");
+}
+
 /// Plan 5f-3 (Ruling 5): `region.open_external` takes an optional
 /// absolute `.app` path and opens no dialog for a programmatic call;
 /// `region.reload_external` takes nothing.
@@ -1802,6 +2046,70 @@ fn external_commands_check_their_params() {
         .unwrap();
     assert_eq!(open.dialogs[0].name, "Choose External Editor");
     assert_eq!(open.dialogs[0].answered_by, ["app"]);
+}
+
+/// Plan 6c Task 5: `region.crossfade` takes the three IDs (all or none;
+/// the Swift layer refuses a part, F15), `length_ms` as text and a shape;
+/// `region.remove_crossfade` the three IDs only. No dialogs.
+#[test]
+fn crossfade_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for good in [
+        json!({}),
+        json!({ "seq": 1, "lane": 2, "event": 3 }),
+        json!({ "seq": 1 }),
+        json!({ "length_ms": "12.5", "shape": "linear" }),
+        json!({ "shape": "s_curve" }),
+        json!({ "shape": "equal_power" }),
+        json!({ "shape": "exponential", "seq": 1, "lane": 2, "event": 3 }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run("region.crossfade", good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    for bad in [
+        json!({ "shape": "cubic" }),
+        json!({ "shape": "Linear" }),
+        json!({ "event": -1 }),
+        json!({ "event": "3" }),
+        json!({ "length_ms": 5 }),
+        json!({ "length_ms": null, "extra": 1 }),
+        json!({ "extra": 1 }),
+    ] {
+        let (code, _) = err("command.run", run("region.crossfade", bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    for good in [json!({}), json!({ "seq": 1, "lane": 2, "event": 3 })] {
+        assert!(matches!(
+            ok("command.run", run("region.remove_crossfade", good)),
+            Command::CommandRun { .. }
+        ));
+    }
+    for bad in [
+        json!({ "length_ms": "5" }),
+        json!({ "shape": "linear" }),
+        json!({ "event": -1 }),
+    ] {
+        let (code, _) = err("command.run", run("region.remove_crossfade", bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    for id in ["region.crossfade", "region.remove_crossfade"] {
+        let c = COMMANDS.iter().find(|c| c.id == id).unwrap();
+        assert!(c.document && c.menu == "Region" && c.menu_item, "{id}");
+        assert!(c.dialogs.is_empty(), "{id}: never a dialog");
+    }
+    assert_eq!(
+        COMMANDS
+            .iter()
+            .find(|c| c.id == "region.crossfade")
+            .unwrap()
+            .title,
+        "Crossfade"
+    );
 }
 
 /// Plan 5f-4 Ruling 2: `surface.add` takes the Kontrol type.
@@ -2284,4 +2592,275 @@ fn mpe_commands_check_their_params() {
         let (code, _) = err("command.run", run(id, params.clone()));
         assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
     }
+}
+
+/// Plan 6d Task 11: the DAWproject commands check their parameters; the
+/// import's "Open" dialog is always (answered by `path`), the export's
+/// "Save" is not, so `dry_run` needs no path.
+#[test]
+fn dawproject_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("file.export_dawproject", json!({})),
+        (
+            "file.export_dawproject",
+            json!({ "path": "/x/a.dawproject" }),
+        ),
+        (
+            "file.export_dawproject",
+            json!({ "region_gain": "leave_out", "dry_run": true }),
+        ),
+        (
+            "file.export_dawproject",
+            json!({ "path": "/x/a.dawproject", "replace": true, "seq": 3, "region_gain": "apply" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "mode": "new" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "mode": "merge" }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "mode": "fuse" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "relative.dawproject" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a\u{0}.dawproject" }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "extra": 1 }),
+        ),
+        (
+            "file.import_dawproject",
+            json!({ "path": "/x/a.dawproject", "dry_run": true }),
+        ),
+        ("file.export_dawproject", json!({ "region_gain": "half" })),
+        ("file.export_dawproject", json!({ "seq": -1 })),
+        ("file.export_dawproject", json!({ "replace": "yes" })),
+        ("file.export_dawproject", json!({ "dry_run": 1 })),
+        ("file.export_dawproject", json!({ "extra": true })),
+        (
+            "file.export_dawproject",
+            json!({ "path": "relative.dawproject" }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let (code, message) = err("command.run", run("file.import_dawproject", json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Open"), "{message}");
+}
+
+/// Plan 6f Task 6: the AAF commands check their parameters.
+#[test]
+fn aaf_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("file.export_aaf", json!({})),
+        ("file.export_aaf", json!({ "dry_run": true })),
+        (
+            "file.export_aaf",
+            json!({ "path": "/x", "seq": 3, "embed": false, "depth": "16", "stereo": "stereo",
+                    "start_tc": "01:00:00:00", "fps": "29.97df", "clip_gain": false,
+                    "automation": false, "dry_run": false }),
+        ),
+        ("file.import_aaf", json!({ "path": "/x/a.aaf" })),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.aaf", "new_project": false, "midi_path": "/x/a.mid",
+                    "media_folder": "/x/media", "join_pairs": false }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params, name) in [
+        ("file.export_aaf", json!({ "fps": "23.976" }), "fps"),
+        ("file.export_aaf", json!({ "depth": "32f" }), "depth"),
+        ("file.export_aaf", json!({ "stereo": "quad" }), "stereo"),
+        (
+            "file.export_aaf",
+            json!({ "start_tc": "02:00:00:00" }),
+            "start_tc",
+        ),
+        ("file.export_aaf", json!({ "path": "a" }), "path"),
+        ("file.import_aaf", json!({ "path": "a.aaf" }), "path"),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.dawproject" }),
+            "path",
+        ),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.aaf", "midi_path": "/x/a.wav" }),
+            "midi_path",
+        ),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.aaf", "join_pairs": "yes" }),
+            "join_pairs",
+        ),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.aaf", "extra": 1 }),
+            "extra",
+        ),
+        ("file.export_aaf", json!({ "extra": 1 }), "extra"),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+        assert!(message.contains(name), "{id} {params}: {message}");
+    }
+    let (code, message) = err("command.run", run("file.import_aaf", json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Open"), "{message}");
+}
+
+/// Plan 6e Task 9: the merge parameters of `file.import_dawproject`
+/// validate; each hostile value is `invalid_params` naming its parameter.
+#[test]
+fn merge_params_validate() {
+    let run = |params: Value| json!({ "id": "file.import_dawproject", "params": params });
+    let good = json!({
+        "mode": "merge",
+        "path": "/x/a.dawproject",
+        "project": "/x/a.vizdaw",
+        "snapshot": "0f8b6f8e-3c1a-4d2e-9b7a-5e6f7a8b9c0d",
+        "preview": true,
+    });
+    assert!(matches!(
+        ok("command.run", run(good.clone())),
+        Command::CommandRun { .. }
+    ));
+    for (name, value) in [
+        ("mode", json!("fuse")),
+        ("project", json!("a.vizdaw")),
+        ("project", json!("/x/a.dawproject")),
+        ("preview", json!("yes")),
+        ("extra", json!(1)),
+    ] {
+        let mut params = good.clone();
+        params[name] = value.clone();
+        let (code, message) = err("command.run", run(params));
+        assert_eq!(code, ErrorCode::InvalidParams, "{name} {value}");
+        assert!(message.contains(name), "{name}: {message}");
+    }
+}
+
+/// Plan 6e Task 9: the command's help lists the "Return" dialog, answered
+/// by `mode`, and the merge's "Open", answered by `project`.
+#[test]
+fn help_names_the_return_dialog() {
+    let list = registry::list_json();
+    let import = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "file.import_dawproject")
+        .unwrap();
+    let dialogs = import["dialogs"].as_array().unwrap();
+    assert!(
+        dialogs
+            .iter()
+            .any(|d| d["name"] == "Return" && d["answered_by"] == json!(["mode"])),
+        "{dialogs:?}"
+    );
+    assert!(
+        dialogs
+            .iter()
+            .any(|d| d["name"] == "Open" && d["answered_by"] == json!(["project"])),
+        "{dialogs:?}"
+    );
+    let names: Vec<&str> = import["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert_eq!(names, ["path", "mode", "project", "snapshot", "preview"]);
+}
+
+/// Plan 6g Task 4: the two Settings › Plug-ins commands take flags only;
+/// each hostile value is `invalid_params`.
+#[test]
+fn plugins_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for on in [true, false] {
+        assert_eq!(
+            ok(
+                "command.run",
+                run("plugins.new_channel_eq", json!({ "on": on }))
+            ),
+            Command::CommandRun {
+                id: "plugins.new_channel_eq".into(),
+                args: vec![("on".into(), ArgValue::Flag(on))],
+                window: None,
+            }
+        );
+    }
+    for params in [json!({}), json!({ "replace": true })] {
+        assert!(matches!(
+            ok("command.run", run("plugins.install_multiq", params)),
+            Command::CommandRun { .. }
+        ));
+    }
+    let huge = "x".repeat(70_000);
+    for (id, params) in [
+        ("plugins.new_channel_eq", json!({})),
+        ("plugins.new_channel_eq", json!({ "on": "yes" })),
+        ("plugins.new_channel_eq", json!({ "on": 1 })),
+        ("plugins.new_channel_eq", json!({ "on": true, "extra": 1 })),
+        ("plugins.new_channel_eq", json!({ "on": huge })),
+        ("plugins.new_channel_eq", json!({ "on": "a\0b" })),
+        ("plugins.install_multiq", json!({ "replace": "x" })),
+        ("plugins.install_multiq", json!({ "extra": true })),
+        ("plugins.install_multiq", json!({ "replace": huge })),
+        ("plugins.install_multiq", json!({ "replace": "a\0b" })),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+    let list = registry::list_json();
+    let install = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "plugins.install_multiq")
+        .unwrap();
+    assert!(
+        install["dialogs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["name"] == "Replace" && d["answered_by"] == json!(["replace"])),
+        "{install}"
+    );
 }

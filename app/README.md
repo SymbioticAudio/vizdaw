@@ -2433,3 +2433,323 @@ recording and round trip (`core-ffi/tests/passes.rs`), the session
 256. With an arpeggiator or a transpose on the MPE track: transposed notes
      keep their own bends; arpeggiated notes play without per-note
      expression (by design).
+
+### MIDI files (plan 6a)
+
+By eye and by ear; the readers and writers are tested (`core-io/tests/smf_bytes.rs`,
+`clip_bytes.rs`, `midi_in.rs`, `midi_out.rs`, and the fuzzers `smf_fuzz.rs`,
+`clip_fuzz.rs`), the jobs and refusals (`core-ffi/tests/interchange.rs`), the
+sheets' models (`InterchangeTests`, `ProjectSettingsModelTests`,
+`AudioDropViewTests`), the commands (`InterchangeCommandsTests`) and the e2e
+`midi_files_round_trip_over_the_channel`.
+
+257. File › Import MIDI File… on a type 1 file shows the sheet: where (this
+     project at the playhead, or a new project), the channel → destination
+     table with suggestions, Split by channel, Treat as MPE, Use the file's
+     tempo map (off). Import: new tracks at the playhead; one Undo ("Import
+     MIDI File") removes them all.
+258. The report sheet opens after the import: the summary line, Changed /
+     Left out / Notes with counts and disclosure rows naming tracks and
+     bars; Copy and Save as Text… work; File › Last Import or Export
+     Report… reopens it.
+259. A type 0 file splits into one track per channel; channel 10 becomes a
+     drum track with General MIDI row names.
+260. Drop a `.mid` on the arrangement: it lands at the drop point (on the
+     track under it for a one-track file). Drop a `.wav` and a `.mid`
+     together: both import.
+261. File › Open… a `.mid` (and double-click one in Finder after
+     `scripts/make-app.sh`, choosing VizDAW): a new untitled project with
+     the file's tempo and title.
+262. File › Export › MIDI File…: the sheet's type, resolution, tracks and
+     MPE options update "What won't transfer" as you change them; Export
+     asks for a place; the file opens again in VizDAW with the same notes.
+263. File › Export › MIDI Clip File… with one track writes one `.midi2`;
+     with three tracks, a folder of three; with a time selection, only that
+     range.
+264. Exporting over an existing file asks first; choosing a place inside
+     the project is refused with a message; Cancel during a long export
+     leaves no file.
+265. File › Project Settings… has a Song info section: type a title and
+     composer, OK; Undo ("Set Song Info") clears them; Save, close and
+     reopen: they are there.
+266. Select a region: the inspector's Region name can be typed (one Undo,
+     "Rename Region"); the arrangement shows the new name (in the region's
+     VoiceOver label: the arrangement draws no region names); clearing it
+     shows the file's name again.
+
+**Owner check (manual, only the owner can do):** export the demo song as a
+MIDI file, open it in the DAW you use that reads MIDI files, and check
+tracks, notes, tempo and markers; export a MIDI file from that DAW and
+import it into VizDAW. Also export one track as a MIDI Clip File and open it
+in any other software that reads `.midi2`, if you have one (F20).
+
+### Export for another DAW (plan 6b)
+
+By eye and by ear; the folder's layout, names, MIDI files and About file are
+tested (`core-io/tests/for_daw.rs`, `midi_out.rs`), the job, its stems,
+cancelling at every stage and the refusals (`core-ffi/tests/for_daw.rs`), the
+command (`core-control/tests/commands.rs`, `InterchangeCommandsTests`),
+the sheet's model (`ForDawModelTests`, `InterchangeTests`) and the e2e
+`exports_for_another_daw_over_the_channel`.
+
+267. File › Export › For Another DAW… shows the sheet:
+     - the line under the title;
+     - every track's strip and each send-only bus ticked;
+     - Format, Bits, Rate and Dither as in Bounce;
+     - "Add the stems to this project" (off);
+     - the start sentence and length;
+     - "What won't transfer", which updates as you change any option.
+
+     Then open File › Bounce…: it looks and behaves as before (the shared
+     format rows; F15).
+268. Export asks for a place, then writes "<Song> for another DAW" there,
+     with `Audio/`, `MIDI/` (one file per MIDI track plus `All MIDI.mid`),
+     `Tempo map.mid` and `About these files.txt`. Exporting again makes
+     "… 2", and the first folder is untouched. The report sheet opens, and
+     Show in Finder shows the folder.
+269. Open `About these files.txt`: start, tempo, meter, sample rate and
+     format, the song info, every file, and the report.
+270. A track on an external MIDI destination gets a MIDI file and no stem,
+     and the report says so. Mute a track's strip in the mixer: its stem is
+     still written, and the report says the strip is muted. Mute an audio
+     track itself: the report names the track as muted (F14). Untick a
+     strip: the report lists it.
+271. Give the song a one-beat pickup. The sheet and the About file say every
+     file starts one beat before bar 1. Import the folder's `All MIDI.mid`
+     and a stem into a new project at its start: they line up.
+272. Tick "Add the stems to this project": new tracks named after the stems
+     at the start point; one Undo ("Add Stems") removes them all, and the
+     folder stays.
+273. Cancel during a long export, in the sheet (it stays up with its
+     progress and Cancel): no folder is left and the project is unchanged.
+     Drop two MIDI files, then start an export at once: the sheet waits,
+     then exports after the imports.
+
+**Owner check (manual, only the owner can do):** drop the folder's stems and
+MIDI files at bar 1 in the DAW you use that reads only audio and MIDI files.
+Check that they line up and that the tempo is right. Repeat with a song that
+has a pickup, placing the files where the About file says.
+
+### Crossfades (plan 6c)
+
+By eye and by ear; the model, its checks and what each edit does to a
+crossfade are tested (`core-model/tests/crossfades.rs`), the sound of every
+shape (`core-engine/tests/crossfades.rs`), the edits, rows and warnings
+(`core-ffi/tests/crossfades.rs`), the commands (`RegionCommandsTests`), the
+X handle and its menu (`RegionEditingTests`), the typed box
+(`AudioEditorModelTests`) and the e2e `crossfades_over_the_channel`.
+
+274. Put two regions on one track so that the second starts inside the
+     first, select both and choose Region › Crossfade. An X covers the start
+     of the overlap: 10 ms, or the whole overlap when it is shorter. Region ›
+     Remove Crossfade turns it back into a plain fade-in; Undo brings the
+     crossfade back.
+275. Drag the X's handle. The length follows, with an "<n> ms" readout. It
+     stops at the end of the first region, and at 1 frame. One Undo
+     ("Crossfade") puts it back; Escape mid-drag changes nothing.
+276. Right-click the X. There are four "Crossfade: …" shapes (the current one
+     ticked) and Remove Crossfade. Each shape changes the sound, not the
+     length, and VoiceOver still names the region with ", crossfade".
+277. Select the later region alone (a click on a crossfaded region's body
+     selects both: click its X handle or its top edge instead, or click it on
+     the Piano Roll's region strip). In the audio editor the Crossfade box
+     and shape picker replace Fade In. Type "25 ms", then "1200 frames": both
+     land as one Undo step each. Type "abc": the status says how to type a
+     fade.
+278. With that region still selected alone, the inspector shows "Crossfade
+     10 ms, Equal Power" for it.
+279. On the Piano Roll's region strip (a body drag in the arrangement moves
+     both regions), move the later region right until it overlaps the first
+     by less than the crossfade: the crossfade shortens and the status says so. Move it
+     past the first region's end: the crossfade goes, with a status line, and
+     moving it back does not bring it back (Undo does). Split inside the X:
+     refused with its sentence. Split later in the region: the new part has
+     no X.
+280. Listen across the overlap with Linear and with Equal Power: no click, no
+     gap. Open a project saved before this build that has overlapping
+     regions: they still cut hard from one to the next.
+281. Settings › Editing › Default crossfade: set 50 ms. Region › Crossfade on
+     a long overlap makes 50 ms; the value is kept after a relaunch.
+
+**Owner check (manual, only the owner can do):** make, drag, type and remove
+a crossfade, and listen through it (spec §12).
+
+### DAWproject (plan 6d)
+
+By eye; the ZIP and XML readers and writers, the export, the import and the
+hostile files are tested (`core-io/tests/zip.rs`, `xml.rs` and
+`dawproject_*.rs`), the jobs, plug-in state, checks and cancelling at every
+stage (`core-ffi/tests/dawproject.rs`), the preset codec
+(`platform-macos/tests/plist.rs`), the sheet's model, the commands and the
+store (`DawprojectModelTests`, `InterchangeCommandsTests`) and the e2e
+`dawproject_round_trip_over_the_channel`.
+
+282. File › Export › DAWproject… opens the sheet with its header line, the
+     Region gain picker and "What won't transfer". Choosing Leave out adds
+     "Region gain" to the list (on a project with region gain). Cancel
+     closes it.
+283. Export… proposes "<Song>.dawproject". After the job, the report opens
+     with its summary and groups; Show in Finder selects the file.
+284. Export again to the same name. The panel asks to replace; Cancel there
+     leaves the old file; Replace writes the new one.
+285. Start a bounce, then export a DAWproject. The sheet says it is waiting
+     and exports when the bounce ends.
+286. File › Import Project › DAWproject… with the file from 283. The prompt
+     of 292 appears; choose New Project. A new untitled window opens, with:
+     - the tracks, regions with their fade lengths and the crossfade's X;
+     - notes with per-note expression in the Piano Roll;
+     - the tempo ramp, markers, levels, sends and automation.
+
+     Edit › Undo is unavailable. The report says "This file came from a
+     VizDAW project".
+287. Double-click the `.dawproject` in Finder, and drop it on the Dock icon.
+     Each does what 286 does, through the same prompt. If another installed
+     app owns `.dawproject`,
+     double-click may open that app instead: use File › Import Project ›
+     DAWproject… or File › Open… then.
+288. Import a file whose instrument is not installed. The track's instrument
+     shows as a placeholder named after the plug-in, and the report says it
+     is not installed and keeps its settings.
+289. Cancel an import from its progress. The new window closes and nothing
+     new is in the project's media.
+290. Fill every Song info field in Project Settings, then export and import.
+     The new project's Song info matches, and its comment has no "VizDAW
+     export" line.
+
+**Owner check (manual, only the owner can do; spec §12, 6d's part):**
+- export the demo song;
+- open it in the DAW you use that reads DAWproject;
+- check tracks, clips, fades, notes with expression, tempo, markers, levels,
+  sends and automation;
+- export a DAWproject back from it and import that into VizDAW as a new
+  project; check what arrived against the report.
+
+### DAWproject merge (plan 6e)
+
+By eye; matching, the merge rules, applying, shared sequences, hostile
+records and the edit-script properties are tested (`core-io`'s
+`dawproject_merge*.rs`), the job, its preview, hold and apply, snapshots and
+cancelling at every stage (`core-ffi/tests/dawproject_merge.rs`), the sheet's
+model, the prompt's store and the channel's parameters (`MergeModelTests`,
+`DocumentStoreTests`, `InterchangeCommandsTests`) and the e2e
+`dawproject_merge_over_the_channel`.
+
+Over the channel, `file.import_dawproject` with `mode: "merge"` and
+`preview` leaves open a project the command itself opened through
+`project`. A project opened through `project` that asks a recovery question
+can't answer it there: open it first with `file.open`, then merge without
+`project`.
+
+291. Make the demo files: `VIZDAW_MERGE_DEMO=<an empty folder> cargo test -p
+     core-ffi --test dawproject_merge write_merge_demo -- --ignored` (the
+     folder must exist and be outside `~/Library`). It writes `Merge
+     Demo.vizdaw`, `Returned.dawproject` and `Other.dawproject` there and
+     prints their paths. Open `Merge Demo.vizdaw`. "Drums" and "Keys" play a
+     test instrument that is not installed, so they show its placeholder;
+     the merge keeps it.
+292. File › Import Project › DAWproject… with `Returned.dawproject`. The
+     prompt says "This DAWproject came from a VizDAW project.", names the
+     open project ("It matches “Merge Demo”, which is open."), and offers
+     New Project, Merge With Existing Project… and Cancel. Cancel does
+     nothing.
+293. Again, and choose New Project: a new untitled window opens, as in 286.
+294. Again, and choose Merge With Existing Project…: the project's window
+     shows the Merge DAWproject sheet, with "Reading the file…" and then the
+     counts line and two conflicts under "Conflicts (VizDAW's version is
+     kept)": the "Drums" level and the "Keys" notes. Cancel leaves the
+     project and Edit › Undo's label unchanged.
+295. Merge: the note moved, the "Bass" level changed and the "Bridge" marker
+     arrived. "Drums" keeps its level. "Keys" has a take "Returned <today>"
+     that is not active. The report opens titled "Merge Report", with
+     "Conflicts" first. The keyboard slot, the input effect and the second
+     sequence are still there.
+296. Edit › Undo Merge DAWproject restores everything from 295 in one step;
+     Redo brings it back.
+297. Close the project. Drop `Returned.dawproject` on the Dock icon: the
+     prompt says no project is open ("Merge it into the project it came
+     from, or open it as a new project."). Merge With Existing Project…
+     shows an Open panel; choose `Merge Demo.vizdaw`; it opens and the sheet
+     follows.
+298. Merge the same file a second time. The sheet lists the same two
+     conflicts and nothing added or removed. After Merge, "Keys" has no
+     second "Returned" take, and Edit › Undo's label is what it was before
+     (Ruling 6: nothing ran). While a merge waits for Merge or Cancel,
+     Convert, a format change in Project Settings and Relink are
+     unavailable, with a tooltip saying why.
+299. Open `Other.dawproject` from the demo folder (a file from another
+     source): no prompt; it opens as a new project.
+
+**Owner check (manual, only the owner can do; spec §12, 6e's part):**
+- export the demo song;
+- open it in the DAW you use that reads DAWproject; move a note, change a
+  level and add a marker there; export a DAWproject back;
+- merge it into the original. Check that the three edits arrived and that
+  keyboard slots, input effects and other sequences are still there;
+- undo the merge.
+
+300. On the demo song, add a send to a bus, an insert, and mute one region.
+     File › Export ▸ AAF…: the sheet shows the options and "What won't
+     transfer", listing the send, the insert and the muted region. Change
+     "Clip gain" off: a line "Clip gain (turned off)" appears.
+301. Export: "<Song> AAF" holds `<Song>.aaf` and `<Song> MIDI.mid`; the report
+     opens with Show in Finder.
+302. Export again: "<Song> AAF 2" appears; the first folder is unchanged.
+303. With "Embed audio" off, export: the folder also holds `Audio/` with
+     numbered WAVs.
+304. File › Import Project ▸ AAF… on `<Song>.aaf`: the sheet names the MIDI
+     file beside it. Import opens a new project whose tracks, regions, fades,
+     crossfade X handle and markers match the demo (less the muted region),
+     with bars in the right place.
+305. The same with "Add to this project" into a project with one track: new
+     tracks appear; Edit › Undo Import AAF removes them in one step.
+306. Move one WAV of the external export elsewhere, then import: its region
+     is offline with Relink…. Import again, choosing that folder under "Look
+     for missing audio in…": it is online.
+307. Import the export made with left and right mono tracks: one stereo track
+     per pair; with "Join…" off, two mono tracks.
+308. Drop `<Song>.aaf` on the Dock icon: a new project opens with it, with no
+     sheet.
+309. Make the demo file: `VIZDAW_AAF_DEMO=<an empty folder> cargo test -p
+     core-io --test aaf_read write_aaf_demo -- --ignored` (the folder must
+     exist and be outside `~/Library`). Import `Other shapes.aaf` from it:
+     the report lists "Picture and other non-audio tracks" and the Selector
+     Note.
+
+**Owner check (manual, only the owner can do; spec §12, 6f's part):**
+- export with the defaults;
+- open the AAF and the MIDI file beside it in each DAW you use that reads
+  AAF;
+- check clip positions to the sample (a click track lines up), fades,
+  crossfades, clip gain, volume and pan automation, markers and track names;
+- export an AAF from that DAW and import it into VizDAW.
+
+Plan 6g, Multi-Q (the bundled EQ):
+
+310. In Finder, Show Package Contents on VizDAW.app: `Contents/PlugIns` holds
+     `Multi-Q.clap` and `Multi-Q.component`, and
+     `Contents/Resources/Licences/Multi-Q` holds the licences and `SOURCE.txt`.
+311. First launch after installing (let the plug-in scan finish), then in a
+     new project Track › New Audio Track. The new strip's EQ slot shows
+     "Multi-Q", and clicking it opens Multi-Q's window, flat. Track › New
+     Instrument Track (the built-in synth, one strip per project) does the
+     same. A second audio or instrument track shares that strip and adds no
+     EQ. Add Bus: the bus shows "EQ ＋".
+312. Edit › Undo once: the track and its EQ go together.
+313. Settings › Plug-ins, turn "Put an EQ on new channels" off. In a new
+     project, the first audio track shows "EQ ＋". Turn it back on.
+314. Plugin Manager: disable Multi-Q. A new track shows "EQ ＋", and existing
+     Multi-Q slots show as unavailable, as any disabled plug-in does. Enable
+     it again.
+315. Settings › Plug-ins › "Install Multi-Q for other apps": the status says
+     "Installed in …/Components". Press it again: VizDAW asks to replace it.
+     Cancel: nothing changes.
+316. Import a DAWproject from another DAW whose track has its built-in EQ with
+     a bell and a high-pass. The track's EQ slot is Multi-Q with those bands
+     (open its window). The report lists anything left out.
+317. Export the project as DAWproject and import it back: the Multi-Q EQ and
+     its settings are unchanged.
+
+**Owner check (manual, only the owner can do):**
+- after step 315, open a DAWproject exported from VizDAW in another DAW on
+  this Mac: the track's Multi-Q loads there with the same curve;
+- check the About or licence wording against D1.

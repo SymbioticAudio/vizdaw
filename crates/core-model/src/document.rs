@@ -1,6 +1,7 @@
 //! The document: settings, instrument list, outputs, media pool and
 //! sequences, plus a derived event index.
 
+use crate::arc_map::ArcMap;
 use crate::error::{ModelError, Result};
 use crate::event::Event;
 use crate::format::AudioFormat;
@@ -27,7 +28,7 @@ pub struct Settings {
     /// Autosave copies to keep (default 10).
     pub autosave_keep: u32,
     /// Named select-and-modify templates.
-    pub templates: OrdMap<String, ModifyTemplate>,
+    pub templates: ArcMap<String, ModifyTemplate>,
     /// The project's audio format: every media file is stored in it
     /// (sub-project 5 spec §4.1).
     pub format: AudioFormat,
@@ -35,6 +36,117 @@ pub struct Settings {
     /// spec §4.8; plan 5f-1 Ruling 6). Absent in files when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub learn: Vec<crate::learn::LearnMap>,
+    /// Song info (plan 6a; format version 8). Absent in files when empty.
+    #[serde(default, skip_serializing_if = "SongInfo::is_empty")]
+    pub info: SongInfo,
+    /// The project's stable ID (plan 6a): 36 characters of lowercase hex
+    /// in 8-4-4-4-12 groups, stamped when the project is first saved.
+    /// Absent in files until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// The longest song-info field, and the longest region name, in bytes.
+pub const MAX_INFO_BYTES: usize = 4096;
+
+/// Whether `s` is a project ID: 36 characters, lowercase hex in 8-4-4-4-12
+/// groups.
+pub fn check_project_id(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
+}
+
+/// Song info: the descriptive fields a MIDI or music file can carry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SongInfo {
+    /// Title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Artist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    /// Album.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    /// Original artist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_artist: Option<String>,
+    /// Composer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composer: Option<String>,
+    /// Songwriter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub songwriter: Option<String>,
+    /// Producer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
+    /// Arranger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arranger: Option<String>,
+    /// Year.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<String>,
+    /// Genre.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre: Option<String>,
+    /// Copyright.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copyright: Option<String>,
+    /// Website.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// Free-form comment (may span lines).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+impl SongInfo {
+    /// The 13 fields in declaration order.
+    pub fn fields(&self) -> [&Option<String>; 13] {
+        [
+            &self.title,
+            &self.artist,
+            &self.album,
+            &self.original_artist,
+            &self.composer,
+            &self.songwriter,
+            &self.producer,
+            &self.arranger,
+            &self.year,
+            &self.genre,
+            &self.copyright,
+            &self.website,
+            &self.comment,
+        ]
+    }
+
+    /// The 13 fields in declaration order, mutably.
+    pub fn fields_mut(&mut self) -> [&mut Option<String>; 13] {
+        [
+            &mut self.title,
+            &mut self.artist,
+            &mut self.album,
+            &mut self.original_artist,
+            &mut self.composer,
+            &mut self.songwriter,
+            &mut self.producer,
+            &mut self.arranger,
+            &mut self.year,
+            &mut self.genre,
+            &mut self.copyright,
+            &mut self.website,
+            &mut self.comment,
+        ]
+    }
+
+    /// Whether every field is unset.
+    pub fn is_empty(&self) -> bool {
+        self.fields().iter().all(|f| f.is_none())
+    }
 }
 
 impl Default for Settings {
@@ -42,9 +154,11 @@ impl Default for Settings {
         Settings {
             history_depth: 200,
             autosave_keep: 10,
-            templates: OrdMap::new(),
+            templates: ArcMap::new(),
             format: AudioFormat::DEFAULT,
             learn: Vec::new(),
+            info: SongInfo::default(),
+            project_id: None,
         }
     }
 }
@@ -277,17 +391,17 @@ pub struct EventLoc {
 #[serde(into = "DocumentRepr", try_from = "DocumentRepr")]
 pub struct Document {
     settings: Settings,
-    instruments: OrdMap<DestId, Destination>,
-    outputs: OrdMap<OutputPathId, OutputPath>,
-    media: OrdMap<MediaId, MediaItem>,
-    sequences: OrdMap<SeqId, Sequence>,
+    instruments: ArcMap<DestId, Destination>,
+    outputs: ArcMap<OutputPathId, OutputPath>,
+    media: ArcMap<MediaId, MediaItem>,
+    sequences: ArcMap<SeqId, Sequence>,
     mixer: Mixer,
     /// Plugin state blobs by ID (Plan Ruling 8). Never serialized into
     /// `project.json`; `file::save`/`load` keep them in `PluginState/`.
     states: OrdMap<StateBlobId, Arc<[u8]>>,
     counters: Counters,
     /// Derived, never serialized: event ID -> location.
-    index: OrdMap<EventId, EventLoc>,
+    index: ArcMap<EventId, EventLoc>,
 }
 
 impl Default for Document {
@@ -337,8 +451,8 @@ fn collect_unique<K: Ord + Clone + std::fmt::Display, V: Clone>(
     items: Vec<V>,
     key: impl Fn(&V) -> K,
     what: &str,
-) -> std::result::Result<OrdMap<K, V>, String> {
-    let mut m = OrdMap::new();
+) -> std::result::Result<ArcMap<K, V>, String> {
+    let mut m = ArcMap::new();
     for v in items {
         let k = key(&v);
         if m.insert(k.clone(), v).is_some() {
@@ -367,7 +481,7 @@ impl TryFrom<DocumentRepr> for Document {
             mixer,
             states: OrdMap::new(),
             counters,
-            index: OrdMap::new(),
+            index: ArcMap::new(),
         };
         d.rebuild_index()?;
         Ok(d)
@@ -382,14 +496,14 @@ impl Document {
         let mixer = Mixer::new(counters.alloc_strip());
         Document {
             settings: Settings::default(),
-            instruments: OrdMap::new(),
-            outputs: OrdMap::new(),
-            media: OrdMap::new(),
-            sequences: OrdMap::new(),
+            instruments: ArcMap::new(),
+            outputs: ArcMap::new(),
+            media: ArcMap::new(),
+            sequences: ArcMap::new(),
             mixer,
             states: OrdMap::new(),
             counters,
-            index: OrdMap::new(),
+            index: ArcMap::new(),
         }
     }
 
@@ -404,19 +518,19 @@ impl Document {
         &self.settings
     }
     /// Instrument list.
-    pub fn instruments(&self) -> &OrdMap<DestId, Destination> {
+    pub fn instruments(&self) -> &ArcMap<DestId, Destination> {
         &self.instruments
     }
     /// Output paths.
-    pub fn outputs(&self) -> &OrdMap<OutputPathId, OutputPath> {
+    pub fn outputs(&self) -> &ArcMap<OutputPathId, OutputPath> {
         &self.outputs
     }
     /// Media pool.
-    pub fn media(&self) -> &OrdMap<MediaId, MediaItem> {
+    pub fn media(&self) -> &ArcMap<MediaId, MediaItem> {
         &self.media
     }
     /// Sequences.
-    pub fn sequences(&self) -> &OrdMap<SeqId, Sequence> {
+    pub fn sequences(&self) -> &ArcMap<SeqId, Sequence> {
         &self.sequences
     }
     /// ID counters.
@@ -467,6 +581,12 @@ impl Document {
     /// The bytes of state blob `id`, when loaded.
     pub fn state_blob(&self, id: StateBlobId) -> Option<&[u8]> {
         self.states.get(&id).map(|b| &b[..])
+    }
+
+    /// State blob `id` as stored, when loaded: shared, not copied, so a
+    /// reader can tell the same bytes by pointer.
+    pub fn state_arc(&self, id: StateBlobId) -> Option<Arc<[u8]>> {
+        self.states.get(&id).cloned()
     }
 
     /// Every blob a plugin slot points at.
@@ -542,18 +662,29 @@ impl Document {
     }
 }
 
+impl Document {
+    /// This document with project ID `id`, unchanged when it already has
+    /// one (plan 6a: the ID is stamped once and never replaced).
+    pub fn with_project_id(mut self, id: &str) -> Document {
+        if self.settings.project_id.is_none() {
+            self.settings.project_id = Some(id.to_owned());
+        }
+        self
+    }
+}
+
 /// Crate-internal mutation, used only by commands.
 impl Document {
     pub(crate) fn settings_mut(&mut self) -> &mut Settings {
         &mut self.settings
     }
-    pub(crate) fn instruments_mut(&mut self) -> &mut OrdMap<DestId, Destination> {
+    pub(crate) fn instruments_mut(&mut self) -> &mut ArcMap<DestId, Destination> {
         &mut self.instruments
     }
-    pub(crate) fn outputs_mut(&mut self) -> &mut OrdMap<OutputPathId, OutputPath> {
+    pub(crate) fn outputs_mut(&mut self) -> &mut ArcMap<OutputPathId, OutputPath> {
         &mut self.outputs
     }
-    pub(crate) fn media_mut(&mut self) -> &mut OrdMap<MediaId, MediaItem> {
+    pub(crate) fn media_mut(&mut self) -> &mut ArcMap<MediaId, MediaItem> {
         &mut self.media
     }
     pub(crate) fn counters_mut(&mut self) -> &mut Counters {
@@ -714,7 +845,7 @@ impl Document {
 
     /// Rebuilds the event index; fails on duplicate event IDs.
     pub(crate) fn rebuild_index(&mut self) -> std::result::Result<(), String> {
-        let mut index = OrdMap::new();
+        let mut index = ArcMap::new();
         for (loc, e) in self.all_events() {
             if index.insert(e.id, loc).is_some() {
                 return Err(format!("duplicate event id {}", e.id));

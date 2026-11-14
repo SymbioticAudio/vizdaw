@@ -3,9 +3,10 @@
 
 use super::Report;
 use super::event::insert_specs;
+use crate::crossfade;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
-use crate::event::{Event, EventBody, EventSpec, Fade};
+use crate::event::{Event, EventBody, EventSpec, Fade, FadeShape};
 use crate::ids::{AnyId, EventId, LaneId, MediaId, SeqId};
 use crate::rules::check_event_fields;
 use crate::time::Tick;
@@ -50,6 +51,16 @@ pub enum AudioCmd {
         event: EventId,
         /// Split position.
         at: Tick,
+    },
+    /// Rename a region (plan 6a): the name is trimmed and must pass
+    /// [`valid_name`](crate::lane::valid_name) and fit
+    /// [`MAX_INFO_BYTES`](crate::document::MAX_INFO_BYTES); `None` or an
+    /// empty name clears it.
+    SetName {
+        /// The region.
+        event: EventId,
+        /// The new name.
+        name: Option<String>,
     },
     /// Set gain.
     SetGain {
@@ -105,6 +116,30 @@ pub enum AudioCmd {
         /// Length (frames, >= 1).
         length: u64,
     },
+    /// Makes the region's fade in a crossfade with the region it starts
+    /// inside (plan 6c): sets the fade in's length and shape and the flag.
+    Crossfade {
+        /// The later region.
+        event: EventId,
+        /// The length.
+        length: CrossfadeLength,
+        /// The shape.
+        shape: FadeShape,
+    },
+    /// Clears a region's crossfade flag; its fade in stays as a plain one.
+    RemoveCrossfade {
+        /// The later region.
+        event: EventId,
+    },
+}
+
+/// How long a [`AudioCmd::Crossfade`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossfadeLength {
+    /// Exactly this many frames, which must fit.
+    Frames(u64),
+    /// This many frames, or the room if that is less.
+    UpTo(u64),
 }
 
 /// Which fade a [`AudioCmd::FadeTo`] sets.
@@ -123,6 +158,7 @@ impl AudioCmd {
             AudioCmd::Insert { .. } => "Insert Audio Region",
             AudioCmd::Trim { .. } => "Trim Region",
             AudioCmd::Split { .. } => "Split Region",
+            AudioCmd::SetName { .. } => "Rename Region",
             AudioCmd::SetGain { .. } => "Set Region Gain",
             AudioCmd::SetFades { .. } => "Set Region Fades",
             AudioCmd::Normalize { .. } => "Normalize",
@@ -135,6 +171,8 @@ impl AudioCmd {
             } => "Fade Out from Cursor",
             AudioCmd::RemoveFades { .. } => "Remove Fades",
             AudioCmd::SetSource { .. } => "Set Region Source",
+            AudioCmd::Crossfade { .. } => "Crossfade",
+            AudioCmd::RemoveCrossfade { .. } => "Remove Crossfade",
         }
     }
 }
@@ -156,12 +194,17 @@ fn region(d: &Document, id: EventId) -> Result<(Event, SeqId, f64)> {
 /// Shortens a region's fades so together they fit it: the fade in first,
 /// then the fade out to what is left (5a Ruling 1).
 pub(crate) fn clamp_fades(ev: &mut Event) {
+    clamp_region_fades(&mut ev.body);
+}
+
+/// [`clamp_fades`] on an event body (a no-op for anything but a region).
+pub(crate) fn clamp_region_fades(body: &mut EventBody) {
     if let EventBody::AudioRegion {
         length,
         fade_in,
         fade_out,
         ..
-    } = &mut ev.body
+    } = body
     {
         fade_in.length_frames = fade_in.length_frames.min(*length);
         fade_out.length_frames = fade_out
@@ -207,6 +250,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                     gain_db: *gain_db,
                     fade_in: *fade_in,
                     fade_out: *fade_out,
+                    name: None,
+                    crossfade: false,
                 },
             );
             insert_specs(d, *seq, *lane, &[spec], r)?;
@@ -247,6 +292,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 gain_db,
                 fade_in,
                 fade_out,
+                name,
+                crossfade,
             } = ev.body.clone()
             else {
                 return Ok(());
@@ -256,6 +303,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
             if *at <= ev.tick || first < 1.0 || first >= length as f64 {
                 return Err(ModelError::range("split.at", at.0));
             }
+            crossfade::check_split(d, *event, *at)?;
             let first = first as u64;
             let mut a = ev.clone();
             a.body = EventBody::AudioRegion {
@@ -265,6 +313,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 gain_db,
                 fade_in,
                 fade_out: Fade::default(),
+                name: name.clone(),
+                crossfade,
             };
             clamp_fades(&mut a);
             store(d, a)?;
@@ -282,6 +332,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                     gain_db,
                     fade_in: Fade::default(),
                     fade_out,
+                    name,
+                    crossfade: false,
                 },
             };
             clamp_fades(&mut b);
@@ -289,6 +341,18 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
             let loc = d.locate(*event)?;
             d.insert_event(loc.seq, loc.lane, Some(loc.take), b)?;
             r.created.push(AnyId::Event(id));
+        }
+        AudioCmd::SetName { event, name } => {
+            let (mut ev, _, _) = region(d, *event)?;
+            let name = name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned);
+            if let EventBody::AudioRegion { name: n, .. } = &mut ev.body {
+                *n = name;
+            }
+            store(d, ev)?;
         }
         AudioCmd::SetGain { event, gain_db } => {
             let (mut ev, _, _) = region(d, *event)?;
@@ -433,6 +497,72 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 *l = *length;
             }
             clamp_fades(&mut ev);
+            store(d, ev)?;
+        }
+        AudioCmd::Crossfade {
+            event,
+            length,
+            shape,
+        } => {
+            let (mut ev, _, _) = region(d, *event)?;
+            let Some(o) = crossfade::overlap(d, *event)? else {
+                return Err(ModelError::invalid(
+                    "This region does not start inside another region on its track.",
+                ));
+            };
+            if matches!(
+                length,
+                CrossfadeLength::Frames(0) | CrossfadeLength::UpTo(0)
+            ) {
+                return Err(ModelError::invalid("A crossfade is at least 1 frame long."));
+            }
+            let free = crossfade::free_length(d, *event)?;
+            let frames = match *length {
+                CrossfadeLength::Frames(n) => {
+                    if n > o.frames {
+                        return Err(ModelError::invalid(format!(
+                            "A crossfade of {n} frames runs past the end of the region it crosses ({} frames).",
+                            o.frames
+                        )));
+                    }
+                    if n > free {
+                        return Err(ModelError::invalid(format!(
+                            "A crossfade of {n} frames does not fit the region with its fade out ({free} frames)."
+                        )));
+                    }
+                    n
+                }
+                CrossfadeLength::UpTo(n) => {
+                    let fit = n.min(o.frames).min(free);
+                    if fit == 0 {
+                        // The fade out takes the whole region.
+                        return Err(ModelError::invalid(format!(
+                            "A crossfade of {n} frames does not fit the region with its fade out ({free} frames)."
+                        )));
+                    }
+                    fit
+                }
+            };
+            if let EventBody::AudioRegion {
+                fade_in, crossfade, ..
+            } = &mut ev.body
+            {
+                *fade_in = Fade {
+                    length_frames: frames,
+                    shape: *shape,
+                };
+                *crossfade = true;
+            }
+            store(d, ev)?;
+        }
+        AudioCmd::RemoveCrossfade { event } => {
+            let (mut ev, _, _) = region(d, *event)?;
+            if let EventBody::AudioRegion { crossfade, .. } = &mut ev.body {
+                if !*crossfade {
+                    return Err(ModelError::invalid("This region has no crossfade."));
+                }
+                *crossfade = false;
+            }
             store(d, ev)?;
         }
     }

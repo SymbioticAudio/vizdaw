@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 715b4a19b741b34b9e81e4af8060cff947dc6a9f7c97f58fbd49ec1b88107496 # shrinks to ops = [SetDest { seq: 0, lane: 0, dest: false }]
 cc cce70fe5ae57b84cb50ce8e35712a4afe1babd5a479b8b64e1e9d92b4a4e378c # shrinks to ops = [SetDest { seq: 0, lane: 0, dest: false }]
+cc 96d5271fecdc1b291c9e3fa17a2ee9767bdeb901f1acb784e864819f6bf1760b # private_copy_and_flatten_keep_playback: region fades past a trimmed reference window

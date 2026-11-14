@@ -60,3 +60,14 @@ fn debug_panic_returns_internal_and_does_not_abort() {
     // The process is still alive and the guard still works.
     assert_eq!(ffi_guard(|| Ok(1)), Ok(1));
 }
+
+#[test]
+fn exists_names_the_path_in_the_way() {
+    let e = VizError::Exists {
+        path: "/x/Multi-Q.component".into(),
+    };
+    assert_eq!(
+        e.to_string(),
+        "Something that is not Multi-Q is in the way: /x/Multi-Q.component."
+    );
+}

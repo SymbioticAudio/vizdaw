@@ -2,7 +2,9 @@
 //! value ranges. Commands call the `check_*` functions; loading calls
 //! [`validate`], which reports every problem instead of stopping at the first.
 
-use crate::document::{DestKind, Document, MAX_RETURN_LATENCY_MS};
+use crate::document::{
+    DestKind, Document, MAX_INFO_BYTES, MAX_RETURN_LATENCY_MS, SongInfo, check_project_id,
+};
 use crate::error::{ModelError, Result};
 use crate::event::{EventBody, EventSpec, LoopCount};
 use crate::ids::{AnyId, EventId, SeqId};
@@ -116,6 +118,62 @@ fn need(cond: bool, field: &'static str, value: impl std::fmt::Display) -> Resul
     }
 }
 
+/// Checks a region name: non-empty after trimming, free of control and
+/// zero-width characters ([`valid_name`](crate::lane::valid_name)) and at
+/// most [`MAX_INFO_BYTES`] bytes.
+pub fn check_region_name(name: &str) -> Result<()> {
+    need(
+        crate::lane::valid_name(name).is_some() && name.len() <= MAX_INFO_BYTES,
+        "region.name",
+        name.len(),
+    )
+}
+
+/// The `info.<field>` name of song-info field `i` (declaration order), for
+/// [`ModelError::OutOfRange`].
+fn info_field_name(i: usize) -> &'static str {
+    match i {
+        0 => "info.title",
+        1 => "info.artist",
+        2 => "info.album",
+        3 => "info.original_artist",
+        4 => "info.composer",
+        5 => "info.songwriter",
+        6 => "info.producer",
+        7 => "info.arranger",
+        8 => "info.year",
+        9 => "info.genre",
+        10 => "info.copyright",
+        11 => "info.website",
+        _ => "info.comment",
+    }
+}
+
+/// A character a song-info field may not hold: a control character other
+/// than newline and tab, or a bidirectional override or isolate (U+202A to
+/// U+202E, U+2066 to U+2069), which could disguise text in exported files.
+fn bad_info_char(c: char) -> bool {
+    (c.is_control() && c != '\n' && c != '\t')
+        || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Checks song info: each set field is at most [`MAX_INFO_BYTES`] bytes and
+/// has no control character other than newline and tab and no bidi
+/// override or isolate. Serves both
+/// `SettingsCmd::SetInfo` and [`validate`].
+pub fn check_info(info: &SongInfo) -> Result<()> {
+    for (i, f) in info.fields().into_iter().enumerate() {
+        if let Some(t) = f {
+            need(
+                t.len() <= MAX_INFO_BYTES && !t.chars().any(bad_info_char),
+                info_field_name(i),
+                t.len(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Checks a media path: relative to the package, normalized (no empty or
 /// `.` components, no trailing slash), no `..`, no backslashes, no drive or
 /// absolute root.
@@ -196,7 +254,12 @@ pub fn check_event_fields(doc: &Document, ev: &EventSpec) -> Result<()> {
             gain_db,
             fade_in,
             fade_out,
+            name,
+            ..
         } => {
+            if let Some(n) = name {
+                check_region_name(n)?;
+            }
             let m = doc
                 .media()
                 .get(media)
@@ -323,6 +386,13 @@ pub fn validate(doc: &Document) -> Vec<String> {
         need(f.is_valid(), "settings.format", f.sample_rate),
         "settings",
     );
+    push(check_info(&doc.settings().info), "settings");
+    if let Some(id) = &doc.settings().project_id {
+        push(
+            need(check_project_id(id), "project_id", id.len()),
+            "settings",
+        );
+    }
     for m in doc.media().values() {
         if m.id.0 >= c.media {
             push(Err(ModelError::range("counters.media", m.id)), "media");
@@ -439,5 +509,6 @@ pub fn validate(doc: &Document) -> Vec<String> {
     }
     p.extend(crate::mixer_rules::mixer_problems(doc));
     p.extend(crate::learn::problems(&doc.settings().learn));
+    p.extend(crate::crossfade::problems(doc));
     p
 }

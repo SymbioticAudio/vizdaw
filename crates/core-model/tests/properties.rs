@@ -1,13 +1,14 @@
 //! Property tests over generated documents and command sequences.
 
 use core_model::command::{
-    Command, EventCmd, LaneCmd, ReferenceCmd, RoutingCmd, SequenceCmd, apply,
+    AudioCmd, Command, CrossfadeLength, EventCmd, LaneCmd, MediaCmd, ReferenceCmd, RoutingCmd,
+    SequenceCmd, apply,
 };
 use core_model::document::{DestKind, Document};
-use core_model::event::{EventBody, EventSpec, LoopCount};
+use core_model::event::{EventBody, EventSpec, Fade, FadeShape, LoopCount};
 use core_model::file::{from_json, to_json};
 use core_model::history::History;
-use core_model::ids::{DestId, EventId, LaneId, SeqId};
+use core_model::ids::{DestId, EventId, LaneId, MediaId, SeqId};
 use core_model::lane::Lane;
 use core_model::query::{flatten, seq_length, use_counts};
 use core_model::rules::{find_cycle, validate};
@@ -92,6 +93,45 @@ enum Op {
         strip: u64,
         value: f64,
     },
+    Region {
+        seq: usize,
+        lane: usize,
+        beat: i64,
+        frames: u64,
+    },
+    Crossfade {
+        ev: usize,
+        frames: u64,
+        up_to: bool,
+        shape: FadeShape,
+    },
+    RemoveCrossfade {
+        ev: usize,
+    },
+    Trim {
+        ev: usize,
+        front: i64,
+        back: i64,
+    },
+    /// Split a region `ticks` after its start (Ruling 7 and F2).
+    Split {
+        ev: usize,
+        ticks: i64,
+    },
+    SetFades {
+        ev: usize,
+        fade_in: u64,
+        fade_out: u64,
+    },
+}
+
+fn arb_shape() -> impl Strategy<Value = FadeShape> {
+    prop_oneof![
+        Just(FadeShape::Linear),
+        Just(FadeShape::EqualPower),
+        Just(FadeShape::Exponential),
+        Just(FadeShape::SCurve),
+    ]
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -115,6 +155,16 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => (i(), -12i8..12).prop_map(|(ev, semis)| Op::Transpose { ev, semis }),
         2 => (i(), i(), 0i64..16, 0u64..4, (0u32..=1000).prop_map(|k| f64::from(k) / 1000.0))
             .prop_map(|(seq, lane, beat, strip, value)| Op::Automation { seq, lane, beat, strip, value }),
+        3 => (i(), i(), 0i64..16, 1_000u64..60_000)
+            .prop_map(|(seq, lane, beat, frames)| Op::Region { seq, lane, beat, frames }),
+        2 => (i(), 0u64..30_000, any::<bool>(), arb_shape())
+            .prop_map(|(ev, frames, up_to, shape)| Op::Crossfade { ev, frames, up_to, shape }),
+        1 => i().prop_map(|ev| Op::RemoveCrossfade { ev }),
+        2 => (i(), -5_000i64..5_000, -5_000i64..5_000)
+            .prop_map(|(ev, front, back)| Op::Trim { ev, front, back }),
+        1 => (i(), 1i64..(2 * Q)).prop_map(|(ev, ticks)| Op::Split { ev, ticks }),
+        1 => (i(), 0u64..30_000, 0u64..5_000)
+            .prop_map(|(ev, fade_in, fade_out)| Op::SetFades { ev, fade_in, fade_out }),
     ]
 }
 
@@ -133,6 +183,14 @@ fn seqs(d: &Document) -> Vec<SeqId> {
 fn lane_of(d: &Document, s: SeqId, i: usize) -> Option<LaneId> {
     let ids: Vec<LaneId> = d.sequence(s).ok()?.lanes.iter().map(|l| l.id).collect();
     pick(&ids, i)
+}
+
+/// The audio regions, which the crossfade and trim ops name.
+fn regions(d: &Document) -> Vec<EventId> {
+    d.all_events()
+        .filter(|(_, e)| matches!(e.body, EventBody::AudioRegion { .. }))
+        .map(|(_, e)| e.id)
+        .collect()
 }
 
 fn events(d: &Document, refs_only: bool) -> Vec<EventId> {
@@ -281,10 +339,74 @@ fn concrete(d: &Document, op: &Op) -> Option<Command> {
             ticks: Tick(0),
             semitones: semis,
         }),
+        Op::Region {
+            seq,
+            lane,
+            beat,
+            frames,
+        } => {
+            let seq = pick(&s, seq)?;
+            Command::Audio(AudioCmd::Insert {
+                seq,
+                lane: lane_of(d, seq, lane)?,
+                tick: Tick(beat * Q),
+                media: MediaId(0),
+                source_offset: 0,
+                length: frames,
+                gain_db: 0.0,
+                fade_in: Fade::default(),
+                fade_out: Fade::default(),
+            })
+        }
+        Op::Crossfade {
+            ev,
+            frames,
+            up_to,
+            shape,
+        } => Command::Audio(AudioCmd::Crossfade {
+            event: pick(&regions(d), ev)?,
+            length: if up_to {
+                CrossfadeLength::UpTo(frames)
+            } else {
+                CrossfadeLength::Frames(frames)
+            },
+            shape,
+        }),
+        Op::RemoveCrossfade { ev } => Command::Audio(AudioCmd::RemoveCrossfade {
+            event: pick(&regions(d), ev)?,
+        }),
+        Op::Trim { ev, front, back } => Command::Audio(AudioCmd::Trim {
+            event: pick(&regions(d), ev)?,
+            front_frames: front,
+            back_frames: back,
+        }),
+        Op::Split { ev, ticks } => {
+            let event = pick(&regions(d), ev)?;
+            Command::Audio(AudioCmd::Split {
+                event,
+                at: Tick(d.event(event).ok()?.0.tick.0 + ticks),
+            })
+        }
+        Op::SetFades {
+            ev,
+            fade_in,
+            fade_out,
+        } => Command::Audio(AudioCmd::SetFades {
+            event: pick(&regions(d), ev)?,
+            fade_in: Fade {
+                length_frames: fade_in,
+                shape: FadeShape::Linear,
+            },
+            fade_out: Fade {
+                length_frames: fade_out,
+                shape: FadeShape::Linear,
+            },
+        }),
     })
 }
 
-/// Two sequences and one MIDI destination to start from.
+/// Two sequences, one MIDI destination and one media item (48 kHz, 480 000
+/// frames) to start from.
 fn seed() -> Document {
     let mut d = Document::new();
     for c in [
@@ -299,6 +421,15 @@ fn seed() -> Document {
         }),
         Command::Sequence(SequenceCmd::New { name: "A".into() }),
         Command::Sequence(SequenceCmd::New { name: "B".into() }),
+        Command::Media(MediaCmd::Add {
+            path: "Media/m.caf".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 480_000,
+            content_hash: None,
+            name: None,
+            origin: None,
+        }),
     ] {
         d = apply(&d, &c).unwrap().doc;
     }
@@ -550,6 +681,26 @@ proptest! {
                 prop_assert_eq!(after, before.clone());
             }
             prop_assert!(validate(&a.doc).is_empty());
+        }
+    }
+}
+
+proptest! {
+    // A crossfade needs two overlapping regions, the command and then an
+    // edit that disturbs it: more cases than the rest, so the sequences
+    // that reach one are common.
+    #![proptest_config(ProptestConfig::with_cases(1024))]
+
+    #[test]
+    fn every_state_validates(ops in ops()) {
+        let mut h = History::new(seed());
+        for op in &ops {
+            if let Some(cmd) = concrete(h.doc(), op) {
+                if h.execute(&cmd, &ViewFilter::default()).is_ok() {
+                    let v = validate(h.doc());
+                    prop_assert!(v.is_empty(), "after {:?}: {:?}", cmd, v);
+                }
+            }
         }
     }
 }

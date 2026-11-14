@@ -479,3 +479,58 @@ fn a_surface_fast_forward_behind_a_latency_moves_a_bar() {
     surface_remove(unit).unwrap();
     s.close().unwrap();
 }
+
+/// Plan 6e Task 3 re-review: a removed plugin whose capture is refused (here
+/// a blob-ID collision: another slot's blob has the captured bytes' ID but
+/// other bytes, as a hostile file can make) is reported as "state not
+/// saved", not dropped silently. The removal still happens.
+#[test]
+fn a_refused_capture_on_removal_is_reported() {
+    let _g = serial();
+    // The default state the gain saves.
+    let (_d, path, _song, id) = project("vizdaw.test.gain");
+    let s = open(&path);
+    idle_until(&s, |s| slot(s, id).status == SlotStatus::Live);
+    s.save().unwrap();
+    s.close().unwrap();
+    let saved = core_model::file::load(std::path::Path::new(&path)).unwrap();
+    let blob = saved
+        .plugin_slot(core_model::ids::PluginInstanceId(id))
+        .unwrap()
+        .state
+        .unwrap();
+    let default = saved.state_blob(blob).unwrap().to_vec();
+    // Two gains: the second points at the default's ID, with other bytes.
+    let doc = demo_document().unwrap();
+    let mut b = Builder::from_doc(doc);
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let first = b.insert(synth, gain_ref("vizdaw.test.gain")).unwrap();
+    let second = b.insert(synth, gain_ref("vizdaw.test.gain")).unwrap();
+    let (doc, sid) = core_model::state::capture(&b.finish(), second, &default).unwrap();
+    assert_eq!(sid, blob);
+    let dir = tempfile::tempdir().unwrap();
+    let pkg = dir.path().join("q.vizdaw");
+    core_model::file::save(&doc, &pkg).unwrap();
+    std::fs::write(
+        pkg.join("PluginState")
+            .join(core_model::state::blob_file_name(sid)),
+        b"not the default",
+    )
+    .unwrap();
+    let s = open(&pkg.to_string_lossy());
+    idle_until(&s, |s| {
+        slot(s, first.0).status == SlotStatus::Live && slot(s, second.0).status == SlotStatus::Live
+    });
+    let _ = s.idle().unwrap();
+    s.remove_insert(first.0).unwrap();
+    let news = s.idle().unwrap();
+    assert!(
+        news.problems
+            .iter()
+            .any(|p| p.contains("state not saved") && p.contains("collide")),
+        "{:?}",
+        news.problems
+    );
+    assert!(s.plugin_slots().unwrap().iter().all(|r| r.id != first.0));
+    s.close().unwrap();
+}

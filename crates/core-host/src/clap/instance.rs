@@ -28,6 +28,10 @@ pub struct ClapInstance {
     info: PluginInfo,
     clap_notes: bool,
     gui_open: bool,
+    /// The parameters set a step away and back before a second activation
+    /// (plan 6g Task 5): the bundled Multi-Q's continuous, writable ones;
+    /// empty for every other plug-in.
+    refresh: Vec<ParamId>,
 }
 
 impl std::fmt::Debug for ClapInstance {
@@ -86,6 +90,7 @@ impl ClapInstance {
             },
             clap_notes: false,
             gui_open: false,
+            refresh: Vec::new(),
         };
         me.read_info();
         Ok(me)
@@ -143,10 +148,19 @@ impl ClapInstance {
             }
         }
         let mut params = Vec::new();
+        let mut refresh = Vec::new();
+        let multiq = self.info.plugin.id == crate::bundled::MULTIQ_CLAP_ID;
         if let Some(pe) = exts.params {
             let mut buf = ParamInfoBuffer::new();
             for i in 0..pe.count(&h) {
                 if let Some(p) = pe.get_info(&h, i, &mut buf) {
+                    if multiq
+                        && !p.flags.contains(ParamInfoFlags::IS_STEPPED)
+                        && !p.flags.contains(ParamInfoFlags::IS_READONLY)
+                        && p.max_value > p.min_value
+                    {
+                        refresh.push(ParamId(u64::from(p.id.get())));
+                    }
                     params.push(ParamInfo {
                         id: ParamId(u64::from(p.id.get())),
                         name: text(p.name),
@@ -168,6 +182,7 @@ impl ClapInstance {
         self.info.outputs = outputs;
         self.info.note_input = note_input;
         self.info.params = params;
+        self.refresh = refresh;
         self.clap_notes = clap_notes;
     }
 }
@@ -277,6 +292,10 @@ impl PluginInstance for ClapInstance {
         })?;
         params.flush(&mut h, &events.as_input(), &mut out.as_output());
         Ok(())
+    }
+
+    fn values_to_refresh(&self) -> Vec<ParamId> {
+        self.refresh.clone()
     }
 
     fn param_value(&mut self, id: ParamId) -> Option<f64> {

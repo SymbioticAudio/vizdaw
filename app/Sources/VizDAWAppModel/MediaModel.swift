@@ -38,6 +38,10 @@ public final class MediaModel {
 
     init(document: DocumentModel) { self.document = document }
 
+    /// A DAWproject merge is held: the core refuses a relink beside it, so
+    /// Relink waits (plan 6e Task 11).
+    public var relinkBlocked: Bool { document?.mergeHeld ?? false }
+
     /// The pool. Refetched when the media version moved; a failed read
     /// keeps the last rows and is not cached, so the next read tries again
     /// (Task 8 review). Safe to read while drawing (the cache is not

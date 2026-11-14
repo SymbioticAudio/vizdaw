@@ -551,3 +551,25 @@ fn hostile_trims_are_refused_and_change_nothing() {
     assert_eq!(after.5.as_deref(), Some("Trim Region"));
     s.close().unwrap();
 }
+
+/// Plan 6a Task 1: a region's name reaches its event row, and undo clears it.
+#[test]
+fn set_name_reaches_event_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(&dir.path().join("n.caf"), 2, &vec![0.25; 2 * 4_800]);
+    let (s, seq, lane, ev) = demo_with(&src);
+    assert_eq!(region(&s, seq, lane).region_name, None);
+    s.edit(
+        EditCommand::Audio {
+            edit: AudioEdit::SetName {
+                event: ev,
+                name: Some("Take 3".into()),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(region(&s, seq, lane).region_name.as_deref(), Some("Take 3"));
+    s.undo().unwrap();
+    assert_eq!(region(&s, seq, lane).region_name, None);
+}

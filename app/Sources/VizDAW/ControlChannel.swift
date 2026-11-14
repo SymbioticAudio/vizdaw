@@ -105,6 +105,17 @@ enum ControlChannel {
             whenJobEnds(server, token, command: command, doc: doc, job: job)
         case .measure(let doc, let job):
             whenMeasured(server, token, doc: doc, job: job)
+        case .pending(let p):
+            // A file read or a render: as long as a job may take.
+            _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
+            later(token, seconds: Double(jobWait) / 1000) { expired in
+                if let o = p.outcome {
+                    answer(server, token, o)
+                    return true
+                }
+                if expired { _ = try? server.fail(token: token, failure: .of(.timeout, "the call did not end in time")) }
+                return expired
+            }
         }
     }
 
@@ -131,6 +142,9 @@ enum ControlChannel {
     /// Answers once job `job` of `doc` ended (an import or conversion may
     /// take minutes; `jobWait` at most).
     static func whenJobEnds(_ server: ControlServer, _ token: UInt64, command: String, doc: UUID, job: UInt64) {
+        // A project an import made shows its window once the import
+        // succeeded (as `file.new`'s does); a failed one closes unseen.
+        var opened = false
         later(token, seconds: Double(jobWait) / 1000) { expired in
             guard let m = appStore.model(doc) else {
                 _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
@@ -150,6 +164,25 @@ enum ControlChannel {
             case .ok(let status):
                 m.refreshAfterJob()
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
+                if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject || j.kind == .importProject
+                    || j.kind == .mergeDawproject || j.kind == .exportAaf || j.kind == .importAaf
+                {
+                    // The reply names the made project's window once it is on screen.
+                    if window == nil, InterchangeCommands.madeProject(doc), !expired {
+                        if !opened {
+                            opened = true
+                            ControlWindows.openDocument(doc)
+                        }
+                        return false
+                    }
+                    InterchangeCommands.jobEnded(doc, failed: false, store: appStore, close: { _ in })
+                    _ = try? server.reply(
+                        token: token,
+                        result: .interchange(
+                            command: command, doc: doc.uuidString, window: window,
+                            undoLabel: m.snapshot.undoLabel, report: j.report, written: j.written))
+                    return true
+                }
                 _ = try? server.reply(
                     token: token,
                     result: .ran(
@@ -159,6 +192,9 @@ enum ControlChannel {
             case .failed(let message):
                 // A failed import may still have changed nothing; a refresh is harmless.
                 m.refreshAfterJob()
+                InterchangeCommands.jobEnded(doc, failed: true, store: appStore) { id in
+                    if let w = ControlWindows.window(of: id) { w.performClose(nil) } else { appStore.close(id) }
+                }
                 _ = try? server.fail(token: token, failure: .of(.failed, message))
                 return true
             }
@@ -443,7 +479,7 @@ enum ControlChannel {
                 case .failed(let f):
                     _ = try? server.fail(token: token, failure: f)
                     return
-                case .done, .opened, .job, .measure:
+                case .done, .opened, .job, .measure, .pending:
                     if case .opened(_, let doc) = outcome { ControlWindows.openDocument(doc) }
                     sent += 1
                     continue
@@ -625,9 +661,12 @@ final class AppControlHost: ControlHost {
     }
 
     var nudge: NudgeSettings { editingPreferences.nudge }
+    var crossfadeMs: Double { editingPreferences.crossfadeMs }
     var keys: KeyBindings { keyBindings }
     /// `ui.theme`'s preference (plan 7b Task B4).
     var appearance: AppearancePreferences { appearancePreferences }
+    /// `plugins.*`'s settings (plan 6g Task 4).
+    var plugins: PluginSettings { pluginSettings }
     var externalEditor: ExternalEditorChoice {
         if ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub" { return .stub }
         return editingPreferences.externalEditor.map { .app($0) } ?? .none

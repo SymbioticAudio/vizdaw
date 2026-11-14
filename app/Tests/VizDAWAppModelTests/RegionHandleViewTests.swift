@@ -6,13 +6,21 @@ import VizDAWCore
 
 /// Song's Chords lane (row 1, y 48–96) holds one region instead of a note:
 /// 2 s (96 000 frames) over bar 1, x 0–160 at the default zoom.
+/// With `crossfade`, the region's 12 000-frame fade in (x 0–20) is a
+/// crossfade over 30 000 frames of region 9 (plan 6c).
 @MainActor
-private func regionArrangement(gain: Float = 0, offline: OfflineReasonRow? = nil) throws
+private func regionArrangement(gain: Float = 0, offline: OfflineReasonRow? = nil, crossfade: Bool = false) throws
     -> (DocumentModel, ArrangementView, FakeSession)
 {
     let f = editorFake()
-    f.laneEventTable["3/31"] = LaneEvents(
-        seq: 3, lane: 31, rev: 2, events: [regionRow(1, tick: 0, duration: 61_440, frames: 96_000, gainDb: gain)])
+    var row = regionRow(1, tick: 0, duration: 61_440, frames: 96_000, gainDb: gain)
+    if crossfade {
+        row.fadeIn = FadeRow(length: 12_000, shape: .linear)
+        row.crossfade = true
+        row.overlapWith = 9
+        row.overlapFrames = 30_000
+    }
+    f.laneEventTable["3/31"] = LaneEvents(seq: 3, lane: 31, rev: 2, events: [row])
     f.mediaRows = [mediaRow(7, "loop", offline: offline)]
     let m = try DocumentModel(session: f)
     let v = ArrangementView(document: m)
@@ -222,5 +230,52 @@ private let top: CGFloat = 51
         v.contentMouseUp(CGPoint(x: 80, y: top - 19), modifiers: [])
         #expect(f.calls == ["begin Region Gain", "gesture", "end"])
         v.removeFromSuperview()
+    }
+
+    // MARK: Plan 6c Task 6: the crossfade's X
+
+    @Test func draggingTheXIsOneCrossfadeStep() throws {
+        let (m, v, f) = try regionArrangement(crossfade: true)
+        v.contentMouseDown(CGPoint(x: 20, y: top + 2), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 30, y: top + 2), modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 40, y: top + 2), modifiers: [])
+        #expect(v.readoutText == "500 ms", "the length by the pointer")
+        v.contentMouseUp(CGPoint(x: 40, y: top + 2), modifiers: [])
+        #expect(v.readoutText == nil)
+        #expect(f.calls == ["begin Crossfade", "gesture", "gesture", "end"])
+        #expect(f.gestureEdits.last == .audio(edit: .crossfade(event: 1, length: .frames(frames: 24_000), shape: .linear)))
+        #expect(f.edits.isEmpty, "no edit outside the gesture")
+        #expect(m.editor.gesture == nil)
+    }
+
+    @Test func escapeDuringTheXDragEditsNothing() throws {
+        let (m, v, f) = try regionArrangement(crossfade: true)
+        v.contentMouseDown(CGPoint(x: 20, y: top + 2), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 40, y: top + 2), modifiers: [])
+        v.contentCancel()
+        #expect(f.calls == ["begin Crossfade", "gesture", "abort"], "no end: no undo step")
+        #expect(m.editor.gesture == nil)
+        #expect(f.edits.isEmpty)
+        // The mouse-up after Escape sends nothing.
+        v.contentMouseUp(CGPoint(x: 40, y: top + 2), modifiers: [])
+        #expect(f.calls == ["begin Crossfade", "gesture", "abort"])
+    }
+
+    @Test func aRefusedXDragEndCancelsTheGesture() throws {
+        let (m, v, f) = try regionArrangement(crossfade: true)
+        let why = "The crossfade cannot be longer than the overlap."
+        f.gestureErrors = [nil, .Model(message: why)]
+        v.contentMouseDown(CGPoint(x: 20, y: top + 2), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 40, y: top + 2), modifiers: [])
+        v.contentMouseUp(CGPoint(x: 60, y: top + 2), modifiers: [])
+        #expect(f.calls == ["begin Crossfade", "gesture", "gesture refused", "abort"])
+        #expect(m.editor.gesture == nil)
+        #expect(m.editor.status == why)
+    }
+
+    @Test func theXSaysCrossfadeToVoiceOver() throws {
+        let (_, v, _) = try regionArrangement(crossfade: true)
+        let labels = v.accessibilityItems().map(\.label)
+        #expect(labels.contains("Region loop on Chords, bar 1, gain 0.0 dB, crossfade"))
     }
 }
