@@ -365,9 +365,11 @@ pub(crate) struct ExportJob {
     pub free: Option<u64>,
 }
 
-/// How a step of the job ended early.
-enum Stop {
+/// How a step of a job ended early (the DAWproject and AAF jobs).
+pub(crate) enum Stop {
+    /// It was cancelled.
     Cancelled,
+    /// It failed: the sentence says why.
     Failed(String),
 }
 
@@ -380,8 +382,9 @@ impl From<IoError> for Stop {
     }
 }
 
-/// The free-space check's multiple: the staged copies and the package.
-const SPACE_FACTOR: u64 = 2;
+/// The free-space check's multiple: the staged copies and the package
+/// (or the AAF file).
+pub(crate) const SPACE_FACTOR: u64 = 2;
 /// Frames read and written per step.
 const CHUNK_FRAMES: usize = 16_384;
 
@@ -453,13 +456,19 @@ fn entry_file(entry: &str) -> &str {
     entry.rsplit('/').next().unwrap_or(entry)
 }
 
-/// Writes `a` from its media item's CAF into `folder` as a WAV at the
-/// project depth and the media rate, its gain applied (`10^(g/20)`).
-fn stage_audio(
+/// Writes `a` from its media item's CAF into `folder` as a WAV at `depth`
+/// and the media rate, its gain applied (`10^(g/20)`): every channel, or
+/// only `channel` (from 0) as a mono file. `dither` adds TPDF dither at an
+/// integer depth (stream `dither_stream`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stage_audio(
     doc: &Document,
     root: &Path,
     folder: &Path,
     a: &AudioFile,
+    channel: Option<u16>,
+    depth: BitDepth,
+    dither: bool,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, Stop> {
     let m = doc
@@ -469,18 +478,27 @@ fn stage_audio(
     let failed = |e: core_media::MediaError| Stop::Failed(format!("{}: {e}", a.name));
     let src = CafReader::open(&root.join(&m.path)).map_err(failed)?;
     let channels = src.info().channels;
+    if channel.is_some_and(|k| k >= channels) {
+        return Err(Stop::Failed(format!(
+            "{}: the audio has no channel {}",
+            a.name,
+            channel.map_or(0, |k| u32::from(k) + 1)
+        )));
+    }
     let fmt = ExportFormat {
         container: Container::Wav,
-        depth: doc.settings().format.depth,
+        depth,
         rate: m.sample_rate,
-        dither: false,
-        dither_stream: 0,
+        dither,
+        dither_stream: u64::from(channel.unwrap_or(0)),
     };
     let path = folder.join(entry_file(&a.entry));
-    let mut w = PcmWriter::create(&path, &fmt, channels).map_err(failed)?;
+    let out_channels = if channel.is_some() { 1 } else { channels };
+    let mut w = PcmWriter::create(&path, &fmt, out_channels).map_err(failed)?;
     let gain = 10f32.powf(a.gain_db / 20.0);
     let gain = if gain.is_finite() { gain } else { 1.0 };
     let mut buf = vec![0f32; CHUNK_FRAMES.saturating_mul(usize::from(channels))];
+    let mut one = Vec::new();
     let mut scratch = Vec::new();
     let mut at = 0u64;
     loop {
@@ -499,7 +517,18 @@ fn stage_audio(
                 *s *= gain;
             }
         }
-        w.write(samples).map_err(failed)?;
+        match channel {
+            Some(k) => {
+                one.clear();
+                one.extend(
+                    samples
+                        .chunks_exact(usize::from(channels))
+                        .filter_map(|f| f.get(usize::from(k)).copied()),
+                );
+                w.write(&one).map_err(failed)?;
+            }
+            None => w.write(samples).map_err(failed)?,
+        }
         at = at.saturating_add(n as u64);
     }
     w.finish().map_err(failed)?;
@@ -640,7 +669,16 @@ fn body(job: &ExportJob, progress: &AtomicU32, cancel: &AtomicBool) -> Result<Re
     if !audio.is_empty() {
         let pending = stage_folder(&audio_dest(&job.dest))?;
         for (k, a) in audio.iter().enumerate() {
-            let p = stage_audio(&job.doc, &job.root, pending.path(), a, cancel)?;
+            let p = stage_audio(
+                &job.doc,
+                &job.root,
+                pending.path(),
+                a,
+                None,
+                job.doc.settings().format.depth,
+                false,
+                cancel,
+            )?;
             staged.push((a.entry.clone(), p));
             if k == 0 {
                 stage(2);
@@ -934,7 +972,7 @@ pub(crate) struct ImportJob {
 }
 
 /// The files an import converted: `(name, items)`.
-type ImportFiles = Vec<(String, Result<Vec<core_media::import::Imported>, String>)>;
+pub(crate) type ImportFiles = Vec<(String, Result<Vec<core_media::import::Imported>, String>)>;
 
 /// A fresh name in `Media/.incoming/` for an extracted entry, keeping its
 /// extension when it is a short ASCII one (the decoder may use it).
@@ -1009,16 +1047,17 @@ fn import_body(
 }
 
 /// The media each audio file of `pkg` became, by its key.
-type MediaMap = BTreeMap<usize, core_io::dawproject::import::MediaSource>;
+pub(crate) type MediaMap = BTreeMap<usize, core_io::dawproject::import::MediaSource>;
 
-/// 6d's import after its open (stages 6–7), for the import and the merge:
-/// the free-space check (external files are looked at only now), then
-/// each audio file extracted and converted into `job.root`'s `Media/`.
-/// Converted media goes into `files` as it is made, so the caller can
-/// remove it whatever happens. Progress runs from 0.1 to 0.9.
-fn read_and_convert(
+/// 6d's import after its open (stages 6–7), for the import, the merge and
+/// the AAF import (plan 6f): the free-space check (external files are
+/// looked at only now), then each audio file extracted and converted into
+/// `job.root`'s `Media/`. Converted media goes into `files` as it is made,
+/// so the caller can remove it whatever happens. Progress runs from 0.1 to
+/// 0.9.
+pub(crate) fn read_and_convert(
     job: &ImportJob,
-    pkg: &core_io::dawproject::package::DpPackage,
+    pkg: &dyn core_io::dawproject::package::AudioPackage,
     importer: &dyn core_media::import::MediaImporter,
     files: &mut ImportFiles,
     progress: &AtomicU32,

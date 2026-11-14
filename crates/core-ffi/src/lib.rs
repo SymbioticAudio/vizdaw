@@ -16,6 +16,7 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod aaf;
 pub mod audio;
 pub mod automation;
 pub mod autowrite;
@@ -64,6 +65,9 @@ pub mod synth;
 pub mod templates;
 pub mod tracks;
 
+pub use aaf::{
+    AafDepthRow, AafExportRequestRow, AafFpsRow, AafImportRequestRow, AafInfoRow, AafStereoRow,
+};
 pub use audio::AudioSettingsRow;
 pub use automation::{
     AutomationModeRow, AutomationSettingsRow, AutomationStateRow, GesturePhaseRow, PreviewPointRow,
@@ -175,6 +179,18 @@ pub fn shutdown() -> Result<(), VizError> {
 #[uniffi::export]
 pub fn dawproject_info(path: String) -> Result<DawprojectInfoRow, VizError> {
     ffi_guard(|| dawproject::info(&path))
+}
+
+/// What an AAF file at `path` holds for the app before an import (plan
+/// 6f Task 5): the project rate to make, its tracks, audio files and
+/// offline ones, whether it came from VizDAW, and the MIDI file beside it
+/// the import would read. A free function, so it works with no document
+/// open; call it off the main thread (it opens and reads the file).
+/// `Model` for a path or file refused (with the reader's sentence), `Io`
+/// when it cannot be read.
+#[uniffi::export]
+pub fn aaf_info(path: String) -> Result<AafInfoRow, VizError> {
+    ffi_guard(|| aaf::info(&path))
 }
 
 /// Panics inside the guard (test hook): returns `VizError::Internal`.

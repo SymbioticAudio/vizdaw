@@ -165,7 +165,7 @@ enum ControlChannel {
                 m.refreshAfterJob()
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
                 if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject || j.kind == .importProject
-                    || j.kind == .mergeDawproject
+                    || j.kind == .mergeDawproject || j.kind == .exportAaf || j.kind == .importAaf
                 {
                     // The reply names the made project's window once it is on screen.
                     if window == nil, InterchangeCommands.madeProject(doc), !expired {

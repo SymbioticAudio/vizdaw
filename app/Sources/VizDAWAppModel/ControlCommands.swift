@@ -76,7 +76,7 @@ public enum ControlJobs {
             // DAW is one with an export (plan 6b Task 3). A finished merge
             // answers its summary (plan 6e Task 8).
             if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject || j.kind == .importProject
-                || j.kind == .mergeDawproject
+                || j.kind == .mergeDawproject || j.kind == .exportAaf || j.kind == .importAaf
             {
                 return .ok(status: j.report?.summary)
             }
@@ -87,7 +87,8 @@ public enum ControlJobs {
         case .failed, .cancelled:
             // A bounce that failed after some renames names what is on disk
             // (plan 5f-2 Ruling 12: renamed files stay).
-            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject ? j.written : []
+            let exports: Set<JobKindRow> = [.exportMidi, .exportProject, .exportDawproject, .exportAaf]
+            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : exports.contains(j.kind) ? j.written : []
             let tail = written.isEmpty ? [] : ["already written: " + written.joined(separator: ", ")]
             return .failed(([j.message ?? "the job was cancelled"] + j.problems + tail).joined(separator: "; "))
         }

@@ -39,6 +39,11 @@ pub enum JobKindRow {
     ImportProject,
     /// Merge a returning DAWproject file into the project (plan 6e Task 8).
     MergeDawproject,
+    /// Export an AAF folder (plan 6f Task 5).
+    ExportAaf,
+    /// Import an AAF file, as a new project or into this one (plan 6f
+    /// Task 5).
+    ImportAaf,
 }
 
 /// Where a job is.
@@ -193,6 +198,23 @@ pub enum Work {
         /// The merge (boxed: it is large), or why there is none
         /// (`"Cancelled"`: it was cancelled).
         result: Result<Box<crate::dawproject::Merged>, String>,
+    },
+    /// An AAF export (plan 6f Task 5): its folder is in place on `Ok`.
+    ExportAaf {
+        /// The report, or why the export failed.
+        result: Result<core_io::report::Report, String>,
+        /// The export folder, once it is in place.
+        written: Vec<String>,
+    },
+    /// An AAF import (plan 6f Task 5): the media it made (removed unless
+    /// applied) and the mapped import.
+    ImportAaf {
+        /// `(audio file name, the items it became)` per file converted,
+        /// joined or split, in order.
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// The mapped import (boxed: it is large), or why there is none
+        /// (`"Cancelled"`: it was cancelled).
+        result: Result<Box<crate::aaf::AafImported>, String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,

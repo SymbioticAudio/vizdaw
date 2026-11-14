@@ -522,6 +522,28 @@ import VizDAWCore
         #expect(!m.interchange.jobFailed(f.jobRows[job]!, message: "not a DAWproject file"))
     }
 
+    /// Plan 6f Task 5: the AAF jobs are their own kinds, with their own bar
+    /// text and failure titles, and hold back exports as the other
+    /// interchange jobs do.
+    @Test func aafJobsAreTheirOwnKinds() async throws {
+        let f = busy()
+        f.jobStartState = .running
+        let m = try DocumentModel(session: f)
+        let req = AafImportRequestRow(
+            path: "/tmp/x.aaf", newProject: false, midiPath: nil, mediaFolder: nil, joinPairs: true)
+        let job = try #require(m.startJob(.importAaf, ProjectBanner.failureTitle(.importAaf)) { try $0.importAaf(req: req) })
+        #expect(f.aafImports == [req] && job == 14001)
+        #expect(ProjectBanner.jobText(.exportAaf) == "Exporting AAF…")
+        #expect(ProjectBanner.jobText(.importAaf) == "Importing AAF…")
+        #expect(ProjectBanner.failureTitle(.exportAaf) == "AAF Export Failed")
+        #expect(ForDawModel.blocking.isSuperset(of: [.exportAaf, .importAaf]))
+        f.jobRows[job] = JobRow(
+            id: job, kind: .importAaf, progress: 1, state: .failed, message: "not an AAF file", problems: [],
+            created: [])
+        m.pollJobs()
+        #expect(m.alert == AlertItem(title: "AAF Import Failed", message: "not an AAF file"))
+    }
+
     /// An export that fails on the poll inside `startJob` keeps its sheet
     /// open with the reason (Task 10 carry-over).
     @Test func anImmediateExportFailureKeepsTheSheet() async throws {

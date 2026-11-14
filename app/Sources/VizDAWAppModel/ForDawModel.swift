@@ -14,6 +14,7 @@ public final class ForDawModel: AudioFormatChoices {
     /// (`DocumentModel.mergeHeld`, plan 6e Ruling 12).
     public static let blocking: Set<JobKindRow> = [
         .bounce, .importMidi, .exportMidi, .exportProject, .exportDawproject, .importProject, .mergeDawproject,
+        .exportAaf, .importAaf,
     ]
     /// Jobs that change the media "Add to project" would add to.
     static let mediaJobs: Set<JobKindRow> = [.format, .convert, .relink, .externalEdit]

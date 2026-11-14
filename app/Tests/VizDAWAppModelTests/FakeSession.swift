@@ -923,6 +923,52 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         interchangeLock.unlock()
         return try dawprojectInfoAnswer.get()
     }
+    /// AAF exports and imports (plan 6f Task 5): what each method was
+    /// called with (export job IDs from 13 001, import job IDs from
+    /// 14 001), with settable answers. The info read is the free function
+    /// `aafInfo(path:)`; this stand-in logs the paths it was asked (and
+    /// whether on the main thread) and gives a settable answer.
+    var aafExports: [AafExportRequestRow] = []
+    var aafChecks: [AafExportRequestRow] = []
+    var aafCheckAnswer: Result<ReportRow, VizError> = .success(
+        ReportRow(summary: "Exported nothing", items: []))
+    var aafFolderNames: [UInt64] = []
+    var aafFolderNameAnswer = "Song AAF"
+    var aafImports: [AafImportRequestRow] = []
+    var aafInfoPaths: [String] = []
+    var aafInfoAnswer: Result<AafInfoRow, VizError> = .success(
+        AafInfoRow(sampleRate: 48_000, tracks: 0, audioFiles: 0, offline: 0, fromVizdaw: false, midiBeside: nil))
+    func aafFolderName(seq: UInt64) throws -> String {
+        if let e = interchangeError { throw e }
+        aafFolderNames.append(seq)
+        return aafFolderNameAnswer
+    }
+    func exportAafCheck(req: AafExportRequestRow) throws -> ReportRow {
+        interchangeLock.lock()
+        aafChecks.append(req)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return try aafCheckAnswer.get()
+    }
+    func exportAaf(req: AafExportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        aafExports.append(req)
+        return interchangeJob(.exportAaf, 13000, aafExports.count)
+    }
+    func importAaf(req: AafImportRequestRow) throws -> UInt64 {
+        if let e = interchangeError { throw e }
+        try interchangeIdle()
+        aafImports.append(req)
+        return interchangeJob(.importAaf, 14000, aafImports.count)
+    }
+    func aafInfo(path: String) throws -> AafInfoRow {
+        interchangeLock.lock()
+        aafInfoPaths.append(path)
+        checkOnMain.append(Thread.isMainThread)
+        interchangeLock.unlock()
+        return try aafInfoAnswer.get()
+    }
     func interchangeReport() throws -> ReportRow? {
         interchangeReportCalls += 1
         if let e = interchangeError { throw e }

@@ -245,9 +245,15 @@ pub(crate) struct Inner {
     /// `project.xml`, 4 before the rename).
     #[cfg(feature = "test-hooks")]
     dawproject_cancel_at: Option<u32>,
-    /// The free bytes DAWproject exports assume (test hook).
+    /// The free bytes DAWproject and AAF exports and imports assume (test
+    /// hook).
     #[cfg(feature = "test-hooks")]
     dawproject_free: Option<u64>,
+    /// The next AAF export or import cancels itself after this stage (test
+    /// hook: export 1 staged, 2 the MIDI file, 3 the `.aaf`; import 5
+    /// opened, 6 first extracted, 7 first converted, 8 joined, 9 mapped).
+    #[cfg(feature = "test-hooks")]
+    aaf_cancel_at: Option<u32>,
     /// DAWproject exports and checks treat every running slot's capture as
     /// failed (test hook).
     #[cfg(feature = "test-hooks")]
@@ -390,6 +396,8 @@ impl Inner {
             #[cfg(feature = "test-hooks")]
             dawproject_free: None,
             #[cfg(feature = "test-hooks")]
+            aaf_cancel_at: None,
+            #[cfg(feature = "test-hooks")]
             dawproject_capture_fails: false,
             held_merge: None,
         }
@@ -521,6 +529,8 @@ impl Inner {
             JobKindRow::ExportDawproject,
             JobKindRow::ImportProject,
             JobKindRow::MergeDawproject,
+            JobKindRow::ExportAaf,
+            JobKindRow::ImportAaf,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
@@ -3297,6 +3307,18 @@ impl Session {
         })
     }
 
+    /// The next AAF export or import cancels itself after `stage` (export:
+    /// 1 its files are staged; 2 the MIDI file is written; 3 the `.aaf` is
+    /// written, before the rename; import: 5 the file is opened; 6 its
+    /// first audio is extracted; 7 its first audio file is converted; 8
+    /// pairs are joined and channels split; 9 it is mapped; None: never).
+    pub fn debug_aaf_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).aaf_cancel_at = stage;
+            Ok(())
+        })
+    }
+
     /// Parameter `param` of slot `slot` as the running plug-in reports it
     /// now (test hook; L4). `Model` while the slot is not running.
     pub fn debug_plugin_param(&self, slot: u64, param: u64) -> Result<f64, VizError> {
@@ -4315,6 +4337,8 @@ impl Drop for Session {
                     crate::jobs::JobKindRow::ExportDawproject,
                     crate::jobs::JobKindRow::ImportProject,
                     crate::jobs::JobKindRow::MergeDawproject,
+                    crate::jobs::JobKindRow::ExportAaf,
+                    crate::jobs::JobKindRow::ImportAaf,
                 ])
             {
                 let root = inner.root(self.id);
@@ -4388,7 +4412,9 @@ pub(crate) fn discard(
             .map(|i| i.path)
             .collect(),
         // What a DAWproject import or merge converted (plans 6d, 6e).
-        Work::ImportProject { files, .. } | Work::MergeDawproject { files, .. } => files
+        Work::ImportProject { files, .. }
+        | Work::MergeDawproject { files, .. }
+        | Work::ImportAaf { files, .. } => files
             .into_iter()
             .filter_map(|(_, r)| r.ok())
             .flatten()
@@ -4398,7 +4424,7 @@ pub(crate) fn discard(
         Work::ExternalEdit { file, .. } => file.into_iter().flatten().map(|i| i.path).collect(),
         // An import wrote nothing; an export's files are in place and its
         // partials already gone (plan 6a).
-        Work::ImportMidi { .. } | Work::ExportMidi { .. } => Vec::new(),
+        Work::ImportMidi { .. } | Work::ExportMidi { .. } | Work::ExportAaf { .. } => Vec::new(),
         Work::Cancelled => Vec::new(),
     };
     for f in files {
@@ -4531,7 +4557,12 @@ impl Session {
                     changed |= swapped;
                     r
                 }
-                Work::ExportMidi { result, written } => {
+                Work::ImportAaf { files, result } => {
+                    let r = apply_aaf_work(inner, &root, id, kind, files, result);
+                    changed |= r.state == JobStateRow::Done;
+                    r
+                }
+                Work::ExportMidi { result, written } | Work::ExportAaf { result, written } => {
                     let mut r = match result {
                         Ok(report) => {
                             let report = crate::interchange::report_row(&report, "Exported");
@@ -4909,6 +4940,101 @@ fn apply_dawproject_import(
     // Serials of the replaced history's steps name nothing now.
     inner.last_step = None;
     inner.surfaces.tempo_step = None;
+    Ok(report)
+}
+
+/// Applies a finished AAF import (plan 6f Task 5), as
+/// [`apply_dawproject_work`] does: on `Err` (and a cancel) the media it
+/// made is removed and the row is Failed (Cancelled for a cancel).
+fn apply_aaf_work(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    kind: crate::jobs::JobKindRow,
+    files: ImportFiles,
+    result: Result<Box<crate::aaf::AafImported>, String>,
+) -> crate::jobs::JobRow {
+    use crate::jobs::{JobStateRow, row};
+    let applied = result
+        .map_err(|message| VizError::Model { message })
+        .and_then(|a| apply_aaf_import(inner, &a));
+    match applied {
+        Ok(report) => {
+            let report = crate::interchange::report_row(&report, "Imported");
+            inner.interchange_report = Some(report.clone());
+            let mut r = row(id, kind, JobStateRow::Done, None, vec![], vec![]);
+            r.report = Some(report);
+            r
+        }
+        Err(e) => {
+            remove_job_media(inner, root, files);
+            match e {
+                VizError::Model { message } if message == crate::for_daw::CANCELLED => {
+                    row(id, kind, JobStateRow::Cancelled, None, vec![], vec![])
+                }
+                e => row(
+                    id,
+                    kind,
+                    JobStateRow::Failed,
+                    Some(match e {
+                        VizError::Model { message } => message,
+                        e => e.to_string(),
+                    }),
+                    vec![],
+                    vec![],
+                ),
+            }
+        }
+    }
+}
+
+/// Applies a mapped AAF file (plan 6f Task 5) by `aaf::import::apply`
+/// inside one transaction "Import AAF" (a panic or error aborts it): as a
+/// new project through a scratch history that then replaces the session's,
+/// leaving nothing to undo (as [`apply_dawproject_import`]); into this
+/// project as one undo step. On an error nothing changes.
+fn apply_aaf_import(
+    inner: &mut Inner,
+    a: &crate::aaf::AafImported,
+) -> Result<core_io::report::Report, VizError> {
+    use core_io::aaf::import::{LABEL, apply};
+    let mut report = core_io::report::Report::default();
+    let run = |h: &mut History,
+               report: &mut core_io::report::Report|
+     -> Result<core_io::dawproject::import::SlotStates, VizError> {
+        h.begin(LABEL)?;
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply(h, &a.imp, a.midi.as_ref(), &a.place, report)
+        }));
+        let failed = match applied {
+            Ok(Ok(states)) => {
+                h.commit()?;
+                return Ok(states);
+            }
+            Ok(Err(e)) => VizError::from(e),
+            Err(p) => VizError::Internal {
+                message: crate::guard::panic_message(p.as_ref()),
+            },
+        };
+        let _ = h.abort();
+        Err(failed)
+    };
+    if a.place.new_project {
+        let mut scratch = History::new(inner.doc().clone());
+        let states = run(&mut scratch, &mut report)?;
+        for (slot, bytes) in &states {
+            scratch.capture_state(*slot, bytes)?;
+        }
+        inner.history = History::new(scratch.doc().clone());
+        // Serials of the replaced history's steps name nothing now.
+        inner.last_step = None;
+        inner.surfaces.tempo_step = None;
+    } else {
+        let states = run(&mut inner.history, &mut report)?;
+        for (slot, bytes) in &states {
+            inner.history.capture_state(*slot, bytes)?;
+        }
+    }
     Ok(report)
 }
 
@@ -9867,6 +9993,150 @@ impl Session {
         })
     }
 
+    /// "<Song> AAF", the folder an AAF export of sequence `seq` makes (plan
+    /// 6f Ruling 2; numbered by the job when it is taken). `Model` for an
+    /// unknown sequence.
+    pub fn aaf_folder_name(&self, seq: u64) -> Result<String, VizError> {
+        ffi_guard(|| crate::aaf::folder_name(lock(&self.inner).doc(), seq))
+    }
+
+    /// What `export_aaf` would report for `req` (plan 6f Task 5), checked
+    /// as it checks it (`Busy` and the path aside): the media is refreshed
+    /// here, the report made off the session lock. Nothing is written.
+    pub fn export_aaf_check(
+        &self,
+        req: crate::aaf::AafExportRequestRow,
+    ) -> Result<crate::interchange::ReportRow, VizError> {
+        ffi_guard(|| {
+            let (doc, opts) = {
+                let mut inner = lock(&self.inner);
+                let mut opts = crate::aaf::options(inner.doc(), &req)?;
+                inner.refresh_media(self.id, false);
+                opts.left_out = inner.dawproject_left_out();
+                (inner.doc().clone(), opts)
+            };
+            crate::aaf::check(&doc, &opts)
+        })
+    }
+
+    /// Starts an AAF export of sequence `req.seq` (plan 6f Task 5; spec
+    /// §7.5): the job ID; `job` reports it (kind `ExportAaf`), its report
+    /// and the folder "<Song> AAF" it put in `req.path` (numbered when
+    /// taken, Ruling 2). `Model` at once for an unknown sequence and path
+    /// text refused; every check of the file system runs in the job, which
+    /// fails with its sentence. `Busy` while recording, inside an open
+    /// edit, while an interchange or media job is unapplied, or while a
+    /// merge is held. Apart from the media refresh nothing touches the disk
+    /// before the job.
+    pub fn export_aaf(&self, req: crate::aaf::AafExportRequestRow) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let mut opts = crate::aaf::options(inner.doc(), &req)?;
+            if req.path.is_empty() {
+                return Err(VizError::Model {
+                    message: "Choose where to export.".into(),
+                });
+            }
+            let parent = crate::bounce::dest_path(&req.path)?;
+            inner.refresh_media(self.id, false);
+            opts.left_out = inner.dawproject_left_out();
+            let modified = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.aaf_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::aaf::ExportJob {
+                doc: inner.doc().clone(),
+                opts,
+                parent,
+                roots: self.export_roots(&inner).to_vec(),
+                root: inner.root(self.id),
+                export_id: crate::project_id::fresh(),
+                modified,
+                cancel_at,
+                free,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ExportAaf,
+                crate::aaf::export_job(job),
+            )
+        })
+    }
+
+    /// Starts importing the AAF file `req.path` (plan 6f Task 5; spec
+    /// §7.5): as a new project into this one, which must have no tracks
+    /// (the app makes it at `aaf_info`'s rate first; nothing to undo), or
+    /// added to this project's first sequence as one undo step "Import
+    /// AAF". The job ID; `job` reports it (kind `ImportAaf`) and its
+    /// report. `Model` at once for path text refused (the AAF's, which
+    /// must end in `.aaf`; `midi_path`'s; `media_folder`'s) and a new
+    /// project on a project with tracks; `Busy` as `export_aaf`. Nothing is
+    /// read before the job: a file or folder refused fails the job with its
+    /// sentence.
+    pub fn import_aaf(&self, req: crate::aaf::AafImportRequestRow) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.interchange_idle(&mut inner)?;
+            inner.media_jobs_idle()?;
+            let path = crate::aaf::aaf_path(&req.path)?;
+            let midi_path = req
+                .midi_path
+                .as_deref()
+                .map(|p| crate::interchange::file_path(p, crate::interchange::MIDI_FILE))
+                .transpose()?;
+            let media_folder = req
+                .media_folder
+                .as_deref()
+                .map(crate::bounce::dest_path)
+                .transpose()?;
+            let doc = inner.doc();
+            if req.new_project && doc.sequences().values().any(|s| !s.lanes.is_empty()) {
+                return Err(VizError::Model {
+                    message: core_io::aaf::import::NOT_NEW_AAF.into(),
+                });
+            }
+            let seq = doc
+                .sequences()
+                .values()
+                .next()
+                .cloned()
+                .ok_or_else(|| VizError::Model {
+                    message: "the project has no sequence".into(),
+                })?;
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, free) = (inner.aaf_cancel_at.take(), inner.dawproject_free);
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, free) = (None, None);
+            let job = crate::aaf::AafImportJob {
+                io: crate::dawproject::ImportJob {
+                    path,
+                    root: inner.root(self.id),
+                    format: inner.doc().settings().format,
+                    reserved: inner.reserved_names(),
+                    installed: Default::default(),
+                    cancel_at,
+                    free,
+                },
+                midi_path,
+                media_folder,
+                join_pairs: req.join_pairs,
+                place: core_io::aaf::import::AafPlace {
+                    seq: seq.id,
+                    new_project: req.new_project,
+                },
+                seq,
+            };
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ImportAaf,
+                crate::aaf::import_job(job),
+            )
+        })
+    }
+
     /// Starts merging the returning DAWproject file `req.path` into this
     /// project (plan 6e Task 8; spec §7.8; Rulings 2, 12, 13): the job ID;
     /// `job` reports it (kind `MergeDawproject`) with its preview (`merge`)
@@ -10080,6 +10350,8 @@ impl Session {
             JobKindRow::ExportDawproject,
             JobKindRow::ImportProject,
             JobKindRow::MergeDawproject,
+            JobKindRow::ExportAaf,
+            JobKindRow::ImportAaf,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the running import, export or bounce to finish.".into(),

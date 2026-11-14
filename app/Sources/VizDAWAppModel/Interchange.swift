@@ -111,7 +111,8 @@ public final class InterchangeModel {
     func jobEnded(_ job: JobRow) {
         guard let r = job.report else { return }
         report = r
-        written = job.kind == .exportMidi || job.kind == .exportProject || job.kind == .exportDawproject ? job.written : []
+        written = job.kind == .exportMidi || job.kind == .exportProject || job.kind == .exportDawproject || job.kind == .exportAaf
+            ? job.written : []
         reportShown = true
     }
 
