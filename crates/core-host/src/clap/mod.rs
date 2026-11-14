@@ -16,22 +16,25 @@ use crate::instance::{LoadRequest, PluginFormat, PluginInstance, PrepareJob, Pre
 use core_model::mixer::{PluginFormat as Format, PluginRef};
 use std::path::{Path, PathBuf};
 
-/// The standard CLAP search folders (spec §5): the user's, then the
-/// system's.
+/// The CLAP search folders (spec §5, plan 6g Ruling 4): the app's
+/// bundled folder ([`crate::bundled::dir`]) first, then the user's, then
+/// the system's.
 pub fn search_paths() -> Vec<PathBuf> {
+    search_paths_with(crate::bundled::dir())
+}
+
+/// [`search_paths`] with an explicit bundled folder `first`.
+pub fn search_paths_with(first: Option<PathBuf>) -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut v: Vec<PathBuf> = first.into_iter().collect();
     if cfg!(target_os = "macos") {
-        let mut v: Vec<PathBuf> = home
-            .map(|h| h.join("Library/Audio/Plug-Ins/CLAP"))
-            .into_iter()
-            .collect();
+        v.extend(home.map(|h| h.join("Library/Audio/Plug-Ins/CLAP")));
         v.push(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"));
-        v
     } else {
-        let mut v: Vec<PathBuf> = home.map(|h| h.join(".clap")).into_iter().collect();
+        v.extend(home.map(|h| h.join(".clap")));
         v.push(PathBuf::from("/usr/lib/clap"));
-        v
     }
+    v
 }
 
 /// Every `.clap` bundle (or file) under `dirs`, recursively, sorted.

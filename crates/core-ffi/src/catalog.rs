@@ -345,13 +345,15 @@ impl PluginCatalog {
     #[uniffi::constructor]
     pub fn open(config: CatalogConfig) -> Result<Arc<PluginCatalog>, VizError> {
         ffi_guard(|| {
-            let (cat, problem) = match Catalog::load(&PathBuf::from(&config.path)) {
+            let (mut cat, problem) = match Catalog::load(&PathBuf::from(&config.path)) {
                 Ok(c) => (c, None),
                 Err(e) => (
                     Catalog::new(),
                     Some(format!("plugin settings not read: {e}")),
                 ),
             };
+            // The app's bundled copy of a plug-in wins (plan 6g Ruling 4).
+            cat.set_preferred_dir(core_host::bundled::dir());
             *lock(&CATALOG) = Some(cat);
             crate::plugins::apply_catalog();
             Ok(Arc::new(PluginCatalog {

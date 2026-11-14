@@ -11,6 +11,9 @@ cmd="$1"
 shift
 # `swift run` has no app bundle: the scanner comes from build-ffi.sh.
 export VIZDAW_SCANNER="${VIZDAW_SCANNER:-$root/target/ffi/vizdaw-scan}"
+# Nor bundled plug-ins: dev runs see Multi-Q once scripts/build-multiq.sh
+# has built it (plan 6g Ruling 3; a missing folder counts as unset).
+export VIZDAW_BUNDLED_PLUGINS="${VIZDAW_BUNDLED_PLUGINS:-$root/target/multiq/out}"
 # Swift tests use the FFI built without test hooks: their retention
 # passes move unused media into a per-run folder, never the user's Trash
 # (plan 5b Ruling 11, preflight M15).

@@ -32,8 +32,20 @@ jobs:
       - name: Real-time allocation tests (rt-check)
         if: runner.os == 'macOS'
         run: cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures --test rt_alloc_bounce --test rt_alloc_input_fx --test rt_alloc_midi_strip --test rt_alloc_mpe --test rt_alloc_crossfade
+      - name: Multi-Q (cached)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: target/multiq/out
+          key: multiq-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-multiq.sh') }}
+      - name: Build Multi-Q
+        if: runner.os == 'macOS'
+        run: scripts/build-multiq.sh
       - name: Test
         run: cargo test --workspace
+      - name: Bundled Multi-Q tests
+        if: runner.os == 'macOS'
+        run: VIZDAW_BUNDLED_PLUGINS=$PWD/target/multiq/out cargo test -p core-host --test multiq -- --ignored
       - name: Big lane read speed (release, spec 4a §3.1)
         if: runner.os == 'macOS'
         run: cargo test --release -p core-ffi --test events lane_events_of_100_000_events_is_fast
@@ -56,6 +68,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Multi-Q (cached)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: target/multiq/out
+          key: multiq-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-multiq.sh') }}
+      - name: Build Multi-Q
+        if: runner.os == 'macOS'
+        run: scripts/build-multiq.sh
       - name: FFI tests
         run: cargo test -p core-ffi
       - name: Build the FFI library and Swift bindings

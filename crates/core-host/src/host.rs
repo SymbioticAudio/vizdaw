@@ -24,7 +24,7 @@ use core_model::ids::{PluginInstanceId, SeqId, StateBlobId};
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef, PluginSlot};
 use core_model::selection::ViewFilter;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
@@ -370,6 +370,14 @@ impl PluginHost {
     /// Says where plugin `id` of `format` lives (the catalog does this).
     pub fn register_path(&mut self, format: Format, id: &str, path: PathBuf) {
         self.paths.insert((format, id.to_string()), path);
+    }
+
+    /// Where plugin `id` of `format` lives: the path
+    /// [`PluginHost::register_path`] last stored.
+    pub fn path_of(&self, format: Format, id: &str) -> Option<&Path> {
+        self.paths
+            .get(&(format, id.to_string()))
+            .map(PathBuf::as_path)
     }
 
     /// Marks a plugin as unavailable (disabled, blocklisted or missing);

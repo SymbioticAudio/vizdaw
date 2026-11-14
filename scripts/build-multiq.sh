@@ -36,10 +36,31 @@ src="$work/dusk-audio-plugins"
 juce="$work/JUCE"
 build="$work/build"
 
+# The licence texts of the third-party code JUCE compiles into MultiQ_CLAP
+# and MultiQ_AU, as "<name in out/licences/JUCE-deps> <path in JUCE>". The
+# modules come from plugins/multi-q/CMakeLists.txt (juce_audio_utils,
+# juce_dsp and what they pull in); the list was checked against the built
+# binaries' symbols (no VST3, LV2, ARA, oboe, box2d or choc code is in them).
+# AudioUnitSDK is in the AU only.
+JUCE_DEPS=(
+    "AudioUnitSDK-LICENSE.txt modules/juce_audio_plugin_client/AU/AudioUnitSDK/LICENSE.txt"
+    "FLAC-LICENSE.txt modules/juce_audio_formats/codecs/flac/Flac Licence.txt"
+    "OggVorbis-LICENSE.txt modules/juce_audio_formats/codecs/oggvorbis/Ogg Vorbis Licence.txt"
+    "libvorbis-COPYING.txt modules/juce_audio_formats/codecs/oggvorbis/libvorbis-1.3.7/COPYING"
+    "zlib-README.txt modules/juce_core/zip/zlib/README"
+    "jpeglib-README.txt modules/juce_graphics/image_formats/jpglib/README"
+    "pnglib-LICENSE.txt modules/juce_graphics/image_formats/pnglib/LICENSE"
+    "HarfBuzz-COPYING.txt modules/juce_graphics/fonts/harfbuzz/COPYING"
+    "SheenBidi-LICENSE.txt modules/juce_graphics/unicode/sheenbidi/LICENSE"
+)
+
+# LICENCES is bumped whenever the set of files in out/licences changes, so
+# an existing build is redone and the new files appear.
 pins="MULTIQ_SHA=$MULTIQ_SHA
 JUCE_SHA=$JUCE_SHA
 CJE_SHA=$CJE_SHA
-AGPL_SHA256=$AGPL_SHA256"
+AGPL_SHA256=$AGPL_SHA256
+LICENCES=2"
 
 if [[ -f "$out/stamp" && "$(cat "$out/stamp")" == "$pins" ]]; then
     echo "multiq: up to date"
@@ -113,6 +134,13 @@ ditto "$juce/LICENSE.md" "$out/licences/JUCE-LICENSE.md"
 ditto "$cje/LICENSE.md" "$out/licences/clap-juce-extensions-LICENSE.md"
 ditto "$cje/clap-libs/clap/LICENSE" "$out/licences/CLAP-LICENSE"
 ditto "$agpl" "$out/licences/AGPL-3.0.txt"
+mkdir -p "$out/licences/JUCE-deps"
+for dep in "${JUCE_DEPS[@]}"; do
+    name="${dep%% *}"
+    from="$juce/${dep#* }"
+    [[ -f "$from" ]] || { echo "multiq: licence $from is missing" >&2; exit 1; }
+    ditto "$from" "$out/licences/JUCE-deps/$name"
+done
 
 configure_text="${configure[*]}"
 compile_text="${compile[*]}"
@@ -134,6 +162,9 @@ clap-juce-extensions $CJE_URL
 JUCE is used under the AGPLv3. Its text, AGPL-3.0.txt, is from
 $AGPL_URL (SHA-256 $AGPL_SHA256).
 CLAP-LICENSE covers clap-helpers too: its LICENSE is the same text.
+JUCE-deps/ holds the notices of the third-party code JUCE compiles into
+the plug-ins (AudioUnitSDK, FLAC, Ogg Vorbis, zlib, the IJG JPEG library,
+libpng, HarfBuzz and SheenBidi), copied from the JUCE commit above.
 
 Build command:
 HOME=<temp> ${configure_text//"$root"/<repo>}
