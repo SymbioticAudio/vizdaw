@@ -298,6 +298,14 @@ const INSTALL_MULTIQ_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "Replace a Multi-Q.component already in the Components folder (answers the dialog).",
 }];
 
+/// `plugins.default_eq`'s parameter (plan 6g-2 Ruling 7).
+const PLUGINS_DEFAULT_EQ_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "plugin",
+    kind: ParamKind::Text,
+    required: true,
+    help: "multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see the Plugin Manager).",
+}];
+
 /// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
 const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "theme",
@@ -2436,6 +2444,16 @@ pub const COMMANDS: &[CommandSpec] = &[
             "plugins.install_multiq",
             "Settings",
             "Install Multi-Q for Other Apps",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        params: PLUGINS_DEFAULT_EQ_PARAMS,
+        ..key_only(cmd(
+            "plugins.default_eq",
+            "Settings",
+            "EQ for New Channels",
             None,
             false,
         ))

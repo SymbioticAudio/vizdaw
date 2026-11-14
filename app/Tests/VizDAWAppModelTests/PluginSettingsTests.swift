@@ -11,8 +11,14 @@ final class FakePluginSettingsSink: PluginSettingsSink {
     var error: VizError?
     var bundledEqName: String? = "Multi-Q"
     var bundledAuPresent = true
+    var pushedEq: [DefaultEqRow?] = []
+    var choices: [DefaultEqRow] = []
+    var note: String?
 
     func setNewChannelEq(_ on: Bool) { pushed.append(on) }
+    func setDefaultEq(_ choice: DefaultEqRow?) { pushedEq.append(choice) }
+    func eqChoices() -> [DefaultEqRow] { choices }
+    func defaultEqNote() -> String? { note }
 
     func installMultiq(dest: String?, replace: Bool) throws -> String {
         installs.append((dest, replace))
@@ -124,7 +130,7 @@ final class FakePluginSettingsSink: PluginSettingsSink {
         #expect(s.newChannelEq == false)
         #expect(sink.pushed == [true, false])
         #expect(PluginSettings(defaults: defaults, sink: sink, installDestination: dest).newChannelEq == false)
-        #expect(PluginSettingsCommands.ids == ["plugins.new_channel_eq", "plugins.install_multiq"])
+        #expect(PluginSettingsCommands.ids == ["plugins.new_channel_eq", "plugins.install_multiq", "plugins.default_eq"])
     }
 
     @Test func noBundledEqDisables() {
@@ -144,5 +150,128 @@ final class FakePluginSettingsSink: PluginSettingsSink {
             Issue.record("expected unavailable")
         }
         #expect(sink.installs.isEmpty)
+    }
+
+    // MARK: The EQ for new channels (plan 6g-2 Task 2, Rulings 5–7)
+
+    let gain = DefaultEqRow(format: .clap, id: "vizdaw.test.gain", name: "Test Gain")
+
+    private func status(_ o: ControlOutcome) -> String? {
+        if case .done(.ran(_, _, _, _, let status)) = o { return status }
+        return nil
+    }
+
+    private func failure(_ o: ControlOutcome) -> ControlFailure? {
+        if case .failed(let f) = o { return f }
+        return nil
+    }
+
+    @Test func theChoiceDefaultsToMultiQAndPersists() {
+        let defaults = MemoryDefaults()
+        let sink = FakePluginSettingsSink()
+        let s = PluginSettings(defaults: defaults, sink: sink, installDestination: dest)
+        #expect(s.defaultEq == nil)
+        #expect(sink.pushedEq == [nil])
+        #expect(s.defaultEqName == "Multi-Q")
+        s.setDefaultEq(gain)
+        #expect(s.defaultEq == gain)
+        #expect(sink.pushedEq == [nil, gain])
+        let stored = defaults.dictionary(forKey: PluginSettings.eqKey) as? [String: String]
+        #expect(stored == ["format": "clap", "id": "vizdaw.test.gain", "name": "Test Gain"])
+        let sink2 = FakePluginSettingsSink()
+        let again = PluginSettings(defaults: defaults, sink: sink2, installDestination: dest)
+        #expect(again.defaultEq == gain)
+        #expect(again.defaultEqName == "Test Gain")
+        #expect(sink2.pushedEq == [gain])
+        again.setDefaultEq(nil)
+        #expect(defaults.object(forKey: PluginSettings.eqKey) == nil)
+        #expect(sink2.pushedEq == [gain, nil])
+    }
+
+    @Test func aDamagedChoiceReadsAsMultiQ() {
+        let damaged: [Any] = [
+            "clap:vizdaw.test.gain",
+            ["format": "vst", "id": "vizdaw.test.gain", "name": "Test Gain"],
+            ["format": "clap", "name": "Test Gain"],
+            ["format": "clap", "id": "vizdaw.test\u{0}gain", "name": "Test Gain"],
+        ]
+        for value in damaged {
+            let defaults = MemoryDefaults()
+            defaults.set(value, forKey: PluginSettings.eqKey)
+            let sink = FakePluginSettingsSink()
+            let s = PluginSettings(defaults: defaults, sink: sink, installDestination: dest)
+            #expect(s.defaultEq == nil, "\(value)")
+            #expect(sink.pushedEq == [nil])
+            #expect(defaults.object(forKey: PluginSettings.eqKey) == nil, "\(value)")
+        }
+    }
+
+    @Test func aMissingChoiceShowsAndSaysSo() {
+        let defaults = MemoryDefaults()
+        let sink = FakePluginSettingsSink()
+        PluginSettings(defaults: defaults, sink: sink, installDestination: dest).setDefaultEq(gain)
+        sink.note = "Test Gain is not available, so new channels get Multi-Q."
+        let s = PluginSettings(defaults: defaults, sink: sink, installDestination: dest)
+        s.refreshEqChoices()
+        #expect(s.defaultEq == gain)
+        #expect(s.defaultEqAvailable == false)
+        #expect(s.eqNote == "Test Gain is not available, so new channels get Multi-Q.")
+        sink.choices = [gain]
+        sink.note = nil
+        s.refreshEqChoices()
+        #expect(s.defaultEqAvailable == true)
+        #expect(s.eqNote == nil)
+    }
+
+    @Test func defaultEqCommandSetsAndAnswers() {
+        let sink = FakePluginSettingsSink()
+        sink.choices = [gain]
+        let s = PluginSettings(defaults: MemoryDefaults(), sink: sink, installDestination: dest)
+        let set = { (plugin: String) in
+            PluginSettingsCommands.run(
+                "plugins.default_eq", args: [ControlArg(name: "plugin", value: .text(value: plugin))], settings: s)
+        }
+        #expect(status(set("clap:vizdaw.test.gain")) == "default EQ Test Gain")
+        #expect(s.defaultEq == gain)
+        #expect(status(set("multi-q")) == "default EQ Multi-Q")
+        #expect(s.defaultEq == nil)
+        #expect(sink.pushedEq == [nil, gain, nil])
+        #expect(PluginSettingsCommands.ids.contains("plugins.default_eq"))
+    }
+
+    @Test func defaultEqCommandRefusesBadInput() {
+        let sink = FakePluginSettingsSink()
+        sink.choices = [gain]
+        let s = PluginSettings(defaults: MemoryDefaults(), sink: sink, installDestination: dest)
+        s.setDefaultEq(gain)
+        let set = { (plugin: String) in
+            PluginSettingsCommands.run(
+                "plugins.default_eq", args: [ControlArg(name: "plugin", value: .text(value: plugin))], settings: s)
+        }
+        for bad in ["clap:", "vst:x", "gain", "clap:a\u{0}b", "au:", ""] {
+            #expect(failure(set(bad))?.code == .invalidParams, "\(bad)")
+            #expect(s.defaultEq == gain)
+        }
+        let unknown = failure(set("clap:vizdaw.test.synth4"))
+        #expect(unknown?.code == .unknownId)
+        #expect(unknown?.message == "No installed effect is clap:vizdaw.test.synth4.")
+        #expect(failure(PluginSettingsCommands.run("plugins.default_eq", args: [], settings: s))?.code == .invalidParams)
+        #expect(s.defaultEq == gain)
+        #expect(sink.pushedEq == [nil, gain])
+    }
+
+    @Test func eqChoicesAreUsableEffectsButMultiQsClap() {
+        let rows = [
+            catalogRow("vizdaw.test.gain", "Test Gain", vendor: "VizDAW"),
+            catalogRow(PluginSettings.multiqClapId, "Multi-Q", vendor: "VizDAW"),
+            catalogRow("aufx/Gain/Test", "AU Gain", vendor: "VizDAW", format: .au, status: .notValidated),
+            catalogRow("vizdaw.test.off", "Off", vendor: "VizDAW", status: .disabled),
+            catalogRow("vizdaw.test.gone", "Gone", vendor: "VizDAW", status: .missing),
+            catalogRow("vizdaw.test.synth4", "Synth", vendor: "VizDAW", kind: .instrument),
+        ]
+        #expect(
+            PluginSettings.eqChoices(from: rows) == [
+                gain, DefaultEqRow(format: .au, id: "aufx/Gain/Test", name: "AU Gain"),
+            ])
     }
 }

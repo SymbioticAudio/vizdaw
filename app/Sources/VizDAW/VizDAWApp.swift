@@ -48,6 +48,9 @@ final class LivePluginSettingsSink: PluginSettingsSink {
     }
     var bundledEqName: String? { VizDAWCore.bundledEqName() }
     var bundledAuPresent: Bool { VizDAWCore.bundledAuPresent() }
+    func setDefaultEq(_ choice: DefaultEqRow?) { VizDAWCore.setDefaultEq(choice: choice) }
+    func eqChoices() -> [DefaultEqRow] { PluginSettings.eqChoices(from: appPlugins.browser(.effect)) }
+    func defaultEqNote() -> String? { VizDAWCore.defaultEqNote() }
 }
 
 /// Settings › Plug-ins (plan 6g Task 4): the switch is a preference of this
