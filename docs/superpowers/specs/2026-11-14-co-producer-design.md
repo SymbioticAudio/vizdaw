@@ -1,6 +1,6 @@
 # Sub-project 8 — Co-Producer
 
-Status: draft from the owner's decisions of 2026-11-11 and the brainstorm of 2026-11-14, for the owner's review.
+Status: draft from the owner's decisions of 2026-11-11, the brainstorm of 2026-11-14 and the owner's answers the same day, with the builder-check settlements, for the owner's review.
 Parent spec: `docs/superpowers/specs/2026-10-15-vizdaw-design.md` (§11 step 8). Builds on `2026-10-18-control-channel-design.md` (the protocol, the command registry, §7 dialogs and Busy, §8 security, the hostile-input rules) and the backlog row "Co-Producer over MCP" in `docs/feature-backlog.md`. Runs after sub-project 6; in the 1.0 release (owner, 2026-11-11).
 
 Throughout, **(owner)** marks the owner's decision, **(controller's call, owner saw it)** a guess the controller showed the owner without objection (it counts as decided), **(controller's call)** a decision made while writing this that the owner may overturn, and anything else is left to the builder (§11).
@@ -75,7 +75,8 @@ Claude's app ── MCP (stdio) ──▶ vizdaw-mcp ── JSON lines, Unix soc
 ### 6.2 Each Co-Producer edit is one named undo step (owner)
 
 - A **request** is one thing the composer asked for in chat ("set up a drum bus"). Claude opens it with a name, runs its commands, then closes it. Everything in between lands in the undo history as one step named "Co-Producer: <name>", in title case, at most about 40 characters (controller's call).
-- Undo and Redo of that step work like any other step, from VizDAW's Edit menu or by the composer asking Claude.
+- **Only Co-Producer's own steps go in that group** (controller's call). If the composer edits by hand while a request is open, the hand edit closes the group and is its own undo step, as always. If Co-Producer then carries on with the same request, it opens a new group named "Co-Producer: <name> (continued)". So undoing a Co-Producer step never takes away the composer's work.
+- Undo and Redo of that step work like any other step, from VizDAW's Edit menu or by the composer asking Claude. If Claude is asked to undo a step that is the composer's own, that is a change and needs a yes (§6.6) (controller's call).
 - If a request is left open (Claude stops, the connection drops), VizDAW closes it after a short idle time and keeps what was done as one step (controller's call). If a command inside a request fails, the steps already done stay, the request is still one step, and the reply says what failed.
 - Commands that do not change the document (exports, bounces to files, reading state) still belong to the request, for the notes, but add nothing to the undo history.
 - Only one request is open per document at a time; a second one gets an error naming the open one.
@@ -97,7 +98,7 @@ Views are read-only pictures plus, at most, the confirm button of §6.6; they ne
 
 - One switch in VizDAW's Settings, labelled **Co-Producer**. When off: the Co-Producer socket is closed and accepts no connections, any open connection is dropped, no Co-Producer views are served, and nothing reaches the document through it.
 - It persists across launches.
-- **On by default** (controller's call from 2026-11-11, not revisited at the brainstorm; see open question 1). Off by default would be the cautious choice.
+- **Off by default** (owner, 2026-11-14). A fresh install opens no Co-Producer socket; the composer turns it on in Settings.
 - The metrics have their own switch (§9), off until turned on.
 
 ### 6.5 Classes of command
@@ -107,15 +108,15 @@ Every registry command that Co-Producer may run carries one class, checked in Ru
 | Class | Meaning | Needs a yes? |
 |---|---|---|
 | read | reads state, changes nothing | no |
-| add | creates something new: a track, bus, send, insert, region on a new track, marker, automation on a control that has none, a file in a new folder | no |
-| change | changes something that exists: names, colours, levels, notes, regions, settings, existing automation | yes, when the thing is the composer's (§6.6) |
+| add | creates something new and sets it up: a new track or bus with its own inserts, sends, routing and automation; a region on a new track; a marker; a file in a new folder | no |
+| change | changes something that exists: names, colours, levels, notes, regions, settings, automation; and on the composer's tracks, routing them to a bus or adding an insert, send or automation (owner) | yes, when the thing is the composer's (§6.6) |
 | remove | deletes something | yes, when the thing is the composer's |
 | outward | writes files outside the project | no, as long as it only creates new files (§6.7) |
 | refused | never run by Co-Producer | always refused |
 
-**The composer's own work** is anything not marked as Co-Producer-added (§7.2), plus anything the composer has taken over. Changing or removing Co-Producer's own additions, not yet taken over, needs no yes (controller's call): it is Co-Producer tidying up after itself.
+**The composer's own work** is anything not marked as Co-Producer-added (§7.2), plus anything the composer has taken over. **Routing and sound changes are changes** (owner, 2026-11-14): pointing the composer's existing tracks at a new bus, or adding an insert, send or automation to a track the composer made, needs a yes, with exactly what will change shown. Adding new tracks and buses, and setting up those new things themselves, stays free (owner). Changing or removing Co-Producer's own additions, not yet taken over, needs no yes (controller's call): it is Co-Producer tidying up after itself.
 
-**Refused** (controller's call): commands that delete or overwrite files (`media.compact`, which removes unused media; `region.reload_external`, which replaces a region's audio from an outside file; key-binding writes `keys.save`, `keys.load`, `keys.reset`), recording (`transport.record`, `record.*`; Co-Producer cannot hear and should not record over takes), `file.close`, `file.save`, `file.save_as` (§6.7), `plugins.install_multiq`, and app-wide settings (`plugins.new_channel_eq`, `audio.set`, themes and layout).
+**Refused** (controller's call): commands that delete or overwrite files (`media.compact`, which removes unused media; `region.reload_external`, which replaces a region's audio from an outside file; key-binding writes `keys.save`, `keys.load`, `keys.reset`), recording (`transport.record`, `record.*`; Co-Producer cannot hear and should not record over takes), `file.close`, `file.save_as` (§6.7), `plugins.install_multiq`, and app-wide settings (`plugins.new_channel_eq`, `audio.set`, themes and layout).
 
 ### 6.6 A yes in chat that shows exactly what changes (owner)
 
@@ -129,7 +130,9 @@ Before a change or remove on the composer's work runs, Co-Producer shows the com
 ### 6.7 A saved copy before each request; files never replaced (owner)
 
 - **Saved copy.** When a request opens, before its first command that changes the document, VizDAW writes a copy of the song as it stands, open changes included, without changing which file the window is editing. The copy goes in the package, under `Co-Producer/Copies/` (controller's call), named by date, time and request ("2026-11-14 15-02 before Set Up Drum Bus.vizdaw"). It holds the song document only; media files are shared, which is safe because they are never replaced. File > Open can open a copy as a project of its own. Copies are never deleted by Co-Producer; their total size is shown in Settings (controller's call).
-- **The project file.** Co-Producer never saves the project itself: the composer saves. Autosave works as it does today (controller's call; see open question 2).
+- **Copies stay complete** (owner, 2026-11-14). Save's pruning of unused media and Compact Media never delete plug-in state or media that a Co-Producer copy still uses. In the owner's words, "Compact can ask to delete producer edits": Compact offers to remove old Co-Producer copies and the files only they use, listing each with its size, and asks the composer first. Nothing is removed without that yes. (Co-Producer itself still cannot run Compact, §6.5.)
+- **Projects never saved** (controller's call). Co-Producer may work in an untitled project. Its notes and copies are kept in VizDAW's support folder for that untitled document and move into the package on its first save.
+- **Saving** (controller's call). Co-Producer may ask to save the project. Save writes over the project file, so it is a change and needs a yes (§6.6). The first save of an untitled project always goes through the composer's own Save dialog: Co-Producer never opens dialogs, so it asks the composer to save, or answers that the project needs saving first. Autosave works as it does today.
 - **Files never replaced.** Every outward command writes into a new file or a new folder. Today's exports already refuse or number a taken name (bounce stems, AAF and other-DAW exports number their folders); for the rest, a Co-Producer call with a path that exists is refused in Rust before it reaches the app (controller's call). "File writing goes through the same checks as the menus" (controller's call, owner saw it): Co-Producer never gets a looser path than the composer's own Save dialog would.
 
 ## 7. The librarian (owner)
@@ -149,7 +152,8 @@ Example entry (controller's call on the layout):
 ```markdown
 ## 2026-11-14 15:02 — Set up a drum bus
 - Asked: "put my drums on a bus with some parallel compression"
-- Did: added bus "Drums (Co-Producer)", routed Kick, Snare, Hats to it, added a send to new bus "Drum Crush (Co-Producer)" with a compressor
+- Added (free): bus "Drums (Co-Producer)"; bus "Drum Crush (Co-Producer)" with a compressor; a send from "Drums (Co-Producer)" to it
+- Changed (yes in chat): Kick, Snare and Hats now go to "Drums (Co-Producer)" instead of the master
 - Undo step: "Co-Producer: Set Up Drum Bus"
 - Saved copy: Co-Producer/Copies/2026-11-14 15-02 before Set Up Drum Bus.vizdaw
 ```
@@ -164,14 +168,14 @@ Example entry (controller's call on the layout):
 
 ### 7.3 Export folders (owner)
 
-Exports go into clearly named, dated folders: `<song> — <what> — <date>` such as "Night Drive — Stems — 2026-11-14", inside a folder the composer chose once (asked in chat the first time, then remembered per song in the notes), or next to the project by default (controller's call). A second export the same day gets a number, never a replacement.
+Exports go into clearly named, dated folders: `<song> — <what> — <date>` such as "Night Drive — Stems — 2026-11-14", inside a folder the composer chose once (asked in chat the first time, then remembered per song in the notes), or next to the project by default (controller's call). For an untitled project the default is the export location set in VizDAW's Settings; if none is set, Co-Producer asks (controller's call). A second export the same day gets a number, never a replacement.
 
 ## 8. Creative help (owner)
 
 - **Any installed plug-in.** Creative work may use any plug-in the composer has installed: AU, CLAP and VizDAW's built-ins (owner). VizDAW exposes the installed plug-in list (name, maker, kind, instrument or effect, enabled or not in the Plugin Manager) through a new read command (§10 gaps). Plug-ins turned off in the Plugin Manager are not offered.
 - **Web search by Claude.** For ideas ("which synths fit 80s synthwave?", "a classic delay into reverb setting"), Claude may search the web with its own tools in Claude's app (owner). VizDAW never goes online for it.
-- **Mix recipes** (examples, owner): a shared reverb bus fed by sends; parallel compression; delay into reverb; "help me mix my drums" (a drum bus, gain staging from the mixer's reported levels, EQ and compression from installed plug-ins). Recipes are adds; changing the composer's existing settings is a change and needs a yes.
-- **Starter templates** (example, owner: "80s synthwave"): a new project with instrument tracks, a drum part's tracks, buses and routing, using installed plug-ins. A template builds a new project, so everything in it is an add and marked Co-Producer-added. What patterns or notes a template may write is a builder question bounded by the non-goal on AI composition (§11).
+- **Mix recipes** (examples, owner): a shared reverb bus fed by sends; parallel compression; delay into reverb; "help me mix my drums" (a drum bus, gain staging from the mixer's reported levels, EQ and compression from installed plug-ins). A recipe usually touches the composer's tracks (routing them to the new bus, adding a send), so it **previews, then asks, then applies** (owner): the new buses and what is on them are adds, and the routing and sends on the composer's tracks are changes shown in the preview.
+- **Starter templates** (example, owner: "80s synthwave"): **sounds and routing only** (owner, 2026-11-14): instruments, a drum kit, buses, effects, tempo, meter and markers, using installed plug-ins. A template writes no notes or beats (owner). It makes an untitled project, as File > New does (controller's call), so everything in it is an add and marked Co-Producer-added.
 - **Edits on the composer's material** (owner, 2026-11-11): held chords to arpeggios as real notes (the 5g-1 arpeggiator rendered offline), reharmonising, humanising, variations. By default Co-Producer writes the result onto a **new** Co-Producer track beside the original, which needs no yes (controller's call); replacing the original's notes is a change and needs one.
 - **Automation as real points**: fades, rides and filter sweeps written as automation points, shown first in the automation preview view.
 
@@ -219,7 +223,7 @@ The owner's order is chores first, creative second. These chores map onto today'
 5. **Installed plug-in list** as a read command (§8).
 6. **Track and strip colours**: also the backlog row "User track colours".
 7. **Direct Modify with parameters**: quantize, transpose and change velocity with values, not only through the panel or a saved template.
-8. **Write notes and regions**: put MIDI notes into a new region on a track (for arpeggios, variations, templates). `midi.inject` is live input, not an edit.
+8. **Write notes and regions**: put MIDI notes into a new region on a track (for arpeggios and variations; templates write none). `midi.inject` is live input, not an edit.
 9. **Automation points**: write and remove points on a control over a time range. Today only live gestures write automation.
 10. **Markers**: add, rename and remove markers (today only `transport.next_marker` and `transport.previous_marker`).
 11. **Fade shapes**: also the backlog row "A control-channel path to set a fade shape".
@@ -241,9 +245,9 @@ The owner's order is chores first, creative second. These chores map onto today'
 10. How the notes file is appended safely while another editor has it open.
 11. The metrics' time-block length, the exact friction signals and their thresholds, and the storage format.
 12. The tool names and descriptions Claude sees, written so Claude follows §6 (show the list, wait for a yes).
-13. What a starter template may write (instrument choices, a drum pattern, chords) without becoming AI composition; propose a line in the plan for the owner to check.
+13. How a starter template chooses instruments and a drum kit from the installed plug-ins, and what it does when none fits.
 14. Whether `ui.screenshot` on the Co-Producer socket needs any extra limit (size, rate).
-15. Tests: hostile input on the Co-Producer socket and through `vizdaw-mcp`; a property test that a request, then its one Undo, returns exactly the original document; a test that no Co-Producer path can replace an existing file; a test that every change or remove on the composer's work without a valid token is refused; the switch off refuses everything; an end-to-end test that drives `vizdaw-mcp` against the built app, as the control channel's E2E test does.
+15. Tests: hostile input on the Co-Producer socket and through `vizdaw-mcp`; a property test that, with no hand edits in between, a request then its one Undo returns exactly the original document; a test that a hand edit during a request closes the group and a later step is named "(continued)"; a test that Save's pruning and Compact keep everything a Co-Producer copy uses; a test that no Co-Producer path can replace an existing file; a test that every change or remove on the composer's work without a valid token is refused; the switch off refuses everything; an end-to-end test that drives `vizdaw-mcp` against the built app, as the control channel's E2E test does.
 
 ## 12. Implementation plans
 
@@ -252,7 +256,7 @@ Chores and safety come first (owner's order). Each plan is its own spec check, p
 | Plan | Scope | Depends on |
 |---|---|---|
 | **8a — Safety and the server** | The Co-Producer socket and Settings switch; `vizdaw-mcp` with tools from the registry and `state.get` resources; command classes and the allow-list; named requests as one undo step; preview, token and apply, with elicitation where the host has it; saved copy before each request; the never-replace check on paths. Read-only and add commands only at first, then change and remove behind the yes. | — |
-| **8b — The librarian** | `Notes.md` (read, append, Window > Song Notes); the Co-Producer-added mark, name, colour and badge; Make Mine; the project format change; dated export folders. Includes the track colours gap. | 8a |
+| **8b — The librarian** | `Notes.md` (read, append, Window > Song Notes); the Co-Producer-added mark, name, colour and badge; Make Mine; the project format change; dated export folders; untitled projects' notes and copies, moved in on first save. Includes the track colours gap. | 8a |
 | **8c — Chores** | The existing exports and bounces end to end through Co-Producer with dated folders and notes; direct Modify with parameters; markers; the track list, export result and change-preview views (MCP Apps). This is where the owner's first chores ("export all as DAWproject", "bounce to stems") work. | 8a, 8b |
 | **8d — Mixer and plug-ins** | The mixer editing gap (buses, sends, inserts, plug-in loading, fader, pan, plug-in parameters); the installed plug-in list; the mixer snapshot view. Enables mix recipes. | 8a, 8b |
 | **8e — Creative** | Automation points and the automation preview view; fade shapes; writing notes and regions; arpeggio, humanise and variation edits on new tracks; mix recipes; starter templates. | 8c, 8d |
@@ -260,10 +264,6 @@ Chores and safety come first (owner's order). Each plan is its own spec check, p
 
 Suggested order: **8a → 8b → 8c → 8d → 8e**, with **8f** after 8c (it is independent and can move to wherever it fits). 8a may split in two (server and switch; then preview, token and saved copy) if it grows past about 12 tasks.
 
-## 13. Open questions for the owner
+## 13. Open questions
 
-Answers to these change what gets built:
-
-1. **On or off by default?** The 2026-11-11 note said on by default, to revisit at the brainstorm; the brainstorm did not. Off by default is the cautious choice; on means it works the first time Claude connects. This spec says on until the owner says otherwise.
-2. **May Co-Producer save the project?** This spec says no: saving writes over the project file, and the composer saves. If the owner wants "save when done" as a chore, Save becomes a change that needs a yes.
-3. **Starter templates: how far?** Instruments, drums and routing only, or also a starting drum pattern and chord part? The second writes musical content, which edges towards the non-goal on AI composition.
+None. The owner answered all of them on 2026-11-14: Co-Producer is off by default (§6.4); routing and sound changes on the composer's tracks need a yes (§6.5); copies stay complete and Compact asks before removing them (§6.7); starter projects cover sounds and routing only (§8). Saving, hand edits during a request and untitled projects are settled as controller's calls (§6.2, §6.7).
