@@ -531,8 +531,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        175,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject"
+        177,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -2670,6 +2670,76 @@ fn dawproject_commands_check_their_params() {
         assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
     }
     let (code, message) = err("command.run", run("file.import_dawproject", json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Open"), "{message}");
+}
+
+/// Plan 6f Task 6: the AAF commands check their parameters.
+#[test]
+fn aaf_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("file.export_aaf", json!({})),
+        ("file.export_aaf", json!({ "dry_run": true })),
+        (
+            "file.export_aaf",
+            json!({ "path": "/x", "seq": 3, "embed": false, "depth": "16", "stereo": "stereo",
+                    "start_tc": "01:00:00:00", "fps": "29.97df", "clip_gain": false,
+                    "automation": false, "dry_run": false }),
+        ),
+        ("file.import_aaf", json!({ "path": "/x/a.aaf" })),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.aaf", "new_project": false, "midi_path": "/x/a.mid",
+                    "media_folder": "/x/media", "join_pairs": false }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params, name) in [
+        ("file.export_aaf", json!({ "fps": "23.976" }), "fps"),
+        ("file.export_aaf", json!({ "depth": "32f" }), "depth"),
+        ("file.export_aaf", json!({ "stereo": "quad" }), "stereo"),
+        (
+            "file.export_aaf",
+            json!({ "start_tc": "02:00:00:00" }),
+            "start_tc",
+        ),
+        ("file.export_aaf", json!({ "path": "a" }), "path"),
+        ("file.import_aaf", json!({ "path": "a.aaf" }), "path"),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.dawproject" }),
+            "path",
+        ),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.aaf", "midi_path": "/x/a.wav" }),
+            "midi_path",
+        ),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.aaf", "join_pairs": "yes" }),
+            "join_pairs",
+        ),
+        (
+            "file.import_aaf",
+            json!({ "path": "/x/a.aaf", "extra": 1 }),
+            "extra",
+        ),
+        ("file.export_aaf", json!({ "extra": 1 }), "extra"),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+        assert!(message.contains(name), "{id} {params}: {message}");
+    }
+    let (code, message) = err("command.run", run("file.import_aaf", json!({})));
     assert_eq!(code, ErrorCode::DialogRequired);
     assert!(message.contains("Open"), "{message}");
 }

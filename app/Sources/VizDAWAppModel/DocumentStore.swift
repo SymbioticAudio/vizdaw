@@ -72,6 +72,14 @@ public final class DocumentStore {
         try VizDAWCore.dawprojectInfo(path: $0)
     }
 
+    /// Reads an AAF file's header with no document open (plan 6f Task 6; the
+    /// core's free function `aafInfo(path:)`; tests set a fake). It parses
+    /// the file: call it off the main thread. `file.import_aaf` reads
+    /// through it.
+    public var aafInfo: @Sendable (String) throws -> AafInfoRow = {
+        try VizDAWCore.aafInfo(path: $0)
+    }
+
     /// A file from VizDAW waiting for the return prompt's answer (plan 6e
     /// Task 10). `openDawproject` sets it for the UI's opens (File › Open,
     /// Import Project ▸ DAWproject…, Finder, the Dock); the app's

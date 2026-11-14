@@ -2,7 +2,7 @@ import Foundation
 import VizDAWCore
 
 /// `file.import_midi`, `file.export_midi`, `file.export_midi_clip`,
-/// `file.export_for_daw`, `file.import_dawproject`, `file.export_dawproject` and `file.interchange_report` over the control
+/// `file.export_for_daw`, `file.import_dawproject`, `file.export_dawproject`, `file.import_aaf`, `file.export_aaf` and `file.interchange_report` over the control
 /// channel (plans 6a Task 8, 6b Task 3): the
 /// Open and Save dialogs' answers as parameters, checked here before the
 /// core sees them; the core checks the destinations.
@@ -32,8 +32,10 @@ public enum InterchangeCommands {
     public static let exportClip = "file.export_midi_clip", report = "file.interchange_report"
     public static let exportForDaw = "file.export_for_daw"
     public static let importDawproject = "file.import_dawproject", exportDawproject = "file.export_dawproject"
+    public static let importAaf = "file.import_aaf", exportAaf = "file.export_aaf"
     public static let ids: Set<String> = [
-        importMidi, exportMidi, exportClip, exportForDaw, importDawproject, exportDawproject, report,
+        importMidi, exportMidi, exportClip, exportForDaw, importDawproject, exportDawproject, importAaf, exportAaf,
+        report,
     ]
 
     /// So `parse` can answer a `Result`.
@@ -317,6 +319,95 @@ public enum InterchangeCommands {
         }
     }
 
+    /// Whether `text` can be a path argument: no NUL, at most 4 KiB.
+    private static func pathProblem(_ text: String) -> Bool {
+        text.utf8.count > 4096 || text.utf8.contains(0)
+    }
+
+    /// The AAF export `args` ask for; `path` is "" for a check. Defaults: the
+    /// shown sequence, embedded 24-bit audio, mono pairs for stereo, start at
+    /// 00:00:00:00, 25 fps, clip gain and automation written.
+    static func aafRequest(_ args: [ControlArg], _ m: DocumentModel) -> Parsed<AafExportRequestRow> {
+        let id = exportAaf
+        let seq: UInt64
+        switch seqArg(args, id, m) {
+        case .failure(let f): return .failure(f)
+        case .success(let s): seq = s
+        }
+        let path = args.text("path") ?? ""
+        if pathProblem(path) { return bad(id, "`path` is a folder path of at most 4096 bytes with no NUL") }
+        let depth: AafDepthRow
+        switch args.text("depth") {
+        case nil, "24": depth = .int24
+        case "16": depth = .int16
+        default: return bad(id, "`depth` is 16 or 24")
+        }
+        let stereo: AafStereoRow
+        switch args.text("stereo") {
+        case nil, "mono_pairs": stereo = .monoPairs
+        case "stereo": stereo = .stereo
+        default: return bad(id, "`stereo` is mono_pairs or stereo")
+        }
+        let hourStart: Bool
+        switch args.text("start_tc") {
+        case nil, "00:00:00:00": hourStart = false
+        case "01:00:00:00": hourStart = true
+        default: return bad(id, "`start_tc` is 00:00:00:00 or 01:00:00:00")
+        }
+        let fps: AafFpsRow
+        switch args.text("fps") {
+        case nil, "25": fps = .fps25
+        case "24": fps = .fps24
+        case "29.97df": fps = .fps2997Drop
+        case "30": fps = .fps30
+        default: return bad(id, "`fps` is 24, 25, 29.97df or 30")
+        }
+        return .success(
+            AafExportRequestRow(
+                seq: seq, path: path, embed: args.flag("embed") ?? true, depth: depth, stereo: stereo,
+                hourStart: hourStart, fps: fps, clipGain: args.flag("clip_gain") ?? true,
+                automation: args.flag("automation") ?? true))
+    }
+
+    /// The AAF import `args` ask for (`path` already checked).
+    static func aafImportRequest(_ args: [ControlArg], _ path: String) -> Parsed<AafImportRequestRow> {
+        let id = importAaf
+        for name in ["path", "midi_path", "media_folder"] {
+            if let text = name == "path" ? path : args.text(name), pathProblem(text) {
+                return bad(id, "`\(name)` is a path of at most 4096 bytes with no NUL")
+            }
+        }
+        if let folder = args.text("media_folder"), !folder.hasPrefix("/") {
+            return bad(id, "`media_folder` must be an absolute path")
+        }
+        return .success(
+            AafImportRequestRow(
+                path: path, newProject: args.flag("new_project") ?? true, midiPath: args.text("midi_path"),
+                mediaFolder: args.text("media_folder"), joinPairs: args.flag("join_pairs") ?? true))
+    }
+
+    /// Makes the project `file.import_aaf` imports into (at the file's rate)
+    /// and starts the import there. A refusal leaves no project.
+    private static func importAafIntoNewProject(
+        _ request: AafImportRequestRow, rate: UInt32, store: DocumentStore
+    ) -> ControlOutcome {
+        guard let made = store.newProject(ProjectFormatRow(sampleRate: rate, depth: store.defaultFormat.depth)),
+            let fresh = store.model(made)
+        else {
+            if let a = store.takeAlert() { return .failed(.alert(a)) }
+            return .failed(.of(.failed, "\(importAaf) made no document."))
+        }
+        madeProjects.insert(made)
+        do {
+            return .job(command: importAaf, doc: made, job: try fresh.session.importAaf(req: request))
+        } catch {
+            // Refused before a job started (e.g. Busy): nothing was done in it.
+            madeProjects.remove(made)
+            store.close(made)
+            return .failed(.thrown(error, "Import Failed"))
+        }
+    }
+
     /// Whether `text` has an export ID's shape: 36 characters, each a
     /// lowercase hex digit or a hyphen (the core checks the rest).
     static func isExportIDShape(_ text: String) -> Bool {
@@ -540,6 +631,46 @@ public enum InterchangeCommands {
             guard let path, !path.isEmpty else { return .failed(.dialog("Save", "path")) }
             do {
                 return .job(command: id, doc: docID, job: try session.exportDawproject(req: req))
+            } catch {
+                return .failed(.thrown(error, "Export Failed"))
+            }
+        case importAaf:
+            guard let path, !path.isEmpty else { return .failed(.dialog("Open", "path")) }
+            let request: AafImportRequestRow
+            switch aafImportRequest(args, path) {
+            case .failure(let f): return .failed(f)
+            case .success(let r): request = r
+            }
+            guard request.newProject else {
+                guard m.editor.gesture == nil else { return ControlCommands.unavailable(EditorModel.gestureOpenMessage) }
+                do {
+                    return .job(command: id, doc: docID, job: try m.session.importAaf(req: request))
+                } catch {
+                    return .failed(.thrown(error, "Import Failed"))
+                }
+            }
+            // The core reads the file first, off the main thread: a refusal
+            // makes no project.
+            let read = store.aafInfo
+            return .pending(
+                PendingOutcome({ Result { try read(path) } }) { info in
+                    switch info {
+                    case .failure(let error): return .failed(.thrown(error, "Import Failed"))
+                    case .success(let row): return importAafIntoNewProject(request, rate: row.sampleRate, store: store)
+                    }
+                })
+        case exportAaf:
+            let dryRun = args.flag("dry_run") ?? false
+            let req: AafExportRequestRow
+            switch aafRequest(args, m) {
+            case .failure(let f): return .failed(f)
+            case .success(let r): req = r
+            }
+            let session = m.session
+            if dryRun { return Self.dryRun(id, docID, m) { try session.exportAafCheck(req: req) } }
+            guard let path, !path.isEmpty else { return .failed(.dialog("Save", "path")) }
+            do {
+                return .job(command: id, doc: docID, job: try session.exportAaf(req: req))
             } catch {
                 return .failed(.thrown(error, "Export Failed"))
             }

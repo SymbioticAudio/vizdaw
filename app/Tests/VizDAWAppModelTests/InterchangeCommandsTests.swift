@@ -909,4 +909,174 @@ import VizDAWCore
         #expect(MergeDate.today(instant, utc) == "2026-11-13")
         #expect(MergeDate.today(instant, ahead) == "2026-11-14")
     }
+
+    // MARK: AAF (plan 6f Task 6)
+
+    func aafCalls(_ f: FakeSession) -> Int {
+        f.aafImports.count + f.aafExports.count + f.aafChecks.count + f.aafInfoPaths.count
+    }
+
+    @Test func importAafMakesAProjectAtTheFileRate() async throws {
+        let (s, id, m, f) = try demo()
+        let fresh = FakeSession([seq(9, "New", topLevel: true)])
+        var formats: [ProjectFormatRow] = []
+        s.makeProject = { fmt in
+            formats.append(fmt)
+            return fresh
+        }
+        f.aafInfoAnswer = .success(
+            AafInfoRow(sampleRate: 44_100, tracks: 2, audioFiles: 1, offline: 0, fromVizdaw: false, midiBeside: nil))
+        s.aafInfo = { try f.aafInfo(path: $0) }
+        let before = s.documents.count
+        let first = run(InterchangeCommands.importAaf, [("path", .text(value: "/tmp/a.aaf"))], m, s, id)
+        guard case .pending = first else { Issue.record("not pending: \(first)"); return }
+        #expect(s.documents.count == before, "no project before the file is read")
+        let o = await settled(first)
+        guard case .job(let command, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(f.aafInfoPaths == ["/tmp/a.aaf"] && f.checkOnMain == [false])
+        #expect(command == "file.import_aaf" && doc != id && s.model(doc) != nil)
+        #expect(formats.map(\.sampleRate) == [44_100])
+        #expect(
+            fresh.aafImports
+                == [AafImportRequestRow(path: "/tmp/a.aaf", newProject: true, midiPath: nil, mediaFolder: nil, joinPairs: true)])
+        #expect(f.aafImports.isEmpty && InterchangeCommands.madeProject(doc))
+        InterchangeCommands.jobEnded(doc, failed: false, store: s) { s.close($0) }
+    }
+
+    @Test func importAafIntoThisProject() async throws {
+        let (s, id, m, f) = try demo()
+        var made = 0
+        s.makeProject = { _ in
+            made += 1
+            return FakeSession([])
+        }
+        let o = run(
+            InterchangeCommands.importAaf,
+            [
+                ("path", .text(value: "/tmp/a.aaf")), ("new_project", .flag(value: false)),
+                ("midi_path", .text(value: "/tmp/a.mid")), ("media_folder", .text(value: "/tmp/media")),
+                ("join_pairs", .flag(value: false)),
+            ], m, s, id)
+        guard case .job(let command, let doc, _) = o else { Issue.record("not a job: \(o)"); return }
+        #expect(command == "file.import_aaf" && doc == id && made == 0)
+        #expect(
+            f.aafImports
+                == [
+                    AafImportRequestRow(
+                        path: "/tmp/a.aaf", newProject: false, midiPath: "/tmp/a.mid", mediaFolder: "/tmp/media",
+                        joinPairs: false)
+                ])
+        #expect(f.aafInfoPaths.isEmpty)
+    }
+
+    @Test func importAafAsksForOpen() throws {
+        let (s, id, m, f) = try demo()
+        for args: [(String, ControlValue)] in [[], [("new_project", .flag(value: false))], [("path", .text(value: ""))]] {
+            let d = failure(run(InterchangeCommands.importAaf, args, m, s, id))
+            #expect(d?.code == .dialogRequired && d?.dialog == "Open")
+        }
+        #expect(aafCalls(f) == 0)
+    }
+
+    @Test func exportAafAsksForSave() throws {
+        let (s, id, m, f) = try demo()
+        for args: [(String, ControlValue)] in [[], [("dry_run", .flag(value: false))], [("path", .text(value: ""))]] {
+            let d = failure(run(InterchangeCommands.exportAaf, args, m, s, id))
+            #expect(d?.code == .dialogRequired && d?.dialog == "Save")
+        }
+        #expect(aafCalls(f) == 0)
+    }
+
+    @Test func exportAafBuildsTheRequest() throws {
+        let (s, id, m, f) = try demo()
+        let shown = try #require(m.selectedSeq)
+        guard case .job(let command, _, _) = run(InterchangeCommands.exportAaf, [("path", .text(value: "/tmp"))], m, s, id)
+        else { Issue.record("not a job"); return }
+        #expect(command == "file.export_aaf")
+        #expect(
+            f.aafExports.last
+                == AafExportRequestRow(
+                    seq: shown, path: "/tmp", embed: true, depth: .int24, stereo: .monoPairs, hourStart: false,
+                    fps: .fps25, clipGain: true, automation: true))
+        _ = run(
+            InterchangeCommands.exportAaf,
+            [
+                ("path", .text(value: "/tmp")), ("seq", .int(value: 2)), ("embed", .flag(value: false)),
+                ("depth", .text(value: "16")), ("stereo", .text(value: "stereo")),
+                ("start_tc", .text(value: "01:00:00:00")), ("fps", .text(value: "29.97df")),
+                ("clip_gain", .flag(value: false)), ("automation", .flag(value: false)),
+            ], m, s, id)
+        #expect(
+            f.aafExports.last
+                == AafExportRequestRow(
+                    seq: 2, path: "/tmp", embed: false, depth: .int16, stereo: .stereo, hourStart: true,
+                    fps: .fps2997Drop, clipGain: false, automation: false))
+    }
+
+    @Test func exportAafDryRunWritesNothing() async throws {
+        let (s, id, m, f) = try demo()
+        f.aafCheckAnswer = .success(ReportRow(summary: "Would leave out 1", items: []))
+        let o = run(InterchangeCommands.exportAaf, [("dry_run", .flag(value: true))], m, s, id)
+        guard case .pending = o else { Issue.record("not pending: \(o)"); return }
+        guard case .done = await settled(o) else { Issue.record("not done"); return }
+        #expect(f.aafChecks.count == 1 && f.aafExports.isEmpty && f.checkOnMain == [false])
+    }
+
+    /// Calls `InterchangeCommands.run` directly, as 6d's hostile test does.
+    /// Each bad argument answers `invalid_params` naming the command and the
+    /// parameter, or the (faked) core's own sentence; never `internal`.
+    @Test func aafHostileArguments() async throws {
+        let (s, id, m, f) = try demo()
+        f.interchangeError = VizError.Model(message: "the core refuses")
+        f.aafInfoAnswer = .failure(VizError.Io(message: "cannot read"))
+        s.aafInfo = { try f.aafInfo(path: $0) }
+        let dir = FileManager.default.temporaryDirectory.path
+        let long = "/" + String(repeating: "a", count: 5_000)
+        func args(_ pairs: [(String, ControlValue)]) -> [ControlArg] { pairs.map { ControlArg(name: $0.0, value: $0.1) } }
+        func check(_ id2: String, _ pairs: [(String, ControlValue)], _ name: String?) async {
+            let o = await settled(InterchangeCommands.run(id2, args: args(pairs), id, m, store: s))
+            guard let r = failure(o) else { Issue.record("\(id2) \(pairs): not refused"); return }
+            #expect(r.code != .internalFailure, "\(id2) \(pairs)")
+            if r.code == .invalidParams, let name {
+                #expect(r.message.contains(id2) && r.message.contains(name), "\(r.message)")
+            } else {
+                #expect(r.code == .failed && !r.message.isEmpty, "\(id2) \(pairs): \(r.code) \(r.message)")
+            }
+        }
+        for p in [dir, "/tmp/a\u{0}.aaf", long + ".aaf"] {
+            await check(InterchangeCommands.importAaf, [("path", .text(value: p))], "path")
+            await check(
+                InterchangeCommands.importAaf, [("path", .text(value: p)), ("new_project", .flag(value: false))], "path")
+            await check(InterchangeCommands.exportAaf, [("path", .text(value: p))], "path")
+        }
+        await check(
+            InterchangeCommands.importAaf,
+            [("path", .text(value: "/tmp/a.aaf")), ("media_folder", .text(value: "/etc/hosts"))], "media_folder")
+        await check(
+            InterchangeCommands.importAaf,
+            [("path", .text(value: "/tmp/a.aaf")), ("midi_path", .text(value: long + ".mid"))], "midi_path")
+        await check(
+            InterchangeCommands.exportAaf, [("path", .text(value: dir)), ("seq", .int(value: 1 << 40))], "seq")
+        await check(InterchangeCommands.exportAaf, [("path", .text(value: dir)), ("fps", .text(value: "0"))], "fps")
+        await check(InterchangeCommands.exportAaf, [("path", .text(value: dir)), ("depth", .text(value: "32f"))], "depth")
+        await check(InterchangeCommands.exportAaf, [("dry_run", .flag(value: true)), ("stereo", .text(value: "quad"))], "stereo")
+        await check(
+            InterchangeCommands.exportAaf, [("path", .text(value: dir)), ("start_tc", .text(value: "02:00:00:00"))], "start_tc")
+        #expect(f.aafImports.isEmpty && f.aafExports.isEmpty && s.documents.count == 1)
+    }
+
+    @Test func aafRefusedImportClosesItsProject() async throws {
+        let (s, id, m, f) = try demo()
+        let fresh = FakeSession([seq(9, "New", topLevel: true)])
+        fresh.interchangeError = VizError.Busy(message: "Wait for the running import, export or bounce to finish.")
+        s.makeProject = { _ in fresh }
+        s.aafInfo = { try f.aafInfo(path: $0) }
+        var made: [UUID] = []
+        s.didMake = { doc, _ in made.append(doc) }
+        let before = s.documents.count
+        let r = failure(await settled(run(InterchangeCommands.importAaf, [("path", .text(value: "/tmp/a.aaf"))], m, s, id)))
+        #expect(r?.code == .busy && r?.message.contains("Wait for the running") == true)
+        #expect(s.documents.count == before && fresh.aafImports.isEmpty)
+        #expect(made.count == 1 && made.allSatisfy { !InterchangeCommands.madeProject($0) && s.model($0) == nil })
+    }
 }

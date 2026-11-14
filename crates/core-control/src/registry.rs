@@ -733,6 +733,108 @@ const EXPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `file.import_aaf` (plan 6f Task 6): an AAF file as a new project, or
+/// added to this one.
+const IMPORT_AAF_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("aaf"),
+        required: false,
+        help: "The .aaf file (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "new_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Open the file as a new project (default true); false adds its tracks to this project, timed by its tempo map. One undo step.",
+    },
+    ParamSpec {
+        name: "midi_path",
+        kind: ParamKind::Path("mid"),
+        required: false,
+        help: "The MIDI file with the tempo map and MIDI tracks (default: the one beside the AAF with its name).",
+    },
+    ParamSpec {
+        name: "media_folder",
+        kind: ParamKind::File,
+        required: false,
+        help: "A folder to look in, by file name, for audio the file cannot find.",
+    },
+    ParamSpec {
+        name: "join_pairs",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Join tracks named as left and right into stereo tracks (default true).",
+    },
+];
+
+/// `file.export_aaf` (plan 6f Task 6): an AAF export folder.
+const EXPORT_AAF_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The folder to put the \"<song> AAF\" folder in (answers the Save dialog; needed unless dry_run). An existing export folder is never replaced: the new one is numbered.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "embed",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Embed the audio in the AAF file (default true); false writes it beside the file.",
+    },
+    ParamSpec {
+        name: "depth",
+        kind: ParamKind::Choice(&["16", "24"]),
+        required: false,
+        help: "The audio's bit depth (default 24).",
+    },
+    ParamSpec {
+        name: "stereo",
+        kind: ParamKind::Choice(&["mono_pairs", "stereo"]),
+        required: false,
+        help: "mono_pairs: a stereo track is two mono tracks; stereo: one stereo track.",
+    },
+    ParamSpec {
+        name: "start_tc",
+        kind: ParamKind::Choice(&["00:00:00:00", "01:00:00:00"]),
+        required: false,
+        help: "The timecode the sequence starts at (default 00:00:00:00).",
+    },
+    ParamSpec {
+        name: "fps",
+        kind: ParamKind::Choice(&["24", "25", "29.97df", "30"]),
+        required: false,
+        help: "The timecode frame rate (default 25).",
+    },
+    ParamSpec {
+        name: "clip_gain",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write clip gain (default true).",
+    },
+    ParamSpec {
+        name: "automation",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write fader and pan automation (default true).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Return what won't transfer; write nothing.",
+    },
+];
+
 /// `file.export_for_daw` (plan 6b Task 3): an export folder for another DAW.
 /// It never replaces anything: an existing folder's name gets " 2".
 const FOR_DAW_PARAMS: &[ParamSpec] = &[
@@ -1503,6 +1605,26 @@ pub const COMMANDS: &[CommandSpec] = &[
             answered_by: &["path"],
         }],
         ..cmd("file.export_dawproject", "File", "DAWproject…", None, true)
+    },
+    CommandSpec {
+        params: IMPORT_AAF_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.import_aaf", "File", "AAF…", None, true)
+    },
+    CommandSpec {
+        params: EXPORT_AAF_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_aaf", "File", "AAF…", None, true)
     },
     CommandSpec {
         ..cmd(
