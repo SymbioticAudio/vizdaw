@@ -142,29 +142,33 @@ struct Pending {
 }
 
 /// Before an inactive instance that was already activated goes active
-/// again (a restart or a new configuration; main thread), when its format
-/// asks for it ([`PluginInstance::refreshes_values_to_reactivate`]): each
-/// continuous parameter it reports is set a step away and back to what it
-/// holds, in one call, so a plug-in that rebuilds its processing only when
-/// a value changes does not come back flat (plan 6g Task 5: the bundled
-/// EQ's pass filters; a state save and load did not revive them reliably).
-/// Stepped parameters (switches, triggers) are left alone. `activate` then
-/// sends only the overlay values it does not hold.
+/// again (a restart or a new configuration; main thread): the parameters
+/// it names ([`PluginInstance::values_to_refresh`], only the bundled
+/// Multi-Q) are set a step away and back to what it holds, in one call, so
+/// its pass filters, rebuilt only when a value changes, do not come back
+/// flat (plan 6g Task 5; a state save and load did not revive them
+/// reliably). Every other plug-in is left as before.
 fn refresh_values(live: &mut Live) {
-    if live.inst.is_active() || !live.inst.refreshes_values_to_reactivate() {
+    if live.inst.is_active() {
         return;
     }
-    let params: Vec<(ParamId, f64, f64)> = live
+    let ids = live.inst.values_to_refresh();
+    if ids.is_empty() {
+        return;
+    }
+    let ranges: BTreeMap<ParamId, (f64, f64)> = live
         .inst
         .info()
         .params
         .iter()
-        .filter(|p| !p.stepped && p.max > p.min)
-        .map(|p| (p.id, p.min, p.max))
+        .map(|p| (p.id, (p.min, p.max)))
         .collect();
-    let mut away = Vec::with_capacity(params.len().saturating_mul(2));
-    let mut back = Vec::with_capacity(params.len());
-    for (id, min, max) in params {
+    let mut away = Vec::with_capacity(ids.len().saturating_mul(2));
+    let mut back = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(&(min, max)) = ranges.get(&id) else {
+            continue;
+        };
         let Some(v) = live.inst.param_value(id).filter(|v| v.is_finite()) else {
             continue;
         };
@@ -1101,13 +1105,14 @@ impl PluginHost {
             // Unreachable: a slot shelves one processor at a time.
             drop(old);
         }
-        // Values the engine never saw must reach the new processor; those
-        // the instance already holds (set before activation) are not sent
-        // again: an unchanged value sent
-        // to the bundled EQ turns its pass filters flat (plan 6g Task 5).
+        // Values the engine never saw must reach the new processor. The
+        // bundled Multi-Q is not sent those it already holds (set before
+        // activation): an unchanged value turns its pass filters flat
+        // (plan 6g Task 5). Every other plug-in gets them all, as before.
+        let skip_held = !live.inst.values_to_refresh().is_empty();
         let sent: Vec<(ParamId, f64)> = live.sent.iter().map(|(k, v)| (*k, *v)).collect();
         for (k, v) in sent {
-            if live.inst.param_value(k).is_some_and(|h| holds(h, v)) {
+            if skip_held && live.inst.param_value(k).is_some_and(|h| holds(h, v)) {
                 continue;
             }
             live.params.send(k, v);

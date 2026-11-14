@@ -339,6 +339,11 @@ struct Script {
     ui: Mutex<VecDeque<ParamEvent>>,
     /// Every `set_params` call, in order.
     sets: Mutex<Vec<Vec<(ParamId, f64)>>>,
+    /// Whether it names its parameters for a refresh, as the bundled
+    /// Multi-Q does.
+    refresh: AtomicBool,
+    /// Every value its processors received, in order.
+    received: Mutex<Vec<(ParamId, f64)>>,
 }
 
 impl Script {
@@ -430,6 +435,7 @@ impl AudioProcessor for FakeProcessor {
             let mut held = self.script.held.lock().unwrap();
             for c in ctx.params_in {
                 held.insert(c.id, c.value);
+                self.script.received.lock().unwrap().push((c.id, c.value));
             }
         }
         // The user moves the plugin's own controls.
@@ -495,8 +501,12 @@ impl PluginInstance for FakeInstance {
     fn param_value(&mut self, id: ParamId) -> Option<f64> {
         self.script.held.lock().unwrap().get(&id).copied()
     }
-    fn refreshes_values_to_reactivate(&self) -> bool {
-        true
+    fn values_to_refresh(&self) -> Vec<ParamId> {
+        if self.script.refresh.load(Ordering::Relaxed) {
+            vec![GAIN, OTHER]
+        } else {
+            Vec::new()
+        }
     }
     fn editor(&mut self) -> Option<&mut dyn PluginEditor> {
         None
@@ -1093,6 +1103,7 @@ fn a_restart_in_the_middle_of_a_gesture_does_not_lose_it() {
 #[test]
 fn a_reactivated_instance_gets_its_values_set_again() {
     let (mut hist, song, id, mut host, script) = with_fake();
+    script.refresh.store(true, Ordering::Relaxed);
     run(
         &mut hist,
         MixerCmd::SetPluginParams {
@@ -1132,6 +1143,52 @@ fn a_reactivated_instance_gets_its_values_set_again() {
     assert_eq!(&last[2..], &[(GAIN, 0.3), (OTHER, 0.0)]);
     peak(&mut be, 512);
     assert_eq!(script.held(GAIN), 0.3, "the overlay value is kept");
+    drop(engine);
+}
+
+/// Plan 6g Task 5, fix round 2: a plug-in that names no parameters to
+/// refresh (every one but the bundled Multi-Q) gets no nudge, and its
+/// overlay is sent to the new processor as before.
+#[test]
+fn other_plugins_get_no_refresh_and_their_overlay_again() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: id,
+            params: vec![(GAIN, 0.3)],
+        },
+    );
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    peak(&mut be, 512);
+    assert_eq!(script.held(GAIN), 0.3);
+    let sets_before = script.sets.lock().unwrap().len();
+    script.received.lock().unwrap().clear();
+    script.restart.store(true, Ordering::Relaxed);
+    let mut reloaded = false;
+    for _ in 0..500 {
+        let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+        if r.compiled.is_some_and(|c| c.graph.placeholders.is_empty()) && r.restart.is_empty() {
+            reloaded = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(reloaded, "restarted and loaded again");
+    peak(&mut be, 512);
+    assert_eq!(
+        script.sets.lock().unwrap().len(),
+        sets_before,
+        "no nudge: nothing set while inactive"
+    );
+    assert!(
+        script.received.lock().unwrap().contains(&(GAIN, 0.3)),
+        "the overlay reaches the new processor: {:?}",
+        script.received.lock().unwrap()
+    );
+    assert_eq!(script.held(GAIN), 0.3);
     drop(engine);
 }
 
