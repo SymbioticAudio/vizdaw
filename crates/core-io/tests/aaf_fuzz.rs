@@ -4,7 +4,8 @@
 //! `map`. It passes when that ends in `Refused` or `Cancelled`, or in a
 //! mapping with its report; it fails on any panic outside `cfb` (a counting
 //! panic hook sees caught ones too), on an `Io` error (the faults are in
-//! the bytes, not the disk), or past 2 s or 256 MiB on its own thread.
+//! the bytes, not the disk), or past 2 s and 1 s per 32 MiB of file, or
+//! past the AAF read budget (768 MiB) and 64 MiB, on its own thread.
 //!
 //! - `byte_damage`: flips, inserts, deletes and truncations of the goldens:
 //!   Task 4's writer output for four option sets and Task 2's other
@@ -58,6 +59,16 @@ use std::time::{Duration, Instant};
 static ALLOC: CountingAlloc = CountingAlloc;
 
 const MIB: usize = 1024 * 1024;
+/// A case's time: 2 s, and 1 s more per 32 MiB of file. Reading is linear
+/// in the file, and the 768 MiB budget admits files of 600 000 objects,
+/// which take about 3 s (release) on the machine this was written on.
+fn time_for(bytes: usize) -> Duration {
+    Duration::from_secs(2) + Duration::from_secs_f64(bytes as f64 / (32 * MIB) as f64)
+}
+
+/// A case's peak allocation: the AAF read budget, and room for the
+/// mapping and what the budget does not count.
+const PEAK: usize = core_io::limits::AAF_READ_BUDGET + 64 * MIB;
 const R48: (i32, i32) = (48_000, 1);
 
 // ---------------------------------------------------------------- panics
@@ -231,12 +242,12 @@ fn run_case(bytes: &[u8], what: &dyn Fn() -> String, stats: &Mutex<Stats>) {
         );
     }
     assert!(
-        seen.peak < 256 * MIB,
+        seen.peak < PEAK,
         "peak {} MiB ({})",
         seen.peak / MIB,
         what()
     );
-    assert!(took < Duration::from_secs(2), "{took:?} ({})", what());
+    assert!(took < time_for(bytes.len()), "{took:?} ({})", what());
     let mut s = stats.lock().unwrap_or_else(|e| e.into_inner());
     s.cases += 1;
     if matches!(result, Err(IoError::Refused(_))) {
@@ -765,4 +776,70 @@ fn cfb_panics_are_refusals() {
     );
     // The hook fires once: the same file then reads.
     AafFile::open(&path, None, &AafLimits::default(), &no()).unwrap();
+}
+
+/// Regression (Task 7's review): `cfb` loads a file's whole directory and
+/// MiniFAT as it opens it, before any limit, so a large file whose header
+/// declares long chains made it allocate in proportion to the file (and
+/// an allocation that fails aborts the app). The chains are now counted
+/// from the header and FAT first: too long is refused, a loop is refused,
+/// and little is allocated either way.
+#[test]
+fn long_directory_and_minifat_chains_are_refused_before_cfb() {
+    let limits = AafLimits {
+        max_model_bytes: 16 * MIB,
+        ..AafLimits::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (name, d, m, looping, why) in [
+        ("dir", 4_096, 0, false, core_io::aaf::store::TOO_LARGE),
+        ("minifat", 1, 4_096, false, core_io::aaf::store::TOO_LARGE),
+        ("loop", 64, 0, true, DAMAGED),
+    ] {
+        let path = dir.path().join(format!("{name}.aaf"));
+        common::aaf::cfb_skeleton(&path, d, m, looping);
+        let t = Instant::now();
+        let (r, seen) = measure(|| AafFile::open(&path, None, &limits, &no()).map(|_| ()));
+        assert!(
+            matches!(&r, Err(IoError::Refused(w)) if w == why),
+            "{name}: {r:?}"
+        );
+        assert!(seen.peak < 2 * MIB, "{name}: peak {} KiB", seen.peak / 1024);
+        assert!(t.elapsed() < Duration::from_secs(1), "{name}");
+    }
+}
+
+/// The owner's ruling after Task 7's review: a large post-production
+/// session (300 000 objects and more) reads, within the AAF read budget and
+/// the cases' time. Too slow to build and read in an unoptimised build.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "times an optimised build")]
+fn three_hundred_thousand_objects_read() {
+    let k = Soup {
+        points: 300_000,
+        nest: 0,
+        chain: 0,
+        mob_loop: false,
+        wav_lie: false,
+        pokes: Vec::new(),
+        weak: None,
+        edits: Vec::new(),
+        sectors: Vec::new(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Large.aaf");
+    std::fs::write(&path, soup_bytes(&k)).unwrap();
+    let t = Instant::now();
+    let (f, seen) = measure(|| AafFile::open(&path, None, &AafLimits::default(), &no()));
+    let took = t.elapsed();
+    let f = f.unwrap();
+    assert_eq!(f.composition().slots.len(), 1);
+    assert!(
+        seen.peak < core_io::limits::AAF_READ_BUDGET,
+        "peak {} MiB",
+        seen.peak / MIB
+    );
+    let size = std::fs::metadata(&path).unwrap().len() as usize;
+    assert!(took < time_for(size), "{took:?} for {} MiB", size / MIB);
+    println!("300 000 objects: {took:?}, peak {} MiB", seen.peak / MIB);
 }

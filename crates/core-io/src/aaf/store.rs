@@ -378,6 +378,13 @@ const DIR_ENTRY_COST: usize = 256;
 /// A path's entry in the set of paths already queued, beyond its bytes.
 const SEEN_COST: usize = std::mem::size_of::<String>() + 16;
 
+/// What a listing from [`Walk::storages`] holds.
+fn listing_cost(listing: &HashMap<String, Auid>) -> usize {
+    let each = std::mem::size_of::<(String, Auid)>().saturating_add(SEEN_COST);
+    let names: usize = listing.keys().map(String::len).sum();
+    listing.len().saturating_mul(each).saturating_add(names)
+}
+
 /// Why one object or property was not read.
 enum Bad {
     /// Leave it out, listed with this detail.
@@ -498,7 +505,8 @@ impl Walk<'_> {
     }
 
     /// The storages directly in the storage at `path`, by name, with
-    /// their classes, counted against the budget. An object's children are
+    /// their classes, counted against the budget while they are held (the
+    /// caller gives back [`listing_cost`]). An object's children are
     /// found in one walk of its storage rather than each by a lookup from
     /// the root, whose cost grows with the depth: with the `properties`
     /// stream's opening, an object costs one such lookup, not four.
@@ -510,10 +518,13 @@ impl Walk<'_> {
                 .collect(),
             Err(_) => HashMap::new(),
         };
-        let each = std::mem::size_of::<(String, Auid)>().saturating_add(SEEN_COST);
-        let names: usize = listing.keys().map(String::len).sum();
-        self.spend(listing.len().saturating_mul(each).saturating_add(names))?;
+        self.spend(listing_cost(&listing))?;
         Ok(listing)
+    }
+
+    /// Gives back `n` bytes counted for something no longer held.
+    fn refund(&mut self, n: usize) {
+        self.bytes = self.bytes.saturating_sub(n);
     }
 
     fn spend(&mut self, n: usize) -> Result<(), IoError> {
@@ -983,6 +994,7 @@ fn read_store(
             }
             let _ = w.queue(&path, &storages, &k.name, p.depth, (id, k.pid, k.pos))?;
         }
+        w.refund(listing_cost(&storages));
     }
     let mut objects = w.objects;
     for o in &mut objects {
@@ -1059,6 +1071,139 @@ fn read_referenced(c: &mut Cfb, limits: &AafLimits, report: &mut Report) -> Vec<
     out
 }
 
+/// Why [`precheck`] stopped the open.
+enum Pre {
+    /// Refuse the file.
+    Refuse(IoError),
+    /// The operating system failed.
+    Os(std::io::Error),
+}
+
+impl From<std::io::Error> for Pre {
+    fn from(e: std::io::Error) -> Self {
+        Pre::Os(e)
+    }
+}
+
+/// The compound file's end-of-chain and free markers: any sector ID at or
+/// past the first ends a chain.
+const MAX_REGULAR_SECTOR: u32 = 0xFFFF_FFFA;
+
+/// Reads `buf.len()` bytes at `at`; `false` when the file ends first.
+fn read_at(file: &mut File, at: u64, buf: &mut [u8]) -> Result<bool, std::io::Error> {
+    file.seek(SeekFrom::Start(at))?;
+    match file.read_exact(buf) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn le32(b: &[u8], at: usize) -> u32 {
+    b.get(at..at.saturating_add(4))
+        .and_then(|c| c.try_into().ok())
+        .map_or(u32::MAX, u32::from_le_bytes)
+}
+
+/// Before `cfb` opens the file, which loads its whole FAT, directory and
+/// MiniFAT with no limit: reads the header and the FAT (charged against
+/// `limits.max_model_bytes` before they are read) and counts the
+/// directory and MiniFAT chains, refusing [`TOO_LARGE`] when what `cfb`
+/// would hold for them passes the budget, and [`DAMAGED`] when a chain
+/// loops. A header or FAT this check cannot follow is left to `cfb`,
+/// which refuses it.
+fn precheck(file: &mut File, limits: &AafLimits, cancel: &AtomicBool) -> Result<(), Pre> {
+    let budget = limits.max_model_bytes as u64;
+    let mut h = [0u8; 512];
+    if !read_at(file, 0, &mut h)? {
+        return Ok(());
+    }
+    let shift = u16::from_le_bytes([h[0x1E], h[0x1F]]);
+    if shift != 9 && shift != 12 {
+        return Ok(());
+    }
+    let ss = 1u64 << shift;
+    let per = (ss / 4) as usize;
+    let len = file.seek(SeekFrom::End(0))?;
+    let sectors = len.saturating_sub(ss) / ss;
+    let num_fat = u64::from(le32(&h, 0x2C));
+    if num_fat > sectors {
+        return Ok(());
+    }
+    // `cfb` holds the FAT as `u32`s, as this check does: charged first.
+    let fat_bytes = num_fat.saturating_mul(ss);
+    if fat_bytes > budget {
+        return Err(Pre::Refuse(refused(TOO_LARGE)));
+    }
+    // The FAT's sectors: 109 in the header, then the DIFAT chain.
+    let mut fat_ids: Vec<u32> = (0..109)
+        .map(|k| le32(&h, 0x4C + 4 * k))
+        .filter(|id| *id < MAX_REGULAR_SECTOR)
+        .take(num_fat as usize)
+        .collect();
+    let mut difat = le32(&h, 0x44);
+    let mut hops = 0u64;
+    let mut buf = vec![0u8; ss as usize];
+    while (fat_ids.len() as u64) < num_fat && difat < MAX_REGULAR_SECTOR {
+        hops += 1;
+        if hops > sectors {
+            return Err(Pre::Refuse(refused(DAMAGED)));
+        }
+        if !read_at(file, (u64::from(difat) + 1) * ss, &mut buf)? {
+            return Ok(());
+        }
+        for k in 0..per.saturating_sub(1) {
+            let id = le32(&buf, 4 * k);
+            if id < MAX_REGULAR_SECTOR && (fat_ids.len() as u64) < num_fat {
+                fat_ids.push(id);
+            }
+        }
+        difat = le32(&buf, ss as usize - 4);
+    }
+    let mut fat: Vec<u32> = Vec::with_capacity(fat_ids.len().saturating_mul(per));
+    for (i, id) in fat_ids.iter().enumerate() {
+        if i % 64 == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(Pre::Refuse(IoError::Cancelled));
+        }
+        if !read_at(file, (u64::from(*id) + 1) * ss, &mut buf)? {
+            return Ok(());
+        }
+        fat.extend((0..per).map(|k| le32(&buf, 4 * k)));
+    }
+    // A chain's length in sectors, or `None` when it loops.
+    let chain = |start: u32| -> Option<u64> {
+        let mut seen = vec![false; fat.len()];
+        let mut at = start;
+        let mut n = 0u64;
+        while at < MAX_REGULAR_SECTOR {
+            let i = at as usize;
+            match seen.get_mut(i) {
+                Some(s) if *s => return None,
+                Some(s) => *s = true,
+                // Past the FAT: `cfb` refuses it.
+                None => break,
+            }
+            n += 1;
+            at = fat.get(i).copied().unwrap_or(u32::MAX);
+        }
+        Some(n)
+    };
+    let Some(dir) = chain(le32(&h, 0x30)) else {
+        return Err(Pre::Refuse(refused(DAMAGED)));
+    };
+    let entries = dir.saturating_mul(ss / 128);
+    let dir_cost = entries.saturating_mul(DIR_ENTRY_COST as u64);
+    // `cfb` reads the MiniFAT whole, then again as `u32`s.
+    let Some(mini) = chain(le32(&h, 0x3C)) else {
+        return Err(Pre::Refuse(refused(DAMAGED)));
+    };
+    let mini_cost = mini.saturating_mul(ss).saturating_mul(2);
+    if fat_bytes.saturating_add(dir_cost).saturating_add(mini_cost) > budget {
+        return Err(Pre::Refuse(refused(TOO_LARGE)));
+    }
+    Ok(())
+}
+
 /// An open AAF file: its object store, what was left out reading it, and
 /// its data streams on demand.
 pub struct AafReader {
@@ -1102,6 +1247,10 @@ impl AafReader {
         if got < magic.len() || magic != MAGIC {
             return Err(refused(NOT_AAF));
         }
+        precheck(&mut file, limits, cancel).map_err(|e| match e {
+            Pre::Refuse(e) => e,
+            Pre::Os(e) => crate::io_err(path, "read", &e),
+        })?;
         file.seek(SeekFrom::Start(0))
             .map_err(|e| crate::io_err(path, "read", &e))?;
         let opened = catch_unwind(AssertUnwindSafe(|| cfb::CompoundFile::open(file)));

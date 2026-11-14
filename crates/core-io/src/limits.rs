@@ -173,6 +173,13 @@ pub const MAX_MOB_CHAIN: usize = 16;
 /// Most control points in one AAF curve (plan 6f Ruling 13).
 pub const MAX_CONTROL_POINTS: usize = 100_000;
 
+/// Most bytes one AAF read holds, counted as it reads: `cfb`'s FAT,
+/// directory and MiniFAT, then the object store (plan 6f Ruling 13, as the
+/// owner ruled after Task 7's review). Its own budget, not
+/// [`MAX_MODEL_BYTES`]: a large post-production session runs to 250 000
+/// objects and more, about 1.2 KB each as read.
+pub const AAF_READ_BUDGET: usize = 768 * 1024 * 1024;
+
 /// The limits an AAF reader applies (plan 6f Ruling 13); tests lower them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AafLimits {
@@ -208,7 +215,7 @@ impl Default for AafLimits {
             max_control_points: MAX_CONTROL_POINTS,
             max_text_bytes: MAX_TEXT_BYTES,
             max_import_tracks: MAX_IMPORT_TRACKS,
-            max_model_bytes: MAX_MODEL_BYTES,
+            max_model_bytes: AAF_READ_BUDGET,
         }
     }
 }

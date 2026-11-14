@@ -2307,3 +2307,87 @@ pub fn soup() -> impl proptest::strategy::Strategy<Value = Soup> {
             },
         )
 }
+
+/// A compound file at `path` whose header and FAT declare a directory
+/// chain of `dir` sectors and a MiniFAT chain of `mini` (4 KiB sectors),
+/// the directory's last sector pointing back at its first when `looping`.
+/// Only the header, the FAT and a root entry are written; the rest is a
+/// sparse hole of zeros.
+pub fn cfb_skeleton(path: &Path, dir: u32, mini: u32, looping: bool) {
+    const END: u32 = 0xFFFF_FFFE;
+    let mut fat_n = 1u32;
+    while fat_n * 1024 < fat_n + dir + mini {
+        fat_n += 1;
+    }
+    assert!(fat_n <= 109, "the header's DIFAT holds 109 FAT sectors");
+    let total = fat_n + dir + mini;
+    let mut fat = vec![0xFFFF_FFFFu32; (fat_n * 1024) as usize];
+    for k in 0..fat_n {
+        fat[k as usize] = 0xFFFF_FFFD;
+    }
+    let first_dir = fat_n;
+    for k in 0..dir {
+        let s = first_dir + k;
+        fat[s as usize] = if k + 1 < dir {
+            s + 1
+        } else if looping {
+            first_dir
+        } else {
+            END
+        };
+    }
+    let first_mini = first_dir + dir;
+    for k in 0..mini {
+        let s = first_mini + k;
+        fat[s as usize] = if k + 1 < mini { s + 1 } else { END };
+    }
+    let mut h = vec![0u8; 4096];
+    h[..8].copy_from_slice(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+    let put16 =
+        |h: &mut Vec<u8>, at: usize, v: u16| h[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    let put32 =
+        |h: &mut Vec<u8>, at: usize, v: u32| h[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    put16(&mut h, 0x18, 0x3E);
+    put16(&mut h, 0x1A, 4);
+    put16(&mut h, 0x1C, 0xFFFE);
+    put16(&mut h, 0x1E, 12);
+    put16(&mut h, 0x20, 6);
+    put32(&mut h, 0x28, dir);
+    put32(&mut h, 0x2C, fat_n);
+    put32(&mut h, 0x30, first_dir);
+    put32(&mut h, 0x38, 4096);
+    put32(&mut h, 0x3C, if mini > 0 { first_mini } else { END });
+    put32(&mut h, 0x40, mini);
+    put32(&mut h, 0x44, END);
+    for k in 0..109 {
+        put32(
+            &mut h,
+            0x4C + 4 * k,
+            if (k as u32) < fat_n {
+                k as u32
+            } else {
+                u32::MAX
+            },
+        );
+    }
+    let mut f = std::fs::File::create(path).unwrap();
+    f.write_all(&h).unwrap();
+    let bytes: Vec<u8> = fat.iter().flat_map(|v| v.to_le_bytes()).collect();
+    f.write_all(&bytes).unwrap();
+    // The root entry, first in the directory.
+    let mut root = vec![0u8; 128];
+    let name: Vec<u8> = "Root Entry"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    root[..name.len()].copy_from_slice(&name);
+    put16(&mut root, 0x40, 22);
+    root[0x42] = 5;
+    root[0x43] = 1;
+    for at in [0x44, 0x48, 0x4C] {
+        put32(&mut root, at, u32::MAX);
+    }
+    put32(&mut root, 0x74, END);
+    f.write_all(&root).unwrap();
+    f.set_len(4096 * (u64::from(total) + 1)).unwrap();
+}
