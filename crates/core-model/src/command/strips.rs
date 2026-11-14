@@ -5,7 +5,7 @@
 use super::Report;
 use crate::document::Document;
 use crate::ids::{AnyId, DestId, OutputPathId, StripId};
-use crate::mixer::{BUILTIN_SYNTH_STRIP, Strip, StripKind};
+use crate::mixer::{BUILTIN_SYNTH_STRIP, PluginRef, PluginSlot, Strip, StripKind};
 
 fn add_strip(d: &mut Document, kind: StripKind, name: &str, r: &mut Report) -> StripId {
     let id = d.counters_mut().alloc_strip();
@@ -89,4 +89,41 @@ pub(crate) fn rename_kind(d: &mut Document, kind: StripKind, name: &str) {
             s.name = name.to_string();
         }
     }
+}
+
+/// Fills the EQ slot of each eligible strip `report` created (plan 6g
+/// Rulings 3, 5): an `AudioPath`, `Instrument` or `BuiltinSynth` strip that
+/// still exists and whose slot is still empty (a command that fills its own
+/// EQ keeps it) gets a fresh `plugin` instance with no state or overlay.
+/// Each new slot's [`AnyId::Plugin`] is pushed onto `report.created`.
+/// Answers how many it filled.
+pub(crate) fn fill_new_eqs(doc: &mut Document, report: &mut Report, plugin: &PluginRef) -> usize {
+    let strips: Vec<StripId> = report
+        .created
+        .iter()
+        .filter_map(|id| match id {
+            AnyId::Strip(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    let mut filled = 0;
+    for id in strips {
+        let eligible = doc.mixer().strip(id).is_ok_and(|s| {
+            s.eq.is_none()
+                && matches!(
+                    s.kind,
+                    StripKind::AudioPath(_) | StripKind::Instrument(_) | StripKind::BuiltinSynth
+                )
+        });
+        if !eligible {
+            continue;
+        }
+        let slot = doc.counters_mut().alloc_plugin();
+        if let Ok(s) = doc.mixer_mut().strip_mut(id) {
+            s.eq = Some(PluginSlot::new(slot, plugin.clone()));
+            report.created.push(AnyId::Plugin(slot));
+            filled += 1;
+        }
+    }
+    filled
 }

@@ -325,7 +325,7 @@ impl Inner {
             revs: crate::revs::Revisions::new(&doc),
             edit_label: None,
             editor_layout: None,
-            history: History::new(doc.clone()),
+            history: crate::bundled::history(doc.clone()),
             path,
             clean: doc,
             version: 0,
@@ -1225,6 +1225,7 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         let mut inner = lock(&self.inner);
         let h = &mut inner.history;
+        crate::bundled::arm(h);
         h.begin("Add Track")?;
         let made = h.execute(&cmd, filter).and_then(|r| {
             let lane = r
@@ -1268,6 +1269,9 @@ impl Session {
             records_busy(&inner)?;
         }
         let before = inner.doc().clone();
+        // New strips get the EQ the switch and the catalog say now (plan 6g
+        // Ruling 6).
+        crate::bundled::arm(&mut inner.history);
         let report = inner.history.execute(&cmd, filter)?;
         // Inside an open edit the notes wait for its end (a drag's last
         // step decides what is said).
@@ -4205,6 +4209,7 @@ impl Session {
             if inner.history.in_transaction() {
                 return Err(edit_open_busy());
             }
+            crate::bundled::arm(&mut inner.history);
             inner.history.begin("New Sequence from Template")?;
             match crate::templates::build(&mut inner.history, &name, &template) {
                 Ok(_) => inner.history.commit()?,
@@ -4241,6 +4246,7 @@ impl Session {
             records_busy(&inner)?;
             let seq = crate::snapshot::seq_id(inner.doc(), seq)?;
             let index = crate::tracks::index_below(inner.doc(), seq, after);
+            crate::bundled::arm(&mut inner.history);
             inner.history.begin(crate::tracks::new_track_label(kind))?;
             match crate::tracks::build_track(&mut inner.history, seq, kind, index, monitor) {
                 Ok(_) => inner.history.commit()?,
@@ -4683,14 +4689,15 @@ fn apply_midi_import(
         Err(failed)
     };
     if place.new_project {
-        let mut scratch = History::new(inner.doc().clone());
+        let mut scratch = crate::bundled::history(inner.doc().clone());
         run(&mut scratch, &mut report)?;
-        inner.history = History::new(scratch.doc().clone());
+        inner.history = crate::bundled::history(scratch.doc().clone());
         // Serials of the replaced history's steps name nothing now (final
         // review M8): a later step must not try to amend into them.
         inner.last_step = None;
         inner.surfaces.tempo_step = None;
     } else {
+        crate::bundled::arm(&mut inner.history);
         run(&mut inner.history, &mut report)?;
     }
     Ok(report)
@@ -4800,6 +4807,7 @@ fn swap_merge(
         });
     };
     inner.history = history;
+    crate::bundled::arm(&mut inner.history);
     // Serials of the replaced history's later steps name nothing now.
     inner.last_step = None;
     inner.surfaces.tempo_step = None;
@@ -4912,7 +4920,7 @@ fn apply_dawproject_import(
             message: "the project has no sequence".into(),
         })?;
     let mut report = core_io::report::Report::default();
-    let mut scratch = History::new(doc.clone());
+    let mut scratch = crate::bundled::history(doc.clone());
     scratch.begin(LABEL)?;
     let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         core_io::dawproject::import::apply(&mut scratch, imp, seq, &mut report)
@@ -4936,7 +4944,7 @@ fn apply_dawproject_import(
     for (slot, bytes) in &states {
         scratch.capture_state(*slot, bytes)?;
     }
-    inner.history = History::new(scratch.doc().clone());
+    inner.history = crate::bundled::history(scratch.doc().clone());
     // Serials of the replaced history's steps name nothing now.
     inner.last_step = None;
     inner.surfaces.tempo_step = None;
@@ -5020,12 +5028,12 @@ fn apply_aaf_import(
         Err(failed)
     };
     if a.place.new_project {
-        let mut scratch = History::new(inner.doc().clone());
+        let mut scratch = crate::bundled::history(inner.doc().clone());
         let states = run(&mut scratch, &mut report)?;
         for (slot, bytes) in &states {
             scratch.capture_state(*slot, bytes)?;
         }
-        inner.history = History::new(scratch.doc().clone());
+        inner.history = crate::bundled::history(scratch.doc().clone());
         // Serials of the replaced history's steps name nothing now.
         inner.last_step = None;
         inner.surfaces.tempo_step = None;
@@ -5040,6 +5048,7 @@ fn apply_aaf_import(
                 message: crate::aaf::TEMPO_CHANGED.into(),
             });
         }
+        crate::bundled::arm(&mut inner.history);
         let states = run(&mut inner.history, &mut report)?;
         for (slot, bytes) in &states {
             inner.history.capture_state(*slot, bytes)?;
@@ -6593,6 +6602,8 @@ impl Session {
             // (plan 5c-2 Ruling 6).
             let mutes = crate::synth::mutes_after(&p, &inner.synth_mutes);
             let automation = p.automation.clone();
+            // A pass with audio may add the first output path.
+            crate::bundled::arm(&mut inner.history);
             match inner
                 .history
                 .execute(&Command::Record(p), &ViewFilter::default())
@@ -6748,6 +6759,8 @@ impl Session {
                 channels,
                 arm_midi,
             });
+            // It may add the first output path.
+            crate::bundled::arm(&mut inner.history);
             inner.history.execute(&cmd, &ViewFilter::default())?;
             inner.version += 1;
             inner.reload_host(self.id);
@@ -10167,6 +10180,7 @@ impl Session {
         ffi_guard(|| {
             // The catalog's lock is not taken under the session's.
             let installed = crate::dawproject::installed();
+            let new_strip_eq = crate::bundled::new_strip_eq();
             let mut inner = lock(&self.inner);
             self.interchange_idle(&mut inner)?;
             inner.media_jobs_idle()?;
@@ -10197,7 +10211,12 @@ impl Session {
                     cancel_at,
                     free,
                 },
-                history: inner.history.clone(),
+                // Armed, so the strips the merge builds get the EQ (Ruling 6).
+                history: {
+                    let mut h = inner.history.clone();
+                    h.set_new_strip_eq(new_strip_eq);
+                    h
+                },
                 base: crate::dawproject::MergeBase::of(&inner.history),
                 req,
             };

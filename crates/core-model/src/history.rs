@@ -1,10 +1,12 @@
 //! Multi-level undo with transactions, the document selection and
 //! "Modify Again". History is never saved with the project.
 
+use crate::command::strips::fill_new_eqs;
 use crate::command::{Command, Context, Report, apply_in};
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::ids::{PluginInstanceId, StateBlobId};
+use crate::mixer::PluginRef;
 use crate::modify::Modify;
 use crate::rule::SelectMode;
 use crate::selection::{Selection, ViewFilter};
@@ -79,6 +81,9 @@ pub struct History {
     group: Option<Group>,
     /// The serial the next step gets.
     next_serial: u64,
+    /// The EQ new audio, instrument and built-in-synth strips get (plan 6g
+    /// Rulings 5, 6); `None`: none.
+    new_strip_eq: Option<PluginRef>,
 }
 
 impl History {
@@ -98,7 +103,20 @@ impl History {
             txn: None,
             group: None,
             next_serial: 1,
+            new_strip_eq: None,
         }
+    }
+
+    /// The EQ new audio, instrument and built-in-synth strips get (plan 6g
+    /// Rulings 5, 6); `None`: none. Read by each [`History::execute`];
+    /// undo and redo restore stored versions and never read it.
+    pub fn set_new_strip_eq(&mut self, plugin: Option<PluginRef>) {
+        self.new_strip_eq = plugin;
+    }
+
+    /// The EQ new strips get, if any ([`History::set_new_strip_eq`]).
+    pub fn new_strip_eq(&self) -> Option<&PluginRef> {
+        self.new_strip_eq.as_ref()
     }
 
     /// The current document.
@@ -243,8 +261,10 @@ impl History {
     /// Applies a command. On error nothing changes; a command that changes
     /// nothing adds no undo step. A selection-only
     /// select-and-modify updates the selection without an undo step.
+    /// New audio, instrument and built-in-synth strips the command made get
+    /// [`History::new_strip_eq`] in their EQ slot, in the same step.
     pub fn execute(&mut self, cmd: &Command, filter: &ViewFilter) -> Result<Report> {
-        let applied = apply_in(
+        let mut applied = apply_in(
             &self.present.doc,
             Context {
                 selection: &self.selection,
@@ -252,6 +272,9 @@ impl History {
             },
             cmd,
         )?;
+        if let Some(p) = &self.new_strip_eq {
+            fill_new_eqs(&mut applied.doc, &mut applied.report, p);
+        }
         let selection_only = matches!(cmd, Command::SelectAndModify { modify: None, .. });
         if let Command::SelectAndModify {
             modify: Some(m), ..

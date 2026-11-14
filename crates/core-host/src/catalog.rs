@@ -399,7 +399,10 @@ impl Catalog {
         Some(self.status_of(e))
     }
 
-    fn status_of(&self, e: &CatalogEntry) -> PluginStatus {
+    /// The status of entry `e` (one of [`Catalog::entries`]): unlike
+    /// [`Catalog::status`], which reads the first entry of an ID, this is
+    /// the one asked about, such as [`Catalog::preferred`]'s.
+    pub fn status_of(&self, e: &CatalogEntry) -> PluginStatus {
         if self.missing.contains(&e.source) {
             return PluginStatus::Missing;
         }

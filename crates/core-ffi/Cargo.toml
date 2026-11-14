@@ -16,7 +16,8 @@ crate-type = ["staticlib", "cdylib", "lib"]
 # `inject_reload_fault`, `engine_active`, `engine_workers`,
 # `add_test_bundle`, `closing_hosts`, `midi_destination_targets`,
 # `set_fake_input` and `set_fake_synth` (the fake input and synth
-# choices), for tests only.
+# choices), and `bundled::debug_set_multiq` and `debug_clear_multiq`, for
+# tests only.
 test-hooks = []
 
 [dependencies]

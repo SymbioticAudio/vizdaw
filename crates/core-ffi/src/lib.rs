@@ -22,6 +22,7 @@ pub mod automation;
 pub mod autowrite;
 pub mod blocks;
 pub mod bounce;
+pub mod bundled;
 pub mod catalog;
 pub mod clock;
 pub mod control;
@@ -78,6 +79,7 @@ pub use bounce::{
     BounceCheckRow, BounceRangeRow, BounceRequestRow, BounceResultRow, BounceSettingsRow,
     BounceSourceRow, BouncedFileRow, ContainerRow, bounce_settings, set_bounce_settings,
 };
+pub use bundled::{new_channel_eq, set_new_channel_eq};
 pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
     ScanProgress,
