@@ -9,9 +9,10 @@ import Testing
     static let dirs = ["VizDAW", "VizDAWEditors", "VizDAWAppModel"]
     /// The owner's list, then (plan 6d Task 13) DAWproject's origin and the
     /// other readers and converters its README lists, then (plan 6f Task 8)
-    /// the AAF libraries read for behaviour.
+    /// the AAF libraries read for behaviour, then (sub-project 8 spec)
+    /// another company's product name, since the AI feature is "Co-Producer".
     static let pattern =
-        #"\b(Opcode|Studio Vision|SVP|Logic|Apple|Midas|Soundcraft|Steinberg|Cubase|NI|Native Instruments|Komplete|Kontrol|Microsoft|Ableton|ROLI|Bitwig|PreSonus|Studio One|Cubasis|VST Live|n-Track|DawVert|ProjectConverter|Cockos|Reaper|LibAAF|pyaaf2)\b"#
+        #"\b(Opcode|Studio Vision|SVP|Logic|Apple|Midas|Soundcraft|Steinberg|Cubase|NI|Native Instruments|Komplete|Kontrol|Microsoft|Ableton|ROLI|Bitwig|PreSonus|Studio One|Cubasis|VST Live|n-Track|DawVert|ProjectConverter|Cockos|Reaper|LibAAF|pyaaf2|Copilot)\b"#
     /// The one listed exception: a smoke-run plug-in reference, never shown.
     static let smokeLine = #"vendor: "Apple""#
 
@@ -62,11 +63,11 @@ import Testing
         #expect(Self.literals("let kontrolMk3 = 1").isEmpty)
         for bad in ["NI's keyboard", "NI x", "x NI", "a Kontrol keyboard", "Native Instruments GmbH",
                     "a Bitwig file", "PreSonus Studio One", "n-Track Studio", "Cockos Reaper",
-                    "read by LibAAF", "pyaaf2 wrote it"] {
+                    "read by LibAAF", "pyaaf2 wrote it", "Producer Copilot"] {
             #expect(Self.matches(bad, regex), "\(bad)")
         }
         for clean in ["kontrol_mk3", "KONTROL S88 MK3 DAW", "NIGHT", "a host-integration keyboard",
-                      "VST Left out", "a DAWproject file", "an AAF file", "Song AAF"] {
+                      "VST Left out", "a DAWproject file", "an AAF file", "Song AAF", "Co-Producer"] {
             #expect(!Self.matches(clean, regex), "\(clean)")
         }
         // The kept ids still parse, through the path `surface.add` uses.
