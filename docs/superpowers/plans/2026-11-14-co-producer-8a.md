@@ -67,18 +67,18 @@ These are this plan's decisions where the spec leaves a choice (spec §11). Each
    - **Hand actions.** Any hand action while a request group is open first ends that group as one step. A hand action is one of those calls made with `acting` false.
    - **Labels.** The step is "Co-Producer: <Title>". If an earlier group of the same request already made a step, it is "Co-Producer: <Title> (continued)".
    - **Undo and redo** always close an open request group first, whoever calls them. So a Co-Producer Undo acts on finished steps, as the menu does.
-   - **Busy.** `set_acting(true)` is refused (Busy) while a hand transaction (a drag) or a recording group is open.
-   - **Idle close.** A request with no Co-Producer call for **5 minutes** closes. The app checks every 5 s.
+   - **Busy.** `set_acting(true)` is refused while a hand transaction (a drag) or a recording group is open. `core-model` has no Busy error, so the refusal is `ModelError::Invalid`; `History::acting_refusal()` names the reason first, and `co_producer_enter` turns it into `VizError::Busy` (Task 4).
+   - **Idle close.** A request with no Co-Producer call for **5 minutes** ends, keeping what it did as one step. Every `co_producer_*` session call on the request and every `co_producer_enter` refreshes its last-activity time. The app checks every 5 s.
    - **Requests and windows.** A request needs no connection: `vizdaw-mcp` may reconnect. There is one request per document.
-   - **Cost if wrong:** an idle composer-yes that takes over 5 minutes splits a request into "… (continued)". Nothing is lost.
+   - **Cost if wrong:** a composer's yes that takes over 5 minutes finds the request ended. The apply then answers "Open a request first (begin_request).", nothing changes, and Claude begins the request again and previews again. Nothing is lost.
 4. **The label (spec §6.2).** `core_model::history::request_label(name) -> Result<(String, String)>` gives the title and the label.
-   - **Refusals.** A name that is empty after trimming is refused. So is one with a C0 or C1 control character, or a bidi control (U+202A–U+202E, U+2066–U+2069).
+   - **Refusals.** A name that is empty after trimming, or longer than 200 characters after trimming (Ruling 11's limit, so the session refuses what the socket would), is refused. So is one with a C0 or C1 control character, a bidi control or mark (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069), or a line or paragraph separator (U+2028, U+2029).
    - **Spaces.** Runs of whitespace become one space.
    - **Title case.** Each word's first character is upper case and the rest is kept. `a an and as at but by for in of on or the to with` stay lower case unless first: "set up a drum bus" gives "Set Up a Drum Bus".
    - **Length.** A title over 27 characters is cut to 26 plus "…", so the label is at most 40 characters. "(continued)" may take it past 40.
    - **Banned names.** The banned-name list cannot be checked at run time without writing it into shipped code, which the project forbids. Instead, the fixed text Co-Producer shows is covered by the name scans: Task 5 adds `vizdaw-mcp/src` to `names.rs`. `begin_request`'s description tells Claude to name requests in plain words, with no product or company names.
    - **Cost if wrong:** a request Claude names after a product shows that name in one undo label.
-5. **Classes (spec §6.5, §11.6).** `class` is a plain field, so the compiler makes every entry have one. `co_producer::effective_class(spec, args)` upgrades `mixer.new_bus` with `strip` to `Change`, because it adds a send on the composer's strip. The table:
+5. **Classes (spec §6.5, §11.6).** `class` is a plain field, so the compiler makes every entry have one. `co_producer::effective_class(spec, args)` upgrades `mixer.new_bus` with `strip` to `Change`, because it adds a send on the composer's strip. It makes `file.import_midi` with `new_project: true` `Refused`, because that opens a new project window. The table:
    - **Read:**
      - `transport.play_stop`, `play`, `stop`, `play_from_edit_in`, `play_from_selection`, `play_selection`, `rewind`, `fast_forward`, `return_to_start`, `go_edit_in`, `go_position`, `go_punch`, `next_marker`, `previous_marker`, `loop` and `scrub`;
      - `locator.go_0`–`go_9`;
@@ -108,17 +108,18 @@ These are this plan's decisions where the spec leaves a choice (spec §11). Each
 6. **What 8a previews (spec §6.6, §11.5).** Only these change and remove commands are previewable in 8a: `track.rename`, `track.delete`, `edit.undo`, `edit.redo` and `file.save`.
    - **Everything else.** Any other change or remove command, even inside a plan, is `not_allowed`: "Co-Producer cannot preview <id> yet." Later plans lift this command by command.
    - **Explicit targets.** `track.rename` and `track.delete` must name `seq` and `lane` in a plan, so a preview never depends on the selection.
+   - **Save takes no path.** `file.save` with `path` is `not_allowed` "Co-Producer saves only over the song's own file.", so a plan's Save can never answer the Save dialog with another package.
    - **How the preview is worked out.** It runs on a clone of the session's `History`: the core-model commands that `Session::edit` would build, `peek_undo`/`peek_redo` after closing an open request group, or no document change for Save. `core_model::diff::describe(before, after)` then lists the changes. Nothing reaches the host, the engine, the disk or the UI.
    - **Direct calls.** A `command.run` of a change or remove command on the Co-Producer socket is `not_allowed`: "<id> changes your work: preview it with co_producer.preview and apply it with the composer's yes." This applies even when the command is previewable.
 7. **The token (spec §6.6, §11.5).**
-   - **Form.** 32 lowercase hex characters, from the same random source `project_id::fresh` uses.
+   - **Form.** 32 lowercase hex characters from 16 bytes of `/dev/urandom`, the source `project_id::fresh` uses. Unlike `fresh`, it has no time-based fallback: when `/dev/urandom` cannot be read, the preview fails.
    - **What it is tied to.** `Inner.version`, `History::present_serial()` and the plan's canonical text, which is each command's id and its args in registry order, as JSON.
    - **One at a time.** A session keeps only its latest preview. A new preview replaces it.
-   - **Take.** `co_producer_take(token, plan)` succeeds once. It fails with `Failed` in these cases:
+   - **Take.** `co_producer_take(token, plan)` succeeds once. It fails with `VizError::Model`, which the reply carries as `failed`, in these cases:
      - "This preview was already used or replaced." when the token is unknown, used or replaced;
      - "The song changed since the preview; preview again." when the version or serial moved;
      - "These are not the previewed commands." when the plan differs.
-   - **No yes needed.** A preview whose items are all Co-Producer's own has `needs_yes: false`. In 8a that is only an Undo or Redo of a "Co-Producer: …" step. Such a preview is applied at once with no question asked.
+   - **No yes needed.** A preview whose items are all Co-Producer's own has `needs_yes: false`. In 8a that is only an Undo of a "Co-Producer: …" step, or a Redo of one whose every item is "added". A Redo that would delete or change something again needs a yes: the composer may have undone that step on purpose. Such a preview is applied at once with no question asked.
 8. **Who says yes (spec §6.6, §11.3).** As of 2026-11, form elicitation works in Claude Code and several editor hosts. Claude's desktop app does not support it yet (feature request open). `vizdaw-mcp`'s `change` tool:
    1. previews;
    2. if `needs_yes` is false, applies at once;
@@ -130,19 +131,21 @@ These are this plan's decisions where the spec leaves a choice (spec §11). Each
      - `message`: "Co-Producer wants to change your work:\n" plus one "- <thing>: <change>" line per item (at most 40 lines, then "- and N more"), then "\nAllow these changes?";
      - `requestedSchema`: `{type:"object", properties:{allow:{type:"boolean", title:"Allow these changes", default:false}}, required:["allow"]}`.
    - **A no.** Decline, cancel, or `allow: false` returns the text "The composer said no. Nothing changed." with `isError: false`.
+   - **No answer.** A question still unanswered after 10 minutes ends as a no, with "The composer did not answer. Nothing changed.", so a host that never answers cannot hang `vizdaw-mcp`.
+   - **Where the answer is read.** The composer's answer is read only from JSON-RPC fields the host fills in (the `elicitation/create` response, or `params.inputResponses` and `params.requestState` of a 2026-07-28 retry), never from a tool's `arguments`, which the model writes.
 9. **Saved copies (spec §6.7, §11.7).**
    - **Where.** A copy is a package `Co-Producer/Copies/<stamp> before <Title>.vizdaw/` holding only `project.json`. The stamp is "YYYY-MM-DD HH-MM" in local time, which Swift passes. Media and state blobs stay the parent's.
    - **The name.** `/` and `:` in the title become `-`, and a leading `.` is dropped. A taken name gets " 2", " 3", and so on. A copy is never replaced.
    - **When.** `co_producer_enter` writes it at the first entry of each request: one copy per request, none for "(continued)". It first writes the present document's unsaved state blobs into the parent's `States/`, as `autosave` does.
    - **A failed copy** refuses the command: "The saved copy could not be written (<reason>), so Co-Producer changed nothing."
-   - **An untitled document.** The copy goes in `<support>/Co-Producer/Untitled/<project id>/Copies/`, with its blobs in that folder's `States/`. A project ID is stamped first if the document has none. Moving these copies into the package is 8b's. Until then such a copy needs the untitled project's media, and 8b's backlog row says so.
+   - **An untitled document.** The folder `<support>/Co-Producer/Untitled/<project id>/` stands in for the package. The copy goes in its `Co-Producer/Copies/`, as `write_copy` puts it in any package, and its blobs go in its `States/`. A project ID is stamped first if the document has none. Moving these copies into the package is 8b's. Until then such a copy needs the untitled project's media, and 8b's backlog row says so.
    - **Kept complete.**
      - `retention::on_disk` reads every copy's `project.json` alongside the autosaves.
      - `prune_states` keeps every blob a copy names.
      - A copy that cannot be read or parsed stops all trashing and pruning in that pass. Retention then adds a problem line: "Unused media files were not moved to the Trash: a Co-Producer copy could not be read."
    - **Opening a copy.** `Session::open_copy(path)` makes a new untitled session. Its scratch root receives a copy (`std::fs::copy`, which clones on APFS) of every media file and blob the copy names. Its title is the copy's name, so Save As makes it a project of its own.
      - **The menu item.** File › Open Co-Producer Copy… opens a panel in the front project's `Co-Producer/Copies`. It is enabled when the front project is saved and has copies.
-     - **Other routes.** `DocumentStore.open(path:)` also routes a copy path there, for example from Finder.
+     - **Other routes.** `DocumentStore.open(path:)` also routes a copy path there, for example from Finder. `Session::open` and `open_with` refuse a copy path ("That is a Co-Producer copy: open it with File › Open Co-Producer Copy…."), so no route edits a copy in place or saves over it.
      - **The registry entry** is `file.open_copy`.
    - **Cost if wrong:** opening a large copy duplicates its media, but on APFS the clones take no space until written.
 10. **The switch and the socket (spec §6.1, §6.4).**
@@ -155,18 +158,24 @@ These are this plan's decisions where the spec leaves a choice (spec §11). Each
       1. stops the server, so queued calls get `shutting_down` and connections drop;
       2. ends every open request as one step;
       3. writes the empty file `<support>/co-producer.off`, except at quit.
+    - **What Settings says** (`CoProducerSettings.status`):
+      - on: "Co-Producer is on: Claude can reach VizDAW through vizdaw-mcp.";
+      - off, or a failed start: "Co-Producer is off: Claude cannot reach VizDAW.".
     - **What `vizdaw-mcp` says when it cannot connect:**
       - "Co-Producer is turned off in VizDAW's Settings." when `co-producer.off` exists;
       - else "VizDAW is not running, or Co-Producer is off in its Settings.".
     - **Its folder.** `vizdaw-mcp` finds `<support>` as the app does: `VIZDAW_SUPPORT_DIR`, else `$HOME/Library/Application Support/VizDAW`.
     - **Security.** The socket is 0600 in a 0700 folder this user owns. The existing `prepare` and `verify_dir` checks apply unchanged. `core-control` forbids unsafe code, so the peer's uid is not read: the folder's mode is what keeps other users out.
-    - **For the e2e.** A new registry command, `settings.co_producer {on: Flag, required}`, flips the switch over the developer channel. It is `key_only`, menu "Settings", `document: false`, and class refused.
+    - **For the e2e.** A new registry command, `settings.co_producer {on: Flag, required}`, flips the switch over the developer channel. It is `key_only`, menu "Settings", title "Co-Producer", `document: false`, and class refused.
+    - **The other new entry.** `file.open_copy {path: Path("vizdaw"), optional}` is menu "File", title "Open Co-Producer Copy…", a menu item, `document: false`, with the dialog "Open" (`always: true`, answered by `path`), and class refused.
     - **Shown in Settings.** The tab shows the count and total size of the saved copies of the open saved projects.
 11. **The protocol additions (control-channel spec §5).**
     - **New commands.** `COMMAND_NAMES` grows from 13 to 18, and the new `co_producer.*` commands are refused on the developer socket with `not_allowed` "only on the Co-Producer socket".
     - **A new error code.** `ErrorCode::NotAllowed` (`not_allowed`) brings `ErrorCode::ALL` to 16. `ControlErrorCode` and Swift gain it too.
     - **On the Co-Producer socket:**
+      - `ping`, `commands.list`, `state.get`, `wait`, `ui.screenshot`, `command.run` and the five `co_producer.*` commands are admitted, under the rules below;
       - `ui.tree`, `ui.click`, `ui.drag`, `ui.key`, `app.new_demo`, `app.open` and `app.quit` are `not_allowed`;
+      - `replace: true` in any command, planned ones included, is `not_allowed` "Co-Producer never replaces a file.";
       - `ui.screenshot` takes only `window` and `scale` (at most 1.0), with no `path` and no `live`, at most one per second (`busy` "one screenshot a second");
       - `state.get input` is `not_allowed`, because Co-Producer does not listen;
       - `commands.list` answers only the non-refused commands, each with its `class` and a `previewable` flag.
@@ -177,19 +186,23 @@ These are this plan's decisions where the spec leaves a choice (spec §11). Each
       - `co_producer.preview`: `commands` (an array of 1–32 `{id, params?}`), `window?`;
       - `co_producer.apply`: `token` (32 lowercase hex characters), `commands`, `window?`.
 
-      Each planned command is checked by `registry::validate_args`, Ruling 6's previewable set and Ruling 6's explicit targets.
-    - **Paths never replace (spec §6.7).** For outward commands, `co_producer::check_output(path)` refuses:
-      - a relative path, or one with a `..` component;
-      - a path that exists, by `symlink_metadata`, whatever it is, link included;
-      - a parent that is not an existing directory, or whose final component is a link;
-      - a path inside any `.vizdaw` package.
+      `validate` parses the shape and checks each planned command by `registry::validate_args` (`invalid_params`, `unknown_id`). `admit` then applies Ruling 6's previewable set, explicit targets and Save rule, and the `replace` rule above.
+    - **Paths never replace (spec §6.7).** Some exports write a new file, and some write a new numbered folder inside a folder that exists (their registry help says so). So `co_producer::output(id, args)` gives each outward command's rule, and `co_producer::check_output(path, rule)` applies it:
+      - **`Output::NewFile(exts)`:** `file.export_midi` (`mid`), `file.export_dawproject` (`dawproject`), `file.export_midi_clip` (`mid`, one track only in 8a), and `file.bounce` with `source` `mix` or `selection` (the `format`'s extension: `wav`, `aif` or `aiff`, or `caf`; any of these when no `format` is given). The path must not exist, by `symlink_metadata`, whatever it is, link included. Its name must end in one of `exts`, and must not start with `.`.
+      - **`Output::IntoFolder`:** `file.export_for_daw`, `file.export_aaf`, and `file.bounce` with `source: stems`. The path must be an existing directory that is not a link. The export makes a new numbered folder inside it, and never replaces one.
+      - **Both:**
+        - a relative path, or one with a `..` component, is refused;
+        - a parent that is not an existing directory, or whose final component is a link, is refused;
+        - a path inside any `.vizdaw` package is refused. The check runs on the canonical parent (`fs::canonicalize`), so a link higher up cannot lead into a package, and it ignores case, as APFS does. Links higher up are otherwise allowed, because `/tmp` itself is one.
 
-      Each is `not_allowed` and names the path and the reason. It checks every Path and File param of an outward command (`path` today). `media.import` and `file.import_midi` read their path and are not checked.
+      Each refusal is `not_allowed` and names the path and the reason. It checks the `path` param of every outward command. An outward command with no `path` falls to the registry's dialog rule as on the developer socket, or writes inside the project (a bounce placed on new tracks). `media.import` and `file.import_midi` read their path and are not checked.
 12. **`vizdaw-mcp`'s tools and resources (spec §6.1, §11.12).**
     - **Tool names.** A tool is named by its registry id with `.` turned into `_` (`track_new_audio`). A test checks that the names are unique and at most 64 characters.
-    - **One tool per read, add or outward command** from the Co-Producer `commands.list`. Its `inputSchema` comes from the params:
-      - Text: `string` with `maxLength` 65 536;
-      - Path and File: `string`, with the help plus "An absolute path to a new file.";
+    - **Where the list comes from.** `vizdaw-mcp` links `core-control` and ships in the same bundle as the app, so it builds its tools from `co_producer::list_json()` itself. `tools/list` works while VizDAW is closed or Co-Producer is off; a call then says why it cannot reach VizDAW.
+    - **One tool per read, add or outward command** in that list. Its `inputSchema` comes from the params:
+      - Text: `string` with `maxLength` 4096 (`params::MAX_STRING`);
+      - Path and File: `string` with `maxLength` 1024 (`params::MAX_PATH`). An outward command's help gains "An absolute path. A file there is never replaced: give a new file, or for stems and folder exports an existing folder that VizDAW puts a new numbered folder in." An import's help gains "An absolute path to the file to read.";
+      - a param named `replace` is left out, because Co-Producer refuses it;
       - Flag: `boolean`;
       - Choice: `enum`;
       - Int: `integer` with min and max;
@@ -203,25 +216,26 @@ These are this plan's decisions where the spec leaves a choice (spec §11). Each
       - `change` and `apply_change`: `destructiveHint: true`.
     - **The descriptions** are the command's title, its menu, then one class line:
       - add: "Adds something new; needs an open request (begin_request).";
-      - outward: "Writes new files only; refuses a path that exists.";
+      - outward: "Writes new files only; refuses a path that exists. Needs an open request (begin_request).";
       - read: "Reads or plays; changes nothing.".
     - **The own tools, with their exact descriptions:**
       - `begin_request {name}`: "Start one thing the composer asked for, before any command that adds or changes anything. Name it in a few plain words, with no product or company names, as the composer would say it ("set up a drum bus"). Everything until end_request becomes one undo step, "Co-Producer: <Name>". Only one request is open per song."
       - `end_request {}`: "Finish the open request. Its steps become one undo step. Call it as soon as the request is done."
-      - `change {commands}`: "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save. VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement."
+      - `change {commands}`: "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement."
       - `apply_change {token, commands}`: "Apply a change the composer has agreed to in this chat, with the token and the same commands change returned. Fails if the song changed since, or the token was used."
-      - `screenshot {window?}`: "A picture of a VizDAW window, for reading what is on screen. It cannot click or type." It returns MCP image content: base64 PNG, read from the path the app answered, which `vizdaw-mcp` then deletes.
+      - `screenshot {window?}`: "A picture of a VizDAW window, for reading what is on screen. It cannot click or type." It returns MCP image content: base64 PNG, read from the path the app answered, which `vizdaw-mcp` then deletes. It reads and deletes only a path that is `<support>/screenshot-<digits>.png` (the Co-Producer server's `screenshot_path`) and not a link; any other answered path is `isError: true` and is left alone.
     - **Resources:**
       - `vizdaw://state/<target>`, `mimeType` `application/json`, for every `state.get` target but `input`;
       - `vizdaw://commands`, the Co-Producer `commands.list`.
     - **The server's instructions:** "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Start every request with begin_request and finish it with end_request."
 13. **The app runs Co-Producer calls as menus do.** `CoProducerCommands.run` resolves the document and sets `acting` around the work:
-    - `runCommand` runs `ControlCommands.run`, between `session.coProducerEnter(stamp:)` and `session.coProducerLeave()`. It enters for every class but read.
+    - `runCommand` runs `ControlCommands.run`, between `session.coProducerEnter(stamp:)` and `session.coProducerLeave()`. It enters for every class but read. `leave` runs in a `defer`, so `acting` never outlives the call, whatever its outcome; otherwise the composer's next hand edit would land in Co-Producer's step.
     - `co_producer.apply` runs `coProducerTake`, then each planned command in turn between enter and leave.
       - A command that fails stops the rest. The reply's `results` has one line per planned command: "<id>: done", "<id>: <failure message>", or "<id>: not run (an earlier command failed)". So every command that did not run has its line.
     - Alerts a call raises are taken as its failure, as `ControlCommands.run` already does. No sheet opens.
+    - **Jobs.** A Co-Producer call that started a job (an export, a bounce, an import) is answered when the job ends, by the deferred machinery. A failure alert the job left on its document is taken as the call's failure and cleared (`m.alert = nil`), as `run` does, so no sheet opens for a Co-Producer job.
     - `ControlChannel.active` stays the developer channel's alone, so with only Co-Producer on, the composer's own sheets and alerts show as usual.
-    - **Cost if wrong:** a job that ends later (a bounce placed on new tracks) lands without `acting` and so closes the request's group as a hand step. That is 8c's row.
+    - **Cost if wrong:** a job that changes the document when it ends lands without `acting`, and so closes the request's group as a hand step. These jobs are `media.import`, `file.import_midi`, and a bounce or folder export placed on new tracks (`add_to_project`). The import or the new tracks then form their own undo step, outside "Co-Producer: …". Nothing is lost. That is 8c's row.
 
 ## Global Constraints
 
@@ -286,7 +300,7 @@ Every task's requirements include these.
     - `cargo test` for the crates the task touches.
   - Tasks 3, 4 and 7 also run `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`.
   - Known flaky: the `damaged_files` and `dawproject_fuzz` proptests, `platform-macos/tests/midi.rs`, `core-ffi` catalog tests under load, and the latency e2e timing. Re-run once before investigating, and say so in the report.
-  - **Baseline:** measure at the start of Task 1: HEAD `08034d4`, registry 181, `COMMAND_NAMES` 13, `ErrorCode::ALL` 15, README through step 325, e2e 31 ignored, `VERSION` 9. Each task reports the counts it adds.
+  - **Baseline:** measure at the start of Task 1: HEAD is this plan's pre-flight commit, whose code is `08034d4`'s (only docs changed since), registry 181, `COMMAND_NAMES` 13, `ErrorCode::ALL` 15, README through step 325, e2e 31 ignored, `VERSION` 9. Each task reports the counts it adds.
 
 ## Review Focus
 
@@ -322,8 +336,9 @@ These are the five failure modes a composer is most likely to hit, most likely f
      - a folder;
      - `..` in the path;
      - a relative path;
-     - a path inside the open package;
-     - a parent folder that is a link.
+     - a path inside the open package, directly or through a link higher up;
+     - a parent folder that is a link;
+     - `replace: true`.
    - Expected: `not_allowed` with the path and the reason, before the app sees the call, and nothing is written.
    - Pinned by Task 1's `outward_paths_never_replace`.
 4. **The switch goes off mid-work.**
@@ -378,7 +393,11 @@ These are the five failure modes a composer is most likely to hit, most likely f
   pub const MAX_PLAN: usize = 32;
   pub fn effective_class(spec: &CommandSpec, args: &[(String, ArgValue)]) -> Class;
   pub fn admit(c: &Command) -> Result<(), ControlError>;        // Rulings 5, 6, 11
-  pub fn check_output(path: &Path) -> Result<(), ControlError>;  // Ruling 11
+  /// Ruling 11: how an outward command's `path` may be used.
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  pub enum Output { NewFile(&'static [&'static str]), IntoFolder }
+  pub fn output(id: &str, args: &[(String, ArgValue)]) -> Option<Output>;   // None: not outward
+  pub fn check_output(path: &Path, rule: Output) -> Result<(), ControlError>;  // Ruling 11
   pub fn list_json() -> Value;                                   // non-refused, with class, previewable
   /// One planned command of a preview or apply.
   #[derive(Debug, Clone, PartialEq)]
@@ -401,35 +420,41 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - each of spec §6.5's refused ids is `Refused`;
     - the registry has 183 entries, and no id outside the lists is anything but `Refused`.
   - `mixer_new_bus_with_a_strip_is_a_change`: `effective_class` gives `Add` for `{}` and `Change` for `{strip: 3}`.
-  - `the_gate_admits_only_the_allow_list`. Through `admit`:
-    - `commands.list`, `state.get document`, `wait stopped`, `command.run track.new_audio` and `command.run file.export_midi {path: <new file in a temp dir>}` pass;
+  - `import_midi_into_a_new_project_is_refused`: `effective_class` of `file.import_midi` gives `Add` for `{path}` and `Refused` for `{path, new_project: true}`.
+  - `the_gate_admits_only_the_allow_list`. Through `validate`, then `admit`:
+    - `ping`, `commands.list`, `state.get document`, `wait stopped`, `command.run track.new_audio`, `command.run file.export_midi {path: <new file in a temp dir>}` and `co_producer.begin {name: "x"}` pass;
     - each of these is `not_allowed`:
       - `ui.click`, `ui.drag`, `ui.key`, `ui.tree`, `app.open`, `app.quit`, `app.new_demo`, `state.get input`;
       - `command.run media.compact`, `transport.record`, `keys.save`, `file.save_as`, `settings.co_producer`;
       - `command.run track.delete {seq: 1, lane: 1}`, with Ruling 6's message;
       - `command.run region.normalize`;
+      - `command.run file.export_midi {path: <new file>, replace: true}`, with "Co-Producer never replaces a file.";
+      - `command.run file.import_midi {path: <a file>, new_project: true}`;
     - `ui.screenshot {path: …}` and `{live: true}` are `invalid_params`, and `{scale: 1.5}` is `invalid_params`.
-  - `plans_check_every_command`. `co_producer.preview` parses `[{id: "track.rename", params: {seq: 1, lane: 2, name: "Vox"}}]`, and each of these fails:
+  - `plans_check_every_command`. Through `validate`, then `admit`. `co_producer.preview` parses `[{id: "track.rename", params: {seq: 1, lane: 2, name: "Vox"}}]`, and each of these fails:
     - an empty array, and 33 commands: `invalid_params`;
     - `track.rename` without `seq` or `lane`: `invalid_params` "name the track's `seq` and `lane`";
     - `region.normalize`: `not_allowed` "Co-Producer cannot preview region.normalize yet.";
     - `track.new_audio`: `not_allowed`;
+    - `file.save {path: "/tmp/Other.vizdaw"}`: `not_allowed` "Co-Producer saves only over the song's own file.";
     - an unknown id: `unknown_id`;
     - `params` as a string, and a `name` of 70 000 characters: `invalid_params`.
   - `apply_checks_its_token`: a token of 31 or 33 characters, uppercase hex, a NUL, or a number is `invalid_params`.
   - `begin_checks_its_name`: `""`, `"   "`, 201 characters, a NUL and `name: 5` are `invalid_params`.
-  - `outward_paths_never_replace`. In a private temp dir, `check_output` refuses each of these with `not_allowed`, naming the path:
+  - `outward_paths_never_replace`. In a private temp dir, `check_output(_, NewFile(&["mid"]))` refuses each of these with `not_allowed`, naming the path:
     - an existing file;
     - a symlink to it;
     - a dangling symlink;
     - an existing folder;
     - `<dir>/a/../b.mid`;
     - `b.mid` (relative);
-    - `<dir>/Song.vizdaw/out.mid`;
+    - `<dir>/Song.vizdaw/out.mid`, with the folder `Song.vizdaw` made first, and the same under `<dir>/Song.VIZDAW`;
+    - `<dir>/x/Media/new.mid`, where `<dir>/x` is a link to `<dir>/Song.vizdaw` and `Song.vizdaw/Media` exists: the parent's final component is no link, but its canonical path is inside the package;
     - `<link-to-dir>/new.mid`;
-    - `<dir>/missing/new.mid`.
+    - `<dir>/missing/new.mid`;
+    - `<dir>/new.wav` (wrong extension) and `<dir>/.mid` (a dot file).
 
-    `<dir>/new.mid` passes.
+    `<dir>/new.mid` passes. `check_output(_, IntoFolder)` passes `<dir>` and refuses a file, a link to `<dir>`, a missing folder and `<dir>/Song.vizdaw`. `output` gives `IntoFolder` for `file.bounce {source: stems}`, `file.export_for_daw` and `file.export_aaf`, and `NewFile` for `file.bounce {}` and `file.export_midi`.
   - `the_filtered_list_has_classes`: Co-Producer `list_json` has no refused id, each entry has `class`, and only Ruling 6's five have `previewable: true`.
   - `canonical_text_is_order_and_value_exact`: two plans that differ only in command order, or in one arg's value, give different text; the same plan twice gives the same.
 - [ ] **Step 2: Add to `tests/server.rs`** `the_co_producer_socket_gates_and_the_developer_socket_refuses_co_producer_calls`:
@@ -440,13 +465,14 @@ These are the five failure modes a composer is most likely to hit, most likely f
 
   In `tests/protocol.rs`, `ErrorCode::ALL` has 16 codes and `not_allowed` round-trips. In `tests/commands.rs`:
   - the count becomes **183**, with "; 8a adds settings.co_producer and file.open_copy" appended to the message;
+  - the minimal-params list that must cover `COMMAND_NAMES` gains one valid line for each of the five `co_producer.*` commands, so `validate` parses all 18;
   - `settings_co_producer_and_open_copy_check_their_params`: `on` missing, `on: 1` and an unknown param are `invalid_params`; `file.open_copy` without `path` is `dialog_required` "Open".
 - [ ] **Step 3: Run** `cargo test -p core-control`. Expected: FAIL (no `Class`, no `co_producer`).
 - [ ] **Step 4: Implement.**
   - **The field and the table.** Add `class` to `CommandSpec`, defaulting to `Refused` in `cmd()`, and set Ruling 5's classes with `..` struct updates. Add the two registry entries, and `"class"` to the developer `list_json` too.
   - **The gate.** `server::handle` calls `co_producer::admit` after `validate` when `role` is `CoProducer`, and answers `commands.list` with `co_producer::list_json()` there. On `Developer`, any `co_producer.*` is refused.
   - **The screenshot rate** is a `Mutex<Option<Instant>>` in `Shared`.
-  - **The path check** runs inside `admit`, which keeps `validate` pure for the developer socket.
+  - **The path check** runs inside `admit`, which keeps `validate` pure for the developer socket. `admit` runs it for a `command.run` of an outward command (by `output`); planned commands are never outward.
   - **Docs.** Update the module docs of `lib.rs` and `server.rs`.
 - [ ] **Step 5: Run** `cargo test -p core-control`. Expected: PASS, including `names.rs` and the random-params proptest over 183 entries.
 - [ ] **Step 6: End-of-task checks. Commit** `feat(control): Co-Producer command classes, the allow-list gate and the never-replace path check (plan 8a Task 1)`.
@@ -474,12 +500,15 @@ These are the five failure modes a composer is most likely to hit, most likely f
   impl History {
       /// Refused while one is open: "Co-Producer request \"<label>\" is still open."
       pub fn begin_request(&mut self, name: &str) -> Result<RequestInfo>;
+      /// Why acting cannot start now: "Finish the drag first." (a hand transaction is open) or
+      /// "Stop recording first." (a recording group is open); None when it can.
+      pub fn acting_refusal(&self) -> Option<&'static str>;
       /// Ends the request (its open group as one step); the label of that step, if one was made.
       pub fn end_request(&mut self) -> Result<Option<String>>;
       pub fn request(&self) -> Option<RequestInfo>;
-      /// Ruling 3; `ModelError::Busy`-style refusal (the crate's existing busy or invalid variant,
-      /// message "Finish the drag first." / "Stop recording first.") when turning it on during a
-      /// hand transaction or a recording group. Turning it off never fails.
+      /// Ruling 3; `ModelError::Invalid` with `acting_refusal()`'s message when turning it on
+      /// during a hand transaction or a recording group (the crate has no Busy variant; Task 4
+      /// maps this to `VizError::Busy`). Turning it off never fails.
       pub fn set_acting(&mut self, on: bool) -> Result<()>;
       pub fn acting(&self) -> bool;
   }
@@ -490,7 +519,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - "set up a drum bus" gives ("Set Up a Drum Bus", "Co-Producer: Set Up a Drum Bus");
     - "  the   kick  " gives "The Kick";
     - a 60-character name gives a 27-character title ending "…" and a label of 40 characters;
-    - "", "   ", "a\u{0}b", "a\nb" and "a\u{202E}b" are refused.
+    - "", "   ", "a\u{0}b", "a\nb", "a\u{202E}b", "a\u{200F}b", "a\u{2028}b" and a 201-character name are refused; a 200-character name is accepted.
   - `a_request_is_one_undo_step`:
     - `begin_request("add two tracks")`, `set_acting(true)`, two `AddLane`s, `set_acting(false)`, then `end_request()`, which returns `Some("Co-Producer: Add Two Tracks")`;
     - `undo_label()` is that label;
@@ -504,11 +533,11 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - an acting step, then a hand `undo`: the step is undone whole, and `request().unwrap().group_open` is false;
     - an acting `undo` behaves the same.
   - `recording_closes_the_request_group`: a hand `begin_group()` during an open request group first closes it as one step, then opens the recording group.
-  - `acting_is_busy_during_a_drag_or_a_recording`: `set_acting(true)` fails after a hand `begin("Drag")`, and after `begin_group()`. The document is unchanged.
+  - `acting_is_busy_during_a_drag_or_a_recording`: `set_acting(true)` fails after a hand `begin("Drag")`, and after `begin_group()`, and `acting_refusal()` gives "Finish the drag first." and "Stop recording first." respectively. The document is unchanged.
   - `only_one_request_at_a_time`: a second `begin_request` fails with the open label in its message. After `end_request`, a new one opens.
   - `prop_request_then_undo_is_the_original` (proptest, 64 cases):
     - from a fixture document, `begin_request`, then 1–12 random acting steps (add a lane, rename one, delete one, using valid ids picked from the current doc), then `end_request`;
-    - one `undo` gives a document equal to the original.
+    - when `end_request` returned `Some`, one `undo` gives a document equal to the original; when it returned `None` (every step changed nothing), the document already equals the original and `undo_depth` is unchanged.
 - [ ] **Step 2: Run** `cargo test -p core-model --test co_producer_requests`. Expected: FAIL.
 - [ ] **Step 3: Implement** Ruling 3.
   - **Request state.** `GroupKind` goes on `Group`. The request's own state (name, title, label, continued) is a new `request: Option<Request>` field.
@@ -525,7 +554,9 @@ These are the five failure modes a composer is most likely to hit, most likely f
 - Modify:
   - `crates/core-model/src/file.rs` (copies, `prune_states`);
   - `crates/core-ffi/src/retention.rs` (`on_disk`);
-  - `crates/core-ffi/src/session.rs` (`open_copy`, `write_co_producer_copy`).
+  - `crates/core-ffi/src/session.rs` (`open_copy`, `write_co_producer_copy`, `open_with` refusing a copy path);
+  - `app/Tests/VizDAWAppModelTests/FakeSession.swift` (a stub for the new `SessionProtocol` method, so the Swift tests compile);
+  - `app/Sources/VizDAWAppModel/ControlCommands.swift` (the two new registry ids in `handled`, so `everyRegisteredMenuCommandHasAHandler` holds; until Task 7 they answer `.failed(.of(.unavailable, "Co-Producer is not on."))`).
 - Create: `crates/core-model/tests/copies.rs`, `crates/core-ffi/tests/co_producer_copies.rs`.
 
 **Interfaces:**
@@ -556,6 +587,9 @@ These are the five failure modes a composer is most likely to hit, most likely f
   #[derive(uniffi::Record)] pub struct CopiesSizeRow { pub count: u64, pub bytes: u64 }
   // crate-internal, used by Task 4:
   impl Inner { fn write_co_producer_copy(&mut self, id: u64, stamp: &str, title: &str) -> Result<PathBuf, VizError>; }
+  // retention.rs: which file stopped the pass, so `run` can say so.
+  pub enum Unread { Saved, Copy }
+  pub fn on_disk(package: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>), Unread>;
   ```
 
 - [ ] **Step 1: Write the failing `core-model` tests** in `copies.rs`, with temp folders.
@@ -577,16 +611,20 @@ These are the five failure modes a composer is most likely to hit, most likely f
 - [ ] **Step 2: Write the failing `core-ffi` tests** in `co_producer_copies.rs`, through a `serial` helper.
   - `retention_and_prune_keep_what_copies_use`:
     - a session with an imported audio file is saved; write a copy through the test hook `debug_write_co_producer_copy("2026-11-14 15-02", "Tidy")`;
-    - delete the track and `compact_media`, then `save`. The media file is still in `Media/`, and the trash folder (`set_trash_dir`, a temp folder) is empty;
+    - delete the track and `compact_media`, then `save`, and drop the session;
+    - open the package in a fresh session, whose history no longer names the file, set its trash folder (`debug_set_trash_dir(Some(<temp folder>))`) and `save`. Only the copy names the file now, so this fails before the fix. The media file is still in `Media/`, and the trash folder is empty;
     - `Session::open_copy(<copy>)` opens untitled, with the track and its region, and `media_file` exists inside the new session's scratch root.
-  - `a_damaged_copy_stops_trashing`: plant junk `project.json` in a second copy. The next save trashes nothing, and the snapshot's problems hold Ruling 9's line.
+  - `a_damaged_copy_stops_trashing`: the same set-up, plus junk `project.json` in a second copy. The fresh session's save trashes nothing, and the snapshot's problems hold Ruling 9's line, not the autosave line.
   - `open_copy_refuses_what_is_not_a_copy`: a normal package, a missing path, a 70 000-character path and a path with a NUL each give `Err`, and nothing panics.
+  - `a_copy_never_opens_as_a_project`: `Session::open(<copy>)` is `Err` with "That is a Co-Producer copy: open it with File › Open Co-Producer Copy….", and the copy's bytes are unchanged.
   - `copies_size_counts_them`: two copies give `count == 2` and `bytes` equal to the sum of their `project.json` sizes.
 - [ ] **Step 3: Run** `cargo test -p core-model --test copies` and `cargo test -p core-ffi --test co_producer_copies`. Expected: FAIL.
 - [ ] **Step 4: Implement** the `file` functions and the copy branch in `prune_states`.
-  - **Retention.** `retention::on_disk` takes the copies' media too, and returns `None` when a copy fails to read. The `run` caller then uses Ruling 9's line when it was a copy that failed. Keep the autosave line for an autosave.
-  - **`open_copy`** uses `std::fs::copy` per file into the new scratch root. A file that fails to copy goes in the snapshot's problems, one line per file: "<path> was not copied (<reason>)."
-  - **The test hook** `debug_write_co_producer_copy` goes behind `test-hooks`, and calls `write_co_producer_copy`. For an untitled session that writes under `support_dir()/Co-Producer/Untitled/<project id>/`.
+  - **Retention.** `retention::on_disk` takes the copies' media too. It answers `Err(Unread::Copy)` when a copy fails to read, and `Err(Unread::Saved)` for the saved project or an autosave. `run`, its only caller, then uses Ruling 9's line for `Copy`, and keeps today's line for `Saved`.
+  - **`open_copy`** uses `std::fs::copy` per file into the new scratch root. It copies only the media paths that the copy's `from_json` accepted (`rules::check_media_path`: relative, no `..`). A file that fails to copy goes in the snapshot's problems, one line per file: "<path> was not copied (<reason>)."
+  - **`open_with`** refuses a path for which `file::copy_parent` is `Some`.
+  - **The test hook** `debug_write_co_producer_copy` goes in the `#[cfg(feature = "test-hooks")] impl Session` block that is not exported to Swift (as `from_document`), and calls `write_co_producer_copy`. For an untitled session that writes under `support_dir()/Co-Producer/Untitled/<project id>/`.
+  - **Swift.** `FakeSession` gains a `coProducerCopiesSize()` stub answering zero copies. `ControlCommands.handled` gains the two ids, as in Files.
 - [ ] **Step 5: Run** the Step 3 commands, then `cargo test -p core-model -p core-ffi`. Expected: PASS.
 - [ ] **Step 6: End-of-task checks**, including `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. **Commit** `feat(model): Co-Producer saved copies, kept whole by Save and Compact, and opened as a new project (plan 8a Task 3)`.
 
@@ -597,7 +635,9 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `crates/core-model/src/lib.rs`;
   - `crates/core-ffi/src/session.rs`;
   - `crates/core-ffi/src/control.rs` (`ControlRequest` and `ControlResult` variants, `ControlServer::start_co_producer`, the `NotAllowed` code);
-  - `crates/core-ffi/src/lib.rs`.
+  - `crates/core-ffi/src/lib.rs`;
+  - `app/Sources/VizDAW/ControlChannel.swift` (the temporary arm of Step 6);
+  - `app/Tests/VizDAWAppModelTests/FakeSession.swift` (stubs for the new `SessionProtocol` methods, so the Swift tests compile; Task 7 scripts them).
 - Create:
   - `crates/core-model/src/diff.rs`, `crates/core-model/tests/diff.rs`;
   - `crates/core-ffi/src/co_producer.rs`, `crates/core-ffi/tests/co_producer.rs`.
@@ -618,6 +658,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - a sequence added, removed or renamed: "Sequence 2, Verse" / the same verbs;
   - a strip added, removed or renamed: "Strip Drums" / the same verbs;
   - when the documents differ but none of the above applies: one "The song" / "other changes".
+  - **Names are shown safely.** Every track, sequence and strip name in an item passes through one helper: C0 and C1 controls, bidi controls and marks, and line and paragraph separators become a space, and a name over 60 characters is cut to 59 plus "…". A name Claude gave a bus can then never add or hide lines in the list the composer says yes to.
 - Produces (`core-ffi`):
   ```rust
   #[derive(uniffi::Record)] pub struct CoProducerRequestRow { pub name: String, pub label: String, pub group_open: bool, pub continued: bool }
@@ -628,9 +669,10 @@ These are the five failure modes a composer is most likely to hit, most likely f
       pub fn co_producer_begin(&self, name: String) -> Result<CoProducerRequestRow, VizError>;
       pub fn co_producer_end(&self) -> Result<Option<String>, VizError>;          // ends; the label made
       pub fn co_producer_request(&self) -> Option<CoProducerRequestRow>;          // never fails
-      /// Before a non-read Co-Producer command: no open request → Failed "Open a request first
-      /// (begin_request)."; Busy per Ruling 3; the first entry of a request writes the copy (Ruling 9)
-      /// and returns its path; sets acting and the request's last-activity time.
+      /// Before a non-read Co-Producer command: no open request → `VizError::Model` "Open a request
+      /// first (begin_request)."; `VizError::Busy` with `acting_refusal()`'s message (Ruling 3), checked
+      /// before anything is written; the first entry of a request writes the copy (Ruling 9) and returns
+      /// its path; sets acting and the request's last-activity time.
       pub fn co_producer_enter(&self, stamp: String) -> Result<Option<String>, VizError>;
       pub fn co_producer_leave(&self);                                              // never fails
       /// Ends a request idle for `idle_ms` or more (Ruling 3); its label, if a step was made.
@@ -652,13 +694,14 @@ These are the five failure modes a composer is most likely to hit, most likely f
   **The preview items for Ruling 6's five:**
   - **rename and delete:** `describe` of a cloned `History` after the same core-model command `Session::edit` builds for the track menu's Rename and Delete;
   - **`edit.undo` and `edit.redo`:** a first item "Undo" (or "Redo") / "\"<label>\"", then `describe(present, peek)`, worked out on a clone whose request group was closed first;
-  - **`file.save`:** "<package file name>" / "saved over the file on disk". An untitled document is refused with `Failed` "The song has no file yet: ask the composer to save it (File › Save).".
-  - **`composers_work`.** It is false only for every item of an Undo or Redo whose label starts "Co-Producer: ". `needs_yes` is true when any item's `composers_work` is.
+  - **`file.save`:** "<package file name>" / "saved over the file on disk". An untitled document is refused with `VizError::Model` "The song has no file yet: ask the composer to save it (File › Save).".
+  - **`composers_work`.** It is false only for every item of an Undo whose label starts "Co-Producer: ", and of a Redo whose label starts so and whose `describe` items are all "added" (Ruling 7). `needs_yes` is true when any item's `composers_work` is.
   - **A combined plan** works through the clone in order.
 
 - [ ] **Step 1: Write the failing diff tests** in `core-model/tests/diff.rs`: one test per item kind above, with the exact strings, plus:
   - `equal_documents_have_no_items`;
-  - `an_unlisted_change_is_other_changes`, using a tempo change.
+  - `an_unlisted_change_is_other_changes`, using a tempo change;
+  - `names_are_shown_safely`: a track renamed to "a\nb\u{202E}c" shows as "a b c", and an 80-character name is cut to 60 characters ending "…".
 - [ ] **Step 2: Write the failing session tests** in `core-ffi/tests/co_producer.rs`, through a `serial` helper.
   - `a_request_through_the_session_is_one_step_with_a_copy`:
     - save a session to a temp package, `co_producer_begin("add a track")`;
@@ -667,7 +710,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - a second enter returns `None`, so there is no second copy;
     - after `co_producer_end()`, `undo_label` is "Co-Producer: Add a Track", and one `undo` leaves no track.
   - `enter_needs_a_request`: enter without one is `Err`, with "Open a request first (begin_request).".
-  - `enter_is_busy_during_a_hand_edit`: with a hand edit transaction open (the Session's drag-begin call used by the gesture tests), enter is `VizError::Busy`, and no copy is written.
+  - `enter_is_busy_during_a_hand_edit`: with a hand edit transaction open (`Session::begin_edit`, as the gesture tests use it), enter is `VizError::Busy` with "Finish the drag first.", and no copy is written.
   - `a_failed_copy_changes_nothing`: make `Co-Producer` a file, not a folder. Enter is `Err` with Ruling 9's sentence, and `acting` stays off, so the next hand edit is an ordinary step.
   - `idle_ends_the_request`:
     - `co_producer_idle(0)` after one acting step returns the label;
@@ -677,6 +720,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - renaming track 2 to "Vox" gives one item, "Track 2, …" / "renamed to \"Vox\"", with `composers_work: true` and `needs_yes: true`;
     - deleting a track with 4 notes says "deleted, with 4 notes";
     - Undo of a "Co-Producer: Add a Track" step gives `needs_yes: false`, while Undo of a hand rename gives `true`;
+    - after that Co-Producer step is undone, its Redo gives `needs_yes: false`; a Co-Producer step that deleted a track, once undone, gives a Redo with `needs_yes: true`;
     - Save on an untitled session is `Err`;
     - after each preview the document, `undo_label`, version and the disk are unchanged, and no host reload happened (`hosts_created` is unchanged).
   - `take_refuses_every_stale_or_altered_yes`. Each of these fails with Ruling 7's sentence:
@@ -698,6 +742,8 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `start_co_producer`, which is `start` with `Config { role: Role::CoProducer, app_timeout, idle_timeout: 900 s, .. }`.
 
   `co_producer_end`, `idle` and `take` bump `version` and reload the host only when they change the document. They do not, because they only relabel.
+
+  `FakeSession` gains stubs for the new Session methods (each throws `VizError.Model(message: "not scripted")` or answers nil), so the Swift tests compile.
 - [ ] **Step 5: Run** the Step 3 commands, then `cargo test -p core-ffi`. Expected: PASS.
 - [ ] **Step 6: End-of-task checks**, including the Swift build and test. Swift gains the new `ControlRequest` cases: give them a temporary `.failed(.of(.unavailable, "Co-Producer is not on."))` arm in `ControlChannel.execute`, which Task 7 replaces. **Commit** `feat(ffi): Co-Producer requests, saved copy at the first step, previews and one-time tokens (plan 8a Task 4)`.
 
@@ -705,8 +751,8 @@ These are the five failure modes a composer is most likely to hit, most likely f
 
 **Files:**
 - Create:
-  - `crates/vizdaw-mcp/Cargo.toml` (`core-control` path dependency, `serde_json = "1"`; dev: `tempfile = "3"`);
-  - `crates/vizdaw-mcp/src/main.rs` (stdin and stdout loop, `catch_unwind` per line);
+  - `crates/vizdaw-mcp/Cargo.toml` (`edition`, `license` and `rust-version` from the workspace, `publish = false`; `core-control` path dependency, `serde_json = "1"`; dev: `tempfile = "3"`);
+  - `crates/vizdaw-mcp/src/main.rs` (stdin on a reader thread with a capped line read, the stdout loop, `catch_unwind` per line);
   - `crates/vizdaw-mcp/src/lib.rs`;
   - `crates/vizdaw-mcp/src/rpc.rs` (JSON-RPC framing, eras, errors);
   - `crates/vizdaw-mcp/src/tools.rs` (the registry-to-tool mapping, schemas, the own tools);
@@ -718,7 +764,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `Cargo.lock`, which gains the package entry only.
 
 **Interfaces:**
-- Consumes: Task 1's Co-Producer `commands.list` JSON (`class`, `previewable`), `client::Client`, `co_producer::MAX_PLAN`.
+- Consumes: Task 1's `co_producer::list_json()` (`class`, `previewable`), linked, not fetched (Ruling 12); `client::Client`; `co_producer::MAX_PLAN`.
 - Produces:
   ```rust
   // lib.rs
@@ -727,6 +773,10 @@ These are the five failure modes a composer is most likely to hit, most likely f
       pub fn new(support: PathBuf) -> Server;
       /// One input line → zero or more output lines (a reply, or Task 6's elicitation request).
       pub fn handle_line(&mut self, line: &str) -> Vec<String>;
+      /// A line longer than MAX_LINE that the reader consumed without keeping: its -32700 reply.
+      pub fn too_long(&mut self) -> Vec<String>;
+      /// Called when no line came for a while: ends waits that expired (Task 6).
+      pub fn tick(&mut self) -> Vec<String>;
   }
   pub fn support_dir_from_env() -> PathBuf;    // Ruling 10
   pub const MAX_LINE: usize = 1 << 20;         // a longer line: -32700, the line skipped
@@ -741,7 +791,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `command.run` gives `{"status":"ran <id>"}`;
   - `state.get` gives `{"target": …}`;
   - `co_producer.*` gives canned results;
-  - a screenshot writes a 1×1 PNG and answers its path.
+  - a screenshot writes a 1×1 PNG at the fake server's `screenshot_path()` and answers that path. A script line can answer another path instead, for the refusal test.
 
   Tests spawn the built binary (`env!("CARGO_BIN_EXE_vizdaw-mcp")`) with `VIZDAW_SUPPORT_DIR` set on the child, and talk to it over pipes.
 - [ ] **Step 2: Write the failing tests** in `tests/server.rs`.
@@ -753,10 +803,11 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - `server/discover` answers Ruling 2's `supportedVersions`;
     - a `tools/list` with `_meta` version "2026-07-28" answers `resultType: "complete"`, `ttlMs: 0` and `cacheScope: "private"`;
     - one with "2030-01-01" is `-32022`, with `data.supported` and `data.requested`.
-  - `tools_come_from_the_allow_list`:
+  - `tools_come_from_the_allow_list`, with no fake app running:
     - `tools/list` has `track_new_audio` (with `destructiveHint: false`), `transport_play_stop` (with `readOnlyHint: true`), `file_export_midi`, `begin_request`, `end_request`, `change`, `apply_change` and `screenshot`;
     - it has no `ui_click`, `media_compact`, `transport_record`, `track_delete` or `settings_co_producer`;
-    - every name matches `^[A-Za-z0-9_.-]{1,64}$`, the names are unique, and every `inputSchema` has `type: "object"` and `additionalProperties: false`.
+    - every name matches `^[A-Za-z0-9_.-]{1,64}$`, the names are unique, and every `inputSchema` has `type: "object"` and `additionalProperties: false`;
+    - no schema has a `replace` property, and `file_export_midi`'s `path` has `maxLength` 1024.
   - `tools_reach_the_app`:
     - `tools/call track_new_audio {seq: 1}` sends `command.run {id: "track.new_audio", params: {seq: 1}}`, and answers the app's result as text with `isError: false`;
     - an app error comes back as `isError: true` with the error's code and message;
@@ -765,7 +816,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - `resources/list` has `vizdaw://state/document`, `vizdaw://state/mixer` and `vizdaw://commands`, and no `vizdaw://state/input`;
     - reading `vizdaw://state/mixer` sends `state.get {target: "mixer"}`;
     - an unknown URI is `-32602`.
-  - `screenshot_returns_an_image`: the content is `{type: "image", mimeType: "image/png", data: <base64 of the PNG>}`, and the file is gone afterwards.
+  - `screenshot_returns_an_image`: the content is `{type: "image", mimeType: "image/png", data: <base64 of the PNG>}`, and the file is gone afterwards. When the fake answers a path outside the support folder (a temp file of the test's), the call is `isError: true` and that file still exists.
   - `hostile_messages_never_end_the_server`. After each of these the next `ping` still answers `{}`:
     - not JSON: `-32700`;
     - a 2 MiB line: `-32700`;
@@ -779,13 +830,14 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `says_why_it_cannot_reach_vizdaw`:
     - with no socket, and `co-producer.off` present in the support folder, a tool call answers `isError: true` with "Co-Producer is turned off in VizDAW's Settings.";
     - without that file it answers "VizDAW is not running, or Co-Producer is off in its Settings.".
-  - `reconnects_after_the_app_drops_it`: stop the fake app and start it again on the same path. The next tool call succeeds.
+  - `reconnects_after_the_app_drops_it`: stop the fake app and start it again on the same path. The next tool call succeeds, and the fake saw it once.
+  - `a_call_that_was_sent_is_never_sent_twice`: the fake reads a `command.run` and closes the connection without answering. The tool call answers `isError: true`, and the fake, started again, sees no second copy of it.
   - `base64_matches_rfc_4648`: "", "f", "fo", "foo", "foob", "fooba" and "foobar".
 - [ ] **Step 3: Run** `cargo test -p vizdaw-mcp`. Expected: FAIL (no crate).
 - [ ] **Step 4: Implement** Rulings 1, 2, 10 and 12.
-  - `app.rs` wraps `core_control::client::Client`, with a 70 s call timeout (above the app's 60 s). On an `Io` error it reconnects once.
+  - `app.rs` wraps `core_control::client::Client`, with a 660 s call timeout: above the app's 60 s, and above the 605 s the app gives a job (`ControlJobs.waitMs` + 5 s), so a long export or bounce is not cut off. It reconnects once and sends again only when connecting or writing the request failed. After the request was written, an `Io` error (a dropped connection, a timeout) is the call's answer, `isError: true`, and is never sent again, because the app may already have run it. The next call reconnects.
   - Tools for read and add commands that take `window` pass it as `window`.
-  - `main.rs` reads stdin line by line, writes each output line with a single `\n` and flushes, and exits 0 at EOF.
+  - `main.rs` reads stdin on its own thread, with a capped read like `server.rs`'s `read_line_capped`: a line over `MAX_LINE` is consumed without being kept and answered by `too_long()`. The thread hands lines over a channel. The main loop waits with `recv_timeout(1 s)` and calls `tick()` when no line came. It writes each output line with a single `\n` and flushes, and exits 0 at EOF.
   - `names.rs`'s literal scan adds `"vizdaw-mcp/src"` to its directory list.
 - [ ] **Step 5: Run** `cargo test -p vizdaw-mcp -p core-control`. Expected: PASS.
 - [ ] **Step 6: End-of-task checks. Commit** by paths: `crates/vizdaw-mcp`, `crates/core-control/tests/names.rs`, `Cargo.lock`. Message `feat(mcp): vizdaw-mcp, a stdio MCP server over the Co-Producer socket (plan 8a Task 5)`.
@@ -803,9 +855,10 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - **The `initialize` era.** `handle_line` returns an `elicitation/create` request line with id `"vz-elicit-<n>"`, then keeps the call pending.
     - Lines that arrive meanwhile are queued, and handled after the wait ends. Two kinds are handled at once: a `ping`, and a `notifications/cancelled` for the pending call, which ends the wait as a cancel with no reply.
     - The response with that id resumes the call.
-  - **2026-07-28.** `tools/call` answers `{resultType: "input_required", inputRequests: {yes: {method: "elicitation/create", params}}, requestState: <24 hex>}`. The retry carries `inputResponses.yes` and that `requestState`.
-    - A `requestState` is one-time, and is kept for at most 10 minutes and at most 8 at once.
-    - An unknown or reused one is `isError: true`: "This question expired; call change again.".
+  - **2026-07-28.** `tools/call` answers `{resultType: "input_required", inputRequests: {yes: {method: "elicitation/create", params}}, requestState: <24 hex>}`. The retry carries `params.inputResponses.yes` and `params.requestState`, beside `name` and `arguments`; both are read only there, never from `arguments`.
+    - A `requestState` is one-time, and is kept for at most 10 minutes and at most 8 at once. It holds the preview's token and commands.
+    - An unknown, reused or expired one is `isError: true`: "This question expired; call change again.". So is a retry whose `arguments.commands` differ from the held commands, and the held state is then dropped.
+  - **No answer.** A legacy wait still open after 10 minutes is ended by `tick()` as Ruling 8's no answer, and the queued lines are then handled. `Server::with_ask_timeout(support, Duration)` sets the limit for tests.
   - **Tokens.** Tokens handed to the model are remembered, at most 8. `apply_change` with a token not among them is `isError: true`: "Use the token change returned in this conversation.".
 
 - [ ] **Step 1: Write the failing tests** in `tests/server.rs`. The fake app's preview answers 2 items with `needs_yes: true`, unless the plan is `[edit.undo]`, which answers `needs_yes: false`.
@@ -822,7 +875,10 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `modern_elicitation_round_trip`:
     - with per-request `clientCapabilities.elicitation: {}`, `change` returns `input_required`;
     - the retry with `inputResponses.yes = {action: "accept", content: {allow: true}}` and the `requestState` applies;
-    - a second retry with the same `requestState` is `isError: true` with "This question expired; call change again.", and no second apply.
+    - a second retry with the same `requestState` is `isError: true` with "This question expired; call change again.", and no second apply;
+    - a retry whose `arguments` carry `inputResponses` and `requestState` (as the model would write them), with no `params.inputResponses`, applies nothing;
+    - a retry with the right `requestState` but other `commands` is `isError: true`, and applies nothing.
+  - `an_unanswered_question_is_a_no`: through the library, a `Server::with_ask_timeout(<support>, 50 ms)` that emitted an `elicitation/create` answers "The composer did not answer. Nothing changed." from `tick()` once the time is up. No apply reaches the app, and a `tools/list` queued meanwhile is then answered.
   - `without_elicitation_the_model_gets_the_list_and_a_token`:
     - with no elicitation capability, `change` answers the items as "- <thing>: <change>" lines, then "Show this list to the composer and ask for a yes. Then call apply_change with token <token> and the same commands.";
     - `apply_change` with that token sends apply;
@@ -847,8 +903,8 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `app/Sources/VizDAW/VizDAWApp.swift` (the Settings tab, `LiveCoProducerSink`, start at launch when on, stop at quit);
   - `app/Sources/VizDAW/AppCommands.swift` (File › Open Co-Producer Copy…);
   - `app/Sources/VizDAWAppModel/DocumentStore.swift` (`openCopy(path:)`, `open(path:)` routes copies);
-  - `app/Sources/VizDAWAppModel/ControlCommands.swift` (`settings.co_producer` and `file.open_copy` in `handled` and dispatch; the `notAllowed` code);
-  - `app/Sources/VizDAWAppModel/AppIcon.swift` (`settingsCoProducer`, SF Symbol `sparkles`);
+  - `app/Sources/VizDAWAppModel/ControlCommands.swift` (the real dispatch of `settings.co_producer` and `file.open_copy`, replacing Task 3's temporary one; the `notAllowed` code);
+  - `app/Sources/VizDAWAppModel/AppIcon.swift` (`settingsCoProducer`: role `.controlLink`, source `.glyph`, legacy `symbol` "sparkles"; every case draws a SymbioticAudio icon, and `AppIconTests` refuses SF Symbols);
   - `app/Tests/VizDAWAppModelTests/FakeSession.swift` (Task 4's methods, scripted);
   - `scripts/build-ffi.sh` (build `-p vizdaw-mcp`, copy it to `target/ffi/vizdaw-mcp`);
   - `scripts/make-app.sh` (copy it to `Contents/MacOS/vizdaw-mcp`, signed with the app as `vizdaw-scan` is).
@@ -870,7 +926,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
       public private(set) var problem: String?  // "Co-Producer could not start: <reason>"
       public init(defaults: UserDefaults, supportDir: URL, sink: CoProducerSink)  // starts when on
       public func setOn(_ on: Bool)              // persists, starts or stops (Ruling 10)
-      public var status: String                  // Ruling 10's three sentences
+      public var status: String                  // Ruling 10's on or off sentence
   }
   @MainActor public enum CoProducerCommands {
       public static let setting = "settings.co_producer"
@@ -901,7 +957,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - `aFailedStartSaysWhyAndStaysOff`: the sink returns "the folder belongs to another user". `on` is false, `problem` is "Co-Producer could not start: the folder belongs to another user", and `status` is the off sentence.
     - `aDamagedSettingReadsAsOff`: a String under `key` reads as off.
   - `CoProducerCommandsTests`:
-    - `commandsRunBetweenEnterAndLeave`: `runCommand track.new_audio` makes the fake record `enter <stamp>`, `newTrack audio`, `leave`, in that order. A read command (`transport.stop`) records no enter.
+    - `commandsRunBetweenEnterAndLeave`: `runCommand track.new_audio` makes the fake record `enter <stamp>`, `newTrack audio`, `leave`, in that order. A read command (`transport.stop`) records no enter. A command that fails after enter (the fake's `newTrack` throws) still records `leave`.
     - `noRequestNoChange`: the fake's enter throws "Open a request first (begin_request).". The command is not run, and the outcome is `.failed` with that text.
     - `applyRunsThePlanAndReportsEveryCommand`:
       - `coProducerApply` with a plan of `track.rename` then `track.delete` makes the fake record `take`, enter, rename, leave, enter, delete, leave;
@@ -919,6 +975,8 @@ These are the five failure modes a composer is most likely to hit, most likely f
 - [ ] **Step 2: Run** `scripts/build-ffi.sh && scripts/swift.sh test --filter 'CoProducer'`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - **The channel.** `ControlChannel` keeps `coProducer: ControlServer?` beside `server`. `pump` takes calls from both. `execute(call, server, coProducer:)` sends Co-Producer calls through `CoProducerCommands.run`; their `.opened`, `.job` and `.pending` outcomes use the same deferred machinery, with `Deferred.server`. `active` still means the developer server only.
+  - **Tokens per server.** Each server numbers its calls from 1, so a deferred answer checks and answers through its own `Deferred.server`, never the developer `server`.
+  - **Jobs.** A deferred job answer for a Co-Producer call takes a failure alert the job left on its document as the call's failure, and clears it (Ruling 13).
   - **The idle check.** `pump` calls `CoProducerCommands.tidy(appStore, all: false)` every 100 ticks (5 s).
   - **`LiveCoProducerSink.start`:**
     1. checks that the support folder's owner is this user, from `FileManager.attributesOfItem`, and sets its mode to 0700;
@@ -929,7 +987,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - **The menu item** "Open Co-Producer Copy…" sits under File › Open Recent's group. It is enabled when the front document has a path and `coProducerCopiesSize().count > 0`. Its `NSOpenPanel` has `directoryURL` set to `<package>/Co-Producer/Copies`, `allowedContentTypes` set to the VizDAW package type, and `treatsFilePackagesAsDirectories = false`. It then calls `appStore.openCopy(path:)`.
   - **The scripts.** `build-ffi.sh` and `make-app.sh` gain `vizdaw-mcp`.
 - [ ] **Step 4: Run** the Step 2 command, then `scripts/swift.sh test`. Expected: PASS.
-- [ ] **Step 5: End-of-task checks**, including `scripts/make-app.sh`. Check that `dist/VizDAW.app/Contents/MacOS/vizdaw-mcp` exists and answers `ping` (`printf '{"jsonrpc":"2.0","id":1,"method":"ping"}\n' | dist/VizDAW.app/Contents/MacOS/vizdaw-mcp` prints `{"jsonrpc":"2.0","id":1,"result":{}}`). **Commit** `feat(app): the Co-Producer switch, its socket and requests in the app, and opening a saved copy (plan 8a Task 7)`.
+- [ ] **Step 5: End-of-task checks**, including `scripts/make-app.sh`. Check that `dist/VizDAW.app/Contents/MacOS/vizdaw-mcp` exists and answers `ping` (`printf '{"jsonrpc":"2.0","id":1,"method":"ping"}\n' | dist/VizDAW.app/Contents/MacOS/vizdaw-mcp` prints `{"id":1,"jsonrpc":"2.0","result":{}}`: the workspace's `serde_json` has no `preserve_order`, so keys come out sorted). **Commit** `feat(app): the Co-Producer switch, its socket and requests in the app, and opening a saved copy (plan 8a Task 7)`.
 
 ### Task 8: README checks, the e2e, the backlog and the gates
 
@@ -968,9 +1026,10 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - `command.run media.compact`;
     - `command.run track.delete` with explicit ids;
     - `file.export_midi` with an existing path.
-  - **A second MCP process with elicitation.** It sends `initialize` with `elicitation: {}`. `change` with `track.delete` emits `elicitation/create`:
+  - **A second MCP process with elicitation.** It sends `initialize` with `elicitation: {}`, then `begin_request {name: "delete the kick"}`. `change` with `track.delete` emits `elicitation/create`:
     - answering `decline` leaves the track;
-    - a second `change` answered `accept`/`allow: true` deletes it in one step. Its label is "Co-Producer: <the open request's title>".
+    - a second `change` answered `accept`/`allow: true` deletes it in one step;
+    - `end_request`. The undo label is "Co-Producer: Delete the Kick".
   - **Undo from VizDAW.** Over the developer channel, `edit.undo` brings the track back.
   - **Off again.** `settings.co_producer {on: false}`. The next MCP tool call answers the off sentence, and the socket file is gone.
 - [ ] **Step 2: Write the README steps** in `app/README.md`, under a heading "Plan 8a, Co-Producer safety and the server:". Each step states what to do and what is seen, and says "track":
@@ -990,7 +1049,8 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - **New rows:**
     - "Compact Media offers to remove old Co-Producer copies, with sizes (spec §6.7)" — 8b;
     - "Move an untitled project's Co-Producer copies into its package on first save; until then they need its scratch media" — 8b;
-    - "A job that ends after its Co-Producer call (a bounce placed on new tracks) lands outside the request's undo step" — 8c;
+    - "A job that ends after its Co-Producer call (`media.import`, `file.import_midi`, a bounce or folder export placed on new tracks) lands outside the request's undo step" — 8c;
+    - "Exports into several files at once through Co-Producer (`file.export_midi_clip` for several tracks into a folder)" — 8c, with the dated folders;
     - "Previews for the remaining change and remove commands" — 8c, 8d and 8e;
     - "A runtime check of request names against the banned-name list, if a way is found that keeps the list out of shipped code";
     - "Recheck which MCP hosts support elicitation and the 2026-07-28 revision before release";
@@ -1046,9 +1106,11 @@ These are the five failure modes a composer is most likely to hit, most likely f
 2. **Steps.** Every test step names its tests and assertions with the plan's values: ids, sentences, counts, paths and modes. Code steps give signatures and point to the ruling that fixes the behaviour. Tool descriptions, elicitation text and Settings copy are written out because the spec leaves them to the plan (§11.3, §11.12).
 3. **Type consistency.** These names are spelled the same in every task:
    - `Class`, `Role`, `Planned`, `PREVIEWABLE`, `MAX_PLAN`;
-   - `co_producer::admit`, `check_output`, `effective_class`, `canonical`;
+   - `co_producer::admit`, `check_output`, `output`, `Output`, `effective_class`, `canonical`;
    - `ErrorCode::NotAllowed`;
-   - `RequestInfo`, `request_label`, `begin_request`, `end_request`, `set_acting`;
+   - `RequestInfo`, `request_label`, `begin_request`, `end_request`, `set_acting`, `acting_refusal`;
+   - `retention::Unread`;
+   - `Server::handle_line`, `too_long`, `tick`, `with_ask_timeout`;
    - `COPIES_DIR`, `write_copy`, `load_copy`, `copy_parent`, `list_copies`;
    - `diff::describe`, `ChangeItem`;
    - `co_producer_begin`, `co_producer_end`, `co_producer_enter`, `co_producer_leave`, `co_producer_idle`, `co_producer_preview`, `co_producer_take`, `co_producer_request`, `co_producer_copies_size`, `open_copy`;
