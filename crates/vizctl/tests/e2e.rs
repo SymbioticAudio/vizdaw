@@ -4697,3 +4697,112 @@ fn multiq_install_and_switch_over_the_channel() {
     assert!(target.exists());
     app.quit();
 }
+
+/// Plan 6g-2 README steps 319, 321 and 322 through the channel: the
+/// default-EQ command answers and refuses, and New Bus from a strip is one
+/// undo step that takes the bus and its send together, and back with redo.
+/// The app launches with `--no-scan`, so which EQ lands is covered by
+/// core-ffi's tests and the README, not here.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn default_eq_and_new_bus_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+
+    // The picker's command: Multi-Q answers, an unknown plug-in is refused.
+    let r = app.call(
+        "command.run",
+        json!({"id": "plugins.default_eq", "params": {"plugin": "multi-q"}}),
+    );
+    assert_eq!(r["status"], "default EQ Multi-Q", "{r}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "plugins.default_eq", "params": {"plugin": "clap:vizdaw.e2e.none"}}),
+    );
+    assert_eq!(e.code, ErrorCode::UnknownId, "{e:?}");
+
+    // A new project with one audio track.
+    let made = app.call("command.run", json!({"id": "file.new"}));
+    let window = made["window"].clone();
+    wait_for_label(&mut app, &window, "Track Headers");
+    app.call(
+        "command.run",
+        json!({"id": "track.new_audio", "window": window}),
+    );
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    let strips = m["strips"].as_array().unwrap();
+    let audio = strips
+        .iter()
+        .find(|s| s["kind_colour"] == "channel")
+        .unwrap_or_else(|| panic!("no audio strip in {m}"))
+        .clone();
+    let master = strips
+        .iter()
+        .find(|s| s["kind_colour"] == "master")
+        .unwrap_or_else(|| panic!("no master in {m}"))
+        .clone();
+    let buses = |m: &Value| {
+        m["strips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["kind_colour"] == "bus")
+            .count()
+    };
+    let buses_before = buses(&m);
+    let audio_name = audio["name"].as_str().unwrap().to_string();
+
+    // New Bus from the strip: "Bus 1", one step, a send to it.
+    let r = app.call(
+        "command.run",
+        json!({"id": "mixer.new_bus", "params": {"strip": audio["id"]}, "window": window}),
+    );
+    assert_eq!(r["status"], "Bus 1", "{r}");
+    assert_eq!(r["undo"], "New Bus", "{r}");
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    let bus = strip_named(&m, "Bus 1");
+    let from = strip_named(&m, &audio_name);
+    assert!(
+        from["sends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["target"] == bus["id"]),
+        "{from}"
+    );
+
+    // One Undo removes the bus and the send; Redo brings both back.
+    app.call("command.run", json!({"id": "edit.undo", "window": window}));
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert_eq!(buses(&m), buses_before, "the bus is gone: {m}");
+    let from = strip_named(&m, &audio_name);
+    assert!(
+        from["sends"].as_array().unwrap().is_empty(),
+        "the send is gone: {from}"
+    );
+    app.call("command.run", json!({"id": "edit.redo", "window": window}));
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    let bus = strip_named(&m, "Bus 1");
+    let from = strip_named(&m, &audio_name);
+    assert!(
+        from["sends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["target"] == bus["id"]),
+        "the send is back: {from}"
+    );
+
+    // Without a strip: a bus with no send, named "Bus 2". The master is refused.
+    let r = app.call(
+        "command.run",
+        json!({"id": "mixer.new_bus", "params": {}, "window": window}),
+    );
+    assert_eq!(r["status"], "Bus 2", "{r}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "mixer.new_bus", "params": {"strip": master["id"]}, "window": window}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    app.quit();
+}

@@ -2733,7 +2733,7 @@ Plan 6g, Multi-Q (the bundled EQ):
      "Multi-Q", and clicking it opens Multi-Q's window, flat. Track › New
      Instrument Track (the built-in synth, one strip per project) does the
      same. A second audio or instrument track shares that strip and adds no
-     EQ. Add Bus: the bus shows "EQ ＋".
+     EQ. Add Bus: the bus shows "Multi-Q" too (plan 6g-2).
 312. Edit › Undo once: the track and its EQ go together.
 313. Settings › Plug-ins, turn "Put an EQ on new channels" off. In a new
      project, the first audio track shows "EQ ＋". Turn it back on.
@@ -2748,6 +2748,31 @@ Plan 6g, Multi-Q (the bundled EQ):
      (open its window). The report lists anything left out.
 317. Export the project as DAWproject and import it back: the Multi-Q EQ and
      its settings are unchanged.
+
+Plan 6g-2, the chosen default EQ and New Bus:
+318. File › New: the master's EQ slot shows "Multi-Q". Open a project saved
+     before this build: its master and buses are as they were, and the
+     project is not marked edited.
+319. Settings › Plug-ins: "EQ for new channels" lists "Multi-Q (built in)"
+     and your installed effects. Choose another EQ. A new audio track, a new
+     bus and File › New's master show it.
+320. Plugin Manager: disable the EQ you chose. A new track gets Multi-Q, and
+     the status line says "<name> is not available, so new channels get
+     Multi-Q."; Settings › Plug-ins says the same under the picker. Enable
+     it again, and choose Multi-Q again.
+321. In the mixer, on an audio track's strip with no sends, click ＋ in the
+     send area. A bus "Bus N" appears with Multi-Q in its EQ slot, and the
+     strip has a send to it. Edit › Undo once: the bus and the send go
+     together. Redo.
+322. On a strip that already has a send, open its Send menu: the buses, then
+     "New Bus". Choose it: a second send to a new bus.
+323. Show the mixer in the arrange window and repeat step 321 on a strip
+     there: the same.
+324. With Settings › Plug-ins' switch off, New Bus makes a bus with "EQ ＋".
+     Turn it back on.
+325. Look at a narrow channel strip, in the arrange window and in the mixer:
+     the ＋ and "New Bus" sit inside the strip, and nothing is clipped or
+     overlaps the fader, the pan or the next strip.
 
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
