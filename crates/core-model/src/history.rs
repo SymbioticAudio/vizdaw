@@ -57,6 +57,8 @@ struct Txn {
 /// one until it ends, and transactions (drags, edits) may open inside it.
 #[derive(Debug, Clone)]
 struct Group {
+    /// What opened it.
+    kind: GroupKind,
     /// `past.len()` when it opened: undo inside it stops there.
     start: usize,
     /// The redo stack when it opened (restored when it made no step).
@@ -67,6 +69,110 @@ struct Group {
     redo_floor: usize,
     /// Whether any step was made inside it.
     executed: bool,
+}
+
+/// What a [`Group`] is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupKind {
+    /// A recording pass ([`History::begin_group`]).
+    Record,
+    /// Co-Producer's steps in a request (plan 8a Ruling 3): opened by its
+    /// first acting step, ended by any hand action, undo, redo or the end
+    /// of the request.
+    Request,
+}
+
+/// The open Co-Producer request (plan 8a Ruling 3).
+#[derive(Debug, Clone)]
+struct Request {
+    name: String,
+    title: String,
+    label: String,
+    /// An earlier group of it made a step.
+    continued: bool,
+}
+
+/// What a request is (8a Ruling 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestInfo {
+    /// The name as given, trimmed.
+    pub name: String,
+    /// Its title ([`request_label`]).
+    pub title: String,
+    /// "Co-Producer: <title>".
+    pub label: String,
+    /// A group of it is open now.
+    pub group_open: bool,
+    /// An earlier group of it made a step: the next is "(continued)".
+    pub continued: bool,
+}
+
+/// Request names are at most this many characters, after trimming.
+const MAX_REQUEST_NAME: usize = 200;
+/// Titles longer than this are cut to one less plus "…".
+const MAX_REQUEST_TITLE: usize = 27;
+/// Words kept lower case unless first.
+const SMALL_WORDS: [&str; 15] = [
+    "a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on", "or", "the", "to", "with",
+];
+
+/// Characters a request name may not hold: controls, bidi controls and
+/// marks, and line and paragraph separators (8a Ruling 4, Ruling P11).
+fn refused_in_name(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
+
+/// A request's title and undo label (8a Ruling 4): runs of whitespace
+/// become one space, each word is capitalised but small words after the
+/// first, and a title over 27 characters is cut to 26 plus "…", so the
+/// label "Co-Producer: <title>" is at most 40 characters.
+/// `ModelError::Invalid` for a name that is empty or over 200 characters
+/// after trimming, or that holds a refused character.
+pub fn request_label(name: &str) -> Result<(String, String)> {
+    if name.chars().any(refused_in_name) {
+        return Err(ModelError::invalid(
+            "A request name cannot hold control characters, direction marks or line breaks.",
+        ));
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ModelError::invalid("Name the request."));
+    }
+    if trimmed.chars().count() > MAX_REQUEST_NAME {
+        return Err(ModelError::invalid(
+            "A request name is at most 200 characters.",
+        ));
+    }
+    let words: Vec<String> = trimmed
+        .split_whitespace()
+        .enumerate()
+        .map(|(i, w)| {
+            if i > 0 && SMALL_WORDS.contains(&w) {
+                return w.to_string();
+            }
+            let mut cs = w.chars();
+            cs.next()
+                .map(|c| c.to_uppercase().chain(cs).collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    let mut title = words.join(" ");
+    if title.chars().count() > MAX_REQUEST_TITLE {
+        title = title.chars().take(MAX_REQUEST_TITLE - 1).collect();
+        title.push('…');
+    }
+    let label = format!("Co-Producer: {title}");
+    Ok((title, label))
 }
 
 /// Undo/redo stacks plus the selection and the last modification.
@@ -87,6 +193,10 @@ pub struct History {
     /// A line added to the warnings of each step whose fill put in at least
     /// one slot (plan 6g-2 Ruling 4); `None`: none.
     new_strip_eq_note: Option<String>,
+    /// The open Co-Producer request (8a Ruling 3).
+    request: Option<Request>,
+    /// Whether steps now are Co-Producer's ([`History::set_acting`]).
+    acting: bool,
 }
 
 impl History {
@@ -108,6 +218,8 @@ impl History {
             next_serial: 1,
             new_strip_eq: None,
             new_strip_eq_note: None,
+            request: None,
+            acting: false,
         }
     }
 
@@ -251,9 +363,19 @@ impl History {
         self.txn.is_some()
     }
 
-    /// Whether a group is open.
+    /// Whether a recording group is open. A Co-Producer request's group
+    /// does not count: any hand action ends it first.
     pub fn in_group(&self) -> bool {
-        self.group.is_some()
+        self.group
+            .as_ref()
+            .is_some_and(|g| g.kind == GroupKind::Record)
+    }
+
+    /// Whether a Co-Producer request's group is open.
+    fn request_group_open(&self) -> bool {
+        self.group
+            .as_ref()
+            .is_some_and(|g| g.kind == GroupKind::Request)
     }
 
     fn trim(&mut self) {
@@ -276,6 +398,9 @@ impl History {
     /// least one slot is filled, the note
     /// ([`History::set_new_strip_eq_note`]) is added to the warnings.
     pub fn execute(&mut self, cmd: &Command, filter: &ViewFilter) -> Result<Report> {
+        if !self.acting {
+            self.before_hand_action();
+        }
         let mut applied = apply_in(
             &self.present.doc,
             Context {
@@ -302,6 +427,9 @@ impl History {
         // A command that changes nothing (e.g. a modify of an empty
         // selection) is not an undo step and keeps the redo stack.
         if !selection_only && applied.doc != self.present.doc {
+            if self.txn.is_none() {
+                self.open_request_group();
+            }
             let serial = self.next_serial;
             self.next_serial = self.next_serial.saturating_add(1);
             let next = Version {
@@ -348,6 +476,11 @@ impl History {
         filter: &ViewFilter,
         step: u64,
     ) -> Result<Option<Report>> {
+        // Co-Producer never amends a step: that could be the composer's.
+        if self.acting {
+            return Ok(None);
+        }
+        self.before_hand_action();
         if self.txn.is_some()
             || self.group.is_some()
             || self.past.is_empty()
@@ -421,8 +554,10 @@ impl History {
     }
 
     /// Steps back one version. Inside a transaction, only the transaction's
-    /// own steps can be undone.
+    /// own steps can be undone. An open request group ends first, whoever
+    /// undoes (8a Ruling 3).
     pub fn undo(&mut self) -> Result<()> {
+        self.before_hand_action();
         if self.past.len() <= self.undo_floor() {
             return Err(ModelError::invalid("nothing to undo"));
         }
@@ -436,8 +571,10 @@ impl History {
     }
 
     /// Steps forward one version. Refused while a transaction is open,
-    /// and inside a group for steps undone before it opened.
+    /// and inside a group for steps undone before it opened. An open
+    /// request group ends first, whoever redoes (8a Ruling 3).
     pub fn redo(&mut self) -> Result<()> {
+        self.before_hand_action();
         if !self.can_redo() {
             return Err(ModelError::invalid("nothing to redo"));
         }
@@ -455,6 +592,11 @@ impl History {
     pub fn begin(&mut self, label: impl Into<String>) -> Result<()> {
         if self.txn.is_some() {
             return Err(ModelError::invalid("a transaction is already open"));
+        }
+        if self.acting {
+            self.open_request_group();
+        } else {
+            self.before_hand_action();
         }
         self.txn = Some(Txn {
             label: label.into(),
@@ -507,6 +649,9 @@ impl History {
     /// [`History::end_group`] becomes one. Refused while a group or a
     /// transaction is open.
     pub fn begin_group(&mut self) -> Result<()> {
+        if !self.acting {
+            self.before_hand_action();
+        }
         if self.group.is_some() {
             return Err(ModelError::invalid("a group is already open"));
         }
@@ -514,6 +659,7 @@ impl History {
             return Err(ModelError::invalid("finish the open edit first"));
         }
         self.group = Some(Group {
+            kind: GroupKind::Record,
             start: self.past.len(),
             base_future: self.future.clone(),
             redo_floor: self.future.len(),
@@ -530,13 +676,25 @@ impl History {
         if self.txn.is_some() {
             return Err(ModelError::invalid("finish the open edit first"));
         }
+        if !self.in_group() {
+            return Err(ModelError::invalid("no open group"));
+        }
         let g = self
             .group
             .take()
             .ok_or_else(|| ModelError::invalid("no open group"))?;
-        if self.past.len() > g.start {
+        self.close_group(g, label.into());
+        Ok(())
+    }
+
+    /// Makes the steps of the group `g` (already taken) one step named
+    /// `label`; one that made none adds nothing and keeps the redo stack
+    /// it found. Whether it made a step.
+    fn close_group(&mut self, g: Group, label: String) -> bool {
+        let made = self.past.len() > g.start;
+        if made {
             self.past.truncate(g.start + 1);
-            self.present.label = label.into();
+            self.present.label = label;
             self.present.at = Timestamp::now();
         }
         // Versions undone inside the group are intermediate states.
@@ -546,7 +704,132 @@ impl History {
             g.base_future
         };
         self.trim();
+        made
+    }
+
+    /// Opens a request group for an acting step, when a request is open
+    /// and no group or transaction is (8a Ruling 3: the group opens lazily).
+    fn open_request_group(&mut self) {
+        if !self.acting || self.request.is_none() || self.group.is_some() || self.txn.is_some() {
+            return;
+        }
+        self.group = Some(Group {
+            kind: GroupKind::Request,
+            start: self.past.len(),
+            base_future: self.future.clone(),
+            redo_floor: self.future.len(),
+            executed: false,
+        });
+    }
+
+    /// Ends an open request group as one step; its label, if it made one.
+    /// Does nothing while a transaction is open (the step would cut it).
+    fn close_request_group(&mut self) -> Option<String> {
+        if self.txn.is_some() || !self.request_group_open() {
+            return None;
+        }
+        let g = self.group.take()?;
+        let label = match &self.request {
+            Some(r) if r.continued => format!("{} (continued)", r.label),
+            Some(r) => r.label.clone(),
+            None => "Co-Producer".to_string(),
+        };
+        if !self.close_group(g, label.clone()) {
+            return None;
+        }
+        if let Some(r) = self.request.as_mut() {
+            r.continued = true;
+        }
+        Some(label)
+    }
+
+    /// A hand action (or any undo or redo) is about to run: an open
+    /// request group ends first, so it holds only Co-Producer's steps and
+    /// undoing it never removes the composer's edits.
+    fn before_hand_action(&mut self) {
+        let _ = self.close_request_group();
+    }
+
+    /// Opens a Co-Producer request named `name` ([`request_label`]).
+    /// Refused while one is open.
+    pub fn begin_request(&mut self, name: &str) -> Result<RequestInfo> {
+        if let Some(r) = &self.request {
+            return Err(ModelError::invalid(format!(
+                "Co-Producer request \"{}\" is still open.",
+                r.label
+            )));
+        }
+        let (title, label) = request_label(name)?;
+        self.request = Some(Request {
+            name: name.trim().to_string(),
+            title,
+            label,
+            continued: false,
+        });
+        self.request()
+            .ok_or_else(|| ModelError::invalid("no open request"))
+    }
+
+    /// Why acting cannot start now: "Finish the drag first." (a hand
+    /// transaction is open) or "Stop recording first." (a recording group
+    /// is open); `None` when it can.
+    pub fn acting_refusal(&self) -> Option<&'static str> {
+        if self.txn.is_some() {
+            Some("Finish the drag first.")
+        } else if self.in_group() {
+            Some("Stop recording first.")
+        } else {
+            None
+        }
+    }
+
+    /// Ends the request, its open group as one step; the label of that
+    /// step, if one was made. Refused when no request is open, and while a
+    /// transaction is open.
+    pub fn end_request(&mut self) -> Result<Option<String>> {
+        if self.request.is_none() {
+            return Err(ModelError::invalid("No Co-Producer request is open."));
+        }
+        if self.txn.is_some() && self.request_group_open() {
+            return Err(ModelError::invalid("Finish the drag first."));
+        }
+        let label = self.close_request_group();
+        self.request = None;
+        Ok(label)
+    }
+
+    /// The open request, if any.
+    pub fn request(&self) -> Option<RequestInfo> {
+        let r = self.request.as_ref()?;
+        Some(RequestInfo {
+            name: r.name.clone(),
+            title: r.title.clone(),
+            label: r.label.clone(),
+            group_open: self.request_group_open(),
+            continued: r.continued,
+        })
+    }
+
+    /// Whether the steps that follow are Co-Producer's (8a Ruling 3).
+    /// Turning it on is `ModelError::Invalid` with
+    /// [`History::acting_refusal`]'s message during a hand transaction or
+    /// a recording group (the crate has no Busy variant; Task 4 maps this
+    /// to `VizError::Busy`). Turning it off never fails, and leaves an
+    /// open request group open until a hand action ends it.
+    pub fn set_acting(&mut self, on: bool) -> Result<()> {
+        if on
+            && !self.acting
+            && let Some(why) = self.acting_refusal()
+        {
+            return Err(ModelError::invalid(why));
+        }
+        self.acting = on;
         Ok(())
+    }
+
+    /// Whether steps now are Co-Producer's ([`History::set_acting`]).
+    pub fn acting(&self) -> bool {
+        self.acting
     }
 
     /// Closes the transaction and restores the state from before it.
