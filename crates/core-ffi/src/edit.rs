@@ -563,6 +563,31 @@ pub fn retries_input_cmd(cmd: &core_model::command::Command) -> bool {
     )
 }
 
+/// Whether `cmd` waits while a session records, finishes a pass or has
+/// one to apply: an arm or input change ([`retries_input`]), or choosing,
+/// renaming or deleting a take (plan 5c-2 takes Task 2), so the app and
+/// the control channel share one refusal.
+pub fn waits_for_recording(cmd: &EditCommand) -> bool {
+    match cmd {
+        EditCommand::Lane { edit } => waits_for_recording_cmd(&Command::Lane(lane_cmd(edit))),
+        _ => false,
+    }
+}
+
+/// [`waits_for_recording`] for the model's command, once converted.
+pub fn waits_for_recording_cmd(cmd: &core_model::command::Command) -> bool {
+    use core_model::command::{Command, lane::LaneCmd};
+    retries_input_cmd(cmd)
+        || matches!(
+            cmd,
+            Command::Lane(
+                LaneCmd::SetActiveTake { .. }
+                    | LaneCmd::RenameTake { .. }
+                    | LaneCmd::RemoveTake { .. }
+            )
+        )
+}
+
 /// What a lane records (mirrors `core_model::lane::LaneInput`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum LaneInputRow {

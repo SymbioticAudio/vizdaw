@@ -547,37 +547,44 @@ public final class ArrangementView: EditorCanvas {
         }
         guard case .block(let b) = blockHit(p) else { return nil }
         if !editor.isSelected(b.block) { editor.selectBlock(b.block, in: b.lane, adding: false) }
+        return Self.blockMenu(document: document, block: b.block, key: b.lane)
+    }
+
+    /// A block's menu: a reference's commands, or the detail editors and
+    /// Make Reference; Takes ▸ for its track (plan 5c-2 takes Ruling 5);
+    /// then Delete.
+    static func blockMenu(document: DocumentModel, block: BlockRow, key: LaneKey) -> NSMenu {
+        let editor = document.editor
         let menu = NSMenu()
         func add(_ title: String, _ run: @escaping @MainActor () -> Void) {
             menu.addItem(MenuAction(title: title, run: run).item(checked: false))
         }
-        let block = b.block
-        let key = b.lane
         if block.kind == .reference, let event = block.events.first {
-            add("Open Sequence") { [weak self] in self?.editor.openReference(block) }
-            add("Parameters…") { [weak self] in self?.editor.editReference(block, in: key) }
-            add("Make Private Copy") { [weak self] in self?.editor.makePrivateCopy(event) }
-            add("Flatten") { [weak self] in self?.editor.flatten(event) }
+            add("Open Sequence") { editor.openReference(block) }
+            add("Parameters…") { editor.editReference(block, in: key) }
+            add("Make Private Copy") { editor.makePrivateCopy(event) }
+            add("Flatten") { editor.flatten(event) }
             let sub = NSMenu()
             for s in EditorModel.rePointTargets(excluding: block.refSeq, among: document.snapshot.sequences) {
-                sub.addItem(
-                    MenuAction(title: s.name) { [weak self] in self?.editor.rePoint(event, to: s.id) }
-                        .item(checked: false))
+                sub.addItem(MenuAction(title: s.name) { editor.rePoint(event, to: s.id) }.item(checked: false))
             }
             let rePoint = NSMenuItem(title: "Re-point To", action: nil, keyEquivalent: "")
             rePoint.submenu = sub
             menu.addItem(rePoint)
         } else {
             for kind in DetailEditorKind.allCases {
-                add("Open in \(kind.title)") { [weak self] in
-                    self?.editor.openDetail(
+                add("Open in \(kind.title)") {
+                    editor.openDetail(
                         .block(seq: key.seq, lane: key.lane, start: block.start, end: block.end), kind: kind)
                 }
             }
-            add("Make Reference") { [weak self] in self?.editor.makeReference(from: block, in: key) }
+            add("Make Reference") { editor.makeReference(from: block, in: key) }
+        }
+        if let lane = TakeCommands.track(seq: key.seq, lane: key.lane, document) {
+            menu.addItem(TakesMenu.item(document: document, seq: key.seq, lane: lane))
         }
         menu.addItem(.separator())
-        add("Delete") { [weak self] in self?.editor.edit(.event(edit: .delete(events: block.events))) }
+        add("Delete") { editor.edit(.event(edit: .delete(events: block.events))) }
         return menu
     }
 

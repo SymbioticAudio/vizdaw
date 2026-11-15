@@ -543,8 +543,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        183,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy"
+        186,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -2492,6 +2492,60 @@ fn track_commands_refuse_hostile_params() {
             ),
             "{id}"
         );
+    }
+}
+
+/// Plan 5c-2 takes Ruling 6 hostile input: the three take commands need
+/// a non-negative integer `take`, and rename a string `name`; anything
+/// else is refused by the checker before it reaches the app.
+#[test]
+fn take_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    let good = |id: &str| {
+        if id == "track.rename_take" {
+            json!({"take": 3, "name": "Verse"})
+        } else {
+            json!({"take": 3})
+        }
+    };
+    let ids = [
+        "track.choose_take",
+        "track.rename_take",
+        "track.delete_take",
+    ];
+    for id in ids {
+        let c = registry::find(id).unwrap();
+        assert_eq!(c.menu, "Track", "{id}");
+        assert!(c.document && c.dialogs.is_empty(), "{id}");
+        assert!(
+            matches!(
+                ok("command.run", run(id, good(id))),
+                Command::CommandRun { .. }
+            ),
+            "{id}"
+        );
+        let mut bad = vec![json!({})];
+        for take in [json!("3"), json!(-1), json!(1e30), json!(true)] {
+            let mut p = good(id);
+            p["take"] = take;
+            bad.push(p);
+        }
+        let mut p = good(id);
+        p.as_object_mut().unwrap().remove("take");
+        bad.push(p);
+        let mut p = good(id);
+        p["bogus"] = json!(1);
+        bad.push(p);
+        if id == "track.rename_take" {
+            bad.push(json!({"take": 3}));
+            bad.push(json!({"take": 3, "name": 5}));
+            bad.push(json!({"take": 3, "name": "x".repeat(70_000)}));
+        }
+        for params in bad {
+            let (code, message) = err("command.run", run(id, params.clone()));
+            assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+            assert!(!message.is_empty());
+        }
     }
 }
 

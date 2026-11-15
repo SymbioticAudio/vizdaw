@@ -1136,6 +1136,26 @@ const TRACK_RENAME_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `track.choose_take` and `track.delete_take` (plan 5c-2 takes Ruling 6).
+const TAKE_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param("lane", "The track (default: the selection's first track)."),
+    id_param("take", "The take (see state.get `lanes` take_list)."),
+];
+
+/// `track.rename_take` (plan 5c-2 takes Ruling 6).
+const TAKE_RENAME_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param("lane", "The track (default: the selection's first track)."),
+    id_param("take", "The take (see state.get `lanes` take_list)."),
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The take's new name.",
+    },
+];
+
 /// `record.set` (plan 5c Ruling 18): every option of the next Record.
 const RECORD_SET_PARAMS: &[ParamSpec] = &[
     ParamSpec {
@@ -2652,6 +2672,22 @@ pub const COMMANDS: &[CommandSpec] = &[
             answered_by: &["name"],
         }],
         ..cmd("track.rename", "Track", "Rename Track", None, true)
+    },
+    // Plan 5c-2 takes Ruling 6: the Takes menu's three, without dialogs.
+    CommandSpec {
+        class: Class::Change,
+        params: TAKE_PARAMS,
+        ..cmd("track.choose_take", "Track", "Choose Take", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: TAKE_RENAME_PARAMS,
+        ..cmd("track.rename_take", "Track", "Rename Take", None, true)
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: TAKE_PARAMS,
+        ..cmd("track.delete_take", "Track", "Delete Take", None, true)
     },
     CommandSpec {
         params: NEW_CHANNEL_EQ_PARAMS,

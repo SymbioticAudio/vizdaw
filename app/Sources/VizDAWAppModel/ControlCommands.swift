@@ -270,7 +270,8 @@ public enum ControlCommands {
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
-            .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(InputFxCommands.ids)
+            .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(TakeCommands.ids)
+            .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
             .union(MixerCommands.ids)
     }
@@ -512,6 +513,8 @@ public enum ControlCommands {
             return MpeCommands.run(id, args: args, doc: docID, m)
         case _ where TrackCommands.ids.contains(id):
             return TrackCommands.run(id, args: args, doc: docID, m)
+        case _ where TakeCommands.ids.contains(id):
+            return TakeCommands.run(id, args: args, doc: docID, m)
         case _ where AutomationCommands.ids.contains(id):
             return AutomationCommands.run(id, args: args, doc: docID, m)
         case _ where MixerCommands.ids.contains(id):

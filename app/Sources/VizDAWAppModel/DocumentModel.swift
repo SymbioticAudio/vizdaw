@@ -428,6 +428,10 @@ public final class DocumentModel {
     @ObservationIgnored public var beginTrackRename: (@MainActor (UInt64, UInt64) -> Bool)?
     /// The header that installed `beginTrackRename`: only it clears it.
     @ObservationIgnored public weak var trackRenameOwner: AnyObject?
+    /// Asks for a take's new name, given its `current` one; nil when
+    /// cancelled (plan 5c-2 takes Ruling 5). Installed by the document
+    /// window; only the Takes menu's Rename… calls it, never the channel.
+    @ObservationIgnored public var askTakeName: (@MainActor (_ current: String) -> String?)?
 
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()

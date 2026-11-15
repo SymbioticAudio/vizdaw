@@ -17,6 +17,16 @@ struct DocumentView: View {
             .modifier(DocumentSheets(model: model, docID: docID))
             .modifier(InterchangeSheets(model: model, docID: docID))
             .modifier(DocumentAlerts(model: model))
+            // The Takes menu's Rename… asks here (plan 5c-2 takes Ruling 5);
+            // the header installs its own rename field for Rename Track.
+            .onAppear { model.askTakeName = Self.askTakeName }
+    }
+
+    /// The Rename Take question; nil when cancelled.
+    static func askTakeName(_ current: String) -> String? {
+        TextPanel.run(
+            title: "Rename Take", message: "A new name for “\(current)”:", initial: current, ok: "Rename",
+            label: "Take name")
     }
 }
 

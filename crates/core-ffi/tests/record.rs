@@ -2002,6 +2002,121 @@ fn arming_while_a_pass_waits_behind_an_open_edit_is_busy() {
     s.close().unwrap();
 }
 
+/// Plan 5c-2 takes Task 2 (Task 1 review carry): choosing, renaming and
+/// deleting a take are `Busy` [`RECORDING_LANES`] in Rust while this
+/// session records, while it finishes, and while its pass waits to apply,
+/// through `edit`, `edit_all` and a gesture alike, and change nothing;
+/// afterwards they apply.
+#[test]
+fn take_edits_wait_while_recording_finishing_or_pending() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let lane = |s: &Session| {
+        s.lanes(d.seq.0)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.id == d.src.0)
+            .unwrap()
+    };
+    s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::AddTake {
+                seq: d.seq.0,
+                lane: d.src.0,
+                name: "Take 2".into(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let row = lane(&s);
+    let (first, second) = (row.takes[0].id, row.takes[1].id);
+    let take_edits = || {
+        [
+            vizdaw_ffi::LaneEdit::SetActiveTake {
+                seq: d.seq.0,
+                lane: d.src.0,
+                take: first,
+            },
+            vizdaw_ffi::LaneEdit::RenameTake {
+                seq: d.seq.0,
+                lane: d.src.0,
+                take: first,
+                name: "Verse".into(),
+            },
+            vizdaw_ffi::LaneEdit::RemoveTake {
+                seq: d.seq.0,
+                lane: d.src.0,
+                take: second,
+            },
+        ]
+        .map(|edit| vizdaw_ffi::EditCommand::Lane { edit })
+    };
+    let lanes_busy = |r: Result<vizdaw_ffi::DocSnapshot, VizError>| {
+        matches!(&r, Err(VizError::Busy { message })
+            if message == vizdaw_ffi::session::RECORDING_LANES)
+    };
+    let all_busy = |s: &Session, state: &str| {
+        for cmd in take_edits() {
+            assert!(lanes_busy(s.edit(cmd.clone(), None)), "{state} {cmd:?}");
+            assert!(
+                lanes_busy(s.edit_all("Takes".into(), vec![cmd.clone()], None)),
+                "{state} {cmd:?}"
+            );
+        }
+    };
+    // Recording, with a gesture open too.
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    all_busy(&s, "recording");
+    s.begin_edit("Drag".into()).unwrap();
+    for cmd in take_edits() {
+        assert!(lanes_busy(s.edit_gesture(cmd.clone(), None)), "{cmd:?}");
+    }
+    s.abort_edit().unwrap();
+    // Finishing (held, on another thread).
+    set_hold_finish(true);
+    let stopper = {
+        let s = Arc::clone(&s);
+        std::thread::spawn(move || s.stop())
+    };
+    wait_until("the pass to be finishing", || {
+        !s.record_state().unwrap().recording
+    });
+    all_busy(&s, "finishing");
+    set_hold_finish(false);
+    stopper.join().unwrap().unwrap();
+    // Pending behind a drag.
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.begin_edit("Drag".into()).unwrap();
+    s.stop().unwrap();
+    // A plain edit meets the open drag first; the gesture meets the pass.
+    for cmd in take_edits() {
+        assert!(
+            matches!(s.edit(cmd.clone(), None), Err(VizError::Busy { .. })),
+            "pending {cmd:?}"
+        );
+        assert!(
+            lanes_busy(s.edit_gesture(cmd.clone(), None)),
+            "pending {cmd:?}"
+        );
+    }
+    s.end_edit().unwrap();
+    // Nothing changed, and now each applies.
+    assert_eq!(lane(&s).takes, row.takes);
+    assert_eq!(lane(&s).active_take_id, second);
+    for cmd in take_edits() {
+        s.edit(cmd, None).unwrap();
+    }
+    let after = lane(&s);
+    assert_eq!(after.takes.len(), 1);
+    assert_eq!(after.takes[0].name, "Verse");
+    assert_eq!(after.active_take_id, first);
+    s.close().unwrap();
+}
+
 /// Hostile input for Ruling 19: an untitled Save while recording is the
 /// usual `Io` and marks nothing; Save As stays Busy and marks nothing;
 /// `saves_after_pass` answers on a closed session.

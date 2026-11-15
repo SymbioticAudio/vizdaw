@@ -80,6 +80,8 @@ const OUTWARD: &[&str] = &[
 ];
 const CHANGE: &[&str] = &[
     "track.rename",
+    "track.choose_take",
+    "track.rename_take",
     "edit.undo",
     "edit.redo",
     "file.save",
@@ -114,6 +116,7 @@ const CHANGE: &[&str] = &[
 ];
 const REMOVE: &[&str] = &[
     "track.delete",
+    "track.delete_take",
     "region.remove_fades",
     "region.remove_crossfade",
     "drum.remove_row",
@@ -168,7 +171,7 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 183);
+    assert_eq!(COMMANDS.len(), 186);
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");

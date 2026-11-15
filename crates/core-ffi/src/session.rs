@@ -1281,7 +1281,7 @@ impl Session {
         let mut inner = lock(&self.inner);
         // Under the lock the command applies under (Ruling 18, Task 9
         // review M5).
-        if crate::edit::retries_input_cmd(&cmd) {
+        if crate::edit::waits_for_recording_cmd(&cmd) {
             records_busy(&inner)?;
         }
         let before = inner.doc().clone();
@@ -1713,14 +1713,15 @@ impl Session {
     }
 
     /// `Busy` when one of `cmds` changes which lanes record (an arm or an
-    /// input) while this session records, finishes a pass or waits to
-    /// apply one (plan 5d-1 Ruling 18, 5c carry M6); monitor changes pass.
+    /// input) or chooses, renames or deletes a take (plan 5c-2 takes Task
+    /// 2) while this session records, finishes a pass or waits to apply
+    /// one (plan 5d-1 Ruling 18, 5c carry M6); monitor changes pass.
     /// This early check refuses before any validation or gesture rewind;
     /// [`records_busy`] repeats it under the lock the command applies
     /// under, so a pass another thread starts meanwhile is seen (Task 9
     /// review M5).
     fn check_records(&self, cmds: &[crate::edit::EditCommand]) -> Result<(), VizError> {
-        if !cmds.iter().any(crate::edit::retries_input) {
+        if !cmds.iter().any(crate::edit::waits_for_recording) {
             return Ok(());
         }
         records_busy(&lock(&self.inner))
@@ -3874,7 +3875,8 @@ impl Session {
     /// edit `begin_edit` opened is in progress (a drag, a fader): joining it
     /// would merge the command into that undo step, or lose it on abort
     /// (plan 5d-1 Ruling 20). `Busy` [`RECORDING_LANES`] for an arm or
-    /// input change while recording (Ruling 18).
+    /// input change, or a take choice, rename or delete, while recording
+    /// (Ruling 18; plan 5c-2 takes Task 2).
     pub fn edit(
         &self,
         cmd: crate::edit::EditCommand,
