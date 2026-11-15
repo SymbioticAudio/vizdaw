@@ -986,9 +986,11 @@ fn records_audio_loop_takes_and_midi() {
     use core_model::tempo::{Bpm, TempoMap, TempoPoint};
     use core_model::time::Tick;
     let mut app = App::start_with(&[("VIZDAW_AUDIO_INPUT", "fake")]);
-    // One bar at 120 BPM (two seconds, so a keep or discard lands in the
-    // pass it means even on a loaded machine): "Keys" (MIDI from source
-    // "Keys" on the built-in synth) and "Mic" (fake input 1, heard never).
+    // Four bars at 120 BPM: eight seconds a pass, so a keep or discard
+    // lands in the pass it means even on a loaded machine (one bar, two
+    // seconds, was not enough on a GitHub macOS runner: a discard landed
+    // in the pass after). "Keys" (MIDI from source "Keys" on the built-in
+    // synth) and "Mic" (fake input 1, heard never).
     let mut b = Builder::new();
     let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
     let (seq, keys) = b.sequence("Take", "Keys", Some(synth)).unwrap();
@@ -1049,7 +1051,7 @@ fn records_audio_loop_takes_and_midi() {
     .unwrap();
     b.run(Command::Sequence(SequenceCmd::SetLength {
         seq,
-        length: SeqLength::Locked(Tick(4 * Q)),
+        length: SeqLength::Locked(Tick(16 * Q)),
     }))
     .unwrap();
     let path = app.launched.home.join("Rec.vizdaw");
@@ -1072,7 +1074,7 @@ fn records_audio_loop_takes_and_midi() {
         json!({"id": "transport.record", "window": w}),
     );
     wait_for_record(&mut app, &w, |r| r["recording"] == true);
-    // The sequence ends after two seconds: the pass ends by itself.
+    // The sequence ends after eight seconds: the pass ends by itself.
     wait_for_record(&mut app, &w, |r| r["recording"] == false);
     wait_for_undo(&mut app, &w, "Record");
     let m = app.call("state.get", json!({"target": "media", "window": w}));
@@ -1120,8 +1122,11 @@ fn records_audio_loop_takes_and_midi() {
         "{r}"
     );
     // Half a second into pass 3, so it is heard (past the output latency)
-    // and becomes a take; it lasts two seconds.
-    let at = r["frames"].as_u64().unwrap();
+    // and becomes a take; it lasts eight seconds. Counted from the pass's
+    // start, not from when the discard answered, so a slow answer does not
+    // push the Stop towards pass 4.
+    assert_eq!(r["pass"], 3, "{r}");
+    let at = r["pass_start_file_frame"].as_u64().unwrap();
     wait_for_record(&mut app, &w, |r| r["frames"].as_u64() >= Some(at + 24_000));
     app.call(
         "command.run",
@@ -1146,6 +1151,14 @@ fn records_audio_loop_takes_and_midi() {
         json!({"id": "transport.arm_previous", "window": w}),
     );
     assert_eq!(lane_named(&mut app, &w, "Keys")["arm"], true);
+    // From the start: the loop pass's Stop left the position wherever it
+    // landed, and the MIDI pass must not get only what is left of the
+    // sequence before it ends by itself.
+    app.call(
+        "command.run",
+        json!({"id": "transport.return_to_start", "window": w}),
+    );
+    wait_for_tick(&mut app, &w, 0);
     app.call(
         "command.run",
         json!({"id": "transport.record", "window": w}),
