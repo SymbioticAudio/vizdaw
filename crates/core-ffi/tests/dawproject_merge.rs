@@ -612,6 +612,13 @@ fn a_step_free_capture_also_refuses() {
 
 /// Review Focus 3: Merge while recording or in an open edit is Busy and
 /// keeps the hold.
+///
+/// The pass overdubs: one that hears nothing changes nothing however long
+/// it rolls. (A Replace pass clears the range it rolled over, played or
+/// not, so whether it erased "Keys"' note at tick 0, and so changed the
+/// project, hung on whether the engine had run a block before Stop.) The
+/// test waits for the transport to pass tick 0, so every run records a
+/// non-empty range.
 #[test]
 fn confirm_while_busy_keeps_the_hold() {
     let _g = serial();
@@ -622,7 +629,7 @@ fn confirm_while_busy_keeps_the_hold() {
     p.s.record(
         p.seq,
         RecordSpecRow {
-            replace: true,
+            replace: false,
             punch: None,
             looped: false,
             count_in_bars: 0,
@@ -632,8 +639,8 @@ fn confirm_while_busy_keeps_the_hold() {
     )
     .unwrap();
     let until = Instant::now() + common::wait_limit();
-    while !p.s.record_state().unwrap().recording {
-        assert!(Instant::now() < until, "recording did not start");
+    while !p.s.record_state().unwrap().recording || p.s.transport().unwrap().tick <= 0 {
+        assert!(Instant::now() < until, "recording did not roll");
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(
