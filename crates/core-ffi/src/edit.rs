@@ -447,6 +447,26 @@ pub enum LaneEdit {
         /// Take.
         take: u64,
     },
+    /// Rename a take (plan 5c-2 takes Ruling 4).
+    RenameTake {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// Take.
+        take: u64,
+        /// New name.
+        name: String,
+    },
+    /// Delete a take; the track keeps at least one (Ruling 4).
+    RemoveTake {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// Take.
+        take: u64,
+    },
     /// Set what the lane records (sub-project 5 spec §4.5).
     SetInput {
         /// Sequence.
@@ -1127,6 +1147,22 @@ fn lane_cmd(e: &LaneEdit) -> LaneCmd {
             name: name.clone(),
         },
         LaneEdit::SetActiveTake { seq, lane, take } => LaneCmd::SetActiveTake {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            take: TakeId(*take),
+        },
+        LaneEdit::RenameTake {
+            seq,
+            lane,
+            take,
+            name,
+        } => LaneCmd::RenameTake {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            take: TakeId(*take),
+            name: name.clone(),
+        },
+        LaneEdit::RemoveTake { seq, lane, take } => LaneCmd::RemoveTake {
             seq: SeqId(*seq),
             lane: LaneId(*lane),
             take: TakeId(*take),

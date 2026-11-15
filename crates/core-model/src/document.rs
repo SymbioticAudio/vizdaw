@@ -9,7 +9,7 @@ use crate::ids::{
     AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, PluginInstanceId, SeqId,
     StateBlobId, StripId, TakeId,
 };
-use crate::lane::Lane;
+use crate::lane::{Lane, Take};
 use crate::mixer::{BUILTIN_SYNTH_REF, Mixer, PluginRef, PluginSlot, derive_mixer};
 use crate::modify::ModifyTemplate;
 use crate::sequence::Sequence;
@@ -841,6 +841,29 @@ impl Document {
         let l = s.lanes.remove(i);
         self.unindex_lane(&l);
         Ok(l)
+    }
+
+    /// Removes a take and unindexes its events (plan 5c-2 takes Ruling 4).
+    /// The track's only take is refused. When the removed take was the
+    /// active one, the take before it becomes active, or the next one when
+    /// it was first.
+    pub(crate) fn remove_take(&mut self, seq: SeqId, lane: LaneId, take: TakeId) -> Result<Take> {
+        let l = self.lane_mut(seq, lane)?;
+        let i = l
+            .take_index(take)
+            .ok_or(ModelError::UnknownId(AnyId::Take(take)))?;
+        if l.takes.len() < 2 {
+            return Err(ModelError::invalid("a track keeps at least one take"));
+        }
+        let t = l.takes.remove(i);
+        if l.active_take == take {
+            let next = l.takes.get(i.saturating_sub(1)).map(|t| t.id);
+            l.active_take = next.ok_or(ModelError::UnknownId(AnyId::Take(take)))?;
+        }
+        for id in t.events.keys().map(|(_, id)| *id) {
+            self.index.remove(&id);
+        }
+        Ok(t)
     }
 
     /// Rebuilds the event index; fails on duplicate event IDs.

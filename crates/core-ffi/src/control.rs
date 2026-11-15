@@ -1482,6 +1482,9 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "events": l.midi_event_count, "regions": l.region_count,
                 "references": l.reference_count, "mute": l.mute, "solo": l.solo, "arm": l.arm,
                 "takes": l.take_count, "active_take": l.active_take,
+                "take_list": l.takes.iter().map(|t| json!({
+                    "id": t.id, "name": t.name, "active": t.id == l.active_take_id,
+                })).collect::<Vec<_>>(),
                 "input": l.input.as_ref().map(lane_input_json),
                 "monitor": monitor_name(l.monitor),
                 "input_fx": crate::input_fx::input_fx_json(&l.input_fx),

@@ -359,6 +359,17 @@ fn no_refusal_or_undo_text_says_lane() {
             lane,
             take: TakeId(0),
         },
+        LaneCmd::RenameTake {
+            seq,
+            lane,
+            take: TakeId(0),
+            name: String::new(),
+        },
+        LaneCmd::RemoveTake {
+            seq,
+            lane,
+            take: TakeId(0),
+        },
         LaneCmd::SetInput {
             seq,
             lane,
@@ -377,7 +388,7 @@ fn no_refusal_or_undo_text_says_lane() {
         },
     ]
     .map(|c| c.name());
-    assert_eq!(names.len(), 16);
+    assert_eq!(names.len(), 18);
     for n in names {
         if n.contains("Lane") {
             hits.push(format!("LaneCmd name {n:?}"));

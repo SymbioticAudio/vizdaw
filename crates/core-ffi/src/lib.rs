@@ -148,7 +148,7 @@ pub use selection::{SelectionRow, TickRange};
 pub use session::{OpenOptions, Session};
 pub use snapshot::{
     DocSnapshot, IdleUpdate, KeySlotRow, LaneRow, ParamRow, ParamValue, PluginFormatTag,
-    PluginRefRow, SeqRow, SlotRow, SlotStatus, TransportState,
+    PluginRefRow, SeqRow, SlotRow, SlotStatus, TakeRow, TransportState,
 };
 pub use step::{
     NoteValueRow, StepInputRow, StepKindRow, StepNoteRow, StepRecordRow, StepResultRow,
