@@ -26,6 +26,26 @@ extension RecordModel {
 
     public func setReplace(_ on: Bool) { document?.editor.updateLayout { $0.transport.overdub = !on } }
 
+    /// The transport bar's mode switch title (plan 5c-2 takes Ruling 7).
+    public var modeTitle: String { replaces ? "Replace" : "Overdub" }
+
+    /// The mode switch's accessibility label.
+    public var modeLabel: String { "Record mode: \(modeTitle)" }
+
+    /// The mode switch's help.
+    public static let modeHelp = "Replace removes the notes in the recorded range; Overdub keeps them (transport.overdub)"
+
+    /// "MIDI passes as takes"'s help (plan 5c-2 takes Ruling 1).
+    public static let midiTakesHelp =
+        "Loop recording: each MIDI pass becomes a new take. Off: passes layer into the playing take. Audio passes always become takes."
+
+    /// The bar's mode switch: `transport.overdub`, so a refusal (a text
+    /// field holding the keyboard) is the key's.
+    @discardableResult public func toggleMode() -> KeyOutcome {
+        guard let m = document else { return .unavailable("No document is open.") }
+        return TransportCommands.run("transport.overdub", m)
+    }
+
     /// Punch on.
     public var punches: Bool { document?.editor.layout.transport.punch ?? false }
 
@@ -114,6 +134,15 @@ extension RecordModel {
     /// keyboard does not disable it: a click is no keystroke, and with a
     /// punch draft open it refuses and says why (fix round 2 N2).
     public var buttonEnabled: Bool { document?.selectedSeq != nil || isRecording }
+
+    /// The bar's mode switch pressed: a refusal shows in the status line,
+    /// as for the key.
+    public func pressMode() {
+        switch toggleMode() {
+        case .done: break
+        case .refused(let why), .busy(let why), .unavailable(let why): document?.editor.status = why
+        }
+    }
 
     /// The toolbar's Record button: like the R key, and a refusal shows in
     /// the status line.

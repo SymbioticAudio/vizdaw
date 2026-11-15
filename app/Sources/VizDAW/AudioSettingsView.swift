@@ -161,7 +161,7 @@ struct RecordingSettingsView: View {
                         set: {
                             prefs.setRecordDefaults(
                                 countIn: $0, preRoll: prefs.settings.preRollBars,
-                                passesAsTakes: prefs.settings.passesAsTakes)
+                                midiPassesAsTakes: prefs.settings.midiPassesAsTakes)
                         }),
                     in: 0...4)
                 Stepper(
@@ -171,18 +171,20 @@ struct RecordingSettingsView: View {
                         set: {
                             prefs.setRecordDefaults(
                                 countIn: prefs.settings.countInBars, preRoll: $0,
-                                passesAsTakes: prefs.settings.passesAsTakes)
+                                midiPassesAsTakes: prefs.settings.midiPassesAsTakes)
                         }),
                     in: 0...8)
                 Toggle(
-                    "Passes as takes",
+                    "MIDI passes as takes",
                     isOn: Binding(
-                        get: { prefs.settings.passesAsTakes },
+                        get: { prefs.settings.midiPassesAsTakes },
                         set: {
                             prefs.setRecordDefaults(
                                 countIn: prefs.settings.countInBars, preRoll: prefs.settings.preRollBars,
-                                passesAsTakes: $0)
-                        }))
+                                midiPassesAsTakes: $0)
+                        })
+                )
+                .help(RecordModel.midiTakesHelp)
                 Picker(
                     "Monitoring for new tracks",
                     selection: Binding(get: { prefs.settings.defaultMonitor }, set: { prefs.setDefaultMonitor($0) })

@@ -178,6 +178,8 @@ import VizDAWCore
 
     @Test func menuItemsRunThroughOneProtocol() throws {
         let (_, _, m, _) = try demo()
+        // New documents overdub (plan 5c-2 takes Ruling 2): start from Replace.
+        m.record.setReplace(true)
         let kinds: [(any MenuCommands.Type, String)] = [
             (TransportCommands.self, "transport.overdub"), (StepCommands.self, StepCommands.entry),
             (DrumCommands.self, DrumCommands.timeline),

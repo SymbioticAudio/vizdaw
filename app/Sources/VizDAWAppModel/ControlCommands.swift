@@ -448,7 +448,7 @@ public enum ControlCommands {
             if let punch = args.flag("punch") { m.editor.updateLayout { $0.transport.punch = punch } }
             if let n = args.int("count_in") { m.record.countInBars = UInt8(clamping: n) }
             if let n = args.int("pre_roll") { m.record.preRollBars = UInt8(clamping: n) }
-            if let on = args.flag("passes_as_takes") { m.record.passesAsTakes = on }
+            if let on = args.flag("passes_as_takes") { m.record.midiPassesAsTakes = on }
         case "record.recover":
             let found = (try? m.session.recoveredRecordings()) ?? []
             guard !found.isEmpty else { return unavailable("There are no recovered recordings.") }

@@ -270,7 +270,7 @@ New `LaneCmd` variants set all three. These are undoable like the other lane fla
   - `punch: Option<(Tick, Tick)>` (from `TransportMarks` when punch is on);
   - `loop_range: Option<(Tick, Tick)>` (the transport loop when loop is on);
   - `count_in_bars: u8` (0–4) and `pre_roll_bars: u8` (0–8);
-  - `passes_as_takes: bool` (default true).
+  - `passes_as_takes: bool` (default false; MIDI only, since audio loop passes always become takes; the UI calls it "MIDI passes as takes"; plan 5c-2 takes).
 - **Count-in and pre-roll:**
   - Count-in plays the click before the start point without moving the timeline.
   - Pre-roll starts playback that many bars early.
@@ -286,8 +286,8 @@ New `LaneCmd` variants set all three. These are undoable like the other lane fla
   - Each wrap ends a pass. Audio uses one continuous file per lane for the whole run; each pass is a region over its slice of that file.
   - `record.keep_pass` keeps all passes so far. `record.discard_pass` drops every pass since the last keep. These commands are already registered in 4f; 5c gives them handlers.
   - At Stop:
-    - With `passes_as_takes`, each kept pass, plus the last pass if not discarded, becomes a new take named "Take n", and the last becomes the active take.
-    - Without it, MIDI passes merge into the active take (overdub). Audio passes still become takes, since they cannot merge.
+    - *MIDI* with `passes_as_takes`: each kept pass, plus the last pass if not discarded, becomes a new take named "Take n", and the last becomes the active take.
+    - *MIDI* without it (the default): every kept pass merges into the active take, so the parts build up. Replace clears the recorded range once, before the passes go in, so it removes what was there before the run, never an earlier pass of the same run. *Audio:* each kept pass becomes a take, since audio cannot merge.
 - **Step recording** is the 4f step entry. Starting Record while step entry is on is refused with a message.
 
 ### 6.5 Finishing a pass
@@ -338,7 +338,7 @@ This is an explicit use case: printing an external synth into the project as aud
   - the MIDI lane's existing events (or the live performance, if it is armed) play to the synth;
   - the audio lane records the return.
   
-  Both kinds of recording share the pass, the history group and the one "Undo Record" step (§6.5). A loop pass makes matching MIDI and audio takes.
+  Both kinds of recording share the pass, the history group and the one "Undo Record" step (§6.5). A loop pass makes an audio take; the MIDI lane's pass is a take too with `passes_as_takes`, else it merges.
 - **Alignment.**
   - Ordinary latency compensation (§6.3) places the return audio at the frame that was audible when it arrived.
   - External MIDI leaves at audible time (§6.3).
@@ -404,7 +404,8 @@ This is an explicit use case: printing an external synth into the project as aud
 ### 6.9 Record UI
 - **Transport toolbar:**
   - a Record button (R, `transport.record`), shown red while recording;
-  - a Record popover with Replace/Overdub, Punch (shows and edits the 4f punch fields), Loop, Count-in, Pre-roll and Passes as takes;
+  - a Record popover with Replace/Overdub, Punch (shows and edits the 4f punch fields), Loop, Count-in, Pre-roll and MIDI passes as takes;
+  - a Replace/Overdub switch beside Record, the same mode as the popover's (plan 5c-2 takes).
   - a record-time remaining readout, based on disk space and the number of armed channels;
   - pass and keep counters during a loop record.
 - **Lane menu:** Track Synth… (§6.7) on MIDI lanes whose destination is external.
@@ -425,7 +426,7 @@ This is an explicit use case: printing an external synth into the project as aud
 - **Settings › Recording:**
   - default project format for new projects (48 kHz / 24-bit);
   - default count-in and pre-roll;
-  - passes as takes;
+  - MIDI passes as takes (default off);
   - default monitor mode for new lanes;
   - low-disk thresholds (shown only).
 
@@ -701,7 +702,7 @@ Rules common to all modes:
   - one pass with an armed `return_of` lane: the clicks land on the MIDI note starts within ±1 ms, with `return_latency_ms` set to the fake delay;
   - Measure finds the fake delay within ±1 ms and fails cleanly with no signal;
   - Track Synth sets up and arms in one undo step;
-  - a loop pass makes MIDI and audio takes together.
+  - a loop pass makes MIDI and audio takes together when `passes_as_takes` is on.
 - **MIDI input effects:**
   - golden tests per arpeggiator mode, rate (including triplets) and octave count, synced and free-running;
   - Latch, transpose, velocity, chord and clamps;

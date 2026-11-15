@@ -5,8 +5,10 @@ import VizDAWCore
 import VizDAWEditors
 
 /// The toolbar's record controls (spec §6.9; plan 5d-2 Task 3): Record
-/// (the R key's `transport.record`, red while recording), the options
-/// popover, and the readouts: count-in, the loop pass and the time left.
+/// (the R key's `transport.record`, red while recording), the
+/// Replace/Overdub switch (`transport.overdub`; plan 5c-2 takes Ruling 7),
+/// the options popover, and the readouts: count-in, the loop pass and the
+/// time left.
 struct RecordControls: View {
     @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
@@ -33,9 +35,16 @@ struct RecordControls: View {
             // bar's punch fields know a press on it (plan 7d Ruling 7's bar
             // Record rule, fix round 1 I1).
             .background(RecordButtonMarker())
+            // The transport's mode, as the popover's picker and the key
+            // set it (plan 5c-2 takes Ruling 7).
+            AppKitButton(
+                record.modeTitle, isOn: !record.replaces, enabled: !record.isRecording, help: RecordModel.modeHelp,
+                label: record.modeLabel
+            ) { record.pressMode() }
+            .fixedSize()
             AppKitButton(
                 "Record Options", icon: .menuDown,
-                help: "Replace or overdub, punch, loop, count-in, pre-roll and takes"
+                help: "Replace or overdub, punch, loop, count-in, pre-roll and MIDI takes"
             ) { [host] in record.togglePopover(in: host) }
             .fixedSize()
             // An AppKit popover, whose close veto reads the press (I1).
@@ -175,7 +184,8 @@ struct RecordPopover: View {
             Toggle("Loop", isOn: Binding(get: { model.looping }, set: { _ in model.toggleLoop() }))
             Stepper("Count-in: \(Self.bars(record.countInBars))", value: $record.countInBars, in: 0...4)
             Stepper("Pre-roll: \(Self.bars(record.preRollBars))", value: $record.preRollBars, in: 0...8)
-            Toggle("Passes as takes", isOn: $record.passesAsTakes)
+            Toggle("MIDI passes as takes", isOn: $record.midiPassesAsTakes)
+                .help(RecordModel.midiTakesHelp)
             if let t = record.remainingText {
                 LabeledContent("Disk", value: t)
             }

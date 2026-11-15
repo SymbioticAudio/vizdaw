@@ -10,8 +10,8 @@ public enum RecordPopoverHost: Equatable, Sendable { case document, mixerWindow 
 /// §6.5): what Record asks the core for, what the core reports while it
 /// records, and the crash-recovery offer. Replace, punch and loop come
 /// from the transport (overdub, the punch fields, Loop); count-in,
-/// pre-roll and passes-as-takes are kept here for the record popover (and
-/// `record.set`), starting from Settings › Recording's defaults.
+/// pre-roll and MIDI passes as takes are kept here for the record popover
+/// (and `record.set`), starting from Settings › Recording's defaults.
 @Observable
 @MainActor
 public final class RecordModel {
@@ -28,8 +28,9 @@ public final class RecordModel {
     public private(set) var lastCountIn: UInt8 = 1
     /// Bars of pre-roll (0–8).
     public var preRollBars: UInt8 = 0
-    /// Kept loop passes become takes.
-    public var passesAsTakes = true
+    /// Kept MIDI loop passes become takes; off, they layer into the
+    /// playing take (plan 5c-2 takes Ruling 1). Audio passes always do.
+    public var midiPassesAsTakes = false
     /// The toolbar's record popover is open; closing it drops the punch
     /// drafts (plan 7d Ruling 7). A press on Record with a draft open never
     /// closes it (`closeAllowed(pressOnRecord:draftOpen:)`).
@@ -88,7 +89,7 @@ public final class RecordModel {
         countInBars = d.countInBars
         lastCountIn = max(d.countInBars, 1)
         preRollBars = d.preRollBars
-        passesAsTakes = d.passesAsTakes
+        midiPassesAsTakes = d.midiPassesAsTakes
     }
 
     /// Count-in off ↔ its last bar count: the keyboard's Count-in button
@@ -110,7 +111,7 @@ public final class RecordModel {
             replace: !t.overdub,
             punch: t.punch ? TickRange(start: t.punchIn, end: t.punchOut) : nil,
             looped: document?.looping ?? false,
-            countInBars: countInBars, preRollBars: preRollBars, passesAsTakes: passesAsTakes)
+            countInBars: countInBars, preRollBars: preRollBars, passesAsTakes: midiPassesAsTakes)
     }
 
     /// `transport.record`: records the shown sequence, or, while recording,

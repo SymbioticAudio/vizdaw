@@ -120,7 +120,10 @@ pub struct RecordSpecRow {
     pub count_in_bars: u8,
     /// Bars of pre-roll, 0–8.
     pub pre_roll_bars: u8,
-    /// Kept loop passes become takes.
+    /// Kept MIDI loop passes become takes; off, they merge into the active
+    /// take. MIDI only: audio loop passes always become takes. The app
+    /// calls it "MIDI passes as takes", off by default (plan 5c-2 takes
+    /// Ruling 1).
     pub passes_as_takes: bool,
 }
 

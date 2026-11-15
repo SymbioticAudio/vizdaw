@@ -17,7 +17,9 @@ public struct TransportMarks: Codable, Equatable, Sendable {
     /// After `punchIn`.
     public var punchOut: Int64 = 4 * 61_440
     public var punch = false
-    public var overdub = false
+    /// New documents start in Overdub (plan 5c-2 takes Ruling 2); a saved
+    /// `overdub` keeps its mode.
+    public var overdub = true
 
     public init() {}
 

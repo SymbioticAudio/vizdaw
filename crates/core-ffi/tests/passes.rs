@@ -1798,3 +1798,119 @@ fn a_note_held_across_a_loop_wrap_keeps_only_its_own_passs_controls() {
     );
     assert!(per_notes_of(&l.takes[1].1.events, 60).is_empty());
 }
+
+/// The pitches of the notes in take `i` of the keys lane, by tick.
+fn take_pitches(doc: &Document, d: &Doc, i: usize) -> Vec<(i64, u8)> {
+    let lane = doc.lane(d.seq, d.keys).unwrap();
+    lane.takes[i]
+        .events
+        .values()
+        .map(|e| match e.body {
+            EventBody::Note { pitch, .. } => (e.tick.0, pitch),
+            _ => (e.tick.0, 0),
+        })
+        .collect()
+}
+
+#[test]
+fn pencilled_notes_survive_a_merged_loop_run() {
+    // Plan 5c-2 takes Rulings 1–3: the owner's bug. Two pencilled notes,
+    // one inside the two-beat loop (at Q) and one outside it (at 3Q); a
+    // loop run of three passes plays one note each.
+    use core_model::command::Command;
+    use core_model::history::History;
+    use core_model::selection::ViewFilter;
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    b.notes(
+        seq,
+        keys,
+        &[(Q, 40, 0x8000, Q / 4), (3 * Q, 41, 0x8000, Q / 4)],
+    )
+    .unwrap();
+    let mic = b.lane(seq, "Mic", None).unwrap();
+    let d = Doc {
+        doc: b.finish(),
+        seq,
+        keys,
+        mic,
+    };
+    let len = 2 * BEAT;
+    let mut c = Case::new(&d, 0);
+    c.looped = true;
+    c.end_run = 3 * len;
+    c.range = RecordRange {
+        start: 0,
+        end: Some(len),
+    };
+    c.marks = vec![
+        mark(0, 0, false),
+        mark(len, 0, true),
+        mark(2 * len, 0, true),
+    ];
+    c.midi_lanes = vec![d.keys];
+    c.takes = false;
+    c.replace = false;
+    let half = (BEAT / 2) as i64;
+    let quarter = (BEAT / 4) as i64;
+    c.midi = (0..3u8)
+        .flat_map(|n| {
+            let at = i64::from(n) * len as i64 + half;
+            [
+                midi(d.keys, at, on(60 + 2 * n, 100)),
+                midi(d.keys, at + quarter, off(60 + 2 * n)),
+            ]
+        })
+        .collect();
+    let pencilled = vec![(Q, 40), (3 * Q, 41)];
+
+    // Overdub: one take holding all five notes; undo leaves the pencilled.
+    let p = c.run().unwrap();
+    let l = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    assert!(l.takes.is_empty() && l.clear.is_empty(), "{l:?}");
+    assert_eq!(l.active.events.len(), 3);
+    let mut h = History::new(d.doc.clone());
+    h.execute(&Command::Record(p), &ViewFilter::default())
+        .unwrap();
+    assert_eq!(h.doc().lane(d.seq, d.keys).unwrap().takes.len(), 1);
+    assert_eq!(
+        take_pitches(h.doc(), &d, 0),
+        vec![(Q / 2, 60), (Q / 2, 62), (Q / 2, 64), (Q, 40), (3 * Q, 41)]
+    );
+    h.undo().unwrap();
+    assert_eq!(take_pitches(h.doc(), &d, 0), pencilled);
+
+    // Replace: the passes' windows are cleared once, before they go in.
+    c.replace = true;
+    let p = c.run().unwrap();
+    let l = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    assert!(!l.clear.is_empty());
+    assert!(
+        l.clear
+            .iter()
+            .all(|&(a, b)| a == Tick(0) && b == Tick(2 * Q)),
+        "{:?}",
+        l.clear
+    );
+    let doc = core_model::command::apply(&d.doc, &Command::Record(p))
+        .unwrap()
+        .doc;
+    assert_eq!(
+        take_pitches(&doc, &d, 0),
+        vec![(Q / 2, 60), (Q / 2, 62), (Q / 2, 64), (3 * Q, 41)]
+    );
+
+    // MIDI passes as takes: three new takes, the last playing; Take 1
+    // still holds both pencilled notes.
+    c.replace = false;
+    c.takes = true;
+    let p = c.run().unwrap();
+    let doc = core_model::command::apply(&d.doc, &Command::Record(p))
+        .unwrap()
+        .doc;
+    let lane = doc.lane(d.seq, d.keys).unwrap();
+    assert_eq!(lane.takes.len(), 4);
+    assert_eq!(lane.active_take, lane.takes[3].id);
+    assert_eq!(take_pitches(&doc, &d, 0), pencilled);
+}

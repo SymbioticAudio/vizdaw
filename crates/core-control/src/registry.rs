@@ -1192,7 +1192,7 @@ const RECORD_SET_PARAMS: &[ParamSpec] = &[
         name: "passes_as_takes",
         kind: ParamKind::Flag,
         required: false,
-        help: "Kept loop passes become takes.",
+        help: "MIDI loop passes become takes (audio always does).",
     },
 ];
 

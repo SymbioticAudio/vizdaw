@@ -18,7 +18,10 @@ public struct AudioSettings: Codable, Equatable, Sendable {
     public var defaultMonitor = "auto"
     public var countInBars: UInt8 = 0
     public var preRollBars: UInt8 = 0
-    public var passesAsTakes = true
+    /// Loop recording: each MIDI pass becomes a take (plan 5c-2 takes
+    /// Ruling 1). Stored under `midiPassesAsTakes`; the old
+    /// `passesAsTakes` key is not read, so the new default holds.
+    public var midiPassesAsTakes = false
     /// The bounce's longest tail in seconds, 0–30 (plan 5f-2 Ruling 4).
     public var bounceTailSeconds: UInt32 = 10
 
@@ -26,7 +29,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case softwareMonitoring, bufferFrames, inputDevice, latencyTrim, cacheMb, readAheadSeconds
-        case defaultMonitor, countInBars, preRollBars, passesAsTakes, bounceTailSeconds
+        case defaultMonitor, countInBars, preRollBars, midiPassesAsTakes, bounceTailSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -46,7 +49,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         defaultMonitor = AudioSettings.monitors.contains(m) ? m : d.defaultMonitor
         countInBars = min(c.field(.countInBars, d.countInBars), 4)
         preRollBars = min(c.field(.preRollBars, d.preRollBars), 8)
-        passesAsTakes = c.field(.passesAsTakes, d.passesAsTakes)
+        midiPassesAsTakes = c.field(.midiPassesAsTakes, d.midiPassesAsTakes)
         let tail: UInt32 = c.field(.bounceTailSeconds, d.bounceTailSeconds)
         bounceTailSeconds = tail <= 30 ? tail : d.bounceTailSeconds
     }
@@ -203,11 +206,11 @@ public final class AudioPreferences {
     }
 
     /// Settings › Recording's defaults for new documents' record options.
-    public func setRecordDefaults(countIn: UInt8, preRoll: UInt8, passesAsTakes: Bool) {
+    public func setRecordDefaults(countIn: UInt8, preRoll: UInt8, midiPassesAsTakes: Bool) {
         var s = settings
         s.countInBars = min(countIn, 4)
         s.preRollBars = min(preRoll, 8)
-        s.passesAsTakes = passesAsTakes
+        s.midiPassesAsTakes = midiPassesAsTakes
         save(s)
         RecordModel.defaults = RecordDefaults(s)
     }
@@ -218,13 +221,13 @@ public final class AudioPreferences {
 public struct RecordDefaults: Equatable, Sendable {
     public var countInBars: UInt8 = 0
     public var preRollBars: UInt8 = 0
-    public var passesAsTakes = true
+    public var midiPassesAsTakes = false
 
     public init() {}
 
     public init(_ s: AudioSettings) {
         countInBars = s.countInBars
         preRollBars = s.preRollBars
-        passesAsTakes = s.passesAsTakes
+        midiPassesAsTakes = s.midiPassesAsTakes
     }
 }
