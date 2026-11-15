@@ -138,6 +138,29 @@ pub enum LaneCmd {
         /// Take (must exist in the lane).
         take: TakeId,
     },
+    /// Rename a take (plan 5c-2 takes Ruling 4); the name is trimmed and
+    /// checked as a track name is.
+    RenameTake {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// Take (must exist in the lane).
+        take: TakeId,
+        /// New name.
+        name: String,
+    },
+    /// Delete a take and its events; the track keeps at least one (plan
+    /// 5c-2 takes Ruling 4). Media stays in the pool, so undo brings the
+    /// take's regions back playing.
+    RemoveTake {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// Take (must exist in the lane).
+        take: TakeId,
+    },
     /// Set what the lane records (sub-project 5 spec §4.5).
     SetInput {
         /// Sequence.
@@ -214,6 +237,8 @@ impl LaneCmd {
             LaneCmd::SetPlayShift { .. } => "Set Play Shift",
             LaneCmd::AddTake { .. } => "Add Take",
             LaneCmd::SetActiveTake { .. } => "Set Active Take",
+            LaneCmd::RenameTake { .. } => "Rename Take",
+            LaneCmd::RemoveTake { .. } => "Delete Take",
             LaneCmd::SetInput { .. } => "Set Track Input",
             LaneCmd::SetMonitor { .. } => "Set Track Monitor",
             LaneCmd::SetInputFx { .. } => "Set Input Effects",
@@ -338,6 +363,30 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
             }
             l.active_take = *take;
         }
+        LaneCmd::RenameTake {
+            seq,
+            lane,
+            take,
+            name,
+        } => {
+            let name = crate::lane::valid_name(name).ok_or_else(|| {
+                ModelError::invalid(
+                    "a take name cannot be empty or hold control or zero-width characters",
+                )
+            })?;
+            d.lane_mut(*seq, *lane)?
+                .takes
+                .iter_mut()
+                .find(|t| t.id == *take)
+                .ok_or(ModelError::UnknownId(AnyId::Take(*take)))?
+                .name = name.to_string();
+        }
+        LaneCmd::RemoveTake { seq, lane, take } => {
+            let t = d.remove_take(*seq, *lane, *take)?;
+            r.removed
+                .extend(t.events.keys().map(|(_, id)| AnyId::Event(*id)));
+            r.removed.push(AnyId::Take(*take));
+        }
         LaneCmd::SetInput { seq, lane, input } => {
             if let Some(i) = input {
                 i.check()?;
@@ -407,7 +456,7 @@ fn duplicate(d: &mut Document, seq: SeqId, lane: LaneId, r: &mut Report) -> Resu
             copy.active_take = tid;
         }
         r.created.push(AnyId::Take(tid));
-        let mut events = im::OrdMap::new();
+        let mut events = crate::arc_map::ArcMap::new();
         for e in t.events.values() {
             if matches!(e.body, EventBody::Automation { .. }) {
                 continue;

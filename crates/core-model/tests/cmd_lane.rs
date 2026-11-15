@@ -550,3 +550,222 @@ fn rename_refuses_a_blank_name() {
     let d = rename("  Bass ").unwrap();
     assert_eq!(d.sequence(SeqId(0)).unwrap().lanes[0].name, "Bass");
 }
+
+// Plan 5c-2 takes Task 1: rename and delete takes.
+
+const T1: TakeId = TakeId(0);
+const T2: TakeId = TakeId(1);
+const T3: TakeId = TakeId(2);
+
+/// "Keys" with two notes in Take 1, one in Take 2, and an empty, active
+/// Take 3.
+fn takes_doc() -> Document {
+    let d = run(
+        &base(),
+        LaneCmd::Rename {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            name: "Keys".into(),
+        },
+    )
+    .unwrap();
+    let d = insert(&d, 0, vec![note(0), note(480)]);
+    let add = |d: &Document, name: &str| {
+        run(
+            d,
+            LaneCmd::AddTake {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                name: name.into(),
+            },
+        )
+        .unwrap()
+    };
+    let d = add(&d, "Take 2");
+    let d = insert(&d, 0, vec![note(960)]);
+    let d = add(&d, "Take 3");
+    let l = d.lane(SeqId(0), LaneId(0)).unwrap();
+    assert_eq!(l.active_take, T3);
+    assert_eq!(l.takes.len(), 3);
+    d
+}
+
+fn take_ids(d: &Document) -> Vec<TakeId> {
+    d.lane(SeqId(0), LaneId(0))
+        .unwrap()
+        .takes
+        .iter()
+        .map(|t| t.id)
+        .collect()
+}
+
+fn active(d: &Document) -> TakeId {
+    d.lane(SeqId(0), LaneId(0)).unwrap().active_take
+}
+
+fn take_events(d: &Document, take: TakeId) -> Vec<core_model::ids::EventId> {
+    d.lane(SeqId(0), LaneId(0))
+        .unwrap()
+        .take(take)
+        .unwrap()
+        .events
+        .values()
+        .map(|e| e.id)
+        .collect()
+}
+
+fn rename_take(take: TakeId, name: &str) -> LaneCmd {
+    LaneCmd::RenameTake {
+        seq: SeqId(0),
+        lane: LaneId(0),
+        take,
+        name: name.into(),
+    }
+}
+
+fn remove_take(take: TakeId) -> LaneCmd {
+    LaneCmd::RemoveTake {
+        seq: SeqId(0),
+        lane: LaneId(0),
+        take,
+    }
+}
+
+fn choose_take(take: TakeId) -> LaneCmd {
+    LaneCmd::SetActiveTake {
+        seq: SeqId(0),
+        lane: LaneId(0),
+        take,
+    }
+}
+
+#[test]
+fn rename_take_checks_its_name() {
+    let d = takes_doc();
+    let renamed = run(&d, rename_take(T1, "  Verse ")).unwrap();
+    let l = renamed.lane(SeqId(0), LaneId(0)).unwrap();
+    assert_eq!(l.take(T1).unwrap().name, "Verse");
+    assert_eq!(l.take(T2).unwrap().name, "Take 2");
+    let before = d.clone();
+    for bad in ["", "   ", "a\u{0}b", "a\u{200B}b"] {
+        assert_eq!(
+            run(&d, rename_take(T1, bad)),
+            Err(ModelError::invalid(
+                "a take name cannot be empty or hold control or zero-width characters"
+            )),
+            "{bad:?}"
+        );
+        assert_eq!(d, before);
+    }
+    assert_eq!(
+        run(&d, rename_take(TakeId(99), "Verse")),
+        Err(ModelError::UnknownId(AnyId::Take(TakeId(99))))
+    );
+}
+
+#[test]
+fn remove_take_unindexes_and_moves_the_active_take() {
+    let d = takes_doc();
+    let t1_events = take_events(&d, T1);
+    let t2_events = take_events(&d, T2);
+    assert_eq!((t1_events.len(), t2_events.len()), (2, 1));
+
+    // Removing the active Take 3 makes the take before it active.
+    let a = apply(&d, &Command::Lane(remove_take(T3))).unwrap();
+    assert_eq!(take_ids(&a.doc), vec![T1, T2]);
+    assert_eq!(active(&a.doc), T2);
+    assert_eq!(a.report.removed, vec![AnyId::Take(T3)]);
+    assert!(validate(&a.doc).is_empty());
+
+    // Removing Take 1 while Take 2 plays leaves Take 2 playing.
+    let b = apply(&a.doc, &Command::Lane(remove_take(T1))).unwrap();
+    assert_eq!(take_ids(&b.doc), vec![T2]);
+    assert_eq!(active(&b.doc), T2);
+    for id in &t1_events {
+        assert!(b.doc.locate(*id).is_err());
+        assert!(b.report.removed.contains(&AnyId::Event(*id)));
+    }
+    assert!(b.report.removed.contains(&AnyId::Take(T1)));
+    assert_eq!(b.report.removed.len(), t1_events.len() + 1);
+    for id in &t2_events {
+        assert!(b.doc.locate(*id).is_ok());
+    }
+    assert!(validate(&b.doc).is_empty());
+
+    // With Take 1 playing, removing it makes the next take active.
+    let d1 = run(&d, choose_take(T1)).unwrap();
+    let c = apply(&d1, &Command::Lane(remove_take(T1))).unwrap();
+    assert_eq!(take_ids(&c.doc), vec![T2, T3]);
+    assert_eq!(active(&c.doc), T2);
+    for id in &t1_events {
+        assert!(c.doc.locate(*id).is_err());
+        assert!(c.report.removed.contains(&AnyId::Event(*id)));
+    }
+    assert!(c.report.removed.contains(&AnyId::Take(T1)));
+    assert!(validate(&c.doc).is_empty());
+
+    // Removing Take 2 (not playing) takes its note out of the index.
+    let e = apply(&d, &Command::Lane(remove_take(T2))).unwrap();
+    assert_eq!(take_ids(&e.doc), vec![T1, T3]);
+    assert_eq!(active(&e.doc), T3);
+    for id in &t2_events {
+        assert!(e.doc.locate(*id).is_err());
+        assert!(e.report.removed.contains(&AnyId::Event(*id)));
+    }
+    assert!(validate(&e.doc).is_empty());
+}
+
+#[test]
+fn remove_take_refuses_the_last_and_unknown() {
+    let d = base();
+    let before = d.clone();
+    assert_eq!(
+        run(&d, remove_take(T1)),
+        Err(ModelError::invalid("a track keeps at least one take"))
+    );
+    assert_eq!(d, before);
+    let d = takes_doc();
+    let before = d.clone();
+    assert_eq!(
+        run(&d, remove_take(TakeId(99))),
+        Err(ModelError::UnknownId(AnyId::Take(TakeId(99))))
+    );
+    assert_eq!(d, before);
+}
+
+#[test]
+fn take_edits_undo_as_one_step_each() {
+    use core_model::history::History;
+    use core_model::selection::ViewFilter;
+    let d = takes_doc();
+    let t2_note = take_events(&d, T2)[0];
+    let mut h = History::new(d);
+    let depth = h.undo_depth();
+    h.execute(&Command::Lane(remove_take(T2)), &ViewFilter::default())
+        .unwrap();
+    assert_eq!(h.undo_depth(), depth + 1);
+    assert_eq!(h.undo_label(), Some("Delete Take"));
+    assert_eq!(take_ids(h.doc()), vec![T1, T3]);
+    assert!(h.doc().locate(t2_note).is_err());
+    h.undo().unwrap();
+    assert_eq!(take_ids(h.doc()), vec![T1, T2, T3]);
+    assert_eq!(take_events(h.doc(), T2), vec![t2_note]);
+    assert_eq!(h.doc().locate(t2_note).unwrap().take, T2);
+    assert_eq!(active(h.doc()), T3);
+    h.execute(
+        &Command::Lane(rename_take(T2, "Chorus")),
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    assert_eq!(h.undo_label(), Some("Rename Take"));
+    h.undo().unwrap();
+    assert_eq!(
+        h.doc()
+            .lane(SeqId(0), LaneId(0))
+            .unwrap()
+            .take(T2)
+            .unwrap()
+            .name,
+        "Take 2"
+    );
+}

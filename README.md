@@ -81,7 +81,7 @@ Windows.
 
 ## Building from source
 
-You need macOS 14 or newer, Rust 1.85 or newer, and the Xcode Command Line
+You need macOS 14 or newer, Rust 1.86 or newer, and the Xcode Command Line
 Tools. Then, from the project folder:
 
 ```bash
@@ -103,6 +103,8 @@ See [app/README.md](app/README.md) for more.
 GPL-3.0 — see [LICENSE](LICENSE).
 
 VizDAW's own build links SymbioticAudio's branded icons under a GPL section 7 additional permission (see LICENSE). The artwork stays all rights reserved and is not covered by the GPL; forks build without it with `VIZDAW_NO_BRAND=1`.
+
+The VizDAW.app bundle also carries Dusk Audio Multi-Q (GPL-3.0-only), built with JUCE (AGPLv3) and clap-juce-extensions (MIT); their licence texts and the source offer are in Contents/Resources/Licences/Multi-Q/.
 
 ## Disclaimer
 

@@ -27,11 +27,16 @@ pub struct DocSnapshot {
     pub redo_label: Option<String>,
     /// Every sequence, in ID order.
     pub sequences: Vec<SeqRow>,
-    /// Problems worth showing (unresolved references).
+    /// Standing problems worth showing (unresolved references): they stay
+    /// while the document has them.
     pub warnings: Vec<String>,
     /// Every lane's revision (spec §3.1): editors refetch a lane's events
     /// only when its revision changed.
     pub lane_revs: Vec<crate::revs::LaneRev>,
+    /// One-shot notes of the edit that made this snapshot (a crossfade
+    /// shortened or dropped; plan 6c), empty for every other snapshot.
+    #[uniffi(default = [])]
+    pub edit_notes: Vec<String>,
 }
 
 /// A keyboard slot: one key plus a modifier bitmask (1 = shift,
@@ -114,6 +119,41 @@ pub struct LaneRow {
     /// Its MPE input decoding (plan 5g-2 Ruling 3), `None` when off.
     #[uniffi(default)]
     pub mpe: Option<crate::mpe::MpeRow>,
+    /// Its takes, in order (plan 5c-2 takes Task 1).
+    #[uniffi(default)]
+    pub takes: Vec<TakeRow>,
+    /// The active take's ID.
+    #[uniffi(default)]
+    pub active_take_id: u64,
+}
+
+/// One take of a lane, in order (plan 5c-2 takes Task 1).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TakeRow {
+    /// Take ID.
+    pub id: u64,
+    /// Name.
+    pub name: String,
+    /// Events in the take other than references, audio regions and
+    /// automation points (as [`LaneRow::midi_event_count`] counts them).
+    pub midi_event_count: u32,
+    /// Audio regions in the take.
+    pub region_count: u32,
+}
+
+/// Counts a take's `(midi, regions, references)` events, as the lane row
+/// counts its active take's.
+fn take_counts(take: &core_model::lane::Take) -> (usize, usize, usize) {
+    let (mut midi, mut regions, mut refs) = (0usize, 0usize, 0usize);
+    for ev in take.events.values() {
+        match ev.body {
+            EventBody::Reference { .. } => refs += 1,
+            EventBody::AudioRegion { .. } => regions += 1,
+            EventBody::Automation { .. } => {}
+            _ => midi += 1,
+        }
+    }
+    (midi, regions, refs)
 }
 
 /// What the transport is doing.
@@ -195,17 +235,20 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
     s.lanes
         .iter()
         .map(|l| {
-            let (mut midi, mut regions, mut refs) = (0usize, 0usize, 0usize);
-            if let Some(take) = l.active() {
-                for ev in take.events.values() {
-                    match ev.body {
-                        EventBody::Reference { .. } => refs += 1,
-                        EventBody::AudioRegion { .. } => regions += 1,
-                        EventBody::Automation { .. } => {}
-                        _ => midi += 1,
+            let (midi, regions, refs) = l.active().map(take_counts).unwrap_or_default();
+            let takes = l
+                .takes
+                .iter()
+                .map(|t| {
+                    let (midi, regions, _) = take_counts(t);
+                    TakeRow {
+                        id: t.id.0,
+                        name: t.name.clone(),
+                        midi_event_count: count(midi),
+                        region_count: count(regions),
                     }
-                }
-            }
+                })
+                .collect();
             Ok(LaneRow {
                 id: l.id.0,
                 name: l.name.clone(),
@@ -232,6 +275,8 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                     .and_then(|o| doc.outputs().get(&o).map(|p| p.name.clone())),
                 input_fx: l.input_fx.iter().map(Into::into).collect(),
                 mpe: l.mpe.map(Into::into),
+                takes,
+                active_take_id: l.active_take.0,
             })
         })
         .collect()

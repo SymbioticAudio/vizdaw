@@ -37,6 +37,7 @@ extension VizError {
         case let .Engine(message): message
         case let .NoDevice(message): "No audio output: \(message)"
         case let .Busy(message): message
+        case let .Exists(path): "Something that is not Multi-Q is in the way: \(path)."
         case let .Internal(message): "Internal error: \(message)"
         }
     }

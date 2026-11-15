@@ -151,4 +151,22 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
         #expect(MemoryDefaults.appStore(environment: ["VIZDAW_SUPPORT_DIR": "/x"]) is MemoryDefaults)
         #expect(!(MemoryDefaults.appStore(environment: [:]) is MemoryDefaults))
     }
+
+    @Test func crossfadePreferenceIsKeptAndClamped() {
+        let d = MemoryDefaults()
+        let p = EditingPreferences(defaults: d)
+        #expect(p.crossfadeMs == 10)
+        p.crossfadeMs = 0
+        #expect(p.crossfadeMs == 1)
+        p.crossfadeMs = 5_000
+        #expect(p.crossfadeMs == 1_000)
+        p.crossfadeMs = .nan
+        #expect(p.crossfadeMs == 10, "not a number falls back to the default")
+        p.crossfadeMs = 25
+        #expect(EditingPreferences(defaults: d).crossfadeMs == 25)
+        d.set(-3.0, forKey: EditingPreferences.crossfadeKey)
+        #expect(EditingPreferences(defaults: d).crossfadeMs == 1, "a stored value is clamped on read")
+        d.set("junk", forKey: EditingPreferences.crossfadeKey)
+        #expect(EditingPreferences(defaults: d).crossfadeMs == 10)
+    }
 }

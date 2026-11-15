@@ -3,10 +3,10 @@
 //! three levels of references < 5 ms; loading a 100k-event project < 200 ms.
 
 use core_model::command::{Command, EventCmd, LaneCmd, SequenceCmd, apply};
-use core_model::document::{Document, DocumentRepr, Settings};
+use core_model::document::{Document, DocumentRepr, MediaItem, MediaOrigin, Settings};
 use core_model::event::{EventBody, EventSpec, LoopCount};
 use core_model::file::{from_json, to_json};
-use core_model::ids::{Counters, EventId, LaneId, SeqId, TakeId};
+use core_model::ids::{Counters, EventId, LaneId, MediaId, SeqId, TakeId};
 use core_model::lane::Lane;
 use core_model::query::flatten;
 use core_model::selection::ViewFilter;
@@ -15,7 +15,8 @@ use core_model::time::{PPQ, Tick};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use im::Vector;
 
-/// One sequence with 10 lanes of 10 000 sixteenth notes each.
+/// One sequence with 10 lanes of 10 000 sixteenth notes each, and one media
+/// item, so every edit runs the crossfade settle pass's scan (plan 6c F11).
 fn big_doc() -> Document {
     let mut lanes = Vector::new();
     let mut next = 0u64;
@@ -37,7 +38,18 @@ fn big_doc() -> Document {
         settings: Settings::default(),
         instruments: vec![],
         outputs: vec![],
-        media: vec![],
+        media: vec![MediaItem {
+            id: MediaId(0),
+            path: "Media/a.caf".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 48_000,
+            content_hash: None,
+            name: "a".into(),
+            origin: MediaOrigin::Imported {
+                original_name: "a.wav".into(),
+            },
+        }],
         sequences: vec![Sequence::new(SeqId(0), "Big", lanes)],
         mixer: None,
         counters: Counters {
@@ -45,6 +57,7 @@ fn big_doc() -> Document {
             lane: 10,
             take: 10,
             event: next,
+            media: 1,
             ..Counters::default()
         },
     })

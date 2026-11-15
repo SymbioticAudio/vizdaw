@@ -10,8 +10,9 @@
 use crate::error::VizError;
 use core_media::caf::CafReader;
 use core_media::overview::{Bins, Overview, Stamp};
-use core_model::event::Fade;
-use core_model::ids::MediaId;
+use core_model::document::Document;
+use core_model::event::{EventBody, Fade};
+use core_model::ids::{EventId, MediaId};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -666,9 +667,103 @@ pub fn peak_of(ov: &Overview) -> f32 {
         .fold(0f32, |m, (lo, hi)| m.max(lo.abs()).max(hi.abs()))
 }
 
+/// A later region's crossfade over a region, as that region's overview
+/// and envelope need it (plan 6c).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Xfade {
+    /// The region frame where the later region starts.
+    pub from: u64,
+    /// The region frame where the later region ends: after it the earlier
+    /// region plays again (a later region inside it).
+    pub until: u64,
+    /// The later region's fade in.
+    pub fade: Fade,
+}
+
+/// The crossfades of the regions that start inside `event`, by start (the
+/// flagged regions of its take whose partner it is). Empty for a
+/// non-region, an unknown event or a region nothing crosses.
+pub fn crossfades_over(doc: &Document, event: EventId) -> Vec<Xfade> {
+    let Ok((ev, loc)) = doc.event(event) else {
+        return Vec::new();
+    };
+    let EventBody::AudioRegion { media, .. } = &ev.body else {
+        return Vec::new();
+    };
+    let Some(take) = doc
+        .lane(loc.seq, loc.lane)
+        .ok()
+        .and_then(|l| l.take(loc.take))
+    else {
+        return Vec::new();
+    };
+    if !take.events.values().any(|e| {
+        matches!(
+            e.body,
+            EventBody::AudioRegion {
+                crossfade: true,
+                ..
+            }
+        )
+    }) {
+        return Vec::new();
+    }
+    let (true, Ok(seq)) = (doc.media().contains_key(media), doc.sequence(loc.seq)) else {
+        return Vec::new();
+    };
+    // The engine's frames: schedule frames at the project rate, each start
+    // rounded from the sequence origin (`compile`'s `frame_signed`).
+    let rate = f64::from(doc.settings().format.sample_rate.max(1));
+    let base = seq.tempo.tick_to_seconds(-seq.start_offset);
+    let frame_of = |t: core_model::time::Tick| -> i64 {
+        // `as` saturates.
+        ((seq.tempo.tick_to_seconds(t) - base) * rate).round() as i64
+    };
+    let start = frame_of(ev.tick);
+    // Only flagged regions that start after this one can have it as their
+    // partner; each is asked for its own overlap (a sweep up to it), not the
+    // whole take's.
+    let mut out: Vec<Xfade> = take
+        .events
+        .values()
+        .filter(|e| e.id != event && e.tick > ev.tick)
+        .filter_map(|later| {
+            let EventBody::AudioRegion {
+                crossfade: true,
+                fade_in,
+                length,
+                ..
+            } = &later.body
+            else {
+                return None;
+            };
+            if fade_in.length_frames == 0 {
+                return None;
+            }
+            let o = core_model::crossfade::overlap(doc, later.id)
+                .ok()
+                .flatten()?;
+            if o.with != event {
+                return None;
+            }
+            let from = frame_of(later.tick).abs_diff(start);
+            Some(Xfade {
+                from,
+                until: from.saturating_add(*length),
+                fade: *fade_in,
+            })
+        })
+        .collect();
+    out.sort_by_key(|x| x.from);
+    out
+}
+
 /// The fade gain at region frame `r` of a region of `length` frames (the
-/// engine's `Segment::gain_at`, without the region gain).
-pub fn fade_gain(r: u64, length: u64, fade_in: Fade, fade_out: Fade) -> f32 {
+/// engine's `Segment::gain_at`, without the region gain). Under a later
+/// region's crossfade the gain follows the complement of its fade in, as the
+/// engine's extra segment does: from where the later region starts, `x`
+/// runs 0 to 1 over its fade in and the gain is `fade_curve(1 - x)`.
+pub fn fade_gain(r: u64, length: u64, fade_in: Fade, fade_out: Fade, xfades: &[Xfade]) -> f32 {
     use core_engine::schedule::fade_curve;
     let mut g = 1.0;
     let fi = fade_in.length_frames;
@@ -680,11 +775,19 @@ pub fn fade_gain(r: u64, length: u64, fade_in: Fade, fade_out: Fade) -> f32 {
     if fo > 0 && left <= fo {
         g *= fade_curve(fade_out.shape, left as f32 / fo as f32);
     }
+    // Of the crossfading later regions covering `r`, the latest-starting one
+    // plays over this region (the engine's winner windows); where none
+    // covers `r` this region is at its own gain. A later region that is not
+    // a crossfade is not in `xfades`, unlike in the engine.
+    if let Some(x) = xfades.iter().rev().find(|x| x.from <= r && r < x.until) {
+        let t = ((r - x.from) as f32 / x.fade.length_frames as f32).min(1.0);
+        g *= fade_curve(x.fade.shape, 1.0 - t);
+    }
     g
 }
 
 /// What the envelope of one audio region needs (plan 7c Ruling 4).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RegionShape {
     /// First media frame the region plays.
     pub source_offset: u64,
@@ -696,6 +799,8 @@ pub struct RegionShape {
     pub fade_in: Fade,
     /// Fade out.
     pub fade_out: Fade,
+    /// The crossfades of later regions over this one, by start (plan 6c).
+    pub xfades: Vec<Xfade>,
 }
 
 /// The gain the engine plays at `columns` media-frame positions between
@@ -723,6 +828,7 @@ pub fn envelope(region: &RegionShape, from: u64, to: u64, columns: u32) -> Vec<f
                     region.length,
                     region.fade_in,
                     region.fade_out,
+                    &region.xfades,
                 );
             if g.is_finite() { g } else { 0.0 }
         })
@@ -762,5 +868,62 @@ pub fn copy_cache(media: &BTreeMap<String, Option<String>>, from: &Path, to: &Pa
         if placed.is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_engine::fixtures::{Builder, demo_audio_document};
+    use core_model::command::{AudioCmd, Command, CrossfadeLength, MediaCmd};
+    use core_model::event::FadeShape;
+    use core_model::ids::AnyId;
+
+    /// The crossfade's start is in the engine's frames (the schedule rate),
+    /// not the earlier region's media rate: media at 44.1 kHz, 48 kHz
+    /// project, B at 0.5 s.
+    #[test]
+    fn crossfades_over_counts_frames_at_the_schedule_rate() {
+        let mut b = Builder::from_doc(demo_audio_document().unwrap());
+        assert_eq!(b.doc().settings().format.sample_rate, 48_000);
+        let song = *b.doc().sequences().keys().next().unwrap();
+        let lane = b.lane(song, "X", None).unwrap();
+        let r = b
+            .run(Command::Media(MediaCmd::Add {
+                path: "Media/odd.wav".into(),
+                sample_rate: 44_100,
+                channels: 2,
+                length_frames: 441_000,
+                content_hash: None,
+                name: None,
+                origin: None,
+            }))
+            .unwrap();
+        let media = r
+            .created
+            .iter()
+            .find_map(|id| match id {
+                AnyId::Media(m) => Some(*m),
+                _ => None,
+            })
+            .unwrap();
+        let none = Fade::default();
+        let a = b
+            .region(song, lane, 0, media, 0, 88_200, 0.0, none, none)
+            .unwrap();
+        let later = b
+            .region(song, lane, 15_360, media, 88_200, 88_200, 0.0, none, none)
+            .unwrap();
+        b.run(Command::Audio(AudioCmd::Crossfade {
+            event: later,
+            length: CrossfadeLength::Frames(2_205),
+            shape: FadeShape::Linear,
+        }))
+        .unwrap();
+        let doc = b.finish();
+        let x = crossfades_over(&doc, a);
+        assert_eq!(x.len(), 1);
+        // 0.5 s at 48 kHz, not 22 050 at 44.1 kHz.
+        assert_eq!(x[0].from, 24_000);
     }
 }

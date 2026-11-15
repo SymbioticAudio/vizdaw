@@ -284,4 +284,36 @@ private let media: UInt64 = 96_000
         }
         #expect(AudioEditorGeometry.span(axis: FrameAxis(), width: .infinity, mediaFrames: 96_000) == nil)
     }
+
+    /// Plan 6c Task 6: the crossfade's X corner, at the fade in's end.
+    @Test func crossfadeCornerInTheAudioEditor() {
+        let w = CGRect(x: 0, y: 0, width: 800, height: 100)
+        let ax = FrameAxis(framesPerPoint: 100, originFrame: 0)
+        func hit(_ r: EventRow, _ x: CGFloat, _ y: CGFloat) -> AudioEditorHandle? {
+            AudioEditorGeometry.hit(CGPoint(x: x, y: y), row: r, axis: ax, in: w)
+        }
+        var r = region(fadeIn: 10_000, fadeOut: 5_000, offset: 24_000, frames: 40_000)
+        r.crossfade = true
+        r.overlapFrames = 20_000
+        let l = ax.x(24_000)
+        let drawn = AudioEditorGeometry.drawn(r, axis: ax, in: w)
+        #expect(drawn.map(\.0) == [.crossfade, .fadeOut, .start, .end, .gain])
+        #expect(drawn.first?.1.midX == l + 100)
+        #expect(hit(r, l + 100, 2) == .crossfade)
+        #expect(AudioEditorGeometry.label(.crossfade) == "Crossfade")
+        #expect(AudioEditorHandle.crossfade.regionHandle == .crossfade)
+        #expect(
+            AudioEditorGeometry.target(
+                r, .crossfade, dx: 1_000, dy: 0, fine: false, axis: ax, mediaFrames: media, startRoom: 0, in: w)
+                == .audio(edit: .crossfade(event: 4, length: .frames(frames: 20_000), shape: .linear)))
+        // The crossfade and the fade out meet: the nearer corner wins, and
+        // at a tie the side of the press, as for the fade in.
+        var met = region(fadeIn: 20_000, fadeOut: 20_000, offset: 24_000, frames: 40_000)
+        met.crossfade = true
+        met.overlapFrames = 30_000
+        #expect(hit(met, l + 199, 2) == .crossfade && hit(met, l + 201, 2) == .fadeOut)
+        #expect(hit(met, l + 197, 2) == .crossfade && hit(met, l + 203, 2) == .fadeOut)
+        // Unflagged: the fade in, as before.
+        #expect(AudioEditorGeometry.drawn(region(fadeIn: 10_000, frames: 40_000), axis: ax, in: w).first?.0 == .fadeIn)
+    }
 }

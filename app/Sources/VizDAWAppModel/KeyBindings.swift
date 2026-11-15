@@ -236,7 +236,7 @@ public enum KeyDispatch {
         switch outcome {
         case .done: return .handled
         case .opened(_, let d): return .opened(d)
-        case .job, .measure: return .handled
+        case .job, .measure, .pending: return .handled
         case .failed(let f):
             switch f.code {
             // No editor chosen (plan 5f-3, owner answer 2026-11-03): the

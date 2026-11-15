@@ -1,7 +1,8 @@
 //! `vizctl launch`: starts VizDAW with the control channel on, in a
-//! throwaway home (control spec §12): its own `HOME`, support folder
-//! (`VIZDAW_SUPPORT_DIR`), private socket directory and log, no plugin
-//! scan. Waits until the channel answers.
+//! throwaway home (control spec §12): its own `HOME` and
+//! `CFFIXED_USER_HOME`, support folder (`VIZDAW_SUPPORT_DIR`), private
+//! socket directory and log, no plugin scan. Waits until the channel
+//! answers.
 
 use core_control::client::Client;
 use core_control::server::MAX_SOCKET_PATH;
@@ -290,6 +291,10 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
         .arg(&socket)
         .arg("--no-scan")
         .env("HOME", &home)
+        // `NSHomeDirectory()` ignores `HOME` and honours this: what finds
+        // `~` through it (a bundled plug-in's own folder under
+        // `~/Library`) stays in this home too.
+        .env("CFFIXED_USER_HOME", &home)
         .env("VIZDAW_SUPPORT_DIR", &support)
         // Untitled projects' scratch packages, and the lost recordings
         // the app looks for at launch, stay in this home (plan 5c Task 10).

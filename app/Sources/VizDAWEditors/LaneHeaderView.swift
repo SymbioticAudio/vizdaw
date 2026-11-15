@@ -193,11 +193,10 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                 switch control {
                 case .kind: kindIcon(AppIcon.track(lane.kind), in: r)
                 case .name:
-                    NSString(string: lane.name).draw(
-                        in: r,
-                        withAttributes: [
-                            .font: theme.font(theme.type.body, weight: .medium), .foregroundColor: theme.label,
-                        ])
+                    // The playing take too, truncated to the name's room.
+                    var attributes = oneLine(theme.font(theme.type.body, weight: .medium), .byTruncatingTail)
+                    attributes[.foregroundColor] = theme.label
+                    NSString(string: LaneHeaderLayout.nameText(lane)).draw(in: r, withAttributes: attributes)
                 case .monitor:
                     toggle(
                         LaneInputs.label(lane.monitor), on: lane.monitor != .off,
@@ -378,8 +377,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     }
 
     /// Track Synth… (spec §6.7) on a
-    /// lane that plays an external synth, and New MIDI Destination… (plan
-    /// 5d-2 Task 8).
+    /// lane that plays an external synth, New MIDI Destination… (plan
+    /// 5d-2 Task 8) and Takes ▸ (plan 5c-2 takes Ruling 5).
     func laneMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -390,6 +389,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         menu.addItem(trackItem)
         let add = MenuAction(title: "New MIDI Destination…") { sheets.beginNewDestination(seq: seq, lane: lane) }
         menu.addItem(add.item(checked: false))
+        menu.addItem(TakesMenu.item(document: document, seq: seq, lane: lane))
         menu.addItem(.separator())
         menu.addItem(colourItem(lane))
         return menu

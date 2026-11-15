@@ -44,7 +44,7 @@ public enum AppIcon: CaseIterable, Sendable {
     case leftPane, bottomPane, rightPane
     // The Settings tabs.
     case settingsEditing, settingsKeys, settingsAudio, settingsRecording, settingsAutomation, settingsSurfaces,
-        settingsAppearance
+        settingsAppearance, settingsPlugins
     case eq
     // Beyond the plan's list (the transport bar and the learn banner).
     case play, stop, midiLearn
@@ -103,6 +103,7 @@ public enum AppIcon: CaseIterable, Sendable {
         case .settingsAutomation: .editorEnvelope
         case .settingsSurfaces: .settingsSurfaces
         case .settingsAppearance: .settingsAppearance
+        case .settingsPlugins: .mixerEq
         case .eq: .mixerEq
         case .play: .transportPlay
         case .stop: .transportStop
@@ -128,7 +129,7 @@ public enum AppIcon: CaseIterable, Sendable {
             .angular
         case .warning, .problem, .info, .mixer, .add, .confirm, .close, .drumGrid, .list, .muted, .loop, .split,
             .empty, .pencil, .diskSlow, .expand, .collapse, .menuDown, .leftPane, .bottomPane, .rightPane,
-            .settingsEditing, .settingsAutomation, .settingsSurfaces, .settingsAppearance, .eq, .midiLearn,
+            .settingsEditing, .settingsAutomation, .settingsSurfaces, .settingsAppearance, .settingsPlugins, .eq, .midiLearn,
             .instrumentTrack, .midiTrack:
             .glyph
         }
@@ -178,6 +179,7 @@ public enum AppIcon: CaseIterable, Sendable {
         case .settingsAutomation: "slider.vertical.3"
         case .settingsSurfaces: "dial.medium"
         case .settingsAppearance: "paintpalette"
+        case .settingsPlugins: "slider.horizontal.3"
         case .eq: "slider.horizontal.3"
         case .play: "play.fill"
         case .stop: "stop.fill"

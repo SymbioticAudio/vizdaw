@@ -348,10 +348,23 @@ public final class MixerModel {
 
     // MARK: Intents
 
+    /// "Bus N" with the lowest N ≥ 1 that no bus has (plan 6g-2 Ruling 8):
+    /// the one rule Add Bus, New Bus and `mixer.new_bus` use.
+    public static func nextBusName(_ buses: [BusRow]) -> String {
+        let names = Set(buses.map(\.name))
+        return (1...).lazy.map { "Bus \($0)" }.first { !names.contains($0) } ?? "Bus"
+    }
+
     public func addBus() {
-        let names = Set(snapshot.buses.map(\.name))
-        let name = (1...).lazy.map { "Bus \($0)" }.first { !names.contains($0) } ?? "Bus"
+        let name = Self.nextBusName(snapshot.buses)
         command("Add Bus Failed") { try $0.addBus(name: name) }
+    }
+
+    /// A new bus fed by a post-fader send from `strip`, one undo step "New
+    /// Bus" (plan 6g-2 Ruling 8).
+    public func newBus(from strip: UInt64) {
+        let name = Self.nextBusName(snapshot.buses)
+        command("New Bus Failed") { try $0.newBusFrom(strip: strip, name: name) }
     }
 
     public func removeBus(_ strip: UInt64) {

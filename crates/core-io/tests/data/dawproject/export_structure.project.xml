@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Project version="1.0">
+  <Application name="VizDAW" version="1.2.3"/>
+  <Transport>
+    <Tempo id="tempo" unit="bpm" value="120" min="5" max="999"/>
+    <TimeSignature id="timesig" numerator="4" denominator="4"/>
+  </Transport>
+  <Structure>
+    <Track id="t0" name="Keys" comment="vz:t0" contentType="notes">
+      <Channel id="c1" name="Synth" comment="vz:s1" role="regular" audioChannels="2" destination="c0" solo="false">
+        <Devices>
+          <ClapPlugin id="c1d0" name="Synth" comment="vz:d0" deviceID="org.example.synth" deviceName="Synth" deviceRole="instrument" deviceVendor="Example" pluginVersion="1.0" loaded="true">
+            <Enabled id="c1d0e" value="true"/>
+            <State path="plugins/001.clap-preset"/>
+          </ClapPlugin>
+          <AuPlugin id="c1d1" name="Delay" comment="vz:d1" deviceID="aufx/dely/xmpl" deviceName="Delay" deviceRole="audioFX" deviceVendor="Example" pluginVersion="2.0" loaded="true">
+            <Enabled id="c1d1e" value="true"/>
+            <State path="plugins/002.aupreset"/>
+          </AuPlugin>
+        </Devices>
+        <Mute id="c1m" value="false"/>
+        <Pan id="c1p" unit="normalized" value="0.5" min="0" max="1"/>
+        <Volume id="c1v" unit="linear" value="1" min="0" max="3.9810717055349722"/>
+      </Channel>
+    </Track>
+    <Track id="t1" name="Drums" color="#0090ff" comment="vz:t1" contentType="audio">
+      <Channel id="c2" name="Drums" comment="vz:s2" role="regular" audioChannels="2" destination="c0" solo="false">
+        <Mute id="c2m" value="false"/>
+        <Pan id="c2p" unit="normalized" value="0.5" min="0" max="1"/>
+        <Sends>
+          <Send id="c2s0" destination="c3" type="pre">
+            <Enable id="c2s0e" value="true"/>
+            <Volume id="c2s0v" unit="linear" value="0.5011872336272722" min="0" max="3.9810717055349722"/>
+          </Send>
+        </Sends>
+        <Volume id="c2v" unit="linear" value="1" min="0" max="3.9810717055349722"/>
+      </Channel>
+    </Track>
+    <Track id="b3" name="Verb" contentType="audio">
+      <Channel id="c3" name="Verb" comment="vz:s3" role="effect" audioChannels="2" destination="c0" solo="false">
+        <Mute id="c3m" value="false"/>
+        <Pan id="c3p" unit="normalized" value="0.5" min="0" max="1"/>
+        <Volume id="c3v" unit="linear" value="1" min="0" max="3.9810717055349722"/>
+      </Channel>
+    </Track>
+    <Track id="master" name="Master" contentType="audio notes">
+      <Channel id="c0" name="Master" comment="vz:s0" role="master" audioChannels="2" solo="false">
+        <Mute id="c0m" value="false"/>
+        <Pan id="c0p" unit="normalized" value="0.5" min="0" max="1"/>
+        <Volume id="c0v" unit="linear" value="0.8413951416451951" min="0" max="3.9810717055349722"/>
+      </Channel>
+    </Track>
+  </Structure>
+  <Arrangement>
+    <Lanes timeUnit="beats">
+      <Lanes track="t0"/>
+      <Lanes track="t1"/>
+    </Lanes>
+    <Markers>
+      <Marker name="Verse" comment="vz:m0" time="0"/>
+      <Marker name="Chorus" comment="vz:m1" time="32"/>
+    </Markers>
+    <TempoAutomation unit="bpm">
+      <Target parameter="tempo"/>
+      <RealPoint time="0" value="120" interpolation="linear"/>
+      <RealPoint time="16" value="140" interpolation="hold"/>
+    </TempoAutomation>
+    <TimeSignatureAutomation>
+      <Target parameter="timesig"/>
+      <TimeSignaturePoint time="0" numerator="4" denominator="4"/>
+      <TimeSignaturePoint time="32" numerator="3" denominator="4"/>
+    </TimeSignatureAutomation>
+  </Arrangement>
+</Project>

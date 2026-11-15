@@ -2,6 +2,7 @@
 //! Routing rules live in [`crate::mixer_rules`]; edits in
 //! `crate::command::mixer`.
 
+use crate::arc_map::ArcMap;
 use crate::automation::AutomationMode;
 use crate::document::{DestKind, Destination, OutputPath};
 use crate::error::{ModelError, Result};
@@ -284,7 +285,7 @@ impl Strip {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "MixerRepr", try_from = "MixerRepr")]
 pub struct Mixer {
-    strips: OrdMap<StripId, Strip>,
+    strips: ArcMap<StripId, Strip>,
     order: Vector<StripId>,
     master: StripId,
 }
@@ -314,7 +315,7 @@ impl From<Mixer> for MixerRepr {
 impl TryFrom<MixerRepr> for Mixer {
     type Error = String;
     fn try_from(r: MixerRepr) -> std::result::Result<Mixer, String> {
-        let mut strips = OrdMap::new();
+        let mut strips = ArcMap::new();
         for s in r.strips {
             let id = s.id;
             if strips.insert(id, s).is_some() {
@@ -333,14 +334,14 @@ impl Mixer {
     /// A mixer holding only the master strip `master`.
     pub fn new(master: StripId) -> Mixer {
         Mixer {
-            strips: OrdMap::unit(master, Strip::new(master, MASTER_NAME, StripKind::Master)),
+            strips: ArcMap::unit(master, Strip::new(master, MASTER_NAME, StripKind::Master)),
             order: Vector::new(),
             master,
         }
     }
 
     /// Strips by ID.
-    pub fn strips(&self) -> &OrdMap<StripId, Strip> {
+    pub fn strips(&self) -> &ArcMap<StripId, Strip> {
         &self.strips
     }
 

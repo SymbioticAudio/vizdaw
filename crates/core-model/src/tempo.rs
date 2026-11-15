@@ -210,6 +210,101 @@ impl TempoMap {
     }
 }
 
+/// One segment of a [`TempoClock`]: its start and end ticks, its tempos,
+/// and the seconds at its start.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClockSeg {
+    start: i64,
+    end: Option<i64>,
+    b0: f64,
+    b1: f64,
+    acc: f64,
+}
+
+/// A tempo map indexed for lookups. [`TempoClock::tick_to_seconds`] and
+/// [`TempoClock::seconds_to_tick`] give exactly what the [`TempoMap`]
+/// methods of the same names give (the same float operations in the same
+/// order), found by binary search, so a long map stays fast. Crossfade
+/// partners are found with it, so code that must agree with them (an
+/// import placing crossfades) uses it too.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempoClock {
+    seg: Vec<ClockSeg>,
+    first: f64,
+}
+
+impl TempoMap {
+    /// The map indexed for lookups.
+    pub fn clock(&self) -> TempoClock {
+        let mut seg: Vec<ClockSeg> = Vec::with_capacity(self.points.len());
+        let mut acc = 0.0;
+        for (start, end, b0, b1) in self.segments() {
+            seg.push(ClockSeg {
+                start,
+                end,
+                b0,
+                b1,
+                acc,
+            });
+            if let Some(e) = end {
+                let len = (e - start) as f64;
+                acc += seg_seconds(len, len, b0, b1);
+            }
+        }
+        TempoClock {
+            seg,
+            first: self.first_bpm(),
+        }
+    }
+}
+
+impl TempoClock {
+    /// [`TempoMap::tick_to_seconds`].
+    pub fn tick_to_seconds(&self, t: Tick) -> f64 {
+        let t = t.0;
+        if t < 0 || self.seg.is_empty() {
+            return t as f64 * spt(self.first);
+        }
+        let i = self.seg.partition_point(|s| s.start <= t);
+        let Some(s) = i.checked_sub(1).and_then(|i| self.seg.get(i)) else {
+            return 0.0;
+        };
+        let seg_end = s.end.unwrap_or(i64::MAX);
+        let len = (seg_end - s.start) as f64;
+        let dx = (t.min(seg_end) - s.start) as f64;
+        s.acc + seg_seconds(dx, len, s.b0, s.b1)
+    }
+
+    /// [`TempoMap::seconds_to_tick`].
+    pub fn seconds_to_tick(&self, s: f64) -> Tick {
+        if s.is_nan() {
+            return Tick::MIN;
+        }
+        if s.is_infinite() {
+            return if s > 0.0 { Tick::MAX } else { Tick::MIN };
+        }
+        if s < 0.0 || self.seg.is_empty() {
+            return Tick((s / spt(self.first)).round() as i64);
+        }
+        // The segments that end at or before `s`.
+        let i = self
+            .seg
+            .get(1..)
+            .map_or(0, |rest| rest.partition_point(|x| s >= x.acc));
+        let Some(g) = self.seg.get(i) else {
+            return Tick::ZERO;
+        };
+        let dx = match g.end {
+            Some(e) => {
+                let len = (e - g.start) as f64;
+                seg_ticks(s - g.acc, len, g.b0, g.b1)
+            }
+            None => (s - g.acc) / spt(g.b0),
+        };
+        Tick((g.start as f64 + dx).round() as i64)
+    }
+}
+
 /// Seconds spent covering `dx` ticks of a segment `len` ticks long ramping
 /// linearly from `b0` to `b1` BPM.
 fn seg_seconds(dx: f64, len: f64, b0: f64, b1: f64) -> f64 {

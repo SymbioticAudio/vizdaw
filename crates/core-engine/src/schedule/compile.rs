@@ -84,7 +84,8 @@ pub struct CompileReport {
     pub audio_segments: usize,
     /// Regions on lanes without an output path (not played).
     pub audio_unrouted: usize,
-    /// Segments whose media is offline (silence).
+    /// Regions whose media is offline (silence), counted once however many
+    /// segments they play as.
     pub audio_offline: usize,
     /// One line per kind of problem, for display.
     pub warnings: Vec<String>,

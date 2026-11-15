@@ -101,6 +101,8 @@ fn fixture() -> Fixture {
                 gain_db: 0.0,
                 fade_in: Fade::default(),
                 fade_out: Fade::default(),
+                name: None,
+                crossfade: false,
             },
         )
         .unwrap();

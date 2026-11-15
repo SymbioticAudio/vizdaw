@@ -41,30 +41,7 @@ struct BounceSheet: View {
             }
             Toggle("Time selection only", isOn: $bounce.useSelection)
                 .disabled(!bounce.hasSelection)
-            Picker("Format", selection: $bounce.container) {
-                Text("WAV").tag(ContainerRow.wav)
-                Text("AIFF").tag(ContainerRow.aiff)
-                Text("CAF").tag(ContainerRow.caf)
-            }
-            Picker("Bits", selection: $bounce.depth) {
-                Text("16-bit").tag(BitDepthRow.int16)
-                Text("24-bit").tag(BitDepthRow.int24)
-                Text("32-bit float").tag(BitDepthRow.float32)
-            }
-            Picker("Rate", selection: $bounce.rateChoice) {
-                ForEach(BounceModel.rates, id: \.self) { Text("\($0) Hz").tag($0) }
-                Text("Other…").tag(UInt32(0))
-            }
-            if bounce.otherRate {
-                TextField(
-                    "Rate (Hz)",
-                    value: Binding(get: { Int(bounce.rate) }, set: { bounce.setOtherRate($0) }),
-                    format: .number.grouping(.never)
-                )
-                .accessibilityLabel("Other rate in Hz, 8000 to 384000")
-            }
-            Toggle("Dither", isOn: $bounce.dither)
-                .disabled(bounce.depth == .float32)
+            AudioFormatRows(choices: bounce)
             Toggle("Add to project", isOn: $bounce.addToProject)
             if bounce.addToProject {
                 Toggle("Also write the files", isOn: $bounce.writeFiles)
@@ -123,5 +100,38 @@ struct BounceSheet: View {
             guard let file = Panels.chooseBounceFile(name: "Bounce", ext: ext) else { return }
             bounce.start(path: file, replace: true)
         }
+    }
+}
+
+/// The Format, Bits, Rate and Dither rows that Bounce and Export for Another
+/// DAW share (plan 6b Task 5).
+struct AudioFormatRows<Choices: AudioFormatChoices>: View {
+    @Bindable var choices: Choices
+
+    var body: some View {
+        Picker("Format", selection: $choices.container) {
+            Text("WAV").tag(ContainerRow.wav)
+            Text("AIFF").tag(ContainerRow.aiff)
+            Text("CAF").tag(ContainerRow.caf)
+        }
+        Picker("Bits", selection: $choices.depth) {
+            Text("16-bit").tag(BitDepthRow.int16)
+            Text("24-bit").tag(BitDepthRow.int24)
+            Text("32-bit float").tag(BitDepthRow.float32)
+        }
+        Picker("Rate", selection: $choices.rateChoice) {
+            ForEach(BounceModel.rates, id: \.self) { Text("\($0) Hz").tag($0) }
+            Text("Other…").tag(UInt32(0))
+        }
+        if choices.otherRate {
+            TextField(
+                "Rate (Hz)",
+                value: Binding(get: { Int(choices.rate) }, set: { choices.setOtherRate($0) }),
+                format: .number.grouping(.never)
+            )
+            .accessibilityLabel("Other rate in Hz, 8000 to 384000")
+        }
+        Toggle("Dither", isOn: $choices.dither)
+            .disabled(choices.depth == .float32)
     }
 }

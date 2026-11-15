@@ -39,6 +39,25 @@ import SymbioticBrand
 @MainActor let appearancePreferences = AppearancePreferences(
     defaults: MemoryDefaults.appStore(), userThemes: userThemes)
 
+/// The core's switch, install and bundled-EQ facts (plan 6g Task 4).
+@MainActor
+final class LivePluginSettingsSink: PluginSettingsSink {
+    func setNewChannelEq(_ on: Bool) { VizDAWCore.setNewChannelEq(on: on) }
+    func installMultiq(dest: String?, replace: Bool) throws -> String {
+        try VizDAWCore.installMultiq(dest: dest, replace: replace)
+    }
+    var bundledEqName: String? { VizDAWCore.bundledEqName() }
+    var bundledAuPresent: Bool { VizDAWCore.bundledAuPresent() }
+    func setDefaultEq(_ choice: DefaultEqRow?) { VizDAWCore.setDefaultEq(choice: choice) }
+    func eqChoices() -> [DefaultEqRow] { PluginSettings.eqChoices(from: appPlugins.browser(.effect)) }
+    func defaultEqNote() -> String? { VizDAWCore.defaultEqNote() }
+}
+
+/// Settings › Plug-ins (plan 6g Task 4): the switch is a preference of this
+/// Mac (in memory under `vizctl launch`); installs go to the real
+/// Components folder (nil), only when asked.
+@MainActor let pluginSettings = PluginSettings(defaults: MemoryDefaults.appStore(), sink: LivePluginSettingsSink())
+
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
 @MainActor let noteInputHub = NoteInputHub(input: NoteInput())
@@ -86,7 +105,7 @@ struct VizDAWApp: App {
                 {
                 case .failed(let f): m.editor.status = f.message
                 case .opened(_, let d): ControlWindows.openDocument(d)
-                case .done, .job, .measure: break
+                case .done, .job, .measure, .pending: break
                 }
             }
         }
@@ -118,6 +137,9 @@ struct VizDAWApp: App {
         // (plan 5d-2 Ruling 2; 5d-1 carry: before the first host opens).
         audioPreferences.applyAll()
         automationPreferences.applyAll()
+        // "Put an EQ on new channels" reaches the core before any document
+        // opens (plan 6g Ruling 8): making the model pushes it.
+        _ = pluginSettings
         MediaModel.channelIsOn = { ControlChannel.active }
         // The control channel (control spec §8) starts before any document
         // opens, so launch-time dialogs already go to it instead of the screen.
@@ -170,6 +192,8 @@ struct VizDAWApp: App {
                     .tabItem { AppIcon.settingsAutomation.label("Automation") }
                 SurfacesSettingsView(settings: surfaceSettings, keys: keyBindings)
                     .tabItem { AppIcon.settingsSurfaces.label("Surfaces") }
+                PluginSettingsView(settings: pluginSettings)
+                    .tabItem { AppIcon.settingsPlugins.label("Plug-ins") }
             }
             .themedRoot()
         }
@@ -186,6 +210,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         StoreAlerts.watch(appStore)
+        ReturnPrompts.watch(appStore)
+        appStore.chooseMergeProject = Panels.chooseProjectToMerge
         AppSetup.recoverUntitled()
         KeyMonitor.start()
         AppSetup.startScan()

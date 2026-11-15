@@ -289,7 +289,14 @@ impl<'a> Walk<'a> {
                     return;
                 }
                 // Float-to-int `as` saturates, so a huge window is safe.
-                *length = (*length).min(avail as u64);
+                let clipped = avail as u64;
+                if clipped < *length {
+                    *length = clipped;
+                    // Clipped like a trim, so its fades fit the same way
+                    // (5a Ruling 1): Flatten and Make Private Copy store
+                    // what plays, and it must be valid.
+                    crate::command::audio::clamp_region_fades(&mut body);
+                }
             }
             _ => {}
         }

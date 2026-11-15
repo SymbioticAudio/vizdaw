@@ -114,6 +114,12 @@ fn replies_round_trip() {
 fn every_error_code_has_a_distinct_wire_name() {
     let names: std::collections::BTreeSet<_> = ErrorCode::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(names.len(), ErrorCode::ALL.len());
+    assert_eq!(ErrorCode::ALL.len(), 16, "plan 8a adds not_allowed");
+    assert_eq!(ErrorCode::parse("not_allowed"), Some(ErrorCode::NotAllowed));
+    assert_eq!(ErrorCode::NotAllowed.as_str(), "not_allowed");
+    let e = ControlError::new(ErrorCode::NotAllowed, "no");
+    let line = reply_line(Some(&RequestId::Num(3)), &Err(e.clone()));
+    assert_eq!(read_reply(&line).unwrap().outcome, Err(e));
     for c in ErrorCode::ALL {
         assert_eq!(ErrorCode::parse(c.as_str()), Some(c));
     }

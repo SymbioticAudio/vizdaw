@@ -6,6 +6,9 @@ import VizDAWCore
 /// Real FFI, offline audio backend (no hardware needed).
 @MainActor
 @Suite struct IntegrationTests {
+    /// The test support folder, before any real session (fix round 2).
+    init() { _ = TestSupportDir.shared }
+
     @Test func demoPlaysThroughTheRealLibrary() async throws {
         setenv("VIZDAW_AUDIO", "offline", 1)
         let m = try DocumentModel(session: Session.newDemo())
@@ -30,6 +33,9 @@ import VizDAWCore
 /// The list editor through the real library.
 @MainActor
 @Suite struct ListIntegrationTests {
+    /// The test support folder, before any real session (fix round 2).
+    init() { _ = TestSupportDir.shared }
+
     @Test func aMixedListDeleteIsOneUndoStepThroughTheRealLibrary() throws {
         setenv("VIZDAW_AUDIO", "offline", 1)
         let m = try DocumentModel(session: Session.newDemo())
@@ -54,11 +60,13 @@ import VizDAWCore
 /// temporary support folder, never the user's).
 @MainActor
 @Suite struct MixerIntegrationTests {
+    /// The test support folder, before any real session (fix round 2).
+    init() { _ = TestSupportDir.shared }
+
     @Test func aBusAndASaveThroughTheRealLibrary() throws {
         setenv("VIZDAW_AUDIO", "offline", 1)
-        let support = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vizdaw-swift-test-\(ProcessInfo.processInfo.processIdentifier)")
-        try setSupportDir(path: support.path)
+        let support = try TestSupportDir.subfolder("mixer")
+        defer { try? FileManager.default.removeItem(at: support) }
         let doc = try DocumentModel(session: Session.newDemo())
         let mixer = try MixerModel(document: doc)
         #expect(mixer.strips.map(\.name) == ["Built-in Synth"])
@@ -73,7 +81,6 @@ import VizDAWCore
         #expect(!info.crashed, "open here, not a crash")
         #expect(info.autosave == nil)
         try doc.session.close()
-        try? FileManager.default.removeItem(at: support)
     }
 }
 
@@ -81,6 +88,9 @@ import VizDAWCore
 /// carries dotted, triplet and the steps taken (final review item 13).
 @MainActor
 @Suite struct StepIntegrationTests {
+    /// The test support folder, before any real session (fix round 2).
+    init() { _ = TestSupportDir.shared }
+
     @Test func theStepRowShowsDotTripletAndARealStep() throws {
         setenv("VIZDAW_AUDIO", "offline", 1)
         let m = try DocumentModel(session: Session.newDemo())

@@ -197,7 +197,7 @@ fn no_hard_links(e: &std::io::Error) -> bool {
 /// Moves `from` to `to`, failing with `AlreadyExists` (and changing
 /// nothing) if `to` exists. macOS: `renamex_np(RENAME_EXCL)`.
 #[cfg(target_os = "macos")]
-pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| {
         std::ffi::CString::new(p.as_os_str().as_bytes())
@@ -221,7 +221,7 @@ pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
 /// mid-copy can leave a short file under `to`). Once `to` holds the whole
 /// file the move has succeeded, even if the source cannot be removed.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -366,10 +366,107 @@ pub fn import_reserved(
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
 ) -> Result<Vec<Imported>, MediaError> {
+    import_within(
+        importer, source, package, format, stem, reserved, None, progress, cancel,
+    )
+}
+
+/// A check that a conversion may reach a number of frames at the project
+/// rate ([`import_checked`]): with a known length, once, with its
+/// [`frame_budget`], before anything is written; with none, before and
+/// then each second ahead of the decoder.
+pub type ProbeCheck<'a> = dyn FnMut(&SourceInfo, u64) -> Result<(), MediaError> + 'a;
+
+/// The refusal ([`MediaError::Refused`]) when a decoder delivers more
+/// than [`frame_budget`] frames.
+pub const LONGER_THAN_PROBED: &str = "the file holds more audio than it says";
+
+/// The most frames a conversion of `info` to `rate` may deliver: the
+/// probe's frames at `rate`, plus 1 % or one second, whichever is more (a
+/// resampler's rounding). A rate that is not positive counts no frames.
+/// `None` when the probe gives no length (0 frames, as a FLAC whose header
+/// leaves it out): the caller's check then bounds it as it goes.
+pub fn frame_budget(info: &SourceInfo, rate: u32) -> Option<u64> {
+    if info.frames == 0 {
+        return None;
+    }
+    let rate64 = u64::from(rate);
+    let at_rate = if info.sample_rate.is_finite() && info.sample_rate > 0.0 {
+        let f = (info.frames as f64 * f64::from(rate) / info.sample_rate).ceil();
+        // `as` saturates a float past the range.
+        f as u64
+    } else {
+        0
+    };
+    Some(at_rate.saturating_add((at_rate / 100).max(rate64)))
+}
+
+/// [`import_reserved`] for a source that is not trusted (plan 6d final
+/// review I1): `check` gets the probe and its [`frame_budget`] before
+/// anything is written, and may refuse; a decoder that delivers more than
+/// the budget is stopped with [`LONGER_THAN_PROBED`]. A probe with no
+/// length has no budget: `check` is asked before anything is written for
+/// one second, then again each time the decoder is about to pass the
+/// frames last allowed, for one second more, and its refusal stops the
+/// conversion. Either way nothing this import wrote is left.
+#[allow(clippy::too_many_arguments)]
+pub fn import_checked(
+    importer: &dyn MediaImporter,
+    source: &Path,
+    package: &Path,
+    format: AudioFormat,
+    stem: &str,
+    reserved: &BTreeSet<String>,
+    check: &mut ProbeCheck<'_>,
+    progress: &mut dyn FnMut(f32),
+    cancel: &AtomicBool,
+) -> Result<Vec<Imported>, MediaError> {
+    import_within(
+        importer,
+        source,
+        package,
+        format,
+        stem,
+        reserved,
+        Some(check),
+        progress,
+        cancel,
+    )
+}
+
+/// The conversion both share; `check`, when given, also sets the budget.
+#[allow(clippy::too_many_arguments)]
+fn import_within(
+    importer: &dyn MediaImporter,
+    source: &Path,
+    package: &Path,
+    format: AudioFormat,
+    stem: &str,
+    reserved: &BTreeSet<String>,
+    check: Option<&mut ProbeCheck<'_>>,
+    progress: &mut dyn FnMut(f32),
+    cancel: &AtomicBool,
+) -> Result<Vec<Imported>, MediaError> {
     let info = importer.probe(source)?;
     if info.channels == 0 {
         return Err(MediaError::Unsupported("a file with no channels".into()));
     }
+    // `budget`: a hard cap; `ahead`: the check asked as the decoder goes,
+    // with the frames allowed so far.
+    let step = u64::from(format.sample_rate).max(1);
+    let (budget, mut ahead) = match check {
+        Some(check) => match frame_budget(&info, format.sample_rate) {
+            Some(b) => {
+                check(&info, b)?;
+                (Some(b), None)
+            }
+            None => {
+                check(&info, step)?;
+                (None, Some((check, step)))
+            }
+        },
+        None => (None, None),
+    };
     let incoming = package.join(INCOMING_DIR);
     std::fs::create_dir_all(&incoming)?;
     let media = package.join(MEDIA_DIR);
@@ -402,6 +499,17 @@ pub fn import_reserved(
             if cancel.load(Ordering::Relaxed) {
                 return Err(MediaError::Cancelled);
             }
+            let frames = (chunk.len() / ch) as u64;
+            let reach = done.saturating_add(frames);
+            if budget.is_some_and(|b| reach > b) {
+                return Err(MediaError::Refused(LONGER_THAN_PROBED.into()));
+            }
+            if let Some((check, allowed)) = ahead.as_mut()
+                && reach > *allowed
+            {
+                *allowed = reach.saturating_add(step);
+                check(&info, *allowed)?;
+            }
             if split {
                 for (k, lane) in lanes.iter_mut().enumerate() {
                     lane.clear();
@@ -413,7 +521,7 @@ pub fn import_reserved(
             } else if let Some(w) = writers.first_mut() {
                 w.write(chunk)?;
             }
-            done += (chunk.len() / ch) as u64;
+            done += frames;
             if expected > 0.0 {
                 progress((done as f64 / expected).min(1.0) as f32);
             }
@@ -761,6 +869,161 @@ mod tests {
             &AtomicBool::new(false),
         );
         assert!(matches!(at_44k, Err(MediaError::Unsupported(_))));
+    }
+
+    /// A decoder whose probe says `says` frames, whatever it decodes.
+    struct Liar {
+        inner: Fake,
+        says: u64,
+    }
+
+    impl MediaImporter for Liar {
+        fn probe(&self, p: &Path) -> Result<SourceInfo, MediaError> {
+            let mut i = self.inner.probe(p)?;
+            i.frames = self.says;
+            Ok(i)
+        }
+
+        fn decode(
+            &self,
+            p: &Path,
+            rate: u32,
+            sink: &mut dyn FnMut(&[f32]) -> Result<(), MediaError>,
+            cancel: &AtomicBool,
+        ) -> Result<u64, MediaError> {
+            self.inner.decode(p, rate, sink, cancel)
+        }
+    }
+
+    fn checked(
+        imp: &dyn MediaImporter,
+        pkg: &Path,
+        check: &mut dyn FnMut(&SourceInfo, u64) -> Result<(), MediaError>,
+    ) -> Result<Vec<Imported>, MediaError> {
+        import_checked(
+            imp,
+            Path::new("/x/a.flac"),
+            pkg,
+            fmt(BitDepth::Int24),
+            "a",
+            &BTreeSet::new(),
+            check,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+    }
+
+    /// Final review I1: the budget is the probe's frames at the project
+    /// rate, plus 1 % or a second, whichever is more.
+    #[test]
+    fn the_frame_budget_is_the_probe_at_the_project_rate() {
+        let info = |rate: f64, frames: u64| SourceInfo {
+            format_name: "x".into(),
+            sample_rate: rate,
+            bits: 16,
+            channels: 1,
+            frames,
+        };
+        assert_eq!(frame_budget(&info(48_000.0, 1000), 48_000), Some(49_000));
+        assert_eq!(frame_budget(&info(8_000.0, 8_000), 48_000), Some(96_000));
+        assert_eq!(
+            frame_budget(&info(48_000.0, 48_000_000), 48_000),
+            Some(48_480_000)
+        );
+        assert_eq!(frame_budget(&info(0.0, 1000), 48_000), Some(48_000));
+        assert_eq!(frame_budget(&info(48_000.0, 0), 48_000), None);
+        assert_eq!(frame_budget(&info(f64::NAN, 1000), 48_000), Some(48_000));
+        assert_eq!(frame_budget(&info(1.0, u64::MAX), 48_000), Some(u64::MAX));
+    }
+
+    /// Final review I1: a decoder that delivers more than its probe said
+    /// stops at the budget, and nothing it wrote is left.
+    #[test]
+    fn a_decoder_past_its_probe_stops_and_leaves_nothing() {
+        let pkg = package();
+        let liar = Liar {
+            inner: Fake {
+                channels: 3,
+                frames: 200_000,
+                cancel_after: None,
+            },
+            says: 1000,
+        };
+        let mut seen = None;
+        let r = checked(&liar, pkg.path(), &mut |i, budget| {
+            seen = Some((i.frames, budget));
+            Ok(())
+        });
+        assert_eq!(r, Err(MediaError::Refused(LONGER_THAN_PROBED.into())));
+        assert_eq!(seen, Some((1000, 49_000)));
+        assert_eq!(listing(pkg.path()), (vec![], vec![]));
+        // Within the slack, it imports.
+        let near = Liar {
+            inner: Fake {
+                channels: 1,
+                frames: 100_500,
+                cancel_after: None,
+            },
+            says: 100_000,
+        };
+        let got = checked(&near, pkg.path(), &mut |_, _| Ok(())).unwrap();
+        assert_eq!(got[0].length_frames, 100_500);
+    }
+
+    /// Final review follow-up: a probe with no length has no frame cap;
+    /// the check is asked a second ahead as the decoder goes, and its
+    /// refusal stops the conversion with nothing left.
+    #[test]
+    fn a_probe_with_no_length_is_checked_as_it_goes() {
+        let pkg = package();
+        let unknown = Liar {
+            inner: Fake {
+                channels: 2,
+                frames: 200_000,
+                cancel_after: None,
+            },
+            says: 0,
+        };
+        let mut asked = Vec::new();
+        let got = checked(&unknown, pkg.path(), &mut |_, reach| {
+            asked.push(reach);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got[0].length_frames, 200_000);
+        assert_eq!(asked[0], 48_000);
+        assert!(asked.windows(2).all(|w| w[1] > w[0]), "{asked:?}");
+        assert!(*asked.last().unwrap() >= 200_000, "{asked:?}");
+        assert_eq!(listing(pkg.path()).1, Vec::<String>::new());
+        // Refused past 100 000 frames: stopped, nothing left.
+        let pkg = package();
+        let r = checked(&unknown, pkg.path(), &mut |_, reach| {
+            if reach > 100_000 {
+                Err(MediaError::Refused("no room".into()))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(r, Err(MediaError::Refused("no room".into())));
+        assert_eq!(listing(pkg.path()), (vec![], vec![]));
+    }
+
+    /// Final review I1: the check sees the probe before anything is
+    /// written, and its refusal is the import's.
+    #[test]
+    fn the_check_refuses_before_anything_is_written() {
+        let pkg = package();
+        let fake = Fake {
+            channels: 2,
+            frames: 5000,
+            cancel_after: None,
+        };
+        let r = checked(&fake, pkg.path(), &mut |_, _| {
+            Err(MediaError::Refused("no room".into()))
+        });
+        assert_eq!(r, Err(MediaError::Refused("no room".into())));
+        assert!(!pkg.path().join(INCOMING_DIR).exists());
+        assert_eq!(listing(pkg.path()), (vec![], vec![]));
     }
 
     #[test]

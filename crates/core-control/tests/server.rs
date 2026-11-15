@@ -315,3 +315,96 @@ fn stop_returns_even_when_the_socket_directory_is_gone() {
         "stop() hung after its directory was removed"
     );
 }
+
+#[test]
+fn the_co_producer_socket_gates_and_the_developer_socket_refuses_co_producer_calls() {
+    use core_control::server::Role;
+    let d = private_dir();
+    let config = Config {
+        role: Role::CoProducer,
+        ..Config::default()
+    };
+    let server = Arc::new(std::sync::Mutex::new(
+        Server::start(&sock(&d), config).unwrap(),
+    ));
+    let mut c = Client::connect(&sock(&d)).unwrap();
+    match c.call("ui.click", json!({"point": {"x": 1, "y": 2}}), LONG) {
+        Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::NotAllowed, "{e}"),
+        other => panic!("{other:?}"),
+    }
+    match c.call("command.run", json!({"id": "media.compact"}), LONG) {
+        Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::NotAllowed, "{e}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        server.lock().unwrap().next_call().is_none(),
+        "a refused call never reaches the app"
+    );
+    let list = c.call("commands.list", json!({}), LONG).unwrap();
+    let commands = list["commands"].as_array().unwrap();
+    assert!(commands.iter().all(|c| c["id"] != "ui.theme"), "{list}");
+    assert!(commands.iter().all(|c| c["class"] != "refused"), "{list}");
+    assert!(commands.iter().any(|c| c["id"] == "track.new_audio"));
+    // One screenshot a second.
+    let stop = Arc::new(AtomicBool::new(false));
+    let app = fake_app(Arc::clone(&server), Arc::clone(&stop), |c| match c {
+        Command::UiScreenshot { path: None, .. } => Some(json!({"path": "/x.png"})),
+        Command::CoProducerBegin { name, .. } => Some(json!({"begun": name})),
+        other => panic!("the app got {other:?}"),
+    });
+    assert_eq!(
+        c.call("ui.screenshot", json!({}), LONG).unwrap(),
+        json!({"path": "/x.png"})
+    );
+    match c.call("ui.screenshot", json!({}), LONG) {
+        Err(CallError::Reply(e)) => {
+            assert_eq!(e.code, ErrorCode::Busy, "{e}");
+            assert!(e.message.contains("one screenshot a second"), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        c.call("co_producer.begin", json!({"name": "x"}), LONG)
+            .unwrap(),
+        json!({"begun": "x"})
+    );
+    stop.store(true, Ordering::SeqCst);
+    app.join().unwrap();
+
+    // The developer socket answers no co_producer call, and the app never
+    // sees one.
+    let d2 = private_dir();
+    let dev = Server::start(&sock(&d2), Config::default()).unwrap();
+    let mut c = Client::connect(&sock(&d2)).unwrap();
+    for (cmd, params) in [
+        ("co_producer.begin", json!({"name": "x"})),
+        ("co_producer.end", json!({})),
+        ("co_producer.status", json!({})),
+        (
+            "co_producer.preview",
+            json!({"commands": [{"id": "edit.undo"}]}),
+        ),
+        (
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": [{"id": "edit.undo"}]}),
+        ),
+    ] {
+        match c.call(cmd, params, LONG) {
+            Err(CallError::Reply(e)) => {
+                assert_eq!(e.code, ErrorCode::NotAllowed, "{cmd}: {e}");
+                assert!(e.message.contains("only on the Co-Producer socket"), "{e}");
+            }
+            other => panic!("{cmd}: {other:?}"),
+        }
+    }
+    assert!(dev.next_call().is_none());
+    // The developer list keeps every command, with its class.
+    let list = c.call("commands.list", json!({}), LONG).unwrap();
+    assert!(
+        list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "ui.theme" && c["class"] == "refused")
+    );
+}

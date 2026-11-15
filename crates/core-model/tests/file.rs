@@ -1,15 +1,18 @@
 use core_model::ModelError;
-use core_model::command::{Command, EventCmd, RoutingCmd, SequenceCmd, SettingsCmd, apply};
+use core_model::command::{
+    AudioCmd, Command, CrossfadeLength, EventCmd, MediaCmd, RoutingCmd, SequenceCmd, SettingsCmd,
+    apply,
+};
 use core_model::document::{DestKind, Document, MediaOrigin};
-use core_model::event::{EventBody, EventSpec};
+use core_model::event::{EventBody, EventSpec, FadeShape};
 use core_model::file::{
     FORMAT, Migration, VERSION, autosave, from_json, list_autosaves, load, migrate_v1_to_v2,
-    migrate_v2_to_v3, migrate_v3_to_v4, migrate_v5_to_v6, migrate_v6_to_v7, run_migrations, save,
-    to_json,
+    migrate_v2_to_v3, migrate_v3_to_v4, migrate_v5_to_v6, migrate_v6_to_v7, migrate_v7_to_v8,
+    migrate_v8_to_v9, run_migrations, save, to_json,
 };
 use core_model::format::{AudioFormat, BitDepth};
 use core_model::history::Timestamp;
-use core_model::ids::{DestId, LaneId, OutputPathId, PluginInstanceId, SeqId, StripId};
+use core_model::ids::{DestId, LaneId, MediaId, OutputPathId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{Output, PluginFormat, PluginRef, StripKind};
 use core_model::query::{flatten, seq_length};
 use core_model::selection::ViewFilter;
@@ -653,7 +656,7 @@ fn a_strip_colour_round_trips_and_none_is_not_written() {
 /// destination without a MIDI mix has the default one).
 #[test]
 fn version_5_projects_migrate_to_version_6() {
-    assert_eq!(VERSION, 7);
+    assert_eq!(VERSION, 9);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(5);
@@ -671,7 +674,7 @@ fn version_5_projects_migrate_to_version_6() {
 /// lane or destination without MPE has none).
 #[test]
 fn version_6_projects_migrate_to_version_7() {
-    assert_eq!(VERSION, 7);
+    assert_eq!(VERSION, 9);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(6);
@@ -683,6 +686,98 @@ fn version_6_projects_migrate_to_version_7() {
             .contains(&format!("\"version\": {VERSION}"))
     );
     assert_eq!(migrate_v6_to_v7(v.clone()).unwrap(), v);
+}
+
+/// Plan 6a (Task 1): a version-7 project migrates to version 8 unchanged
+/// (settings without song info or a project ID have neither; regions
+/// without a name have none).
+#[test]
+fn version_7_projects_migrate_to_version_8() {
+    assert_eq!(VERSION, 9);
+    let d = small_doc();
+    let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    v["version"] = json!(7);
+    let back = from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(back, d);
+    assert!(
+        to_json(&back)
+            .unwrap()
+            .contains(&format!("\"version\": {VERSION}"))
+    );
+    assert_eq!(migrate_v7_to_v8(v.clone()).unwrap(), v);
+}
+
+/// Plan 6a (Task 1): a damaged project ID, song-info field or region name
+/// fails to load as Corrupt, naming the field.
+#[test]
+fn damaged_v8_fields_are_corrupt() {
+    let d = small_doc();
+    let v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    let problems = |v: &Value| match from_json(&v.to_string()) {
+        Err(ModelError::Corrupt { problems }) => problems,
+        other => panic!("expected Corrupt, got {other:?}"),
+    };
+    let mut bad = v.clone();
+    bad["document"]["settings"]["project_id"] = json!("xyz");
+    assert!(problems(&bad).iter().any(|p| p.contains("project_id")));
+    let mut bad = v.clone();
+    bad["document"]["settings"]["info"] = json!({"title": "a\u{7}b"});
+    assert!(problems(&bad).iter().any(|p| p.contains("info.title")));
+    // A region name that is empty after trimming is corrupt; a real one loads.
+    let with_region = apply(
+        &d,
+        &Command::Media(MediaCmd::Add {
+            path: "Media/a.caf".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 48_000,
+            content_hash: None,
+            name: None,
+            origin: None,
+        }),
+    )
+    .and_then(|a| {
+        apply(
+            &a.doc,
+            &Command::Audio(AudioCmd::Insert {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                tick: Tick(0),
+                media: MediaId(0),
+                source_offset: 0,
+                length: 4800,
+                gain_db: 0.0,
+                fade_in: Default::default(),
+                fade_out: Default::default(),
+            }),
+        )
+    })
+    .unwrap()
+    .doc;
+    fn name_regions(v: &mut Value, name: &Value) {
+        match v {
+            Value::Object(m) => {
+                if m.get("type") == Some(&json!("audio_region")) {
+                    m.insert("name".into(), name.clone());
+                }
+                m.values_mut().for_each(|c| name_regions(c, name));
+            }
+            Value::Array(a) => a.iter_mut().for_each(|c| name_regions(c, name)),
+            _ => {}
+        }
+    }
+    let rv: Value = serde_json::from_str(&to_json(&with_region).unwrap()).unwrap();
+    let mut bad = rv.clone();
+    name_regions(&mut bad, &json!(""));
+    assert!(problems(&bad).iter().any(|p| p.contains("region.name")));
+    let mut ok = rv.clone();
+    name_regions(&mut ok, &json!("Lead vox"));
+    assert!(from_json(&ok.to_string()).is_ok());
+    // A well-formed ID and info load.
+    let mut ok = v.clone();
+    ok["document"]["settings"]["project_id"] = json!("0a1b2c3d-0000-4000-8000-00000000000a");
+    ok["document"]["settings"]["info"] = json!({"title": "Song"});
+    assert!(from_json(&ok.to_string()).is_ok());
 }
 
 /// Plan 5g-1b: a MIDI mix out of range, or on a destination that is not
@@ -733,4 +828,87 @@ fn a_damaged_midi_mix_is_corrupt() {
     let mut ok = v.clone();
     ok["document"]["instruments"][0]["midi_mix"] = json!({"volume": 90, "mute": true});
     assert!(from_json(&ok.to_string()).is_ok());
+}
+
+/// An overlapping pair of regions: B (event 2) starts inside A (event 1);
+/// the note is event 0.
+fn overlapping_doc() -> Document {
+    let mut d = apply(
+        &small_doc(),
+        &Command::Media(MediaCmd::Add {
+            path: "Media/a.caf".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 192_000,
+            content_hash: None,
+            name: None,
+            origin: None,
+        }),
+    )
+    .unwrap()
+    .doc;
+    for (tick, offset) in [(0, 0), (1920, 4800)] {
+        d = apply(
+            &d,
+            &Command::Audio(AudioCmd::Insert {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                tick: Tick(tick),
+                media: MediaId(0),
+                source_offset: offset,
+                length: 4800,
+                gain_db: 0.0,
+                fade_in: Default::default(),
+                fade_out: Default::default(),
+            }),
+        )
+        .unwrap()
+        .doc;
+    }
+    d
+}
+
+/// Plan 6c (Task 1): a version-8 project with overlapping regions loads
+/// unchanged, with no implicit crossfade, and saves as version 9 with no
+/// `crossfade` key.
+#[test]
+fn version_8_projects_migrate_to_version_9() {
+    assert_eq!(VERSION, 9);
+    let d = overlapping_doc();
+    let text = to_json(&d).unwrap();
+    assert!(text.contains("\"version\": 9"));
+    assert!(!text.contains("crossfade"));
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    v["version"] = json!(8);
+    let back = from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(back, d);
+    for (_, ev) in back.all_events() {
+        if let EventBody::AudioRegion { crossfade, .. } = &ev.body {
+            assert!(!crossfade);
+        }
+    }
+    let saved = to_json(&back).unwrap();
+    assert!(saved.contains("\"version\": 9"));
+    assert!(!saved.contains("crossfade"));
+    assert_eq!(migrate_v8_to_v9(v.clone()).unwrap(), v);
+}
+
+/// Plan 6c (Task 1): the flag is written once, on the later region, and
+/// loads back equal.
+#[test]
+fn crossfade_survives_save_and_load() {
+    let d = apply(
+        &overlapping_doc(),
+        &Command::Audio(AudioCmd::Crossfade {
+            event: core_model::ids::EventId(2),
+            length: CrossfadeLength::Frames(1200),
+            shape: FadeShape::SCurve,
+        }),
+    )
+    .unwrap()
+    .doc;
+    let text = to_json(&d).unwrap();
+    assert_eq!(text.matches("\"crossfade\": true").count(), 1);
+    assert_eq!(text.matches("crossfade").count(), 1);
+    assert_eq!(from_json(&text).unwrap(), d);
 }

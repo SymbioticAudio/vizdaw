@@ -64,14 +64,7 @@ public enum TrackCommands {
     static func execute(
         _ id: String, seq: UInt64, lane: UInt64?, after: UInt64?, name: String?, _ m: DocumentModel
     ) -> KeyOutcome {
-        guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
-        // The core refuses New and Duplicate while recording; Delete and
-        // Rename it does not, so all five are refused here, before any call.
-        m.record.refresh(quiet: true)
-        if m.record.isRecording {
-            m.editor.status = recordingBusy
-            return .busy(recordingBusy)
-        }
+        if let refused = waitRefusal(m) { return refused }
         if let kind = kind(of: id) { return m.newTrack(kind, seq: seq, after: after) }
         guard let lane else { return .unavailable(noTrack) }
         switch id {
@@ -107,42 +100,77 @@ public enum TrackCommands {
         }
     }
 
+    /// Why an edit cannot start now: an open drag, or a recording. The core
+    /// refuses New and Duplicate while recording; Delete and Rename it does
+    /// not, so all five (and the take commands) are refused here, before
+    /// any call. A recording's refusal shows in the status line.
+    static func waitRefusal(_ m: DocumentModel) -> KeyOutcome? {
+        guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
+        m.record.refresh(quiet: true)
+        if m.record.isRecording {
+            m.editor.status = recordingBusy
+            return .busy(recordingBusy)
+        }
+        return nil
+    }
+
+    /// The channel's whole-number argument `name`: absent, a value, or bad.
+    static func number(_ args: [ControlArg], _ name: String) -> (value: UInt64?, bad: Bool) {
+        guard args.contains(where: { $0.name == name }) else { return (nil, false) }
+        guard let v = args.int(name).flatMap({ UInt64(exactly: $0) }) else { return (nil, true) }
+        return (v, false)
+    }
+
+    /// `invalid_params` for a bad whole-number argument of `id`.
+    static func badNumber(_ id: String, _ name: String) -> ControlOutcome {
+        .failed(.of(.invalidParams, "\(id): `\(name)` is a whole number from 0"))
+    }
+
+    /// The track a channel call acts on: sequence `seq` (else the shown
+    /// one) and track `lane` (else the selection's first track, in the
+    /// shown sequence), with the sequence's tracks; or the refusal
+    /// `track.rename` gives for an unknown sequence or track.
+    static func target(
+        seq seqArg: UInt64?, lane laneArg: UInt64?, _ m: DocumentModel
+    ) -> (seq: UInt64, row: LaneRow?, rows: [LaneRow], refusal: ControlOutcome?) {
+        guard let seq = seqArg ?? m.selectedSeq else { return (0, nil, [], ControlCommands.unavailable(noSequence)) }
+        guard m.snapshot.sequences.contains(where: { $0.id == seq }) else {
+            return (seq, nil, [], .failed(.of(.failed, "There is no sequence \(seq).")))
+        }
+        let rows = seq == m.selectedSeq ? m.lanes : ((try? m.session.lanes(seq: seq)) ?? [])
+        if let l = laneArg {
+            guard let row = rows.first(where: { $0.id == l }) else { return (seq, nil, rows, missing(l)) }
+            return (seq, row, rows, nil)
+        }
+        let selected = seq == m.selectedSeq ? m.selectedLane?.id : nil
+        return (seq, rows.first { $0.id == selected }, rows, nil)
+    }
+
+    /// "There is no track `lane` in this sequence."
+    static func missing(_ lane: UInt64) -> ControlOutcome {
+        .failed(.of(.failed, "There is no track \(lane) in this sequence."))
+    }
+
     /// The channel's entry. `seq` defaults to the shown sequence and `lane`
     /// to the selection's first track; ids that name nothing are refused in
     /// track wording, and a blank `name` is the core's refusal, passed on.
     public static func run(_ id: String, args: [ControlArg], doc: UUID, _ m: DocumentModel) -> ControlOutcome {
-        func bad(_ name: String) -> ControlOutcome {
-            .failed(.of(.invalidParams, "\(id): `\(name)` is a whole number from 0"))
-        }
-        func number(_ name: String) -> (value: UInt64?, bad: Bool) {
-            guard args.contains(where: { $0.name == name }) else { return (nil, false) }
-            guard let v = args.int(name).flatMap({ UInt64(exactly: $0) }) else { return (nil, true) }
-            return (v, false)
-        }
-        let seqArg = number("seq"), laneArg = number("lane"), afterArg = number("after")
-        if seqArg.bad { return bad("seq") }
-        if laneArg.bad { return bad("lane") }
-        if afterArg.bad { return bad("after") }
+        let seqArg = number(args, "seq"), laneArg = number(args, "lane"), afterArg = number(args, "after")
+        if seqArg.bad { return badNumber(id, "seq") }
+        if laneArg.bad { return badNumber(id, "lane") }
+        if afterArg.bad { return badNumber(id, "after") }
         var name: String?
         if args.contains(where: { $0.name == "name" }) {
             guard let n = args.text("name") else { return .failed(.of(.invalidParams, "\(id): `name` is text")) }
             name = n
         }
-        guard let seq = seqArg.value ?? m.selectedSeq else { return ControlCommands.unavailable(noSequence) }
-        guard m.snapshot.sequences.contains(where: { $0.id == seq }) else {
-            return .failed(.of(.failed, "There is no sequence \(seq)."))
-        }
-        let rows = seq == m.selectedSeq ? m.lanes : ((try? m.session.lanes(seq: seq)) ?? [])
-        func missing(_ lane: UInt64) -> ControlOutcome {
-            .failed(.of(.failed, "There is no track \(lane) in this sequence."))
-        }
-        if let a = afterArg.value, !rows.contains(where: { $0.id == a }) { return missing(a) }
-        var lane = laneArg.value
-        if let l = lane, !rows.contains(where: { $0.id == l }) { return missing(l) }
-        if lane == nil, kind(of: id) == nil {
-            lane = seq == m.selectedSeq ? m.selectedLane?.id : nil
-            if lane == nil { return ControlCommands.unavailable(noTrack) }
-        }
+        let t = target(seq: seqArg.value, lane: laneArg.value, m)
+        if let refusal = t.refusal { return refusal }
+        if let a = afterArg.value, !t.rows.contains(where: { $0.id == a }) { return missing(a) }
+        // A New command ignores the track; the others act on it.
+        let lane = t.row?.id
+        if lane == nil, kind(of: id) == nil { return ControlCommands.unavailable(noTrack) }
+        let seq = t.seq
         if id == rename, name == nil { return .failed(.dialog("Rename Track", "name")) }
         let outcome = execute(id, seq: seq, lane: lane, after: afterArg.value, name: name, m)
         if let f = ControlCommands.failure(outcome) { return f }

@@ -20,6 +20,7 @@
 )]
 
 pub mod adapt;
+pub mod bundled;
 pub mod catalog;
 pub mod clap;
 pub mod error;

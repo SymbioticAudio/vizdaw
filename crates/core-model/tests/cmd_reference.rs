@@ -850,3 +850,90 @@ fn a_project_at_the_limit_saves_and_reopens() {
     let back = core_model::file::from_json(&text).expect("reopens");
     assert_eq!(core_model::file::to_json(&back).unwrap(), text);
 }
+
+/// A region the reference window cuts short keeps fades that fit it: like
+/// a trim, the fade in first, then the fade out (5a Ruling 1). Before,
+/// Flatten stored the clipped length with the old fades and was refused
+/// ("region.fades" out of range; found by the property tests).
+#[test]
+fn flatten_fits_the_fades_of_a_region_the_window_clips() {
+    let mut d = Document::new();
+    for name in ["Song", "Clip"] {
+        d = run(
+            &d,
+            Command::Sequence(SequenceCmd::New { name: name.into() }),
+        )
+        .unwrap();
+    }
+    d = run(
+        &d,
+        Command::Media(MediaCmd::Add {
+            path: "Media/m.caf".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 480_000,
+            content_hash: None,
+            name: None,
+            origin: None,
+        }),
+    )
+    .unwrap();
+    // One second (two beats at 120 BPM), fades 30 000 + 10 000 frames.
+    let fade = |n| Fade {
+        length_frames: n,
+        ..Fade::default()
+    };
+    d = run(
+        &d,
+        Command::Audio(AudioCmd::Insert {
+            seq: SeqId(1),
+            lane: LaneId(1),
+            tick: Tick(0),
+            media: MediaId(0),
+            source_offset: 0,
+            length: 48_000,
+            gain_db: 0.0,
+            fade_in: fade(30_000),
+            fade_out: fade(10_000),
+        }),
+    )
+    .unwrap();
+    // A one-beat use: the region plays 24 000 frames.
+    d = run(
+        &d,
+        rc(ReferenceCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            tick: Tick(0),
+            target: SeqId(1),
+            length: Some(Tick(Q)),
+            loop_count: LoopCount::Count(1),
+            transpose: 0,
+        }),
+    )
+    .unwrap();
+    let r = EventId(1);
+    let before = played(&d, 0);
+    for cmd in [
+        ReferenceCmd::MakePrivateCopy { event: r },
+        ReferenceCmd::Flatten { event: r },
+    ] {
+        let a = apply(&d, &rc(cmd.clone())).unwrap_or_else(|e| panic!("{cmd:?}: {e:?}"));
+        assert_eq!(played(&a.doc, 0), before, "{cmd:?}");
+        assert!(validate(&a.doc).is_empty(), "{:?}", validate(&a.doc));
+    }
+    let f = run(&d, rc(ReferenceCmd::Flatten { event: r })).unwrap();
+    let region = f
+        .all_events()
+        .find_map(|(_, e)| match &e.body {
+            EventBody::AudioRegion {
+                length,
+                fade_in,
+                fade_out,
+                ..
+            } => Some((*length, fade_in.length_frames, fade_out.length_frames)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(region, (24_000, 24_000, 0));
+}

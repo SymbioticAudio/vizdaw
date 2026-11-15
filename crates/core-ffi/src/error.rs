@@ -43,6 +43,14 @@ pub enum VizError {
         /// Why.
         message: String,
     },
+    /// Something that is not Multi-Q (a plain file or folder) is where
+    /// "Install Multi-Q for other apps" would put it, and `replace` was not
+    /// given (plan 6g Ruling 9): the app asks before replacing it.
+    #[error("Something that is not Multi-Q is in the way: {path}.")]
+    Exists {
+        /// The path in the way.
+        path: String,
+    },
     /// A bug: a caught panic or an impossible state.
     #[error("internal error: {message}")]
     Internal {

@@ -4,7 +4,7 @@
 use core_control::bindings::{
     BindError, COMMAND, Chord, Keymap, MAX_CHORDS, MAX_JSON, SHIFT, default_chords,
 };
-use core_control::registry::{COMMANDS, CommandSpec, KeyContext};
+use core_control::registry::{COMMANDS, Class, CommandSpec, KeyContext};
 use proptest::prelude::*;
 use serde_json::json;
 
@@ -30,6 +30,7 @@ const fn spec(
         params: &[],
         dialogs: &[],
         yields: false,
+        class: Class::Refused,
     }
 }
 

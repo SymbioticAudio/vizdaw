@@ -171,6 +171,9 @@ pub struct Catalog {
     missing: BTreeSet<Source>,
     /// Plugins the last [`Catalog::apply`] marked unavailable on the host.
     marked: HostMarks,
+    /// The app's bundled plug-in folder, whose copy of an ID wins (plan
+    /// 6g Ruling 4); not saved.
+    preferred_dir: Option<PathBuf>,
 }
 
 impl Catalog {
@@ -245,6 +248,7 @@ impl Catalog {
             disabled: r.disabled.into_iter().collect(),
             missing: BTreeSet::new(),
             marked: HostMarks::default(),
+            preferred_dir: None,
         })
     }
 
@@ -311,6 +315,28 @@ impl Catalog {
             .find(|e| e.plugin.format == format && e.plugin.id == id)
     }
 
+    /// Sets the folder whose entries win when several sources share an ID
+    /// (the app's bundled plug-ins, [`crate::bundled::dir`]); `None`: the
+    /// first entry wins.
+    pub fn set_preferred_dir(&mut self, dir: Option<PathBuf>) {
+        self.preferred_dir = dir;
+    }
+
+    /// The entry of plugin `id` of `format` the host uses: the one whose
+    /// source path is under the preferred dir when there is one, else the
+    /// first.
+    pub fn preferred(&self, format: PluginFormat, id: &str) -> Option<&CatalogEntry> {
+        let mut same = self
+            .entries
+            .iter()
+            .filter(|e| e.plugin.format == format && e.plugin.id == id);
+        let first = same.clone().next();
+        match &self.preferred_dir {
+            Some(dir) => same.find(|e| e.source.path.starts_with(dir)).or(first),
+            None => first,
+        }
+    }
+
     /// Of `found` (every source discovery saw now), the ones that must be
     /// scanned: new, or changed since their scan (another version or
     /// modification time). Entries of changed sources are dropped;
@@ -373,7 +399,10 @@ impl Catalog {
         Some(self.status_of(e))
     }
 
-    fn status_of(&self, e: &CatalogEntry) -> PluginStatus {
+    /// The status of entry `e` (one of [`Catalog::entries`]): unlike
+    /// [`Catalog::status`], which reads the first entry of an ID, this is
+    /// the one asked about, such as [`Catalog::preferred`]'s.
+    pub fn status_of(&self, e: &CatalogEntry) -> PluginStatus {
         if self.missing.contains(&e.source) {
             return PluginStatus::Missing;
         }
@@ -441,12 +470,22 @@ impl Catalog {
 
     /// [`Catalog::apply`] for one of several hosts: `marks` is what this
     /// catalog told `host` last time (start with `HostMarks::default()`).
+    /// When several entries share an ID, only [`Catalog::preferred`]'s
+    /// counts: its path is registered and its status decides.
     pub fn apply_to(&self, host: &mut PluginHost, marks: &mut HostMarks) {
         let mut now = BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for e in &self.entries {
             if e.plugin.id.is_empty() {
                 continue;
             }
+            let key = (e.plugin.format, e.plugin.id.clone());
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            // Of several copies of one ID, only the preferred one counts:
+            // a shadowed copy is neither loaded nor marks the ID.
+            let e = self.preferred(key.0, &key.1).unwrap_or(e);
             if e.plugin.format == PluginFormat::Clap {
                 host.register_path(e.plugin.format, &e.plugin.id, e.source.path.clone());
             }
@@ -456,7 +495,6 @@ impl Catalog {
                 PluginStatus::Blocklisted(r) => Some(format!("Blocklisted: {r}")),
                 PluginStatus::Missing => Some("Missing".to_string()),
             };
-            let key = (e.plugin.format, e.plugin.id.clone());
             // Only the user's preference stops running instances.
             host.set_disabled(key.0, &key.1, self.disabled.contains(&key));
             if let Some(w) = why {

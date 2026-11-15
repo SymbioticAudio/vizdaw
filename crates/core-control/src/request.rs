@@ -2,6 +2,7 @@
 //! checked here, in Rust, before anything reaches the app. Validation is
 //! total: any [`RawRequest`] gives a [`Command`] or an error, never a panic.
 
+use crate::co_producer::{MAX_PLAN, Planned};
 use crate::element::{self, ElementRef};
 use crate::error::{ControlError, ErrorCode};
 use crate::keys::{KeyStroke, Modifiers, named_key, text_strokes};
@@ -13,7 +14,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every command name.
-pub const COMMAND_NAMES: [&str; 13] = [
+pub const COMMAND_NAMES: [&str; 18] = [
     "commands.list",
     "command.run",
     "state.get",
@@ -27,7 +28,18 @@ pub const COMMAND_NAMES: [&str; 13] = [
     "app.quit",
     "wait",
     "ping",
+    "co_producer.begin",
+    "co_producer.end",
+    "co_producer.status",
+    "co_producer.preview",
+    "co_producer.apply",
 ];
+
+/// The longest Co-Producer request name, in characters after trimming
+/// (plan 8a Ruling 11).
+pub const MAX_REQUEST_NAME: usize = 200;
+/// A preview token's length: 32 lowercase hex characters (Ruling 7).
+pub const TOKEN_LEN: usize = 32;
 
 /// The deepest `ui.tree` (and the default).
 pub const MAX_TREE_DEPTH: u32 = 64;
@@ -220,12 +232,58 @@ pub enum Command {
         /// At most this long.
         timeout_ms: u64,
     },
+    /// Opens a Co-Producer request: one named undo step (plan 8a).
+    CoProducerBegin {
+        /// What the composer asked for, trimmed.
+        name: String,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Ends the open request.
+    CoProducerEnd {
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// The open request, if any.
+    CoProducerStatus {
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Works out what a plan of change and remove commands would do.
+    CoProducerPreview {
+        /// The planned commands, in order.
+        plan: Vec<Planned>,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Runs a previewed plan with the composer's yes.
+    CoProducerApply {
+        /// The preview's one-time token.
+        token: String,
+        /// The previewed commands, again.
+        plan: Vec<Planned>,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
 }
 
 impl Command {
     /// Whether the server answers it without the app.
     pub fn is_local(&self) -> bool {
         matches!(self, Command::CommandsList | Command::Ping)
+    }
+
+    /// Whether it is one of the `co_producer.*` commands, which only the
+    /// Co-Producer socket accepts.
+    pub fn is_co_producer(&self) -> bool {
+        matches!(
+            self,
+            Command::CoProducerBegin { .. }
+                | Command::CoProducerEnd { .. }
+                | Command::CoProducerStatus { .. }
+                | Command::CoProducerPreview { .. }
+                | Command::CoProducerApply { .. }
+        )
     }
 }
 
@@ -388,6 +446,40 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
             Ok(Command::AppQuit)
         }
         "wait" => wait(&p),
+        "co_producer.begin" => {
+            p.only(&["name", "window"])?;
+            Ok(Command::CoProducerBegin {
+                name: request_name(&p)?,
+                window: p.window()?,
+            })
+        }
+        "co_producer.end" => {
+            p.only(&["window"])?;
+            Ok(Command::CoProducerEnd {
+                window: p.window()?,
+            })
+        }
+        "co_producer.status" => {
+            p.only(&["window"])?;
+            Ok(Command::CoProducerStatus {
+                window: p.window()?,
+            })
+        }
+        "co_producer.preview" => {
+            p.only(&["commands", "window"])?;
+            Ok(Command::CoProducerPreview {
+                plan: plan(&p)?,
+                window: p.window()?,
+            })
+        }
+        "co_producer.apply" => {
+            p.only(&["token", "commands", "window"])?;
+            Ok(Command::CoProducerApply {
+                token: token(&p)?,
+                plan: plan(&p)?,
+                window: p.window()?,
+            })
+        }
         other => Err(ControlError::new(
             ErrorCode::UnknownCommand,
             format!(
@@ -431,6 +523,98 @@ fn command_run(p: &Params<'_>, all: &Map<String, Value>) -> Result<Command, Cont
         args: registry::validate_args(spec, args)?,
         window: p.window()?,
     })
+}
+
+/// A character a request name may not hold (plan 8a Ruling 4): a C0 or C1
+/// control, a bidi control or mark, or a line or paragraph separator.
+fn refused_in_name(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
+
+/// `co_producer.begin`'s `name`: 1 to [`MAX_REQUEST_NAME`] characters after
+/// trimming, with no control, bidi or separator character.
+fn request_name(p: &Params<'_>) -> Result<String, ControlError> {
+    let raw = p.str("name", MAX_STRING)?;
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(p.error("`name` must not be empty"));
+    }
+    if name.chars().count() > MAX_REQUEST_NAME {
+        return Err(p.error(format!(
+            "`name` is longer than {MAX_REQUEST_NAME} characters"
+        )));
+    }
+    if name.chars().any(refused_in_name) {
+        return Err(p.error("`name` must not hold control, direction or line-separator characters"));
+    }
+    Ok(name.to_string())
+}
+
+/// `co_producer.apply`'s `token`: [`TOKEN_LEN`] lowercase hex characters.
+fn token(p: &Params<'_>) -> Result<String, ControlError> {
+    let t = p.str("token", TOKEN_LEN)?;
+    if t.len() != TOKEN_LEN || !t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(p.error(format!(
+            "`token` must be the {TOKEN_LEN} lowercase hex characters the preview gave"
+        )));
+    }
+    Ok(t)
+}
+
+/// A plan's `commands`: 1 to [`MAX_PLAN`] `{id, params?}`, each checked by
+/// the registry as `command.run` checks it.
+fn plan(p: &Params<'_>) -> Result<Vec<Planned>, ControlError> {
+    let shape = || {
+        p.error(format!(
+            "`commands` must be an array of 1 to {MAX_PLAN} {{\"id\", \"params\"}} objects"
+        ))
+    };
+    let list = match p.raw("commands") {
+        Some(Value::Array(a)) if (1..=MAX_PLAN).contains(&a.len()) => a,
+        Some(_) => return Err(shape()),
+        None => return Err(p.error("missing `commands`")),
+    };
+    let empty = Map::new();
+    let mut out = Vec::with_capacity(list.len());
+    for (i, item) in list.iter().enumerate() {
+        let Value::Object(m) = item else {
+            return Err(shape());
+        };
+        let at = |message: String| p.error(format!("`commands[{i}]`: {message}"));
+        if let Some(k) = m.keys().find(|k| *k != "id" && *k != "params") {
+            return Err(at(format!(
+                "unknown key {:?} (allowed: id, params)",
+                truncate(k, 64)
+            )));
+        }
+        let id = match m.get("id") {
+            Some(Value::String(s)) if s.chars().count() <= 64 => s.clone(),
+            Some(Value::String(_)) => return Err(at("`id` is longer than 64 characters".into())),
+            Some(_) => return Err(at("`id` must be a string".into())),
+            None => return Err(at("missing `id`".into())),
+        };
+        let spec = registry::find(&id).ok_or_else(|| registry::unknown(&id))?;
+        let args = match m.get("params") {
+            None | Some(Value::Null) => &empty,
+            Some(Value::Object(a)) => a,
+            Some(_) => return Err(at("`params` must be an object".into())),
+        };
+        out.push(Planned {
+            id,
+            args: registry::validate_args(spec, args)?,
+        });
+    }
+    Ok(out)
 }
 
 fn wait(p: &Params<'_>) -> Result<Command, ControlError> {

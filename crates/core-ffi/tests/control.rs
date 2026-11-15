@@ -1082,6 +1082,8 @@ fn audio_editor_result_json() {
             media_frames: 96000,
             sample_rate: 48000,
             offline: false,
+            crossfade: false,
+            crossfade_with: None,
         }),
         message: None,
         frames_per_point: 88.0,
@@ -1103,7 +1105,8 @@ fn audio_editor_result_json() {
                 "fade_in": {"frames": 12000, "shape": "linear"},
                 "fade_out": {"frames": 0, "shape": "linear"},
                 "source_offset": 24000, "length": 48000,
-                "media_frames": 96000, "sample_rate": 48000, "offline": false}})
+                "media_frames": 96000, "sample_rate": 48000, "offline": false,
+                "crossfade": null}})
     );
     let empty = result_json(&ControlResult::AudioEditor {
         doc: "D".into(),
@@ -1137,6 +1140,8 @@ fn audio_editor_result_json() {
             media_frames: 0,
             sample_rate: 0,
             offline: true,
+            crossfade: false,
+            crossfade_with: None,
         };
         e.gain_db = 6.0;
         let j = result_json(&ControlResult::AudioEditor {
@@ -1154,6 +1159,52 @@ fn audio_editor_result_json() {
         assert_eq!(j["region"]["fade_in"]["shape"], name);
         assert_eq!(j["region"]["fade_out"]["shape"], name);
     }
+}
+
+/// Plan 6c Task 4: a crossfaded region shows its length, shape and partner;
+/// any other shows `null`.
+#[test]
+fn audio_editor_state_shows_the_crossfade() {
+    use vizdaw_ffi::{AudioEditorRegionRow, AudioEditorStateRow, FadeRow, FadeShapeRow};
+    let state = |crossfade: bool, with: Option<u64>| {
+        result_json(&ControlResult::AudioEditor {
+            doc: "D".into(),
+            editor: AudioEditorStateRow {
+                shown: true,
+                region: Some(AudioEditorRegionRow {
+                    event: 8,
+                    media: 5,
+                    name: "tone".into(),
+                    gain_db: 0.0,
+                    fade_in: FadeRow {
+                        length: 4800,
+                        shape: FadeShapeRow::EqualPower,
+                    },
+                    fade_out: FadeRow {
+                        length: 0,
+                        shape: FadeShapeRow::Linear,
+                    },
+                    source_offset: 0,
+                    length: 48000,
+                    media_frames: 96000,
+                    sample_rate: 48000,
+                    offline: false,
+                    crossfade,
+                    crossfade_with: with,
+                }),
+                message: None,
+                frames_per_point: 1.0,
+                origin_frame: 0.0,
+                amplitude: 1,
+                boxes: vec![],
+            },
+        })
+    };
+    assert_eq!(
+        state(true, Some(7))["region"]["crossfade"],
+        json!({"frames": 4800, "shape": "equal_power", "with": 7})
+    );
+    assert_eq!(state(false, None)["region"]["crossfade"], Value::Null);
 }
 
 #[test]

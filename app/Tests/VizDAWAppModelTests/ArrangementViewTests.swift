@@ -241,7 +241,7 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         let lane = m.lanes[1]
         let titles = h.laneMenu(seq: 3, lane: lane).items.filter { !$0.isSeparatorItem }.map(\.title)
         // Colour ▸ last (plan 7b Task B7; StripColourTests covers it).
-        #expect(titles == ["Track Synth…", "New MIDI Destination…", "Colour"])
+        #expect(titles == ["Track Synth…", "New MIDI Destination…", "Takes", "Colour"])
         #expect(!h.laneMenu(seq: 3, lane: lane).items[0].isEnabled, "Chords plays no external synth")
         let saved = f.dests
         f.dests = saved + [DestRow(id: 7, name: "Juno", plugin: nil, external: true)]
@@ -249,6 +249,53 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         juno.midiDest = 7
         #expect(h.laneMenu(seq: 3, lane: juno).items[0].isEnabled, "Juno is an external synth")
         f.dests = saved
+    }
+
+    /// Plan 5c-2 takes Ruling 5: the Takes submenu lists the track's takes
+    /// with the playing one checked, then Rename and Delete for it.
+    @Test func theTakesMenuListsAndActs() throws {
+        let (m, f) = try takesDemo()
+        let groove = try #require(m.lanes.first { $0.id == 30 })
+        let item = TakesMenu.item(document: m, seq: 3, lane: groove)
+        #expect(item.title == "Takes")
+        let items = try #require(item.submenu).items.filter { !$0.isSeparatorItem }
+        #expect(items.map(\.title) == ["Take 1", "Take 2", "Rename “Take 2”…", "Delete “Take 2”"])
+        #expect(items.filter { $0.state == .on }.map(\.title) == ["Take 2"])
+        #expect(items.filter { !$0.isEnabled }.isEmpty)
+        let take1 = items[0]
+        _ = take1.target?.perform(take1.action, with: take1)
+        #expect(f.edits.last == .lane(edit: .setActiveTake(seq: 3, lane: 30, take: 300)))
+        let chords = try #require(m.lanes.first { $0.id == 31 })
+        let one = try #require(TakesMenu.item(document: m, seq: 3, lane: chords).submenu).items
+            .filter { !$0.isSeparatorItem }
+        #expect(one.map(\.title) == ["Take 1", "Rename “Take 1”…", "Delete “Take 1”"])
+        #expect(one.last?.isEnabled == false, "a track keeps at least one take")
+    }
+
+    @Test func theHeaderNamesThePlayingTake() throws {
+        var keys = lane(40, "Keys")
+        keys.takes = [
+            TakeRow(id: 1, name: "Take 1", midiEventCount: 0, regionCount: 0),
+            TakeRow(id: 2, name: "Take 2", midiEventCount: 0, regionCount: 0),
+        ]
+        keys.activeTakeId = 2
+        #expect(LaneHeaderLayout.nameText(keys) == "Keys · Take 2")
+        keys.takes.removeLast()
+        keys.activeTakeId = 1
+        #expect(LaneHeaderLayout.nameText(keys) == "Keys")
+        #expect(LaneHeaderLayout.nameText(lane(41, "Bass")) == "Bass")
+    }
+
+    @Test func theRegionMenuHasTakes() throws {
+        let (m, _) = try takesDemo()
+        let key = LaneKey(3, 30)
+        let block = try #require(m.editor.blocks(key).first)
+        let menu = ArrangementView.blockMenu(document: m, block: block, key: key)
+        let titles = menu.items.map(\.title)
+        #expect(titles.contains("Takes"))
+        // Just above the separator before Delete.
+        let i = try #require(titles.firstIndex(of: "Takes"))
+        #expect(menu.items[i + 1].isSeparatorItem && titles[i + 2] == "Delete")
     }
 
     /// A header click selects its track; ⇧ or ⌘ adds or removes one, and

@@ -15,6 +15,9 @@ pub enum MediaError {
     /// The operation was cancelled.
     #[error("cancelled")]
     Cancelled,
+    /// A check refused the work, which stops it (the sentence says why).
+    #[error("{0}")]
+    Refused(String),
 }
 
 impl From<std::io::Error> for MediaError {

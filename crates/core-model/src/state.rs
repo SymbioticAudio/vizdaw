@@ -2,7 +2,8 @@
 //! Ruling 9).
 
 use crate::document::Document;
-use crate::error::Result;
+use crate::error::{ModelError, Result};
+use crate::ids::AnyId;
 use crate::ids::{PluginInstanceId, StateBlobId};
 use crate::mixer::ParamId;
 use serde_json::Value;
@@ -11,6 +12,11 @@ use std::sync::Arc;
 
 /// The package folder holding blobs.
 pub const STATE_DIR: &str = "PluginState";
+
+/// Largest plug-in state one slot holds through `MixerCmd::SetPluginState`,
+/// in bytes: the import's per-state cap (spec §6.5; `core_io::limits`
+/// re-exports it).
+pub const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The ID of a blob: the 64-bit FNV-1a hash of its bytes.
 pub fn blob_id(bytes: &[u8]) -> StateBlobId {
@@ -59,7 +65,39 @@ pub fn capture_keeping(
     keep: &BTreeMap<ParamId, f64>,
 ) -> Result<(Document, StateBlobId)> {
     let mut d = doc.clone();
-    let id = blob_id(bytes);
+    let id = store(&mut d, slot, Arc::from(bytes), keep)?;
+    Ok((d, id))
+}
+
+/// Stores `bytes` as blob [`blob_id`]`(bytes)`, points `slot` at it, sets
+/// its overlay to `keep` (finite values only) and drops the blobs no slot
+/// points at any more. Shared by [`capture_keeping`] (no undo step) and
+/// `MixerCmd::SetPluginState` (an undo step, plan 6e Ruling 10).
+///
+/// A blob a slot already points at under that ID with other bytes is a
+/// hash collision (FNV-1a is easy to collide on purpose, so in practice a
+/// hostile file): refused, nothing overwritten. With the same bytes the
+/// stored blob is shared. On an error `d` is unchanged.
+pub(crate) fn store(
+    d: &mut Document,
+    slot: PluginInstanceId,
+    bytes: Arc<[u8]>,
+    keep: &BTreeMap<ParamId, f64>,
+) -> Result<StateBlobId> {
+    let id = blob_id(&bytes);
+    d.plugin_slot(slot)
+        .ok_or(ModelError::UnknownId(AnyId::Plugin(slot)))?;
+    let held = d.states_mut().get(&id).cloned();
+    let bytes = match held {
+        Some(held) if held[..] == bytes[..] => held,
+        Some(_) if d.referenced_states().contains(&id) => {
+            return Err(ModelError::invalid(format!(
+                "plugin settings collide with other settings under blob {:016x}",
+                id.0
+            )));
+        }
+        _ => bytes,
+    };
     let s = d.slot_mut(slot)?;
     s.state = Some(id);
     s.params = keep
@@ -67,18 +105,18 @@ pub fn capture_keeping(
         .filter(|(_, v)| v.is_finite())
         .map(|(k, v)| (*k, *v))
         .collect();
-    d.states_mut().insert(id, Arc::from(bytes));
-    let keep = d.referenced_states();
+    d.states_mut().insert(id, bytes);
+    let referenced = d.referenced_states();
     let stale: Vec<StateBlobId> = d
         .states_mut()
         .keys()
-        .filter(|k| !keep.contains(k))
+        .filter(|k| !referenced.contains(k))
         .copied()
         .collect();
     for k in stale {
         d.states_mut().remove(&k);
     }
-    Ok((d, id))
+    Ok(id)
 }
 
 /// Blob IDs a `project.json` text references (every `state` field of an

@@ -47,7 +47,8 @@ public final class AudioEditorCanvas: NSView, ThemedView {
     }
 
     private var pressed: Press?
-    /// The gain readout while the gain band is dragged.
+    /// The gain readout while the gain band is dragged, the length while
+    /// the crossfade's X is.
     private var readout: (text: String, at: CGPoint)?
     /// VoiceOver children, kept so their identity is stable between queries.
     private var a11yElements: [CanvasElement] = []
@@ -181,10 +182,14 @@ public final class AudioEditorCanvas: NSView, ThemedView {
             pressed = d
         }
         editor.updateGesture(target(d, to: p, modifiers: modifiers))
+        let at = CGPoint(x: p.x + theme.spacing.m, y: max(p.y - theme.spacing.xl, d.wave.minY))
         if d.handle == .gain {
             let g = RegionHandles.gain(d.region.row, dy: p.y - d.from.y, fine: modifiers.contains(.shift))
-            let at = CGPoint(x: p.x + theme.spacing.m, y: max(p.y - theme.spacing.xl, d.wave.minY))
             readout = (AudioEditorEntry.gainText(Double(g)), at)
+        } else if d.handle == .crossfade {
+            let rect = AudioEditorGeometry.regionRect(d.region.row, axis: d.axis, in: d.wave)
+            let rate = RegionCommands.sampleRate(of: d.region.row, document)
+            readout = (RegionHandles.crossfadeReadout(d.region.row, dx: p.x - d.from.x, in: rect, rate: rate), at)
         }
         needsDisplay = true
     }
@@ -445,6 +450,16 @@ public final class AudioEditorCanvas: NSView, ThemedView {
                 }
             }
         }
+        // 8a. A crossfade's X over the fade-in area (plan 6c), as the
+        // arrangement draws it.
+        RegionPalette(theme).fadeLine.setStroke()
+        for (from, to) in RegionDrawing.crossfadeLines(r.row, in: regionRect) {
+            let line = NSBezierPath()
+            line.move(to: from)
+            line.line(to: to)
+            line.lineWidth = 1
+            line.stroke()
+        }
         NSGraphicsContext.restoreGraphicsState()
         theme.regionLine.setStroke()
         let outline = NSBezierPath(rect: regionVis.insetBy(dx: 0.5, dy: 0.5))
@@ -471,7 +486,7 @@ public final class AudioEditorCanvas: NSView, ThemedView {
             let active = pressed?.handle == h
             let colour = active ? theme.audioHandleSelected : theme.audioHandle
             switch h {
-            case .fadeIn, .fadeOut:
+            case .fadeIn, .fadeOut, .crossfade:
                 colour.setFill()
                 NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
             case .start, .end:
@@ -502,6 +517,7 @@ public final class AudioEditorCanvas: NSView, ThemedView {
         case .start: "Start Handle"
         case .end: "End Handle"
         case .gain: "Gain Handle"
+        case .crossfade: "Crossfade Handle"
         }
     }
 

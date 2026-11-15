@@ -109,6 +109,38 @@ impl KeyContext {
     }
 }
 
+/// What a command does to the composer's work, for the Co-Producer gate
+/// (Co-Producer spec §6.5, plan 8a Ruling 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Class {
+    /// Reads or plays; changes nothing.
+    Read,
+    /// Creates something new.
+    Add,
+    /// Changes something that exists.
+    Change,
+    /// Deletes something.
+    Remove,
+    /// Writes files outside the project, never over one.
+    Outward,
+    /// Never run by Co-Producer.
+    Refused,
+}
+
+impl Class {
+    /// Its name in `commands.list`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Class::Read => "read",
+            Class::Add => "add",
+            Class::Change => "change",
+            Class::Remove => "remove",
+            Class::Outward => "outward",
+            Class::Refused => "refused",
+        }
+    }
+}
+
 /// A command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -138,6 +170,9 @@ pub struct CommandSpec {
     /// another command (plan 7d controller ruling I3): true only for
     /// commands whose defaults came after users had keys files.
     pub yields: bool,
+    /// Its Co-Producer class (plan 8a Ruling 5); [`Class::Refused`] unless
+    /// the entry says otherwise.
+    pub class: Class,
 }
 
 /// What a null [`ParamKind::IntOrNull`] value reaches the app as.
@@ -173,6 +208,7 @@ const fn cmd(
         params: &[],
         dialogs: &[],
         yields: false,
+        class: Class::Refused,
     }
 }
 
@@ -256,9 +292,17 @@ const fn step(
     }
 }
 
-/// A numbered locator's command (plan 4f Ruling 7).
-const fn locator(id: &'static str, title: &'static str, key: &'static str) -> CommandSpec {
-    key_only(cmd(id, "Locators", title, Some(key), true))
+/// A numbered locator's command (plan 4f Ruling 7), of `class`.
+const fn locator(
+    class: Class,
+    id: &'static str,
+    title: &'static str,
+    key: &'static str,
+) -> CommandSpec {
+    CommandSpec {
+        class,
+        ..key_only(cmd(id, "Locators", title, Some(key), true))
+    }
 }
 
 const ON: &[ParamSpec] = &[ParamSpec {
@@ -281,6 +325,60 @@ pub const THEME_IDS: &[&str] = &[
 
 /// The prefix of a user theme's ID (controller ruling R-UT).
 pub const USER_THEME_PREFIX: &str = "user.";
+
+/// `plugins.new_channel_eq`'s parameter (plan 6g Task 4).
+const NEW_CHANNEL_EQ_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "on",
+    kind: ParamKind::Flag,
+    required: true,
+    help: "Put an EQ on new channels (on) or not (off).",
+}];
+
+/// `plugins.install_multiq`'s parameter (plan 6g Task 4).
+const INSTALL_MULTIQ_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "replace",
+    kind: ParamKind::Flag,
+    required: false,
+    help: "Replace a Multi-Q.component already in the Components folder (answers the dialog).",
+}];
+
+/// `plugins.default_eq`'s parameter (plan 6g-2 Ruling 7).
+const PLUGINS_DEFAULT_EQ_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "plugin",
+    kind: ParamKind::Text,
+    required: true,
+    help: "multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see the Plugin Manager).",
+}];
+
+/// `settings.co_producer`'s parameter (plan 8a Ruling 10).
+const CO_PRODUCER_SWITCH_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "on",
+    kind: ParamKind::Flag,
+    required: true,
+    help: "Turn Co-Producer on (true) or off (false).",
+}];
+
+/// `file.open_copy`'s parameter (plan 8a Ruling 9).
+const OPEN_COPY_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "path",
+    kind: ParamKind::Path("vizdaw"),
+    required: false,
+    help: "The Co-Producer copy to open as a new untitled project (answers the Open dialog).",
+}];
+
+/// `mixer.new_bus`'s parameters (plan 6g-2 Ruling 7).
+const MIXER_NEW_BUS_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "strip",
+        "The strip whose new send feeds the bus (see state.get mixer); absent: a bus with no send.",
+    ),
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The bus's name (default: the next free Bus N).",
+    },
+];
 
 /// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
 const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
@@ -484,6 +582,422 @@ const BOUNCE_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `file.import_midi` (plan 6a Task 8): the Open dialog and the import options.
+const IMPORT_MIDI_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The MIDI file (SMF or MIDI Clip File; answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "new_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Import into a new, empty project instead of this one (default false).",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "lane",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Drop onto this track (default: new tracks at the end).",
+    },
+    ParamSpec {
+        name: "tick",
+        kind: ParamKind::Int {
+            min: -(1 << 40),
+            max: 1 << 40,
+        },
+        required: false,
+        help: "Where the file's start goes (negative is 0; default 0).",
+    },
+    ParamSpec {
+        name: "channel_map",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Where each channel plays: JSON [{\"group\":0,\"channel\":9,\"dest\":3}]; dest null makes a new built-in synth. A pair not listed takes its suggestion.",
+    },
+    ParamSpec {
+        name: "split_channels",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Split tracks by channel (default: type 0 files only).",
+    },
+    ParamSpec {
+        name: "mpe",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Decode every track as MPE (default false).",
+    },
+    ParamSpec {
+        name: "use_tempo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Use the file's tempo and meter (default false; always into a sequence without events).",
+    },
+];
+
+/// `file.export_midi` (plan 6a Task 8): a Standard MIDI File.
+const EXPORT_MIDI_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("mid"),
+        required: false,
+        help: "The .mid file to write (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "type",
+        kind: ParamKind::Choice(&["0", "1"]),
+        required: false,
+        help: "0 (one track) or 1 (default).",
+    },
+    ParamSpec {
+        name: "ppq",
+        kind: ParamKind::Choice(&["480", "960", "15360"]),
+        required: false,
+        help: "Ticks per quarter note: 480, 960 (default) or 15360.",
+    },
+    ParamSpec {
+        name: "lanes",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Track IDs, comma-separated (default: every track; see state.get sequence).",
+    },
+    ParamSpec {
+        name: "mpe",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write per-note expression as MPE (default false).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
+/// `file.export_midi_clip` (plan 6a Task 8): MIDI Clip Files, one per track.
+const EXPORT_MIDI_CLIP_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "A file for one track, an existing folder for several (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "lanes",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Track IDs, comma-separated (default: every track; see state.get sequence).",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: 1 << 40,
+        },
+        required: false,
+        help: "The range's first tick for every track (needs `end`; default: the pickup's start).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: 1 << 40,
+        },
+        required: false,
+        help: "The range's end tick, exclusive (default: the sequence's end).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
+/// `file.import_dawproject` (plan 6d Task 11): a DAWproject file as a new
+/// project, or merged into the project it came from (plan 6e Task 9).
+const IMPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("dawproject"),
+        required: false,
+        help: "The .dawproject file to open as a new project (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(&["new", "merge"]),
+        required: false,
+        help: "new: open the file as a new project; merge: merge it into the project it came from. Needed when the file came from VizDAW.",
+    },
+    ParamSpec {
+        name: "project",
+        kind: ParamKind::Path("vizdaw"),
+        required: false,
+        help: "For merge: the project the file came from, when it is not open (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "snapshot",
+        kind: ParamKind::Text,
+        required: false,
+        help: "For merge: the export the file came from (an export ID), when the file lost its own.",
+    },
+    ParamSpec {
+        name: "preview",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "For merge: return the merge preview and change nothing.",
+    },
+];
+
+/// `file.export_dawproject` (plan 6d Task 11): a DAWproject file.
+const EXPORT_DAWPROJECT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("dawproject"),
+        required: false,
+        help: "The .dawproject file to write (answers the Save dialog; needed unless dry_run).",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing file (default false); the old file stays until the new one is complete.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "region_gain",
+        kind: ParamKind::Choice(&["apply", "leave_out"]),
+        required: false,
+        help: "apply (default): region gain is applied to the exported audio; leave_out: it is left out.",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Return what won't transfer; write nothing.",
+    },
+];
+
+/// `file.import_aaf` (plan 6f Task 6): an AAF file as a new project, or
+/// added to this one.
+const IMPORT_AAF_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::Path("aaf"),
+        required: false,
+        help: "The .aaf file (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "new_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Open the file as a new project (default true); false adds its tracks to this project, timed by its tempo map. One undo step.",
+    },
+    ParamSpec {
+        name: "midi_path",
+        kind: ParamKind::Path("mid"),
+        required: false,
+        help: "The MIDI file with the tempo map and MIDI tracks (default: the one beside the AAF with its name).",
+    },
+    ParamSpec {
+        name: "media_folder",
+        kind: ParamKind::File,
+        required: false,
+        help: "A folder to look in, by file name, for audio the file cannot find.",
+    },
+    ParamSpec {
+        name: "join_pairs",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Join tracks named as left and right into stereo tracks (default true).",
+    },
+];
+
+/// `file.export_aaf` (plan 6f Task 6): an AAF export folder.
+const EXPORT_AAF_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The folder to put the \"<song> AAF\" folder in (answers the Save dialog; needed unless dry_run). An existing export folder is never replaced: the new one is numbered.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "embed",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Embed the audio in the AAF file (default true); false writes it beside the file.",
+    },
+    ParamSpec {
+        name: "depth",
+        kind: ParamKind::Choice(&["16", "24"]),
+        required: false,
+        help: "The audio's bit depth (default 24).",
+    },
+    ParamSpec {
+        name: "stereo",
+        kind: ParamKind::Choice(&["mono_pairs", "stereo"]),
+        required: false,
+        help: "mono_pairs: a stereo track is two mono tracks; stereo: one stereo track.",
+    },
+    ParamSpec {
+        name: "start_tc",
+        kind: ParamKind::Choice(&["00:00:00:00", "01:00:00:00"]),
+        required: false,
+        help: "The timecode the sequence starts at (default 00:00:00:00).",
+    },
+    ParamSpec {
+        name: "fps",
+        kind: ParamKind::Choice(&["24", "25", "29.97df", "30"]),
+        required: false,
+        help: "The timecode frame rate (default 25).",
+    },
+    ParamSpec {
+        name: "clip_gain",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write clip gain (default true).",
+    },
+    ParamSpec {
+        name: "automation",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Write fader and pan automation (default true).",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Return what won't transfer; write nothing.",
+    },
+];
+
+/// `file.export_for_daw` (plan 6b Task 3): an export folder for another DAW.
+/// It never replaces anything: an existing folder's name gets " 2".
+const FOR_DAW_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The folder to put the export folder in (answers the Save dialog; needed unless dry_run). An existing export folder is never replaced: the new one is numbered.",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The sequence (default: the one shown).",
+    },
+    ParamSpec {
+        name: "strips",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Strip IDs whose stems are written, comma-separated, or none for MIDI files only (default: the usual strips).",
+    },
+    ParamSpec {
+        name: "container",
+        kind: ParamKind::Choice(&["wav", "aiff", "caf"]),
+        required: false,
+        help: "The stems' file type: wav (default), aiff or caf.",
+    },
+    ParamSpec {
+        name: "depth",
+        kind: ParamKind::Choice(&["16", "24", "32f"]),
+        required: false,
+        help: "The stems' bit depth: 16, 24 or 32f (default: the project's).",
+    },
+    ParamSpec {
+        name: "rate",
+        kind: ParamKind::Int {
+            min: 8000,
+            max: 384000,
+        },
+        required: false,
+        help: "The stems' sample rate in Hz (default: the project's).",
+    },
+    ParamSpec {
+        name: "dither",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Dither the stems (default: on at 16 bits only, off at 24; 32f never dithers, whatever this says).",
+    },
+    ParamSpec {
+        name: "add_to_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Add the stems to this project as heard (default false); one undo step.",
+    },
+    ParamSpec {
+        name: "dry_run",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Only check: answer what the export would do, write nothing.",
+    },
+];
+
 /// A media item by ID (plan 5b).
 const MEDIA_ID: ParamSpec = ParamSpec {
     name: "media",
@@ -551,6 +1065,50 @@ const fn opt_id_param(name: &'static str, help: &'static str) -> ParamSpec {
     }
 }
 
+/// `region.crossfade` (plan 6c Task 5).
+const CROSSFADE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The later region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    ParamSpec {
+        name: "length_ms",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Milliseconds, more than 0, as text (\"12.5\"); default: the whole overlap, at most Settings > Editing's default crossfade.",
+    },
+    ParamSpec {
+        name: "shape",
+        kind: ParamKind::Choice(&["linear", "equal_power", "exponential", "s_curve"]),
+        required: false,
+        help: "The crossfade's shape (default: equal_power).",
+    },
+];
+
+/// `region.remove_crossfade` (plan 6c Task 5).
+const REMOVE_CROSSFADE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The later region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The later region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+];
+
 /// `track.new_*` (plan tracks Ruling 5).
 const NEW_TRACK_PARAMS: &[ParamSpec] = &[
     opt_id_param("seq", "The sequence (default: the selected one)."),
@@ -575,6 +1133,26 @@ const TRACK_RENAME_PARAMS: &[ParamSpec] = &[
         kind: ParamKind::Text,
         required: false,
         help: "The track's new name (answers the Rename Track dialog).",
+    },
+];
+
+/// `track.choose_take` and `track.delete_take` (plan 5c-2 takes Ruling 6).
+const TAKE_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param("lane", "The track (default: the selection's first track)."),
+    id_param("take", "The take (see state.get `lanes` take_list)."),
+];
+
+/// `track.rename_take` (plan 5c-2 takes Ruling 6).
+const TAKE_RENAME_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param("lane", "The track (default: the selection's first track)."),
+    id_param("take", "The take (see state.get `lanes` take_list)."),
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The take's new name.",
     },
 ];
 
@@ -1004,6 +1582,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
     ),
     CommandSpec {
+        class: Class::Add,
         params: IMPORT_PARAMS,
         dialogs: &[DialogSpec {
             name: "Open",
@@ -1015,6 +1594,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     cmd("file.close", "File", "Close", Some("⌘W"), true),
     CommandSpec {
+        class: Class::Change,
         params: SAVE_PATH,
         dialogs: &[DialogSpec {
             name: "Save",
@@ -1035,6 +1615,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.save_as", "File", "Save As…", Some("⇧⌘S"), true)
     },
     CommandSpec {
+        class: Class::Change,
         params: FORMAT_PARAMS,
         dialogs: &[DialogSpec {
             name: "Project Settings",
@@ -1051,6 +1632,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Outward,
         params: BOUNCE_PARAMS,
         dialogs: &[DialogSpec {
             name: "Bounce",
@@ -1061,6 +1643,129 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("file.bounce", "File", "Bounce…", None, true)
     },
     CommandSpec {
+        class: Class::Add,
+        params: IMPORT_MIDI_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.import_midi", "File", "Import MIDI File…", None, true)
+    },
+    CommandSpec {
+        class: Class::Outward,
+        params: EXPORT_MIDI_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_midi", "File", "MIDI File…", None, true)
+    },
+    CommandSpec {
+        class: Class::Outward,
+        params: EXPORT_MIDI_CLIP_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd(
+            "file.export_midi_clip",
+            "File",
+            "MIDI Clip File…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Outward,
+        params: FOR_DAW_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd(
+            "file.export_for_daw",
+            "File",
+            "For Another DAW…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        params: IMPORT_DAWPROJECT_PARAMS,
+        dialogs: &[
+            DialogSpec {
+                name: "Open",
+                when: "always",
+                always: true,
+                answered_by: &["path"],
+            },
+            DialogSpec {
+                name: "Return",
+                when: "the file came from VizDAW and no mode",
+                always: false,
+                answered_by: &["mode"],
+            },
+            DialogSpec {
+                name: "Open",
+                when: "merge with no matching open project",
+                always: false,
+                answered_by: &["project"],
+            },
+        ],
+        ..cmd("file.import_dawproject", "File", "DAWproject…", None, true)
+    },
+    CommandSpec {
+        class: Class::Outward,
+        params: EXPORT_DAWPROJECT_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_dawproject", "File", "DAWproject…", None, true)
+    },
+    CommandSpec {
+        params: IMPORT_AAF_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.import_aaf", "File", "AAF…", None, true)
+    },
+    CommandSpec {
+        class: Class::Outward,
+        params: EXPORT_AAF_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "no path and no dry_run",
+            always: false,
+            answered_by: &["path"],
+        }],
+        ..cmd("file.export_aaf", "File", "AAF…", None, true)
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "file.interchange_report",
+            "File",
+            "Last Import or Export Report…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
         menu_item: false,
         ..cmd(
             "media.convert",
@@ -1071,6 +1776,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Change,
         params: RELINK_PARAMS,
         dialogs: &[DialogSpec {
             name: "Relink",
@@ -1082,6 +1788,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     key_only(cmd("media.compact", "Media", "Compact Media", None, true)),
     CommandSpec {
+        class: Class::Change,
         params: RENAME_PARAMS,
         dialogs: &[DialogSpec {
             name: "Rename Media",
@@ -1091,8 +1798,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         }],
         ..key_only(cmd("media.rename", "Media", "Rename Media…", None, true))
     },
-    cmd("edit.undo", "Edit", "Undo", Some("⌘Z"), true),
-    cmd("edit.redo", "Edit", "Redo", Some("⇧⌘Z"), true),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("edit.undo", "Edit", "Undo", Some("⌘Z"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("edit.redo", "Edit", "Redo", Some("⇧⌘Z"), true)
+    },
     cmd("window.mixer", "Window", "Mixer", Some("⌥⌘M"), true),
     cmd(
         "window.plugin_manager",
@@ -1188,64 +1901,98 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         true,
     ),
-    cmd(
-        "editors.insert_event",
-        "Editors",
-        "Insert Event",
-        Some("⌘I"),
-        true,
-    ),
-    cmd(
-        "editors.nudge_earlier",
-        "Editors",
-        "Nudge Earlier",
-        Some("⌥←"),
-        true,
-    ),
-    cmd(
-        "editors.nudge_later",
-        "Editors",
-        "Nudge Later",
-        Some("⌥→"),
-        true,
-    ),
-    cmd("editors.nudge_up", "Editors", "Nudge Up", Some("⌥↑"), true),
-    cmd(
-        "editors.nudge_down",
-        "Editors",
-        "Nudge Down",
-        Some("⌥↓"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "editors.insert_event",
+            "Editors",
+            "Insert Event",
+            Some("⌘I"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "editors.nudge_earlier",
+            "Editors",
+            "Nudge Earlier",
+            Some("⌥←"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "editors.nudge_later",
+            "Editors",
+            "Nudge Later",
+            Some("⌥→"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("editors.nudge_up", "Editors", "Nudge Up", Some("⌥↑"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "editors.nudge_down",
+            "Editors",
+            "Nudge Down",
+            Some("⌥↓"),
+            true,
+        )
+    },
     CommandSpec {
         params: ON,
         ..cmd("editors.snap", "Editors", "Snap to Grid", Some("G"), true)
     },
-    cmd(
-        "modify.select_by_rule",
-        "Modify",
-        "Select by Rule…",
-        Some("⌃⌘S"),
-        true,
-    ),
-    cmd(
-        "modify.transpose",
-        "Modify",
-        "Transpose…",
-        Some("⌃⌘T"),
-        true,
-    ),
-    cmd("modify.quantize", "Modify", "Quantize…", Some("⌃⌘U"), true),
-    cmd(
-        "modify.change",
-        "Modify",
-        "Change Values…",
-        Some("⌃⌘M"),
-        true,
-    ),
-    cmd("modify.move", "Modify", "Move…", Some("⌃⌘V"), true),
-    cmd("modify.again", "Modify", "Modify Again", Some("⌃⌘R"), true),
     CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "modify.select_by_rule",
+            "Modify",
+            "Select by Rule…",
+            Some("⌃⌘S"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "modify.transpose",
+            "Modify",
+            "Transpose…",
+            Some("⌃⌘T"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("modify.quantize", "Modify", "Quantize…", Some("⌃⌘U"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "modify.change",
+            "Modify",
+            "Change Values…",
+            Some("⌃⌘M"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("modify.move", "Modify", "Move…", Some("⌃⌘V"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("modify.again", "Modify", "Modify Again", Some("⌃⌘R"), true)
+    },
+    CommandSpec {
+        class: Class::Change,
         params: &[ParamSpec {
             name: "name",
             kind: ParamKind::Text,
@@ -1255,6 +2002,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("modify.template", "Modify", "Templates", None, true)
     },
     CommandSpec {
+        class: Class::Change,
         params: ON,
         ..cmd(
             "modify.exact_mode",
@@ -1264,13 +2012,16 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         )
     },
-    cmd(
-        "sequence.make_reference",
-        "Sequence",
-        "Make Reference from Selection",
-        Some("⌥⌘R"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "sequence.make_reference",
+            "Sequence",
+            "Make Reference from Selection",
+            Some("⌥⌘R"),
+            true,
+        )
+    },
     cmd(
         "sequence.back",
         "Sequence",
@@ -1278,24 +2029,34 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌘["),
         true,
     ),
-    cmd("drum.add_row", "Drum", "Add Drum Row", None, true),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("drum.add_row", "Drum", "Add Drum Row", None, true)
+    },
     CommandSpec {
         params: ON,
         ..cmd("drum.show_velocity", "Drum", "Show Velocity", None, true)
     },
-    cmd(
-        "drum.split_row",
-        "Drum",
-        "Split Row to Own Track",
-        None,
-        true,
-    ),
-    cmd("drum.remove_row", "Drum", "Remove Drum Row", None, true),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "drum.split_row",
+            "Drum",
+            "Split Row to Own Track",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Remove,
+        ..cmd("drum.remove_row", "Drum", "Remove Drum Row", None, true)
+    },
     CommandSpec {
         params: ON,
         ..cmd("drum.timeline", "Drum", "Timeline View", None, true)
     },
     CommandSpec {
+        class: Class::Change,
         params: NORMALIZE_PARAMS,
         dialogs: &[DialogSpec {
             name: "Normalize",
@@ -1305,21 +2066,46 @@ pub const COMMANDS: &[CommandSpec] = &[
         }],
         ..cmd("region.normalize", "Region", "Normalize…", None, true)
     },
-    cmd(
-        "region.fade_in_to_cursor",
-        "Region",
-        "Fade In to Cursor",
-        None,
-        true,
-    ),
-    cmd(
-        "region.fade_out_from_cursor",
-        "Region",
-        "Fade Out from Cursor",
-        None,
-        true,
-    ),
-    cmd("region.remove_fades", "Region", "Remove Fades", None, true),
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "region.fade_in_to_cursor",
+            "Region",
+            "Fade In to Cursor",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd(
+            "region.fade_out_from_cursor",
+            "Region",
+            "Fade Out from Cursor",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Remove,
+        ..cmd("region.remove_fades", "Region", "Remove Fades", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: CROSSFADE_PARAMS,
+        ..cmd("region.crossfade", "Region", "Crossfade", None, true)
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: REMOVE_CROSSFADE_PARAMS,
+        ..cmd(
+            "region.remove_crossfade",
+            "Region",
+            "Remove Crossfade",
+            None,
+            true,
+        )
+    },
     CommandSpec {
         params: EXTERNAL_PARAMS,
         dialogs: &[DialogSpec {
@@ -1343,54 +2129,80 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         true,
     ),
-    cmd(
-        "transport.play_stop",
-        "Transport",
-        "Play / Stop",
-        Some("Space"),
-        true,
-    ),
-    cmd("transport.stop", "Transport", "Stop", Some("S"), true),
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.play_stop",
+            "Transport",
+            "Play / Stop",
+            Some("Space"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd("transport.stop", "Transport", "Stop", Some("S"), true)
+    },
     // A surface's Play: only starts (plan 5f-1 Ruling 5).
-    key_only(cmd("transport.play", "Transport", "Play", None, true)),
-    cmd(
-        "transport.play_selection",
-        "Transport",
-        "Play Selection",
-        Some("⌥Space"),
-        true,
-    ),
-    cmd(
-        "transport.play_from_selection",
-        "Transport",
-        "Play from Selection",
-        Some("⇧Space"),
-        true,
-    ),
-    cmd(
-        "transport.play_from_edit_in",
-        "Transport",
-        "Play from Edit-In",
-        Some("Y"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Read,
+        ..key_only(cmd("transport.play", "Transport", "Play", None, true))
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.play_selection",
+            "Transport",
+            "Play Selection",
+            Some("⌥Space"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.play_from_selection",
+            "Transport",
+            "Play from Selection",
+            Some("⇧Space"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.play_from_edit_in",
+            "Transport",
+            "Play from Edit-In",
+            Some("Y"),
+            true,
+        )
+    },
     cmd("transport.record", "Transport", "Record", Some("R"), true),
-    cmd("transport.scrub", "Transport", "Scrub", Some("K"), true),
-    cmd(
-        "transport.return_to_start",
-        "Transport",
-        "Return to Start",
-        Some("Return"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Read,
+        ..cmd("transport.scrub", "Transport", "Scrub", Some("K"), true)
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.return_to_start",
+            "Transport",
+            "Return to Start",
+            Some("Return"),
+            true,
+        )
+    },
     // Plan 7d Ruling 4: a click (or the menu, or the channel) steps one
     // bar; the keys are new defaults, so they give way (ruling I3).
     CommandSpec {
+        class: Class::Read,
         extra_keys: &["Keypad-"],
         yields: true,
         ..cmd("transport.rewind", "Transport", "Rewind", Some("⇧,"), true)
     },
     CommandSpec {
+        class: Class::Read,
         extra_keys: &["Keypad+"],
         yields: true,
         ..cmd(
@@ -1401,21 +2213,28 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         )
     },
-    cmd(
-        "transport.previous_marker",
-        "Transport",
-        "Previous Marker",
-        Some(","),
-        true,
-    ),
-    cmd(
-        "transport.next_marker",
-        "Transport",
-        "Next Marker",
-        Some("."),
-        true,
-    ),
     CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.previous_marker",
+            "Transport",
+            "Previous Marker",
+            Some(","),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.next_marker",
+            "Transport",
+            "Next Marker",
+            Some("."),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
         params: ON,
         ..cmd("transport.loop", "Transport", "Loop", Some("L"), true)
     },
@@ -1427,27 +2246,36 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: ON,
         ..cmd("transport.punch", "Transport", "Punch", Some("I"), true)
     },
-    cmd(
-        "transport.go_position",
-        "Transport",
-        "Go to Position Field",
-        Some("P"),
-        true,
-    ),
-    cmd(
-        "transport.go_edit_in",
-        "Transport",
-        "Go to Edit-In Field",
-        Some("E"),
-        true,
-    ),
-    cmd(
-        "transport.go_punch",
-        "Transport",
-        "Go to Punch Fields",
-        Some("U"),
-        true,
-    ),
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.go_position",
+            "Transport",
+            "Go to Position Field",
+            Some("P"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.go_edit_in",
+            "Transport",
+            "Go to Edit-In Field",
+            Some("E"),
+            true,
+        )
+    },
+    CommandSpec {
+        class: Class::Read,
+        ..cmd(
+            "transport.go_punch",
+            "Transport",
+            "Go to Punch Fields",
+            Some("U"),
+            true,
+        )
+    },
     cmd(
         "transport.arm_previous",
         "Transport",
@@ -1520,6 +2348,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: SET_INPUT_PARAMS,
         ..key_only(cmd(
             "lane.set_input",
@@ -1530,6 +2359,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: SET_MONITOR_PARAMS,
         ..key_only(cmd(
             "lane.set_monitor",
@@ -1540,6 +2370,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: SET_INPUT_FX_PARAMS,
         ..key_only(cmd(
             "lane.set_input_fx",
@@ -1550,6 +2381,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: SET_MPE_PARAMS,
         ..key_only(cmd("lane.set_mpe", "Track", "Set Track MPE", None, true))
     },
@@ -1558,10 +2390,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..key_only(cmd("midi.inject", "MIDI", "Inject MIDI", None, true))
     },
     CommandSpec {
+        class: Class::Change,
         params: TRACK_SYNTH_PARAMS,
         ..key_only(cmd("lane.track_synth", "Track", "Track Synth", None, true))
     },
     CommandSpec {
+        class: Class::Change,
         params: RETURN_LATENCY_PARAMS,
         ..key_only(cmd(
             "destination.set_return_latency",
@@ -1572,6 +2406,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: MIDI_MIX_PARAMS,
         ..key_only(cmd(
             "destination.set_midi_mix",
@@ -1582,6 +2417,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: DEST_MPE_PARAMS,
         ..key_only(cmd(
             "destination.set_mpe",
@@ -1602,6 +2438,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: ADD_MIDI_PARAMS,
         ..key_only(cmd(
             "destination.add_midi",
@@ -1612,6 +2449,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: AUTOMATION_MODE_PARAMS,
         ..key_only(cmd(
             "automation.set_mode",
@@ -1622,6 +2460,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     CommandSpec {
+        class: Class::Change,
         params: AUTOMATION_GESTURE_PARAMS,
         ..key_only(cmd(
             "automation.gesture",
@@ -1631,13 +2470,32 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         ))
     },
-    cmd("automation.mode.off", "Automation", "Off", None, true),
-    cmd("automation.mode.read", "Automation", "Read", None, true),
-    cmd("automation.mode.touch", "Automation", "Touch", None, true),
-    cmd("automation.mode.latch", "Automation", "Latch", None, true),
-    cmd("automation.mode.write", "Automation", "Write", None, true),
-    cmd("automation.mode.trim", "Automation", "Trim", None, true),
     CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.off", "Automation", "Off", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.read", "Automation", "Read", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.touch", "Automation", "Touch", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.latch", "Automation", "Latch", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.write", "Automation", "Write", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        ..cmd("automation.mode.trim", "Automation", "Trim", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
         params: ON,
         ..cmd(
             "automation.suspend",
@@ -1689,36 +2547,36 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: AUDIO_SET_PARAMS,
         ..key_only(cmd("audio.set", "Audio", "Audio Settings", None, false))
     },
-    locator("locator.go_0", "Go to Locator 0", "0"),
-    locator("locator.go_1", "Go to Locator 1", "1"),
-    locator("locator.go_2", "Go to Locator 2", "2"),
-    locator("locator.go_3", "Go to Locator 3", "3"),
-    locator("locator.go_4", "Go to Locator 4", "4"),
-    locator("locator.go_5", "Go to Locator 5", "5"),
-    locator("locator.go_6", "Go to Locator 6", "6"),
-    locator("locator.go_7", "Go to Locator 7", "7"),
-    locator("locator.go_8", "Go to Locator 8", "8"),
-    locator("locator.go_9", "Go to Locator 9", "9"),
-    locator("locator.set_0", "Set Locator 0", "⌥0"),
-    locator("locator.set_1", "Set Locator 1", "⌥1"),
-    locator("locator.set_2", "Set Locator 2", "⌥2"),
-    locator("locator.set_3", "Set Locator 3", "⌥3"),
-    locator("locator.set_4", "Set Locator 4", "⌥4"),
-    locator("locator.set_5", "Set Locator 5", "⌥5"),
-    locator("locator.set_6", "Set Locator 6", "⌥6"),
-    locator("locator.set_7", "Set Locator 7", "⌥7"),
-    locator("locator.set_8", "Set Locator 8", "⌥8"),
-    locator("locator.set_9", "Set Locator 9", "⌥9"),
-    locator("locator.clear_0", "Clear Locator 0", "⌥⇧0"),
-    locator("locator.clear_1", "Clear Locator 1", "⌥⇧1"),
-    locator("locator.clear_2", "Clear Locator 2", "⌥⇧2"),
-    locator("locator.clear_3", "Clear Locator 3", "⌥⇧3"),
-    locator("locator.clear_4", "Clear Locator 4", "⌥⇧4"),
-    locator("locator.clear_5", "Clear Locator 5", "⌥⇧5"),
-    locator("locator.clear_6", "Clear Locator 6", "⌥⇧6"),
-    locator("locator.clear_7", "Clear Locator 7", "⌥⇧7"),
-    locator("locator.clear_8", "Clear Locator 8", "⌥⇧8"),
-    locator("locator.clear_9", "Clear Locator 9", "⌥⇧9"),
+    locator(Class::Read, "locator.go_0", "Go to Locator 0", "0"),
+    locator(Class::Read, "locator.go_1", "Go to Locator 1", "1"),
+    locator(Class::Read, "locator.go_2", "Go to Locator 2", "2"),
+    locator(Class::Read, "locator.go_3", "Go to Locator 3", "3"),
+    locator(Class::Read, "locator.go_4", "Go to Locator 4", "4"),
+    locator(Class::Read, "locator.go_5", "Go to Locator 5", "5"),
+    locator(Class::Read, "locator.go_6", "Go to Locator 6", "6"),
+    locator(Class::Read, "locator.go_7", "Go to Locator 7", "7"),
+    locator(Class::Read, "locator.go_8", "Go to Locator 8", "8"),
+    locator(Class::Read, "locator.go_9", "Go to Locator 9", "9"),
+    locator(Class::Change, "locator.set_0", "Set Locator 0", "⌥0"),
+    locator(Class::Change, "locator.set_1", "Set Locator 1", "⌥1"),
+    locator(Class::Change, "locator.set_2", "Set Locator 2", "⌥2"),
+    locator(Class::Change, "locator.set_3", "Set Locator 3", "⌥3"),
+    locator(Class::Change, "locator.set_4", "Set Locator 4", "⌥4"),
+    locator(Class::Change, "locator.set_5", "Set Locator 5", "⌥5"),
+    locator(Class::Change, "locator.set_6", "Set Locator 6", "⌥6"),
+    locator(Class::Change, "locator.set_7", "Set Locator 7", "⌥7"),
+    locator(Class::Change, "locator.set_8", "Set Locator 8", "⌥8"),
+    locator(Class::Change, "locator.set_9", "Set Locator 9", "⌥9"),
+    locator(Class::Change, "locator.clear_0", "Clear Locator 0", "⌥⇧0"),
+    locator(Class::Change, "locator.clear_1", "Clear Locator 1", "⌥⇧1"),
+    locator(Class::Change, "locator.clear_2", "Clear Locator 2", "⌥⇧2"),
+    locator(Class::Change, "locator.clear_3", "Clear Locator 3", "⌥⇧3"),
+    locator(Class::Change, "locator.clear_4", "Clear Locator 4", "⌥⇧4"),
+    locator(Class::Change, "locator.clear_5", "Clear Locator 5", "⌥⇧5"),
+    locator(Class::Change, "locator.clear_6", "Clear Locator 6", "⌥⇧6"),
+    locator(Class::Change, "locator.clear_7", "Clear Locator 7", "⌥⇧7"),
+    locator(Class::Change, "locator.clear_8", "Clear Locator 8", "⌥⇧8"),
+    locator(Class::Change, "locator.clear_9", "Clear Locator 9", "⌥⇧9"),
     CommandSpec {
         params: KEYS_PATH,
         dialogs: &[DialogSpec {
@@ -1759,6 +2617,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
     )),
     CommandSpec {
+        class: Class::Add,
         params: NEW_TRACK_PARAMS,
         yields: true,
         ..cmd(
@@ -1770,6 +2629,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Add,
         params: NEW_TRACK_PARAMS,
         yields: true,
         ..cmd(
@@ -1781,6 +2641,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Add,
         params: NEW_TRACK_PARAMS,
         yields: true,
         ..cmd(
@@ -1792,14 +2653,17 @@ pub const COMMANDS: &[CommandSpec] = &[
         )
     },
     CommandSpec {
+        class: Class::Add,
         params: TRACK_PARAMS,
         ..cmd("track.duplicate", "Track", "Duplicate Track", None, true)
     },
     CommandSpec {
+        class: Class::Remove,
         params: TRACK_PARAMS,
         ..cmd("track.delete", "Track", "Delete Track", None, true)
     },
     CommandSpec {
+        class: Class::Change,
         params: TRACK_RENAME_PARAMS,
         dialogs: &[DialogSpec {
             name: "Rename Track",
@@ -1808,6 +2672,91 @@ pub const COMMANDS: &[CommandSpec] = &[
             answered_by: &["name"],
         }],
         ..cmd("track.rename", "Track", "Rename Track", None, true)
+    },
+    // Plan 5c-2 takes Ruling 6: the Takes menu's three, without dialogs.
+    CommandSpec {
+        class: Class::Change,
+        params: TAKE_PARAMS,
+        ..cmd("track.choose_take", "Track", "Choose Take", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: TAKE_RENAME_PARAMS,
+        ..cmd("track.rename_take", "Track", "Rename Take", None, true)
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: TAKE_PARAMS,
+        ..cmd("track.delete_take", "Track", "Delete Take", None, true)
+    },
+    CommandSpec {
+        params: NEW_CHANNEL_EQ_PARAMS,
+        ..key_only(cmd(
+            "plugins.new_channel_eq",
+            "Settings",
+            "Put an EQ on New Channels",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        params: INSTALL_MULTIQ_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Replace",
+            when: "a Multi-Q.component is already in the Components folder",
+            always: false,
+            answered_by: &["replace"],
+        }],
+        ..key_only(cmd(
+            "plugins.install_multiq",
+            "Settings",
+            "Install Multi-Q for Other Apps",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        params: PLUGINS_DEFAULT_EQ_PARAMS,
+        ..key_only(cmd(
+            "plugins.default_eq",
+            "Settings",
+            "EQ for New Channels",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        class: Class::Add,
+        params: MIXER_NEW_BUS_PARAMS,
+        ..key_only(cmd("mixer.new_bus", "Mixer", "New Bus", None, true))
+    },
+    // Plan 8a Ruling 10: the Co-Producer switch, for the e2e.
+    CommandSpec {
+        params: CO_PRODUCER_SWITCH_PARAMS,
+        ..key_only(cmd(
+            "settings.co_producer",
+            "Settings",
+            "Co-Producer",
+            None,
+            false,
+        ))
+    },
+    // Plan 8a Ruling 9: a saved copy opens as a project of its own.
+    CommandSpec {
+        params: OPEN_COPY_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd(
+            "file.open_copy",
+            "File",
+            "Open Co-Producer Copy…",
+            None,
+            false,
+        )
     },
 ];
 
@@ -1962,37 +2911,38 @@ fn kind_json(k: ParamKind) -> Value {
 
 /// The `commands.list` result.
 pub fn list_json() -> Value {
-    let commands: Vec<Value> = COMMANDS
+    let commands: Vec<Value> = COMMANDS.iter().map(command_json).collect();
+    json!({ "commands": commands })
+}
+
+/// One command as `commands.list` gives it, with its Co-Producer class.
+pub fn command_json(c: &CommandSpec) -> Value {
+    let params: Vec<Value> = c
+        .params
         .iter()
-        .map(|c| {
-            let params: Vec<Value> = c
-                .params
-                .iter()
-                .map(|p| {
-                    let mut v = kind_json(p.kind);
-                    if let Some(o) = v.as_object_mut() {
-                        o.insert("name".into(), json!(p.name));
-                        o.insert("required".into(), json!(p.required));
-                        o.insert("help".into(), json!(p.help));
-                    }
-                    v
-                })
-                .collect();
-            let dialogs: Vec<Value> = c
-                .dialogs
-                .iter()
-                .map(|d| json!({"name": d.name, "when": d.when, "answered_by": d.answered_by}))
-                .collect();
-            let keys: Vec<String> = crate::bindings::default_chords(c)
-                .iter()
-                .map(crate::bindings::Chord::text)
-                .collect();
-            json!({
-                "id": c.id, "menu": c.menu, "title": c.title, "shortcut": c.shortcut,
-                "keys": keys, "menu_item": c.menu_item, "context": c.context.name(),
-                "document": c.document, "params": params, "dialogs": dialogs,
-            })
+        .map(|p| {
+            let mut v = kind_json(p.kind);
+            if let Some(o) = v.as_object_mut() {
+                o.insert("name".into(), json!(p.name));
+                o.insert("required".into(), json!(p.required));
+                o.insert("help".into(), json!(p.help));
+            }
+            v
         })
         .collect();
-    json!({ "commands": commands })
+    let dialogs: Vec<Value> = c
+        .dialogs
+        .iter()
+        .map(|d| json!({"name": d.name, "when": d.when, "answered_by": d.answered_by}))
+        .collect();
+    let keys: Vec<String> = crate::bindings::default_chords(c)
+        .iter()
+        .map(crate::bindings::Chord::text)
+        .collect();
+    json!({
+        "id": c.id, "menu": c.menu, "title": c.title, "shortcut": c.shortcut,
+        "keys": keys, "menu_item": c.menu_item, "context": c.context.name(),
+        "document": c.document, "params": params, "dialogs": dialogs,
+        "class": c.class.name(),
+    })
 }

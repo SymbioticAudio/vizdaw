@@ -63,6 +63,18 @@ public enum RegionDrawing {
         return label
     }
 
+    /// A crossfade's X over the fade-in area (plan 6c): the rising and the
+    /// falling line, from the region's start to where the fade in ends;
+    /// none without a crossfade.
+    public static func crossfadeLines(_ r: EventRow, in rect: CGRect) -> [(CGPoint, CGPoint)] {
+        guard r.crossfade else { return [] }
+        let x = RegionHandles.fadeInX(r, in: rect)
+        return [
+            (CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: x, y: rect.minY)),
+            (CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: x, y: rect.maxY)),
+        ]
+    }
+
     /// Draws `r` in `rect` into the current context: its body, its
     /// waveform `rows` in `waveRect` (ready or coarse only), its fade lines,
     /// its outline, a gain line when the gain is not 0 dB and, with
@@ -88,7 +100,15 @@ public enum RegionDrawing {
             for b in WaveformGeometry.bars(rows, in: waveRect) { b.fill() }
         }
         palette.fadeLine.setStroke()
-        if r.fadeIn.length > 0 {
+        let cross = crossfadeLines(r, in: rect)
+        for (from, to) in cross {
+            let p = NSBezierPath()
+            p.move(to: from)
+            p.line(to: to)
+            p.lineWidth = 1
+            p.stroke()
+        }
+        if cross.isEmpty, r.fadeIn.length > 0 {
             let p = NSBezierPath()
             p.move(to: CGPoint(x: rect.minX, y: rect.maxY))
             p.line(to: CGPoint(x: RegionHandles.fadeInX(r, in: rect), y: rect.minY))
@@ -206,7 +226,8 @@ public enum RegionDrawing {
     }
 
     /// The context menu of a fade's area: its four shapes, the current one
-    /// checked; `apply` sends the edit.
+    /// checked; a crossfade's adds Remove Crossfade (plan 6c). `apply`
+    /// sends the edit.
     public static func fadeShapeMenu(
         _ r: EventRow, _ h: RegionHandle, apply: @escaping @MainActor (EditCommand) -> Void
     ) -> NSMenu {
@@ -218,6 +239,12 @@ public enum RegionDrawing {
                 MenuAction(title: "\(fade): \(title)") {
                     if let c = RegionHandles.shapeCommand(r, h, shape) { apply(c) }
                 }.item(checked: shape == current))
+        }
+        if h == .crossfade {
+            let id = r.id
+            menu.addItem(
+                MenuAction(title: "Remove Crossfade") { apply(.audio(edit: .removeCrossfade(event: id))) }
+                    .item(checked: false))
         }
         return menu
     }

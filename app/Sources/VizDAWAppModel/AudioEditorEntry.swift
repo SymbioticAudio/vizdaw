@@ -7,7 +7,12 @@ public enum AudioEditorEntry {
     public enum Unit: Sendable { case ms, s }
 
     public static let gainHint = "Type a gain in dB, like \u{2212}4.2 or +6."
-    public static let fadeHint = "Type a fade like 250 ms or 1.5 s."
+    public static let fadeHint = "Type a fade like 250 ms, 1.5 s or 480 frames."
+    /// The Fade In box of a region whose fade in is a crossfade (plan 6c).
+    public static let crossfadeInHint =
+        "This region's fade in is a crossfade: type its length in the Crossfade box."
+    /// The Crossfade box of a region without one (plan 6c).
+    public static let noCrossfadeHint = "This region has no crossfade. Use Region \u{203A} Crossfade."
     public static let timeHint = "Type a time like 0:01.250, 1.25 s or 1250 ms."
     public static let peakHint = "Type a peak from \u{2212}96 to 0 dB, like \u{2212}0.3."
     public static let noMediaHint = "This region's audio file is unknown."
@@ -81,6 +86,23 @@ public enum AudioEditorEntry {
         guard v.isFinite else { return 0 }
         // `Double(Int64.max / 2)` rounds up to 2^62: clamp the integer too.
         return min(Int64(min(max(v, 0), Double(Int64.max / 2))), Int64.max / 2)
+    }
+
+    /// A fade's frames from `N frames` or `N frame` (a whole number from 0
+    /// to `Int64.max / 2`), else from a duration with bare numbers in ms
+    /// (plan 6c). nil when refused.
+    public static func fadeFrames(_ text: String, rate: UInt32) -> Int64? {
+        guard var t = StripEntry.clean(text)?.lowercased() else { return nil }
+        for unit in ["frames", "frame"] where t.hasSuffix(unit) {
+            t.removeLast(unit.count)
+            if t.hasSuffix(" ") { t.removeLast() }
+            // Digits only: no sign, point, exponent or hex; at most 19 of
+            // them, so `Int64` reads every one it is given.
+            guard ascii(Substring(t), maxCount: 19), let n = Int64(t), n <= Int64.max / 2 else { return nil }
+            return n
+        }
+        guard let s = duration(text, bare: .ms) else { return nil }
+        return frames(s, rate: rate)
     }
 
     /// "−4.2 dB", "+24.0 dB", "−∞ dB".

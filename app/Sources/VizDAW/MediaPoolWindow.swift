@@ -74,7 +74,9 @@ struct MediaPoolView: View {
                         .help("Remove every item no region uses (one undo step). Their files go to the Trash on save.")
                     Spacer()
                     Button("Rename…") { if let id = selected { rename(id) } }.disabled(selected == nil)
-                    Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil)
+                    Button("Relink…") { if let id = selected { relink(id) } }
+                        .disabled(selected == nil || media.relinkBlocked)
+                        .help(media.relinkBlocked ? MergeModel.heldHelp : "")
                     Button("Reveal in Finder") { if let id = selected { reveal(id) } }.disabled(selected == nil)
                     Button("Import…") { media.importIntoPool(Panels.chooseAudio()) }
                     Button("Delete", role: .destructive) { if let id = selected { delete(id) } }
@@ -126,7 +128,7 @@ struct MediaPoolView: View {
         Button("Compact (Remove Unused Items)") { media.compact() }
         Divider()
         Button("Rename…") { if let id = selected { rename(id) } }.disabled(selected == nil)
-        Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil)
+        Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil || media.relinkBlocked)
         Button("Reveal in Finder") { if let id = selected { reveal(id) } }.disabled(selected == nil)
         Button("Import…") { media.importIntoPool(Panels.chooseAudio()) }
         Divider()
@@ -137,7 +139,7 @@ struct MediaPoolView: View {
     @ViewBuilder private func rowMenu(_ id: UInt64) -> some View {
         Button("Select Regions") { media.selectUsers(id) }
         Button("Rename…") { rename(id) }
-        Button("Relink…") { relink(id) }
+        Button("Relink…") { relink(id) }.disabled(media.relinkBlocked)
         Button("Reveal in Finder") { reveal(id) }
         Divider()
         Button("Delete", role: .destructive) { delete(id) }

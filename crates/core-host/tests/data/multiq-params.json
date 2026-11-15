@@ -1,0 +1,365 @@
+{
+  "domain": "normalized",
+  "params": [
+    {
+      "clap_id": 757438110,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 1 Enabled",
+      "stepped": true,
+      "string_id": "band1_enabled"
+    },
+    {
+      "clap_id": 1472467003,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 1 Frequency",
+      "stepped": false,
+      "string_id": "band1_freq"
+    },
+    {
+      "clap_id": 3957659022,
+      "default": 0.28375276923179626,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 1 Q",
+      "stepped": false,
+      "string_id": "band1_q"
+    },
+    {
+      "clap_id": 2708640840,
+      "default": 0.1428571492433548,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 1 Slope",
+      "stepped": false,
+      "string_id": "band1_slope"
+    },
+    {
+      "clap_id": 3244950943,
+      "default": 1.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 2 Enabled",
+      "stepped": true,
+      "string_id": "band2_enabled"
+    },
+    {
+      "clap_id": 1501096154,
+      "default": 0.23298999667167664,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 2 Frequency",
+      "stepped": false,
+      "string_id": "band2_freq"
+    },
+    {
+      "clap_id": 1501109729,
+      "default": 0.5,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 2 Gain",
+      "stepped": false,
+      "string_id": "band2_gain"
+    },
+    {
+      "clap_id": 3957659983,
+      "default": 0.28375276923179626,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 2 Q",
+      "stepped": false,
+      "string_id": "band2_q"
+    },
+    {
+      "clap_id": 3596011903,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 2 Shape",
+      "stepped": false,
+      "string_id": "band2_shape"
+    },
+    {
+      "clap_id": 1437496480,
+      "default": 1.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 3 Enabled",
+      "stepped": true,
+      "string_id": "band3_enabled"
+    },
+    {
+      "clap_id": 1529725305,
+      "default": 0.3333333432674408,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 3 Frequency",
+      "stepped": false,
+      "string_id": "band3_freq"
+    },
+    {
+      "clap_id": 1529738880,
+      "default": 0.5,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 3 Gain",
+      "stepped": false,
+      "string_id": "band3_gain"
+    },
+    {
+      "clap_id": 3957660944,
+      "default": 0.28375276923179626,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 3 Q",
+      "stepped": false,
+      "string_id": "band3_q"
+    },
+    {
+      "clap_id": 188548288,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 3 Shape",
+      "stepped": false,
+      "string_id": "band3_shape"
+    },
+    {
+      "clap_id": 3925009313,
+      "default": 1.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 4 Enabled",
+      "stepped": true,
+      "string_id": "band4_enabled"
+    },
+    {
+      "clap_id": 1558354456,
+      "default": 0.46597999334335327,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 4 Frequency",
+      "stepped": false,
+      "string_id": "band4_freq"
+    },
+    {
+      "clap_id": 1558368031,
+      "default": 0.5,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 4 Gain",
+      "stepped": false,
+      "string_id": "band4_gain"
+    },
+    {
+      "clap_id": 3957661905,
+      "default": 0.28375276923179626,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 4 Q",
+      "stepped": false,
+      "string_id": "band4_q"
+    },
+    {
+      "clap_id": 1076051969,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 4 Shape",
+      "stepped": false,
+      "string_id": "band4_shape"
+    },
+    {
+      "clap_id": 2117554850,
+      "default": 1.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 5 Enabled",
+      "stepped": true,
+      "string_id": "band5_enabled"
+    },
+    {
+      "clap_id": 1586983607,
+      "default": 0.5663233399391174,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 5 Frequency",
+      "stepped": false,
+      "string_id": "band5_freq"
+    },
+    {
+      "clap_id": 1586997182,
+      "default": 0.5,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 5 Gain",
+      "stepped": false,
+      "string_id": "band5_gain"
+    },
+    {
+      "clap_id": 3957662866,
+      "default": 0.28375276923179626,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 5 Q",
+      "stepped": false,
+      "string_id": "band5_q"
+    },
+    {
+      "clap_id": 1963555650,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 5 Shape",
+      "stepped": false,
+      "string_id": "band5_shape"
+    },
+    {
+      "clap_id": 310100387,
+      "default": 1.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 6 Enabled",
+      "stepped": true,
+      "string_id": "band6_enabled"
+    },
+    {
+      "clap_id": 1615612758,
+      "default": 0.6666666865348816,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 6 Frequency",
+      "stepped": false,
+      "string_id": "band6_freq"
+    },
+    {
+      "clap_id": 1615626333,
+      "default": 0.5,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 6 Gain",
+      "stepped": false,
+      "string_id": "band6_gain"
+    },
+    {
+      "clap_id": 3957663827,
+      "default": 0.28375276923179626,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 6 Q",
+      "stepped": false,
+      "string_id": "band6_q"
+    },
+    {
+      "clap_id": 2851059331,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 6 Shape",
+      "stepped": false,
+      "string_id": "band6_shape"
+    },
+    {
+      "clap_id": 2797613220,
+      "default": 1.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 7 Enabled",
+      "stepped": true,
+      "string_id": "band7_enabled"
+    },
+    {
+      "clap_id": 1644241909,
+      "default": 0.767009973526001,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 7 Frequency",
+      "stepped": false,
+      "string_id": "band7_freq"
+    },
+    {
+      "clap_id": 1644255484,
+      "default": 0.5,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 7 Gain",
+      "stepped": false,
+      "string_id": "band7_gain"
+    },
+    {
+      "clap_id": 3957664788,
+      "default": 0.28375276923179626,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 7 Q",
+      "stepped": false,
+      "string_id": "band7_q"
+    },
+    {
+      "clap_id": 3738563012,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 7 Shape",
+      "stepped": false,
+      "string_id": "band7_shape"
+    },
+    {
+      "clap_id": 990158757,
+      "default": 0.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 8 Enabled",
+      "stepped": true,
+      "string_id": "band8_enabled"
+    },
+    {
+      "clap_id": 1672871060,
+      "default": 1.0,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 8 Frequency",
+      "stepped": false,
+      "string_id": "band8_freq"
+    },
+    {
+      "clap_id": 3957665749,
+      "default": 0.28375276923179626,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 8 Q",
+      "stepped": false,
+      "string_id": "band8_q"
+    },
+    {
+      "clap_id": 331232015,
+      "default": 0.1428571492433548,
+      "max": 1.0,
+      "min": 0.0,
+      "name": "Band 8 Slope",
+      "stepped": false,
+      "string_id": "band8_slope"
+    }
+  ],
+  "ranges": {
+    "freq": {
+      "end": 20000.0,
+      "log": true,
+      "start": 20.0
+    },
+    "gain": {
+      "end": 24.0,
+      "interval": 0.1,
+      "skew": 1.0,
+      "start": -24.0
+    },
+    "q": {
+      "end": 100.0,
+      "log": true,
+      "start": 0.1
+    }
+  }
+}

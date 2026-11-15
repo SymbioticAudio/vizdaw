@@ -177,9 +177,8 @@ private struct StripCells: View {
             }
         }
         if strip.kind != .master {
-            if !strip.sends.isEmpty || !model.targets(for: strip).isEmpty {
-                row(.sends, band: .light) { SendKnobRow(model: model, strip: strip) }
-            }
+            // Every strip but master offers New Bus (plan 6g-2 Ruling 8).
+            row(.sends, band: .light) { SendKnobRow(model: model, strip: strip) }
             row(.output) { StripOutputMenu(model: model, strip: strip) }
             row(.pan, band: .dark) { StripPan(model: model, strip: strip) }
         }
@@ -632,11 +631,14 @@ private struct StripInserts: View {
 
 /// The sends (Ruling 14): per send, its target's name on its own line,
 /// then a small knob beside a number box with the level; then the "Send"
-/// menu to add one.
+/// menu: the buses to send to, then "New Bus" (plan 6g-2 Ruling 8). With no
+/// sends yet, a "＋" beside the menu makes a new bus fed by this strip too.
 struct SendKnobRow: View {
     @Bindable var model: MixerModel
     let strip: StripRow
     @Environment(\.symbioticTheme) private var theme
+
+    static let newBusHelp = "New Bus: a bus with a send from this strip"
 
     var body: some View {
         let targets = model.targets(for: strip)
@@ -645,14 +647,31 @@ struct SendKnobRow: View {
             ForEach(Array(strip.sends.enumerated()), id: \.offset) { i, send in
                 SendKnob(model: model, strip: strip, index: i, send: send)
             }
-            if !targets.isEmpty {
+            HStack(spacing: theme.spacing.xs) {
                 StripMenu(text: "Send") {
                     ForEach(targets, id: \.id) { b in
                         Button(b.name) { model.addSend(strip.id, to: b.id) }
                     }
+                    Divider()
+                    Button("New Bus") { model.newBus(from: strip.id) }
+                        .accessibilityLabel("New Bus")
                 }
                 .help("Add a send")
                 .accessibilityLabel("Add a send to \(strip.name)")
+                if strip.sends.isEmpty {
+                    Button {
+                        model.newBus(from: strip.id)
+                    } label: {
+                        AppIcon.add.image
+                            .font(theme.type.caption.font)
+                            .foregroundStyle(theme.text.secondary.color)
+                            .frame(width: ControlMetrics.minimumHit, height: ControlMetrics.minimumHit)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(Self.newBusHelp)
+                    .accessibilityLabel("New bus fed by \(strip.name)")
+                }
             }
         }
     }

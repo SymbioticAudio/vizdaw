@@ -112,3 +112,46 @@ proptest! {
         prop_assert!(m.tick_to_seconds(Tick(t + 1)) > m.tick_to_seconds(Tick(t)));
     }
 }
+
+proptest! {
+    // The indexed clock is the map, bit for bit (crossfade partners and an
+    // import placing crossfades both use it).
+    #[test]
+    fn clock_agrees_with_the_map(
+        m in arb_map(),
+        t in -PPQ * 8..PPQ * 200,
+        s in -4.0f64..400.0,
+    ) {
+        let c = m.clock();
+        prop_assert_eq!(
+            c.tick_to_seconds(Tick(t)).to_bits(),
+            m.tick_to_seconds(Tick(t)).to_bits()
+        );
+        prop_assert_eq!(c.seconds_to_tick(s), m.seconds_to_tick(s));
+        // At each point, where segments meet.
+        for p in m.points() {
+            prop_assert_eq!(
+                c.tick_to_seconds(p.tick).to_bits(),
+                m.tick_to_seconds(p.tick).to_bits()
+            );
+            let at = m.tick_to_seconds(p.tick);
+            prop_assert_eq!(c.seconds_to_tick(at), m.seconds_to_tick(at));
+        }
+    }
+}
+
+#[test]
+fn clock_handles_the_edges() {
+    let m = TempoMap::default();
+    let c = m.clock();
+    for s in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, -0.5, 0.0, 1e300] {
+        assert_eq!(c.seconds_to_tick(s), m.seconds_to_tick(s), "{s}");
+    }
+    for t in [i64::MIN, -1, 0, i64::MAX] {
+        assert_eq!(
+            c.tick_to_seconds(Tick(t)).to_bits(),
+            m.tick_to_seconds(Tick(t)).to_bits(),
+            "{t}"
+        );
+    }
+}

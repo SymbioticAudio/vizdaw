@@ -8,6 +8,8 @@ import VizDAWCore
 public enum AudioEditorBox: String, CaseIterable, Sendable {
     case gain
     case fadeIn = "fade_in"
+    /// A crossfade's length (plan 6c): the fade in of a crossfaded region.
+    case crossfade
     case fadeOut = "fade_out"
     case start, length, peak
 
@@ -16,6 +18,7 @@ public enum AudioEditorBox: String, CaseIterable, Sendable {
         switch self {
         case .gain: "Region Gain"
         case .fadeIn: "Fade In Length"
+        case .crossfade: "Crossfade Length"
         case .fadeOut: "Fade Out Length"
         case .start: "Region Start"
         case .length: "Region Length"
@@ -27,14 +30,14 @@ public enum AudioEditorBox: String, CaseIterable, Sendable {
     public var hint: String {
         switch self {
         case .gain: AudioEditorEntry.gainHint
-        case .fadeIn, .fadeOut: AudioEditorEntry.fadeHint
+        case .fadeIn, .crossfade, .fadeOut: AudioEditorEntry.fadeHint
         case .start, .length: AudioEditorEntry.timeHint
         case .peak: AudioEditorEntry.peakHint
         }
     }
 
-    /// Fades, start and length need the media's rate.
-    var isTime: Bool { self == .fadeIn || self == .fadeOut || self == .start || self == .length }
+    /// Fades, the crossfade, start and length need the media's rate.
+    var isTime: Bool { self != .gain && self != .peak }
 }
 
 /// The bottom pane's audio editor (plan 7c Rulings 1–3, 5, 7 and 9): the
@@ -158,7 +161,8 @@ public final class AudioEditorModel {
                 event: r.row.id, media: r.row.media ?? 0, name: r.media?.name ?? "", gainDb: r.row.gainDb,
                 fadeIn: r.row.fadeIn, fadeOut: r.row.fadeOut, sourceOffset: r.row.sourceOffset,
                 length: r.row.frames, mediaFrames: r.media?.frames ?? 0, sampleRate: r.media?.sampleRate ?? 0,
-                offline: r.media == nil || r.media?.offline != nil)
+                offline: r.media == nil || r.media?.offline != nil, crossfade: r.row.crossfade,
+                crossfadeWith: r.row.crossfade ? r.row.overlapWith : nil)
             boxes = AudioEditorBox.allCases.map { AudioEditorBoxRow(name: $0.rawValue, text: text($0)) }
         }
         return AudioEditorStateRow(
@@ -172,7 +176,9 @@ public final class AudioEditorModel {
     private static let none = "\u{2013}"
 
     /// What `box` shows now: "–" for every box with no region, and for a
-    /// time box without a media row.
+    /// time box without a media row. A crossfaded region's fade in shows in
+    /// the Crossfade box, and the Fade In box shows "–" (plan 6c); without
+    /// a crossfade the Crossfade box shows "–".
     public func text(_ box: AudioEditorBox) -> String {
         guard let r = document.editedRegion else { return Self.none }
         if box == .peak { return AudioEditorEntry.peakText(peakDb) }
@@ -180,7 +186,9 @@ public final class AudioEditorModel {
         if box == .gain { return AudioEditorEntry.gainText(Double(row.gainDb)) }
         guard let rate = r.media?.sampleRate, rate > 0 else { return Self.none }
         switch box {
-        case .fadeIn: return AudioEditorEntry.fadeText(frames: row.fadeIn.length, rate: rate)
+        case .fadeIn, .crossfade:
+            guard row.crossfade == (box == .crossfade) else { return Self.none }
+            return AudioEditorEntry.fadeText(frames: row.fadeIn.length, rate: rate)
         case .fadeOut: return AudioEditorEntry.fadeText(frames: row.fadeOut.length, rate: rate)
         case .start: return Formatting.time(Double(row.sourceOffset) / Double(rate))
         case .length: return Formatting.time(Double(row.frames) / Double(rate))
@@ -191,7 +199,9 @@ public final class AudioEditorModel {
     /// Commits `text` to `box`: parsed, clamped and sent as one edit. Text
     /// equal to what the box shows, or a value equal to the current one,
     /// sends nothing and answers true. A refusal sets the box's hint as
-    /// the status, sends nothing and answers false.
+    /// the status, sends nothing and answers false; the Crossfade box of a
+    /// region without one, and the Fade In box of a crossfade, refuse with
+    /// their own hints (plan 6c).
     @discardableResult
     public func type(_ box: AudioEditorBox, _ text: String) -> Bool {
         let editor = document.editor
@@ -208,6 +218,16 @@ public final class AudioEditorModel {
         // sides are compared cleaned, as `NumberBox` commits its text with
         // U+2212 read as "-" (final review I1).
         if let typed = StripEntry.clean(text), typed == StripEntry.clean(self.text(box)) { return true }
+        // A crossfade's length is typed in its own box (plan 6c); its "–"
+        // back, above, moves nothing.
+        if box == .crossfade, !r.row.crossfade {
+            editor.status = AudioEditorEntry.noCrossfadeHint
+            return false
+        }
+        if box == .fadeIn, r.row.crossfade {
+            editor.status = AudioEditorEntry.crossfadeInHint
+            return false
+        }
         guard let parsed = command(box, text, r) else {
             editor.status = box.hint
             return false
@@ -232,15 +252,24 @@ public final class AudioEditorModel {
             if peakDb != db { peakDb = db }
             return .some(nil)
         case .fadeIn, .fadeOut:
-            guard let s = AudioEditorEntry.duration(text, bare: .ms) else { return nil }
+            guard let typed = AudioEditorEntry.fadeFrames(text, rate: rate) else { return nil }
             let other = box == .fadeIn ? row.fadeOut.length : row.fadeIn.length
             let room = max(frames - max(other, 0), 0)
-            let length = min(AudioEditorEntry.frames(s, rate: rate), room)
+            let length = min(typed, room)
             var fadeIn = row.fadeIn
             var fadeOut = row.fadeOut
             if box == .fadeIn { fadeIn.length = length } else { fadeOut.length = length }
             guard fadeIn != row.fadeIn || fadeOut != row.fadeOut else { return .some(nil) }
             return .some(.audio(edit: .setFades(event: row.id, fadeIn: fadeIn, fadeOut: fadeOut)))
+        case .crossfade:
+            // At least one frame, at most the room the overlap and the fade
+            // out leave.
+            guard let typed = AudioEditorEntry.fadeFrames(text, rate: rate) else { return nil }
+            let length = min(max(typed, 1), max(RegionCommands.crossfadeRoom(row), 1))
+            guard length != row.fadeIn.length else { return .some(nil) }
+            return .some(
+                .audio(
+                    edit: .crossfade(event: row.id, length: .frames(frames: UInt64(length)), shape: row.fadeIn.shape)))
         case .start:
             guard let s = AudioEditorEntry.duration(text, bare: .s) else { return nil }
             let low = max(0, offset - Int64(clamping: startRoom))
@@ -258,12 +287,19 @@ public final class AudioEditorModel {
         }
     }
 
-    /// A new shape for `.fadeIn` or `.fadeOut`, keeping its length; other
-    /// boxes, or the same shape, send nothing.
+    /// A new shape for `.fadeIn`, `.fadeOut` or `.crossfade`, keeping its
+    /// length; other boxes, the same shape, or `.crossfade` on a region
+    /// without one, send nothing.
     public func setShape(_ box: AudioEditorBox, _ shape: FadeShapeRow) {
-        guard box == .fadeIn || box == .fadeOut else { return }
+        guard box == .fadeIn || box == .fadeOut || box == .crossfade else { return }
         guard let row = document.editedRegion?.row else {
             document.editor.status = Self.emptyMessage
+            return
+        }
+        if box == .crossfade {
+            guard row.crossfade, row.fadeIn.shape != shape else { return }
+            let length = UInt64(clamping: max(row.fadeIn.length, 1))
+            document.editor.edit(.audio(edit: .crossfade(event: row.id, length: .frames(frames: length), shape: shape)))
             return
         }
         var fadeIn = row.fadeIn

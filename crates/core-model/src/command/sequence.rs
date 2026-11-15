@@ -10,7 +10,7 @@ use crate::rules::references_to;
 use crate::sequence::{KeySlot, Marker, SeqKind, SeqLength, Sequence};
 use crate::tempo::TempoMap;
 use crate::time::Tick;
-use im::{OrdMap, Vector};
+use im::Vector;
 
 /// Sequence-level edits.
 #[derive(Debug, Clone, PartialEq)]
@@ -134,7 +134,7 @@ pub(crate) fn clone_sequence(d: &mut Document, src: SeqId, name: String) -> Resu
             if t.id == l.active_take {
                 nl.active_take = tid;
             }
-            let mut events = OrdMap::new();
+            let mut events = crate::arc_map::ArcMap::new();
             for e in t.events.values() {
                 let mut ne = e.clone();
                 ne.id = c.alloc_event();

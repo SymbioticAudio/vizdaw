@@ -33,6 +33,8 @@ struct RelinkSheet: View {
                     Button("Locate…") {
                         if let p = Panels.chooseRelink(name: r.name) { media.relink(r.id, path: p) }
                     }
+                    .disabled(media.relinkBlocked)
+                    .help(media.relinkBlocked ? MergeModel.heldHelp : "")
                     .accessibilityLabel("Locate \(r.name)")
                 }
                 .accessibilityElement(children: .contain)
@@ -42,6 +44,8 @@ struct RelinkSheet: View {
                 Button("Search Folder…") {
                     if let d = Panels.chooseFolder() { media.searchFolder(d) }
                 }
+                .disabled(media.relinkBlocked)
+                .help(media.relinkBlocked ? MergeModel.heldHelp : "")
                 Spacer()
                 Button("Leave Offline") { media.leaveOffline() }
                     .keyboardShortcut(.cancelAction)

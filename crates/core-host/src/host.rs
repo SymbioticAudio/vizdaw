@@ -24,7 +24,7 @@ use core_model::ids::{PluginInstanceId, SeqId, StateBlobId};
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef, PluginSlot};
 use core_model::selection::ViewFilter;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
@@ -121,9 +121,7 @@ impl Want {
         Want {
             plugin: slot.plugin.clone(),
             instrument,
-            state: slot
-                .state
-                .and_then(|id| doc.state_blob(id).map(|b| (id, Arc::from(b)))),
+            state: slot.state.and_then(|id| doc.state_arc(id).map(|b| (id, b))),
             params: slot.params.iter().map(|(k, v)| (*k, *v)).collect(),
         }
     }
@@ -143,6 +141,56 @@ struct Pending {
     doc: Option<f64>,
 }
 
+/// Before an inactive instance that was already activated goes active
+/// again (a restart or a new configuration; main thread): the parameters
+/// it names ([`PluginInstance::values_to_refresh`], only the bundled
+/// Multi-Q, CLAP or AU) are set a step away and back to what it holds, in
+/// one call, so its pass filters, rebuilt only when a value changes, do
+/// not come back flat (plan 6g Task 5 and final fixes; a state save and
+/// load did not revive them reliably). Every other plug-in is left as
+/// before.
+fn refresh_values(live: &mut Live) {
+    if live.inst.is_active() {
+        return;
+    }
+    let ids = live.inst.values_to_refresh();
+    if ids.is_empty() {
+        return;
+    }
+    let ranges: BTreeMap<ParamId, (f64, f64)> = live
+        .inst
+        .info()
+        .params
+        .iter()
+        .map(|p| (p.id, (p.min, p.max)))
+        .collect();
+    let mut away = Vec::with_capacity(ids.len().saturating_mul(2));
+    let mut back = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(&(min, max)) = ranges.get(&id) else {
+            continue;
+        };
+        let Some(v) = live.inst.param_value(id).filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let step = (max - min) * 1e-3;
+        let other = if v + step <= max { v + step } else { v - step };
+        away.push((id, other));
+        back.push((id, v));
+    }
+    if away.is_empty() {
+        return;
+    }
+    away.extend(back);
+    let _ = live.inst.set_params(&away);
+}
+
+/// Whether a plug-in reporting `held` holds `v`: equal to single
+/// precision, as most plug-ins keep their values.
+fn holds(held: f64, v: f64) -> bool {
+    (held - v).abs() <= 1e-6 * v.abs().max(1.0)
+}
+
 /// A live instance and its main-thread ends.
 struct Live {
     inst: Box<dyn PluginInstance>,
@@ -155,6 +203,9 @@ struct Live {
     processor: Option<usize>,
     /// The state blob last loaded into it.
     applied_state: Option<StateBlobId>,
+    /// Its bytes: a blob whose ID is unchanged but whose bytes differ (a
+    /// hash collision from a hostile file) is loaded again, not skipped.
+    applied_bytes: Option<Arc<[u8]>>,
     /// Parameter values before the overlay (to restore when an overlay
     /// entry goes away, e.g. on undo).
     base: BTreeMap<ParamId, f64>,
@@ -371,6 +422,14 @@ impl PluginHost {
         self.paths.insert((format, id.to_string()), path);
     }
 
+    /// Where plugin `id` of `format` lives: the path
+    /// [`PluginHost::register_path`] last stored.
+    pub fn path_of(&self, format: Format, id: &str) -> Option<&Path> {
+        self.paths
+            .get(&(format, id.to_string()))
+            .map(PathBuf::as_path)
+    }
+
     /// Marks a plugin as unavailable (disabled, blocklisted or missing);
     /// its slots become placeholders showing `why` (spec §9) when they
     /// next load: running instances keep running, unless the user turned
@@ -448,6 +507,16 @@ impl PluginHost {
     pub fn instance(&mut self, id: PluginInstanceId) -> Option<&mut dyn PluginInstance> {
         match self.slots.get_mut(&id).map(|s| &mut s.state) {
             Some(State::Live(l)) => Some(l.inst.as_mut()),
+            _ => None,
+        }
+    }
+
+    /// The state bytes last loaded into running instance `id`, as the
+    /// host holds them (a sync that finds equal bytes in another copy
+    /// keeps that copy, so the next sync compares pointers).
+    pub fn applied_state_bytes(&self, id: PluginInstanceId) -> Option<Arc<[u8]>> {
+        match &self.slots.get(&id)?.state {
+            State::Live(l) => l.applied_bytes.clone(),
             _ => None,
         }
     }
@@ -942,6 +1011,7 @@ impl PluginHost {
             active: false,
             processor: None,
             applied_state: None,
+            applied_bytes: None,
             base: BTreeMap::new(),
             defaults: None,
             sent: BTreeMap::new(),
@@ -953,7 +1023,10 @@ impl PluginHost {
         // State first, then the overlay (spec §4).
         if let Some((sid, bytes)) = &want.state {
             match live.inst.load_state(bytes) {
-                Ok(()) => live.applied_state = Some(*sid),
+                Ok(()) => {
+                    live.applied_state = Some(*sid);
+                    live.applied_bytes = Some(bytes.clone());
+                }
                 Err(e) => r.rejected_state.push((id, e.to_string())),
             }
         }
@@ -1033,9 +1106,16 @@ impl PluginHost {
             // Unreachable: a slot shelves one processor at a time.
             drop(old);
         }
-        // Values the engine never saw must reach the new processor.
+        // Values the engine never saw must reach the new processor. The
+        // bundled Multi-Q is not sent those it already holds (set before
+        // activation): an unchanged value turns its pass filters flat
+        // (plan 6g Task 5). Every other plug-in gets them all, as before.
+        let skip_held = !live.inst.values_to_refresh().is_empty();
         let sent: Vec<(ParamId, f64)> = live.sent.iter().map(|(k, v)| (*k, *v)).collect();
         for (k, v) in sent {
+            if skip_held && live.inst.param_value(k).is_some_and(|h| holds(h, v)) {
+                continue;
+            }
             live.params.send(k, v);
         }
         Ok(())
@@ -1083,6 +1163,7 @@ impl PluginHost {
         }
         // A processor comes back only when the engine dropped it: a
         // restart or a new configuration. Activate it again.
+        refresh_values(&mut live);
         match self.activate(id, &mut live, instrument) {
             Ok(()) => {
                 r.reload = true;
@@ -1278,6 +1359,7 @@ impl PluginHost {
             else {
                 continue;
             };
+            refresh_values(&mut live);
             match self.activate(id, &mut live, instrument) {
                 Ok(()) => {
                     self.owed_load = true;
@@ -1382,6 +1464,7 @@ impl PluginHost {
             .capture_state_keeping(id, &bytes, &keep)
             .map_err(|e| HostError::StateRejected(e.to_string()))?;
         live.applied_state = Some(blob);
+        live.applied_bytes = history.doc().state_arc(blob);
         // The overlay, and values the document had not caught up with, are
         // now part of the state; a kept parameter's are not.
         let sent = std::mem::take(&mut live.sent);
@@ -1391,7 +1474,7 @@ impl PluginHost {
         // The document's overlay; as sent, so `apply_want` leaves what the
         // plugin plays alone.
         live.sent.clone_from(&keep);
-        want.state = history.doc().state_blob(blob).map(|b| (blob, Arc::from(b)));
+        want.state = history.doc().state_arc(blob).map(|b| (blob, b));
         want.params = keep;
         Ok(blob)
     }
@@ -1612,6 +1695,23 @@ fn flush_gesture(id: PluginInstanceId, l: &mut Live, out: &mut Vec<Gesture>) {
     }
 }
 
+/// Whether the wanted state's bytes are the ones `l` last loaded, for
+/// equal blob IDs (plan 6e Task 3 fix round 1): different bytes (a hash
+/// collision) are loaded again. Equal bytes in another copy (a document
+/// loaded or restored separately) are kept as `l`'s, so the next sync is
+/// a pointer test, not a byte compare of up to `MAX_STATE_BYTES`.
+fn same_bytes(want: &Want, l: &mut Live) -> bool {
+    match (&want.state, &l.applied_bytes) {
+        (Some((_, w)), Some(a)) if Arc::ptr_eq(w, a) => true,
+        (Some((_, w)), Some(a)) if w[..] == a[..] => {
+            l.applied_bytes = Some(w.clone());
+            true
+        }
+        (Some(_), Some(_)) => false,
+        _ => true,
+    }
+}
+
 /// Brings a running instance in line with what the document wants: a new
 /// state blob is loaded (an undo past a capture; no blob restores the
 /// values it was loaded with), then overlay values that changed are sent
@@ -1622,11 +1722,12 @@ fn flush_gesture(id: PluginInstanceId, l: &mut Live, out: &mut Vec<Gesture>) {
 /// 15).
 fn apply_want(l: &mut Live, want: &Want) {
     let want_state = want.state.as_ref().map(|(id, _)| *id);
-    if want_state != l.applied_state {
+    if want_state != l.applied_state || !same_bytes(want, l) {
         match &want.state {
             Some((sid, bytes)) => {
                 if l.inst.load_state(bytes).is_ok() {
                     l.applied_state = Some(*sid);
+                    l.applied_bytes = Some(bytes.clone());
                     l.base = current_values(l.inst.as_mut());
                     l.sent.clear();
                     l.pending.clear();
@@ -1645,6 +1746,7 @@ fn apply_want(l: &mut Live, want: &Want) {
                     }
                     if all {
                         l.applied_state = None;
+                        l.applied_bytes = None;
                         l.base = defaults;
                         l.pending.clear();
                     }

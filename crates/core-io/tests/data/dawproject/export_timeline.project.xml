@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Project version="1.0">
+  <Application name="VizDAW" version="1.2.3"/>
+  <Transport>
+    <Tempo id="tempo" unit="bpm" value="120" min="5" max="999"/>
+    <TimeSignature id="timesig" numerator="4" denominator="4"/>
+  </Transport>
+  <Structure>
+    <Track id="t0" name="Keys" comment="vz:t0" contentType="notes">
+      <Channel id="c1" name="Built-in Synth" comment="vz:s1" role="regular" audioChannels="2" destination="c0" solo="false">
+        <Mute id="c1m" value="false"/>
+        <Pan id="c1p" unit="normalized" value="0.5" min="0" max="1"/>
+        <Volume id="c1v" unit="linear" value="1" min="0" max="3.9810717055349722"/>
+      </Channel>
+    </Track>
+    <Track id="t1" name="Drums" comment="vz:t1" contentType="audio">
+      <Channel id="c2" name="Drums" comment="vz:s2" role="regular" audioChannels="2" destination="c0" solo="false">
+        <Mute id="c2m" value="false"/>
+        <Pan id="c2p" unit="normalized" value="0.5" min="0" max="1"/>
+        <Volume id="c2v" unit="linear" value="1" min="0" max="3.9810717055349722"/>
+      </Channel>
+    </Track>
+    <Track id="master" name="Master" contentType="audio notes">
+      <Channel id="c0" name="Master" comment="vz:s0" role="master" audioChannels="2" solo="false">
+        <Mute id="c0m" value="false"/>
+        <Pan id="c0p" unit="normalized" value="0.5" min="0" max="1"/>
+        <Volume id="c0v" unit="linear" value="1" min="0" max="3.9810717055349722"/>
+      </Channel>
+    </Track>
+  </Structure>
+  <Arrangement>
+    <Lanes timeUnit="beats">
+      <Lanes track="t0">
+        <Clips>
+          <Clip time="0" duration="2" playStart="0">
+            <Lanes>
+              <Notes>
+                <Note time="0" duration="1" channel="0" key="60" vel="0.5000076295109483"/>
+                <Note time="1" duration="1" channel="0" key="60" vel="0.5000076295109483"/>
+              </Notes>
+              <Points unit="normalized">
+                <Target expression="channelController" channel="0" controller="1"/>
+                <RealPoint time="0.5" value="0.25000000005820766" interpolation="hold"/>
+              </Points>
+            </Lanes>
+          </Clip>
+          <Clip time="12" duration="2" playStart="0">
+            <Lanes>
+              <Notes>
+                <Note time="0" duration="2" channel="0" key="60" vel="0.5000076295109483">
+                  <Lanes>
+                    <Points unit="semitones">
+                      <Target expression="transpose"/>
+                      <RealPoint time="0" value="1.9999999925494194" interpolation="hold"/>
+                    </Points>
+                    <Points unit="normalized">
+                      <Target expression="timbre"/>
+                      <RealPoint time="1" value="0.5000000001164153" interpolation="hold"/>
+                    </Points>
+                  </Lanes>
+                </Note>
+              </Notes>
+              <Points unit="normalized">
+                <Target expression="channelController" channel="0" controller="0"/>
+                <RealPoint time="0" value="0" interpolation="hold"/>
+              </Points>
+              <Points unit="normalized">
+                <Target expression="channelController" channel="0" controller="32"/>
+                <RealPoint time="0" value="0.007874015748031496" interpolation="hold"/>
+              </Points>
+              <Points>
+                <Target expression="programChange" channel="0"/>
+                <IntegerPoint time="0" value="5"/>
+              </Points>
+            </Lanes>
+          </Clip>
+          <Clip name="Riff" comment="vz:e6" time="16" duration="8" playStart="0" loopStart="0" loopEnd="4">
+            <Notes>
+              <Note time="0" duration="1" channel="0" key="62" vel="0.5000076295109483"/>
+            </Notes>
+          </Clip>
+          <Clip name="Riff" comment="vz:e7" time="32" duration="4" playStart="0" enable="false">
+            <Notes>
+              <Note time="0" duration="1" channel="0" key="62" vel="0.5000076295109483"/>
+            </Notes>
+          </Clip>
+        </Clips>
+      </Lanes>
+      <Lanes track="t1">
+        <Clips>
+          <Clip comment="vz:e8" time="0" duration="2" contentTimeUnit="seconds" playStart="0" playStop="1" fadeTimeUnit="seconds" fadeInTime="0.01" fadeOutTime="0.5">
+            <Audio name="a" timeUnit="seconds" duration="1" channels="2" sampleRate="48000">
+              <File path="audio/001.wav"/>
+            </Audio>
+          </Clip>
+          <Clip name="Hit" comment="vz:e9" time="1" duration="2" contentTimeUnit="seconds" playStart="0" playStop="1" fadeTimeUnit="seconds" fadeInTime="0.1">
+            <Audio name="a" timeUnit="seconds" duration="1" channels="2" sampleRate="48000">
+              <File path="audio/002.wav"/>
+            </Audio>
+          </Clip>
+        </Clips>
+        <Points unit="linear">
+          <Target parameter="c2v"/>
+          <RealPoint time="0" value="0" interpolation="linear"/>
+          <RealPoint time="1" value="1.000202827040279" interpolation="linear"/>
+          <RealPoint time="2" value="3.9810717055349722" interpolation="linear"/>
+        </Points>
+        <Points>
+          <Target parameter="c2m"/>
+          <BoolPoint time="3" value="true"/>
+        </Points>
+      </Lanes>
+    </Lanes>
+  </Arrangement>
+</Project>

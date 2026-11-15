@@ -104,6 +104,7 @@ fn body(d: &Document, e: u64) -> (MediaId, u64, u64, u64, u64, Tick, f32) {
             gain_db,
             fade_in,
             fade_out,
+            ..
         } => (
             *media,
             *source_offset,

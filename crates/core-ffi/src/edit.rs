@@ -6,12 +6,13 @@
 
 use crate::error::VizError;
 use crate::events::{
-    EventKindRow, EventRow, FadeRow, GroupChannel, MarkerRow, MeterEntryRow, PerNoteKindRow,
-    PerNoteValueRow, TempoPointRow, bad, fade_of, kind_of, loops, per_note_kind, spec,
+    EventKindRow, EventRow, FadeRow, FadeShapeRow, GroupChannel, MarkerRow, MeterEntryRow,
+    PerNoteKindRow, PerNoteValueRow, TempoPointRow, bad, fade_of, kind_of, loops, per_note_kind,
+    shape_of, spec,
 };
 use crate::snapshot::KeySlotRow;
 use core_model::command::{
-    AudioCmd, Command, EventCmd, FadeEdge, LaneCmd, ReferenceCmd, SequenceCmd,
+    AudioCmd, Command, CrossfadeLength, EventCmd, FadeEdge, LaneCmd, ReferenceCmd, SequenceCmd,
 };
 use core_model::ids::{DestId, EventId, LaneId, MediaId, OutputPathId, SeqId, TakeId};
 use core_model::lane::QuantizeSpec;
@@ -446,6 +447,26 @@ pub enum LaneEdit {
         /// Take.
         take: u64,
     },
+    /// Rename a take (plan 5c-2 takes Ruling 4).
+    RenameTake {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// Take.
+        take: u64,
+        /// New name.
+        name: String,
+    },
+    /// Delete a take; the track keeps at least one (Ruling 4).
+    RemoveTake {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// Take.
+        take: u64,
+    },
     /// Set what the lane records (sub-project 5 spec §4.5).
     SetInput {
         /// Sequence.
@@ -540,6 +561,31 @@ pub fn retries_input_cmd(cmd: &core_model::command::Command) -> bool {
         cmd,
         Command::Lane(LaneCmd::SetInput { .. } | LaneCmd::SetFlags { arm: Some(_), .. })
     )
+}
+
+/// Whether `cmd` waits while a session records, finishes a pass or has
+/// one to apply: an arm or input change ([`retries_input`]), or choosing,
+/// renaming or deleting a take (plan 5c-2 takes Task 2), so the app and
+/// the control channel share one refusal.
+pub fn waits_for_recording(cmd: &EditCommand) -> bool {
+    match cmd {
+        EditCommand::Lane { edit } => waits_for_recording_cmd(&Command::Lane(lane_cmd(edit))),
+        _ => false,
+    }
+}
+
+/// [`waits_for_recording`] for the model's command, once converted.
+pub fn waits_for_recording_cmd(cmd: &core_model::command::Command) -> bool {
+    use core_model::command::{Command, lane::LaneCmd};
+    retries_input_cmd(cmd)
+        || matches!(
+            cmd,
+            Command::Lane(
+                LaneCmd::SetActiveTake { .. }
+                    | LaneCmd::RenameTake { .. }
+                    | LaneCmd::RemoveTake { .. }
+            )
+        )
 }
 
 /// What a lane records (mirrors `core_model::lane::LaneInput`).
@@ -767,6 +813,13 @@ pub enum AudioEdit {
         /// Split position.
         at: i64,
     },
+    /// Rename a region (`None` or empty clears the name).
+    SetName {
+        /// The region.
+        event: u64,
+        /// The new name.
+        name: Option<String>,
+    },
     /// Set gain.
     SetGain {
         /// The region.
@@ -798,6 +851,37 @@ pub enum AudioEdit {
     RemoveFades {
         /// The events.
         events: Vec<u64>,
+    },
+    /// Make the region's fade in a crossfade with the region it starts
+    /// inside (plan 6c).
+    Crossfade {
+        /// The later region.
+        event: u64,
+        /// The length.
+        length: CrossfadeLengthRow,
+        /// The shape.
+        shape: FadeShapeRow,
+    },
+    /// Clear a region's crossfade flag; its fade in stays as a plain one.
+    RemoveCrossfade {
+        /// The later region.
+        event: u64,
+    },
+}
+
+/// How long an [`AudioEdit::Crossfade`] is (mirrors
+/// `core_model::command::CrossfadeLength`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CrossfadeLengthRow {
+    /// Exactly this many frames, which must fit.
+    Frames {
+        /// Frames.
+        frames: u64,
+    },
+    /// This many frames, or the room if that is less.
+    UpTo {
+        /// Frames.
+        frames: u64,
     },
 }
 
@@ -1092,6 +1176,22 @@ fn lane_cmd(e: &LaneEdit) -> LaneCmd {
             lane: LaneId(*lane),
             take: TakeId(*take),
         },
+        LaneEdit::RenameTake {
+            seq,
+            lane,
+            take,
+            name,
+        } => LaneCmd::RenameTake {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            take: TakeId(*take),
+            name: name.clone(),
+        },
+        LaneEdit::RemoveTake { seq, lane, take } => LaneCmd::RemoveTake {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            take: TakeId(*take),
+        },
         LaneEdit::SetInput { seq, lane, input } => LaneCmd::SetInput {
             seq: SeqId(*seq),
             lane: LaneId(*lane),
@@ -1259,6 +1359,10 @@ fn audio_cmd(e: &AudioEdit) -> AudioCmd {
             event: EventId(*event),
             at: Tick(*at),
         },
+        AudioEdit::SetName { event, name } => AudioCmd::SetName {
+            event: EventId(*event),
+            name: name.clone(),
+        },
         AudioEdit::SetGain { event, gain_db } => AudioCmd::SetGain {
             event: EventId(*event),
             gain_db: *gain_db,
@@ -1287,6 +1391,21 @@ fn audio_cmd(e: &AudioEdit) -> AudioCmd {
         },
         AudioEdit::RemoveFades { events } => AudioCmd::RemoveFades {
             events: ids(events),
+        },
+        AudioEdit::Crossfade {
+            event,
+            length,
+            shape,
+        } => AudioCmd::Crossfade {
+            event: EventId(*event),
+            length: match length {
+                CrossfadeLengthRow::Frames { frames } => CrossfadeLength::Frames(*frames),
+                CrossfadeLengthRow::UpTo { frames } => CrossfadeLength::UpTo(*frames),
+            },
+            shape: shape_of(*shape),
+        },
+        AudioEdit::RemoveCrossfade { event } => AudioCmd::RemoveCrossfade {
+            event: EventId(*event),
         },
     }
 }

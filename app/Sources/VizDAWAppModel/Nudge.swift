@@ -93,8 +93,30 @@ public final class EditingPreferences {
         didSet { defaults.set(externalEditor, forKey: Self.externalEditorKey) }
     }
 
+    /// The default crossfade length (plan 6c Task 5), in milliseconds.
+    public static let crossfadeKey = "VizDAW.crossfadeMs"
+    public static let crossfadeRange: ClosedRange<Double> = 1...1000
+    public static let defaultCrossfadeMs = 10.0
+
+    /// Region › Crossfade's length when the overlap is longer: clamped to
+    /// `crossfadeRange` on read and on set (not a number: the default).
+    public var crossfadeMs: Double {
+        didSet {
+            let c = Self.clampCrossfade(crossfadeMs)
+            if c != crossfadeMs { crossfadeMs = c }
+            defaults.set(c, forKey: Self.crossfadeKey)
+        }
+    }
+
+    static func clampCrossfade(_ v: Double) -> Double {
+        guard !v.isNaN else { return defaultCrossfadeMs }
+        return min(max(v, crossfadeRange.lowerBound), crossfadeRange.upperBound)
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        crossfadeMs = (defaults.object(forKey: Self.crossfadeKey) as? Double).map(Self.clampCrossfade)
+            ?? Self.defaultCrossfadeMs
         nudge =
             defaults.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(NudgeSettings.self, from: $0) }
             ?? NudgeSettings()

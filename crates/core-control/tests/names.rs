@@ -22,6 +22,26 @@ const NAMES: &[&str] = &[
     "Komplete",
     "Kontrol",
     "Microsoft",
+    "Ableton",
+    "ROLI",
+    // DAWproject's origin and the other readers and converters its README
+    // lists (plan 6d Task 13).
+    "Bitwig",
+    "PreSonus",
+    "Studio One",
+    "Cubasis",
+    "VST Live",
+    "n-Track",
+    "DawVert",
+    "ProjectConverter",
+    "Cockos",
+    "Reaper",
+    // The AAF libraries read for behaviour (plan 6f Task 8).
+    "LibAAF",
+    "pyaaf2",
+    // Another company's product name; the AI feature is "Co-Producer"
+    // (sub-project 8 spec).
+    "Copilot",
 ];
 
 fn is_word(b: u8) -> bool {
@@ -61,6 +81,13 @@ fn self_check() {
         "Native Instruments GmbH",
         "(Logic)",
         "Studio Vision Pro",
+        "a Bitwig file",
+        "PreSonus Studio One",
+        "n-Track Studio",
+        "Cockos Reaper",
+        "read by LibAAF",
+        "pyaaf2 wrote it",
+        "Producer Copilot",
     ] {
         assert!(third_party_name(bad).is_some(), "must catch {bad:?}");
     }
@@ -72,6 +99,11 @@ fn self_check() {
         "Logical",
         "SVPN",
         "a host-integration keyboard",
+        "VST Left out",
+        "a DAWproject file",
+        "an AAF file",
+        "Song AAF",
+        "Co-Producer",
         "",
     ] {
         assert_eq!(third_party_name(clean), None, "must pass {clean:?}");
@@ -166,7 +198,7 @@ fn no_refusal_text_names_a_third_party_product() {
     literal_check();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
-    for d in ["core-ffi/src", "core-surface/src"] {
+    for d in ["core-ffi/src", "core-surface/src", "core-io/src"] {
         rust_files(&root.join(d), &mut files);
     }
     assert!(files.len() > 20, "the source directories were found");

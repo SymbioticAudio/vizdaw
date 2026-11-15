@@ -42,7 +42,7 @@ struct AudioEditorHost: NSViewRepresentable {
     }
 }
 
-/// Gain, the fades and their shapes, start and length, then the peak and
+/// Gain, the fades (or the crossfade) and their shapes, start and length, then the peak and
 /// Normalize, the zoom and the waveform height. In a horizontal scroll
 /// view, so a narrow pane scrolls rather than squashes.
 struct AudioEditorBar: View {
@@ -78,14 +78,15 @@ struct AudioEditorBar: View {
         }
     }
 
-    /// The fade's shape: a change keeps its length.
+    /// The fade's shape: a change keeps its length. The Crossfade picker
+    /// shows the fade in's shape, which is the crossfade's.
     private func shape(_ b: AudioEditorBox, _ label: String) -> some View {
         Picker(
             label,
             selection: Binding(
                 get: {
                     let row = model.editedRegion?.row
-                    return (b == .fadeIn ? row?.fadeIn.shape : row?.fadeOut.shape) ?? .linear
+                    return (b == .fadeOut ? row?.fadeOut.shape : row?.fadeIn.shape) ?? .linear
                 },
                 set: { editor.setShape(b, $0) })
         ) {
@@ -107,9 +108,17 @@ struct AudioEditorBar: View {
     private var values: some View {
         HStack(spacing: theme.spacing.m) {
             field("Gain", .gain)
-            HStack(spacing: theme.spacing.xs) {
-                field("Fade In", .fadeIn)
-                shape(.fadeIn, "Fade In Shape")
+            // A crossfaded region's fade in is its crossfade (plan 6c).
+            if model.editedRegion?.row.crossfade == true {
+                HStack(spacing: theme.spacing.xs) {
+                    field("Crossfade", .crossfade)
+                    shape(.crossfade, "Crossfade Shape")
+                }
+            } else {
+                HStack(spacing: theme.spacing.xs) {
+                    field("Fade In", .fadeIn)
+                    shape(.fadeIn, "Fade In Shape")
+                }
             }
             HStack(spacing: theme.spacing.xs) {
                 field("Fade Out", .fadeOut)

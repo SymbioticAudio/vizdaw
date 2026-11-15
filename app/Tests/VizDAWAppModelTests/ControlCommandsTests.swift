@@ -7,12 +7,19 @@ import VizDAWCore
 final class FakeControlHost: ControlHost {
     var calls: [String] = []
     var nudge = NudgeSettings()
+    /// Settings › Editing's default crossfade (plan 6c Task 5).
+    var crossfadeMs: Double = 10
     var surfaces: any SurfaceCore = FakeSurfaceCore()
     /// The editor `region.open_external` uses without `app` (plan 5f-3).
     var externalEditor: ExternalEditorChoice = .none
     let keys = KeyBindings(defaults: MemoryDefaults())
     /// The theme preference `ui.theme` sets (plan 7b Task B4).
     let appearance = AppearancePreferences(defaults: MemoryDefaults())
+    /// Settings › Plug-ins `plugins.*` set (plan 6g Task 4); installs go to
+    /// a temp folder through the fake sink.
+    let plugins = PluginSettings(
+        defaults: MemoryDefaults(), sink: FakePluginSettingsSink(),
+        installDestination: FileManager.default.temporaryDirectory.path)
     /// Whether `focus` finds the fields.
     var fieldsShown = true
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {
@@ -546,6 +553,7 @@ final class FakeControlHost: ControlHost {
             e?.boxes == [
                 AudioEditorBoxRow(name: "gain", text: "\u{2212}4.2 dB"),
                 AudioEditorBoxRow(name: "fade_in", text: "250 ms"),
+                AudioEditorBoxRow(name: "crossfade", text: "\u{2013}"),
                 AudioEditorBoxRow(name: "fade_out", text: "0 ms"),
                 AudioEditorBoxRow(name: "start", text: "0:00.500"),
                 AudioEditorBoxRow(name: "length", text: "0:01.000"),

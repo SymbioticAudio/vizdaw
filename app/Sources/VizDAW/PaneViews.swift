@@ -133,8 +133,8 @@ struct LeftStripPane: View {
     }
 }
 
-/// The left pane's read-only inspector (Ruling 6): the followed lane, then
-/// the single selected audio region.
+/// The left pane's inspector (Ruling 6): the followed lane, then the single
+/// selected audio region, whose name can be typed (plan 6a Task 10).
 struct InspectorPane: View {
     @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
@@ -154,10 +154,14 @@ struct InspectorPane: View {
                             Text(r.label)
                                 .foregroundStyle(.secondary)
                                 .gridColumnAlignment(.trailing)
-                            Text(r.value)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .textSelection(.enabled)
+                            if r.kind == .regionName, let region = model.inspectorRegion {
+                                regionName(region)
+                            } else {
+                                Text(r.value)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .textSelection(.enabled)
+                            }
                         }
                     }
                 }
@@ -165,6 +169,22 @@ struct InspectorPane: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    /// The region's own name; empty shows its file's name. Return renames
+    /// (one undo step, "Rename Region"), Escape puts it back.
+    private func regionName(_ region: EventRow) -> some View {
+        let m = model
+        return TextField(
+            m.media.row(region.media)?.name ?? "Region",
+            text: Binding(get: { m.regionNameText(region.id) }, set: { m.editRegionName(region.id, $0) })
+        )
+        .textFieldStyle(.roundedBorder)
+        .onSubmit { m.commitRegionName() }
+        .onExitCommand { m.cancelRegionName() }
+        .onChange(of: region.id) { m.regionSelectionChanged() }
+        .onDisappear { m.regionSelectionChanged() }
+        .accessibilityLabel("Region name")
     }
 }
 

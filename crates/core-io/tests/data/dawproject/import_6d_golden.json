@@ -1,0 +1,1858 @@
+{
+  "clap_tags": {
+    "projection": {
+      "info": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "markers": [],
+      "meter": [
+        [
+          0,
+          4,
+          4
+        ]
+      ],
+      "origin": 0,
+      "strips": [
+        {
+          "colour": null,
+          "devices": [
+            [
+              "clap",
+              "org.example.a",
+              false,
+              null
+            ]
+          ],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "A",
+          "output": 2,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [
+            [
+              "clap",
+              "org.example.b",
+              false,
+              null
+            ]
+          ],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "B",
+          "output": 2,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Master",
+          "output": null,
+          "pan": 0.0,
+          "role": "master",
+          "sends": [],
+          "solo": false
+        }
+      ],
+      "tempo": [
+        [
+          0,
+          120000,
+          false
+        ]
+      ],
+      "tracks": [
+        {
+          "audio": false,
+          "automation": [],
+          "midi": [],
+          "name": "A",
+          "notes": true,
+          "notes_played": [],
+          "regions": [],
+          "strip": 0
+        },
+        {
+          "audio": false,
+          "automation": [],
+          "midi": [],
+          "name": "B",
+          "notes": true,
+          "notes_played": [],
+          "regions": [],
+          "strip": 1
+        }
+      ]
+    },
+    "report": [
+      "LeftOut Colours and comments on tracks, clips and markers x1 [\"track 'A'\"]",
+      "Note This file came from a VizDAW project; it was opened as a new project x1 []"
+    ]
+  },
+  "hand_other": {
+    "projection": {
+      "info": [
+        "Other Song",
+        "An Artist",
+        "An Album",
+        "First Artist",
+        "A Composer",
+        "A Songwriter",
+        "A Producer",
+        "An Arranger",
+        "2026",
+        "Rock",
+        "(c) 2026 Someone",
+        "https://example.com",
+        "made here"
+      ],
+      "markers": [
+        [
+          0,
+          "Intro"
+        ],
+        [
+          983040,
+          "Out"
+        ]
+      ],
+      "meter": [
+        [
+          0,
+          4,
+          4
+        ],
+        [
+          491520,
+          7,
+          8
+        ]
+      ],
+      "origin": 0,
+      "strips": [
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Built-in Synth",
+          "output": 3,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [
+            [
+              "au",
+              "aufx/dely/xmpl",
+              false,
+              null
+            ]
+          ],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Gtr",
+          "output": 3,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": "#46a758",
+          "devices": [
+            [
+              "clap",
+              "org.example.lead",
+              false,
+              null
+            ]
+          ],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Lead",
+          "output": 5,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [
+            [
+              4,
+              -6.020599913279624,
+              false,
+              false
+            ]
+          ],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Band",
+          "output": 5,
+          "pan": 0.0,
+          "role": "submix",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Room",
+          "output": 5,
+          "pan": 0.0,
+          "role": "effect",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Master",
+          "output": null,
+          "pan": 0.0,
+          "role": "master",
+          "sends": [],
+          "solo": false
+        }
+      ],
+      "tempo": [
+        [
+          0,
+          149000,
+          true
+        ],
+        [
+          491520,
+          160000,
+          false
+        ]
+      ],
+      "tracks": [
+        {
+          "audio": false,
+          "automation": [],
+          "midi": [],
+          "name": "Bass",
+          "notes": true,
+          "notes_played": [],
+          "regions": [],
+          "strip": 0
+        },
+        {
+          "audio": true,
+          "automation": [],
+          "midi": [],
+          "name": "Gtr",
+          "notes": false,
+          "notes_played": [],
+          "regions": [],
+          "strip": 1
+        },
+        {
+          "audio": false,
+          "automation": [],
+          "midi": [],
+          "name": "Lead",
+          "notes": true,
+          "notes_played": [],
+          "regions": [],
+          "strip": 2
+        }
+      ]
+    },
+    "report": [
+      "Changed Meter changes moved to the next barline x1 []",
+      "Changed Folder tracks became buses x1 []",
+      "LeftOut VST plug-ins x1 [\"Bass VST\"]",
+      "LeftOut Built-in effects on tracks x1 [\"Equalizer on track 'Gtr': Band type=bell: Freq id=dv3f1 unit=hertz value=1000, Gain id=dv3g1 unit=decibel value=3, Q id=dv3q1 unit=linear value=0.71\", \"Equalizer on track 'Gtr': Band type=highPass: Freq id=dv3f2 unit=hertz value=80\"]",
+      "Changed Colours changed to the nearest VizDAW colour x1 []",
+      "LeftOut VCA channels x1 []"
+    ]
+  },
+  "hostile": {
+    "projection": {
+      "info": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "markers": [],
+      "meter": [
+        [
+          0,
+          4,
+          4
+        ]
+      ],
+      "origin": 0,
+      "strips": [
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Built-in Synth",
+          "output": 3,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Built-in Synth",
+          "output": 3,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Built-in Synth",
+          "output": 3,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Master",
+          "output": null,
+          "pan": 0.0,
+          "role": "master",
+          "sends": [],
+          "solo": false
+        }
+      ],
+      "tempo": [
+        [
+          0,
+          120000,
+          false
+        ]
+      ],
+      "tracks": [
+        {
+          "audio": false,
+          "automation": [],
+          "midi": [],
+          "name": "A",
+          "notes": true,
+          "notes_played": [
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 0,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 15360,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 30720,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 46080,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 61440,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 76800,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 92160,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 107520,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 122880,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 138240,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 153600,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 168960,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 184320,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 199680,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 215040,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 230400,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 245760,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 261120,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 276480,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 291840,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 307200,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 322560,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 337920,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 353280,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 368640,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 384000,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 399360,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 414720,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 430080,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 445440,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 460800,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 476160,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 491520,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 506880,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 522240,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 537600,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 552960,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 568320,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 583680,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 599040,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 614400,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 629760,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 645120,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 660480,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 675840,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 691200,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 706560,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 721920,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 737280,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 752640,
+              "velocity": 32768
+            }
+          ],
+          "regions": [],
+          "strip": 0
+        },
+        {
+          "audio": false,
+          "automation": [],
+          "midi": [],
+          "name": "B",
+          "notes": true,
+          "notes_played": [],
+          "regions": [],
+          "strip": 1
+        },
+        {
+          "audio": false,
+          "automation": [],
+          "midi": [],
+          "name": "D",
+          "notes": true,
+          "notes_played": [],
+          "regions": [],
+          "strip": 2
+        }
+      ]
+    },
+    "report": [
+      "Note Tracks that play the built-in synth x3 [\"A\", \"B\", \"D\"]",
+      "Note This file came from a VizDAW project; it was opened as a new project x1 []"
+    ]
+  },
+  "many_notes": {
+    "projection": {
+      "info": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "markers": [],
+      "meter": [
+        [
+          0,
+          4,
+          4
+        ]
+      ],
+      "origin": 0,
+      "strips": [
+        {
+          "colour": null,
+          "devices": [
+            [
+              "clap",
+              "org.example.a",
+              false,
+              null
+            ]
+          ],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "A",
+          "output": 1,
+          "pan": 0.0,
+          "role": "regular",
+          "sends": [],
+          "solo": false
+        },
+        {
+          "colour": null,
+          "devices": [],
+          "gain_db": 0.0,
+          "mute": false,
+          "name": "Master",
+          "output": null,
+          "pan": 0.0,
+          "role": "master",
+          "sends": [],
+          "solo": false
+        }
+      ],
+      "tempo": [
+        [
+          0,
+          120000,
+          false
+        ]
+      ],
+      "tracks": [
+        {
+          "audio": false,
+          "automation": [],
+          "midi": [],
+          "name": "A",
+          "notes": true,
+          "notes_played": [
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 0,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 15360,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 30720,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 46080,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 61440,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 76800,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 92160,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 107520,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 122880,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 138240,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 153600,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 168960,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 184320,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 199680,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 215040,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 230400,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 245760,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 261120,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 276480,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 291840,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 307200,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 322560,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 337920,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 353280,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 368640,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 384000,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 399360,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 414720,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 430080,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 445440,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 460800,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 476160,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 491520,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 506880,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 522240,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 537600,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 552960,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 568320,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 583680,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 599040,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 614400,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 629760,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 645120,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 660480,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 675840,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 691200,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 706560,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 721920,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 737280,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 752640,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 768000,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 783360,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 798720,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 814080,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 829440,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 844800,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 860160,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 875520,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 890880,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 906240,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 921600,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 936960,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 952320,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 967680,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 983040,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 998400,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1013760,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1029120,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1044480,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1059840,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1075200,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1090560,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1105920,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1121280,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1136640,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1152000,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1167360,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1182720,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1198080,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1213440,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1228800,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1244160,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1259520,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1274880,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1290240,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1305600,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1320960,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1336320,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1351680,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1367040,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1382400,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1397760,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1413120,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1428480,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1443840,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1459200,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1474560,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1489920,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1505280,
+              "velocity": 32768
+            },
+            {
+              "channel": 0,
+              "duration": 7680,
+              "expression": [],
+              "pitch": 60,
+              "release": 0,
+              "tick": 1520640,
+              "velocity": 32768
+            }
+          ],
+          "regions": [],
+          "strip": 0
+        }
+      ]
+    },
+    "report": []
+  }
+}

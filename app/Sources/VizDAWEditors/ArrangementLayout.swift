@@ -177,7 +177,7 @@ public enum ArrangementA11y {
     public static func header(_ lane: LaneRow, returnOf: String? = nil) -> String {
         // An audio track plays to an output path, not a MIDI destination.
         let routing = lane.kind == .audio ? "output " + (lane.audioOutName ?? "none") : lane.destination ?? "no destination"
-        var parts = [lane.name, routing]
+        var parts = [LaneHeaderLayout.nameText(lane), routing]
         if lane.mute { parts.append("muted") }
         if lane.solo { parts.append("soloed") }
         if lane.arm { parts.append("armed") }
@@ -201,6 +201,16 @@ public enum HeaderControl: Equatable, Sendable {
 
 public enum LaneHeaderLayout {
     public static let width: CGFloat = 200
+
+    /// The name a header shows (plan 5c-2 takes Ruling 5): "<name> ·
+    /// <playing take>" when the track has more than one take, else the
+    /// track's name. Drawn, and read as the header's accessibility label.
+    public static func nameText(_ lane: LaneRow) -> String {
+        guard lane.takes.count > 1, let take = lane.takes.first(where: { $0.id == lane.activeTakeId }) else {
+            return lane.name
+        }
+        return "\(lane.name) · \(take.name)"
+    }
 
     /// The kind icon's side: 16 pt, the size AppIcon is designed at (the
     /// theme's icon strokes are defined for 16 and 24 pt, so a smaller icon
