@@ -49,6 +49,9 @@ struct Txn {
     base_future: Vec<Version>,
     /// Whether any command inside the transaction made an undo step.
     executed: bool,
+    /// Whether it was begun while acting (Co-Producer's): turning acting
+    /// off aborts it, so no hand edit can join it.
+    acting: bool,
 }
 
 /// A history group (sub-project 5 spec §4.7): every step made between
@@ -88,8 +91,21 @@ struct Request {
     name: String,
     title: String,
     label: String,
+    /// `label` plus " (continued)".
+    continued_label: String,
     /// An earlier group of it made a step.
     continued: bool,
+}
+
+impl Request {
+    /// The label its open group's step gets.
+    fn group_label(&self) -> &str {
+        if self.continued {
+            &self.continued_label
+        } else {
+            &self.label
+        }
+    }
 }
 
 /// What a request is (8a Ruling 3).
@@ -266,14 +282,31 @@ impl History {
         self.last_modify.as_ref()
     }
 
-    /// Number of steps that can be undone.
+    /// Number of steps that can be undone. An open request group that
+    /// made steps counts as the one step [`History::undo`] closes it into.
     pub fn undo_depth(&self) -> usize {
-        self.past.len()
+        self.pending_request_start()
+            .map_or(self.past.len(), |start| start + 1)
     }
 
-    /// Label of the step undo would revert.
+    /// Label of the step undo would revert: for an open request group
+    /// that made steps, the label it closes with.
     pub fn undo_label(&self) -> Option<&str> {
+        if self.pending_request_start().is_some()
+            && let Some(r) = &self.request
+        {
+            return Some(r.group_label());
+        }
         self.past.last().map(|_| self.present.label.as_str())
+    }
+
+    /// Where the open request group starts, when it made steps and the
+    /// next undo or redo would close it (no transaction is open): undo
+    /// and its previews then see the group as one closed step.
+    fn pending_request_start(&self) -> Option<usize> {
+        let g = self.group.as_ref()?;
+        (g.kind == GroupKind::Request && self.txn.is_none() && self.past.len() > g.start)
+            .then_some(g.start)
     }
 
     /// Label of the step redo would re-apply.
@@ -300,8 +333,12 @@ impl History {
     }
 
     /// The document [`History::undo`] would go back to (inside a
-    /// transaction, only its own steps can be undone).
+    /// transaction, only its own steps can be undone; an open request
+    /// group counts as the one step undo closes it into).
     pub fn peek_undo(&self) -> Option<&Document> {
+        if let Some(start) = self.pending_request_start() {
+            return self.past.get(start).map(|v| &v.doc);
+        }
         if self.past.len() <= self.undo_floor() {
             return None;
         }
@@ -604,6 +641,7 @@ impl History {
             base: self.present.clone(),
             base_future: self.future.clone(),
             executed: false,
+            acting: self.acting,
         });
         Ok(())
     }
@@ -729,11 +767,10 @@ impl History {
             return None;
         }
         let g = self.group.take()?;
-        let label = match &self.request {
-            Some(r) if r.continued => format!("{} (continued)", r.label),
-            Some(r) => r.label.clone(),
-            None => "Co-Producer".to_string(),
-        };
+        let label = self.request.as_ref().map_or_else(
+            || "Co-Producer".to_string(),
+            |r| r.group_label().to_string(),
+        );
         if !self.close_group(g, label.clone()) {
             return None;
         }
@@ -763,6 +800,7 @@ impl History {
         self.request = Some(Request {
             name: name.trim().to_string(),
             title,
+            continued_label: format!("{label} (continued)"),
             label,
             continued: false,
         });
@@ -814,14 +852,20 @@ impl History {
     /// Turning it on is `ModelError::Invalid` with
     /// [`History::acting_refusal`]'s message during a hand transaction or
     /// a recording group (the crate has no Busy variant; Task 4 maps this
-    /// to `VizError::Busy`). Turning it off never fails, and leaves an
-    /// open request group open until a hand action ends it.
+    /// to `VizError::Busy`). Turning it off never fails: it aborts a
+    /// transaction begun while acting, and leaves an open request group
+    /// open until a hand action ends it.
     pub fn set_acting(&mut self, on: bool) -> Result<()> {
         if on
             && !self.acting
             && let Some(why) = self.acting_refusal()
         {
             return Err(ModelError::invalid(why));
+        }
+        // A Co-Producer transaction left open is aborted: a hand edit that
+        // joined it would leave with one undo of Co-Producer's step.
+        if !on && self.txn.as_ref().is_some_and(|t| t.acting) {
+            let _ = self.abort();
         }
         self.acting = on;
         Ok(())

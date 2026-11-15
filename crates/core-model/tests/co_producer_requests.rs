@@ -355,3 +355,71 @@ proptest! {
         }
     }
 }
+
+/// Review I1: a transaction Co-Producer leaves open when acting turns off
+/// is aborted, so a later hand edit never joins Co-Producer's step.
+#[test]
+fn turning_acting_off_aborts_a_co_producer_transaction() {
+    let mut h = hist();
+    let original = h.doc().clone();
+    h.begin_request("two").unwrap();
+    h.set_acting(true).unwrap();
+    h.begin("Drag").unwrap();
+    h.execute(&add_lane("a"), &f()).unwrap();
+    h.set_acting(false).unwrap();
+    assert!(!h.in_transaction(), "the acting transaction is aborted");
+    assert_eq!(h.doc(), &original);
+    h.execute(&rename_lane(LaneId(0), "Mine"), &f()).unwrap();
+    assert!(h.commit().is_err());
+    assert_eq!(h.end_request().unwrap(), None);
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &original);
+    assert!(h.undo().is_err(), "the rename was its own step");
+    h.redo().unwrap();
+    assert_eq!(lane_name(&h, LaneId(0)), "Mine");
+
+    // A hand transaction is not touched by turning acting off.
+    let mut h = hist();
+    h.begin("Drag").unwrap();
+    h.set_acting(false).unwrap();
+    assert!(h.in_transaction());
+}
+
+/// Review I2: between calls, the undo label, depth and peek describe the
+/// one step `undo` will close the open request group into.
+#[test]
+fn undo_label_depth_and_peek_see_the_closed_group() {
+    let mut h = hist();
+    h.execute(&rename_lane(LaneId(0), "Mine"), &f()).unwrap();
+    let before = h.doc().clone();
+    h.begin_request("add two tracks").unwrap();
+    acting(&mut h, &add_lane("a"));
+    acting(&mut h, &add_lane("b"));
+    assert!(h.request().unwrap().group_open);
+    assert_eq!(h.undo_label(), Some("Co-Producer: Add Two Tracks"));
+    assert_eq!(h.undo_depth(), 2);
+    assert_eq!(h.peek_undo(), Some(&before));
+    assert_eq!(h.peek_redo(), None);
+    let mut probe = h.clone();
+    probe.undo().unwrap();
+    assert_eq!(probe.doc(), &before);
+    assert_eq!(probe.undo_depth(), 1);
+
+    // A hand edit, then a continued group.
+    h.execute(&rename_lane(LaneId(0), "Again"), &f()).unwrap();
+    let before = h.doc().clone();
+    acting(&mut h, &add_lane("c"));
+    assert_eq!(
+        h.undo_label(),
+        Some("Co-Producer: Add Two Tracks (continued)")
+    );
+    assert_eq!(h.undo_depth(), 4);
+    assert_eq!(h.peek_undo(), Some(&before));
+
+    // An open group that made no step changes nothing.
+    let mut h = hist();
+    h.execute(&rename_lane(LaneId(0), "Mine"), &f()).unwrap();
+    h.begin_request("nothing").unwrap();
+    assert_eq!(h.undo_label(), Some(rename_lane(LaneId(0), "x").name()));
+    assert_eq!(h.undo_depth(), 1);
+}
