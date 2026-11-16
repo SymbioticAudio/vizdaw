@@ -266,6 +266,16 @@ pub(crate) struct Inner {
     /// counts as a running interchange and media job until
     /// `confirm_merge`, `cancel_merge` or close.
     held_merge: Option<HeldMerge>,
+    /// The thread inside a Co-Producer call (`co_producer_enter` to
+    /// `co_producer_leave`): `History::acting` is on only while that
+    /// thread holds the session lock (plan 8a Task 4).
+    co_producer_thread: Option<std::thread::ThreadId>,
+    /// The open request's last Co-Producer call (Ruling 3's idle close).
+    co_producer_seen: Instant,
+    /// The open request wrote its saved copy (Ruling 9: one per request).
+    co_producer_copied: bool,
+    /// The latest preview, until taken or replaced (Ruling 7).
+    co_producer_preview: Option<crate::co_producer::PendingPreview>,
 }
 
 /// A held merge (plan 6e Task 8): its job, the merged history and the
@@ -406,6 +416,41 @@ impl Inner {
             #[cfg(feature = "test-hooks")]
             capture_busy: false,
             held_merge: None,
+            co_producer_thread: None,
+            co_producer_seen: Instant::now(),
+            co_producer_copied: false,
+            co_producer_preview: None,
+        }
+    }
+
+    /// Turns `History::acting` on for the thread inside a Co-Producer call
+    /// and off for any other (plan 8a Task 2 review): every session lock
+    /// goes through here, so acting is on only while that thread holds the
+    /// lock, and another thread's edit is a hand edit, which closes the
+    /// request's group. Turning it off aborts a transaction Co-Producer
+    /// left open; turning it on may be refused (a hand drag), and the
+    /// edit is then a hand edit.
+    fn sync_acting(&mut self) {
+        let mine = self
+            .co_producer_thread
+            .is_some_and(|t| t == std::thread::current().id());
+        self.set_acting(mine);
+    }
+
+    /// Sets `History::acting`. When turning it off aborts a transaction
+    /// Co-Producer left open, the document went back: the edit it opened
+    /// is gone and the engine follows at the next `idle`.
+    fn set_acting(&mut self, on: bool) {
+        if self.history.acting() == on {
+            return;
+        }
+        let open = self.history.in_transaction();
+        let _ = self.history.set_acting(on);
+        if open && !self.history.in_transaction() {
+            self.edit_label = None;
+            self.version += 1;
+            self.reload_owed = true;
+            self.news.doc_changed = true;
         }
     }
 
@@ -885,7 +930,14 @@ impl Session {
     /// Makes every capture of plug-in states Busy, as when a plug-in call
     /// is on the stack (test hook). Not exported to Swift.
     pub fn debug_capture_busy(&self, on: bool) {
-        lock(&self.inner).capture_busy = on;
+        self.lock_inner().capture_busy = on;
+    }
+
+    /// Owes the composer an MPE setting a controller gave `lane`, as a
+    /// report the engine took while an edit was open (test hook; plan 8a
+    /// Task 4). Not exported to Swift.
+    pub fn debug_owe_mpe(&self, lane: u64, mpe: Option<core_model::mpe::MpeConfig>) {
+        self.lock_inner().mpe_owed.insert(LaneId(lane), mpe);
     }
 
     /// Writes a Co-Producer copy as a request's first entry will (plan 8a
@@ -895,7 +947,7 @@ impl Session {
         stamp: &str,
         title: &str,
     ) -> Result<PathBuf, VizError> {
-        ffi_guard(|| self.co_producer_copy(&mut lock(&self.inner), stamp, title))
+        ffi_guard(|| self.co_producer_copy(&mut self.lock_inner(), stamp, title))
     }
 }
 
@@ -1016,7 +1068,7 @@ impl Session {
             c.keep();
         }
         {
-            let mut inner = lock(&s.inner);
+            let mut inner = s.lock_inner();
             inner.marked = marked;
             if let Some(e) = unmarked {
                 inner
@@ -1034,6 +1086,15 @@ impl Session {
 
     fn mark(&self, inner: &mut Inner) {
         inner.mark(self.id, false);
+    }
+
+    /// The session lock, with `History::acting` on only for the thread
+    /// inside a Co-Producer call ([`Inner::sync_acting`]). Every lock of
+    /// `inner` goes through here.
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, Inner> {
+        let mut inner = lock(&self.inner);
+        inner.sync_acting();
+        inner
     }
 
     /// Captures every running plugin's state into the document (spec §4:
@@ -1076,7 +1137,6 @@ impl Session {
     /// - the unsaved state blobs, then a new copy named for `stamp` and
     ///   `title`, are written into the package (or the untitled stand-in,
     ///   Ruling P9). Never replaces a file. Returns the copy's path.
-    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     fn co_producer_copy(
         &self,
         inner: &mut Inner,
@@ -1356,7 +1416,7 @@ impl Session {
     /// current selection, one undo step named after it. It removes no
     /// plugin, so nothing is captured first.
     fn modify_again_with(&self, filter: &ViewFilter) -> Result<DocSnapshot, VizError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         inner.history.modify_again(filter)?;
         inner.version += 1;
         inner.reload_host(self.id);
@@ -1373,7 +1433,7 @@ impl Session {
         monitor: core_model::lane::MonitorMode,
         filter: &ViewFilter,
     ) -> Result<DocSnapshot, VizError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         let h = &mut inner.history;
         crate::bundled::arm(h);
         h.begin("Add Track")?;
@@ -1405,14 +1465,14 @@ impl Session {
     /// [`Session::execute`] with a view filter (editor commands that act
     /// on the selection).
     fn execute_with(&self, cmd: Command, filter: &ViewFilter) -> Result<DocSnapshot, VizError> {
-        let next = core_model::command::apply(lock(&self.inner).doc(), &cmd)
+        let next = core_model::command::apply(self.lock_inner().doc(), &cmd)
             .ok()
             .map(|n| n.doc);
         if let Some(next) = next {
             self.capture_removed(&next)?;
         }
         before_execute();
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         // Under the lock the command applies under (Ruling 18, Task 9
         // review M5).
         if crate::edit::waits_for_recording_cmd(&cmd) {
@@ -1465,7 +1525,7 @@ impl Session {
     /// losing the state.
     fn capture_removed(&self, next: &Document) -> Result<(), VizError> {
         let (mut scratch, gone, riding) = {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let before = mixer::slot_ids(inner.doc());
             let after = mixer::slot_ids(next);
             let gone: Vec<_> = before.difference(&after).copied().collect();
@@ -1483,7 +1543,7 @@ impl Session {
                 })
                 .collect::<Vec<_>>()
         })?;
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         for (id, captured) in captured {
             let blob = match captured {
                 Ok(blob) => blob,
@@ -1525,7 +1585,7 @@ impl Session {
             return false;
         }
         let (mut scratch, riding) = {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             if inner.history.in_transaction() {
                 return false;
             }
@@ -1537,7 +1597,7 @@ impl Session {
         }) else {
             return false;
         };
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         for (id, captured) in unloaded {
             let stored = captured.map_err(|e| e.to_string()).and_then(|blob| {
                 let bytes = scratch
@@ -1574,7 +1634,7 @@ impl Session {
             });
         }
         let next = {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             // A gesture the plugin finished since the last timer tick is
             // the newest step: undo must see it (3b: sync after commit,
             // before undo).
@@ -1590,7 +1650,7 @@ impl Session {
         if let Some(next) = next {
             self.capture_removed(&next)?;
         }
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         let before = inner.doc().clone();
         if undo {
             inner.history.undo()?;
@@ -1623,7 +1683,7 @@ impl Session {
         start: Option<Tick>,
         until: Option<Tick>,
     ) -> Result<(), VizError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         if inner.recording.is_some() || inner.finishing {
             return Err(recording_busy());
         }
@@ -1669,7 +1729,7 @@ impl Session {
         let played = host::finish_play(pending);
         if played.is_err() {
             // A Play that did not start writes nothing (Ruling 24).
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.finish_writing(&mut inner);
             self.apply_pending_automation(&mut inner);
         }
@@ -1692,7 +1752,7 @@ impl Session {
     /// because another window's idle engine is opening its input is owed:
     /// `idle` tries it again (Task 8 parked n2).
     fn claim(&self, seq: SeqId) -> bool {
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         inner.claim_owed = None;
         if inner.closed || !host::wants_live(inner.doc(), seq) {
             return false;
@@ -1858,7 +1918,7 @@ impl Session {
         if !cmds.iter().any(crate::edit::waits_for_recording) {
             return Ok(());
         }
-        records_busy(&lock(&self.inner))
+        records_busy(&self.lock_inner())
     }
 
     /// Why Measure or Track Synth cannot start or take its step now:
@@ -1985,7 +2045,7 @@ impl Session {
             let windows = read_windows(&p);
             let layout = read_layout(&p);
             {
-                let mut inner = lock(&s.inner);
+                let mut inner = s.lock_inner();
                 // Plan 5c Task 10: kept takes, and what a crash left.
                 let (kept, unread) = crate::record::kept_at_open(&p, inner.doc());
                 let recovered = crate::record::offered(&p, inner.doc(), &kept);
@@ -2040,7 +2100,7 @@ impl Session {
                 }
             }
             {
-                let mut inner = lock(&s.inner);
+                let mut inner = s.lock_inner();
                 inner.news.problems.extend(problems);
                 // The files are there now: online, as `recheck_media` does.
                 if inner.refresh_media(s.id, true) {
@@ -2054,7 +2114,7 @@ impl Session {
     /// Saves to the current path; `Io` when untitled.
     pub fn save(&self) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let path = inner.path.clone().ok_or_else(|| VizError::Io {
                 message: "the document has no file yet; use Save As".into(),
             })?;
@@ -2073,7 +2133,7 @@ impl Session {
     /// untitled document that never had one.
     pub fn co_producer_copies_size(&self) -> Result<CopiesSizeRow, VizError> {
         ffi_guard(|| {
-            let home = lock(&self.inner).copies_home(false)?;
+            let home = self.lock_inner().copies_home(false)?;
             let mut row = CopiesSizeRow { count: 0, bytes: 0 };
             let Some(home) = home else { return Ok(row) };
             for pj in file::list_copies(&home)? {
@@ -2087,7 +2147,7 @@ impl Session {
     /// Whether a Save made while recording saves again once the pass
     /// lands (plan 5d-1 Ruling 19; the app says so).
     pub fn saves_after_pass(&self) -> Result<bool, VizError> {
-        ffi_guard(|| Ok(lock(&self.inner).save_after_pass))
+        ffi_guard(|| Ok(self.lock_inner().save_after_pass))
     }
 
     /// Why Save As would be refused before its panel opens: the sentence
@@ -2095,7 +2155,7 @@ impl Session {
     /// model-only check under the lock; no I/O.
     pub fn save_as_refusal(&self) -> Result<Option<String>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             Ok(inner
                 .held_merge
                 .as_ref()
@@ -2110,7 +2170,7 @@ impl Session {
     /// from (plan 5a Ruling 15).
     pub fn save_as(&self, path: String) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             // Recordings are written under the current root, and a pass
             // waiting for an edit to end names paths under it (pre-flight
             // I1).
@@ -2241,7 +2301,7 @@ impl Session {
     /// The current package path.
     pub fn path(&self) -> Result<Option<String>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             Ok(inner
                 .path
                 .as_ref()
@@ -2251,18 +2311,18 @@ impl Session {
 
     /// The document at sequence level.
     pub fn snapshot(&self) -> Result<DocSnapshot, VizError> {
-        ffi_guard(|| lock(&self.inner).snapshot())
+        ffi_guard(|| self.lock_inner().snapshot())
     }
 
     /// The lanes of sequence `seq`.
     pub fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
-        ffi_guard(|| lane_rows(lock(&self.inner).doc(), seq))
+        ffi_guard(|| lane_rows(self.lock_inner().doc(), seq))
     }
 
     /// The drum lanes of sequence `seq` with their rows and each row's
     /// notes in the active take (the drum grid, 4e).
     pub fn drum_lanes(&self, seq: u64) -> Result<Vec<crate::drum::DrumLaneRow>, VizError> {
-        ffi_guard(|| crate::drum::drum_lanes(lock(&self.inner).doc(), seq))
+        ffi_guard(|| crate::drum::drum_lanes(self.lock_inner().doc(), seq))
     }
 
     /// Renames sequence `seq` (one undo step).
@@ -2328,7 +2388,7 @@ impl Session {
         seq: u64,
     ) -> Result<Option<crate::selection::TickRange>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let id = seq_id(inner.doc(), seq)?;
             let span =
                 core_editor::transport::selection_span(inner.doc(), inner.history.selection(), id);
@@ -2342,7 +2402,7 @@ impl Session {
     /// The nearest marker of `seq` after (`forward`) or before `tick`.
     pub fn marker_step(&self, seq: u64, tick: i64, forward: bool) -> Result<Option<i64>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let s = inner.doc().sequence(seq_id(inner.doc(), seq)?)?;
             Ok(core_editor::transport::marker_step(s, Tick(tick), forward).map(|t| t.0))
         })
@@ -2353,7 +2413,7 @@ impl Session {
     /// error at the first or last lane.
     pub fn move_record_arm(&self, seq: u64, forward: bool) -> Result<DocSnapshot, VizError> {
         let (lanes, m) = ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let s = inner.doc().sequence(seq_id(inner.doc(), seq)?)?;
             let armed: Vec<bool> = s.lanes.iter().map(|l| l.arm).collect();
             let ids: Vec<u64> = s.lanes.iter().map(|l| l.id.0).collect();
@@ -2392,13 +2452,13 @@ impl Session {
             // Stop while recording finishes the pass (spec §6.5), then
             // stops as any Stop does (pre-flight M4: a rebuild running
             // meanwhile must not resume playing).
-            if lock(&self.inner).recording.is_some() {
+            if self.lock_inner().recording.is_some() {
                 self.finish_recording(None)?;
             }
             // Behind a rebuild this session's poll is running (its drain
             // has taken the host out of the slot): the Stop must not be
             // lost to an empty slot.
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.restart_writing = None;
             let stopped = host::stop(self.id);
             // What was written lands now (spec §7.4).
@@ -2414,7 +2474,7 @@ impl Session {
     /// once does not wait for the engine's position to catch up.
     pub fn locate(&self, tick: i64) -> Result<(), VizError> {
         self.transport_call(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.locate_in(&mut inner, tick)?;
             inner.surfaces.wind = Some((crate::surfaces::now(), tick));
             Ok(())
@@ -2430,7 +2490,7 @@ impl Session {
     /// sequence. Returns the new tick.
     pub fn transport_step_bar(&self, forward: bool) -> Result<i64, VizError> {
         self.transport_call(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let now = crate::surfaces::now();
             let to = self.bar_target(&inner, forward, now)?;
             self.locate_in(&mut inner, to)?;
@@ -2445,7 +2505,7 @@ impl Session {
     /// [`Session::transport_hold_end`] lands once. Returns the new tick.
     pub fn transport_key_step(&self, forward: bool) -> Result<i64, VizError> {
         self.transport_call(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let now = crate::surfaces::now();
             let to = self.bar_target(&inner, forward, now)?;
             self.wind_move(&mut inner, to, now)?;
@@ -2462,7 +2522,7 @@ impl Session {
     /// recording. Returns the new tick.
     pub fn transport_wind(&self, quarters: f64) -> Result<i64, VizError> {
         self.transport_call(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let now = crate::surfaces::now();
             let (_, base) = self.jump_base(&inner, now)?;
             let to = core_editor::transport::wind_target(base, quarters).ok_or_else(|| {
@@ -2483,7 +2543,7 @@ impl Session {
     /// I1). Otherwise it does nothing. Returns the tick.
     pub fn transport_hold_end(&self) -> Result<i64, VizError> {
         self.transport_call(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let now = crate::surfaces::now();
             let tick = match inner.surfaces.wind {
                 Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
@@ -2510,7 +2570,7 @@ impl Session {
     /// Loops from bar 1 to the end of the sequence, or stops looping.
     pub fn set_loop(&self, on: bool) -> Result<(), VizError> {
         self.transport_call(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.recording.is_some() {
                 return Err(recording_busy());
             }
@@ -2531,7 +2591,7 @@ impl Session {
         on: bool,
     ) -> Result<bool, VizError> {
         self.transport_call(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             host::audition(self.id, inner.doc(), DestId(dest), pitch, velocity, on)
         })
     }
@@ -2539,7 +2599,7 @@ impl Session {
     /// Where the transport stands.
     pub fn transport(&self) -> Result<TransportState, VizError> {
         self.transport_call(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let doc = inner.doc();
             let state = plugins::with(self.id, |p| host::state(self.id, doc, p)).and_then(|r| r)?;
             Ok(match state {
@@ -2626,11 +2686,11 @@ impl Session {
             self.service_surfaces();
             // An arm's claim another window's opening input put off (Task
             // 8 parked n2); the sources were reconnected at the arm.
-            let owed = lock(&self.inner).claim_owed;
+            let owed = self.lock_inner().claim_owed;
             if let Some(seq) = owed {
                 self.claim(seq);
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.apply_pending_pass(&mut inner);
             self.apply_pending_automation(&mut inner);
             self.apply_mpe_reports(&mut inner);
@@ -2736,7 +2796,7 @@ impl Session {
     /// inserts.
     pub fn plugin_slots(&self) -> Result<Vec<SlotRow>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             plugins::with(self.id, |p| plugins::slot_rows(inner.doc(), p))
         })
     }
@@ -2832,7 +2892,7 @@ impl Session {
         ffi_guard(|| {
             // A copy, so the session lock is not held while the registry is.
             let (doc, version) = {
-                let inner = lock(&self.inner);
+                let inner = self.lock_inner();
                 (inner.doc().clone(), inner.version)
             };
             plugins::with(self.id, |p| mixer::snapshot(&doc, version, p))
@@ -2845,7 +2905,7 @@ impl Session {
         // The surfaces read the same peaks (plan 5f-1 Ruling 13): one take
         // feeds both holds, each cleared only by its own reader.
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.take_meters(&mut inner);
             Ok(inner
                 .meters
@@ -2858,7 +2918,7 @@ impl Session {
     /// undo step named `label`, and each is heard at once.
     pub fn begin_edit(&self, label: String) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.history.begin(label.clone())?;
             inner.edit_label = Some(label);
             inner.last_warnings.clear();
@@ -2870,7 +2930,7 @@ impl Session {
     /// open).
     pub fn end_edit(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             // No edit open: nothing was said since the last one closed.
             if inner.edit_label.is_none() {
                 inner.last_warnings.clear();
@@ -2908,7 +2968,7 @@ impl Session {
                     message: "A bus needs a name.".into(),
                 });
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.edit_label.is_some() || inner.history.in_transaction() {
                 return Err(edit_open_busy());
             }
@@ -3215,7 +3275,7 @@ impl Session {
     /// (none: a MIDI endpoint or the built-in synth).
     pub fn destinations(&self) -> Result<Vec<DestRow>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             Ok(inner
                 .doc()
                 .instruments()
@@ -3309,7 +3369,8 @@ impl Session {
         plugin: PluginRefRow,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let default_patch = lock(&self.inner)
+            let default_patch = self
+                .lock_inner()
                 .doc()
                 .instruments()
                 .get(&DestId(dest))
@@ -3456,7 +3517,7 @@ impl Session {
     /// project).
     pub fn set_window_open(&self, slot: u64, open: bool) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if open {
                 inner.windows.insert(slot);
             } else {
@@ -3470,7 +3531,7 @@ impl Session {
     /// saved whose slot still exists.
     pub fn open_windows(&self) -> Result<Vec<u64>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let slots = mixer::slot_ids(inner.doc());
             Ok(inner
                 .windows
@@ -3543,7 +3604,7 @@ impl Session {
     /// value.
     pub fn debug_plugin_value(&self, slot: u64, param: u64, value: f64) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let e = core_host::ParamEvent::Value(core_model::mixer::ParamId(param), value);
             let _ = self.plugin_events(&mut inner, &[(PluginInstanceId(slot), e)]);
             Ok(())
@@ -3554,7 +3615,7 @@ impl Session {
     /// hook).
     pub fn debug_slot_state(&self, slot: u64) -> Result<Option<u64>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             Ok(inner
                 .doc()
                 .plugin_slot(PluginInstanceId(slot))
@@ -3567,7 +3628,7 @@ impl Session {
     /// lets them go (test hook).
     pub fn debug_hold_jobs(&self, on: bool) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).jobs.set_held(on);
+            self.lock_inner().jobs.set_held(on);
             Ok(())
         })
     }
@@ -3575,7 +3636,7 @@ impl Session {
     /// The next bounce cancels itself once its progress reaches `at` (None: never).
     pub fn debug_bounce_cancel_at(&self, at: Option<f32>) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).bounce_cancel_at = at;
+            self.lock_inner().bounce_cancel_at = at;
             Ok(())
         })
     }
@@ -3584,7 +3645,7 @@ impl Session {
     /// (0-based, in import order) as a disk error would (None: never).
     pub fn debug_bounce_fail_import(&self, at: Option<u32>) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).bounce_fail_import_at = at;
+            self.lock_inner().bounce_fail_import_at = at;
             Ok(())
         })
     }
@@ -3594,7 +3655,7 @@ impl Session {
     /// the rename; None: never; plan 6b F6).
     pub fn debug_for_daw_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).for_daw_cancel_at = stage;
+            self.lock_inner().for_daw_cancel_at = stage;
             Ok(())
         })
     }
@@ -3608,7 +3669,7 @@ impl Session {
     /// inside the apply, at its first check; None: never).
     pub fn debug_dawproject_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).dawproject_cancel_at = stage;
+            self.lock_inner().dawproject_cancel_at = stage;
             Ok(())
         })
     }
@@ -3620,7 +3681,7 @@ impl Session {
     /// pairs are joined and channels split; 9 it is mapped; None: never).
     pub fn debug_aaf_cancel_at(&self, stage: Option<u32>) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).aaf_cancel_at = stage;
+            self.lock_inner().aaf_cancel_at = stage;
             Ok(())
         })
     }
@@ -3643,7 +3704,7 @@ impl Session {
     /// destination (None: the disk's). It stays set until changed.
     pub fn debug_free_bytes(&self, bytes: Option<u64>) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).dawproject_free = bytes;
+            self.lock_inner().dawproject_free = bytes;
             Ok(())
         })
     }
@@ -3654,7 +3715,7 @@ impl Session {
     /// capture as usual (`false`). It stays set until changed.
     pub fn debug_dawproject_capture_fails(&self, on: bool) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).dawproject_capture_fails = on;
+            self.lock_inner().dawproject_capture_fails = on;
             Ok(())
         })
     }
@@ -3662,7 +3723,7 @@ impl Session {
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
-            let _inner = lock(&self.inner);
+            let _inner = self.lock_inner();
             #[allow(clippy::panic)]
             {
                 panic!("panic while locked")
@@ -3679,7 +3740,7 @@ impl Session {
     /// when a plugin call is on the stack (nothing changes).
     pub fn load_plugins(&self, slots: Vec<u64>) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             plugins::with(self.id, |p| {
                 if let Some(p) = p {
                     for s in slots {
@@ -3697,7 +3758,7 @@ impl Session {
     /// The slots safe mode holds (placeholders until loaded).
     pub fn held_slots(&self) -> Result<Vec<u64>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let slots = mixer::slot_ids(inner.doc());
             Ok(
                 plugins::with(self.id, |p| p.map(|p| p.held()).unwrap_or_default())?
@@ -3715,7 +3776,7 @@ impl Session {
         ffi_guard(|| {
             // What finishing a pass here says: no `idle` follows a close
             // (review minor c).
-            let before = lock(&self.inner).news.problems.len();
+            let before = self.lock_inner().news.problems.len();
             let mut inner = loop {
                 // A pass another thread is finishing lands first
                 // (pre-flight I1): its files are in no document yet.
@@ -3723,12 +3784,12 @@ impl Session {
                 // A recording ends cleanly first: its files are finished,
                 // its pass applied (what is not saved then goes to the
                 // Trash).
-                if lock(&self.inner).recording.is_some() {
+                if self.lock_inner().recording.is_some() {
                     self.finish_recording(None)?;
                 }
                 // Another thread may have started finishing meanwhile
                 // (review minor a): checked again under the lock kept.
-                let inner = lock(&self.inner);
+                let inner = self.lock_inner();
                 if !inner.finishing && inner.recording.is_none() {
                     break inner;
                 }
@@ -3843,7 +3904,7 @@ pub struct OpenOptions {
 /// no longer counts as open here (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn simulate_crash(s: Arc<Session>) {
-    if let Some(p) = lock(&s.inner).path.clone() {
+    if let Some(p) = s.lock_inner().path.clone() {
         recovery::forget_open(&p);
     }
     release_packages(s.id);
@@ -3857,7 +3918,7 @@ impl Session {
     /// order, with the lane's revision.
     pub fn lane_events(&self, seq: u64, lane: u64) -> Result<crate::events::LaneEvents, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let rev = inner.lane_rev(SeqId(seq), LaneId(lane));
             crate::events::lane_events(inner.doc(), SeqId(seq), LaneId(lane), rev)
         })
@@ -3867,7 +3928,7 @@ impl Session {
     /// tempo map (the list's SMPTE column, 4c).
     pub fn seconds_at(&self, seq: u64, ticks: Vec<i64>) -> Result<Vec<f64>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let tempo = &inner.doc().sequence(SeqId(seq))?.tempo;
             Ok(ticks
                 .into_iter()
@@ -3879,7 +3940,7 @@ impl Session {
     /// The nearest tick at each time in seconds (typed SMPTE positions, 4c).
     pub fn ticks_at(&self, seq: u64, seconds: Vec<f64>) -> Result<Vec<i64>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let tempo = &inner.doc().sequence(SeqId(seq))?.tempo;
             Ok(seconds
                 .into_iter()
@@ -3890,13 +3951,14 @@ impl Session {
 
     /// The select-and-modify templates, by name (4c).
     pub fn modify_templates(&self) -> Result<Vec<crate::modify::ModifyTemplateRow>, VizError> {
-        ffi_guard(|| Ok(crate::modify::template_rows(lock(&self.inner).doc())))
+        ffi_guard(|| Ok(crate::modify::template_rows(self.lock_inner().doc())))
     }
 
     /// The modification Modify Again repeats, if any (4c).
     pub fn last_modify(&self) -> Result<Option<crate::modify::ModifyRow>, VizError> {
         ffi_guard(|| {
-            Ok(lock(&self.inner)
+            Ok(self
+                .lock_inner()
                 .history
                 .last_modify()
                 .map(crate::modify::modify_row))
@@ -3905,7 +3967,7 @@ impl Session {
 
     /// Tempo, meter, markers, start offset and length of sequence `seq`.
     pub fn sequence_info(&self, seq: u64) -> Result<crate::events::SequenceInfo, VizError> {
-        ffi_guard(|| crate::events::sequence_info(lock(&self.inner).doc(), SeqId(seq)))
+        ffi_guard(|| crate::events::sequence_info(self.lock_inner().doc(), SeqId(seq)))
     }
 
     /// The arrangement blocks of lane `lane` under `rule` (spec §3.1).
@@ -3915,7 +3977,7 @@ impl Session {
         lane: u64,
         rule: crate::blocks::BlockRule,
     ) -> Result<Vec<crate::blocks::BlockRow>, VizError> {
-        ffi_guard(|| crate::blocks::blocks(lock(&self.inner).doc(), SeqId(seq), LaneId(lane), rule))
+        ffi_guard(|| crate::blocks::blocks(self.lock_inner().doc(), SeqId(seq), LaneId(lane), rule))
     }
 }
 
@@ -3931,7 +3993,7 @@ impl Session {
     /// How many loop passes of the pass being written have landed (plan
     /// 5e-1 Task 12), or `None` when none is being written (test hook).
     pub fn debug_loop_passes_landed(&self) -> Option<usize> {
-        lock(&self.inner).writing.as_ref().map(|w| w.landed)
+        self.lock_inner().writing.as_ref().map(|w| w.landed)
     }
 
     /// The input routes the engine was last given for this session (test
@@ -3954,27 +4016,27 @@ impl Session {
 
     /// The document as `project.json` text (test hook, plan 6a).
     pub fn debug_document_json(&self) -> String {
-        core_model::file::to_json(lock(&self.inner).doc()).unwrap_or_default()
+        core_model::file::to_json(self.lock_inner().doc()).unwrap_or_default()
     }
 
     /// True when every job thread has ended, applied or not (test hook).
     pub fn debug_jobs_settled(&self) -> bool {
-        lock(&self.inner).jobs.settled()
+        self.lock_inner().jobs.settled()
     }
 
     /// True when the overview worker has nothing to do (test hook).
     pub fn debug_overviews_idle(&self) -> bool {
-        lock(&self.inner).overviews.idle()
+        self.lock_inner().overviews.idle()
     }
 
     /// Holds the overview worker (`true`) or lets it go (test hook).
     pub fn debug_hold_overviews(&self, on: bool) {
-        lock(&self.inner).overviews.set_held(on);
+        self.lock_inner().overviews.set_held(on);
     }
 
     /// Forgets every loaded overview (test hook).
     pub fn debug_forget_overviews(&self) {
-        lock(&self.inner).overviews.forget_all();
+        self.lock_inner().overviews.forget_all();
     }
 
     /// Holds (`true`) or releases the finishing of every recording pass
@@ -3986,13 +4048,13 @@ impl Session {
     /// The folder this session's retention moves files into instead of
     /// the Trash (test hook; `None`: back to the default).
     pub fn debug_set_trash_dir(&self, dir: Option<String>) {
-        lock(&self.inner).trash_dir = dir.map(PathBuf::from);
+        self.lock_inner().trash_dir = dir.map(PathBuf::from);
     }
 
     /// Makes the overview worker's next task panic (test hook, preflight
     /// M10).
     pub fn debug_panic_overviews(&self) {
-        lock(&self.inner).overviews.panic_next();
+        self.lock_inner().overviews.panic_next();
     }
 }
 
@@ -4097,7 +4159,7 @@ impl Session {
         filter: Option<crate::edit::ViewFilterRow>,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            if lock(&self.inner).edit_label.is_some() {
+            if self.lock_inner().edit_label.is_some() {
                 return Err(edit_open_busy());
             }
             self.check_records(std::slice::from_ref(&cmd))?;
@@ -4106,7 +4168,7 @@ impl Session {
                 return self.modify_again_with(&filter);
             }
             if let crate::edit::EditCommand::Settings { edit } = &cmd {
-                crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
+                crate::modify::check_settings_edit(self.lock_inner().doc(), edit)?;
             }
             let c = crate::edit::to_command(&cmd)?;
             // Add Lane gives the lane the default monitor mode (plan 5d-1
@@ -4142,7 +4204,7 @@ impl Session {
         filter: Option<crate::edit::ViewFilterRow>,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            if lock(&self.inner).edit_label.is_some() {
+            if self.lock_inner().edit_label.is_some() {
                 return Err(edit_open_busy());
             }
             self.check_records(&cmds)?;
@@ -4156,14 +4218,14 @@ impl Session {
                         ));
                     }
                     crate::edit::EditCommand::Settings { edit } => {
-                        crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
+                        crate::modify::check_settings_edit(self.lock_inner().doc(), edit)?;
                     }
                     _ => {}
                 }
                 core.push(crate::edit::to_command(cmd)?);
             }
             {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 inner.history.begin(label.clone())?;
                 inner.edit_label = Some(label.clone());
                 inner.last_warnings.clear();
@@ -4177,7 +4239,7 @@ impl Session {
                     self.execute_with(c, &filter)?;
                     merge_notes(
                         &mut notes,
-                        std::mem::take(&mut lock(&self.inner).last_warnings),
+                        std::mem::take(&mut self.lock_inner().last_warnings),
                     );
                 }
                 Ok::<(), VizError>(())
@@ -4190,7 +4252,7 @@ impl Session {
                 }),
             };
             if let Some(e) = failure {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 inner.edit_label = None;
                 inner.last_warnings.clear();
                 if inner.history.in_transaction() {
@@ -4202,7 +4264,7 @@ impl Session {
                 self.apply_jobs_after_edit(&mut inner);
                 return Err(e);
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.edit_label = None;
             inner.history.commit()?;
             inner.version += 1;
@@ -4233,7 +4295,7 @@ impl Session {
             self.check_records(std::slice::from_ref(&cmd))?;
             let c = crate::edit::to_command(&cmd)?;
             {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 let label = match (&inner.edit_label, inner.history.in_transaction()) {
                     (Some(l), true) => l.clone(),
                     _ => return Err(crate::events::bad("no edit is open")),
@@ -4249,7 +4311,7 @@ impl Session {
                 Ok(s) => Ok(s),
                 Err(e) => {
                     // The rewind changed the document: the engine follows.
-                    lock(&self.inner).reload_host(self.id);
+                    self.lock_inner().reload_host(self.id);
                     Err(e)
                 }
             }
@@ -4260,7 +4322,7 @@ impl Session {
     /// (Escape during a drag). Nothing happens when no edit is open.
     pub fn abort_edit(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.history.in_transaction() && inner.static_edit.is_none() {
                 inner.history.abort()?;
                 inner.version += 1;
@@ -4271,6 +4333,273 @@ impl Session {
             self.commit_held(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
+        })
+    }
+}
+
+/// Ruling 9's refusal when the saved copy could not be written: the
+/// same kind of error, so a Busy capture stays Busy.
+fn copy_failed(e: VizError) -> VizError {
+    let wrap = |m: &str| {
+        format!(
+            "The saved copy could not be written ({}), so Co-Producer changed nothing.",
+            m.trim_end_matches('.')
+        )
+    };
+    match e {
+        VizError::Busy { message } => VizError::Busy {
+            message: wrap(&message),
+        },
+        VizError::Io { message } => VizError::Io {
+            message: wrap(&message),
+        },
+        other => VizError::Model {
+            message: wrap(&other.to_string()),
+        },
+    }
+}
+
+/// "Open a request first (begin_request)." (plan 8a Task 4).
+const OPEN_A_REQUEST: &str = "Open a request first (begin_request).";
+
+impl Session {
+    /// Lands the work owed to the composer (a recording's pass, an
+    /// automation pass, controllers' MPE settings, plugin-window gestures)
+    /// as their own hand steps, before Co-Producer acts or a token is
+    /// checked (plan 8a Task 2 review): none of it may join a
+    /// "Co-Producer: …" step. Each waits as usual while an edit is open.
+    fn land_owed(&self, inner: &mut Inner) {
+        self.apply_pending_pass(inner);
+        self.apply_pending_automation(inner);
+        self.apply_mpe_reports(inner);
+        self.pump(inner);
+    }
+
+    /// Why Co-Producer cannot act now, if it cannot (Ruling 3).
+    fn co_producer_busy(inner: &Inner) -> Option<&'static str> {
+        if inner.edit_label.is_some() {
+            return Some("Finish the drag first.");
+        }
+        inner.history.acting_refusal().or_else(|| {
+            (inner.recording.is_some() || inner.finishing).then_some("Stop recording first.")
+        })
+    }
+}
+
+/// Co-Producer requests, previews and one-time tokens (plan 8a Task 4;
+/// Rulings 3, 6, 7 and 9). Every call is hostile input.
+#[uniffi::export]
+impl Session {
+    /// Opens a Co-Producer request named `name` (Ruling 4): its steps
+    /// become one undo step "Co-Producer: <Title>". `Model` for a refused
+    /// name, or while a request is open (one per document).
+    pub fn co_producer_begin(
+        &self,
+        name: String,
+    ) -> Result<crate::co_producer::CoProducerRequestRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let info = inner.history.begin_request(&name)?;
+            inner.co_producer_seen = Instant::now();
+            inner.co_producer_copied = false;
+            Ok(info.into())
+        })
+    }
+
+    /// Ends the open request; the label of the step it made, if any.
+    /// `Model` when none is open. It only relabels: the document and its
+    /// version stay.
+    pub fn co_producer_end(&self) -> Result<Option<String>, VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let label = inner.history.end_request()?;
+            inner.co_producer_copied = false;
+            if label.is_some() {
+                // The Undo menu shows the new label.
+                inner.news.doc_changed = true;
+            }
+            Ok(label)
+        })
+    }
+
+    /// The open request, if any. Never fails.
+    pub fn co_producer_request(&self) -> Option<crate::co_producer::CoProducerRequestRow> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let r = inner.history.request();
+            if r.is_some() {
+                inner.co_producer_seen = Instant::now();
+            }
+            Ok(r.map(Into::into))
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// Before a non-read Co-Producer command: no open request → `Model`
+    /// "Open a request first (begin_request)."; `Busy` with
+    /// `acting_refusal()`'s message (Ruling 3; "Finish the drag first."
+    /// during an open edit, "Stop recording first." while recording),
+    /// checked before anything is written. The work owed to the composer
+    /// lands first as its own steps. The first entry of a request writes
+    /// the saved copy (Ruling 9) and returns its path; a copy that cannot
+    /// be written (a Busy capture included) refuses with Ruling 9's
+    /// sentence, writing nothing and leaving Co-Producer not acting. Then
+    /// Co-Producer acts, on this thread only, until `co_producer_leave`.
+    pub fn co_producer_enter(&self, stamp: String) -> Result<Option<String>, VizError> {
+        ffi_guard(|| {
+            let me = std::thread::current().id();
+            let mut inner = self.lock_inner();
+            let Some(request) = inner.history.request() else {
+                return Err(VizError::Model {
+                    message: OPEN_A_REQUEST.into(),
+                });
+            };
+            inner.co_producer_seen = Instant::now();
+            match inner.co_producer_thread {
+                Some(t) if t == me => return Ok(None),
+                Some(_) => {
+                    return Err(VizError::Busy {
+                        message: "Co-Producer is already acting.".into(),
+                    });
+                }
+                None => {}
+            }
+            if let Some(why) = Self::co_producer_busy(&inner) {
+                return Err(VizError::Busy {
+                    message: why.into(),
+                });
+            }
+            self.land_owed(&mut inner);
+            if let Some(why) = Self::co_producer_busy(&inner) {
+                return Err(VizError::Busy {
+                    message: why.into(),
+                });
+            }
+            let copy = if inner.co_producer_copied {
+                None
+            } else {
+                let path = self
+                    .co_producer_copy(&mut inner, &stamp, &request.title)
+                    .map_err(copy_failed)?;
+                inner.co_producer_copied = true;
+                Some(path.to_string_lossy().into_owned())
+            };
+            inner.history.set_acting(true).map_err(|e| VizError::Busy {
+                message: e.to_string(),
+            })?;
+            inner.co_producer_thread = Some(me);
+            Ok(copy)
+        })
+    }
+
+    /// After a Co-Producer command, whatever its outcome: Co-Producer no
+    /// longer acts. Never fails.
+    pub fn co_producer_leave(&self) {
+        let _ = ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.co_producer_thread = None;
+            inner.set_acting(false);
+            if inner.history.request().is_some() {
+                inner.co_producer_seen = Instant::now();
+            }
+            Ok(())
+        });
+    }
+
+    /// Ends a request with no Co-Producer call for `idle_ms` or more
+    /// (Ruling 3), never while Co-Producer acts; the label of the step it
+    /// made, if any. Never fails.
+    pub fn co_producer_idle(&self, idle_ms: u64) -> Option<String> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            if inner.co_producer_thread.is_some()
+                || inner.history.request().is_none()
+                || inner.co_producer_seen.elapsed() < std::time::Duration::from_millis(idle_ms)
+            {
+                return Ok(None);
+            }
+            // Refused only inside an open transaction: the next check
+            // tries again.
+            let Ok(label) = inner.history.end_request() else {
+                return Ok(None);
+            };
+            inner.co_producer_copied = false;
+            if label.is_some() {
+                inner.news.doc_changed = true;
+            }
+            Ok(label)
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// What `plan` would change (Ruling 6), with a new one-time token that
+    /// replaces any earlier preview's (Ruling 7). Works on a clone of the
+    /// history: the document, its version, the host, the engine and the
+    /// disk are untouched. `Model` for a refused plan, a command that
+    /// would fail, or Save of an untitled song; `Busy` during an open
+    /// edit or recording group.
+    pub fn co_producer_preview(
+        &self,
+        plan: Vec<crate::co_producer::PlannedRow>,
+    ) -> Result<crate::co_producer::PreviewRow, VizError> {
+        use crate::co_producer as cp;
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            inner.co_producer_preview = None;
+            if inner.history.request().is_some() {
+                inner.co_producer_seen = Instant::now();
+            }
+            if inner.edit_label.is_some() {
+                return Err(VizError::Busy {
+                    message: "Finish the drag first.".into(),
+                });
+            }
+            let plan = cp::plan_of(&plan)?;
+            let items = cp::preview_items(&inner.history, inner.path.as_deref(), &plan)?;
+            let token = cp::fresh_token()?;
+            inner.co_producer_preview = Some(cp::PendingPreview {
+                token: token.clone(),
+                version: inner.version,
+                serial: inner.history.present_serial(),
+                canonical: cp::canonical(&plan),
+            });
+            Ok(cp::PreviewRow {
+                token,
+                needs_yes: items.iter().any(|i| i.composers_work),
+                items,
+            })
+        })
+    }
+
+    /// Takes the latest preview's `token` for `plan` (Ruling 7): once, and
+    /// only while the song is as it was previewed and `plan` is the
+    /// previewed plan. `Model` "This preview was already used or
+    /// replaced.", "The song changed since the preview; preview again." or
+    /// "These are not the previewed commands."; any take uses the token
+    /// up. It only checks: the app then runs the plan between
+    /// `co_producer_enter` and `co_producer_leave`.
+    pub fn co_producer_take(
+        &self,
+        token: String,
+        plan: Vec<crate::co_producer::PlannedRow>,
+    ) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let pending = inner.co_producer_preview.take();
+            if inner.history.request().is_some() {
+                inner.co_producer_seen = Instant::now();
+            }
+            // The composer's own work waiting to land lands now, so a
+            // gesture made since the preview counts as a change.
+            if inner.co_producer_thread.is_none()
+                && pending.as_ref().is_some_and(|p| p.token == token)
+            {
+                self.land_owed(&mut inner);
+            }
+            let (version, serial) = (inner.version, inner.history.present_serial());
+            crate::co_producer::check_take(pending, &token, &plan, version, serial)
         })
     }
 }
@@ -4296,7 +4625,7 @@ impl Session {
         use core_model::event::{EventBody, EventSpec};
         ffi_guard(|| {
             let (seq_id, lane_id, next, effect, live) = {
-                let inner = lock(&self.inner);
+                let inner = self.lock_inner();
                 if inner.edit_label.is_some() {
                     return Err(edit_open_busy());
                 }
@@ -4427,7 +4756,7 @@ impl Session {
                 Effect::TakeBack { .. } => "Delete Last Step",
                 _ => "Step Entry",
             };
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.history.begin(label.to_string())?;
             // A panic inside a command must not leave the transaction open
             // (as in `edit_all`).
@@ -4487,14 +4816,14 @@ impl Session {
 impl Session {
     /// The document-wide selection.
     pub fn selection(&self) -> Result<crate::selection::SelectionRow, VizError> {
-        ffi_guard(|| Ok(crate::selection::row(lock(&self.inner).history.selection())))
+        ffi_guard(|| Ok(crate::selection::row(self.lock_inner().history.selection())))
     }
 
     /// Replaces the selection (not an undo step); unknown lanes and events
     /// are dropped.
     pub fn set_selection(&self, selection: crate::selection::SelectionRow) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let sel = crate::selection::selection(&selection).retain_existing(inner.doc());
             inner.history.set_selection(sel);
             Ok(())
@@ -4508,7 +4837,7 @@ impl Session {
         template: crate::templates::SequenceTemplate,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.history.in_transaction() {
                 return Err(edit_open_busy());
             }
@@ -4542,7 +4871,7 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let monitor = crate::audio::default_monitor();
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.edit_label.is_some() || inner.history.in_transaction() {
                 return Err(edit_open_busy());
             }
@@ -4583,7 +4912,7 @@ impl Session {
     /// open or recording.
     pub fn duplicate_track(&self, seq: u64, lane: u64) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.edit_label.is_some() || inner.history.in_transaction() {
                 return Err(edit_open_busy());
             }
@@ -4613,7 +4942,8 @@ impl Session {
     /// The editor layout saved with the project (JSON), if any.
     pub fn ui_layout(&self) -> Result<Option<String>, VizError> {
         ffi_guard(|| {
-            Ok(lock(&self.inner)
+            Ok(self
+                .lock_inner()
                 .editor_layout
                 .as_ref()
                 .map(|v| v.to_string()))
@@ -4626,7 +4956,7 @@ impl Session {
         ffi_guard(|| {
             let v: serde_json::Value = serde_json::from_str(&json)
                 .map_err(|e| crate::events::bad(&format!("the layout is not JSON: {e}")))?;
-            lock(&self.inner).editor_layout = Some(v);
+            self.lock_inner().editor_layout = Some(v);
             Ok(())
         })
     }
@@ -4635,7 +4965,7 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let (key, recording) = {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             (inner.key.clone(), inner.recording.is_some())
         };
         // Dropped while recording without `close`: the tap goes with the
@@ -4649,7 +4979,7 @@ impl Drop for Session {
         // review T4-M5). So does an export for another DAW, which renders
         // through one (plan 6b F2).
         {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.bounce_copies.is_some()
                 || inner.jobs.pending(&[
                     crate::jobs::JobKindRow::Bounce,
@@ -6077,7 +6407,7 @@ impl Session {
             }
             // Under the lock: what to measure and the overviews in memory.
             let (root, mut measure) = {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 if inner.edit_label.is_some() {
                     return Err(edit_open_busy());
                 }
@@ -6161,7 +6491,7 @@ impl Session {
             // Under the lock again: apply only if every item still names
             // the file measured and every region the frames measured.
             let cmd = Command::Audio(core_model::command::AudioCmd::Normalize { regions, peak_db });
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.edit_label.is_some() {
                 return Err(edit_open_busy());
             }
@@ -6255,7 +6585,7 @@ impl Session {
                     "from_file_frame must be before to_file_frame",
                 ));
             }
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let r = inner
                 .recording
                 .as_ref()
@@ -6270,7 +6600,7 @@ impl Session {
     /// What recording is doing (`state.get record`).
     pub fn record_state(&self) -> Result<crate::record::RecordStateRow, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             Ok(match inner.recording.as_mut() {
                 Some(r) => {
                     r.drain();
@@ -6310,7 +6640,8 @@ impl Session {
     /// into a new lane / move to Trash"); empty once answered.
     pub fn recovered_recordings(&self) -> Result<Vec<String>, VizError> {
         ffi_guard(|| {
-            Ok(lock(&self.inner)
+            Ok(self
+                .lock_inner()
                 .recovered
                 .iter()
                 .map(|r| r.path.clone())
@@ -6323,7 +6654,7 @@ impl Session {
     /// names) or not (a crash leftover), and whether it reads at all
     /// (pre-flight M9).
     pub fn recovered_files(&self) -> Result<Vec<crate::record::RecoveredFileRow>, VizError> {
-        ffi_guard(|| Ok(lock(&self.inner).recovered.clone()))
+        ffi_guard(|| Ok(self.lock_inner().recovered.clone()))
     }
 
     /// Answers the offer: `import` puts each readable offered file on a
@@ -6335,7 +6666,7 @@ impl Session {
     /// waits to be applied, or while an edit is open.
     pub fn recover_recordings(&self, import: bool) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.recovered.is_empty() {
                 return Err(crate::events::bad("there are no recovered recordings"));
             }
@@ -6519,7 +6850,7 @@ fn recover_into_lanes(
 
 impl Session {
     fn press_pass(&self, keep: bool) -> Result<(), VizError> {
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         match inner.recording.as_mut() {
             Some(r) => r.press(keep),
             None => Err(crate::events::bad("nothing is recording")),
@@ -6536,7 +6867,7 @@ impl Session {
         use core_engine::record::RecordRequest;
         use core_media::record::{WriterConfig, WriterLane};
         use core_model::lane::LaneInput;
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         if inner.recording.is_some() || inner.finishing {
             return Err(VizError::Busy {
                 message: "A recording is already running.".into(),
@@ -6824,7 +7155,7 @@ impl Session {
     /// [`crate::record::FINISH_WAIT`] and some), `Busy` after.
     fn wait_finished(&self) -> Result<(), VizError> {
         let until = Instant::now() + crate::record::FINISH_WAIT * 4;
-        while lock(&self.inner).finishing {
+        while self.lock_inner().finishing {
             if Instant::now() >= until {
                 return Err(recording_busy());
             }
@@ -6839,7 +7170,7 @@ impl Session {
     /// which closes as one undo step. `reason` is told to the user.
     fn finish_recording(&self, reason: Option<String>) -> Result<(), VizError> {
         let rec = {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let Some(r) = inner.recording.take() else {
                 return Ok(());
             };
@@ -6850,7 +7181,7 @@ impl Session {
             r
         };
         let done = rec.finish(crate::record::FINISH_WAIT);
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         inner.finishing = false;
         if let Some(why) = reason {
             inner
@@ -7010,7 +7341,7 @@ impl Session {
     /// away, the disk failed or filled, or the transport stopped by itself.
     fn service_recording(&self) -> Result<(), VizError> {
         let ending = {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let id = self.id;
             let stopped = || host::transport_stopped(id).unwrap_or(false);
             let (mut problems, mut faults) = (Vec::new(), Vec::new());
@@ -7059,7 +7390,7 @@ impl Session {
             // holds it (Task 8 review M2): a Record from another thread
             // runs wholly before or after. Track Synth removes no plugin,
             // so nothing is captured first.
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             // Not while recording, nor with an edit open: its restart
             // would drop the step (Task 8 review M1). Both are `Busy`, as
             // for Measure (Task 10 review I1).
@@ -7125,7 +7456,7 @@ impl Session {
             // One lock from the checks to the start (Task 9 review M3):
             // the engine loads the document the checks saw.
             let (seq, status) = {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 Self::check_idle(&inner)?;
                 let d = crate::synth::external_dest(inner.doc(), dest)?;
                 let Some((seq, _, name, channels)) = crate::synth::return_lane(inner.doc(), dest)
@@ -7153,7 +7484,7 @@ impl Session {
             // One lock from the end to the step (Task 9 review I1, as
             // Track Synth): an edit opened meanwhile never absorbs it, and
             // the input follows the current document (review I2).
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let ours = host::end_measure(self.id, inner.doc(), seq, &status)?;
             host::after_measure_end();
             // Measured off the plugin thread (the app's task): the engine
@@ -7237,7 +7568,7 @@ impl Session {
         pan: Option<u8>,
     ) -> Result<bool, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let dest = DestId(dest);
             let external = inner
                 .doc()
@@ -7334,7 +7665,7 @@ impl Session {
                 GesturePhaseRow::Value { value } => core_surface::Phase::Value(value),
                 GesturePhaseRow::Release => core_surface::Phase::Release,
             };
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.gesture_held(&mut inner, t, phase, TouchHolder::from(holder), None)
         })
     }
@@ -7348,7 +7679,7 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             // Not inside an open static touch's step (Task 10 review M2).
-            if lock(&self.inner).static_edit.is_some() {
+            if self.lock_inner().static_edit.is_some() {
                 return Err(VizError::Busy {
                     message: "Release the touched control first.".into(),
                 });
@@ -7358,7 +7689,7 @@ impl Session {
                 mode: mode.into(),
             }))?;
             // Resting touches take the new mode (Ruling T6-1).
-            self.repick_resting(&mut lock(&self.inner), None);
+            self.repick_resting(&mut self.lock_inner(), None);
             Ok(snap)
         })
     }
@@ -7367,7 +7698,7 @@ impl Session {
     /// this session writes.
     pub fn automation_state(&self) -> Result<AutomationStateRow, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let m = inner.doc().mixer();
             let modes = m
                 .order()
@@ -7402,7 +7733,7 @@ impl Session {
     ) -> Result<Vec<PreviewPointRow>, VizError> {
         ffi_guard(|| {
             let t = automation_target_of(target);
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let Some(w) = inner.writing.as_mut() else {
                 return Ok(Vec::new());
             };
@@ -8662,7 +8993,7 @@ impl Session {
     /// `idle`'s writing step: the kept ends, the sampler's due values, the
     /// tap's marks and stamps, and the pass's end (Ruling 24).
     fn service_writing(&self) {
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         self.resend_ends(&mut inner);
         self.release_plugin_touches(&mut inner);
         // A suspend toggle or an undone mode change (Ruling T6-1).
@@ -9431,7 +9762,7 @@ impl Session {
             if from_frame >= to_frame {
                 return Err(crate::events::bad("from_frame must be before to_frame"));
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.refresh_media(self.id, false);
             let id = core_model::ids::MediaId(media);
             let m = inner
@@ -9495,7 +9826,7 @@ impl Session {
             if from_tick >= to_tick {
                 return Err(crate::events::bad("from_tick must be before to_tick"));
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.refresh_media(self.id, false);
             let doc = inner.doc().clone();
             let (ev, loc) = doc.event(core_model::ids::EventId(event))?;
@@ -9593,7 +9924,7 @@ impl Session {
                 return Err(crate::events::bad("from_frame must be before to_frame"));
             }
             let shape = {
-                let inner = lock(&self.inner);
+                let inner = self.lock_inner();
                 let doc = inner.doc();
                 let (ev, _) = doc.event(core_model::ids::EventId(event))?;
                 let EventBody::AudioRegion {
@@ -9635,7 +9966,7 @@ impl Session {
     /// The media pool, with offline items and use counts.
     pub fn media(&self) -> Result<Vec<crate::media::MediaRow>, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.refresh_media(self.id, false);
             let mut rows = crate::media::rows(inner.doc(), &inner.offline);
             // The overview's peak, once it is built (plan 5d-1 Ruling 21).
@@ -9653,7 +9984,7 @@ impl Session {
     /// asked); true when the offline set changed.
     pub fn recheck_media(&self) -> Result<bool, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let changed = inner.refresh_media(self.id, true);
             if changed {
                 inner.reload_host(self.id);
@@ -9671,7 +10002,7 @@ impl Session {
         target: Option<crate::jobs::ImportTargetRow>,
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if let Some(t) = target {
                 let doc = inner.doc();
                 doc.sequence(SeqId(t.seq))?;
@@ -9740,7 +10071,7 @@ impl Session {
     /// Play, Ruling 20 / F19).
     pub fn project_info(&self) -> Result<crate::format::ProjectInfoRow, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.refresh_media(self.id, false);
             let mismatched = inner
                 .offline
@@ -9775,7 +10106,7 @@ impl Session {
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
             let f = core_model::format::AudioFormat::from(format);
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             // A take is planned and filed at the project rate (review
             // I-1): not while one records, finishes or waits to land.
             if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
@@ -9847,7 +10178,7 @@ impl Session {
     /// (the banner's "Convert"; a job, one undo step "Convert Media").
     pub fn convert_media(&self) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.apply_jobs_after_edit(&mut inner);
             inner.media_jobs_idle()?;
             inner.refresh_media(self.id, false);
@@ -9883,7 +10214,7 @@ impl Session {
     /// Job `id`, applying it first when it just finished.
     pub fn job(&self, id: u64) -> Result<crate::jobs::JobRow, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.apply_jobs(&mut inner);
             inner.jobs.row(id).ok_or_else(|| VizError::Model {
                 message: format!("unknown job {id}"),
@@ -9894,7 +10225,7 @@ impl Session {
     /// Asks job `id` to stop (nothing it did is applied).
     pub fn cancel_job(&self, id: u64) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).jobs.cancel(id);
+            self.lock_inner().jobs.cancel(id);
             Ok(())
         })
     }
@@ -9907,7 +10238,7 @@ impl Session {
     /// (Ruling 9).
     pub fn bounce(&self, req: crate::bounce::BounceRequestRow) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.refresh_media(self.id, false);
             let plan = self.bounce_plan(&inner, &req)?;
             if inner.history.in_transaction() {
@@ -9949,7 +10280,7 @@ impl Session {
         req: crate::bounce::BounceRequestRow,
     ) -> Result<crate::bounce::BounceCheckRow, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.refresh_media(self.id, false);
             let plan = self.bounce_plan(&inner, &req)?;
             let root = inner.root(self.id);
@@ -9968,7 +10299,7 @@ impl Session {
         job: u64,
     ) -> Result<Option<crate::bounce::BounceResultRow>, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.apply_jobs(&mut inner);
             Ok(inner.bounce_results.get(&job).cloned())
         })
@@ -9997,7 +10328,7 @@ impl Session {
                 &std::sync::atomic::AtomicBool::new(false),
             )
             .map_err(crate::interchange::io_error)?;
-            Ok(crate::interchange::file_info(lock(&self.inner).doc(), &imp))
+            Ok(crate::interchange::file_info(self.lock_inner().doc(), &imp))
         })
     }
 
@@ -10011,7 +10342,7 @@ impl Session {
         req: crate::interchange::MidiImportRequestRow,
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             // Finished jobs apply first, so the request is checked against
             // the document the job will land in.
             self.interchange_idle(&mut inner)?;
@@ -10031,7 +10362,7 @@ impl Session {
         req: crate::interchange::SmfExportRequestRow,
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.interchange_idle(&mut inner)?;
             let opts = crate::interchange::smf_options(inner.doc(), &req)?;
             let dest =
@@ -10049,7 +10380,7 @@ impl Session {
     ) -> Result<crate::interchange::ReportRow, VizError> {
         ffi_guard(|| {
             let (doc, opts) = {
-                let inner = lock(&self.inner);
+                let inner = self.lock_inner();
                 let opts = crate::interchange::smf_options(inner.doc(), &req)?;
                 (inner.doc().clone(), opts)
             };
@@ -10065,7 +10396,7 @@ impl Session {
         req: crate::interchange::ClipExportRequestRow,
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.interchange_idle(&mut inner)?;
             let plan = crate::interchange::clip_plan(inner.doc(), &req)?;
             let dests = crate::interchange::clip_dests(&plan, &req, &self.export_roots(&inner))?;
@@ -10082,7 +10413,7 @@ impl Session {
     ) -> Result<crate::interchange::ReportRow, VizError> {
         ffi_guard(|| {
             let (doc, plan) = {
-                let inner = lock(&self.inner);
+                let inner = self.lock_inner();
                 let plan = crate::interchange::clip_plan(inner.doc(), &req)?;
                 (inner.doc().clone(), plan)
             };
@@ -10102,7 +10433,7 @@ impl Session {
         req: crate::interchange::ClipExportRequestRow,
     ) -> Result<crate::interchange::ClipNamesRow, VizError> {
         ffi_guard(|| {
-            let plan = crate::interchange::clip_plan(lock(&self.inner).doc(), &req)?;
+            let plan = crate::interchange::clip_plan(self.lock_inner().doc(), &req)?;
             crate::interchange::clip_names(&plan, &req)
         })
     }
@@ -10122,7 +10453,7 @@ impl Session {
     /// nothing touches the disk before the job (F13).
     pub fn export_for_daw(&self, req: crate::for_daw::ForDawRequestRow) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.interchange_idle(&mut inner)?;
             if req.add_to_project {
                 inner.media_jobs_idle()?;
@@ -10171,7 +10502,7 @@ impl Session {
     ) -> Result<crate::for_daw::ForDawCheckRow, VizError> {
         ffi_guard(|| {
             let (doc, c, roots, root) = {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 inner.refresh_media(self.id, false);
                 let c = crate::for_daw::check(inner.doc(), &req, false, &inner.offline)?;
                 let roots = self.export_roots(&inner).to_vec();
@@ -10201,7 +10532,7 @@ impl Session {
         req: crate::dawproject::DawprojectExportRequestRow,
     ) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.interchange_idle(&mut inner)?;
             inner.media_jobs_idle()?;
             let mut opts = crate::dawproject::options(inner.doc(), &req)?;
@@ -10264,7 +10595,7 @@ impl Session {
     ) -> Result<crate::interchange::ReportRow, VizError> {
         ffi_guard(|| {
             let (doc, opts, uncaptured, will_capture) = {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 let mut opts = crate::dawproject::options(inner.doc(), &req)?;
                 inner.refresh_media(self.id, false);
                 opts.left_out = inner.dawproject_left_out();
@@ -10298,7 +10629,7 @@ impl Session {
         ffi_guard(|| {
             // The catalog's lock is not taken under the session's.
             let installed = crate::dawproject::installed();
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.interchange_idle(&mut inner)?;
             inner.media_jobs_idle()?;
             let path =
@@ -10337,7 +10668,7 @@ impl Session {
     /// 6f Ruling 2; numbered by the job when it is taken). `Model` for an
     /// unknown sequence.
     pub fn aaf_folder_name(&self, seq: u64) -> Result<String, VizError> {
-        ffi_guard(|| crate::aaf::folder_name(lock(&self.inner).doc(), seq))
+        ffi_guard(|| crate::aaf::folder_name(self.lock_inner().doc(), seq))
     }
 
     /// What `export_aaf` would report for `req` (plan 6f Task 5), checked
@@ -10349,7 +10680,7 @@ impl Session {
     ) -> Result<crate::interchange::ReportRow, VizError> {
         ffi_guard(|| {
             let (doc, opts) = {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 let mut opts = crate::aaf::options(inner.doc(), &req)?;
                 inner.refresh_media(self.id, false);
                 opts.left_out = inner.dawproject_left_out();
@@ -10370,7 +10701,7 @@ impl Session {
     /// before the job.
     pub fn export_aaf(&self, req: crate::aaf::AafExportRequestRow) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.interchange_idle(&mut inner)?;
             inner.media_jobs_idle()?;
             let mut opts = crate::aaf::options(inner.doc(), &req)?;
@@ -10419,7 +10750,7 @@ impl Session {
     /// sentence.
     pub fn import_aaf(&self, req: crate::aaf::AafImportRequestRow) -> Result<u64, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.interchange_idle(&mut inner)?;
             inner.media_jobs_idle()?;
             let path = crate::aaf::aaf_path(&req.path)?;
@@ -10498,7 +10829,7 @@ impl Session {
             // The catalog's lock is not taken under the session's.
             let installed = crate::dawproject::installed();
             let new_strip_eq = crate::bundled::new_strip_eq();
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.interchange_idle(&mut inner)?;
             inner.media_jobs_idle()?;
             let path =
@@ -10553,7 +10884,7 @@ impl Session {
     /// with none), and the hold and its media are dropped.
     pub fn confirm_merge(&self, job: u64) -> Result<crate::interchange::ReportRow, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             // A Hold job that finished becomes the held merge first.
             self.apply_jobs_after_edit(&mut inner);
             if !inner.held_merge.as_ref().is_some_and(|h| h.job == job) {
@@ -10588,7 +10919,7 @@ impl Session {
     /// (a running merge is cancelled with `cancel_job`).
     pub fn cancel_merge(&self, job: u64) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             // A Hold job that finished becomes the held merge first.
             self.apply_jobs_after_edit(&mut inner);
             if !inner.held_merge.as_ref().is_some_and(|h| h.job == job) {
@@ -10608,7 +10939,7 @@ impl Session {
     pub fn dawproject_snapshots(&self) -> Result<Vec<crate::dawproject::SnapshotRow>, VizError> {
         ffi_guard(|| {
             let (root, id) = {
-                let inner = lock(&self.inner);
+                let inner = self.lock_inner();
                 (
                     inner.root(self.id),
                     inner.doc().settings().project_id.clone(),
@@ -10620,14 +10951,14 @@ impl Session {
 
     /// The project's ID (stamped by its first DAWproject export), if any.
     pub fn project_id(&self) -> Result<Option<String>, VizError> {
-        ffi_guard(|| Ok(lock(&self.inner).doc().settings().project_id.clone()))
+        ffi_guard(|| Ok(self.lock_inner().doc().settings().project_id.clone()))
     }
 
     /// Whether the project keeps the snapshot of export `export_id` (Ruling
     /// 13's open match): one lstat; false for a malformed ID.
     pub fn has_snapshot(&self, export_id: String) -> Result<bool, VizError> {
         ffi_guard(|| {
-            let root = lock(&self.inner).root(self.id);
+            let root = self.lock_inner().root(self.id);
             Ok(crate::dawproject::has_snapshot(&root, &export_id))
         })
     }
@@ -10637,7 +10968,7 @@ impl Session {
     /// safe). `Model` for an unknown sequence.
     pub fn dawproject_name(&self, seq: u64) -> Result<String, VizError> {
         ffi_guard(|| {
-            core_io::dawproject::export::file_name(lock(&self.inner).doc(), SeqId(seq))
+            core_io::dawproject::export::file_name(self.lock_inner().doc(), SeqId(seq))
                 .map_err(crate::interchange::io_error)
         })
     }
@@ -10645,7 +10976,7 @@ impl Session {
     /// The report of this document's last MIDI import or export job, if any.
     pub fn interchange_report(&self) -> Result<Option<crate::interchange::ReportRow>, VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.apply_jobs(&mut inner);
             Ok(inner.interchange_report.clone())
         })
@@ -10653,7 +10984,7 @@ impl Session {
 
     /// The project's song info.
     pub fn song_info(&self) -> Result<crate::interchange::SongInfoRow, VizError> {
-        ffi_guard(|| Ok((&lock(&self.inner).doc().settings().info).into()))
+        ffi_guard(|| Ok((&self.lock_inner().doc().settings().info).into()))
     }
 
     /// Sets the song info, one undo step; `Model` for a field the rules
@@ -10728,7 +11059,7 @@ impl Session {
         ffi_guard(|| {
             let ev = core_model::ids::EventId(event);
             let (source, start, frames, dir, stem, fmt, from) = {
-                let mut inner = lock(&self.inner);
+                let mut inner = self.lock_inner();
                 if inner.closed {
                     return Err(crate::events::bad("this project was closed"));
                 }
@@ -10777,7 +11108,7 @@ impl Session {
             let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::external::write_copy(&source, start, frames, &dir, &stem, &fmt)
             }));
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             inner.edits_writing = inner.edits_writing.saturating_sub(1);
             let written = match written {
                 Ok(w) => w?,
@@ -10825,7 +11156,7 @@ impl Session {
         use crate::external::{ExternalEditRow, ExternalEditStateRow};
         ffi_guard(|| {
             let ev = core_model::ids::EventId(event);
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let (media, ..) = crate::external::region_span(inner.doc(), ev)?;
             if let Some(c) = inner.edits.get(&ev) {
                 return Ok(
@@ -10889,7 +11220,7 @@ impl Session {
                 });
             }
             let ev = core_model::ids::EventId(event);
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.history.in_transaction() {
                 return Err(VizError::Busy {
                     message: "Finish the open edit first.".into(),
@@ -11202,7 +11533,7 @@ impl Session {
     /// A media-pool edit as one undo step; refused while an edit (a drag)
     /// is open.
     fn pool_edit(&self, cmd: Command) -> Result<DocSnapshot, VizError> {
-        if lock(&self.inner).edit_label.is_some() {
+        if self.lock_inner().edit_label.is_some() {
             return Err(edit_open_busy());
         }
         self.execute(cmd)
@@ -11210,7 +11541,7 @@ impl Session {
 
     /// The item `media`, or a `Model` error.
     fn media_item(&self, media: u64) -> Result<core_model::document::MediaItem, VizError> {
-        lock(&self.inner)
+        self.lock_inner()
             .doc()
             .media()
             .get(&core_model::ids::MediaId(media))
@@ -11245,7 +11576,7 @@ impl Session {
             use core_model::command::{EventCmd, MediaCmd};
             let id = core_model::ids::MediaId(media);
             self.media_item(media)?;
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             if inner.edit_label.is_some() {
                 return Err(edit_open_busy());
             }
@@ -11299,7 +11630,7 @@ impl Session {
         ffi_guard(|| {
             self.media_item(media)?;
             Ok(crate::media::users(
-                lock(&self.inner).doc(),
+                self.lock_inner().doc(),
                 core_model::ids::MediaId(media),
             ))
         })
@@ -11309,7 +11640,7 @@ impl Session {
     pub fn media_file(&self, media: u64) -> Result<String, VizError> {
         ffi_guard(|| {
             let m = self.media_item(media)?;
-            let root = lock(&self.inner).root(self.id);
+            let root = self.lock_inner().root(self.id);
             Ok(root.join(&m.path).to_string_lossy().into_owned())
         })
     }
@@ -11330,7 +11661,7 @@ impl Session {
             // Never a FIFO, socket, device or folder: opening one could
             // block the job for good (Task 6 review m2).
             crate::relink::regular_file(&src).map_err(|e| crate::events::bad(&e.to_string()))?;
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.apply_jobs_after_edit(&mut inner);
             inner.media_jobs_idle()?;
             let root = inner.root(self.id);
@@ -11375,7 +11706,7 @@ impl Session {
                     "search needs the absolute path of a folder",
                 ));
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.apply_jobs_after_edit(&mut inner);
             inner.media_jobs_idle()?;
             inner.refresh_media(self.id, false);
@@ -11456,7 +11787,7 @@ impl Session {
                     "at most {MAX_SURFACE_SELECTION} strips"
                 )));
             }
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             let m = inner.doc().mixer();
             let keep: Vec<StripId> = strips
                 .into_iter()
@@ -11473,7 +11804,7 @@ impl Session {
     /// 16).
     pub fn set_surface_count_in(&self, on: bool) -> Result<(), VizError> {
         ffi_guard(|| {
-            lock(&self.inner).surfaces.count_in = on;
+            self.lock_inner().surfaces.count_in = on;
             Ok(())
         })
     }
@@ -11515,7 +11846,7 @@ impl Session {
     /// The surfaces' commands, selects, arms and jogs since the last call
     /// (Ruling 12), oldest first.
     pub fn take_surface_events(&self) -> Result<Vec<SurfaceEventRow>, VizError> {
-        ffi_guard(|| Ok(std::mem::take(&mut lock(&self.inner).surfaces.events)))
+        ffi_guard(|| Ok(std::mem::take(&mut self.lock_inner().surfaces.events)))
     }
 
     /// Learns the next control for `target` into this project (Rulings 7,
@@ -11525,7 +11856,7 @@ impl Session {
         ffi_guard(|| {
             let t = automation_target_of(target);
             let text = {
-                let inner = lock(&self.inner);
+                let inner = self.lock_inner();
                 if matches!(t, AutomationTarget::VelocityScale(_)) {
                     return Err(crate::events::bad("a velocity scale cannot be learned"));
                 }
@@ -11542,7 +11873,7 @@ impl Session {
     /// The project's learn maps.
     pub fn learn_maps(&self) -> Result<Vec<LearnMapRow>, VizError> {
         ffi_guard(|| {
-            let inner = lock(&self.inner);
+            let inner = self.lock_inner();
             let doc = inner.doc();
             Ok(doc
                 .settings()
@@ -11675,20 +12006,20 @@ impl Session {
     /// Makes this session the focused one, with its document's maps. True
     /// when the focus moved here.
     fn focus_here(&self) -> bool {
-        let maps = lock(&self.inner).doc().settings().learn.clone();
+        let maps = self.lock_inner().doc().settings().learn.clone();
         crate::surfaces::focus(self.id, maps)
     }
 
     /// The surfaces get this document's maps now (a learn edit; Ruling 17).
     fn sync_learn(&self) {
-        let maps = lock(&self.inner).doc().settings().learn.clone();
+        let maps = self.lock_inner().doc().settings().learn.clone();
         crate::surfaces::sync_maps(self.id, &maps);
     }
 
     /// A learn edit: one undo step, then the surfaces' maps follow.
     /// `Busy` while a static touch's step is open.
     fn learn_edit(&self, cmd: SettingsCmd) -> Result<DocSnapshot, VizError> {
-        if lock(&self.inner).static_edit.is_some() {
+        if self.lock_inner().static_edit.is_some() {
             return Err(VizError::Busy {
                 message: "Release the touched control first.".into(),
             });
@@ -11706,7 +12037,8 @@ impl Session {
         f: impl FnOnce(&mut core_model::learn::LearnMap),
     ) -> Result<DocSnapshot, VizError> {
         let source = source.source()?;
-        let mut map = lock(&self.inner)
+        let mut map = self
+            .lock_inner()
             .doc()
             .settings()
             .learn
@@ -11739,7 +12071,7 @@ impl Session {
         let now = crate::surfaces::now();
         let mut moved = Vec::new();
         let focused = {
-            let mut inner = lock(&self.inner);
+            let mut inner = self.lock_inner();
             self.take_meters(&mut inner);
             let (owed, focused) = crate::surfaces::begin(self.id, now);
             for (h, t, idle) in owed {
@@ -11772,7 +12104,7 @@ impl Session {
     /// `SetLearn` ("MIDI Learn", pick-up on; Rulings 7, 18). Not while an
     /// edit is open: the step would join it.
     fn decide_learn(&self, now: Instant) {
-        if !crate::surfaces::learning_for(self.id) || lock(&self.inner).history.in_transaction() {
+        if !crate::surfaces::learning_for(self.id) || self.lock_inner().history.in_transaction() {
             return;
         }
         let Some(l) = crate::surfaces::decide(self.id, now) else {
@@ -11785,11 +12117,11 @@ impl Session {
             pickup: true,
         };
         match self.execute(Command::Settings(SettingsCmd::SetLearn { map })) {
-            Ok(_) => lock(&self.inner).news.doc_changed = true,
+            Ok(_) => self.lock_inner().news.doc_changed = true,
             Err(e) => {
                 // Its control is no longer claimed (final review N4).
                 crate::surfaces::learn_failed(self.id);
-                lock(&self.inner)
+                self.lock_inner()
                     .news
                     .problems
                     .push(format!("MIDI Learn: {e}"));
@@ -12138,7 +12470,7 @@ impl Session {
     /// Steps 7–8: when a unit or the maps are due, the MixerView of heard
     /// values (only for the strips the due units show), then feedback.
     fn feed_surfaces(&self, now: Instant, moved: &[crate::surfaces::Moved]) {
-        let mut inner = lock(&self.inner);
+        let mut inner = self.lock_inner();
         let order = display_order(inner.doc());
         let Some(due) = crate::surfaces::due(self.id, now, &order, moved) else {
             return;

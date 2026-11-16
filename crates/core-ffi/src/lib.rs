@@ -25,6 +25,7 @@ pub mod bounce;
 pub mod bundled;
 pub mod catalog;
 pub mod clock;
+pub mod co_producer;
 pub mod control;
 pub mod dawproject;
 pub mod drum;
@@ -87,6 +88,7 @@ pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
     ScanProgress,
 };
+pub use co_producer::{ChangeItemRow, CoProducerRequestRow, PlannedRow, PreviewRow};
 pub use control::{
     AlertRow, AudioEditorBoxRow, AudioEditorRegionRow, AudioEditorStateRow, ControlArg,
     ControlCall, ControlErrorCode, ControlFailure, ControlRequest, ControlResult, ControlServer,

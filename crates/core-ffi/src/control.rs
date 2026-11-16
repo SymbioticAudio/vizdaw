@@ -14,7 +14,7 @@ use core_control::keys::{KeyStroke, Modifiers};
 use core_control::params::WindowRef;
 use core_control::registry::{self, ArgValue};
 use core_control::request::{Button, Command, CrashAnswer, Pointer, StateTarget};
-use core_control::server::{Config, Server};
+use core_control::server::{Config, Role, Server};
 use core_control::wait::{self, DocFacts, Facts, WaitCondition};
 use core_control::{ControlError, ErrorCode};
 use serde_json::{Map, Value, json};
@@ -435,6 +435,39 @@ pub enum ControlRequest {
         /// At most this long.
         timeout_ms: u64,
     },
+    /// `co_producer.begin` (plan 8a Task 4).
+    CoProducerBegin {
+        /// What the composer asked for.
+        name: String,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.end`.
+    CoProducerEnd {
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.status`.
+    CoProducerStatus {
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.preview`.
+    CoProducerPreview {
+        /// The planned commands, in order.
+        plan: Vec<crate::co_producer::PlannedRow>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.apply`.
+    CoProducerApply {
+        /// The preview's one-time token.
+        token: String,
+        /// The previewed commands, again.
+        plan: Vec<crate::co_producer::PlannedRow>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
 }
 
 /// A request and the token to answer it with.
@@ -825,6 +858,32 @@ pub enum ControlResult {
         /// How long it took.
         elapsed_ms: u64,
     },
+    /// `co_producer.begin`, `co_producer.end` and `co_producer.status`
+    /// (plan 8a Task 4).
+    CoProducerRequest {
+        /// Document ID.
+        doc: String,
+        /// The open request, if any.
+        request: Option<crate::co_producer::CoProducerRequestRow>,
+        /// The undo label afterwards.
+        undo_label: Option<String>,
+    },
+    /// `co_producer.preview`.
+    CoProducerPreview {
+        /// Document ID.
+        doc: String,
+        /// What would change, and the token.
+        preview: crate::co_producer::PreviewRow,
+    },
+    /// `co_producer.apply`.
+    CoProducerApplied {
+        /// Document ID.
+        doc: String,
+        /// One line per planned command: done, its failure, or not run.
+        results: Vec<String>,
+        /// The undo label afterwards.
+        undo_label: Option<String>,
+    },
 }
 
 /// Error codes (control spec §5.3).
@@ -860,6 +919,8 @@ pub enum ControlErrorCode {
     ShuttingDown,
     /// `internal` (`Internal` is a Swift keyword when lower-cased).
     InternalFailure,
+    /// `not_allowed` (plan 8a Ruling 11).
+    NotAllowed,
 }
 
 /// A failed call.
@@ -890,6 +951,7 @@ fn code_of(c: ControlErrorCode) -> ErrorCode {
         ControlErrorCode::Timeout => ErrorCode::Timeout,
         ControlErrorCode::ShuttingDown => ErrorCode::ShuttingDown,
         ControlErrorCode::InternalFailure => ErrorCode::Internal,
+        ControlErrorCode::NotAllowed => ErrorCode::NotAllowed,
     }
 }
 
@@ -977,14 +1039,36 @@ fn facts_of(f: WaitFactsRow) -> Facts {
 pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<ControlRequest> {
     Some(match c {
         Command::CommandsList | Command::Ping => return None,
-        // The developer socket refuses these before they are queued
-        // (plan 8a Ruling 11); the Co-Producer socket's rows come with its
-        // server (Task 4).
-        Command::CoProducerBegin { .. }
-        | Command::CoProducerEnd { .. }
-        | Command::CoProducerStatus { .. }
-        | Command::CoProducerPreview { .. }
-        | Command::CoProducerApply { .. } => return None,
+        // Only the Co-Producer socket queues these (plan 8a Ruling 11).
+        Command::CoProducerBegin { name, window } => ControlRequest::CoProducerBegin {
+            name,
+            window: window_row(window),
+        },
+        Command::CoProducerEnd { window } => ControlRequest::CoProducerEnd {
+            window: window_row(window),
+        },
+        Command::CoProducerStatus { window } => ControlRequest::CoProducerStatus {
+            window: window_row(window),
+        },
+        Command::CoProducerPreview { plan, window } => ControlRequest::CoProducerPreview {
+            plan: plan
+                .into_iter()
+                .map(crate::co_producer::planned_row)
+                .collect(),
+            window: window_row(window),
+        },
+        Command::CoProducerApply {
+            token,
+            plan,
+            window,
+        } => ControlRequest::CoProducerApply {
+            token,
+            plan: plan
+                .into_iter()
+                .map(crate::co_producer::planned_row)
+                .collect(),
+            window: window_row(window),
+        },
         Command::CommandRun { id, args, window } => ControlRequest::RunCommand {
             id,
             args: args
@@ -1569,6 +1653,31 @@ pub fn result_json(r: &ControlResult) -> Value {
             condition,
             elapsed_ms,
         } => json!({ "condition": condition, "elapsed_ms": elapsed_ms }),
+        ControlResult::CoProducerRequest {
+            doc,
+            request,
+            undo_label,
+        } => json!({
+            "doc": doc,
+            "request": request.as_ref().map(|r| json!({
+                "name": r.name, "label": r.label,
+                "group_open": r.group_open, "continued": r.continued,
+            })),
+            "undo_label": undo_label,
+        }),
+        ControlResult::CoProducerPreview { doc, preview } => json!({
+            "doc": doc,
+            "token": preview.token,
+            "needs_yes": preview.needs_yes,
+            "items": preview.items.iter().map(|i| json!({
+                "thing": i.thing, "change": i.change, "composers_work": i.composers_work,
+            })).collect::<Vec<_>>(),
+        }),
+        ControlResult::CoProducerApplied {
+            doc,
+            results,
+            undo_label,
+        } => json!({ "doc": doc, "results": results, "undo_label": undo_label }),
     }
 }
 
@@ -1603,11 +1712,25 @@ fn window_kind(k: WindowKindRow) -> &'static str {
     }
 }
 
-/// The control socket the app listens on (`--control` / `VIZDAW_CONTROL`).
+/// The control socket the app listens on (`--control` / `VIZDAW_CONTROL`),
+/// or the Co-Producer socket.
 #[derive(uniffi::Object)]
 pub struct ControlServer {
     server: Mutex<Server>,
     path: String,
+}
+
+impl ControlServer {
+    fn with(path: String, config: Config) -> Result<Arc<ControlServer>, VizError> {
+        let server =
+            Server::start(std::path::Path::new(&path), config).map_err(|e| VizError::Io {
+                message: e.to_string(),
+            })?;
+        Ok(Arc::new(ControlServer {
+            server: Mutex::new(server),
+            path,
+        }))
+    }
 }
 
 #[uniffi::export]
@@ -1617,18 +1740,36 @@ impl ControlServer {
     #[uniffi::constructor]
     pub fn start(path: String, app_timeout_ms: u64) -> Result<Arc<ControlServer>, VizError> {
         ffi_guard(|| {
-            let config = Config {
-                app_timeout: Duration::from_millis(app_timeout_ms.max(1)),
-                ..Config::default()
-            };
-            let server =
-                Server::start(std::path::Path::new(&path), config).map_err(|e| VizError::Io {
-                    message: e.to_string(),
-                })?;
-            Ok(Arc::new(ControlServer {
-                server: Mutex::new(server),
+            ControlServer::with(
                 path,
-            }))
+                Config {
+                    app_timeout: Duration::from_millis(app_timeout_ms.max(1)),
+                    ..Config::default()
+                },
+            )
+        })
+    }
+
+    /// The Co-Producer socket at `path` (plan 8a Rulings 10, 11): only
+    /// what `core_control::co_producer::admit` allows reaches the app, and
+    /// an idle connection stays open 15 minutes (a composer's yes may take
+    /// a while). A call the app does not answer within `app_timeout_ms` is
+    /// answered `timeout`.
+    #[uniffi::constructor]
+    pub fn start_co_producer(
+        path: String,
+        app_timeout_ms: u64,
+    ) -> Result<Arc<ControlServer>, VizError> {
+        ffi_guard(|| {
+            ControlServer::with(
+                path,
+                Config {
+                    role: Role::CoProducer,
+                    app_timeout: Duration::from_millis(app_timeout_ms.max(1)),
+                    idle_timeout: Duration::from_secs(900),
+                    ..Config::default()
+                },
+            )
         })
     }
 

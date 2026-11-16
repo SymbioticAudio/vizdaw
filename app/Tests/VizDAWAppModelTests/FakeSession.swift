@@ -909,6 +909,22 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     /// Plan 8a Task 3: no Co-Producer copies (Task 7 scripts it).
     func coProducerCopiesSize() throws -> CopiesSizeRow { CopiesSizeRow(count: 0, bytes: 0) }
+    /// Plan 8a Task 4: requests, previews and tokens are not scripted yet
+    /// (Task 7 scripts them).
+    func coProducerBegin(name: String) throws -> CoProducerRequestRow {
+        throw VizError.Model(message: "not scripted")
+    }
+    func coProducerEnd() throws -> String? { throw VizError.Model(message: "not scripted") }
+    func coProducerRequest() -> CoProducerRequestRow? { nil }
+    func coProducerEnter(stamp: String) throws -> String? { throw VizError.Model(message: "not scripted") }
+    func coProducerLeave() {}
+    func coProducerIdle(idleMs: UInt64) -> String? { nil }
+    func coProducerPreview(plan: [PlannedRow]) throws -> PreviewRow {
+        throw VizError.Model(message: "not scripted")
+    }
+    func coProducerTake(token: String, plan: [PlannedRow]) throws {
+        throw VizError.Model(message: "not scripted")
+    }
     func projectId() throws -> String? {
         interchangeLock.lock()
         projectIdCalls += 1

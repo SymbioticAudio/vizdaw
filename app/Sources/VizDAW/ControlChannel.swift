@@ -395,6 +395,9 @@ enum ControlChannel {
                 _ = try? server.waitTimedOut(token: token, condition: condition, facts: last, timeoutMs: timeoutMs)
                 return true
             }
+        case .coProducerBegin, .coProducerEnd, .coProducerStatus, .coProducerPreview, .coProducerApply:
+            // Plan 8a Task 7 replaces this arm.
+            answer(server, token, .failed(.of(.unavailable, "Co-Producer is not on.")))
         }
     }
 

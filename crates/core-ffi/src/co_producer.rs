@@ -1,0 +1,306 @@
+//! Co-Producer's requests, previews and one-time tokens (plan 8a Task 4;
+//! Rulings 3, 6 and 7). The session methods live in `session.rs`; this
+//! module holds their rows, the preview builder and the pending preview.
+//!
+//! A preview runs on a clone of the session's `History` and never reaches
+//! the host, the engine, the disk or the UI. Its token is tied to the
+//! session's version, the present step's serial and the plan's canonical
+//! text, and is taken at most once. Every input is hostile.
+
+use crate::control::{ControlArg, ControlValue};
+use crate::error::VizError;
+use core_control::co_producer::{self as gate, MAX_PLAN, Planned};
+use core_control::registry::{self, ArgValue};
+use core_control::request::Command as ControlCommand;
+use core_model::diff::{self, ChangeItem};
+use core_model::history::{History, RequestInfo};
+use core_model::selection::ViewFilter;
+use serde_json::{Map, Value};
+use std::io::Read;
+use std::path::Path;
+
+/// What a Co-Producer request is (Ruling 3).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CoProducerRequestRow {
+    /// The name as given, trimmed.
+    pub name: String,
+    /// Its undo label, "Co-Producer: <Title>".
+    pub label: String,
+    /// A group of it is open now.
+    pub group_open: bool,
+    /// An earlier group of it made a step: the next is "(continued)".
+    pub continued: bool,
+}
+
+impl From<RequestInfo> for CoProducerRequestRow {
+    fn from(r: RequestInfo) -> Self {
+        CoProducerRequestRow {
+            name: r.name,
+            label: r.label,
+            group_open: r.group_open,
+            continued: r.continued,
+        }
+    }
+}
+
+/// One line of a preview (Ruling 6).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChangeItemRow {
+    /// What it acts on.
+    pub thing: String,
+    /// What happens to it.
+    pub change: String,
+    /// It changes or removes the composer's work, so it needs their yes.
+    pub composers_work: bool,
+}
+
+/// What a plan would change, and the token to apply it with (Ruling 7).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PreviewRow {
+    /// 32 lowercase hex characters, taken once.
+    pub token: String,
+    /// Some item is the composer's work.
+    pub needs_yes: bool,
+    /// What changes, in order.
+    pub items: Vec<ChangeItemRow>,
+}
+
+/// One planned command of a preview or apply.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PlannedRow {
+    /// Registry ID.
+    pub id: String,
+    /// Its arguments.
+    pub args: Vec<ControlArg>,
+}
+
+/// The FFI form of a planned command.
+pub fn planned_row(p: Planned) -> PlannedRow {
+    PlannedRow {
+        id: p.id,
+        args: p
+            .args
+            .into_iter()
+            .map(|(name, v)| ControlArg {
+                name,
+                value: match v {
+                    ArgValue::Text(value) => ControlValue::Text { value },
+                    ArgValue::Flag(value) => ControlValue::Flag { value },
+                    ArgValue::Int(value) => ControlValue::Int { value },
+                },
+            })
+            .collect(),
+    }
+}
+
+fn model(message: impl Into<String>) -> VizError {
+    VizError::Model {
+        message: message.into(),
+    }
+}
+
+/// `rows` checked as the Co-Producer socket checks a plan: 1 to
+/// [`MAX_PLAN`] commands, each validated by the registry (no unknown,
+/// duplicate or missing argument, every value of its type) with its args
+/// in registry order, then admitted by the gate (Ruling 6: previewable,
+/// explicit targets, Save without a path, nothing replaced).
+pub fn plan_of(rows: &[PlannedRow]) -> Result<Vec<Planned>, VizError> {
+    if rows.is_empty() || rows.len() > MAX_PLAN {
+        return Err(model(format!("A plan holds 1 to {MAX_PLAN} commands.")));
+    }
+    let mut plan = Vec::with_capacity(rows.len());
+    for r in rows {
+        let spec = registry::find(&r.id).ok_or_else(|| model(registry::unknown(&r.id).message))?;
+        let mut params = Map::new();
+        for a in &r.args {
+            let v = match &a.value {
+                ControlValue::Text { value } => Value::from(value.as_str()),
+                ControlValue::Flag { value } => Value::from(*value),
+                ControlValue::Int { value } => Value::from(*value),
+            };
+            if params.insert(a.name.clone(), v).is_some() {
+                return Err(model(format!("{}: `{}` is given twice", r.id, a.name)));
+            }
+        }
+        let args = registry::validate_args(spec, &params).map_err(|e| model(e.message))?;
+        plan.push(Planned {
+            id: r.id.clone(),
+            args,
+        });
+    }
+    let c = ControlCommand::CoProducerPreview { plan, window: None };
+    gate::admit(&c).map_err(|e| model(e.message))?;
+    match c {
+        ControlCommand::CoProducerPreview { plan, .. } => Ok(plan),
+        _ => Err(model("not a plan")),
+    }
+}
+
+/// Ruling 7's canonical text of a validated plan.
+pub fn canonical(plan: &[Planned]) -> String {
+    gate::canonical(plan)
+}
+
+/// A fresh token: 32 lowercase hex characters from 16 bytes of
+/// `/dev/urandom`. No fallback: when it cannot be read, the preview fails.
+pub fn fresh_token() -> Result<String, VizError> {
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .map_err(|e| VizError::Io {
+            message: format!("The preview's token could not be made ({e})."),
+        })?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// The session's latest preview (Ruling 7): one at a time, taken once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPreview {
+    /// Its token.
+    pub token: String,
+    /// The session's version when it was made.
+    pub version: u64,
+    /// The present step's serial when it was made.
+    pub serial: u64,
+    /// The plan's canonical text.
+    pub canonical: String,
+}
+
+/// Ruling 7's refusals.
+pub const USED: &str = "This preview was already used or replaced.";
+/// The song moved since the preview.
+pub const CHANGED: &str = "The song changed since the preview; preview again.";
+/// The plan differs from the previewed one.
+pub const NOT_PREVIEWED: &str = "These are not the previewed commands.";
+
+/// Whether `pending` (already taken out of the session) lets `token` and
+/// `plan` through now, at `version` and `serial`.
+pub fn check_take(
+    pending: Option<PendingPreview>,
+    token: &str,
+    plan: &[PlannedRow],
+    version: u64,
+    serial: u64,
+) -> Result<(), VizError> {
+    let Some(p) = pending.filter(|p| p.token == token) else {
+        return Err(model(USED));
+    };
+    if p.version != version || p.serial != serial {
+        return Err(model(CHANGED));
+    }
+    match plan_of(plan) {
+        Ok(plan) if canonical(&plan) == p.canonical => Ok(()),
+        _ => Err(model(NOT_PREVIEWED)),
+    }
+}
+
+const CO_PRODUCER: &str = "Co-Producer: ";
+
+fn rows(items: Vec<ChangeItem>, composers_work: bool) -> impl Iterator<Item = ChangeItemRow> {
+    items.into_iter().map(move |i| ChangeItemRow {
+        thing: i.thing,
+        change: i.change,
+        composers_work,
+    })
+}
+
+fn id_arg(p: &Planned, name: &str) -> Result<u64, VizError> {
+    match p.args.iter().find(|(n, _)| n == name) {
+        Some((_, ArgValue::Int(i))) => {
+            u64::try_from(*i).map_err(|_| model(format!("{}: `{name}` is out of range", p.id)))
+        }
+        _ => Err(model(format!("{}: name the track's `{name}`", p.id))),
+    }
+}
+
+/// The core-model command the track menu's Rename or Delete builds, as
+/// `Session::edit` does.
+fn track_command(p: &Planned) -> Result<core_model::command::Command, VizError> {
+    use crate::edit::{EditCommand, LaneEdit};
+    let (seq, lane) = (id_arg(p, "seq")?, id_arg(p, "lane")?);
+    let edit = match p.id.as_str() {
+        "track.rename" => {
+            let name = match p.args.iter().find(|(n, _)| n == "name") {
+                Some((_, ArgValue::Text(t))) => t.clone(),
+                _ => return Err(model("track.rename: give the track's new `name`")),
+            };
+            LaneEdit::Rename { seq, lane, name }
+        }
+        _ => LaneEdit::Remove { seq, lane },
+    };
+    crate::edit::to_command(&EditCommand::Lane { edit })
+}
+
+/// What `plan` would change (Ruling 6), worked out in order on a clone of
+/// `history` with Co-Producer acting, as the apply will run it. `package`
+/// is the song's file, if saved. Nothing outside the clone changes.
+pub fn preview_items(
+    history: &History,
+    package: Option<&Path>,
+    plan: &[Planned],
+) -> Result<Vec<ChangeItemRow>, VizError> {
+    let mut h = history.clone();
+    if let Some(why) = h.acting_refusal() {
+        return Err(VizError::Busy {
+            message: why.to_string(),
+        });
+    }
+    h.set_acting(true)?;
+    let mut out = Vec::new();
+    let filter = ViewFilter::default();
+    for p in plan {
+        match p.id.as_str() {
+            "track.rename" | "track.delete" => {
+                let cmd = track_command(p)?;
+                let before = h.doc().clone();
+                h.execute(&cmd, &filter)?;
+                out.extend(rows(diff::describe(&before, h.doc()), true));
+            }
+            "edit.undo" | "edit.redo" => {
+                let undo = p.id == "edit.undo";
+                // An open request group closes first: its label is the one
+                // the step gets.
+                let label = if undo { h.undo_label() } else { h.redo_label() };
+                let Some(label) = label.map(str::to_string) else {
+                    return Err(model(if undo {
+                        "There is nothing to undo."
+                    } else {
+                        "There is nothing to redo."
+                    }));
+                };
+                let before = h.doc().clone();
+                if undo {
+                    h.undo()?;
+                } else {
+                    h.redo()?;
+                }
+                let items = diff::describe(&before, h.doc());
+                // Ruling 7, P4: undoing Co-Producer's step only restores
+                // the composer's song; redoing one needs no yes only when
+                // all it does is add.
+                let ours = label.starts_with(CO_PRODUCER)
+                    && (undo || items.iter().all(|i| i.change == "added"));
+                out.push(ChangeItemRow {
+                    thing: if undo { "Undo" } else { "Redo" }.to_string(),
+                    change: format!("\"{}\"", diff::shown_name(&label)),
+                    composers_work: !ours,
+                });
+                out.extend(rows(items, !ours));
+            }
+            "file.save" => {
+                let name = package.and_then(Path::file_name).ok_or_else(|| {
+                    model("The song has no file yet: ask the composer to save it (File › Save).")
+                })?;
+                out.push(ChangeItemRow {
+                    thing: diff::shown_name(&name.to_string_lossy()),
+                    change: "saved over the file on disk".to_string(),
+                    composers_work: true,
+                });
+            }
+            other => {
+                return Err(model(format!("Co-Producer cannot preview {other} yet.")));
+            }
+        }
+    }
+    Ok(out)
+}
