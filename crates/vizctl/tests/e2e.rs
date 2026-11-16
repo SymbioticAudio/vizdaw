@@ -4819,3 +4819,221 @@ fn default_eq_and_new_bus_over_the_channel() {
     assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
     app.quit();
 }
+
+/// The ID of the tree's button (or toggle button) labelled exactly `label`.
+fn button_labelled(nodes: &Value, label: &str) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        let exact = |k: &str| n[k].as_str() == Some(label);
+        if (n["role"] == "AXButton" || n["role"] == "AXCheckBox")
+            && (exact("label") || exact("title"))
+        {
+            Some(n["id"].clone())
+        } else {
+            button_labelled(&n["children"], label)
+        }
+    })
+}
+
+/// README steps 326–331 through the channel (plan 5c-2 takes): a new file
+/// records in Overdub; a MIDI loop run layers its passes onto the one take
+/// and one Undo removes them; with MIDI passes as takes on, the passes make
+/// takes, which `track.choose_take`, `track.rename_take` and
+/// `track.delete_take` choose, rename and delete, each one undo step. The
+/// offline device only: no audio hardware and no permission prompt.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn takes_and_layered_midi_loop_over_the_channel() {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, SequenceCmd};
+    use core_model::lane::LaneInput;
+    use core_model::sequence::SeqLength;
+    use core_model::tempo::{Bpm, TempoMap, TempoPoint};
+    use core_model::time::Tick;
+    let mut app = App::start();
+    // Four bars at 120 BPM (eight seconds a pass): "Keys" takes MIDI from
+    // port "Keys" on the built-in synth, with two notes in Take 1.
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("Take", "Keys", Some(synth)).unwrap();
+    b.notes(
+        seq,
+        keys,
+        &[(0, 60, 0x8000, Q / 2), (8 * Q, 64, 0x8000, Q / 2)],
+    )
+    .unwrap();
+    b.run(Command::Lane(LaneCmd::SetInput {
+        seq,
+        lane: keys,
+        input: Some(LaneInput::Midi {
+            port: Some("Keys".into()),
+            channel: None,
+        }),
+    }))
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetTempo {
+        seq,
+        tempo: TempoMap::new(vec![TempoPoint {
+            tick: Tick(0),
+            bpm: Bpm::whole(120),
+            ramp: false,
+        }])
+        .unwrap(),
+    }))
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(16 * Q)),
+    }))
+    .unwrap();
+    let path = app.launched.home.join("Takes.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let lane = lane_named(&mut app, &w, "Keys");
+    assert_eq!(
+        (lane["takes"].clone(), lane["events"].clone()),
+        (json!(1), json!(2))
+    );
+    let keys_id = lane["id"].clone();
+
+    // The bar's switch reads Overdub in a new file, and a click flips it
+    // (the record spec exists only while recording, so the label is what
+    // shows the idle mode).
+    let wait_button = |app: &mut App, label: &str| -> Value {
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        loop {
+            let tree = app.call("ui.tree", json!({"window": w}));
+            if let Some(id) = button_labelled(&tree["nodes"], label) {
+                return id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no {label:?} button within {WAIT_MS} ms in {tree}"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    let mode = wait_button(&mut app, "Record mode: Overdub");
+    app.call("ui.click", json!({"window": w, "element": mode}));
+    let back = wait_button(&mut app, "Record mode: Replace");
+    app.call("ui.click", json!({"window": w, "element": back}));
+    wait_button(&mut app, "Record mode: Overdub");
+    let record = |app: &mut App| app.call("state.get", json!({"target": "record", "window": w}));
+
+    // One note in pass `n` (counted from 1): a note-on a little way in,
+    // a note-off a little later, both inside that pass.
+    let note = |app: &mut App, n: u64, pitch: &str| {
+        wait_for_record(app, &w, |r| r["pass"].as_u64() >= Some(n));
+        let r = record(app);
+        let at = r["pass_start_file_frame"].as_u64().unwrap();
+        wait_for_record(app, &w, |r| r["frames"].as_u64() >= Some(at + 2_400));
+        app.call(
+            "command.run",
+            json!({"id": "midi.inject", "params": {"port": "Keys", "bytes": format!("90 {pitch} 64")}, "window": w}),
+        );
+        wait_for_record(app, &w, |r| r["frames"].as_u64() >= Some(at + 9_600));
+        app.call(
+            "command.run",
+            json!({"id": "midi.inject", "params": {"port": "Keys", "bytes": format!("80 {pitch} 00")}, "window": w}),
+        );
+        // Half a second in: a pass cut short before it is heard makes no take.
+        wait_for_record(app, &w, |r| r["frames"].as_u64() >= Some(at + 30_000));
+    };
+    let loop_run = |app: &mut App, as_takes: bool| {
+        app.call(
+            "command.run",
+            json!({"id": "transport.return_to_start", "window": w}),
+        );
+        wait_for_tick(app, &w, 0);
+        app.call(
+            "command.run",
+            json!({"id": "transport.record", "window": w}),
+        );
+        // The defaults: Overdub, and MIDI passes layered unless asked.
+        let r = wait_for_record(app, &w, |r| r["spec"].is_object());
+        assert_eq!(
+            (
+                r["spec"]["replace"].clone(),
+                r["spec"]["passes_as_takes"].clone()
+            ),
+            (json!(false), json!(as_takes)),
+            "{r}"
+        );
+        note(app, 1, "3e");
+        note(app, 2, "40");
+        app.call(
+            "command.run",
+            json!({"id": "transport.record", "window": w}),
+        );
+        wait_for_record(app, &w, |r| r["recording"] == false);
+        wait_for_undo(app, &w, "Record");
+    };
+
+    // Layering: two passes, one note each, on the one take; one Undo.
+    app.call(
+        "command.run",
+        json!({"id": "transport.arm_previous", "window": w}),
+    );
+    assert_eq!(lane_named(&mut app, &w, "Keys")["arm"], true);
+    app.call(
+        "command.run",
+        json!({"id": "record.set", "params": {"loop": true, "pre_roll": 0}, "window": w}),
+    );
+    loop_run(&mut app, false);
+    let lane = lane_named(&mut app, &w, "Keys");
+    assert_eq!(
+        (lane["takes"].clone(), lane["events"].clone()),
+        (json!(1), json!(4)),
+        "{lane}"
+    );
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    assert_eq!(lane_named(&mut app, &w, "Keys")["events"], 2);
+
+    // Takes: with MIDI passes as takes on, two passes make Take 2 and 3.
+    app.call(
+        "command.run",
+        json!({"id": "record.set", "params": {"passes_as_takes": true}, "window": w}),
+    );
+    loop_run(&mut app, true);
+    let lane = lane_named(&mut app, &w, "Keys");
+    assert_eq!(
+        (lane["takes"].clone(), lane["active_take"].clone()),
+        (json!(3), json!("Take 3")),
+        "{lane}"
+    );
+    let take = |lane: &Value, name: &str| -> Value {
+        lane["take_list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("no take {name} in {lane}"))["id"]
+            .clone()
+    };
+    let (t1, t3) = (take(&lane, "Take 1"), take(&lane, "Take 3"));
+    let r = app.call(
+        "command.run",
+        json!({"id": "track.choose_take", "params": {"lane": keys_id, "take": t1}, "window": w}),
+    );
+    assert_eq!(r["status"], "Take 1", "{r}");
+    assert_eq!(r["undo"], "Set Active Take", "{r}");
+    assert_eq!(lane_named(&mut app, &w, "Keys")["events"], 2);
+    let r = app.call(
+        "command.run",
+        json!({"id": "track.rename_take", "params": {"lane": keys_id, "take": t1, "name": "Verse"}, "window": w}),
+    );
+    assert_eq!(r["status"], "Verse", "{r}");
+    app.call(
+        "command.run",
+        json!({"id": "track.delete_take", "params": {"lane": keys_id, "take": t3}, "window": w}),
+    );
+    assert_eq!(lane_named(&mut app, &w, "Keys")["takes"], 2);
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    assert_eq!(lane_named(&mut app, &w, "Keys")["takes"], 3);
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "track.delete_take", "params": {"lane": keys_id, "take": 999_999}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::UnknownId, "{e:?}");
+    app.quit();
+}

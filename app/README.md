@@ -1194,7 +1194,8 @@ the channel steps stay as they are.
      Overdub) merges a second pass; Replace with Punch on clears only
      the punch range. With an external MIDI synth mixed into the same
      monitors as VizDAW's audio, its clicks and VizDAW's line up by ear.
-134. Loop passes: turn Loop on and record over a short sequence for
+134. Loop passes: arm an audio track (a MIDI track makes takes only with
+     MIDI passes as takes on: step 328), turn Loop on and record over a short sequence for
      three passes; after the first pass run `$V run record.keep_pass`,
      after the second `$V run record.discard_pass`, then Stop: the track
      has two new takes ("Take 2", "Take 3"), the last plays, and one
@@ -1320,7 +1321,7 @@ a copy, not one you care about.
      refusal (no track armed with an input, step entry on) shows in the
      status line. The chevron's popover holds Replace/Overdub, Punch with
      its In and Out fields, Loop, Count-in (off to 4 bars), Pre-roll (off
-     to 8 bars) and Passes as takes. Type `3` in Punch In and press
+     to 8 bars) and MIDI passes as takes. Type `3` in Punch In and press
      Return: the punch starts at bar 3, as the transport bar's field
      shows; typing R or Space in the field types it (no transport key
      fires). With Overdub chosen and an audio track armed, the popover says
@@ -1400,7 +1401,7 @@ a copy, not one you care about.
      relaunch: every setting is kept (they are app preferences, never in
      a project).
 152. Settings › Recording: the sample rate and bit depth are what File >
-     New offers first. Count-in, Pre-roll and Passes as takes are what
+     New offers first. Count-in, Pre-roll and MIDI passes as takes are what
      the next opened document's popover starts with (open documents keep
      theirs). Monitoring for new tracks set to Input: "+ Add Track" makes a
      track of any kind (audio, instrument, MIDI) showing I, and one Undo
@@ -2773,6 +2774,36 @@ Plan 6g-2, the chosen default EQ and New Bus:
 325. Look at a narrow channel strip, in the arrange window and in the mixer:
      the ＋ and "New Bus" sit inside the strip, and nothing is clipped or
      overlaps the fader, the pan or the next strip.
+
+Plan 5c-2 takes, choosing takes and MIDI loop recording that layers:
+
+326. File › New: the transport bar shows "Overdub" beside Record. Pencil four
+     notes into a MIDI track. Turn Loop on and record three passes, playing
+     different notes each time. Everything plays together from one take, the
+     pencilled notes are still there, and the header shows no take name. One
+     Undo removes only what you played.
+327. Click "Overdub" on the bar: it reads "Replace", and the Record ⌄
+     popover's Mode says Replace too. Loop-record over the same range: the
+     notes in the loop range are replaced by what you played across the
+     passes, and notes outside the loop stay. Click back to "Overdub".
+328. Settings › Recording › New Documents: turn on "MIDI passes as takes",
+     then make a new project, or turn it on in the Record ⌄ popover.
+     Loop-record two MIDI passes. Right-click the track's header › Takes:
+     "Take 1" to "Take 3", with the last checked, and the header reads
+     "<track> · Take 3". Choose Take 1: the pencilled notes play again.
+329. Takes › Rename "Take 1"…: type "Verse". The header shows it. Undo puts the
+     old name back. Right-click a region on the track: the same Takes menu.
+330. Takes › Delete "Verse": the take goes, and the one before it plays, or the
+     next when it was first. Undo brings it back with its notes. On a track
+     with one take, Delete is greyed out.
+331. Arm an audio track and loop-record two passes with "MIDI passes as takes"
+     off: you get two takes anyway. Choose between them in Takes, and each
+     plays its pass.
+332. Open a project saved before this build that recorded in Replace: the bar
+     shows "Replace" before you press Record.
+333. Look at the transport bar at its narrowest, in the document window and in
+     the mixer window: the mode switch sits between Record and ⌄, and nothing
+     is clipped or overlaps.
 
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on

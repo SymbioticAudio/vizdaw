@@ -84,6 +84,12 @@ struct BarButton: NSViewRepresentable {
             b.title = title
         }
         b.setAccessibilityLabel(label)
+        // A titled button's own label and title are what its cell says, so
+        // a label that differs from the title goes on the cell too.
+        if icon == nil {
+            b.cell?.setAccessibilityLabel(label)
+            b.cell?.setAccessibilityTitle(label)
+        }
         b.toolTip = help
         b.isEnabled = enabled
         if let isOn { b.state = isOn ? .on : .off }
