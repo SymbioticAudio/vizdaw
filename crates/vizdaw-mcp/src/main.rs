@@ -26,11 +26,22 @@ enum Input {
     TooLong,
 }
 
+/// Lines read ahead of the main loop at most: while a call waits on
+/// VizDAW, the reader then blocks and the pipe holds the writer back.
+const QUEUE: usize = 16;
+
 /// How long the main loop waits for a line before it calls `tick`.
 const TICK: Duration = Duration::from_secs(1);
 
 fn main() {
-    let (tx, rx) = mpsc::channel::<Input>();
+    let support = match support_dir_from_env() {
+        Ok(s) => s,
+        Err(m) => {
+            eprintln!("{m}");
+            std::process::exit(2);
+        }
+    };
+    let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE);
     let reader = std::thread::Builder::new()
         .name("vizdaw-mcp-stdin".into())
         .spawn(move || {
@@ -50,7 +61,7 @@ fn main() {
         eprintln!("vizdaw-mcp: cannot read stdin: {e}");
         std::process::exit(1);
     }
-    let mut server = Server::new(support_dir_from_env());
+    let mut server = Server::new(support);
     let stdout = io::stdout();
     loop {
         let input = match rx.recv_timeout(TICK) {

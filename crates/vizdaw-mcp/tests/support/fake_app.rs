@@ -52,6 +52,8 @@ pub enum Answer {
     Err(ControlError),
     /// A screenshot answer naming this path; nothing is written.
     ScreenshotAt(PathBuf),
+    /// This result, after this long (a call that keeps the server waiting).
+    After(Duration, Value),
 }
 
 /// The fake app.
@@ -114,6 +116,10 @@ impl FakeApp {
                         Some(Answer::Ok(v)) => Ok(v),
                         Some(Answer::Err(e)) => Err(e),
                         Some(Answer::ScreenshotAt(p)) => Ok(json!({ "path": p })),
+                        Some(Answer::After(d, v)) => {
+                            thread::sleep(d);
+                            Ok(v)
+                        }
                         None => Ok(canned(&s, &call.command)),
                     };
                     s.reply(call.token, outcome);

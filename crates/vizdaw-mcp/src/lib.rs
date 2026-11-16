@@ -37,14 +37,26 @@ const MAX_SCREENSHOT: u64 = 64 << 20;
 
 /// Where VizDAW keeps its files, found as the app finds it (Ruling 10):
 /// `VIZDAW_SUPPORT_DIR`, else `$HOME/Library/Application Support/VizDAW`.
-pub fn support_dir_from_env() -> PathBuf {
+/// Err, a sentence for stderr, when the one used is missing or not
+/// absolute: there is no fallback to a folder other users may write.
+pub fn support_dir_from_env() -> Result<PathBuf, String> {
     if let Some(d) = std::env::var_os("VIZDAW_SUPPORT_DIR") {
-        return PathBuf::from(d);
+        let d = PathBuf::from(d);
+        if !d.is_absolute() {
+            return Err("vizdaw-mcp: VIZDAW_SUPPORT_DIR must be an absolute path.".into());
+        }
+        return Ok(d);
     }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-    home.join("Library")
-        .join("Application Support")
-        .join("VizDAW")
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if home.is_absolute() => Ok(home
+            .join("Library")
+            .join("Application Support")
+            .join("VizDAW")),
+        _ => Err(
+            "vizdaw-mcp: HOME is not set to an absolute path, so VizDAW's folder cannot be found."
+                .into(),
+        ),
+    }
 }
 
 /// The server's state: its tools, what the client declared, and the app

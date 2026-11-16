@@ -503,6 +503,90 @@ fn a_call_that_was_sent_is_never_sent_twice() {
     assert_eq!(app.runs(), vec![run_of("transport.stop", vec![])]);
 }
 
+/// The child's resident memory in KiB.
+fn rss_kib(pid: u32) -> u64 {
+    let out = Process::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+}
+
+#[test]
+fn a_flood_while_a_call_waits_stays_bounded() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::After(
+        Duration::from_secs(4),
+        json!({"status": "slow"}),
+    ));
+    m.send(
+        &json!({"jsonrpc": "2.0", "id": "slow", "method": "tools/call",
+        "params": {"name": "track_new_audio", "arguments": {}}}),
+    );
+    // 150 lines of 900 KB (135 MB) written while the call waits.
+    let mut stdin = m.stdin.take().unwrap();
+    let flood = std::thread::spawn(move || {
+        let pad = "x".repeat(900_000);
+        for i in 0..150 {
+            let line = json!({"jsonrpc": "2.0", "id": i, "method": "ping", "params": {"pad": pad}});
+            stdin.write_all(format!("{line}\n").as_bytes()).unwrap();
+        }
+        stdin
+    });
+    std::thread::sleep(Duration::from_millis(2500));
+    let kib = rss_kib(m.child.id());
+    assert!(
+        kib < 64 * 1024,
+        "vizdaw-mcp holds {kib} KiB while a call waits"
+    );
+    m.stdin = Some(flood.join().unwrap());
+    let first = m.recv();
+    assert_eq!(first["id"], "slow", "{first}");
+    for i in 0..150 {
+        let r = m.recv();
+        assert_eq!(r["id"], i, "{r}");
+        assert_eq!(r["result"], json!({}), "{r}");
+    }
+    m.ping_answers();
+}
+
+#[test]
+fn it_will_not_start_without_an_absolute_home() {
+    for home in [None, Some("relative/home")] {
+        let mut p = Process::new(env!("CARGO_BIN_EXE_vizdaw-mcp"));
+        p.env_remove("VIZDAW_SUPPORT_DIR").env_remove("HOME");
+        if let Some(h) = home {
+            p.env("HOME", h);
+        }
+        let out = p
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{home:?}");
+        assert!(out.stdout.is_empty());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("HOME is not set to an absolute path"), "{err}");
+    }
+}
+
+#[test]
+fn it_will_not_connect_in_a_folder_others_can_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+    let r = m.call("track_new_audio", json!({}));
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(is_error(&r), "{r}");
+    assert!(text(&r).contains("can be written by other users"), "{r}");
+    assert!(app.runs().is_empty());
+}
+
 #[test]
 fn base64_matches_rfc_4648() {
     use vizdaw_mcp::base64::encode;
