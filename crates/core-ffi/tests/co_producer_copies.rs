@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit};
 use vizdaw_ffi::host::{force_offline, reset_host};
 use vizdaw_ffi::jobs::ImportTargetRow;
-use vizdaw_ffi::{JobStateRow, Session};
+use vizdaw_ffi::record::set_free_bytes;
+use vizdaw_ffi::{JobStateRow, Session, VizError};
 
 const STAMP: &str = "2026-11-14 15-02";
 const COPY_LINE: &str =
@@ -30,6 +31,7 @@ fn serial() -> MutexGuard<'static, ()> {
     let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     force_offline();
     reset_host();
+    set_free_bytes(None);
     g
 }
 
@@ -242,5 +244,100 @@ fn save_as_never_writes_over_a_copy() {
     }
     assert_eq!(std::fs::read(copy.join("project.json")).unwrap(), before);
     other.close().unwrap();
+    s.close().unwrap();
+}
+
+/// An untitled song: one imported track, its own trash folder.
+fn untitled(dir: &Path) -> Arc<Session> {
+    let s = Session::new_empty().unwrap();
+    s.debug_set_trash_dir(Some(dir.join("Trash").display().to_string()));
+    import(&s, &caf(&dir.join("src/kick.caf"), 200));
+    s
+}
+
+#[cfg(unix)]
+fn inode(p: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p).unwrap().ino()
+}
+
+/// Fix round 1 (I-1): an untitled song's copy holds its own media, so
+/// Save As and Close (which delete the untitled scratch folder) leave the
+/// copy whole; the copy step only reads the scratch folder.
+#[test]
+fn an_untitled_copy_keeps_its_media() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let s = untitled(dir.path());
+    let item = s.media().unwrap()[0].clone();
+    let scratch = PathBuf::from(s.media_file(item.id).unwrap());
+    let before = std::fs::read(&scratch).unwrap();
+    let copy = s.debug_write_co_producer_copy(STAMP, "Tidy").unwrap();
+    let own = copy.join(&item.path);
+    assert!(own.is_file(), "{}", own.display());
+    assert_eq!(std::fs::read(&own).unwrap(), before);
+    assert!(scratch.is_file(), "the scratch file stays");
+    assert_eq!(std::fs::read(&scratch).unwrap(), before);
+    #[cfg(unix)]
+    assert_ne!(inode(&own), inode(&scratch), "a copy, never the same file");
+    assert_eq!(
+        s.media().unwrap()[0].path,
+        item.path,
+        "the song is unchanged"
+    );
+    s.save_as(dir.path().join("Song.vizdaw").display().to_string())
+        .unwrap();
+    s.close().unwrap();
+    drop(s);
+    assert!(!scratch.exists(), "Save As removed the scratch folder");
+    assert!(own.is_file());
+
+    let c = Session::open_copy(copy.display().to_string()).unwrap();
+    let media = c.media().unwrap();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].offline, None, "it plays");
+    assert!(PathBuf::from(c.media_file(media[0].id).unwrap()).is_file());
+    let problems = c.idle().unwrap().problems;
+    assert!(problems.is_empty(), "{problems:?}");
+    c.close().unwrap();
+}
+
+/// Fix round 1 (I-1): the copy's media are charged against free space
+/// first; without room nothing is written and no project ID is stamped.
+#[test]
+fn an_untitled_copy_needs_room_for_its_media() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let s = untitled(dir.path());
+    set_free_bytes(Some(10));
+    let e = s.debug_write_co_producer_copy(STAMP, "Tidy").unwrap_err();
+    set_free_bytes(None);
+    assert!(e.to_string().contains("free space"), "{e}");
+    assert_eq!(s.project_id().unwrap(), None);
+    assert_eq!(s.co_producer_copies_size().unwrap().count, 0);
+    s.close().unwrap();
+}
+
+/// Fix round 1 (I-2): a copy captures live plug-in states first; a Busy
+/// capture writes nothing and stamps no project ID.
+#[test]
+fn a_busy_capture_writes_no_copy() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let s = untitled(dir.path());
+    s.debug_capture_busy(true);
+    let e = s.debug_write_co_producer_copy(STAMP, "Tidy").unwrap_err();
+    assert!(matches!(e, VizError::Busy { .. }), "{e:?}");
+    assert_eq!(s.project_id().unwrap(), None);
+    let pkg = dir.path().join("Q.vizdaw");
+    s.debug_capture_busy(false);
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.debug_capture_busy(true);
+    assert!(matches!(
+        s.debug_write_co_producer_copy(STAMP, "Tidy"),
+        Err(VizError::Busy { .. })
+    ));
+    assert!(core_model::file::list_copies(&pkg).unwrap().is_empty());
+    s.debug_capture_busy(false);
     s.close().unwrap();
 }

@@ -488,14 +488,14 @@ fn check_stamp(stamp: &str) -> bool {
         })
 }
 
-/// `title` made safe for a file name: `/`, `:` and control characters
-/// become `-`, leading dots go, and it is cut to [`COPY_TITLE_BYTES`].
+/// `title` made safe for a file name and a media path: `/`, `:`, `\`
+/// and control characters become `-`, leading dots go, and it is cut to [`COPY_TITLE_BYTES`].
 fn copy_title(title: &str) -> String {
     let mut out = String::new();
     for c in title
         .chars()
         .map(|c| {
-            if c == '/' || c == ':' || c.is_control() {
+            if matches!(c, '/' | ':' | '\\') || c.is_control() {
                 '-'
             } else {
                 c
@@ -540,33 +540,115 @@ pub fn copy_name(dir: &Path, stamp: &str, title: &str) -> Result<String> {
 /// created with `create_dir`, which fails if it exists). Returns the
 /// copy's path.
 pub fn write_copy(doc: &Document, package: &Path, stamp: &str, title: &str) -> Result<PathBuf> {
+    write_copy_from(doc, package, stamp, title, None)
+}
+
+/// [`write_copy`] for a document whose media live outside `package` (an
+/// untitled song's scratch root `media_root`; plan 8a Task 3 fix round 1):
+/// each media file that is there is copied (`std::fs::copy`, which clones
+/// on APFS) into the copy's own folder at the same relative path, and the
+/// copy's project names it there (`<COPIES_DIR>/<name>/<path>`). A file
+/// that is missing or not a regular file stays named where it was
+/// (offline already). `media_root` is only read. On any failure nothing
+/// of this copy is left.
+pub fn write_copy_with_media(
+    doc: &Document,
+    package: &Path,
+    stamp: &str,
+    title: &str,
+    media_root: &Path,
+) -> Result<PathBuf> {
+    write_copy_from(doc, package, stamp, title, Some(media_root))
+}
+
+/// The regular media files of `doc` under `root`, as (package-relative
+/// path, bytes): what [`write_copy_with_media`] copies.
+pub fn copy_media_files(doc: &Document, root: &Path) -> Result<Vec<(String, u64)>> {
+    let mut out = Vec::new();
+    for m in doc.media().values() {
+        match fs::symlink_metadata(root.join(&m.path)) {
+            Ok(md) if md.is_file() => out.push((m.path.clone(), md.len())),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(out)
+}
+
+fn write_copy_from(
+    doc: &Document,
+    package: &Path,
+    stamp: &str,
+    title: &str,
+    media_root: Option<&Path>,
+) -> Result<PathBuf> {
     let dir = package.join(COPIES_DIR);
     // Checked before anything is written.
     copy_name(&dir, stamp, title)?;
     fs::create_dir_all(&dir)?;
     write_states(doc, package)?;
-    let text = to_json(doc)?;
     // Another writer may take the free name first: try the next one.
     let mut tries = 0;
-    let copy = loop {
-        let copy = dir.join(copy_name(&dir, stamp, title)?);
+    let (copy, name) = loop {
+        let name = copy_name(&dir, stamp, title)?;
+        let copy = dir.join(&name);
         match fs::create_dir(&copy) {
-            Ok(()) => break copy,
+            Ok(()) => break (copy, name),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => tries += 1,
             Err(e) => return Err(e.into()),
         }
     };
     let pj = copy.join(PROJECT_FILE);
-    if let Err(e) = write_atomic(&pj, text.as_bytes()) {
-        // This call's own folder, still without a project: a half-made
-        // copy would stop every later prune. Only empty folders go.
-        let mut tmp = pj.into_os_string();
-        tmp.push(".tmp");
-        let _ = fs::remove_file(PathBuf::from(tmp));
-        let _ = fs::remove_dir(&copy);
+    let written = match media_root {
+        None => to_json(doc).and_then(|t| write_atomic(&pj, t.as_bytes())),
+        Some(root) => with_own_media(doc, root, &copy, &name)
+            .and_then(|d| to_json(&d))
+            .and_then(|t| write_atomic(&pj, t.as_bytes())),
+    };
+    if let Err(e) = written {
+        // This call's own folder, made by its `create_dir`: a half-made
+        // copy would stop every later prune.
+        if media_root.is_some() {
+            let _ = fs::remove_dir_all(&copy);
+        } else {
+            let mut tmp = pj.into_os_string();
+            tmp.push(".tmp");
+            let _ = fs::remove_file(PathBuf::from(tmp));
+            let _ = fs::remove_dir(&copy);
+        }
         return Err(e);
     }
     Ok(copy)
+}
+
+/// `doc` with each media file under `root` copied into `copy` (named
+/// `name` in [`COPIES_DIR`]) and named there.
+fn with_own_media(doc: &Document, root: &Path, copy: &Path, name: &str) -> Result<Document> {
+    let mut out = doc.clone();
+    let files: std::collections::BTreeSet<String> = copy_media_files(doc, root)?
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    for (id, m) in doc.media().iter() {
+        if !files.contains(&m.path) {
+            continue;
+        }
+        let to = copy.join(&m.path);
+        if let Some(d) = to.parent() {
+            fs::create_dir_all(d)?;
+        }
+        // Several items may name one file: it is copied once.
+        if fs::symlink_metadata(&to).is_err() {
+            fs::copy(root.join(&m.path), &to)?;
+        }
+        let path = format!("{COPIES_DIR}/{name}/{}", m.path);
+        crate::rules::check_media_path(&path)?;
+        if let Some(item) = out.media_mut().get_mut(id) {
+            item.path = path;
+        }
+    }
+    Ok(out)
 }
 
 /// The copies' `project.json` paths, sorted; Err when the folder cannot

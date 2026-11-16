@@ -258,6 +258,10 @@ pub(crate) struct Inner {
     /// failed (test hook).
     #[cfg(feature = "test-hooks")]
     dawproject_capture_fails: bool,
+    /// Every capture of plug-in states is Busy (test hook; plan 8a Task 3
+    /// fix round 1).
+    #[cfg(feature = "test-hooks")]
+    capture_busy: bool,
     /// A merge between its preview and Merge (plan 6e Ruling 12): it
     /// counts as a running interchange and media job until
     /// `confirm_merge`, `cancel_merge` or close.
@@ -399,6 +403,8 @@ impl Inner {
             aaf_cancel_at: None,
             #[cfg(feature = "test-hooks")]
             dawproject_capture_fails: false,
+            #[cfg(feature = "test-hooks")]
+            capture_busy: false,
             held_merge: None,
         }
     }
@@ -578,25 +584,6 @@ impl Inner {
                 .join("Untitled")
                 .join(id),
         ))
-    }
-
-    /// Writes a Co-Producer copy of the present document (plan 8a Ruling
-    /// 9): its unsaved state blobs into the package's (or the untitled
-    /// stand-in's) state folder, then a new copy named for `stamp` and
-    /// `title`. Never replaces a file. Returns the copy's path. The
-    /// session ID is unused for now; Task 4's caller passes it.
-    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
-    fn write_co_producer_copy(
-        &mut self,
-        _id: u64,
-        stamp: &str,
-        title: &str,
-    ) -> Result<PathBuf, VizError> {
-        let home = self
-            .copies_home(true)?
-            .ok_or_else(|| crate::events::bad("the copy has no folder"))?;
-        let _g = lock(&SAVE_LOCK);
-        Ok(file::write_copy(self.doc(), &home, stamp, title)?)
     }
 
     /// Recomputes the offline set when the media pool, the format or the
@@ -895,6 +882,12 @@ impl Session {
         ffi_guard(|| Session::with(doc, None, false))
     }
 
+    /// Makes every capture of plug-in states Busy, as when a plug-in call
+    /// is on the stack (test hook). Not exported to Swift.
+    pub fn debug_capture_busy(&self, on: bool) {
+        lock(&self.inner).capture_busy = on;
+    }
+
     /// Writes a Co-Producer copy as a request's first entry will (plan 8a
     /// Task 3; test hook). Not exported to Swift.
     pub fn debug_write_co_producer_copy(
@@ -902,7 +895,7 @@ impl Session {
         stamp: &str,
         title: &str,
     ) -> Result<PathBuf, VizError> {
-        ffi_guard(|| lock(&self.inner).write_co_producer_copy(self.id, stamp, title))
+        ffi_guard(|| self.co_producer_copy(&mut lock(&self.inner), stamp, title))
     }
 }
 
@@ -1048,6 +1041,12 @@ impl Session {
     /// plugin call is on the stack: nothing is captured, and the caller
     /// must not write a half-captured file.
     fn capture_all(&self, inner: &mut Inner) -> Result<bool, VizError> {
+        #[cfg(feature = "test-hooks")]
+        if inner.capture_busy {
+            return Err(VizError::Busy {
+                message: "plugin host is busy".into(),
+            });
+        }
         let riding = inner.riding_params();
         let history = &mut inner.history;
         let failed = plugins::with(self.id, |p| {
@@ -1060,6 +1059,60 @@ impl Session {
             inner.news.problems.push(line);
         }
         Ok(all)
+    }
+
+    /// Writes a Co-Producer copy of the present document (plan 8a Ruling
+    /// 9; Task 3 fix round 1): the only way a copy is written. Under the
+    /// caller's `inner` lock, with nothing released in between:
+    /// - live plug-in states are captured first, as Save does. A Busy
+    ///   capture fails with nothing written and no project ID stamped; a
+    ///   slot that fails alone keeps its stored state, with one "state not
+    ///   saved" line;
+    /// - for an untitled song, the media files the copy names are charged
+    ///   against free space, then copied (cloned on APFS) into the copy's
+    ///   own folder, which its project names: the scratch folder they come
+    ///   from is deleted by Save As and Close. The scratch files are only
+    ///   read;
+    /// - the unsaved state blobs, then a new copy named for `stamp` and
+    ///   `title`, are written into the package (or the untitled stand-in,
+    ///   Ruling P9). Never replaces a file. Returns the copy's path.
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    fn co_producer_copy(
+        &self,
+        inner: &mut Inner,
+        stamp: &str,
+        title: &str,
+    ) -> Result<PathBuf, VizError> {
+        self.capture_all(inner)?;
+        let media_root = match inner.path {
+            Some(_) => None,
+            None => {
+                let root = crate::media::scratch_root(self.id);
+                let need: u64 = file::copy_media_files(inner.doc(), &root)?
+                    .iter()
+                    .map(|(_, bytes)| bytes)
+                    .sum();
+                // The stand-in is under the support folder.
+                let free = crate::record::free_bytes(&recovery::support_dir());
+                if free.is_some_and(|f| need > f) {
+                    return Err(VizError::Io {
+                        message: format!(
+                            "Not enough free space for the copy's media (it needs {} MB).",
+                            need.div_ceil(1_000_000)
+                        ),
+                    });
+                }
+                Some(root)
+            }
+        };
+        let home = inner
+            .copies_home(true)?
+            .ok_or_else(|| crate::events::bad("the copy has no folder"))?;
+        let _g = lock(&SAVE_LOCK);
+        Ok(match media_root {
+            Some(root) => file::write_copy_with_media(inner.doc(), &home, stamp, title, &root)?,
+            None => file::write_copy(inner.doc(), &home, stamp, title)?,
+        })
     }
 
     /// Notes which slots run here now (`Inner::live_slots`).
