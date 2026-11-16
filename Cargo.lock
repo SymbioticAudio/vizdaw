@@ -1806,6 +1806,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vizdaw-mcp"
+version = "0.1.0"
+dependencies = [
+ "core-control",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "vizdaw-play"
 version = "0.1.0"
 dependencies = [
