@@ -24,6 +24,7 @@ const OPEN_FIRST: &str = "Open a request first (begin_request).";
 const USED: &str = "This preview was already used or replaced.";
 const CHANGED: &str = "The song changed since the preview; preview again.";
 const NOT_PREVIEWED: &str = "These are not the previewed commands.";
+const ENTER_FIRST: &str = "Take the preview inside the Co-Producer call: co_producer_enter first.";
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -491,6 +492,79 @@ fn previews_list_exactly_what_changes() {
     u.close().unwrap();
 }
 
+/// A take as the app makes it: inside the Co-Producer call (Task 4 fix
+/// round 1: enter, take, the plan, leave).
+fn take(s: &Session, token: String, plan: Vec<PlannedRow>) -> Result<(), VizError> {
+    s.co_producer_enter(STAMP.into()).unwrap();
+    let r = s.co_producer_take(token, plan);
+    s.co_producer_leave();
+    r
+}
+
+#[test]
+fn take_needs_enter() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = saved(dir.path());
+    let plan = || vec![rename(first_seq(&s), lanes(&s)[0].0, "Vox")];
+    s.co_producer_begin("tidy up".into()).unwrap();
+    let p = s.co_producer_preview(plan()).unwrap();
+    assert_eq!(
+        message(s.co_producer_take(p.token, plan()).unwrap_err()),
+        ENTER_FIRST
+    );
+    // The token went with it.
+    let p = s.co_producer_preview(plan()).unwrap();
+    take(&s, p.token, plan()).unwrap();
+    s.close().unwrap();
+}
+
+/// A plug-in gesture the composer finishes while Co-Producer runs an
+/// approved Undo stays the composer's own step, and the Undo is refused
+/// (Task 4 fix round 1, review I1).
+#[test]
+fn a_gesture_during_co_producers_undo_stays_the_composers() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = saved(dir.path());
+    let master = s.mixer().unwrap().strips.last().unwrap().id;
+    s.add_insert(
+        master,
+        None,
+        vizdaw_ffi::PluginRefRow {
+            format: vizdaw_ffi::PluginFormatTag::Clap,
+            id: "test.gain".into(),
+            name: "Gain".into(),
+            vendor: "VizDAW".into(),
+            version: "1.0.0".into(),
+        },
+    )
+    .unwrap();
+    let slot = s.plugin_slots().unwrap()[0].id;
+    let tracks = lanes(&s).len();
+    co_producer(&s, "add a track", |s| {
+        s.new_track(first_seq(s), TrackKindRow::Audio, None)
+            .unwrap();
+    });
+    let p = s.co_producer_preview(vec![undo()]).unwrap();
+    assert!(!p.needs_yes);
+    s.co_producer_begin("undo that".into()).unwrap();
+    s.co_producer_enter(STAMP.into()).unwrap();
+    s.co_producer_take(p.token, vec![undo()]).unwrap();
+    // The gesture arrives after the take, before the Undo runs.
+    s.debug_owe_gesture(slot, 0, 0.25);
+    assert_eq!(message(s.undo().unwrap_err()), CHANGED);
+    s.co_producer_leave();
+    assert_eq!(s.co_producer_end().unwrap(), None);
+    // Co-Producer's track is still there, and the gesture is the
+    // composer's own step on top.
+    assert_eq!(lanes(&s).len(), tracks + 1);
+    assert_eq!(undo_label(&s).as_deref(), Some("Change Plugin Parameter"));
+    s.undo().unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some("Co-Producer: Add a Track"));
+    s.close().unwrap();
+}
+
 #[test]
 fn take_refuses_every_stale_or_altered_yes() {
     let _g = serial();
@@ -499,9 +573,10 @@ fn take_refuses_every_stale_or_altered_yes() {
     let seq = first_seq(&s);
     let (a, b) = (lanes(&s)[0].0, lanes(&s)[1].0);
     let plan = || vec![rename(seq, a, "Vox"), delete(seq, b)];
+    s.co_producer_begin("tidy up".into()).unwrap();
     let refused = |s: &Session, token: String, plan: Vec<PlannedRow>, why: &str| {
         let doc = s.debug_document_json();
-        assert_eq!(message(s.co_producer_take(token, plan).unwrap_err()), why);
+        assert_eq!(message(take(s, token, plan).unwrap_err()), why);
         assert_eq!(s.debug_document_json(), doc);
     };
 
@@ -512,7 +587,7 @@ fn take_refuses_every_stale_or_altered_yes() {
 
     // A second take of the same token.
     let p = s.co_producer_preview(plan()).unwrap();
-    s.co_producer_take(p.token.clone(), plan()).unwrap();
+    take(&s, p.token.clone(), plan()).unwrap();
     refused(&s, p.token, plan(), USED);
 
     // The plan's name changed.
@@ -564,7 +639,7 @@ fn take_refuses_every_stale_or_altered_yes() {
 
     // A fresh preview, then a take with the same plan, succeeds once.
     let p = s.co_producer_preview(plan()).unwrap();
-    s.co_producer_take(p.token.clone(), plan()).unwrap();
+    take(&s, p.token.clone(), plan()).unwrap();
     refused(&s, p.token, plan(), USED);
     s.close().unwrap();
 }

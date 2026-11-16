@@ -940,6 +940,16 @@ impl Session {
         self.lock_inner().mpe_owed.insert(LaneId(lane), mpe);
     }
 
+    /// Owes the composer a finished plug-in gesture on `slot`, as one the
+    /// audio side's ring delivered and the next pump commits (test hook;
+    /// plan 8a Task 4 fix round 1). Not exported to Swift.
+    pub fn debug_owe_gesture(&self, slot: u64, param: u64, value: f64) {
+        lock(&self.inner).held.push(core_host::Gesture {
+            slot: PluginInstanceId(slot),
+            values: vec![(ParamId(param), value)],
+        });
+    }
+
     /// Writes a Co-Producer copy as a request's first entry will (plan 8a
     /// Task 3; test hook). Not exported to Swift.
     pub fn debug_write_co_producer_copy(
@@ -1637,9 +1647,25 @@ impl Session {
             let mut inner = self.lock_inner();
             // A gesture the plugin finished since the last timer tick is
             // the newest step: undo must see it (3b: sync after commit,
-            // before undo).
+            // before undo). It is the composer's, so it lands with
+            // Co-Producer not acting; and a Co-Producer Undo or Redo was
+            // approved for the song before it, so it is refused (plan 8a
+            // Task 4 review I1).
+            let acting = inner.history.acting();
+            let was = (inner.version, inner.history.present_serial());
+            if acting {
+                inner.set_acting(false);
+            }
             if self.pump(&mut inner) {
                 inner.news.doc_changed = true;
+            }
+            if acting {
+                inner.sync_acting();
+                if (inner.version, inner.history.present_serial()) != was {
+                    return Err(VizError::Model {
+                        message: crate::co_producer::CHANGED.into(),
+                    });
+                }
             }
             if undo {
                 inner.history.peek_undo().cloned()
@@ -4578,8 +4604,12 @@ impl Session {
     /// previewed plan. `Model` "This preview was already used or
     /// replaced.", "The song changed since the preview; preview again." or
     /// "These are not the previewed commands."; any take uses the token
-    /// up. It only checks: the app then runs the plan between
-    /// `co_producer_enter` and `co_producer_leave`.
+    /// up. It must run inside the Co-Producer call, on the entered thread
+    /// (review I1): the order is `co_producer_enter` (which lands the
+    /// composer's owed work), then this check, then the plan, then
+    /// `co_producer_leave`, so nothing lands between the check and the
+    /// plan. Otherwise `Model` "Take the preview inside the Co-Producer
+    /// call: co_producer_enter first.", and the token is used up.
     pub fn co_producer_take(
         &self,
         token: String,
@@ -4591,12 +4621,12 @@ impl Session {
             if inner.history.request().is_some() {
                 inner.co_producer_seen = Instant::now();
             }
-            // The composer's own work waiting to land lands now, so a
-            // gesture made since the preview counts as a change.
-            if inner.co_producer_thread.is_none()
-                && pending.as_ref().is_some_and(|p| p.token == token)
-            {
-                self.land_owed(&mut inner);
+            if inner.co_producer_thread != Some(std::thread::current().id()) {
+                return Err(VizError::Model {
+                    message:
+                        "Take the preview inside the Co-Producer call: co_producer_enter first."
+                            .into(),
+                });
             }
             let (version, serial) = (inner.version, inner.history.present_serial());
             crate::co_producer::check_take(pending, &token, &plan, version, serial)
