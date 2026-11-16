@@ -1,7 +1,7 @@
 //! The retention rule (sub-project 5 spec §6.5 and Ruling 13; plan 5b
 //! Ruling 11): on save and on close, files under `Media/` that no undo or
-//! redo state, no saved project and no autosave references go to the
-//! Trash. They are moved, never unlinked. The history's references come
+//! redo state, no saved project, no autosave and no Co-Producer copy (plan
+//! 8a Ruling 9) references go to the Trash. They are moved, never unlinked. The history's references come
 //! from `History::referenced_media_anywhere` (final review I3), never from
 //! the present document alone.
 //!
@@ -25,10 +25,20 @@ pub struct Outcome {
     pub problems: Vec<String>,
 }
 
-/// The media paths and hashes the package's saved project and autosaves
-/// name; `None` when any of them cannot be read or parsed (then nothing
-/// may be trashed).
-pub fn on_disk(package: &Path) -> Option<(BTreeSet<String>, BTreeSet<String>)> {
+/// Which file stopped a retention pass, so `run` can say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unread {
+    /// The saved project or one of its autosaves.
+    Saved,
+    /// A Co-Producer copy (plan 8a Ruling 9).
+    Copy,
+}
+
+/// The media paths and hashes the package's saved project, autosaves and
+/// Co-Producer copies name (copies stay complete, plan 8a Ruling 9); `Err`
+/// names the kind of file that could not be listed, read or parsed (then
+/// nothing may be trashed).
+pub fn on_disk(package: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>), Unread> {
     let mut paths = BTreeSet::new();
     let mut hashes = BTreeSet::new();
     let mut take = |d: &Document| {
@@ -39,14 +49,23 @@ pub fn on_disk(package: &Path) -> Option<(BTreeSet<String>, BTreeSet<String>)> {
             }
         }
     };
+    let read = |p: &Path, why: Unread| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|t| file::from_json(&t).ok())
+            .ok_or(why)
+    };
     let pj = package.join(file::PROJECT_FILE);
     if pj.exists() {
-        take(&file::from_json(&std::fs::read_to_string(&pj).ok()?).ok()?);
+        take(&read(&pj, Unread::Saved)?);
     }
-    for a in file::list_autosaves(package).ok()? {
-        take(&file::from_json(&std::fs::read_to_string(&a).ok()?).ok()?);
+    for a in file::list_autosaves(package).map_err(|_| Unread::Saved)? {
+        take(&read(&a, Unread::Saved)?);
     }
-    Some((paths, hashes))
+    for c in file::list_copies(package).map_err(|_| Unread::Copy)? {
+        take(&read(&c, Unread::Copy)?);
+    }
+    Ok((paths, hashes))
 }
 
 /// Package-relative paths of the regular files under `package/Media/`
@@ -90,12 +109,18 @@ pub fn run(
     trash: &dyn Fn(&Path) -> Result<(), String>,
 ) -> Outcome {
     let mut out = Outcome::default();
-    let Some((disk_paths, disk_hashes)) = on_disk(package) else {
-        out.problems.push(
-            "Unused media files were not moved to the Trash: the saved project or one of its autosaves could not be read."
+    let (disk_paths, disk_hashes) = match on_disk(package) {
+        Ok(found) => found,
+        Err(why) => {
+            out.problems.push(
+                match why {
+                    Unread::Saved => "Unused media files were not moved to the Trash: the saved project or one of its autosaves could not be read.",
+                    Unread::Copy => "Unused media files were not moved to the Trash: a Co-Producer copy could not be read.",
+                }
                 .into(),
-        );
-        return out;
+            );
+            return out;
+        }
     };
     let keep: BTreeSet<&str> = history
         .keys()

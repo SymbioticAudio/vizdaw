@@ -907,6 +907,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         hold?.wait()
         return try snapshotsAnswer.get()
     }
+    /// Plan 8a Task 3: no Co-Producer copies (Task 7 scripts it).
+    func coProducerCopiesSize() throws -> CopiesSizeRow { CopiesSizeRow(count: 0, bytes: 0) }
     func projectId() throws -> String? {
         interchangeLock.lock()
         projectIdCalls += 1

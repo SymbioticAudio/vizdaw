@@ -550,6 +550,55 @@ impl Inner {
             .unwrap_or_else(|| crate::media::scratch_root(id))
     }
 
+    /// Where this document's Co-Producer copies go (plan 8a Ruling 9,
+    /// Ruling P9): the package, or for an untitled document
+    /// `<support>/Co-Producer/Untitled/<project id>/`, stamping a project ID
+    /// first when it has none and `stamp` is true (else `None`).
+    fn copies_home(&mut self, stamp: bool) -> Result<Option<PathBuf>, VizError> {
+        if let Some(p) = &self.path {
+            return Ok(Some(p.clone()));
+        }
+        let id = match self.doc().settings().project_id.clone() {
+            Some(id) => id,
+            None if stamp => {
+                let id = crate::project_id::fresh();
+                self.history.stamp_project_id(&id)?;
+                // The title shows Edited.
+                self.news.doc_changed = true;
+                id
+            }
+            None => return Ok(None),
+        };
+        if !core_model::document::check_project_id(&id) {
+            return Err(crate::events::bad("the project ID is malformed"));
+        }
+        Ok(Some(
+            recovery::support_dir()
+                .join("Co-Producer")
+                .join("Untitled")
+                .join(id),
+        ))
+    }
+
+    /// Writes a Co-Producer copy of the present document (plan 8a Ruling
+    /// 9): its unsaved state blobs into the package's (or the untitled
+    /// stand-in's) state folder, then a new copy named for `stamp` and
+    /// `title`. Never replaces a file. Returns the copy's path. The
+    /// session ID is unused for now; Task 4's caller passes it.
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    fn write_co_producer_copy(
+        &mut self,
+        _id: u64,
+        stamp: &str,
+        title: &str,
+    ) -> Result<PathBuf, VizError> {
+        let home = self
+            .copies_home(true)?
+            .ok_or_else(|| crate::events::bad("the copy has no folder"))?;
+        let _g = lock(&SAVE_LOCK);
+        Ok(file::write_copy(self.doc(), &home, stamp, title)?)
+    }
+
     /// Recomputes the offline set when the media pool, the format or the
     /// root changed (or `force`), and hands the online media to the
     /// engine host and to the overview worker (which re-verifies every
@@ -788,6 +837,28 @@ fn title(path: Option<&Path>) -> String {
         .unwrap_or_else(|| "Untitled".to_string())
 }
 
+/// Why `open` refuses a Co-Producer copy (plan 8a Ruling 9).
+pub const COPY_NOT_A_PROJECT: &str =
+    "That is a Co-Producer copy: open it with File › Open Co-Producer Copy….";
+
+/// True when `p`, as given or as its real place, is a Co-Producer copy.
+fn is_copy(p: &Path) -> bool {
+    file::copy_parent(p).is_some()
+        || std::fs::canonicalize(p)
+            .ok()
+            .is_some_and(|c| file::copy_parent(&c).is_some())
+}
+
+/// Count and bytes of a document's Co-Producer copies (their
+/// `project.json` files), for Settings (plan 8a Task 3).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CopiesSizeRow {
+    /// How many copies.
+    pub count: u64,
+    /// Their `project.json` files' bytes.
+    pub bytes: u64,
+}
+
 /// Appends `.vizdaw` unless present.
 fn with_extension(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
@@ -822,6 +893,16 @@ impl Session {
     /// `core_engine::fixtures::Builder`). Not exported to Swift.
     pub fn from_document(doc: Document) -> Result<Arc<Session>, VizError> {
         ffi_guard(|| Session::with(doc, None, false))
+    }
+
+    /// Writes a Co-Producer copy as a request's first entry will (plan 8a
+    /// Task 3; test hook). Not exported to Swift.
+    pub fn debug_write_co_producer_copy(
+        &self,
+        stamp: &str,
+        title: &str,
+    ) -> Result<PathBuf, VizError> {
+        ffi_guard(|| lock(&self.inner).write_co_producer_copy(self.id, stamp, title))
     }
 }
 
@@ -1822,6 +1903,13 @@ impl Session {
     pub fn open_with(path: String, options: OpenOptions) -> Result<Arc<Session>, VizError> {
         ffi_guard(|| {
             let p = PathBuf::from(&path);
+            // A copy is never edited in place nor saved over (plan 8a
+            // Ruling 9): it opens only as a new project, by `open_copy`.
+            if is_copy(&p) {
+                return Err(VizError::Model {
+                    message: COPY_NOT_A_PROJECT.into(),
+                });
+            }
             if !p.join(file::PROJECT_FILE).is_file() {
                 return Err(VizError::NotFound { path });
             }
@@ -1859,6 +1947,57 @@ impl Session {
         })
     }
 
+    /// Ruling 9: a new untitled session from the Co-Producer copy at
+    /// `path`; the media files and state blobs it names are copied into
+    /// the new session's scratch root, so the copy and its package are
+    /// never written. A file that fails to copy is a problem line for the
+    /// first `idle`.
+    #[uniffi::constructor]
+    pub fn open_copy(path: String) -> Result<Arc<Session>, VizError> {
+        ffi_guard(|| {
+            let not_a_copy = || VizError::Model {
+                message: "That is not a Co-Producer copy.".into(),
+            };
+            let given = PathBuf::from(&path);
+            // The real place, so a link to a copy reads that copy's package.
+            let copy = std::fs::canonicalize(&given).map_err(|_| not_a_copy())?;
+            let package = file::copy_parent(&copy).ok_or_else(not_a_copy)?;
+            // Every media path `from_json` accepted is relative, without `..`.
+            let doc = file::load_copy(&copy)?;
+            let mut files: Vec<String> = doc.media().values().map(|m| m.path.clone()).collect();
+            files.extend(doc.referenced_states().into_iter().map(|b| {
+                format!(
+                    "{}/{}",
+                    core_model::state::STATE_DIR,
+                    core_model::state::blob_file_name(b)
+                )
+            }));
+            let s = Session::with(doc, None, false)?;
+            let root = crate::media::scratch_root(s.id);
+            let mut problems = Vec::new();
+            for rel in files {
+                let to = root.join(&rel);
+                let done = match to.parent() {
+                    Some(d) => std::fs::create_dir_all(d),
+                    None => Ok(()),
+                }
+                .and_then(|()| std::fs::copy(package.join(&rel), &to));
+                if let Err(e) = done {
+                    problems.push(format!("{rel} was not copied ({e})."));
+                }
+            }
+            {
+                let mut inner = lock(&s.inner);
+                inner.news.problems.extend(problems);
+                // The files are there now: online, as `recheck_media` does.
+                if inner.refresh_media(s.id, true) {
+                    inner.reload_host(s.id);
+                }
+            }
+            Ok(s)
+        })
+    }
+
     /// Saves to the current path; `Io` when untitled.
     pub fn save(&self) -> Result<(), VizError> {
         ffi_guard(|| {
@@ -1873,6 +2012,22 @@ impl Session {
                 inner.save_after_pass = true;
             }
             Ok(())
+        })
+    }
+
+    /// Count and bytes of this document's Co-Producer copies (their
+    /// `project.json` files), for Settings (plan 8a Ruling 9). Zero for an
+    /// untitled document that never had one.
+    pub fn co_producer_copies_size(&self) -> Result<CopiesSizeRow, VizError> {
+        ffi_guard(|| {
+            let home = lock(&self.inner).copies_home(false)?;
+            let mut row = CopiesSizeRow { count: 0, bytes: 0 };
+            let Some(home) = home else { return Ok(row) };
+            for pj in file::list_copies(&home)? {
+                row.count += 1;
+                row.bytes += std::fs::symlink_metadata(&pj).map_or(0, |m| m.len());
+            }
+            Ok(row)
         })
     }
 
@@ -1935,6 +2090,12 @@ impl Session {
                 return Err(crate::events::bad("this project was closed"));
             }
             let p = with_extension(&path);
+            // Copies stay as written (plan 8a Ruling 9): no Save As over one.
+            if is_copy(&p) {
+                return Err(VizError::Model {
+                    message: "That is a Co-Producer copy: Save As cannot replace it.".into(),
+                });
+            }
             // Another window's package (review I-2): its retention would
             // not know this session's files. Claimed before anything is
             // written (re-review m-2); a failed save releases it.

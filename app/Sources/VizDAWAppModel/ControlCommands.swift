@@ -254,11 +254,10 @@ public enum ControlCommands {
         "file.project_settings", "media.import", "media.convert",
         "media.relink", "media.compact", "media.rename", "window.media_pool",
         "record.set", "record.recover", "lane.set_input", "lane.set_monitor", "midi.inject",
-        // Plan 8a Task 1's two registry ids, handled here only so the
-        // registry and the handlers stay in step; they answer "no handler"
-        // until Task 3 replaces them with their real handlers.
-        "settings.co_producer", "file.open_copy",
     ]
+    /// Co-Producer's two registry ids (plan 8a): until Task 7 gives them
+    /// their handlers they answer that Co-Producer is not on.
+    static let coProducer: Set<String> = ["settings.co_producer", "file.open_copy"]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
         "transport.go_position": .position, "transport.go_edit_in": .editIn, "transport.go_punch": .punchIn,
@@ -273,7 +272,7 @@ public enum ControlCommands {
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(TakeCommands.ids)
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
-            .union(MixerCommands.ids)
+            .union(MixerCommands.ids).union(coProducer)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -323,6 +322,8 @@ public enum ControlCommands {
         case _ where SurfaceCommands.ids.contains(id):
             // Process-wide or per document (plan 5f-1 Task 9).
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
+        case _ where coProducer.contains(id):
+            return .failed(.of(.unavailable, "Co-Producer is not on."))
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }
