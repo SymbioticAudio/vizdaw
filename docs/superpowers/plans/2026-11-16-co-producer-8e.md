@@ -2,25 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Co-Producer can help creatively. "Set up a new template project for me, I'd like it to be in a sort of 80's Synthwave style" makes a new untitled project in one call. It sets up sounds and routing only: instruments, a drum kit, buses, effects, tempo, meter and markers. It uses the composer's installed plug-ins and falls back to the Built-in Synth and Multi-Q. It writes no notes or beats. "Help me figure out how to mix my drums" and the bus recipes (a shared reverb, parallel compression, delay into reverb) are written-down recipes that Claude reads and then follows with 8d's mixer commands. Automation is written as real points: fades, rides and filter sweeps. Claude sees the curve in a view before it is written. New parts, such as an arpeggio of held chords, a reharmonised line or a variation, go onto a new Co-Producer track beside the original. Anything that adds notes or automation to the composer's own tracks shows exactly what changes and waits for their yes.
+**Goal:** Co-Producer can help creatively. "Set up a new template project for me, I'd like it to be in a sort of 80's Synthwave style" makes a new untitled project in one call. It sets up sounds and routing only: instruments, a drum kit, buses, effects, tempo, meter and markers. It uses the composer's installed plug-ins and falls back to the Built-in Synth and Multi-Q. It writes no notes or beats. "Help me figure out how to mix my drums" and the bus recipes (a shared reverb, parallel compression, delay into reverb) are written-down recipes that Claude reads and then follows with 8d's mixer commands. Automation is written as real points: fades, rides and filter sweeps. Claude sees the curve in a view before it is written. Co-Producer writes no MIDI notes, on any track, its own included: it may read the composer's notes with `read_midi_notes` and describe an idea in chat, such as an arpeggio of held chords, a reharmonised line or a variation, but it writes nothing. Anything that adds automation to the composer's own tracks shows exactly what changes and waits for their yes.
+
+**Owner ruling (binding; it overrides anything below that reads otherwise):** Owner, 2026-11-16: no Co-Producer notes in 1.0; Co-Producer never writes MIDI notes. Note-writing commands move to 27.1.0. So 8e registers no `midi.new_part` or `midi.add_notes`, has no `new_part` recipe or prompt, and no task writes notes. The backlog row "Co-Producer writes notes (variations, arpeggios on its own tracks)" holds them for 27.1.0.
 
 **Architecture:**
 - **`core-control`.**
-  - Three registry commands:
-    - `automation.write` (change, previewable);
-    - `midi.add_notes` (change, previewable);
-    - `midi.new_part` (add).
+  - One registry command: `automation.write` (change, previewable). No command writes notes (the owner's ruling above).
   - Three protocol commands on the Co-Producer socket: `co_producer.starter`, `co_producer.midi_notes` and `co_producer.automation`.
   - A new `starter` module parses and checks a starter project's spec. It is the only parser; `core-ffi` calls it again.
 - **`core-model`.**
   - `Command::WriteAutomation`, on the recording pass's existing `write_automation`.
-  - `diff` learns automation and added notes.
+  - `diff` learns automation.
 - **`core-ffi`.**
-  - A new `creative` module builds the core-model commands for the three registry commands. The preview and the apply share them.
+  - A new `creative` module builds the core-model commands for `automation.write`. The preview and the apply share them.
   - A new `starter` module resolves a starter's plug-ins with the fallback and builds the project as one step.
   - The new `Session` methods live in a child module, `session/co_producer_creative.rs`, so the release-fixes merge meets one new line in `session.rs`.
 - **Swift.**
-  - `CreativeCommands` runs the three registry commands through one Session call.
+  - `CreativeCommands` runs `automation.write` through one Session call.
   - `CoProducerCommands` answers the three protocol commands. `co_producer.starter` opens a new untitled document, as File › New does.
 - **`vizdaw-mcp`.**
   - Four new tools: `starter_project`, `read_midi_notes`, `preview_automation` and `recipes`.
@@ -34,8 +33,8 @@
 - **No new third-party dependency.**
 
 **Spec:** `docs/superpowers/specs/2026-11-14-co-producer-design.md`, approved by the owner on 2026-11-14, is binding. This plan builds its §12 row **8e**:
-- §8, creative help: any installed plug-in, web search by Claude, mix recipes, starter templates, edits on the composer's material, and automation as real points;
-- §10's gaps 8 (write notes), 9 (automation points) and 14 (tempo and meter, for templates);
+- §8, creative help: any installed plug-in, web search by Claude, mix recipes, starter templates, advice in chat on the composer's material (no edits to its notes), and automation as real points;
+- §10's gaps 9 (automation points) and 14 (tempo and meter, for templates). Gap 8 (write notes) moves to 27.1.0 by the owner's 2026-11-16 ruling; 8e builds only its read half, `read_midi_notes`;
 - §6.3's automation preview view.
 
 **The owner's answers are binding too** (2026-11-14):
@@ -60,10 +59,11 @@ Executors read all five.
 
 **Not in this plan:**
 - **The feel recipe.** The backlog row "Feel: per-track timing lean, and a humanize that isn't random" names a Co-Producer recipe, "give this a live feel". The feature is placed in 27.1.0, so 8e does not build it, and humanising is not one of 8e's recipes. When that row ships, its recipe joins Ruling 6's table. Task 7 notes this on the row.
-- **Rendering the input-FX arpeggiator offline.** The spec's parenthesis names the 5g-1 arpeggiator. No offline render exists, so Claude works out the arpeggio's notes itself and writes them with `midi.new_part` (Ruling 3). A backlog row covers rendering the arpeggiator into notes. (Controller's call.)
+- **Writing notes (spec §10 gap 8).** By the owner's ruling of 2026-11-16, Co-Producer writes no MIDI notes in 1.0, on any track, its own included. `midi.new_part`, `midi.add_notes`, their previews and tools, and the `new_part` recipe move to 27.1.0, in the backlog row "Co-Producer writes notes (variations, arpeggios on its own tracks)". Arpeggios, reharmonised lines and variations are advice in chat (Ruling 3).
+- **Rendering the input-FX arpeggiator offline.** The spec's parenthesis names the 5g-1 arpeggiator. No offline render exists, and Co-Producer writes no notes in 1.0, so Claude describes an arpeggio idea in chat and writes nothing (Ruling 3). Rendering the arpeggiator into notes is folded into the 27.1.0 row above.
 - **Meter peaks for gain staging.** 8d's backlog row gave this to 8e. The engine's strip peaks are read and cleared by the mixer window at 30 Hz, so a second reader needs its own peak hold in `core-engine`. That is too much for 26.0.0. The drum recipe gain-stages from the fader levels `show_mixer` reports and asks the composer to play the song and read the meters. The row moves to 27.1.0. (Controller's call.)
-- **Marks on notes and automation.** 8b left these to 8e. 8e does not need them. A write onto the composer's track always asks (Ruling 4), and a write onto Co-Producer's own track is decided by the track's or strip's mark. So the project format does not change. A backlog row keeps the per-event marks.
-- **Deleting or replacing the composer's notes.** Co-Producer adds notes. It never removes the original's notes in 8e: the composer mutes the original if they like the new part better. A backlog row covers "replace the original's notes".
+- **Marks on notes and automation.** 8b left these to 8e. 8e does not need them. 8e writes no notes, an automation write onto the composer's strip always asks (Ruling 4), and a write onto Co-Producer's own strip is decided by the strip's mark. So the project format does not change. A backlog row keeps the per-event marks.
+- **Deleting or replacing the composer's notes.** Co-Producer writes no notes in 1.0, so it neither adds nor removes any. Replacing the original's notes is folded into the 27.1.0 row above.
 - **Tempo and meter changes on an existing song.** A starter sets them as it makes the song. Changing them later is a backlog row.
 - **Plug-in categories** (reverb, delay, compressor) in `list_plugins`. Claude picks by name and maker, using its own knowledge and web search. A backlog row covers reading the CLAP features and AU types.
 
@@ -71,23 +71,15 @@ Executors read all five.
 
 These are this plan's decisions where the spec or 8a–8d leave a choice. Each one names its cost if wrong.
 
-1. **The creative commands (spec §10 gaps 8 and 9).**
-   - **Common shape.** All three are `key_only`, with `document: true`. Every target is a required ID, so no preview depends on the selection (8a Ruling 6). Ticks are at `PPQ` 15 360, and the tool descriptions say so.
-   - **The commands.** The title is the undo label outside a request.
+1. **The creative command (spec §10 gap 9).**
+   - **No note writing.** By the owner's 2026-11-16 ruling, 8e registers no command that writes notes. Gap 8 moves to 27.1.0.
+   - **Common shape.** `automation.write` is `key_only`, with `document: true`. Every target is a required ID, so no preview depends on the selection (8a Ruling 6). Ticks are at `PPQ` 15 360, and the tool descriptions say so.
+   - **The command.** The title is the undo label outside a request.
 
      | id | params | class | title | menu | core-model |
      |---|---|---|---|---|---|
      | `automation.write` | `seq` (Int ≥ 1); `target` (Text, `automation.gesture`'s grammar); `start`, `end` (Int ≥ 0, `end > start`); `points` (Text, a point list, 0–1024 points) | change | "Write Automation" | Mixer | `Command::WriteAutomation` |
-     | `midi.add_notes` | `seq`; `lane` (Int ≥ 1); `notes` (Text, a note list, 1–1024 notes) | change | "Add Notes" | Track | `EventCmd::Insert` into the track's active take |
-     | `midi.new_part` | `seq`; `lane`; `name` (Text, 1–64 characters after trimming, with 8a P11's character rules); `notes` (1–1024 notes) | add | "New Part" | Track | a new track below `lane`, playing `lane`'s destination, then `EventCmd::Insert` |
 
-   - **A note list** is entries separated by one or more ASCII spaces. Each entry is `<start>:<pitch>:<length>:<velocity>`, in ASCII digits only:
-     - `start` in ticks from the song's start, at most 1 000 000 000;
-     - `pitch` 0–127;
-     - `length` 1 to 983 040 ticks (64 quarter notes);
-     - `velocity` 1–127, mapped as 8c's velocity `set` maps it (`input::upscale_velocity`).
-
-     The text is at most 32 768 bytes. `registry::note_list` refuses anything else with "Note <n>: <what> is <range>." or "Note <n> is not start:pitch:length:velocity.".
    - **A point list** is entries separated by one or more ASCII spaces. Each entry is `<tick>:<value>`:
      - `tick` is ASCII digits, within `start..=end`, and strictly after the point before it;
      - `value` passes `registry::decimal(text, -1_000_000, 1_000_000)`.
@@ -103,27 +95,23 @@ These are this plan's decisions where the spec or 8a–8d leave a choice. Each o
    - **Refusals found from the document** are `VizError::Model`, and a preview reports them as `failed` with nothing changed:
      - a target that does not exist: "This song has no <target>.";
      - a `seq` that is not top-level, or unknown: "This song has no sequence <seq>.";
-     - a `lane` not in `seq`: "Track <id> is not in sequence <seq>.";
-     - an audio or drum track for `midi.add_notes` or `midi.new_part`: "Track <name> is not a MIDI or instrument track.". Drum tracks are left for a backlog row because their rows map pitches.
-   - **Cost if wrong:** 1024 notes or points per call is about 64 bars of sixteenths. A longer part takes several calls in one request.
+     - for the read `co_producer.midi_notes` (Ruling 3), a `lane` not in `seq`: "Track <id> is not in sequence <seq>.", and an audio track: "Track <name> is not a MIDI or instrument track.".
+   - **Cost if wrong:** 1024 points per call is about 64 bars of sixteenths. A longer curve takes several calls in one request.
 2. **Automation as real points (spec §8, §6.3).**
    - **`Command::WriteAutomation(AutomationWrite)`** is new in `core-model`. It runs the recording pass's own `check_write` and `write_automation` (`command/record.rs`), so the points land as a live pass's do. Its `name()` is "Write Automation". `lane_name` is "<strip name> <fader|pan|mute|solo|send n|param name> Automation", cut to 64 characters.
    - **The range is replaced.** Points already in `start..=end` on that target go, and the new ones take their place, as a Write pass does. An empty list clears the range.
    - **Fades, rides and sweeps.** A fade is fader points, a ride is fader points across a phrase, and a filter sweep is a `param` target on a filter's cutoff. These are recipes (Ruling 6), not commands.
    - **Cost if wrong:** a write over a range with hand-drawn points replaces them. The preview says how many points go (Ruling 4), and a yes is needed on the composer's strips.
-3. **New parts beside the original (spec §8, "edits on the composer's material").**
-   - **Reading.** `co_producer.midi_notes {seq, lane, start?, end?, window?}` is read. It answers `{doc, seq, lane, name, notes: [[start, pitch, length, velocity]], truncated}` for the active take's notes, at most 4096, by start then pitch. `start` and `end` are both given or neither, with `end > start`. Velocities are 7-bit, through the inverse of `upscale_velocity`.
-   - **Writing.** By default Claude writes the result with `midi.new_part`, as a new track below the original that plays the same destination. Being an add, it needs no yes, and 8b's marks name it "<name> (Co-Producer)". Arpeggios, reharmonised lines and variations are all worked out by Claude and written this way.
-   - **Onto an existing track.** `midi.add_notes` adds notes to a track. On a Co-Producer track it applies without asking; on the composer's it asks (Ruling 4). It never removes or changes a note already there.
-   - **Cost if wrong:** a composer who wanted the original replaced mutes it by hand, or asks Claude to mute its strip (8d's `mixer.set_strip`, with a yes).
+3. **Reading the composer's notes, and no note writing (spec §8, "edits on the composer's material"; the owner's 2026-11-16 ruling).**
+   - **Reading.** `co_producer.midi_notes {seq, lane, start?, end?, window?}` is read. It answers `{doc, seq, lane, name, notes: [[start, pitch, length, velocity]], truncated}` for the active take's notes, at most 4096, by start then pitch. `start` and `end` are both given or neither, with `end > start`. Velocities are 7-bit, through the inverse of `upscale_velocity`. `read_midi_notes` shows the notes as `start:pitch:length:velocity` text (Ruling 7).
+   - **No writing.** Co-Producer writes no MIDI notes in 1.0, on any track, its own included. There is no `midi.new_part` or `midi.add_notes`. Arpeggios, reharmonised lines and variations are advice in chat: Claude reads the notes, then describes the idea (the chords, the pattern, the rhythm, the bars), and writes nothing. The composer plays or draws it in. Note writing, with the arpeggiator render, is the 27.1.0 backlog row "Co-Producer writes notes (variations, arpeggios on its own tracks)".
+   - **Cost if wrong:** a composer who wants the idea as notes enters them by hand until 27.1.0.
 4. **Who must say yes (spec §6.5; the owner's rule; 8d Ruling 2).**
    - **`automation.write`.** The target's strip decides, by 8d Ruling 2: `automation::strip_of(target)`, or for a parameter the slot's strip, or an instrument slot's main strip (`diff::instrument_strip`). So automation on a Co-Producer bus is free. Automation on the composer's Kick asks. A parameter of a Co-Producer insert on the composer's Bass asks too, because it changes the sound of the composer's track.
-   - **`midi.add_notes`.** The track decides. `composers_work` is true when the lane was in `before` and is not marked as Co-Producer's (8b Ruling 1). This narrows 8c Ruling 3 for this command alone: 8c's quantize, transpose and velocity chores still always ask.
    - **New automation tracks.** A track that `WriteAutomation` makes is new in `after`, so its own item is not the composer's. The strip's item decides.
    - **Asking.** `needs_yes` is true when any item is the composer's work, as 8a–8d compute it. A plan whose items are all Co-Producer's applies at once, and `change` answers `applied_without_asking` (8c Ruling 8).
-   - **What the preview says.** `diff::describe_with` gains two parts:
+   - **What the preview says.** `diff::describe_with` gains one part:
      - On the strip's item (8d Ruling 4), after the parameters: `<label> automation <n> points → <m> points, bars <a>–<b>`. `<label>` is `fader`, `pan`, `mute`, `solo`, `send to <bus>` or `<slot name> <param name>`. The bars are 1-based, from the sequence's meter, as the transport counts them. With `m == 0` it reads `<label> automation cleared, bars <a>–<b>`.
-     - On the track's item, when notes were only added: `<n> notes added, bars <a>–<b>`. This replaces 8c's `"12 notes → 76 notes"` part for that case. Any other note change keeps 8c's parts.
    - **Cost if wrong:** one extra question when Co-Producer automates its own insert on a composer's track.
 5. **Starter projects (spec §8; the owner's answers).**
    - **One call.** `co_producer.starter {spec}` is class add and needs no open request. It:
@@ -183,17 +171,17 @@ These are this plan's decisions where the spec or 8a–8d leave a choice. Each o
      | `parallel_compression` | Parallel compression | Make a bus "Crush", put a compressor on it set hard (fast attack, high ratio), and plan a send from the source track or bus at 0 dB, post-fader. Bring the bus's fader up from −∞ until it thickens the sound; start near −10 dB. |
      | `delay_into_reverb` | Delay into reverb | Make or reuse the "Reverb" bus, make a bus "Delay" with a delay plug-in fully wet, route "Delay" to "Reverb" with mixer.set_output (both are Co-Producer's, so no question), and plan sends to "Delay" from the chosen tracks. |
      | `automation_moves` | Fades, rides and filter sweeps | Read the curve first with preview_automation, and show it. Then write it with change and automation.write. A fade is fader points from the level to −144 dB; a ride is a few fader points across a phrase, a dB or two up or down; a sweep is points on a filter's cutoff parameter from plugin_params. Use the target's own units. |
-     | `new_part` | A new part from the composer's own | Read the notes with read_midi_notes. Work out the new part yourself: an arpeggio of the held chords, a reharmonised line, or a variation. Write it with midi_new_part as a new track below the original, which needs no yes. Never change the original's notes; if the composer wants to hear only the new part, offer to mute the original's strip. |
 
+   - **No recipe writes notes** (the owner's 2026-11-16 ruling). There is no `new_part` recipe or prompt. When the composer asks for an arpeggio, a reharmonisation or a variation, the server's instructions (below) tell Claude to read the notes with read_midi_notes and describe the idea in chat only.
    - **Plug-ins that are not there.** Every mix recipe adds: "If list_plugins has no fitting effect, say so, set up the bus with multi-q only, and suggest the kind of plug-in to install."
    - **No banned names.** Recipe text is scanned like every other text in `vizdaw-mcp/src` (`names.rs`). It names no plug-in, maker or product.
    - **The tool.** `recipes {}` answers "Recipes:" and one "- <name>: <title>" line per recipe. `recipes {name}` answers "<title>:" and its steps, one "- <step>" line each. An unknown name is `isError: true` "No recipe <name>. Call recipes with no name for the list.", with the name passed through `rpc::truncate` and 8a's `disguises`.
-     - Its description, exactly: "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb, automation moves, and new parts from the composer's own. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing."
+     - Its description, exactly: "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb and automation moves. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing."
    - **The prompts.** `capabilities` gains `prompts: {listChanged: false}`.
      - `prompts/list` gives one prompt per recipe, with its `name` and `title` and the title as its `description`. `starter_project` has one optional argument, `style`; the others have none.
      - `prompts/get {name, arguments?}` gives one `user` message whose text is "<title>." plus the steps, and for `starter_project` with a style, "The style: <style>.".
      - `style` is at most 200 characters, with no control character, and passes `disguises`. Anything else is `-32602` "style is up to 200 characters of plain text.". An unknown prompt is `-32602` "No prompt <name>.".
-   - **The server's instructions** gain: "For creative help (a starter project, mixing, automation, a new part), read the matching recipe with the recipes tool first."
+   - **The server's instructions** gain: "For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat."
    - **Cost if wrong:** a host that never shows prompts still has the tool. A recipe that reads badly is a text change with no code risk.
 7. **The tools and the automation view (spec §6.1, §6.3, §11.12).**
    - **`starter_project {spec}`** sends `co_producer.starter`. Its `inputSchema` gives the spec's shape, with `additionalProperties: false` at each level and Ruling 5's limits as `maxItems`, `maxLength`, `minimum` and `maximum`.
@@ -201,7 +189,7 @@ These are this plan's decisions where the spec or 8a–8d leave a choice. Each o
      - Its description, exactly: "Make a new untitled song set up in a style: tempo, meter, section markers, instrument and audio tracks, buses, effects, outputs and sends. It writes no notes or beats. Use plug-ins from list_plugins; an instrument or effect that is not usable falls back to the Built-in Synth or Multi-Q, and the answer says which. Pass window from the answer to later tools to work in the new song. Read the starter_project recipe first."
    - **`read_midi_notes {seq, lane, start?, end?}`**, read only, sends `co_producer.midi_notes`.
      - Its text: "Track <lane>, <name>: N notes (start:pitch:length:velocity, 15360 ticks per quarter note):", then the notes as one note list, wrapped at 80 notes a line. If `truncated`, it adds "- and more; read a shorter range".
-     - Its description, exactly: "Read a track's notes as start:pitch:length:velocity, in ticks at 15360 per quarter note, for working out a new part. Changes nothing."
+     - Its description, exactly: "Read a track's notes as start:pitch:length:velocity, in ticks at 15360 per quarter note, to advise on the composer's part in chat. Co-Producer writes no notes. Changes nothing."
    - **`preview_automation {seq, target, start, end, points}`**, read only.
      - It checks `points` with `registry::point_list` itself, then sends `co_producer.automation {seq, target, start, end}`. That answers `{doc, target, target_name, unit, min, max, start_bar, end_bar, points: [[tick, value]], truncated}`, with values in the target's units, at most 4096 points.
      - Its text: "<target_name>, bars <start_bar>–<end_bar>: now N points, planned M points." Then "Planned:" with one "- tick <t>: <value> <unit>" line each, at most 40, then "- and N more".
@@ -212,8 +200,8 @@ These are this plan's decisions where the spec or 8a–8d leave a choice. Each o
      - The SVG is built with `createElementNS` and `setAttribute` of numbers only. Every name is set with `textContent`. Points that are not finite are skipped.
      - It follows 8c Ruling 7: no data of its own, nothing from the network, and the host's light or dark palette.
      - It has no controls: it is a picture.
-   - **`change`'s description** adds, after 8d's sentence: "creative writes: automation points with automation.write, and notes added to an existing track with midi.add_notes. On Co-Producer's own tracks and buses these apply without asking."
-   - **The registry tools.** `midi_new_part` appears through 8a Ruling 12, being an add. Its `notes` has `maxLength` 32 768. `automation.write` and `midi.add_notes` are run only through `change`.
+   - **`change`'s description** adds, after 8d's sentence: "creative writes: automation points with automation.write. On Co-Producer's own tracks and buses these apply without asking."
+   - **The registry tools.** 8e adds no registry tool: `automation.write` is run only through `change`, and no tool writes notes.
    - **Safe text.** Every name in a text or `structuredContent` has 8a's `disguises` characters replaced by U+FFFD, as 8c's `show_tracks` does.
    - **Cost if wrong:** a curve of more than 4096 existing points shows the first 4096, and the text says "truncated".
 
@@ -248,17 +236,19 @@ Every task's requirements include these.
   - CLAP is the built-in default: Co-Producer's `multi-q`, and either Multi-Q ID, load the bundled CLAP (8d Ruling 3).
   - The restart refresh applies only to the bundled Multi-Q: `crates/core-host` and `crates/platform-macos` do not change in this plan, and 6g's refresh tests stay green.
 - **Hostile input.**
-  - Every MCP input is hostile: every MCP message, every tool and prompt argument, every Co-Producer call, every starter spec, every plug-in name and maker from the catalog, every parameter name from a plug-in, every note and point list, and every name a view draws.
+  - Every MCP input is hostile: every MCP message, every tool and prompt argument, every Co-Producer call, every starter spec, every plug-in name and maker from the catalog, every parameter name from a plug-in, every point list, and every name a view draws.
   - Every new FFI export runs inside `ffi_guard` (and so `catch_unwind`). It returns `Result<_, VizError>`, or a safe default for the never-failing ones.
   - `vizdaw-mcp` handles each message inside `std::panic::catch_unwind`. A panic answers `-32603` and the server goes on.
-  - Each new command and call gets hostile-input tests: wrong types, unknown params or keys, missing required params, a 70 000-character string, a NUL, IDs out of range or unknown, and IDs of the wrong kind (an audio track for notes, a slot as a strip).
+  - Each new command and call gets hostile-input tests: wrong types, unknown params or keys, missing required params, a 70 000-character string, a NUL, IDs out of range or unknown, and IDs of the wrong kind (an audio track for a notes read, a slot as a strip).
   - Every planned command that does not run gets its line in the reply (8a Ruling 13).
-- **The composer's yes.** `automation.write` and `midi.add_notes` are previewable and run only through `co_producer.apply` (8a Rulings 6–8; Ruling 4). A direct `command.run` of either on the Co-Producer socket stays `not_allowed`.
+- **The composer's yes.** `automation.write` is previewable and runs only through `co_producer.apply` (8a Rulings 6–8; Ruling 4). A direct `command.run` of it on the Co-Producer socket stays `not_allowed`.
+- **No notes from Co-Producer** (owner, 2026-11-16). No task adds a command, tool, recipe or prompt that writes MIDI notes, on any track, Co-Producer's own included. `midi.new_part` and `midi.add_notes` are not registered; they move to 27.1.0. Notes are only read (`co_producer.midi_notes`, `read_midi_notes`). Task 1's `co_producer_writes_no_notes` and Task 6's `no_tool_writes_notes` pin it.
 - **No notes or beats in a starter.** A starter project writes no events of any kind (Ruling 5).
 - **Counts.** Check every count at the start of Task 1, and report each task's change against it.
-  - The registry grows by **3**, from the count measured at the start. It is expected to be 209, after 8d's +13.
-  - `COMMAND_NAMES` grows by **3**, expected 24 → 27. `ErrorCode::ALL` stays as measured, expected 16.
-  - `PREVIEWABLE` grows by **2**, expected 24 → 26.
+  - The registry grows by **1** (`automation.write`), from the count measured at the start. It is expected to be 209 → 210, after 8d's +13.
+  - `COMMAND_NAMES` grows by **3** (the three protocol commands), expected 24 → 27. `ErrorCode::ALL` stays as measured, expected 16.
+  - `PREVIEWABLE` grows by **1**, expected 24 → 25.
+  - The README grows by **11** steps, expected 377 → 388.
 - **Names.**
   - The repo and UI never name the vendors and DAWs on the project's banned list. The list lives only in the name scans (`app/Tests/VizDAWAppModelTests/NameScanTests.swift`, `crates/core-control/tests/names.rs`); read them, keep all new text clear of them, and never copy the list.
   - The list includes the feature's old working name, which plan 8a added to the scans (spec, "Name"). Like every banned name, it is never written in the repo, this plan included.
@@ -310,8 +300,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
    - Examples:
      - fader automation on the composer's Kick;
      - a filter sweep on a Co-Producer insert that sits on the composer's Bass;
-     - notes added to the composer's Piano track;
-     - a plan holding free automation on a Co-Producer bus and notes on the composer's track.
+     - a plan holding free automation on a Co-Producer bus and fader automation on the composer's Piano strip.
    - Expected: each asks, and the list shows exactly the composer's items. Only a plan whose every item is Co-Producer's applies without asking.
    - Pinned by Task 3's `creative_writes_ask_for_the_composers_work` and Task 1's `creative_changes_only_through_a_preview`.
 2. **A starter project meets an install with nothing fitting.**
@@ -322,21 +311,21 @@ These are the five failure modes a composer is most likely to hit, most likely f
      - a build without Multi-Q.
    - Expected: the project is still made, every fallback has its line, and no starter fails over a plug-in.
    - Pinned by Task 4's `starters_fall_back_to_built_ins` and `starters_never_fail_over_a_plugin`.
-3. **A starter writes notes, or a bad spec opens a window.**
+3. **A starter or any Co-Producer path writes notes, or a bad spec opens a window.**
    - Examples:
      - any track with an event after the build;
+     - a `midi.new_part` or `midi.add_notes` reaching the registry or a tool;
      - a spec with a bus cycle, two strips named "Bass", 33 tracks, `bar: 0`, `tempo: "1e3"`, `meter: "4/3"` or an unknown key.
-   - Expected: every starter track has no events, and a bad spec is refused before any window opens.
-   - Pinned by Task 4's `starters_write_no_notes`, Task 1's `starter_specs_refuse_hostile_input` and Task 5's `badStarterOpensNoWindow`.
-4. **Odd notes and points.**
+   - Expected: every starter track has no events, no note-writing command or tool exists, and a bad spec is refused before any window opens.
+   - Pinned by Task 4's `starters_write_no_notes`, Task 1's `co_producer_writes_no_notes`, Task 6's `no_tool_writes_notes`, Task 1's `starter_specs_refuse_hostile_input` and Task 5's `badStarterOpensNoWindow`.
+4. **Odd points and reads.**
    - Examples:
      - a point outside `start..end`, two points out of order, or 1025 points;
      - a fader value of 20 dB, or a stepped parameter given 0.5;
      - a parameter of a plug-in still loading;
-     - a note of pitch 128 or length 0;
-     - notes for an audio track, or for a track of another sequence.
-   - Expected: Ruling 1's refusal, at preview, with the document unchanged.
-   - Pinned by Task 1's `note_and_point_lists_parse_strictly` and Task 3's `odd_creative_targets_are_refused_at_preview`.
+     - a notes read of an audio track, or of a track of another sequence.
+   - Expected: Ruling 1's refusal, at preview or at the read, with the document unchanged.
+   - Pinned by Task 1's `point_lists_parse_strictly` and Task 3's `odd_creative_targets_are_refused_at_preview` and `reads_change_nothing`.
 5. **The automation view, recipes and prompts meet hostile or unusual data.**
    - Examples:
      - a parameter named `<img src=x onerror=alert(1)>`;
@@ -360,13 +349,13 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `crates/core-control/src/starter.rs` (`StarterSpec` and `parse`);
   - `crates/core-control/tests/starter.rs`.
 - Modify:
-  - `crates/core-control/src/registry.rs` (the three entries and their params; `note_list`, `point_list`);
+  - `crates/core-control/src/registry.rs` (the `automation.write` entry and its params; `point_list`);
   - `crates/core-control/src/request.rs` (`COMMAND_NAMES`; `co_producer.starter`, `co_producer.midi_notes`, `co_producer.automation`);
-  - `crates/core-control/src/co_producer.rs` (`PREVIEWABLE`; `admit` for the three new commands);
+  - `crates/core-control/src/co_producer.rs` (`PREVIEWABLE`; `admit` for the new command and the three protocol commands);
   - `crates/core-control/src/lib.rs`;
   - `crates/core-control/tests/co_producer.rs`, `tests/commands.rs`, `tests/protocol.rs`;
   - `crates/core-ffi/src/control.rs` (the `ControlRequest` variants and their mapping, so the workspace builds);
-  - `app/Sources/VizDAWAppModel/CreativeCommands.swift` (new: the three ids, answering `.failed(.of(.unavailable, "Not ready yet."))` until Task 5);
+  - `app/Sources/VizDAWAppModel/CreativeCommands.swift` (new: the one id, answering `.failed(.of(.unavailable, "Not ready yet."))` until Task 5);
   - `app/Sources/VizDAWAppModel/CoProducerCommands.swift` (the three new commands answer the same until Task 5).
 
 **Interfaces:**
@@ -374,14 +363,10 @@ These are the five failure modes a composer is most likely to hit, most likely f
 - Produces:
   ```rust
   // registry.rs
-  pub const CREATIVE_IDS: &[&str] = &["automation.write", "midi.add_notes", "midi.new_part"];
-  pub const MAX_NOTES: usize = 1024;
+  pub const CREATIVE_IDS: &[&str] = &["automation.write"];   // no note writing (owner, 2026-11-16)
   pub const MAX_POINTS: usize = 1024;
   pub const LIST_TEXT_MAX: usize = 32_768;
   #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-  pub struct NoteSpec { pub start: u64, pub pitch: u8, pub length: u64, pub velocity: u8 }
-  /// Ruling 1's note list: 1..=MAX_NOTES notes.
-  pub fn note_list(text: &str) -> Result<Vec<NoteSpec>, String>;
   /// Ruling 1's point list: 0..=MAX_POINTS points, ticks in start..=end, strictly rising.
   pub fn point_list(text: &str, start: u64, end: u64) -> Result<Vec<(u64, f64)>, String>;
   // starter.rs
@@ -399,7 +384,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
   CoProducerStarter { spec: serde_json::Value },   // checked by starter::parse in admit
   CoProducerMidiNotes { seq: u64, lane: u64, range: Option<(u64, u64)>, window: Option<WindowRef> },
   CoProducerAutomation { seq: u64, target: String, start: u64, end: u64, window: Option<WindowRef> },
-  // co_producer.rs: PREVIEWABLE gains "automation.write" and "midi.add_notes", after 8d's.
+  // co_producer.rs: PREVIEWABLE gains "automation.write", after 8d's.
   ```
   In `core-ffi/src/control.rs`, `ControlRequest` gains `CoProducerStarter { spec: String }` (the spec's JSON text), `CoProducerMidiNotes { seq, lane, start, end, window }` and `CoProducerAutomation { seq, target, start, end, window }`.
 
@@ -407,17 +392,16 @@ These are the five failure modes a composer is most likely to hit, most likely f
 - [ ] **Step 2: Write the failing tests.**
   - In `tests/co_producer.rs`:
     - `creative_commands_have_their_class`:
-      - `automation.write` and `midi.add_notes` are `Change`, and `midi.new_part` is `Add`;
-      - `list_json()` lists all three, with `previewable: true` for the first two and `false` for `midi.new_part`.
+      - `automation.write` is `Change`;
+      - `list_json()` lists it with `previewable: true`.
+    - `co_producer_writes_no_notes` (owner, 2026-11-16): `CREATIVE_IDS` is exactly `["automation.write"]`; the registry has no `midi.new_part` or `midi.add_notes`; and `command.run` or a `co_producer.preview` plan holding either is `unknown_command`, as any unregistered id is.
     - `creative_changes_only_through_a_preview`:
-      - `command.run` of `automation.write` or `midi.add_notes`, with valid params, is `not_allowed` with 8a Ruling 6's direct-call sentence;
-      - a `co_producer.preview` plan holding each is admitted;
-      - `command.run midi.new_part {seq: 1, lane: 2, name: "Arp", notes: "0:60:3840:100"}` is admitted.
+      - `command.run` of `automation.write`, with valid params, is `not_allowed` with 8a Ruling 6's direct-call sentence;
+      - a `co_producer.preview` plan holding it is admitted.
     - `creative_commands_refuse_hostile_input`. Each is `invalid_params`:
-      - `seq` or `lane` missing, `0`, `-1`, `"2"` or `2^53`;
+      - `seq` missing, `0`, `-1`, `"2"` or `2^53`;
       - `automation.write` with `end` equal to `start`, a `target` of `"fader:x"`, `"vel:1"` or 70 000 characters, or `points` of 32 769 bytes;
-      - `midi.new_part` with `name` of `""`, `"   "`, 65 characters or `"a\u{0}b"`;
-      - an unknown param on any of the three.
+      - an unknown param.
     - `starter_and_reads_only_on_the_co_producer_socket`: on a developer server, all three protocol commands are `not_allowed` "only on the Co-Producer socket". On the Co-Producer socket they are admitted with no open request.
     - `reads_refuse_hostile_input`: `co_producer.midi_notes` with only `start`, or `end <= start`; `co_producer.automation` with no `target`, `end <= start`, or `{extra: 1}`. Each is `invalid_params`.
   - In `tests/starter.rs`:
@@ -442,22 +426,20 @@ These are the five failure modes a composer is most likely to hit, most likely f
       - an unknown key at the top, in a bus, in a track or in a send;
       - a name with a NUL, or a title of 70 000 characters.
   - In `tests/commands.rs`:
-    - the registry count is the baseline plus 3, and `COMMAND_NAMES.len()` is the baseline plus 3;
+    - the registry count is the baseline plus 1, and `COMMAND_NAMES.len()` is the baseline plus 3;
     - the minimal-shape list gains `co_producer.starter`;
-    - `note_and_point_lists_parse_strictly`:
-      - `"0:60:3840:100 3840:64:3840:90"` gives two `NoteSpec`s;
-      - pitch 128, length 0, length 983 041, velocity 0, velocity 128, `"0:60:3840"`, `"0:60:3840:100:1"`, `"-1:60:1:1"`, `"0:+60:1:1"`, 1025 notes and `""` are each `Err` with Ruling 1's message;
+    - `point_lists_parse_strictly`:
       - `point_list("0:-6 3840:0", 0, 3840)` gives two points;
       - `""` gives no points;
       - a tick outside `start..=end`, two equal ticks, a falling tick, `"0:1e3"`, `"0:NaN"`, `"0:"` and 1025 points are each `Err`.
   - In `tests/protocol.rs`: the round-trip parse of `co_producer.midi_notes {seq: 1, lane: 2, start: 0, end: 61440}`, `co_producer.automation {seq: 1, target: "fader:3", start: 0, end: 61440}` and `co_producer.starter {spec: <the example>}`.
 - [ ] **Step 3: Run** `cargo test -p core-control`. Expected: FAIL.
-- [ ] **Step 4: Implement** Ruling 1's entries and lists, Ruling 5's `starter::parse`, the three protocol commands and the `PREVIEWABLE` additions.
+- [ ] **Step 4: Implement** Ruling 1's entry and point list, Ruling 5's `starter::parse`, the three protocol commands and the `PREVIEWABLE` additions.
   - **The cross-param checks** (`end > start`; `start` and `end` together) go beside 8d's, as `registry::validate_args` runs them for both sockets. `point_list` runs there with the call's own `start` and `end`.
   - **`admit`** runs `starter::parse` on `co_producer.starter`'s spec, so the app never sees a bad one.
   - **The two other crates.** `core-ffi/src/control.rs` maps the new commands. Swift gets the temporary arms named in Files, so `everyRegisteredMenuCommandHasAHandler` passes.
 - [ ] **Step 5: Run** `cargo test -p core-control -p core-ffi`. Expected: PASS, including `names.rs`.
-- [ ] **Step 6: End-of-task checks**, including the Swift build and test. **Commit** `feat(control): Co-Producer creative commands, reads and the starter spec (plan 8e Task 1)`.
+- [ ] **Step 6: End-of-task checks**, including the Swift build and test. **Commit** `feat(control): Co-Producer automation writes, reads and the starter spec (plan 8e Task 1)`.
 
 ### Task 2: Automation writes and what the preview says (`core-model`)
 
@@ -465,12 +447,12 @@ These are the five failure modes a composer is most likely to hit, most likely f
 - Modify:
   - `crates/core-model/src/command/mod.rs` (`Command::WriteAutomation`);
   - `crates/core-model/src/command/record.rs` (`check_write` and `write_automation` made `pub(crate)`);
-  - `crates/core-model/src/diff.rs` (Ruling 4's two parts);
+  - `crates/core-model/src/diff.rs` (Ruling 4's automation part);
   - `crates/core-model/tests/diff.rs`;
   - `crates/core-model/tests/automation_write.rs` (new).
 
 **Interfaces:**
-- Consumes: `AutomationWrite`, `MAX_WRITE_POINTS`, `automation::strip_of`; 8d's `describe_with`, `ParamLookup`, `instrument_strip`, `MAX_PARTS`; 8c's note parts.
+- Consumes: `AutomationWrite`, `MAX_WRITE_POINTS`, `automation::strip_of`; 8d's `describe_with`, `ParamLookup`, `instrument_strip`, `MAX_PARTS`.
 - Produces:
   ```rust
   // command/mod.rs
@@ -496,14 +478,13 @@ These are the five failure modes a composer is most likely to hit, most likely f
       - with a lookup giving ("Cutoff", 0.5), a parameter target gives "Test Gain Cutoff automation …";
       - an instrument slot's parameter joins its main strip's item.
     - `bars_follow_the_meter`: in 3/4, tick 3 × 15 360 is bar 2.
-    - `added_notes_say_so`: inserting 64 notes on a track with 12 gives "64 notes added, bars 1–4", and no "12 notes → 76 notes" part. A quantize still gives 8c's parts.
     - `automation_parts_count_toward_the_cap`: 20 parameter writes on one strip give 12 parts, then "and 8 more changes".
 - [ ] **Step 2: Run** `cargo test -p core-model --test automation_write --test diff`. Expected: FAIL.
-- [ ] **Step 3: Implement** Ruling 2's command and Ruling 4's parts, after 8d's parameter parts.
+- [ ] **Step 3: Implement** Ruling 2's command and Ruling 4's part, after 8d's parameter parts.
 - [ ] **Step 4: Run** `cargo test -p core-model`. Expected: PASS, including 8a's `co_producer_requests` proptest, 8c's note and marker items and 8d's mixer items.
 - [ ] **Step 5: End-of-task checks. Commit** `feat(model): automation writes and creative changes in the Co-Producer preview (plan 8e Task 2)`.
 
-### Task 3: Creative commands, their previews and the yes (`core-ffi`)
+### Task 3: Automation writes, their previews, the yes and the reads (`core-ffi`)
 
 **Files:**
 - Create:
@@ -513,17 +494,16 @@ These are the five failure modes a composer is most likely to hit, most likely f
 - Modify:
   - `crates/core-ffi/src/session.rs` (`mod co_producer_creative;` only);
   - `crates/core-ffi/src/lib.rs`;
-  - `crates/core-ffi/src/co_producer.rs` (the arms of `preview_items` for `automation.write` and `midi.add_notes`; `composers_work` by Ruling 4);
-  - `crates/core-ffi/src/tracks.rs` (a MIDI track below a given one, on its destination, for `midi.new_part`);
+  - `crates/core-ffi/src/co_producer.rs` (the arm of `preview_items` for `automation.write`; `composers_work` by Ruling 4);
   - `crates/core-ffi/src/control.rs` (`ControlResult::{CoProducerMidiNotes, CoProducerAutomation}` and their JSON);
   - `app/Tests/VizDAWAppModelTests/FakeSession.swift` (the stubs).
 
 **Interfaces:**
-- Consumes: Task 1's ids, lists and requests; Task 2's `WriteAutomation`, `bar_of` and parts; 8d's `PluginLookup`, `describe_with`, `instrument_strip` and its Ruling 2; `automation::{fader_norm, fader_db, pan_norm, pan_of, param_plain}`; `parse_automation_target`; `input::upscale_velocity`; 8b's marks.
+- Consumes: Task 1's ids, lists and requests; Task 2's `WriteAutomation`, `bar_of` and parts; 8d's `PluginLookup`, `describe_with`, `instrument_strip` and its Ruling 2; `automation::{fader_norm, fader_db, pan_norm, pan_of, param_plain}`; `parse_automation_target`; `input::upscale_velocity` (inverted, for the read); 8b's marks.
 - Produces:
   ```rust
   // creative.rs
-  /// The core-model commands for one of CREATIVE_IDS, in order; Ruling 1's refusals.
+  /// The core-model commands for `automation.write` (CREATIVE_IDS), in order; Ruling 1's refusals.
   pub fn commands_for(doc: &Document, id: &str, args: &[(String, ArgValue)], host: &dyn PluginLookup)
       -> Result<Vec<Command>, VizError>;
   /// A value in the target's units to the stored 0–1, or Ruling 1's refusal.
@@ -559,16 +539,13 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - `automation.write {target: "fader:<Drums>", points: "0:-6 61440:0"}` builds one `WriteAutomation` with `fader_norm(-6.0)` and `fader_norm(0.0)`;
     - `pan` −30 is stored as `pan_norm(-0.3)`;
     - `param` 0.25 on Cutoff is stored as 0.25;
-    - `midi.add_notes` builds one `EventCmd::Insert` with velocities through `upscale_velocity`;
-    - `midi.new_part {lane: Piano, name: "Arp"}` builds a new track below Piano, on Piano's destination, then the insert.
+    - `midi.new_part` and `midi.add_notes` are unknown ids, and build nothing (owner, 2026-11-16).
   - `creative_writes_ask_for_the_composers_work`:
     - **Free.** `[automation.write {target: "fader:<Drums>", …}]` previews `needs_yes: false`.
     - **Asks.** `[automation.write {target: "fader:<Piano>", …}]` previews `needs_yes: true`, with "Strip Piano" / "fader automation 0 points → 2 points, bars 1–2" `composers_work: true`.
     - **Asks, for Co-Producer's insert on the composer's strip.** `automation.write {target: "param:<Vox insert>:<Cutoff>"}` previews `needs_yes: true`.
-    - **Asks, for notes on the composer's track.** `midi.add_notes {lane: Piano}` previews `needs_yes: true` with "64 notes added, bars 1–4".
-    - **Free, for notes on Co-Producer's track.** After `midi.new_part` makes "Arp (Co-Producer)", `midi.add_notes {lane: Arp}` previews `needs_yes: false`.
-    - **A mixed plan asks.** Free automation on Drums plus notes on Piano previews `needs_yes: true`, and exactly the Piano item has `composers_work: true`.
-  - `creative_previews_match_what_the_apply_does`: for each of the two previewable ids:
+    - **A mixed plan asks.** Free automation on Drums plus fader automation on Piano previews `needs_yes: true`, and exactly the Piano item has `composers_work: true`.
+  - `creative_previews_match_what_the_apply_does`: for `automation.write`:
     - `co_producer_take`, then `run_creative` with the same args, gives a document whose `describe_with` from the start equals the preview's items;
     - a hand edit between the preview and the take makes the take fail with "The song changed since the preview; preview again.".
   - `odd_creative_targets_are_refused_at_preview`. Each previews to `Err` with Ruling 1's message, and the plan runs nothing:
@@ -579,30 +556,25 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - the fake answering `None` gives 8d's not-running sentence;
     - `fader:999` gives "This song has no fader:999.";
     - `seq: 99` gives "This song has no sequence 99.";
-    - `midi.add_notes {lane: Vox}` gives "Track Vox is not a MIDI or instrument track.";
-    - a lane of another sequence gives "Track <id> is not in sequence <seq>.".
-  - `new_parts_are_marked`:
-    - in a request, `run_creative("midi.new_part", …)` adds one track "Arp (Co-Producer)" below Piano, playing Piano's destination, with exactly the given notes;
-    - Piano's notes are unchanged;
-    - it is one step "Co-Producer: <Title>";
-    - outside a request, the undo label is "New Part".
+    - outside a request, a write's undo label is "Write Automation", and in one it is one step "Co-Producer: <Title>".
   - `reads_change_nothing`:
     - `co_producer_midi_notes(Piano)` gives its 12 notes, 7-bit, by start then pitch, and a range gives only those inside it;
     - `co_producer_automation("fader:<Piano>", …)` after an applied write gives the points in dB, with `unit` "dB", `min` −144, `max` 12 and the bars;
     - neither changes the document's revision;
     - a track of 5000 notes gives 4096 with `truncated: true`;
+    - `co_producer_midi_notes(Vox)` is `Err` "Track Vox is not a MIDI or instrument track.", and a lane of another sequence is `Err` "Track <id> is not in sequence <seq>.";
     - an unknown lane, an unknown target, or `u64::MAX` is `Err`, with no panic.
-  - `run_creative_refuses_hostile_input`: an unknown id, a missing arg, `notes` of 70 000 characters, and `u64::MAX` as `lane` are each `Err`, with no panic and no change.
+  - `run_creative_refuses_hostile_input`: an unknown id (`midi.new_part` and `midi.add_notes` among them), a missing arg, `points` of 70 000 characters, and `u64::MAX` as `seq` are each `Err`, with no panic and no change.
   - `creative_results_json`: both read results serialise to the keys in Interfaces.
 - [ ] **Step 2: Run** `cargo test -p core-ffi --test creative`. Expected: FAIL.
 - [ ] **Step 3: Implement** Rulings 1–4.
   - **`commands_for`** reads the args by name, as 8d's does. Refusals found from the document come before any command is built.
-  - **`preview_items`** gains one arm for the two ids. It executes `commands_for(h.doc(), …)` on the clone, describes with `describe_with` and the live lookup, and sets `composers_work` by Ruling 4.
+  - **`preview_items`** gains one arm for `automation.write`. It executes `commands_for(h.doc(), …)` on the clone, describes with `describe_with` and the live lookup, and sets `composers_work` by Ruling 4.
   - **`run_creative`** follows 8d's `run_mixer`: it refuses with `Busy` while an edit is open, runs one transaction named the title, aborts on an error, then commits and marks.
   - **The reads** take the document as it stands and change nothing.
   - **Swift.** `FakeSession` gains the stubs.
 - [ ] **Step 4: Run** `cargo test -p core-ffi`. Expected: PASS, including 8a's `co_producer`, 8b's `notes`, 8c's `chores` and 8d's `mixer_chores`.
-- [ ] **Step 5: End-of-task checks**, including the Swift build and test. **Commit** `feat(ffi): Co-Producer automation points and new parts, with exact previews (plan 8e Task 3)`.
+- [ ] **Step 5: End-of-task checks**, including the Swift build and test. **Commit** `feat(ffi): Co-Producer automation points with exact previews, and note reads (plan 8e Task 3)`.
 
 ### Task 4: Starter projects (`core-ffi`)
 
@@ -670,19 +642,19 @@ These are the five failure modes a composer is most likely to hit, most likely f
 
 **Files:**
 - Modify:
-  - `app/Sources/VizDAWAppModel/CreativeCommands.swift` (the three handlers through `runCreative`, replacing Task 1's arms);
+  - `app/Sources/VizDAWAppModel/CreativeCommands.swift` (the `automation.write` handler through `runCreative`, replacing Task 1's arm);
   - `app/Sources/VizDAWAppModel/CoProducerCommands.swift` (`co_producer.starter`, `co_producer.midi_notes`, `co_producer.automation`);
   - `app/Tests/VizDAWAppModelTests/CreativeCommandsTests.swift` (new), `CoProducerCommandsTests.swift`, `FakeSession.swift`.
 
 **Interfaces:**
 - Consumes: Task 3's `runCreative(id:args:)`, `coProducerMidiNotes(…)` and `coProducerAutomation(…)`; Task 4's `coProducerStarter(spec:)`; `DocumentStore.newProject(_:)` and `store.defaultFormat`, as `file.new`'s handler uses them; 8a's request begin and end and `coProducerEnter(stamp:)` / `coProducerLeave()`.
-- Produces: the handlers. Each creative handler answers `.ran(command:doc:window:undoLabel:status:)` with `status` the title, and `midi.new_part` with the new track's name. `co_producer.starter` answers its result with the new document's `window`.
+- Produces: the handlers. The creative handler answers `.ran(command:doc:window:undoLabel:status:)` with `status` the title. `co_producer.starter` answers its result with the new document's `window`.
 
 - [ ] **Step 1: Write the failing Swift tests** with `FakeSession`.
   - `CreativeCommandsTests`:
-    - `creativeEditsRunThroughOneCall`: each of the three ids calls `runCreative` with its id and args unchanged, then applies the snapshot;
+    - `creativeEditsRunThroughOneCall`: `automation.write` calls `runCreative` with its id and args unchanged, then applies the snapshot;
     - a throwing `runCreative` is `.failed` with the session's message, and its `Busy` is `busy`;
-    - with an editor gesture open, each is `unavailable` with `EditorModel.gestureOpenMessage`, and `runCreative` is not called.
+    - with an editor gesture open, it is `unavailable` with `EditorModel.gestureOpenMessage`, and `runCreative` is not called.
   - `CoProducerCommandsTests`:
     - `starterOpensOneNewSong`: `co_producer.starter {spec}` makes exactly one new document with the default format. In it, the request is begun as "start <title>", then entered, then `coProducerStarter` is called with the spec's JSON, then left, then ended, in that order. The answer carries that document's `window`. The composer's own window and its request are untouched.
     - `badStarterOpensNoWindow`: when `coProducerStarter` throws, the new document is closed without a sheet or a save question, no document is left, and the answer is `.failed` with the message.
@@ -694,7 +666,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - The creative handlers keep 8d's guard order: the gesture first, then the session call.
   - `co_producer.starter` makes the document as `file.new`'s handler does, and runs Ruling 5's steps 2–3. Nothing else opens: no panel, no sheet, no plug-in window.
 - [ ] **Step 4: Run** the Step 2 command, then `scripts/swift.sh test`. Expected: PASS, including `NameScanTests`, `noLaneInWhatTheAppShows` and `everyRegisteredMenuCommandHasAHandler`.
-- [ ] **Step 5: End-of-task checks**, including `scripts/make-app.sh`. **Commit** `feat(app): Co-Producer creative edits and starter projects in the app (plan 8e Task 5)`.
+- [ ] **Step 5: End-of-task checks**, including `scripts/make-app.sh`. **Commit** `feat(app): Co-Producer automation writes and starter projects in the app (plan 8e Task 5)`.
 
 ### Task 6: `vizdaw-mcp`: creative tools, recipes, prompts and the automation view
 
@@ -710,7 +682,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
 
 **Interfaces:**
 - Consumes:
-  - Task 1's three protocol commands, `registry::point_list` and the three entries in `list_json()`;
+  - Task 1's three protocol commands, `registry::point_list` and the `automation.write` entry in `list_json()`;
   - the answers of Tasks 3 and 4;
   - 8c's `MAX_SHOWN`, `views::{VIEWS, wants_views, html}`, `bridge.js` and the `change` tool's states; 8a's `disguises` and `rpc::truncate`.
 - Produces:
@@ -726,7 +698,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
   pub fn automation_answer(current: &Value, planned: &[(u64, f64)]) -> (String, Value);
   // recipes.rs
   pub struct Recipe { pub name: &'static str, pub title: &'static str, pub steps: &'static [&'static str] }
-  pub const RECIPES: &[Recipe];   // Ruling 6's seven, in its order
+  pub const RECIPES: &[Recipe];   // Ruling 6's six, in its order
   pub fn recipes_answer(name: Option<&str>) -> Result<String, String>;
   pub fn prompts_list() -> Value;
   pub fn prompt_get(params: &Map<String, Value>) -> Result<Value, RpcError>;
@@ -738,9 +710,9 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - `starter_project`, `read_midi_notes`, `preview_automation` and `recipes` have Ruling 6's and 7's descriptions;
     - the last three have `readOnlyHint: true`, and `starter_project` has `destructiveHint: false`;
     - `starter_project`'s schema has `additionalProperties: false` at every level, `tracks` with `minItems` 1 and `maxItems` 32, and `kind` an `enum` of `instrument audio`;
-    - `midi_new_part` is listed, with `notes`' `maxLength` 32 768;
-    - no tool is named `automation_write` or `midi_add_notes`;
+    - no tool is named `automation_write`;
     - `change`'s description holds Ruling 7's added sentence, and the instructions hold Ruling 6's.
+  - `no_tool_writes_notes` (owner, 2026-11-16): no tool is named `midi_new_part` or `midi_add_notes`; no recipe or prompt is named `new_part`; no recipe step, prompt text, tool description or the instructions names `midi_new_part`, `midi.new_part` or `midi.add_notes`; and `change` with `[midi.add_notes …]` is refused before any socket call.
   - `starters_reach_the_app`:
     - `starter_project {spec}` sends `co_producer.starter` with the spec unchanged;
     - its text starts "Made a new song, "Synthwave", in window <n>.", lists "Tracks:" and "Buses:", and ends with the fallback lines.
@@ -751,12 +723,12 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - its `structuredContent` has `existing` and `planned`;
     - a bad `points` is `isError: true` with `point_list`'s message, before any socket call.
   - `recipes_are_a_tool_and_prompts`:
-    - `recipes {}` lists the seven names in Ruling 6's order;
+    - `recipes {}` lists the six names in Ruling 6's order;
     - `recipes {name: "mix_drums"}` starts "Help me mix my drums:", its first step "- Start a request with begin_request." and its last "- End the request with end_request, …";
     - every mix recipe holds the "If list_plugins has no fitting effect" step;
     - `starter_project`'s steps hold "Never write notes or beats.";
     - `initialize`'s `capabilities` has `prompts: {listChanged: false}`;
-    - `prompts/list` gives the seven, and only `starter_project` has the argument `style`;
+    - `prompts/list` gives the six, and only `starter_project` has the argument `style`;
     - `prompts/get {name: "starter_project", arguments: {style: "80s synthwave"}}` gives one `user` message ending "The style: 80s synthwave.".
   - `recipes_and_prompts_refuse_hostile_input`:
     - `recipes {name: <70 000 characters>}` is `isError: true` with the name truncated;
@@ -794,7 +766,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
 
 - [ ] **Step 1: Add the e2e** `co_producer_creative_over_mcp`, `#[ignore]`, in the style of 8d's `co_producer_mixer_over_mcp` and with 8a's MCP helper. Its client declares `elicitation: {}` and the MCP Apps extension.
   - **Start.** Launch the app and switch Co-Producer on over the developer channel. Run `file.create_demo`, then `file.save {path: <home>/Song.vizdaw}`. Take an instrument track P of the demo's with notes, and its strip.
-  - **Recipes.** `recipes {}` lists seven, and `prompts/list` has `starter_project` with `style`.
+  - **Recipes.** `recipes {}` lists six, and `prompts/list` has `starter_project` with `style`.
   - **A starter project.**
     1. `starter_project` with Task 1's synthwave example, where "Bass" asks for `clap:vizdaw.e2e.none` and "Reverb" asks for `clap:vizdaw.e2e.none` too;
     2. the text names a new window W, and holds the Built-in Synth line for "Bass" and the Multi-Q line for "Reverb";
@@ -803,15 +775,14 @@ These are the five failure modes a composer is most likely to hit, most likely f
     5. the undo label in W is "Co-Producer: Start Synthwave", and the demo window's undo history is unchanged.
   - **Automation on Co-Producer's bus, in W.** In a request, `preview_automation {target: "fader:<Reverb>", points: "0:-144 61440:0"}` gives "planned 2 points", with `structuredContent.view` "automation". Then `change [automation.write …]` with the same args applies with no elicitation, and its state is `"applied_without_asking"`.
   - **Automation on the composer's strip, in the demo window.** `change [automation.write {target: "fader:<P's strip>", …}]` emits `elicitation/create` with "fader automation 0 points → 2 points". Answer `decline`: nothing changed. The same `change`, answered `accept` with `allow: true`, applies.
-  - **A new part.**
-    1. `read_midi_notes` on P gives its notes;
-    2. `midi_new_part {lane: P, name: "Arp", notes: <16 notes>}` adds "Arp (Co-Producer)" below P, with 16 events, and P's event count is unchanged;
-    3. `change [midi.add_notes {lane: <Arp>, …}]` applies without asking;
-    4. `change [midi.add_notes {lane: P, …}]` asks with "notes added"; `decline` leaves P unchanged.
+  - **Notes are read, never written** (owner, 2026-11-16).
+    1. `read_midi_notes` on P gives its notes, and P's event count is unchanged;
+    2. `tools/list` has no `midi_new_part` or `midi_add_notes`, and `recipes {}` has no `new_part`.
   - **The gate.** A raw client on the Co-Producer socket gets:
-    - `not_allowed` for `command.run automation.write` and `command.run midi.add_notes`;
+    - `not_allowed` for `command.run automation.write`;
+    - `unknown_command` for `command.run midi.new_part` and `command.run midi.add_notes`;
     - `invalid_params` for `co_producer.starter` with a bus cycle, and `state.get windows` shows no new window.
-  - **Undo.** One `edit.undo` in the demo window takes back the request that held the new part.
+  - **Undo.** One `edit.undo` in the demo window takes back the request that held the accepted automation write on P's strip.
 - [ ] **Step 2: Write the README steps** in `app/README.md`, after the last step, under a heading "Plan 8e, Co-Producer creative help and starter projects:". Each step states what to do and what is seen, and says "track":
   1. Ask Claude to "set up a new template project in a sort of 80s synthwave style". A new untitled song opens with a tempo, meter, section markers, instrument tracks for drums, bass, pad, lead and arpeggio, and reverb and delay buses, all with the Co-Producer badge. No track holds any notes.
   2. Look at which instruments and effects it chose: they are plug-ins you have installed. Claude tells you which roles fell back to the Built-in Synth or Multi-Q, and that tracks on the Built-in Synth share one sound for now.
@@ -821,26 +792,23 @@ These are the five failure modes a composer is most likely to hit, most likely f
   6. Ask for a shared reverb, then for parallel compression on the drums, then for a delay into the reverb. Each new bus appears without a question. Sends from your tracks are listed first and wait for your yes.
   7. Ask Claude to fade out the song's last four bars. In a host that shows views, a curve appears first. It asks before writing on your master or track strips, and the fade plays as real automation points you can edit.
   8. Ask Claude for a filter sweep on a filter plug-in Co-Producer added to one of your tracks. It asks first, because the track is yours.
-  9. Ask Claude to turn the held chords on your piano track into an arpeggio. A new track "… (Co-Producer)" appears below the piano, playing the same instrument, with real notes. Your piano's notes are unchanged.
-  10. Ask Claude to add those notes to your piano track itself: it asks first, and says how many notes and which bars.
-  11. In a host that offers prompts, open the prompt list: the recipes are there, and the starter project prompt takes a style.
-  12. In a host without MCP Apps views, ask for the automation curve: the same answer comes as text.
+  9. Ask Claude to turn the held chords on your piano track into an arpeggio. Claude reads your piano's notes and describes an arpeggio idea in the chat. No track is added, and no track's notes change, the piano's included.
+  10. In a host that offers prompts, open the prompt list: the recipes are there, and the starter project prompt takes a style.
+  11. In a host without MCP Apps views, ask for the automation curve: the same answer comes as text.
 - [ ] **Step 3: Update the backlog** (`docs/feature-backlog.md`).
   - **The "Co-Producer over MCP" row.** Note 8e's delivery:
     - starter projects from installed plug-ins, with built-in fallbacks, and no notes;
-    - the seven recipes, as a tool and as MCP prompts;
+    - the six recipes, as a tool and as MCP prompts;
     - automation points and the automation preview view;
-    - new parts and added notes, with the track-decides yes rule.
+    - note reads for advice in chat, and no note writing (owner, 2026-11-16).
+  - **The "Co-Producer writes notes (variations, arpeggios on its own tracks)" row** is already in the backlog (27.1.0, owner 2026-11-16), with the arpeggiator render, drum-track notes and replacing the original's notes folded in. Note against it that 8e reads notes only.
   - **Closes and notes.**
     - Close 8c's row "The automation preview view".
-    - Note against "Previews for the remaining change and remove commands" that 8e added two, and that the release-fixes commands remain for the merge.
+    - Note against "Previews for the remaining change and remove commands" that 8e added one, and that the release-fixes commands remain for the merge.
     - Note against "Feel: per-track timing lean, and a humanize that isn't random" that 8e leaves it, and that its recipe "give this a live feel" joins the recipes table when the row ships.
     - Move "Meter peaks in Co-Producer's mixer read, for gain staging from levels" to 27.1.0, with the reason: a second peak reader needs its own hold in `core-engine`.
-    - Re-target 8b's "Marks on regions, notes and automation Co-Producer writes onto the composer's tracks": 8e decides the yes by the track and strip mark, so the row is now about tidying such writes without a question.
+    - Re-target 8b's "Marks on regions, notes and automation Co-Producer writes onto the composer's tracks": 8e decides an automation write's yes by the strip mark and writes no notes, so the row is now about tidying such writes without a question.
   - **New rows:**
-    - "Render the input-FX arpeggiator offline into notes, for Co-Producer's arpeggio recipe";
-    - "Replace the original's notes with a new part through Co-Producer (a remove on the composer's notes)";
-    - "Write notes onto drum tracks through Co-Producer";
     - "Change the tempo or meter of an existing song through Co-Producer";
     - "Plug-in categories (reverb, delay, compressor) in list_plugins, from CLAP features and AU types";
     - "Starter projects give each fallback role its own Built-in Synth sound" — with 27.1.0's Built-in Synth per track;
@@ -856,7 +824,7 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `scripts/make-app.sh`;
   - the e2e, `VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1`: the baseline's ignored tests plus one run, and all pass, 6g's `multiq_install_and_switch_over_the_channel` and 8d's `co_producer_mixer_over_mcp` included.
 
-  Then `pgrep -lf MacOS/VizDAW` and `pgrep -lf vizdaw-mcp` print nothing. Report against the baseline: registry +3, `COMMAND_NAMES` +3, `PREVIEWABLE` +2, error codes unchanged, README +12, e2e +1, `VERSION` unchanged, and no change under `crates/core-host`, `crates/core-engine` or `crates/platform-macos` (`git diff --stat <baseline HEAD> -- crates/core-host crates/core-engine crates/platform-macos` is empty).
+  Then `pgrep -lf MacOS/VizDAW` and `pgrep -lf vizdaw-mcp` print nothing. Report against the baseline: registry +1, `COMMAND_NAMES` +3, `PREVIEWABLE` +1, error codes unchanged, README +11, e2e +1, `VERSION` unchanged, and no change under `crates/core-host`, `crates/core-engine` or `crates/platform-macos` (`git diff --stat <baseline HEAD> -- crates/core-host crates/core-engine crates/platform-macos` is empty).
 - [ ] **Step 5: Commit** `docs(app): Co-Producer creative README checks, e2e and backlog (plan 8e Task 7)`.
 
 ## At the release-fixes merge
@@ -866,7 +834,7 @@ These steps are not a task of this branch. They run when `release-fixes` merges,
 1. **Counts.** The registry count tests take this branch's count plus 4. `COMMAND_NAMES` does not change.
 2. **Classes.** `automation.release_all` is refused on the Co-Producer socket, with the other app-wide commands of 8a Ruling 5's refused list.
 3. **Previews.** `region.set_fade_shape`, `destination.set_sound` and `lane.set_output` join `PREVIEWABLE`. Each gets a `preview_items` arm that executes its own command on the clone.
-   - **`region.set_fade_shape`.** The track decides, as `midi.add_notes` does (Ruling 4). The region's track item gains `fade in linear → s-curve`, with the shapes' menu titles.
+   - **`region.set_fade_shape`.** The track decides: `composers_work` is true when the region's track was in `before` and is not marked as Co-Producer's (8b Ruling 1). The region's track item gains `fade in linear → s-curve`, with the shapes' menu titles.
    - **`destination.set_sound`.** It always asks: the sound is shared by every track that plays the Built-in Synth (release-fixes Scope 1). The item is "Built-in Synth" / "sound Piano → Pad".
    - **`lane.set_output`.** The track decides. The item is "output <old> → <new>", with the output names from `doc.outputs()`.
 4. **Tests.** Each command gets 8a's preview-matches-apply test, a hostile-input test on the Co-Producer socket, and a direct `command.run` that is `not_allowed`.
@@ -879,8 +847,8 @@ These steps are not a task of this branch. They run when `release-fixes` merges,
    - **Automation points** (§10 gap 9; §8 "automation as real points"): Rulings 1 and 2, Tasks 2 and 3, with fades, rides and sweeps as Ruling 6's `automation_moves`.
    - **The automation preview view** (§6.3): Ruling 7 and Task 6, with its text fallback (§5).
    - **Fade shapes** (§10 gap 11): reused from release-fixes, not duplicated, in "At the release-fixes merge". Until then, fades are fader points.
-   - **Writing notes** (§10 gap 8): `midi.new_part` and `midi.add_notes` (Rulings 1 and 3), with `read_midi_notes` so Claude can see the composer's material. "Regions" here are the notes of a track's active take, as the model holds MIDI.
-   - **Arpeggio and variation edits on new tracks** (§8): the `new_part` recipe and `midi.new_part`. Humanising is the Feel row's, in 27.1.0, by the owner's backlog row.
+   - **Writing notes** (§10 gap 8): moved to 27.1.0 by the owner (2026-11-16), in the backlog row "Co-Producer writes notes (variations, arpeggios on its own tracks)". 8e builds only `read_midi_notes` (Ruling 3), so Claude can see the composer's material and advise in chat. No task writes notes.
+   - **Arpeggio and variation edits** (§8): advice in chat only in 1.0 (Ruling 3); writing them is the 27.1.0 row. Humanising is the Feel row's, in 27.1.0, by the owner's backlog row.
    - **Mix recipes** (§8; the owner's examples): Ruling 6's `mix_drums`, `shared_reverb`, `parallel_compression` and `delay_into_reverb`, on 8d's commands, with the composer's routing and sends asked for.
    - **Starter templates** (§8; the owner's answers): Ruling 5 and Task 4. They cover sounds and routing only, write no notes or beats, use installed plug-ins, and fall back to the Built-in Synth and Multi-Q. They make an untitled project, as File › New does.
    - **Tempo and meter** (§10 gap 14): set by a starter. Changing them later is a backlog row.
@@ -889,7 +857,7 @@ These steps are not a task of this branch. They run when `release-fixes` merges,
    - **8d's hand-offs**: meter peaks (moved to 27.1.0, with its reason); `region.set_fade_shape` and `destination.set_sound` (the merge section); the release-fixes rows (the merge section).
 2. **Steps.** Every test step names its tests and assertions with the plan's values: ids, ranges, grammars, sentences, item texts and caps. Code steps give signatures and point to the ruling. The tool descriptions and the recipes' steps are written out, because the spec leaves them to the plan (§11.12).
 3. **Type consistency.** These names are spelled the same in every task:
-   - `registry::{CREATIVE_IDS, MAX_NOTES, MAX_POINTS, LIST_TEXT_MAX, NoteSpec, note_list, point_list}`, `PREVIEWABLE`;
+   - `registry::{CREATIVE_IDS, MAX_POINTS, LIST_TEXT_MAX, point_list}`, `PREVIEWABLE`;
    - `starter::{StarterSpec, StarterBus, StarterTrack, StarterSend, StarterKind, parse, MAX_TRACKS, MAX_BUSES, MAX_MARKERS}` in `core-control`;
    - `Command::{CoProducerStarter, CoProducerMidiNotes, CoProducerAutomation}`, the matching `ControlRequest` variants, and `ControlResult::{CoProducerStarter, CoProducerMidiNotes, CoProducerAutomation}`;
    - `core_model::Command::WriteAutomation`, `diff::bar_of`;
@@ -905,8 +873,7 @@ These steps are not a task of this branch. They run when `release-fixes` merges,
    - File › New for the starter's document.
 6. **Owner decisions.** None are open. These calls are stated for the owner's review:
    - recipes are a read tool plus MCP prompts, not resources (Ruling 6);
-   - Claude works out arpeggios itself; rendering the input-FX arpeggiator offline is a backlog row (Not in this plan);
+   - by the owner's ruling of 2026-11-16, Co-Producer writes no notes in 1.0: arpeggios, reharmonisations and variations are advice in chat, and note writing, with the input-FX arpeggiator render, is 27.1.0's row (Not in this plan);
    - gain staging reads fader levels; meter peaks move to 27.1.0 (Not in this plan);
    - a starter's fallback is the existing Built-in Synth, one shared sound, until release-fixes and 27.1.0 (Ruling 5);
    - an unusable effect becomes Multi-Q, once per strip, by the owner's fallback rule (Ruling 5);
-   - Co-Producer adds notes but never removes the original's in 8e (Ruling 3).
