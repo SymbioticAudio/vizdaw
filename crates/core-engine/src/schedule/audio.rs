@@ -59,15 +59,18 @@ pub struct Segment {
     pub xfade: Fade,
     /// Media frame where the complement starts.
     pub xfade_from: u64,
-    /// The linear ramp at a hard region edge: the rate ×
+    /// The linear ramp at a region edge that meets silence: the rate ×
     /// [`EDGE_FADE_SECONDS`], rounded (0: none). A region's own fade, or a
     /// crossfade, at that edge replaces it.
     pub edge_frames: u64,
-    /// The region's start is a crossfade (its `fade_in` is the curve).
-    pub crossfaded_start: bool,
-    /// The region's end lies under a later region's crossfade: the
-    /// complement is the curve there.
-    pub crossfaded_end: bool,
+    /// The region's start meets silence, so it ramps: false when the start
+    /// is a crossfade (its `fade_in` is the curve) or another piece of the
+    /// lane ends there (a split, a plain overlap: the switch is instant).
+    pub ramp_start: bool,
+    /// The region's end meets silence, so it ramps: false when it lies
+    /// under a later region's crossfade (the complement is the curve) or
+    /// another piece of the lane starts there.
+    pub ramp_end: bool,
 }
 
 impl Segment {
@@ -77,7 +80,7 @@ impl Segment {
     }
 
     /// Gain × fade in × fade out (× the crossfade's complement) at media
-    /// frame `f`. An edge without a fade or crossfade ramps over
+    /// frame `f`. An edge without a fade that meets silence ramps over
     /// `edge_frames`. // RT
     pub fn gain_at(&self, f: u64) -> f32 {
         let r = f.saturating_sub(self.region_offset);
@@ -88,7 +91,7 @@ impl Segment {
             if r < fi {
                 g *= fade_curve(self.fade_in.shape, r as f32 / fi as f32);
             }
-        } else if edge > 0 && !self.crossfaded_start && r < edge {
+        } else if edge > 0 && self.ramp_start && r < edge {
             g *= r as f32 / edge as f32;
         }
         let fo = self.fade_out.length_frames;
@@ -97,7 +100,7 @@ impl Segment {
             if left <= fo {
                 g *= fade_curve(self.fade_out.shape, left as f32 / fo as f32);
             }
-        } else if edge > 0 && !self.crossfaded_end && left < edge {
+        } else if edge > 0 && self.ramp_end && left < edge {
             g *= left as f32 / edge as f32;
         }
         let xf = self.xfade.length_frames;
@@ -308,7 +311,7 @@ fn complements(
         s.frames = hi - lo;
         s.file_frame = p.file_frame.saturating_add(lo - p.start);
         s.xfade = u.fade_in;
-        s.crossfaded_end = end_under;
+        s.ramp_end = !end_under;
         s.xfade_from = p
             .seg
             .region_offset
@@ -408,8 +411,8 @@ pub(crate) fn build(
                 xfade: Fade::default(),
                 xfade_from: 0,
                 edge_frames,
-                crossfaded_start: crossfade,
-                crossfaded_end: false,
+                ramp_start: !crossfade,
+                ramp_end: true,
             },
         });
     }
@@ -452,14 +455,33 @@ pub(crate) fn build(
                 out.push(s);
             }
         }
+        // Release-fixes Task 7 fix round 1: no edge ramp where pieces join
+        // (a split, a plain overlap), within a frame of split rounding.
+        // `pieces` are sorted and never overlap, so only neighbours can be
+        // that close; `out[first..]` begins with them, in order.
+        let joined = |x: u64, y: u64| x.abs_diff(y) <= 1;
+        for (k, s) in out.iter_mut().skip(first).take(pieces.len()).enumerate() {
+            let (Some(&(_, a, b)), prev, next) = (
+                pieces.get(k),
+                k.checked_sub(1).and_then(|j| pieces.get(j)),
+                pieces.get(k + 1),
+            ) else {
+                continue;
+            };
+            if prev.is_some_and(|&(_, _, e)| joined(e, a)) {
+                s.ramp_start = false;
+            }
+            if next.is_some_and(|&(_, st, _)| joined(b, st)) {
+                s.ramp_end = false;
+            }
+        }
         if uses.iter().any(|u| u.crossfade) {
             let mut ends_under = BTreeSet::new();
             complements(doc, &uses, &pieces, &mut memo, out, &mut ends_under);
             if !ends_under.is_empty() {
-                // `out[first..]` begins with this group's pieces, in order.
                 for (&(i, _, _), s) in pieces.iter().zip(out.iter_mut().skip(first)) {
                     if ends_under.contains(&i) {
-                        s.crossfaded_end = true;
+                        s.ramp_end = false;
                     }
                 }
             }

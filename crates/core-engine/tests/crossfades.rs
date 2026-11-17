@@ -297,20 +297,76 @@ fn a_region_without_a_crossfade_renders_as_before() {
     dc_media(dir.path());
     let (b, _) = pair(Fade::default());
     let l = render(&b, dir.path());
-    // Every edge is hard, B's start too: each ramps over 72 frames.
-    for (f, x) in l.iter().enumerate() {
+    // A plain overlap switches instantly at B's start, as before (fix
+    // round 1): only the edges that meet silence, A's start and B's end,
+    // ramp over 72 frames.
+    assert!(l[72..800].iter().all(|x| *x == 0.5));
+    assert!(l[800..1728].iter().all(|x| *x == 0.25));
+    assert!(l[1800..].iter().all(|x| *x == 0.0));
+    for (f, x) in l.iter().enumerate().take(1800) {
         let f = f as u64;
-        let want = match f {
-            0..800 => 0.5 * edge(f, 1200),
-            800..1800 => 0.25 * edge(f - 800, 1000),
-            _ => 0.0,
+        let want = if f < 800 {
+            0.5 * edge(f, 1200)
+        } else {
+            // B's end only: its start joins A.
+            0.25 * ((1800 - f) as f32 / 72.0).min(1.0)
         };
         assert!((x - want).abs() < 1e-6, "frame {f}: {x} vs {want}");
     }
-    assert_eq!(l[800], 0.0);
-    assert!(l[72..800].iter().all(|x| *x == 0.5));
-    assert!(l[872..1728].iter().all(|x| *x == 0.25));
-    assert!(l[1800..].iter().all(|x| *x == 0.0));
+}
+
+/// Fix round 1 (I1): a split of continuous media plays sample for sample
+/// as the region did before it: the two halves butt, and a join never
+/// ramps. Only the outer edges, which meet silence, do.
+#[test]
+fn a_split_region_plays_seamlessly() {
+    let dir = tempfile::tempdir().unwrap();
+    ramp(&dir.path().join("a.caf"), 4000);
+    ramp(&dir.path().join("b.caf"), 4000);
+    let mut b = Builder::new();
+    let (seq, lane) = b.sequence("Song", "Audio", None).unwrap();
+    let ma = b.media("Media/a.caf", 4000, 1).unwrap();
+    b.media("Media/b.caf", 4000, 1).unwrap();
+    let ev = b
+        .region(
+            seq,
+            lane,
+            0,
+            ma,
+            0,
+            1800,
+            0.0,
+            Fade::default(),
+            Fade::default(),
+        )
+        .unwrap();
+    let whole = render(&b, dir.path());
+    // Ticks 256 and 333 (frames 400 and 520.3125, a fractional split) and
+    // two splits in a row.
+    for at in [vec![256i64], vec![333], vec![256, 700]] {
+        let mut s = Builder::from_doc(b.doc().clone());
+        for t in &at {
+            // The region holding `t`: the last one starting before it.
+            let holder = s
+                .doc()
+                .all_events()
+                .filter(|(_, e)| e.tick.0 < *t)
+                .max_by_key(|(_, e)| e.tick)
+                .map_or(ev, |(_, e)| e.id);
+            s.run(Command::Audio(AudioCmd::Split {
+                event: holder,
+                at: Tick(*t),
+            }))
+            .unwrap();
+        }
+        assert_eq!(schedule(&s).segment_count(), at.len() + 1, "{at:?}");
+        let split = render(&s, dir.path());
+        assert_eq!(split, whole, "split at {at:?}");
+    }
+    // The outer edges still ramp.
+    assert_eq!(whole[0], 0.0);
+    assert!((whole[36] - value(36) * 0.5).abs() < 1e-9);
+    assert!((whole[1799] - value(1799) / 72.0).abs() < 1e-9);
 }
 
 #[test]

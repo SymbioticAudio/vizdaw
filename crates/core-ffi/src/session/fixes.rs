@@ -124,8 +124,8 @@ impl Session {
     /// changes sign (s[k-1] and s[k] differ in sign, or s[k] == 0), within
     /// `radius` frames each side; ties go to the earlier frame. None found,
     /// or the media offline: `frame`. `frame` past the end clamps to the
-    /// length. Unknown media: UnknownId; radius > 48_000: Invalid. Reads
-    /// with CafReader as Normalize does.
+    /// length. Unknown media, or a radius over 48_000: `VizError::Model`.
+    /// Reads with CafReader as Normalize does.
     pub fn zero_crossing(&self, media: u64, frame: u64, radius: u64) -> Result<u64, VizError> {
         ffi_guard(|| {
             use core_model::ids::{AnyId, MediaId};

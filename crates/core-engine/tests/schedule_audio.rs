@@ -277,6 +277,46 @@ fn a_region_without_fades_ramps_its_edges() {
     assert!(g.gain_at(QF - 1) < 0.02, "{}", g.gain_at(QF - 1));
 }
 
+/// Fix round 1 (I1): an edge ramps only where it meets silence. Butted
+/// regions (a split) and a plain overlap switch instantly; a gap of more
+/// than a frame is silence, so both sides ramp.
+#[test]
+fn only_edges_that_meet_silence_ramp() {
+    let flags = |a: &AudioSchedule| -> Vec<(u64, bool, bool)> {
+        a.segments(OutputPathId(0))
+            .iter()
+            .map(|s| (s.start, s.ramp_start, s.ramp_end))
+            .collect()
+    };
+    // Butted: one quarter, then the next from its end.
+    let (mut b, seq, lane) = base();
+    b.region(seq, lane, 0, MediaId(0), 0, QF, 0.0, none(), none())
+        .unwrap();
+    b.region(seq, lane, Q, MediaId(1), 0, QF, 0.0, none(), none())
+        .unwrap();
+    let (s, _) = run(b.doc(), seq, &[]);
+    assert_eq!(flags(&s.audio), vec![(0, true, false), (QF, false, true)]);
+    // Overlapped: B starts inside A, which is cut there.
+    let (mut b, seq, lane) = base();
+    b.region(seq, lane, 0, MediaId(0), 0, 2 * QF, 0.0, none(), none())
+        .unwrap();
+    b.region(seq, lane, Q, MediaId(1), 0, 2 * QF, 0.0, none(), none())
+        .unwrap();
+    let (s, _) = run(b.doc(), seq, &[]);
+    assert_eq!(flags(&s.audio), vec![(0, true, false), (QF, false, true)]);
+    let g = s.audio.segments(OutputPathId(0))[1];
+    assert_eq!(g.gain_at(0), 1.0, "B starts at full level");
+    // A gap of one tick (2 frames, just past the one-frame allowance for
+    // split rounding): both edges meet silence.
+    let (mut b, seq, lane) = base();
+    b.region(seq, lane, 0, MediaId(0), 0, QF, 0.0, none(), none())
+        .unwrap();
+    b.region(seq, lane, Q + 1, MediaId(1), 0, QF, 0.0, none(), none())
+        .unwrap();
+    let (s, _) = run(b.doc(), seq, &[]);
+    assert_eq!(flags(&s.audio), vec![(0, true, true), (QF + 2, true, true)]);
+}
+
 #[test]
 fn a_region_fade_overrides_the_edge_fade() {
     let (mut b, seq, lane) = base();
@@ -421,8 +461,8 @@ fn segment_gain_combines_fades() {
         xfade: none(),
         xfade_from: 0,
         edge_frames: 0,
-        crossfaded_start: false,
-        crossfaded_end: false,
+        ramp_start: true,
+        ramp_end: true,
     };
     // In at 0.5, out (5 frames left of 10) at 0.5: 0.5 × 0.5 × 0.5.
     assert!((g.gain_at(5) - 0.125).abs() < 1e-6);
@@ -641,8 +681,8 @@ fn segment_gain_applies_the_complement() {
         xfade: fade(400, FadeShape::Linear),
         xfade_from: 800,
         edge_frames: 0,
-        crossfaded_start: false,
-        crossfaded_end: false,
+        ramp_start: true,
+        ramp_end: true,
     };
     assert_eq!(g.gain_at(800), 1.0);
     assert!((g.gain_at(900) - 0.75).abs() < 1e-6);

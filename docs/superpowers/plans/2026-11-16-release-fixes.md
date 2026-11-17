@@ -30,7 +30,7 @@ These rows are bigger than their line. The 1.0 version is stated first, then wha
      - The sound belongs to the destination. Every instrument track shares the first Built-in Synth destination (`tracks.rs` `synth_dest`), so choosing a sound changes every track that plays it, and the window says so.
    - **27.1.0:** a Built-in Synth per track, more sounds or a GM list, synth parameters, and VizDAW's own synth DSP.
 2. **Zero-crossing snapping and edge fades.**
-   - **1.0:** a fixed 1.5 ms edge fade, always on, at every region start and end without its own fade or crossfade (Ruling 8). A "Snap audio edits to zero crossings" setting, on by default, moves a trimmed start or end to the nearest zero crossing of the summed signal within 3 ms. It applies to the trim drag and to the typed start and length.
+   - **1.0:** a fixed 1.5 ms edge fade, always on, at every region start and end that meets silence and has no fade or crossfade of its own (Ruling 8). An edge that butts against or is overlapped by another region of the same track (a split, a plain overlap), within a frame, does not ramp: the switch is instant, as before (Task 7 fix round 1). A "Snap audio edits to zero crossings" setting, on by default, moves a trimmed start or end to the nearest zero crossing of the summed signal within 3 ms. It applies to the trim drag and to the typed start and length.
    - **27.1.0:**
      - snapping a Split, which has no UI caller today;
      - snapping per channel;
@@ -162,9 +162,9 @@ These are the five failure modes a user is most likely to hit, most likely first
    - Examples: a region with its own 10 ms fade; a crossfaded start; a bounce of an old project.
    - Expected:
      - a region's own fade and any crossfade sound exactly as before;
-     - only hard edges get the 1.5 ms ramp;
+     - only edges that meet silence get the 1.5 ms ramp; a split plays seamlessly, and a plain overlap switches instantly;
      - streamed and cached renders still match.
-   - Pinned by Task 7's `a_region_fade_overrides_the_edge_fade` and `a_crossfaded_start_gets_no_edge_fade`, and Task 5's proptest run.
+   - Pinned by Task 7's `a_region_fade_overrides_the_edge_fade`, `a_crossfaded_start_gets_no_edge_fade`, `only_edges_that_meet_silence_ramp` and `a_split_region_plays_seamlessly`, and Task 5's proptest run.
 5. **Choosing a synth sound does more than it says.**
    - Examples: choosing Drums then Undo; choosing a sound for a destination that is not a Built-in Synth.
    - Expected:
@@ -600,7 +600,8 @@ Rows: "Zero-crossing snapping and edge fades for audio edits" and "A control-cha
   pub const EDGE_FADE_SECONDS: f64 = 0.0015;
   ```
   - `Segment` gains `edge_frames: u64`, which is `round(rate * EDGE_FADE_SECONDS)` and is set in `build`.
-  - `gain_at` multiplies by a linear ramp over `edge_frames` at the region's start, when `fade_in.length_frames == 0` and the start is not crossfaded. It does the same at the end, when `fade_out.length_frames == 0` and the end is not crossfaded.
+  - `gain_at` multiplies by a linear ramp over `edge_frames` at the region's start, when `fade_in.length_frames == 0` and the start meets silence (`ramp_start`). It does the same at the end, when `fade_out.length_frames == 0` and the end meets silence (`ramp_end`).
+  - **Fix round 1 (I1, controller ruling).** `build` sets `ramp_start`/`ramp_end` false at a crossfaded edge, and at any written edge that butts against or is overlapped by another piece in the same group, within ±1 frame (split rounding). Joins switch instantly, as before: a split of continuous media renders sample for sample as the unsplit region, and a plain overlap's later region starts at full level. The earlier region is never ramped out at the cut (that would still notch a split). Tests: `only_edges_that_meet_silence_ramp` (schedule), `a_split_region_plays_seamlessly` and the restored `a_region_without_a_crossfade_renders_as_before` (render).
   - A region's own fade of any length replaces the edge fade.
   - `overviews.rs` `fade_gain` does not change (Scope 2).
   - Existing tests that pin a hard first or last sample get the ramp. List them in the report.
