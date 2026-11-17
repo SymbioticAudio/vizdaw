@@ -4422,6 +4422,58 @@ impl Session {
         })
     }
 
+    /// Runs one of [`CHORE_IDS`](crate::chores::CHORE_IDS) (plan 8c Task
+    /// 2) through `edit`, as the menus' edits run: `args` are validated by
+    /// the registry, the command is built from the present document by
+    /// [`crate::chores::command_for`] (as the preview builds it), and it is
+    /// one undo step. A marker command's step is "Add Marker", "Rename
+    /// Marker" or "Remove Marker" (Ruling 4). `Model` for an unknown or
+    /// other ID, a refused argument or a target that is not there; `Busy`
+    /// as `edit` is. Inside a Co-Producer call it is Co-Producer's step.
+    pub fn run_chore(
+        &self,
+        id: String,
+        args: Vec<crate::control::ControlArg>,
+    ) -> Result<DocSnapshot, VizError> {
+        use crate::edit::{EditCommand, SequenceEdit};
+        ffi_guard(|| {
+            if !crate::chores::CHORE_IDS.contains(&id.as_str()) {
+                let shown: String = id.chars().take(64).collect();
+                return Err(crate::events::bad(&format!(
+                    "{} is not a note or marker chore.",
+                    core_model::diff::shown_name(&shown)
+                )));
+            }
+            let args = crate::co_producer::validated(&id, &args)?;
+            let cmd = crate::chores::command_for(self.lock_inner().doc(), &id, &args)?;
+            let label = crate::chores::label(&id, &cmd);
+            match cmd {
+                Command::Sequence(SequenceCmd::SetMarkers { seq, markers }) => self.edit_all(
+                    label,
+                    vec![EditCommand::Sequence {
+                        edit: SequenceEdit::SetMarkers {
+                            seq: seq.0,
+                            markers: markers
+                                .iter()
+                                .map(|m| crate::events::MarkerRow {
+                                    tick: m.tick.0,
+                                    name: m.name.clone(),
+                                })
+                                .collect(),
+                        },
+                    }],
+                    None,
+                ),
+                cmd => {
+                    if self.lock_inner().edit_label.is_some() {
+                        return Err(edit_open_busy());
+                    }
+                    self.execute_with(cmd, &ViewFilter::default())
+                }
+            }
+        })
+    }
+
     /// Inside the edit `begin_edit` opened (a drag): replaces everything the
     /// edit did so far with `cmd` (Plan Ruling 7), so each pointer move
     /// sends the full target. A refused `cmd` leaves the document as it was

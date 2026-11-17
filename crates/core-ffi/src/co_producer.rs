@@ -99,6 +99,25 @@ fn model(message: impl Into<String>) -> VizError {
     }
 }
 
+/// `args` of registry command `id`, validated by the registry (no unknown,
+/// duplicate or missing argument, every value of its type), in registry
+/// order.
+pub fn validated(id: &str, args: &[ControlArg]) -> Result<Vec<(String, ArgValue)>, VizError> {
+    let spec = registry::find(id).ok_or_else(|| model(registry::unknown(id).message))?;
+    let mut params = Map::new();
+    for a in args {
+        let v = match &a.value {
+            ControlValue::Text { value } => Value::from(value.as_str()),
+            ControlValue::Flag { value } => Value::from(*value),
+            ControlValue::Int { value } => Value::from(*value),
+        };
+        if params.insert(a.name.clone(), v).is_some() {
+            return Err(model(format!("{id}: `{}` is given twice", a.name)));
+        }
+    }
+    registry::validate_args(spec, &params).map_err(|e| model(e.message))
+}
+
 /// `rows` checked as the Co-Producer socket checks a plan: 1 to
 /// [`MAX_PLAN`] commands, each validated by the registry (no unknown,
 /// duplicate or missing argument, every value of its type) with its args
@@ -110,22 +129,9 @@ pub fn plan_of(rows: &[PlannedRow]) -> Result<Vec<Planned>, VizError> {
     }
     let mut plan = Vec::with_capacity(rows.len());
     for r in rows {
-        let spec = registry::find(&r.id).ok_or_else(|| model(registry::unknown(&r.id).message))?;
-        let mut params = Map::new();
-        for a in &r.args {
-            let v = match &a.value {
-                ControlValue::Text { value } => Value::from(value.as_str()),
-                ControlValue::Flag { value } => Value::from(*value),
-                ControlValue::Int { value } => Value::from(*value),
-            };
-            if params.insert(a.name.clone(), v).is_some() {
-                return Err(model(format!("{}: `{}` is given twice", r.id, a.name)));
-            }
-        }
-        let args = registry::validate_args(spec, &params).map_err(|e| model(e.message))?;
         plan.push(Planned {
             id: r.id.clone(),
-            args,
+            args: validated(&r.id, &r.args)?,
         });
     }
     let c = ControlCommand::CoProducerPreview { plan, window: None };
@@ -349,6 +355,14 @@ pub fn preview_items(
                 let before = h.doc().clone();
                 h.execute(&cmd, &filter)?;
                 out.extend(own_rows(diff::describe(&before, h.doc())));
+            }
+            id if crate::chores::PREVIEWABLE_CHORES.contains(&id) => {
+                // Ruling 3: every note or marker change is the composer's
+                // work, even on Co-Producer's own track.
+                let cmd = crate::chores::command_for(h.doc(), id, &p.args)?;
+                let before = h.doc().clone();
+                h.execute(&cmd, &filter)?;
+                out.extend(rows(diff::describe(&before, h.doc()), true));
             }
             "edit.undo" | "edit.redo" => {
                 let undo = p.id == "edit.undo";

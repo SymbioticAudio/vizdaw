@@ -880,6 +880,8 @@ pub enum ControlResult {
         selected_seq: Option<u64>,
         /// That sequence's lanes.
         lanes: Vec<LaneRow>,
+        /// That sequence's markers, in order (plan 8c Ruling 4).
+        markers: Vec<crate::events::MarkerRow>,
         /// The destinations, with their return latency and MIDI mix.
         destinations: Vec<crate::mixer::DestRow>,
         /// The alert its window would show.
@@ -1725,6 +1727,7 @@ pub fn result_json(r: &ControlResult) -> Value {
             snapshot: s,
             selected_seq,
             lanes,
+            markers,
             destinations,
             alert,
         } => json!({
@@ -1753,6 +1756,10 @@ pub fn result_json(r: &ControlResult) -> Value {
                     crate::tracks::TrackKindRow::Instrument => "instrument",
                     crate::tracks::TrackKindRow::Midi => "midi",
                 },
+            })).collect::<Vec<_>>(),
+            // `index` is what marker.rename and marker.remove take.
+            "markers": markers.iter().enumerate().map(|(i, m)| json!({
+                "index": i + 1, "tick": m.tick, "name": m.name,
             })).collect::<Vec<_>>(),
             "destinations": destinations.iter().map(|d| json!({
                 "id": d.id, "name": d.name, "external": d.external,

@@ -1024,6 +1024,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = coNoteError { throw e }
         return (parent ?? "/tmp") + "/Untitled — Stems — \(date)"
     }
+    func runChore(id: String, args: [ControlArg]) throws -> DocSnapshot {
+        coLog.append("chore \(id)")
+        return try snapshot()
+    }
     func coProducerCopies() throws -> [CopyRow] { coCopies }
     func removeCoProducerCopies(names: [String]) throws -> RemovedCopiesRow {
         coLog.append("remove \(names.count)")

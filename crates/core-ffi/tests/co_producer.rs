@@ -1484,6 +1484,7 @@ fn marks_reach_the_rows_and_state() {
         snapshot: s.snapshot().unwrap(),
         selected_seq: Some(seq),
         lanes: rows.clone(),
+        markers: vec![],
         destinations: vec![],
         alert: None,
     });

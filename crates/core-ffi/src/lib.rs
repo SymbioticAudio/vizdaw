@@ -25,6 +25,7 @@ pub mod bounce;
 pub mod builtin_sound;
 pub mod bundled;
 pub mod catalog;
+pub mod chores;
 pub mod clock;
 pub mod co_producer;
 pub mod control;

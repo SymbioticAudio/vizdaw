@@ -82,6 +82,7 @@ fn a_state_call_round_trips_as_typed_rows() {
         snapshot,
         selected_seq: None,
         lanes: vec![],
+        markers: vec![],
         destinations: vec![],
         alert: Some(AlertRow {
             title: "Play Failed".into(),
@@ -638,6 +639,7 @@ fn lanes_show_takes_input_and_monitor() {
         snapshot,
         selected_seq: Some(seq),
         lanes,
+        markers: vec![],
         destinations: vec![],
         alert: None,
     });
@@ -684,6 +686,7 @@ fn document_state_lanes_carry_kind() {
         snapshot: session.snapshot().unwrap(),
         selected_seq: Some(seq),
         lanes: session.lanes(seq).unwrap(),
+        markers: vec![],
         destinations: vec![],
         alert: None,
     });
@@ -716,6 +719,7 @@ fn document_state_reports_the_midi_mix_per_destination() {
         snapshot: session.snapshot().unwrap(),
         selected_seq: None,
         lanes: vec![],
+        markers: vec![],
         destinations: vec![
             row(
                 4,
@@ -769,6 +773,7 @@ fn document_state_shows_outputs_and_synth_sounds() {
         snapshot: session.snapshot().unwrap(),
         selected_seq: Some(seq),
         lanes: lanes.clone(),
+        markers: vec![],
         destinations: vec![row(1, Some(BuiltinSound::Drums)), row(2, None)],
         alert: None,
     });
@@ -1304,6 +1309,7 @@ fn document_state_reports_mpe_per_track_and_destination() {
         snapshot,
         selected_seq: Some(seq),
         lanes,
+        markers: vec![],
         destinations: vec![dest(4, Some(setting)), dest(5, None)],
         alert: None,
     });

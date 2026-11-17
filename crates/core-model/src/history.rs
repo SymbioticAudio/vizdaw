@@ -457,6 +457,9 @@ impl History {
             }
         }
         crate::marks::settle(&self.present.doc, &mut applied.doc, self.acting);
+        // Only a select-and-modify is remembered for Modify Again: a
+        // `ModifyNotes` (plan 8c Ruling 2) leaves it, and the selection,
+        // as they were.
         let selection_only = matches!(cmd, Command::SelectAndModify { modify: None, .. });
         if let Command::SelectAndModify {
             modify: Some(m), ..

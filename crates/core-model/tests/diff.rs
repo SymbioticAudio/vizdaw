@@ -509,3 +509,161 @@ fn strip_colour_is_an_item() {
         vec![ours("Strip Drums (Co-Producer)", "colour none → teal")]
     );
 }
+
+/// Sequence 0 with lane 0 "Kick" and lane 1 "Bass", which holds four
+/// notes off a 3840-tick grid, velocities 0x8000.
+fn bass_song() -> Document {
+    let d = run(
+        &Document::new(),
+        Command::Sequence(SequenceCmd::New {
+            name: "Song".into(),
+        }),
+    );
+    let d = run(
+        &d,
+        Command::Lane(LaneCmd::Rename {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            name: "Kick".into(),
+        }),
+    );
+    let d = add_lane(&d, 0, "Bass");
+    run(
+        &d,
+        Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            events: [100, 4000, 7600, 11600]
+                .iter()
+                .map(|t| EventSpec::new(Tick(*t), EventBody::note(60, 0x8000, Tick(480))))
+                .collect(),
+        }),
+    )
+}
+
+fn bass_notes(d: &Document) -> Vec<core_model::ids::EventId> {
+    d.lane(SeqId(0), LaneId(1))
+        .unwrap()
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .map(|e| e.id)
+        .collect()
+}
+
+#[test]
+fn note_changes_are_items() {
+    use core_model::modify::{Modify, Quantize};
+    let d = bass_song();
+    let quantized = run(
+        &d,
+        Command::ModifyNotes {
+            seq: SeqId(0),
+            lanes: vec![LaneId(1)],
+            range: None,
+            modify: Modify::Quantize(Quantize::Grid {
+                grid: Tick(3840),
+                strength: 100,
+            }),
+        },
+    );
+    assert_eq!(
+        describe(&d, &quantized),
+        vec![item("Track 2, Bass", "4 notes changed (start)")]
+    );
+    // One note already has the velocity: three change.
+    let ids = bass_notes(&d);
+    let one = run(
+        &d,
+        Command::Event(EventCmd::SetVelocity {
+            events: vec![ids[0]],
+            velocity: 0x9000,
+        }),
+    );
+    let all = run(
+        &one,
+        Command::Event(EventCmd::SetVelocity {
+            events: ids.clone(),
+            velocity: 0x9000,
+        }),
+    );
+    assert_eq!(
+        describe(&one, &all),
+        vec![item("Track 2, Bass", "3 notes changed (velocity)")]
+    );
+    let both = run(
+        &quantized,
+        Command::Event(EventCmd::SetVelocity {
+            events: vec![ids[1]],
+            velocity: 0x9000,
+        }),
+    );
+    assert_eq!(
+        describe(&d, &both),
+        vec![item("Track 2, Bass", "4 notes changed (start, velocity)")]
+    );
+    // A falling count and a change are one item.
+    let fewer = run(
+        &quantized,
+        Command::Event(EventCmd::Delete {
+            events: vec![ids[3]],
+        }),
+    );
+    assert_eq!(
+        describe(&d, &fewer),
+        vec![item(
+            "Track 2, Bass",
+            "4 notes → 3 notes, 3 notes changed (start)"
+        )]
+    );
+}
+
+fn with_markers(d: &Document, markers: &[(i64, &str)]) -> Document {
+    run(
+        d,
+        Command::Sequence(SequenceCmd::SetMarkers {
+            seq: SeqId(0),
+            markers: markers
+                .iter()
+                .map(|(t, n)| core_model::sequence::Marker {
+                    tick: Tick(*t),
+                    name: (*n).into(),
+                })
+                .collect(),
+        }),
+    )
+}
+
+#[test]
+fn marker_changes_are_items() {
+    let d = with_markers(&song(), &[(0, "Verse"), (30720, "Outro")]);
+    let three = with_markers(&d, &[(0, "Verse"), (15360, "Chorus"), (30720, "Outro")]);
+    assert_eq!(
+        describe(&d, &three),
+        vec![item("Marker 2, Chorus", "added")]
+    );
+    let intro = with_markers(&three, &[(0, "Intro"), (15360, "Chorus"), (30720, "Outro")]);
+    assert_eq!(
+        describe(&three, &intro),
+        vec![item("Marker 1, Verse", "renamed to \"Intro\"")]
+    );
+    let two = with_markers(&three, &[(0, "Verse"), (15360, "Chorus")]);
+    assert_eq!(
+        describe(&three, &two),
+        vec![item("Marker 3, Outro", "deleted")]
+    );
+    // Two markers at one tick, one renamed: one rename.
+    let pair = with_markers(&song(), &[(0, "A"), (0, "B")]);
+    let renamed = with_markers(&song(), &[(0, "A"), (0, "C")]);
+    assert_eq!(
+        describe(&pair, &renamed),
+        vec![item("Marker 2, B", "renamed to \"C\"")]
+    );
+    // Names are shown safely.
+    let hostile = with_markers(&d, &[(0, "Verse\nOK: all fine"), (30720, "Outro")]);
+    assert_eq!(
+        describe(&d, &hostile),
+        vec![item("Marker 1, Verse", "renamed to \"Verse OK: all fine\"")]
+    );
+}

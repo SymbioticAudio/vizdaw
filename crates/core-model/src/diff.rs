@@ -6,11 +6,11 @@
 //! that list.
 
 use crate::document::Document;
-use crate::event::EventBody;
-use crate::ids::{LaneId, SeqId, StripId};
+use crate::event::{Event, EventBody};
+use crate::ids::{EventId, LaneId, SeqId, StripId};
 use crate::lane::Lane;
 use crate::mixer::Swatch;
-use crate::sequence::Sequence;
+use crate::sequence::{Marker, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One thing a change does.
@@ -165,10 +165,126 @@ fn tracks(before: &Sequence, after: &Sequence, out: &mut Vec<ChangeItem>) {
                 count(n1, "note", "notes")
             ));
         }
+        let changed = changed_notes(old, l);
+        let kept = changed.is_empty();
+        if !kept {
+            parts.push(changed);
+        }
         if !parts.is_empty() {
-            // A falling count takes the composer's work away.
-            let ours = old.co_producer && r1 >= r0 && n1 >= n0;
+            // A falling count, or a changed note, takes the composer's work
+            // away.
+            let ours = old.co_producer && r1 >= r0 && n1 >= n0 && kept;
             out.push(item_of(track(i, &old.name), parts.join(", "), ours));
+        }
+    }
+}
+
+/// A lane's notes over all its takes, by ID.
+fn notes(l: &Lane) -> BTreeMap<EventId, &Event> {
+    l.takes
+        .iter()
+        .flat_map(|t| t.events.values())
+        .filter(|e| matches!(e.body, EventBody::Note { .. }))
+        .map(|e| (e.id, e))
+        .collect()
+}
+
+/// Ruling 5: "N notes changed (start, pitch, velocity, length)" for the
+/// notes of both versions whose values differ, naming only the values
+/// that do; empty when none differ.
+fn changed_notes(before: &Lane, after: &Lane) -> String {
+    let after_notes = notes(after);
+    let mut n = 0;
+    let mut what = [false; 4];
+    for (id, b) in notes(before) {
+        let Some(a) = after_notes.get(&id) else {
+            continue;
+        };
+        let (
+            EventBody::Note {
+                pitch: p0,
+                velocity: v0,
+                duration: d0,
+                ..
+            },
+            EventBody::Note {
+                pitch: p1,
+                velocity: v1,
+                duration: d1,
+                ..
+            },
+        ) = (&b.body, &a.body)
+        else {
+            continue;
+        };
+        let diffs = [b.tick != a.tick, p0 != p1, v0 != v1, d0 != d1];
+        if diffs.iter().any(|d| *d) {
+            n += 1;
+            for (w, d) in what.iter_mut().zip(diffs) {
+                *w |= d;
+            }
+        }
+    }
+    if n == 0 {
+        return String::new();
+    }
+    let names: Vec<&str> = ["start", "pitch", "velocity", "length"]
+        .into_iter()
+        .zip(what)
+        .filter_map(|(name, d)| d.then_some(name))
+        .collect();
+    format!(
+        "{} changed ({})",
+        count(n, "note", "notes"),
+        names.join(", ")
+    )
+}
+
+fn marker(i: usize, m: &Marker) -> String {
+    format!("Marker {}, {}", i + 1, shown_name(&m.name))
+}
+
+/// Ruling 5's marker items of one sequence: markers equal in tick and
+/// name match first; of the rest, a pair at the same index and tick is a
+/// rename, and at the same index and name a move; the others are
+/// deletions (before's position) and additions (after's).
+fn markers(before: &Sequence, after: &Sequence, out: &mut Vec<ChangeItem>) {
+    let (b, a) = (&before.markers, &after.markers);
+    let mut b_left = vec![true; b.len()];
+    let mut a_left = vec![true; a.len()];
+    for (i, m) in b.iter().enumerate() {
+        let found = a
+            .iter()
+            .enumerate()
+            .find(|(j, n)| a_left.get(*j).copied().unwrap_or(false) && *n == m);
+        if let Some((j, _)) = found {
+            if let (Some(x), Some(y)) = (b_left.get_mut(i), a_left.get_mut(j)) {
+                *x = false;
+                *y = false;
+            }
+        }
+    }
+    for (i, m) in b.iter().enumerate() {
+        if !b_left.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let other = a.get(i).filter(|_| a_left.get(i).copied().unwrap_or(false));
+        let change = match other {
+            Some(n) if n.tick == m.tick => renamed(&n.name),
+            Some(n) if n.name == m.name => "moved".to_string(),
+            _ => {
+                out.push(item(marker(i, m), "deleted".into()));
+                continue;
+            }
+        };
+        if let Some(y) = a_left.get_mut(i) {
+            *y = false;
+        }
+        out.push(item(marker(i, m), change));
+    }
+    for (j, n) in a.iter().enumerate() {
+        if a_left.get(j).copied().unwrap_or(false) {
+            out.push(item(marker(j, n), "added".into()));
         }
     }
 }
@@ -204,6 +320,7 @@ fn sequences(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
                 }
                 if b != a {
                     tracks(b, a, out);
+                    markers(b, a, out);
                 }
             }
             (Err(_), Err(_)) => {}

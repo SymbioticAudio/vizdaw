@@ -1628,7 +1628,7 @@ fn note_chores_refuse_hostile_input() {
         }
         cases.extend([
             with(base, "seq", Value::Null),
-            with(base, "seq", json!(0)),
+            with(base, "seq", json!(-1)),
             with(base, "seq", json!("1")),
             with(base, "start", json!(10)),
             with(&with(base, "start", json!(10)), "end", json!(10)),
@@ -1780,7 +1780,7 @@ fn marker_commands_refuse_hostile_input() {
             .map(|n| with(base, "name", n.clone()))
             .collect();
         cases.extend([
-            with(base, "seq", json!(0)),
+            with(base, "seq", json!(-1)),
             with(base, "seq", Value::Null),
             with(base, "extra", json!(true)),
         ]);

@@ -1209,11 +1209,12 @@ const GRID_NAMES: &[&str] = &["1/4", "1/8", "1/16", "1/32", "1/8t", "1/16t"];
 /// The latest tick a note chore or a marker takes.
 const MAX_TICK: i64 = 1 << 40;
 
-/// A required sequence ID of at least 1 (plan 8c Rulings 2 and 4).
+/// A required sequence ID (plan 8c Rulings 2 and 4). A song's first
+/// sequence is 0, so 0 is allowed (plan 8c Task 2).
 const CHORE_SEQ: ParamSpec = ParamSpec {
     name: "seq",
     kind: ParamKind::Int {
-        min: 1,
+        min: 0,
         max: i64::MAX / 2,
     },
     required: true,
