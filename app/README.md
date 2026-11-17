@@ -2839,6 +2839,103 @@ Plan 8a, Co-Producer safety and the server:
 344. Settings › Co-Producer shows the number and size of saved copies in
      your open projects.
 
+Plan 8b, the Co-Producer notes file and the librarian:
+345. Window › Song Notes on a saved song: `Notes.md` opens in the Mac's
+     default Markdown editor, with the song's name as its heading. Write
+     "never touch the piano part" and save.
+346. Ask Claude for something new ("add a reverb bus"). Claude first reads
+     the notes and mentions your rule. When it is done, Window › Song
+     Notes shows one new entry at the end: what you asked, what was
+     added, the undo step and the saved copy. Your own text is untouched.
+347. Keep `Notes.md` open in the editor, type a line, and ask Claude for
+     another change without saving first. After saving, both your line
+     and Claude's new entry are there.
+348. The tracks and buses Claude added are named "… (Co-Producer)", drawn
+     in the theme's accent colour, and show the small Co-Producer badge
+     on the track header and the mixer strip. Check this in each theme.
+349. Ask Claude to rename or colour one of its own tracks: it happens
+     without asking you. Then record a few notes on that track and ask
+     Claude to delete it: now it asks for your yes first.
+350. Track › Make Mine on a Co-Producer track: the badge and the
+     "(Co-Producer)" text go, and the track uses its kind's colour again.
+     Undo brings them back. Renaming a Co-Producer track yourself also
+     makes it yours.
+351. Duplicate a Co-Producer track yourself: the copy is yours, with no
+     badge.
+352. Ask Claude to export stems: the folder is "<song> — Stems — <date>",
+     next to the song or where you told Claude the first time. A second
+     export the same day makes "… 2". Exports never include `Notes.md`.
+353. In a new untitled song, ask Claude to add a track, then File › Save:
+     the song's package now holds `Notes.md` and `Co-Producer/Copies`.
+354. With a song that has Co-Producer copies, Media Pool › Compact: after
+     Compact, a sheet lists each copy with its size, none ticked. Keep
+     All removes nothing. Tick one and Remove Selected: it goes to the
+     Trash. After the next Save, the files only it used go too.
+355. Compact Media asked of Claude is still refused, and no sheet appears.
+356. Ask Claude, in Claude's desktop app, to rename one of your own
+     tracks. After Claude's own question (or your yes in chat), VizDAW
+     shows "Allow Co-Producer to Change Your Song?" on the song's
+     window, with the rename listed and the app's name. Don't Allow
+     leaves the track as it was. Ask again and click Allow: the track is
+     renamed. Pressing Return on the sheet never allows.
+357. Ask again and tick "Always allow <App>" before Allow. The next
+     change from that app applies with no VizDAW sheet. Settings ›
+     Co-Producer lists the app, its team and identifier, and today's
+     date. Click Revoke: the next change shows the sheet again.
+358. Use a command-line host, or start
+     `VizDAW.app/Contents/MacOS/vizdaw-mcp` yourself from Terminal, and
+     ask for a change through it. The sheet says VizDAW cannot identify
+     the app, and still offers "Always allow". Tick it and click Allow:
+     the warning "VizDAW can't check which program this is. Any program
+     you run from Terminal could use this approval." appears. Cancel
+     saves nothing. Always Allow Anyway saves it, and Settings ›
+     Co-Producer lists it marked "unverified". Revoke it, and the next
+     change asks again. Leave a sheet open for 10 minutes: it closes,
+     and the change is not made.
+
+The approval sheet, by hand on a real Mac (an ad-hoc build, and a signed
+one for step 364). Watch the log with
+`log stream --predicate 'subsystem == "VizDAW" AND category == "co-producer-approval"'`.
+Presses from VoiceOver, Switch Control, Voice Control and Screen Sharing are
+refused on the sheet by design, so use "Always allow" with those.
+359. A real click: with Co-Producer on and no developer channel, ask Claude
+     for a change to one of your own tracks, then click Allow. The change
+     applies and nothing is logged. If it is refused, note the logged
+     type, pid and age.
+360. The keyboard: run the change again, Tab to Allow and press Space.
+     Then repeat with Return on a focused Allow (this needs Full Keyboard
+     Access). Both apply. If either is refused, record the logged type
+     and key, which shows whether AppKit fires on key-down or key-up.
+361. Return and Esc with nothing focused are both Don't Allow, and Claude
+     reports "The composer did not allow this in VizDAW."
+362. An accessibility press is refused. With the sheet open, run
+     `osascript -e 'tell application "System Events" to tell process "VizDAW" to click button "Allow" of sheet 1 of window 1'`
+     (Terminal needs Accessibility access). Nothing applies, the sheet
+     says "That press didn't come from your mouse or keyboard. Click
+     Allow yourself.", and the log shows type none (or a stale or
+     other-window event).
+363. A posted click is refused. Post a click at Allow's position from
+     another process (a small `CGEventPost` tool, or a remote-control or
+     gesture utility). It is refused, and the log shows the poster's
+     source pid.
+364. A signed app: Always allow a signed, hardened host app. Settings lists
+     it with its team and identifier. Revoke makes the next change ask
+     again, and Revoke All empties the list.
+365. The Keychain after an ad-hoc rebuild: Always allow an app, rebuild
+     with `scripts/make-app.sh`, relaunch, and ask for another change.
+     Note whether macOS asks for the Keychain item "VizDAW Co-Producer
+     approvals". With Deny, VizDAW just asks on the sheet. Note whether
+     the approval survives Always Allow. Repeat with a Developer-ID-signed
+     build.
+366. Stale and timed-out sheets. Leave the sheet unanswered for 10
+     minutes: Claude reports VizDAW's no. Make a hand edit while the
+     sheet is open: it closes with the same no. Close the document, or
+     turn Co-Producer off, while it is open: the same no.
+367. Assistive input, accepted knowingly: try Allow with VoiceOver, Switch
+     Control, Voice Control and Screen Sharing. Each is refused by design,
+     and the refusal line shows. Record which of these you want allowed
+     in a later release.
+
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;

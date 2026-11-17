@@ -309,7 +309,10 @@ pub fn entry(log: &RequestLog, title: &str) -> Option<String> {
         out.push_str(&format!("{EXPORT_LINE}{}\n", line_text(f)));
     }
     for n in &log.notes {
-        out.push_str(&format!("- Note: {}\n", line_text(n)));
+        // One "- Note:" line for each non-empty line of the note.
+        for line in n.split('\n').map(str::trim).filter(|l| !l.is_empty()) {
+            out.push_str(&format!("- Note: {}\n", line_text(line)));
+        }
     }
     if !log.labels.is_empty() {
         let labels: Vec<String> = log

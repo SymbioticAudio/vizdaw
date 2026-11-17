@@ -209,6 +209,18 @@ fn notes_cannot_forge_an_entry() {
 }
 
 #[test]
+fn a_note_of_several_lines_is_one_note_line_each() {
+    // Ruling 5: each non-empty line of a note becomes "- Note: <line>".
+    let mut log = stamped();
+    log.notes = vec!["## fake\n\n  keep it dark \n".into()];
+    let e = notes::entry(&log, "Real").unwrap();
+    assert!(
+        e.contains("\n- Note: ## fake\n- Note: keep it dark\n"),
+        "{e}"
+    );
+}
+
+#[test]
 fn export_folders_are_new_and_dated() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path();

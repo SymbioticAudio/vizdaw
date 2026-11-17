@@ -280,8 +280,8 @@ fn a_region_without_a_crossfade_renders_as_before() {
 fn a_version_8_pair_loads_and_renders_as_before() {
     let (b, _) = pair(Fade::default());
     let text = core_model::file::to_json(b.doc()).unwrap();
-    assert_eq!(text.matches("\"version\": 9").count(), 1);
-    let v8 = text.replace("\"version\": 9", "\"version\": 8");
+    assert_eq!(text.matches("\"version\": 10").count(), 1);
+    let v8 = text.replace("\"version\": 10", "\"version\": 8");
     let doc = core_model::file::from_json(&v8).unwrap();
     let audio = schedule(&Builder::from_doc(doc));
     let segs = audio.segments(OutputPathId(0));
