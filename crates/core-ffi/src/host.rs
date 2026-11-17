@@ -1310,11 +1310,67 @@ fn retire(old: Option<Host>) {
         return;
     };
     std::thread::sleep(DRAIN);
+    drop_retired(old);
+}
+
+/// Drops a stopped host whose drain is over (output first, then the
+/// engine). Call without the host lock.
+fn drop_retired(old: Host) {
     #[cfg(feature = "test-hooks")]
     if let Some(log) = &old.log {
         lock(&RETIRED_LOG).extend(log.drain().iter().map(|r| (r.frame, r.bytes().to_vec())));
     }
     drop(old);
+}
+
+/// Hosts waiting out their drain: (host, drop after). Dropped on the
+/// main thread by reap_retired, never on a background thread.
+static RETIRING: Mutex<Vec<(Host, Instant)>> = Mutex::new(Vec::new());
+
+/// [`retire`] without the wait (release-fixes Task 3): the stopped host
+/// plays its note-offs while parked, and [`reap_retired`] drops it once
+/// `DRAIN` is over. An arm's claim parks, so the edit never sleeps on the
+/// main thread.
+fn park(old: Option<Host>) {
+    if let Some(old) = old {
+        lock(&RETIRING).push((old, Instant::now() + DRAIN));
+    }
+}
+
+/// Drops the parked hosts whose drain is over, without the host lock. Runs
+/// at the top of a claim made with the plugin host, and from [`state`] and
+/// `Session::idle`, all on the main thread.
+pub(crate) fn reap_retired() {
+    let now = Instant::now();
+    let done: Vec<Host> = {
+        let mut parked = lock(&RETIRING);
+        let (done, keep) = std::mem::take(&mut *parked)
+            .into_iter()
+            .partition(|(_, after)| *after <= now);
+        *parked = keep;
+        done.into_iter().map(|(h, _)| h).collect()
+    };
+    for h in done {
+        drop_retired(h);
+    }
+}
+
+/// Waits out every parked host's drain and drops them all (a reset).
+fn reap_all() {
+    let parked = std::mem::take(&mut *lock(&RETIRING));
+    for (h, after) in parked {
+        let left = after.saturating_duration_since(Instant::now());
+        if !left.is_zero() {
+            std::thread::sleep(left);
+        }
+        drop_retired(h);
+    }
+}
+
+/// How many retired hosts still wait out their drain (test hook).
+#[doc(hidden)]
+pub fn retiring_count() -> usize {
+    lock(&RETIRING).len()
 }
 
 /// Drops the host: its engine stops first, so played and auditioned
@@ -1329,6 +1385,7 @@ pub fn reset() {
         let _ = h.engine.stop();
     }
     retire(old);
+    reap_all();
 }
 
 /// While set, the offline driver renders nothing and skips the time held
@@ -2578,8 +2635,16 @@ fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
 /// processors go back to the plugin host), makes a new host for the
 /// owner, recompiles and resumes at the same tick. The owner's plugins
 /// follow the new engine's rate (`attach`). A failed rebuild leaves no
-/// host; a host another call made meanwhile wins.
-fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Result<(), VizError> {
+/// host; a host another call made meanwhile wins. With `park` (an arm's
+/// claim, release-fixes Task 3) the old host drains parked rather than
+/// in a sleep, and the MIDI sources connect on a thread of their own:
+/// the caller never waits for either.
+fn rebuild(
+    r: Rebuild,
+    doc: &Document,
+    plugins: Option<&mut PluginHost>,
+    park: bool,
+) -> Result<(), VizError> {
     let Rebuild {
         old,
         at,
@@ -2588,12 +2653,17 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
         drain,
     } = r;
     let (owner, seq, looped, until) = (old.owner, old.seq, old.looped, old.until);
-    if drain {
+    if drain && !park {
         std::thread::sleep(DRAIN);
     }
-    // Read once the old output has stopped (dropped first, below).
+    // Read once the old output has stopped (dropped first, below), or,
+    // parked, once its engine has stopped.
     let overrides = old.engine.overrides();
-    drop(old);
+    if drain && park {
+        self::park(Some(old));
+    } else {
+        drop(old);
+    }
     #[cfg(feature = "test-hooks")]
     if let Some((reached, release)) = lock(&REBUILD_GATE).take() {
         let _ = reached.send(());
@@ -2601,8 +2671,8 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     }
     let mut new = Host::create(project_rate(doc))?;
     // Without the host lock (a cold CoreMIDI server is slow; M7: live
-    // hosts only).
-    if new.is_live() {
+    // hosts only). Parked: once the new host is in, off this thread.
+    if new.is_live() && !park {
         let fault = connect_midi_sources();
         note_midi_fault(&mut new, fault);
     }
@@ -2638,6 +2708,9 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     };
     drop(slot);
     drop(spare);
+    if park {
+        listen_to_midi_sources_soon();
+    }
     Ok(())
 }
 
@@ -2731,6 +2804,13 @@ fn claim_host(
     idle: Idle,
 ) -> Result<(HostGuard, bool), VizError> {
     let idle_only = idle != Idle::Any;
+    // An arm's claim never waits out a drain (release-fixes Task 3).
+    let park = idle == Idle::Untouched;
+    // Only on the plugin thread (the main one): a claim with no plugin
+    // host may come from a background task (Measure).
+    if plugins.is_some() {
+        reap_retired();
+    }
     let project = project_rate(doc);
     let mut slot = loop {
         let mut slot = lock_host();
@@ -2769,7 +2849,7 @@ fn claim_host(
             // The drain and the rebuild run without the host lock; then
             // start over (another call may have changed the host).
             drop(slot);
-            rebuild(r, doc, plugins.as_deref_mut())?;
+            rebuild(r, doc, plugins.as_deref_mut(), park)?;
             continue;
         }
         // Another session's plugins played here, or the host was opened for
@@ -2796,7 +2876,11 @@ fn claim_host(
             // Then start over: another call may have changed the host
             // meanwhile.
             drop(slot);
-            retire(old);
+            if park {
+                self::park(old);
+            } else {
+                retire(old);
+            }
             continue;
         }
         break slot;
@@ -3191,6 +3275,7 @@ pub fn state(
     doc: &Document,
     plugins: Option<&mut PluginHost>,
 ) -> Result<Option<HostState>, VizError> {
+    reap_retired();
     let mut slot = lock_host();
     match slot.as_ref() {
         Some(h) if h.owner == owner => {}
@@ -3198,7 +3283,7 @@ pub fn state(
     }
     if let Some(r) = handle_events(&mut slot)? {
         drop(slot);
-        rebuild(r, doc, plugins)?;
+        rebuild(r, doc, plugins, false)?;
         slot = lock_host();
     }
     let Some(h) = slot.as_mut().filter(|h| h.owner == owner) else {

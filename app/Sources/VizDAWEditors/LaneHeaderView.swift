@@ -479,6 +479,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     /// lane; the lane's input is checked.
     func inputMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let inputs = document.inputs
+        // Reads the sources again off the main thread: the menu lists the
+        // last read, which can be one refresh old (release-fixes Task 3).
         inputs.refreshInfo()
         let menu = NSMenu()
         menu.autoenablesItems = false

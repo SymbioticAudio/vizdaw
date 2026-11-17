@@ -41,16 +41,28 @@ public final class LaneInputs {
     /// The clock the clip hold runs on (tests replace it).
     @ObservationIgnored var now: () -> ContinuousClock.Instant = { ContinuousClock.now }
 
-    /// The MIDI sources the picker offers (tests replace it).
-    public static var midiPorts: () -> [String] = { midiSourcePorts() }
+    /// The MIDI sources the picker offers (tests replace it). Read off the
+    /// main thread only, by `refreshSources` (a cold CoreMIDI server can
+    /// take seconds; release-fixes Task 3).
+    nonisolated(unsafe) public static var midiPorts: @Sendable () -> [String] = { midiSourcePorts() }
     /// The surfaces' input ports, which reach no lane (plan 5f-1 Ruling
     /// 17); the app sets it, tests replace it.
     public static var claimedPorts: () -> Set<String> = { [] }
     /// The chosen input device's channels read without the engine (tests
-    /// replace it; 5d-2 final review I4).
-    public static var deviceChannels: () -> InputChannelsRow? = { audioInputChannels() }
+    /// replace it; 5d-2 final review I4). Read off the main thread only,
+    /// by `refreshSources`.
+    nonisolated(unsafe) public static var deviceChannels: @Sendable () -> InputChannelsRow? = {
+        audioInputChannels()
+    }
     /// The chosen device's channels as last read without the engine.
     public private(set) var device: InputChannelsRow?
+    /// The MIDI sources as the last refresh read them: the picker lists
+    /// these, so it can be one refresh old.
+    public private(set) var midiSources: [String] = []
+    /// The last refresh started, and the newest one applied: a slower,
+    /// older read never overwrites a newer one.
+    @ObservationIgnored private var refreshesStarted: UInt64 = 0
+    @ObservationIgnored private var refreshApplied: UInt64 = 0
     /// The input channels the picker offers, by name: the engine's open
     /// input, else the chosen device's (nil: unknown, nothing read yet).
     var known: (count: Int, names: [String])? {
@@ -69,11 +81,28 @@ public final class LaneInputs {
 
     /// Reads the device's channels and names again (a picker opens): the
     /// engine's when this document holds it, else the chosen device's,
-    /// read without the engine (5d-2 final review I4).
+    /// read without the engine (5d-2 final review I4). The device and the
+    /// MIDI sources are read off the main thread (`refreshSources`).
     public func refreshInfo() {
         guard let m = document else { return }
         if let i = try? m.session.inputInfo() { info = i }
-        if (info?.channels ?? 0) == 0 { device = Self.deviceChannels() }
+        Task { await refreshSources() }
+    }
+
+    /// Reads the MIDI sources, and the chosen device's channels when the
+    /// engine's input is not open, off the main thread (release-fixes
+    /// Task 3), then keeps them for the picker.
+    public func refreshSources() async {
+        refreshesStarted += 1
+        let mine = refreshesStarted
+        let wantsDevice = (info?.channels ?? 0) == 0
+        let ports = Self.midiPorts
+        let channels = Self.deviceChannels
+        let (sources, read) = await Task.detached { (ports(), wantsDevice ? channels() : nil) }.value
+        guard mine > refreshApplied else { return }
+        refreshApplied = mine
+        if sources != midiSources { midiSources = sources }
+        if wantsDevice { device = read }
     }
 
     /// Whether the lane records audio (it plays to an audio path or has an
@@ -117,7 +146,7 @@ public final class LaneInputs {
             }
             let claimed = Self.claimedPorts()
             let ports = [InputChoice("All MIDI Inputs", .midi(port: nil, channel: channel))]
-                + Self.midiPorts().map { p in
+                + midiSources.map { p in
                     InputChoice(
                         claimed.contains(p) ? "\(p) (used by a surface)" : p, .midi(port: p, channel: channel))
                 }

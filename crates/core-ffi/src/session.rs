@@ -2716,6 +2716,7 @@ impl Session {
             if let Some(seq) = owed {
                 self.claim(seq);
             }
+            host::reap_retired();
             let mut inner = self.lock_inner();
             self.apply_pending_pass(&mut inner);
             self.apply_pending_automation(&mut inner);
