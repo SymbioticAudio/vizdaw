@@ -160,9 +160,12 @@ struct DestinationEditorSheet: View {
                 HStack {
                     Spacer()
                     // Return commits the field (and keeps the sheet); Done
-                    // commits and closes.
-                    Button("Done") { if sheets.commitLatency() { sheets.closeEditDestination() } }
+                    // commits and closes; Cancel (and Escape) closes without
+                    // committing, so text that does not parse never traps it.
+                    Button("Cancel") { sheets.closeEditDestination() }
                         .keyboardShortcut(.cancelAction)
+                        .accessibilityLabel("Cancel")
+                    Button("Done") { if sheets.commitLatency() { sheets.closeEditDestination() } }
                         .accessibilityLabel("Done")
                 }
             }
