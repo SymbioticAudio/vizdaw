@@ -958,7 +958,7 @@ fn notes_and_folder_results_as_json() {
     };
     assert_eq!(
         result_json(&r),
-        serde_json::json!({"text": "# S\n", "truncated": true, "path": "/x/S.vizdaw/Notes.md"})
+        serde_json::json!({"doc": "d1", "text": "# S\n", "truncated": true, "path": "/x/S.vizdaw/Notes.md"})
     );
     let r = ControlResult::CoProducerFolder {
         doc: "d1".into(),

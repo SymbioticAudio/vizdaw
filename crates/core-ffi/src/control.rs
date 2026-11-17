@@ -1785,8 +1785,8 @@ pub fn result_json(r: &ControlResult) -> Value {
             results,
             undo_label,
         } => json!({ "doc": doc, "results": results, "undo_label": undo_label }),
-        ControlResult::CoProducerNotes { notes, .. } => json!({
-            "text": notes.text, "truncated": notes.truncated, "path": notes.path,
+        ControlResult::CoProducerNotes { doc, notes } => json!({
+            "doc": doc, "text": notes.text, "truncated": notes.truncated, "path": notes.path,
         }),
         ControlResult::CoProducerFolder { path, .. } => json!({ "path": path }),
     }
