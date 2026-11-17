@@ -3,7 +3,7 @@
 //! validated call through [`admit`] before it reaches the app:
 //!
 //! - only `ping`, `commands.list`, `state.get` (not `input`), `wait`,
-//!   `ui.screenshot` (window and scale only), `command.run` and the nine
+//!   `ui.screenshot` (window and scale only), `command.run` and the eleven
 //!   `co_producer.*` commands are allowed;
 //! - `command.run` runs read, add and outward commands only; a change or
 //!   remove goes through `co_producer.preview` and the composer's yes;
@@ -23,7 +23,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// The change and remove commands Co-Producer can preview (8a Ruling 6;
 /// 8b Ruling 9 adds `mixer.set_colour`; 8c Rulings 2 and 4 add the note
-/// chores and the marker changes).
+/// chores and the marker changes; 8d Ruling 1 adds `mixer.new_bus` with a
+/// `strip` and the twelve mixer edits).
 pub const PREVIEWABLE: &[&str] = &[
     "track.rename",
     "track.delete",
@@ -36,6 +37,19 @@ pub const PREVIEWABLE: &[&str] = &[
     "modify.velocity_notes",
     "marker.rename",
     "marker.remove",
+    "mixer.new_bus",
+    "mixer.set_strip",
+    "mixer.set_output",
+    "mixer.add_send",
+    "mixer.set_send",
+    "mixer.remove_send",
+    "mixer.add_insert",
+    "mixer.remove_insert",
+    "mixer.move_insert",
+    "mixer.set_bypass",
+    "mixer.set_eq",
+    "mixer.set_param",
+    "mixer.remove_bus",
 ];
 
 /// The most IDs in one [`id_list`] (plan 8c Rulings 1 and 2).
@@ -297,7 +311,9 @@ fn admit_planned(p: &Planned) -> Result<(), ControlError> {
     let id = p.id.as_str();
     let spec = spec_of(id)?;
     never_replaces(&p.args)?;
-    if !PREVIEWABLE.contains(&id) {
+    // A free bus is an add (8d Ruling 1): only its `strip` form previews.
+    let free_bus = id == "mixer.new_bus" && arg(&p.args, "strip").is_none();
+    if !PREVIEWABLE.contains(&id) || free_bus {
         return Err(match effective_class(spec, &p.args) {
             Class::Change | Class::Remove => {
                 ControlError::not_allowed(format!("Co-Producer cannot preview {id} yet."))
@@ -336,6 +352,8 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
         | Command::CoProducerStatus { .. }
         | Command::CoProducerNotes { .. }
         | Command::CoProducerNote { .. }
+        | Command::CoProducerPlugins { .. }
+        | Command::CoProducerParams { .. }
         | Command::CoProducerExportFolder { parent: None, .. }
         | Command::CoProducerExport { parent: None, .. } => Ok(()),
         // Plan 8b Ruling 6 (and 8c Ruling 1 for the one-call export): a

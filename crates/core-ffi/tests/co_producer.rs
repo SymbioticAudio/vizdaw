@@ -1082,6 +1082,32 @@ mod control {
                 window: None,
             }
         );
+        // Plan 8d Ruling 5: the plug-in reads.
+        use core_control::request::PluginKindArg;
+        use vizdaw_ffi::catalog::PluginKindTag;
+        for (kind, tag) in [
+            (None, None),
+            (
+                Some(PluginKindArg::Instrument),
+                Some(PluginKindTag::Instrument),
+            ),
+            (Some(PluginKindArg::Effect), Some(PluginKindTag::Effect)),
+        ] {
+            assert_eq!(
+                of(Command::CoProducerPlugins { kind }),
+                ControlRequest::CoProducerPlugins { kind: tag }
+            );
+        }
+        assert_eq!(
+            of(Command::CoProducerParams {
+                slot: 7,
+                window: Some(WindowRef::Key),
+            }),
+            ControlRequest::CoProducerParams {
+                slot: 7,
+                window: key
+            }
+        );
     }
 
     #[test]

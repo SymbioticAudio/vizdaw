@@ -408,3 +408,47 @@ mod fuzz {
         }
     }
 }
+
+/// Plan 8d Ruling 5: the plug-in reads go over the wire and back.
+#[test]
+fn co_producer_plugin_calls_round_trip() {
+    use core_control::params::WindowRef;
+    use core_control::request::PluginKindArg;
+    use core_control::{Command, validate};
+    let parse = |cmd: &str, params: Value| {
+        let line = request_line(&RequestId::Num(9), cmd, &params);
+        let raw = read_request(line.as_bytes()).unwrap();
+        assert_eq!(raw.cmd, cmd);
+        validate(&raw).unwrap()
+    };
+    assert_eq!(
+        parse("co_producer.params", json!({"slot": 7})),
+        Command::CoProducerParams {
+            slot: 7,
+            window: None
+        }
+    );
+    assert_eq!(
+        parse("co_producer.params", json!({"slot": 7, "window": "main"})),
+        Command::CoProducerParams {
+            slot: 7,
+            window: Some(WindowRef::Main)
+        }
+    );
+    assert_eq!(
+        parse("co_producer.plugins", json!({"kind": "effect"})),
+        Command::CoProducerPlugins {
+            kind: Some(PluginKindArg::Effect)
+        }
+    );
+    assert_eq!(
+        parse("co_producer.plugins", json!({"kind": "instrument"})),
+        Command::CoProducerPlugins {
+            kind: Some(PluginKindArg::Instrument)
+        }
+    );
+    assert_eq!(
+        parse("co_producer.plugins", json!({})),
+        Command::CoProducerPlugins { kind: None }
+    );
+}

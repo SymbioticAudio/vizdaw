@@ -520,7 +520,8 @@ enum ControlChannel {
                 return true
             }
         case .coProducerBegin, .coProducerEnd, .coProducerStatus, .coProducerPreview, .coProducerApply,
-            .coProducerNotes, .coProducerNote, .coProducerExportFolder, .coProducerExport:
+            .coProducerNotes, .coProducerNote, .coProducerExportFolder, .coProducerExport, .coProducerPlugins,
+            .coProducerParams:
             // The developer server's gate refuses these (Ruling 11).
             answer(server, token, .failed(.of(.notAllowed, "only on the Co-Producer socket")))
         }
@@ -531,7 +532,8 @@ enum ControlChannel {
         switch request {
         case .runCommand(_, _, let w), .coProducerBegin(_, _, let w), .coProducerEnd(let w), .coProducerStatus(let w),
             .coProducerPreview(_, let w), .coProducerApply(_, _, let w, _), .coProducerNotes(let w),
-            .coProducerNote(_, let w), .coProducerExportFolder(_, _, let w), .coProducerExport(_, _, _, let w):
+            .coProducerNote(_, let w), .coProducerExportFolder(_, _, let w), .coProducerExport(_, _, _, let w),
+            .coProducerParams(_, let w):
             w
         default: nil
         }
@@ -544,7 +546,7 @@ enum ControlChannel {
         switch request {
         case .runCommand(_, _, let w), .state(_, let w): window = w
         case .coProducerBegin, .coProducerEnd, .coProducerStatus, .coProducerPreview, .coProducerApply,
-            .coProducerNotes, .coProducerNote, .coProducerExportFolder, .coProducerExport:
+            .coProducerNotes, .coProducerNote, .coProducerExportFolder, .coProducerExport, .coProducerParams:
             window = requestWindow(request)
         case .wait(let c, let w, _): window = ControlWindowCheck.waitReadsDocument(c) ? w : nil
         default: return false

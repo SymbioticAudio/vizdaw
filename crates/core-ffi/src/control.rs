@@ -13,7 +13,9 @@ use core_control::element::{self as el, ElementRef};
 use core_control::keys::{KeyStroke, Modifiers};
 use core_control::params::WindowRef;
 use core_control::registry::{self, ArgValue};
-use core_control::request::{Button, Command, CrashAnswer, ExportWhat, Pointer, StateTarget};
+use core_control::request::{
+    Button, Command, CrashAnswer, ExportWhat, PluginKindArg, Pointer, StateTarget,
+};
 use core_control::server::{Config, Role, Server};
 use core_control::wait::{self, DocFacts, Facts, WaitCondition};
 use core_control::{ControlError, ErrorCode};
@@ -549,6 +551,20 @@ pub enum ControlRequest {
         parent: Option<String>,
         /// The strips, already checked: 1 to 64 unique IDs.
         strips: Option<Vec<u64>>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.plugins` (plan 8d Ruling 5): the plug-ins Co-Producer
+    /// may use.
+    CoProducerPlugins {
+        /// Only instruments or only effects; None: both.
+        kind: Option<crate::catalog::PluginKindTag>,
+    },
+    /// `co_producer.params` (plan 8d Ruling 5): a loaded plug-in's
+    /// parameters.
+    CoProducerParams {
+        /// The slot, already checked: at least 1.
+        slot: u64,
         /// Whose document.
         window: Option<WindowRefRow>,
     },
@@ -1213,6 +1229,16 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
             what: export_what_row(what),
             parent: parent.map(|p| p.to_string_lossy().into_owned()),
             strips,
+            window: window_row(window),
+        },
+        Command::CoProducerPlugins { kind } => ControlRequest::CoProducerPlugins {
+            kind: kind.map(|k| match k {
+                PluginKindArg::Instrument => crate::catalog::PluginKindTag::Instrument,
+                PluginKindArg::Effect => crate::catalog::PluginKindTag::Effect,
+            }),
+        },
+        Command::CoProducerParams { slot, window } => ControlRequest::CoProducerParams {
+            slot,
             window: window_row(window),
         },
         Command::CoProducerEnd { window } => ControlRequest::CoProducerEnd {

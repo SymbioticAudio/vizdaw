@@ -28,7 +28,7 @@ import VizDAWCore
     }
 
     @Test func newBusCommandRuns() throws {
-        #expect(MixerCommands.ids == [MixerCommands.newBus])
+        #expect(MixerCommands.ids == Set([MixerCommands.newBus] + MixerCommands.coProducerEdits))
         #expect(ControlCommands.handled.contains(MixerCommands.newBus))
         let (m, f) = try demo()
         let doc = UUID()
@@ -64,6 +64,26 @@ import VizDAWCore
             let fail = try #require(failure(r), "\(args)")
             #expect(fail.code == code, "\(args): \(fail.message)")
             if let message { #expect(fail.message == message, "\(args)") }
+        }
+        #expect(f.calls.isEmpty)
+        #expect(m.alert == nil)
+    }
+
+    /// Plan 8d Task 1: the thirteen Co-Producer mixer commands are
+    /// registered and answer "Not ready yet." until Task 5; none reaches
+    /// the session.
+    @Test func coProducerMixerEditsAreNotReadyYet() throws {
+        let (m, f) = try demo()
+        #expect(MixerCommands.coProducerEdits == [
+            "mixer.set_strip", "mixer.set_output", "mixer.add_send", "mixer.set_send", "mixer.remove_send",
+            "mixer.add_insert", "mixer.remove_insert", "mixer.move_insert", "mixer.set_bypass", "mixer.set_eq",
+            "mixer.set_param", "mixer.remove_bus", "track.new_plugin_instrument",
+        ])
+        for id in MixerCommands.coProducerEdits {
+            #expect(ControlCommands.handled.contains(id), "\(id)")
+            let o = MixerCommands.run(id, args: [arg("strip", 2)], docID: UUID(), m)
+            #expect(failure(o)?.code == .unavailable, "\(id): \(o)")
+            #expect(failure(o)?.message == "Not ready yet.", "\(id)")
         }
         #expect(f.calls.isEmpty)
         #expect(m.alert == nil)

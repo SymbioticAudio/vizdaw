@@ -435,6 +435,291 @@ const MIXER_SET_COLOUR_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// The largest strip, slot, bus or index plan 8d's mixer commands take:
+/// the largest integer a JSON number carries exactly (2^53 − 1).
+pub const MAX_EXACT_ID: i64 = (1 << 53) - 1;
+
+/// The longest plug-in reference, in characters (plan 8d Ruling 3).
+pub const PLUGIN_REF_MAX: usize = 512;
+
+/// Plan 8d Ruling 1's thirteen commands: the twelve mixer edits, then
+/// `track.new_plugin_instrument`.
+pub const MIXER_IDS: &[&str] = &[
+    "mixer.set_strip",
+    "mixer.set_output",
+    "mixer.add_send",
+    "mixer.set_send",
+    "mixer.remove_send",
+    "mixer.add_insert",
+    "mixer.remove_insert",
+    "mixer.move_insert",
+    "mixer.set_bypass",
+    "mixer.set_eq",
+    "mixer.set_param",
+    "mixer.remove_bus",
+    "track.new_plugin_instrument",
+];
+
+/// A fader or send level's range in dB (plan 8d Ruling 1; −144 is −∞).
+const LEVEL_DB: (f64, f64) = (-144.0, 12.0);
+
+/// `mixer.set_param`'s `value` range in the registry: everything
+/// [`decimal`]'s shape can spell. The plug-in's own range is the app's
+/// check.
+const PARAM_VALUE: (f64, f64) = (-1_000_000.0, 1_000_000.0);
+
+/// Ruling 1: `-?[0-9]{1,6}(\.[0-9]{1,6})?` within `min..=max`; the message
+/// names the range. So exponents, `NaN`, `inf`, a leading `+`, hex, a
+/// comma, spaces and the empty text are all refused.
+pub fn decimal(text: &str, min: f64, max: f64) -> Result<f64, String> {
+    let refuse = || format!("must be a plain decimal from {min} to {max}, such as \"-6.5\"");
+    let digits = |s: &str| (1..=6).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    let body = text.strip_prefix('-').unwrap_or(text);
+    let shaped = match body.split_once('.') {
+        Some((whole, frac)) => digits(whole) && digits(frac),
+        None => digits(body),
+    };
+    if !shaped {
+        return Err(refuse());
+    }
+    match text.parse::<f64>() {
+        Ok(v) if v.is_finite() && (min..=max).contains(&v) => Ok(v),
+        _ => Err(refuse()),
+    }
+}
+
+/// A required mixer target of plan 8d (a strip, slot or bus): 1 to
+/// [`MAX_EXACT_ID`].
+const fn mixer_id(name: &'static str, help: &'static str) -> ParamSpec {
+    ParamSpec {
+        name,
+        kind: ParamKind::Int {
+            min: 1,
+            max: MAX_EXACT_ID,
+        },
+        required: true,
+        help,
+    }
+}
+
+/// An optional [`mixer_id`].
+const fn opt_mixer_id(name: &'static str, help: &'static str) -> ParamSpec {
+    ParamSpec {
+        required: false,
+        ..mixer_id(name, help)
+    }
+}
+
+const MIXER_STRIP: ParamSpec = mixer_id("strip", "The strip (see state.get mixer).");
+const MIXER_SLOT: ParamSpec = mixer_id(
+    "slot",
+    "The plug-in slot: an insert, an EQ or an instrument (see state.get mixer).",
+);
+
+/// `mixer.set_strip` (plan 8d Ruling 1).
+const MIXER_SET_STRIP_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    ParamSpec {
+        name: "gain_db",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The fader in dB as text, -144 (silent) to 12, such as \"-6.5\". At least one of gain_db, pan, mute and solo is required.",
+    },
+    ParamSpec {
+        name: "pan",
+        kind: ParamKind::Int {
+            min: -100,
+            max: 100,
+        },
+        required: false,
+        help: "Pan in percent, -100 (left) to 100 (right); 0 is the centre.",
+    },
+    ParamSpec {
+        name: "mute",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Mute (true) or unmute (false).",
+    },
+    ParamSpec {
+        name: "solo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Solo (true) or unsolo (false).",
+    },
+];
+
+/// `mixer.set_output` (plan 8d Ruling 1).
+const MIXER_SET_OUTPUT_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    ParamSpec {
+        name: "bus",
+        kind: ParamKind::IntOrNull {
+            min: 1,
+            max: MAX_EXACT_ID,
+        },
+        required: true,
+        help: "The bus strip to route to, or null for master.",
+    },
+];
+
+const SEND_LEVEL: ParamSpec = ParamSpec {
+    name: "level_db",
+    kind: ParamKind::Text,
+    required: false,
+    help: "The send level in dB as text, -144 (silent) to 12 (default \"0\").",
+};
+
+const PRE_FADER: ParamSpec = ParamSpec {
+    name: "pre_fader",
+    kind: ParamKind::Flag,
+    required: false,
+    help: "Send before the fader (default false: after it).",
+};
+
+const SEND_INDEX: ParamSpec = mixer_id("index", "The send, counting from 1 (see state.get mixer).");
+
+/// `mixer.add_send` (plan 8d Ruling 1).
+const MIXER_ADD_SEND_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    mixer_id("bus", "The bus strip the send feeds."),
+    SEND_LEVEL,
+    PRE_FADER,
+];
+
+/// `mixer.set_send` (plan 8d Ruling 1).
+const MIXER_SET_SEND_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    SEND_INDEX,
+    ParamSpec {
+        help: "The send level in dB as text, -144 (silent) to 12. At least one of level_db, pre_fader and enabled is required.",
+        ..SEND_LEVEL
+    },
+    ParamSpec {
+        help: "Send before the fader (true) or after it (false).",
+        ..PRE_FADER
+    },
+    ParamSpec {
+        name: "enabled",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Turn the send on (true) or off (false).",
+    },
+];
+
+/// `mixer.remove_send` (plan 8d Ruling 1).
+const MIXER_REMOVE_SEND_PARAMS: &[ParamSpec] = &[MIXER_STRIP, SEND_INDEX];
+
+const PLUGIN_REF: ParamSpec = ParamSpec {
+    name: "plugin",
+    kind: ParamKind::Text,
+    required: true,
+    help: "multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see co_producer.plugins).",
+};
+
+/// `mixer.add_insert` (plan 8d Ruling 1).
+const MIXER_ADD_INSERT_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    PLUGIN_REF,
+    opt_mixer_id(
+        "index",
+        "Where the insert goes, counting from 1 (default: after the last).",
+    ),
+];
+
+/// `mixer.remove_insert` (plan 8d Ruling 1).
+const MIXER_SLOT_PARAMS: &[ParamSpec] = &[MIXER_SLOT];
+
+/// `mixer.move_insert` (plan 8d Ruling 1).
+const MIXER_MOVE_INSERT_PARAMS: &[ParamSpec] = &[
+    MIXER_SLOT,
+    mixer_id(
+        "index",
+        "The insert's new place on its own strip, counting from 1.",
+    ),
+];
+
+/// `mixer.set_bypass` (plan 8d Ruling 1).
+const MIXER_SET_BYPASS_PARAMS: &[ParamSpec] = &[
+    MIXER_SLOT,
+    ParamSpec {
+        name: "bypass",
+        kind: ParamKind::Flag,
+        required: true,
+        help: "Bypass the insert (true) or turn it back on (false).",
+    },
+];
+
+/// `mixer.set_eq` (plan 8d Ruling 1).
+const MIXER_SET_EQ_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    ParamSpec {
+        help: "The strip's EQ: multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see co_producer.plugins).",
+        ..PLUGIN_REF
+    },
+];
+
+/// `mixer.set_param` (plan 8d Ruling 1).
+const MIXER_SET_PARAM_PARAMS: &[ParamSpec] = &[
+    MIXER_SLOT,
+    ParamSpec {
+        name: "param",
+        kind: ParamKind::Int {
+            min: 0,
+            max: u32::MAX as i64,
+        },
+        required: true,
+        help: "The parameter's id (see co_producer.params).",
+    },
+    ParamSpec {
+        name: "value",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The value as text, such as \"0.75\", within the parameter's own range; a stepped parameter takes whole values.",
+    },
+];
+
+/// `mixer.remove_bus` (plan 8d Ruling 1).
+const MIXER_REMOVE_BUS_PARAMS: &[ParamSpec] = &[mixer_id("strip", "The bus strip to remove.")];
+
+/// `track.new_plugin_instrument` (plan 8d Ruling 1).
+const NEW_PLUGIN_INSTRUMENT_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param(
+        "after",
+        "The track to put the new one below (default: the selection's first track, else the end).",
+    ),
+    ParamSpec {
+        name: "plugin",
+        kind: ParamKind::Text,
+        required: true,
+        help: "built-in-synth, or clap:<id> or au:<type/subtype/manufacturer> of an installed instrument (see co_producer.plugins).",
+    },
+];
+
+/// Ruling 3's shape of a plug-in reference: `multi-q`, `clap:<id>` or
+/// `au:<id>` with a non-empty rest (and `built-in-synth` when
+/// `instrument`), at most [`PLUGIN_REF_MAX`] characters, with no control,
+/// bidi or line-separator character. Resolving it is the app's.
+pub fn plugin_ref(text: &str, instrument: bool) -> Result<(), String> {
+    let named = text == "multi-q" || (instrument && text == "built-in-synth");
+    let prefixed = ["clap:", "au:"]
+        .iter()
+        .any(|p| text.strip_prefix(p).is_some_and(|rest| !rest.is_empty()));
+    if text.chars().count() > PLUGIN_REF_MAX || text.chars().any(crate::request::refused_in_name) {
+        return Err(format!(
+            "must be at most {PLUGIN_REF_MAX} characters with no control character"
+        ));
+    }
+    if named || prefixed {
+        return Ok(());
+    }
+    Err(if instrument {
+        "must be built-in-synth, multi-q, clap:<id> or au:<type/subtype/manufacturer>".into()
+    } else {
+        "must be multi-q, clap:<id> or au:<type/subtype/manufacturer>".into()
+    })
+}
+
 /// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
 const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "theme",
@@ -3123,6 +3408,103 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         ))
     },
+    // Plan 8d Ruling 1: Co-Producer's mixer edits, each previewable, and
+    // a new track on a plug-in instrument.
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_STRIP_PARAMS,
+        ..key_only(cmd("mixer.set_strip", "Mixer", "Set Strip", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_OUTPUT_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_output",
+            "Mixer",
+            "Set Strip Output",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_ADD_SEND_PARAMS,
+        ..key_only(cmd("mixer.add_send", "Mixer", "Add Send", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_SEND_PARAMS,
+        ..key_only(cmd("mixer.set_send", "Mixer", "Set Send", None, true))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: MIXER_REMOVE_SEND_PARAMS,
+        ..key_only(cmd("mixer.remove_send", "Mixer", "Remove Send", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_ADD_INSERT_PARAMS,
+        ..key_only(cmd("mixer.add_insert", "Mixer", "Add Insert", None, true))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: MIXER_SLOT_PARAMS,
+        ..key_only(cmd(
+            "mixer.remove_insert",
+            "Mixer",
+            "Remove Insert",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_MOVE_INSERT_PARAMS,
+        ..key_only(cmd("mixer.move_insert", "Mixer", "Move Insert", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_BYPASS_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_bypass",
+            "Mixer",
+            "Bypass Insert",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_EQ_PARAMS,
+        ..key_only(cmd("mixer.set_eq", "Mixer", "Set EQ", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_PARAM_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_param",
+            "Mixer",
+            "Set Plug-in Parameter",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: MIXER_REMOVE_BUS_PARAMS,
+        ..key_only(cmd("mixer.remove_bus", "Mixer", "Remove Bus", None, true))
+    },
+    CommandSpec {
+        class: Class::Add,
+        params: NEW_PLUGIN_INSTRUMENT_PARAMS,
+        ..key_only(cmd(
+            "track.new_plugin_instrument",
+            "Track",
+            "New Plug-in Instrument Track",
+            None,
+            true,
+        ))
+    },
     // Plan 8a Ruling 10: the Co-Producer switch, for the e2e.
     CommandSpec {
         params: CO_PRODUCER_SWITCH_PARAMS,
@@ -3238,6 +3620,7 @@ pub fn validate_args(
     {
         return Err(p.error("give at least one of `volume`, `pan` and `mute`"));
     }
+    mixer_rules(&p, spec.id, &out)?;
     chore_rules(&p, spec.id, &mut out)?;
     for d in spec.dialogs.iter().filter(|d| d.always) {
         if !d.answered_by.iter().any(|a| p.has(a)) {
@@ -3307,6 +3690,36 @@ fn chore_rules(
                 *v = ArgValue::Text(crate::request::marker_name(t).map_err(|m| p.error(m))?);
             }
         }
+    }
+    Ok(())
+}
+
+/// Plan 8d Rulings 1 and 3's rules across parameters, for both sockets:
+/// at least one of `mixer.set_strip`'s and `mixer.set_send`'s settings,
+/// decimals as [`decimal`] spells them, and a plug-in reference's shape.
+fn mixer_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(), ControlError> {
+    if !MIXER_IDS.contains(&id) {
+        return Ok(());
+    }
+    let none_of = |keys: &[&str]| !keys.iter().any(|k| out.iter().any(|(n, _)| n == k));
+    if id == "mixer.set_strip" && none_of(&["gain_db", "pan", "mute", "solo"]) {
+        return Err(p.error("give at least one of `gain_db`, `pan`, `mute` and `solo`"));
+    }
+    if id == "mixer.set_send" && none_of(&["level_db", "pre_fader", "enabled"]) {
+        return Err(p.error("give at least one of `level_db`, `pre_fader` and `enabled`"));
+    }
+    for (name, (min, max)) in [
+        ("gain_db", LEVEL_DB),
+        ("level_db", LEVEL_DB),
+        ("value", PARAM_VALUE),
+    ] {
+        if let Some(t) = text_arg(out, name) {
+            decimal(t, min, max).map_err(|m| p.error(format!("`{name}` {m}")))?;
+        }
+    }
+    if let Some(t) = text_arg(out, "plugin") {
+        plugin_ref(t, id == "track.new_plugin_instrument")
+            .map_err(|m| p.error(format!("`plugin` {m}")))?;
     }
     Ok(())
 }

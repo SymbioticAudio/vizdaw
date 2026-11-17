@@ -119,6 +119,9 @@ public enum CoProducerCommands {
         case .coProducerExport(let what, let parent, let strips, _):
             guard let (docID, m) = doc else { return noDocument }
             return export(what, parent: parent, strips: strips, docID, m, store, host, stamp: stamp)
+        case .coProducerPlugins, .coProducerParams:
+            // Plan 8d Task 5 answers these.
+            return .failed(.of(.unavailable, "Not ready yet."))
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }

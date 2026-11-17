@@ -189,6 +189,21 @@ import VizDAWCore
         #expect(failure(refused)?.message == "What was asked is over 500 characters.")
     }
 
+    /// Plan 8d Task 1: the plug-in reads answer "Not ready yet." until
+    /// Task 5, and reach nothing.
+    @Test func pluginReadsAreNotReadyYet() throws {
+        let (s, id, _, f) = try demo()
+        for r in [
+            ControlRequest.coProducerPlugins(kind: nil), .coProducerPlugins(kind: .effect),
+            .coProducerPlugins(kind: .instrument), .coProducerParams(slot: 4, window: nil),
+        ] {
+            let o = run(r, s, id)
+            #expect(failure(o)?.code == .unavailable, "\(r): \(o)")
+            #expect(failure(o)?.message == "Not ready yet.", "\(r)")
+        }
+        #expect(f.coLog.isEmpty)
+    }
+
     /// Plan 8b Task 5: the notes, a note and an export folder reach the
     /// session; the folder's date is the stamp's day.
     @Test func notesNoteAndFolderPassThrough() throws {

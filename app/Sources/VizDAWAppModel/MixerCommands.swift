@@ -15,12 +15,20 @@ import VizDAWCore
 @MainActor
 public enum MixerCommands {
     public static let newBus = "mixer.new_bus"
-    public static let ids: Set<String> = [newBus]
+    /// Plan 8d Ruling 1's thirteen commands, in registry order. They answer
+    /// "Not ready yet." until plan 8d Task 5.
+    public static let coProducerEdits: [String] = [
+        "mixer.set_strip", "mixer.set_output", "mixer.add_send", "mixer.set_send", "mixer.remove_send",
+        "mixer.add_insert", "mixer.remove_insert", "mixer.move_insert", "mixer.set_bypass", "mixer.set_eq",
+        "mixer.set_param", "mixer.remove_bus", "track.new_plugin_instrument",
+    ]
+    public static let ids: Set<String> = Set([newBus] + coProducerEdits)
     /// Why master gets no new bus.
     public static let masterHasNoSends = "Master has no sends."
 
     /// Runs `id` (one of `ids`) on document `docID`.
     public static func run(_ id: String, args: [ControlArg], docID: UUID, _ m: DocumentModel) -> ControlOutcome {
+        if coProducerEdits.contains(id) { return .failed(.of(.unavailable, "Not ready yet.")) }
         guard id == newBus else { return .failed(.of(.unknownId, "VizDAW has no handler for \(id).")) }
         guard m.editor.gesture == nil else { return ControlCommands.unavailable(EditorModel.gestureOpenMessage) }
         var strip: UInt64?

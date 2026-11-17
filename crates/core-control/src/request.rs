@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every command name.
-pub const COMMAND_NAMES: [&str; 22] = [
+pub const COMMAND_NAMES: [&str; 24] = [
     "commands.list",
     "command.run",
     "state.get",
@@ -37,6 +37,8 @@ pub const COMMAND_NAMES: [&str; 22] = [
     "co_producer.note",
     "co_producer.export_folder",
     "co_producer.export",
+    "co_producer.plugins",
+    "co_producer.params",
 ];
 
 /// The longest Co-Producer request name, in characters after trimming
@@ -117,6 +119,15 @@ impl ExportWhat {
             ExportWhat::OtherDaw => "Other DAW",
         }
     }
+}
+
+/// The kind of plug-in `co_producer.plugins` lists (plan 8d Ruling 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginKindArg {
+    /// Takes notes, makes audio.
+    Instrument,
+    /// Processes audio.
+    Effect,
 }
 
 /// A preview token's length: 32 lowercase hex characters (Ruling 7).
@@ -389,6 +400,19 @@ pub enum Command {
         /// Whose document.
         window: Option<WindowRef>,
     },
+    /// Lists the installed plug-ins Co-Producer may use (plan 8d
+    /// Ruling 5): a read.
+    CoProducerPlugins {
+        /// Only instruments or only effects; absent: both.
+        kind: Option<PluginKindArg>,
+    },
+    /// Reads a loaded plug-in's parameters (plan 8d Ruling 5): a read.
+    CoProducerParams {
+        /// The slot, from 1.
+        slot: u64,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
 }
 
 impl Command {
@@ -411,6 +435,8 @@ impl Command {
                 | Command::CoProducerNote { .. }
                 | Command::CoProducerExportFolder { .. }
                 | Command::CoProducerExport { .. }
+                | Command::CoProducerPlugins { .. }
+                | Command::CoProducerParams { .. }
         )
     }
 }
@@ -648,6 +674,23 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 what,
                 parent: export_parent(&p)?,
                 strips,
+                window: p.window()?,
+            })
+        }
+        "co_producer.plugins" => {
+            p.only(&["kind"])?;
+            let kind = match p.opt_str("kind", 32)?.as_deref() {
+                None => None,
+                Some("instrument") => Some(PluginKindArg::Instrument),
+                Some("effect") => Some(PluginKindArg::Effect),
+                Some(_) => return Err(p.error("`kind` must be instrument or effect")),
+            };
+            Ok(Command::CoProducerPlugins { kind })
+        }
+        "co_producer.params" => {
+            p.only(&["slot", "window"])?;
+            Ok(Command::CoProducerParams {
+                slot: p.int("slot", 1, registry::MAX_EXACT_ID)? as u64,
                 window: p.window()?,
             })
         }

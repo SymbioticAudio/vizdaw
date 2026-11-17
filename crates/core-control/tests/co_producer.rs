@@ -70,6 +70,7 @@ const ADD: &[&str] = &[
     "file.import_midi",
     "mixer.new_bus",
     "marker.add",
+    "track.new_plugin_instrument",
 ];
 const OUTWARD: &[&str] = &[
     "file.bounce",
@@ -120,6 +121,15 @@ const CHANGE: &[&str] = &[
     "editors.nudge_up",
     "editors.nudge_down",
     "marker.rename",
+    "mixer.set_strip",
+    "mixer.set_output",
+    "mixer.add_send",
+    "mixer.set_send",
+    "mixer.add_insert",
+    "mixer.move_insert",
+    "mixer.set_bypass",
+    "mixer.set_eq",
+    "mixer.set_param",
 ];
 const REMOVE: &[&str] = &[
     "track.delete",
@@ -128,6 +138,9 @@ const REMOVE: &[&str] = &[
     "region.remove_crossfade",
     "drum.remove_row",
     "marker.remove",
+    "mixer.remove_send",
+    "mixer.remove_insert",
+    "mixer.remove_bus",
 ];
 /// Spec §6.5's refused commands (the layout `ui.*` included).
 const SPEC_REFUSED: &[&str] = &[
@@ -179,7 +192,7 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 201);
+    assert_eq!(COMMANDS.len(), 214, "plan 8d adds thirteen");
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");
@@ -478,8 +491,11 @@ fn plans_check_every_command() {
         e.message,
         "Co-Producer cannot preview region.normalize yet."
     );
-    let e = preview(json!([{"id": "mixer.new_bus", "params": {"strip": 2}}])).unwrap_err();
-    assert_eq!(e.message, "Co-Producer cannot preview mixer.new_bus yet.");
+    // Plan 8d Ruling 1: a new bus fed by a strip now previews.
+    assert_eq!(
+        preview(json!([{"id": "mixer.new_bus", "params": {"strip": 2}}])),
+        Ok(())
+    );
     let e =
         preview(json!([{"id": "file.save", "params": {"path": "/tmp/Other.vizdaw"}}])).unwrap_err();
     assert_eq!(e.code, ErrorCode::NotAllowed);
@@ -1455,6 +1471,19 @@ fn chore_commands_have_their_class() {
             "modify.velocity_notes",
             "marker.rename",
             "marker.remove",
+            "mixer.new_bus",
+            "mixer.set_strip",
+            "mixer.set_output",
+            "mixer.add_send",
+            "mixer.set_send",
+            "mixer.remove_send",
+            "mixer.add_insert",
+            "mixer.remove_insert",
+            "mixer.move_insert",
+            "mixer.set_bypass",
+            "mixer.set_eq",
+            "mixer.set_param",
+            "mixer.remove_bus",
         ]
     );
 }
@@ -2011,4 +2040,484 @@ fn midi_clips_for_several_tracks_go_into_a_folder() {
         ),
         Ok(())
     );
+}
+
+/// Plan 8d Ruling 1: the twelve mixer edits, each with valid params.
+fn mixer_edits() -> Vec<(&'static str, Value)> {
+    vec![
+        ("mixer.set_strip", json!({"strip": 2, "gain_db": "-6"})),
+        ("mixer.set_output", json!({"strip": 2, "bus": 3})),
+        ("mixer.add_send", json!({"strip": 2, "bus": 3})),
+        (
+            "mixer.set_send",
+            json!({"strip": 2, "index": 1, "level_db": "-3"}),
+        ),
+        ("mixer.remove_send", json!({"strip": 2, "index": 1})),
+        ("mixer.add_insert", json!({"strip": 2, "plugin": "multi-q"})),
+        ("mixer.remove_insert", json!({"slot": 4})),
+        ("mixer.move_insert", json!({"slot": 4, "index": 1})),
+        ("mixer.set_bypass", json!({"slot": 4, "bypass": true})),
+        (
+            "mixer.set_eq",
+            json!({"strip": 2, "plugin": "clap:vizdaw.test.eq"}),
+        ),
+        (
+            "mixer.set_param",
+            json!({"slot": 4, "param": 0, "value": "0.5"}),
+        ),
+        ("mixer.remove_bus", json!({"strip": 3})),
+    ]
+}
+
+#[test]
+fn mixer_commands_have_their_class() {
+    assert_eq!(registry::MIXER_IDS.len(), 13);
+    assert_eq!(registry::PLUGIN_REF_MAX, 512);
+    let edits = mixer_edits();
+    let ids: Vec<&str> = edits.iter().map(|(id, _)| *id).collect();
+    let mut all = ids.clone();
+    all.push("track.new_plugin_instrument");
+    assert_eq!(registry::MIXER_IDS, &all[..]);
+    for id in registry::MIXER_IDS {
+        let c = registry::find(id).unwrap_or_else(|| panic!("{id} is not registered"));
+        let want = match *id {
+            "mixer.remove_send" | "mixer.remove_insert" | "mixer.remove_bus" => Class::Remove,
+            "track.new_plugin_instrument" => Class::Add,
+            _ => Class::Change,
+        };
+        assert_eq!(c.class, want, "{id}");
+        assert!(!c.menu_item, "{id} is key-only");
+        assert!(c.document, "{id} acts on a document");
+        assert_eq!(c.shortcut, None, "{id}");
+        let menu = if *id == "track.new_plugin_instrument" {
+            "Track"
+        } else {
+            "Mixer"
+        };
+        assert_eq!(c.menu, menu, "{id}");
+    }
+    for (id, title) in [
+        ("mixer.set_strip", "Set Strip"),
+        ("mixer.set_output", "Set Strip Output"),
+        ("mixer.add_send", "Add Send"),
+        ("mixer.set_send", "Set Send"),
+        ("mixer.remove_send", "Remove Send"),
+        ("mixer.add_insert", "Add Insert"),
+        ("mixer.remove_insert", "Remove Insert"),
+        ("mixer.move_insert", "Move Insert"),
+        ("mixer.set_bypass", "Bypass Insert"),
+        ("mixer.set_eq", "Set EQ"),
+        ("mixer.set_param", "Set Plug-in Parameter"),
+        ("mixer.remove_bus", "Remove Bus"),
+        (
+            "track.new_plugin_instrument",
+            "New Plug-in Instrument Track",
+        ),
+    ] {
+        assert_eq!(registry::find(id).unwrap().title, title, "{id}");
+    }
+    let list = co_producer::list_json();
+    let commands = list["commands"].as_array().unwrap();
+    let listed = |id: &str| {
+        commands
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is not listed"))
+            .clone()
+    };
+    for id in registry::MIXER_IDS {
+        let c = listed(id);
+        let previewable = *id != "track.new_plugin_instrument";
+        assert_eq!(c["previewable"], json!(previewable), "{id}");
+        assert_eq!(PREVIEWABLE.contains(id), previewable, "{id}");
+    }
+    assert_eq!(listed("track.new_plugin_instrument")["class"], "add");
+    let bus = listed("mixer.new_bus");
+    assert_eq!(bus["previewable"], json!(true));
+    let spec = registry::find("mixer.new_bus").unwrap();
+    assert_eq!(effective_class(spec, &[]), Class::Add);
+    assert_eq!(
+        effective_class(spec, &[("strip".into(), ArgValue::Int(2))]),
+        Class::Change
+    );
+}
+
+#[test]
+fn mixer_changes_only_through_a_preview() {
+    let direct = |id: &str| {
+        format!(
+            "{id} changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+        )
+    };
+    let mut edits = mixer_edits();
+    edits.push(("mixer.new_bus", json!({"strip": 2})));
+    edits.push(("mixer.new_bus", json!({"strip": 2, "name": "Drums"})));
+    for (id, params) in &edits {
+        let m = assert_code(
+            "command.run",
+            run(id, params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert_eq!(m, direct(id));
+        assert_eq!(
+            preview(json!([{"id": id, "params": params}])),
+            Ok(()),
+            "{id} {params}"
+        );
+    }
+    // One plan holding all of them.
+    let plan: Vec<Value> = edits
+        .iter()
+        .map(|(id, params)| json!({"id": id, "params": params}))
+        .collect();
+    assert_eq!(preview(Value::Array(plan.clone())), Ok(()));
+    assert_eq!(
+        gate(
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": plan})
+        ),
+        Ok(())
+    );
+    // The adds run directly.
+    for (id, params) in [
+        (
+            "track.new_plugin_instrument",
+            json!({"plugin": "clap:vizdaw.test.synth4"}),
+        ),
+        (
+            "track.new_plugin_instrument",
+            json!({"plugin": "built-in-synth", "seq": 1, "after": 2}),
+        ),
+        ("mixer.new_bus", json!({"name": "Drums"})),
+        ("mixer.new_bus", json!({})),
+    ] {
+        assert_eq!(gate("command.run", run(id, params.clone())), Ok(()), "{id}");
+    }
+    // An add needs no preview: a free bus and a new instrument track.
+    for (id, params) in [
+        ("mixer.new_bus", json!({"name": "Drums"})),
+        (
+            "track.new_plugin_instrument",
+            json!({"plugin": "clap:vizdaw.test.synth4"}),
+        ),
+    ] {
+        let e = preview(json!([{"id": id, "params": params}])).unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotAllowed, "{id}: {}", e.message);
+        assert_eq!(
+            e.message,
+            format!("{id} needs no preview: run it with command.run.")
+        );
+    }
+}
+
+#[test]
+fn mixer_commands_refuse_hostile_input() {
+    let long = "1".repeat(70_000);
+    let big = json!(1u64 << 53);
+    let edits = mixer_edits();
+    // A missing, zero, negative, text or too-large target.
+    for (id, base) in &edits {
+        let target = if base.get("strip").is_some() {
+            "strip"
+        } else {
+            "slot"
+        };
+        let mut cases = vec![with(base, target, Value::Null)];
+        for bad in [json!(0), json!(-1), json!("2"), big.clone(), json!(2.5)] {
+            cases.push(with(base, target, bad));
+        }
+        cases.push(with(base, "extra", json!(1)));
+        all_invalid(id, &cases);
+    }
+    // Strip, slot and index at 2^53 - 1 still pass the registry.
+    let top = json!((1u64 << 53) - 1);
+    assert_eq!(
+        preview(json!([{"id": "mixer.remove_insert", "params": {"slot": top}}])),
+        Ok(())
+    );
+    let strip = json!({"strip": 2});
+    let mut gains = vec![
+        strip.clone(),
+        with(&strip, "pan", json!(101)),
+        with(&strip, "pan", json!(-101)),
+        with(&strip, "pan", json!("10")),
+        with(&strip, "mute", json!("true")),
+        with(&strip, "gain_db", json!(-6)),
+    ];
+    for bad in [
+        "13",
+        "-145",
+        "1e3",
+        "NaN",
+        "inf",
+        "+1",
+        "0x10",
+        "1,5",
+        "",
+        " 1",
+        "1.",
+        ".5",
+        "-",
+        "1234567",
+        "1.1234567",
+        "١",
+    ] {
+        gains.push(with(&strip, "gain_db", json!(bad)));
+    }
+    gains.push(with(&strip, "gain_db", json!(long)));
+    gains.push(with(&strip, "gain_db", json!("-6\u{0}")));
+    all_invalid("mixer.set_strip", &gains);
+    // Each of the four alone, and the ends of both ranges, pass.
+    for params in [
+        json!({"strip": 2, "gain_db": "-144"}),
+        json!({"strip": 2, "gain_db": "12"}),
+        json!({"strip": 2, "gain_db": "-0.5"}),
+        json!({"strip": 2, "pan": -100}),
+        json!({"strip": 2, "pan": 100}),
+        json!({"strip": 2, "mute": false}),
+        json!({"strip": 2, "solo": true}),
+    ] {
+        assert_eq!(
+            preview(json!([{"id": "mixer.set_strip", "params": params}])),
+            Ok(()),
+            "{params}"
+        );
+    }
+    all_invalid(
+        "mixer.set_output",
+        &[
+            json!({"strip": 2}),
+            json!({"strip": 2, "bus": "master"}),
+            json!({"strip": 2, "bus": 0}),
+            json!({"strip": 2, "bus": true}),
+        ],
+    );
+    assert_eq!(
+        preview(json!([{"id": "mixer.set_output", "params": {"strip": 2, "bus": null}}])),
+        Ok(()),
+        "null is master"
+    );
+    all_invalid(
+        "mixer.add_send",
+        &[
+            json!({"strip": 2}),
+            json!({"strip": 2, "bus": 0}),
+            json!({"strip": 2, "bus": null}),
+            json!({"strip": 2, "bus": 3, "level_db": "13"}),
+            json!({"strip": 2, "bus": 3, "level_db": "NaN"}),
+            json!({"strip": 2, "bus": 3, "pre_fader": 1}),
+        ],
+    );
+    all_invalid(
+        "mixer.set_send",
+        &[
+            json!({"strip": 2, "index": 1}),
+            json!({"strip": 2, "index": 0, "enabled": true}),
+            json!({"strip": 2, "index": -1, "enabled": true}),
+            json!({"strip": 2, "enabled": true}),
+            json!({"strip": 2, "index": 1, "level_db": "1e3"}),
+        ],
+    );
+    for params in [
+        json!({"strip": 2, "index": 1, "enabled": false}),
+        json!({"strip": 2, "index": 1, "pre_fader": true}),
+    ] {
+        assert_eq!(
+            preview(json!([{"id": "mixer.set_send", "params": params}])),
+            Ok(()),
+            "{params}"
+        );
+    }
+    all_invalid(
+        "mixer.remove_send",
+        &[json!({"strip": 2}), json!({"strip": 2, "index": 0})],
+    );
+    all_invalid(
+        "mixer.move_insert",
+        &[json!({"slot": 4}), json!({"slot": 4, "index": 0})],
+    );
+    all_invalid(
+        "mixer.add_insert",
+        &[json!({"strip": 2, "plugin": "multi-q", "index": 0})],
+    );
+    all_invalid(
+        "mixer.set_bypass",
+        &[json!({"slot": 4}), json!({"slot": 4, "bypass": "yes"})],
+    );
+    // Plug-in references (Ruling 3's shape).
+    let bad_refs = [
+        json!(""),
+        json!("clap:"),
+        json!("au:"),
+        json!("vst:x"),
+        json!("multi-q\u{0}"),
+        json!("au:a\u{202E}b"),
+        json!("clap:a\nb"),
+        json!("Multi-Q"),
+        json!(" multi-q"),
+        json!(format!("clap:{}", "x".repeat(508))),
+        json!("x".repeat(70_000)),
+        json!(7),
+    ];
+    assert_eq!(format!("clap:{}", "x".repeat(508)).chars().count(), 513);
+    for (id, base) in [
+        ("mixer.add_insert", json!({"strip": 2, "plugin": "multi-q"})),
+        ("mixer.set_eq", json!({"strip": 2, "plugin": "multi-q"})),
+        (
+            "track.new_plugin_instrument",
+            json!({"plugin": "built-in-synth"}),
+        ),
+    ] {
+        let mut cases: Vec<Value> = bad_refs
+            .iter()
+            .map(|r| with(&base, "plugin", r.clone()))
+            .collect();
+        cases.push(with(&base, "plugin", Value::Null));
+        for (case, label) in cases.iter().zip(0..) {
+            let e = validate(&req("command.run", run(id, case.clone()))).unwrap_err();
+            assert_eq!(
+                e.code,
+                ErrorCode::InvalidParams,
+                "{id} #{label}: {}",
+                e.message
+            );
+        }
+    }
+    for (id, base) in [
+        ("mixer.add_insert", json!({"strip": 2})),
+        ("mixer.set_eq", json!({"strip": 2})),
+    ] {
+        for good in [
+            "multi-q",
+            "clap:vizdaw.test.eq",
+            "au:aufx/Test/Viz",
+            &format!("clap:{}", "x".repeat(507)),
+        ] {
+            assert_eq!(
+                preview(json!([{"id": id, "params": with(&base, "plugin", json!(good))}])),
+                Ok(()),
+                "{id} {good}"
+            );
+        }
+        // The Built-in Synth is an instrument, never an insert or the EQ.
+        all_invalid(id, &[with(&base, "plugin", json!("built-in-synth"))]);
+    }
+    for good in [
+        "multi-q",
+        "built-in-synth",
+        "clap:vizdaw.test.synth4",
+        "au:aumu/Test/Viz",
+    ] {
+        assert_eq!(
+            gate(
+                "command.run",
+                run("track.new_plugin_instrument", json!({"plugin": good}))
+            ),
+            Ok(()),
+            "{good}"
+        );
+    }
+    // A plug-in parameter.
+    all_invalid(
+        "mixer.set_param",
+        &[
+            json!({"slot": 4, "param": 0, "value": "NaN"}),
+            json!({"slot": 4, "param": 0, "value": "1e3"}),
+            json!({"slot": 4, "param": 0, "value": 0.5}),
+            json!({"slot": 4, "param": 0}),
+            json!({"slot": 4, "value": "0.5"}),
+            json!({"slot": 4, "param": -1, "value": "0.5"}),
+            json!({"slot": 4, "param": "0", "value": "0.5"}),
+            json!({"slot": 4, "param": 1u64 << 32, "value": "0.5"}),
+        ],
+    );
+    assert_eq!(
+        preview(
+            json!([{"id": "mixer.set_param", "params": {"slot": 4, "param": 12, "value": "-999999.5"}}])
+        ),
+        Ok(())
+    );
+    // track.new_plugin_instrument's own params.
+    let e = validate(&req(
+        "command.run",
+        run("track.new_plugin_instrument", json!({})),
+    ))
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{}", e.message);
+    // An unknown param on any of the thirteen.
+    for id in registry::MIXER_IDS {
+        let e = validate(&req("command.run", run(id, json!({"colour": "red"})))).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{id}: {}", e.message);
+    }
+    for (id, base) in &edits {
+        let e = validate(&req("command.run", run(id, with(base, "window", json!(1))))).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{id}: {}", e.message);
+    }
+}
+
+#[test]
+fn plugin_calls_only_on_the_co_producer_socket() {
+    use core_control::client::{CallError, Client};
+    use core_control::server::{Config, Server};
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let dev = Server::start(&sock, Config::default()).unwrap();
+    let mut c = Client::connect(&sock).unwrap();
+    for (cmd, params) in [
+        ("co_producer.plugins", json!({})),
+        ("co_producer.plugins", json!({"kind": "effect"})),
+        ("co_producer.params", json!({"slot": 4})),
+    ] {
+        match c.call(cmd, params, std::time::Duration::from_secs(20)) {
+            Err(CallError::Reply(e)) => {
+                assert_eq!(e.code, ErrorCode::NotAllowed, "{cmd}: {e}");
+                assert!(e.message.contains("only on the Co-Producer socket"), "{e}");
+            }
+            other => panic!("{cmd}: {other:?}"),
+        }
+    }
+    assert!(dev.next_call().is_none(), "the app never sees them");
+    // The gate admits both, with no request open: they only read.
+    for (cmd, params) in [
+        ("co_producer.plugins", json!({})),
+        ("co_producer.plugins", json!({"kind": "instrument"})),
+        ("co_producer.plugins", json!({"kind": "effect"})),
+        ("co_producer.params", json!({"slot": 4})),
+        ("co_producer.params", json!({"slot": 4, "window": "key"})),
+    ] {
+        assert_eq!(gate(cmd, params.clone()), Ok(()), "{cmd} {params}");
+        assert!(
+            validate(&req(cmd, params)).unwrap().is_co_producer(),
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn plugin_calls_refuse_hostile_input() {
+    for (cmd, params) in [
+        ("co_producer.plugins", json!({"kind": "synth"})),
+        ("co_producer.plugins", json!({"kind": "Effect"})),
+        ("co_producer.plugins", json!({"kind": 1})),
+        ("co_producer.plugins", json!({"kind": "effect\u{0}"})),
+        ("co_producer.plugins", json!({"kind": "x".repeat(70_000)})),
+        ("co_producer.plugins", json!({"extra": 1})),
+        ("co_producer.plugins", json!({"window": 1})),
+        ("co_producer.params", json!({})),
+        ("co_producer.params", json!({"slot": 0})),
+        ("co_producer.params", json!({"slot": -1})),
+        ("co_producer.params", json!({"slot": "a"})),
+        ("co_producer.params", json!({"slot": "4"})),
+        ("co_producer.params", json!({"slot": 1u64 << 53})),
+        ("co_producer.params", json!({"slot": 4, "window": 0})),
+        ("co_producer.params", json!({"slot": 4, "extra": 1})),
+    ] {
+        let e = validate(&req(cmd, params.clone())).unwrap_err();
+        assert_eq!(
+            e.code,
+            ErrorCode::InvalidParams,
+            "{cmd} {params}: {}",
+            e.message
+        );
+    }
 }
