@@ -101,6 +101,34 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
         #expect(e.status == EditorModel.gestureOpenMessage)
     }
 
+    /// Owner decision 5 (plan release-fixes Task 5): in the Mix view with
+    /// no editor showing, the nudges wait and say why; a key says it in the
+    /// status line.
+    @Test func nudgesWaitWhileTheMixViewHidesTheSelection() throws {
+        let f = rollFake()
+        let store = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in rollFake() })
+        let id = try #require(store.newDemo())
+        let m = try #require(store.model(id))
+        let host = FakeControlHost()
+        func run(_ c: String) -> ControlOutcome { ControlCommands.run(c, args: [], doc: (id, m), store: store, host: host) }
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 31)], events: [1, 2]))
+        guard case .done = run("ui.view_mix") else { Issue.record("ui.view_mix failed"); return }
+        let before = f.edits.count
+        for c in ["editors.nudge_earlier", "editors.nudge_later", "editors.nudge_up", "editors.nudge_down"] {
+            guard case .failed(let why) = run(c) else { Issue.record("\(c) ran"); continue }
+            #expect(why.code == .unavailable && why.message == DocumentModel.hiddenSelection, "\(c)")
+        }
+        #expect(f.edits.count == before)
+        // A key press says why in the status line.
+        #expect(KeyDispatch.command("editors.nudge_later", doc: (id, m), store: store, host: host) == .handled)
+        #expect(m.editor.status == DocumentModel.hiddenSelection)
+        #expect(f.edits.count == before)
+        // The Editor shown in the Mix view's bottom pane: the nudge runs.
+        m.editor.updateLayout { $0.views.mix.bottom = PaneState(shown: true, view: .editor, size: 260) }
+        guard case .done = run("editors.nudge_later") else { Issue.record("the nudge was refused"); return }
+        #expect(f.edits.last == .event(edit: .nudge(events: [1, 2], ticks: 15_360, semitones: 0)))
+    }
+
     @Test func theAnchorIsTheRangeStartElseTheEarliestSelectedEvent() throws {
         let (_, e) = try selected([2])
         #expect(e.nudgeAnchor()?.tick == 15_360)

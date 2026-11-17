@@ -564,6 +564,18 @@ public final class DocumentModel {
     /// or reference field is edited, so typing a space types a space. A
     /// surface's button is no key (ruling T9-1): it acts regardless.
     public var transportKeysEnabled: Bool { surfaceActing || !textFieldHasKeyboard }
+    /// True in the Mix view when the bottom pane shows neither the Editor nor
+    /// the Audio Editor (Decision 5): views.main == .mix && !(views.mix.bottom.shown
+    /// && [.editor, .audioEditor].contains(views.mix.bottom.view)). A torn-off
+    /// editor window does not count as showing the selection.
+    public var selectionHidden: Bool {
+        let views = editor.layout.views
+        return views.main == .mix
+            && !(views.mix.bottom.shown && [.editor, .audioEditor].contains(views.mix.bottom.view))
+    }
+    /// Why the nudges and Modify Again wait while `selectionHidden`.
+    public static let hiddenSelection =
+        "The Mix view shows no editor: press ⌃1, or show the Editor in the bottom pane, to edit the selection."
     /// A name, comment, slot, reference or panel field is edited. Commands
     /// that move the keyboard focus wait for it even from a surface
     /// (review M1): taking the focus would cut the edit short.

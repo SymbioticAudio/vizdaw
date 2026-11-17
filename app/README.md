@@ -1928,6 +1928,7 @@ the detail pane is the bottom pane's editor.
      instead, Mission Control owns ⌃1/⌃2: rebind Arrange View and Mix View
      in Settings › Keys › View.) A sequence's keyboard slot on ⌃1, ⌃2 or
      ⌃⌘←/↓/→ no longer fires: the View command wins (backlog).
+     In the Mix view with no editor showing, the nudges and Modify Again are greyed out, and their keys say why in the status line.
 201. Press ⌃⌘→: the right pane opens beside the bottom pane, under the
      arrangement. Press ⌃⌘↓: the bottom pane hides and the right pane runs
      beside the arrangement for the full height. Press ⌃⌘↓: the bottom

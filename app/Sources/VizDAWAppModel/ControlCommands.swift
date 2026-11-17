@@ -555,6 +555,8 @@ public enum ControlCommands {
             }
             list.insert()
         case _ where nudges[id] != nil:
+            // Owner decision 5 (plan release-fixes Task 5).
+            guard !m.selectionHidden else { return unavailable(DocumentModel.hiddenSelection) }
             guard m.transportKeysEnabled, !m.editor.selection.events.isEmpty else {
                 return unavailable("Nudge needs selected events and no text being edited.")
             }
@@ -564,6 +566,7 @@ public enum ControlCommands {
         case _ where panels[id] != nil:
             m.selectModify.open(panels[id] ?? .change)
         case "modify.again":
+            guard !m.selectionHidden else { return unavailable(DocumentModel.hiddenSelection) }
             guard m.selectModify.canModifyAgain else { return unavailable("There is no modification to repeat.") }
             if !m.selectModify.modifyAgain() {
                 return .failed(.of(.failed, m.editor.status ?? "Modify Again was refused."))
