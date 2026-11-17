@@ -42,7 +42,7 @@ What it is for, in the owner's order (owner, 2026-11-14):
 
 ## 4. Anti-goals (never, in any version)
 
-- **Destructive edits, deletions or overwriting the composer's creative work without a yes** (owner). No hidden or silent route around §6 may exist: not a "trust me" setting, not a batch mode. The one standing grant is the owner's per-app approval (§6.8, owner 2026-11-16). The composer gives it on VizDAW's own sheet, for one identified app, and Settings lists it and can revoke it, so it is neither hidden nor silent.
+- **Destructive edits, deletions or overwriting the composer's creative work without a yes** (owner). No hidden or silent route around §6 may exist: not a "trust me" setting, not a batch mode. The one standing grant is the owner's per-app approval (§6.8, owner 2026-11-16). The composer gives it on VizDAW's own sheet, for one app (with a warning first when VizDAW cannot verify the app), and Settings lists it and can revoke it, so it is neither hidden nor silent.
 - **Replacing a file.** Co-Producer never writes over an existing file, inside or outside the project (owner).
 - **Interrupting.** Coaching and suggestions come only when the composer asks (controller's call, owner saw it).
 - **Sending the composer's data anywhere by itself.** Metrics and notes stay on the Mac; Claude sees them only when the composer asks through Co-Producer (controller's call, owner saw it).
@@ -144,7 +144,7 @@ Before a change or remove on the composer's work runs, Co-Producer shows the com
 - Before VizDAW applies a change or remove that needs a yes (a preview with `needs_yes`, §6.6), it shows its own small sheet on the document's window. The sheet lists exactly what the preview listed and has two buttons, **Allow** and **Don't Allow**.
 - Only two things count as the composer's yes: a click on Allow in that sheet, or a standing approval for the asking app (below). The host's elicitation, or the yes in chat, stays as the first prompt. VizDAW's sheet is what actually authorises the change.
 - This is a deliberate exception, approved by the owner, to the rule that programmatic calls never open dialogs (§5; control-channel spec §3). It covers this one sheet only, and no other call opens anything.
-- **Which applies get the sheet** (controller's call). Only an apply whose preview has `needs_yes` gets it. A change or remove that touches only Co-Producer's own additions, not yet taken over, needs no yes (§6.5), so it needs no sheet either.
+- **Which applies get the sheet** (controller's call, owner confirmed 2026-11-16). Only an apply whose preview has `needs_yes` gets it. A change or remove that touches only Co-Producer's own additions, not yet taken over, needs no yes (§6.5), so it needs no sheet either.
 - **The wording** (controller's call):
   - the title is "Allow Co-Producer to Change Your Song?";
   - the text is "<App> asks to make these changes to "<song>":", then the preview's list;
@@ -155,13 +155,26 @@ Before a change or remove on the composer's work runs, Co-Producer shows the com
 **"Always allow <App>" (owner).**
 - The sheet offers a checkbox, unticked, "Always allow <App>". Allow with the box ticked grants that app a standing approval and applies the change. From then on, a request from that app that needs a yes applies with no sheet.
 - The box carries one line of explanation: "Anything <App> runs can then change your songs without VizDAW asking. You can stop this in Settings › Co-Producer." (controller's call).
-- The box appears only for an app VizDAW can identify strongly (below). For any other caller the sheet says instead: "VizDAW cannot confirm which app is asking, so it asks every time."
-- **Settings › Co-Producer** lists every standing approval: the app's name, its team ID and identifier, and the date it was granted. Each one has a **Revoke** button, and there is a **Revoke All**. With none, the list reads "None. VizDAW asks before every change." A revoked approval stops at once, and the next request asks again.
+- **Verified and unverified approvals** (owner, 2026-11-16).
+  - **A verified approval** is offered for an app VizDAW can identify strongly (below). Its key is the app's team ID and bundle identifier.
+  - **An unverified approval** is offered for every other host too, including a command-line host such as Claude Code, a `vizdaw-mcp` started from a shell, and an unsigned program. It comes with a warning that is shown first, in plain words, before anything is saved:
+    - the warning reads: "VizDAW can't check which program this is. Any program you run from Terminal could use this approval.";
+    - when the composer ticks "Always allow" for such a host and clicks Allow, the sheet shows the warning with two buttons, **Cancel** (the default, and Esc) and **Always Allow Anyway**;
+    - only Always Allow Anyway saves the approval and applies the change;
+    - Cancel unticks the box and returns to the sheet, with nothing saved and nothing applied.
+  - **The unverified key** is the best label VizDAW has (controller's call on the exact form): the host's executable path, from `proc_pidpath`, joined with the `clientInfo` name. For `vizdaw-mcp` the host is its parent; for a raw client on the socket it is the client itself.
+    - An unverified approval matches only a caller with that same path and that same name, and that is also unverified.
+    - Both parts can be copied by any program, which is exactly what the warning says.
+  - **The kinds never cross.**
+    - A verified approval is used only for a caller that verifies as that app.
+    - An unverified approval is used only for a caller that does not verify. A signed app whose identity does verify never picks up an unverified approval that shares its path and name.
+    - A caller with no peer token or no readable path has no key at all, so it gets the sheet with no "Always allow".
+- **Settings › Co-Producer** lists every standing approval. A verified one shows the app's name, its team ID and identifier, and the date it was granted. An unverified one shows its name (or its path when it has none), the word **unverified**, its path and the date. Each one has a **Revoke** button, and there is a **Revoke All**. With none, the list reads "None. VizDAW asks before every change." A revoked approval stops at once, and the next request asks again.
 - Approvals stay when the Co-Producer switch goes off (controller's call); only Revoke removes them.
 - **Where approvals are kept** (controller's call). They are kept in the login Keychain as one generic-password item that VizDAW creates, not in preferences or a file. An agent could write those with a single `defaults` or `echo` command. The Keychain makes the system ask the composer before another program reads or changes VizDAW's item. That is stronger, but it is not proof against a determined program running as the composer (see "What this cannot stop").
 
 **How VizDAW identifies the app (controller's call).**
-- **The decision.** A standing approval is keyed on the code-signed host app: its team ID and its bundle identifier. VizDAW finds the host from the socket connection, not from anything the caller says. A caller that VizDAW cannot trace to a strongly signed host is "unknown". An unknown caller always gets the sheet, and is never offered "Always allow".
+- **The decision.** A verified approval is keyed on the code-signed host app: its team ID and its bundle identifier. VizDAW finds the host from the socket connection, not from anything the caller says. A caller that VizDAW cannot trace to a strongly signed host is "unverified". It can still be given an unverified approval, after the warning (owner, 2026-11-16; above).
 - **What is feasible without new crates.**
   1. **Who is on the socket.** When the Co-Producer socket accepts a connection, it reads the peer's audit token with `getsockopt(LOCAL_PEERTOKEN)`. The kernel fills it in, so the caller cannot forge it, and unlike a bare pid (`LOCAL_PEERPID`) it cannot be confused with a reused pid.
      - This needs one system call. `core-control` forbids unsafe code, and std's `peer_cred` is not stable, so the call lives in `platform-macos` as a hand-declared `extern "C"`. That crate already declares system calls this way. `core-control` gets a safe hook for it.
@@ -176,16 +189,22 @@ Before a change or remove on the composer's work runs, Co-Producer shows the com
        - its launch arguments and environment (`sysctl KERN_PROCARGS2`) hold no `DYLD_*`, `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect…` or `--remote-debugging…`.
      - The app's key is its team ID and bundle identifier, and its shown name comes from that bundle's `Info.plist`.
      - Security (`SecCode…`) and Darwin (`proc_pidinfo`, `sysctl`) are system frameworks that Swift calls directly, so this takes no new dependency.
-  4. **The `clientInfo` name that the host reports at `initialize`** can be forged, so it is a display label only. The sheet shows it in quotes ("calls itself …") next to the identified app, or alone for an unknown caller. It never keys, grants or matches an approval.
+  4. **The `clientInfo` name that the host reports at `initialize`** can be forged. For a verified app it is a display label only: the sheet shows it in quotes ("calls itself …"), and it never keys, grants or matches a verified approval. For an unverified host it is half of the unverified key, and the warning says why that is weak.
 - **What this means in practice.**
-  - A program on the raw socket is unknown.
-  - So is a `vizdaw-mcp` started from a shell, or by a command-line host, even a signed one, because a shell or terminal sits in its parent chain. These get the sheet every time.
-  - A signed, hardened desktop app started from the Finder or Dock can be identified and approved.
+  - A program on the raw socket is unverified.
+  - So is a `vizdaw-mcp` started from a shell, or by a command-line host, even a signed one, because a shell or terminal sits in its parent chain. Each of these gets the sheet unless the composer gave it an unverified approval after the warning.
+  - A signed, hardened desktop app started from the Finder or Dock can be identified and given a verified approval.
 - **What this cannot stop, said plainly.** A standing approval trusts the approved app, and whatever can run as that app. A program running as the composer with full shell access can still act as an approved app in ways VizDAW cannot see. For example:
   - it can rewrite the app's own MCP configuration so that a relay in front of `vizdaw-mcp` feeds it input;
   - it can steer an app whose own launch can be made to run other code.
 
-  It cannot forge the sheet's click (short of Accessibility access, above), and it cannot use the raw socket. VizDAW and `vizdaw-mcp` are ad-hoc signed today and do not use the hardened runtime. Code injected into VizDAW itself, for example by relaunching it with `DYLD_*` in its environment, defeats any check inside VizDAW. A release signed with Developer ID and the hardened runtime closes that route (backlog). The developer control channel (§6.1) is separate: when the launch flag turns it on, it runs every command with no yes, and this sheet does not cover it.
+  It cannot forge the sheet's click (short of Accessibility access, above). Without an approval, it cannot get past the sheet through the raw socket.
+- **Limits the owner accepts for 1.0** (owner, 2026-11-16):
+  - **Unverified approvals.** Any program that runs from the same executable path and reports the same `clientInfo` name gets the same blanket approval. For a shell or a command-line host, that is any program the composer, or an agent, runs from Terminal. The composer is told so before saving one.
+  - **Code injected into VizDAW.** VizDAW and `vizdaw-mcp` are ad-hoc signed and do not use the hardened runtime. Code injected into VizDAW itself, for example by relaunching it with `DYLD_*` in its environment, defeats every check inside VizDAW. Signing with Developer ID and the hardened runtime closes that route. It is a backlog row for after 1.0, on the release checklist.
+  - **Programs with Accessibility access.** They can press Allow wherever macOS does not let VizDAW tell their press from a real one (above).
+  - **Hosts that can be steered.** A program that rewrites an approved app's MCP configuration, or steers that app, acts as that app (above).
+  - **The developer control channel** (§6.1). When its launch flag turns it on, it runs every command with no yes, and this sheet does not cover it.
 
 **The sheet waits at most 10 minutes (owner).** An unanswered sheet counts as a no after 10 minutes, as an unanswered elicitation does (8a Ruling P6). The sheet also closes as a no when:
 - the document changes while it is open, since the list would be out of date and the token is bound to the revision;

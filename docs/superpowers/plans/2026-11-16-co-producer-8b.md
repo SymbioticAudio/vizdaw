@@ -174,37 +174,50 @@ These are this plan's decisions where the spec or 8a leaves a choice. Each one n
         - the hardened runtime, and no `get-task-allow`;
         - no `DYLD_*`, `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect…` or `--remote-debugging…` in its launch arguments.
       - **Pid reuse.** Start times are read before and after each check.
-      - **The key and the name.** The key is `"<team ID>:<bundle identifier>"`, and the name is the bundle's `CFBundleDisplayName`, else `CFBundleName`.
-      - **Anything else is unknown.** The identity is worked out once per connection, on the first apply that needs a yes, and cached by connection number. Connection numbers are never reused.
-      - **The label.** `client` (from `clientInfo.name`) is a label only. It is shown as "calls itself "<label>"", and it never keys or matches an approval.
+      - **Known.** The key is `"signed:<team ID>:<bundle identifier>"`, and the name is the bundle's `CFBundleDisplayName`, else `CFBundleName`.
+      - **Unverified** (owner, 2026-11-16). Any other caller whose host path can be read is unverified.
+        - The host is `vizdaw-mcp`'s parent. For a peer that is not VizDAW's `vizdaw-mcp`, the host is the peer itself.
+        - The path comes from `proc_pidpath`.
+        - The key is `"unverified:<path>\n<label>"`, with an empty label when there is none.
+      - **Unknown.** No peer token, or no readable path, gives no key. The sheet then offers no "Always allow".
+      - **Caching.** The identity is worked out once per connection, on the first apply that needs a yes, and cached by connection number. Connection numbers are never reused.
+      - **The kinds never cross.** A known caller is matched only against `signed:` keys, and an unverified caller only against `unverified:` keys. So the same path and label never carry an approval from one kind to the other.
+      - **The label.** `client` (from `clientInfo.name`) is shown as "calls itself "<label>"". For a known app it never keys or matches anything. For an unverified host it is half the key, which the warning explains.
     - **The sheet** (`CoProducerApprovalSheet`):
       - the title "Allow Co-Producer to Change Your Song?";
       - the text "<App> asks to make these changes to "<song>":", or "An app VizDAW cannot identify (it calls itself "<label>") asks to make these changes to "<song>":";
       - the preview's items as 8a's list (at most 40 lines, then "and N more");
-      - for a strong identity, the unticked checkbox "Always allow <App>" with spec §6.8's line;
-      - for an unknown one, the line "VizDAW cannot confirm which app is asking, so it asks every time.";
-      - **Don't Allow** (default and Esc) and **Allow**.
+      - for a known or unverified caller, the unticked checkbox "Always allow <App>" with spec §6.8's line. <App> is the label, else the path's last component;
+      - for an unknown one, the line "VizDAW cannot confirm which app is asking, so it asks every time.", and no checkbox;
+      - **Don't Allow** (default and Esc) and **Allow**;
+      - **the warning step, for an unverified caller.** Allow with the box ticked first shows "VizDAW can't check which program this is. Any program you run from Terminal could use this approval." with **Cancel** (default and Esc) and **Always Allow Anyway**:
+        - only Always Allow Anyway saves the approval and applies;
+        - Cancel unticks the box and returns to the sheet, with nothing saved and nothing applied;
+        - the press check below applies to both buttons.
 
       The sheet does not activate VizDAW. It calls `NSApp.requestUserAttention(.informationalRequest)` once.
     - **A real press.** Allow counts only when `NSApp.currentEvent` is a left-mouse-up or key-down whose `CGEvent` source process ID (`.eventSourceUnixProcessID`) is 0 or VizDAW's own pid. That is a pure function, `CoProducerApproval.isRealPress`. The builder checks what a real click and an accessibility press report on this Mac. If the two cannot be told apart, the task report says so and the owner decides; the check stays as a backstop either way.
-    - **The store.** Standing approvals are `[StandingApproval {key, team, identifier, name, granted}]`, JSON in one login-Keychain generic-password item: service "VizDAW Co-Producer approvals", account "approvals".
+    - **The store.** Standing approvals are `[StandingApproval {key, verified, name, team?, identifier?, path?, label?, granted}]`, JSON in one login-Keychain generic-password item: service "VizDAW Co-Producer approvals", account "approvals" (controller's call, owner agreed 2026-11-16).
       - It sits behind `protocol CoProducerApprovalStore`. Tests use `MemoryApprovalStore`.
-      - It is read only for a strong identity and when Settings › Co-Producer shows the list, so an unknown caller, such as the e2e's, never touches the Keychain.
+      - With `VIZDAW_TEST_HOOKS=1` the app uses `MemoryApprovalStore` too, so the e2e never touches the Keychain. Its approvals then last only until quit.
+      - It is read only for an apply that needs a yes from a caller with a key, and when Settings › Co-Producer shows the list.
       - A store that cannot be read counts as empty, so VizDAW asks.
     - **Settings › Co-Producer** gains the list "Apps that may change songs without asking":
-      - each row reads "<name> — team <team> · <identifier> · since <date>", with **Revoke**;
+      - a verified row reads "<name> — team <team> · <identifier> · since <date>", with **Revoke**;
+      - an unverified row reads "<label, else the path> — unverified · <path> · since <date>", with **Revoke**. The word "unverified" is in the row's accessibility label too;
       - a **Revoke All** button;
       - with no approvals, "None. VizDAW asks before every change.".
-    - **The test hook.** `settings.co_producer_answer {allow: Bool, required; always: Bool}` is a registry command: `key_only`, class refused, so it is never on the Co-Producer socket. It answers the open sheet of the front document, or of `window`, as a real press would.
+    - **The test hook.** `settings.co_producer_answer {allow: Bool, required; always: Bool; confirm: Bool}` is a registry command: `key_only`, class refused, so it is never on the Co-Producer socket. It answers the open sheet of the front document, or of `window`, as a real press would.
       - It works only on the developer channel, and only when VizDAW was launched with `VIZDAW_TEST_HOOKS=1`. Otherwise it is `not_allowed` "test hook".
-      - Its answer is `{app, known, label, items}`.
+      - Its answer is `{app, kind, label, path, items}`, where `kind` is `"known"`, `"unverified"` or `"unknown"`.
       - With no sheet open it is `failed` "No Co-Producer approval is waiting.".
-      - `always: true` for an unknown caller is `not_allowed` "Always allow is offered only for an app VizDAW can identify.", and the sheet stays open.
+      - `always: true` for an unverified caller without `confirm: true` is `not_allowed` "Confirm the warning first: VizDAW can't check which program this is.". Nothing is saved, and the sheet stays open. `confirm: true` stands for Always Allow Anyway.
+      - `always: true` for an unknown caller is `not_allowed` "Always allow needs a program VizDAW can name.", and the sheet stays open.
       - It opens no new route: the developer channel already runs every command with no yes.
       - With `VIZDAW_TEST_HOOKS=1` only, the launch variable `VIZDAW_APPROVAL_WAIT_MS` shortens `APPROVAL_WAIT`, to 1000 ms at least, for the e2e's unanswered sheet. It can never lengthen it.
     - **Cost if wrong:**
-      - a composer using a command-line host sees the sheet on every change;
-      - a host that is not hardened, or is launched with debugging flags, can never be approved.
+      - an unverified approval for a shell's path covers every program run from that shell that reports the same name. The composer is warned of this, and the owner accepts it for 1.0 (spec §6.8);
+      - a host that is not hardened, or is launched with debugging flags, gets only unverified approvals.
 
 ## Global Constraints
 
@@ -342,10 +355,10 @@ These are the six failure modes a composer is most likely to hit, most likely fi
    - Expected:
      - no change applies without a real Allow or a standing approval for a strongly identified app;
      - the label never grants anything;
-     - unknown callers always get the sheet and are never offered "Always allow";
+     - an unverified caller gets "Always allow" only after the warning is confirmed, and an approval of one kind never applies to the other;
      - an unanswered or stale sheet is a no;
      - no sheet ever opens without a waiting yes.
-   - Pinned by Task 6's `forgedClientInfoIsOnlyALabel`, `unknownParentsAlwaysGetTheSheet`, `revokedApprovalAsksAgain`, `applyWithoutTheClickIsRefused`, `noSheetWithoutAWaitingYes`, `take_needs_vizdaw_approval_for_a_yes`, and Task 7's `co_producer_approval_over_mcp`.
+   - Pinned by Task 6's `forgedClientInfoIsOnlyALabel`, `unverifiedParentsAreNeverKnown`, `theKindsNeverCross`, `alwaysAllowNeedsTheWarningWhenUnverified`, `revokedApprovalAsksAgain`, `applyWithoutTheClickIsRefused`, `noSheetWithoutAWaitingYes`, `take_needs_vizdaw_approval_for_a_yes`, and Task 7's `co_producer_approval_over_mcp`.
 
 ---
 
@@ -802,6 +815,7 @@ These are the six failure modes a composer is most likely to hit, most likely fi
       public let pid: Int32; public let parent: Int32; public let started: UInt64
       public let valid: Bool; public let team: String?; public let identifier: String?
       public let cdhash: Data?; public let hardened: Bool; public let getTaskAllow: Bool
+      public let path: String?               // proc_pidpath
       public let appBundle: URL?             // when it is an .app's main executable
       public let launch: [String]            // argv and environment, KERN_PROCARGS2
   }
@@ -812,13 +826,22 @@ These are the six failure modes a composer is most likely to hit, most likely fi
       func bundleName(_ app: URL) -> String?
   }
   public enum ClientIdentity: Equatable {
-      case known(key: String, team: String, identifier: String, name: String)
-      case unknown
-      public static func decide(peer: PeerRow?, facts: any ClientFacts) -> ClientIdentity
+      case known(key: String, team: String, identifier: String, name: String)   // "signed:…"
+      case unverified(key: String, path: String, label: String?)                // "unverified:…"
+      case unknown                                                              // no key
+      public static func decide(peer: PeerRow?, label: String?, facts: any ClientFacts) -> ClientIdentity
+      public var key: String? { get }
   }
-  public struct StandingApproval: Codable, Equatable { public let key, team, identifier, name: String; public let granted: Date }
+  public struct StandingApproval: Codable, Equatable {
+      public let key: String; public let verified: Bool; public let name: String
+      public let team: String?; public let identifier: String?; public let path: String?; public let label: String?
+      public let granted: Date
+  }
+  /// The approval for `identity`, if any: a known identity matches only verified
+  /// approvals and an unverified one only unverified approvals, by exact key.
+  public func standingApproval(for identity: ClientIdentity, in all: [StandingApproval]) -> StandingApproval?
   public protocol CoProducerApprovalStore { func load() -> [StandingApproval]; func save(_ all: [StandingApproval]) throws }
-  public enum ApprovalAnswer { case allow(always: Bool), deny }
+  public enum ApprovalAnswer { case allow(always: Bool, confirmed: Bool), deny }   // confirmed: Always Allow Anyway
   @MainActor public protocol CoProducerApprover {
       /// Opens the sheet for `pending`; calls `done` exactly once.
       func ask(_ pending: PendingApproval, done: @escaping @MainActor (ApprovalAnswer) -> Void)
@@ -874,8 +897,7 @@ These are the six failure modes a composer is most likely to hit, most likely fi
 
     The tests:
     - `aSignedHostIsKnown`: `decide` gives `.known(key: "ABCDE12345:com.example.chat", …, name: "Helper Chat")`.
-    - `unknownParentsAlwaysGetTheSheet`. Each of these gives `.unknown`:
-      - no peer row;
+    - `unverifiedParentsAreNeverKnown`. With the label "Helper Chat", each of these gives `.unverified`, never `.known`. Its key holds the host's path and the label: the peer's own path for a raw client, else the parent's.
       - a peer whose cdhash differs (a raw client, or `vizctl`);
       - a peer with no code;
       - a parent that is unsigned, ad-hoc signed (no team) or a shell that ships with macOS (a platform binary, no team);
@@ -887,22 +909,37 @@ These are the six failure modes a composer is most likely to hit, most likely fi
       - a launch list holding `DYLD_INSERT_LIBRARIES=…`, `ELECTRON_RUN_AS_NODE=1`, `NODE_OPTIONS=…`, `--inspect=9229` or `--remote-debugging-port=1`;
       - a start time that differs between the two reads;
       - a chain longer than 32 processes.
+
+      No peer row, or a host whose path cannot be read, gives `.unknown` (no key).
     - `forgedClientInfoIsOnlyALabel`:
-      - with a standing approval for "ABCDE12345:com.example.chat" stored, an apply from an unsigned parent whose `client` is "Helper Chat" still asks;
-      - the `PendingApproval` is `.unknown`, with label "Helper Chat";
-      - the sheet's text is the unknown sentence with "calls itself "Helper Chat"", and it offers no "Always allow".
-    - `revokedApprovalAsksAgain`: a known host with a standing approval applies with no `ask`, and the Session sees `Standing`. After `CoProducerSettings.revoke(key)`, the next apply asks. `revokeAll()` empties the store.
+      - with a verified approval for "signed:ABCDE12345:com.example.chat" stored, an apply from an unsigned parent whose `client` is "Helper Chat" still asks;
+      - the `PendingApproval` is `.unverified`, with label "Helper Chat";
+      - the sheet's text is the unidentified sentence with "calls itself "Helper Chat"".
+    - `theKindsNeverCross`:
+      - an unverified approval whose path and label are exactly the good chain's top app (`/Applications/Helper Chat.app/Contents/MacOS/Helper Chat`, "Helper Chat") is never applied to that app when it verifies: the apply asks;
+      - a verified approval for the good chain is never applied when the same app is unverified (say, started from a shell): the apply asks;
+      - an unverified approval for path P and label "A" does not match path P with label "B", nor path Q with label "A";
+      - a hand-made store entry with `verified: true` but an `unverified:` key, or the other way round, matches nothing.
+    - `revokedApprovalAsksAgain`, for both kinds:
+      - a known host with a verified approval applies with no `ask`, and the Session sees `Standing`;
+      - an unverified host with an unverified approval does the same;
+      - after `CoProducerSettings.revoke(key)` of each, its next apply asks, and the other kind's approval still applies;
+      - `revokeAll()` empties the store;
+      - Settings' rows show "unverified" for the unverified one only.
     - `anUnreadableStoreAsks`: a store whose `load` finds bad JSON is empty, so the apply asks.
   - In `CoProducerApprovalTests`:
     - `applyWithoutTheClickIsRefused`, with a hand track's `needs_yes` preview from an unknown caller:
       - `run(.coProducerApply…)` answers `.awaitingApproval`, and `coProducerTake` is not called;
       - on `.deny` the deferred answer is `failed` "The composer did not allow this in VizDAW.", and `coProducerTake` is never called;
-      - on `.allow(always: false)`, enter, take with `Sheet`, the plan and leave run in that order, and the store is unchanged;
+      - on `.allow(always: false, confirmed: false)`, enter, take with `Sheet`, the plan and leave run in that order, and the store is unchanged;
       - with no answer, the fake clock at 600 s gives the same no;
       - a document revision change, the caller gone, the switch off or the document closed each give the same no and `cancel(doc:)`.
-    - `alwaysAllowGrantsOnlyAKnownApp`:
-      - for a known host, `.allow(always: true)` stores one `StandingApproval` with today's date and applies with `Sheet`;
-      - for an unknown one, the hook's `always: true` is refused with Ruling 11's sentence, nothing is stored, and the sheet stays open.
+    - `alwaysAllowNeedsTheWarningWhenUnverified`:
+      - for a known host, `.allow(always: true, confirmed: false)` stores one verified `StandingApproval` with today's date, and applies with `Sheet`;
+      - for an unverified host, `.allow(always: true, confirmed: false)` stores nothing, applies nothing, and leaves the sheet open on the warning;
+      - for an unverified host, Cancel on the warning stores nothing and returns to the sheet;
+      - for an unverified host, `.allow(always: true, confirmed: true)` stores one unverified approval with its path and label, and applies;
+      - for an unknown caller, `always: true` is refused with Ruling 11's sentence, nothing is stored, and the sheet stays open.
     - `noSheetWithoutAWaitingYes`. No `ask` happens for any of these:
       - `begin`, `preview`, `status` or a read;
       - an apply with a bad, used or stale token, or a changed plan, which is answered `failed` at once;
@@ -911,21 +948,21 @@ These are the six failure modes a composer is most likely to hit, most likely fi
 
       A second apply while a sheet is open is `busy` with Ruling 11's sentence. `tidy` does not idle-close a request whose document has a sheet open.
     - `isRealPressRefusesSynthesizedInput`: a left-mouse-up or key-down from source pid 0, or from VizDAW's own pid, is a real press. No event (an accessibility press), another pid, or another event type is not.
-    - `theAnswerHookNeedsTheLaunchFlag`: `settings.co_producer_answer` without `VIZDAW_TEST_HOOKS=1` in the injected environment is `not_allowed` "test hook". With it, and no sheet open, it is `failed` "No Co-Producer approval is waiting.". With a sheet open it answers `{app, known, label, items}` and resolves the sheet as Allow or Don't Allow. `VIZDAW_APPROVAL_WAIT_MS=2000` shortens the wait only together with `VIZDAW_TEST_HOOKS=1`, and is ignored above 600 000 and without the flag.
+    - `theAnswerHookNeedsTheLaunchFlag`: `settings.co_producer_answer` without `VIZDAW_TEST_HOOKS=1` in the injected environment is `not_allowed` "test hook". With it, and no sheet open, it is `failed` "No Co-Producer approval is waiting.". With a sheet open it answers `{app, kind, label, path, items}` and resolves the sheet as Allow or Don't Allow. With `always: true` it needs `confirm: true` for an unverified caller. `VIZDAW_APPROVAL_WAIT_MS=2000` shortens the wait only together with `VIZDAW_TEST_HOOKS=1`, and is ignored above 600 000 and without the flag.
   - **8a's `CoProducerCommandsTests`** apply tests pass `approver: FakeApprover(.allow)` and `peer: nil`, which is the test hook that grants VizDAW's approval. A test whose preview needs a yes then also asserts that the take got `Sheet`. Their other assertions are unchanged.
   - **`NameScanTests` and `noLaneInWhatTheAppShows`** pass with the sheet's and Settings' text. Test fixtures use made-up app names only.
 - [ ] **Step 6: Run** `scripts/build-ffi.sh && scripts/swift.sh test --filter 'CoProducerApproval|CoProducerClients|CoProducerCommands|ControlCommands'`. Expected: FAIL.
 - [ ] **Step 7: Implement the Swift side** (Ruling 11).
   - **`DarwinClientFacts`.**
     - The code: `SecCodeCopyGuestWithAttributes` with `kSecGuestAttributeAudit`, or with `kSecGuestAttributePid` for the parents. Then `SecCodeCheckValidity`, and `SecCodeCopySigningInformation` for the team ID, the identifier, the `unique` cdhash, the runtime flag and the entitlements.
-    - The process facts: `proc_pidinfo(PROC_PIDTBSDINFO)` for the parent and the start time, and `sysctl(KERN_PROCARGS2)` for the launch list. `SecStaticCodeCreateWithPath` on `Bundle.main`'s `vizdaw-mcp` gives `bundledMcpHash`.
+    - The process facts: `proc_pidpath` for the path, `proc_pidinfo(PROC_PIDTBSDINFO)` for the parent and the start time, and `sysctl(KERN_PROCARGS2)` for the launch list. `SecStaticCodeCreateWithPath` on `Bundle.main`'s `vizdaw-mcp` gives `bundledMcpHash`.
     - All of it is in the `VizDAW` target, with no new dependency.
   - **`KeychainApprovalStore`** uses `SecItemCopyMatching`, `SecItemAdd` and `SecItemUpdate` on the one item.
   - **`CoProducerCommands.run`** handles the apply by Ruling 11's flow. `ControlChannel` answers `.awaitingApproval` by extending the call's timeout to 630 s. It answers the call when `done` fires, after running the stretch on Allow, and passes `call.peer`.
-  - **The sheet** is presented on the document's window, with Ruling 11's text, accessibility labels on every control, and theme tokens. The press check runs in Allow's action.
+  - **The sheet** is presented on the document's window, with Ruling 11's text, the warning step, accessibility labels on every control, and theme tokens. The press check runs in the actions of Allow and Always Allow Anyway.
   - **Settings › Co-Producer** shows the list, Revoke and Revoke All.
 - [ ] **Step 8: Run** the Step 6 command, then `scripts/swift.sh test`. Expected: PASS.
-- [ ] **Step 9: End-of-task checks**, including the Swift build and test and `scripts/make-app.sh`. **Commit** `feat(co-producer): VizDAW's own approval sheet, and standing approvals for code-signed apps (plan 8b Task 6)`.
+- [ ] **Step 9: End-of-task checks**, including the Swift build and test and `scripts/make-app.sh`. **Commit** `feat(co-producer): VizDAW's own approval sheet, and standing approvals per app, verified or unverified (plan 8b Task 6)`.
 
 ### Task 7: README checks, the e2e, the backlog and the gates
 
@@ -940,7 +977,7 @@ These are the six failure modes a composer is most likely to hit, most likely fi
 
 - [ ] **Step 1: Update 8a's e2e** `co_producer_over_mcp` for Rulings 2 and 11.
   - **Ruling 2.** The track it renames with a token, and the one it deletes through elicitation, are made over the developer channel (`track.new_audio`), so they are the composer's and still need a yes. The tracks Claude adds are named "… (Co-Producer)". The undo labels are unchanged.
-  - **Ruling 11.** `App::start` launches the app with `VIZDAW_TEST_HOOKS=1`. The e2e's `vizdaw-mcp` has the test binary as its parent, so it is unknown, and every apply that needs a yes now waits for VizDAW's sheet. A helper `answer_sheet(app, allow)` grants it through the test-only hook, never a GUI:
+  - **Ruling 11.** `App::start` launches the app with `VIZDAW_TEST_HOOKS=1`. The e2e's `vizdaw-mcp` has the test binary as its parent, so it is unverified, and every apply that needs a yes now waits for VizDAW's sheet. A helper `answer_sheet(app, allow)` grants it through the test-only hook, never a GUI:
     - it sends `command.run settings.co_producer_answer {allow}` over the developer channel;
     - it retries `failed` "No Co-Producer approval is waiting." every 100 ms, for up to 10 s.
 
@@ -978,18 +1015,22 @@ These are the six failure modes a composer is most likely to hit, most likely fi
   - **Raw socket, no click.**
     1. A raw `Client` on the Co-Producer socket sends `co_producer.begin`, then `co_producer.preview` of `track.rename` of that track (`needs_yes: true`).
     2. On a second thread, it sends `co_producer.apply` with the token.
-    3. `answer_sheet(false)` answers `{known: false, …}`, and its `items` hold the rename.
+    3. `answer_sheet(false)` answers `{kind: "unverified", …}` with the test binary's path, and its `items` hold the rename.
     4. The raw apply gets `failed` "The composer did not allow this in VizDAW.", and the track keeps its name.
     5. Applying the same token again is refused at once, with no sheet.
   - **A forged label.** An `McpProc` started with `clientInfo: {name: "Helper Chat"}` asks for the same rename with `apply_change`. Then:
-    - `settings.co_producer_answer {allow: true, always: true}` is `not_allowed` "Always allow is offered only for an app VizDAW can identify.", and the sheet stays open;
-    - `answer_sheet(true)` then answers `{known: false, label: "Helper Chat"}` and the rename applies.
-  - **Always for an unknown caller.** The next change from the same process asks again: `answer_sheet` finds a sheet.
+    - `settings.co_producer_answer {allow: true, always: true}` without `confirm` is `not_allowed` with Ruling 11's warning sentence. Nothing is saved, and the sheet stays open;
+    - `settings.co_producer_answer {allow: true, always: true, confirm: true}` answers `{kind: "unverified", label: "Helper Chat"}`, and the rename applies.
+  - **An unverified approval, used and contained.**
+    - The next change from that `McpProc` applies with no sheet: `settings.co_producer_answer` is `failed` "No Co-Producer approval is waiting.".
+    - A second `McpProc` with `clientInfo: {name: "Other Chat"}` and the same parent path still gets the sheet.
+    - The raw client, with another path, still gets the sheet. Both are answered `allow: false`.
+    - These approvals live in the memory store that `VIZDAW_TEST_HOOKS=1` selects, never in the Keychain.
   - **No yes needed, no sheet.** In a request, `change` with `track.rename` of a track Claude added applies at once, and `settings.co_producer_answer` is `failed` "No Co-Producer approval is waiting.".
   - **Unanswered.** This needs the launch override `VIZDAW_APPROVAL_WAIT_MS=2000`, honoured only with `VIZDAW_TEST_HOOKS=1`. With it, an apply nobody answers is `failed` with the no after about 2 s, and the document is unchanged.
   - **Clean up.** `pgrep -lf vizdaw-mcp` prints nothing after the test.
 
-  A signed, hardened host and a revoked standing approval cannot be built in the e2e's throwaway home, so Task 6's `revokedApprovalAsksAgain` and `aSignedHostIsKnown` pin them, and README steps 12–14 check them by hand.
+  A signed, hardened host cannot be built in the e2e's throwaway home, and Revoke is a Settings control with no channel command. So Task 6's `aSignedHostIsKnown`, `theKindsNeverCross` and `revokedApprovalAsksAgain` pin those, and README steps 12–14 check them by hand.
 - [ ] **Step 4: Write the README steps** in `app/README.md`, after the last step, under a heading "Plan 8b, the Co-Producer notes file and the librarian:". Each step states what to do and what is seen, and says "track":
   1. Window › Song Notes on a saved song: `Notes.md` opens in the Mac's default Markdown editor, with the song's name as its heading. Write "never touch the piano part" and save.
   2. Ask Claude for something new ("add a reverb bus"). Claude first reads the notes and mentions your rule. When it is done, Window › Song Notes shows one new entry at the end: what you asked, what was added, the undo step and the saved copy. Your own text is untouched.
@@ -1004,7 +1045,7 @@ These are the six failure modes a composer is most likely to hit, most likely fi
   11. Compact Media asked of Claude is still refused, and no sheet appears.
   12. Ask Claude, in Claude's desktop app, to rename one of your own tracks. After Claude's own question (or your yes in chat), VizDAW shows "Allow Co-Producer to Change Your Song?" on the song's window, with the rename listed and the app's name. Don't Allow leaves the track as it was. Ask again and click Allow: the track is renamed. Pressing Return on the sheet never allows.
   13. Ask again and tick "Always allow <App>" before Allow. The next change from that app applies with no VizDAW sheet. Settings › Co-Producer lists the app, its team and identifier, and today's date. Click Revoke: the next change shows the sheet again.
-  14. From Terminal, start `VizDAW.app/Contents/MacOS/vizdaw-mcp` yourself and ask for a change through it: the sheet says VizDAW cannot confirm which app is asking, and it offers no "Always allow". Leave a sheet open for 10 minutes: it closes, and the change is not made.
+  14. Use a command-line host, or start `VizDAW.app/Contents/MacOS/vizdaw-mcp` yourself from Terminal, and ask for a change through it. The sheet says VizDAW cannot identify the app, and still offers "Always allow". Tick it and click Allow: the warning "VizDAW can't check which program this is. Any program you run from Terminal could use this approval." appears. Cancel saves nothing. Always Allow Anyway saves it, and Settings › Co-Producer lists it marked "unverified". Revoke it, and the next change asks again. Leave a sheet open for 10 minutes: it closes, and the change is not made.
 - [ ] **Step 5: Update the backlog** (`docs/feature-backlog.md`).
   - In the "Co-Producer over MCP" row, note 8b's delivery: `Notes.md` with one entry per request, the marks and badge, Make Mine, format 10, dated export folders, the move-in on first save, and Compact's offer.
   - Close or mark done 8a's rows "Compact Media offers to remove old Co-Producer copies…" and "Move an untitled project's Co-Producer copies into its package on first save…".
@@ -1016,7 +1057,7 @@ These are the six failure modes a composer is most likely to hit, most likely fi
     - "Untitled songs closed unsaved leave a stand-in folder of notes and copies in the support folder; show and clear them in Settings";
     - "A copy whose name clashes stays in the stand-in at first save";
     - "Open Notes.md with `O_NOFOLLOW` once a way without a libc dependency is found";
-    - "Sign VizDAW and vizdaw-mcp with Developer ID and the hardened runtime, so code cannot be injected into VizDAW itself (spec §6.8)";
+    - "After 1.0 (release checklist): sign VizDAW and vizdaw-mcp with Developer ID and the hardened runtime, so code cannot be injected into VizDAW itself. The owner accepts the risk for 1.0 (spec §6.8)";
     - "Name in each Co-Producer notes entry whether VizDAW's sheet or a standing approval allowed it";
     - "Limit how often one caller may open VizDAW's approval sheet after Don't Allow";
     - any narrow edge cases the task reports listed, at the owner's review pace.
@@ -1055,7 +1096,7 @@ These are the six failure modes a composer is most likely to hit, most likely fi
    - **Deferred by 8a's ledger to 8b:** Compact's offer, the move-in, and the untitled copies' media need (8a backlog row), all covered.
    - **VizDAW's own approval** (§6.8, owner 2026-11-16). Ruling 11 and Task 6 cover:
      - the sheet, and the Rust backstop on take;
-     - "Always allow" for identified apps, with Settings' list and Revoke;
+     - "Always allow" for verified apps, and for unverified hosts after the warning, with keys that never cross, and Settings' list marked "unverified", with Revoke;
      - identity by audit token and code signature, with the label never trusted;
      - the 10-minute no, and no sheet without a waiting yes.
 
@@ -1071,12 +1112,16 @@ These are the six failure modes a composer is most likely to hit, most likely fi
    - `SongNotes.open`, `CopiesOffer`, `MediaModel.compactFromMenu`, `AppIcon.coProducerBadge`;
    - the ids `track.make_mine`, `mixer.make_mine`, `mixer.set_colour`, `window.song_notes`, `co_producer.notes`, `co_producer.note`, `co_producer.export_folder`, `settings.co_producer_answer`;
    - `peer::audit_token`, `PeerHook`, `Call.conn`, `Call.audit_token`, `MAX_CLIENT_LABEL`, `PeerRow`, `CoProducerApproval`, `co_producer_pending`;
-   - `CodeFacts`, `ClientFacts`, `ClientIdentity.decide`, `StandingApproval`, `CoProducerApprovalStore`, `CoProducerApprover`, `PendingApproval`, `ApprovalAnswer`, `ControlOutcome.awaitingApproval`.
+   - `CodeFacts`, `ClientFacts`, `ClientIdentity.decide`, `standingApproval(for:in:)`, `StandingApproval`, `CoProducerApprovalStore`, `CoProducerApprover`, `PendingApproval`, `ApprovalAnswer`, `ControlOutcome.awaitingApproval`.
 4. **Review Focus.** Each of the six lines names the tests that pin it, in Tasks 1, 2, 3, 5, 6 and 7.
 5. **Proportion.** Seven tasks: the six the owner asked for 26.0.0 by 2026-11-20, plus Task 6 for the owner's decision of 2026-11-16. Code appears only as signatures, and the entry and copy text the spec leaves to the plan. The plan reuses `fill_new_eqs`'s place in `execute` for the marks, 8a's `IntoFolder` check for every export folder, `copies_home`'s stand-in, `create_dir`'s never-replace, retention's Trash for copies, and 8a's MCP helper in the e2e.
 6. **Owner decisions.** None are open. These calls are stated for the owner's review:
-   - command-line hosts, and any `vizdaw-mcp` with a shell in its parent chain, are always unknown, so they get the sheet every time and are never offered "Always allow" (Ruling 11);
-   - an apply that touches only Co-Producer's own things needs no yes, so it gets no sheet (Ruling 11; spec §6.8);
+   - the unverified key is the host's path and the `clientInfo` name. For a raw client the host is the client itself (Ruling 11);
+   - the owner settled the rest on 2026-11-16:
+     - command-line hosts get "Always allow" after a warning;
+     - Co-Producer's own things get no sheet;
+     - the signing risk is accepted for 1.0;
+     - approvals live in the Keychain.
    - a Co-Producer track that holds regions or notes needs a yes to delete, which is stricter than spec §6.5 (Ruling 2);
    - with no Settings export location yet, an untitled song with no remembered folder asks the composer (Ruling 6);
    - the Co-Producer colour is the theme's accent (Ruling 3).
