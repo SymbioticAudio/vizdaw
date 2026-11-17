@@ -344,18 +344,102 @@ final class ApprovalRig {
         #expect(rig.f.coLog.contains { $0.hasPrefix("idle") })
     }
 
+    /// The press check's decision table (Task 6 hardening): described
+    /// events only, never a real one.
     @Test func isRealPressRefusesSynthesizedInput() {
         let own: Int64 = 777
-        #expect(CoProducerApproval.isRealPress(type: .leftMouseUp, sourcePid: 0, ownPid: own))
-        #expect(CoProducerApproval.isRealPress(type: .keyDown, sourcePid: 0, ownPid: own))
-        #expect(CoProducerApproval.isRealPress(type: .leftMouseUp, sourcePid: own, ownPid: own))
-        #expect(CoProducerApproval.isRealPress(type: .keyDown, sourcePid: own, ownPid: own))
-        #expect(!CoProducerApproval.isRealPress(type: nil, sourcePid: 0, ownPid: own), "an accessibility press")
-        #expect(!CoProducerApproval.isRealPress(type: .leftMouseUp, sourcePid: 4_242, ownPid: own))
-        #expect(!CoProducerApproval.isRealPress(type: .keyDown, sourcePid: 4_242, ownPid: own))
-        for other: NSEvent.EventType in [.leftMouseDown, .keyUp, .rightMouseUp, .otherMouseUp, .flagsChanged, .appKitDefined] {
-            #expect(!CoProducerApproval.isRealPress(type: other, sourcePid: 0, ownPid: own), "\(other)")
+        let space: UInt16 = 49, ret: UInt16 = 36, letterA: UInt16 = 0
+        func press(
+            _ type: NSEvent.EventType?, key: UInt16? = nil, inSheet: Bool = true, pid: Int64 = 0, age: TimeInterval = 0.1
+        ) -> PressFacts {
+            PressFacts(type: type, keyCode: key, inSheetWindow: inSheet, sourcePid: pid, ownPid: own, age: age)
         }
+        let real = CoProducerApproval.isRealPress
+        // Accepted: a mouse-up, or Space or Return down or up, in the sheet's
+        // window, from the window server (0) or VizDAW itself.
+        #expect(real(press(.leftMouseUp)))
+        #expect(real(press(.leftMouseUp, pid: own)))
+        for key in [space, ret] {
+            #expect(real(press(.keyDown, key: key)), "key \(key) down")
+            #expect(real(press(.keyUp, key: key)), "key \(key) up")
+            #expect(real(press(.keyDown, key: key, pid: own)))
+        }
+        #expect(real(press(.leftMouseUp, age: 2.9)))
+        // Refused.
+        #expect(!real(press(nil)), "an accessibility press: no event")
+        #expect(!real(press(.leftMouseUp, pid: 4_242)), "posted by another process")
+        #expect(!real(press(.keyDown, key: space, pid: 4_242)))
+        #expect(!real(press(.leftMouseUp, pid: -1)), "no event source")
+        #expect(!real(press(.leftMouseUp, inSheet: false)), "another window's click")
+        #expect(!real(press(.keyDown, key: space, inSheet: false)))
+        #expect(!real(press(.leftMouseUp, age: 3)), "an old event still current")
+        #expect(!real(press(.leftMouseUp, age: 30)))
+        #expect(!real(press(.leftMouseUp, age: -1)), "an event from the future")
+        #expect(!real(press(.keyDown, key: letterA)), "another key")
+        #expect(!real(press(.keyDown, key: nil)))
+        #expect(!real(press(.keyUp, key: nil)))
+        for other: NSEvent.EventType in [
+            .leftMouseDown, .rightMouseUp, .otherMouseUp, .flagsChanged, .appKitDefined, .scrollWheel, .mouseMoved,
+        ] {
+            #expect(!real(press(other)), "\(other)")
+            #expect(!real(press(other, key: space)), "\(other) with Space's code")
+        }
+        #expect(CoProducerApproval.maxPressAge == 3)
+    }
+
+    /// A refused press says so on the sheet, and allows nothing.
+    @Test func aRefusedPressSaysSo() throws {
+        let rig = try ApprovalRig()
+        _ = rig.apply(peer: nil, client: nil)
+        let w = try #require(rig.wait)
+        let sheet = try #require(rig.m.coProducerApproval)
+        #expect(sheet.refusedPress == nil)
+        sheet.allow(realPress: false)
+        #expect(sheet.refusedPress == "That press didn't come from your mouse or keyboard. Click Allow yourself.")
+        #expect(w.outcome == nil)
+        sheet.allow(realPress: true)
+        #expect(rig.isApplied(try #require(w.outcome)))
+
+        let cli = try ApprovalRig()
+        _ = cli.apply(peer: F.peerRow(F.cliPid, conn: 2), client: "Helper CLI")
+        let warn = try #require(cli.m.coProducerApproval)
+        warn.always = true
+        warn.allow(realPress: true)
+        #expect(warn.refusedPress == nil)
+        warn.allowAnyway(realPress: false)
+        #expect(warn.refusedPress == "That press didn't come from your mouse or keyboard. Click Allow yourself.")
+        #expect(cli.approvals.load().isEmpty)
+        // Cancel clears the line.
+        warn.cancelWarning()
+        #expect(warn.refusedPress == nil)
+    }
+
+    /// Host paths are shown with controls and bidi characters blanked.
+    @Test func hostPathsAreShownClean() throws {
+        let tricky = "/tmp/evil\u{202E}txt.app\u{0007}/x\nchat"
+        let f = F.goodChain()
+        f.peers[F.cliPid] = f.peers[F.cliPid]!.with { $0.path = tricky }
+        let rig = try ApprovalRig(facts: f)
+        _ = rig.apply(peer: F.peerRow(F.cliPid, conn: 2), client: nil)
+        let sheet = try #require(rig.m.coProducerApproval)
+        #expect(sheet.app == "x chat")
+        #expect(sheet.alwaysLabel == "Always allow x chat")
+        rig.store(StandingApproval(
+            key: "unverified:\(tricky)\n", verified: false, name: "x", team: nil, identifier: nil, path: tricky,
+            label: nil, granted: rig.now))
+        rig.store(StandingApproval(
+            key: "signed:T:i", verified: true, name: "Odd\u{2066}Name", team: "T\u{0000}", identifier: "i\u{200F}",
+            path: nil, label: nil, granted: rig.now))
+        rig.host.coProducer.readApprovals()
+        let rows = rig.host.coProducer.approvalRows
+        #expect(rows.map(\.text) == [
+            "/tmp/evil txt.app /x chat — unverified · /tmp/evil txt.app /x chat · since 2026-11-16",
+            "Odd Name — team T  · i  · since 2026-11-16",
+        ])
+        for r in rows {
+            #expect(!r.accessibility.unicodeScalars.contains { CoProducerApprovalSheetModel.unsafe($0) })
+        }
+        #expect(CoProducerApprovalSheetModel.shown("a\u{202E}b\u{2029}c\u{061C}d\u{0085}e") == "a b c d e")
     }
 
     func hook(_ rig: ApprovalRig, _ args: [ControlArg]) -> ControlOutcome {

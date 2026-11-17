@@ -44,29 +44,71 @@ public protocol CoProducerApprover {
     func cancel(doc: UUID)
 }
 
+/// What the press check reads about the event that pressed Allow (plan 8b
+/// Task 6 hardening): described, so the decision is a pure function.
+public struct PressFacts: Equatable, Sendable {
+    /// The event's type; nil when there is no event (an accessibility press).
+    public let type: NSEvent.EventType?
+    /// A key event's key code.
+    public let keyCode: UInt16?
+    /// The event's window is the sheet's own.
+    public let inSheetWindow: Bool
+    /// `.eventSourceUnixProcessID`; -1 when the event has no source.
+    public let sourcePid: Int64
+    public let ownPid: Int64
+    /// Seconds since the event happened.
+    public let age: TimeInterval
+
+    public init(
+        type: NSEvent.EventType?, keyCode: UInt16?, inSheetWindow: Bool, sourcePid: Int64, ownPid: Int64,
+        age: TimeInterval
+    ) {
+        self.type = type
+        self.keyCode = keyCode
+        self.inSheetWindow = inSheetWindow
+        self.sourcePid = sourcePid
+        self.ownPid = ownPid
+        self.age = age
+    }
+}
+
 extension CoProducerApproval {
+    /// Space and Return, the keys that press a focused button.
+    public static let pressKeys: Set<UInt16> = [49, 36]
+
+    /// How old the press's event may be, in seconds: an accessibility
+    /// action can run while an older click is still `NSApp.currentEvent`.
+    public static let maxPressAge: TimeInterval = 3
+
     /// Whether the event that pressed Allow is the composer's own (Ruling
-    /// 11): a left-mouse-up or key-down whose source process is 0 (the
-    /// window server's input) or VizDAW itself. No event (an accessibility
-    /// press) or an event another process posted is not. A backstop only:
-    /// a program with Accessibility access can still drive the Mac.
-    public static func isRealPress(type: NSEvent.EventType?, sourcePid: Int64, ownPid: Int64) -> Bool {
-        guard let type, type == .leftMouseUp || type == .keyDown else { return false }
-        return sourcePid == 0 || sourcePid == ownPid
+    /// 11, hardened after review): a left-mouse-up, or a key-down or
+    /// key-up of Space or Return, in the sheet's own window, from the
+    /// window server's input (pid 0) or VizDAW itself, and fresh. No event
+    /// (an accessibility press), another process's event, another window's
+    /// or another key is refused. Never accepted by session or uid, and
+    /// never accepted with a log line instead: it fails closed. A backstop
+    /// only: a program with Accessibility access can still drive the Mac.
+    public static func isRealPress(_ p: PressFacts) -> Bool {
+        guard let type = p.type, p.inSheetWindow, p.age >= 0, p.age < maxPressAge else { return false }
+        guard p.sourcePid == 0 || p.sourcePid == p.ownPid else { return false }
+        switch type {
+        case .leftMouseUp: return true
+        case .keyDown, .keyUp: return p.keyCode.map(pressKeys.contains) ?? false
+        default: return false
+        }
     }
 
-    /// `isRealPress` of AppKit's current event, which must also be fresh:
-    /// an accessibility action can run while an old click is still
-    /// `NSApp.currentEvent`.
-    public static func currentEventIsRealPress() -> Bool {
-        guard let e = NSApp.currentEvent else { return false }
-        guard ProcessInfo.processInfo.systemUptime - e.timestamp < maxPressAge else { return false }
-        let source = e.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? -1
-        return isRealPress(type: e.type, sourcePid: source, ownPid: Int64(getpid()))
+    /// AppKit's current event, described for `isRealPress`, against the
+    /// sheet's `window`.
+    public static func currentPress(window: NSWindow?) -> PressFacts {
+        let e = NSApp.currentEvent
+        let isKey = e.map { $0.type == .keyDown || $0.type == .keyUp } ?? false
+        return PressFacts(
+            type: e?.type, keyCode: isKey ? e?.keyCode : nil,
+            inSheetWindow: e?.window != nil && e?.window === window,
+            sourcePid: e?.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? -1, ownPid: Int64(getpid()),
+            age: e.map { ProcessInfo.processInfo.systemUptime - $0.timestamp } ?? .infinity)
     }
-
-    /// How old the current event may be to count as the press (seconds).
-    public static let maxPressAge: TimeInterval = 1
 }
 
 /// VizDAW's approval sheet's state (Ruling 11): its text, the Always allow
@@ -84,6 +126,12 @@ public final class CoProducerApprovalSheetModel: Identifiable {
     public internal(set) var step: Step = .ask
     /// The Always allow box; unticked at first.
     public var always = false
+    /// Shown after a press the check refused, until the next step.
+    public private(set) var refusedPress: String?
+    /// The window the sheet is in, for the press check (set by the view).
+    @ObservationIgnored public weak var window: NSWindow?
+
+    public static let refusedLine = "That press didn't come from your mouse or keyboard. Click Allow yourself."
     @ObservationIgnored let respond: @MainActor (ApprovalAnswer) -> String?
 
     /// The most item lines the sheet lists.
@@ -109,7 +157,7 @@ public final class CoProducerApprovalSheetModel: Identifiable {
     nonisolated static func appName(_ p: PendingApproval) -> String {
         switch p.identity {
         case .known(_, _, _, let name): return name
-        case .unverified(_, let path, let label): return label ?? URL(fileURLWithPath: path).lastPathComponent
+        case .unverified(_, let path, let label): return label ?? shown(URL(fileURLWithPath: path).lastPathComponent)
         case .unknown: return p.label ?? "An app VizDAW cannot identify"
         }
     }
@@ -141,10 +189,31 @@ public final class CoProducerApprovalSheetModel: Identifiable {
         "Anything \(app) runs can then change your songs without VizDAW asking. You can stop this in Settings › Co-Producer."
     }
 
-    /// Allow, if `realPress`. With the box ticked for an unverified caller
-    /// it shows the warning first.
+    /// Text a host path or a stored name becomes on screen: controls, bidi
+    /// controls and marks, and line and paragraph separators become a
+    /// space, as 8a's `diff::shown_name` does.
+    public nonisolated static func shown(_ text: String) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.map { unsafe($0) ? " " : $0 }))
+    }
+
+    /// `diff::shown_name`'s refused characters.
+    public nonisolated static func unsafe(_ c: Unicode.Scalar) -> Bool {
+        switch c.value {
+        case 0x00...0x1F, 0x7F...0x9F, 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069, 0x2028, 0x2029:
+            return true
+        default: return false
+        }
+    }
+
+    /// Allow, if `realPress`; else the refusal line. With the box ticked
+    /// for an unverified caller it shows the warning first.
     public func allow(realPress: Bool) {
-        guard realPress, step == .ask else { return }
+        guard step == .ask else { return }
+        guard realPress else {
+            refusedPress = Self.refusedLine
+            return
+        }
+        refusedPress = nil
         let always = offersAlways && self.always
         if always, !verifies {
             step = .warning
@@ -161,11 +230,18 @@ public final class CoProducerApprovalSheetModel: Identifiable {
     public func cancelWarning() {
         step = .ask
         always = false
+        refusedPress = nil
     }
 
-    /// The warning's Always Allow Anyway, if `realPress`.
+    /// The warning's Always Allow Anyway, if `realPress`; else the
+    /// refusal line.
     public func allowAnyway(realPress: Bool) {
-        guard realPress, step == .warning else { return }
+        guard step == .warning else { return }
+        guard realPress else {
+            refusedPress = Self.refusedLine
+            return
+        }
+        refusedPress = nil
         _ = respond(.allow(always: true, confirmed: true))
     }
 }

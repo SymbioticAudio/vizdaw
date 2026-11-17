@@ -181,15 +181,17 @@ public final class CoProducerSettings {
         day.calendar = Calendar(identifier: .gregorian)
         day.timeZone = .current
         day.dateFormat = "yyyy-MM-dd"
+        let clean = CoProducerApprovalSheetModel.shown
         approvalRows = approvals.load().map { a in
             let since = "since \(day.string(from: a.granted))"
             if a.verified {
-                let text = "\(a.name) — team \(a.team ?? "?") · \(a.identifier ?? "?") · \(since)"
+                let text = "\(clean(a.name)) — team \(clean(a.team ?? "?")) · \(clean(a.identifier ?? "?")) · \(since)"
                 return ApprovalRow(id: a.key, text: text, accessibility: text)
             }
-            let path = a.path ?? "?"
-            let text = "\(a.label ?? path) — unverified · \(path) · \(since)"
-            return ApprovalRow(id: a.key, text: text, accessibility: "\(a.label ?? path), unverified, \(path), \(since)")
+            let path = clean(a.path ?? "?")
+            let name = a.label.map(clean) ?? path
+            let text = "\(name) — unverified · \(path) · \(since)"
+            return ApprovalRow(id: a.key, text: text, accessibility: "\(name), unverified, \(path), \(since)")
         }
     }
 
