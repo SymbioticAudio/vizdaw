@@ -2720,3 +2720,35 @@ fn a_chain_edit_while_recording_joins_the_record_step() {
     );
     s.close().unwrap();
 }
+
+/// Plan 8c final review, Important 1: a Co-Producer export while the
+/// composer records is refused before its dated folder is made, both at
+/// the enter and at the plan.
+#[test]
+fn an_export_while_recording_makes_no_folder() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let parent = g.dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    s.co_producer_begin("export the mix".into()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    let busy = |r: Result<_, VizError>| match r {
+        Err(VizError::Busy { message }) => assert_eq!(message, "Stop recording first."),
+        other => panic!("{other:?}"),
+    };
+    busy(s.co_producer_enter("2026-11-17 10-00".into()).map(|_| ()));
+    busy(
+        s.co_producer_export_plan(
+            vizdaw_ffi::ExportWhatRow::Mix,
+            "2026-11-17".into(),
+            Some(parent.display().to_string()),
+            None,
+        )
+        .map(|_| ()),
+    );
+    assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0, "no folder");
+    s.stop().unwrap();
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}

@@ -236,29 +236,16 @@ public enum CoProducerCommands {
 
     // MARK: The one-call export (plan 8c Ruling 1)
 
-    /// `co_producer.export`: the core's plan (the app's date, never
-    /// Claude's), then its one command run as the menus run it, between
-    /// enter and leave in one stretch (8a Ruling 13). A refused plan runs
-    /// nothing. The answer comes when the job ends.
+    /// `co_producer.export`, in one stretch on the main thread with nothing
+    /// awaited (8a Ruling 13): enter, then the core's plan (the app's date,
+    /// never Claude's), which refuses as Busy before making its folder
+    /// whatever the command's start would refuse, then the plan's one
+    /// command as the menus run it, then leave. A command that still does
+    /// not start drops the folder while it is empty, with its notes line
+    /// (plan 8c final review). The answer comes when the job ends.
     static func export(
         _ what: ExportWhatRow, parent: String?, strips: [UInt64]?, _ docID: UUID, _ m: DocumentModel,
         _ store: DocumentStore, _ host: any ControlHost, stamp: String
-    ) -> ControlOutcome {
-        let plan: ExportPlanRow
-        do {
-            plan = try m.session.coProducerExportPlan(
-                what: what, date: String(stamp.prefix(10)), parent: parent, strips: strips)
-        } catch {
-            return .failed(failure(error))
-        }
-        let started = runPlanned(plan, docID, m, store, host, stamp: stamp)
-        return exported(started, folder: plan.folder, docID, store)
-    }
-
-    /// Enter, the plan's command, leave: one stretch, nothing awaited.
-    static func runPlanned(
-        _ plan: ExportPlanRow, _ docID: UUID, _ m: DocumentModel, _ store: DocumentStore, _ host: any ControlHost,
-        stamp: String
     ) -> ControlOutcome {
         do {
             _ = try m.session.coProducerEnter(stamp: stamp)
@@ -266,7 +253,16 @@ public enum CoProducerCommands {
             return .failed(failure(error))
         }
         defer { m.session.coProducerLeave() }
-        return command(plan.id, plan.args, docID, m, store, host)
+        let plan: ExportPlanRow
+        do {
+            plan = try m.session.coProducerExportPlan(
+                what: what, date: String(stamp.prefix(10)), parent: parent, strips: strips)
+        } catch {
+            return .failed(failure(error))
+        }
+        let started = command(plan.id, plan.args, docID, m, store, host)
+        if case .failed = started { _ = try? m.session.coProducerDropExport(folder: plan.folder) }
+        return exported(started, folder: plan.folder, docID, store)
     }
 
     /// The export's answer from the outcome its command `started`: for a

@@ -1044,6 +1044,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
                 ControlArg(name: "path", value: .text(value: folder + "/Untitled.wav")),
             ])
     }
+    /// Each folder `coProducerDropExport` was asked to drop (plan 8c final review).
+    func coProducerDropExport(folder: String) throws -> Bool {
+        coLog.append("drop \(folder)")
+        return true
+    }
     /// Each `runChore` call (plan 8c Task 4); `choreError` is thrown instead.
     var chores: [(id: String, args: [ControlArg])] = []
     var choreError: VizError?

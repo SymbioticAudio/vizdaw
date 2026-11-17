@@ -877,6 +877,83 @@ fn a_refused_plan_makes_no_folder() {
 
 /// A ":" in a file name is how the Finder shows a "/"; a leading dot is
 /// dropped (8b Ruling 6's cleaning).
+/// Plan 8c final review, Important 1: an export the app would refuse to
+/// start is refused before its folder is made, so no empty folder and no
+/// notes line are left, and the retry makes the first-numbered folder.
+#[test]
+fn a_refused_export_leaves_no_folder_and_no_notes_line() {
+    use vizdaw_ffi::ExportWhatRow as W;
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = audio_song(dir.path(), "Night Drive");
+    let parent = dir.path().join("Exports");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::create_dir(&out).unwrap();
+    s.co_producer_begin("export the stems".into()).unwrap();
+    // A bounce is running.
+    s.debug_hold_jobs(true).unwrap();
+    s.co_producer_enter(STAMP.into()).unwrap();
+    let running = stems_onto_tracks(&s, &out);
+    let e = plan(&s, W::Stems, &parent, None).unwrap_err();
+    s.co_producer_leave();
+    assert!(matches!(e, VizError::Busy { .. }), "{e:?}");
+    assert!(names_in(&parent).is_empty(), "{:?}", names_in(&parent));
+    s.debug_hold_jobs(false).unwrap();
+    assert_eq!(wait_job(&s, running).state, vizdaw_ffi::JobStateRow::Done);
+    s.co_producer_end().unwrap();
+    let notes = std::fs::read_to_string(pkg.join("Notes.md")).unwrap();
+    assert!(!notes.contains("Night Drive — Stems"), "{notes}");
+
+    // The retry makes the first-numbered folder, not "… 2".
+    s.co_producer_begin("export the stems again".into())
+        .unwrap();
+    s.co_producer_enter(STAMP.into()).unwrap();
+    let p = plan(&s, W::Stems, &parent, None).unwrap();
+    s.co_producer_leave();
+    let first = parent.join("Night Drive — Stems — 2026-11-16");
+    assert_eq!(p.folder, shown(&first));
+    assert_eq!(names_in(&parent), ["Night Drive — Stems — 2026-11-16"]);
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+/// A planned export that still did not start: its folder goes while it is
+/// empty, with its line; a folder with anything in it, or one the entry
+/// does not name, stays.
+#[test]
+fn a_planned_folder_is_dropped_only_while_empty() {
+    use vizdaw_ffi::ExportWhatRow as W;
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = audio_song(dir.path(), "Night Drive");
+    let parent = dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    s.co_producer_begin("export".into()).unwrap();
+    let mix = plan(&s, W::Mix, &parent, None).unwrap();
+    let midi = plan(&s, W::Midi, &parent, None).unwrap();
+    std::fs::write(Path::new(&midi.folder).join("kept.txt"), "x").unwrap();
+    assert_eq!(s.co_producer_drop_export(mix.folder.clone()), Ok(true));
+    assert!(!Path::new(&mix.folder).exists());
+    assert_eq!(s.co_producer_drop_export(midi.folder.clone()), Ok(false));
+    assert!(Path::new(&midi.folder).join("kept.txt").is_file());
+    // Not the entry's: nothing happens.
+    let other = parent.join("Other");
+    std::fs::create_dir(&other).unwrap();
+    assert_eq!(s.co_producer_drop_export(shown(&other)), Ok(false));
+    assert!(other.is_dir());
+    s.co_producer_end().unwrap();
+    let notes = std::fs::read_to_string(pkg.join("Notes.md")).unwrap();
+    assert!(!notes.contains(&mix.folder), "{notes}");
+    assert!(notes.contains(&midi.folder), "{notes}");
+    // No open request.
+    assert!(matches!(
+        s.co_producer_drop_export(midi.folder.clone()),
+        Err(VizError::Model { .. })
+    ));
+    s.close().unwrap();
+}
+
 #[test]
 fn odd_song_names_are_cleaned() {
     use vizdaw_ffi::ExportWhatRow as W;

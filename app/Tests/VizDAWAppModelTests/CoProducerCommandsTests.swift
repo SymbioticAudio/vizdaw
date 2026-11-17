@@ -382,7 +382,7 @@ import VizDAWCore
         f.jobStartState = .running
         let o = run(.coProducerExport(what: .stems, parent: "/Users/x/Exports", strips: [2, 3], window: nil), s, id)
         // `stamp(now)`'s first 10 characters are the date.
-        #expect(f.coLog == ["export plan stems 2026-11-14 /Users/x/Exports 2,3", "enter \(stamp)", "bounce", "leave"])
+        #expect(f.coLog == ["enter \(stamp)", "export plan stems 2026-11-14 /Users/x/Exports 2,3", "bounce", "leave"])
         let req = try #require(f.bounces.first)
         #expect(req.source == .stems(strips: [2, 3]))
         #expect(req.path == folder)
@@ -418,7 +418,7 @@ import VizDAWCore
             folder: folder, id: InterchangeCommands.exportDawproject, args: [text("path", folder + "/Song.dawproject")])
         f.jobStartState = .running
         let o = run(.coProducerExport(what: .dawproject, parent: nil, strips: nil, window: nil), s, id)
-        #expect(f.coLog == ["export plan dawproject 2026-11-14 - -", "enter \(stamp)", "leave"])
+        #expect(f.coLog == ["enter \(stamp)", "export plan dawproject 2026-11-14 - -", "leave"])
         #expect(f.dawprojectExports.map(\.path) == [folder + "/Song.dawproject"])
         let job = try #require(f.jobRows.keys.max())
         f.jobRows[job]?.state = .done
@@ -524,7 +524,7 @@ import VizDAWCore
         let o = run(.coProducerExport(what: .stems, parent: nil, strips: nil, window: nil), s, id)
         #expect(failure(o)?.code == .failed)
         #expect(failure(o)?.message == "There is nothing to bounce: no strip plays audio.")
-        #expect(f.coLog == ["export plan stems 2026-11-14 - -"])
+        #expect(f.coLog == ["enter \(stamp)", "export plan stems 2026-11-14 - -", "leave"])
         #expect(f.bounces.isEmpty)
         // No document: no call.
         f.coLog = []
@@ -533,6 +533,50 @@ import VizDAWCore
             stamp: stamp, peer: nil, approver: FakeApprover(.allow))
         #expect(failure(none)?.code == .noDocument)
         #expect(f.coLog == [])
+    }
+
+    /// Plan 8c final review: an export refused at its start leaves no
+    /// folder and no notes line. A bounce already running: the core's plan
+    /// refuses before making the folder, so nothing runs and nothing is
+    /// dropped; a command that refuses after the plan drops its folder.
+    @Test func aRefusedExportLeavesNoFolder() throws {
+        let (s, id, _, f) = try demo()
+        let folder = "/tmp/Song — Stems — 2026-11-14"
+        f.coExportPlan = stemsPlan(folder)
+        f.coNoteError = .Busy(message: "Wait for the running import, export or bounce to finish.")
+        let busy = run(.coProducerExport(what: .stems, parent: nil, strips: nil, window: nil), s, id)
+        #expect(failure(busy)?.code == .busy)
+        #expect(f.coLog == ["enter \(stamp)", "export plan stems 2026-11-14 - -", "leave"])
+        #expect(f.bounces.isEmpty)
+
+        // The plan was made, but the bounce still refused: its folder goes.
+        f.coNoteError = nil
+        f.bounceError = .Busy(message: "A bounce is running.")
+        f.coLog = []
+        let refused = run(.coProducerExport(what: .stems, parent: nil, strips: nil, window: nil), s, id)
+        #expect(failure(refused)?.code == .busy)
+        #expect(f.coLog == ["enter \(stamp)", "export plan stems 2026-11-14 - -", "drop \(folder)", "leave"])
+
+        // The retry plans again (the core makes the first-numbered folder).
+        f.bounceError = nil
+        f.coLog = []
+        let retry = run(.coProducerExport(what: .stems, parent: nil, strips: nil, window: nil), s, id)
+        guard case .pending = retry else {
+            Issue.record("the retry did not start: \(retry)")
+            return
+        }
+        #expect(f.coLog == ["enter \(stamp)", "export plan stems 2026-11-14 - -", "bounce", "leave"])
+    }
+
+    /// Recording (or a held drag): the enter refuses, so no plan is made.
+    @Test func anExportWhileRecordingPlansNothing() throws {
+        let (s, id, _, f) = try demo()
+        f.coEnterError = .Busy(message: "Stop recording first.")
+        let o = run(.coProducerExport(what: .mix, parent: "/tmp", strips: nil, window: nil), s, id)
+        #expect(failure(o)?.code == .busy)
+        #expect(failure(o)?.message == "Stop recording first.")
+        #expect(f.coLog == ["enter \(stamp)"])
+        #expect(f.bounces.isEmpty)
     }
 
     /// 8a Ruling 13: a failing export job is the call's failure, and its

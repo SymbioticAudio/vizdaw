@@ -5224,7 +5224,10 @@ impl Session {
     /// folder, which the request's entry names (with `parent`, when
     /// given, remembered). The app runs the command through the menu's
     /// own path. `Model` with no open request, and for every refusal; a
-    /// refusal makes no folder.
+    /// refusal makes no folder. `Busy`, before anything is made, while a
+    /// drag is held, the composer records, an edit is open, or a bounce,
+    /// import or export runs: the refusals the command's start would give
+    /// (plan 8c final review).
     pub fn co_producer_export_plan(
         &self,
         what: crate::control::ExportWhatRow,
@@ -5240,6 +5243,12 @@ impl Session {
                     "An export folder's date is \"YYYY-MM-DD\".",
                 ));
             }
+            if let Some(why) = Self::co_producer_busy(&inner) {
+                return Err(VizError::Busy {
+                    message: why.into(),
+                });
+            }
+            self.interchange_idle(&mut inner)?;
             let song = inner.song_name();
             let given = parent.map(PathBuf::from);
             let folder = Self::export_parent(&mut inner, given.as_deref())?;
@@ -5255,6 +5264,32 @@ impl Session {
             )?;
             Self::log_export(&mut inner, &plan.folder, given.is_some().then_some(&folder))?;
             Ok(plan)
+        })
+    }
+
+    /// The export whose plan made `folder` did not start (plan 8c final
+    /// review): the folder is removed only while it is still empty (never
+    /// anything in it), and then its line leaves the open request's entry.
+    /// `true` when it is gone; `false`, changing nothing, for a folder the
+    /// entry does not name or one that is not empty. `Model` with no open
+    /// request.
+    pub fn co_producer_drop_export(&self, folder: String) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let log = Self::open_log(&mut inner)?;
+            if !log.files.contains(&folder) {
+                return Ok(false);
+            }
+            let path = Path::new(&folder);
+            let gone = match std::fs::symlink_metadata(path) {
+                Ok(m) if m.is_dir() => std::fs::remove_dir(path).is_ok(),
+                Ok(_) => false,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            };
+            if gone {
+                log.files.retain(|f| f != &folder);
+            }
+            Ok(gone)
         })
     }
 
