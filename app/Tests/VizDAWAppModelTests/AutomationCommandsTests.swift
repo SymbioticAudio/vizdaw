@@ -94,6 +94,37 @@ import VizDAWCore
         #expect(ControlCommands.handled.contains(AutomationCommands.releaseAll))
     }
 
+    /// Task 4 review backlog 1: `automation.release_all` takes no
+    /// parameters, so Settings › Keys and the surfaces can bind it; a bound
+    /// key releases the channel's touches, and so does the menu-command
+    /// path.
+    @Test func aKeyBoundToReleaseAllReleasesTheChannelsTouches() throws {
+        let f = mixerFake()
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        f.channelTouches = 1
+        let keys = KeyBindings(defaults: MemoryDefaults())
+        try keys.bind(AutomationCommands.releaseAll, keys: ["⌃⌥⌘R"], replace: true)
+        let r = KeyRouter.route(
+            keyCode: 15, modifiers: ModifiersRow(shift: false, control: true, option: true, command: true),
+            typing: false, stepEntry: false, menus: true, keys: keys, sequences: [])
+        guard case .command(let c) = r else {
+            Issue.record("\(r)")
+            return
+        }
+        #expect(c == AutomationCommands.releaseAll)
+        #expect(KeyDispatch.command(c, doc: (id, m), store: s, host: FakeControlHost()) == .handled)
+        #expect(f.releaseChannelCalls == 1)
+        #expect(m.editor.status == "Released 1 touch.")
+        f.channelTouches = 0
+        #expect(AutomationCommands.run(AutomationCommands.releaseAll, on: nil, m) == .done)
+        #expect(f.releaseChannelCalls == 2)
+        #expect(m.editor.status == "The channel holds no touch.")
+        f.releaseChannelError = .Busy(message: "Finish the open edit first.")
+        #expect(AutomationCommands.run(AutomationCommands.releaseAll, on: nil, m) == .busy("Finish the open edit first."))
+    }
+
     @Test func theChannelGesturesAsItsOwnHolder() throws {
         let (id, m, f) = try doc()
         let o = AutomationCommands.run(

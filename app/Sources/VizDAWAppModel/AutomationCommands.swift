@@ -195,7 +195,7 @@ extension AutomationCommands {
     /// core releases every touch the control channel holds, e.g. after a
     /// script stopped mid-gesture; the mouse's, a surface's, a learned
     /// control's and a plugin's holds stay. Takes no arguments.
-    static func runReleaseAll(_ args: [ControlArg], doc: UUID, _ m: DocumentModel) -> ControlOutcome {
+    static func runReleaseAll(_ args: [ControlArg], doc: UUID?, _ m: DocumentModel) -> ControlOutcome {
         guard args.isEmpty else { return invalid("automation.release_all takes no parameters") }
         let n: UInt32
         do {
@@ -224,6 +224,13 @@ extension AutomationCommands: MenuCommands {
         if id == suspend {
             setAutomationSuspended(on: on ?? !automationSuspended())
             return .done
+        }
+        if id == releaseAll {
+            switch runReleaseAll([], doc: nil, m) {
+            case .failed(let f) where f.code == .busy: return .busy(f.message)
+            case .failed(let f): return .refused(f.message)
+            default: return .done
+            }
         }
         guard modeIDs[id] != nil else { return .refused("VizDAW has no handler for \(id).") }
         switch runMode(id, m) {
