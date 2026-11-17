@@ -379,7 +379,42 @@ enum SourceScan {
         let drawing = try String(
             contentsOf: SourceScan.sourcesRoot.appendingPathComponent("VizDAWEditors/RegionDrawing.swift"),
             encoding: .utf8)
-        #expect(drawing.contains("theme.swatchLegend(on: palette.body)"), "region names take the swatch legend")
+        #expect(
+            drawing.contains("theme.regionNameInk(fill: bodyFill, under: under ?? theme.canvas)"),
+            "region names take the legend of the fill as drawn")
+        let arrangement = try String(
+            contentsOf: SourceScan.sourcesRoot.appendingPathComponent("VizDAWEditors/ArrangementView.swift"),
+            encoding: .utf8)
+        #expect(arrangement.contains("tint: tint(row), under: under)"), "the arrangement passes its block fill")
+    }
+
+    /// Final review (region names): the fills are translucent, so the ink is
+    /// chosen on the colour drawn, the region body over the events block's
+    /// fill over the canvas (as the arrangement draws it), and over the
+    /// canvas alone. Untinted and every swatch tint, muted or not, reach
+    /// 4.5:1 in every theme.
+    @Test func regionNamesReadOnTheDrawnFill() {
+        for t in Theme.all {
+            let s = t.swatch
+            let tints: [(String, NSColor?)] = [
+                ("untinted", nil), ("red", s.red.nsColor), ("orange", s.orange.nsColor),
+                ("yellow", s.yellow.nsColor), ("green", s.green.nsColor), ("teal", s.teal.nsColor),
+                ("blue", s.blue.nsColor), ("purple", s.purple.nsColor), ("pink", s.pink.nsColor),
+            ]
+            for (name, tint) in tints {
+                for mute in [false, true] {
+                    let base = t.regionFill(tint: tint)
+                    let fill = base.withAlphaComponent(base.alphaComponent * (mute ? 0.4 : 1))
+                    let block = Theme.composite(fill, over: t.canvas)
+                    for (place, under) in [("arrangement", block), ("canvas", t.canvas)] {
+                        let drawn = Theme.composite(fill, over: under)
+                        let ink = t.regionNameInk(fill: fill, under: under)
+                        let c = Theme.contrast(ink, drawn)
+                        #expect(c >= 4.5, "\(t.id) \(name) mute \(mute) \(place): \(c)")
+                    }
+                }
+            }
+        }
     }
 
     /// Plan release-fixes Task 9 (Decision 8): Console's legends are in the

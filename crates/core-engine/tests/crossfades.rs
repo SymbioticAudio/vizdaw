@@ -369,6 +369,82 @@ fn a_split_region_plays_seamlessly() {
     assert!((whole[1799] - value(1799) / 72.0).abs() < 1e-9);
 }
 
+/// Final review I1: two references to one sequence, back to back on a
+/// track, join as one region does (a seamless loop does not tick at the
+/// boundary): the regions are in different groups, yet both are pieces of
+/// the same arrangement track, so neither side of the join ramps.
+#[test]
+fn back_to_back_references_play_seamlessly() {
+    let dir = tempfile::tempdir().unwrap();
+    dc(&dir.path().join("a.caf"), 4000, 0.5);
+    dc(&dir.path().join("b.caf"), 4000, 0.25);
+    // "Song" first, so it is the sequence `render` plays.
+    let mut b = Builder::new();
+    let (song, refs) = b.sequence("Song", "Refs", None).unwrap();
+    let (lp, ll) = b.sequence("Loop", "Audio", None).unwrap();
+    let ma = b.media("Media/a.caf", 4000, 1).unwrap();
+    b.media("Media/b.caf", 4000, 1).unwrap();
+    b.region(lp, ll, 0, ma, 0, 800, 0.0, Fade::default(), Fade::default())
+        .unwrap();
+    // Ticks 0 and 512: frames 0 and 800, the second where the first's
+    // region ends.
+    b.reference(song, refs, 0, lp, 1, 0).unwrap();
+    b.reference(song, refs, 512, lp, 1, 0).unwrap();
+    assert_eq!(*b.doc().sequences().keys().next().unwrap(), song);
+    let got: Vec<(u64, u64, bool, bool)> = schedule(&b)
+        .segments(OutputPathId(0))
+        .iter()
+        .map(|s| (s.start, s.frames, s.ramp_start, s.ramp_end))
+        .collect();
+    assert_eq!(got, vec![(0, 800, true, false), (800, 800, false, true)]);
+    let refs_render = render(&b, dir.path());
+    // The same level as one 1 600-frame region, sample for sample.
+    let mut one = Builder::new();
+    let (seq, lane) = one.sequence("Song", "Audio", None).unwrap();
+    let m = one.media("Media/a.caf", 4000, 1).unwrap();
+    one.media("Media/b.caf", 4000, 1).unwrap();
+    one.region(
+        seq,
+        lane,
+        0,
+        m,
+        0,
+        1600,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+    let whole = render(&one, dir.path());
+    assert_eq!(refs_render, whole);
+    assert!(
+        refs_render[72..1528].iter().all(|x| *x == 0.5),
+        "no dip at 800"
+    );
+    // A region on the track itself, butting a reference, joins too.
+    b.region(
+        song,
+        refs,
+        1024,
+        ma,
+        0,
+        800,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+    let got: Vec<(u64, bool, bool)> = schedule(&b)
+        .segments(OutputPathId(0))
+        .iter()
+        .map(|s| (s.start, s.ramp_start, s.ramp_end))
+        .collect();
+    assert_eq!(
+        got,
+        vec![(0, true, false), (800, false, false), (1600, false, true)]
+    );
+}
+
 #[test]
 fn a_version_8_pair_loads_and_renders_as_before() {
     let (b, _) = pair(Fade::default());

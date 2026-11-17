@@ -87,6 +87,35 @@ public extension Theme {
         return Self.contrast(dark, fill) >= Self.contrast(light, fill) ? dark : light
     }
 
+    /// A region name's ink (final review, region names): the swatch legend
+    /// of the colour actually drawn, `fill` (often translucent) composited
+    /// over the opaque `under`, not of `fill` alone. Where the white key
+    /// falls short of 4.5:1 (Studio Dark's teal on its block), pure black
+    /// or pure white, whichever reads better: one of them always reaches
+    /// 4.58:1.
+    func regionNameInk(fill: NSColor, under: NSColor) -> NSColor {
+        let drawn = Self.composite(fill, over: under)
+        let ink = swatchLegend(on: drawn)
+        guard Self.contrast(ink, drawn) < 4.5 else { return ink }
+        let black = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+        let white = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+        return Self.contrast(black, drawn) >= Self.contrast(white, drawn) ? black : white
+    }
+
+    /// The opaque colour of `fill` drawn over the canvas.
+    func onCanvas(_ fill: NSColor) -> NSColor { Self.composite(fill, over: canvas) }
+
+    /// `top` drawn over `bottom` with source-over, in sRGB; the result is
+    /// opaque (`bottom` is taken as opaque).
+    static func composite(_ top: NSColor, over bottom: NSColor) -> NSColor {
+        guard let t = top.usingColorSpace(.sRGB), let b = bottom.usingColorSpace(.sRGB) else { return bottom }
+        let a = t.alphaComponent
+        func mix(_ x: CGFloat, _ y: CGFloat) -> CGFloat { x * a + y * (1 - a) }
+        return NSColor(
+            srgbRed: mix(t.redComponent, b.redComponent), green: mix(t.greenComponent, b.greenComponent),
+            blue: mix(t.blueComponent, b.blueComponent), alpha: 1)
+    }
+
     /// The first of `candidates` with at least `ratio` contrast on
     /// `background`; if none has, the one with the most.
     func firstReadable(_ candidates: [ThemeColor], on background: NSColor, ratio: CGFloat) -> NSColor {

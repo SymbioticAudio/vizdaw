@@ -215,7 +215,10 @@ public final class ArrangementView: EditorCanvas {
         shape.lineWidth = selected ? 2 : 1
         if b.muted { shape.setLineDash([3, 2], count: 2, phase: 0) }
         shape.stroke()
-        if !light, b.kind == .events { drawRegions(b, row: row, key: key, dirty: dirty) }
+        // Region names read on the block's fill over the canvas, beneath
+        // each region (final review).
+        let under = theme.onCanvas(fill.withAlphaComponent(fill.alphaComponent * (b.muted ? 0.4 : 1)))
+        if !light, b.kind == .events { drawRegions(b, row: row, key: key, dirty: dirty, under: under) }
         guard !light, r.width > 24 else { return }
         if b.kind == .reference {
             let text = NSString(string: "↻ " + (b.label ?? ""))
@@ -260,7 +263,7 @@ public final class ArrangementView: EditorCanvas {
 
     /// The audio regions of an events block: waveform, fades, gain and
     /// handles (spec §10.1–10.2).
-    private func drawRegions(_ b: BlockRow, row: Int, key: LaneKey, dirty: CGRect) {
+    private func drawRegions(_ b: BlockRow, row: Int, key: LaneKey, dirty: CGRect, under: NSColor) {
         let ids = Set(b.events)
         let media = document.media
         for r in regionRows(key) where ids.contains(r.id) {
@@ -281,7 +284,7 @@ public final class ArrangementView: EditorCanvas {
             RegionDrawing.draw(
                 r, in: rect, rows: rows, waveRect: wave, offline: offline, selected: editor.isSelected(event: r.id),
                 handles: editor.tool == .arrow, name: Self.regionName(r) { media.row($0)?.name }, theme: theme,
-                tint: tint(row))
+                tint: tint(row), under: under)
         }
     }
 

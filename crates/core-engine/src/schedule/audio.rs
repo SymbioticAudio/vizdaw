@@ -320,6 +320,44 @@ fn complements(
     }
 }
 
+/// No edge ramp where one path's pieces join on one arrangement track
+/// (release-fixes Task 7 fix round 1; final review I1): a piece's start
+/// within a frame (split rounding) of another piece's end on the same
+/// `top_lane` switches instantly, and so does an end within a frame of
+/// another's start. Across groups too: back-to-back references, a region
+/// beside a reference. Crossfade complements (`xfade` set) are not pieces.
+fn unramp_joins(segs: &mut [Segment]) {
+    let piece = |s: &Segment| s.xfade.length_frames == 0;
+    let mut ends: Vec<(LaneId, u64, usize)> = Vec::new();
+    let mut starts: Vec<(LaneId, u64, usize)> = Vec::new();
+    for (i, s) in segs.iter().enumerate().filter(|(_, s)| piece(s)) {
+        ends.push((s.top_lane, s.end(), i));
+        starts.push((s.top_lane, s.start, i));
+    }
+    ends.sort_unstable();
+    starts.sort_unstable();
+    // Another entry of `list` on `lane` within a frame of `at`.
+    let near = |list: &[(LaneId, u64, usize)], lane: LaneId, at: u64, me: usize| {
+        let from = list.partition_point(|&(l, f, _)| (l, f) < (lane, at.saturating_sub(1)));
+        list.get(from..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|&&(l, f, _)| l == lane && f <= at.saturating_add(1))
+            .any(|&(_, _, j)| j != me)
+    };
+    for (i, s) in segs.iter_mut().enumerate() {
+        if !piece(s) {
+            continue;
+        }
+        if near(&ends, s.top_lane, s.start, i) {
+            s.ramp_start = false;
+        }
+        if near(&starts, s.top_lane, s.end(), i) {
+            s.ramp_end = false;
+        }
+    }
+}
+
 /// Builds the audio schedule from the flattened regions of `doc`
 /// (`frame_of` maps a tick to a signed schedule frame). Counts into
 /// `report`.
@@ -455,26 +493,6 @@ pub(crate) fn build(
                 out.push(s);
             }
         }
-        // Release-fixes Task 7 fix round 1: no edge ramp where pieces join
-        // (a split, a plain overlap), within a frame of split rounding.
-        // `pieces` are sorted and never overlap, so only neighbours can be
-        // that close; `out[first..]` begins with them, in order.
-        let joined = |x: u64, y: u64| x.abs_diff(y) <= 1;
-        for (k, s) in out.iter_mut().skip(first).take(pieces.len()).enumerate() {
-            let (Some(&(_, a, b)), prev, next) = (
-                pieces.get(k),
-                k.checked_sub(1).and_then(|j| pieces.get(j)),
-                pieces.get(k + 1),
-            ) else {
-                continue;
-            };
-            if prev.is_some_and(|&(_, _, e)| joined(e, a)) {
-                s.ramp_start = false;
-            }
-            if next.is_some_and(|&(_, st, _)| joined(b, st)) {
-                s.ramp_end = false;
-            }
-        }
         if uses.iter().any(|u| u.crossfade) {
             let mut ends_under = BTreeSet::new();
             complements(doc, &uses, &pieces, &mut memo, out, &mut ends_under);
@@ -490,6 +508,7 @@ pub(crate) fn build(
     let paths: Box<[PathSegments]> = per_path
         .into_iter()
         .map(|(path, mut segments)| {
+            unramp_joins(&mut segments);
             segments.sort_by_key(|s| s.start);
             let longest = segments.iter().map(|s| s.frames).max().unwrap_or(0);
             report.audio_segments += segments.len();

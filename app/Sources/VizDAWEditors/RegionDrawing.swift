@@ -126,15 +126,19 @@ public enum RegionDrawing {
     /// of showing a waveform and, with `offlineLabel`, says "Offline" when
     /// it has room (the region strip puts it in its own label instead;
     /// final review V1). With `name` (the arrangement's), the name is drawn
-    /// at the top left in the legend colour of the fill, before the pill.
+    /// at the top left in the legend colour of the fill as drawn: the body
+    /// composited over `under`, the opaque colour beneath the region (the
+    /// canvas when nil).
     public static func draw(
         _ r: EventRow, in rect: CGRect, rows: OverviewRows?, waveRect: CGRect, offline: Bool, selected: Bool,
-        handles: Bool, offlineLabel: Bool = true, name: String? = nil, theme: Theme, tint: NSColor? = nil
+        handles: Bool, offlineLabel: Bool = true, name: String? = nil, theme: Theme, tint: NSColor? = nil,
+        under: NSColor? = nil
     ) {
         let palette = RegionPalette(theme, tint: tint)
         let body = NSBezierPath(
             roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: theme.radius.s, yRadius: theme.radius.s)
-        palette.body.withAlphaComponent(palette.body.alphaComponent * (r.mute ? 0.4 : 1)).setFill()
+        let bodyFill = palette.body.withAlphaComponent(palette.body.alphaComponent * (r.mute ? 0.4 : 1))
+        bodyFill.setFill()
         body.fill()
         NSGraphicsContext.saveGraphicsState()
         body.addClip()
@@ -193,7 +197,8 @@ public enum RegionDrawing {
             let style = NSMutableParagraphStyle()
             style.lineBreakMode = .byTruncatingTail
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: font, .foregroundColor: theme.swatchLegend(on: palette.body), .paragraphStyle: style,
+                .font: font, .foregroundColor: theme.regionNameInk(fill: bodyFill, under: under ?? theme.canvas),
+                .paragraphStyle: style,
             ]
             NSString(string: name).draw(
                 with: box, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
