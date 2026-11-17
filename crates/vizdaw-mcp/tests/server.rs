@@ -1554,3 +1554,252 @@ fn note_and_folder_refuse_when_the_front_song_changed() {
         "{seen:?}"
     );
 }
+
+const EXPORT_DESCRIPTION: &str = "Export the song in one step into a new dated folder, \"<song> \u{2014} <what> \u{2014} <date>\": stems (one audio file per strip; pass strips to choose them), mix (one audio file), midi (one MIDI file), dawproject (a DAWproject file that other music apps open), aaf, or other_daw (stems plus MIDI files). Without parent it uses the folder remembered in the song's notes, else the folder the song is in; for an untitled song with neither, ask the composer where exports should go and pass parent. Never replaces a file. Needs an open request (begin_request). Answers what was written.";
+
+#[test]
+fn chore_tools_are_listed() {
+    let d = support_dir();
+    let mut m = Mcp::spawn(d.path());
+    let r = m.result("tools/list", json!({}));
+    let tools = r["tools"].as_array().unwrap();
+    let find = |n: &str| tools.iter().find(|t| t["name"] == n).cloned();
+    let export = find("export").unwrap();
+    assert_eq!(export["description"], EXPORT_DESCRIPTION);
+    assert_eq!(
+        export["inputSchema"]["properties"]["what"]["enum"],
+        json!(["stems", "mix", "midi", "dawproject", "aaf", "other_daw"])
+    );
+    assert_eq!(
+        export["inputSchema"]["properties"]["parent"]["maxLength"],
+        1024
+    );
+    assert_eq!(
+        export["inputSchema"]["properties"]["strips"]["maxLength"],
+        512
+    );
+    assert_eq!(export["inputSchema"]["required"], json!(["what"]));
+    let show = find("show_tracks").unwrap();
+    assert_eq!(
+        show["description"],
+        "List the song's tracks and mixer strips, with their kinds and colours and which ones Co-Producer added. Changes nothing."
+    );
+    assert_eq!(show["annotations"]["readOnlyHint"], true);
+    assert!(find("marker_add").is_some());
+    for n in [
+        "modify_quantize_notes",
+        "modify_transpose_notes",
+        "modify_velocity_notes",
+        "marker_rename",
+        "marker_remove",
+    ] {
+        assert!(find(n).is_none(), "{n} is not a tool");
+    }
+    let change = find("change").unwrap()["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        change.contains(
+            "quantizing, transposing or changing the velocity of notes, and renaming or removing a marker"
+        ),
+        "{change}"
+    );
+}
+
+fn exported(files: usize, summary: Value) -> Answer {
+    let written: Vec<String> = (0..files)
+        .map(|i| format!("/x/Song \u{2014} Stems \u{2014} 2026-11-16/T{i}.wav"))
+        .collect();
+    Answer::Ok(json!({
+        "doc": "d1",
+        "folder": "/x/Song \u{2014} Stems \u{2014} 2026-11-16",
+        "written": written,
+        "summary": summary,
+    }))
+}
+
+#[test]
+fn export_reaches_the_app() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::Ok(json!({
+        "doc": "d1",
+        "folder": "/x/Song \u{2014} Stems \u{2014} 2026-11-16",
+        "written": ["/x/\u{2026}/Kick.wav", "/x/\u{2026}/Bass.wav"],
+        "summary": null,
+    })));
+    let r = m.call("export", json!({"what": "stems"}));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        text(&r),
+        "Wrote 2 files in /x/Song \u{2014} Stems \u{2014} 2026-11-16:\n- /x/\u{2026}/Kick.wav\n- /x/\u{2026}/Bass.wav"
+    );
+    let seen = app.seen();
+    assert!(
+        matches!(&seen[..], [Command::CoProducerExport { what, parent: None, strips: None, .. }]
+            if what.name() == "stems"),
+        "{seen:?}"
+    );
+    // A summary adds a Report line.
+    app.script(exported(1, json!("2 tracks, 0 problems")));
+    let parent = tempfile::Builder::new()
+        .prefix("vzx")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let r = m.call(
+        "export",
+        json!({"what": "dawproject", "parent": parent.path()}),
+    );
+    assert!(text(&r).ends_with("\nReport: 2 tracks, 0 problems"), "{r}");
+    // Strips go through as given.
+    let r = m.call("export", json!({"what": "stems", "strips": "3, 4"}));
+    assert!(!is_error(&r), "{r}");
+    assert!(
+        matches!(app.seen().last(), Some(Command::CoProducerExport { strips: Some(s), .. }) if s == &vec![3, 4]),
+        "{:?}",
+        app.seen()
+    );
+    // An app failure is an error with its message.
+    app.script(Answer::Err(ControlError::new(
+        ErrorCode::Busy,
+        "A job is running.",
+    )));
+    let r = m.call("export", json!({"what": "mix"}));
+    assert!(is_error(&r), "{r}");
+    assert!(text(&r).contains("A job is running."), "{r}");
+}
+
+fn doc_state(lanes: Value) -> Answer {
+    Answer::Ok(json!({"doc": "d1", "title": "Song", "selected_seq": 1, "lanes": lanes}))
+}
+
+fn mixer_state(strips: Value) -> Answer {
+    Answer::Ok(json!({"doc": "d1", "strips": strips}))
+}
+
+#[test]
+fn show_tracks_lists_tracks_and_strips() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(doc_state(json!([
+        {"id": 7, "name": "Keys", "kind": "instrument", "co_producer": false},
+        {"id": 9, "name": "Pad", "kind": "audio", "co_producer": true},
+    ])));
+    app.script(mixer_state(json!([
+        {"id": 1, "name": "Keys", "kind_label": "Instrument", "colour": "blue", "co_producer": false},
+        {"id": 2, "name": "Bus", "kind_label": "Bus", "colour": null, "co_producer": true},
+    ])));
+    let r = m.call("show_tracks", json!({}));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        text(&r),
+        "Song: Song\nTracks:\n- Track 1, Keys: instrument\n- Track 2, Pad: audio \u{2014} added by Co-Producer\nStrips:\n- Keys: Instrument, colour blue\n- Bus: Bus, colour none \u{2014} added by Co-Producer"
+    );
+    let seen = app.seen();
+    assert!(
+        matches!(
+            &seen[..],
+            [Command::StateGet { .. }, Command::StateGet { .. }]
+        ),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn long_lists_are_capped() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let lanes: Vec<Value> = (0..500)
+        .map(
+            |i| json!({"id": i + 1, "name": format!("T{i}"), "kind": "midi", "co_producer": false}),
+        )
+        .collect();
+    app.script(doc_state(json!(lanes)));
+    app.script(mixer_state(json!([])));
+    let r = m.call("show_tracks", json!({}));
+    let t = text(&r);
+    assert_eq!(t.matches("\n- Track ").count(), 200, "{t}");
+    assert!(t.contains("\n- and 300 more"), "{t}");
+    app.script(exported(45, Value::Null));
+    let r = m.call("export", json!({"what": "stems"}));
+    let t = text(&r);
+    assert!(t.starts_with("Wrote 45 files in "), "{t}");
+    assert_eq!(t.matches("\n- /x/").count(), 40, "{t}");
+    assert!(t.ends_with("\n- and 5 more"), "{t}");
+}
+
+#[test]
+fn chore_tools_refuse_hostile_arguments() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    for (tool, args) in [
+        ("export", json!({})),
+        ("export", json!({"what": "selection"})),
+        ("export", json!({"what": 5})),
+        ("export", json!({"what": "stems", "extra": 1})),
+        (
+            "export",
+            json!({"what": "stems", "parent": "x".repeat(70_000)}),
+        ),
+        ("export", json!({"what": "stems", "parent": "a\u{0}b"})),
+        ("export", json!({"what": "stems", "parent": 3})),
+        (
+            "export",
+            json!({"what": "stems", "strips": "x".repeat(70_000)}),
+        ),
+        ("export", json!({"what": "stems", "strips": "1,,2"})),
+        ("export", json!({"what": "stems", "strips": [1]})),
+        ("export", json!({"what": "mix", "window": 0})),
+        ("show_tracks", json!({"extra": 1})),
+        ("show_tracks", json!({"window": 1})),
+    ] {
+        let r = m.call(tool, args.clone());
+        assert!(is_error(&r), "{tool} {args}: {r}");
+    }
+    m.ping_answers();
+    assert!(app.seen().is_empty(), "no socket call: {:?}", app.seen());
+}
+
+#[test]
+fn names_are_shown_safely() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(doc_state(json!([
+        {"id": 1, "name": "a\u{202E}b", "kind": "audio", "co_producer": false},
+        {"id": 2, "name": "x\n- Track 9, forged: audio", "kind": "audio", "co_producer": false},
+    ])));
+    app.script(mixer_state(json!([
+        {"id": 1, "name": "s\u{2028}t", "kind_label": "Bus", "colour": null, "co_producer": false},
+    ])));
+    let r = m.call("show_tracks", json!({}));
+    let t = text(&r);
+    assert!(t.contains("Track 1, a\u{FFFD}b: audio"), "{t}");
+    assert!(t.contains("s\u{FFFD}t: Bus"), "{t}");
+    assert!(!t.contains("\n- Track 9"), "{t}");
+}
+
+#[test]
+fn export_refuses_when_the_front_song_changed() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::Ok(json!({"doc": "d1", "begun": "x"})));
+    app.script(notes_answer("n\n"));
+    assert!(!is_error(&m.call("begin_request", json!({"name": "x"}))));
+    app.script(Answer::Ok(json!({"doc": "d2", "request": null})));
+    let r = m.call("export", json!({"what": "stems"}));
+    assert!(is_error(&r), "{r}");
+    assert!(
+        !app.seen()
+            .iter()
+            .any(|c| matches!(c, Command::CoProducerExport { .. })),
+        "{:?}",
+        app.seen()
+    );
+}

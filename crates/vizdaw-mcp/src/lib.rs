@@ -421,6 +421,8 @@ impl Server {
             tools::READ_NOTES => done(self.read_notes(args)),
             tools::ADD_NOTE => done(self.add_note(args)),
             tools::EXPORT_FOLDER => done(self.export_folder(args)),
+            tools::EXPORT => done(self.export(args)),
+            tools::SHOW_TRACKS => done(self.show_tracks(args)),
             tools::SCREENSHOT => done(self.screenshot(args)),
             tools::CHANGE => match self.change(id, era, params, args) {
                 Done::Result(v) => done(v),
@@ -802,6 +804,54 @@ impl Server {
             }
             Err(e) => e,
         }
+    }
+
+    /// Ruling 8: one call exports into a new dated folder. The front
+    /// document must be the begin's, as for the other writes.
+    fn export(&mut self, args: &Map<String, Value>) -> Value {
+        if let Err(m) = tools::check_export_args(args) {
+            return tool_error(m);
+        }
+        if let Err(e) = self.begun_front(args) {
+            return e;
+        }
+        let r = match self.pass("co_producer.export", args, &["what", "parent", "strips"]) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        if let Err(e) = self.begun_answer(args, &r) {
+            return e;
+        }
+        let what = args.get("what").and_then(Value::as_str).unwrap_or("");
+        // The structured form is built here and sent by the views (Task 6).
+        match tools::export_answer(what, &r) {
+            Ok((text, _structured)) => tool_text(text, false),
+            Err(m) => tool_error(m),
+        }
+    }
+
+    /// Ruling 8: the tracks and strips, from two state reads.
+    fn show_tracks(&mut self, args: &Map<String, Value>) -> Value {
+        if let Some(k) = args.keys().next() {
+            return tool_error(format!(
+                "show_tracks takes no arguments (got `{}`)",
+                rpc::truncate(k, 64)
+            ));
+        }
+        let document = match self.app.call("state.get", json!({"target": "document"})) {
+            Ok(v) => v,
+            Err(e) => return self.failed(&e),
+        };
+        let mixer = match self.app.call("state.get", json!({"target": "mixer"})) {
+            Ok(v) => v,
+            Err(e) => return self.failed(&e),
+        };
+        let same = |a: &Value, b: &Value| a.get("doc") == b.get("doc");
+        if !same(&document, &mixer) {
+            return other_song();
+        }
+        let (text, _structured) = tools::tracks_answer(&document, &mixer);
+        tool_text(text, false)
     }
 
     fn screenshot(&mut self, args: &Map<String, Value>) -> Value {

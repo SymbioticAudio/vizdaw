@@ -25,6 +25,14 @@ pub const READ_NOTES: &str = "read_notes";
 pub const ADD_NOTE: &str = "add_note";
 /// Makes a dated export folder.
 pub const EXPORT_FOLDER: &str = "export_folder";
+/// Exports the song in one call into a new dated folder (plan 8c Task 5).
+pub const EXPORT: &str = "export";
+/// Lists the song's tracks and mixer strips.
+pub const SHOW_TRACKS: &str = "show_tracks";
+/// The most tracks, strips or files a chore answer lists (Ruling 8).
+pub const MAX_SHOWN: usize = 200;
+/// The longest `strips` list `export` takes.
+const MAX_STRIPS_ARG: usize = 512;
 /// A picture of a window.
 pub const SCREENSHOT: &str = "screenshot";
 
@@ -209,6 +217,25 @@ fn own_tool(
     })
 }
 
+/// The export names a chore takes: all but `selection`.
+fn export_names() -> Vec<&'static str> {
+    ExportWhat::ALL
+        .iter()
+        .filter(|w| **w != ExportWhat::Selection)
+        .map(|w| w.name())
+        .collect()
+}
+
+/// `show_tracks`: it takes no argument at all, not even `window`.
+fn show_tracks_tool() -> Value {
+    json!({
+        "name": SHOW_TRACKS,
+        "description": "List the song's tracks and mixer strips, with their kinds and colours and which ones Co-Producer added. Changes nothing.",
+        "inputSchema": object_schema(Map::new(), Vec::new()),
+        "annotations": {"readOnlyHint": true},
+    })
+}
+
 /// Co-Producer's own tools, with Ruling 12's descriptions.
 fn own_tools() -> Vec<Value> {
     let quiet = || json!({"destructiveHint": false, "openWorldHint": false});
@@ -238,7 +265,7 @@ fn own_tools() -> Vec<Value> {
         ),
         own_tool(
             CHANGE,
-            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
+            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save, quantizing, transposing or changing the velocity of notes, and renaming or removing a marker. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
             &[("commands", plan_schema())],
             &["commands"],
             json!({"destructiveHint": true}),
@@ -293,6 +320,31 @@ fn own_tools() -> Vec<Value> {
             &["what"],
             quiet(),
         ),
+        own_tool(
+            EXPORT,
+            "Export the song in one step into a new dated folder, \"<song> \u{2014} <what> \u{2014} <date>\": stems (one audio file per strip; pass strips to choose them), mix (one audio file), midi (one MIDI file), dawproject (a DAWproject file that other music apps open), aaf, or other_daw (stems plus MIDI files). Without parent it uses the folder remembered in the song's notes, else the folder the song is in; for an untitled song with neither, ask the composer where exports should go and pass parent. Never replaces a file. Needs an open request (begin_request). Answers what was written.",
+            &[
+                (
+                    "what",
+                    json!({
+                        "type": "string",
+                        "enum": export_names(),
+                        "description": "What to export.",
+                    }),
+                ),
+                (
+                    "parent",
+                    json!({"type": "string", "minLength": 1, "maxLength": MAX_PATH, "description": "An absolute path to the folder to make the new folder in."}),
+                ),
+                (
+                    "strips",
+                    json!({"type": "string", "minLength": 1, "maxLength": MAX_STRIPS_ARG, "description": "Only for stems and other_daw: the strip IDs to bounce, comma-separated, from the mixer state."}),
+                ),
+            ],
+            &["what"],
+            quiet(),
+        ),
+        show_tracks_tool(),
         own_tool(
             SCREENSHOT,
             "A picture of a VizDAW window, for reading what is on screen. It cannot click or type.",
@@ -483,6 +535,56 @@ pub fn check_notes_args(tool: &str, args: &Map<String, Value>) -> Result<(), Str
     }
 }
 
+/// Checks `export`'s arguments (`window` aside): `what` one of the six,
+/// `parent` a path, `strips` a list of IDs, no other name. Err names what
+/// is wrong. VizDAW checks them again.
+pub fn check_export_args(args: &Map<String, Value>) -> Result<(), String> {
+    for (k, v) in args {
+        match k.as_str() {
+            "window" => {
+                window_arg(v)?;
+            }
+            "what" => {
+                if !v.as_str().is_some_and(|s| export_names().contains(&s)) {
+                    return Err(format!(
+                        "`what` must be one of {}",
+                        export_names().join(", ")
+                    ));
+                }
+            }
+            "parent" => match v {
+                Value::String(s) if !s.is_empty() && s.len() <= MAX_PATH && !s.contains('\0') => {}
+                _ => {
+                    return Err(format!(
+                        "`parent` must be a folder's path of 1 to {MAX_PATH} bytes"
+                    ));
+                }
+            },
+            "strips" => match v {
+                Value::String(s) if s.len() <= MAX_STRIPS_ARG => {
+                    core_control::co_producer::id_list(s).map_err(|m| format!("`strips`: {m}"))?;
+                }
+                _ => {
+                    return Err(format!(
+                        "`strips` must be strip IDs, comma-separated, of at most {MAX_STRIPS_ARG} characters"
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "unknown argument `{}`",
+                    crate::rpc::truncate(k, 64)
+                ));
+            }
+        }
+    }
+    if args.contains_key("what") {
+        Ok(())
+    } else {
+        Err("missing `what`".into())
+    }
+}
+
 /// Ruling 8: the most items a question lists before "- and N more".
 pub const MAX_LISTED: usize = 40;
 /// The longest item part shown; the app already cuts names to 60 (P11).
@@ -660,6 +762,154 @@ pub fn list_for_the_model(items: &[Value], token: &str) -> String {
         "Show this list to the composer and ask for a yes. Then call apply_change with token {token} and the same commands."
     ));
     text
+}
+
+/// `s` as one safe line: each disguising character becomes U+FFFD (and,
+/// when `flat`, a newline or tab a space), cut to `max` characters.
+fn safe(s: &str, max: usize, flat: bool) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' | '\t' if flat => ' ',
+            c if disguises(c) => '\u{FFFD}',
+            c => c,
+        })
+        .take(max)
+        .collect()
+}
+
+fn shown(v: Option<&Value>, fallback: &str) -> String {
+    safe(
+        v.and_then(Value::as_str).unwrap_or(fallback),
+        MAX_ITEM_PART,
+        false,
+    )
+}
+
+fn path_of(v: &Value) -> String {
+    safe(
+        v.as_str().unwrap_or("?"),
+        core_control::params::MAX_PATH,
+        false,
+    )
+}
+
+/// Ruling 8: `export`'s text, and its `structuredContent` minus `what`
+/// (the caller adds the name it sent). A result with no folder is Err.
+pub fn export_answer(what: &str, result: &Value) -> Result<(String, Value), String> {
+    let folder = match result.get("folder").and_then(Value::as_str) {
+        Some(f) => safe(f, core_control::params::MAX_PATH, false),
+        None => return Err("VizDAW's export answer named no folder.".into()),
+    };
+    let files: &[Value] = result
+        .get("written")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let summary = result
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(|s| safe(s, MAX_SUMMARY, true));
+    let noun = if files.len() == 1 { "file" } else { "files" };
+    let mut text = format!("Wrote {} {noun} in {folder}:", files.len());
+    for f in files.iter().take(MAX_LISTED) {
+        text.push_str("\n- ");
+        text.push_str(&path_of(f));
+    }
+    if files.len() > MAX_LISTED {
+        text.push_str(&format!("\n- and {} more", files.len() - MAX_LISTED));
+    }
+    if let Some(s) = &summary {
+        text.push_str("\nReport: ");
+        text.push_str(s);
+    }
+    let written: Vec<String> = files.iter().take(MAX_SHOWN).map(path_of).collect();
+    let structured = json!({
+        "view": "export", "what": what, "folder": folder, "written": written, "summary": summary,
+    });
+    Ok((text, structured))
+}
+
+/// The longest report summary shown.
+const MAX_SUMMARY: usize = 2000;
+
+fn flag(v: &Value) -> bool {
+    v.get("co_producer").and_then(Value::as_bool) == Some(true)
+}
+
+const ADDED: &str = " \u{2014} added by Co-Producer";
+
+/// Ruling 8: `show_tracks`' text and `structuredContent`, from
+/// `state.get document` and `state.get mixer`. Each list stops at
+/// [`MAX_SHOWN`] lines, then "- and N more".
+pub fn tracks_answer(document: &Value, mixer: &Value) -> (String, Value) {
+    let title = shown(document.get("title"), "Untitled");
+    let seq = document.get("selected_seq").cloned().unwrap_or(Value::Null);
+    let lanes: &[Value] = document
+        .get("lanes")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let strips: &[Value] = mixer
+        .get("strips")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let mut text = format!("Song: {title}\nTracks:");
+    let mut tracks = Vec::new();
+    for (i, l) in lanes.iter().enumerate().take(MAX_SHOWN) {
+        let (name, kind) = (shown(l.get("name"), "?"), shown(l.get("kind"), "?"));
+        let mark = if flag(l) { ADDED } else { "" };
+        text.push_str(&format!("\n- Track {}, {name}: {kind}{mark}", i + 1));
+        tracks.push(json!({
+            "seq": seq, "lane": l.get("id").cloned().unwrap_or(Value::Null), "n": i + 1,
+            "name": name, "kind": kind, "co_producer": flag(l),
+        }));
+    }
+    if lanes.len() > MAX_SHOWN {
+        text.push_str(&format!("\n- and {} more", lanes.len() - MAX_SHOWN));
+    }
+    text.push_str("\nStrips:");
+    let mut rows = Vec::new();
+    for s in strips.iter().take(MAX_SHOWN) {
+        let (name, kind) = (shown(s.get("name"), "?"), shown(s.get("kind_label"), "?"));
+        let colour = s
+            .get("colour")
+            .and_then(Value::as_str)
+            .map(|c| safe(c, 32, false));
+        let mark = if flag(s) { ADDED } else { "" };
+        text.push_str(&format!(
+            "\n- {name}: {kind}, colour {}{mark}",
+            colour.as_deref().unwrap_or("none")
+        ));
+        rows.push(json!({
+            "id": s.get("id").cloned().unwrap_or(Value::Null),
+            "name": name, "kind": kind, "colour": colour, "co_producer": flag(s),
+        }));
+    }
+    if strips.len() > MAX_SHOWN {
+        text.push_str(&format!("\n- and {} more", strips.len() - MAX_SHOWN));
+    }
+    let structured = json!({"view": "tracks", "title": title, "tracks": tracks, "strips": rows});
+    (text, structured)
+}
+
+/// Ruling 8: `change`'s `structuredContent`. `state` is `ask_in_chat`,
+/// `applied`, `said_no` or `applied_without_asking`. Items are cut to the
+/// lines the question lists, with the same safe text. The token is never
+/// in it.
+pub fn change_view(state: &str, items: &[Value], undo_label: Option<&str>) -> Value {
+    let items: Vec<Value> = items
+        .iter()
+        .take(MAX_LISTED)
+        .map(|i| {
+            json!({
+                "thing": item_part(i.get("thing")),
+                "change": item_part(i.get("change")),
+                "composers_work": i.get("composers_work").and_then(Value::as_bool) == Some(true),
+            })
+        })
+        .collect();
+    json!({
+        "view": "change", "state": state, "items": items,
+        "undo_label": undo_label.map(|l| safe(l, MAX_ITEM_PART, false)),
+    })
 }
 
 /// The resources: a state resource per target, and the command list.

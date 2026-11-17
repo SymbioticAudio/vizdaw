@@ -94,6 +94,12 @@ fn canned(server: &Server, c: &Command, previews: usize) -> Value {
         Command::CoProducerExportFolder { .. } => {
             json!({ "path": "/x/Song \u{2014} Stems \u{2014} 2026-11-16" })
         }
+        Command::CoProducerExport { .. } => json!({
+            "doc": "d1",
+            "folder": "/x/Song \u{2014} Stems \u{2014} 2026-11-16",
+            "written": ["/x/\u{2026}/Kick.wav", "/x/\u{2026}/Bass.wav"],
+            "summary": null,
+        }),
         Command::CoProducerEnd { .. } => json!({ "ended": true }),
         Command::CoProducerStatus { .. } => json!({ "request": null }),
         Command::CoProducerPreview { plan, .. } => {
