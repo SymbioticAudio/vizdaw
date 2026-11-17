@@ -193,10 +193,20 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                 switch control {
                 case .kind: kindIcon(AppIcon.track(lane.kind), in: r)
                 case .name:
-                    // The playing take too, truncated to the name's room.
+                    // The playing take too, truncated to the name's room;
+                    // a Co-Producer track's badge ends the row (plan 8b
+                    // Ruling 3).
                     var attributes = oneLine(theme.font(theme.type.body, weight: .medium), .byTruncatingTail)
                     attributes[.foregroundColor] = theme.label
-                    NSString(string: LaneHeaderLayout.nameText(lane)).draw(in: r, withAttributes: attributes)
+                    var text = r
+                    if lane.coProducer {
+                        let side = AppIcon.coProducerBadgeSide
+                        text.size.width = max(0, r.width - side - theme.spacing.xs)
+                        let badge = CGRect(x: r.maxX - side, y: r.minY + (r.height - side) / 2, width: side, height: side)
+                        tinted(.coProducerBadge, side: side, colour: theme.accent.accent.nsColor)
+                            .draw(in: badge, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                    }
+                    NSString(string: LaneHeaderLayout.nameText(lane)).draw(in: text, withAttributes: attributes)
                 case .monitor:
                     toggle(
                         LaneInputs.label(lane.monitor), on: lane.monitor != .off,
@@ -242,18 +252,18 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     /// `icon` in the label colour: a template image, so it is filled with
     /// the colour where it has ink.
     private func kindIcon(_ icon: AppIcon, in r: CGRect) {
-        let tinted = kindImage(icon, side: r.width)
-        tinted.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        let image = tinted(icon, side: r.width, colour: theme.label)
+        image.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     }
 
-    /// The tinted kind images, kept per theme, icon and size.
+    /// The tinted icon images (the kind icons, the Co-Producer badge), kept
+    /// per theme, icon and size: each icon has one colour per theme.
     private var kindImages: [String: NSImage] = [:]
 
-    private func kindImage(_ icon: AppIcon, side: CGFloat) -> NSImage {
+    private func tinted(_ icon: AppIcon, side: CGFloat, colour: NSColor) -> NSImage {
         let key = "\(theme.id)/\(icon)/\(side)"
         if let cached = kindImages[key] { return cached }
         let image = icon.nsImage(accessibilityDescription: nil, size: side, theme: theme)
-        let colour = theme.label
         let tinted = NSImage(size: CGSize(width: side, height: side), flipped: false) { rect in
             image.draw(in: rect)
             colour.set()
@@ -392,6 +402,14 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         menu.addItem(TakesMenu.item(document: document, seq: seq, lane: lane))
         menu.addItem(.separator())
         menu.addItem(colourItem(lane))
+        // Only a Co-Producer track can be made the composer's (plan 8b Ruling 1).
+        if lane.coProducer {
+            let doc = document
+            menu.addItem(.separator())
+            menu.addItem(MenuAction(title: "Make Mine") {
+                TrackCommands.makeMineFromMenu(seq: seq, lane: lane.id, doc)
+            }.item(checked: false))
+        }
         return menu
     }
 
@@ -605,7 +623,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             let opening = inputs.opening && inputs.showsMeter(lane)
             let item = CanvasAccessibilityItem(
                 label: ArrangementA11y.kindName(lane.kind) + ", "
-                    + ArrangementA11y.header(lane, returnOf: inputs.returnName(lane)) + (opening ? ", input opening" : ""),
+                    + ArrangementA11y.header(lane, returnOf: inputs.returnName(lane)) + (opening ? ", input opening" : "")
+                    + (lane.coProducer ? ", " + AppIcon.coProducerBadgeLabel : ""),
                 frame: r, selected: selected.contains(lane.id),
                 press: { [weak self] in self?.flags(seq, lane.id, mute: !lane.mute) })
             return (item: item, frame: r)

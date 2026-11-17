@@ -40,6 +40,14 @@ public final class PendingOutcome {
         }
     }
 
+    /// `first`'s answer, once it is there, through `then`.
+    public init(after first: PendingOutcome, then: @escaping @MainActor (ControlOutcome) -> ControlOutcome) {
+        task = Task { @MainActor in
+            await first.settle()
+            self.outcome = first.outcome.map(then)
+        }
+    }
+
     /// Waits until `outcome` is there.
     public func settle() async { await task?.value }
 }
@@ -261,9 +269,11 @@ public enum ControlCommands {
     /// Co-Producer's two registry ids (plan 8a Ruling 10): the switch and
     /// opening a saved copy, both app-wide.
     static let coProducer: Set<String> = [CoProducerCommands.setting, CoProducerCommands.openCopy]
-    /// Plan 8b's four registry ids, answered "Not ready yet." until its
-    /// Task 5 builds them.
-    static let notYet: Set<String> = ["track.make_mine", "mixer.make_mine", "mixer.set_colour", "window.song_notes"]
+    /// Plan 8b's strip commands (Rulings 1 and 3): Make Mine of a strip and
+    /// a strip's own colour. `track.make_mine` is `TrackCommands`'s.
+    static let makeMineStrip = "mixer.make_mine"
+    static let setColour = "mixer.set_colour"
+    static let strips: Set<String> = [makeMineStrip, setColour]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
         "transport.go_position": .position, "transport.go_edit_in": .editIn, "transport.go_punch": .punchIn,
@@ -278,7 +288,7 @@ public enum ControlCommands {
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(TakeCommands.ids)
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
-            .union(MixerCommands.ids).union(coProducer).union(notYet)
+            .union(MixerCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -330,8 +340,6 @@ public enum ControlCommands {
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
         case _ where coProducer.contains(id):
             return CoProducerCommands.runAppWide(id, args: args, store: store, host: host)
-        case _ where notYet.contains(id):
-            return unavailable("Not ready yet.")
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }
@@ -528,6 +536,10 @@ public enum ControlCommands {
             return AutomationCommands.run(id, args: args, doc: docID, m)
         case _ where MixerCommands.ids.contains(id):
             return MixerCommands.run(id, args: args, docID: docID, m)
+        case _ where strips.contains(id):
+            return runStrip(id, args, docID, m)
+        case SongNotes.command:
+            return SongNotes.run(docID, m)
         case AudioCommands.addMidi:
             return AudioCommands.runAddMidi(args, doc: docID, m)
         case RegionCommands.openExternal, RegionCommands.reloadExternal:
@@ -638,6 +650,35 @@ public enum ControlCommands {
     }
 
     static func unavailable(_ message: String) -> ControlOutcome { .failed(.of(.unavailable, message)) }
+
+    /// `mixer.make_mine {strip}` and `mixer.set_colour {strip, colour}`:
+    /// the arguments are checked here; a strip the song lacks is the
+    /// session's refusal, in its words.
+    static func runStrip(_ id: String, _ args: [ControlArg], _ docID: UUID, _ m: DocumentModel) -> ControlOutcome {
+        guard let strip = args.int("strip").flatMap({ UInt64(exactly: $0) }) else {
+            return .failed(.of(.invalidParams, "\(id): `strip` is a strip ID (see state.get mixer)"))
+        }
+        var colour: SwatchRow?
+        if id == setColour {
+            let name = args.text("colour")
+            guard let name, name == "none" || StripPalette.swatch(named: name) != nil else {
+                return .failed(.of(
+                    .invalidParams, "\(id): `colour` is none, red, orange, yellow, green, teal, blue, purple or pink"))
+            }
+            colour = StripPalette.swatch(named: name)
+        }
+        guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+        do {
+            if id == makeMineStrip {
+                m.apply(try m.session.makeMineStrip(strip: strip))
+            } else {
+                m.apply(try m.session.setStripColour(strip: strip, colour: colour))
+            }
+        } catch {
+            return .failed(CoProducerCommands.failure(error))
+        }
+        return .done(ran(id, docID, m))
+    }
 
     /// A command's outcome as the channel's failure; nil when it ran.
     static func failure(_ o: KeyOutcome) -> ControlOutcome? {

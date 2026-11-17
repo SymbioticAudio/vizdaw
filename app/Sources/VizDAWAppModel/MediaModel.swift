@@ -35,6 +35,12 @@ public final class MediaModel {
     @ObservationIgnored public static var channelIsOn: @MainActor () -> Bool = { false }
     /// The relink sheet is up (Ruling 14).
     public var relinkShown = false
+    /// Compact's offer to remove old Co-Producer copies (plan 8b Ruling 8):
+    /// set only by `compactFromMenu`; nil is Keep All.
+    public var copiesOffer: CopiesOffer?
+    /// What the last Remove Selected left behind, one line each, for the
+    /// pool window to show.
+    public var copiesReport: [String] = []
 
     init(document: DocumentModel) { self.document = document }
 
@@ -141,6 +147,30 @@ public final class MediaModel {
     /// Compact: every unused item goes (one undo step).
     @discardableResult
     public func compact() -> Bool { act("Compact Failed") { try $0.compactMedia() } }
+
+    /// The Media Pool's Compact buttons: `compact`, then the offer to remove
+    /// old Co-Producer copies when the song has any (Ruling 8). Never under
+    /// the control channel, whose calls open no sheet.
+    @discardableResult
+    public func compactFromMenu(channelOn: Bool = MediaModel.channelIsOn()) -> Bool {
+        guard compact() else { return false }
+        copiesReport = []
+        guard !channelOn, let document else { return true }
+        do {
+            copiesOffer = CopiesOffer(copies: try document.session.coProducerCopies())
+        } catch {
+            copiesReport = ["Old Co-Producer copies could not be listed: \(SongNotes.sentence(error))."]
+        }
+        return true
+    }
+
+    /// Remove Selected: the chosen copies go to the Trash; the offer closes
+    /// and its problems become `copiesReport`.
+    public func removeChosenCopies() {
+        guard let offer = copiesOffer, let document else { return }
+        copiesReport = offer.remove(document.session)
+        copiesOffer = nil
+    }
 
     /// Deletes the item and its regions (ask with `deleteQuestion` first).
     @discardableResult

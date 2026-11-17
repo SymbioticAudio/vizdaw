@@ -157,6 +157,13 @@ struct AppCommands: Commands {
                 Button("Media Pool") { if let docID { openWindow(id: "media-pool", value: docID) } }
                     .keyboardShortcut(KeyMenu.shortcut("window.media_pool"))
                     .disabled(docID == nil)
+                // Plan 8b Ruling 4: the song's Notes.md in the composer's
+                // editor; what fails is the window's alert.
+                Button(keyBindings.row(SongNotes.command)?.title ?? "Song Notes") {
+                    if let doc { SongNotes.openFromMenu(doc) { NSWorkspace.shared.open($0) } }
+                }
+                .keyboardShortcut(KeyMenu.shortcut(SongNotes.command))
+                .disabled(doc == nil)
                 Divider()
             }
             CommandGroup(before: .toolbar) {
@@ -250,6 +257,8 @@ struct AppCommands: Commands {
             trackItem(TrackCommands.duplicate)
             trackItem(TrackCommands.delete)
             trackItem(TrackCommands.rename)
+            Divider()
+            trackItem(TrackCommands.makeMine)
         }
         CommandMenu("Region") {
             Button(keyBindings.row(RegionCommands.normalize)?.title ?? "Normalize…") { if let doc { normalize(doc) } }

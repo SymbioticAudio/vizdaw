@@ -60,6 +60,22 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
         #expect(StripPalette.lane(pathLane(5), destinations: dests, strips: coloured, t) == nil)
     }
 
+    /// Plan 8b Ruling 3: a Co-Producer strip with no colour of its own
+    /// draws the theme's accent; its own colour still comes first.
+    @Test func coProducerStripsDrawTheAccent() {
+        for t in [Theme.studioDark, Theme.classicLight] {
+            var s = stripRow(4, "Drums (Co-Producer)", kind: .audioPath(path: 7))
+            #expect(StripPalette.bar(s, t) == t.strip.channel)
+            s.coProducer = true
+            #expect(StripPalette.bar(s, t) == t.accent.accent)
+            s.colour = SwatchRow.blue
+            #expect(StripPalette.bar(s, t) == t.swatch.blue)
+            // A track on that path takes the same.
+            s.colour = nil
+            #expect(StripPalette.lane(pathLane(1, path: 7), destinations: [], strips: [s], t) == t.accent.accent)
+        }
+    }
+
     /// Song's Chords lane (31) plays to path 7, whose strip is Vocal (4).
     func header() throws -> (FakeSession, DocumentModel, MixerModel, LaneHeaderView) {
         let f = editorFake()
@@ -72,6 +88,18 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
         let mixer = try MixerModel(document: m)
         m.storeMixer = mixer
         return (f, m, mixer, LaneHeaderView(document: m))
+    }
+
+    /// Plan 8b Ruling 1: the strip menu's Make Mine, for a Co-Producer strip
+    /// only.
+    @Test func makeMineIsOnlyForACoProducerStrip() throws {
+        let (f, _, mixer, _) = try header()
+        var s = try #require(mixer.snapshot.strips.first { $0.id == 4 })
+        mixer.makeMine(s)
+        #expect(!f.calls.contains("makeMineStrip 4"))
+        s.coProducer = true
+        mixer.makeMine(s)
+        #expect(f.calls.last == "makeMineStrip 4")
     }
 
     @Test func theDocumentColoursItsLanesThroughItsMixer() throws {

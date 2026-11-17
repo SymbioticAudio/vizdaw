@@ -251,6 +251,28 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         f.dests = saved
     }
 
+    /// Plan 8b Ruling 1 and 3: a Co-Producer track's menu ends with Make
+    /// Mine, which acts on that track; its header says who added it.
+    @Test func aCoProducerTrackOffersMakeMine() throws {
+        let f = editorFake()
+        let i = try #require(f.laneTable[3]?.firstIndex { $0.id == 31 })
+        f.laneTable[3]?[i].coProducer = true
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        let h = LaneHeaderView(document: m)
+        let marked = try #require(m.lanes.first { $0.id == 31 })
+        let plain = try #require(m.lanes.first { $0.id == 30 })
+        let items = h.laneMenu(seq: 3, lane: marked).items.filter { !$0.isSeparatorItem }
+        #expect(items.map(\.title) == ["Track Synth…", "New MIDI Destination…", "Takes", "Colour", "Make Mine"])
+        #expect(!h.laneMenu(seq: 3, lane: plain).items.map(\.title).contains("Make Mine"))
+        let mine = try #require(items.last)
+        _ = mine.target?.perform(mine.action)
+        #expect(f.calls.last == "makeMineTrack 3 31")
+        let labels = (h.accessibilityChildren() ?? []).compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
+        #expect(labels.filter { $0.hasSuffix(", Added by Co-Producer") }.count == 1)
+        #expect(labels.contains { $0.contains("Chords") && $0.hasSuffix(", Added by Co-Producer") })
+    }
+
     /// Plan 5c-2 takes Ruling 5: the Takes submenu lists the track's takes
     /// with the playing one checked, then Rename and Delete for it.
     @Test func theTakesMenuListsAndActs() throws {

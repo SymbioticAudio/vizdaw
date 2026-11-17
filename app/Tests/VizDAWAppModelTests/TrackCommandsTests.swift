@@ -67,7 +67,28 @@ import VizDAWCore
         }
         let (full, _) = try demo()
         selectTrack(full, 31)
-        for id in TrackCommands.ids.sorted() { #expect(TrackCommands.enabled(id, full), "\(id)") }
+        for id in TrackCommands.ids.subtracting([TrackCommands.makeMine]).sorted() {
+            #expect(TrackCommands.enabled(id, full), "\(id)")
+        }
+    }
+
+    /// Plan 8b Ruling 1: Make Mine is enabled only for a Co-Producer track,
+    /// and acts on the selection's first track, or the header's.
+    @Test func makeMineNeedsACoProducerTrack() throws {
+        let (plain, _) = try demo()
+        selectTrack(plain, 31)
+        #expect(!TrackCommands.enabled(TrackCommands.makeMine, plain))
+        let f = editorFake()
+        let i = try #require(f.laneTable[3]?.firstIndex { $0.id == 31 })
+        f.laneTable[3]?[i].coProducer = true
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        selectTrack(m, 31)
+        #expect(TrackCommands.enabled(TrackCommands.makeMine, m))
+        #expect(TrackCommands.perform(TrackCommands.makeMine, m) == .done)
+        #expect(f.calls.last == "makeMineTrack 3 31")
+        TrackCommands.makeMineFromMenu(seq: 3, lane: 30, m)
+        #expect(f.calls.last == "makeMineTrack 3 30")
     }
 
     @Test func aMidiTrackWithoutDestinationSaysSo() throws {

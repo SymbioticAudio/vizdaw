@@ -43,11 +43,14 @@ public enum CoProducerCommands {
             }
             defer { m.session.coProducerLeave() }
             return command(id, args, docID, m, store, host)
-        case .coProducerBegin(let name, _, _):
-            // `asked` waits for plan 8b Task 5.
+        case .coProducerBegin(let name, let asked, _):
             guard let (docID, m) = doc else { return noDocument }
             do {
                 let row = try m.session.coProducerBegin(name: name)
+                // The time a request that never enters is logged under
+                // (plan 8b Task 3 ruling): its begin's.
+                try m.session.coProducerSetStamp(stamp: stamp)
+                if let asked { try m.session.coProducerSetAsked(asked: asked) }
                 return .done(.coProducerRequest(doc: docID.uuidString, request: row, undoLabel: m.snapshot.undoLabel))
             } catch {
                 return .failed(failure(error))
@@ -76,9 +79,31 @@ public enum CoProducerCommands {
         case .coProducerApply(let token, let plan, _):
             guard let (docID, m) = doc else { return noDocument }
             return apply(token, plan, docID, m, store, host, stamp: stamp)
-        case .coProducerNotes, .coProducerNote, .coProducerExportFolder:
-            // Plan 8b Task 5 builds these.
-            return .failed(.of(.unavailable, "Not ready yet."))
+        case .coProducerNotes:
+            guard let (docID, m) = doc else { return noDocument }
+            do {
+                return .done(.coProducerNotes(doc: docID.uuidString, notes: try m.session.coProducerNotes()))
+            } catch {
+                return .failed(failure(error))
+            }
+        case .coProducerNote(let text, _):
+            guard let (docID, m) = doc else { return noDocument }
+            do {
+                try m.session.coProducerNote(text: text)
+            } catch {
+                return .failed(failure(error))
+            }
+            return .done(.coProducerRequest(
+                doc: docID.uuidString, request: m.session.coProducerRequest(), undoLabel: m.snapshot.undoLabel))
+        case .coProducerExportFolder(let what, let parent, _):
+            guard let (docID, m) = doc else { return noDocument }
+            do {
+                // The date is the app's, never Claude's (Ruling 6).
+                let path = try m.session.coProducerExportFolder(what: what, date: String(stamp.prefix(10)), parent: parent)
+                return .done(.coProducerFolder(doc: docID.uuidString, path: path))
+            } catch {
+                return .failed(failure(error))
+            }
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }
@@ -126,7 +151,54 @@ public enum CoProducerCommands {
     ) -> ControlOutcome {
         let before = m.alert?.id
         let o = ControlCommands.run(id, args: args, doc: (docID, m), store: store, host: host)
-        return takeAlert(o, m, before: before)
+        return recorded(takeAlert(o, m, before: before), id, args, docID, m)
+    }
+
+    /// The commands that write outside the song (8a Ruling 1's outward
+    /// class), whose `path` the request's entry lists (plan 8b Ruling 5).
+    public static let outward: Set<String> = [
+        "file.bounce", "file.export_midi", "file.export_midi_clip", "file.export_dawproject", "file.export_aaf",
+        "file.export_for_daw",
+    ]
+
+    /// The file outward command `id` writes: its `path`, unless it is a dry
+    /// run, which writes nothing.
+    static func outwardPath(_ id: String, _ args: [ControlArg]) -> String? {
+        guard outward.contains(id), args.flag("dry_run") != true else { return nil }
+        return args.text("path")
+    }
+
+    /// Outward jobs still running, by document and job: the path each will
+    /// have written when it succeeds.
+    static var outwardJobs: [UUID: [UInt64: String]] = [:]
+
+    /// `outcome` of command `id`, with its outward path recorded for the
+    /// request's entry: now when it succeeded, when its job ends for a job,
+    /// and when its answer is there for work still running.
+    static func recorded(
+        _ outcome: ControlOutcome, _ id: String, _ args: [ControlArg], _ docID: UUID, _ m: DocumentModel
+    ) -> ControlOutcome {
+        guard let path = outwardPath(id, args) else { return outcome }
+        switch outcome {
+        case .done, .opened:
+            // The request may have ended meanwhile; the file is then in no entry.
+            try? m.session.coProducerFile(path: path)
+        case .job(_, let doc, let job):
+            outwardJobs[doc, default: [:]][job] = path
+        case .pending(let p):
+            return .pending(PendingOutcome(after: p) { recorded($0, id, args, docID, m) })
+        case .failed, .measure:
+            break
+        }
+        return outcome
+    }
+
+    /// Job `job` of `doc` ended (`ok`: it succeeded, its alert taken): an
+    /// outward job's file goes in the request's entry, once.
+    public static func jobEnded(doc: UUID, job: UInt64, ok: Bool, _ m: DocumentModel?) {
+        guard let path = outwardJobs[doc]?.removeValue(forKey: job) else { return }
+        if outwardJobs[doc]?.isEmpty == true { outwardJobs[doc] = nil }
+        if ok { try? m?.session.coProducerFile(path: path) }
     }
 
     /// `outcome`, or the alert `m` shows that was not there before (`before`)

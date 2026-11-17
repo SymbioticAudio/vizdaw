@@ -344,12 +344,20 @@ private struct StripHeader: View {
                 .onExitCommand { model.cancelRename() }
                 .onAppear { renaming = true }
         } else {
-            Text(theme.stripLabel(strip.name))
-                .font(theme.type.body.font.weight(.semibold))
-                .foregroundStyle(theme.text.primary.color)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity)
+            HStack(spacing: theme.spacing.xxs) {
+                Text(theme.stripLabel(strip.name))
+                    .font(theme.type.body.font.weight(.semibold))
+                    .foregroundStyle(theme.text.primary.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                // Plan 8b Ruling 3: Co-Producer's strip, beside its name.
+                if strip.coProducer {
+                    AppIcon.coProducerBadge.image(size: AppIcon.coProducerBadgeSide)
+                        .foregroundStyle(theme.accent.accent.color)
+                        .accessibilityLabel(AppIcon.coProducerBadgeLabel)
+                }
+            }
+            .frame(maxWidth: .infinity)
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { model.beginRename(strip, in: placement) }
                 .onTapGesture { model.select(strip.id, adding: NSEvent.modifierFlags.contains(.command)) }
@@ -360,6 +368,10 @@ private struct StripHeader: View {
 
     @ViewBuilder private var menu: some View {
         Button("Rename…") { model.beginRename(strip, in: placement) }
+        // Only a Co-Producer strip can be made the composer's (plan 8b Ruling 1).
+        if strip.coProducer {
+            Button("Make Mine") { model.makeMine(strip) }
+        }
         Menu("Set All Strips to") {
             ForEach(AutomationModes.all, id: \.self) { m in
                 Button(AutomationModes.title(m)) { model.setAllModes(m) }

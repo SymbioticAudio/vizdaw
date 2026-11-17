@@ -57,6 +57,7 @@ struct MediaPoolView: View {
                 // asking first as the button does (Task 12 review M3).
                 .onDeleteCommand { if let id = selected { delete(id) } }
                 .accessibilityLabel("Media items")
+            if !media.copiesReport.isEmpty { copiesReport }
             Divider()
             if compact {
                 HStack(spacing: theme.spacing.s) {
@@ -70,7 +71,7 @@ struct MediaPoolView: View {
                     Button("Select Regions") { if let id = selected { media.selectUsers(id) } }
                         .disabled(selected == nil)
                     Button("Select Unused") { media.selectUnused() }
-                    Button("Compact") { media.compact() }
+                    Button("Compact") { media.compactFromMenu() }
                         .help("Remove every item no region uses (one undo step). Their files go to the Trash on save.")
                     Spacer()
                     Button("Rename…") { if let id = selected { rename(id) } }.disabled(selected == nil)
@@ -86,6 +87,34 @@ struct MediaPoolView: View {
             }
         }
         .frame(minWidth: compact ? nil : 620, minHeight: compact ? nil : 280)
+        // Compact's offer to remove old Co-Producer copies (plan 8b Ruling
+        // 8): only after a Compact button, never from a channel call.
+        .sheet(
+            isPresented: Binding(get: { media.copiesOffer != nil }, set: { if !$0 { media.copiesOffer = nil } })
+        ) {
+            if let offer = media.copiesOffer { CopiesOfferSheet(media: media, offer: offer) }
+        }
+    }
+
+    /// What Remove Selected left behind, one line each (Ruling 8).
+    private var copiesReport: some View {
+        HStack(alignment: .top, spacing: theme.spacing.s) {
+            VStack(alignment: .leading, spacing: theme.spacing.xxs) {
+                ForEach(Array(media.copiesReport.enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(theme.type.caption.font)
+                        .foregroundStyle(theme.text.secondary.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(media.copiesReport.joined(separator: " "))
+            Spacer(minLength: 0)
+            Button("Dismiss") { media.copiesReport = [] }
+                .controlSize(.small)
+                .accessibilityLabel("Dismiss the copies report")
+        }
+        .padding(theme.spacing.s)
     }
 
     @ViewBuilder private var table: some View {
@@ -125,7 +154,7 @@ struct MediaPoolView: View {
             .disabled(selected == nil)
         Button("Select Unused") { media.selectUnused() }
         // Menu items do not show `.help`: the title says it (Task 8 review M1).
-        Button("Compact (Remove Unused Items)") { media.compact() }
+        Button("Compact (Remove Unused Items)") { media.compactFromMenu() }
         Divider()
         Button("Rename…") { if let id = selected { rename(id) } }.disabled(selected == nil)
         Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil || media.relinkBlocked)

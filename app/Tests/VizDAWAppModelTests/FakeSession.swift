@@ -347,7 +347,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         try mixerCall("makeMineTrack \(seq) \(lane)")
     }
     func makeMineStrip(strip: UInt64) throws -> DocSnapshot {
-        try mixerCall("makeMineStrip \(strip)")
+        guard mixerSnap.strips.contains(where: { $0.id == strip }) else {
+            throw VizError.Model(message: "unknown id strip\(strip)")
+        }
+        return try mixerCall("makeMineStrip \(strip)")
     }
     func setSidechain(slot: UInt64, source: UInt64?) throws -> DocSnapshot {
         try mixerCall("sidechain \(slot) \(source.map(String.init) ?? "none")")
@@ -973,22 +976,46 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var coNotes = NotesRow(text: "# Untitled\n", truncated: false, path: "/tmp/Notes.md")
     /// What `coProducerCopies` answers.
     var coCopies: [CopyRow] = []
-    func notesPath() throws -> String { coNotes.path }
-    func coProducerNotes() throws -> NotesRow { coNotes }
-    func coProducerSetAsked(asked: String) throws { coLog.append("asked \(asked)") }
+    /// Thrown by `notesPath` and `coProducerNotes` (plan 8b Task 5).
+    var coNotesError: VizError?
+    /// Thrown by `coProducerNote`, `coProducerExportFolder` and `coProducerSetAsked`.
+    var coNoteError: VizError?
+    /// What `removeCoProducerCopies` adds as its problems.
+    var coRemoveProblems: [String] = []
+    /// The names each `removeCoProducerCopies` was given.
+    var coRemoved: [[String]] = []
+    func notesPath() throws -> String {
+        coLog.append("notes path")
+        if let e = coNotesError { throw e }
+        return coNotes.path
+    }
+    func coProducerNotes() throws -> NotesRow {
+        coLog.append("notes")
+        if let e = coNotesError { throw e }
+        return coNotes
+    }
+    func coProducerSetAsked(asked: String) throws {
+        coLog.append("asked \(asked)")
+        if let e = coNoteError { throw e }
+    }
     func coProducerSetStamp(stamp: String) throws { coLog.append("stamp \(stamp)") }
-    func coProducerNote(text: String) throws { coLog.append("note \(text)") }
+    func coProducerNote(text: String) throws {
+        coLog.append("note \(text)")
+        if let e = coNoteError { throw e }
+    }
     func coProducerFile(path: String) throws { coLog.append("file \(path)") }
     func coProducerExportFolder(what: ExportWhatRow, date: String, parent: String?) throws -> String {
-        coLog.append("export folder \(date)")
+        coLog.append("export folder \(what) \(date) \(parent ?? "-")")
+        if let e = coNoteError { throw e }
         return (parent ?? "/tmp") + "/Untitled — Stems — \(date)"
     }
     func coProducerCopies() throws -> [CopyRow] { coCopies }
     func removeCoProducerCopies(names: [String]) throws -> RemovedCopiesRow {
         coLog.append("remove \(names.count)")
+        coRemoved.append(names)
         let gone = coCopies.filter { names.contains($0.name) }
         coCopies.removeAll { names.contains($0.name) }
-        return RemovedCopiesRow(removed: UInt64(gone.count), problems: [])
+        return RemovedCopiesRow(removed: UInt64(gone.count), problems: coRemoveProblems)
     }
     func projectId() throws -> String? {
         interchangeLock.lock()

@@ -14,7 +14,11 @@ public enum TrackCommands {
     public static let duplicate = "track.duplicate"
     public static let delete = "track.delete"
     public static let rename = "track.rename"
-    public static let ids: Set<String> = [newAudio, newInstrument, newMidi, duplicate, delete, rename]
+    /// Make Mine (plan 8b Ruling 1): the composer takes over a Co-Producer
+    /// track, its strip, and that strip's sends and plug-ins. Never
+    /// Co-Producer's own call.
+    public static let makeMine = "track.make_mine"
+    public static let ids: Set<String> = [newAudio, newInstrument, newMidi, duplicate, delete, rename, makeMine]
 
     static let noSequence = "Select a sequence first."
     static let noTrack = "Select a track in the arrangement first."
@@ -40,8 +44,10 @@ public enum TrackCommands {
 
     /// Whether `id` can run on `m` now (its menu item is enabled): the New
     /// items need a selected sequence, the others also a selected track.
+    /// Make Mine needs the selection's first track to be Co-Producer's.
     public static func enabled(_ id: String, _ m: DocumentModel) -> Bool {
         guard ids.contains(id), m.selectedSeq != nil else { return false }
+        if id == makeMine { return m.selectedLane?.coProducer == true }
         return kind(of: id) != nil || m.selectedLane != nil
     }
 
@@ -58,6 +64,14 @@ public enum TrackCommands {
     /// in the status line (a refusal already does).
     public static func performFromMenu(_ id: String, _ m: DocumentModel) {
         if case .unavailable(let why) = perform(id, m) { m.editor.status = why }
+    }
+
+    /// The track header's Make Mine, for the track it was opened on; what
+    /// it cannot do shows in the status line.
+    public static func makeMineFromMenu(seq: UInt64, lane: UInt64, _ m: DocumentModel) {
+        if case .unavailable(let why) = execute(makeMine, seq: seq, lane: lane, after: nil, name: nil, m) {
+            m.editor.status = why
+        }
     }
 
     /// Runs `id` for `seq` (and `lane`, `after`, `name` where it takes them).
@@ -88,6 +102,18 @@ public enum TrackCommands {
         case delete:
             return m.editor.edit(.lane(edit: .remove(seq: seq, lane: lane)))
                 ? .done : .refused(m.editor.status ?? "Delete Track was refused.")
+        case makeMine:
+            do {
+                m.apply(try m.session.makeMineTrack(seq: seq, lane: lane))
+                m.editor.refreshSelection()
+                return .done
+            } catch VizError.Busy(let message) {
+                m.editor.status = message
+                return .busy(message)
+            } catch {
+                m.editor.report(error)
+                return .refused(m.editor.status ?? "Make Mine was refused.")
+            }
         case rename:
             if let name {
                 return m.editor.edit(.lane(edit: .rename(seq: seq, lane: lane, name: name)))

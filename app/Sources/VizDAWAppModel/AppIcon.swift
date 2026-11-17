@@ -48,6 +48,9 @@ public enum AppIcon: CaseIterable, Sendable {
     /// Settings › Co-Producer (plan 8a Ruling P10): a connection, until
     /// symbiotic-design has a Co-Producer glyph.
     case settingsCoProducer
+    /// The mark on Co-Producer's tracks and strips (plan 8b Ruling 3): the
+    /// same link, 12 pt, in the theme's accent.
+    case coProducerBadge
     case eq
     // Beyond the plan's list (the transport bar and the learn banner).
     case play, stop, midiLearn
@@ -56,6 +59,11 @@ public enum AppIcon: CaseIterable, Sendable {
     // The track-kind icons (plan tracks Ruling 6): symbiotic-design 0.2.2 has
     // no track-kind roles, so each borrows one.
     case audioTrack, instrumentTrack, midiTrack
+
+    /// The badge's accessibility label (plan 8b Ruling 3).
+    public static let coProducerBadgeLabel = "Added by Co-Producer"
+    /// The badge's side, in points (Ruling 3).
+    public static let coProducerBadgeSide: CGFloat = 12
 
     /// The icon of a track of `kind`.
     public static func track(_ kind: TrackKindRow) -> AppIcon {
@@ -108,6 +116,7 @@ public enum AppIcon: CaseIterable, Sendable {
         case .settingsAppearance: .settingsAppearance
         case .settingsPlugins: .mixerEq
         case .settingsCoProducer: .controlLink
+        case .coProducerBadge: .controlLink
         case .eq: .mixerEq
         case .play: .transportPlay
         case .stop: .transportStop
@@ -133,7 +142,7 @@ public enum AppIcon: CaseIterable, Sendable {
             .angular
         case .warning, .problem, .info, .mixer, .add, .confirm, .close, .drumGrid, .list, .muted, .loop, .split,
             .empty, .pencil, .diskSlow, .expand, .collapse, .menuDown, .leftPane, .bottomPane, .rightPane,
-            .settingsEditing, .settingsAutomation, .settingsSurfaces, .settingsAppearance, .settingsPlugins, .settingsCoProducer, .eq, .midiLearn,
+            .settingsEditing, .settingsAutomation, .settingsSurfaces, .settingsAppearance, .settingsPlugins, .settingsCoProducer, .coProducerBadge, .eq, .midiLearn,
             .instrumentTrack, .midiTrack:
             .glyph
         }
@@ -185,6 +194,7 @@ public enum AppIcon: CaseIterable, Sendable {
         case .settingsAppearance: "paintpalette"
         case .settingsPlugins: "slider.horizontal.3"
         case .settingsCoProducer: "sparkles"
+        case .coProducerBadge: "sparkles"
         case .eq: "slider.horizontal.3"
         case .play: "play.fill"
         case .stop: "stop.fill"

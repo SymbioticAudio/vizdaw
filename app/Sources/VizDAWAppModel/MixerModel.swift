@@ -557,6 +557,14 @@ public final class MixerModel {
         command("Strip Colour Failed") { try $0.setStripColour(strip: s.id, colour: c) }
     }
 
+    /// Make Mine (plan 8b Ruling 1): a Co-Producer strip, its sends and its
+    /// plug-ins become the composer's, one undo step; the composer's own
+    /// strip is no change.
+    public func makeMine(_ s: StripRow) {
+        guard s.coProducer else { return }
+        command("Make Mine Failed") { try $0.makeMineStrip(strip: s.id) }
+    }
+
     public func removeInsert(_ slot: UInt64) {
         command("Remove Plugin Failed") { try $0.removeInsert(slot: slot) }
     }

@@ -583,4 +583,54 @@ final class FakeControlHost: ControlHost {
         #expect(u.region?.sampleRate == 0)
         #expect(u.region?.offline == true)
     }
+
+    /// Plan 8b Task 5: Make Mine of a track and of a strip, and a strip's
+    /// colour, over the channel.
+    @Test func makeMineAndColourHandlers() throws {
+        let (s, id, m, f) = try demo()
+        f.mixerSnap = MixerSnapshot(
+            version: f.snap.version, strips: [stripRow(4, "Drums (Co-Producer)"), stripRow(0, "Master", kind: .master)],
+            buses: [])
+        func int(_ n: String, _ v: Int64) -> ControlArg { ControlArg(name: n, value: .int(value: v)) }
+        func text(_ n: String, _ v: String) -> ControlArg { ControlArg(name: n, value: .text(value: v)) }
+        let track = run(TrackCommands.makeMine, [int("seq", 3), int("lane", 31)], s, id)
+        #expect(failure(track) == nil, "\(track)")
+        #expect(f.calls.last == "makeMineTrack 3 31")
+        let strip = run("mixer.make_mine", [int("strip", 4)], s, id)
+        #expect(failure(strip) == nil, "\(strip)")
+        #expect(f.calls.last == "makeMineStrip 4")
+        let none = run("mixer.set_colour", [int("strip", 4), text("colour", "none")], s, id)
+        #expect(failure(none) == nil, "\(none)")
+        #expect(f.calls.last == "setStripColour 4 none")
+        let blue = run("mixer.set_colour", [int("strip", 4), text("colour", "blue")], s, id)
+        #expect(failure(blue) == nil, "\(blue)")
+        #expect(f.calls.last == "setStripColour 4 blue")
+        #expect(m.alert == nil)
+
+        // A missing strip is the session's refusal, in its words.
+        let missing = run("mixer.make_mine", [int("strip", 99)], s, id)
+        #expect(failure(missing)?.code == .failed)
+        #expect(failure(missing)?.message == "unknown id strip99")
+        #expect(m.alert == nil)
+        // A missing track is the track wording's refusal.
+        #expect(failure(run(TrackCommands.makeMine, [int("seq", 3), int("lane", 99)], s, id))?.code == .failed)
+
+        // Hostile input never reaches the session.
+        let before = f.calls
+        for args in [
+            [ControlArg](), [text("strip", "4")], [int("strip", -1)], [int("strip", 4), int("colour", 3)],
+            [int("strip", 4), text("colour", "beige")], [int("strip", 4), text("colour", String(repeating: "a", count: 70_000))],
+            [int("strip", 4), text("colour", "blue\u{0}")], [int("strip", 4)],
+        ] {
+            let o = run("mixer.set_colour", args, s, id)
+            #expect(failure(o)?.code == .invalidParams, "\(args)")
+        }
+        for args in [[ControlArg](), [text("strip", "4")], [int("strip", -1)]] {
+            #expect(failure(run("mixer.make_mine", args, s, id))?.code == .invalidParams, "\(args)")
+        }
+        #expect(failure(run(TrackCommands.makeMine, [int("seq", 3), text("lane", "x")], s, id))?.code == .invalidParams)
+        #expect(f.calls == before)
+        // No document.
+        #expect(failure(run("mixer.make_mine", [int("strip", 4)], s, nil))?.code == .noDocument)
+    }
 }

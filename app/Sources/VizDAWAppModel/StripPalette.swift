@@ -46,6 +46,12 @@ public enum StripPalette {
         SwatchRow.teal, SwatchRow.blue, SwatchRow.purple, SwatchRow.pink,
     ]
 
+    /// The swatch a channel call names ("red" … "pink"); nil for any other
+    /// word.
+    public static func swatch(named name: String) -> SwatchRow? {
+        swatches.first { title($0).lowercased() == name }
+    }
+
     /// The Colour menu's first item: no colour of its own (the kind's).
     public static let noColourTitle = "None"
 
@@ -86,9 +92,11 @@ public enum StripPalette {
         (t.readout.background, t.readout.text, t.readout.text)
     }
 
-    /// The colour bar: the strip's own colour, else its kind's.
+    /// The colour bar: the strip's own colour, else the theme's accent for
+    /// a Co-Producer strip (plan 8b Ruling 3), else its kind's.
     public static func bar(_ s: StripRow, _ t: Theme) -> ThemeColor {
-        s.colour.map { swatch($0, t) } ?? cap(s.kindColour, t)
+        if let c = s.colour { return swatch(c, t) }
+        return s.coProducer ? t.accent.accent : cap(s.kindColour, t)
     }
 
     public static func knob(_ f: KnobFunction, _ t: Theme) -> ThemeColor {
