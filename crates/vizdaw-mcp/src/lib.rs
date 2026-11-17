@@ -684,7 +684,18 @@ impl Server {
                 .map(|w| ("window".to_string(), w.clone()))
                 .into_iter()
                 .collect();
-            if let Ok(notes) = self.pass("co_producer.notes", &window, &[]) {
+            // The notes call is separate, so the front document may have
+            // changed: notes that name another document are not shown.
+            let same_song = |n: &Value| {
+                n.get("doc")
+                    .and_then(Value::as_str)
+                    .is_none_or(|d| d == doc)
+            };
+            if let Some(notes) = self
+                .pass("co_producer.notes", &window, &[])
+                .ok()
+                .filter(same_song)
+            {
                 if let Some(notes) = notes.get("text").and_then(Value::as_str) {
                     let (shown, cut) = first_notes(notes);
                     text.push_str("\n\nThe song's notes (Notes.md):\n");

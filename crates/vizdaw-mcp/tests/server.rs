@@ -1370,3 +1370,23 @@ fn instructions_say_read_the_notes() {
         "{r}"
     );
 }
+
+#[test]
+fn notes_from_another_song_are_not_shown() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    // The front document changes between begin (d1) and notes (d2).
+    app.script(Answer::Ok(json!({"doc": "d1", "begun": "x"})));
+    app.script(Answer::Ok(
+        json!({"doc": "d2", "text": "Other song.\n", "truncated": false, "path": "/y/Notes.md"}),
+    ));
+    let r = m.call("begin_request", json!({"name": "x"}));
+    assert!(!is_error(&r), "{r}");
+    assert!(!text(&r).contains("Other song"), "{r}");
+    assert!(!text(&r).contains("Notes.md"), "{r}");
+    m.call("end_request", json!({}));
+    // Not remembered as shown: the next begin reads the notes again.
+    let r = m.call("begin_request", json!({"name": "y"}));
+    assert!(text(&r).contains("Keep the drums dry."), "{r}");
+}
