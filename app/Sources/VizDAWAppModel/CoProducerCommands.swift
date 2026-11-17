@@ -38,6 +38,13 @@ public enum CoProducerCommands {
             if controlCommandReads(id: id) {
                 return ControlCommands.run(id, args: args, doc: doc, store: store, host: host)
             }
+            // The gate refuses these first; the app refuses them again, so a
+            // change to the composer's work runs only after a yes (8c Ruling 3).
+            if changesWork.contains(id) {
+                return .failed(.of(
+                    .notAllowed,
+                    "\(id) changes your work: preview it with co_producer.preview and apply it with the composer's yes."))
+            }
             guard let (docID, m) = doc else { return noDocument }
             do {
                 _ = try m.session.coProducerEnter(stamp: stamp)
@@ -109,9 +116,9 @@ public enum CoProducerCommands {
             } catch {
                 return .failed(failure(error))
             }
-        case .coProducerExport:
-            // Plan 8c Task 4 runs the export plan; until then it answers this.
-            return .failed(.of(.unavailable, ControlCommands.notReadyYet))
+        case .coProducerExport(let what, let parent, let strips, _):
+            guard let (docID, m) = doc else { return noDocument }
+            return export(what, parent: parent, strips: strips, docID, m, store, host, stamp: stamp)
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }
@@ -164,11 +171,15 @@ public enum CoProducerCommands {
     }
 
     /// The commands that write outside the song (8a Ruling 1's outward
-    /// class), whose `path` the request's entry lists (plan 8b Ruling 5).
+    /// class), whose files the request's entry lists (plan 8b Ruling 5).
     public static let outward: Set<String> = [
         "file.bounce", "file.export_midi", "file.export_midi_clip", "file.export_dawproject", "file.export_aaf",
         "file.export_for_daw",
     ]
+
+    /// The chores that change or remove the composer's work (plan 8c
+    /// Rulings 2–4): only through `co_producer.apply`, after a yes.
+    static let changesWork: Set<String> = ControlCommands.chores.subtracting(["marker.add"])
 
     /// The file outward command `id` writes: its `path`, unless it is a dry
     /// run, which writes nothing.
@@ -177,13 +188,14 @@ public enum CoProducerCommands {
         return args.text("path")
     }
 
-    /// Outward jobs still running, by document and job: the path each will
-    /// have written when it succeeds.
-    static var outwardJobs: [UUID: [UInt64: String]] = [:]
+    /// Outward jobs still running, by document: their files go in the
+    /// request's entry when they end.
+    static var outwardJobs: [UUID: Set<UInt64>] = [:]
 
-    /// `outcome` of command `id`, with its outward path recorded for the
-    /// request's entry: now when it succeeded, when its job ends for a job,
-    /// and when its answer is there for work still running.
+    /// `outcome` of command `id`, with what it wrote recorded for the
+    /// request's entry: its path now when it succeeded at once, the files
+    /// its job wrote when the job ends (`jobEnded`; plan 8c Task 4), and so
+    /// on for work still running.
     static func recorded(
         _ outcome: ControlOutcome, _ id: String, _ args: [ControlArg], _ docID: UUID, _ m: DocumentModel
     ) -> ControlOutcome {
@@ -193,7 +205,7 @@ public enum CoProducerCommands {
             // The request may have ended meanwhile; the file is then in no entry.
             try? m.session.coProducerFile(path: path)
         case .job(_, let doc, let job):
-            outwardJobs[doc, default: [:]][job] = path
+            outwardJobs[doc, default: []].insert(job)
         case .pending(let p):
             return .pending(PendingOutcome(after: p) { recorded($0, id, args, docID, m) })
         case .failed, .measure, .awaitingApproval:
@@ -202,12 +214,119 @@ public enum CoProducerCommands {
         return outcome
     }
 
-    /// Job `job` of `doc` ended (`ok`: it succeeded, its alert taken): an
-    /// outward job's file goes in the request's entry, once.
-    public static func jobEnded(doc: UUID, job: UInt64, ok: Bool, _ m: DocumentModel?) {
-        guard let path = outwardJobs[doc]?.removeValue(forKey: job) else { return }
+    /// The files job `j` wrote, each once: a bounce's files, else an
+    /// export's `written`. A failed job's are those it had already written.
+    static func written(_ j: JobRow, _ m: DocumentModel) -> [String] {
+        let paths = j.kind == .bounce ? ((try? m.session.bounceResult(job: j.id)) ?? nil)?.files.map(\.path) ?? [] : j.written
+        var seen = Set<String>()
+        return paths.filter { seen.insert($0).inserted }
+    }
+
+    /// Job `job` of `doc` ended, well or not: the files an outward job
+    /// Co-Producer ran really wrote go in the request's entry, once each,
+    /// once per job (plan 8c Task 4, replacing 8b's `path`). `m` is nil when
+    /// the document closed.
+    public static func jobEnded(doc: UUID, job: UInt64, _ m: DocumentModel?) {
+        guard outwardJobs[doc]?.remove(job) != nil else { return }
         if outwardJobs[doc]?.isEmpty == true { outwardJobs[doc] = nil }
-        if ok { try? m?.session.coProducerFile(path: path) }
+        guard let m, let j = try? m.session.job(id: job) else { return }
+        // The request may have ended meanwhile; the files are then in no entry.
+        for path in written(j, m) { try? m.session.coProducerFile(path: path) }
+    }
+
+    // MARK: The one-call export (plan 8c Ruling 1)
+
+    /// `co_producer.export`: the core's plan (the app's date, never
+    /// Claude's), then its one command run as the menus run it, between
+    /// enter and leave in one stretch (8a Ruling 13). A refused plan runs
+    /// nothing. The answer comes when the job ends.
+    static func export(
+        _ what: ExportWhatRow, parent: String?, strips: [UInt64]?, _ docID: UUID, _ m: DocumentModel,
+        _ store: DocumentStore, _ host: any ControlHost, stamp: String
+    ) -> ControlOutcome {
+        let plan: ExportPlanRow
+        do {
+            plan = try m.session.coProducerExportPlan(
+                what: what, date: String(stamp.prefix(10)), parent: parent, strips: strips)
+        } catch {
+            return .failed(failure(error))
+        }
+        let started = runPlanned(plan, docID, m, store, host, stamp: stamp)
+        return exported(started, folder: plan.folder, docID, store)
+    }
+
+    /// Enter, the plan's command, leave: one stretch, nothing awaited.
+    static func runPlanned(
+        _ plan: ExportPlanRow, _ docID: UUID, _ m: DocumentModel, _ store: DocumentStore, _ host: any ControlHost,
+        stamp: String
+    ) -> ControlOutcome {
+        do {
+            _ = try m.session.coProducerEnter(stamp: stamp)
+        } catch {
+            return .failed(failure(error))
+        }
+        defer { m.session.coProducerLeave() }
+        return command(plan.id, plan.args, docID, m, store, host)
+    }
+
+    /// The export's answer from the outcome its command `started`: for a
+    /// job, `{doc, folder, written, summary}` once it ends.
+    static func exported(_ started: ControlOutcome, folder: String, _ docID: UUID, _ store: DocumentStore)
+        -> ControlOutcome
+    {
+        switch started {
+        case .job(_, let doc, let job):
+            let before = store.model(doc)?.alert?.id
+            return .pending(PendingOutcome(wait: .milliseconds(Int64(ControlJobs.waitMs))) { expired in
+                exportEnded(doc, job, folder: folder, store, alertBefore: before, expired: expired)
+            })
+        case .pending(let p):
+            return .pending(PendingOutcome(after: p) { exported($0, folder: folder, docID, store) })
+        default:
+            return started
+        }
+    }
+
+    /// The jobs whose answer names their report's summary (Ruling 1).
+    static let reported: Set<JobKindRow> = [.exportDawproject, .exportAaf, .exportMidi]
+
+    /// Export job `job`'s answer once it ended (nil while it runs, unless
+    /// `expired`), as the channel answers a Co-Producer job: a failure
+    /// alert it left is the call's failure and is cleared, so no sheet
+    /// opens (Ruling P8), and its files are recorded either way.
+    static func exportEnded(
+        _ doc: UUID, _ job: UInt64, folder: String, _ store: DocumentStore, alertBefore: UUID?, expired: Bool
+    ) -> ControlOutcome? {
+        guard let m = store.model(doc) else {
+            jobEnded(doc: doc, job: job, nil)
+            return .failed(.of(.noDocument, "the document closed"))
+        }
+        let j: JobRow
+        do {
+            j = try m.session.job(id: job)
+        } catch {
+            if case VizError.Busy = error, !expired { return nil }
+            jobEnded(doc: doc, job: job, m)
+            return .failed(.of(.failed, "the job is unknown"))
+        }
+        switch m.jobAnswer(j) {
+        case .wait:
+            guard expired else { return nil }
+            jobEnded(doc: doc, job: job, m)
+            return .failed(.of(.timeout, ControlJobs.expiredMessage(j)))
+        case .ok:
+            m.refreshAfterJob()
+            jobEnded(doc: doc, job: job, m)
+            if let a = takeNewAlert(m, before: alertBefore) { return .failed(.alert(a)) }
+            return .done(.coProducerExported(
+                doc: doc.uuidString, folder: folder, written: written(j, m),
+                summary: reported.contains(j.kind) ? j.report?.summary : nil))
+        case .failed(let message):
+            m.refreshAfterJob()
+            _ = takeNewAlert(m, before: alertBefore)
+            jobEnded(doc: doc, job: job, m)
+            return .failed(.of(.failed, message))
+        }
     }
 
     /// `outcome`, or the alert `m` shows that was not there before (`before`)

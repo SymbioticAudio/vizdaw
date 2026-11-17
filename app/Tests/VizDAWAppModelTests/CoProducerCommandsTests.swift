@@ -245,57 +245,6 @@ import VizDAWCore
         }
     }
 
-    /// Plan 8b Task 5 (Ruling 5): a file an outward command wrote is in the
-    /// request's entry once the command succeeded, a job's when it ended.
-    @Test func outwardFilesAreRecorded() throws {
-        let (s, id, m, f) = try demo()
-        f.jobStartState = .running
-        let bounce = command(BounceCommands.id, [text("path", "/tmp/mix.wav")])
-        guard case .job(_, _, let job) = run(bounce, s, id) else {
-            Issue.record("the bounce is not a job")
-            return
-        }
-        // Not yet: the job runs.
-        #expect(!f.coLog.contains { $0.hasPrefix("file") })
-        CoProducerCommands.jobEnded(doc: id, job: job, ok: true, m)
-        #expect(f.coLog.last == "file /tmp/mix.wav")
-        // Once only.
-        f.coLog = []
-        CoProducerCommands.jobEnded(doc: id, job: job, ok: true, m)
-        #expect(f.coLog.isEmpty)
-
-        // A job that fails records nothing.
-        guard case .job(_, _, let failing) = run(command(BounceCommands.id, [text("path", "/tmp/b.wav")]), s, id) else {
-            Issue.record("the bounce is not a job")
-            return
-        }
-        CoProducerCommands.jobEnded(doc: id, job: failing, ok: false, m)
-        CoProducerCommands.jobEnded(doc: id, job: failing, ok: true, m)
-        #expect(!f.coLog.contains { $0.hasPrefix("file") })
-
-        // A command that fails at once records nothing.
-        f.bounceError = .Model(message: "no room")
-        f.coLog = []
-        #expect(failure(run(command(BounceCommands.id, [text("path", "/tmp/c.wav")]), s, id)) != nil)
-        #expect(!f.coLog.contains { $0.hasPrefix("file") })
-
-        // One answered at once records its path then; a failure, a dry run
-        // or a command that is not outward records nothing.
-        let ran = ControlOutcome.done(ControlCommands.ran("file.export_midi", id, m))
-        f.coLog = []
-        _ = CoProducerCommands.recorded(ran, "file.export_midi", [text("path", "/tmp/song.mid")], id, m)
-        #expect(f.coLog == ["file /tmp/song.mid"])
-        f.coLog = []
-        _ = CoProducerCommands.recorded(
-            .failed(.of(.failed, "no")), "file.export_midi", [text("path", "/tmp/song.mid")], id, m)
-        _ = CoProducerCommands.recorded(
-            ran, "file.export_midi",
-            [text("path", "/tmp/song.mid"), ControlArg(name: "dry_run", value: .flag(value: true))], id, m)
-        _ = CoProducerCommands.recorded(ran, "media.import", [text("path", "/tmp/in.wav")], id, m)
-        _ = CoProducerCommands.recorded(ran, "file.export_midi", [], id, m)
-        #expect(f.coLog.isEmpty)
-    }
-
     /// The Task 3 review's carry: turning the switch off ends the open
     /// request through the session's end, which writes its entry.
     @Test func turningTheSwitchOffEndsTheRequest() throws {
@@ -320,23 +269,296 @@ import VizDAWCore
         #expect(failure(o)?.code == .noDocument)
     }
 
-    /// Plan 8c Task 1: the one-call export and the six chore commands
-    /// answer "Not ready yet." until Task 4, and reach no session call.
-    @Test func choresAreNotReadyYet() throws {
+    // MARK: Plan 8c Task 4: chores and the one-call export
+
+    var choreArgs: [ControlArg] { [int("seq", 1), text("lanes", "1,2"), int("semitones", 2)] }
+
+    /// The carry from Tasks 2 and 3: a note chore, a marker rename or a
+    /// marker removal changes the composer's work, so `command.run` refuses
+    /// it here as the gate does, with no enter and no session call.
+    @Test func changeChoresAreRefusedOnCommandRun() throws {
         let (s, id, _, f) = try demo()
-        let o = run(.coProducerExport(what: .stems, parent: nil, strips: [2, 3], window: nil), s, id)
-        #expect(failure(o)?.code == .unavailable)
-        #expect(failure(o)?.message == "Not ready yet.")
-        #expect(f.coLog == [])
         for chore in [
-            "modify.quantize_notes", "modify.transpose_notes", "modify.velocity_notes",
-            "marker.add", "marker.rename", "marker.remove",
+            "modify.quantize_notes", "modify.transpose_notes", "modify.velocity_notes", "marker.rename",
+            "marker.remove",
         ] {
-            #expect(ControlCommands.handled.contains(chore), "\(chore)")
-            let r = ControlCommands.run(chore, args: [], doc: (id, try #require(s.model(id))), store: s, host: host)
-            #expect(failure(r)?.code == .unavailable, "\(chore)")
-            #expect(failure(r)?.message == "Not ready yet.", "\(chore)")
+            f.coLog = []
+            let o = run(command(chore, choreArgs), s, id)
+            #expect(failure(o)?.code == .notAllowed, "\(chore)")
+            #expect(failure(o)?.message
+                == "\(chore) changes your work: preview it with co_producer.preview and apply it with the composer's yes.")
+            #expect(f.coLog == [], "\(chore)")
         }
+        #expect(f.chores.isEmpty)
+        // Adding a marker adds freely (the 8c Task 1 ruling): it runs in the stretch.
+        f.coLog = []
+        let added = run(command("marker.add", [int("seq", 1), int("tick", 0), text("name", "Verse")]), s, id)
+        #expect(failure(added) == nil)
+        #expect(f.coLog == ["enter \(stamp)", "chore marker.add", "leave"])
+    }
+
+    /// A change chore runs only after `co_producer_take` got a yes: the
+    /// sheet's Allow, or a standing approval for the caller; a no runs nothing.
+    @Test func changeChoresRunOnlyAfterAGrantedTake() throws {
+        let (s, id, _, f) = try demo()
+        let token = String(repeating: "d", count: 32)
+        let plan = [
+            PlannedRow(id: "modify.transpose_notes", args: choreArgs),
+            PlannedRow(id: "marker.remove", args: [int("seq", 1), int("index", 2)]),
+        ]
+        let o = run(.coProducerApply(token: token, plan: plan, window: nil, client: nil), s, id)
+        guard case .coProducerApplied(_, let lines, _) = result(o) else {
+            Issue.record("not applied: \(o)")
+            return
+        }
+        #expect(lines == ["modify.transpose_notes: done", "marker.remove: done"])
+        #expect(f.coLog == ["enter \(stamp)", "take", "chore modify.transpose_notes", "chore marker.remove", "leave"])
+        #expect(f.coTakeApprovals == [.sheet])
+        #expect(f.chores.map(\.id) == ["modify.transpose_notes", "marker.remove"])
+        #expect(f.chores.first?.args == choreArgs)
+
+        // The composer said no on the sheet: no take, no chore.
+        f.coLog = []
+        f.chores = []
+        let no = CoProducerCommands.run(
+            .coProducerApply(token: token, plan: plan, window: nil, client: nil), doc: (id, try #require(s.model(id))),
+            store: s, host: host, stamp: stamp, peer: nil, approver: FakeApprover(.deny))
+        #expect(failure(no)?.message == CoProducerCommands.notAllowed)
+        #expect(f.coLog == [])
+        #expect(f.chores.isEmpty)
+
+        // A refused take runs no chore, and still leaves.
+        f.coTakeError = .Model(message: "This preview was already used or replaced.")
+        let refused = run(.coProducerApply(token: token, plan: plan, window: nil, client: nil), s, id)
+        #expect(failure(refused)?.message == "This preview was already used or replaced.")
+        #expect(f.coLog == ["enter \(stamp)", "take", "leave"])
+        #expect(f.chores.isEmpty)
+
+        // A standing approval for the caller is the other yes.
+        let rig = try ApprovalRig()
+        rig.store(StandingApproval(
+            key: "signed:ABCDE12345:com.example.chat", verified: true, name: "Helper Chat", team: FakeClientFacts.team,
+            identifier: "com.example.chat", path: nil, label: nil, granted: rig.now))
+        let standing = rig.run(
+            .coProducerApply(token: rig.token, plan: plan, window: nil, client: "Helper Chat"),
+            peer: FakeClientFacts.peerRow(conn: 1))
+        #expect(rig.isApplied(standing))
+        #expect(rig.approver.asked.isEmpty)
+        #expect(rig.f.coTakeApprovals == [.standing])
+        #expect(rig.f.coLog == [
+            "enter \(rig.stamp)", "take", "chore modify.transpose_notes", "chore marker.remove", "leave",
+        ])
+    }
+
+    /// The export's deferred answer, once there.
+    func settled(_ o: ControlOutcome) async -> ControlOutcome? {
+        guard case .pending(let p) = o else {
+            Issue.record("the export is not deferred: \(o)")
+            return nil
+        }
+        await p.settle()
+        return p.outcome
+    }
+
+    /// A file a bounce wrote.
+    func bounced(_ path: String) -> BouncedFileRow {
+        BouncedFileRow(path: path, frames: 96_000, rate: 48_000, bits: "24-bit", channels: 2, clipped: 0)
+    }
+
+    /// A stems plan as the core makes it.
+    func stemsPlan(_ folder: String) -> ExportPlanRow {
+        ExportPlanRow(
+            folder: folder, id: BounceCommands.id,
+            args: [text("source", "stems"), text("strips", "2,3"), text("path", folder)])
+    }
+
+    /// `co_producer.export` plans with the app's date, runs the plan's
+    /// command between enter and leave as the menus run it, and answers
+    /// from the finished job.
+    @Test func exportRunsThePlannedCommand() async throws {
+        let (s, id, _, f) = try demo()
+        let folder = "/Users/x/Exports/Song — Stems — 2026-11-14"
+        f.coExportPlan = stemsPlan(folder)
+        f.jobStartState = .running
+        let o = run(.coProducerExport(what: .stems, parent: "/Users/x/Exports", strips: [2, 3], window: nil), s, id)
+        // `stamp(now)`'s first 10 characters are the date.
+        #expect(f.coLog == ["export plan stems 2026-11-14 /Users/x/Exports 2,3", "enter \(stamp)", "bounce", "leave"])
+        let req = try #require(f.bounces.first)
+        #expect(req.source == .stems(strips: [2, 3]))
+        #expect(req.path == folder)
+        guard case .pending(let p) = o else {
+            Issue.record("the export is not deferred: \(o)")
+            return
+        }
+        // Not yet: the job runs.
+        #expect(p.outcome == nil)
+        let job = try #require(f.jobRows.keys.max())
+        f.resultRow = BounceResultRow(
+            files: [
+                bounced(folder + "/Bass.wav"),
+                bounced(folder + "/Keys.wav"),
+            ], media: [])
+        f.jobRows[job]?.state = .done
+        await p.settle()
+        guard case .done(.coProducerExported(let doc, let answered, let written, let summary))? = p.outcome else {
+            Issue.record("not exported: \(String(describing: p.outcome))")
+            return
+        }
+        #expect(doc == id.uuidString)
+        #expect(answered == folder)
+        #expect(written == [folder + "/Bass.wav", folder + "/Keys.wav"])
+        #expect(summary == nil)
+    }
+
+    /// A DAWproject export answers the job's `written` and its report's summary.
+    @Test func exportOfADawprojectAnswersItsReport() async throws {
+        let (s, id, _, f) = try demo()
+        let folder = "/tmp/Song — DAWproject — 2026-11-14"
+        f.coExportPlan = ExportPlanRow(
+            folder: folder, id: InterchangeCommands.exportDawproject, args: [text("path", folder + "/Song.dawproject")])
+        f.jobStartState = .running
+        let o = run(.coProducerExport(what: .dawproject, parent: nil, strips: nil, window: nil), s, id)
+        #expect(f.coLog == ["export plan dawproject 2026-11-14 - -", "enter \(stamp)", "leave"])
+        #expect(f.dawprojectExports.map(\.path) == [folder + "/Song.dawproject"])
+        let job = try #require(f.jobRows.keys.max())
+        f.jobRows[job]?.state = .done
+        f.jobRows[job]?.written = [folder + "/Song.dawproject"]
+        f.jobRows[job]?.report = ReportRow(summary: "Exported 4 tracks", items: [])
+        guard case .done(.coProducerExported(_, let answered, let written, let summary))? = await settled(o) else {
+            Issue.record("not exported")
+            return
+        }
+        #expect(answered == folder)
+        #expect(written == [folder + "/Song.dawproject"])
+        #expect(summary == "Exported 4 tracks")
+    }
+
+    /// The request's entry lists the files a job really wrote, once each;
+    /// a failed job lists what it had already written.
+    @Test func writtenFilesAreRecorded() async throws {
+        let (s, id, m, f) = try demo()
+        f.jobStartState = .running
+        // An outward `command.run`: the job's files, not its `path`.
+        let bounce = command(BounceCommands.id, [text("source", "stems"), text("strips", "1"), text("path", "/tmp/out")])
+        guard case .job(_, _, let job) = run(bounce, s, id) else {
+            Issue.record("the bounce is not a job")
+            return
+        }
+        #expect(!f.coLog.contains { $0.hasPrefix("file") })
+        f.jobRows[job]?.state = .done
+        f.resultRow = BounceResultRow(
+            files: [bounced("/tmp/out/A.wav"), bounced("/tmp/out/A.wav")],
+            media: [])
+        f.coLog = []
+        CoProducerCommands.jobEnded(doc: id, job: job, m)
+        #expect(f.coLog == ["file /tmp/out/A.wav"])
+        // Once only.
+        f.coLog = []
+        CoProducerCommands.jobEnded(doc: id, job: job, m)
+        #expect(f.coLog.isEmpty)
+
+        // A failed export job records only what it had already written.
+        f.resultRow = nil
+        let midi = command(InterchangeCommands.exportMidi, [text("path", "/tmp/song.mid")])
+        guard case .job(_, _, let failing) = run(midi, s, id) else {
+            Issue.record("the MIDI export is not a job")
+            return
+        }
+        f.jobRows[failing]?.state = .failed
+        f.jobRows[failing]?.message = "disk full"
+        f.coLog = []
+        CoProducerCommands.jobEnded(doc: id, job: failing, m)
+        #expect(f.coLog.isEmpty, "it wrote nothing")
+        guard case .job(_, _, let partial) = run(command(InterchangeCommands.exportMidi, [text("path", "/tmp/b.mid")]), s, id)
+        else {
+            Issue.record("the MIDI export is not a job")
+            return
+        }
+        f.jobRows[partial]?.state = .failed
+        f.jobRows[partial]?.written = ["/tmp/b-1.mid"]
+        f.coLog = []
+        CoProducerCommands.jobEnded(doc: id, job: partial, m)
+        #expect(f.coLog == ["file /tmp/b-1.mid"])
+        // The document closed: nothing to record into.
+        CoProducerCommands.jobEnded(doc: id, job: partial, nil)
+
+        // A command that fails at once records nothing.
+        f.bounceError = .Model(message: "no room")
+        f.coLog = []
+        #expect(failure(run(command(BounceCommands.id, [text("path", "/tmp/c.wav")]), s, id)) != nil)
+        #expect(!f.coLog.contains { $0.hasPrefix("file") })
+        f.bounceError = nil
+
+        // One answered at once records its path then; a failure, a dry run
+        // or a command that is not outward records nothing.
+        let ran = ControlOutcome.done(ControlCommands.ran("file.export_midi", id, m))
+        f.coLog = []
+        _ = CoProducerCommands.recorded(ran, "file.export_midi", [text("path", "/tmp/song.mid")], id, m)
+        #expect(f.coLog == ["file /tmp/song.mid"])
+        f.coLog = []
+        _ = CoProducerCommands.recorded(
+            .failed(.of(.failed, "no")), "file.export_midi", [text("path", "/tmp/song.mid")], id, m)
+        _ = CoProducerCommands.recorded(
+            ran, "file.export_midi",
+            [text("path", "/tmp/song.mid"), ControlArg(name: "dry_run", value: .flag(value: true))], id, m)
+        _ = CoProducerCommands.recorded(ran, "media.import", [text("path", "/tmp/in.wav")], id, m)
+        _ = CoProducerCommands.recorded(ran, "file.export_midi", [], id, m)
+        #expect(f.coLog.isEmpty)
+
+        // The one-call export records its bounce's files the same way, once.
+        let folder = "/tmp/Song — Stems — 2026-11-14"
+        f.coExportPlan = stemsPlan(folder)
+        let o = run(.coProducerExport(what: .stems, parent: nil, strips: nil, window: nil), s, id)
+        let exportJob = UInt64(3000 + f.bounces.count)
+        f.resultRow = BounceResultRow(files: [bounced(folder + "/Bass.wav")], media: [])
+        f.jobRows[exportJob]?.state = .done
+        f.coLog = []
+        _ = await settled(o)
+        #expect(f.coLog.filter { $0.hasPrefix("file") } == ["file \(folder)/Bass.wav"])
+    }
+
+    /// A refused plan answers its sentence and runs no command.
+    @Test func aRefusedPlanRunsNothing() throws {
+        let (s, id, _, f) = try demo()
+        f.coNoteError = .Model(message: "There is nothing to bounce: no strip plays audio.")
+        let o = run(.coProducerExport(what: .stems, parent: nil, strips: nil, window: nil), s, id)
+        #expect(failure(o)?.code == .failed)
+        #expect(failure(o)?.message == "There is nothing to bounce: no strip plays audio.")
+        #expect(f.coLog == ["export plan stems 2026-11-14 - -"])
+        #expect(f.bounces.isEmpty)
+        // No document: no call.
+        f.coLog = []
+        let none = CoProducerCommands.run(
+            .coProducerExport(what: .mix, parent: nil, strips: nil, window: nil), doc: nil, store: s, host: host,
+            stamp: stamp, peer: nil, approver: FakeApprover(.allow))
+        #expect(failure(none)?.code == .noDocument)
+        #expect(f.coLog == [])
+    }
+
+    /// 8a Ruling 13: a failing export job is the call's failure, and its
+    /// alert is taken, so no sheet opens; the files it wrote are recorded.
+    @Test func noSheetsForChores() async throws {
+        let (s, id, m, f) = try demo()
+        let folder = "/tmp/Song — Stems — 2026-11-14"
+        f.coExportPlan = stemsPlan(folder)
+        f.jobStartState = .running
+        let o = run(.coProducerExport(what: .stems, parent: nil, strips: nil, window: nil), s, id)
+        let job = try #require(f.jobRows.keys.max())
+        // The job fails after one file, and the app raised its alert.
+        f.resultRow = BounceResultRow(files: [bounced(folder + "/Bass.wav")], media: [])
+        f.jobRows[job]?.state = .failed
+        f.jobRows[job]?.message = "disk full"
+        m.alert = AlertItem(title: "Bounce Failed", message: "disk full")
+        f.coLog = []
+        let answer = await settled(o)
+        #expect(failure(try #require(answer))?.code == .failed)
+        #expect(failure(try #require(answer))?.message.hasPrefix("disk full") == true)
+        #expect(m.alert == nil)
+        #expect(f.coLog == ["file \(folder)/Bass.wav"])
+        // A chore the session refuses raises no alert either.
+        f.choreError = .Model(message: "Track 4 has no notes there.")
+        #expect(failure(run(command("marker.add", choreArgs), s, id))?.message == "Track 4 has no notes there.")
+        #expect(m.alert == nil)
     }
 
     @Test func requestsTheGateRefusesAreNotAllowedHereToo() throws {

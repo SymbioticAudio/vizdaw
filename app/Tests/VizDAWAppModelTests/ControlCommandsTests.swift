@@ -636,4 +636,55 @@ final class FakeControlHost: ControlHost {
         // No document.
         #expect(failure(run("mixer.make_mine", [int("strip", 4)], s, nil))?.code == .noDocument)
     }
+
+    /// Plan 8c Task 4: each of the six chores is one `runChore` call, with
+    /// its ID and its arguments as given; the core checks them again.
+    @Test func choresRunThroughOneCall() throws {
+        let (s, id, m, f) = try demo()
+        let args = [
+            ControlArg(name: "seq", value: .int(value: 1)), ControlArg(name: "lanes", value: .text(value: "1,2")),
+            ControlArg(name: "semitones", value: .int(value: -3)),
+            ControlArg(name: "name", value: .text(value: "Verse \u{0}")),
+        ]
+        for chore in [
+            "modify.quantize_notes", "modify.transpose_notes", "modify.velocity_notes",
+            "marker.add", "marker.rename", "marker.remove",
+        ] {
+            f.chores = []
+            f.snap.undoLabel = "Undo \(chore)"
+            let o = run(chore, args, s, id)
+            #expect(failure(o) == nil, "\(chore)")
+            #expect(f.chores.map(\.id) == [chore])
+            #expect(f.chores.first?.args == args, "\(chore)")
+            guard case .done(.ran(let command, let doc, _, let undo, _)) = o else {
+                Issue.record("\(chore) did not run: \(o)")
+                continue
+            }
+            #expect(command == chore)
+            #expect(doc == id.uuidString)
+            // The document took the session's answer.
+            #expect(undo == "Undo \(chore)")
+            #expect(m.snapshot.undoLabel == "Undo \(chore)")
+        }
+        // No document: no call.
+        f.chores = []
+        #expect(failure(run("marker.add", args, s, nil))?.code == .noDocument)
+        #expect(f.chores.isEmpty)
+    }
+
+    /// A refused chore is the call's failure, in the session's own words.
+    @Test func aRefusedChoreIsFailed() throws {
+        let (s, id, m, f) = try demo()
+        f.snap.undoLabel = "before"
+        m.apply(try f.snapshot())
+        f.choreError = .Model(message: "Track 4 has no notes there.")
+        let o = run("modify.transpose_notes", [ControlArg(name: "seq", value: .int(value: 1))], s, id)
+        #expect(failure(o)?.code == .failed)
+        #expect(failure(o)?.message == "Track 4 has no notes there.")
+        #expect(f.chores.isEmpty)
+        #expect(m.alert == nil)
+        // Busy stays busy.
+        f.choreError = .Busy(message: "Finish the drag first.")
+        #expect(failure(run("marker.remove", [], s, id))?.code == .busy)
+    }
 }

@@ -52,6 +52,27 @@ public final class PendingOutcome {
         }
     }
 
+    /// `poll`'s answer, asked on the main actor now and every `every`
+    /// until it gives one; once `wait` is up `poll` is told it expired and
+    /// must answer then. For a job whose answer is built when it ends (plan
+    /// 8c Task 4).
+    public init(
+        every: Duration = .milliseconds(100), wait: Duration,
+        poll: @escaping @MainActor (_ expired: Bool) -> ControlOutcome?
+    ) {
+        task = Task { @MainActor in
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: wait)
+            while true {
+                if let o = poll(clock.now >= deadline) {
+                    self.outcome = o
+                    return
+                }
+                try? await Task.sleep(for: every)
+            }
+        }
+    }
+
     /// Waits until `outcome` is there.
     public func settle() async { await task?.value }
 }
@@ -288,14 +309,12 @@ public enum ControlCommands {
     static let makeMineStrip = "mixer.make_mine"
     static let setColour = "mixer.set_colour"
     static let strips: Set<String> = [makeMineStrip, setColour]
-    /// Plan 8c's chore commands (Rulings 2 and 4): registered in Task 1,
-    /// run through one Session call from Task 4.
+    /// Plan 8c's chore commands (Rulings 2 and 4), each one Session call
+    /// (`runChore`), which reads and checks the arguments again.
     static let chores: Set<String> = [
         "modify.quantize_notes", "modify.transpose_notes", "modify.velocity_notes",
         "marker.add", "marker.rename", "marker.remove",
     ]
-    /// What a chore answers until plan 8c Task 4.
-    static let notReadyYet = "Not ready yet."
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
         "transport.go_position": .position, "transport.go_edit_in": .editIn, "transport.go_punch": .punchIn,
@@ -565,7 +584,7 @@ public enum ControlCommands {
         case _ where strips.contains(id):
             return runStrip(id, args, docID, m)
         case _ where chores.contains(id):
-            return unavailable(notReadyYet)
+            return runChore(id, args, docID, m)
         case SongNotes.command:
             return SongNotes.run(docID, m)
         case AudioCommands.addMidi:
@@ -710,6 +729,21 @@ public enum ControlCommands {
         } catch {
             return .failed(CoProducerCommands.failure(error))
         }
+        return .done(ran(id, docID, m))
+    }
+
+    /// A note chore or a marker command (plan 8c Rulings 2 and 4): one
+    /// `runChore` call with the arguments as given, one undo step. A
+    /// refusal is `failed` in the session's words (Busy stays `busy`), and
+    /// raises no alert.
+    static func runChore(_ id: String, _ args: [ControlArg], _ docID: UUID, _ m: DocumentModel) -> ControlOutcome {
+        guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+        do {
+            m.apply(try m.session.runChore(id: id, args: args))
+        } catch {
+            return .failed(CoProducerCommands.failure(error))
+        }
+        m.editor.refreshSelection()
         return .done(ran(id, docID, m))
     }
 

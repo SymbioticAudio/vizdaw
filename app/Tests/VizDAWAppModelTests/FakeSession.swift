@@ -683,6 +683,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func bounce(req: BounceRequestRow) throws -> UInt64 {
         if let e = bounceError { throw e }
         bounces.append(req)
+        // In the Co-Producer log too, so a test sees it ran inside enter and leave.
+        coLog.append("bounce")
         let id = UInt64(3000 + bounces.count)
         jobRows[id] = JobRow(
             id: id, kind: .bounce, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
@@ -1025,11 +1027,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = coNoteError { throw e }
         return (parent ?? "/tmp") + "/Untitled — Stems — \(date)"
     }
+    /// What `coProducerExportPlan` answers instead of its mix bounce (plan 8c Task 4).
+    var coExportPlan: ExportPlanRow?
     func coProducerExportPlan(
         what: ExportWhatRow, date: String, parent: String?, strips: [UInt64]?
     ) throws -> ExportPlanRow {
-        coLog.append("export plan \(what) \(date) \(parent ?? "-")")
+        let shownStrips = strips.map { $0.map(String.init).joined(separator: ",") } ?? "-"
+        coLog.append("export plan \(what) \(date) \(parent ?? "-") \(shownStrips)")
         if let e = coNoteError { throw e }
+        if let plan = coExportPlan { return plan }
         let folder = (parent ?? "/tmp") + "/Untitled — Mix — \(date)"
         return ExportPlanRow(
             folder: folder, id: "file.bounce",
@@ -1038,8 +1044,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
                 ControlArg(name: "path", value: .text(value: folder + "/Untitled.wav")),
             ])
     }
+    /// Each `runChore` call (plan 8c Task 4); `choreError` is thrown instead.
+    var chores: [(id: String, args: [ControlArg])] = []
+    var choreError: VizError?
     func runChore(id: String, args: [ControlArg]) throws -> DocSnapshot {
         coLog.append("chore \(id)")
+        if let e = choreError { throw e }
+        chores.append((id, args))
         return try snapshot()
     }
     func coProducerCopies() throws -> [CopyRow] { coCopies }

@@ -237,19 +237,19 @@ enum ControlChannel {
         let alertBefore = appStore.model(doc)?.alert?.id
         later(server, token, seconds: Double(jobWait) / 1000) { expired in
             guard let m = appStore.model(doc) else {
-                CoProducerCommands.jobEnded(doc: doc, job: job, ok: false, nil)
+                CoProducerCommands.jobEnded(doc: doc, job: job, nil)
                 _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
                 return true
             }
             guard let j = try? m.session.job(id: job) else {
-                CoProducerCommands.jobEnded(doc: doc, job: job, ok: false, m)
+                CoProducerCommands.jobEnded(doc: doc, job: job, m)
                 _ = try? server.fail(token: token, failure: .of(.failed, "the job is unknown"))
                 return true
             }
             switch m.jobAnswer(j) {
             case .wait:
                 if expired {
-                    CoProducerCommands.jobEnded(doc: doc, job: job, ok: false, m)
+                    CoProducerCommands.jobEnded(doc: doc, job: job, m)
                     _ = try? server.fail(
                         token: token, failure: .of(.timeout, ControlJobs.expiredMessage(j)))
                 }
@@ -257,13 +257,13 @@ enum ControlChannel {
             case .ok(let status):
                 m.refreshAfterJob()
                 if coProducer, let a = CoProducerCommands.takeNewAlert(m, before: alertBefore) {
-                    CoProducerCommands.jobEnded(doc: doc, job: job, ok: false, m)
+                    CoProducerCommands.jobEnded(doc: doc, job: job, m)
                     _ = try? server.fail(token: token, failure: .alert(a))
                     return true
                 }
-                // An outward job Co-Producer ran: its file goes in the
-                // request's entry (plan 8b Ruling 5).
-                CoProducerCommands.jobEnded(doc: doc, job: job, ok: true, m)
+                // An outward job Co-Producer ran: the files it wrote go in
+                // the request's entry (plan 8b Ruling 5, 8c Task 4).
+                CoProducerCommands.jobEnded(doc: doc, job: job, m)
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
                 if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject || j.kind == .importProject
                     || j.kind == .mergeDawproject || j.kind == .exportAaf || j.kind == .importAaf
@@ -294,7 +294,7 @@ enum ControlChannel {
                 // A failed import may still have changed nothing; a refresh is harmless.
                 m.refreshAfterJob()
                 if coProducer { _ = CoProducerCommands.takeNewAlert(m, before: alertBefore) }
-                CoProducerCommands.jobEnded(doc: doc, job: job, ok: false, m)
+                CoProducerCommands.jobEnded(doc: doc, job: job, m)
                 InterchangeCommands.jobEnded(doc, failed: true, store: appStore) { id in
                     if let w = ControlWindows.window(of: id) { w.performClose(nil) } else { appStore.close(id) }
                 }
