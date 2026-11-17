@@ -993,7 +993,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var coCopies: [CopyRow] = []
     /// Thrown by `notesPath` and `coProducerNotes` (plan 8b Task 5).
     var coNotesError: VizError?
-    /// Thrown by `coProducerNote`, `coProducerExportFolder` and `coProducerSetAsked`.
+    /// Thrown by `coProducerNote`, `coProducerExportFolder`, `coProducerExportPlan` and
+    /// `coProducerSetAsked`.
     var coNoteError: VizError?
     /// What `removeCoProducerCopies` adds as its problems.
     var coRemoveProblems: [String] = []
@@ -1023,6 +1024,19 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         coLog.append("export folder \(what) \(date) \(parent ?? "-")")
         if let e = coNoteError { throw e }
         return (parent ?? "/tmp") + "/Untitled — Stems — \(date)"
+    }
+    func coProducerExportPlan(
+        what: ExportWhatRow, date: String, parent: String?, strips: [UInt64]?
+    ) throws -> ExportPlanRow {
+        coLog.append("export plan \(what) \(date) \(parent ?? "-")")
+        if let e = coNoteError { throw e }
+        let folder = (parent ?? "/tmp") + "/Untitled — Mix — \(date)"
+        return ExportPlanRow(
+            folder: folder, id: "file.bounce",
+            args: [
+                ControlArg(name: "source", value: .text(value: "mix")),
+                ControlArg(name: "path", value: .text(value: folder + "/Untitled.wav")),
+            ])
     }
     func runChore(id: String, args: [ControlArg]) throws -> DocSnapshot {
         coLog.append("chore \(id)")

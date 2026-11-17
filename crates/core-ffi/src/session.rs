@@ -43,7 +43,7 @@ use core_model::selection::ViewFilter;
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::Tick;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -457,6 +457,17 @@ impl Inner {
             .is_some_and(|t| t == std::thread::current().id())
             && !plugins::is_busy();
         self.set_acting(mine);
+    }
+
+    /// Starts a job ([`crate::jobs::Jobs::spawn`]), Co-Producer's when it
+    /// acts now (plan 8c Ruling 6): every job starts here.
+    fn spawn_job(
+        &mut self,
+        kind: crate::jobs::JobKindRow,
+        work: impl FnOnce(&AtomicU32, &AtomicBool) -> crate::jobs::Work + Send + 'static,
+    ) -> Result<u64, VizError> {
+        let co_producer = self.history.acting();
+        self.jobs.spawn(kind, co_producer, work)
     }
 
     /// Sets `History::acting`. When turning it off aborts a transaction
@@ -4588,7 +4599,15 @@ impl Session {
         let Some(before) = inner.co_producer_entered.take() else {
             return;
         };
-        let items = core_model::diff::describe(&before, inner.doc());
+        Self::log_changes(inner, &before, yes);
+    }
+
+    /// What changed since `before` goes in the request's log (flagged
+    /// `yes` when it followed one), with the undo step its open group will
+    /// be: a call's changes, or a Co-Producer job's landing (plan 8c
+    /// Ruling 6).
+    fn log_changes(inner: &mut Inner, before: &core_model::document::Document, yes: bool) {
+        let items = core_model::diff::describe(before, inner.doc());
         let label = inner.history.request().filter(|r| r.group_open).map(|r| {
             if r.continued {
                 format!("{} (continued)", r.label)
@@ -4647,6 +4666,48 @@ impl Session {
         Ok(inner.co_producer_log.get_or_insert_with(Default::default))
     }
 
+    /// The folder an export folder goes in (plan 8b Ruling 6's order):
+    /// `given`, else the one the song's notes remember, else the folder
+    /// the saved package is in; for an untitled song with neither, `Model`
+    /// asking for a parent. Not checked here.
+    fn export_parent(inner: &mut Inner, given: Option<&Path>) -> Result<PathBuf, VizError> {
+        if let Some(p) = given {
+            return Ok(p.to_path_buf());
+        }
+        let song = inner.song_name();
+        let remembered = match inner.copies_home(false)? {
+            Some(h) if std::fs::symlink_metadata(h.join(crate::notes::NOTES_FILE)).is_ok() => {
+                let _g = lock(&SAVE_LOCK);
+                crate::notes::remembered_folder(&crate::notes::read(&h, &song)?.text)
+            }
+            _ => None,
+        };
+        remembered
+            .or_else(|| {
+                inner
+                    .path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+            })
+            .ok_or_else(|| VizError::Model {
+                message: crate::notes::ASK_FOR_FOLDER.into(),
+            })
+    }
+
+    /// The new export folder `made` goes in the request's entry, and the
+    /// `parent` given is remembered (plan 8b Ruling 6).
+    fn log_export(inner: &mut Inner, made: &str, parent: Option<&PathBuf>) -> Result<(), VizError> {
+        let log = Self::open_log(inner)?;
+        if !log.files.iter().any(|f| f == made) && log.files.len() < MAX_LOG_FILES {
+            log.files.push(made.to_string());
+        }
+        if let Some(p) = parent {
+            log.export_folder = Some(p.to_string_lossy().into_owned());
+        }
+        Ok(())
+    }
+
     /// Why Co-Producer cannot act now, if it cannot (Ruling 3).
     fn co_producer_busy(inner: &Inner) -> Option<&'static str> {
         if inner.edit_label.is_some() {
@@ -4672,6 +4733,8 @@ impl Session {
         ffi_guard(|| {
             let mut inner = self.lock_inner();
             let info = inner.history.begin_request(&name)?;
+            // Only the jobs this request starts are its own (Ruling 6).
+            inner.jobs.forget_co_producer();
             inner.co_producer_seen = Instant::now();
             inner.co_producer_copied = false;
             inner.co_producer_log = Some(crate::notes::RequestLog::default());
@@ -4690,6 +4753,7 @@ impl Session {
             let mut inner = self.lock_inner();
             let request = inner.history.request();
             let label = inner.history.end_request()?;
+            inner.jobs.forget_co_producer();
             inner.co_producer_copied = false;
             if label.is_some() {
                 // The Undo menu shows the new label.
@@ -4818,6 +4882,7 @@ impl Session {
             let Ok(label) = inner.history.end_request() else {
                 return Ok(None);
             };
+            inner.jobs.forget_co_producer();
             inner.co_producer_copied = false;
             if label.is_some() {
                 inner.news.doc_changed = true;
@@ -5141,48 +5206,55 @@ impl Session {
             }
             let song = inner.song_name();
             let given = parent.map(PathBuf::from);
-            let folder = match &given {
-                Some(p) => p.clone(),
-                None => {
-                    let home = inner.copies_home(false)?;
-                    let remembered = match home {
-                        Some(h)
-                            if std::fs::symlink_metadata(h.join(crate::notes::NOTES_FILE))
-                                .is_ok() =>
-                        {
-                            let _g = lock(&SAVE_LOCK);
-                            crate::notes::remembered_folder(&crate::notes::read(&h, &song)?.text)
-                        }
-                        _ => None,
-                    };
-                    match remembered.or_else(|| {
-                        inner
-                            .path
-                            .as_deref()
-                            .and_then(Path::parent)
-                            .map(Path::to_path_buf)
-                    }) {
-                        Some(p) => p,
-                        None => {
-                            return Err(VizError::Model {
-                                message: crate::notes::ASK_FOR_FOLDER.into(),
-                            });
-                        }
-                    }
-                }
-            };
+            let folder = Self::export_parent(&mut inner, given.as_deref())?;
             check_output(&folder, Output::IntoFolder)
                 .map_err(|e| VizError::Model { message: e.message })?;
             let made = crate::notes::make_export_folder(&folder, &song, what.into(), &date)?;
             let shown = made.to_string_lossy().into_owned();
-            let log = Self::open_log(&mut inner)?;
-            if !log.files.contains(&shown) && log.files.len() < MAX_LOG_FILES {
-                log.files.push(shown.clone());
-            }
-            if given.is_some() {
-                log.export_folder = Some(folder.to_string_lossy().into_owned());
-            }
+            Self::log_export(&mut inner, &shown, given.is_some().then_some(&folder))?;
             Ok(shown)
+        })
+    }
+
+    /// Plans one export chore (plan 8c Ruling 1) for the open request:
+    /// the parent found as [`Session::co_producer_export_folder`] finds it,
+    /// then [`crate::chores::export_plan`] works out the strips (`strips`,
+    /// else For Another DAW's defaults for the shown sequence) and the
+    /// menu's command, checks them, and only then makes the new dated
+    /// folder, which the request's entry names (with `parent`, when
+    /// given, remembered). The app runs the command through the menu's
+    /// own path. `Model` with no open request, and for every refusal; a
+    /// refusal makes no folder.
+    pub fn co_producer_export_plan(
+        &self,
+        what: crate::control::ExportWhatRow,
+        date: String,
+        parent: Option<String>,
+        strips: Option<Vec<u64>>,
+    ) -> Result<crate::chores::ExportPlanRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            Self::open_log(&mut inner)?;
+            if !crate::notes::check_date(&date) {
+                return Err(crate::events::bad(
+                    "An export folder's date is \"YYYY-MM-DD\".",
+                ));
+            }
+            let song = inner.song_name();
+            let given = parent.map(PathBuf::from);
+            let folder = Self::export_parent(&mut inner, given.as_deref())?;
+            let seq = inner.selected_seq();
+            let plan = crate::chores::export_plan(
+                inner.doc(),
+                seq,
+                what.into(),
+                &folder,
+                &song,
+                &date,
+                strips.as_deref(),
+            )?;
+            Self::log_export(&mut inner, &plan.folder, given.is_some().then_some(&folder))?;
+            Ok(plan)
         })
     }
 
@@ -5754,7 +5826,9 @@ impl Session {
         // A job is never Co-Producer's step, wherever it is applied from
         // (plan 8a final review I1): with acting off it lands as a hand
         // step, which closes an open request group, as `step` does around
-        // `pump`.
+        // `pump`. The one exception is a job Co-Producer itself started in
+        // the request still open (plan 8c Ruling 6), which
+        // `apply_finished_jobs` lands acting.
         let acting = inner.history.acting();
         if acting {
             inner.set_acting(false);
@@ -5770,7 +5844,16 @@ impl Session {
     fn apply_finished_jobs(&self, inner: &mut Inner) -> bool {
         use crate::jobs::{JobStateRow, Work, row};
         let mut changed = false;
-        for (id, kind, work) in inner.jobs.finished() {
+        for (id, kind, work, co_producer) in inner.jobs.finished() {
+            // Co-Producer's job lands in its request while that is open
+            // (plan 8c Ruling 6): acting for this landing alone, under this
+            // lock, with the same switch `co_producer_enter` uses. A hand
+            // transaction or a recording group refuses it, and the job lands
+            // as the composer's step, as every other job does.
+            let joined = (co_producer
+                && inner.history.request().is_some()
+                && inner.history.set_acting(true).is_ok())
+            .then(|| inner.doc().clone());
             let root = inner.root(self.id);
             let row = match work {
                 Work::Cancelled => row(id, kind, JobStateRow::Cancelled, None, vec![], vec![]),
@@ -5931,6 +6014,10 @@ impl Session {
                     }
                 }
             };
+            if let Some(before) = joined {
+                inner.set_acting(false);
+                Self::log_changes(inner, &before, false);
+            }
             inner.jobs.finish(id, row);
         }
         // A bounce's plugin copies end with its job, however it ended:
@@ -10685,56 +10772,54 @@ impl Session {
             let root = inner.root(self.id);
             let format = inner.doc().settings().format;
             let reserved = inner.reserved_names();
-            inner
-                .jobs
-                .spawn(crate::jobs::JobKindRow::Import, move |progress, cancel| {
-                    let importer = crate::media::importer();
-                    let n = paths.len().max(1) as f32;
-                    let mut files: ImportFiles = Vec::new();
-                    for (k, p) in paths.iter().enumerate() {
-                        let path = std::path::PathBuf::from(p);
-                        let name = path
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| p.clone());
-                        let stem = path
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let r = crate::relink::regular_file(&path).and_then(|()| {
-                            core_media::import::import_reserved(
-                                importer.as_ref(),
-                                &path,
-                                &root,
-                                format,
-                                &stem,
-                                &reserved,
-                                &mut |f| {
-                                    progress.store(
-                                        ((k as f32 + f) / n).to_bits(),
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    )
-                                },
-                                cancel,
-                            )
-                        });
-                        match r {
-                            Err(core_media::MediaError::Cancelled) => {
-                                // Remove what earlier files of this batch wrote.
-                                for (_, done) in &files {
-                                    if let Ok(items) = done {
-                                        for i in items {
-                                            let _ = std::fs::remove_file(root.join(&i.path));
-                                        }
+            inner.spawn_job(crate::jobs::JobKindRow::Import, move |progress, cancel| {
+                let importer = crate::media::importer();
+                let n = paths.len().max(1) as f32;
+                let mut files: ImportFiles = Vec::new();
+                for (k, p) in paths.iter().enumerate() {
+                    let path = std::path::PathBuf::from(p);
+                    let name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.clone());
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let r = crate::relink::regular_file(&path).and_then(|()| {
+                        core_media::import::import_reserved(
+                            importer.as_ref(),
+                            &path,
+                            &root,
+                            format,
+                            &stem,
+                            &reserved,
+                            &mut |f| {
+                                progress.store(
+                                    ((k as f32 + f) / n).to_bits(),
+                                    std::sync::atomic::Ordering::Relaxed,
+                                )
+                            },
+                            cancel,
+                        )
+                    });
+                    match r {
+                        Err(core_media::MediaError::Cancelled) => {
+                            // Remove what earlier files of this batch wrote.
+                            for (_, done) in &files {
+                                if let Ok(items) = done {
+                                    for i in items {
+                                        let _ = std::fs::remove_file(root.join(&i.path));
                                     }
                                 }
-                                return crate::jobs::Work::Cancelled;
                             }
-                            r => files.push((name, r.map_err(|e| e.to_string()))),
+                            return crate::jobs::Work::Cancelled;
                         }
+                        r => files.push((name, r.map_err(|e| e.to_string()))),
                     }
-                    crate::jobs::Work::Import { files, target }
-                })
+                }
+                crate::jobs::Work::Import { files, target }
+            })
         })
     }
 
@@ -10816,32 +10901,30 @@ impl Session {
             let items = convert_list(&inner, self.id, |_| true);
             let root = inner.root(self.id);
             let reserved = inner.reserved_names();
-            inner
-                .jobs
-                .spawn(crate::jobs::JobKindRow::Format, move |progress, cancel| {
-                    if !blocked.is_empty() {
-                        return crate::jobs::Work::Convert {
-                            kind: crate::jobs::JobKindRow::Format,
-                            format: Some(f),
-                            files: vec![(
-                                core_model::ids::MediaId(u64::MAX),
-                                Err(format!(
-                                    "missing or changed media must be relinked first: {}",
-                                    blocked.join(", ")
-                                )),
-                            )],
-                        };
-                    }
-                    convert_files(
-                        &root,
-                        items,
-                        f,
-                        &reserved,
-                        progress,
-                        cancel,
-                        crate::jobs::JobKindRow::Format,
-                    )
-                })
+            inner.spawn_job(crate::jobs::JobKindRow::Format, move |progress, cancel| {
+                if !blocked.is_empty() {
+                    return crate::jobs::Work::Convert {
+                        kind: crate::jobs::JobKindRow::Format,
+                        format: Some(f),
+                        files: vec![(
+                            core_model::ids::MediaId(u64::MAX),
+                            Err(format!(
+                                "missing or changed media must be relinked first: {}",
+                                blocked.join(", ")
+                            )),
+                        )],
+                    };
+                }
+                convert_files(
+                    &root,
+                    items,
+                    f,
+                    &reserved,
+                    progress,
+                    cancel,
+                    crate::jobs::JobKindRow::Format,
+                )
+            })
         })
     }
 
@@ -10867,19 +10950,17 @@ impl Session {
             let f = inner.doc().settings().format;
             let root = inner.root(self.id);
             let reserved = inner.reserved_names();
-            inner
-                .jobs
-                .spawn(crate::jobs::JobKindRow::Convert, move |progress, cancel| {
-                    convert_files(
-                        &root,
-                        items,
-                        f,
-                        &reserved,
-                        progress,
-                        cancel,
-                        crate::jobs::JobKindRow::Convert,
-                    )
-                })
+            inner.spawn_job(crate::jobs::JobKindRow::Convert, move |progress, cancel| {
+                convert_files(
+                    &root,
+                    items,
+                    f,
+                    &reserved,
+                    progress,
+                    cancel,
+                    crate::jobs::JobKindRow::Convert,
+                )
+            })
         })
     }
 
@@ -11019,7 +11100,7 @@ impl Session {
             // the document the job will land in.
             self.interchange_idle(&mut inner)?;
             let plan = crate::interchange::import_plan(inner.doc(), &req)?;
-            inner.jobs.spawn(
+            inner.spawn_job(
                 crate::jobs::JobKindRow::ImportMidi,
                 crate::interchange::import_job(plan),
             )
@@ -11040,7 +11121,7 @@ impl Session {
             let dest =
                 crate::interchange::file_dest(&req.path, req.replace, &self.export_roots(&inner))?;
             let job = crate::interchange::smf_job(inner.doc().clone(), opts, dest, req.replace);
-            inner.jobs.spawn(crate::jobs::JobKindRow::ExportMidi, job)
+            inner.spawn_job(crate::jobs::JobKindRow::ExportMidi, job)
         })
     }
 
@@ -11073,7 +11154,7 @@ impl Session {
             let plan = crate::interchange::clip_plan(inner.doc(), &req)?;
             let dests = crate::interchange::clip_dests(&plan, &req, &self.export_roots(&inner))?;
             let job = crate::interchange::clip_job(inner.doc().clone(), plan, dests, req.replace);
-            inner.jobs.spawn(crate::jobs::JobKindRow::ExportMidi, job)
+            inner.spawn_job(crate::jobs::JobKindRow::ExportMidi, job)
         })
     }
 
@@ -11242,7 +11323,7 @@ impl Session {
                 cancel_at,
                 free,
             };
-            inner.jobs.spawn(
+            inner.spawn_job(
                 crate::jobs::JobKindRow::ExportDawproject,
                 crate::dawproject::job(job),
             )
@@ -11329,7 +11410,7 @@ impl Session {
                 cancel_at,
                 free,
             };
-            inner.jobs.spawn(
+            inner.spawn_job(
                 crate::jobs::JobKindRow::ImportProject,
                 crate::dawproject::import_job(job),
             )
@@ -11403,7 +11484,7 @@ impl Session {
                 cancel_at,
                 free,
             };
-            inner.jobs.spawn(
+            inner.spawn_job(
                 crate::jobs::JobKindRow::ExportAaf,
                 crate::aaf::export_job(job),
             )
@@ -11473,7 +11554,7 @@ impl Session {
                 },
                 seq,
             };
-            inner.jobs.spawn(
+            inner.spawn_job(
                 crate::jobs::JobKindRow::ImportAaf,
                 crate::aaf::import_job(job),
             )
@@ -11540,7 +11621,7 @@ impl Session {
                 base: crate::dawproject::MergeBase::of(&inner.history),
                 req,
             };
-            inner.jobs.spawn(
+            inner.spawn_job(
                 crate::jobs::JobKindRow::MergeDawproject,
                 crate::dawproject::merge_job(job),
             )
@@ -11928,7 +12009,7 @@ impl Session {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let from = copy.from;
-            inner.jobs.spawn(
+            inner.spawn_job(
                 crate::jobs::JobKindRow::ExternalEdit,
                 move |progress, cancel| {
                     let importer = crate::media::importer();
@@ -12171,9 +12252,7 @@ impl Session {
             cancel_at,
             fail_import_at,
         };
-        let spawned = inner
-            .jobs
-            .spawn(kind, move |progress, cancel| body(job, progress, cancel));
+        let spawned = inner.spawn_job(kind, move |progress, cancel| body(job, progress, cancel));
         match spawned {
             Ok(id) => {
                 if let Some(t) = token {
@@ -12341,27 +12420,25 @@ impl Session {
             let named = inner.named_media();
             let unapplied = inner.jobs.unapplied();
             let id = core_model::ids::MediaId(media);
-            inner
-                .jobs
-                .spawn(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
-                    let importer = crate::media::importer();
-                    let r = crate::relink::relink_file(
-                        importer.as_ref(),
-                        &root,
-                        &src,
-                        format,
-                        &named,
-                        &unapplied,
-                        &mut |f| progress.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed),
-                        cancel,
-                    );
-                    match r {
-                        Err(core_media::MediaError::Cancelled) => crate::jobs::Work::Cancelled,
-                        r => crate::jobs::Work::Relink {
-                            files: vec![(id, r.map_err(|e| format!("{}: {e}", item.name)))],
-                        },
-                    }
-                })
+            inner.spawn_job(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
+                let importer = crate::media::importer();
+                let r = crate::relink::relink_file(
+                    importer.as_ref(),
+                    &root,
+                    &src,
+                    format,
+                    &named,
+                    &unapplied,
+                    &mut |f| progress.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed),
+                    cancel,
+                );
+                match r {
+                    Err(core_media::MediaError::Cancelled) => crate::jobs::Work::Cancelled,
+                    r => crate::jobs::Work::Relink {
+                        files: vec![(id, r.map_err(|e| format!("{}: {e}", item.name)))],
+                    },
+                }
+            })
         })
     }
 
@@ -12413,22 +12490,20 @@ impl Session {
             let format = inner.doc().settings().format;
             let named = inner.named_media();
             let unapplied = inner.jobs.unapplied();
-            inner
-                .jobs
-                .spawn(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
-                    let importer = crate::media::importer();
-                    crate::relink::search(
-                        importer.as_ref(),
-                        &root,
-                        &dir,
-                        lost,
-                        format,
-                        &named,
-                        &unapplied,
-                        progress,
-                        cancel,
-                    )
-                })
+            inner.spawn_job(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
+                let importer = crate::media::importer();
+                crate::relink::search(
+                    importer.as_ref(),
+                    &root,
+                    &dir,
+                    lost,
+                    format,
+                    &named,
+                    &unapplied,
+                    progress,
+                    cancel,
+                )
+            })
         })
     }
 }

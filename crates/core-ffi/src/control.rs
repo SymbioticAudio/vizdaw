@@ -998,6 +998,17 @@ pub enum ControlResult {
         /// The new folder.
         path: String,
     },
+    /// `co_producer.export` (plan 8c Ruling 1), when its job ended.
+    CoProducerExported {
+        /// Document ID.
+        doc: String,
+        /// The new dated folder.
+        folder: String,
+        /// The files the job wrote.
+        written: Vec<String>,
+        /// The interchange report's summary for DAWproject, AAF and MIDI.
+        summary: Option<String>,
+    },
     /// `settings.co_producer_answer` (plan 8b Ruling 11): what the
     /// approval sheet it answered asked.
     CoProducerApprovalAnswered {
@@ -1865,6 +1876,12 @@ pub fn result_json(r: &ControlResult) -> Value {
             "doc": doc, "text": notes.text, "truncated": notes.truncated, "path": notes.path,
         }),
         ControlResult::CoProducerFolder { doc, path } => json!({ "doc": doc, "path": path }),
+        ControlResult::CoProducerExported {
+            doc,
+            folder,
+            written,
+            summary,
+        } => json!({ "doc": doc, "folder": folder, "written": written, "summary": summary }),
         ControlResult::CoProducerApprovalAnswered {
             app,
             kind,

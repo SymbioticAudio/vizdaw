@@ -566,3 +566,655 @@ fn run_chore_refuses_hostile_input() {
         Some("Add Marker")
     );
 }
+
+// ---- Plan 8c Task 3: the export plan (Ruling 1), and jobs that land in
+// their request (Ruling 6). ----
+
+const DATE: &str = "2026-11-16";
+const OPEN_FIRST: &str = "Open a request first (begin_request).";
+/// One bar at 120 BPM.
+const BAR: i64 = 4 * 15_360;
+const FRAMES: u64 = 96_000;
+
+/// `<dir>/<name>.vizdaw` built by `build` (on a sequence "Song" whose
+/// first track is "Bass" with no destination) and saved, with
+/// `Media/a.caf` written (FRAMES stereo frames). Opened, with a private
+/// Trash.
+fn song_with(
+    dir: &Path,
+    name: &str,
+    build: impl FnOnce(&mut core_engine::fixtures::Builder, SeqId, LaneId),
+) -> (Arc<Session>, PathBuf) {
+    use core_media::caf::{CafWriter, WriteMode};
+    use core_model::format::BitDepth;
+    let pkg = dir.join(format!("{name}.vizdaw"));
+    let mut b = core_engine::fixtures::Builder::new();
+    let (seq, bass) = b.sequence("Song", "Bass", None).unwrap();
+    build(&mut b, seq, bass);
+    core_model::file::save(&b.finish(), &pkg).unwrap();
+    let media = pkg.join("Media");
+    std::fs::create_dir_all(&media).unwrap();
+    let mut w = CafWriter::create(
+        &media.join("a.caf"),
+        48_000,
+        2,
+        BitDepth::Float32,
+        WriteMode::Normal,
+    )
+    .unwrap();
+    w.write(&vec![0.25f32; FRAMES as usize * 2]).unwrap();
+    w.finish().unwrap();
+    let s = Session::open(pkg.display().to_string()).unwrap();
+    s.debug_set_trash_dir(Some(dir.join("Trash").display().to_string()));
+    (s, pkg)
+}
+
+/// Two audio tracks, "Bass" and "Drums", each playing `Media/a.caf` from
+/// tick 0.
+fn audio_song(dir: &Path, name: &str) -> (Arc<Session>, PathBuf) {
+    use core_model::event::Fade;
+    song_with(dir, name, |b, seq, bass| {
+        let drums = b.lane(seq, "Drums", None).unwrap();
+        let m = b.media("Media/a.caf", FRAMES, 2).unwrap();
+        for lane in [bass, drums] {
+            b.region(
+                seq,
+                lane,
+                0,
+                m,
+                0,
+                FRAMES,
+                0.0,
+                Fade::default(),
+                Fade::default(),
+            )
+            .unwrap();
+        }
+    })
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .map(|r| {
+            r.filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+fn arg<'a>(args: &'a [ControlArg], name: &str) -> Option<&'a ControlValue> {
+    args.iter().find(|a| a.name == name).map(|a| &a.value)
+}
+
+fn text_arg(args: &[ControlArg], name: &str) -> Option<String> {
+    match arg(args, name) {
+        Some(ControlValue::Text { value }) => Some(value.clone()),
+        Some(other) => panic!("{name}: {other:?}"),
+        None => None,
+    }
+}
+
+fn shown(p: &Path) -> String {
+    p.display().to_string()
+}
+
+fn plan(
+    s: &Session,
+    what: vizdaw_ffi::ExportWhatRow,
+    parent: &Path,
+    strips: Option<Vec<u64>>,
+) -> Result<vizdaw_ffi::chores::ExportPlanRow, VizError> {
+    s.co_producer_export_plan(what, DATE.into(), Some(shown(parent)), strips)
+}
+
+/// Each planned path passes the Co-Producer output check, as the app
+/// runs it.
+fn passes_the_check(p: &vizdaw_ffi::chores::ExportPlanRow) {
+    use core_control::co_producer::{check_output, output};
+    let args = arg_values(&p.args);
+    let rule = output(&p.id, &args).unwrap_or_else(|| panic!("{} has no output", p.id));
+    let path = text_arg(&p.args, "path").unwrap();
+    check_output(Path::new(&path), rule).unwrap_or_else(|e| panic!("{path}: {}", e.message));
+    for never in ["replace", "dry_run", "add_to_project"] {
+        assert!(arg(&p.args, never).is_none(), "{} sets {never}", p.id);
+    }
+}
+
+#[test]
+fn export_plans_are_new_and_checked() {
+    use vizdaw_ffi::ExportWhatRow as W;
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = audio_song(dir.path(), "Night Drive");
+    let parent = dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    s.co_producer_begin("export the song".into()).unwrap();
+
+    let p = plan(&s, W::Dawproject, &parent, None).unwrap();
+    let folder = parent.join("Night Drive — DAWproject — 2026-11-16");
+    assert_eq!(p.id, "file.export_dawproject");
+    assert_eq!(p.folder, shown(&folder));
+    assert!(folder.is_dir());
+    assert!(names_in(&folder).is_empty(), "the folder starts empty");
+    assert_eq!(p.args.len(), 1, "{:?}", p.args);
+    assert_eq!(
+        text_arg(&p.args, "path"),
+        Some(shown(&folder.join("Night Drive.dawproject")))
+    );
+    passes_the_check(&p);
+
+    // Stems with no strips: For Another DAW's defaults.
+    let defaults: Vec<String> = core_io::for_daw::default_strips(&doc(&s), SeqId(first_seq(&s)))
+        .unwrap()
+        .into_iter()
+        .map(|id| id.0.to_string())
+        .collect();
+    assert!(
+        !defaults.is_empty(),
+        "the audio tracks play through a strip"
+    );
+    let p = plan(&s, W::Stems, &parent, None).unwrap();
+    let folder = parent.join("Night Drive — Stems — 2026-11-16");
+    assert_eq!(p.id, "file.bounce");
+    assert_eq!(p.folder, shown(&folder));
+    assert_eq!(text_arg(&p.args, "source").as_deref(), Some("stems"));
+    assert_eq!(text_arg(&p.args, "strips"), Some(defaults.join(",")));
+    assert_eq!(text_arg(&p.args, "path"), Some(shown(&folder)));
+    assert_eq!(p.args.len(), 3, "{:?}", p.args);
+    passes_the_check(&p);
+    let again = plan(&s, W::Stems, &parent, None).unwrap();
+    assert_eq!(
+        again.folder,
+        shown(&parent.join("Night Drive — Stems — 2026-11-16 2"))
+    );
+    passes_the_check(&again);
+
+    // Ruling 1's table.
+    let p = plan(&s, W::Mix, &parent, None).unwrap();
+    let folder = parent.join("Night Drive — Mix — 2026-11-16");
+    assert_eq!(p.id, "file.bounce");
+    assert_eq!(text_arg(&p.args, "source").as_deref(), Some("mix"));
+    assert_eq!(
+        text_arg(&p.args, "path"),
+        Some(shown(&folder.join("Night Drive.wav")))
+    );
+    assert_eq!(p.args.len(), 2, "{:?}", p.args);
+    passes_the_check(&p);
+
+    let p = plan(&s, W::Midi, &parent, None).unwrap();
+    let folder = parent.join("Night Drive — MIDI — 2026-11-16");
+    assert_eq!(p.id, "file.export_midi");
+    assert_eq!(
+        text_arg(&p.args, "path"),
+        Some(shown(&folder.join("Night Drive.mid")))
+    );
+    assert_eq!(p.args.len(), 1, "{:?}", p.args);
+    passes_the_check(&p);
+
+    let p = plan(&s, W::Aaf, &parent, None).unwrap();
+    let folder = parent.join("Night Drive — AAF — 2026-11-16");
+    assert_eq!(p.id, "file.export_aaf");
+    assert_eq!(text_arg(&p.args, "path"), Some(shown(&folder)));
+    assert_eq!(p.args.len(), 1, "{:?}", p.args);
+    passes_the_check(&p);
+
+    let p = plan(&s, W::OtherDaw, &parent, None).unwrap();
+    let folder = parent.join("Night Drive — Other DAW — 2026-11-16");
+    assert_eq!(p.id, "file.export_for_daw");
+    assert_eq!(p.folder, shown(&folder));
+    assert_eq!(text_arg(&p.args, "path"), Some(shown(&folder)));
+    assert_eq!(p.args.len(), 1, "no strips unless given: {:?}", p.args);
+    passes_the_check(&p);
+    let first: u64 = defaults[0].parse().unwrap();
+    let p = plan(&s, W::OtherDaw, &parent, Some(vec![first])).unwrap();
+    assert_eq!(text_arg(&p.args, "strips"), Some(first.to_string()));
+    passes_the_check(&p);
+    let p = plan(&s, W::Stems, &parent, Some(vec![first])).unwrap();
+    assert_eq!(text_arg(&p.args, "strips"), Some(first.to_string()));
+
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+#[test]
+fn an_export_plan_is_logged_like_an_export_folder() {
+    use vizdaw_ffi::ExportWhatRow as W;
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = audio_song(dir.path(), "Night Drive");
+    let parent = dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    s.co_producer_begin("export the song".into()).unwrap();
+    s.co_producer_enter(STAMP.into()).unwrap();
+    let p = plan(&s, W::Mix, &parent, None).unwrap();
+    s.co_producer_leave();
+    s.co_producer_end().unwrap();
+    let notes = std::fs::read_to_string(pkg.join("Notes.md")).unwrap();
+    assert!(
+        notes.contains(&format!("\n- Export folder: {}\n", parent.display())),
+        "{notes}"
+    );
+    assert!(notes.contains(&p.folder), "{notes}");
+    // The next request remembers the parent.
+    s.co_producer_begin("export again".into()).unwrap();
+    let p = s
+        .co_producer_export_plan(W::Midi, DATE.into(), None, None)
+        .unwrap();
+    assert!(Path::new(&p.folder).starts_with(&parent), "{}", p.folder);
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+#[test]
+fn a_refused_plan_makes_no_folder() {
+    use vizdaw_ffi::ExportWhatRow as W;
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = audio_song(dir.path(), "Night Drive");
+    let parent = dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    s.co_producer_begin("export the song".into()).unwrap();
+    for what in [W::Stems, W::OtherDaw] {
+        let e = plan(&s, what, &parent, Some(vec![999])).unwrap_err();
+        assert!(e.to_string().contains("999"), "{e}");
+    }
+    let e = plan(&s, W::Selection, &parent, None).unwrap_err();
+    assert!(e.to_string().contains("export_folder"), "{e}");
+    let e = plan(&s, W::Mix, &parent, Some(vec![1])).unwrap_err();
+    assert!(e.to_string().contains("strips"), "{e}");
+    let e = s
+        .co_producer_export_plan(W::Mix, "16 Nov".into(), Some(shown(&parent)), None)
+        .unwrap_err();
+    assert!(e.to_string().contains("YYYY-MM-DD"), "{e}");
+    assert!(names_in(&parent).is_empty(), "{:?}", names_in(&parent));
+
+    // A remembered parent inside the package.
+    let before = names_in(&pkg);
+    std::fs::write(
+        pkg.join("Notes.md"),
+        format!("# Night Drive\n- Export folder: {}\n", pkg.display()),
+    )
+    .unwrap();
+    let e = s
+        .co_producer_export_plan(W::Mix, DATE.into(), None, None)
+        .unwrap_err();
+    assert!(
+        e.to_string().contains("it is inside a project package"),
+        "{e}"
+    );
+    let mut after = names_in(&pkg);
+    after.retain(|n| n != "Notes.md");
+    let mut was = before.clone();
+    was.retain(|n| n != "Notes.md");
+    assert_eq!(after, was);
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+
+    // Only external MIDI plays: no stems.
+    let (s, _) = song_with(dir.path(), "Outboard", |b, seq, bass| {
+        let ext = b.dest("Ext", "port:Outboard", 0).unwrap();
+        b.run(Command::Lane(core_model::command::LaneCmd::SetDest {
+            seq,
+            lane: bass,
+            dest: Some(ext),
+        }))
+        .unwrap();
+        b.notes(seq, bass, &[(0, 64, 0x8000, 15_360)]).unwrap();
+    });
+    s.co_producer_begin("export the stems".into()).unwrap();
+    let e = plan(&s, W::Stems, &parent, None).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "There is nothing to bounce: no strip plays audio."
+    );
+    assert!(names_in(&parent).is_empty(), "{:?}", names_in(&parent));
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+/// A ":" in a file name is how the Finder shows a "/"; a leading dot is
+/// dropped (8b Ruling 6's cleaning).
+#[test]
+fn odd_song_names_are_cleaned() {
+    use vizdaw_ffi::ExportWhatRow as W;
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    for (name, song) in [("..:Mix", "-Mix"), ("a:b", "a-b"), (".hidden", "hidden")] {
+        let (s, _) = audio_song(dir.path(), name);
+        s.co_producer_begin("export the song".into()).unwrap();
+        let p = plan(&s, W::Dawproject, &parent, None).unwrap();
+        let folder = parent.join(format!("{song} — DAWproject — 2026-11-16"));
+        assert_eq!(p.folder, shown(&folder), "{name}");
+        assert_eq!(
+            text_arg(&p.args, "path"),
+            Some(shown(&folder.join(format!("{song}.dawproject")))),
+            "{name}"
+        );
+        passes_the_check(&p);
+        s.co_producer_end().unwrap();
+        s.close().unwrap();
+    }
+}
+
+#[test]
+fn export_needs_a_request() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = audio_song(dir.path(), "Night Drive");
+    let parent = dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    let e = plan(&s, vizdaw_ffi::ExportWhatRow::Mix, &parent, None).unwrap_err();
+    assert_eq!(e.to_string(), OPEN_FIRST);
+    assert!(names_in(&parent).is_empty());
+    s.close().unwrap();
+}
+
+fn wait_job(s: &Session, id: u64) -> vizdaw_ffi::JobRow {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        s.idle().unwrap();
+        let j = s.job(id).unwrap();
+        if j.state != vizdaw_ffi::JobStateRow::Running {
+            s.idle().unwrap();
+            return j;
+        }
+        assert!(std::time::Instant::now() < until, "job {id} still running");
+        std::thread::yield_now();
+    }
+}
+
+/// Stems of every default strip, one bar, onto new tracks and into `out`.
+fn stems_onto_tracks(s: &Session, out: &Path) -> u64 {
+    use vizdaw_ffi::{
+        BitDepthRow, BounceRangeRow, BounceRequestRow, BounceSourceRow, ContainerRow,
+    };
+    let strips = core_io::for_daw::default_strips(&doc(s), SeqId(first_seq(s)))
+        .unwrap()
+        .into_iter()
+        .map(|id| id.0)
+        .collect();
+    s.bounce(BounceRequestRow {
+        seq: first_seq(s),
+        source: BounceSourceRow::Stems { strips },
+        range: BounceRangeRow::Ticks { start: 0, end: BAR },
+        container: ContainerRow::Wav,
+        depth: BitDepthRow::Int24,
+        rate: 48_000,
+        dither: false,
+        path: Some(shown(out)),
+        add_to_project: true,
+        replace: false,
+    })
+    .unwrap()
+}
+
+fn lane_names(s: &Session) -> Vec<String> {
+    s.lanes(first_seq(s))
+        .unwrap()
+        .into_iter()
+        .map(|l| l.name)
+        .collect()
+}
+
+fn undo_label(s: &Session) -> Option<String> {
+    s.snapshot().unwrap().undo_label
+}
+
+#[test]
+fn jobs_land_inside_their_request() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = audio_song(dir.path(), "Night Drive");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let label = s
+        .co_producer_begin("bounce the stems".into())
+        .unwrap()
+        .label;
+    s.co_producer_enter(STAMP.into()).unwrap();
+    let id = stems_onto_tracks(&s, &out);
+    s.co_producer_leave();
+    let j = wait_job(&s, id);
+    assert_eq!(j.state, vizdaw_ffi::JobStateRow::Done, "{j:?}");
+    assert_eq!(
+        s.co_producer_end().unwrap().as_deref(),
+        Some(label.as_str())
+    );
+    assert_eq!(undo_label(&s).as_deref(), Some(label.as_str()));
+    let names = lane_names(&s);
+    assert!(names.len() > 2, "{names:?}");
+    for n in &names[2..] {
+        assert!(n.ends_with(" (Co-Producer)"), "{names:?}");
+    }
+    assert!(!names[0].ends_with(" (Co-Producer)"), "{names:?}");
+    s.undo().unwrap();
+    assert_eq!(lane_names(&s), ["Bass", "Drums"], "one undo removes them");
+
+    // A hand rename between the leave and the landing: "(continued)".
+    let label = s.co_producer_begin("mark and bounce".into()).unwrap().label;
+    s.co_producer_enter(STAMP.into()).unwrap();
+    s.run_chore(
+        "marker.add".into(),
+        vec![
+            int("seq", first_seq(&s) as i64),
+            int("tick", 0),
+            text("name", "Top"),
+        ],
+    )
+    .unwrap();
+    s.debug_hold_jobs(true).unwrap();
+    let id = stems_onto_tracks(&s, &out);
+    s.co_producer_leave();
+    let bass = lane_ids(&s)[0];
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::Rename {
+                seq: first_seq(&s),
+                lane: bass,
+                name: "Low End".into(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    s.debug_hold_jobs(false).unwrap();
+    let j = wait_job(&s, id);
+    assert_eq!(j.state, vizdaw_ffi::JobStateRow::Done, "{j:?}");
+    let continued = format!("{label} (continued)");
+    assert_eq!(
+        s.co_producer_end().unwrap().as_deref(),
+        Some(continued.as_str())
+    );
+    assert_eq!(undo_label(&s).as_deref(), Some(continued.as_str()));
+    let names = lane_names(&s);
+    assert!(names.len() > 2, "{names:?}");
+    assert!(
+        names[2..].iter().all(|n| n.ends_with(" (Co-Producer)")),
+        "{names:?}"
+    );
+    s.undo().unwrap();
+    assert_eq!(lane_names(&s), ["Low End", "Drums"]);
+    s.undo().unwrap();
+    assert_eq!(lane_names(&s), ["Bass", "Drums"]);
+    assert_eq!(undo_label(&s).as_deref(), Some(label.as_str()));
+    s.close().unwrap();
+}
+
+#[test]
+fn a_job_after_its_request_lands_on_its_own() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = audio_song(dir.path(), "Night Drive");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    s.co_producer_begin("bounce the stems".into()).unwrap();
+    s.co_producer_enter(STAMP.into()).unwrap();
+    s.debug_hold_jobs(true).unwrap();
+    let id = stems_onto_tracks(&s, &out);
+    s.co_producer_leave();
+    assert_eq!(s.co_producer_end().unwrap(), None, "no step yet");
+    // A later request does not take it either.
+    s.co_producer_begin("something else".into()).unwrap();
+    s.debug_hold_jobs(false).unwrap();
+    let j = wait_job(&s, id);
+    assert_eq!(j.state, vizdaw_ffi::JobStateRow::Done, "{j:?}");
+    assert_eq!(s.co_producer_end().unwrap(), None);
+    assert_eq!(undo_label(&s).as_deref(), Some("Bounce"));
+    let names = lane_names(&s);
+    assert!(names.len() > 2, "{names:?}");
+    assert!(
+        names.iter().all(|n| !n.ends_with(" (Co-Producer)")),
+        "{names:?}"
+    );
+    s.undo().unwrap();
+    assert_eq!(lane_names(&s), ["Bass", "Drums"]);
+    s.redo().unwrap();
+    assert_eq!(lane_names(&s), names, "no step is lost");
+    s.close().unwrap();
+}
+
+/// 8a final review: a job the composer started lands as the composer's
+/// own step, even while a request is open.
+#[test]
+fn a_composers_job_during_a_request_stays_the_composers() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = audio_song(dir.path(), "Night Drive");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let label = s.co_producer_begin("add a marker".into()).unwrap().label;
+    s.co_producer_enter(STAMP.into()).unwrap();
+    s.run_chore(
+        "marker.add".into(),
+        vec![
+            int("seq", first_seq(&s) as i64),
+            int("tick", 0),
+            text("name", "Top"),
+        ],
+    )
+    .unwrap();
+    s.co_producer_leave();
+    let id = stems_onto_tracks(&s, &out);
+    let j = wait_job(&s, id);
+    assert_eq!(j.state, vizdaw_ffi::JobStateRow::Done, "{j:?}");
+    assert_eq!(undo_label(&s).as_deref(), Some("Bounce"));
+    let names = lane_names(&s);
+    assert!(names.len() > 2, "{names:?}");
+    assert!(
+        names.iter().all(|n| !n.ends_with(" (Co-Producer)")),
+        "{names:?}"
+    );
+    assert_eq!(
+        s.co_producer_end().unwrap(),
+        None,
+        "the hand step closed it"
+    );
+    s.undo().unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some(label.as_str()));
+    s.close().unwrap();
+}
+
+#[test]
+fn export_result_json() {
+    let v = result_json(&ControlResult::CoProducerExported {
+        doc: "d".into(),
+        folder: "/x/Night Drive — Mix — 2026-11-16".into(),
+        written: vec!["/x/Night Drive — Mix — 2026-11-16/Night Drive.wav".into()],
+        summary: None,
+    });
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "doc": "d",
+            "folder": "/x/Night Drive — Mix — 2026-11-16",
+            "written": ["/x/Night Drive — Mix — 2026-11-16/Night Drive.wav"],
+            "summary": null,
+        })
+    );
+    let v = result_json(&ControlResult::CoProducerExported {
+        doc: "d".into(),
+        folder: "/x".into(),
+        written: vec![],
+        summary: Some("3 tracks".into()),
+    });
+    assert_eq!(v["summary"], "3 tracks");
+}
+
+/// What, date, parent and strips.
+type HostileExport = (
+    vizdaw_ffi::ExportWhatRow,
+    String,
+    Option<String>,
+    Option<Vec<u64>>,
+);
+
+#[test]
+fn export_plan_refuses_hostile_input() {
+    use vizdaw_ffi::ExportWhatRow as W;
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = audio_song(dir.path(), "Night Drive");
+    let parent = dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    s.co_producer_begin("export the song".into()).unwrap();
+    let good = shown(&parent);
+    let cases: Vec<HostileExport> = vec![
+        (W::Stems, DATE.into(), Some(good.clone()), Some(vec![])),
+        (W::Stems, DATE.into(), Some(good.clone()), Some(vec![0])),
+        (W::Stems, DATE.into(), Some(good.clone()), Some(vec![1, 1])),
+        (
+            W::Stems,
+            DATE.into(),
+            Some(good.clone()),
+            Some(vec![u64::MAX]),
+        ),
+        (
+            W::Stems,
+            DATE.into(),
+            Some(good.clone()),
+            Some((1..=70_000).collect()),
+        ),
+        (W::Aaf, DATE.into(), Some(good.clone()), Some(vec![1])),
+        (W::Mix, "x".repeat(70_000), Some(good.clone()), None),
+        (W::Mix, "2026-11-1\0".into(), Some(good.clone()), None),
+        (W::Mix, DATE.into(), Some("relative".into()), None),
+        (
+            W::Mix,
+            DATE.into(),
+            Some(format!("/{}", "x".repeat(70_000))),
+            None,
+        ),
+        (W::Mix, DATE.into(), Some(format!("{good}\0")), None),
+        (
+            W::Mix,
+            DATE.into(),
+            Some(format!("{good}/../Exports")),
+            None,
+        ),
+        (W::Mix, DATE.into(), Some(format!("{good}/")), None),
+        (
+            W::Mix,
+            DATE.into(),
+            Some(dir.path().join("missing").display().to_string()),
+            None,
+        ),
+    ];
+    for (what, date, parent_arg, strips) in cases {
+        let r = s.co_producer_export_plan(what, date.clone(), parent_arg.clone(), strips.clone());
+        assert!(
+            matches!(r, Err(VizError::Model { .. })),
+            "{what:?} {:?} {:?} {:?}: {r:?}",
+            date.chars().take(20).collect::<String>(),
+            parent_arg.map(|p| p.chars().take(40).collect::<String>()),
+            strips.map(|v| v.len())
+        );
+    }
+    assert!(names_in(&parent).is_empty(), "{:?}", names_in(&parent));
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}

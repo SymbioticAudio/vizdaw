@@ -363,7 +363,7 @@ pub fn check_date(date: &str) -> bool {
 /// `-`, controls removed, leading dots dropped, cut to [`SONG_CHARS`]
 /// characters (and [`SONG_BYTES`] bytes, so the name fits a file name);
 /// "Untitled" when nothing is left.
-fn folder_song(song: &str) -> String {
+pub(crate) fn clean_song(song: &str) -> String {
     let mut out = String::new();
     let chars = song
         .chars()
@@ -383,6 +383,11 @@ fn folder_song(song: &str) -> String {
     }
 }
 
+/// An export folder's first name, "<song> — <what> — <date>" (Ruling 6).
+pub(crate) fn export_folder_name(song: &str, what: ExportWhat, date: &str) -> String {
+    format!("{} — {} — {date}", clean_song(song), what.label())
+}
+
 /// Ruling 6: a new folder "<song> — <what> — <date>" inside `parent`,
 /// with " 2", " 3"… up to 999 when the name is taken (`create_dir` never
 /// replaces). `date` must be "YYYY-MM-DD". `parent` is checked by the
@@ -396,7 +401,7 @@ pub fn make_export_folder(
     if !check_date(date) {
         return Err(model("An export folder's date is \"YYYY-MM-DD\"."));
     }
-    let base = format!("{} — {} — {date}", folder_song(song), what.label());
+    let base = export_folder_name(song, what, date);
     for n in 1..=MAX_NUMBER {
         let name = if n == 1 {
             base.clone()
@@ -725,10 +730,14 @@ mod tests {
 
     #[test]
     fn songs_in_folder_names() {
-        assert_eq!(folder_song("a/b:.c"), "a-b-.c");
-        assert_eq!(folder_song("..x\u{7}y"), "xy");
-        assert_eq!(folder_song("..."), "Untitled");
-        assert_eq!(folder_song(&"é".repeat(150)).chars().count(), 90);
-        assert_eq!(folder_song(&"a".repeat(150)).chars().count(), 100);
+        assert_eq!(clean_song("a/b:.c"), "a-b-.c");
+        assert_eq!(clean_song("..x\u{7}y"), "xy");
+        assert_eq!(clean_song("..."), "Untitled");
+        // Plan 8c Task 3: the leading dots go after the `/` becomes `-`.
+        assert_eq!(clean_song("../Mix"), "-Mix");
+        assert_eq!(clean_song("a/b"), "a-b");
+        assert_eq!(clean_song(".hidden"), "hidden");
+        assert_eq!(clean_song(&"é".repeat(150)).chars().count(), 90);
+        assert_eq!(clean_song(&"a".repeat(150)).chars().count(), 100);
     }
 }

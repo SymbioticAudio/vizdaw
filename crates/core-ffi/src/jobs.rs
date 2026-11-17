@@ -232,6 +232,9 @@ pub struct RelinkFile {
 
 struct Job {
     kind: JobKindRow,
+    /// Started while Co-Producer acted (plan 8c Ruling 6): its document
+    /// change lands in that request while it is still open.
+    co_producer: bool,
     progress: Arc<AtomicU32>,
     cancel: Arc<AtomicBool>,
     thread: Option<JoinHandle<Work>>,
@@ -264,10 +267,11 @@ impl std::fmt::Debug for Jobs {
 
 impl Jobs {
     /// Starts `work` on a thread; it gets a progress cell (f32 bits) and
-    /// the cancel flag.
+    /// the cancel flag. `co_producer`: started while Co-Producer acted.
     pub fn spawn(
         &mut self,
         kind: JobKindRow,
+        co_producer: bool,
         work: impl FnOnce(&AtomicU32, &AtomicBool) -> Work + Send + 'static,
     ) -> Result<u64, VizError> {
         self.next += 1;
@@ -298,6 +302,7 @@ impl Jobs {
             id,
             Job {
                 kind,
+                co_producer,
                 progress,
                 cancel,
                 thread: Some(thread),
@@ -342,13 +347,14 @@ impl Jobs {
     }
 
     /// The finished jobs' work, to apply (each once; a panicked thread
-    /// becomes a failure row at once).
-    pub fn finished(&mut self) -> Vec<(u64, JobKindRow, Work)> {
+    /// becomes a failure row at once), each with whether Co-Producer
+    /// started it in the request still open.
+    pub fn finished(&mut self) -> Vec<(u64, JobKindRow, Work, bool)> {
         let mut out = Vec::new();
         for (id, j) in self.list.iter_mut() {
             if j.thread.as_ref().is_some_and(JoinHandle::is_finished) {
                 match j.thread.take().map(JoinHandle::join) {
-                    Some(Ok(w)) => out.push((*id, j.kind, w)),
+                    Some(Ok(w)) => out.push((*id, j.kind, w, j.co_producer)),
                     _ => {
                         self.unapplied.fetch_sub(1, Ordering::SeqCst);
                         j.row = Some(row(
@@ -364,6 +370,14 @@ impl Jobs {
             }
         }
         out
+    }
+
+    /// A Co-Producer request ended or began: no job started before now
+    /// belongs to the open request (plan 8c Ruling 6).
+    pub fn forget_co_producer(&mut self) {
+        for j in self.list.values_mut() {
+            j.co_producer = false;
+        }
     }
 
     /// Records how job `id` ended.
