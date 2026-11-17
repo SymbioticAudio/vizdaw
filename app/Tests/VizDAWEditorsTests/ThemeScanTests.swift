@@ -353,6 +353,35 @@ enum SourceScan {
         }
     }
 
+    /// Plan release-fixes Task 9: the region names and lit legends draw on
+    /// the track swatches, so each of the eight carries its legend (WCAG
+    /// 4.5:1) in every theme, except the swatches below.
+    /// Swatches on which the better key ink stays under 4.5:1 (the key
+    /// blacks are #1A1A1A and #222222, not pure black): Classic Light's
+    /// orange (4.42), Symbiotic's orange and yellow (4.33, 4.31). Decision
+    /// 7 (darker orange) is not approved, so the tokens are unchanged and
+    /// the token owner decides.
+    static let shortSwatches: Set<String> = ["classic-light orange", "symbiotic orange", "symbiotic yellow"]
+
+    @Test func everySwatchCarriesALegend() {
+        for t in Theme.all {
+            let s = t.swatch
+            let fills: [(String, ThemeColor)] = [
+                ("red", s.red), ("orange", s.orange), ("yellow", s.yellow), ("green", s.green),
+                ("teal", s.teal), ("blue", s.blue), ("purple", s.purple), ("pink", s.pink),
+            ]
+            for (name, fill) in fills {
+                let f = fill.nsColor
+                let ratio = Theme.contrast(t.legend(on: f), f)
+                if Self.shortSwatches.contains("\(t.id) \(name)") {
+                    #expect(ratio < 4.5 && ratio >= 4.3, "\(t.id) \(name): \(ratio)")
+                } else {
+                    #expect(ratio >= 4.5, "\(t.id) \(name): \(ratio)")
+                }
+            }
+        }
+    }
+
     /// B5 review M4 and M5: offline text and icons on the window (4.5:1),
     /// the key recorder's ring on the window and a tool overlay on the
     /// canvas (3:1, non-text), in every theme.
