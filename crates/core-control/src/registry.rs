@@ -2470,6 +2470,18 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         ))
     },
+    // Release every touch the control channel holds, e.g. after a script
+    // stopped mid-gesture (release-fixes Task 4, Decision 2).
+    CommandSpec {
+        class: Class::Change,
+        ..key_only(cmd(
+            "automation.release_all",
+            "Mixer",
+            "Release Channel Touches",
+            None,
+            true,
+        ))
+    },
     CommandSpec {
         class: Class::Change,
         ..cmd("automation.mode.off", "Automation", "Off", None, true)

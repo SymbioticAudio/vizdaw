@@ -47,6 +47,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod fixes;
+
 /// Package extension.
 pub const EXTENSION: &str = "vizdaw";
 
@@ -7945,6 +7947,7 @@ impl Session {
     }
 
     fn write_mode_of(&self, inner: &Inner, t: AutomationTarget) -> Option<WriteMode> {
+        self.may_write(inner, t).then_some(())?;
         let w = inner.writing.as_ref()?;
         if crate::automation::suspended() || !self.pass_plays(w) {
             return None;

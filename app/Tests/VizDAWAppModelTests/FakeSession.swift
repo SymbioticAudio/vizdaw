@@ -1445,6 +1445,28 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
 
     func automationPreview(target: AutomationTargetRow) throws -> [PreviewPointRow] { previewRows }
+
+    // MARK: Release fixes (plan release-fixes Task 4)
+
+    /// What `releaseChannelTouches` answers, and how often it was called.
+    var channelTouches: UInt32 = 0
+    var releaseChannelCalls = 0
+    /// Thrown by `releaseChannelTouches` (after it is counted) when set.
+    var releaseChannelError: VizError?
+    func releaseChannelTouches() throws -> UInt32 {
+        releaseChannelCalls += 1
+        if let e = releaseChannelError { throw e }
+        return channelTouches
+    }
+
+    /// The heard values `heardValues` answers while playing (none while
+    /// stopped, as the core), and the targets each call asked for.
+    var heard: [AutomationTargetRow: Double] = [:]
+    var heardCalls: [[AutomationTargetRow]] = []
+    func heardValues(targets: [AutomationTargetRow]) throws -> [Double?] {
+        heardCalls.append(targets)
+        return targets.map { state.playing ? heard[$0] : nil }
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

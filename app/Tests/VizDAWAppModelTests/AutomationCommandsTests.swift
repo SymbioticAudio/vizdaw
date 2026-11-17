@@ -61,6 +61,39 @@ import VizDAWCore
         #expect(code(run(AutomationCommands.gesture, [arg("target", "fader:1"), arg("phase", "touch")])) == .busy)
     }
 
+    /// Release-fixes Task 4 (Decision 2): `automation.release_all` asks
+    /// the core to release the channel's touches and says how many; any
+    /// argument is refused before the core is called.
+    @Test func releaseAllReleasesTheChannelsTouches() throws {
+        let (id, m, f) = try doc()
+        let run = { (args: [ControlArg]) in AutomationCommands.run(AutomationCommands.releaseAll, args: args, doc: id, m) }
+        func status(_ o: ControlOutcome) -> String? {
+            if case .done(.ran(_, _, _, _, let status)) = o { return status }
+            return nil
+        }
+        f.channelTouches = 2
+        let two = run([])
+        #expect(code(two) == nil)
+        #expect(status(two) == "Released 2 touches.")
+        #expect(f.releaseChannelCalls == 1)
+        f.channelTouches = 1
+        #expect(status(run([])) == "Released 1 touch.")
+        f.channelTouches = 0
+        #expect(status(run([])) == "The channel holds no touch.")
+        #expect(f.releaseChannelCalls == 3)
+        for args in [
+            [ControlArg(name: "x", value: .int(value: 1))], [arg("all", "\u{0}")],
+            [arg("target", String(repeating: "x", count: 70_000))],
+            [ControlArg(name: "strip", value: .int(value: 99_999))],
+        ] {
+            #expect(code(run(args)) == .invalidParams, "\(args)")
+        }
+        #expect(f.releaseChannelCalls == 3, "no call made")
+        f.releaseChannelError = .Busy(message: "Finish the open edit first.")
+        #expect(code(run([])) == .busy)
+        #expect(ControlCommands.handled.contains(AutomationCommands.releaseAll))
+    }
+
     @Test func theChannelGesturesAsItsOwnHolder() throws {
         let (id, m, f) = try doc()
         let o = AutomationCommands.run(
