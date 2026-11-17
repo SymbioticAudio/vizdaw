@@ -199,6 +199,9 @@ public protocol ControlHost: AnyObject {
     /// Applies `audio.set`'s change to the app's audio settings (plan
     /// 5d-1 Ruling 26); the core's refusal is thrown.
     func applyAudio(_ change: AudioChange) throws
+    /// The input devices `audio.set`'s `input_device` is looked up in
+    /// (release fixes Task 2; tests give a fake list).
+    func inputDeviceList() -> [InputDeviceRow]
     /// The core's process-wide surfaces, command maps and learn state
     /// (plan 5f-1; tests pass a fake, pre-flight M25).
     var surfaces: any SurfaceCore { get }
@@ -210,6 +213,11 @@ public protocol ControlHost: AnyObject {
     var appearance: AppearancePreferences { get }
     /// Settings › Plug-ins (plan 6g Task 4): `plugins.*` set it.
     var plugins: PluginSettings { get }
+}
+
+extension ControlHost {
+    /// Settings › Audio's list: the core's devices.
+    public func inputDeviceList() -> [InputDeviceRow] { AudioPreferences.inputDeviceList() }
 }
 
 /// Which window's transport fields the P, E and U keys focus (plan 7d

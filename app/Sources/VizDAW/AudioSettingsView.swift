@@ -16,11 +16,11 @@ struct AudioSettingsView: View {
             Section("Input") {
                 Picker(
                     "Input device",
-                    selection: Binding(get: { prefs.settings.inputDevice }, set: { prefs.setInputDevice($0) })
+                    selection: Binding(get: { prefs.inputDeviceTag() }, set: { prefs.selectInputDevice(tag: $0) })
                 ) {
-                    // By position: two devices may share a name (final review m3).
+                    // Tagged by UID: two devices may share a name (release fixes Task 2).
                     ForEach(Array(prefs.inputDeviceChoices().enumerated()), id: \.offset) { _, c in
-                        Text(c.title).tag(c.name)
+                        Text(c.title).tag(AudioPreferences.tag(of: c))
                     }
                 }
                 Text("A new device takes effect at once; while recording or measuring, once that stops.")

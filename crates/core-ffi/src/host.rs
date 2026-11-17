@@ -478,11 +478,12 @@ pub fn hold_next_rebuild() -> RebuildGate {
     RebuildGate { reached, release }
 }
 
-/// The input device live hosts open (`None`: the output device's own
+/// The input device live hosts open, by UID or name (`None`: the output device's own
 /// input; spec §6.1 Settings › Audio "Input device").
 static INPUT_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 
-/// Chooses the audio input device by name (`None`: "Same as output").
+/// Chooses the audio input device by UID, or by name (older settings;
+/// a name two devices share opens neither) (`None`: "Same as output").
 /// Takes effect at once for an open input (it is reopened on the input
 /// thread); while recording or measuring, when the pass or measurement
 /// ends (5d-2 final review I1). A device that
@@ -1161,6 +1162,47 @@ fn audio_input_devices_body() -> Vec<String> {
     #[cfg(target_os = "macos")]
     {
         platform_macos::hal::input_devices()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+/// An input device Settings › Audio offers: its name, which two devices
+/// may share, and the UID that tells them apart (release fixes Task 2).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct InputDeviceRow {
+    /// The display name.
+    pub name: String,
+    /// The persistent UID ("" when the device gives none).
+    pub uid: String,
+}
+
+/// The audio input devices Settings › Audio offers, with their UIDs, in
+/// the system's order: every device with input channels on a live host;
+/// none offline. Infallible: the body runs inside `catch_unwind`, so a
+/// panic in the HAL listing answers no devices rather than crossing the
+/// FFI.
+#[uniffi::export]
+pub fn audio_input_device_list() -> Vec<InputDeviceRow> {
+    std::panic::catch_unwind(audio_input_device_list_body).unwrap_or_default()
+}
+
+/// [`audio_input_device_list`]'s body, which may panic.
+fn audio_input_device_list_body() -> Vec<InputDeviceRow> {
+    if offline_mode() {
+        return Vec::new();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform_macos::hal::input_device_list()
+            .into_iter()
+            .map(|d| InputDeviceRow {
+                name: d.name,
+                uid: d.uid,
+            })
+            .collect()
     }
     #[cfg(not(target_os = "macos"))]
     {

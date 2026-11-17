@@ -9,8 +9,13 @@ import VizDAWCore
 public struct AudioSettings: Codable, Equatable, Sendable {
     public var softwareMonitoring = true
     public var bufferFrames: UInt32 = 128
-    /// The input device by name; nil: "Same as output".
+    /// The input device's name; nil: "Same as output". Kept beside the
+    /// UID for the picker's "(not connected)" title, and alone in settings
+    /// saved before devices were kept by UID.
     public var inputDevice: String?
+    /// The input device's UID (release fixes Task 2): what the core gets
+    /// when set, so two devices with one name are kept apart.
+    public var inputDeviceUID: String?
     public var latencyTrim: Int32 = 0
     public var cacheMb: UInt32 = 512
     public var readAheadSeconds: UInt32 = 3
@@ -28,7 +33,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case softwareMonitoring, bufferFrames, inputDevice, latencyTrim, cacheMb, readAheadSeconds
+        case softwareMonitoring, bufferFrames, inputDevice, inputDeviceUID, latencyTrim, cacheMb, readAheadSeconds
         case defaultMonitor, countInBars, preRollBars, midiPassesAsTakes, bounceTailSeconds
     }
 
@@ -39,6 +44,8 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         let b: UInt32 = c.field(.bufferFrames, d.bufferFrames)
         bufferFrames = Self.bufferSizes.contains(b) ? b : d.bufferFrames
         inputDevice = c.field(.inputDevice, d.inputDevice)
+        let uid: String? = c.field(.inputDeviceUID, d.inputDeviceUID)
+        inputDeviceUID = uid?.isEmpty == false ? uid : nil
         let t: Int32 = c.field(.latencyTrim, d.latencyTrim)
         latencyTrim = Int64(t).magnitude <= UInt64(Self.maxTrim) ? t : 0
         let mb: UInt32 = c.field(.cacheMb, d.cacheMb)
@@ -77,6 +84,7 @@ public protocol AudioSink: AnyObject {
     func softwareMonitoring(_ on: Bool)
     /// `Busy` while recording.
     func bufferFrames(_ frames: UInt32) throws
+    /// The input device's UID, else its name; nil: "Same as output".
     func inputDevice(_ name: String?)
     func latencyTrim(_ frames: Int32)
     func stream(cacheMb: UInt32, readAheadSeconds: UInt32) throws
@@ -114,7 +122,7 @@ public final class AudioPreferences {
     public func applyAll() {
         let s = settings
         sink.softwareMonitoring(s.softwareMonitoring)
-        sink.inputDevice(s.inputDevice)
+        sink.inputDevice(s.inputDeviceUID ?? s.inputDevice)
         sink.latencyTrim(s.latencyTrim)
         sink.defaultMonitor(s.monitorRow)
         sink.bounceTail(ms: s.bounceTailSeconds * 1000)
@@ -146,8 +154,11 @@ public final class AudioPreferences {
             s.softwareMonitoring = on
         }
         if let d = c.inputDevice {
-            sink.inputDevice(d)
+            // A new name without a UID drops the old device's UID.
+            let uid = d == nil ? nil : c.inputDeviceUID
+            sink.inputDevice(uid ?? d)
             s.inputDevice = d
+            s.inputDeviceUID = uid
         }
         if let t = c.latencyTrim {
             sink.latencyTrim(t)
@@ -168,7 +179,10 @@ public final class AudioPreferences {
 
     public func setSoftwareMonitoring(_ on: Bool) { change(AudioChange(softwareMonitoring: on)) }
     public func setBufferFrames(_ frames: UInt32) { change(AudioChange(bufferFrames: frames)) }
-    public func setInputDevice(_ name: String?) { change(AudioChange(inputDevice: .some(name))) }
+    /// The device with `uid` and `name` (nil, nil: "Same as output").
+    public func setInputDevice(uid: String?, name: String?) {
+        change(AudioChange(inputDevice: .some(name), inputDeviceUID: uid))
+    }
     public func setLatencyTrim(_ frames: Int32) {
         let t = max(-AudioSettings.maxTrim, min(AudioSettings.maxTrim, Int64(frames)))
         change(AudioChange(latencyTrim: Int32(clamping: t)))

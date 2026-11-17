@@ -1381,7 +1381,7 @@ const AUDIO_SET_PARAMS: &[ParamSpec] = &[
         name: "input_device",
         kind: ParamKind::Text,
         required: false,
-        help: "The audio input device by name (\"\": the output device's own input).",
+        help: "The input device's uid, or its name if no other device has that name.",
     },
     ParamSpec {
         name: "latency_trim",

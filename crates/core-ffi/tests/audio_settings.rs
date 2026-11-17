@@ -495,6 +495,7 @@ fn a_lost_device_retires_the_host() {
 fn offline_hosts_offer_no_devices_or_sources() {
     let _g = serial(None);
     assert!(vizdaw_ffi::host::audio_input_devices().is_empty());
+    assert!(vizdaw_ffi::host::audio_input_device_list().is_empty());
     assert!(vizdaw_ffi::host::midi_source_ports().is_empty());
 }
 

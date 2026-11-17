@@ -38,6 +38,9 @@ final class FakeControlHost: ControlHost {
         if let e = audioError { throw e }
         audio.append(change)
     }
+    /// The input devices `audio.set` resolves `input_device` against.
+    var inputDevices: [InputDeviceRow] = []
+    func inputDeviceList() -> [InputDeviceRow] { inputDevices }
 }
 
 @MainActor
