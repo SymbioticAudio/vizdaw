@@ -271,7 +271,7 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         let marked = try #require(m.lanes.first { $0.id == 31 })
         let plain = try #require(m.lanes.first { $0.id == 30 })
         let items = h.laneMenu(seq: 3, lane: marked).items.filter { !$0.isSeparatorItem }
-        #expect(items.map(\.title) == ["Track Synth…", "New MIDI Destination…", "Takes", "Colour", "Make Mine"])
+        #expect(items.map(\.title) == ["Track Synth…", "Edit Destination…", "New MIDI Destination…", "Takes", "Colour", "Make Mine"])
         #expect(!h.laneMenu(seq: 3, lane: plain).items.map(\.title).contains("Make Mine"))
         let mine = try #require(items.last)
         _ = mine.target?.perform(mine.action)
