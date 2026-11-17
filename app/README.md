@@ -2979,6 +2979,46 @@ refused on the sheet by design, so use "Always allow" with those.
 382. Choose the Console theme: the strip legends use the new face. Every other
      theme is unchanged.
 
+Plan 8c, Co-Producer chores:
+
+383. On a saved song, ask Claude to "export all tracks as a DAWproject". A
+     folder "<song> — DAWproject — <date>" appears next to the song,
+     holding "<song>.dawproject". Open that file in another music app: the
+     tracks are there. Window › Song Notes shows the entry, with the file
+     under "Files".
+384. Ask Claude to "bounce to stems". A folder "<song> — Stems — <date>"
+     holds one audio file per strip. Ask again: a second folder "… 2"
+     appears, and the first is untouched.
+385. Tell Claude to put exports in another folder, then ask for a mix. The
+     mix goes there, and the next export goes there too, without asking.
+386. Ask Claude for an AAF and for "a folder for another DAW": each lands in
+     its own dated folder, and Claude reports what did not transfer.
+387. Ask Claude to "quantize the bass to sixteenths". It first shows exactly
+     which track and how many notes change. Say no: nothing changes. Ask
+     again and say yes: the notes move, as one undo step "Co-Producer: …".
+388. Ask Claude to transpose a track up two semitones, and to set the
+     velocities of another to 100. Each asks first, and Undo takes each
+     back.
+389. Ask Claude to add markers "Verse" and "Chorus": they appear at once.
+     Ask it to rename "Chorus" to "Hook": it asks first.
+390. Ask Claude to bounce a track's stem onto a new track. The new track is
+     named "… (Co-Producer)", has the badge, and one Undo removes it with
+     the rest of the request.
+391. In Claude's desktop app or another host that shows MCP Apps views, ask
+     Claude to "show my tracks". A small list shows each track and strip,
+     with Co-Producer's marked. Ask for a change to your work: a preview
+     shows each item before you answer. After an export, a result view
+     shows the files and "Show in Finder".
+392. In a host without views, the same requests answer in plain text with
+     the same lists.
+393. Ask Claude to export into the song's own package, or over an existing
+     file: it is refused, and nothing is written.
+394. In Claude's desktop app, ask for a change to your work, "show my
+     tracks", and an export. The change preview, the track list and the
+     export result views each draw, and follow the app's light and dark
+     mode (switch it and ask again). In the export result, "Show in
+     Finder" opens the export folder.
+
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;

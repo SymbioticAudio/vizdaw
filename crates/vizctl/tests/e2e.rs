@@ -5884,6 +5884,291 @@ fn co_producer_approval_over_mcp() {
     app.quit();
 }
 
+/// Plan 8c README steps 383-393 through `vizdaw-mcp`: one-call exports into
+/// dated folders, the note and marker chores with the composer's yes, a
+/// bounce placed on new tracks, the track list view, and the socket's gate.
+/// Everything stays in the throwaway home.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn co_producer_chores_over_mcp() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let sock = home.join("support").join("co-producer.sock");
+    let day = today();
+    let mut mcp = McpProc::start(
+        &app,
+        json!({"elicitation": {},
+            "extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}),
+    );
+    app.call(
+        "command.run",
+        json!({"id": "settings.co_producer", "params": {"on": true}}),
+    );
+    wait_for_path(&sock, true);
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let song = home.join("Song.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save", "params": {"path": song.display().to_string()}, "window": w}),
+    );
+    let doc = |app: &mut App| app.call("state.get", json!({"target": "document", "window": w}));
+    let lanes = |app: &mut App| -> Vec<Value> { doc(app)["lanes"].as_array().unwrap().clone() };
+    let seq = doc(&mut app)["selected_seq"].clone();
+    let demo_tracks = lanes(&mut app).len();
+    let names = |dir: &std::path::Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let notes_file = song.join("Notes.md");
+
+    // "Export all tracks as a DAWproject" (README step 383).
+    mcp.ok(
+        "begin_request",
+        json!({"name": "export all tracks as a dawproject",
+            "asked": "export all tracks as a dawproject", "window": w}),
+    );
+    let said = mcp.ok(
+        "export",
+        json!({"what": "dawproject", "parent": home.display().to_string()}),
+    );
+    mcp.ok("end_request", json!({}));
+    let dp_folder = home.join(format!("Song \u{2014} DAWproject \u{2014} {day}"));
+    let dp = dp_folder.join("Song.dawproject");
+    assert!(std::fs::metadata(&dp).unwrap().len() > 0, "{dp:?}");
+    assert!(said.contains(&dp.display().to_string()), "{said}");
+    let text = std::fs::read_to_string(&notes_file).unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("- Files: ") && l.contains("Song.dawproject")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l == format!("- Export folder: {}", home.display())),
+        "{text}"
+    );
+
+    // "Bounce to stems": no parent, twice (README step 384).
+    let before = names(&home);
+    mcp.ok("begin_request", json!({"name": "bounce to stems"}));
+    let one = mcp.tool("export", json!({"what": "stems"}));
+    assert_eq!(one["isError"], false, "{one}");
+    assert_eq!(one["structuredContent"]["view"], "export", "{one}");
+    mcp.ok("export", json!({"what": "stems"}));
+    mcp.ok("end_request", json!({}));
+    let stems = home.join(format!("Song \u{2014} Stems \u{2014} {day}"));
+    let stems2 = home.join(format!("Song \u{2014} Stems \u{2014} {day} 2"));
+    assert!(stems.is_dir() && stems2.is_dir());
+    let after = names(&home);
+    let new: Vec<_> = after.iter().filter(|n| !before.contains(n)).collect();
+    assert_eq!(new.len(), 2, "only the two stems folders are new: {new:?}");
+    assert!(
+        before.iter().all(|n| after.contains(n)),
+        "nothing else went: {before:?} {after:?}"
+    );
+    let audio = |dir: &std::path::Path| -> usize {
+        names(dir)
+            .into_iter()
+            .filter(|n| {
+                [".wav", ".aif", ".aiff", ".caf"]
+                    .iter()
+                    .any(|e| n.ends_with(e))
+            })
+            .count()
+    };
+    assert!(audio(&stems) > 0);
+    assert_eq!(audio(&stems), names(&stems).len(), "audio only");
+    assert_eq!(names(&stems2).len(), names(&stems).len());
+    // `default_strips`' count is what the For Another DAW export writes.
+    let probe = home.join("Probe");
+    std::fs::create_dir(&probe).unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": probe}, "window": w}),
+    );
+    let folder = PathBuf::from(r["written"][0].as_str().unwrap());
+    assert_eq!(wavs_in(&folder.join("Audio")).len(), names(&stems).len());
+
+    // A note chore with a yes (README steps 387-388).
+    let track = lanes(&mut app)
+        .into_iter()
+        .find(|l| l["events"].as_u64().unwrap_or(0) > 0)
+        .unwrap_or_else(|| panic!("a demo MIDI track with notes: {}", doc(&mut app)["lanes"]));
+    let transpose = json!([{"id": "modify.transpose_notes",
+        "params": {"seq": seq, "lanes": track["id"].to_string(), "semitones": 2}}]);
+    mcp.ok("begin_request", json!({"name": "transpose the bass"}));
+    let ask = |mcp: &mut McpProc, app: &mut App, n: i64, commands: &Value, result: Value| {
+        mcp.send(
+            &json!({"jsonrpc": "2.0", "id": 2000 + n, "method": "tools/call",
+            "params": {"name": "change", "arguments": {"commands": commands, "window": w}}}),
+        );
+        let e = mcp.recv();
+        assert_eq!(e["method"], "elicitation/create", "{e}");
+        let message = e["params"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let accepted = result["action"] == "accept";
+        mcp.send(&json!({"jsonrpc": "2.0", "id": e["id"], "result": result}));
+        if accepted {
+            answer_sheet(app, true);
+        }
+        let r = mcp.recv();
+        assert_eq!(r["id"], 2000 + n, "{r}");
+        (message, r["result"].clone())
+    };
+    let v0 = doc(&mut app)["version"].clone();
+    let (message, r) = ask(
+        &mut mcp,
+        &mut app,
+        1,
+        &transpose,
+        json!({"action": "decline"}),
+    );
+    let line = message
+        .lines()
+        .find(|l| l.starts_with("- Track "))
+        .unwrap_or_else(|| panic!("no track line in {message}"));
+    assert!(line.ends_with(" notes changed (pitch)"), "{message}");
+    assert_eq!(
+        mcp_text(&r),
+        "The composer said no. Nothing changed.",
+        "{r}"
+    );
+    assert_eq!(r["structuredContent"]["state"], "said_no", "{r}");
+    assert_eq!(doc(&mut app)["version"], v0, "nothing changed");
+    assert_no_sheet(&mut app);
+    let (_, r) = ask(
+        &mut mcp,
+        &mut app,
+        2,
+        &transpose,
+        json!({"action": "accept", "content": {"allow": true}}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    mcp.ok("end_request", json!({}));
+    wait_for_undo(&mut app, &w, "Co-Producer: Transpose the Bass");
+
+    // Markers (README step 389).
+    mcp.ok("begin_request", json!({"name": "mark the song"}));
+    mcp.ok(
+        "marker_add",
+        json!({"seq": seq, "tick": 0, "name": "Intro", "window": w}),
+    );
+    let rename = json!([{"id": "marker.rename",
+        "params": {"seq": seq, "index": 1, "name": "Top"}}]);
+    let (_, r) = ask(
+        &mut mcp,
+        &mut app,
+        3,
+        &rename,
+        json!({"action": "accept", "content": {"allow": true}}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    mcp.ok("end_request", json!({}));
+    let markers = doc(&mut app)["markers"].clone();
+    assert_eq!(markers[0]["name"], "Top", "{markers}");
+
+    // A bounce placed on new tracks (README step 390).
+    let strip =
+        app.call("state.get", json!({"target": "mixer", "window": w}))["strips"][0]["id"].clone();
+    let tracks_before = lanes(&mut app).len();
+    mcp.ok(
+        "begin_request",
+        json!({"name": "bounce a stem onto a track"}),
+    );
+    mcp.ok(
+        "file_bounce",
+        json!({"source": "stems", "strips": strip.to_string(),
+            "path": home.display().to_string(), "add_to_project": true, "window": w}),
+    );
+    mcp.ok("end_request", json!({}));
+    let now = lanes(&mut app);
+    assert_eq!(now.len(), tracks_before + 1, "{now:?}");
+    let bounced = now.iter().find(|l| l["co_producer"] == true).unwrap();
+    assert!(
+        bounced["name"]
+            .as_str()
+            .unwrap()
+            .ends_with(" (Co-Producer)"),
+        "{bounced}"
+    );
+    // The track list view, with the bounced track marked.
+    let listed = mcp.request("tools/list", json!({}));
+    let show = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "show_tracks")
+        .unwrap_or_else(|| panic!("no show_tracks in {listed}"))
+        .clone();
+    assert_eq!(
+        show["_meta"]["ui"]["resourceUri"], "ui://vizdaw/tracks",
+        "{show}"
+    );
+    let page = mcp.request("resources/read", json!({"uri": "ui://vizdaw/tracks"}));
+    let html = page["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(html.starts_with("<!DOCTYPE html>"), "{page}");
+    let shown = mcp.tool("show_tracks", json!({}));
+    let rows = shown["structuredContent"]["tracks"].as_array().unwrap();
+    assert_eq!(rows.len(), demo_tracks + 1, "{shown}");
+    assert!(rows.iter().any(|t| t["co_producer"] == true), "{shown}");
+    // One Undo from VizDAW takes the new track away with its request.
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    assert_eq!(lanes(&mut app).len(), tracks_before);
+
+    // The gate (README step 393): a raw client on the socket.
+    let mut raw = Client::connect(&sock).expect("the Co-Producer socket");
+    let t = Duration::from_secs(30);
+    let two = lanes(&mut app)
+        .iter()
+        .take(2)
+        .map(|l| l["id"].to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let exists = home.join("Existing.mid");
+    std::fs::write(&exists, b"keep").unwrap();
+    for (cmd, params) in [
+        (
+            "command.run",
+            json!({"id": "modify.quantize_notes",
+                "params": {"seq": seq, "lanes": "1", "grid": "1/16"}, "window": w}),
+        ),
+        (
+            "command.run",
+            json!({"id": "marker.remove", "params": {"seq": seq, "index": 1}, "window": w}),
+        ),
+        (
+            "co_producer.export",
+            json!({"what": "midi", "parent": song.display().to_string(), "window": w}),
+        ),
+        (
+            "command.run",
+            json!({"id": "file.export_midi_clip",
+                "params": {"lanes": two, "path": exists.display().to_string()}, "window": w}),
+        ),
+    ] {
+        match raw.call(cmd, params.clone(), t) {
+            Err(CallError::Reply(e)) => {
+                assert_eq!(e.code, ErrorCode::NotAllowed, "{cmd} {params}: {e:?}")
+            }
+            other => panic!("{cmd} {params}: expected not_allowed, got {other:?}"),
+        }
+    }
+    assert_eq!(std::fs::read(&exists).unwrap(), b"keep");
+    drop(raw);
+    drop(mcp);
+    app.quit();
+}
+
 /// README steps 368 to 382 through the channel (plan release-fixes): a
 /// region's fade shape, a track's output, a Built-in Synth's sound, a
 /// held channel touch released, and the Mix view refusing nudges.
