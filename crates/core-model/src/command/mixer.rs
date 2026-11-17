@@ -185,6 +185,12 @@ pub enum MixerCmd {
         /// The swatch, or none for the kind's colour.
         colour: Option<Swatch>,
     },
+    /// Make Mine (plan 8b Ruling 1): the strip, its sends and its plug-in
+    /// slots become the composer's; its name loses its " (Co-Producer)".
+    MakeMine {
+        /// The strip.
+        strip: StripId,
+    },
 }
 
 impl MixerCmd {
@@ -217,6 +223,7 @@ impl MixerCmd {
             MixerCmd::SetEq { plugin: None, .. } => "Remove EQ",
             MixerCmd::SetPluginState { .. } => "Set Plugin Settings",
             MixerCmd::SetColour { .. } => "Set Strip Colour",
+            MixerCmd::MakeMine { .. } => "Make Mine",
         }
     }
 }
@@ -291,9 +298,15 @@ pub(crate) fn apply(d: &mut Document, cmd: &MixerCmd, r: &mut Report) -> Result<
         }
         MixerCmd::EditSend { strip, index, send } => {
             let s = d.mixer_mut().strip_mut(*strip)?;
-            *s.sends
+            let old = s
+                .sends
                 .get_mut(*index)
-                .ok_or(ModelError::range("send", index))? = *send;
+                .ok_or(ModelError::range("send", index))?;
+            // The edit keeps the send's mark (Ruling 1).
+            *old = AuxSend {
+                co_producer: old.co_producer,
+                ..*send
+            };
             check_strip_values(s)?;
         }
         MixerCmd::RemoveSend { strip, index } => {
@@ -394,6 +407,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &MixerCmd, r: &mut Report) -> Result<
         MixerCmd::SetColour { strip, colour } => {
             d.mixer_mut().strip_mut(*strip)?.colour = *colour;
         }
+        MixerCmd::MakeMine { strip } => crate::marks::make_strip_mine(d, *strip)?,
         MixerCmd::AddInstrumentOutput { dest, index, name } => {
             let plugin = matches!(
                 d.instruments().get(dest).map(|x| &x.kind),

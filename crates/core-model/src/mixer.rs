@@ -89,6 +89,10 @@ pub struct PluginSlot {
     /// Values changed through VizDAW since the last capture (the overlay).
     #[serde(with = "param_list")]
     pub params: OrdMap<ParamId, f64>,
+    /// Co-Producer made it and the composer has not taken it over (plan
+    /// 8b Ruling 1); absent in files when not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub co_producer: bool,
 }
 
 impl PluginSlot {
@@ -101,6 +105,7 @@ impl PluginSlot {
             sidechain: None,
             state: None,
             params: OrdMap::new(),
+            co_producer: false,
         }
     }
 }
@@ -171,6 +176,10 @@ pub struct AuxSend {
     pub pre_fader: bool,
     /// Off sends keep their settings but carry nothing.
     pub enabled: bool,
+    /// Co-Producer made it and the composer has not taken it over (plan
+    /// 8b Ruling 1); absent in files when not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub co_producer: bool,
 }
 
 impl AuxSend {
@@ -181,6 +190,7 @@ impl AuxSend {
             level_db: 0.0,
             pre_fader: false,
             enabled: true,
+            co_producer: false,
         }
     }
 }
@@ -246,6 +256,10 @@ pub struct Strip {
     /// Read, so all-Read projects save as before (plan 5e-1 Ruling 2).
     #[serde(default, skip_serializing_if = "AutomationMode::is_read")]
     pub automation: AutomationMode,
+    /// Co-Producer made it and the composer has not taken it over (plan
+    /// 8b Ruling 1); absent in files when not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub co_producer: bool,
 }
 
 impl Strip {
@@ -266,6 +280,7 @@ impl Strip {
             sends: Vector::new(),
             output: Output::Master,
             automation: AutomationMode::Read,
+            co_producer: false,
         }
     }
 

@@ -906,7 +906,7 @@ fn layout_result_json() {
 }
 
 /// Plan 7b Ruling 11: `state.get mixer` answers each strip with exactly
-/// the ruling's keys; the demo's synth has no EQ, the instrument kind
+/// the ruling's keys (plus plan 8b's `co_producer`); the demo's synth has no EQ, the instrument kind
 /// colour and no colour of its own.
 #[test]
 fn state_get_mixer_answers_json() {
@@ -939,6 +939,7 @@ fn state_get_mixer_answers_json() {
         "kind_label",
         "kind_colour",
         "colour",
+        "co_producer",
         "gain_db",
         "pan",
         "mute",

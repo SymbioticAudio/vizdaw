@@ -276,6 +276,7 @@ fn structure_fixture() -> Structure {
             level_db: -6.0,
             pre_fader: true,
             enabled: true,
+            co_producer: false,
         },
     })
     .unwrap();

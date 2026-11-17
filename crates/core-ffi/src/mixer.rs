@@ -186,6 +186,10 @@ pub struct StripRow {
     pub kind_colour: StripColourRow,
     /// Its own colour, if any (C-1): the colour bar takes it when set.
     pub colour: Option<SwatchRow>,
+    /// Co-Producer made it and the composer has not taken it over (plan
+    /// 8b Ruling 1).
+    #[uniffi(default)]
+    pub co_producer: bool,
 }
 
 /// A destination of the instrument list (lanes play through these).
@@ -404,6 +408,7 @@ fn strip_row(
             .map(|slot| slot_row(slot, false, host.as_deref_mut())),
         kind_colour: strip_colour(doc.mixer(), s),
         colour: s.colour.map(SwatchRow::from),
+        co_producer: s.co_producer,
     }
 }
 

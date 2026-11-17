@@ -9,6 +9,7 @@ use crate::document::Document;
 use crate::event::EventBody;
 use crate::ids::{LaneId, SeqId, StripId};
 use crate::lane::Lane;
+use crate::mixer::Swatch;
 use crate::sequence::Sequence;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +20,10 @@ pub struct ChangeItem {
     pub thing: String,
     /// What happens to it ("deleted, with 4 notes", "renamed to \"Vox\"").
     pub change: String,
+    /// The track or strip it names was Co-Producer's (marked before the
+    /// change), and the change takes away none of its regions or notes
+    /// (plan 8b Ruling 2): Co-Producer may do it without a yes.
+    pub co_producers: bool,
 }
 
 /// Names longer than this are cut to one less plus "…".
@@ -58,7 +63,19 @@ pub fn shown_name(name: &str) -> String {
 }
 
 fn item(thing: String, change: String) -> ChangeItem {
-    ChangeItem { thing, change }
+    ChangeItem {
+        thing,
+        change,
+        co_producers: false,
+    }
+}
+
+/// An item about a thing that was Co-Producer's when `ours`.
+fn item_of(thing: String, change: String, ours: bool) -> ChangeItem {
+    ChangeItem {
+        co_producers: ours,
+        ..item(thing, change)
+    }
 }
 
 fn renamed(to: &str) -> String {
@@ -114,7 +131,11 @@ fn tracks(before: &Sequence, after: &Sequence, out: &mut Vec<ChangeItem>) {
         } else {
             format!("deleted, with {}", parts.join(" and "))
         };
-        out.push(item(track(i, &l.name), change));
+        out.push(item_of(
+            track(i, &l.name),
+            change,
+            l.co_producer && parts.is_empty(),
+        ));
     }
     for (i, l) in after.lanes.iter().enumerate() {
         let Some((_, old)) = b.get(&l.id) else {
@@ -122,7 +143,11 @@ fn tracks(before: &Sequence, after: &Sequence, out: &mut Vec<ChangeItem>) {
             continue;
         };
         if old.name != l.name {
-            out.push(item(track(i, &old.name), renamed(&l.name)));
+            out.push(item_of(
+                track(i, &old.name),
+                renamed(&l.name),
+                old.co_producer,
+            ));
         }
         let ((r0, n0), (r1, n1)) = (held(old), held(l));
         let mut parts = Vec::new();
@@ -141,7 +166,9 @@ fn tracks(before: &Sequence, after: &Sequence, out: &mut Vec<ChangeItem>) {
             ));
         }
         if !parts.is_empty() {
-            out.push(item(track(i, &old.name), parts.join(", ")));
+            // A falling count takes the composer's work away.
+            let ours = old.co_producer && r1 >= r0 && n1 >= n0;
+            out.push(item_of(track(i, &old.name), parts.join(", "), ours));
         }
     }
 }
@@ -202,21 +229,43 @@ fn strip(name: &str) -> String {
     format!("Strip {}", shown_name(name))
 }
 
+/// A strip colour as the list says it (plan 8b Ruling 3).
+fn colour(c: Option<Swatch>) -> &'static str {
+    match c {
+        None => "none",
+        Some(Swatch::Red) => "red",
+        Some(Swatch::Orange) => "orange",
+        Some(Swatch::Yellow) => "yellow",
+        Some(Swatch::Green) => "green",
+        Some(Swatch::Teal) => "teal",
+        Some(Swatch::Blue) => "blue",
+        Some(Swatch::Purple) => "purple",
+        Some(Swatch::Pink) => "pink",
+    }
+}
+
 fn strips(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
     let (b, a) = (before.mixer().strips(), after.mixer().strips());
     for id in strip_order(before) {
         if let (Some(s), None) = (b.get(&id), a.get(&id)) {
-            out.push(item(strip(&s.name), "deleted".into()));
+            out.push(item_of(strip(&s.name), "deleted".into(), s.co_producer));
         }
     }
     for id in strip_order(after) {
         let Some(s) = a.get(&id) else { continue };
-        match b.get(&id) {
-            None => out.push(item(strip(&s.name), "added".into())),
-            Some(old) if old.name != s.name => {
-                out.push(item(strip(&old.name), renamed(&s.name)));
-            }
-            Some(_) => {}
+        let Some(old) = b.get(&id) else {
+            out.push(item(strip(&s.name), "added".into()));
+            continue;
+        };
+        if old.name != s.name {
+            out.push(item_of(strip(&old.name), renamed(&s.name), old.co_producer));
+        }
+        if old.colour != s.colour {
+            out.push(item_of(
+                strip(&old.name),
+                format!("colour {} → {}", colour(old.colour), colour(s.colour)),
+                old.co_producer,
+            ));
         }
     }
 }

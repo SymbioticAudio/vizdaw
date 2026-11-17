@@ -8,7 +8,7 @@ use core_model::event::{EventBody, EventSpec, FadeShape};
 use core_model::file::{
     FORMAT, Migration, VERSION, autosave, from_json, list_autosaves, load, migrate_v1_to_v2,
     migrate_v2_to_v3, migrate_v3_to_v4, migrate_v5_to_v6, migrate_v6_to_v7, migrate_v7_to_v8,
-    migrate_v8_to_v9, run_migrations, save, to_json,
+    migrate_v8_to_v9, migrate_v9_to_v10, run_migrations, save, to_json,
 };
 use core_model::format::{AudioFormat, BitDepth};
 use core_model::history::Timestamp;
@@ -656,7 +656,7 @@ fn a_strip_colour_round_trips_and_none_is_not_written() {
 /// destination without a MIDI mix has the default one).
 #[test]
 fn version_5_projects_migrate_to_version_6() {
-    assert_eq!(VERSION, 9);
+    assert_eq!(VERSION, 10);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(5);
@@ -674,7 +674,7 @@ fn version_5_projects_migrate_to_version_6() {
 /// lane or destination without MPE has none).
 #[test]
 fn version_6_projects_migrate_to_version_7() {
-    assert_eq!(VERSION, 9);
+    assert_eq!(VERSION, 10);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(6);
@@ -693,7 +693,7 @@ fn version_6_projects_migrate_to_version_7() {
 /// without a name have none).
 #[test]
 fn version_7_projects_migrate_to_version_8() {
-    assert_eq!(VERSION, 9);
+    assert_eq!(VERSION, 10);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(7);
@@ -869,14 +869,14 @@ fn overlapping_doc() -> Document {
 }
 
 /// Plan 6c (Task 1): a version-8 project with overlapping regions loads
-/// unchanged, with no implicit crossfade, and saves as version 9 with no
+/// unchanged, with no implicit crossfade, and saves as the current version with no
 /// `crossfade` key.
 #[test]
 fn version_8_projects_migrate_to_version_9() {
-    assert_eq!(VERSION, 9);
+    assert_eq!(VERSION, 10);
     let d = overlapping_doc();
     let text = to_json(&d).unwrap();
-    assert!(text.contains("\"version\": 9"));
+    assert!(text.contains(&format!("\"version\": {VERSION}")));
     assert!(!text.contains("crossfade"));
     let mut v: Value = serde_json::from_str(&text).unwrap();
     v["version"] = json!(8);
@@ -888,7 +888,7 @@ fn version_8_projects_migrate_to_version_9() {
         }
     }
     let saved = to_json(&back).unwrap();
-    assert!(saved.contains("\"version\": 9"));
+    assert!(saved.contains(&format!("\"version\": {VERSION}")));
     assert!(!saved.contains("crossfade"));
     assert_eq!(migrate_v8_to_v9(v.clone()).unwrap(), v);
 }
@@ -911,4 +911,111 @@ fn crossfade_survives_save_and_load() {
     assert_eq!(text.matches("\"crossfade\": true").count(), 1);
     assert_eq!(text.matches("crossfade").count(), 1);
     assert_eq!(from_json(&text).unwrap(), d);
+}
+
+/// A song where Co-Producer made a track, a bus with an insert, and a send
+/// from the hand track's strip to it (plan 8b Task 2, Ruling 1).
+fn marked_doc() -> Document {
+    use core_model::command::{LaneCmd, MixerCmd};
+    use core_model::history::History;
+    use core_model::mixer::AuxSend;
+    let d = small_doc();
+    let d = apply(
+        &d,
+        &Command::Routing(RoutingCmd::AddOutput {
+            name: "Audio 1".into(),
+            reference: "audio:1-2".into(),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let hand = *d.mixer().order().iter().next().unwrap();
+    let mut h = History::new(d);
+    h.begin_request("help").unwrap();
+    h.set_acting(true).unwrap();
+    let f = ViewFilter::default();
+    h.execute(
+        &Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Bass".into(),
+            index: None,
+        }),
+        &f,
+    )
+    .unwrap();
+    let r = h
+        .execute(
+            &Command::Mixer(MixerCmd::AddBus {
+                name: "Drums".into(),
+                index: None,
+            }),
+            &f,
+        )
+        .unwrap();
+    let bus = r
+        .created
+        .iter()
+        .find_map(|i| match i {
+            core_model::ids::AnyId::Strip(s) => Some(*s),
+            _ => None,
+        })
+        .unwrap();
+    h.execute(
+        &Command::Mixer(MixerCmd::AddSend {
+            strip: hand,
+            send: AuxSend::new(bus),
+        }),
+        &f,
+    )
+    .unwrap();
+    h.execute(
+        &Command::Mixer(MixerCmd::AddInsert {
+            strip: bus,
+            index: None,
+            plugin: PluginRef::from_legacy("au:comp"),
+        }),
+        &f,
+    )
+    .unwrap();
+    h.doc().clone()
+}
+
+#[test]
+fn marks_round_trip_and_version_10() {
+    assert_eq!(VERSION, 10);
+    let d = marked_doc();
+    let text = to_json(&d).unwrap();
+    assert!(text.contains("\"version\": 10"));
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let lanes = v["document"]["sequences"][0]["lanes"].as_array().unwrap();
+    assert_eq!(lanes[0].get("co_producer"), None);
+    assert_eq!(lanes[1]["co_producer"], true);
+    assert_eq!(from_json(&text).unwrap(), d);
+    let pkg = temp_package("marks");
+    save(&d, &pkg).unwrap();
+    assert_eq!(load(&pkg).unwrap(), d);
+    std::fs::remove_dir_all(&pkg).unwrap();
+    // Every kind of mark is written.
+    let n = text.matches("\"co_producer\": true").count();
+    assert_eq!(n, 4, "lane, bus, send and insert: {text}");
+
+    // A version-9 file loads, with no marks; it is unchanged by the step.
+    let plain = small_doc();
+    let mut v9: Value = serde_json::from_str(&to_json(&plain).unwrap()).unwrap();
+    v9["version"] = json!(9);
+    assert_eq!(migrate_v9_to_v10(v9.clone()).unwrap(), v9);
+    let back = from_json(&serde_json::to_string(&v9).unwrap()).unwrap();
+    assert_eq!(back, plain);
+    assert!(!to_json(&back).unwrap().contains("co_producer"));
+
+    // An unmarked document's JSON has no `co_producer` key.
+    assert!(!to_json(&plain).unwrap().contains("co_producer"));
+
+    // A newer file is refused as before.
+    let mut v11: Value = serde_json::from_str(&text).unwrap();
+    v11["version"] = json!(11);
+    assert!(matches!(
+        from_json(&v11.to_string()),
+        Err(ModelError::NewerFormat { found: 11 })
+    ));
 }

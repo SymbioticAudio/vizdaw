@@ -1120,3 +1120,210 @@ fn a_composers_finished_job_never_lands_in_a_co_producer_step() {
     s.idle().unwrap();
     s.close().unwrap();
 }
+
+fn colour(strip: u64, c: &str) -> PlannedRow {
+    planned(
+        "mixer.set_colour",
+        vec![int("strip", strip), text("colour", c)],
+    )
+}
+
+/// The strip of `kind` in the session's mixer.
+fn strip_of(s: &Session, want: impl Fn(&vizdaw_ffi::StripKindRow) -> bool) -> vizdaw_ffi::StripRow {
+    s.mixer()
+        .unwrap()
+        .strips
+        .into_iter()
+        .find(|x| want(&x.kind))
+        .unwrap()
+}
+
+fn synth_strip(s: &Session) -> vizdaw_ffi::StripRow {
+    strip_of(s, |k| matches!(k, vizdaw_ffi::StripKindRow::BuiltinSynth))
+}
+
+fn audio_strip(s: &Session) -> vizdaw_ffi::StripRow {
+    strip_of(s, |k| {
+        matches!(k, vizdaw_ffi::StripKindRow::AudioPath { .. })
+    })
+}
+
+/// Inside an open request, Co-Producer adds an instrument track (with its
+/// own new built-in synth strip); answers the track.
+fn co_producer_track(s: &Session) -> u64 {
+    s.co_producer_begin("add keys".into()).unwrap();
+    s.co_producer_enter(STAMP.into()).unwrap();
+    let lane = add_track(s, TrackKindRow::Instrument);
+    s.co_producer_leave();
+    lane
+}
+
+/// Plan 8b Ruling 2: Co-Producer's own track and strip need no yes.
+#[test]
+fn previews_spare_co_producers_own_things() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = saved(dir.path());
+    let seq = first_seq(&s);
+    let keys = co_producer_track(&s);
+    assert_eq!(
+        lanes(&s).last().unwrap(),
+        &(keys, "Inst 1 (Co-Producer)".to_string())
+    );
+
+    let p = preview(&s, &pkg, vec![rename(seq, keys, "Kick")]);
+    assert!(!p.needs_yes, "{p:?}");
+    assert_eq!(
+        p.items,
+        vec![row(
+            "Track 3, Inst 1 (Co-Producer)",
+            "renamed to \"Kick (Co-Producer)\"",
+            false
+        )]
+    );
+    let synth = synth_strip(&s);
+    assert!(synth.co_producer);
+    let p = preview(&s, &pkg, vec![colour(synth.id, "blue")]);
+    assert!(!p.needs_yes, "{p:?}");
+    assert_eq!(
+        p.items,
+        vec![row(
+            &format!("Strip {}", synth.name),
+            "colour none → blue",
+            false
+        )]
+    );
+    // An empty Co-Producer track goes without a yes.
+    let p = preview(&s, &pkg, vec![delete(seq, keys)]);
+    assert!(!p.needs_yes, "{p:?}");
+
+    // The same on the composer's track and strip need a yes.
+    let (hand, name) = lanes(&s)[0].clone();
+    let p = preview(&s, &pkg, vec![rename(seq, hand, "Kick")]);
+    assert!(p.needs_yes);
+    assert_eq!(
+        p.items,
+        vec![row(
+            &format!("Track 1, {name}"),
+            "renamed to \"Kick\"",
+            true
+        )]
+    );
+    let audio = audio_strip(&s);
+    assert!(!audio.co_producer);
+    let p = preview(&s, &pkg, vec![colour(audio.id, "blue")]);
+    assert!(p.needs_yes);
+    assert_eq!(
+        p.items,
+        vec![row(
+            &format!("Strip {}", audio.name),
+            "colour none → blue",
+            true
+        )]
+    );
+    // "none" on an uncoloured strip changes nothing; a missing strip is
+    // refused.
+    let p = preview(&s, &pkg, vec![colour(audio.id, "none")]);
+    assert_eq!(p.items, vec![], "an uncoloured strip stays as it is");
+    assert!(s.co_producer_preview(vec![colour(9_999, "red")]).is_err());
+    s.co_producer_end().unwrap();
+}
+
+/// Ruling 2's stricter rule: a Co-Producer track holding the composer's
+/// notes needs a yes to delete.
+#[test]
+fn deleting_a_filled_co_producer_track_needs_a_yes() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = saved(dir.path());
+    let seq = first_seq(&s);
+    let keys = co_producer_track(&s);
+    add_notes(&s, keys, 1);
+    let p = preview(&s, &pkg, vec![delete(seq, keys)]);
+    assert!(p.needs_yes, "{p:?}");
+    assert!(p.items[0].change.starts_with("deleted, with"), "{p:?}");
+    assert!(p.items[0].composers_work);
+}
+
+/// The marks reach the rows and the control channel's state JSON.
+#[test]
+fn marks_reach_the_rows_and_state() {
+    use vizdaw_ffi::ControlResult;
+    use vizdaw_ffi::control::result_json;
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _pkg) = saved(dir.path());
+    let seq = first_seq(&s);
+    let keys = co_producer_track(&s);
+    s.co_producer_end().unwrap();
+    let rows = s.lanes(seq).unwrap();
+    let row = rows.iter().find(|l| l.id == keys).unwrap();
+    assert!(row.co_producer);
+    assert!(rows.iter().filter(|l| l.id != keys).all(|l| !l.co_producer));
+    assert!(synth_strip(&s).co_producer);
+    assert!(!audio_strip(&s).co_producer);
+
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot: s.snapshot().unwrap(),
+        selected_seq: Some(seq),
+        lanes: rows.clone(),
+        destinations: vec![],
+        alert: None,
+    });
+    let l = v["lanes"].as_array().unwrap();
+    assert_eq!(l[2]["co_producer"], true);
+    assert_eq!(l[0]["co_producer"], false);
+    let m = result_json(&ControlResult::Mixer {
+        doc: "D".into(),
+        mixer: s.mixer().unwrap(),
+    });
+    let strips = m["strips"].as_array().unwrap();
+    let synth = synth_strip(&s).id;
+    for st in strips {
+        assert_eq!(st["co_producer"], st["id"] == synth, "{st}");
+    }
+}
+
+/// Make Mine through the session: one undo step, and a hostile strip id
+/// changes nothing.
+#[test]
+fn make_mine_through_the_session() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _pkg) = saved(dir.path());
+    let seq = first_seq(&s);
+    let keys = co_producer_track(&s);
+    s.co_producer_end().unwrap();
+    s.make_mine_track(seq, keys).unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some("Make Mine"));
+    let row = s
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.id == keys)
+        .unwrap();
+    assert!(!row.co_producer);
+    assert_eq!(row.name, "Inst 1");
+    let synth = synth_strip(&s);
+    assert!(!synth.co_producer);
+    assert_eq!(synth.name, "Built-in Synth");
+
+    s.undo().unwrap();
+    let synth = synth_strip(&s);
+    assert!(synth.co_producer);
+    s.make_mine_strip(synth.id).unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some("Make Mine"));
+    assert!(!synth_strip(&s).co_producer);
+
+    let before = s.debug_document_json();
+    let version = s.snapshot().unwrap().version;
+    for bad in [9_999, u64::MAX] {
+        assert!(s.make_mine_strip(bad).is_err());
+        assert!(s.make_mine_track(seq, bad).is_err());
+        assert!(s.make_mine_track(bad, keys).is_err());
+    }
+    assert_eq!(s.debug_document_json(), before);
+    assert_eq!(s.snapshot().unwrap().version, version);
+}

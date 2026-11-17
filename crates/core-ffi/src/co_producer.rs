@@ -204,6 +204,16 @@ fn rows(items: Vec<ChangeItem>, composers_work: bool) -> impl Iterator<Item = Ch
     })
 }
 
+/// Items whose own flag says whether each is the composer's work (Ruling
+/// 2): what was Co-Producer's, and loses nothing, needs no yes.
+fn own_rows(items: Vec<ChangeItem>) -> impl Iterator<Item = ChangeItemRow> {
+    items.into_iter().map(|i| ChangeItemRow {
+        composers_work: !i.co_producers,
+        thing: i.thing,
+        change: i.change,
+    })
+}
+
 fn id_arg(p: &Planned, name: &str) -> Result<u64, VizError> {
     match p.args.iter().find(|(n, _)| n == name) {
         Some((_, ArgValue::Int(i))) => {
@@ -231,6 +241,43 @@ fn track_command(p: &Planned) -> Result<core_model::command::Command, VizError> 
     crate::edit::to_command(&EditCommand::Lane { edit })
 }
 
+/// The core-model command the strip's Colour menu builds (plan 8b Ruling
+/// 3): `none` clears the colour.
+fn colour_command(p: &Planned) -> Result<core_model::command::Command, VizError> {
+    use core_model::command::{Command, MixerCmd};
+    use core_model::mixer::Swatch;
+    let strip = match p.args.iter().find(|(n, _)| n == "strip") {
+        Some((_, ArgValue::Int(i))) => {
+            u64::try_from(*i).map_err(|_| model("mixer.set_colour: `strip` is out of range"))?
+        }
+        _ => return Err(model("mixer.set_colour: name the `strip`")),
+    };
+    let colour = match p.args.iter().find(|(n, _)| n == "colour") {
+        Some((_, ArgValue::Text(t))) => match t.as_str() {
+            "none" => None,
+            "red" => Some(Swatch::Red),
+            "orange" => Some(Swatch::Orange),
+            "yellow" => Some(Swatch::Yellow),
+            "green" => Some(Swatch::Green),
+            "teal" => Some(Swatch::Teal),
+            "blue" => Some(Swatch::Blue),
+            "purple" => Some(Swatch::Purple),
+            "pink" => Some(Swatch::Pink),
+            other => {
+                return Err(model(format!(
+                    "mixer.set_colour: `{}` is not a colour",
+                    diff::shown_name(other)
+                )));
+            }
+        },
+        _ => return Err(model("mixer.set_colour: give the `colour`")),
+    };
+    Ok(Command::Mixer(MixerCmd::SetColour {
+        strip: core_model::ids::StripId(strip),
+        colour,
+    }))
+}
+
 /// What `plan` would change (Ruling 6), worked out in order on a clone of
 /// `history` with Co-Producer acting, as the apply will run it. `package`
 /// is the song's file, if saved. Nothing outside the clone changes.
@@ -250,11 +297,15 @@ pub fn preview_items(
     let filter = ViewFilter::default();
     for p in plan {
         match p.id.as_str() {
-            "track.rename" | "track.delete" => {
-                let cmd = track_command(p)?;
+            "track.rename" | "track.delete" | "mixer.set_colour" => {
+                let cmd = if p.id == "mixer.set_colour" {
+                    colour_command(p)?
+                } else {
+                    track_command(p)?
+                };
                 let before = h.doc().clone();
                 h.execute(&cmd, &filter)?;
-                out.extend(rows(diff::describe(&before, h.doc()), true));
+                out.extend(own_rows(diff::describe(&before, h.doc())));
             }
             "edit.undo" | "edit.redo" => {
                 let undo = p.id == "edit.undo";

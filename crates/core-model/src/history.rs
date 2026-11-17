@@ -434,6 +434,8 @@ impl History {
     /// [`History::new_strip_eq`] in its EQ slot, in the same step; when at
     /// least one slot is filled, the note
     /// ([`History::set_new_strip_eq_note`]) is added to the warnings.
+    /// Then Co-Producer's marks settle ([`crate::marks::settle`]): undo
+    /// and redo restore whole versions, so they need nothing.
     pub fn execute(&mut self, cmd: &Command, filter: &ViewFilter) -> Result<Report> {
         if !self.acting {
             self.before_hand_action();
@@ -454,6 +456,7 @@ impl History {
                 applied.report.warnings.push(note.clone());
             }
         }
+        crate::marks::settle(&self.present.doc, &mut applied.doc, self.acting);
         let selection_only = matches!(cmd, Command::SelectAndModify { modify: None, .. });
         if let Command::SelectAndModify {
             modify: Some(m), ..
@@ -525,7 +528,7 @@ impl History {
         {
             return Ok(None);
         }
-        let applied = apply_in(
+        let mut applied = apply_in(
             &self.present.doc,
             Context {
                 selection: &self.selection,
@@ -533,6 +536,8 @@ impl History {
             },
             cmd,
         )?;
+        // Never acting here (see above).
+        crate::marks::settle(&self.present.doc, &mut applied.doc, false);
         if applied.doc != self.present.doc {
             self.present.doc = applied.doc;
             self.present.at = Timestamp::now();

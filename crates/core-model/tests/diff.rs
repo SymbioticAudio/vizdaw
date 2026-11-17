@@ -8,7 +8,10 @@ use core_model::diff::{ChangeItem, describe};
 use core_model::document::Document;
 use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
 use core_model::file::{from_json, to_json};
+use core_model::history::History;
 use core_model::ids::{LaneId, MediaId, SeqId, StripId};
+use core_model::mixer::Swatch;
+use core_model::selection::ViewFilter;
 use core_model::tempo::{Bpm, TempoMap};
 use core_model::time::Tick;
 
@@ -20,7 +23,25 @@ fn item(thing: &str, change: &str) -> ChangeItem {
     ChangeItem {
         thing: thing.into(),
         change: change.into(),
+        co_producers: false,
     }
+}
+
+/// An item about something Co-Producer made that takes away nothing.
+fn ours(thing: &str, change: &str) -> ChangeItem {
+    ChangeItem {
+        co_producers: true,
+        ..item(thing, change)
+    }
+}
+
+/// `c` applied with Co-Producer acting, so what it makes is marked.
+fn acting(d: &Document, c: Command) -> Document {
+    let mut h = History::new(d.clone());
+    h.begin_request("help").unwrap();
+    h.set_acting(true).unwrap();
+    h.execute(&c, &ViewFilter::default()).unwrap();
+    h.doc().clone()
 }
 
 fn add_lane(d: &Document, seq: u64, name: &str) -> Document {
@@ -336,4 +357,155 @@ fn names_are_shown_safely() {
         }),
     );
     assert_eq!(describe(&d, &sep), vec![item("Strip a b c d e", "added")]);
+}
+
+#[test]
+fn items_know_co_producers_things() {
+    let d = acting(
+        &song(),
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Bass".into(),
+            index: None,
+        }),
+    );
+    let bass = lane_id(&d, "Bass (Co-Producer)");
+    let rename = |d: &Document, lane: LaneId, name: &str| {
+        run(
+            d,
+            Command::Lane(LaneCmd::Rename {
+                seq: SeqId(0),
+                lane,
+                name: name.into(),
+            }),
+        )
+    };
+    let remove = |d: &Document, lane: LaneId| {
+        run(
+            d,
+            Command::Lane(LaneCmd::Remove {
+                seq: SeqId(0),
+                lane,
+            }),
+        )
+    };
+    assert_eq!(
+        describe(&d, &rename(&d, bass, "Sub")),
+        vec![ours("Track 3, Bass (Co-Producer)", "renamed to \"Sub\"")]
+    );
+    let vox = lane_id(&d, "Lead Vox");
+    assert_eq!(
+        describe(&d, &rename(&d, vox, "Vox")),
+        vec![item("Track 2, Lead Vox", "renamed to \"Vox\"")]
+    );
+    // Deleting an empty Co-Producer track is its own; a filled one is not.
+    assert_eq!(
+        describe(&d, &remove(&d, bass)),
+        vec![ours("Track 3, Bass (Co-Producer)", "deleted")]
+    );
+    let filled = notes(&d, bass.0, 4);
+    assert_eq!(
+        describe(&filled, &remove(&filled, bass)),
+        vec![item("Track 3, Bass (Co-Producer)", "deleted, with 4 notes")]
+    );
+    // A falling count takes the composer's work away; a rising one does not.
+    let twelve = notes(&d, bass.0, 12);
+    let ids: Vec<_> = twelve
+        .all_events()
+        .filter(|(loc, _)| loc.lane == bass)
+        .take(2)
+        .map(|(_, e)| e.id)
+        .collect();
+    let ten = run(&twelve, Command::Event(EventCmd::Delete { events: ids }));
+    assert_eq!(
+        describe(&twelve, &ten),
+        vec![item("Track 3, Bass (Co-Producer)", "12 notes → 10 notes")]
+    );
+    assert_eq!(
+        describe(&ten, &twelve),
+        vec![ours("Track 3, Bass (Co-Producer)", "10 notes → 12 notes")]
+    );
+    // A Co-Producer bus: renamed and deleted are its own.
+    let with = acting(
+        &d,
+        Command::Mixer(MixerCmd::AddBus {
+            name: "Drums".into(),
+            index: None,
+        }),
+    );
+    let drums = bus(&with, "Drums (Co-Producer)");
+    assert_eq!(
+        describe(&d, &with),
+        vec![item("Strip Drums (Co-Producer)", "added")]
+    );
+    let kit = run(
+        &with,
+        Command::Mixer(MixerCmd::RenameStrip {
+            strip: drums,
+            name: "Kit".into(),
+        }),
+    );
+    assert_eq!(
+        describe(&with, &kit),
+        vec![ours("Strip Drums (Co-Producer)", "renamed to \"Kit\"")]
+    );
+    let gone = run(&with, Command::Mixer(MixerCmd::RemoveBus { strip: drums }));
+    assert_eq!(
+        describe(&with, &gone),
+        vec![ours("Strip Drums (Co-Producer)", "deleted")]
+    );
+}
+
+#[test]
+fn strip_colour_is_an_item() {
+    let d = run(
+        &song(),
+        Command::Mixer(MixerCmd::AddBus {
+            name: "Drums".into(),
+            index: None,
+        }),
+    );
+    let drums = bus(&d, "Drums");
+    let colour = |d: &Document, c: Option<Swatch>| {
+        run(
+            d,
+            Command::Mixer(MixerCmd::SetColour {
+                strip: drums,
+                colour: c,
+            }),
+        )
+    };
+    let blue = colour(&d, Some(Swatch::Blue));
+    assert_eq!(
+        describe(&d, &blue),
+        vec![item("Strip Drums", "colour none → blue")]
+    );
+    assert_eq!(
+        describe(&blue, &d),
+        vec![item("Strip Drums", "colour blue → none")]
+    );
+    assert_eq!(
+        describe(&blue, &colour(&blue, Some(Swatch::Purple))),
+        vec![item("Strip Drums", "colour blue → purple")]
+    );
+    // A Co-Producer strip's colour is its own.
+    let ours_d = acting(
+        &song(),
+        Command::Mixer(MixerCmd::AddBus {
+            name: "Drums".into(),
+            index: None,
+        }),
+    );
+    let id = bus(&ours_d, "Drums (Co-Producer)");
+    let teal = run(
+        &ours_d,
+        Command::Mixer(MixerCmd::SetColour {
+            strip: id,
+            colour: Some(Swatch::Teal),
+        }),
+    );
+    assert_eq!(
+        describe(&ours_d, &teal),
+        vec![ours("Strip Drums (Co-Producer)", "colour none → teal")]
+    );
 }

@@ -341,6 +341,14 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         }
         return r
     }
+    /// Make Mine (plan 8b Ruling 1): records the call; the fake's rows
+    /// carry no marks.
+    func makeMineTrack(seq: UInt64, lane: UInt64) throws -> DocSnapshot {
+        try mixerCall("makeMineTrack \(seq) \(lane)")
+    }
+    func makeMineStrip(strip: UInt64) throws -> DocSnapshot {
+        try mixerCall("makeMineStrip \(strip)")
+    }
     func setSidechain(slot: UInt64, source: UInt64?) throws -> DocSnapshot {
         try mixerCall("sidechain \(slot) \(source.map(String.init) ?? "none")")
     }

@@ -1957,6 +1957,7 @@ fn send(
         level_db,
         pre_fader,
         enabled,
+        co_producer: false,
     };
     let cmd = match (theirs, index) {
         (Some(s), Some(index)) => MixerCmd::EditSend {

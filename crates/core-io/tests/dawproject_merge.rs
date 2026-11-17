@@ -867,6 +867,7 @@ fn change_everything(t: &Trip, doc: &Document) -> Document {
                     level_db: -4.0,
                     pre_fader: false,
                     enabled: true,
+                    co_producer: false,
                 },
             }),
         );
@@ -1106,6 +1107,7 @@ fn new_tracks_and_buses_are_added_as_an_import_would() {
                     level_db: -8.0,
                     pre_fader: false,
                     enabled: true,
+                    co_producer: false,
                 },
             }),
         );
@@ -1822,6 +1824,7 @@ fn send_and_output_to_a_bus_deleted_here_are_listed() {
                     level_db: -12.0,
                     pre_fader: false,
                     enabled: true,
+                    co_producer: false,
                 },
             }),
         );
@@ -1919,6 +1922,7 @@ fn new_track_needing_a_bus_deleted_here_plays_into_the_master() {
                     level_db: -8.0,
                     pre_fader: false,
                     enabled: true,
+                    co_producer: false,
                 },
             }),
         );
@@ -3155,6 +3159,7 @@ fn a_curve_on_a_send_theirs_adds_lands_with_it() {
                     level_db: -12.0,
                     pre_fader: false,
                     enabled: true,
+                    co_producer: false,
                 },
             }),
         );
@@ -3600,6 +3605,7 @@ fn a_removed_sends_curves_go_with_it_and_never_drive_another() {
                     level_db: -6.0,
                     pre_fader: false,
                     enabled: true,
+                    co_producer: false,
                 },
             }),
         );
@@ -3940,6 +3946,7 @@ fn a_removed_buses_send_curves_go_with_it_and_never_drive_another() {
                         level_db: -6.0,
                         pre_fader: false,
                         enabled: true,
+                        co_producer: false,
                     },
                 }),
             );
@@ -4020,6 +4027,7 @@ fn a_removed_buses_send_curves_go_with_it_and_never_drive_another() {
                     level_db: -4.0,
                     pre_fader: false,
                     enabled: true,
+                    co_producer: false,
                 },
             }),
         );
@@ -4144,6 +4152,7 @@ fn a_curve_on_a_second_send_to_one_bus_keeps_its_send() {
                     level_db: -3.0,
                     pre_fader: true,
                     enabled: true,
+                    co_producer: false,
                 },
             }),
         );

@@ -140,6 +140,7 @@ pub fn fixture() -> (Document, SeqId) {
             level_db: -10.0,
             pre_fader: false,
             enabled: true,
+            co_producer: false,
         },
     })
     .unwrap();

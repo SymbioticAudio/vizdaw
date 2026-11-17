@@ -3168,6 +3168,8 @@ impl Session {
                     level_db: send.level_db,
                     pre_fader: send.pre_fader,
                     enabled: send.enabled,
+                    // EditSend keeps the send's own mark.
+                    co_producer: false,
                 },
             }))
         })
@@ -3248,6 +3250,29 @@ impl Session {
             self.execute(Command::Mixer(MixerCmd::SetColour {
                 strip: StripId(strip),
                 colour: colour.map(Into::into),
+            }))
+        })
+    }
+
+    /// Make Mine of track `lane` (plan 8b Ruling 1): it and the strip it
+    /// plays through, with that strip's sends and plug-ins, become the
+    /// composer's, one undo step "Make Mine". A track that is already the
+    /// composer's changes nothing and adds no step.
+    pub fn make_mine_track(&self, seq: u64, lane: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Lane(LaneCmd::MakeMine {
+                seq: SeqId(seq),
+                lane: LaneId(lane),
+            }))
+        })
+    }
+
+    /// Make Mine of strip `strip` (plan 8b Ruling 1): it, its sends and
+    /// its plug-ins become the composer's, one undo step "Make Mine".
+    pub fn make_mine_strip(&self, strip: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::MakeMine {
+                strip: StripId(strip),
             }))
         })
     }

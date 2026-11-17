@@ -1424,6 +1424,7 @@ fn strip_json(s: &crate::mixer::StripRow) -> Value {
     use crate::mixer::{StripColourRow as K, SwatchRow as W};
     json!({
         "id": s.id, "name": s.name, "kind_label": s.kind_label,
+        "co_producer": s.co_producer,
         "kind_colour": match s.kind_colour {
             K::Channel => "channel",
             K::Instrument => "instrument",
@@ -1639,6 +1640,7 @@ pub fn result_json(r: &ControlResult) -> Value {
             })).collect::<Vec<_>>(),
             "lanes": lanes.iter().map(|l| json!({
                 "id": l.id, "name": l.name, "destination": l.destination,
+                "co_producer": l.co_producer,
                 "events": l.midi_event_count, "regions": l.region_count,
                 "references": l.reference_count, "mute": l.mute, "solo": l.solo, "arm": l.arm,
                 "takes": l.take_count, "active_take": l.active_take,

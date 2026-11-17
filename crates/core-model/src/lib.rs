@@ -30,6 +30,7 @@ pub mod ids;
 pub mod input_fx;
 pub mod lane;
 pub mod learn;
+pub mod marks;
 pub mod meter;
 pub mod mixer;
 pub mod mixer_rules;

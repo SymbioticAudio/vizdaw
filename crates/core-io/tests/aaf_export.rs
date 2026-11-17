@@ -894,6 +894,7 @@ fn listed() {
             level_db: -6.0,
             pre_fader: false,
             enabled: true,
+            co_producer: false,
         },
     })
     .unwrap();
