@@ -238,14 +238,14 @@ fn own_tools() -> Vec<Value> {
         ),
         own_tool(
             CHANGE,
-            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement.",
+            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
             &[("commands", plan_schema())],
             &["commands"],
             json!({"destructiveHint": true}),
         ),
         own_tool(
             APPLY_CHANGE,
-            "Apply a change the composer has agreed to in this chat, with the token and the same commands change returned. Fails if the song changed since, or the token was used.",
+            "Apply a change the composer has agreed to in this chat, with the token and the same commands change returned. Fails if the song changed since, or the token was used. VizDAW then asks the composer too, unless they always allow this app.",
             &[
                 (
                     "token",
@@ -584,6 +584,24 @@ fn disguises(c: char) -> bool {
         )
         || ('\u{202A}'..='\u{202E}').contains(&c)
         || ('\u{2066}'..='\u{2069}').contains(&c)
+}
+
+/// The longest label `co_producer.apply` takes (plan 8b Ruling 11).
+pub const MAX_CLIENT_LABEL: usize = core_control::request::MAX_CLIENT_LABEL;
+
+/// The client's `clientInfo.name` as `co_producer.apply`'s `client` label
+/// (plan 8b Ruling 11): trimmed and cut to [`MAX_CLIENT_LABEL`] characters
+/// at a character boundary. None for a name that is not a string, is
+/// blank, or holds a control, bidi or separator character, so a hostile
+/// name is never sent. VizDAW only shows it; it never proves who asks.
+pub fn client_label(v: Option<&Value>) -> Option<String> {
+    let name = v?.as_str()?;
+    if name.chars().any(disguises) {
+        return None;
+    }
+    let cut: String = name.trim().chars().take(MAX_CLIENT_LABEL).collect();
+    let cut = cut.trim_end();
+    (!cut.is_empty()).then(|| cut.to_string())
 }
 
 fn item_part(v: Option<&Value>) -> String {

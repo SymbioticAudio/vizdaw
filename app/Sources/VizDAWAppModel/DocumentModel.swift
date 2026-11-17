@@ -73,6 +73,10 @@ public final class DocumentModel {
     public var slotDraft: KeySlotDraft?
     public var pendingDelete: UInt64?
     public var alert: AlertItem?
+    /// VizDAW's own approval sheet for a Co-Producer change that needs the
+    /// composer's yes (plan 8b Ruling 11); set and cleared only by
+    /// `CoProducerCommands`.
+    public internal(set) var coProducerApproval: CoProducerApprovalSheetModel?
     /// The mixer's selected strips (plan 5e-2 Ruling 5), for `automation.mode.<mode>`.
     /// The surfaces show it (plan 5f-1 Ruling 12).
     public var selectedStrips: Set<UInt64> = [] {

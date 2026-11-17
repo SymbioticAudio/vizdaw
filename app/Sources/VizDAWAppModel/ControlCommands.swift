@@ -19,6 +19,10 @@ public enum ControlOutcome {
     /// final review I2, M4): the app answers with its outcome once it is
     /// there, which may itself be a job.
     case pending(PendingOutcome)
+    /// A Co-Producer apply waits for the composer on VizDAW's own approval
+    /// sheet (plan 8b Ruling 11): the app answers with
+    /// `CoProducerCommands.approvalWait(for: doc)`'s outcome once it is set.
+    case awaitingApproval(doc: UUID)
 }
 
 /// A control call's answer computed off the main actor: `work` runs on a
@@ -268,7 +272,9 @@ public enum ControlCommands {
     ]
     /// Co-Producer's two registry ids (plan 8a Ruling 10): the switch and
     /// opening a saved copy, both app-wide.
-    static let coProducer: Set<String> = [CoProducerCommands.setting, CoProducerCommands.openCopy]
+    static let coProducer: Set<String> = [
+        CoProducerCommands.setting, CoProducerCommands.openCopy, CoProducerCommands.answerHook,
+    ]
     /// Plan 8b's strip commands (Rulings 1 and 3): Make Mine of a strip and
     /// a strip's own colour. `track.make_mine` is `TrackCommands`'s.
     static let makeMineStrip = "mixer.make_mine"
@@ -338,6 +344,9 @@ public enum ControlCommands {
         case _ where SurfaceCommands.ids.contains(id):
             // Process-wide or per document (plan 5f-1 Task 9).
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
+        case CoProducerCommands.answerHook:
+            // Plan 8b Ruling 11's test hook: the target document's sheet.
+            return CoProducerCommands.runAnswerHook(args, doc: doc, store: store, host: host)
         case _ where coProducer.contains(id):
             return CoProducerCommands.runAppWide(id, args: args, store: store, host: host)
         default: break

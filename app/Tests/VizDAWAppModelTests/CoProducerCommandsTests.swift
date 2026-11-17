@@ -21,7 +21,11 @@ import VizDAWCore
     }
 
     func run(_ r: ControlRequest, _ s: DocumentStore, _ id: UUID) -> ControlOutcome {
-        CoProducerCommands.run(r, doc: s.model(id).map { (id, $0) }, store: s, host: host, stamp: stamp)
+        // FakeApprover(.allow) grants VizDAW's own approval as the sheet's
+        // Allow would (plan 8b Task 6).
+        CoProducerCommands.run(
+            r, doc: s.model(id).map { (id, $0) }, store: s, host: host, stamp: stamp, peer: nil,
+            approver: FakeApprover(.allow))
     }
 
     func command(_ id: String, _ args: [ControlArg] = []) -> ControlRequest {
@@ -84,7 +88,7 @@ import VizDAWCore
     @Test func applyRunsThePlanAndReportsEveryCommand() throws {
         let (s, id, _, f) = try demo()
         let token = String(repeating: "b", count: 32)
-        let o = run(.coProducerApply(token: token, plan: renameThenDelete, window: nil), s, id)
+        let o = run(.coProducerApply(token: token, plan: renameThenDelete, window: nil, client: nil), s, id)
         #expect(f.coLog == ["enter \(stamp)", "take", "rename", "delete", "leave"])
         guard case .coProducerApplied(let doc, let results, _) = result(o) else {
             Issue.record("not applied: \(o)")
@@ -92,11 +96,13 @@ import VizDAWCore
         }
         #expect(doc == id.uuidString)
         #expect(results == ["track.rename: done", "track.delete: done"])
+        // The preview needs a yes: the take had the sheet's approval.
+        #expect(f.coTakeApprovals == [.sheet])
 
         // A failed command stops the rest; each has its line.
         f.coLog = []
         f.editError = .Model(message: "the name is refused")
-        let failed = run(.coProducerApply(token: token, plan: renameThenDelete, window: nil), s, id)
+        let failed = run(.coProducerApply(token: token, plan: renameThenDelete, window: nil, client: nil), s, id)
         guard case .coProducerApplied(_, let lines, _) = result(failed) else {
             Issue.record("not applied: \(failed)")
             return
@@ -108,14 +114,14 @@ import VizDAWCore
         f.coLog = []
         f.editError = nil
         f.coTakeError = .Model(message: "This preview was already used or replaced.")
-        let refused = run(.coProducerApply(token: token, plan: renameThenDelete, window: nil), s, id)
+        let refused = run(.coProducerApply(token: token, plan: renameThenDelete, window: nil, client: nil), s, id)
         #expect(failure(refused)?.message == "This preview was already used or replaced.")
         #expect(f.coLog == ["enter \(stamp)", "take", "leave"])
 
         // No request: nothing is taken.
         f.coLog = []
         f.coEnterError = .Model(message: "Open a request first (begin_request).")
-        let none = run(.coProducerApply(token: token, plan: renameThenDelete, window: nil), s, id)
+        let none = run(.coProducerApply(token: token, plan: renameThenDelete, window: nil, client: nil), s, id)
         #expect(failure(none)?.message == "Open a request first (begin_request).")
         #expect(f.coLog == ["enter \(stamp)"])
     }
@@ -233,7 +239,8 @@ import VizDAWCore
             .coProducerNotes(window: nil), .coProducerNote(text: "x", window: nil),
             .coProducerExportFolder(what: .stems, parent: nil, window: nil),
         ] {
-            let o = CoProducerCommands.run(r, doc: nil, store: s, host: host, stamp: stamp)
+            let o = CoProducerCommands.run(
+                r, doc: nil, store: s, host: host, stamp: stamp, peer: nil, approver: FakeApprover(.allow))
             #expect(failure(o)?.code == .noDocument)
         }
     }
@@ -307,7 +314,9 @@ import VizDAWCore
 
     @Test func noDocumentIsNoDocument() {
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() })
-        let o = CoProducerCommands.run(.coProducerBegin(name: "x", asked: nil, window: nil), doc: nil, store: s, host: host, stamp: stamp)
+        let o = CoProducerCommands.run(
+            .coProducerBegin(name: "x", asked: nil, window: nil), doc: nil, store: s, host: host, stamp: stamp,
+            peer: nil, approver: FakeApprover(.allow))
         #expect(failure(o)?.code == .noDocument)
     }
 

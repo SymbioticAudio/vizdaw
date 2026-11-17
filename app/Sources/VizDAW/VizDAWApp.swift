@@ -103,10 +103,19 @@ final class LiveCoProducerSink: CoProducerSink {
 /// Settings › Co-Producer (plan 8a Ruling 10): off unless the composer
 /// turned it on; made after the support folder exists, and it starts the
 /// socket then when on. Turning it off ends every open request.
+///
+/// VizDAW's own approval (plan 8b Ruling 11): callers are identified by
+/// `DarwinClientFacts`, and standing approvals live in the login Keychain,
+/// or in memory until quit with `VIZDAW_TEST_HOOKS=1`, so the e2e never
+/// touches the Keychain.
 @MainActor let coProducerSettings: CoProducerSettings = {
     let dir = AppSetup.coProducerSupportDir
+    let env = ProcessInfo.processInfo.environment
+    let approvals: any CoProducerApprovalStore =
+        env["VIZDAW_TEST_HOOKS"] == "1" ? MemoryApprovalStore() : KeychainApprovalStore()
     let s = CoProducerSettings(
-        defaults: MemoryDefaults.appStore(), supportDir: dir, sink: LiveCoProducerSink(supportDir: dir))
+        defaults: MemoryDefaults.appStore(), supportDir: dir, sink: LiveCoProducerSink(supportDir: dir),
+        facts: DarwinClientFacts(), approvals: approvals, environment: env)
     s.didTurnOff = { CoProducerCommands.tidy(appStore, all: true) }
     return s
 }()
@@ -158,7 +167,7 @@ struct VizDAWApp: App {
                 {
                 case .failed(let f): m.editor.status = f.message
                 case .opened(_, let d): ControlWindows.openDocument(d)
-                case .done, .job, .measure, .pending: break
+                case .done, .job, .measure, .pending, .awaitingApproval: break
                 }
             }
         }

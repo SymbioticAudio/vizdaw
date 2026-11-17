@@ -1390,3 +1390,139 @@ fn notes_from_another_song_are_not_shown() {
     let r = m.call("begin_request", json!({"name": "y"}));
     assert!(text(&r).contains("Keep the drums dry."), "{r}");
 }
+
+/// Plan 8b Task 6 (Ruling 11): VizDAW's own no.
+const VIZDAW_NO: &str = "The composer did not allow this in VizDAW.";
+/// The sentence `change` and `apply_change` add.
+const ASKS_TOO: &str = "VizDAW then asks the composer too, unless they always allow this app.";
+
+impl Mcp {
+    /// Spawned and initialized with `clientInfo.name` = `name`, able to
+    /// show a form when `elicitation`.
+    fn named(support: &Path, name: Value, elicitation: bool) -> Mcp {
+        let mut m = Mcp::spawn(support);
+        let caps = if elicitation {
+            json!({"elicitation": {}})
+        } else {
+            json!({})
+        };
+        m.result(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": caps, "clientInfo": {"name": name, "version": "1"}}),
+        );
+        m.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        m
+    }
+}
+
+/// The `client` of each `co_producer.apply` the app saw.
+fn clients(app: &FakeApp) -> Vec<Option<String>> {
+    app.applies()
+        .into_iter()
+        .map(|c| match c {
+            Command::CoProducerApply { client, .. } => client,
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn apply_sends_the_client_label() {
+    // An accepted `change`.
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::named(d.path(), json!("Helper Chat"), true);
+    let e = m.ask("c1", &two_changes());
+    m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
+    assert!(!is_error(&m.reply_to("c1")));
+    // A change that needs no yes applies at once, with the label too.
+    let r = m.call("change", json!({"commands": [{"id": "edit.undo"}]}));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        clients(&app),
+        [
+            Some("Helper Chat".to_string()),
+            Some("Helper Chat".to_string())
+        ]
+    );
+    drop(m);
+    drop(app);
+
+    // `apply_change`, the fallback's second half.
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::named(d.path(), json!("Helper Chat"), false);
+    m.call("change", json!({"commands": two_changes()}));
+    let r = m.call(
+        "apply_change",
+        json!({"token": preview_token(1), "commands": two_changes()}),
+    );
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(clients(&app), [Some("Helper Chat".to_string())]);
+}
+
+#[test]
+fn a_long_client_name_is_cut_on_a_character() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::named(d.path(), json!("é".repeat(300)), false);
+    m.call("change", json!({"commands": [{"id": "edit.undo"}]}));
+    assert_eq!(clients(&app), [Some("é".repeat(100))]);
+}
+
+#[test]
+fn a_hostile_client_name_is_not_sent() {
+    for name in [
+        json!("Helper\u{0007}Chat"),
+        json!("Helper\nChat"),
+        json!("Helper \u{202E}Chat"),
+        json!("Helper\u{2028}Chat"),
+        json!("Helper\0Chat"),
+        json!("   "),
+        json!(42),
+        json!(["Helper Chat"]),
+        json!(null),
+    ] {
+        let d = support_dir();
+        let app = FakeApp::start(d.path());
+        let mut m = Mcp::named(d.path(), name.clone(), false);
+        let r = m.call("change", json!({"commands": [{"id": "edit.undo"}]}));
+        assert!(!is_error(&r), "{name}: {r}");
+        assert_eq!(clients(&app), [None], "{name}");
+    }
+    // No clientInfo at all.
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result("initialize", json!({"protocolVersion": "2025-06-18"}));
+    m.call("change", json!({"commands": [{"id": "edit.undo"}]}));
+    assert_eq!(clients(&app), [None]);
+}
+
+#[test]
+fn vizdaws_no_reaches_the_model() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::named(d.path(), json!("Helper Chat"), false);
+    m.call("change", json!({"commands": two_changes()}));
+    app.script(Answer::Err(ControlError::new(ErrorCode::Failed, VIZDAW_NO)));
+    let r = m.call(
+        "apply_change",
+        json!({"token": preview_token(1), "commands": two_changes()}),
+    );
+    assert!(is_error(&r), "{r}");
+    assert!(text(&r).contains(VIZDAW_NO), "{r}");
+    let tools = m.result("tools/list", json!({}));
+    for name in ["change", "apply_change"] {
+        let t = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap();
+        assert!(
+            t["description"].as_str().unwrap().contains(ASKS_TOO),
+            "{name}: {t}"
+        );
+    }
+}

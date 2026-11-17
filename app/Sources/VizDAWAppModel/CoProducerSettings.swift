@@ -44,11 +44,33 @@ public final class CoProducerSettings {
     /// The saved copies of the open saved projects, as `readCopies` found.
     public private(set) var copies = CopiesSizeRow(count: 0, bytes: 0)
 
+    /// Who is asking (plan 8b Ruling 11): `DarwinClientFacts` in the app.
+    @ObservationIgnored public var facts: any ClientFacts
+    /// Standing approvals: the login Keychain in the app; memory in tests
+    /// and with `VIZDAW_TEST_HOOKS=1`.
+    @ObservationIgnored public var approvals: any CoProducerApprovalStore
+    /// The launch environment (`VIZDAW_TEST_HOOKS`, `VIZDAW_APPROVAL_WAIT_MS`).
+    @ObservationIgnored public var environment: [String: String]
+    /// The clock approvals are dated and timed by.
+    @ObservationIgnored public var now: @MainActor () -> Date = { Date() }
+    /// Identities worked out this listening session, by connection and
+    /// label (Ruling 11). Connection numbers restart with the server, so
+    /// this is emptied whenever the switch turns on or off.
+    @ObservationIgnored var identities: [String: ClientIdentity] = [:]
+    /// Settings › Co-Producer's list, as `readApprovals` found it.
+    public private(set) var approvalRows: [ApprovalRow] = []
+
     /// Reads the switch and, when it is on, starts at once.
-    public init(defaults: UserDefaults, supportDir: URL, sink: any CoProducerSink) {
+    public init(
+        defaults: UserDefaults, supportDir: URL, sink: any CoProducerSink, facts: any ClientFacts = NoClientFacts(),
+        approvals: any CoProducerApprovalStore = MemoryApprovalStore(), environment: [String: String] = [:]
+    ) {
         self.defaults = defaults
         self.supportDir = supportDir
         self.sink = sink
+        self.facts = facts
+        self.approvals = approvals
+        self.environment = environment
         if defaults.object(forKey: Self.key) as? Bool == true {
             turnOn()
         } else {
@@ -75,6 +97,7 @@ public final class CoProducerSettings {
             }
             sink.stop()
             on = false
+            identities = [:]
             didTurnOff?()
             sink.markOff(true)
             defaults.set(false, forKey: Self.key)
@@ -87,10 +110,12 @@ public final class CoProducerSettings {
         guard on else { return }
         sink.stop()
         on = false
+        identities = [:]
         didTurnOff?()
     }
 
     private func turnOn() {
+        identities = [:]
         sink.markOff(false)
         if let why = sink.start(path: socketPath) {
             problem = "Co-Producer could not start: \(why)"
@@ -120,6 +145,69 @@ public final class CoProducerSettings {
     public var copiesLine: String {
         let mb = String(format: "%.1f", Double(copies.bytes) / 1_000_000)
         return "Saved copies in open projects: \(copies.count) (\(mb) MB)"
+    }
+
+    // MARK: VizDAW's own approval (plan 8b Ruling 11)
+
+    /// One row of "Apps that may change songs without asking".
+    public struct ApprovalRow: Identifiable, Equatable, Sendable {
+        /// The approval's key.
+        public let id: String
+        public let text: String
+        public let accessibility: String
+    }
+
+    public static let approvalsTitle = "Apps that may change songs without asking"
+    public let approvalsEmptyLine = "None. VizDAW asks before every change."
+
+    /// `settings.co_producer_answer` and the shortened wait work only with
+    /// `VIZDAW_TEST_HOOKS=1` at launch.
+    public var testHooks: Bool { environment["VIZDAW_TEST_HOOKS"] == "1" }
+
+    /// How long the sheet waits for the composer: 10 minutes, or with test
+    /// hooks `VIZDAW_APPROVAL_WAIT_MS`, at least a second and never longer.
+    public var approvalWait: TimeInterval {
+        let full = CoProducerCommands.approvalWait
+        guard testHooks, let ms = environment["VIZDAW_APPROVAL_WAIT_MS"].flatMap({ Int($0) }),
+            ms <= Int(full * 1000)
+        else { return full }
+        return TimeInterval(max(ms, 1000)) / 1000
+    }
+
+    /// Reads the standing approvals for the list.
+    public func readApprovals() {
+        let day = DateFormatter()
+        day.locale = Locale(identifier: "en_US_POSIX")
+        day.calendar = Calendar(identifier: .gregorian)
+        day.timeZone = .current
+        day.dateFormat = "yyyy-MM-dd"
+        approvalRows = approvals.load().map { a in
+            let since = "since \(day.string(from: a.granted))"
+            if a.verified {
+                let text = "\(a.name) — team \(a.team ?? "?") · \(a.identifier ?? "?") · \(since)"
+                return ApprovalRow(id: a.key, text: text, accessibility: text)
+            }
+            let path = a.path ?? "?"
+            let text = "\(a.label ?? path) — unverified · \(path) · \(since)"
+            return ApprovalRow(id: a.key, text: text, accessibility: "\(a.label ?? path), unverified, \(path), \(since)")
+        }
+    }
+
+    /// Revoke: the approval stops at once; the next request asks again.
+    public func revoke(_ key: String) {
+        try? approvals.save(approvals.load().filter { $0.key != key })
+        readApprovals()
+    }
+
+    /// Revoke All.
+    public func revokeAll() {
+        try? approvals.save([])
+        readApprovals()
+    }
+
+    /// Keeps a new standing approval, replacing one with the same key.
+    func grant(_ a: StandingApproval) {
+        try? approvals.save(approvals.load().filter { $0.key != a.key } + [a])
     }
 
     /// The support folder as `vizdaw-mcp` finds it (Task 5's

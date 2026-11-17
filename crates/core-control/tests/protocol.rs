@@ -176,6 +176,33 @@ fn co_producer_notes_calls_round_trip() {
     );
 }
 
+/// Plan 8b Task 6: `co_producer.apply`'s `client` label goes over the
+/// wire and back, trimmed; without it there is none.
+#[test]
+fn co_producer_apply_carries_its_client() {
+    use core_control::{Command, validate};
+    let parse = |params: Value| {
+        let line = request_line(&RequestId::Num(9), "co_producer.apply", &params);
+        validate(&read_request(line.as_bytes()).unwrap()).unwrap()
+    };
+    let token = "0123456789abcdef0123456789abcdef";
+    match parse(
+        json!({"token": token, "commands": [{"id": "edit.undo"}], "client": " Helper Chat"}),
+    ) {
+        Command::CoProducerApply {
+            token: t, client, ..
+        } => {
+            assert_eq!(t, token);
+            assert_eq!(client.as_deref(), Some("Helper Chat"));
+        }
+        other => panic!("{other:?}"),
+    }
+    match parse(json!({"token": token, "commands": [{"id": "edit.undo"}], "client": "   "})) {
+        Command::CoProducerApply { client, .. } => assert_eq!(client, None),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn every_error_code_has_a_distinct_wire_name() {
     let names: std::collections::BTreeSet<_> = ErrorCode::ALL.iter().map(|c| c.as_str()).collect();

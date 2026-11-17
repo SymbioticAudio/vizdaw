@@ -164,7 +164,38 @@ pub struct PendingPreview {
     pub serial: u64,
     /// The plan's canonical text.
     pub canonical: String,
+    /// Some item is the composer's work (plan 8b Ruling 11: a take then
+    /// needs VizDAW's own approval).
+    pub needs_yes: bool,
+    /// What it lists, for `co_producer_pending`.
+    pub items: Vec<ChangeItemRow>,
 }
+
+impl PendingPreview {
+    /// The preview's row again.
+    pub fn row(&self) -> PreviewRow {
+        PreviewRow {
+            token: self.token.clone(),
+            needs_yes: self.needs_yes,
+            items: self.items.clone(),
+        }
+    }
+}
+
+/// Which of VizDAW's own approvals a take has (plan 8b Ruling 11). A take
+/// whose preview needs the composer's yes needs `Sheet` or `Standing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CoProducerApproval {
+    /// None: only a take that needs no yes goes through.
+    None,
+    /// The composer pressed Allow on VizDAW's approval sheet.
+    Sheet,
+    /// The asking app has the composer's standing approval.
+    Standing,
+}
+
+/// Ruling 11's refusal of a take with no approval.
+pub const NEEDS_APPROVAL: &str = "VizDAW's own approval is needed for this change.";
 
 /// Ruling 7's refusals.
 pub const USED: &str = "This preview was already used or replaced.";
@@ -177,6 +208,18 @@ pub const NOT_PREVIEWED: &str = "These are not the previewed commands.";
 /// `plan` through now, at `version` and `serial`.
 pub fn check_take(
     pending: Option<PendingPreview>,
+    token: &str,
+    plan: &[PlannedRow],
+    version: u64,
+    serial: u64,
+) -> Result<(), VizError> {
+    check_pending(pending.as_ref(), token, plan, version, serial)
+}
+
+/// [`check_take`]'s checks on a preview still in the session (plan 8b
+/// Ruling 11): nothing is taken.
+pub fn check_pending(
+    pending: Option<&PendingPreview>,
     token: &str,
     plan: &[PlannedRow],
     version: u64,

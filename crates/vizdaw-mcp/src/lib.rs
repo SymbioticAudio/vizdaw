@@ -127,6 +127,9 @@ pub struct Server {
     /// The documents whose notes the first answer already gave, oldest
     /// first, at most [`MAX_NOTED`].
     noted: VecDeque<String>,
+    /// What the client called itself at `initialize`, cleaned: every
+    /// `co_producer.apply` carries it as `client` (plan 8b Ruling 11).
+    client: Option<String>,
 }
 
 /// What a request gives: a result now, or a question for the client while
@@ -170,6 +173,7 @@ impl Server {
             held: Vec::new(),
             tokens: VecDeque::new(),
             noted: VecDeque::new(),
+            client: None,
         }
     }
 
@@ -376,6 +380,7 @@ impl Server {
 
     fn initialize(&mut self, params: &Map<String, Value>) -> Value {
         self.elicitation = rpc::form_elicitation(params.get("capabilities"));
+        self.client = tools::client_label(params.get("clientInfo").and_then(|c| c.get("name")));
         json!({
             "protocolVersion": rpc::negotiate(params.get("protocolVersion")),
             "capabilities": capabilities(),
@@ -567,10 +572,11 @@ impl Server {
             window: p.window,
             token: None,
         };
-        match self
-            .app
-            .call("co_producer.apply", plan_params(&a, Some(&p.token)))
-        {
+        let mut params = plan_params(&a, Some(&p.token));
+        if let (Some(client), Some(o)) = (&self.client, params.as_object_mut()) {
+            o.insert("client".into(), json!(client));
+        }
+        match self.app.call("co_producer.apply", params) {
             Ok(result) => {
                 let mut text = result.to_string();
                 if let Some(label) = result.get("undo_label").and_then(Value::as_str) {

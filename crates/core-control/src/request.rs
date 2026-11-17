@@ -44,6 +44,9 @@ pub const MAX_REQUEST_NAME: usize = 200;
 /// The longest `asked` of `co_producer.begin`, in characters after
 /// trimming (plan 8b Ruling 9).
 pub const MAX_ASKED: usize = 500;
+/// The longest `client` label of `co_producer.apply`, in characters after
+/// trimming (plan 8b Ruling 11).
+pub const MAX_CLIENT_LABEL: usize = 100;
 /// The longest `co_producer.note` text, in characters (Ruling 9).
 pub const MAX_NOTE: usize = 2000;
 /// The most lines in one `co_producer.note` (Ruling 9).
@@ -341,6 +344,10 @@ pub enum Command {
         plan: Vec<Planned>,
         /// Whose document.
         window: Option<WindowRef>,
+        /// What the host calls itself (`vizdaw-mcp` passes its client's
+        /// `clientInfo.name`): a label VizDAW shows, never proof of who
+        /// is asking (plan 8b Ruling 11).
+        client: Option<String>,
     },
     /// Reads the song's notes (plan 8b Ruling 9).
     CoProducerNotes {
@@ -576,11 +583,12 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
             })
         }
         "co_producer.apply" => {
-            p.only(&["token", "commands", "window"])?;
+            p.only(&["token", "commands", "window", "client"])?;
             Ok(Command::CoProducerApply {
                 token: token(&p)?,
                 plan: plan(&p)?,
                 window: p.window()?,
+                client: client(&p)?,
             })
         }
         "co_producer.notes" => {
@@ -704,6 +712,30 @@ fn asked(p: &Params<'_>) -> Result<Option<String>, ControlError> {
         );
     }
     Ok(Some(asked))
+}
+
+/// `co_producer.apply`'s optional `client`: at most [`MAX_CLIENT_LABEL`]
+/// characters after trimming, with no control, bidi or separator
+/// character (plan 8b Ruling 11). Blank is absent.
+fn client(p: &Params<'_>) -> Result<Option<String>, ControlError> {
+    let Some(raw) = p.opt_str("client", MAX_STRING)? else {
+        return Ok(None);
+    };
+    let client = raw.trim();
+    if client.is_empty() {
+        return Ok(None);
+    }
+    if client.chars().count() > MAX_CLIENT_LABEL {
+        return Err(p.error(format!(
+            "`client` is longer than {MAX_CLIENT_LABEL} characters"
+        )));
+    }
+    if client.chars().any(refused_in_name) {
+        return Err(
+            p.error("`client` must not hold control, direction or line-separator characters")
+        );
+    }
+    Ok(Some(client.to_string()))
 }
 
 /// `co_producer.note`'s `text`: 1 to [`MAX_NOTE`] characters, not blank,

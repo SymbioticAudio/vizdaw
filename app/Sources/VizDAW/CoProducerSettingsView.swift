@@ -53,9 +53,49 @@ struct CoProducerSettingsView: View {
                     .foregroundStyle(theme.state.warning.color)
                     .accessibilityLabel(problem)
             }
+            approvals
         }
         .formStyle(.grouped)
         .frame(width: 500)
-        .onAppear { settings.readCopies(store) }
+        .onAppear {
+            settings.readCopies(store)
+            settings.readApprovals()
+        }
+    }
+
+    /// "Apps that may change songs without asking" (plan 8b Ruling 11):
+    /// each standing approval with Revoke, and Revoke All.
+    private var approvals: some View {
+        Section {
+            if settings.approvalRows.isEmpty {
+                Text(settings.approvalsEmptyLine)
+                    .font(theme.type.caption.font)
+                    .foregroundStyle(theme.text.secondary.color)
+                    .accessibilityLabel(settings.approvalsEmptyLine)
+            } else {
+                ForEach(settings.approvalRows) { row in
+                    HStack(spacing: theme.spacing.s) {
+                        Text(row.text)
+                            .font(theme.type.caption.font)
+                            .foregroundStyle(theme.text.primary.color)
+                            .textSelection(.enabled)
+                            .accessibilityLabel(row.accessibility)
+                        Spacer(minLength: theme.spacing.m)
+                        Button("Revoke") { settings.revoke(row.id) }
+                            .accessibilityLabel("Revoke: \(row.accessibility)")
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("Revoke All") { settings.revokeAll() }
+                        .accessibilityLabel("Revoke all approvals")
+                }
+            }
+        } header: {
+            Text(CoProducerSettings.approvalsTitle)
+                .font(theme.type.body.font)
+                .foregroundStyle(theme.text.primary.color)
+                .accessibilityLabel(CoProducerSettings.approvalsTitle)
+        }
     }
 }

@@ -172,7 +172,7 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 190);
+    assert_eq!(COMMANDS.len(), 191);
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");
@@ -202,7 +202,11 @@ fn every_command_has_the_spec_class() {
     ] {
         assert_eq!(class.name(), name);
     }
-    for id in ["settings.co_producer", "file.open_copy"] {
+    for id in [
+        "settings.co_producer",
+        "file.open_copy",
+        "settings.co_producer_answer",
+    ] {
         assert_eq!(registry::find(id).unwrap().class, Class::Refused, "{id}");
     }
 }
@@ -1187,4 +1191,193 @@ fn new_calls_only_on_the_co_producer_socket() {
         }
     }
     assert!(dev.next_call().is_none(), "the app never sees them");
+}
+
+/// Plan 8b Task 6 (Ruling 11): a fake peer hook for the server.
+fn fake_peer(_fd: std::os::fd::RawFd) -> Option<[u32; 8]> {
+    Some([1, 2, 3, 4, 5, 6, 7, 8])
+}
+
+/// A private socket folder under `/tmp`, as `server.rs`'s tests make.
+fn private_tmp() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::Builder::new()
+        .prefix("vzc")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    d
+}
+
+/// Sends one `co_producer.status` on `stream` and answers it from
+/// `server`; returns the call the app saw.
+fn one_call(
+    server: &core_control::server::Server,
+    stream: &mut std::os::unix::net::UnixStream,
+) -> core_control::server::Call {
+    use std::io::{BufRead, BufReader, Write};
+    let line =
+        core_control::protocol::request_line(&RequestId::Num(1), "co_producer.status", &json!({}));
+    stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let call = loop {
+        if let Some(c) = server.next_call() {
+            break c;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the call never arrived"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    assert!(server.reply(call.token, Ok(json!({"request": null}))));
+    let mut reply = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut reply)
+        .unwrap();
+    assert!(reply.contains("\"ok\":true"), "{reply}");
+    call
+}
+
+#[test]
+fn the_peer_reaches_every_call() {
+    use core_control::server::{Config, Role, Server};
+    use std::os::unix::net::UnixStream;
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let server = Server::start(
+        &sock,
+        Config {
+            role: Role::CoProducer,
+            peer: Some(fake_peer),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    let mut first = UnixStream::connect(&sock).unwrap();
+    let a = one_call(&server, &mut first);
+    let b = one_call(&server, &mut first);
+    assert_eq!(a.audit_token, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+    assert_eq!(b.audit_token, a.audit_token);
+    assert_eq!(a.conn, b.conn, "one connection, one number");
+    let mut second = UnixStream::connect(&sock).unwrap();
+    let c = one_call(&server, &mut second);
+    assert_ne!(c.conn, a.conn, "a new connection, a new number");
+    assert_eq!(c.audit_token, a.audit_token);
+    drop(server);
+
+    // No hook: no token.
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let server = Server::start(
+        &sock,
+        Config {
+            role: Role::CoProducer,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    assert!(Config::default().peer.is_none());
+    let mut s = UnixStream::connect(&sock).unwrap();
+    assert_eq!(one_call(&server, &mut s).audit_token, None);
+}
+
+#[test]
+fn apply_takes_a_client_label() {
+    use core_control::request::{Command, MAX_CLIENT_LABEL};
+    let token = "0123456789abcdef0123456789abcdef";
+    let plan = json!([{"id": "edit.undo"}]);
+    let parsed = |client: Value| {
+        validate(&req(
+            "co_producer.apply",
+            json!({"token": token, "commands": plan, "client": client}),
+        ))
+    };
+    match parsed(json!("  Helper Chat ")).unwrap() {
+        Command::CoProducerApply { client, .. } => {
+            assert_eq!(client.as_deref(), Some("Helper Chat"))
+        }
+        other => panic!("{other:?}"),
+    }
+    match validate(&req(
+        "co_producer.apply",
+        json!({"token": token, "commands": plan}),
+    ))
+    .unwrap()
+    {
+        Command::CoProducerApply { client, .. } => assert_eq!(client, None),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(MAX_CLIENT_LABEL, 100);
+    assert!(parsed(json!("a".repeat(100))).is_ok());
+    for bad in [
+        json!("a".repeat(101)),
+        json!("Helper\0Chat"),
+        json!("Helper \u{202E}Chat"),
+        json!("Helper\nChat"),
+        json!("x".repeat(70_000)),
+        json!(12),
+        json!(true),
+        json!(["Helper Chat"]),
+    ] {
+        let e = parsed(bad.clone()).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{bad}: {}", e.message);
+    }
+    // The gate admits it as before.
+    assert_eq!(
+        gate(
+            "co_producer.apply",
+            json!({"token": token, "commands": plan, "client": "Helper Chat"})
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn the_answer_hook_is_never_co_producers() {
+    use core_control::client::{CallError, Client};
+    use core_control::server::{Config, Role, Server};
+    let spec = registry::find("settings.co_producer_answer").expect("the test hook is registered");
+    assert_eq!(spec.class, Class::Refused);
+    assert!(!spec.menu_item);
+    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
+    assert_eq!(names, ["allow", "always", "confirm"]);
+    assert!(spec.params[0].required && !spec.params[1].required && !spec.params[2].required);
+    let list = co_producer::list_json();
+    assert!(
+        list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["id"] != "settings.co_producer_answer")
+    );
+    assert_code(
+        "command.run",
+        run("settings.co_producer_answer", json!({"allow": true})),
+        ErrorCode::NotAllowed,
+    );
+    // Through the Co-Producer socket itself.
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let server = Server::start(
+        &sock,
+        Config {
+            role: Role::CoProducer,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    let mut c = Client::connect(&sock).unwrap();
+    match c.call(
+        "command.run",
+        run(
+            "settings.co_producer_answer",
+            json!({"allow": true, "always": true}),
+        ),
+        std::time::Duration::from_secs(20),
+    ) {
+        Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::NotAllowed, "{e}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(server.next_call().is_none(), "the app never sees it");
 }

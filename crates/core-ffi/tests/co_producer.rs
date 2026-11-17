@@ -11,7 +11,7 @@ use core_model::mpe::{MpeConfig, MpeZone};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
-use vizdaw_ffi::co_producer::{ChangeItemRow, PlannedRow, PreviewRow};
+use vizdaw_ffi::co_producer::{ChangeItemRow, CoProducerApproval, PlannedRow, PreviewRow};
 use vizdaw_ffi::control::{ControlArg, ControlValue};
 use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneEdit};
 use vizdaw_ffi::host::{force_offline, hosts_created, reset_host};
@@ -496,7 +496,7 @@ fn previews_list_exactly_what_changes() {
 /// round 1: enter, take, the plan, leave).
 fn take(s: &Session, token: String, plan: Vec<PlannedRow>) -> Result<(), VizError> {
     s.co_producer_enter(STAMP.into()).unwrap();
-    let r = s.co_producer_take(token, plan);
+    let r = s.co_producer_take(token, plan, CoProducerApproval::Sheet);
     s.co_producer_leave();
     r
 }
@@ -510,7 +510,10 @@ fn take_needs_enter() {
     s.co_producer_begin("tidy up".into()).unwrap();
     let p = s.co_producer_preview(plan()).unwrap();
     assert_eq!(
-        message(s.co_producer_take(p.token, plan()).unwrap_err()),
+        message(
+            s.co_producer_take(p.token, plan(), CoProducerApproval::Sheet)
+                .unwrap_err()
+        ),
         ENTER_FIRST
     );
     // The token went with it.
@@ -550,7 +553,8 @@ fn a_gesture_during_co_producers_undo_stays_the_composers() {
     assert!(!p.needs_yes);
     s.co_producer_begin("undo that".into()).unwrap();
     s.co_producer_enter(STAMP.into()).unwrap();
-    s.co_producer_take(p.token, vec![undo()]).unwrap();
+    s.co_producer_take(p.token, vec![undo()], CoProducerApproval::Sheet)
+        .unwrap();
     // The gesture arrives after the take, before the Undo runs.
     s.debug_owe_gesture(slot, 0, 0.25);
     assert_eq!(message(s.undo().unwrap_err()), CHANGED);
@@ -760,6 +764,159 @@ fn another_threads_edit_is_a_hand_edit() {
     s.close().unwrap();
 }
 
+/// Plan 8b Ruling 11's sentence: the Rust backstop.
+const NEEDS_VIZDAW: &str = "VizDAW's own approval is needed for this change.";
+
+/// A take as the app makes it, with `approval`.
+fn take_with(
+    s: &Session,
+    token: String,
+    plan: Vec<PlannedRow>,
+    approval: CoProducerApproval,
+) -> Result<(), VizError> {
+    s.co_producer_enter(STAMP.into()).unwrap();
+    let r = s.co_producer_take(token, plan, approval);
+    s.co_producer_leave();
+    r
+}
+
+/// Plan 8b Task 6 (Ruling 11): a take whose preview needs the composer's
+/// yes needs VizDAW's own approval too, and a refused one uses the token.
+#[test]
+fn take_needs_vizdaw_approval_for_a_yes() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = saved(dir.path());
+    let seq = first_seq(&s);
+    let (hand, name) = lanes(&s)[0].clone();
+    let plan = || vec![rename(seq, hand, "Kick")];
+    s.co_producer_begin("tidy up".into()).unwrap();
+    let p = s.co_producer_preview(plan()).unwrap();
+    assert!(p.needs_yes);
+    let doc = s.debug_document_json();
+    assert_eq!(
+        message(take_with(&s, p.token.clone(), plan(), CoProducerApproval::None).unwrap_err()),
+        NEEDS_VIZDAW
+    );
+    assert_eq!(s.debug_document_json(), doc, "nothing changed");
+    assert_eq!(lanes(&s)[0].1, name);
+    // That refusal used the token up.
+    assert_eq!(
+        message(take_with(&s, p.token, plan(), CoProducerApproval::Sheet).unwrap_err()),
+        USED
+    );
+    // A fresh preview with the sheet's Allow, and one with a standing
+    // approval, both take.
+    let p = s.co_producer_preview(plan()).unwrap();
+    take_with(&s, p.token, plan(), CoProducerApproval::Sheet).unwrap();
+    let back = || vec![rename(seq, hand, "Snare")];
+    let p = s.co_producer_preview(back()).unwrap();
+    assert!(p.needs_yes);
+    take_with(&s, p.token, back(), CoProducerApproval::Standing).unwrap();
+    s.co_producer_end().unwrap();
+
+    // Co-Producer's own track needs no yes, so no approval either.
+    let keys = co_producer_track(&s);
+    let own = || vec![rename(seq, keys, "Pad")];
+    let p = s.co_producer_preview(own()).unwrap();
+    assert!(!p.needs_yes, "{p:?}");
+    take_with(&s, p.token, own(), CoProducerApproval::None).unwrap();
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+/// Ruling 11: `co_producer_pending` checks a token as a take does, but
+/// takes nothing, and answers the preview's row.
+#[test]
+fn pending_checks_without_taking() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = saved(dir.path());
+    let seq = first_seq(&s);
+    let (a, b) = (lanes(&s)[0].0, lanes(&s)[1].0);
+    let plan = || vec![rename(seq, a, "Vox"), delete(seq, b)];
+    s.co_producer_begin("tidy up".into()).unwrap();
+    let p = s.co_producer_preview(plan()).unwrap();
+    let doc = s.debug_document_json();
+    assert_eq!(s.co_producer_pending(p.token.clone(), plan()).unwrap(), p);
+    assert_eq!(s.co_producer_pending(p.token.clone(), plan()).unwrap(), p);
+    assert_eq!(s.debug_document_json(), doc, "a peek changes nothing");
+
+    // Refusals, none of which uses the good token up.
+    let wrong = "0".repeat(32);
+    assert_eq!(
+        message(s.co_producer_pending(wrong, plan()).unwrap_err()),
+        USED
+    );
+    assert_eq!(
+        message(
+            s.co_producer_pending("x".repeat(70_000), plan())
+                .unwrap_err()
+        ),
+        USED
+    );
+    assert_eq!(
+        message(
+            s.co_producer_pending(
+                p.token.clone(),
+                vec![rename(seq, a, "Bass"), delete(seq, b)]
+            )
+            .unwrap_err()
+        ),
+        NOT_PREVIEWED
+    );
+    assert_eq!(
+        message(s.co_producer_pending(p.token.clone(), vec![]).unwrap_err()),
+        NOT_PREVIEWED
+    );
+    take_with(&s, p.token.clone(), plan(), CoProducerApproval::Sheet).unwrap();
+    // A used token.
+    assert_eq!(
+        message(s.co_producer_pending(p.token, plan()).unwrap_err()),
+        USED
+    );
+
+    // A hand edit in between.
+    let c = add_track(&s, TrackKindRow::Audio);
+    let again = || vec![rename(seq, c, "Bass")];
+    let p = s.co_producer_preview(again()).unwrap();
+    hand_rename(&s, a, "Kick");
+    assert_eq!(
+        message(s.co_producer_pending(p.token.clone(), again()).unwrap_err()),
+        CHANGED
+    );
+    // A good token after the refusals still takes.
+    let p = s.co_producer_preview(again()).unwrap();
+    let _ = s.co_producer_pending("1".repeat(32), again());
+    let _ = s.co_producer_pending(p.token.clone(), vec![rename(seq, c, "Other")]);
+    s.co_producer_pending(p.token.clone(), again()).unwrap();
+    take_with(&s, p.token, again(), CoProducerApproval::Sheet).unwrap();
+
+    // VizDAW's no drops the token (Ruling 11); another token drops nothing.
+    let p = s.co_producer_preview(again()).unwrap();
+    s.co_producer_forget("2".repeat(32));
+    s.co_producer_forget("x".repeat(70_000));
+    s.co_producer_pending(p.token.clone(), again()).unwrap();
+    s.co_producer_forget(p.token.clone());
+    assert_eq!(
+        message(s.co_producer_pending(p.token.clone(), again()).unwrap_err()),
+        USED
+    );
+    assert_eq!(
+        message(take_with(&s, p.token, again(), CoProducerApproval::Sheet).unwrap_err()),
+        USED
+    );
+    s.co_producer_end().unwrap();
+
+    // With no open request there is nothing to wait for.
+    let p = s.co_producer_preview(again()).unwrap();
+    assert_eq!(
+        message(s.co_producer_pending(p.token, again()).unwrap_err()),
+        OPEN_FIRST
+    );
+    s.close().unwrap();
+}
+
 mod control {
     //! The five `co_producer.*` calls through the FFI (plan 8a Task 4):
     //! typed requests in, typed results out as the reply's JSON, and the
@@ -838,11 +995,13 @@ mod control {
                 token: "ab".into(),
                 plan: plan(),
                 window: Some(WindowRef::Main),
+                client: Some("Helper Chat".into()),
             }),
             ControlRequest::CoProducerApply {
                 token: "ab".into(),
                 plan: vec![rename(1, 2, "Vox")],
                 window: Some(WindowRefRow::Main),
+                client: Some("Helper Chat".into()),
             }
         );
         // Plan 8b Ruling 9's three.
@@ -949,6 +1108,22 @@ mod control {
             result_json(&a),
             json!({"doc": "D1", "results": ["track.delete: done"], "undo_label": "Co-Producer: Tidy"})
         );
+        // Plan 8b Task 6: the test hook's answer.
+        let h = ControlResult::CoProducerApprovalAnswered {
+            app: "Helper Chat".into(),
+            kind: "unverified".into(),
+            label: Some("Helper Chat".into()),
+            path: Some("/usr/local/bin/helper".into()),
+            items: vec![row("Track 2, Vox", "deleted", true)],
+        };
+        assert_eq!(
+            result_json(&h),
+            json!({
+                "app": "Helper Chat", "kind": "unverified", "label": "Helper Chat",
+                "path": "/usr/local/bin/helper",
+                "items": [{"thing": "Track 2, Vox", "change": "deleted", "composers_work": true}],
+            })
+        );
     }
 
     fn private_dir() -> tempfile::TempDir {
@@ -996,6 +1171,17 @@ mod control {
                 window: None,
             }
         );
+        // Plan 8b Task 6: the peer read at accept rides on the call.
+        #[cfg(target_os = "macos")]
+        {
+            let peer = call
+                .peer
+                .clone()
+                .expect("the Co-Producer socket knows its peer");
+            assert_eq!(peer.audit_token.len(), 8);
+            assert_eq!(peer.audit_token[5], std::process::id());
+            assert!(peer.conn >= 1);
+        }
         s.fail(
             call.token,
             ControlFailure {

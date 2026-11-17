@@ -358,6 +358,29 @@ const CO_PRODUCER_SWITCH_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "Turn Co-Producer on (true) or off (false).",
 }];
 
+/// `settings.co_producer_answer`'s parameters (plan 8b Ruling 11): the
+/// e2e's answer to VizDAW's own approval sheet.
+const CO_PRODUCER_ANSWER_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "allow",
+        kind: ParamKind::Flag,
+        required: true,
+        help: "Allow (true) or Don't Allow (false) the change the open Co-Producer approval sheet asks about.",
+    },
+    ParamSpec {
+        name: "always",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "With allow: tick Always allow for the asking app.",
+    },
+    ParamSpec {
+        name: "confirm",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "With always, for an app VizDAW cannot verify: Always Allow Anyway on the warning.",
+    },
+];
+
 /// `file.open_copy`'s parameter (plan 8a Ruling 9).
 const OPEN_COPY_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "path",
@@ -2789,6 +2812,18 @@ pub const COMMANDS: &[CommandSpec] = &[
             "Co-Producer",
             None,
             false,
+        ))
+    },
+    // Plan 8b Ruling 11: the e2e's answer to VizDAW's approval sheet,
+    // only with VIZDAW_TEST_HOOKS=1 and never on the Co-Producer socket.
+    CommandSpec {
+        params: CO_PRODUCER_ANSWER_PARAMS,
+        ..key_only(cmd(
+            "settings.co_producer_answer",
+            "Settings",
+            "Answer Co-Producer Approval",
+            None,
+            true,
         ))
     },
     // Plan 8a Ruling 9: a saved copy opens as a project of its own.

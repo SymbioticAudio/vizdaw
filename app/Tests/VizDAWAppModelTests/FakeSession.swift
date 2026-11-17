@@ -968,10 +968,23 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = coPreviewError { throw e }
         return coPreview
     }
-    func coProducerTake(token: String, plan: [PlannedRow]) throws {
+    /// Each take's approval, in order (plan 8b Task 6).
+    var coTakeApprovals: [CoProducerApproval] = []
+    /// Thrown by `coProducerPending` (a bad, used or stale token, or no
+    /// open request); it is not logged in `coLog`.
+    var coPendingError: VizError?
+    /// The tokens `coProducerForget` dropped.
+    var coForgotten: [String] = []
+    func coProducerTake(token: String, plan: [PlannedRow], approval: CoProducerApproval) throws {
         coLog.append("take")
+        coTakeApprovals.append(approval)
         if let e = coTakeError { throw e }
     }
+    func coProducerPending(token: String, plan: [PlannedRow]) throws -> PreviewRow {
+        if let e = coPendingError { throw e }
+        return coPreview
+    }
+    func coProducerForget(token: String) { coForgotten.append(token) }
     /// What the song's notes stubs answer (plan 8b Task 3).
     var coNotes = NotesRow(text: "# Untitled\n", truncated: false, path: "/tmp/Notes.md")
     /// What `coProducerCopies` answers.

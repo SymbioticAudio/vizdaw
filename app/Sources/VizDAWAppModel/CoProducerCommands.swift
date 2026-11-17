@@ -21,9 +21,12 @@ public enum CoProducerCommands {
     /// copy the request's first entry writes ("yyyy-MM-dd HH-mm", local
     /// time, now). `ping`, `state.get`, `wait` and `ui.screenshot` are the
     /// channel's own; any other request the gate admits not is refused.
+    /// `peer` is who sent it (the socket's audit token), and `approver`
+    /// shows VizDAW's own approval sheet for an apply that needs a yes
+    /// (plan 8b Ruling 11).
     public static func run(
         _ request: ControlRequest, doc: (id: UUID, model: DocumentModel)?, store: DocumentStore,
-        host: any ControlHost, stamp: String
+        host: any ControlHost, stamp: String, peer: PeerRow?, approver: any CoProducerApprover
     ) -> ControlOutcome {
         // A nested run loop inside a plugin call could deliver the
         // composer's events while Co-Producer acts.
@@ -76,9 +79,11 @@ public enum CoProducerCommands {
             } catch {
                 return .failed(failure(error))
             }
-        case .coProducerApply(let token, let plan, _):
+        case .coProducerApply(let token, let plan, _, let client):
             guard let (docID, m) = doc else { return noDocument }
-            return apply(token, plan, docID, m, store, host, stamp: stamp)
+            return approve(
+                Apply(token: token, plan: plan, doc: docID, stamp: stamp), client: client, m, store, host,
+                peer: peer, approver: approver)
         case .coProducerNotes:
             guard let (docID, m) = doc else { return noDocument }
             do {
@@ -111,9 +116,10 @@ public enum CoProducerCommands {
 
     /// Enter, take, every planned command, leave: one stretch (Ruling 13).
     /// A command that fails stops the rest, and every command has its line.
+    /// `approval` is VizDAW's own (plan 8b Ruling 11).
     static func apply(
         _ token: String, _ plan: [PlannedRow], _ docID: UUID, _ m: DocumentModel, _ store: DocumentStore,
-        _ host: any ControlHost, stamp: String
+        _ host: any ControlHost, stamp: String, approval: CoProducerApproval
     ) -> ControlOutcome {
         do {
             _ = try m.session.coProducerEnter(stamp: stamp)
@@ -122,7 +128,7 @@ public enum CoProducerCommands {
         }
         defer { m.session.coProducerLeave() }
         do {
-            try m.session.coProducerTake(token: token, plan: plan)
+            try m.session.coProducerTake(token: token, plan: plan, approval: approval)
         } catch {
             return .failed(failure(error))
         }
@@ -187,7 +193,7 @@ public enum CoProducerCommands {
             outwardJobs[doc, default: [:]][job] = path
         case .pending(let p):
             return .pending(PendingOutcome(after: p) { recorded($0, id, args, docID, m) })
-        case .failed, .measure:
+        case .failed, .measure, .awaitingApproval:
             break
         }
         return outcome
@@ -218,10 +224,13 @@ public enum CoProducerCommands {
     }
 
     /// Every document's request: ended when idle for `idleMs`, or, when
-    /// `all` (the switch went off), ended now.
+    /// `all` (the switch went off), ended now, its approval sheet a no. A
+    /// request whose document has an approval sheet open is not idle.
     public static func tidy(_ store: DocumentStore, all: Bool) {
-        for m in store.documents.values {
+        if all { refuseAll(store) }
+        for (id, m) in store.documents {
             let ended: Bool
+            if !all, waiting[id] != nil { continue }
             if all {
                 ended = m.session.coProducerRequest() != nil && (try? m.session.coProducerEnd()) != nil
             } else {
@@ -282,5 +291,200 @@ public enum CoProducerCommands {
     /// The document again after its request ended (the Undo title).
     static func refresh(_ m: DocumentModel) {
         if let s = try? m.session.snapshot() { m.apply(s) }
+    }
+}
+
+// MARK: VizDAW's own approval (plan 8b Ruling 11; spec §6.8)
+
+/// One apply waiting for the composer on VizDAW's sheet. The channel keeps
+/// it until `outcome` is set, and answers the call with that.
+@MainActor
+public final class CoProducerApprovalWait {
+    let apply: CoProducerCommands.Apply
+    let pending: PendingApproval
+    /// The document's version when the sheet opened: a change is a no.
+    let version: UInt64
+    let started: Date
+    let wait: TimeInterval
+    let approver: any CoProducerApprover
+    /// The call's answer, once the composer (or the clock) decided.
+    public internal(set) var outcome: ControlOutcome?
+    /// Whether the caller still waits; the channel sets it.
+    public var callerWaiting: (@MainActor () -> Bool)?
+
+    init(
+        apply: CoProducerCommands.Apply, pending: PendingApproval, version: UInt64, started: Date,
+        wait: TimeInterval, approver: any CoProducerApprover
+    ) {
+        self.apply = apply
+        self.pending = pending
+        self.version = version
+        self.started = started
+        self.wait = wait
+        self.approver = approver
+    }
+}
+
+extension CoProducerCommands {
+    /// How long the sheet waits for the composer.
+    public static let approvalWait: TimeInterval = 600
+    /// Ruling 11's answers.
+    public static let notAllowed = "The composer did not allow this in VizDAW."
+    public static let askingAlready = "VizDAW is already asking the composer about another change."
+    public static let noApprovalWaiting = "No Co-Producer approval is waiting."
+    public static let confirmFirst = "Confirm the warning first: VizDAW can't check which program this is."
+    public static let cannotName = "Always allow needs a program VizDAW can name."
+    /// The e2e's answer to the sheet (developer channel, test hooks only).
+    public static let answerHook = "settings.co_producer_answer"
+
+    /// An apply's call, kept while the sheet waits.
+    struct Apply {
+        let token: String
+        let plan: [PlannedRow]
+        let doc: UUID
+        let stamp: String
+    }
+
+    /// The sheets waiting, by document: at most one each.
+    static var waiting: [UUID: CoProducerApprovalWait] = [:]
+
+    /// The wait open on `doc`, if any.
+    public static func approvalWait(for doc: UUID) -> CoProducerApprovalWait? { waiting[doc] }
+
+    /// Ruling 11's flow for an apply: a bad token or a preview that needs
+    /// no yes goes straight to the stretch with no approval (the session
+    /// refuses or takes it); a standing approval for the caller runs it
+    /// with `.standing`; otherwise the sheet opens and the call waits.
+    static func approve(
+        _ a: Apply, client: String?, _ m: DocumentModel, _ store: DocumentStore, _ host: any ControlHost,
+        peer: PeerRow?, approver: any CoProducerApprover
+    ) -> ControlOutcome {
+        if waiting[a.doc] != nil { return .failed(.of(.busy, askingAlready)) }
+        guard let preview = try? m.session.coProducerPending(token: a.token, plan: a.plan), preview.needsYes else {
+            return apply(a.token, a.plan, a.doc, m, store, host, stamp: a.stamp, approval: .none)
+        }
+        let settings = host.coProducer
+        let identity = identify(peer, client, settings)
+        if identity.key != nil, standingApproval(for: identity, in: settings.approvals.load()) != nil {
+            return apply(a.token, a.plan, a.doc, m, store, host, stamp: a.stamp, approval: .standing)
+        }
+        let pending = PendingApproval(doc: a.doc, identity: identity, label: client, items: preview.items)
+        let w = CoProducerApprovalWait(
+            apply: a, pending: pending, version: m.snapshot.version, started: settings.now(),
+            wait: settings.approvalWait, approver: approver)
+        waiting[a.doc] = w
+        let handler: @MainActor (ApprovalAnswer) -> String? = { answer in
+            respond(w, answer, store, host)
+        }
+        m.coProducerApproval = CoProducerApprovalSheetModel(pending: pending, song: m.snapshot.title, respond: handler)
+        approver.ask(pending) { _ = handler($0) }
+        // An approver that answered at once (a test's) leaves nothing waiting.
+        if let o = w.outcome { return o }
+        return .awaitingApproval(doc: a.doc)
+    }
+
+    /// The caller's identity, worked out once per connection and label.
+    static func identify(_ peer: PeerRow?, _ client: String?, _ settings: CoProducerSettings) -> ClientIdentity {
+        guard let peer else { return .unknown }
+        let cacheKey = "\(peer.conn)\n\(client ?? "")"
+        if let id = settings.identities[cacheKey] { return id }
+        let id = ClientIdentity.decide(peer: peer, label: client, facts: settings.facts)
+        settings.identities[cacheKey] = id
+        return id
+    }
+
+    /// The composer's `answer` to `w`'s sheet: nil when taken, else why it
+    /// was refused (the sheet then stays open).
+    static func respond(
+        _ w: CoProducerApprovalWait, _ answer: ApprovalAnswer, _ store: DocumentStore, _ host: any ControlHost
+    ) -> String? {
+        guard waiting[w.apply.doc] === w, w.outcome == nil else { return noApprovalWaiting }
+        guard case .allow(let always, let confirmed) = answer else {
+            refuse(w, store, cancel: false)
+            return nil
+        }
+        let settings = host.coProducer
+        if always {
+            switch w.pending.identity {
+            case .unknown:
+                return cannotName
+            case .unverified(let key, let path, let label) where confirmed:
+                settings.grant(StandingApproval(
+                    key: "unverified:" + key, verified: false,
+                    name: CoProducerApprovalSheetModel.appName(w.pending), team: nil, identifier: nil, path: path,
+                    label: label, granted: settings.now()))
+            case .unverified:
+                store.model(w.apply.doc)?.coProducerApproval?.step = .warning
+                return confirmFirst
+            case .known(let key, let team, let identifier, let name):
+                settings.grant(StandingApproval(
+                    key: "signed:" + key, verified: true, name: name, team: team, identifier: identifier, path: nil,
+                    label: nil, granted: settings.now()))
+            }
+        }
+        waiting[w.apply.doc] = nil
+        guard let m = store.model(w.apply.doc) else {
+            w.outcome = .failed(.of(.failed, notAllowed))
+            return nil
+        }
+        m.coProducerApproval = nil
+        let a = w.apply
+        w.outcome = apply(a.token, a.plan, a.doc, m, store, host, stamp: a.stamp, approval: .sheet)
+        return nil
+    }
+
+    /// `w` is a no: answered "The composer did not allow this in VizDAW.",
+    /// its token dropped, its sheet closed; `cancel`: the composer did not
+    /// answer, so the approver is told.
+    static func refuse(_ w: CoProducerApprovalWait, _ store: DocumentStore, cancel: Bool) {
+        guard waiting[w.apply.doc] === w, w.outcome == nil else { return }
+        waiting[w.apply.doc] = nil
+        w.outcome = .failed(.of(.failed, notAllowed))
+        if let m = store.model(w.apply.doc) {
+            m.session.coProducerForget(token: w.apply.token)
+            m.coProducerApproval = nil
+        }
+        if cancel { w.approver.cancel(doc: w.apply.doc) }
+    }
+
+    /// Every open sheet is a no (the switch went off, quit).
+    static func refuseAll(_ store: DocumentStore) {
+        for w in Array(waiting.values) { refuse(w, store, cancel: true) }
+    }
+
+    /// Each tick: a sheet whose 10 minutes are up, whose song changed,
+    /// whose caller left, whose document closed, or with the switch off,
+    /// is a no.
+    public static func checkApprovals(store: DocumentStore, host: any ControlHost, now: Date) {
+        for w in Array(waiting.values) {
+            let m = store.model(w.apply.doc)
+            let stale =
+                m == nil || !host.coProducer.on || now >= w.started.addingTimeInterval(w.wait)
+                || m?.snapshot.version != w.version || w.callerWaiting?() == false
+            if stale { refuse(w, store, cancel: true) }
+        }
+    }
+
+    /// `settings.co_producer_answer` (Ruling 11's test hook): answers the
+    /// open sheet of `doc` as a real press would. Only with
+    /// `VIZDAW_TEST_HOOKS=1`; its answer is what the sheet asked.
+    static func runAnswerHook(
+        _ args: [ControlArg], doc: (id: UUID, model: DocumentModel)?, store: DocumentStore, host: any ControlHost
+    ) -> ControlOutcome {
+        guard host.coProducer.testHooks else { return .failed(.of(.notAllowed, "test hook")) }
+        guard let allow = args.flag("allow") else {
+            return .failed(.of(.invalidParams, "\(answerHook): `allow` is true or false"))
+        }
+        guard let (docID, _) = doc, let w = waiting[docID], w.outcome == nil else {
+            return .failed(.of(.failed, noApprovalWaiting))
+        }
+        let p = w.pending
+        let asked = ControlResult.coProducerApprovalAnswered(
+            app: CoProducerApprovalSheetModel.appName(p), kind: p.identity.kind, label: p.label,
+            path: p.identity.path, items: p.items)
+        let answer: ApprovalAnswer =
+            allow ? .allow(always: args.flag("always") ?? false, confirmed: args.flag("confirm") ?? false) : .deny
+        if let refused = respond(w, answer, store, host) { return .failed(.of(.notAllowed, refused)) }
+        return .done(asked)
     }
 }

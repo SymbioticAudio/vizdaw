@@ -72,6 +72,8 @@ fn a_state_call_round_trips_as_typed_rows() {
             window: Some(vizdaw_ffi::WindowRefRow::Number { number: 9 })
         }
     ));
+    // The developer channel reads no peer (plan 8b Task 6).
+    assert_eq!(call.peer, None);
     let session = Session::new_demo().unwrap();
     let snapshot = session.snapshot().unwrap();
     let r = ControlResult::Document {

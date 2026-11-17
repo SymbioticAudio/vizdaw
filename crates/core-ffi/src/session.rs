@@ -274,10 +274,9 @@ pub(crate) struct Inner {
     co_producer_seen: Instant,
     /// The open request wrote its saved copy (Ruling 9: one per request).
     co_producer_copied: bool,
-    /// The latest preview, until taken or replaced (Ruling 7).
+    /// The latest preview, until taken or replaced (Ruling 7); it keeps
+    /// whether it needs the composer's yes (plan 8b Rulings 5 and 11).
     co_producer_preview: Option<crate::co_producer::PendingPreview>,
-    /// The latest preview needs the composer's yes (plan 8b Ruling 5).
-    co_producer_preview_yes: bool,
     /// The call now inside took a preview that needed a yes: its items
     /// are logged "(yes in chat)" (plan 8b Ruling 5).
     co_producer_yes: bool,
@@ -433,7 +432,6 @@ impl Inner {
             co_producer_seen: Instant::now(),
             co_producer_copied: false,
             co_producer_preview: None,
-            co_producer_preview_yes: false,
             co_producer_yes: false,
             co_producer_log: None,
             co_producer_entered: None,
@@ -4789,7 +4787,6 @@ impl Session {
         ffi_guard(|| {
             let mut inner = self.lock_inner();
             inner.co_producer_preview = None;
-            inner.co_producer_preview_yes = false;
             if inner.history.request().is_some() {
                 inner.co_producer_seen = Instant::now();
             }
@@ -4802,18 +4799,17 @@ impl Session {
             let items = cp::preview_items(&inner.history, inner.path.as_deref(), &plan)?;
             let token = cp::fresh_token()?;
             let needs_yes = items.iter().any(|i| i.composers_work);
-            inner.co_producer_preview = Some(cp::PendingPreview {
-                token: token.clone(),
+            let pending = cp::PendingPreview {
+                token,
                 version: inner.version,
                 serial: inner.history.present_serial(),
                 canonical: cp::canonical(&plan),
-            });
-            inner.co_producer_preview_yes = needs_yes;
-            Ok(cp::PreviewRow {
-                token,
                 needs_yes,
                 items,
-            })
+            };
+            let row = pending.row();
+            inner.co_producer_preview = Some(pending);
+            Ok(row)
         })
     }
 
@@ -4828,15 +4824,24 @@ impl Session {
     /// `co_producer_leave`, so nothing lands between the check and the
     /// plan. Otherwise `Model` "Take the preview inside the Co-Producer
     /// call: co_producer_enter first.", and the token is used up.
+    ///
+    /// Plan 8b Ruling 11, after those checks: a preview that needs the
+    /// composer's yes needs VizDAW's own `approval` too (the sheet's Allow,
+    /// or a standing approval for the asking app). With
+    /// [`CoProducerApproval::None`](crate::co_producer::CoProducerApproval)
+    /// it is `Model` "VizDAW's own approval is needed for this change.",
+    /// and the token is used up as by any take.
     pub fn co_producer_take(
         &self,
         token: String,
         plan: Vec<crate::co_producer::PlannedRow>,
+        approval: crate::co_producer::CoProducerApproval,
     ) -> Result<(), VizError> {
+        use crate::co_producer::{CoProducerApproval, NEEDS_APPROVAL};
         ffi_guard(|| {
             let mut inner = self.lock_inner();
             let pending = inner.co_producer_preview.take();
-            let yes = std::mem::take(&mut inner.co_producer_preview_yes);
+            let yes = pending.as_ref().is_some_and(|p| p.needs_yes);
             if inner.history.request().is_some() {
                 inner.co_producer_seen = Instant::now();
             }
@@ -4848,13 +4853,61 @@ impl Session {
                 });
             }
             let (version, serial) = (inner.version, inner.history.present_serial());
-            let taken = crate::co_producer::check_take(pending, &token, &plan, version, serial);
-            if taken.is_ok() {
-                // This call's items were the composer's yes (Ruling 5).
-                inner.co_producer_yes = yes;
+            crate::co_producer::check_take(pending, &token, &plan, version, serial)?;
+            if yes && approval == CoProducerApproval::None {
+                return Err(VizError::Model {
+                    message: NEEDS_APPROVAL.into(),
+                });
             }
-            taken
+            // This call's items were the composer's yes (Ruling 5).
+            inner.co_producer_yes = yes;
+            Ok(())
         })
+    }
+
+    /// Plan 8b Ruling 11: the latest preview's row, when `token` and `plan`
+    /// would pass [`Session::co_producer_take`]'s checks now (unused, the
+    /// song as previewed, the same plan). Nothing is taken, so the app
+    /// can ask the composer first. `Model` with the take's sentence
+    /// otherwise, or "Open a request first (begin_request)." with no open
+    /// request (a take could not enter, so nothing waits for a yes).
+    pub fn co_producer_pending(
+        &self,
+        token: String,
+        plan: Vec<crate::co_producer::PlannedRow>,
+    ) -> Result<crate::co_producer::PreviewRow, VizError> {
+        use crate::co_producer as cp;
+        ffi_guard(|| {
+            let inner = self.lock_inner();
+            if inner.history.request().is_none() {
+                return Err(VizError::Model {
+                    message: OPEN_A_REQUEST.into(),
+                });
+            }
+            let (version, serial) = (inner.version, inner.history.present_serial());
+            let pending = inner.co_producer_preview.as_ref();
+            cp::check_pending(pending, &token, &plan, version, serial)?;
+            pending.map(cp::PendingPreview::row).ok_or(VizError::Model {
+                message: cp::USED.into(),
+            })
+        })
+    }
+
+    /// Plan 8b Ruling 11: VizDAW's own answer was no, so the latest
+    /// preview is dropped when its token is `token` and a new preview is
+    /// needed. Any other token drops nothing; it never fails.
+    pub fn co_producer_forget(&self, token: String) {
+        let _ = ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            if inner
+                .co_producer_preview
+                .as_ref()
+                .is_some_and(|p| p.token == token)
+            {
+                inner.co_producer_preview = None;
+            }
+            Ok(())
+        });
     }
 }
 

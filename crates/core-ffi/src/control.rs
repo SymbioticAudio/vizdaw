@@ -515,6 +515,8 @@ pub enum ControlRequest {
         plan: Vec<crate::co_producer::PlannedRow>,
         /// Whose document.
         window: Option<WindowRefRow>,
+        /// What the host calls itself: a label only (plan 8b Ruling 11).
+        client: Option<String>,
     },
     /// `co_producer.notes` (plan 8b Ruling 9).
     CoProducerNotes {
@@ -539,6 +541,16 @@ pub enum ControlRequest {
     },
 }
 
+/// Who a Co-Producer call came from (plan 8b Ruling 11): its connection
+/// and the audit token read when it connected.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PeerRow {
+    /// The connection, numbered from 1 per server and never reused.
+    pub conn: u64,
+    /// The peer's `audit_token_t`: eight words, its pid in word 5.
+    pub audit_token: Vec<u32>,
+}
+
 /// A request and the token to answer it with.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct ControlCall {
@@ -546,6 +558,9 @@ pub struct ControlCall {
     pub token: u64,
     /// The request.
     pub request: ControlRequest,
+    /// The peer, when the server read one (the Co-Producer socket on
+    /// macOS); None on the developer channel.
+    pub peer: Option<PeerRow>,
 }
 
 /// An alert the app would have shown.
@@ -968,6 +983,20 @@ pub enum ControlResult {
         /// The new folder.
         path: String,
     },
+    /// `settings.co_producer_answer` (plan 8b Ruling 11): what the
+    /// approval sheet it answered asked.
+    CoProducerApprovalAnswered {
+        /// The asking app as the sheet names it.
+        app: String,
+        /// "known", "unverified" or "unknown".
+        kind: String,
+        /// What the app calls itself, if anything.
+        label: Option<String>,
+        /// The host's path, when VizDAW could read it.
+        path: Option<String>,
+        /// The preview's items the sheet listed.
+        items: Vec<crate::co_producer::ChangeItemRow>,
+    },
 }
 
 /// Error codes (control spec §5.3).
@@ -1166,6 +1195,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
             token,
             plan,
             window,
+            client,
         } => ControlRequest::CoProducerApply {
             token,
             plan: plan
@@ -1173,6 +1203,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 .map(crate::co_producer::planned_row)
                 .collect(),
             window: window_row(window),
+            client,
         },
         Command::CommandRun { id, args, window } => ControlRequest::RunCommand {
             id,
@@ -1789,6 +1820,18 @@ pub fn result_json(r: &ControlResult) -> Value {
             "doc": doc, "text": notes.text, "truncated": notes.truncated, "path": notes.path,
         }),
         ControlResult::CoProducerFolder { path, .. } => json!({ "path": path }),
+        ControlResult::CoProducerApprovalAnswered {
+            app,
+            kind,
+            label,
+            path,
+            items,
+        } => json!({
+            "app": app, "kind": kind, "label": label, "path": path,
+            "items": items.iter().map(|i| json!({
+                "thing": i.thing, "change": i.change, "composers_work": i.composers_work,
+            })).collect::<Vec<_>>(),
+        }),
     }
 }
 
@@ -1878,6 +1921,9 @@ impl ControlServer {
                     role: Role::CoProducer,
                     app_timeout: Duration::from_millis(app_timeout_ms.max(1)),
                     idle_timeout: Duration::from_secs(900),
+                    // Plan 8b Ruling 11: who connected, read at accept.
+                    #[cfg(target_os = "macos")]
+                    peer: Some(platform_macos::peer::audit_token),
                     ..Config::default()
                 },
             )
@@ -1895,8 +1941,16 @@ impl ControlServer {
             let server = lock(&self.server);
             while let Some(call) = server.next_call() {
                 let token = call.token;
+                let peer = call.audit_token.map(|t| PeerRow {
+                    conn: call.conn,
+                    audit_token: t.to_vec(),
+                });
                 if let Some(request) = request_of(call.command, || server.screenshot_path()) {
-                    return Ok(Some(ControlCall { token, request }));
+                    return Ok(Some(ControlCall {
+                        token,
+                        request,
+                        peer,
+                    }));
                 }
             }
             Ok(None)

@@ -135,6 +135,9 @@ enum ControlChannel {
                 guard let call = (try? coProducer.nextCall()) ?? nil else { break }
                 execute(call, coProducer, coProducer: true)
             }
+            // VizDAW's approval sheets: out of time, stale or orphaned is a
+            // no (plan 8b Ruling 11).
+            CoProducerCommands.checkApprovals(store: appStore, host: AppControlHost.shared, now: Date())
             // A request idle for 5 minutes ends (Ruling 3), checked every 5 s.
             ticks += 1
             if ticks % 100 == 0 { CoProducerCommands.tidy(appStore, all: false) }
@@ -163,6 +166,8 @@ enum ControlChannel {
             whenJobEnds(server, token, command: command, doc: doc, job: job, coProducer: coProducer)
         case .measure(let doc, let job):
             whenMeasured(server, token, doc: doc, job: job)
+        case .awaitingApproval(let doc):
+            whenApproved(server, token, doc: doc)
         case .pending(let p):
             // A file read or a render: as long as a job may take.
             _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
@@ -174,6 +179,28 @@ enum ControlChannel {
                 if expired { _ = try? server.fail(token: token, failure: .of(.timeout, "the call did not end in time")) }
                 return expired
             }
+        }
+    }
+
+    /// Answers a Co-Producer apply once the composer answered VizDAW's
+    /// approval sheet (plan 8b Ruling 11): the call waits the sheet's time
+    /// plus 30 s, within `vizdaw-mcp`'s 660 s, and its sheet is a no once
+    /// nobody waits for it.
+    static func whenApproved(_ server: ControlServer, _ token: UInt64, doc: UUID) {
+        guard let w = CoProducerCommands.approvalWait(for: doc) else {
+            _ = try? server.fail(token: token, failure: .of(.failed, CoProducerCommands.notAllowed))
+            return
+        }
+        let seconds = AppControlHost.shared.coProducer.approvalWait + 30
+        _ = try? server.extendTimeout(token: token, timeoutMs: UInt64(seconds * 1000))
+        w.callerWaiting = { server.isWaiting(token: token) }
+        later(server, token, seconds: seconds) { expired in
+            if let o = w.outcome {
+                answer(server, token, o, coProducer: true)
+                return true
+            }
+            if expired { _ = try? server.fail(token: token, failure: .of(.failed, CoProducerCommands.notAllowed)) }
+            return expired
         }
     }
 
@@ -392,7 +419,7 @@ enum ControlChannel {
                 let doc = ControlWindows.document(requestWindow(call.request))
                 let outcome = CoProducerCommands.run(
                     call.request, doc: doc, store: appStore, host: AppControlHost.shared,
-                    stamp: CoProducerCommands.stamp(Date()))
+                    stamp: CoProducerCommands.stamp(Date()), peer: call.peer, approver: SheetApprover.shared)
                 return answer(server, token, outcome, coProducer: true)
             }
         }
@@ -503,7 +530,7 @@ enum ControlChannel {
     static func requestWindow(_ request: ControlRequest) -> WindowRefRow? {
         switch request {
         case .runCommand(_, _, let w), .coProducerBegin(_, _, let w), .coProducerEnd(let w), .coProducerStatus(let w),
-            .coProducerPreview(_, let w), .coProducerApply(_, _, let w), .coProducerNotes(let w),
+            .coProducerPreview(_, let w), .coProducerApply(_, _, let w, _), .coProducerNotes(let w),
             .coProducerNote(_, let w), .coProducerExportFolder(_, _, let w):
             w
         default: nil
@@ -594,7 +621,7 @@ enum ControlChannel {
                 case .failed(let f):
                     _ = try? server.fail(token: token, failure: f)
                     return
-                case .done, .opened, .job, .measure, .pending:
+                case .done, .opened, .job, .measure, .pending, .awaitingApproval:
                     if case .opened(_, let doc) = outcome { ControlWindows.openDocument(doc) }
                     sent += 1
                     continue
