@@ -740,6 +740,45 @@ fn document_state_reports_the_midi_mix_per_destination() {
     assert_eq!(d[1]["midi_mute"], json!(false));
 }
 
+/// Plan release-fixes Task 10: `state.get document` names a track's output
+/// path (null for none) and a Built-in Synth destination's sound.
+#[test]
+fn document_state_shows_outputs_and_synth_sounds() {
+    use vizdaw_ffi::{BuiltinSound, DestRow, MidiMixRow, TrackKindRow};
+    let session = Session::new_empty().unwrap();
+    let seq = session.snapshot().unwrap().sequences[0].id;
+    session.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    session.new_track(seq, TrackKindRow::Midi, None).unwrap();
+    let lanes = session.lanes(seq).unwrap();
+    let row = |id, sound| DestRow {
+        id,
+        name: format!("D{id}"),
+        plugin: None,
+        external: false,
+        return_latency_ms: 0.0,
+        midi_mix: MidiMixRow::default(),
+        channel: None,
+        mpe: None,
+        builtin_sound: sound,
+    };
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot: session.snapshot().unwrap(),
+        selected_seq: Some(seq),
+        lanes: lanes.clone(),
+        destinations: vec![row(1, Some(BuiltinSound::Drums)), row(2, None)],
+        alert: None,
+    });
+    let l = v["lanes"].as_array().unwrap();
+    assert_eq!(l[0]["audio_out"], json!(lanes[0].audio_out));
+    assert!(l[0]["audio_out"].is_number(), "{}", l[0]);
+    assert_eq!(l[1]["audio_out"], Value::Null);
+    let d = v["destinations"].as_array().unwrap();
+    assert_eq!(d[0]["sound"], json!("drums"));
+    assert_eq!(d[1]["sound"], Value::Null);
+}
+
 /// Plan 5d-1 Task 12 (Ruling 26): `state.get transport` says whether a
 /// count-in is playing.
 #[test]

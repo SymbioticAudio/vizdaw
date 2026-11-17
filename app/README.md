@@ -2805,6 +2805,49 @@ Plan 5c-2 takes, choosing takes and MIDI loop recording that layers:
      the mixer window: the mode switch sits between Record and ⌄, and nothing
      is clipped or overlaps.
 
+26.0.0 release fixes:
+
+334. Arm a MIDI track with a 1-bar count-in and press Record. On beat 2, choose
+     another output device in Settings › Audio: the count-in carries on from
+     the next beat and recording starts on the bar, with no doubled click.
+335. Connect two interfaces with the same name, if you have them: Settings ›
+     Audio lists "<name>" and "<name> (2)", and your choice survives a
+     relaunch.
+336. With a slow MIDI setup (or at first launch), open a MIDI track's input
+     picker: the window never stalls. A source plugged in appears the next
+     time the picker opens.
+337. Arm a track while another document's engine winds down: the window stays
+     responsive, and the input is heard within about half a second.
+338. Open a plug-in with a read-only meter parameter, set its strip to Touch,
+     play, and drag that slider: no automation track appears.
+339. Write fader automation, play, and watch the mixer: the fader follows what
+     you hear. Grab it: it starts from there. Stop: it shows the static
+     value.
+340. In the Mix view with no editor pane, press ⌥→: nothing moves, and the
+     status line says why. Edit › Nudge is greyed out.
+341. Rename a region in the inspector: its name shows at the region's top left
+     in the arrangement. Narrow the region: the name truncates, then hides.
+342. Click "→ Audio 1" on an audio track's header: pick another output. One
+     Undo puts it back.
+343. With a keyboard surface connected, colour a track: its LED takes the
+     colour. "No colour" brings back the kind's colour.
+344. Double-click the Built-in Synth slot on an instrument strip: the Built-in
+     Synth window opens. Choose Bass, then Drums, playing a few notes after
+     each: the sound changes, and Drums plays a kit. Undo brings back Bass.
+345. On a track with an external destination, choose Edit Destination…: type a
+     return latency, or press Measure with the synth's return input
+     connected. The field shows the measured value, and one Undo puts the
+     old one back.
+346. Trim the start of an audio region in the middle of a waveform with "Snap
+     audio edits to zero crossings" on (Settings › Editing): zoom in, and the
+     edge sits on a zero crossing. Play: no click at either edge. With the
+     setting off, the edge stays exactly where you dropped it, still without
+     a click.
+347. Give a region a 10 ms fade-in: it sounds exactly as before this build. A
+     crossfaded start sounds as before too.
+348. Choose the Console theme: the strip legends use the new face. Every other
+     theme is unchanged.
+
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;
