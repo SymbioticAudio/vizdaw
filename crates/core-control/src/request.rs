@@ -6,7 +6,7 @@ use crate::co_producer::{MAX_PLAN, Planned};
 use crate::element::{self, ElementRef};
 use crate::error::{ControlError, ErrorCode};
 use crate::keys::{KeyStroke, Modifiers, named_key, text_strokes};
-use crate::params::{MAX_STRING, Params, WindowRef};
+use crate::params::{MAX_PATH, MAX_STRING, Params, WindowRef};
 use crate::protocol::{RawRequest, truncate};
 use crate::registry::{self, ArgValue, OPEN_DIALOGS};
 use crate::wait::{DEFAULT_TIMEOUT_MS, DETAIL_KINDS, MAX_TIMEOUT_MS, WaitCondition};
@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every command name.
-pub const COMMAND_NAMES: [&str; 18] = [
+pub const COMMAND_NAMES: [&str; 21] = [
     "commands.list",
     "command.run",
     "state.get",
@@ -33,11 +33,85 @@ pub const COMMAND_NAMES: [&str; 18] = [
     "co_producer.status",
     "co_producer.preview",
     "co_producer.apply",
+    "co_producer.notes",
+    "co_producer.note",
+    "co_producer.export_folder",
 ];
 
 /// The longest Co-Producer request name, in characters after trimming
 /// (plan 8a Ruling 11).
 pub const MAX_REQUEST_NAME: usize = 200;
+/// The longest `asked` of `co_producer.begin`, in characters after
+/// trimming (plan 8b Ruling 9).
+pub const MAX_ASKED: usize = 500;
+/// The longest `co_producer.note` text, in characters (Ruling 9).
+pub const MAX_NOTE: usize = 2000;
+/// The most lines in one `co_producer.note` (Ruling 9).
+pub const MAX_NOTE_LINES: usize = 20;
+
+/// What a `co_producer.export_folder` is for (plan 8b Ruling 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportWhat {
+    /// Stems.
+    Stems,
+    /// A mix.
+    Mix,
+    /// A selection.
+    Selection,
+    /// MIDI.
+    Midi,
+    /// A DAWproject file.
+    Dawproject,
+    /// AAF.
+    Aaf,
+    /// The export for another DAW.
+    OtherDaw,
+}
+
+impl ExportWhat {
+    /// Every value, in the order the protocol lists them.
+    pub const ALL: [ExportWhat; 7] = [
+        ExportWhat::Stems,
+        ExportWhat::Mix,
+        ExportWhat::Selection,
+        ExportWhat::Midi,
+        ExportWhat::Dawproject,
+        ExportWhat::Aaf,
+        ExportWhat::OtherDaw,
+    ];
+
+    /// Its protocol name.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExportWhat::Stems => "stems",
+            ExportWhat::Mix => "mix",
+            ExportWhat::Selection => "selection",
+            ExportWhat::Midi => "midi",
+            ExportWhat::Dawproject => "dawproject",
+            ExportWhat::Aaf => "aaf",
+            ExportWhat::OtherDaw => "other_daw",
+        }
+    }
+
+    /// The value named `s` (`"stems"` … `"other_daw"`), exactly.
+    pub fn parse(s: &str) -> Option<ExportWhat> {
+        ExportWhat::ALL.into_iter().find(|w| w.name() == s)
+    }
+
+    /// How a folder name shows it (Ruling 6): "Stems" … "Other DAW".
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportWhat::Stems => "Stems",
+            ExportWhat::Mix => "Mix",
+            ExportWhat::Selection => "Selection",
+            ExportWhat::Midi => "MIDI",
+            ExportWhat::Dawproject => "DAWproject",
+            ExportWhat::Aaf => "AAF",
+            ExportWhat::OtherDaw => "Other DAW",
+        }
+    }
+}
+
 /// A preview token's length: 32 lowercase hex characters (Ruling 7).
 pub const TOKEN_LEN: usize = 32;
 
@@ -236,6 +310,9 @@ pub enum Command {
     CoProducerBegin {
         /// What the composer asked for, trimmed.
         name: String,
+        /// The composer's own words for the notes (plan 8b Ruling 9):
+        /// trimmed, newlines as spaces; None when absent or blank.
+        asked: Option<String>,
         /// Whose document.
         window: Option<WindowRef>,
     },
@@ -265,6 +342,28 @@ pub enum Command {
         /// Whose document.
         window: Option<WindowRef>,
     },
+    /// Reads the song's notes (plan 8b Ruling 9).
+    CoProducerNotes {
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Adds a note to the open request's entry.
+    CoProducerNote {
+        /// 1 to [`MAX_NOTE`] characters in at most [`MAX_NOTE_LINES`] lines.
+        text: String,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Makes a new dated export folder (Ruling 6).
+    CoProducerExportFolder {
+        /// What the export is.
+        what: ExportWhat,
+        /// The folder to make it in; absent: the remembered one, else the
+        /// song's own. Checked by the gate, not here.
+        parent: Option<PathBuf>,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
 }
 
 impl Command {
@@ -283,6 +382,9 @@ impl Command {
                 | Command::CoProducerStatus { .. }
                 | Command::CoProducerPreview { .. }
                 | Command::CoProducerApply { .. }
+                | Command::CoProducerNotes { .. }
+                | Command::CoProducerNote { .. }
+                | Command::CoProducerExportFolder { .. }
         )
     }
 }
@@ -447,9 +549,10 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
         }
         "wait" => wait(&p),
         "co_producer.begin" => {
-            p.only(&["name", "window"])?;
+            p.only(&["name", "asked", "window"])?;
             Ok(Command::CoProducerBegin {
                 name: request_name(&p)?,
+                asked: asked(&p)?,
                 window: p.window()?,
             })
         }
@@ -477,6 +580,27 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
             Ok(Command::CoProducerApply {
                 token: token(&p)?,
                 plan: plan(&p)?,
+                window: p.window()?,
+            })
+        }
+        "co_producer.notes" => {
+            p.only(&["window"])?;
+            Ok(Command::CoProducerNotes {
+                window: p.window()?,
+            })
+        }
+        "co_producer.note" => {
+            p.only(&["text", "window"])?;
+            Ok(Command::CoProducerNote {
+                text: note(&p)?,
+                window: p.window()?,
+            })
+        }
+        "co_producer.export_folder" => {
+            p.only(&["what", "parent", "window"])?;
+            Ok(Command::CoProducerExportFolder {
+                what: export_what(&p)?,
+                parent: export_parent(&p)?,
                 window: p.window()?,
             })
         }
@@ -558,6 +682,75 @@ fn request_name(p: &Params<'_>) -> Result<String, ControlError> {
         return Err(p.error("`name` must not hold control, direction or line-separator characters"));
     }
     Ok(name.to_string())
+}
+
+/// `co_producer.begin`'s optional `asked`: at most [`MAX_ASKED`] characters
+/// after trimming, newlines as spaces, and no other control, bidi or
+/// separator character (plan 8b Ruling 9). Blank is absent.
+fn asked(p: &Params<'_>) -> Result<Option<String>, ControlError> {
+    let Some(raw) = p.opt_str("asked", MAX_STRING)? else {
+        return Ok(None);
+    };
+    let asked = raw.trim().replace('\n', " ");
+    if asked.is_empty() {
+        return Ok(None);
+    }
+    if asked.chars().count() > MAX_ASKED {
+        return Err(p.error(format!("`asked` is longer than {MAX_ASKED} characters")));
+    }
+    if asked.chars().any(refused_in_name) {
+        return Err(
+            p.error("`asked` must not hold control, direction or line-separator characters")
+        );
+    }
+    Ok(Some(asked))
+}
+
+/// `co_producer.note`'s `text`: 1 to [`MAX_NOTE`] characters, not blank,
+/// in at most [`MAX_NOTE_LINES`] lines, with no control but `\n` and no
+/// bidi or separator character (plan 8b Ruling 9).
+fn note(p: &Params<'_>) -> Result<String, ControlError> {
+    let text = p.str("text", MAX_STRING)?;
+    if text.trim().is_empty() {
+        return Err(p.error("`text` must not be empty"));
+    }
+    if text.chars().count() > MAX_NOTE {
+        return Err(p.error(format!("`text` is longer than {MAX_NOTE} characters")));
+    }
+    if text.split('\n').count() > MAX_NOTE_LINES {
+        return Err(p.error(format!("`text` has more than {MAX_NOTE_LINES} lines")));
+    }
+    if text.chars().any(|c| c != '\n' && refused_in_name(c)) {
+        return Err(p.error(
+            "`text` must not hold control (but newline), direction or line-separator characters",
+        ));
+    }
+    Ok(text)
+}
+
+/// `co_producer.export_folder`'s `what`.
+fn export_what(p: &Params<'_>) -> Result<ExportWhat, ControlError> {
+    let what = p.str("what", 32)?;
+    ExportWhat::parse(&what).ok_or_else(|| {
+        let names: Vec<&str> = ExportWhat::ALL.iter().map(|w| w.name()).collect();
+        p.error(format!("`what` must be one of {}", names.join(", ")))
+    })
+}
+
+/// `co_producer.export_folder`'s optional `parent`: a string of at most
+/// [`MAX_PATH`] bytes with no NUL. Whether it is a folder Co-Producer may
+/// write in is the gate's check (`co_producer::check_output`), so a
+/// relative or linked one is `not_allowed`, not `invalid_params`.
+fn export_parent(p: &Params<'_>) -> Result<Option<PathBuf>, ControlError> {
+    let Some(s) = p.opt_str("parent", MAX_PATH)? else {
+        return Ok(None);
+    };
+    if s.len() > MAX_PATH || s.contains('\0') || s.is_empty() {
+        return Err(p.error(format!(
+            "`parent` must be a folder's path of 1 to {MAX_PATH} bytes"
+        )));
+    }
+    Ok(Some(PathBuf::from(s)))
 }
 
 /// `co_producer.apply`'s `token`: [`TOKEN_LEN`] lowercase hex characters.

@@ -93,7 +93,7 @@ pub use control::{
     AlertRow, AudioEditorBoxRow, AudioEditorRegionRow, AudioEditorStateRow, ControlArg,
     ControlCall, ControlErrorCode, ControlFailure, ControlRequest, ControlResult, ControlServer,
     ControlValue, CrashAnswerRow, DetailRow, DocFactsRow, EditorStateRow, ElementRefRow,
-    KeyStrokeRow, LayoutStateRow, ModifiersRow, MouseButtonRow, PaneRow, PointerRow,
+    ExportWhatRow, KeyStrokeRow, LayoutStateRow, ModifiersRow, MouseButtonRow, PaneRow, PointerRow,
     RecoveryAnswersRow, StateTargetRow, StepEntryStateRow, TornRow, TransportMarksRow, UiNodeRow,
     ViewPanesRow, WaitConditionRow, WaitFactsRow, WindowKindRow, WindowRefRow, WindowRow,
     control_command_ids, control_element_check, control_host_busy, control_wait_met,

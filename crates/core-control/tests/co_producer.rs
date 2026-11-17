@@ -80,6 +80,7 @@ const OUTWARD: &[&str] = &[
 ];
 const CHANGE: &[&str] = &[
     "track.rename",
+    "mixer.set_colour",
     "track.choose_take",
     "track.rename_take",
     "edit.undo",
@@ -171,7 +172,7 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 186);
+    assert_eq!(COMMANDS.len(), 190);
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");
@@ -556,8 +557,13 @@ fn begin_checks_its_name() {
         );
     }
     match validate(&req("co_producer.begin", json!({"name": "  Drum bus "}))).unwrap() {
-        core_control::Command::CoProducerBegin { name, window } => {
+        core_control::Command::CoProducerBegin {
+            name,
+            asked,
+            window,
+        } => {
             assert_eq!(name, "Drum bus");
+            assert_eq!(asked, None);
             assert_eq!(window, None);
         }
         other => panic!("{other:?}"),
@@ -838,9 +844,9 @@ fn the_filtered_list_has_classes() {
         }
     }
     previewable.sort_unstable();
-    let mut five = PREVIEWABLE.to_vec();
-    five.sort_unstable();
-    assert_eq!(previewable, five);
+    let mut six = PREVIEWABLE.to_vec();
+    six.sort_unstable();
+    assert_eq!(previewable, six);
     assert!(commands.iter().all(|c| c["id"] != "ui.theme"));
     // The developer list carries every command's class too.
     let all = registry::list_json();
@@ -884,4 +890,301 @@ fn canonical_text_is_order_and_value_exact() {
     assert_ne!(canonical(&forged), canonical(&a));
     let v: Value = serde_json::from_str(&canonical(&a)).unwrap();
     assert_eq!(v[0]["id"], "track.rename");
+}
+
+#[test]
+fn new_registry_entries_have_their_class() {
+    for id in ["track.make_mine", "mixer.make_mine", "window.song_notes"] {
+        assert_eq!(registry::find(id).unwrap().class, Class::Refused, "{id}");
+    }
+    assert_eq!(
+        registry::find("mixer.set_colour").unwrap().class,
+        Class::Change
+    );
+    let list = co_producer::list_json();
+    let commands = list["commands"].as_array().unwrap();
+    for id in ["track.make_mine", "mixer.make_mine", "window.song_notes"] {
+        assert!(commands.iter().all(|c| c["id"] != id), "{id} is listed");
+    }
+    let colour = commands
+        .iter()
+        .find(|c| c["id"] == "mixer.set_colour")
+        .expect("mixer.set_colour is listed");
+    assert_eq!(colour["previewable"], json!(true));
+    assert_eq!(colour["class"], "change");
+}
+
+#[test]
+fn set_colour_only_through_a_preview() {
+    let m = assert_code(
+        "command.run",
+        run("mixer.set_colour", json!({"strip": 2, "colour": "blue"})),
+        ErrorCode::NotAllowed,
+    );
+    assert_eq!(
+        m,
+        "mixer.set_colour changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+    );
+    assert_eq!(
+        preview(json!([
+            {"id": "mixer.set_colour", "params": {"strip": 2, "colour": "blue"}}
+        ])),
+        Ok(())
+    );
+    for colour in [
+        "none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+    ] {
+        assert_eq!(
+            preview(json!([
+                {"id": "mixer.set_colour", "params": {"strip": 1, "colour": colour}}
+            ])),
+            Ok(()),
+            "{colour}"
+        );
+    }
+    for params in [
+        json!({"strip": 2, "colour": "mauve"}),
+        json!({"strip": 2}),
+        json!({"colour": "blue"}),
+        json!({"strip": 0, "colour": "blue"}),
+        json!({"strip": "2", "colour": "blue"}),
+        json!({"strip": 2, "colour": 3}),
+        json!({"strip": 2, "colour": "blue", "extra": 1}),
+    ] {
+        assert_code(
+            "command.run",
+            run("mixer.set_colour", params.clone()),
+            ErrorCode::InvalidParams,
+        );
+        let e = preview(json!([{"id": "mixer.set_colour", "params": params}])).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{}", e.message);
+    }
+}
+
+fn export(params: Value) -> Result<(), ControlError> {
+    gate("co_producer.export_folder", params)
+}
+
+#[test]
+fn export_folder_parent_is_checked() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let plain = dir.join("Exports");
+    std::fs::create_dir(&plain).unwrap();
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let link = dir.join("link");
+    symlink(&plain, &link).unwrap();
+    let package = dir.join("X.vizdaw");
+    std::fs::create_dir_all(package.join("Media")).unwrap();
+    let upper = dir.join("x.VIZDAW");
+    std::fs::create_dir_all(upper.join("sub")).unwrap();
+    let linked_parent = dir.join("up");
+    symlink(&upper, &linked_parent).unwrap();
+    let s = |p: &Path| p.to_str().unwrap().to_string();
+    for (parent, reason) in [
+        ("Exports".to_string(), "absolute"),
+        (s(&dir.join("Exports").join("..").join("Exports")), "`..`"),
+        (s(&file), "not a folder"),
+        (s(&link), "is a link"),
+        (s(&package.join("Media")), "inside a project package"),
+        (s(&package), "inside a project package"),
+        (s(&linked_parent.join("sub")), "inside a project package"),
+    ] {
+        let e = export(json!({"what": "stems", "parent": parent})).unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotAllowed, "{parent}: {}", e.message);
+        assert!(e.message.contains(&parent), "{parent}: {}", e.message);
+        assert!(e.message.contains(reason), "{parent}: {}", e.message);
+    }
+    assert_eq!(
+        export(json!({"what": "stems", "parent": s(&plain)})),
+        Ok(())
+    );
+    assert_eq!(export(json!({"what": "mix"})), Ok(()));
+    assert_eq!(export(json!({"what": "other_daw", "window": 2})), Ok(()));
+    match validate(&req(
+        "co_producer.export_folder",
+        json!({"what": "midi", "parent": s(&plain), "window": "key"}),
+    ))
+    .unwrap()
+    {
+        core_control::Command::CoProducerExportFolder {
+            what,
+            parent,
+            window,
+        } => {
+            assert_eq!(what, core_control::request::ExportWhat::Midi);
+            assert_eq!(parent.as_deref(), Some(plain.as_path()));
+            assert_eq!(window, Some(core_control::params::WindowRef::Key));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn export_what_parses_and_labels() {
+    use core_control::request::ExportWhat;
+    for (s, what, label) in [
+        ("stems", ExportWhat::Stems, "Stems"),
+        ("mix", ExportWhat::Mix, "Mix"),
+        ("selection", ExportWhat::Selection, "Selection"),
+        ("midi", ExportWhat::Midi, "MIDI"),
+        ("dawproject", ExportWhat::Dawproject, "DAWproject"),
+        ("aaf", ExportWhat::Aaf, "AAF"),
+        ("other_daw", ExportWhat::OtherDaw, "Other DAW"),
+    ] {
+        assert_eq!(ExportWhat::parse(s), Some(what), "{s}");
+        assert_eq!(what.label(), label);
+    }
+    for s in ["", "Stems", "video", "other daw", "mix "] {
+        assert_eq!(ExportWhat::parse(s), None, "{s:?}");
+    }
+}
+
+#[test]
+fn new_calls_refuse_hostile_input() {
+    use core_control::request::{MAX_ASKED, MAX_NOTE, MAX_NOTE_LINES};
+    assert_eq!((MAX_ASKED, MAX_NOTE, MAX_NOTE_LINES), (500, 2000, 20));
+    let lines = |n: usize| vec!["line"; n].join("\n");
+    for text in [
+        json!("x"),
+        json!("x".repeat(2000)),
+        json!(lines(20)),
+        json!("the composer wants the drums dry in the verse"),
+    ] {
+        assert_eq!(gate("co_producer.note", json!({"text": text})), Ok(()));
+    }
+    match validate(&req(
+        "co_producer.note",
+        json!({"text": "a\nb", "window": 4}),
+    ))
+    .unwrap()
+    {
+        core_control::Command::CoProducerNote { text, window } => {
+            assert_eq!(text, "a\nb");
+            assert_eq!(window, Some(core_control::params::WindowRef::Number(4)));
+        }
+        other => panic!("{other:?}"),
+    }
+    for params in [
+        json!({}),
+        json!({"text": ""}),
+        json!({"text": "   "}),
+        json!({"text": "x".repeat(2001)}),
+        json!({"text": "x".repeat(70_000)}),
+        json!({"text": lines(21)}),
+        json!({"text": "a\0b"}),
+        json!({"text": "a\rb"}),
+        json!({"text": "a\tb"}),
+        json!({"text": "a\u{85}b"}),
+        json!({"text": "a\u{202E}b"}),
+        json!({"text": "a\u{2028}b"}),
+        json!({"text": "a\u{2029}b"}),
+        json!({"text": "a\u{200F}b"}),
+        json!({"text": 5}),
+        json!({"text": null}),
+        json!({"text": ["x"]}),
+        json!({"text": "x", "extra": 1}),
+        json!({"text": "x", "window": 0}),
+    ] {
+        assert_code("co_producer.note", params, ErrorCode::InvalidParams);
+    }
+    // `asked` on begin.
+    for params in [
+        json!({"name": "x", "asked": "x".repeat(501)}),
+        json!({"name": "x", "asked": "x".repeat(70_000)}),
+        json!({"name": "x", "asked": "a\0b"}),
+        json!({"name": "x", "asked": "a\rb"}),
+        json!({"name": "x", "asked": "a\u{202E}b"}),
+        json!({"name": "x", "asked": "a\u{2028}b"}),
+        json!({"name": "x", "asked": 5}),
+        json!({"name": "x", "asked": ["x"]}),
+    ] {
+        assert_code("co_producer.begin", params, ErrorCode::InvalidParams);
+    }
+    let asked = |a: Value| match validate(&req(
+        "co_producer.begin",
+        json!({"name": "Drum bus", "asked": a}),
+    ))
+    .unwrap()
+    {
+        core_control::Command::CoProducerBegin { name, asked, .. } => {
+            assert_eq!(name, "Drum bus");
+            asked
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(asked(json!("two\nlines")), Some("two lines".into()));
+    assert_eq!(asked(json!("  padded \n")), Some("padded".into()));
+    assert_eq!(asked(json!("x".repeat(500))), Some("x".repeat(500)));
+    assert_eq!(asked(json!(null)), None);
+    assert_eq!(asked(json!("   ")), None);
+    assert_eq!(
+        gate(
+            "co_producer.begin",
+            json!({"name": "x", "asked": "put my drums on a bus"})
+        ),
+        Ok(())
+    );
+    // `export_folder`.
+    for params in [
+        json!({"what": "video"}),
+        json!({}),
+        json!({"parent": "/tmp"}),
+        json!({"what": 3}),
+        json!({"what": "Stems"}),
+        json!({"what": "stems", "parent": "/".repeat(70_000)}),
+        json!({"what": "stems", "parent": format!("/{}", "x".repeat(70_000))}),
+        json!({"what": "stems", "parent": "/tmp/a\0b"}),
+        json!({"what": "stems", "parent": 5}),
+        json!({"what": "stems", "extra": true}),
+        json!({"what": "stems", "window": -2}),
+    ] {
+        assert_code(
+            "co_producer.export_folder",
+            params,
+            ErrorCode::InvalidParams,
+        );
+    }
+    // `notes`.
+    assert_eq!(gate("co_producer.notes", json!({})), Ok(()));
+    assert_eq!(gate("co_producer.notes", json!({"window": "main"})), Ok(()));
+    for params in [
+        json!({"extra": 1}),
+        json!({"window": true}),
+        json!({"text": "x"}),
+    ] {
+        assert_code("co_producer.notes", params, ErrorCode::InvalidParams);
+    }
+}
+
+#[test]
+fn new_calls_only_on_the_co_producer_socket() {
+    use core_control::client::{CallError, Client};
+    use core_control::server::{Config, Server};
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::Builder::new()
+        .prefix("vzc")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sock = d.path().join("ctl").join("s.sock");
+    let dev = Server::start(&sock, Config::default()).unwrap();
+    let mut c = Client::connect(&sock).unwrap();
+    let long = std::time::Duration::from_secs(20);
+    for (cmd, params) in [
+        ("co_producer.notes", json!({})),
+        ("co_producer.note", json!({"text": "x"})),
+        ("co_producer.export_folder", json!({"what": "stems"})),
+    ] {
+        match c.call(cmd, params, long) {
+            Err(CallError::Reply(e)) => {
+                assert_eq!(e.code, ErrorCode::NotAllowed, "{cmd}: {e}");
+                assert!(e.message.contains("only on the Co-Producer socket"), "{e}");
+            }
+            other => panic!("{cmd}: {other:?}"),
+        }
+    }
+    assert!(dev.next_call().is_none(), "the app never sees them");
 }

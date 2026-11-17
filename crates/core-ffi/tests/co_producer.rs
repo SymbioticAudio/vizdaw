@@ -770,7 +770,7 @@ mod control {
     use core_control::co_producer::Planned;
     use core_control::params::WindowRef;
     use core_control::registry::ArgValue;
-    use core_control::request::Command;
+    use core_control::request::{Command, ExportWhat};
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
@@ -778,7 +778,7 @@ mod control {
     use vizdaw_ffi::control::{request_of, result_json};
     use vizdaw_ffi::{
         ControlErrorCode, ControlFailure, ControlRequest, ControlResult, ControlServer,
-        WindowRefRow,
+        ExportWhatRow, WindowRefRow,
     };
 
     fn plan() -> Vec<Planned> {
@@ -802,10 +802,12 @@ mod control {
         assert_eq!(
             of(Command::CoProducerBegin {
                 name: "tidy".into(),
+                asked: Some("tidy my drums".into()),
                 window: Some(WindowRef::Key),
             }),
             ControlRequest::CoProducerBegin {
                 name: "tidy".into(),
+                asked: Some("tidy my drums".into()),
                 window: key,
             }
         );
@@ -840,6 +842,55 @@ mod control {
             ControlRequest::CoProducerApply {
                 token: "ab".into(),
                 plan: vec![rename(1, 2, "Vox")],
+                window: Some(WindowRefRow::Main),
+            }
+        );
+        // Plan 8b Ruling 9's three.
+        assert_eq!(
+            of(Command::CoProducerNotes { window: None }),
+            ControlRequest::CoProducerNotes { window: None }
+        );
+        assert_eq!(
+            of(Command::CoProducerNote {
+                text: "dry verse".into(),
+                window: Some(WindowRef::Key),
+            }),
+            ControlRequest::CoProducerNote {
+                text: "dry verse".into(),
+                window: key,
+            }
+        );
+        for (what, row) in [
+            (ExportWhat::Stems, ExportWhatRow::Stems),
+            (ExportWhat::Mix, ExportWhatRow::Mix),
+            (ExportWhat::Selection, ExportWhatRow::Selection),
+            (ExportWhat::Midi, ExportWhatRow::Midi),
+            (ExportWhat::Dawproject, ExportWhatRow::Dawproject),
+            (ExportWhat::Aaf, ExportWhatRow::Aaf),
+            (ExportWhat::OtherDaw, ExportWhatRow::OtherDaw),
+        ] {
+            assert_eq!(
+                of(Command::CoProducerExportFolder {
+                    what,
+                    parent: Some("/Users/x/Exports".into()),
+                    window: None,
+                }),
+                ControlRequest::CoProducerExportFolder {
+                    what: row,
+                    parent: Some("/Users/x/Exports".into()),
+                    window: None,
+                }
+            );
+        }
+        assert_eq!(
+            of(Command::CoProducerExportFolder {
+                what: ExportWhat::Mix,
+                parent: None,
+                window: Some(WindowRef::Main),
+            }),
+            ControlRequest::CoProducerExportFolder {
+                what: ExportWhatRow::Mix,
+                parent: None,
                 window: Some(WindowRefRow::Main),
             }
         );
@@ -941,6 +992,7 @@ mod control {
             call.request,
             ControlRequest::CoProducerBegin {
                 name: "tidy".into(),
+                asked: None,
                 window: None,
             }
         );

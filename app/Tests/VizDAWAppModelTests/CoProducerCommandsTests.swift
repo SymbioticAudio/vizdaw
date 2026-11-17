@@ -122,7 +122,7 @@ import VizDAWCore
 
     @Test func beginEndAndPreviewPassThrough() throws {
         let (s, id, _, f) = try demo()
-        guard case .coProducerRequest(_, let req?, _) = result(run(.coProducerBegin(name: "drum bus", window: nil), s, id))
+        guard case .coProducerRequest(_, let req?, _) = result(run(.coProducerBegin(name: "drum bus", asked: nil, window: nil), s, id))
         else {
             Issue.record("begin did not answer its request")
             return
@@ -146,15 +146,35 @@ import VizDAWCore
         #expect(f.coLog == ["begin drum bus", "preview 2", "end"])
         // The session's refusals pass on, a blank name's included.
         f.coBeginError = .Model(message: "Name the request.")
-        #expect(failure(run(.coProducerBegin(name: "", window: nil), s, id))?.message == "Name the request.")
+        #expect(failure(run(.coProducerBegin(name: "", asked: nil, window: nil), s, id))?.message == "Name the request.")
         f.coPreviewError = .Busy(message: "Finish the drag first.")
         #expect(failure(run(.coProducerPreview(plan: renameThenDelete, window: nil), s, id))?.code == .busy)
         #expect(failure(run(.coProducerEnd(window: nil), s, id))?.message == "No request is open.")
     }
 
+    /// Plan 8b Task 1: the new calls and registry ids answer "Not ready
+    /// yet." until Task 5 builds them.
+    @Test func plan8bCallsAreNotReadyYet() throws {
+        let (s, id, _, _) = try demo()
+        for r: ControlRequest in [
+            .coProducerNotes(window: nil),
+            .coProducerNote(text: "dry verse", window: nil),
+            .coProducerExportFolder(what: .stems, parent: nil, window: nil),
+        ] {
+            let f = failure(run(r, s, id))
+            #expect(f?.code == .unavailable)
+            #expect(f?.message == "Not ready yet.")
+        }
+        for c in ["track.make_mine", "mixer.make_mine", "mixer.set_colour", "window.song_notes"] {
+            let f = failure(ControlCommands.run(c, args: [], doc: s.model(id).map { (id, $0) }, store: s, host: host))
+            #expect(f?.code == .unavailable, "\(c)")
+            #expect(f?.message == "Not ready yet.", "\(c)")
+        }
+    }
+
     @Test func noDocumentIsNoDocument() {
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() })
-        let o = CoProducerCommands.run(.coProducerBegin(name: "x", window: nil), doc: nil, store: s, host: host, stamp: stamp)
+        let o = CoProducerCommands.run(.coProducerBegin(name: "x", asked: nil, window: nil), doc: nil, store: s, host: host, stamp: stamp)
         #expect(failure(o)?.code == .noDocument)
     }
 

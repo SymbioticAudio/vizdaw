@@ -62,9 +62,12 @@ fn every_command_validates_its_minimal_form() {
             "co_producer.apply",
             json!({"token": "0123456789abcdef0123456789abcdef", "commands": [{"id": "edit.undo"}]}),
         ),
+        ("co_producer.notes", json!({})),
+        ("co_producer.note", json!({"text": "keep the verse dry"})),
+        ("co_producer.export_folder", json!({"what": "stems"})),
     ];
     assert_eq!(minimal.len(), COMMAND_NAMES.len());
-    assert_eq!(COMMAND_NAMES.len(), 18);
+    assert_eq!(COMMAND_NAMES.len(), 21);
     for (cmd, params) in minimal {
         assert!(
             validate(&req(cmd, params.clone())).is_ok(),
@@ -543,8 +546,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        186,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take"
+        190,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -3066,4 +3069,113 @@ fn settings_co_producer_and_open_copy_check_their_params() {
     let o = registry::find("file.open_copy").unwrap();
     assert!(o.menu_item && !o.document);
     assert_eq!((o.menu, o.title), ("File", "Open Co-Producer Copy…"));
+}
+
+/// Plan 8b Ruling 9: Make Mine, strip colours and Song Notes.
+#[test]
+fn make_mine_colour_and_song_notes_are_registered() {
+    let spec = |id: &str| registry::find(id).unwrap_or_else(|| panic!("{id}"));
+    let shape = |id: &str| {
+        let s = spec(id);
+        (s.menu, s.title, s.menu_item, s.document, s.shortcut)
+    };
+    assert_eq!(
+        shape("track.make_mine"),
+        ("Track", "Make Mine", true, true, None)
+    );
+    assert_eq!(
+        shape("mixer.make_mine"),
+        ("Mixer", "Make Mine", false, true, None)
+    );
+    assert_eq!(
+        shape("mixer.set_colour"),
+        ("Mixer", "Colour", false, true, None)
+    );
+    assert_eq!(
+        shape("window.song_notes"),
+        ("Window", "Song Notes", true, true, None)
+    );
+    assert!(spec("window.song_notes").params.is_empty());
+    let names = |id: &str| spec(id).params.iter().map(|p| p.name).collect::<Vec<_>>();
+    assert_eq!(names("track.make_mine"), ["seq", "lane"]);
+    assert_eq!(names("mixer.make_mine"), ["strip"]);
+    assert_eq!(names("mixer.set_colour"), ["strip", "colour"]);
+    for id in [
+        "track.make_mine",
+        "mixer.make_mine",
+        "mixer.set_colour",
+        "window.song_notes",
+    ] {
+        assert!(spec(id).dialogs.is_empty(), "{id}");
+    }
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    assert_eq!(
+        ok(
+            "command.run",
+            run("track.make_mine", json!({"seq": 1, "lane": 2}))
+        ),
+        Command::CommandRun {
+            id: "track.make_mine".into(),
+            args: vec![
+                ("seq".into(), ArgValue::Int(1)),
+                ("lane".into(), ArgValue::Int(2)),
+            ],
+            window: None,
+        }
+    );
+    assert_eq!(
+        ok("command.run", run("mixer.make_mine", json!({"strip": 4}))),
+        Command::CommandRun {
+            id: "mixer.make_mine".into(),
+            args: vec![("strip".into(), ArgValue::Int(4))],
+            window: None,
+        }
+    );
+    for colour in [
+        "none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+    ] {
+        assert_eq!(
+            ok(
+                "command.run",
+                run("mixer.set_colour", json!({"strip": 2, "colour": colour}))
+            ),
+            Command::CommandRun {
+                id: "mixer.set_colour".into(),
+                args: vec![
+                    ("strip".into(), ArgValue::Int(2)),
+                    ("colour".into(), ArgValue::Text(colour.into())),
+                ],
+                window: None,
+            }
+        );
+    }
+    assert_eq!(
+        ok("command.run", run("window.song_notes", json!({}))),
+        Command::CommandRun {
+            id: "window.song_notes".into(),
+            args: vec![],
+            window: None,
+        }
+    );
+    let huge = "x".repeat(70_000);
+    for (id, params) in [
+        ("mixer.make_mine", json!({})),
+        ("mixer.make_mine", json!({"strip": 0})),
+        ("mixer.make_mine", json!({"strip": "1"})),
+        ("mixer.make_mine", json!({"strip": 1, "extra": 1})),
+        ("mixer.set_colour", json!({"strip": 1})),
+        ("mixer.set_colour", json!({"colour": "red"})),
+        ("mixer.set_colour", json!({"strip": 1, "colour": "mauve"})),
+        ("mixer.set_colour", json!({"strip": 1, "colour": "Red"})),
+        ("mixer.set_colour", json!({"strip": 1, "colour": huge})),
+        ("mixer.set_colour", json!({"strip": 1, "colour": "red\0"})),
+        ("mixer.set_colour", json!({"strip": -1, "colour": "red"})),
+        ("track.make_mine", json!({"seq": -1})),
+        ("track.make_mine", json!({"lane": "x"})),
+        ("track.make_mine", json!({"name": "x"})),
+        ("window.song_notes", json!({"path": "/tmp/Notes.md"})),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
 }

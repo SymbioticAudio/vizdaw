@@ -261,6 +261,9 @@ public enum ControlCommands {
     /// Co-Producer's two registry ids (plan 8a Ruling 10): the switch and
     /// opening a saved copy, both app-wide.
     static let coProducer: Set<String> = [CoProducerCommands.setting, CoProducerCommands.openCopy]
+    /// Plan 8b's four registry ids, answered "Not ready yet." until its
+    /// Task 5 builds them.
+    static let notYet: Set<String> = ["track.make_mine", "mixer.make_mine", "mixer.set_colour", "window.song_notes"]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
         "transport.go_position": .position, "transport.go_edit_in": .editIn, "transport.go_punch": .punchIn,
@@ -275,7 +278,7 @@ public enum ControlCommands {
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(TakeCommands.ids)
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
-            .union(MixerCommands.ids).union(coProducer)
+            .union(MixerCommands.ids).union(coProducer).union(notYet)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -327,6 +330,8 @@ public enum ControlCommands {
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
         case _ where coProducer.contains(id):
             return CoProducerCommands.runAppWide(id, args: args, store: store, host: host)
+        case _ where notYet.contains(id):
+            return unavailable("Not ready yet.")
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }

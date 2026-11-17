@@ -43,7 +43,8 @@ public enum CoProducerCommands {
             }
             defer { m.session.coProducerLeave() }
             return command(id, args, docID, m, store, host)
-        case .coProducerBegin(let name, _):
+        case .coProducerBegin(let name, _, _):
+            // `asked` waits for plan 8b Task 5.
             guard let (docID, m) = doc else { return noDocument }
             do {
                 let row = try m.session.coProducerBegin(name: name)
@@ -75,6 +76,9 @@ public enum CoProducerCommands {
         case .coProducerApply(let token, let plan, _):
             guard let (docID, m) = doc else { return noDocument }
             return apply(token, plan, docID, m, store, host, stamp: stamp)
+        case .coProducerNotes, .coProducerNote, .coProducerExportFolder:
+            // Plan 8b Task 5 builds these.
+            return .failed(.of(.unavailable, "Not ready yet."))
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }

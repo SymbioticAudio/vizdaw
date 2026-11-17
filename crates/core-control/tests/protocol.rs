@@ -110,6 +110,72 @@ fn replies_round_trip() {
     assert_eq!(read_request(req.as_bytes()).unwrap().cmd, "app.quit");
 }
 
+/// Plan 8b Ruling 9: each new Co-Producer command, and `begin` with
+/// `asked`, goes over the wire and back to the same command.
+#[test]
+fn co_producer_notes_calls_round_trip() {
+    use core_control::params::WindowRef;
+    use core_control::request::ExportWhat;
+    use core_control::{Command, validate};
+    let parse = |cmd: &str, params: Value| {
+        let line = request_line(&RequestId::Num(9), cmd, &params);
+        let raw = read_request(line.as_bytes()).unwrap();
+        assert_eq!(raw.cmd, cmd);
+        validate(&raw).unwrap()
+    };
+    assert_eq!(
+        parse("co_producer.notes", json!({"window": 3})),
+        Command::CoProducerNotes {
+            window: Some(WindowRef::Number(3))
+        }
+    );
+    assert_eq!(
+        parse("co_producer.note", json!({"text": "dry verse\nwet chorus"})),
+        Command::CoProducerNote {
+            text: "dry verse\nwet chorus".into(),
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.export_folder",
+            json!({"what": "other_daw", "parent": "/Users/x/Exports", "window": "main"})
+        ),
+        Command::CoProducerExportFolder {
+            what: ExportWhat::OtherDaw,
+            parent: Some("/Users/x/Exports".into()),
+            window: Some(WindowRef::Main)
+        }
+    );
+    assert_eq!(
+        parse("co_producer.export_folder", json!({"what": "aaf"})),
+        Command::CoProducerExportFolder {
+            what: ExportWhat::Aaf,
+            parent: None,
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.begin",
+            json!({"name": "Set Up a Drum Bus", "asked": "put my drums on a bus\nwith some parallel compression"})
+        ),
+        Command::CoProducerBegin {
+            name: "Set Up a Drum Bus".into(),
+            asked: Some("put my drums on a bus with some parallel compression".into()),
+            window: None
+        }
+    );
+    assert_eq!(
+        parse("co_producer.begin", json!({"name": "x"})),
+        Command::CoProducerBegin {
+            name: "x".into(),
+            asked: None,
+            window: None
+        }
+    );
+}
+
 #[test]
 fn every_error_code_has_a_distinct_wire_name() {
     let names: std::collections::BTreeSet<_> = ErrorCode::ALL.iter().map(|c| c.as_str()).collect();

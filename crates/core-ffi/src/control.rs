@@ -13,7 +13,7 @@ use core_control::element::{self as el, ElementRef};
 use core_control::keys::{KeyStroke, Modifiers};
 use core_control::params::WindowRef;
 use core_control::registry::{self, ArgValue};
-use core_control::request::{Button, Command, CrashAnswer, Pointer, StateTarget};
+use core_control::request::{Button, Command, CrashAnswer, ExportWhat, Pointer, StateTarget};
 use core_control::server::{Config, Role, Server};
 use core_control::wait::{self, DocFacts, Facts, WaitCondition};
 use core_control::{ControlError, ErrorCode};
@@ -35,6 +35,38 @@ pub enum WindowRefRow {
     Key,
     /// The main window.
     Main,
+}
+
+/// What a `co_producer.export_folder` is for (plan 8b Ruling 6); mirrors
+/// `core_control::request::ExportWhat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum ExportWhatRow {
+    /// Stems.
+    Stems,
+    /// A mix.
+    Mix,
+    /// A selection.
+    Selection,
+    /// MIDI.
+    Midi,
+    /// A DAWproject file.
+    Dawproject,
+    /// AAF.
+    Aaf,
+    /// The export for another DAW.
+    OtherDaw,
+}
+
+fn export_what_row(w: ExportWhat) -> ExportWhatRow {
+    match w {
+        ExportWhat::Stems => ExportWhatRow::Stems,
+        ExportWhat::Mix => ExportWhatRow::Mix,
+        ExportWhat::Selection => ExportWhatRow::Selection,
+        ExportWhat::Midi => ExportWhatRow::Midi,
+        ExportWhat::Dawproject => ExportWhatRow::Dawproject,
+        ExportWhat::Aaf => ExportWhatRow::Aaf,
+        ExportWhat::OtherDaw => ExportWhatRow::OtherDaw,
+    }
 }
 
 /// An element from `ui.tree`.
@@ -439,6 +471,8 @@ pub enum ControlRequest {
     CoProducerBegin {
         /// What the composer asked for.
         name: String,
+        /// The composer's own words for the notes (plan 8b Ruling 9).
+        asked: Option<String>,
         /// Whose document.
         window: Option<WindowRefRow>,
     },
@@ -465,6 +499,27 @@ pub enum ControlRequest {
         token: String,
         /// The previewed commands, again.
         plan: Vec<crate::co_producer::PlannedRow>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.notes` (plan 8b Ruling 9).
+    CoProducerNotes {
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.note`.
+    CoProducerNote {
+        /// The note, already checked.
+        text: String,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.export_folder` (Ruling 6).
+    CoProducerExportFolder {
+        /// What the export is.
+        what: ExportWhatRow,
+        /// The folder to make it in, already checked by the gate.
+        parent: Option<String>,
         /// Whose document.
         window: Option<WindowRefRow>,
     },
@@ -1040,8 +1095,29 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
     Some(match c {
         Command::CommandsList | Command::Ping => return None,
         // Only the Co-Producer socket queues these (plan 8a Ruling 11).
-        Command::CoProducerBegin { name, window } => ControlRequest::CoProducerBegin {
+        Command::CoProducerBegin {
             name,
+            asked,
+            window,
+        } => ControlRequest::CoProducerBegin {
+            name,
+            asked,
+            window: window_row(window),
+        },
+        Command::CoProducerNotes { window } => ControlRequest::CoProducerNotes {
+            window: window_row(window),
+        },
+        Command::CoProducerNote { text, window } => ControlRequest::CoProducerNote {
+            text,
+            window: window_row(window),
+        },
+        Command::CoProducerExportFolder {
+            what,
+            parent,
+            window,
+        } => ControlRequest::CoProducerExportFolder {
+            what: export_what_row(what),
+            parent: parent.map(|p| p.to_string_lossy().into_owned()),
             window: window_row(window),
         },
         Command::CoProducerEnd { window } => ControlRequest::CoProducerEnd {

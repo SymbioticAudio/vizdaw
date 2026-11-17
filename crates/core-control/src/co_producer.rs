@@ -3,7 +3,7 @@
 //! validated call through [`admit`] before it reaches the app:
 //!
 //! - only `ping`, `commands.list`, `state.get` (not `input`), `wait`,
-//!   `ui.screenshot` (window and scale only), `command.run` and the five
+//!   `ui.screenshot` (window and scale only), `command.run` and the eight
 //!   `co_producer.*` commands are allowed;
 //! - `command.run` runs read, add and outward commands only; a change or
 //!   remove goes through `co_producer.preview` and the composer's yes;
@@ -21,13 +21,15 @@ use crate::request::{Command, StateTarget};
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 
-/// The change and remove commands 8a can preview (Ruling 6).
+/// The change and remove commands Co-Producer can preview (8a Ruling 6;
+/// 8b Ruling 9 adds `mixer.set_colour`).
 pub const PREVIEWABLE: &[&str] = &[
     "track.rename",
     "track.delete",
     "edit.undo",
     "edit.redo",
     "file.save",
+    "mixer.set_colour",
 ];
 
 /// The most commands in one plan (Ruling 11).
@@ -281,7 +283,15 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
         | Command::Wait { .. }
         | Command::CoProducerBegin { .. }
         | Command::CoProducerEnd { .. }
-        | Command::CoProducerStatus { .. } => Ok(()),
+        | Command::CoProducerStatus { .. }
+        | Command::CoProducerNotes { .. }
+        | Command::CoProducerNote { .. }
+        | Command::CoProducerExportFolder { parent: None, .. } => Ok(()),
+        // Plan 8b Ruling 6: a given parent is checked before the app sees it.
+        Command::CoProducerExportFolder {
+            parent: Some(parent),
+            ..
+        } => check_output(parent, Output::IntoFolder),
         Command::StateGet { target, .. } => match target {
             StateTarget::Input => Err(ControlError::not_allowed(
                 "Co-Producer does not listen: state.get input is not available to it.",

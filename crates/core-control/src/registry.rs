@@ -380,6 +380,38 @@ const MIXER_NEW_BUS_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// A required strip ID of `mixer.make_mine` and `mixer.set_colour`
+/// (plan 8b Ruling 9).
+const STRIP_PARAM: ParamSpec = ParamSpec {
+    name: "strip",
+    kind: ParamKind::Int {
+        min: 1,
+        max: i64::MAX / 2,
+    },
+    required: true,
+    help: "The strip (see state.get mixer).",
+};
+
+/// `mixer.make_mine` (plan 8b Ruling 1).
+const MIXER_MAKE_MINE_PARAMS: &[ParamSpec] = &[STRIP_PARAM];
+
+/// The strip colours `mixer.set_colour` takes (plan 8b Ruling 3): `none`
+/// clears the strip's own colour.
+pub const STRIP_COLOURS: &[&str] = &[
+    "none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+];
+
+/// `mixer.set_colour` (plan 8b Ruling 3).
+const MIXER_SET_COLOUR_PARAMS: &[ParamSpec] = &[
+    STRIP_PARAM,
+    ParamSpec {
+        name: "colour",
+        kind: ParamKind::Choice(STRIP_COLOURS),
+        required: true,
+        help: "The strip's colour; none clears it.",
+    },
+];
+
 /// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
 const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "theme",
@@ -1815,6 +1847,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
     ),
     cmd("window.media_pool", "Window", "Media Pool", None, true),
+    // Plan 8b Ruling 9: over a channel it only answers the notes' path.
+    cmd("window.song_notes", "Window", "Song Notes", None, true),
     cmd("ui.view_arrange", "View", "Arrange View", Some("⌃1"), true),
     cmd("ui.view_mix", "View", "Mix View", Some("⌃2"), true),
     CommandSpec {
@@ -2673,6 +2707,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         }],
         ..cmd("track.rename", "Track", "Rename Track", None, true)
     },
+    // Plan 8b Ruling 1: the composer's act alone, so refused to Co-Producer.
+    CommandSpec {
+        params: TRACK_PARAMS,
+        ..cmd("track.make_mine", "Track", "Make Mine", None, true)
+    },
     // Plan 5c-2 takes Ruling 6: the Takes menu's three, without dialogs.
     CommandSpec {
         class: Class::Change,
@@ -2729,6 +2768,17 @@ pub const COMMANDS: &[CommandSpec] = &[
         class: Class::Add,
         params: MIXER_NEW_BUS_PARAMS,
         ..key_only(cmd("mixer.new_bus", "Mixer", "New Bus", None, true))
+    },
+    // Plan 8b Ruling 1: the composer's act alone.
+    CommandSpec {
+        params: MIXER_MAKE_MINE_PARAMS,
+        ..key_only(cmd("mixer.make_mine", "Mixer", "Make Mine", None, true))
+    },
+    // Plan 8b Ruling 3: a strip's colour, previewable for Co-Producer.
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_COLOUR_PARAMS,
+        ..key_only(cmd("mixer.set_colour", "Mixer", "Colour", None, true))
     },
     // Plan 8a Ruling 10: the Co-Producer switch, for the e2e.
     CommandSpec {
