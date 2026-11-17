@@ -7,6 +7,7 @@ use crate::error::VizError;
 use crate::guard::lock;
 use crate::plugins;
 use core_engine::backend::{AudioBackend, BackendEvent};
+use core_engine::count_in::CountIn;
 use core_engine::engine::{Engine, EngineConfig, PendingPlay};
 use core_engine::graph::NoInserts;
 use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, MidiSender, MonitorRoute, port_key};
@@ -1681,6 +1682,10 @@ struct Host {
     /// Where the asked Play stops (Play Selection, plan 4f): a rebuild
     /// resumes with it.
     until: Option<Tick>,
+    /// The count-in the asked Play sent (set by [`finish_play`], cleared
+    /// by [`stop`]): a rebuild before the renderer applied it counts in
+    /// from the start (plan release-fixes Task 1).
+    count_in: Option<CountIn>,
     /// The tick a device rebuild resumed this host from (plan 5e-1
     /// re-review N1: its renderer publishes no position until it runs).
     resumed_at: Option<Tick>,
@@ -1865,6 +1870,7 @@ impl Host {
             looped: false,
             want_play: false,
             until: None,
+            count_in: None,
             resumed_at: None,
             epoch: next_epoch(),
             device: device.to_string(),
@@ -2461,6 +2467,10 @@ struct Rebuild {
     old: Host,
     at: Tick,
     playing: bool,
+    /// The count-in still playing and its clicks started: the rebuilt
+    /// engine plays only the beats left (plan release-fixes Task 1, owner
+    /// decision 1).
+    count_in: Option<(CountIn, u32)>,
     /// The device still renders: its note-offs get `DRAIN` to play.
     drain: bool,
 }
@@ -2496,6 +2506,13 @@ fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
                 // and Stop a block late, so its state can lag it). A song in
                 // its release tail is past its end: a Play would restart it.
                 let playing = old.want_play && old.engine.state() != PlayState::Tail;
+                // Read before the Stop below ends it. A counted Play the
+                // renderer has not applied yet counts in from the start.
+                let count_in = old.engine.count_in_progress().or_else(|| {
+                    old.count_in
+                        .filter(|_| old.want_play && old.engine.state() == PlayState::Stopped)
+                        .map(|c| (c, 0))
+                });
                 let drain = !matches!(ev, BackendEvent::DeviceLost);
                 if drain {
                     let _ = old.engine.stop();
@@ -2505,6 +2522,7 @@ fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
                     old,
                     at,
                     playing,
+                    count_in,
                     drain,
                 }));
             }
@@ -2524,6 +2542,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
         old,
         at,
         playing,
+        count_in,
         drain,
     } = r;
     let (owner, seq, looped, until) = (old.owner, old.seq, old.looped, old.until);
@@ -2556,12 +2575,15 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     new.engine.locate_tick(at)?;
     new.resumed_at = Some(at);
     if playing {
-        match until {
-            Some(t) => new.engine.play_until(t)?,
-            None => new.engine.play()?,
+        let mut p = new.engine.begin_play(until);
+        if let Some((c, done)) = count_in {
+            p.resume_count_in(c, done);
         }
+        p.wait();
+        new.engine.finish_play(p)?;
         new.want_play = true;
         new.until = until;
+        new.count_in = count_in.map(|(c, _)| c);
     }
     new.owner = owner;
     new.seq = seq;
@@ -2628,6 +2650,8 @@ pub struct HostPlay {
     owner: u64,
     epoch: u64,
     pending: PendingPlay,
+    /// The count-in [`HostPlay::count_in`] set.
+    count_in: Option<CountIn>,
     /// The host is live: `finish_play` connects the MIDI sources, without
     /// the host lock (M7, Task 12 review).
     connect_midi: bool,
@@ -2805,11 +2829,14 @@ pub fn play(
     let pending = host.engine.begin_play(until);
     host.want_play = true;
     host.until = until;
+    // Until `finish_play` sends this Play's count-in, none is asked.
+    host.count_in = None;
     host.epoch = next_epoch();
     Ok(HostPlay {
         owner,
         epoch: host.epoch,
         pending,
+        count_in: None,
         connect_midi: host.is_live(),
         located,
     })
@@ -2818,8 +2845,9 @@ pub fn play(
 impl HostPlay {
     /// Plays count-in `c` before the transport rolls (Record's, plan 5d-1
     /// Ruling 7).
-    pub fn count_in(&mut self, c: Option<core_engine::count_in::CountIn>) {
+    pub fn count_in(&mut self, c: Option<CountIn>) {
         self.pending.set_count_in(c);
+        self.count_in = c;
     }
 
     /// The tick this Play located to; `None` when it resumes where the
@@ -2841,6 +2869,7 @@ pub fn finish_play(p: HostPlay) -> Result<(), VizError> {
     let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == p.owner && h.epoch == p.epoch => {
+            h.count_in = p.count_in;
             Ok(h.engine.finish_play(p.pending)?)
         }
         _ => Ok(()),
@@ -2854,6 +2883,7 @@ pub fn stop(owner: u64) -> Result<(), VizError> {
         Some(h) if h.owner == owner => {
             h.want_play = false;
             h.until = None;
+            h.count_in = None;
             h.epoch = next_epoch();
             Ok(h.engine.stop()?)
         }
