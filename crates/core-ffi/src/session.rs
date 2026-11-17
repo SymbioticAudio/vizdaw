@@ -276,6 +276,9 @@ pub(crate) struct Inner {
     co_producer_copied: bool,
     /// The latest preview, until taken or replaced (Ruling 7).
     co_producer_preview: Option<crate::co_producer::PendingPreview>,
+    /// An opened Co-Producer copy's name, its title until it is saved
+    /// (Ruling 9).
+    copy_title: Option<String>,
 }
 
 /// A held merge (plan 6e Task 8): its job, the merged history and the
@@ -420,6 +423,7 @@ impl Inner {
             co_producer_seen: Instant::now(),
             co_producer_copied: false,
             co_producer_preview: None,
+            copy_title: None,
         }
     }
 
@@ -813,7 +817,7 @@ impl Inner {
         Ok(DocSnapshot {
             lane_revs: self.revs.rows(),
             version: self.version,
-            title: title(self.path.as_deref()),
+            title: title(self.path.as_deref(), self.copy_title.as_deref()),
             dirty: self.unsaved(),
             undo_label: self.history.undo_label().map(str::to_string),
             redo_label: self.history.redo_label().map(str::to_string),
@@ -863,9 +867,11 @@ fn note_lines(notes: Vec<Note>) -> Vec<String> {
 }
 
 /// "demo" for `/x/demo.vizdaw`, "Untitled" without a path.
-fn title(path: Option<&Path>) -> String {
+/// The file's name; else an opened copy's name (Ruling 9); else "Untitled".
+fn title(path: Option<&Path>, copy: Option<&str>) -> String {
     path.and_then(Path::file_stem)
         .map(|s| s.to_string_lossy().into_owned())
+        .or_else(|| copy.map(str::to_string))
         .unwrap_or_else(|| "Untitled".to_string())
 }
 
@@ -2128,6 +2134,7 @@ impl Session {
             {
                 let mut inner = s.lock_inner();
                 inner.news.problems.extend(problems);
+                inner.copy_title = copy.file_stem().map(|n| n.to_string_lossy().into_owned());
                 // The files are there now: online, as `recheck_media` does.
                 if inner.refresh_media(s.id, true) {
                     inner.reload_host(s.id);

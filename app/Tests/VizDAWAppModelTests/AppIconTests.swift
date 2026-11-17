@@ -45,7 +45,7 @@ private struct SquareBrand: IconProvider {
             .warning, .problem, .info, .mixer, .add, .confirm, .close, .drumGrid, .list, .muted, .loop, .split,
             .empty, .pencil, .diskSlow, .expand, .collapse, .menuDown, .leftPane, .bottomPane, .rightPane,
             .settingsEditing, .settingsAutomation, .settingsSurfaces, .eq, .midiLearn, .instrumentTrack, .midiTrack,
-            .settingsPlugins,
+            .settingsPlugins, .settingsCoProducer,
         ]
         let angular: [AppIcon] = [
             .fault, .faultIndicator, .remove, .zoomIn, .zoomOut, .audio, .pianoRoll, .record, .armed, .recording,
@@ -61,6 +61,14 @@ private struct SquareBrand: IconProvider {
         #expect(listed.count == glyph.count + angular.count + 1, "a case is in both lists")
         #expect(listed == Set(AppIcon.allCases))
         #expect(IconSource.glyph.set == .standard && IconSource.angular.set == .angular)
+    }
+
+    /// Plan 8a Ruling P10: Settings › Co-Producer draws a connection from
+    /// the glyph set; "sparkles" is only its legacy symbol.
+    @Test func theCoProducerTabDrawsALink() {
+        #expect(AppIcon.settingsCoProducer.role == .controlLink)
+        #expect(AppIcon.settingsCoProducer.source == .glyph)
+        #expect(AppIcon.settingsCoProducer.symbol == "sparkles")
     }
 
     /// Ruling 6: symbiotic-design 0.2.2 has no track-kind roles, so each

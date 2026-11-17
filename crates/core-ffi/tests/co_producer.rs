@@ -959,4 +959,18 @@ mod control {
         }
         s.stop().unwrap();
     }
+
+    /// Task 7: the app enters for every class but read, from the
+    /// registry's own table (Ruling 5).
+    #[test]
+    fn the_app_knows_which_commands_only_read() {
+        use vizdaw_ffi::control::control_command_reads as reads;
+        assert!(reads("transport.stop".into()));
+        assert!(reads("locator.go_3".into()));
+        assert!(!reads("track.new_audio".into()));
+        assert!(!reads("file.export_midi".into()));
+        assert!(!reads("track.delete".into()));
+        assert!(!reads("no.such".into()));
+        assert!(!reads("a\0b".repeat(70_000)));
+    }
 }

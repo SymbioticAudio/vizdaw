@@ -20,6 +20,11 @@ final class FakeControlHost: ControlHost {
     let plugins = PluginSettings(
         defaults: MemoryDefaults(), sink: FakePluginSettingsSink(),
         installDestination: FileManager.default.temporaryDirectory.path)
+    /// Settings › Co-Producer (plan 8a Task 7), through a sink that opens
+    /// no socket and writes no file.
+    let coProducer = CoProducerSettings(
+        defaults: MemoryDefaults(), supportDir: URL(fileURLWithPath: "/tmp/vizdaw-fake-host-support"),
+        sink: FakeCoProducerSink())
     /// Whether `focus` finds the fields.
     var fieldsShown = true
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {

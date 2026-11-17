@@ -210,6 +210,9 @@ public protocol ControlHost: AnyObject {
     var appearance: AppearancePreferences { get }
     /// Settings › Plug-ins (plan 6g Task 4): `plugins.*` set it.
     var plugins: PluginSettings { get }
+    /// Settings › Co-Producer (plan 8a Ruling 10): `settings.co_producer`
+    /// sets it.
+    var coProducer: CoProducerSettings { get }
 }
 
 /// Which window's transport fields the P, E and U keys focus (plan 7d
@@ -255,9 +258,9 @@ public enum ControlCommands {
         "media.relink", "media.compact", "media.rename", "window.media_pool",
         "record.set", "record.recover", "lane.set_input", "lane.set_monitor", "midi.inject",
     ]
-    /// Co-Producer's two registry ids (plan 8a): until Task 7 gives them
-    /// their handlers they answer that Co-Producer is not on.
-    static let coProducer: Set<String> = ["settings.co_producer", "file.open_copy"]
+    /// Co-Producer's two registry ids (plan 8a Ruling 10): the switch and
+    /// opening a saved copy, both app-wide.
+    static let coProducer: Set<String> = [CoProducerCommands.setting, CoProducerCommands.openCopy]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
         "transport.go_position": .position, "transport.go_edit_in": .editIn, "transport.go_punch": .punchIn,
@@ -323,7 +326,7 @@ public enum ControlCommands {
             // Process-wide or per document (plan 5f-1 Task 9).
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
         case _ where coProducer.contains(id):
-            return .failed(.of(.unavailable, "Co-Producer is not on."))
+            return CoProducerCommands.runAppWide(id, args: args, store: store, host: host)
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }

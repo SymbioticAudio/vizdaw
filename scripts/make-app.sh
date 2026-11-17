@@ -13,6 +13,9 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/VizDAW" "$app/Contents/MacOS/VizDAW"
 cp target/ffi/vizdaw-scan "$app/Contents/MacOS/vizdaw-scan"
+# Co-Producer's MCP server (plan 8a): the path Settings › Co-Producer
+# shows; signed with the app below, as vizdaw-scan is.
+cp target/ffi/vizdaw-mcp "$app/Contents/MacOS/vizdaw-mcp"
 # The bundled Multi-Q EQ (plan 6g Ruling 2): both bundles in PlugIns, its
 # licence texts and SOURCE.txt in Resources/Licences/Multi-Q. It is not a
 # brand asset, so VIZDAW_NO_BRAND=1 bundles it too. Every licence file the

@@ -1868,6 +1868,15 @@ pub fn control_command_ids() -> Vec<String> {
         .collect()
 }
 
+/// Whether registry command `id` only reads or plays (Co-Producer class
+/// `read`, plan 8a Ruling 5): the app runs those without entering the
+/// request. False for an unknown ID.
+#[uniffi::export]
+pub fn control_command_reads(id: String) -> bool {
+    ffi_guard(|| Ok(registry::find(&id).is_some_and(|c| c.class == registry::Class::Read)))
+        .unwrap_or(false)
+}
+
 /// Whether a plugin call is on this (the main) thread's stack: a control
 /// call now must answer `busy` (control spec §7).
 #[uniffi::export]

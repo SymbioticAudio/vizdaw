@@ -146,6 +146,7 @@ public final class DocumentStore {
             open: { try Session.open(path: $0) }
         )
         s.makeDemoAudio = { try Session.newDemoAudio() }
+        s.openCopySession = { try Session.openCopy(path: $0) }
         s.makeProject = { try Session.newProject(format: $0) }
         s.recoverUntitled = { try recoverUntitledRecordings() }
         s.defaults = MemoryDefaults.appStore()
@@ -310,6 +311,9 @@ public final class DocumentStore {
             openAaf(path)
             return nil
         }
+        // A saved Co-Producer copy (from Finder, say) opens as a new
+        // untitled project, never in place (plan 8a Ruling 9).
+        if Self.isCopy(path) { return openCopy(path: path) }
         guard (path as NSString).pathExtension == "vizdaw" else {
             postAlert(AlertItem(
                 title: "Open Failed",
@@ -327,6 +331,37 @@ public final class DocumentStore {
         }
         guard let options = recovery.options(for: path) else { return nil }
         return add("Open Failed") { try recovery.openWith(path, options) }
+    }
+
+    /// Opens a Co-Producer copy (set by `live()`; tests set a fake).
+    @ObservationIgnored public var openCopySession: Open?
+
+    /// Whether `path` is a saved Co-Producer copy,
+    /// `<package>/Co-Producer/Copies/<name>.vizdaw`, as given or as its real
+    /// place (names compared without case, as the core does).
+    public nonisolated static func isCopy(_ path: String) -> Bool {
+        func shaped(_ p: String) -> Bool {
+            let parts = (p as NSString).pathComponents.filter { $0 != "." && $0 != "/" }
+            guard parts.count >= 4, let last = parts.last else { return false }
+            let name = last as NSString
+            return name.pathExtension.lowercased() == "vizdaw" && !name.deletingPathExtension.isEmpty
+                && parts[parts.count - 2].lowercased() == "copies"
+                && parts[parts.count - 3].lowercased() == "co-producer"
+        }
+        return shaped(path) || shaped(URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
+    }
+
+    /// File › Open Co-Producer Copy… (plan 8a Ruling 9): the copy at
+    /// `path` as a new untitled project, titled with the copy's name; the
+    /// copy and its package are never written. Anything else is refused
+    /// with an alert.
+    public func openCopy(path: String) -> UUID? {
+        guard Self.isCopy(path) else {
+            postAlert(AlertItem(title: "Open Failed", message: "That is not a Co-Producer copy."))
+            return nil
+        }
+        guard let make = openCopySession else { return nil }
+        return add("Open Failed") { try make(path) }
     }
 
     /// The import sheet's Import with "a new project" chosen: the sheet

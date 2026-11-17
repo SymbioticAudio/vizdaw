@@ -907,23 +907,59 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         hold?.wait()
         return try snapshotsAnswer.get()
     }
-    /// Plan 8a Task 3: no Co-Producer copies (Task 7 scripts it).
-    func coProducerCopiesSize() throws -> CopiesSizeRow { CopiesSizeRow(count: 0, bytes: 0) }
-    /// Plan 8a Task 4: requests, previews and tokens are not scripted yet
-    /// (Task 7 scripts them).
+    // MARK: Co-Producer (plan 8a Task 7)
+
+    /// Co-Producer calls in order ("enter <stamp>", "take", "leave",
+    /// "begin <name>", "end", "idle <ms>", "preview <n>"), with the edits
+    /// ("rename", "delete", "edit") and new tracks ("newTrack <kind>") made
+    /// between them.
+    var coLog: [String] = []
+    /// The open request.
+    var coRequest: CoProducerRequestRow?
+    var coBeginError: VizError?
+    var coEnterError: VizError?
+    var coTakeError: VizError?
+    var coPreviewError: VizError?
+    /// What `coProducerPreview` answers.
+    var coPreview = PreviewRow(token: String(repeating: "a", count: 32), needsYes: true, items: [])
+    /// What `coProducerIdle` answers (a label: it ended the request).
+    var coIdleLabel: String?
+    /// What `coProducerCopiesSize` answers.
+    var copies = CopiesSizeRow(count: 0, bytes: 0)
+    func coProducerCopiesSize() throws -> CopiesSizeRow { copies }
     func coProducerBegin(name: String) throws -> CoProducerRequestRow {
-        throw VizError.Model(message: "not scripted")
+        coLog.append("begin \(name)")
+        if let e = coBeginError { throw e }
+        let row = CoProducerRequestRow(name: name, label: "Co-Producer: \(name)", groupOpen: false, continued: false)
+        coRequest = row
+        return row
     }
-    func coProducerEnd() throws -> String? { throw VizError.Model(message: "not scripted") }
-    func coProducerRequest() -> CoProducerRequestRow? { nil }
-    func coProducerEnter(stamp: String) throws -> String? { throw VizError.Model(message: "not scripted") }
-    func coProducerLeave() {}
-    func coProducerIdle(idleMs: UInt64) -> String? { nil }
+    func coProducerEnd() throws -> String? {
+        coLog.append("end")
+        guard let r = coRequest else { throw VizError.Model(message: "No request is open.") }
+        coRequest = nil
+        return r.label
+    }
+    func coProducerRequest() -> CoProducerRequestRow? { coRequest }
+    func coProducerEnter(stamp: String) throws -> String? {
+        coLog.append("enter \(stamp)")
+        if let e = coEnterError { throw e }
+        return nil
+    }
+    func coProducerLeave() { coLog.append("leave") }
+    func coProducerIdle(idleMs: UInt64) -> String? {
+        coLog.append("idle \(idleMs)")
+        if coIdleLabel != nil { coRequest = nil }
+        return coIdleLabel
+    }
     func coProducerPreview(plan: [PlannedRow]) throws -> PreviewRow {
-        throw VizError.Model(message: "not scripted")
+        coLog.append("preview \(plan.count)")
+        if let e = coPreviewError { throw e }
+        return coPreview
     }
     func coProducerTake(token: String, plan: [PlannedRow]) throws {
-        throw VizError.Model(message: "not scripted")
+        coLog.append("take")
+        if let e = coTakeError { throw e }
     }
     func projectId() throws -> String? {
         interchangeLock.lock()
@@ -1157,6 +1193,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var editError: VizError?
     var editFilters: [ViewFilterRow?] = []
     func edit(cmd: EditCommand, filter: ViewFilterRow?) throws -> DocSnapshot {
+        switch cmd {
+        case .lane(.rename): coLog.append("rename")
+        case .lane(.remove): coLog.append("delete")
+        default: coLog.append("edit")
+        }
         if let e = editError { throw e }
         edits.append(cmd)
         editFilters.append(filter)
@@ -1228,7 +1269,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var duplicateError: VizError?
     /// A new track: a row with the given kind appended (below `after`
     /// when it names a row), `midiDest == nil` for MIDI.
+    /// Thrown by `newTrack` (after it is logged) when set.
+    var newTrackError: VizError?
     func newTrack(seq: UInt64, kind: TrackKindRow, after: UInt64?) throws -> DocSnapshot {
+        coLog.append("newTrack \(kind)")
+        if let e = newTrackError { throw e }
         newTracks.append((seq, kind, after))
         guard var rows = laneTable[seq] else {
             throw VizError.Model(message: "unknown id seq\(seq)")

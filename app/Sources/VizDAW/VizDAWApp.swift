@@ -58,6 +58,59 @@ final class LivePluginSettingsSink: PluginSettingsSink {
 /// Components folder (nil), only when asked.
 @MainActor let pluginSettings = PluginSettings(defaults: MemoryDefaults.appStore(), sink: LivePluginSettingsSink())
 
+/// The Co-Producer switch's live side (plan 8a Ruling 10): the second
+/// control server, the support folder's owner and mode, and the off marker
+/// `vizdaw-mcp` reads.
+@MainActor
+final class LiveCoProducerSink: CoProducerSink {
+    let supportDir: URL
+    init(supportDir: URL) { self.supportDir = supportDir }
+
+    private var marker: String { supportDir.appendingPathComponent("co-producer.off").path }
+
+    /// The folder must be this user's; it becomes 0700, so the socket's
+    /// folder passes the server's own checks (control spec §8).
+    func start(path: String) -> String? {
+        let fm = FileManager.default
+        let dir = (path as NSString).deletingLastPathComponent
+        do {
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let owner = (try fm.attributesOfItem(atPath: dir)[.ownerAccountID] as? NSNumber)?.uint32Value
+            guard owner == getuid() else { return "the folder \(dir) belongs to another user" }
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir)
+        } catch {
+            return AlertItem(error, title: "Co-Producer").message
+        }
+        return ControlChannel.startCoProducer(path: path)
+    }
+
+    func stop() { ControlChannel.stopCoProducer() }
+
+    /// Writes the empty marker only where nothing is (a link is never
+    /// followed or replaced); removes whatever is there.
+    func markOff(_ off: Bool) {
+        let fm = FileManager.default
+        if off {
+            guard (try? fm.attributesOfItem(atPath: marker)) == nil else { return }
+            try? fm.createDirectory(at: supportDir, withIntermediateDirectories: true)
+            _ = fm.createFile(atPath: marker, contents: Data())
+        } else {
+            try? fm.removeItem(atPath: marker)
+        }
+    }
+}
+
+/// Settings › Co-Producer (plan 8a Ruling 10): off unless the composer
+/// turned it on; made after the support folder exists, and it starts the
+/// socket then when on. Turning it off ends every open request.
+@MainActor let coProducerSettings: CoProducerSettings = {
+    let dir = AppSetup.coProducerSupportDir
+    let s = CoProducerSettings(
+        defaults: MemoryDefaults.appStore(), supportDir: dir, sink: LiveCoProducerSink(supportDir: dir))
+    s.didTurnOff = { CoProducerCommands.tidy(appStore, all: true) }
+    return s
+}()
+
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
 @MainActor let noteInputHub = NoteInputHub(input: NoteInput())
@@ -149,6 +202,8 @@ struct VizDAWApp: App {
             ControlChannel.start(path: path)
         }
         AppSetup.openCatalog()
+        // Co-Producer's socket, when its switch is on (Ruling 10).
+        _ = coProducerSettings
         LaunchArguments.apply(ControlLaunch.strip(CommandLine.arguments), to: appStore)
     }
 
@@ -194,6 +249,8 @@ struct VizDAWApp: App {
                     .tabItem { AppIcon.settingsSurfaces.label("Surfaces") }
                 PluginSettingsView(settings: pluginSettings)
                     .tabItem { AppIcon.settingsPlugins.label("Plug-ins") }
+                CoProducerSettingsView(settings: coProducerSettings, store: appStore)
+                    .tabItem { AppIcon.settingsCoProducer.label("Co-Producer") }
             }
             .themedRoot()
         }
@@ -227,7 +284,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // A clean quit leaves no crash markers.
         MainActor.assumeIsolated {
-            // Pending control calls are answered before the documents go.
+            // Pending control calls are answered before the documents go;
+            // Co-Producer's requests end first (Ruling 10).
+            coProducerSettings.quit()
             ControlChannel.stop()
             appStore.closeAll()
             // Stop the engine so no plugin host is dropped while it renders.
@@ -257,6 +316,18 @@ enum AppSetup {
         }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("VizDAW")
+    }
+
+    /// Co-Producer's folder (plan 8a Task 5 carry): the very path
+    /// `vizdaw-mcp` derives, or it refuses the screenshots it is sent.
+    /// `--smoke` runs keep their temporary folder; without a folder
+    /// `vizdaw-mcp` could find, the app's own.
+    static var coProducerSupportDir: URL {
+        if LaunchArguments.smokeRun { return supportDir }
+        if let p = CoProducerSettings.supportPath(environment: ProcessInfo.processInfo.environment) {
+            return URL(fileURLWithPath: p, isDirectory: true)
+        }
+        return supportDir
     }
 
     /// `VIZDAW_SCANNER` (scripts/swift.sh sets it), else `vizdaw-scan` next

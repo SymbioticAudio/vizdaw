@@ -136,7 +136,10 @@ fn retention_and_prune_keep_what_copies_use() {
 
     let c = Session::open_copy(copy.display().to_string()).unwrap();
     let snap = c.snapshot().unwrap();
-    assert_eq!(snap.title, "Untitled");
+    // Ruling 9: its title is the copy's name, so Save As offers it.
+    let name = copy.file_stem().unwrap().to_str().unwrap();
+    assert!(name.contains(" before "), "{name}");
+    assert_eq!(snap.title, name);
     let seq = snap.sequences[0].id;
     let lanes = c.lanes(seq).unwrap();
     assert_eq!(lanes.len(), 1);

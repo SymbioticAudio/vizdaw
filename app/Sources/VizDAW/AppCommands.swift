@@ -60,6 +60,14 @@ struct AppCommands: Commands {
                 .keyboardShortcut(KeyMenu.shortcut("file.new"))
                 Button("Open…") { if let path = Panels.chooseProject() { show(store.open(path: path)) } }
                     .keyboardShortcut(KeyMenu.shortcut("file.open"))
+                // A saved Co-Producer copy of the front project, as a new
+                // untitled project (plan 8a Ruling 9).
+                Button("Open Co-Producer Copy…") {
+                    guard let package = copiesPackage, let path = Panels.chooseCoProducerCopy(in: package) else { return }
+                    show(store.openCopy(path: path))
+                }
+                .keyboardShortcut(KeyMenu.shortcut(CoProducerCommands.openCopy))
+                .disabled(copiesPackage == nil)
                 Button("Import Audio…") {
                     let paths = Panels.chooseAudio()
                     doc?.importAudio(paths: paths)
@@ -446,6 +454,15 @@ struct AppCommands: Commands {
         report(RegionCommands.normalize(peakDb: peak, doc), doc)
     }
 
+    /// The front project's package when it is saved and has Co-Producer
+    /// copies (File › Open Co-Producer Copy… is enabled).
+    private var copiesPackage: String? {
+        guard let doc, let path = (try? doc.session.path()) ?? nil,
+            ((try? doc.session.coProducerCopiesSize())?.count ?? 0) > 0
+        else { return nil }
+        return path
+    }
+
     private func show(_ id: UUID?) {
         if let id { openWindow(value: id) }
     }
@@ -488,6 +505,21 @@ enum Panels {
             [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 } + midiTypes + dawprojectTypes + aafTypes
         panel.prompt = "Open"
         panel.message = "Choose a VizDAW project, a MIDI file, a DAWproject file or an AAF file"
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// File › Open Co-Producer Copy…: a copy in `package`'s
+    /// `Co-Producer/Copies`, chosen as a whole package.
+    static func chooseCoProducerCopy(in package: String) -> String? {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(fileURLWithPath: package).appendingPathComponent("Co-Producer/Copies", isDirectory: true)
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType("org.vizdaw.project")].compactMap { $0 }
+        panel.prompt = "Open Copy"
+        panel.message = "Choose a saved Co-Producer copy: it opens as a new untitled project."
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
