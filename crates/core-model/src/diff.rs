@@ -525,14 +525,24 @@ fn mixer_parts(
     sends(before, after, old, new, &mut parts);
     eq(before, after, old, new, &mut parts);
     inserts(before, after, old, new, &mut parts);
-    // Parameters, in signal order: the instrument's own slot, the EQ,
-    // then the inserts.
-    if let (StripKind::Instrument(d0), StripKind::Instrument(d1)) = (old.kind, new.kind) {
-        if let (Some(a), Some(b)) = (own_slot(before, d0), own_slot(after, d1)) {
-            if a.id == b.id {
-                param_parts(a, b, params, &mut parts);
+    // The instrument's own slot (`mixer.set_bypass` reaches it too).
+    let own = match (old.kind, new.kind) {
+        (StripKind::Instrument(d0), StripKind::Instrument(d1)) => {
+            match (own_slot(before, d0), own_slot(after, d1)) {
+                (Some(a), Some(b)) if a.id == b.id => Some((a, b)),
+                _ => None,
             }
         }
+        _ => None,
+    };
+    if let Some((a, b)) = own {
+        let label = format!("instrument {}", shown_name(&a.plugin.name));
+        slot_parts(before, after, &label, a, b, &mut parts);
+    }
+    // Parameters, in signal order: the instrument's own slot, the EQ,
+    // then the inserts.
+    if let Some((a, b)) = own {
+        param_parts(a, b, params, &mut parts);
     }
     let old_slots: BTreeMap<PluginInstanceId, &PluginSlot> =
         old.chain().map(|p| (p.id, p)).collect();

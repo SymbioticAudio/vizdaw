@@ -1175,3 +1175,27 @@ fn mixer_names_are_shown_safely() {
         vec![item("Strip Kick", "a b x y 1 → 0.125")]
     );
 }
+
+#[test]
+fn an_instruments_own_slot_is_listed() {
+    let d = mix();
+    let synth = instrument_slot(&d);
+    let off = exec(
+        &d,
+        vec![MixerCmd::SetBypass {
+            slot: synth,
+            bypass: true,
+        }],
+    );
+    let items = describe(&d, &off);
+    assert_eq!(
+        items,
+        vec![item("Strip Synth", "instrument Synth bypassed")]
+    );
+    // The composer's strip, so it needs a yes.
+    assert!(!items[0].co_producers);
+    assert_eq!(
+        describe(&off, &d),
+        vec![item("Strip Synth", "instrument Synth turned back on")]
+    );
+}
