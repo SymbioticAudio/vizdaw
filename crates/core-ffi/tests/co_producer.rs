@@ -974,3 +974,97 @@ mod control {
         assert!(!reads("a\0b".repeat(70_000)));
     }
 }
+
+/// A composer's job that finishes while Co-Producer acts lands as the
+/// composer's own step, never inside "Co-Producer: …", wherever it is
+/// applied from: here by Co-Producer's own `file.bounce` (plan 8a final
+/// review I1).
+#[test]
+fn a_composers_finished_job_never_lands_in_a_co_producer_step() {
+    use core_media::caf::{CafWriter, WriteMode};
+    use vizdaw_ffi::{
+        BitDepthRow, BounceRangeRow, BounceRequestRow, BounceSourceRow, ContainerRow,
+        ImportTargetRow,
+    };
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = saved(dir.path());
+    let src = dir.path().join("kick.caf");
+    let mut w = CafWriter::create(
+        &src,
+        48_000,
+        2,
+        core_model::format::BitDepth::Float32,
+        WriteMode::Normal,
+    )
+    .unwrap();
+    w.write(&vec![0.25; 400]).unwrap();
+    w.finish().unwrap();
+    let before = lanes(&s).len();
+    // The composer's import, held until Co-Producer has entered.
+    s.debug_hold_jobs(true).unwrap();
+    s.import_audio(
+        vec![src.display().to_string()],
+        Some(ImportTargetRow {
+            seq: first_seq(&s),
+            lane: None,
+            tick: 0,
+        }),
+    )
+    .unwrap();
+    s.co_producer_begin("add a track".into()).unwrap();
+    s.co_producer_enter(STAMP.into()).unwrap();
+    s.new_track(first_seq(&s), TrackKindRow::Audio, None)
+        .unwrap();
+    s.debug_hold_jobs(false).unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while !s.debug_jobs_settled() {
+        assert!(
+            std::time::Instant::now() < until,
+            "the import never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Co-Producer's bounce applies finished jobs first.
+    s.bounce(BounceRequestRow {
+        seq: first_seq(&s),
+        source: BounceSourceRow::Mix,
+        range: BounceRangeRow::Ticks {
+            start: 0,
+            end: 15_360,
+        },
+        container: ContainerRow::Wav,
+        depth: BitDepthRow::Int24,
+        rate: 48_000,
+        dither: false,
+        path: Some(dir.path().join("mix.wav").display().to_string()),
+        add_to_project: false,
+        replace: false,
+    })
+    .unwrap();
+    s.co_producer_leave();
+    s.co_producer_end().unwrap();
+    assert_eq!(lanes(&s).len(), before + 2, "both tracks are there");
+    let top = undo_label(&s).unwrap();
+    assert!(
+        !top.starts_with("Co-Producer"),
+        "the import is the composer's: {top}"
+    );
+    // Its Undo is the composer's work: it needs a yes.
+    assert!(s.co_producer_preview(vec![undo()]).unwrap().needs_yes);
+    s.undo().unwrap();
+    assert_eq!(lanes(&s).len(), before + 1);
+    // Co-Producer's own step holds only its track.
+    assert_eq!(undo_label(&s).as_deref(), Some("Co-Producer: Add a Track"));
+    s.redo().unwrap();
+    let wait = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while !s.debug_jobs_settled() {
+        assert!(
+            std::time::Instant::now() < wait,
+            "the bounce never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    s.idle().unwrap();
+    s.close().unwrap();
+}

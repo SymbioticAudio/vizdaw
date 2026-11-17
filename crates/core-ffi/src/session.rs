@@ -435,9 +435,13 @@ impl Inner {
     /// left open; turning it on may be refused (a hand drag), and the
     /// edit is then a hand edit.
     fn sync_acting(&mut self) {
+        // Inside a plug-in call (a nested run loop may run the composer's
+        // UI events on this thread) nothing is Co-Producer's (plan 8a
+        // final review, Minor 1).
         let mine = self
             .co_producer_thread
-            .is_some_and(|t| t == std::thread::current().id());
+            .is_some_and(|t| t == std::thread::current().id())
+            && !plugins::is_busy();
         self.set_acting(mine);
     }
 
@@ -4402,6 +4406,9 @@ impl Session {
     /// checked (plan 8a Task 2 review): none of it may join a
     /// "Co-Producer: …" step. Each waits as usual while an edit is open.
     fn land_owed(&self, inner: &mut Inner) {
+        // Finished jobs too (the composer's imports, conversions and
+        // bounces; plan 8a final review I1).
+        self.apply_jobs_after_edit(inner);
         self.apply_pending_pass(inner);
         self.apply_pending_automation(inner);
         self.apply_mpe_reports(inner);
@@ -5131,10 +5138,27 @@ impl Session {
     /// `end_edit`/`abort_edit` call [`Session::apply_jobs_after_edit`],
     /// and `idle`/`job` apply them too.
     fn apply_jobs(&self, inner: &mut Inner) -> bool {
-        use crate::jobs::{JobStateRow, Work, row};
         if inner.history.in_transaction() {
             return false;
         }
+        // A job is never Co-Producer's step, wherever it is applied from
+        // (plan 8a final review I1): with acting off it lands as a hand
+        // step, which closes an open request group, as `step` does around
+        // `pump`.
+        let acting = inner.history.acting();
+        if acting {
+            inner.set_acting(false);
+        }
+        let changed = self.apply_finished_jobs(inner);
+        if acting {
+            inner.sync_acting();
+        }
+        changed
+    }
+
+    /// [`Session::apply_jobs`]'s work, with acting already off.
+    fn apply_finished_jobs(&self, inner: &mut Inner) -> bool {
+        use crate::jobs::{JobStateRow, Work, row};
         let mut changed = false;
         for (id, kind, work) in inner.jobs.finished() {
             let root = inner.root(self.id);
