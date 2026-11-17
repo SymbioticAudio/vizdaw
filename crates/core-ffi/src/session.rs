@@ -2183,7 +2183,11 @@ impl Session {
             let copy = std::fs::canonicalize(&given).map_err(|_| not_a_copy())?;
             let package = file::copy_parent(&copy).ok_or_else(not_a_copy)?;
             // Every media path `from_json` accepted is relative, without `..`.
-            let doc = file::load_copy(&copy)?;
+            // A song of its own (plan 8b Task 3 review I1): with the
+            // original's project ID its untitled stand-in would be the
+            // original's, whose next save would move this window's notes
+            // and copies in.
+            let doc = file::load_copy(&copy)?.with_new_project_id(&crate::project_id::fresh());
             let mut files: Vec<String> = doc.media().values().map(|m| m.path.clone()).collect();
             files.extend(doc.referenced_states().into_iter().map(|b| {
                 format!(
@@ -4904,6 +4908,25 @@ impl Session {
         })
     }
 
+    /// The time a request that never enters is logged under (fix round 1
+    /// ruling): "YYYY-MM-DD HH-MM", the app's local time, passed at begin
+    /// or at the first note, file or export folder; the first one given
+    /// is kept. An entered request uses its first enter's stamp. `Model`
+    /// with no open request or another form.
+    pub fn co_producer_set_stamp(&self, stamp: String) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let log = Self::open_log(&mut inner)?;
+            if !crate::notes::check_stamp(&stamp) {
+                return Err(crate::events::bad(
+                    "A request's stamp is \"YYYY-MM-DD HH-MM\".",
+                ));
+            }
+            log.begun.get_or_insert(stamp);
+            Ok(())
+        })
+    }
+
     /// What the composer asked, in their words, for the open request's
     /// entry (plan 8b Ruling 5); blank is none. `Model` with no open
     /// request, or over 500 characters.
@@ -4966,7 +4989,7 @@ impl Session {
             let log = Self::open_log(&mut inner)?;
             if path.is_empty()
                 || path.len() > MAX_FILE_PATH
-                || path.contains(' ')
+                || path.contains('\0')
                 || !Path::new(&path).is_absolute()
             {
                 return Err(crate::events::bad(&format!(

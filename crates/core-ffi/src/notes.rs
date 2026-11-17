@@ -214,8 +214,11 @@ fn append_to(path: &Path, text: &[u8]) -> Result<(), VizError> {
 #[derive(Debug, Clone, Default)]
 pub struct RequestLog {
     /// The first enter's stamp, "YYYY-MM-DD HH-MM"; `None` until the
-    /// request enters (then it writes no entry).
+    /// request enters.
     pub stamp: Option<String>,
+    /// The stamp the app gave at begin or at the first note, file or
+    /// export folder, for a request that never enters (fix round 1).
+    pub begun: Option<String>,
     /// What the composer asked, in their words.
     pub asked: Option<String>,
     /// What Co-Producer's calls changed; `true` after a yes in chat.
@@ -247,18 +250,32 @@ fn joined(items: &[String]) -> String {
 }
 
 /// Ruling 5's entry for `log` of the request titled `title`, ending in a
-/// newline; `None` when the request never entered. Item lines are Added
+/// newline. A request that entered is headed by its first enter's stamp.
+/// One that never entered still writes an entry when it has notes, files
+/// or an export folder (fix round 1 ruling), headed by `begun` (or by the
+/// title alone when the app gave none), and has no "Saved copy:" line
+/// unless a copy was written. `None` for a request that only read. Item lines are Added
 /// (change "added"), Deleted (change starting "deleted") and Changed,
 /// those after a yes on their own "(yes in chat)" line, in the order each
 /// line's first item came. Every text is on one line ([`line_text`]), so
 /// no line but the heading starts with `#`.
 pub fn entry(log: &RequestLog, title: &str) -> Option<String> {
-    let stamp = log.stamp.as_deref()?;
-    let shown = match stamp.split_once(' ') {
-        Some((date, time)) => format!("{date} {}", time.replacen('-', ":", 1)),
-        None => stamp.to_string(),
+    let logged = !log.notes.is_empty() || !log.files.is_empty() || log.export_folder.is_some();
+    let stamp = match log.stamp.as_deref() {
+        Some(s) => Some(s),
+        None if logged => log.begun.as_deref(),
+        None => return None,
     };
-    let mut out = format!("## {} — {}\n", line_text(&shown), line_text(title));
+    let mut out = match stamp {
+        Some(stamp) => {
+            let shown = match stamp.split_once(' ') {
+                Some((date, time)) => format!("{date} {}", time.replacen('-', ":", 1)),
+                None => stamp.to_string(),
+            };
+            format!("## {} — {}\n", line_text(&shown), line_text(title))
+        }
+        None => format!("## {}\n", line_text(title)),
+    };
     if let Some(a) = &log.asked {
         out.push_str(&format!("- Asked: \"{}\"\n", line_text(a)));
     }
@@ -318,6 +335,16 @@ pub fn remembered_folder(text: &str) -> Option<PathBuf> {
         .map(Path::new)
         .find(|p| p.is_absolute())
         .map(Path::to_path_buf)
+}
+
+/// True when `stamp` is "YYYY-MM-DD HH-MM" (digits checked).
+pub fn check_stamp(stamp: &str) -> bool {
+    stamp.len() == 16
+        && stamp.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 | 13 => b == b'-',
+            10 => b == b' ',
+            _ => b.is_ascii_digit(),
+        })
 }
 
 /// True when `date` is "YYYY-MM-DD" (digits checked).

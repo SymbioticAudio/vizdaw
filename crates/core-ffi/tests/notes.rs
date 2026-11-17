@@ -170,6 +170,7 @@ fn the_entry_is_exact() {
         notes: vec!["the composer wants the drums dry in the verse".into()],
         export_folder: Some("/Users/x/Exports".into()),
         copy: Some("Co-Producer/Copies/2026-11-14 15-02 before Set Up a Drum Bus.vizdaw".into()),
+        begun: None,
     };
     assert_eq!(
         notes::entry(&log, "Set Up a Drum Bus").as_deref(),
@@ -967,4 +968,176 @@ fn notes_and_folder_results_as_json() {
         result_json(&r),
         serde_json::json!({"path": "/x/S — Stems — 2026-11-16"})
     );
+}
+
+// ---- fix round 1 ----
+
+/// Fix round 1 ruling: a request that never entered still logs its
+/// notes, files and export folder, headed by the app's stamp, with no
+/// saved copy line; one that only read logs nothing.
+#[test]
+fn an_entry_without_an_enter() {
+    let mut log = RequestLog {
+        begun: Some("2026-11-16 09-30".into()),
+        ..RequestLog::default()
+    };
+    assert_eq!(notes::entry(&log, "Look"), None, "only read");
+    log.notes = vec!["dry verse".into()];
+    assert_eq!(
+        notes::entry(&log, "Note").as_deref(),
+        Some("## 2026-11-16 09:30 — Note\n- Note: dry verse\n")
+    );
+    log.begun = None;
+    assert_eq!(
+        notes::entry(&log, "Note").as_deref(),
+        Some("## Note\n- Note: dry verse\n")
+    );
+    let log = RequestLog {
+        begun: Some("2026-11-16 09-30".into()),
+        export_folder: Some("/x".into()),
+        ..RequestLog::default()
+    };
+    assert_eq!(
+        notes::entry(&log, "Export").as_deref(),
+        Some("## 2026-11-16 09:30 — Export\n- Nothing changed.\n- Export folder: /x\n")
+    );
+}
+
+#[test]
+fn an_export_only_request_logs_and_remembers() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = saved(dir.path(), "A");
+    let parent = dir.path().join("Exports");
+    std::fs::create_dir(&parent).unwrap();
+    s.co_producer_begin("export stems".into()).unwrap();
+    s.co_producer_set_stamp("2026-11-16 09-30".into()).unwrap();
+    let made = s
+        .co_producer_export_folder(
+            ExportWhatRow::Stems,
+            DATE.into(),
+            Some(parent.display().to_string()),
+        )
+        .unwrap();
+    s.co_producer_end().unwrap();
+    let e = last_entry(&pkg);
+    assert_eq!(
+        e,
+        format!(
+            "## 2026-11-16 09:30 — Export Stems\n- Files: {made}\n- Export folder: {}\n",
+            parent.display()
+        )
+    );
+    assert!(!pkg.join("Co-Producer/Copies").exists(), "no copy written");
+    // Remembered by the next request.
+    s.co_producer_begin("export a mix".into()).unwrap();
+    let p = s
+        .co_producer_export_folder(ExportWhatRow::Mix, DATE.into(), None)
+        .unwrap();
+    assert_eq!(PathBuf::from(&p), parent.join("A — Mix — 2026-11-16"));
+    s.co_producer_end().unwrap();
+    assert_eq!(headings(&pkg), 2);
+    s.close().unwrap();
+}
+
+#[test]
+fn a_note_only_request_logs() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = saved(dir.path(), "Song");
+    s.co_producer_begin("remember the tempo".into()).unwrap();
+    s.co_producer_note("the verse stays at 92".into()).unwrap();
+    s.co_producer_set_stamp("2026-11-16 09-31".into()).unwrap();
+    s.co_producer_set_stamp("2026-11-16 09-45".into()).unwrap();
+    s.co_producer_end().unwrap();
+    assert_eq!(
+        last_entry(&pkg),
+        "## 2026-11-16 09:31 — Remember the Tempo\n- Note: the verse stays at 92\n"
+    );
+    s.close().unwrap();
+}
+
+#[test]
+fn a_read_only_request_writes_nothing() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg) = saved(dir.path(), "Song");
+    s.co_producer_begin("look".into()).unwrap();
+    s.co_producer_set_stamp("2026-11-16 09-30".into()).unwrap();
+    let n = s.co_producer_notes().unwrap();
+    s.co_producer_end().unwrap();
+    assert_eq!(n.text, "# Song\n");
+    assert_eq!(text_of(&pkg.join(NOTES_FILE)), "# Song\n");
+    assert_eq!(headings(&pkg), 0);
+    s.close().unwrap();
+}
+
+#[test]
+fn set_stamp_refuses_hostile_input() {
+    let _g = serial();
+    let s = Session::new_empty().unwrap();
+    assert_eq!(
+        s.co_producer_set_stamp("2026-11-16 09-30".into())
+            .unwrap_err()
+            .to_string(),
+        OPEN_FIRST
+    );
+    s.co_producer_begin("look".into()).unwrap();
+    let long = "1".repeat(70_000);
+    for bad in [
+        "",
+        "x",
+        "2026-11-16",
+        "2026-11-16 09:30",
+        "2026-11-16 09-3\0",
+        long.as_str(),
+    ] {
+        assert!(
+            s.co_producer_set_stamp(bad.into()).is_err(),
+            "{}",
+            bad.len()
+        );
+    }
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+/// Review I1: an opened copy is a song of its own, so its requests never
+/// reach the original's notes or copies.
+#[test]
+fn an_opened_copy_is_its_own_song() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (orig, pkg) = saved(dir.path(), "Orig");
+    let copy = orig
+        .debug_write_co_producer_copy("2026-11-14 15-02", "Tidy")
+        .unwrap();
+    let copies_before = names_in(&pkg.join("Co-Producer/Copies"));
+    assert!(!pkg.join(NOTES_FILE).exists());
+
+    let c = Session::open_copy(copy.display().to_string()).unwrap();
+    assert_ne!(c.project_id().unwrap(), orig.project_id().unwrap());
+    c.co_producer_begin("add a track".into()).unwrap();
+    c.co_producer_enter(STAMP.into()).unwrap();
+    add_track(&c);
+    c.co_producer_leave();
+    c.co_producer_note("in the copy".into()).unwrap();
+    c.co_producer_end().unwrap();
+    let theirs = stand_in_of(&c);
+    assert!(theirs.join(NOTES_FILE).is_file());
+
+    orig.save().unwrap();
+    let problems = orig.idle().unwrap().problems;
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(
+        !pkg.join(NOTES_FILE).exists(),
+        "the original's notes gained nothing"
+    );
+    assert_eq!(names_in(&pkg.join("Co-Producer/Copies")), copies_before);
+    assert!(
+        theirs.join(NOTES_FILE).is_file(),
+        "the copy window's stay its own"
+    );
+    c.close().unwrap();
+    orig.close().unwrap();
 }

@@ -976,6 +976,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func notesPath() throws -> String { coNotes.path }
     func coProducerNotes() throws -> NotesRow { coNotes }
     func coProducerSetAsked(asked: String) throws { coLog.append("asked \(asked)") }
+    func coProducerSetStamp(stamp: String) throws { coLog.append("stamp \(stamp)") }
     func coProducerNote(text: String) throws { coLog.append("note \(text)") }
     func coProducerFile(path: String) throws { coLog.append("file \(path)") }
     func coProducerExportFolder(what: ExportWhatRow, date: String, parent: String?) throws -> String {

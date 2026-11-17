@@ -725,6 +725,13 @@ impl Document {
         }
         self
     }
+
+    /// The document with project ID `id` in place of any it has: an opened
+    /// Co-Producer copy is a song of its own (plan 8b Task 3 review I1).
+    pub fn with_new_project_id(mut self, id: &str) -> Document {
+        self.settings.project_id = Some(id.to_owned());
+        self
+    }
 }
 
 /// Crate-internal mutation, used only by commands.
