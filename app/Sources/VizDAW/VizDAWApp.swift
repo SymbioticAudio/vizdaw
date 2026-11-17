@@ -277,6 +277,10 @@ enum AppSetup {
         // it; lanes mark surface ports.
         try? surfacesLoad()
         LaneInputs.claimedPorts = { Set(surfaceList().map(\.input)) }
+        // The pickers' first menus list the MIDI sources and the device's
+        // channels (release-fixes Task 3 review I1), read off the main
+        // thread. Not in `--smoke` runs, which read no device.
+        if !LaunchArguments.smokeRun { Task { await LaneInputs.warmSources() } }
         appPlugins.start(config: AppPlugins.config(supportDir: dir, scanner: scanner), scan: false)
     }
 

@@ -63,6 +63,11 @@ public final class LaneInputs {
     /// older read never overwrites a newer one.
     @ObservationIgnored private var refreshesStarted: UInt64 = 0
     @ObservationIgnored private var refreshApplied: UInt64 = 0
+    /// The MIDI sources and the device's channels as any document last
+    /// read them (the app warms them at launch, `warmSources`): a new
+    /// document's first picker lists them (Task 3 review I1).
+    static var lastSources: [String] = []
+    static var lastDevice: InputChannelsRow?
     /// The input channels the picker offers, by name: the engine's open
     /// input, else the chosen device's (nil: unknown, nothing read yet).
     var known: (count: Int, names: [String])? {
@@ -75,7 +80,22 @@ public final class LaneInputs {
     /// How long a clip mark stays lit (plan 5d-1 Ruling 27).
     public static let clipHold: Duration = .seconds(2)
 
-    init(document: DocumentModel) { self.document = document }
+    init(document: DocumentModel) {
+        self.document = document
+        midiSources = Self.lastSources
+        device = Self.lastDevice
+    }
+
+    /// Reads the MIDI sources and the chosen device's channels once, off
+    /// the main thread, for the documents opened from now on (the app at
+    /// launch; Task 3 review I1).
+    public static func warmSources() async {
+        let ports = midiPorts
+        let channels = deviceChannels
+        let (sources, read) = await Task.detached { (ports(), channels()) }.value
+        lastSources = sources
+        lastDevice = read
+    }
 
     // MARK: The picker
 
@@ -102,7 +122,11 @@ public final class LaneInputs {
         guard mine > refreshApplied else { return }
         refreshApplied = mine
         if sources != midiSources { midiSources = sources }
-        if wantsDevice { device = read }
+        Self.lastSources = sources
+        if wantsDevice {
+            device = read
+            Self.lastDevice = read
+        }
     }
 
     /// Whether the lane records audio (it plays to an audio path or has an

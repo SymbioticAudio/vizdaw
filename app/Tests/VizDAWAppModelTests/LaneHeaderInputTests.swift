@@ -12,6 +12,8 @@ import VizDAWCore
     /// Song's Chords lane (31) plays to an audio path; the device has two
     /// named channels.
     func header(armed: Bool = false) throws -> (DocumentModel, FakeSession, LaneHeaderView) {
+        // The input menu reads no real MIDI source or device (Task 3 review I2).
+        TestDevices.stubbed
         let f = editorFake()
         f.laneTable[3]?[1].audioOut = 7
         if armed {

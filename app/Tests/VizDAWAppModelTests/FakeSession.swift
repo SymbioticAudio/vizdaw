@@ -24,6 +24,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var slots: [SlotRow] = []
 
     init(_ sequences: [SeqRow], version: UInt64 = 0) {
+        // Pickers a fake document opens read no real device (Task 3 review I2).
+        TestDevices.stubbed
         snap = DocSnapshot(
             version: version, title: "Untitled", dirty: false, undoLabel: nil,
             redoLabel: nil, sequences: sequences, warnings: [], laneRevs: [])

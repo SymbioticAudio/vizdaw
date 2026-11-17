@@ -10,13 +10,19 @@ import VizDAWCore
 @MainActor
 @Suite(.serialized) struct LaneInputsTests {
     /// Song (3) with `lanes`, shown.
-    func doc(_ lanes: [LaneRow]) throws -> (DocumentModel, FakeSession) {
+    func doc(_ lanes: [LaneRow], keepLastRead: Bool = false) throws -> (DocumentModel, FakeSession) {
         let f = demoFake()
         f.laneTable[3] = lanes
         // No device read from the HAL in tests (final review I4), and no
         // real MIDI source (a refresh reads them; release-fixes Task 3).
-        LaneInputs.deviceChannels = { nil }
-        LaneInputs.midiPorts = { [] }
+        TestDevices.stubbed
+        if !keepLastRead {
+            LaneInputs.deviceChannels = { nil }
+            LaneInputs.midiPorts = { [] }
+            // No read carried over from another test (review I1).
+            LaneInputs.lastSources = []
+            LaneInputs.lastDevice = nil
+        }
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
         let m = try #require(s.newDemo().flatMap(s.model))
         m.select(3)
@@ -183,6 +189,21 @@ import VizDAWCore
         #expect(calls.reads == [false], "one read, off the main thread")
         #expect(titles(m.inputs.groups(for: l))["MIDI Input"] == ["All MIDI Inputs", "Keys", "Pads"])
         #expect(calls.reads.count == 1, "the picker reads the cache")
+    }
+
+    /// Task 3 review I1: a new document's first picker lists the sources
+    /// the last read found (the app warms them at launch), before its own
+    /// refresh has run.
+    @Test func aNewDocumentsFirstMenuListsTheWarmedSources() async throws {
+        var l = lane(31, "Keys")
+        l.midiDest = 1
+        _ = try doc([l])
+        LaneInputs.midiPorts = { ["Keys", "Pads"] }
+        defer { LaneInputs.midiPorts = { [] } }
+        await LaneInputs.warmSources()
+        let (m, _) = try doc([l], keepLastRead: true)
+        #expect(m.inputs.midiSources == ["Keys", "Pads"], "seeded before any refresh")
+        #expect(titles(m.inputs.groups(for: l))["MIDI Input"] == ["All MIDI Inputs", "Keys", "Pads"])
     }
 
     @Test func theMonitorButtonCyclesAutoInputOff() throws {
