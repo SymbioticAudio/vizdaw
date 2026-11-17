@@ -99,7 +99,7 @@ public enum AudioCommands {
                 return .failed(
                     .of(
                         .failed,
-                        "Two input devices are named \u{201C}\(key)\u{201D}: give its uid (state.get audio input_device_list)."
+                        "Two input devices are named \u{201C}\(key)\u{201D}: choose one in Settings › Audio, or give its uid."
                     ))
             }
             c.inputDevice = .some(d.name)

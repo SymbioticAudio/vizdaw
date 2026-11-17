@@ -78,7 +78,7 @@ import VizDAWCore
         #expect(f?.code == .failed)
         #expect(
             f?.message
-                == "Two input devices are named \u{201C}A\u{201D}: give its uid (state.get audio input_device_list).")
+                == "Two input devices are named \u{201C}A\u{201D}: choose one in Settings › Audio, or give its uid.")
         #expect(host.audio.isEmpty, "nothing applied")
         #expect(failure(run("audio.set", [("input_device", .text(value: "u2"))], s, nil)) == nil)
         #expect(host.audio.last?.inputDevice == .some("A"))
