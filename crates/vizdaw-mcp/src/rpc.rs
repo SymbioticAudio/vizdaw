@@ -18,6 +18,8 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 /// A resource VizDAW could not give (it is not running, or it refused).
 pub const APP_ERROR: i64 = -32000;
+/// A resource that does not exist (a view URI not served).
+pub const RESOURCE_NOT_FOUND: i64 = -32002;
 /// A request that came while the composer is being asked, when no more
 /// can be kept until the answer.
 pub const WAITING: i64 = -32001;
@@ -268,6 +270,25 @@ pub fn form_elicitation(caps: Option<&Value>) -> bool {
 pub fn request_elicitation(params: &Map<String, Value>) -> bool {
     let in_meta = params.get("_meta").and_then(|m| m.get(CAPABILITIES_META));
     form_elicitation(in_meta) || form_elicitation(params.get("clientCapabilities"))
+}
+
+/// The `initialize` revision from before client extensions: no views.
+pub const BEFORE_EXTENSIONS: &str = "2025-03-26";
+
+/// Whether an `initialize` client at revision `version` (the one answered)
+/// with capabilities `caps` asks for MCP Apps views (plan 8c Ruling 7).
+pub fn initialize_views(version: &str, caps: Option<&Value>) -> bool {
+    version != BEFORE_EXTENSIONS && caps.is_some_and(crate::views::wants_views)
+}
+
+/// Whether a 2026-07-28 request's client asks for views, in `_meta` or
+/// beside it.
+pub fn request_views(params: &Map<String, Value>) -> bool {
+    let in_meta = params.get("_meta").and_then(|m| m.get(CAPABILITIES_META));
+    in_meta.is_some_and(crate::views::wants_views)
+        || params
+            .get("clientCapabilities")
+            .is_some_and(crate::views::wants_views)
 }
 
 /// What the composer answered an elicitation.

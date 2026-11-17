@@ -1803,3 +1803,371 @@ fn export_refuses_when_the_front_song_changed() {
         app.seen()
     );
 }
+
+// --- MCP Apps views (plan 8c Task 6, Ruling 7) ---
+
+use vizdaw_mcp::views::{EXTENSION, MIME, VIEWS};
+
+fn ui_caps(mime: &str) -> Value {
+    json!({"extensions": {EXTENSION: {"mimeTypes": [mime]}}})
+}
+
+/// The 2026-07-28 params, with `caps` as the request's client capabilities.
+fn modern_with(caps: Value, extra: Value) -> Value {
+    let mut p = json!({"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": caps,
+    }});
+    for (k, v) in extra.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    p
+}
+
+/// What a client sees of views in one era: the server's capabilities, the
+/// three tools' `_meta`, the `ui://` resources, and each view tool's
+/// result (with its text kept apart).
+struct Seen {
+    extension: Option<Value>,
+    tool_meta: Vec<Value>,
+    ui_resources: Vec<Value>,
+    results: Vec<Value>,
+}
+
+fn look(m: &mut Mcp, app: &FakeApp, wrap: &dyn Fn(Value) -> Value, caps: Value) -> Seen {
+    let extension = caps["capabilities"]["extensions"].get(EXTENSION).cloned();
+    let tools = m.result("tools/list", wrap(json!({})));
+    let tool_meta = VIEWS
+        .iter()
+        .map(|(_, tool)| {
+            let t = tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == *tool)
+                .unwrap_or_else(|| panic!("{tool}"));
+            t.get("_meta").cloned().unwrap_or(Value::Null)
+        })
+        .collect();
+    let res = m.result("resources/list", wrap(json!({})));
+    let ui_resources = res["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["uri"].as_str().unwrap().starts_with("ui://"))
+        .cloned()
+        .collect();
+    let mut results = Vec::new();
+    for (name, args) in [
+        ("change", json!({"commands": [{"id": "edit.undo"}]})),
+        ("show_tracks", json!({})),
+        ("export", json!({"what": "stems"})),
+    ] {
+        if name == "show_tracks" {
+            app.script(doc_state(json!([
+                {"id": 7, "name": "Keys", "kind": "instrument", "co_producer": false},
+            ])));
+            app.script(mixer_state(json!([])));
+        }
+        let r = m.result("tools/call", wrap(json!({"name": name, "arguments": args})));
+        assert!(!is_error(&r), "{name}: {r}");
+        results.push(r);
+    }
+    Seen {
+        extension,
+        tool_meta,
+        ui_resources,
+        results,
+    }
+}
+
+fn assert_views(s: &Seen) {
+    assert_eq!(s.extension, Some(json!({})));
+    for ((uri, tool), meta) in VIEWS.iter().zip(&s.tool_meta) {
+        assert_eq!(meta["ui"]["resourceUri"], *uri, "{tool}");
+    }
+    let uris: Vec<&str> = s
+        .ui_resources
+        .iter()
+        .map(|r| r["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(uris, VIEWS.iter().map(|v| v.0).collect::<Vec<_>>());
+    for r in &s.ui_resources {
+        assert_eq!(r["mimeType"], MIME, "{r}");
+    }
+    for (r, view) in s.results.iter().zip(["change", "tracks", "export"]) {
+        assert_eq!(r["structuredContent"]["view"], view, "{r}");
+    }
+}
+
+fn assert_no_views(s: &Seen, with: &Seen) {
+    assert_eq!(s.extension, None);
+    assert!(s.tool_meta.iter().all(Value::is_null), "{:?}", s.tool_meta);
+    assert!(s.ui_resources.is_empty(), "{:?}", s.ui_resources);
+    for (r, w) in s.results.iter().zip(&with.results) {
+        assert!(r.get("structuredContent").is_none(), "{r}");
+        assert_eq!(text(r), text(w), "the text is the same");
+        assert_eq!(r["content"], w["content"]);
+    }
+}
+
+#[test]
+fn views_only_for_hosts_that_ask() {
+    let legacy = |version: &str, caps: Value| {
+        let d = support_dir();
+        let app = FakeApp::start(d.path());
+        let mut m = Mcp::spawn(d.path());
+        let init = m.result(
+            "initialize",
+            json!({"protocolVersion": version, "capabilities": caps}),
+        );
+        let s = look(
+            &mut m,
+            &app,
+            &|p| p,
+            json!({"capabilities": init["capabilities"]}),
+        );
+        m.ping_answers();
+        s
+    };
+    let with = legacy("2025-11-25", ui_caps(MIME));
+    assert_views(&with);
+    assert_no_views(&legacy("2025-11-25", json!({})), &with);
+    assert_no_views(&legacy("2025-11-25", ui_caps("text/html")), &with);
+    assert_no_views(&legacy("2025-03-26", ui_caps(MIME)), &with);
+
+    let modern_era = |caps: Value| {
+        let d = support_dir();
+        let app = FakeApp::start(d.path());
+        let mut m = Mcp::spawn(d.path());
+        let wrap = |p: Value| modern_with(caps.clone(), p);
+        let discover = m.result("server/discover", wrap(json!({})));
+        let s = look(&mut m, &app, &wrap, discover);
+        m.ping_answers();
+        s
+    };
+    let with_modern = modern_era(ui_caps(MIME));
+    assert_views(&with_modern);
+    assert_no_views(&modern_era(json!({})), &with_modern);
+    assert_no_views(&modern_era(ui_caps("text/html")), &with_modern);
+    for (a, b) in with.results.iter().zip(&with_modern.results) {
+        assert_eq!(a["structuredContent"], b["structuredContent"]);
+    }
+}
+
+#[test]
+fn views_are_served() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    for (uri, _) in VIEWS {
+        let r = m.result("resources/read", json!({"uri": uri}));
+        let c = r["contents"].as_array().unwrap();
+        assert_eq!(c.len(), 1, "{r}");
+        let c = &c[0];
+        assert_eq!(c["uri"], *uri);
+        assert_eq!(c["mimeType"], MIME);
+        assert_eq!(c["_meta"]["ui"]["prefersBorder"], true);
+        assert!(c["_meta"]["ui"].get("csp").is_none(), "{c}");
+        let html = c["text"].as_str().unwrap();
+        assert!(html.starts_with("<!DOCTYPE html>"), "{uri}");
+        assert!(!html.contains("<!--"), "{uri}: no marker left");
+        assert!(
+            html.contains("ui/notifications/tool-result"),
+            "{uri}: bridge in place"
+        );
+        assert_eq!(Some(html.to_string()), vizdaw_mcp::views::html(uri));
+    }
+    assert!(app.seen().is_empty(), "a view holds no song data");
+    assert_eq!(
+        m.error_code("resources/read", json!({"uri": "ui://vizdaw/nope"})),
+        -32002
+    );
+    assert_eq!(vizdaw_mcp::views::html("ui://vizdaw/nope"), None);
+    m.ping_answers();
+}
+
+fn view_sources() -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("views");
+    ["bridge.js", "change.html", "tracks.html", "export.html"]
+        .iter()
+        .map(|f| (f.to_string(), std::fs::read_to_string(dir.join(f)).unwrap()))
+        .collect()
+}
+
+#[test]
+fn views_draw_names_as_text() {
+    for (f, s) in view_sources() {
+        for bad in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+            "eval(",
+            "new Function",
+            "http:",
+            "https:",
+            "src=",
+            "<link",
+        ] {
+            assert!(!s.contains(bad), "{f} holds {bad}");
+        }
+        assert!(s.contains("textContent"), "{f}");
+    }
+    // Hostile names reach a view only as escaped JSON values.
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": ui_caps(MIME)}),
+    );
+    let hostile = [
+        "<script>alert(1)</script>",
+        "<img src=x onerror=alert(1)>",
+        "\"quoted\" 'name'",
+        "a\u{202E}b\u{2066}c",
+    ];
+    let lanes: Vec<Value> = hostile
+        .iter()
+        .enumerate()
+        .map(|(i, n)| json!({"id": i + 1, "name": n, "kind": "audio", "co_producer": true}))
+        .collect();
+    app.script(Answer::Ok(
+        json!({"doc": "d1", "title": "</script><script>x()</script>", "selected_seq": 1, "lanes": lanes}),
+    ));
+    app.script(mixer_state(json!([
+        {"id": 1, "name": "<b>bold</b>", "kind_label": "Bus", "colour": "red;background:url(x)", "co_producer": false},
+    ])));
+    let r = m.call("show_tracks", json!({}));
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["title"], "</script><script>x()</script>");
+    assert_eq!(sc["tracks"][0]["name"], hostile[0]);
+    assert_eq!(sc["tracks"][1]["name"], hostile[1]);
+    assert_eq!(sc["tracks"][2]["name"], hostile[2]);
+    assert_eq!(sc["tracks"][3]["name"], "a\u{FFFD}b\u{FFFD}c");
+    assert_eq!(sc["strips"][0]["name"], "<b>bold</b>");
+    // The page served is the same whatever the song holds.
+    for (uri, _) in VIEWS {
+        let html = m.result("resources/read", json!({"uri": uri}))["contents"][0]["text"].clone();
+        let html = html.as_str().unwrap();
+        assert!(
+            !html.contains("alert(1)") && !html.contains("bold"),
+            "{uri}"
+        );
+    }
+}
+
+#[test]
+fn views_speak_the_extension() {
+    let sources: std::collections::HashMap<String, String> = view_sources().into_iter().collect();
+    for m in [
+        "\"ui/initialize\"",
+        "\"ui/notifications/initialized\"",
+        "\"ui/notifications/tool-result\"",
+    ] {
+        assert!(sources["bridge.js"].contains(m), "{m}");
+    }
+    assert!(sources["export.html"].contains("\"ui/open-link\""));
+    assert!(sources["export.html"].contains("Open it in Finder: "));
+    assert!(
+        sources["bridge.js"].contains("hostContext"),
+        "the views follow the host's theme"
+    );
+    for f in ["change.html", "tracks.html", "export.html"] {
+        assert!(sources[f].contains("<!--BRIDGE-->"), "{f}");
+    }
+}
+
+#[test]
+fn change_view_states() {
+    let state = |r: &Value| r["structuredContent"]["state"].clone();
+    // The token fallback.
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": ui_caps(MIME)}),
+    );
+    let r = m.call("change", json!({"commands": two_changes()}));
+    assert_eq!(state(&r), "ask_in_chat", "{r}");
+    let token = preview_token(1);
+    assert!(text(&r).contains(&token));
+    let rest = {
+        let mut r = r.clone();
+        r.as_object_mut().unwrap().remove("content");
+        r.to_string()
+    };
+    assert!(
+        !rest.contains(&token),
+        "the token is only in the text: {rest}"
+    );
+    assert_eq!(
+        r["structuredContent"]["items"],
+        json!([
+            {"thing": "Track 2, Vox", "change": "deleted", "composers_work": true},
+            {"thing": "Track 3, Bass", "change": "renamed to \"Low\"", "composers_work": true},
+        ])
+    );
+    // No yes needed.
+    let r = m.call("change", json!({"commands": [{"id": "edit.undo"}]}));
+    assert_eq!(state(&r), "applied_without_asking", "{r}");
+    assert_eq!(r["structuredContent"]["undo_label"], "Co-Producer: Tidy Up");
+    drop(m);
+    drop(app);
+
+    // Elicitation: a yes, then a no.
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let mut caps = ui_caps(MIME);
+    caps["elicitation"] = json!({});
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": caps}),
+    );
+    let e = m.ask("y", &two_changes());
+    m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
+    let r = m.reply_to("y");
+    assert_eq!(state(&r), "applied", "{r}");
+    assert_eq!(r["structuredContent"]["items"][0]["thing"], "Track 2, Vox");
+    let e = m.ask("n", &two_changes());
+    m.answer(&e, json!({"action": "decline"}));
+    let r = m.reply_to("n");
+    assert_eq!(state(&r), "said_no", "{r}");
+    assert_eq!(text(&r), SAID_NO);
+    assert_eq!(app.applies().len(), 1);
+
+    // The 2026-07-28 retry.
+    let mut caps = ui_caps(MIME);
+    caps["elicitation"] = json!({});
+    let ask = |m: &mut Mcp| {
+        let r = m.result(
+            "tools/call",
+            modern_with(
+                caps.clone(),
+                json!({"name": "change", "arguments": {"commands": two_changes()}}),
+            ),
+        );
+        r["requestState"].as_str().unwrap().to_string()
+    };
+    for (answer, want) in [
+        (
+            json!({"action": "accept", "content": {"allow": true}}),
+            "applied",
+        ),
+        (json!({"action": "decline"}), "said_no"),
+    ] {
+        let key = ask(&mut m);
+        let r = m.result(
+            "tools/call",
+            modern_with(
+                caps.clone(),
+                json!({"name": "change", "arguments": {"commands": two_changes()},
+                    "inputResponses": {"yes": answer}, "requestState": key}),
+            ),
+        );
+        assert_eq!(state(&r), want, "{r}");
+    }
+}

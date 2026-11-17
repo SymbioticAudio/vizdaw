@@ -232,6 +232,33 @@ fn no_refusal_text_names_a_third_party_product() {
     );
 }
 
+/// The MCP Apps views (plan 8c Task 6): every line of every page and
+/// script is text a host may show, so the whole file is scanned.
+#[test]
+fn no_view_text_names_a_third_party_product() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vizdaw-mcp/views");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .collect();
+    files.sort();
+    assert!(files.len() >= 4, "the views were found: {files:?}");
+    let mut hits = Vec::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        for (i, line) in text.lines().enumerate() {
+            if let Some(n) = third_party_name(line) {
+                hits.push(format!("{}:{}: {n}", f.display(), i + 1));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "third-party names in the views:\n{}",
+        hits.join("\n")
+    );
+}
+
 /// Ruling 7's rule on one registry text (plan Tracks): strip `{…}`, the id
 /// tokens `lane.xxx` and `` `lane` ``, and the allow-listed phrases; a hit
 /// has whitespace and the word lane/lanes, or is exactly `Lane`/`Lanes`.

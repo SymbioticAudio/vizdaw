@@ -20,6 +20,7 @@ pub mod app;
 pub mod base64;
 pub mod rpc;
 pub mod tools;
+pub mod views;
 
 use app::{App, AppError};
 use rpc::{Answer, Era, Kind, Message, RpcError};
@@ -86,6 +87,8 @@ struct Pending {
     token: String,
     commands: Value,
     window: Option<i64>,
+    /// The preview's items, for the change view.
+    items: Vec<Value>,
 }
 
 /// An `initialize`-era question in flight: the `tools/call` it answers,
@@ -114,6 +117,8 @@ pub struct Server {
     by_name: HashMap<String, Value>,
     /// The client declared form elicitation at `initialize`.
     elicitation: bool,
+    /// The client asked for MCP Apps views at `initialize` (Ruling 7).
+    views: bool,
     ask_timeout: Duration,
     /// The question in flight, if any; lines meanwhile wait in `queue`.
     wait: Option<Wait>,
@@ -151,6 +156,15 @@ fn tool_error(text: impl Into<String>) -> Value {
     tool_text(text, true)
 }
 
+/// `result` with `structured` as its `structuredContent` (Ruling 8), when
+/// views are on; the text content is left as it is.
+fn with_view(mut result: Value, structured: Option<Value>) -> Value {
+    if let (Some(sc), Some(o)) = (structured, result.as_object_mut()) {
+        o.insert("structuredContent".into(), sc);
+    }
+    result
+}
+
 impl Server {
     /// A server for the app whose support folder is `support`.
     pub fn new(support: PathBuf) -> Server {
@@ -168,6 +182,7 @@ impl Server {
             tools,
             by_name,
             elicitation: false,
+            views: false,
             ask_timeout: limit,
             wait: None,
             queue: VecDeque::new(),
@@ -280,8 +295,9 @@ impl Server {
         let Some(w) = self.wait.take() else {
             return Vec::new();
         };
+        let views = self.views;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            self.decided(rpc::elicitation_answer(result), &w.pending)
+            self.decided(rpc::elicitation_answer(result), &w.pending, views)
         }));
         vec![match outcome {
             Ok(v) => rpc::result_line(&w.call, v),
@@ -289,11 +305,12 @@ impl Server {
         }]
     }
 
-    /// The tool result for `answer` to `pending`.
-    fn decided(&mut self, answer: Answer, pending: &Pending) -> Value {
+    /// The tool result for `answer` to `pending`, with the change view
+    /// when `views` is on.
+    fn decided(&mut self, answer: Answer, pending: &Pending, views: bool) -> Value {
         match answer {
-            Answer::Yes => self.apply(pending),
-            Answer::No => tool_text(tools::SAID_NO, false),
+            Answer::Yes => self.apply(pending, views.then_some("applied")),
+            Answer::No => said_no(tools::SAID_NO, pending, views),
             Answer::Unreadable => tool_error(tools::UNREADABLE),
         }
     }
@@ -329,7 +346,7 @@ impl Server {
             if let Some(w) = self.wait.take() {
                 out.push(rpc::result_line(
                     &w.call,
-                    tool_text(tools::NO_ANSWER, false),
+                    said_no(tools::NO_ANSWER, &w.pending, self.views),
                 ));
                 out.push(rpc::notification_line(
                     "notifications/cancelled",
@@ -360,16 +377,23 @@ impl Server {
                 Kind::Plain,
                 json!({
                     "supportedVersions": rpc::SUPPORTED,
-                    "capabilities": capabilities(),
+                    "capabilities": capabilities(self.views_for(era, params)),
                     "serverInfo": server_info(),
                     "instructions": tools::INSTRUCTIONS,
                 }),
             ),
-            "tools/list" => (Kind::Cacheable, json!({ "tools": self.tools })),
-            "resources/list" => (
+            "tools/list" if self.views_for(era, params) => (
                 Kind::Cacheable,
-                json!({ "resources": tools::resources_json() }),
+                json!({ "tools": views::with_tool_meta(&self.tools) }),
             ),
+            "tools/list" => (Kind::Cacheable, json!({ "tools": self.tools })),
+            "resources/list" => {
+                let mut resources = tools::resources_json();
+                if self.views_for(era, params) {
+                    resources.extend(views::resources_json());
+                }
+                (Kind::Cacheable, json!({ "resources": resources }))
+            }
             "resources/templates/list" => (Kind::Cacheable, json!({ "resourceTemplates": [] })),
             "resources/read" => (Kind::Cacheable, self.read_resource(params)?),
             _ => {
@@ -382,12 +406,24 @@ impl Server {
         Ok(Done::Result(rpc::finish(era, kind, result)))
     }
 
+    /// Whether a request with `params` in `era` gets views: in the
+    /// `initialize` era as the client asked then, in 2026-07-28 as the
+    /// request itself asks.
+    fn views_for(&self, era: Era, params: &Map<String, Value>) -> bool {
+        match era {
+            Era::Legacy => self.views,
+            Era::Modern => rpc::request_views(params),
+        }
+    }
+
     fn initialize(&mut self, params: &Map<String, Value>) -> Value {
+        let version = rpc::negotiate(params.get("protocolVersion"));
         self.elicitation = rpc::form_elicitation(params.get("capabilities"));
+        self.views = rpc::initialize_views(version, params.get("capabilities"));
         self.client = tools::client_label(params.get("clientInfo").and_then(|c| c.get("name")));
         json!({
-            "protocolVersion": rpc::negotiate(params.get("protocolVersion")),
-            "capabilities": capabilities(),
+            "protocolVersion": version,
+            "capabilities": capabilities(self.views),
             "serverInfo": server_info(),
             "instructions": tools::INSTRUCTIONS,
         })
@@ -415,16 +451,17 @@ impl Server {
         if let Some(spec) = self.by_name.get(name).cloned() {
             return done(self.run_command(&spec, args));
         }
+        let views = self.views_for(era, params);
         match name {
             tools::BEGIN_REQUEST => done(self.begin_request(args)),
             tools::END_REQUEST => done(self.end_request(args)),
             tools::READ_NOTES => done(self.read_notes(args)),
             tools::ADD_NOTE => done(self.add_note(args)),
             tools::EXPORT_FOLDER => done(self.export_folder(args)),
-            tools::EXPORT => done(self.export(args)),
-            tools::SHOW_TRACKS => done(self.show_tracks(args)),
+            tools::EXPORT => done(self.export(args, views)),
+            tools::SHOW_TRACKS => done(self.show_tracks(args, views)),
             tools::SCREENSHOT => done(self.screenshot(args)),
-            tools::CHANGE => match self.change(id, era, params, args) {
+            tools::CHANGE => match self.change(id, era, params, args, views) {
                 Done::Result(v) => done(v),
                 ask => Ok(ask),
             },
@@ -448,13 +485,14 @@ impl Server {
         era: Era,
         params: &Map<String, Value>,
         args: &Map<String, Value>,
+        views: bool,
     ) -> Done {
         let a = match tools::change_args(args, false) {
             Ok(a) => a,
             Err(m) => return Done::Result(tool_error(m)),
         };
         if params.contains_key("requestState") || params.contains_key("inputResponses") {
-            return Done::Result(self.retry(params, &a));
+            return Done::Result(self.retry(params, &a, views));
         }
         let preview = match self.app.call("co_producer.preview", plan_params(&a, None)) {
             Ok(p) => p,
@@ -474,10 +512,11 @@ impl Server {
             token: token.to_string(),
             commands: a.commands.clone(),
             window: a.window,
+            items: items.iter().take(tools::MAX_LISTED).cloned().collect(),
         };
         // Only an explicit `needs_yes: false` skips the question.
         if preview.get("needs_yes") == Some(&Value::Bool(false)) {
-            return Done::Result(self.apply(&pending));
+            return Done::Result(self.apply(&pending, views.then_some("applied_without_asking")));
         }
         let question = tools::question(items);
         match era {
@@ -520,9 +559,10 @@ impl Server {
                     self.tokens.pop_front();
                 }
                 self.tokens.push_back(pending.token.clone());
-                Done::Result(tool_text(
-                    tools::list_for_the_model(items, &pending.token),
-                    false,
+                // The token is only in the text, never in the view.
+                Done::Result(with_view(
+                    tool_text(tools::list_for_the_model(items, &pending.token), false),
+                    views.then(|| tools::change_view("ask_in_chat", items, None)),
                 ))
             }
         }
@@ -530,7 +570,7 @@ impl Server {
 
     /// A 2026-07-28 retry: its `requestState` is used up whatever happens,
     /// and must be one this server holds, for the same commands.
-    fn retry(&mut self, params: &Map<String, Value>, a: &ChangeArgs) -> Value {
+    fn retry(&mut self, params: &Map<String, Value>, a: &ChangeArgs, views: bool) -> Value {
         let now = Instant::now();
         self.held.retain(|h| h.expires > now);
         let key = params.get("requestState").and_then(Value::as_str);
@@ -549,7 +589,7 @@ impl Server {
             },
             Some(_) => Answer::Unreadable,
         };
-        self.decided(answer, &held.pending)
+        self.decided(answer, &held.pending, views)
     }
 
     /// The fallback's second half: a token `change` gave the model in this
@@ -564,15 +604,20 @@ impl Server {
             return tool_error(tools::NOT_OUR_TOKEN);
         };
         self.tokens.remove(at);
-        self.apply(&Pending {
-            token,
-            commands: a.commands,
-            window: a.window,
-        })
+        self.apply(
+            &Pending {
+                token,
+                commands: a.commands,
+                window: a.window,
+                items: Vec::new(),
+            },
+            None,
+        )
     }
 
-    /// Sends `co_producer.apply` and answers its results.
-    fn apply(&mut self, p: &Pending) -> Value {
+    /// Sends `co_producer.apply` and answers its results; with the change
+    /// view in `state` when one is given.
+    fn apply(&mut self, p: &Pending, state: Option<&str>) -> Value {
         let a = ChangeArgs {
             commands: p.commands.clone(),
             window: p.window,
@@ -591,7 +636,11 @@ impl Server {
                         text.push_str(label);
                     }
                 }
-                tool_text(text, false)
+                let undo = result.get("undo_label").and_then(Value::as_str);
+                with_view(
+                    tool_text(text, false),
+                    state.map(|s| tools::change_view(s, &p.items, undo)),
+                )
             }
             Err(e) => self.failed(&e),
         }
@@ -808,7 +857,7 @@ impl Server {
 
     /// Ruling 8: one call exports into a new dated folder. The front
     /// document must be the begin's, as for the other writes.
-    fn export(&mut self, args: &Map<String, Value>) -> Value {
+    fn export(&mut self, args: &Map<String, Value>, views: bool) -> Value {
         if let Err(m) = tools::check_export_args(args) {
             return tool_error(m);
         }
@@ -823,15 +872,16 @@ impl Server {
             return e;
         }
         let what = args.get("what").and_then(Value::as_str).unwrap_or("");
-        // The structured form is built here and sent by the views (Task 6).
         match tools::export_answer(what, &r) {
-            Ok((text, _structured)) => tool_text(text, false),
+            Ok((text, structured)) => {
+                with_view(tool_text(text, false), views.then_some(structured))
+            }
             Err(m) => tool_error(m),
         }
     }
 
     /// Ruling 8: the tracks and strips, from two state reads.
-    fn show_tracks(&mut self, args: &Map<String, Value>) -> Value {
+    fn show_tracks(&mut self, args: &Map<String, Value>, views: bool) -> Value {
         if let Some(k) = args.keys().next() {
             return tool_error(format!(
                 "show_tracks takes no arguments (got `{}`)",
@@ -850,8 +900,8 @@ impl Server {
         if !same(&document, &mixer) {
             return other_song();
         }
-        let (text, _structured) = tools::tracks_answer(&document, &mixer);
-        tool_text(text, false)
+        let (text, structured) = tools::tracks_answer(&document, &mixer);
+        with_view(tool_text(text, false), views.then_some(structured))
     }
 
     fn screenshot(&mut self, args: &Map<String, Value>) -> Value {
@@ -891,6 +941,16 @@ impl Server {
                 "resources/read needs a `uri`.",
             ));
         };
+        if uri.starts_with("ui://") {
+            // A view holds no song data: it is served to anyone who asks.
+            return match views::read(uri) {
+                Some(c) => Ok(json!({ "contents": [c] })),
+                None => Err(RpcError::new(
+                    rpc::RESOURCE_NOT_FOUND,
+                    format!("No resource {:?}.", rpc::truncate(uri, 128)),
+                )),
+            };
+        }
         let text = if uri == tools::COMMANDS_URI {
             self.commands.to_string()
         } else if let Some(target) = tools::state_target(uri) {
@@ -953,8 +1013,22 @@ fn random_hex(n: usize) -> Option<String> {
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn capabilities() -> Value {
-    json!({ "tools": {}, "resources": {} })
+/// The server's capabilities; with the MCP Apps extension when the
+/// client asked for views.
+fn capabilities(views: bool) -> Value {
+    if views {
+        json!({ "tools": {}, "resources": {}, "extensions": { views::EXTENSION: {} } })
+    } else {
+        json!({ "tools": {}, "resources": {} })
+    }
+}
+
+/// A "no" answer: `text`, with the change view's `said_no` when `views`.
+fn said_no(text: &str, pending: &Pending, views: bool) -> Value {
+    with_view(
+        tool_text(text, false),
+        views.then(|| tools::change_view("said_no", &pending.items, None)),
+    )
 }
 
 fn server_info() -> Value {
