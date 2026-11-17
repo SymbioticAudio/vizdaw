@@ -83,7 +83,17 @@ fn canned(server: &Server, c: &Command, previews: usize) -> Value {
     match c {
         Command::CommandRun { id, .. } => json!({ "status": format!("ran {id}") }),
         Command::StateGet { target, .. } => json!({ "target": format!("{target:?}") }),
-        Command::CoProducerBegin { name, .. } => json!({ "begun": name }),
+        Command::CoProducerBegin { name, .. } => json!({ "begun": name, "doc": "d1" }),
+        Command::CoProducerNotes { .. } => json!({
+            "doc": "d1",
+            "text": "Keep the drums dry.\n",
+            "truncated": false,
+            "path": "/x/Song.vizdaw/Notes.md",
+        }),
+        Command::CoProducerNote { .. } => json!({ "doc": "d1", "request": null }),
+        Command::CoProducerExportFolder { .. } => {
+            json!({ "path": "/x/Song \u{2014} Stems \u{2014} 2026-11-16" })
+        }
         Command::CoProducerEnd { .. } => json!({ "ended": true }),
         Command::CoProducerStatus { .. } => json!({ "request": null }),
         Command::CoProducerPreview { plan, .. } => {

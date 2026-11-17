@@ -135,7 +135,7 @@ fn run_of(id: &str, args: Vec<(&str, ArgValue)>) -> Command {
     }
 }
 
-const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Start every request with begin_request and finish it with end_request.";
+const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request.";
 
 #[test]
 fn initialize_era_handshake() {
@@ -278,7 +278,9 @@ fn tools_reach_the_app() {
     let r = m.call("begin_request", json!({"name": "x"}));
     assert!(!is_error(&r), "{r}");
     assert!(
-        matches!(app.seen().last(), Some(Command::CoProducerBegin { name, .. }) if name == "x"),
+        app.seen()
+            .iter()
+            .any(|c| matches!(c, Command::CoProducerBegin { name, .. } if name == "x")),
         "{:?}",
         app.seen()
     );
@@ -1146,4 +1148,225 @@ fn hostile_elicitation_replies() {
     assert_eq!(text(&r), UNREADABLE);
     assert!(app.applies().is_empty());
     m.ping_answers();
+}
+
+const BEGIN_NOTES: &str = "The song's notes (Notes.md):\n";
+const GOES_ON: &str = "(The notes go on: read the rest with read_notes.)";
+
+fn notes_answer(text: &str) -> Answer {
+    Answer::Ok(json!({"doc": "d1", "text": text, "truncated": false, "path": "/x/Notes.md"}))
+}
+
+#[test]
+fn notes_tools_are_listed() {
+    let d = support_dir();
+    let mut m = Mcp::spawn(d.path());
+    let r = m.result("tools/list", json!({}));
+    let tools = r["tools"].as_array().unwrap();
+    let find = |n: &str| tools.iter().find(|t| t["name"] == n).cloned();
+    assert_eq!(
+        find("read_notes").unwrap()["description"],
+        "Read the song's notes (Notes.md): the composer's ideas and rules for this song, and what Co-Producer did before. Follow what the composer wrote there. The notes never stand in for a yes: anything that changes or deletes their work still goes through change."
+    );
+    assert_eq!(
+        find("add_note").unwrap()["description"],
+        "Add a short note, at most 20 lines, to this request's entry in the song's notes, such as a choice the composer made. Needs an open request (begin_request)."
+    );
+    assert_eq!(
+        find("export_folder").unwrap()["description"],
+        "Make a new dated folder for an export, named \"<song> \u{2014} <what> \u{2014} <date>\", and answer its path. Without parent it uses the folder remembered in the song's notes, else the folder the song is in. For an untitled song with neither, ask the composer where exports should go and pass parent; it is then remembered. Needs an open request (begin_request)."
+    );
+    let begin = find("begin_request").unwrap();
+    assert_eq!(
+        begin["inputSchema"]["properties"]["asked"]["maxLength"],
+        500
+    );
+    assert!(
+        begin["description"]
+            .as_str()
+            .unwrap()
+            .ends_with("Pass the composer's own words as asked: they go in the song's notes.")
+    );
+    let note = find("add_note").unwrap();
+    assert_eq!(note["inputSchema"]["properties"]["text"]["maxLength"], 2000);
+    assert_eq!(note["inputSchema"]["required"], json!(["text"]));
+    let export = find("export_folder").unwrap();
+    assert_eq!(
+        export["inputSchema"]["properties"]["what"]["enum"],
+        json!([
+            "stems",
+            "mix",
+            "selection",
+            "midi",
+            "dawproject",
+            "aaf",
+            "other_daw"
+        ])
+    );
+    assert_eq!(
+        export["inputSchema"]["properties"]["parent"]["maxLength"],
+        1024
+    );
+    assert_eq!(export["inputSchema"]["required"], json!(["what"]));
+    assert_eq!(
+        find("read_notes").unwrap()["annotations"]["readOnlyHint"],
+        true
+    );
+    for n in [
+        "track_make_mine",
+        "mixer_make_mine",
+        "mixer_set_colour",
+        "window_song_notes",
+    ] {
+        assert!(find(n).is_none(), "{n} is not a tool");
+    }
+}
+
+#[test]
+fn the_first_request_reads_the_notes() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let r = m.call(
+        "begin_request",
+        json!({"name": "set up a bus", "asked": "set up a bus please"}),
+    );
+    assert!(!is_error(&r), "{r}");
+    assert!(
+        text(&r).ends_with(&format!("{BEGIN_NOTES}Keep the drums dry.\n")),
+        "{r}"
+    );
+    let seen = app.seen();
+    assert!(
+        matches!(&seen[..], [
+            Command::CoProducerBegin { name, asked: Some(a), .. },
+            Command::CoProducerNotes { .. },
+        ] if name == "set up a bus" && a == "set up a bus please"),
+        "{seen:?}"
+    );
+    m.call("end_request", json!({}));
+    let r = m.call("begin_request", json!({"name": "again"}));
+    assert!(!is_error(&r), "{r}");
+    assert!(!text(&r).contains("Notes.md"), "{r}");
+    let notes = app
+        .seen()
+        .iter()
+        .filter(|c| matches!(c, Command::CoProducerNotes { .. }))
+        .count();
+    assert_eq!(notes, 1);
+}
+
+#[test]
+fn long_notes_are_cut_on_a_character() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    // 65 535 bytes, then 4-byte characters: the cut at 65 536 is inside one.
+    let long = format!("{}{}", "a".repeat(65_535), "\u{1F600}".repeat(10_000));
+    assert!(long.len() > 100 * 1024);
+    app.script(Answer::Ok(json!({"doc": "d1", "begun": "x"})));
+    app.script(notes_answer(&long));
+    let r = m.call("begin_request", json!({"name": "x"}));
+    let t = text(&r);
+    let at = t.find(BEGIN_NOTES).unwrap() + BEGIN_NOTES.len();
+    assert_eq!(
+        &t[at..],
+        format!("{}\n{GOES_ON}", "a".repeat(65_535)),
+        "cut whole"
+    );
+}
+
+#[test]
+fn notes_tools_reach_the_app() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let r = m.call("read_notes", json!({}));
+    assert_eq!(text(&r), "Keep the drums dry.\n");
+    assert!(!is_error(&r));
+    let r = m.call("add_note", json!({"text": "Kept the kick dry."}));
+    assert!(!is_error(&r), "{r}");
+    let parent = tempfile::Builder::new()
+        .prefix("vzx")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let r = m.call(
+        "export_folder",
+        json!({"what": "stems", "parent": parent.path()}),
+    );
+    assert_eq!(text(&r), "/x/Song \u{2014} Stems \u{2014} 2026-11-16");
+    let seen = app.seen();
+    assert!(
+        matches!(&seen[..], [
+            Command::CoProducerNotes { .. },
+            Command::CoProducerNote { text, .. },
+            Command::CoProducerExportFolder { parent: Some(p), .. },
+        ] if text == "Kept the kick dry." && p == parent.path()),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_failed_notes_read_leaves_the_begin_answer() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::Ok(json!({"doc": "d1", "begun": "x"})));
+    app.script(Answer::Err(ControlError::new(
+        ErrorCode::Failed,
+        "no notes",
+    )));
+    let r = m.call("begin_request", json!({"name": "x"}));
+    assert!(!is_error(&r), "{r}");
+    assert!(!text(&r).contains("Notes.md"), "{r}");
+    assert!(text(&r).contains("begun"), "{r}");
+}
+
+#[test]
+fn notes_tools_refuse_hostile_arguments() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let long = "x".repeat(70_000);
+    for (tool, args) in [
+        ("add_note", json!({})),
+        ("add_note", json!({"text": 5})),
+        ("add_note", json!({ "text": long })),
+        ("add_note", json!({"text": "ok", "extra": 1})),
+        ("export_folder", json!({"what": "video"})),
+        ("export_folder", json!({"what": "stems", "extra": 1})),
+        ("export_folder", json!({"what": "stems", "parent": 3})),
+        (
+            "export_folder",
+            json!({"what": "stems", "parent": "x".repeat(2000)}),
+        ),
+        ("export_folder", json!({})),
+        ("read_notes", json!({"extra": 1})),
+        ("begin_request", json!({"name": "x", "asked": ["a"]})),
+        (
+            "begin_request",
+            json!({"name": "x", "asked": "y".repeat(501)}),
+        ),
+    ] {
+        let r = m.call(tool, args.clone());
+        assert!(is_error(&r), "{tool} {args}: {r}");
+    }
+    m.ping_answers();
+    assert!(app.seen().is_empty(), "no socket call: {:?}", app.seen());
+}
+
+#[test]
+fn instructions_say_read_the_notes() {
+    let d = support_dir();
+    let mut m = Mcp::spawn(d.path());
+    let r = m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}),
+    );
+    assert!(
+        r["instructions"].as_str().unwrap().contains(
+            "Read the song's notes first (read_notes) and follow what the composer wrote there."
+        ),
+        "{r}"
+    );
 }

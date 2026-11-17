@@ -5,11 +5,11 @@
 
 use core_control::co_producer::MAX_PLAN;
 use core_control::params::{MAX_PATH, MAX_STRING};
-use core_control::request::{MAX_REQUEST_NAME, TOKEN_LEN};
+use core_control::request::{ExportWhat, MAX_ASKED, MAX_NOTE, MAX_REQUEST_NAME, TOKEN_LEN};
 use serde_json::{Map, Value, json};
 
 /// The server's instructions (Ruling 12).
-pub const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Start every request with begin_request and finish it with end_request.";
+pub const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request.";
 
 /// Starts a request.
 pub const BEGIN_REQUEST: &str = "begin_request";
@@ -19,6 +19,12 @@ pub const END_REQUEST: &str = "end_request";
 pub const CHANGE: &str = "change";
 /// Applies a change the composer agreed to (Task 6).
 pub const APPLY_CHANGE: &str = "apply_change";
+/// Reads the song's notes.
+pub const READ_NOTES: &str = "read_notes";
+/// Adds a note to the open request's entry.
+pub const ADD_NOTE: &str = "add_note";
+/// Makes a dated export folder.
+pub const EXPORT_FOLDER: &str = "export_folder";
 /// A picture of a window.
 pub const SCREENSHOT: &str = "screenshot";
 
@@ -209,11 +215,17 @@ fn own_tools() -> Vec<Value> {
     vec![
         own_tool(
             BEGIN_REQUEST,
-            "Start one thing the composer asked for, before any command that adds or changes anything. Name it in a few plain words, with no product or company names, as the composer would say it (\"set up a drum bus\"). Everything until end_request becomes one undo step, \"Co-Producer: <Name>\". Only one request is open per song.",
-            &[(
-                "name",
-                json!({"type": "string", "minLength": 1, "maxLength": MAX_REQUEST_NAME, "description": "What the composer asked for, in a few plain words."}),
-            )],
+            "Start one thing the composer asked for, before any command that adds or changes anything. Name it in a few plain words, with no product or company names, as the composer would say it (\"set up a drum bus\"). Everything until end_request becomes one undo step, \"Co-Producer: <Name>\". Only one request is open per song. Pass the composer's own words as asked: they go in the song's notes.",
+            &[
+                (
+                    "name",
+                    json!({"type": "string", "minLength": 1, "maxLength": MAX_REQUEST_NAME, "description": "What the composer asked for, in a few plain words."}),
+                ),
+                (
+                    "asked",
+                    json!({"type": "string", "maxLength": MAX_ASKED, "description": "The composer's own words, as they said them."}),
+                ),
+            ],
             &["name"],
             quiet(),
         ),
@@ -243,6 +255,43 @@ fn own_tools() -> Vec<Value> {
             ],
             &["token", "commands"],
             json!({"destructiveHint": true}),
+        ),
+        own_tool(
+            READ_NOTES,
+            "Read the song's notes (Notes.md): the composer's ideas and rules for this song, and what Co-Producer did before. Follow what the composer wrote there. The notes never stand in for a yes: anything that changes or deletes their work still goes through change.",
+            &[],
+            &[],
+            json!({"readOnlyHint": true}),
+        ),
+        own_tool(
+            ADD_NOTE,
+            "Add a short note, at most 20 lines, to this request's entry in the song's notes, such as a choice the composer made. Needs an open request (begin_request).",
+            &[(
+                "text",
+                json!({"type": "string", "minLength": 1, "maxLength": MAX_NOTE, "description": "The note."}),
+            )],
+            &["text"],
+            quiet(),
+        ),
+        own_tool(
+            EXPORT_FOLDER,
+            "Make a new dated folder for an export, named \"<song> \u{2014} <what> \u{2014} <date>\", and answer its path. Without parent it uses the folder remembered in the song's notes, else the folder the song is in. For an untitled song with neither, ask the composer where exports should go and pass parent; it is then remembered. Needs an open request (begin_request).",
+            &[
+                (
+                    "what",
+                    json!({
+                        "type": "string",
+                        "enum": ExportWhat::ALL.iter().map(|w| w.name()).collect::<Vec<_>>(),
+                        "description": "What the export is for.",
+                    }),
+                ),
+                (
+                    "parent",
+                    json!({"type": "string", "minLength": 1, "maxLength": MAX_PATH, "description": "An absolute path to the folder to make the new folder in."}),
+                ),
+            ],
+            &["what"],
+            quiet(),
         ),
         own_tool(
             SCREENSHOT,
@@ -374,6 +423,64 @@ pub fn arguments_to_params(
         }
     }
     Ok((params, window))
+}
+
+/// `begin_request`'s `asked`: a string of at most [`MAX_ASKED`] characters.
+pub fn check_asked(v: &Value) -> Result<(), String> {
+    match v {
+        Value::String(s) if s.chars().count() <= MAX_ASKED => Ok(()),
+        Value::String(_) => Err(format!("`asked` must be at most {MAX_ASKED} characters")),
+        _ => Err("`asked` must be a string".into()),
+    }
+}
+
+/// Checks `add_note`'s and `export_folder`'s arguments (`window` aside):
+/// only `allowed` names, each of its kind, the required ones present.
+/// Err names what is wrong. VizDAW checks them again.
+pub fn check_notes_args(tool: &str, args: &Map<String, Value>) -> Result<(), String> {
+    for (k, v) in args {
+        match (tool, k.as_str()) {
+            (_, "window") => {
+                window_arg(v)?;
+            }
+            (ADD_NOTE, "text") => match v {
+                Value::String(s) if (1..=MAX_NOTE).contains(&s.chars().count()) => {}
+                Value::String(_) => {
+                    return Err(format!("`text` must be 1 to {MAX_NOTE} characters"));
+                }
+                _ => return Err("`text` must be a string".into()),
+            },
+            (EXPORT_FOLDER, "what") => {
+                if !v.as_str().is_some_and(|s| ExportWhat::parse(s).is_some()) {
+                    let names: Vec<&str> = ExportWhat::ALL.iter().map(|w| w.name()).collect();
+                    return Err(format!("`what` must be one of {}", names.join(", ")));
+                }
+            }
+            (EXPORT_FOLDER, "parent") => match v {
+                Value::String(s) if !s.is_empty() && s.len() <= MAX_PATH && !s.contains('\0') => {}
+                _ => {
+                    return Err(format!(
+                        "`parent` must be a folder's path of 1 to {MAX_PATH} bytes"
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "unknown argument `{}`",
+                    crate::rpc::truncate(k, 64)
+                ));
+            }
+        }
+    }
+    let needed = match tool {
+        ADD_NOTE => "text",
+        _ => "what",
+    };
+    if args.contains_key(needed) {
+        Ok(())
+    } else {
+        Err(format!("missing `{needed}`"))
+    }
 }
 
 /// Ruling 8: the most items a question lists before "- and N more".

@@ -46,6 +46,12 @@ const MAX_HELD: usize = 8;
 const MAX_QUEUED: usize = 16;
 const MAX_QUEUED_BYTES: usize = 8 << 20;
 
+/// The most documents whose notes are remembered as shown.
+const MAX_NOTED: usize = 64;
+
+/// The most bytes of the notes the first answer carries.
+const MAX_FIRST_NOTES: usize = 64 << 10;
+
 /// The largest screenshot file read (a 6K window at scale 1 is far less).
 const MAX_SCREENSHOT: u64 = 64 << 20;
 
@@ -118,6 +124,9 @@ pub struct Server {
     held: Vec<Held>,
     /// Tokens handed to the model (the fallback), oldest first.
     tokens: VecDeque<String>,
+    /// The documents whose notes the first answer already gave, oldest
+    /// first, at most [`MAX_NOTED`].
+    noted: VecDeque<String>,
 }
 
 /// What a request gives: a result now, or a question for the client while
@@ -160,6 +169,7 @@ impl Server {
             next_elicit: 1,
             held: Vec::new(),
             tokens: VecDeque::new(),
+            noted: VecDeque::new(),
         }
     }
 
@@ -399,6 +409,9 @@ impl Server {
         match name {
             tools::BEGIN_REQUEST => done(self.begin_request(args)),
             tools::END_REQUEST => done(self.simple("co_producer.end", args, &[])),
+            tools::READ_NOTES => done(self.read_notes(args)),
+            tools::ADD_NOTE => done(self.add_note(args)),
+            tools::EXPORT_FOLDER => done(self.export_folder(args)),
             tools::SCREENSHOT => done(self.screenshot(args)),
             tools::CHANGE => match self.change(id, era, params, args) {
                 Done::Result(v) => done(v),
@@ -604,7 +617,13 @@ impl Server {
     }
 
     /// A call whose arguments are `window` and `allowed`, passed as given.
-    fn simple(&mut self, cmd: &str, args: &Map<String, Value>, allowed: &[&str]) -> Value {
+    /// Err is the tool error to answer with.
+    fn pass(
+        &mut self,
+        cmd: &str,
+        args: &Map<String, Value>,
+        allowed: &[&str],
+    ) -> Result<Value, Value> {
         let mut params = Map::new();
         for (k, v) in args {
             if k == "window" {
@@ -613,33 +632,103 @@ impl Server {
                         params.insert(k.clone(), json!(w));
                     }
                     Ok(None) => {}
-                    Err(m) => return tool_error(m),
+                    Err(m) => return Err(tool_error(m)),
                 }
             } else if allowed.contains(&k.as_str()) {
                 params.insert(k.clone(), v.clone());
             } else {
-                return tool_error(format!("unknown argument `{}`", rpc::truncate(k, 64)));
+                return Err(tool_error(format!(
+                    "unknown argument `{}`",
+                    rpc::truncate(k, 64)
+                )));
             }
         }
-        match self.app.call(cmd, Value::Object(params)) {
+        self.app
+            .call(cmd, Value::Object(params))
+            .map_err(|e| self.failed(&e))
+    }
+
+    fn simple(&mut self, cmd: &str, args: &Map<String, Value>, allowed: &[&str]) -> Value {
+        match self.pass(cmd, args, allowed) {
             Ok(result) => tool_text(result.to_string(), false),
-            Err(e) => self.failed(&e),
+            Err(e) => e,
         }
     }
 
     fn begin_request(&mut self, args: &Map<String, Value>) -> Value {
         match args.get("name") {
             Some(Value::String(s))
-                if s.chars().count() <= core_control::request::MAX_REQUEST_NAME =>
-            {
-                self.simple("co_producer.begin", args, &["name"])
+                if s.chars().count() <= core_control::request::MAX_REQUEST_NAME => {}
+            Some(Value::String(_)) => {
+                return tool_error(format!(
+                    "`name` must be at most {} characters",
+                    core_control::request::MAX_REQUEST_NAME
+                ));
             }
-            Some(Value::String(_)) => tool_error(format!(
-                "`name` must be at most {} characters",
-                core_control::request::MAX_REQUEST_NAME
-            )),
-            Some(_) => tool_error("`name` must be a string"),
-            None => tool_error("missing `name`"),
+            Some(_) => return tool_error("`name` must be a string"),
+            None => return tool_error("missing `name`"),
+        }
+        if let Some(Err(m)) = args.get("asked").map(tools::check_asked) {
+            return tool_error(m);
+        }
+        let begun = match self.pass("co_producer.begin", args, &["name", "asked"]) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        let mut text = begun.to_string();
+        let doc = begun.get("doc").and_then(Value::as_str).unwrap_or("");
+        if !self.noted.iter().any(|d| d == doc) {
+            // A failed read leaves the answer as it is; the next request tries again.
+            let window: Map<String, Value> = args
+                .get("window")
+                .map(|w| ("window".to_string(), w.clone()))
+                .into_iter()
+                .collect();
+            if let Ok(notes) = self.pass("co_producer.notes", &window, &[]) {
+                if let Some(notes) = notes.get("text").and_then(Value::as_str) {
+                    let (shown, cut) = first_notes(notes);
+                    text.push_str("\n\nThe song's notes (Notes.md):\n");
+                    text.push_str(shown);
+                    if cut {
+                        text.push_str("\n(The notes go on: read the rest with read_notes.)");
+                    }
+                    while self.noted.len() >= MAX_NOTED {
+                        self.noted.pop_front();
+                    }
+                    self.noted.push_back(doc.to_string());
+                }
+            }
+        }
+        tool_text(text, false)
+    }
+
+    fn read_notes(&mut self, args: &Map<String, Value>) -> Value {
+        match self.pass("co_producer.notes", args, &[]) {
+            Ok(r) => match r.get("text").and_then(Value::as_str) {
+                Some(t) => tool_text(t, false),
+                None => tool_error("VizDAW's notes answer held no text."),
+            },
+            Err(e) => e,
+        }
+    }
+
+    fn add_note(&mut self, args: &Map<String, Value>) -> Value {
+        match tools::check_notes_args(tools::ADD_NOTE, args) {
+            Ok(()) => self.simple("co_producer.note", args, &["text"]),
+            Err(m) => tool_error(m),
+        }
+    }
+
+    fn export_folder(&mut self, args: &Map<String, Value>) -> Value {
+        if let Err(m) = tools::check_notes_args(tools::EXPORT_FOLDER, args) {
+            return tool_error(m);
+        }
+        match self.pass("co_producer.export_folder", args, &["what", "parent"]) {
+            Ok(r) => match r.get("path").and_then(Value::as_str) {
+                Some(p) => tool_text(p, false),
+                None => tool_text(r.to_string(), false),
+            },
+            Err(e) => e,
         }
     }
 
@@ -697,6 +786,19 @@ impl Server {
             "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }],
         }))
     }
+}
+
+/// The notes as the first answer shows them: at most [`MAX_FIRST_NOTES`]
+/// bytes, cut on a character boundary, and whether anything was cut.
+fn first_notes(notes: &str) -> (&str, bool) {
+    if notes.len() <= MAX_FIRST_NOTES {
+        return (notes, false);
+    }
+    let mut end = MAX_FIRST_NOTES;
+    while !notes.is_char_boundary(end) {
+        end -= 1;
+    }
+    (notes.get(..end).unwrap_or(""), true)
 }
 
 fn internal_error(id: &Value) -> String {
