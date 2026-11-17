@@ -7,7 +7,7 @@ mod fake_app;
 
 use core_control::registry::ArgValue;
 use core_control::{Command, ControlError, ErrorCode};
-use fake_app::{Answer, DroppingApp, FakeApp, PNG, support_dir};
+use fake_app::{Answer, DroppingApp, FakeApp, PNG, preview_token, support_dir, two_items};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -601,4 +601,549 @@ fn base64_matches_rfc_4648() {
     ] {
         assert_eq!(encode(input.as_bytes()), want, "{input:?}");
     }
+}
+
+// ---- Task 6: the change tool (Ruling 8, P5, P6) ----
+
+const SAID_NO: &str = "The composer said no. Nothing changed.";
+const UNREADABLE: &str = "The composer's answer could not be read. Nothing changed.";
+const EXPIRED: &str = "This question expired; call change again.";
+const MESSAGE: &str = "Co-Producer wants to change your work:\n- Track 2, Vox: deleted\n- Track 3, Bass: renamed to \"Low\"\n\nAllow these changes?";
+
+/// The plan the fake previews as two items of the composer's work.
+fn two_changes() -> Value {
+    json!([
+        {"id": "track.delete", "params": {"seq": 1, "lane": 2}},
+        {"id": "track.rename", "params": {"seq": 1, "lane": 3, "name": "Low"}},
+    ])
+}
+
+fn schema() -> Value {
+    json!({"type": "object", "properties": {"allow": {"type": "boolean", "title": "Allow these changes", "default": false}}, "required": ["allow"]})
+}
+
+fn previews(app: &FakeApp) -> Vec<Command> {
+    app.seen()
+        .into_iter()
+        .filter(|c| matches!(c, Command::CoProducerPreview { .. }))
+        .collect()
+}
+
+impl Mcp {
+    /// Spawned and initialized as a client that can show a form.
+    fn with_elicitation(support: &Path) -> Mcp {
+        let mut m = Mcp::spawn(support);
+        m.result(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}}),
+        );
+        m.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        m
+    }
+
+    /// Sends a `change` call with id `id`, and returns the elicitation
+    /// request it brings.
+    fn ask(&mut self, id: &str, commands: &Value) -> Value {
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "change", "arguments": {"commands": commands}}}));
+        let e = self.recv();
+        assert_eq!(e["method"], "elicitation/create", "{e}");
+        assert!(
+            e["id"]
+                .as_str()
+                .is_some_and(|i| i.starts_with("vz-elicit-")),
+            "{e}"
+        );
+        e
+    }
+
+    fn answer(&mut self, elicit: &Value, result: Value) {
+        self.send(&json!({"jsonrpc": "2.0", "id": elicit["id"], "result": result}));
+    }
+
+    /// The reply to call `id`.
+    fn reply_to(&self, id: &str) -> Value {
+        let r = self.recv();
+        assert_eq!(r["id"], id, "{r}");
+        assert!(r.get("error").is_none(), "{r}");
+        r["result"].clone()
+    }
+}
+
+#[test]
+fn no_yes_needed_applies_at_once() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let r = m.call("change", json!({"commands": [{"id": "edit.undo"}]}));
+    assert!(!is_error(&r), "{r}");
+    assert!(text(&r).contains("\"results\""), "{r}");
+    assert!(text(&r).contains("Undo step: Co-Producer: Tidy Up"), "{r}");
+    let seen = app.seen();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(matches!(seen[0], Command::CoProducerPreview { .. }));
+    match &seen[1] {
+        Command::CoProducerApply { token, plan, .. } => {
+            assert_eq!(token, &preview_token(1));
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].id, "edit.undo");
+        }
+        other => panic!("{other:?}"),
+    }
+    m.ping_answers();
+}
+
+#[test]
+fn legacy_elicitation_accept_applies() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let e = m.ask("c1", &two_changes());
+    assert_eq!(e["params"]["message"], MESSAGE);
+    assert_eq!(e["params"]["requestedSchema"], schema());
+    assert!(app.applies().is_empty(), "nothing applied before the yes");
+    m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
+    let r = m.reply_to("c1");
+    assert!(!is_error(&r), "{r}");
+    let t = text(&r);
+    assert!(t.contains("\"results\""), "{t}");
+    assert!(
+        !t.contains(&preview_token(1)),
+        "no token reaches the model: {t}"
+    );
+    let previewed = match &previews(&app)[0] {
+        Command::CoProducerPreview { plan, .. } => plan.clone(),
+        other => panic!("{other:?}"),
+    };
+    match app.applies().as_slice() {
+        [Command::CoProducerApply { token, plan, .. }] => {
+            assert_eq!(token, &preview_token(1));
+            assert_eq!(plan, &previewed);
+        }
+        other => panic!("{other:?}"),
+    }
+    // The token was never handed out, so apply_change refuses it.
+    let r = m.call(
+        "apply_change",
+        json!({"token": preview_token(1), "commands": two_changes()}),
+    );
+    assert!(is_error(&r), "{r}");
+    assert_eq!(app.applies().len(), 1);
+}
+
+#[test]
+fn legacy_elicitation_no_changes_nothing() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let answers = [
+        json!({"result": {"action": "decline"}}),
+        json!({"result": {"action": "cancel"}}),
+        json!({"result": {"action": "accept", "content": {"allow": false}}}),
+        json!({"result": {"action": "accept", "content": {"allow": "yes"}}}),
+        json!({"error": {"code": -32603, "message": "the host failed"}}),
+    ];
+    for (i, a) in answers.iter().enumerate() {
+        let id = format!("n{i}");
+        let e = m.ask(&id, &two_changes());
+        let mut line = a.clone();
+        line["jsonrpc"] = json!("2.0");
+        line["id"] = e["id"].clone();
+        m.send(&line);
+        let r = m.reply_to(&id);
+        assert!(!is_error(&r), "{a}: {r}");
+        assert_eq!(text(&r), SAID_NO, "{a}");
+    }
+    assert!(app.applies().is_empty(), "{:?}", app.applies());
+    m.ping_answers();
+}
+
+#[test]
+fn legacy_elicitation_meanwhile() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let e = m.ask("c1", &two_changes());
+    m.send(&json!({"jsonrpc": "2.0", "id": "list", "method": "tools/list"}));
+    m.send(&json!({"jsonrpc": "2.0", "id": "p", "method": "ping"}));
+    let r = m.recv();
+    assert_eq!(r["id"], "p", "a ping is answered at once: {r}");
+    m.silent_for(Duration::from_millis(300));
+    m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
+    assert!(!is_error(&m.reply_to("c1")));
+    let r = m.reply_to("list");
+    assert!(r["tools"].is_array(), "{r}");
+    assert_eq!(app.applies().len(), 1);
+    // A cancel ends the wait with no apply and no reply.
+    let e = m.ask("c2", &two_changes());
+    m.send(
+        &json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+        "params": {"requestId": "c2", "reason": "the user stopped it"}}),
+    );
+    m.silent_for(Duration::from_millis(300));
+    // A late answer to the cancelled question is ignored.
+    m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
+    m.silent_for(Duration::from_millis(300));
+    m.ping_answers();
+    assert_eq!(app.applies().len(), 1, "{:?}", app.applies());
+}
+
+/// More lines than vizdaw-mcp keeps arrive during a wait: the extra
+/// requests are refused at once, nothing blocks, and the composer's
+/// answer still arrives and applies.
+#[test]
+fn a_full_queue_never_drops_the_answer() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let e = m.ask("c1", &two_changes());
+    for i in 0..40 {
+        m.send(&json!({"jsonrpc": "2.0", "id": i, "method": "resources/list"}));
+    }
+    let mut refused = Vec::new();
+    for _ in 0..24 {
+        let r = m.recv();
+        assert_eq!(r["error"]["code"], -32001, "{r}");
+        refused.push(r["id"].as_i64().unwrap());
+    }
+    assert_eq!(refused, (16..40).collect::<Vec<_>>());
+    m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
+    assert!(!is_error(&m.reply_to("c1")));
+    for i in 0..16 {
+        let r = m.recv();
+        assert_eq!(r["id"], i, "{r}");
+        assert!(r["result"]["resources"].is_array(), "{r}");
+    }
+    assert_eq!(app.applies().len(), 1);
+    m.ping_answers();
+}
+
+fn modern(extra: Value) -> Value {
+    let mut p = json!({"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {"elicitation": {}},
+    }});
+    for (k, v) in extra.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    p
+}
+
+#[test]
+fn modern_elicitation_round_trip() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let ask = |m: &mut Mcp| -> String {
+        let r = m.result(
+            "tools/call",
+            modern(json!({"name": "change", "arguments": {"commands": two_changes()}})),
+        );
+        assert_eq!(r["resultType"], "input_required", "{r}");
+        let q = &r["inputRequests"]["yes"];
+        assert_eq!(q["method"], "elicitation/create", "{r}");
+        assert_eq!(q["params"]["message"], MESSAGE);
+        assert_eq!(q["params"]["requestedSchema"], schema());
+        let state = r["requestState"].as_str().unwrap().to_string();
+        assert!(
+            state.len() == 24 && state.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{state}"
+        );
+        assert!(
+            !r.to_string().contains("feed"),
+            "no token in the question: {r}"
+        );
+        state
+    };
+    let yes = json!({"yes": {"action": "accept", "content": {"allow": true}}});
+    let state = ask(&mut m);
+    assert!(app.applies().is_empty());
+    let retry = |state: &str, commands: Value| {
+        modern(
+            json!({"name": "change", "arguments": {"commands": commands},
+            "inputResponses": yes, "requestState": state}),
+        )
+    };
+    let r = m.result("tools/call", retry(&state, two_changes()));
+    assert_eq!(r["resultType"], "complete", "{r}");
+    assert!(!is_error(&r), "{r}");
+    assert!(text(&r).contains("\"results\""), "{r}");
+    assert_eq!(app.applies().len(), 1);
+    // One-time.
+    let r = m.result("tools/call", retry(&state, two_changes()));
+    assert!(is_error(&r), "{r}");
+    assert_eq!(text(&r), EXPIRED);
+    assert_eq!(app.applies().len(), 1);
+    // The model writes `arguments`: a yes there is not the composer's.
+    let state = ask(&mut m);
+    let r = m.result(
+        "tools/call",
+        modern(
+            json!({"name": "change", "arguments": {"commands": two_changes(),
+            "inputResponses": yes, "requestState": state}}),
+        ),
+    );
+    assert!(is_error(&r), "{r}");
+    assert_eq!(app.applies().len(), 1);
+    // Other commands than were asked about: refused, and the state is gone.
+    let other = json!([{"id": "track.delete", "params": {"seq": 1, "lane": 9}}]);
+    let r = m.result("tools/call", retry(&state, other));
+    assert!(is_error(&r), "{r}");
+    assert_eq!(text(&r), EXPIRED);
+    let r = m.result("tools/call", retry(&state, two_changes()));
+    assert_eq!(text(&r), EXPIRED, "{r}");
+    assert_eq!(app.applies().len(), 1);
+    // A no.
+    let state = ask(&mut m);
+    let r = m.result(
+        "tools/call",
+        modern(
+            json!({"name": "change", "arguments": {"commands": two_changes()},
+            "inputResponses": {"yes": {"action": "decline"}}, "requestState": state}),
+        ),
+    );
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(text(&r), SAID_NO);
+    // The capability may also sit beside `_meta`.
+    let r = m.result(
+        "tools/call",
+        json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+            "clientCapabilities": {"elicitation": {}},
+            "name": "change", "arguments": {"commands": two_changes()}}),
+    );
+    assert_eq!(r["resultType"], "input_required", "{r}");
+    assert_eq!(app.applies().len(), 1);
+}
+
+#[test]
+fn an_unanswered_question_is_a_no() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut s =
+        vizdaw_mcp::Server::with_ask_timeout(d.path().to_path_buf(), Duration::from_millis(50));
+    let line = |v: Value| v.to_string();
+    let parse = |l: &str| -> Value { serde_json::from_str(l).unwrap() };
+    s.handle_line(&line(
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}}}),
+    ));
+    let out = s.handle_line(&line(
+        json!({"jsonrpc": "2.0", "id": "c", "method": "tools/call",
+        "params": {"name": "change", "arguments": {"commands": two_changes()}}}),
+    ));
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(parse(&out[0])["method"], "elicitation/create");
+    let out = s.handle_line(&line(
+        json!({"jsonrpc": "2.0", "id": "l", "method": "tools/list"}),
+    ));
+    assert!(out.is_empty(), "queued: {out:?}");
+    assert!(s.tick().is_empty(), "not yet");
+    std::thread::sleep(Duration::from_millis(80));
+    let out: Vec<Value> = s.tick().iter().map(|l| parse(l)).collect();
+    let reply = out
+        .iter()
+        .find(|v| v["id"] == "c")
+        .unwrap_or_else(|| panic!("{out:?}"));
+    assert_eq!(
+        reply["result"]["content"][0]["text"],
+        "The composer did not answer. Nothing changed."
+    );
+    assert_eq!(reply["result"]["isError"], false);
+    let list = out
+        .iter()
+        .position(|v| v["id"] == "l")
+        .unwrap_or_else(|| panic!("{out:?}"));
+    assert!(out[list]["result"]["tools"].is_array());
+    assert!(out.iter().position(|v| v["id"] == "c").unwrap() < list);
+    assert!(app.applies().is_empty());
+    assert!(s.tick().is_empty());
+}
+
+#[test]
+fn without_elicitation_the_model_gets_the_list_and_a_token() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+    );
+    let r = m.call("change", json!({"commands": two_changes()}));
+    assert!(!is_error(&r), "{r}");
+    let token = preview_token(1);
+    assert_eq!(
+        text(&r),
+        format!(
+            "- Track 2, Vox: deleted\n- Track 3, Bass: renamed to \"Low\"\nShow this list to the composer and ask for a yes. Then call apply_change with token {token} and the same commands."
+        )
+    );
+    assert!(app.applies().is_empty());
+    let r = m.call(
+        "apply_change",
+        json!({"token": token, "commands": two_changes()}),
+    );
+    assert!(!is_error(&r), "{r}");
+    match app.applies().as_slice() {
+        [Command::CoProducerApply { token: t, .. }] => assert_eq!(t, &token),
+        other => panic!("{other:?}"),
+    }
+    let before = app.seen().len();
+    for t in ["0".repeat(32), token.clone()] {
+        let r = m.call(
+            "apply_change",
+            json!({"token": t, "commands": two_changes()}),
+        );
+        assert!(is_error(&r), "{r}");
+        assert_eq!(
+            text(&r),
+            "Use the token change returned in this conversation."
+        );
+    }
+    assert_eq!(app.seen().len(), before, "refused before reaching the app");
+    let _ = two_items();
+}
+
+#[test]
+fn the_list_is_capped() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let items: Vec<Value> = (1..=45)
+        .map(
+            |i| json!({"thing": format!("Track {i}"), "change": "deleted", "composers_work": true}),
+        )
+        .collect();
+    app.script(Answer::Ok(
+        json!({"token": preview_token(1), "needs_yes": true, "items": items}),
+    ));
+    let r = m.call("change", json!({"commands": two_changes()}));
+    let t = text(&r);
+    let lines: Vec<&str> = t.lines().filter(|l| l.starts_with("- ")).collect();
+    assert_eq!(lines.len(), 41, "{t}");
+    assert_eq!(lines[39], "- Track 40: deleted");
+    assert_eq!(lines[40], "- and 5 more");
+}
+
+#[test]
+fn change_commands_are_checked_first() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let many: Vec<Value> = (0..33).map(|_| json!({"id": "edit.undo"})).collect();
+    let long = "x".repeat(70_000);
+    for bad in [
+        json!({}),
+        json!({"commands": "edit.undo"}),
+        json!({"commands": []}),
+        json!({"commands": many}),
+        json!({"commands": [7]}),
+        json!({"commands": [{}]}),
+        json!({"commands": [{"id": 7}]}),
+        json!({"commands": [{"id": long}]}),
+        json!({"commands": [{"id": "edit.undo", "params": [1]}]}),
+        json!({"commands": [{"id": "edit.undo", "extra": 1}]}),
+        json!({"commands": [{"id": "edit.undo"}], "nope": 1}),
+        json!({"commands": [{"id": "edit.undo"}], "window": 0}),
+    ] {
+        for tool in ["change", "apply_change"] {
+            let mut args = bad.clone();
+            if tool == "apply_change" {
+                args["token"] = json!(preview_token(1));
+            }
+            let r = m.call(tool, args.clone());
+            assert!(is_error(&r), "{tool} {args}: {r}");
+        }
+    }
+    for t in [
+        json!(7),
+        json!("x".repeat(70_000)),
+        json!("A".repeat(32)),
+        json!(null),
+    ] {
+        let r = m.call(
+            "apply_change",
+            json!({"token": t, "commands": [{"id": "edit.undo"}]}),
+        );
+        assert!(is_error(&r), "{r}");
+    }
+    assert!(app.seen().is_empty(), "{:?}", app.seen());
+}
+
+#[test]
+fn hostile_elicitation_replies() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let e = m.ask("c1", &two_changes());
+    // An answer to a question never asked is ignored.
+    m.send(&json!({"jsonrpc": "2.0", "id": "vz-elicit-999", "result": {"action": "accept", "content": {"allow": true}}}));
+    m.send(&json!({"jsonrpc": "2.0", "id": 5, "result": {"action": "accept", "content": {"allow": true}}}));
+    m.send(&json!({"jsonrpc": "2.0", "id": "c1", "result": {"action": "accept", "content": {"allow": true}}}));
+    m.silent_for(Duration::from_millis(300));
+    m.ping_answers();
+    // Content that is an array is not a yes.
+    m.answer(
+        &e,
+        json!({"action": "accept", "content": [{"allow": true}]}),
+    );
+    let r = m.reply_to("c1");
+    assert!(is_error(&r), "{r}");
+    assert_eq!(text(&r), UNREADABLE);
+    let long = "x".repeat(70_000);
+    let hostile = [
+        (
+            json!({"action": long, "content": {"allow": true}}),
+            UNREADABLE,
+        ),
+        (
+            json!({"action": "accept", "content": {"allow": true, "message": long}}),
+            UNREADABLE,
+        ),
+        (
+            json!({"action": "accept", "content": {"allow": long}}),
+            SAID_NO,
+        ),
+        (json!({"action": "accept"}), SAID_NO),
+        (json!("accept"), UNREADABLE),
+        (json!(null), UNREADABLE),
+    ];
+    for (i, (h, want)) in hostile.iter().enumerate() {
+        let id = format!("h{i}");
+        let e = m.ask(&id, &two_changes());
+        m.answer(&e, h.clone());
+        let r = m.reply_to(&id);
+        assert_eq!(text(&r), *want, "{h}");
+        assert_eq!(is_error(&r), *want == UNREADABLE, "{r}");
+    }
+    assert!(app.applies().is_empty(), "{:?}", app.applies());
+    // A modern retry with a huge or wrong-typed requestState.
+    for state in [json!(long), json!(7), json!({"a": 1}), json!(null)] {
+        let r = m.result(
+            "tools/call",
+            modern(
+                json!({"name": "change", "arguments": {"commands": two_changes()},
+                "inputResponses": {"yes": {"action": "accept", "content": {"allow": true}}},
+                "requestState": state}),
+            ),
+        );
+        assert!(is_error(&r), "{r}");
+        assert_eq!(text(&r), EXPIRED);
+    }
+    // inputResponses of the wrong shape with a real state is a no.
+    let r = m.result(
+        "tools/call",
+        modern(json!({"name": "change", "arguments": {"commands": two_changes()}})),
+    );
+    let state = r["requestState"].as_str().unwrap().to_string();
+    let r = m.result(
+        "tools/call",
+        modern(
+            json!({"name": "change", "arguments": {"commands": two_changes()},
+            "inputResponses": [long], "requestState": state}),
+        ),
+    );
+    assert!(is_error(&r), "{r}");
+    assert_eq!(text(&r), UNREADABLE);
+    assert!(app.applies().is_empty());
+    m.ping_answers();
 }

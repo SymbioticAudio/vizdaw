@@ -376,6 +376,167 @@ pub fn arguments_to_params(
     Ok((params, window))
 }
 
+/// Ruling 8: the most items a question lists before "- and N more".
+pub const MAX_LISTED: usize = 40;
+/// The longest item part shown; the app already cuts names to 60 (P11).
+const MAX_ITEM_PART: usize = 200;
+
+/// A no (Ruling 8).
+pub const SAID_NO: &str = "The composer said no. Nothing changed.";
+/// No answer within the wait (Ruling 8, P6).
+pub const NO_ANSWER: &str = "The composer did not answer. Nothing changed.";
+/// An answer that is not the asked-for form.
+pub const UNREADABLE: &str = "The composer's answer could not be read. Nothing changed.";
+/// An unknown, used, expired or altered `requestState` (P5).
+pub const EXPIRED: &str = "This question expired; call change again.";
+/// A token `change` did not hand out in this conversation.
+pub const NOT_OUR_TOKEN: &str = "Use the token change returned in this conversation.";
+
+/// `change` and `apply_change`'s checked arguments.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangeArgs {
+    /// The plan, as given: 1 to `MAX_PLAN` `{id, params?}`.
+    pub commands: Value,
+    /// The window, if named.
+    pub window: Option<i64>,
+    /// `apply_change`'s token.
+    pub token: Option<String>,
+}
+
+/// Checks `change`'s arguments, or `apply_change`'s when `with_token`.
+/// Err names what is wrong. VizDAW checks each command again.
+pub fn change_args(args: &Map<String, Value>, with_token: bool) -> Result<ChangeArgs, String> {
+    let shape =
+        || format!("`commands` must be an array of 1 to {MAX_PLAN} {{\"id\", \"params\"}} objects");
+    let mut out = ChangeArgs {
+        commands: Value::Null,
+        window: None,
+        token: None,
+    };
+    for (k, v) in args {
+        match k.as_str() {
+            "window" => out.window = window_arg(v)?,
+            "commands" => out.commands = v.clone(),
+            "token" if with_token => match v {
+                Value::String(t)
+                    if t.len() == TOKEN_LEN
+                        && t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+                {
+                    out.token = Some(t.clone());
+                }
+                _ => {
+                    return Err(format!(
+                        "`token` must be the {TOKEN_LEN} lowercase hex characters change gave"
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "unknown argument `{}`",
+                    crate::rpc::truncate(k, 64)
+                ));
+            }
+        }
+    }
+    let list = match &out.commands {
+        Value::Array(a) if (1..=MAX_PLAN).contains(&a.len()) => a,
+        Value::Null => return Err("missing `commands`".into()),
+        _ => return Err(shape()),
+    };
+    for (i, c) in list.iter().enumerate() {
+        let Value::Object(m) = c else {
+            return Err(shape());
+        };
+        if let Some(k) = m.keys().find(|k| *k != "id" && *k != "params") {
+            return Err(format!(
+                "`commands[{i}]`: unknown key `{}` (allowed: id, params)",
+                crate::rpc::truncate(k, 64)
+            ));
+        }
+        match m.get("id") {
+            Some(Value::String(s)) if !s.is_empty() && s.chars().count() <= 64 => {}
+            _ => return Err(format!("`commands[{i}]`: `id` must be a command id")),
+        }
+        if !matches!(m.get("params"), None | Some(Value::Object(_))) {
+            return Err(format!("`commands[{i}]`: `params` must be an object"));
+        }
+    }
+    if with_token && out.token.is_none() {
+        return Err("missing `token`".into());
+    }
+    Ok(out)
+}
+
+/// Whether `c` could disguise a line of the list: a control, a bidi
+/// control or mark, or a line or paragraph separator.
+fn disguises(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}'
+        )
+        || ('\u{202A}'..='\u{202E}').contains(&c)
+        || ('\u{2066}'..='\u{2069}').contains(&c)
+}
+
+fn item_part(v: Option<&Value>) -> String {
+    let s = v.and_then(Value::as_str).unwrap_or("?");
+    s.chars()
+        .map(|c| if disguises(c) { ' ' } else { c })
+        .take(MAX_ITEM_PART)
+        .collect()
+}
+
+/// A preview's items as "- <thing>: <change>" lines: at most
+/// [`MAX_LISTED`], then "- and N more" (Ruling 8).
+pub fn item_lines(items: &[Value]) -> Vec<String> {
+    let mut lines: Vec<String> = items
+        .iter()
+        .take(MAX_LISTED)
+        .map(|i| {
+            format!(
+                "- {}: {}",
+                item_part(i.get("thing")),
+                item_part(i.get("change"))
+            )
+        })
+        .collect();
+    if items.len() > MAX_LISTED {
+        lines.push(format!("- and {} more", items.len() - MAX_LISTED));
+    }
+    lines
+}
+
+/// The `elicitation/create` params that ask the composer (Ruling 8).
+pub fn question(items: &[Value]) -> Value {
+    let mut message = String::from("Co-Producer wants to change your work:\n");
+    for l in item_lines(items) {
+        message.push_str(&l);
+        message.push('\n');
+    }
+    message.push_str("\nAllow these changes?");
+    json!({
+        "message": message,
+        "requestedSchema": {
+            "type": "object",
+            "properties": {"allow": {"type": "boolean", "title": "Allow these changes", "default": false}},
+            "required": ["allow"],
+        },
+    })
+}
+
+/// What the model gets without elicitation: the list, then how to ask.
+pub fn list_for_the_model(items: &[Value], token: &str) -> String {
+    let mut text = item_lines(items).join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&format!(
+        "Show this list to the composer and ask for a yes. Then call apply_change with token {token} and the same commands."
+    ));
+    text
+}
+
 /// The resources: a state resource per target, and the command list.
 pub fn resources_json() -> Vec<Value> {
     let mut out: Vec<Value> = STATE_TARGETS
@@ -445,6 +606,17 @@ mod tests {
             let e = arguments_to_params(spec, &args(bad.clone())).unwrap_err();
             assert!(e.contains(word), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn items_cannot_forge_lines() {
+        let items = vec![
+            json!({"thing": "A\n- B: kept", "change": "x\u{2028}y\u{202E}"}),
+            json!({}),
+        ];
+        assert_eq!(item_lines(&items), vec!["- A - B: kept: x y ", "- ?: ?"]);
+        let long = vec![json!({"thing": "t".repeat(70_000), "change": "c"})];
+        assert_eq!(item_lines(&long)[0].chars().count(), 2 + MAX_ITEM_PART + 3);
     }
 
     #[test]

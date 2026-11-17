@@ -18,6 +18,9 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 /// A resource VizDAW could not give (it is not running, or it refused).
 pub const APP_ERROR: i64 = -32000;
+/// A request that came while the composer is being asked, when no more
+/// can be kept until the answer.
+pub const WAITING: i64 = -32001;
 /// A request whose `_meta` names a protocol version not served.
 pub const UNSUPPORTED_VERSION: i64 = -32022;
 
@@ -31,6 +34,8 @@ pub const NEWEST_LEGACY: &str = "2025-11-25";
 pub const SUPPORTED: [&str; 4] = [MODERN, "2025-11-25", "2025-06-18", "2025-03-26"];
 /// Where a 2026-07-28 request names its version.
 pub const VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
+/// Where a 2026-07-28 request names what its client can do.
+pub const CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 
 /// One line, read.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,11 +53,15 @@ pub enum Message {
     Notification {
         /// The method.
         method: String,
+        /// Its params (empty when absent or not an object).
+        params: Map<String, Value>,
     },
-    /// A response to a request this server sent (Task 6's elicitation).
+    /// A response to a request this server sent (an elicitation).
     Response {
         /// The id it answers.
         id: Value,
+        /// Its `result`; None for an error reply.
+        result: Option<Value>,
     },
 }
 
@@ -94,6 +103,16 @@ pub fn error_line(id: &Value, e: &RpcError) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "error": error }).to_string()
 }
 
+/// A request line this server sends (an elicitation).
+pub fn request_line(id: &str, method: &str, params: Value) -> String {
+    json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
+}
+
+/// A notification line this server sends.
+pub fn notification_line(method: &str, params: Value) -> String {
+    json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string()
+}
+
 /// `s` cut to at most `n` characters, for messages that quote input.
 pub fn truncate(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
@@ -132,15 +151,21 @@ pub fn parse(line: &str) -> Result<Message, String> {
         Some(_) => return fail(&echo, INVALID_REQUEST, "`method` must be a string."),
         None => {
             return match valid_id {
-                Some(id) if obj.contains_key("result") || obj.contains_key("error") => {
-                    Ok(Message::Response { id })
-                }
+                Some(id) if obj.contains_key("error") => Ok(Message::Response { id, result: None }),
+                Some(id) if obj.contains_key("result") => Ok(Message::Response {
+                    id,
+                    result: obj.remove("result"),
+                }),
                 _ => fail(&echo, INVALID_REQUEST, "A message needs a `method`."),
             };
         }
     };
     if id.is_none() {
-        return Ok(Message::Notification { method });
+        let params = match obj.remove("params") {
+            Some(Value::Object(p)) => p,
+            _ => Map::new(),
+        };
+        return Ok(Message::Notification { method, params });
     }
     let Some(id) = valid_id else {
         return fail(
@@ -208,7 +233,7 @@ pub enum Kind {
 pub fn finish(era: Era, kind: Kind, mut result: Value) -> Value {
     if era == Era::Modern {
         if let Some(o) = result.as_object_mut() {
-            o.insert("resultType".into(), json!("complete"));
+            o.entry("resultType").or_insert_with(|| json!("complete"));
             if kind == Kind::Cacheable {
                 o.insert("ttlMs".into(), json!(0));
                 o.insert("cacheScope".into(), json!("private"));
@@ -227,6 +252,57 @@ pub fn negotiate(requested: Option<&Value>) -> &'static str {
         .find(|v| Some(**v) == r)
         .copied()
         .unwrap_or(NEWEST_LEGACY)
+}
+
+/// Whether client capabilities `caps` declare form elicitation: an
+/// `elicitation` object that is empty (form, before modes) or names `form`.
+pub fn form_elicitation(caps: Option<&Value>) -> bool {
+    match caps.and_then(|c| c.get("elicitation")) {
+        Some(Value::Object(e)) => e.is_empty() || e.get("form").is_some_and(Value::is_object),
+        _ => false,
+    }
+}
+
+/// Whether a 2026-07-28 request's client declared form elicitation, in
+/// `_meta` or beside it.
+pub fn request_elicitation(params: &Map<String, Value>) -> bool {
+    let in_meta = params.get("_meta").and_then(|m| m.get(CAPABILITIES_META));
+    form_elicitation(in_meta) || form_elicitation(params.get("clientCapabilities"))
+}
+
+/// What the composer answered an elicitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// `accept` with exactly `{allow: true}`.
+    Yes,
+    /// Decline, cancel, an accept without `allow: true`, or an error reply.
+    No,
+    /// Not an elicitation result: no action, an unknown one, or content
+    /// that is not the asked-for form.
+    Unreadable,
+}
+
+/// Reads an elicitation's answer: `result` is the response's result (or a
+/// 2026-07-28 retry's `inputResponses.yes`); None for an error reply.
+/// Only an `accept` whose content is exactly `{allow: true}` is a yes.
+pub fn elicitation_answer(result: Option<&Value>) -> Answer {
+    let Some(r) = result else {
+        return Answer::No;
+    };
+    let Some(o) = r.as_object() else {
+        return Answer::Unreadable;
+    };
+    match o.get("action").and_then(Value::as_str) {
+        Some("decline" | "cancel") => Answer::No,
+        Some("accept") => match o.get("content") {
+            None | Some(Value::Null) => Answer::No,
+            Some(Value::Object(c)) if c.keys().any(|k| k != "allow") => Answer::Unreadable,
+            Some(Value::Object(c)) if c.get("allow") == Some(&Value::Bool(true)) => Answer::Yes,
+            Some(Value::Object(_)) => Answer::No,
+            Some(_) => Answer::Unreadable,
+        },
+        _ => Answer::Unreadable,
+    }
 }
 
 /// A line read with a length cap.
@@ -309,6 +385,42 @@ mod tests {
             Some(Line::Full(b"xy".to_vec()))
         );
         assert_eq!(read_line_capped(&mut r, 5).unwrap(), None);
+    }
+
+    #[test]
+    fn answers() {
+        use Answer::*;
+        for (r, want) in [
+            (json!({"action": "accept", "content": {"allow": true}}), Yes),
+            (json!({"action": "accept", "content": {"allow": false}}), No),
+            (json!({"action": "accept", "content": {"allow": 1}}), No),
+            (json!({"action": "accept"}), No),
+            (json!({"action": "decline"}), No),
+            (json!({"action": "cancel"}), No),
+            (
+                json!({"action": "accept", "content": {"allow": true, "x": 1}}),
+                Unreadable,
+            ),
+            (json!({"action": "accept", "content": [true]}), Unreadable),
+            (
+                json!({"action": "Accept", "content": {"allow": true}}),
+                Unreadable,
+            ),
+            (json!({"content": {"allow": true}}), Unreadable),
+            (json!(true), Unreadable),
+        ] {
+            assert_eq!(elicitation_answer(Some(&r)), want, "{r}");
+        }
+        assert_eq!(elicitation_answer(None), No);
+        assert!(form_elicitation(Some(&json!({"elicitation": {}}))));
+        assert!(form_elicitation(Some(
+            &json!({"elicitation": {"form": {}, "url": {}}})
+        )));
+        assert!(!form_elicitation(Some(
+            &json!({"elicitation": {"url": {}}})
+        )));
+        assert!(!form_elicitation(Some(&json!({"elicitation": true}))));
+        assert!(!form_elicitation(None));
     }
 
     #[test]

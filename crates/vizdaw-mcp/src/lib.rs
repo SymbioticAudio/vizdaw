@@ -22,15 +22,29 @@ pub mod rpc;
 pub mod tools;
 
 use app::{App, AppError};
-use rpc::{Kind, Message, RpcError};
+use rpc::{Answer, Era, Kind, Message, RpcError};
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tools::ChangeArgs;
 
 /// The longest input line; a longer one is answered `-32700` and skipped.
 pub const MAX_LINE: usize = 1 << 20;
+
+/// How long the composer has to answer (Ruling 8, P6), and how long a
+/// 2026-07-28 `requestState` is kept.
+pub const ASK_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The most `requestState`s kept, and the most tokens handed to the model
+/// that are remembered.
+const MAX_HELD: usize = 8;
+
+/// The most lines kept while the composer is asked, and their bytes.
+const MAX_QUEUED: usize = 16;
+const MAX_QUEUED_BYTES: usize = 8 << 20;
 
 /// The largest screenshot file read (a 6K window at scale 1 is far less).
 const MAX_SCREENSHOT: u64 = 64 << 20;
@@ -59,6 +73,31 @@ pub fn support_dir_from_env() -> Result<PathBuf, String> {
     }
 }
 
+/// A previewed plan waiting for the composer's yes: never shown to the
+/// model.
+#[derive(Debug, Clone)]
+struct Pending {
+    token: String,
+    commands: Value,
+    window: Option<i64>,
+}
+
+/// An `initialize`-era question in flight: the `tools/call` it answers,
+/// the `elicitation/create` id, and when it counts as no answer.
+struct Wait {
+    call: Value,
+    elicit: String,
+    pending: Pending,
+    deadline: Instant,
+}
+
+/// A 2026-07-28 `requestState`, kept here: the client holds only its key.
+struct Held {
+    key: String,
+    pending: Pending,
+    expires: Instant,
+}
+
 /// The server's state: its tools, what the client declared, and the app
 /// connection.
 pub struct Server {
@@ -67,8 +106,25 @@ pub struct Server {
     tools: Vec<Value>,
     /// Command tools by name, with their `commands.list` entries.
     by_name: HashMap<String, Value>,
-    /// The client declared form elicitation at `initialize` (Task 6).
+    /// The client declared form elicitation at `initialize`.
     elicitation: bool,
+    ask_timeout: Duration,
+    /// The question in flight, if any; lines meanwhile wait in `queue`.
+    wait: Option<Wait>,
+    queue: VecDeque<String>,
+    queued_bytes: usize,
+    next_elicit: u64,
+    /// 2026-07-28 questions awaiting their retry, oldest first.
+    held: Vec<Held>,
+    /// Tokens handed to the model (the fallback), oldest first.
+    tokens: VecDeque<String>,
+}
+
+/// What a request gives: a result now, or a question for the client while
+/// the call waits.
+enum Done {
+    Result(Value),
+    Ask(String),
 }
 
 /// A tool's answer: text, as an error or not.
@@ -83,6 +139,11 @@ fn tool_error(text: impl Into<String>) -> Value {
 impl Server {
     /// A server for the app whose support folder is `support`.
     pub fn new(support: PathBuf) -> Server {
+        Server::with_ask_timeout(support, ASK_TIMEOUT)
+    }
+
+    /// A server whose composer has `limit` to answer (tests use a short one).
+    pub fn with_ask_timeout(support: PathBuf, limit: Duration) -> Server {
         let commands = core_control::co_producer::list_json();
         let tools = tools::tools_json(&commands);
         let by_name = tools::command_tools(&commands).into_iter().collect();
@@ -92,30 +153,131 @@ impl Server {
             tools,
             by_name,
             elicitation: false,
+            ask_timeout: limit,
+            wait: None,
+            queue: VecDeque::new(),
+            queued_bytes: 0,
+            next_elicit: 1,
+            held: Vec::new(),
+            tokens: VecDeque::new(),
         }
     }
 
-    /// One input line → zero or more output lines (a reply, or Task 6's
-    /// elicitation request).
+    /// One input line → zero or more output lines: replies, and an
+    /// `elicitation/create` request when a change needs the composer's yes.
+    /// While that question is open, lines are kept and handled after it,
+    /// except a `ping`, the answer, and a cancel of the waiting call.
     pub fn handle_line(&mut self, line: &str) -> Vec<String> {
+        let mut out = self.tick();
         let line = line.trim();
         if line.is_empty() {
-            return Vec::new();
+            return out;
         }
+        if self.wait.is_some() {
+            out.extend(self.while_waiting(line));
+        } else {
+            out.extend(self.dispatch(line));
+        }
+        out.extend(self.drain());
+        out
+    }
+
+    /// A line handled now.
+    fn dispatch(&mut self, line: &str) -> Vec<String> {
         let (id, method, params) = match rpc::parse(line) {
             Err(reply) => return vec![reply],
             Ok(Message::Notification { .. } | Message::Response { .. }) => return Vec::new(),
             Ok(Message::Request { id, method, params }) => (id, method, params),
         };
-        let outcome = catch_unwind(AssertUnwindSafe(|| self.request(&method, &params)));
+        let outcome = catch_unwind(AssertUnwindSafe(|| self.request(&id, &method, &params)));
         vec![match outcome {
-            Ok(Ok(result)) => rpc::result_line(&id, result),
+            Ok(Ok(Done::Result(result))) => rpc::result_line(&id, result),
+            Ok(Ok(Done::Ask(line))) => line,
             Ok(Err(e)) => rpc::error_line(&id, &e),
-            Err(_) => rpc::error_line(
-                &id,
-                &RpcError::new(rpc::INTERNAL_ERROR, "Internal error: vizdaw-mcp went on."),
-            ),
+            Err(_) => internal_error(&id),
         }]
+    }
+
+    /// A line that came while the composer is asked.
+    fn while_waiting(&mut self, line: &str) -> Vec<String> {
+        let (call, elicit) = match &self.wait {
+            Some(w) => (w.call.clone(), w.elicit.clone()),
+            None => return self.dispatch(line),
+        };
+        match rpc::parse(line) {
+            Err(reply) => vec![reply],
+            Ok(Message::Response { id, result }) => {
+                if id.as_str() == Some(elicit.as_str()) {
+                    self.answered(result.as_ref())
+                } else {
+                    Vec::new()
+                }
+            }
+            Ok(Message::Request { method, .. }) if method == "ping" => self.dispatch(line),
+            Ok(Message::Notification { method, params })
+                if method == "notifications/cancelled"
+                    && params.get("requestId") == Some(&call) =>
+            {
+                self.wait = None;
+                Vec::new()
+            }
+            Ok(m) => {
+                if self.queue.len() < MAX_QUEUED
+                    && self.queued_bytes.saturating_add(line.len()) <= MAX_QUEUED_BYTES
+                {
+                    self.queued_bytes = self.queued_bytes.saturating_add(line.len());
+                    self.queue.push_back(line.to_string());
+                    return Vec::new();
+                }
+                match m {
+                    Message::Request { id, .. } => vec![rpc::error_line(
+                        &id,
+                        &RpcError::new(
+                            rpc::WAITING,
+                            "vizdaw-mcp is waiting for the composer's answer to a change: send this again after it.",
+                        ),
+                    )],
+                    _ => Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// Lines kept during a question, handled once it ends, until another
+    /// question starts.
+    fn drain(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        while self.wait.is_none() {
+            let Some(line) = self.queue.pop_front() else {
+                break;
+            };
+            self.queued_bytes = self.queued_bytes.saturating_sub(line.len());
+            out.extend(self.dispatch(&line));
+        }
+        out
+    }
+
+    /// The composer's answer to the open question: apply on a yes.
+    fn answered(&mut self, result: Option<&Value>) -> Vec<String> {
+        let Some(w) = self.wait.take() else {
+            return Vec::new();
+        };
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            self.decided(rpc::elicitation_answer(result), &w.pending)
+        }));
+        vec![match outcome {
+            Ok(v) => rpc::result_line(&w.call, v),
+            Err(_) => internal_error(&w.call),
+        }]
+    }
+
+    /// The tool result for `answer` to `pending`.
+    fn decided(&mut self, answer: Answer, pending: &Pending) -> Value {
+        match answer {
+            Answer::Yes => self.apply(pending),
+            Answer::No => tool_text(tools::SAID_NO, false),
+            Answer::Unreadable => tool_error(tools::UNREADABLE),
+        }
     }
 
     /// A line longer than [`MAX_LINE`] that the reader consumed without
@@ -138,14 +300,39 @@ impl Server {
         )]
     }
 
-    /// Called when no line came for a while: ends waits that expired
-    /// (Task 6). Nothing waits yet.
+    /// Called at least once a second: a question unanswered for the ask
+    /// timeout ends as a no (Ruling 8, P6), and the lines kept meanwhile
+    /// are then handled.
     pub fn tick(&mut self) -> Vec<String> {
-        Vec::new()
+        let now = Instant::now();
+        self.held.retain(|h| h.expires > now);
+        let mut out = Vec::new();
+        if self.wait.as_ref().is_some_and(|w| now >= w.deadline) {
+            if let Some(w) = self.wait.take() {
+                out.push(rpc::result_line(
+                    &w.call,
+                    tool_text(tools::NO_ANSWER, false),
+                ));
+                out.push(rpc::notification_line(
+                    "notifications/cancelled",
+                    json!({ "requestId": w.elicit, "reason": "The composer did not answer in time." }),
+                ));
+            }
+        }
+        out.extend(self.drain());
+        out
     }
 
-    fn request(&mut self, method: &str, params: &Map<String, Value>) -> Result<Value, RpcError> {
+    fn request(
+        &mut self,
+        id: &Value,
+        method: &str,
+        params: &Map<String, Value>,
+    ) -> Result<Done, RpcError> {
         let era = rpc::era(params)?;
+        if method == "tools/call" {
+            return self.call_tool(id, era, params);
+        }
         let (kind, result) = match method {
             "initialize" => (Kind::Plain, self.initialize(params)),
             "ping" => (Kind::Plain, json!({})),
@@ -161,7 +348,6 @@ impl Server {
                 }),
             ),
             "tools/list" => (Kind::Cacheable, json!({ "tools": self.tools })),
-            "tools/call" => (Kind::Plain, self.call_tool(params)?),
             "resources/list" => (
                 Kind::Cacheable,
                 json!({ "resources": tools::resources_json() }),
@@ -175,14 +361,11 @@ impl Server {
                 ));
             }
         };
-        Ok(rpc::finish(era, kind, result))
+        Ok(Done::Result(rpc::finish(era, kind, result)))
     }
 
     fn initialize(&mut self, params: &Map<String, Value>) -> Value {
-        self.elicitation = params
-            .get("capabilities")
-            .and_then(|c| c.get("elicitation"))
-            .is_some_and(Value::is_object);
+        self.elicitation = rpc::form_elicitation(params.get("capabilities"));
         json!({
             "protocolVersion": rpc::negotiate(params.get("protocolVersion")),
             "capabilities": capabilities(),
@@ -191,7 +374,13 @@ impl Server {
         })
     }
 
-    fn call_tool(&mut self, params: &Map<String, Value>) -> Result<Value, RpcError> {
+    fn call_tool(
+        &mut self,
+        id: &Value,
+        era: Era,
+        params: &Map<String, Value>,
+    ) -> Result<Done, RpcError> {
+        let done = |v| Ok(Done::Result(rpc::finish(era, Kind::Plain, v)));
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return Err(RpcError::new(
                 rpc::INVALID_PARAMS,
@@ -202,25 +391,185 @@ impl Server {
         let args = match params.get("arguments") {
             None | Some(Value::Null) => &empty,
             Some(Value::Object(a)) => a,
-            Some(_) => return Ok(tool_error("`arguments` must be an object.")),
+            Some(_) => return done(tool_error("`arguments` must be an object.")),
         };
         if let Some(spec) = self.by_name.get(name).cloned() {
-            return Ok(self.run_command(&spec, args));
+            return done(self.run_command(&spec, args));
         }
-        Ok(match name {
-            tools::BEGIN_REQUEST => self.begin_request(args),
-            tools::END_REQUEST => self.simple("co_producer.end", args, &[]),
-            tools::SCREENSHOT => self.screenshot(args),
-            tools::CHANGE | tools::APPLY_CHANGE => {
-                tool_error("Co-Producer cannot change existing work yet.")
+        match name {
+            tools::BEGIN_REQUEST => done(self.begin_request(args)),
+            tools::END_REQUEST => done(self.simple("co_producer.end", args, &[])),
+            tools::SCREENSHOT => done(self.screenshot(args)),
+            tools::CHANGE => match self.change(id, era, params, args) {
+                Done::Result(v) => done(v),
+                ask => Ok(ask),
+            },
+            tools::APPLY_CHANGE => done(self.apply_change(args)),
+            _ => Err(RpcError::new(
+                rpc::INVALID_PARAMS,
+                format!("No tool {:?}.", rpc::truncate(name, 64)),
+            )),
+        }
+    }
+
+    /// Ruling 8: preview; apply at once when no yes is needed; else ask
+    /// the composer through elicitation when the client can show a form;
+    /// else give the model the list and a token. A 2026-07-28 retry
+    /// (`params.requestState`, `params.inputResponses`) resumes a question.
+    /// The composer's answer is read only from those host-filled fields,
+    /// never from `arguments`, which the model writes (P5).
+    fn change(
+        &mut self,
+        id: &Value,
+        era: Era,
+        params: &Map<String, Value>,
+        args: &Map<String, Value>,
+    ) -> Done {
+        let a = match tools::change_args(args, false) {
+            Ok(a) => a,
+            Err(m) => return Done::Result(tool_error(m)),
+        };
+        if params.contains_key("requestState") || params.contains_key("inputResponses") {
+            return Done::Result(self.retry(params, &a));
+        }
+        let preview = match self.app.call("co_producer.preview", plan_params(&a, None)) {
+            Ok(p) => p,
+            Err(e) => return Done::Result(self.failed(&e)),
+        };
+        let token = preview.get("token").and_then(Value::as_str).filter(|t| {
+            t.len() == core_control::request::TOKEN_LEN
+                && t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        });
+        let (Some(token), Some(items)) = (token, preview.get("items").and_then(Value::as_array))
+        else {
+            return Done::Result(tool_error(
+                "VizDAW's preview answer could not be read, so nothing changed.",
+            ));
+        };
+        let pending = Pending {
+            token: token.to_string(),
+            commands: a.commands.clone(),
+            window: a.window,
+        };
+        // Only an explicit `needs_yes: false` skips the question.
+        if preview.get("needs_yes") == Some(&Value::Bool(false)) {
+            return Done::Result(self.apply(&pending));
+        }
+        let question = tools::question(items);
+        match era {
+            Era::Legacy if self.elicitation => {
+                let elicit = format!("vz-elicit-{}", self.next_elicit);
+                self.next_elicit = self.next_elicit.wrapping_add(1);
+                let line = rpc::request_line(&elicit, "elicitation/create", question);
+                self.wait = Some(Wait {
+                    call: id.clone(),
+                    elicit,
+                    pending,
+                    deadline: Instant::now() + self.ask_timeout,
+                });
+                Done::Ask(line)
+            }
+            Era::Modern if rpc::request_elicitation(params) => {
+                let Some(key) = random_hex(12) else {
+                    return Done::Result(tool_error(
+                        "vizdaw-mcp could not make a one-time key for the question, so nothing changed.",
+                    ));
+                };
+                let now = Instant::now();
+                self.held.retain(|h| h.expires > now);
+                while self.held.len() >= MAX_HELD {
+                    self.held.remove(0);
+                }
+                self.held.push(Held {
+                    key: key.clone(),
+                    pending,
+                    expires: now + self.ask_timeout,
+                });
+                Done::Result(json!({
+                    "resultType": "input_required",
+                    "inputRequests": { "yes": { "method": "elicitation/create", "params": question } },
+                    "requestState": key,
+                }))
             }
             _ => {
-                return Err(RpcError::new(
-                    rpc::INVALID_PARAMS,
-                    format!("No tool {:?}.", rpc::truncate(name, 64)),
-                ));
+                while self.tokens.len() >= MAX_HELD {
+                    self.tokens.pop_front();
+                }
+                self.tokens.push_back(pending.token.clone());
+                Done::Result(tool_text(
+                    tools::list_for_the_model(items, &pending.token),
+                    false,
+                ))
             }
+        }
+    }
+
+    /// A 2026-07-28 retry: its `requestState` is used up whatever happens,
+    /// and must be one this server holds, for the same commands.
+    fn retry(&mut self, params: &Map<String, Value>, a: &ChangeArgs) -> Value {
+        let now = Instant::now();
+        self.held.retain(|h| h.expires > now);
+        let key = params.get("requestState").and_then(Value::as_str);
+        let Some(at) = key.and_then(|k| self.held.iter().position(|h| h.key == k)) else {
+            return tool_error(tools::EXPIRED);
+        };
+        let held = self.held.remove(at);
+        if held.pending.commands != a.commands || held.pending.window != a.window {
+            return tool_error(tools::EXPIRED);
+        }
+        let answer = match params.get("inputResponses") {
+            None | Some(Value::Null) => Answer::No,
+            Some(Value::Object(r)) => match r.get("yes") {
+                None => Answer::No,
+                Some(v) => rpc::elicitation_answer(Some(v)),
+            },
+            Some(_) => Answer::Unreadable,
+        };
+        self.decided(answer, &held.pending)
+    }
+
+    /// The fallback's second half: a token `change` gave the model in this
+    /// conversation, used once.
+    fn apply_change(&mut self, args: &Map<String, Value>) -> Value {
+        let a = match tools::change_args(args, true) {
+            Ok(a) => a,
+            Err(m) => return tool_error(m),
+        };
+        let token = a.token.clone().unwrap_or_default();
+        let Some(at) = self.tokens.iter().position(|t| *t == token) else {
+            return tool_error(tools::NOT_OUR_TOKEN);
+        };
+        self.tokens.remove(at);
+        self.apply(&Pending {
+            token,
+            commands: a.commands,
+            window: a.window,
         })
+    }
+
+    /// Sends `co_producer.apply` and answers its results.
+    fn apply(&mut self, p: &Pending) -> Value {
+        let a = ChangeArgs {
+            commands: p.commands.clone(),
+            window: p.window,
+            token: None,
+        };
+        match self
+            .app
+            .call("co_producer.apply", plan_params(&a, Some(&p.token)))
+        {
+            Ok(result) => {
+                let mut text = result.to_string();
+                if let Some(label) = result.get("undo_label").and_then(Value::as_str) {
+                    if label.starts_with("Co-Producer: ") {
+                        text.push_str("\nUndo step: ");
+                        text.push_str(label);
+                    }
+                }
+                tool_text(text, false)
+            }
+            Err(e) => self.failed(&e),
+        }
     }
 
     /// The text of a failed call.
@@ -348,6 +697,36 @@ impl Server {
             "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }],
         }))
     }
+}
+
+fn internal_error(id: &Value) -> String {
+    rpc::error_line(
+        id,
+        &RpcError::new(rpc::INTERNAL_ERROR, "Internal error: vizdaw-mcp went on."),
+    )
+}
+
+/// A preview's or apply's params.
+fn plan_params(a: &ChangeArgs, token: Option<&str>) -> Value {
+    let mut p = Map::new();
+    p.insert("commands".into(), a.commands.clone());
+    if let Some(w) = a.window {
+        p.insert("window".into(), json!(w));
+    }
+    if let Some(t) = token {
+        p.insert("token".into(), json!(t));
+    }
+    Value::Object(p)
+}
+
+/// `n` random bytes from `/dev/urandom` as lowercase hex; None when it
+/// cannot be read (no weaker fallback).
+fn random_hex(n: usize) -> Option<String> {
+    let mut bytes = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .ok()?;
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn capabilities() -> Value {

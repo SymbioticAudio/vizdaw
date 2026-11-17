@@ -65,17 +65,45 @@ pub struct FakeApp {
     script: Arc<Mutex<VecDeque<Answer>>>,
 }
 
-fn canned(server: &Server, c: &Command) -> Value {
+/// The token the fake's `n`th preview (from 1) answers.
+pub fn preview_token(n: usize) -> String {
+    format!("{:032x}", 0xfeed_0000_usize + n)
+}
+
+/// The two items the fake previews for any plan but `[edit.undo]`.
+pub fn two_items() -> Value {
+    json!([
+        {"thing": "Track 2, Vox", "change": "deleted", "composers_work": true},
+        {"thing": "Track 3, Bass", "change": "renamed to \"Low\"", "composers_work": true},
+    ])
+}
+
+/// `previews` counts the previews seen so far, this one included.
+fn canned(server: &Server, c: &Command, previews: usize) -> Value {
     match c {
         Command::CommandRun { id, .. } => json!({ "status": format!("ran {id}") }),
         Command::StateGet { target, .. } => json!({ "target": format!("{target:?}") }),
         Command::CoProducerBegin { name, .. } => json!({ "begun": name }),
         Command::CoProducerEnd { .. } => json!({ "ended": true }),
         Command::CoProducerStatus { .. } => json!({ "request": null }),
-        Command::CoProducerPreview { .. } => {
-            json!({ "token": "0".repeat(32), "needs_yes": true, "items": [] })
+        Command::CoProducerPreview { plan, .. } => {
+            let undo_only = plan.len() == 1 && plan[0].id == "edit.undo";
+            if undo_only {
+                json!({
+                    "doc": 1,
+                    "token": preview_token(previews),
+                    "needs_yes": false,
+                    "items": [{"thing": "Undo", "change": "Co-Producer: Add a Bus", "composers_work": false}],
+                })
+            } else {
+                json!({ "doc": 1, "token": preview_token(previews), "needs_yes": true, "items": two_items() })
+            }
         }
-        Command::CoProducerApply { .. } => json!({ "results": [], "undo_label": null }),
+        Command::CoProducerApply { plan, .. } => json!({
+            "doc": 1,
+            "results": plan.iter().map(|p| json!({"id": p.id, "status": "ran"})).collect::<Vec<_>>(),
+            "undo_label": "Co-Producer: Tidy Up",
+        }),
         Command::UiScreenshot { .. } => {
             let path = server.screenshot_path();
             std::fs::write(&path, PNG).unwrap();
@@ -111,7 +139,13 @@ impl FakeApp {
                         thread::sleep(Duration::from_millis(1));
                         continue;
                     };
-                    seen.lock().unwrap().push(call.command.clone());
+                    let previews = {
+                        let mut seen = seen.lock().unwrap();
+                        seen.push(call.command.clone());
+                        seen.iter()
+                            .filter(|c| matches!(c, Command::CoProducerPreview { .. }))
+                            .count()
+                    };
                     let outcome = match script.lock().unwrap().pop_front() {
                         Some(Answer::Ok(v)) => Ok(v),
                         Some(Answer::Err(e)) => Err(e),
@@ -120,7 +154,7 @@ impl FakeApp {
                             thread::sleep(d);
                             Ok(v)
                         }
-                        None => Ok(canned(&s, &call.command)),
+                        None => Ok(canned(&s, &call.command, previews)),
                     };
                     s.reply(call.token, outcome);
                 }
@@ -143,6 +177,14 @@ impl FakeApp {
     /// Every call that reached the app, in order.
     pub fn seen(&self) -> Vec<Command> {
         self.seen.lock().unwrap().clone()
+    }
+
+    /// The `co_producer.apply` calls that reached the app.
+    pub fn applies(&self) -> Vec<Command> {
+        self.seen()
+            .into_iter()
+            .filter(|c| matches!(c, Command::CoProducerApply { .. }))
+            .collect()
     }
 
     /// The `command.run` calls that reached the app.
