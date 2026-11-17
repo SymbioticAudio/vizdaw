@@ -127,6 +127,9 @@ pub struct Server {
     /// The documents whose notes the first answer already gave, oldest
     /// first, at most [`MAX_NOTED`].
     noted: VecDeque<String>,
+    /// The document of the latest begin: a note or an export folder sent
+    /// without `window` must land there, not in the front document.
+    begun: Option<String>,
     /// What the client called itself at `initialize`, cleaned: every
     /// `co_producer.apply` carries it as `client` (plan 8b Ruling 11).
     client: Option<String>,
@@ -173,6 +176,7 @@ impl Server {
             held: Vec::new(),
             tokens: VecDeque::new(),
             noted: VecDeque::new(),
+            begun: None,
             client: None,
         }
     }
@@ -413,7 +417,7 @@ impl Server {
         }
         match name {
             tools::BEGIN_REQUEST => done(self.begin_request(args)),
-            tools::END_REQUEST => done(self.simple("co_producer.end", args, &[])),
+            tools::END_REQUEST => done(self.end_request(args)),
             tools::READ_NOTES => done(self.read_notes(args)),
             tools::ADD_NOTE => done(self.add_note(args)),
             tools::EXPORT_FOLDER => done(self.export_folder(args)),
@@ -654,13 +658,6 @@ impl Server {
             .map_err(|e| self.failed(&e))
     }
 
-    fn simple(&mut self, cmd: &str, args: &Map<String, Value>, allowed: &[&str]) -> Value {
-        match self.pass(cmd, args, allowed) {
-            Ok(result) => tool_text(result.to_string(), false),
-            Err(e) => e,
-        }
-    }
-
     fn begin_request(&mut self, args: &Map<String, Value>) -> Value {
         match args.get("name") {
             Some(Value::String(s))
@@ -683,6 +680,7 @@ impl Server {
         };
         let mut text = begun.to_string();
         let doc = begun.get("doc").and_then(Value::as_str).unwrap_or("");
+        self.begun = begun.get("doc").and_then(Value::as_str).map(str::to_string);
         if !self.noted.iter().any(|d| d == doc) {
             // A failed read leaves the answer as it is; the next request tries again.
             let window: Map<String, Value> = args
@@ -729,10 +727,59 @@ impl Server {
         }
     }
 
+    fn end_request(&mut self, args: &Map<String, Value>) -> Value {
+        match self.pass("co_producer.end", args, &[]) {
+            Ok(r) => {
+                if r.get("doc").and_then(Value::as_str) == self.begun.as_deref() {
+                    self.begun = None;
+                }
+                tool_text(r.to_string(), false)
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// A write sent without `window` goes to the front document, which may
+    /// not be the begin's: check the front document first, and the answer's.
+    fn begun_front(&mut self, args: &Map<String, Value>) -> Result<(), Value> {
+        let Some(want) = self.begun.clone() else {
+            return Ok(());
+        };
+        if args.get("window").is_some_and(|w| !w.is_null()) {
+            return Ok(());
+        }
+        let status = self.pass("co_producer.status", &Map::new(), &[])?;
+        match status.get("doc").and_then(Value::as_str) {
+            Some(d) if d != want => Err(other_song()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The answer must name the begin's document too.
+    fn begun_answer(&self, args: &Map<String, Value>, r: &Value) -> Result<(), Value> {
+        match (&self.begun, r.get("doc").and_then(Value::as_str)) {
+            (Some(want), Some(d))
+                if d != want && !args.get("window").is_some_and(|w| !w.is_null()) =>
+            {
+                Err(other_song())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn add_note(&mut self, args: &Map<String, Value>) -> Value {
-        match tools::check_notes_args(tools::ADD_NOTE, args) {
-            Ok(()) => self.simple("co_producer.note", args, &["text"]),
-            Err(m) => tool_error(m),
+        if let Err(m) = tools::check_notes_args(tools::ADD_NOTE, args) {
+            return tool_error(m);
+        }
+        if let Err(e) = self.begun_front(args) {
+            return e;
+        }
+        match self.pass("co_producer.note", args, &["text"]) {
+            Ok(r) => match self.begun_answer(args, &r) {
+                Ok(()) => tool_text(r.to_string(), false),
+                Err(e) => e,
+            },
+            Err(e) => e,
         }
     }
 
@@ -740,11 +787,19 @@ impl Server {
         if let Err(m) = tools::check_notes_args(tools::EXPORT_FOLDER, args) {
             return tool_error(m);
         }
+        if let Err(e) = self.begun_front(args) {
+            return e;
+        }
         match self.pass("co_producer.export_folder", args, &["what", "parent"]) {
-            Ok(r) => match r.get("path").and_then(Value::as_str) {
-                Some(p) => tool_text(p, false),
-                None => tool_text(r.to_string(), false),
-            },
+            Ok(r) => {
+                if let Err(e) = self.begun_answer(args, &r) {
+                    return e;
+                }
+                match r.get("path").and_then(Value::as_str) {
+                    Some(p) => tool_text(p, false),
+                    None => tool_text(r.to_string(), false),
+                }
+            }
             Err(e) => e,
         }
     }
@@ -895,6 +950,13 @@ fn take_screenshot(support: &Path, path: &Path) -> Result<Vec<u8>, String> {
         Ok(b) => Ok(b),
         Err(e) => Err(format!("The screenshot could not be read ({e}).")),
     }
+}
+
+/// The refusal when a note or an export folder would land in another song.
+fn other_song() -> Value {
+    tool_error(
+        "The front song is not the one this request began in. Bring that song's window forward, or name its `window`.",
+    )
 }
 
 #[cfg(test)]

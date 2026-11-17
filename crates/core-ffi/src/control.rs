@@ -1833,7 +1833,7 @@ pub fn result_json(r: &ControlResult) -> Value {
         ControlResult::CoProducerNotes { doc, notes } => json!({
             "doc": doc, "text": notes.text, "truncated": notes.truncated, "path": notes.path,
         }),
-        ControlResult::CoProducerFolder { path, .. } => json!({ "path": path }),
+        ControlResult::CoProducerFolder { doc, path } => json!({ "doc": doc, "path": path }),
         ControlResult::CoProducerApprovalAnswered {
             app,
             kind,

@@ -1526,3 +1526,31 @@ fn vizdaws_no_reaches_the_model() {
         );
     }
 }
+
+#[test]
+fn note_and_folder_refuse_when_the_front_song_changed() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::Ok(json!({"doc": "d1", "begun": "x"})));
+    app.script(Answer::Ok(
+        json!({"doc": "d1", "text": "n\n", "truncated": false, "path": "/y/Notes.md"}),
+    ));
+    let r = m.call("begin_request", json!({"name": "x"}));
+    assert!(!is_error(&r), "{r}");
+    // The front document is now d2: status names it, so nothing is sent.
+    app.script(Answer::Ok(json!({"doc": "d2", "request": null})));
+    let r = m.call("add_note", json!({"text": "Wrong song."}));
+    assert!(is_error(&r), "{r}");
+    app.script(Answer::Ok(json!({"doc": "d2", "request": null})));
+    let r = m.call("export_folder", json!({"what": "stems"}));
+    assert!(is_error(&r), "{r}");
+    let seen = app.seen();
+    assert!(
+        !seen.iter().any(|c| matches!(
+            c,
+            Command::CoProducerNote { .. } | Command::CoProducerExportFolder { .. }
+        )),
+        "{seen:?}"
+    );
+}
