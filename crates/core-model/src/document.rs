@@ -402,6 +402,41 @@ pub struct Document {
     counters: Counters,
     /// Derived, never serialized: event ID -> location.
     index: ArcMap<EventId, EventLoc>,
+    /// Derived, never serialized: whether any Co-Producer mark may be in
+    /// it ([`Document::may_have_marks`]).
+    marks: MayHaveMarks,
+}
+
+/// Whether a document may hold Co-Producer marks (plan 8b Ruling 1):
+/// false only when it surely holds none, so a hand step on it can skip
+/// [`crate::marks::settle`]. Set when a file with marks is read and by
+/// every acting step; never cleared, so a song whose marks were all taken
+/// over keeps settling. It is a cache, not content: equality ignores it.
+#[derive(Debug, Clone, Copy, Default)]
+struct MayHaveMarks(bool);
+
+impl PartialEq for MayHaveMarks {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// Whether any track, strip, send or plug-in slot of these is marked.
+fn holds_marks<'a>(
+    instruments: impl Iterator<Item = &'a Destination>,
+    sequences: impl Iterator<Item = &'a Sequence>,
+    mixer: &Mixer,
+) -> bool {
+    let inst = |d: &Destination| matches!(&d.kind, DestKind::PluginInstrument { slot } if slot.co_producer);
+    let mut insts = instruments;
+    let mut seqs = sequences;
+    insts.any(inst)
+        || seqs.any(|s| s.lanes.iter().any(|l| l.co_producer))
+        || mixer.strips().values().any(|s| {
+            s.co_producer
+                || s.sends.iter().any(|x| x.co_producer)
+                || s.chain().any(|p| p.co_producer)
+        })
 }
 
 impl Default for Document {
@@ -472,16 +507,23 @@ impl TryFrom<DocumentRepr> for Document {
             Some(m) => m,
             None => derive_mixer(instruments.values(), outputs.values(), &mut counters),
         };
+        let sequences = collect_unique(r.sequences, |v| v.id, "sequence")?;
+        let marks = MayHaveMarks(holds_marks(
+            instruments.values(),
+            sequences.values(),
+            &mixer,
+        ));
         let mut d = Document {
             settings: r.settings,
             instruments,
             outputs,
             media: collect_unique(r.media, |v| v.id, "media")?,
-            sequences: collect_unique(r.sequences, |v| v.id, "sequence")?,
+            sequences,
             mixer,
             states: OrdMap::new(),
             counters,
             index: ArcMap::new(),
+            marks,
         };
         d.rebuild_index()?;
         Ok(d)
@@ -504,6 +546,7 @@ impl Document {
             states: OrdMap::new(),
             counters,
             index: ArcMap::new(),
+            marks: MayHaveMarks(false),
         }
     }
 
@@ -511,6 +554,17 @@ impl Document {
     /// duplicate IDs; run [`crate::rules::validate`] for the full checks.
     pub fn from_parts(repr: DocumentRepr) -> Result<Document> {
         Document::try_from(repr).map_err(|p| ModelError::Corrupt { problems: vec![p] })
+    }
+
+    /// Whether it may hold Co-Producer marks (plan 8b Ruling 1): false
+    /// only when it surely holds none. A song read from a file with marks,
+    /// or changed by any Co-Producer step, says true from then on.
+    pub fn may_have_marks(&self) -> bool {
+        self.marks.0
+    }
+
+    pub(crate) fn set_may_have_marks(&mut self) {
+        self.marks = MayHaveMarks(true);
     }
 
     /// Settings.

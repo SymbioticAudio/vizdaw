@@ -207,8 +207,22 @@ fn settle_instruments(
     }
 }
 
+/// Whether [`settle`] has work for a step from `before`: always while
+/// Co-Producer acts, else only when `before` may hold marks. A hand step
+/// on a song with no marks makes none (whatever it adds is unmarked, and
+/// nothing it copies is marked), so it skips the settling.
+pub fn settles(before: &Document, acting: bool) -> bool {
+    acting || before.may_have_marks()
+}
+
 /// Ruling 1's settling of `after` against `before`.
 pub fn settle(before: &Document, after: &mut Document, acting: bool) {
+    if !settles(before, acting) {
+        return;
+    }
+    if acting {
+        after.set_may_have_marks();
+    }
     settle_lanes(before, after, acting);
     let mixer = !after.mixer().strips().ptr_eq(before.mixer().strips());
     let insts = !after.instruments().ptr_eq(before.instruments());

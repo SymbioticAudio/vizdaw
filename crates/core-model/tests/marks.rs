@@ -512,3 +512,49 @@ fn lane_strip_matches_the_app() {
     assert_eq!(lane_strip(&d, LaneId(9_999)), None);
     assert_eq!(SUFFIX, " (Co-Producer)");
 }
+
+/// Review I-1: a hand step on a song with no marks skips the settling;
+/// once Co-Producer has acted, or a file with marks is read, every step
+/// settles.
+#[test]
+fn an_unmarked_song_skips_the_settling() {
+    use core_model::file::{from_json, to_json};
+    use core_model::marks::settles;
+    let mut h = fixture();
+    assert!(!h.doc().may_have_marks());
+    assert!(!settles(h.doc(), false));
+    assert!(settles(h.doc(), true));
+    // Hand steps keep it unmarked and skipped.
+    exec(&mut h, rename_lane(LaneId(0), "Vox"));
+    new_bus(&mut h, "Verb");
+    assert!(!h.doc().may_have_marks());
+    assert!(!settles(h.doc(), false));
+    // A file without marks reads as skipped.
+    let plain = from_json(&to_json(h.doc()).unwrap()).unwrap();
+    assert!(!plain.may_have_marks());
+
+    // After an acting step, hand steps settle again: a hand rename still
+    // takes the track over.
+    let (lane, _) = acting(&mut h, new_audio_track);
+    h.end_request().unwrap();
+    assert!(h.doc().may_have_marks());
+    assert!(settles(h.doc(), false));
+    exec(&mut h, rename_lane(lane, "Bass"));
+    assert!(!lane_of(&h, lane).co_producer);
+
+    // A file with marks reads as settling; the flag is not content.
+    let (_, strip) = acting(&mut h, new_audio_track);
+    h.end_request().unwrap();
+    let read = from_json(&to_json(h.doc()).unwrap()).unwrap();
+    assert!(read.may_have_marks());
+    assert_eq!(&read, h.doc());
+    let mut h2 = History::new(read);
+    exec(
+        &mut h2,
+        Command::Mixer(MixerCmd::RenameStrip {
+            strip,
+            name: "Mine".into(),
+        }),
+    );
+    assert!(!strip_of(&h2, strip).co_producer);
+}
