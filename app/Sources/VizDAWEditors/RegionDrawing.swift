@@ -193,7 +193,7 @@ public enum RegionDrawing {
             let style = NSMutableParagraphStyle()
             style.lineBreakMode = .byTruncatingTail
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: font, .foregroundColor: theme.legend(on: palette.body), .paragraphStyle: style,
+                .font: font, .foregroundColor: theme.swatchLegend(on: palette.body), .paragraphStyle: style,
             ]
             NSString(string: name).draw(
                 with: box, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)

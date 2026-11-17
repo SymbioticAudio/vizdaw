@@ -321,7 +321,7 @@ private struct StripHeader: View {
             }
             name
             Text(theme.stripLabel(strip.kindLabel))
-                .font(theme.type.caption.font)
+                .font(theme.stripLabelFont(theme.type.caption))
                 .foregroundStyle(theme.text.secondary.color)
                 .lineLimit(1)
             let held = model.heldSlots(of: strip)
@@ -345,7 +345,7 @@ private struct StripHeader: View {
                 .onAppear { renaming = true }
         } else {
             Text(theme.stripLabel(strip.name))
-                .font(theme.type.body.font.weight(.semibold))
+                .font(theme.stripLabelFont(theme.type.body, weight: .semibold))
                 .foregroundStyle(theme.text.primary.color)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -415,6 +415,8 @@ struct StripMenuFace: View {
     let text: String
     var dot: Color?
     var centred = false
+    /// The text's font; the caption by default.
+    var font: Font?
     @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
@@ -424,7 +426,7 @@ struct StripMenuFace: View {
             }
             if centred { Spacer(minLength: 0) }
             Text(text)
-                .font(theme.type.caption.font)
+                .font(font ?? theme.type.caption.font)
                 .foregroundStyle(theme.text.primary.color)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -447,13 +449,14 @@ struct StripMenu<Content: View>: View {
     let text: String
     var dot: Color?
     var centred = false
+    var font: Font?
     @ViewBuilder let content: () -> Content
 
     var body: some View {
         Menu {
             content()
         } label: {
-            StripMenuFace(text: text, dot: dot, centred: centred)
+            StripMenuFace(text: text, dot: dot, centred: centred, font: font)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -1017,6 +1020,13 @@ extension Theme {
         case .lowercase: text.lowercased()
         case .caps, .condensedCaps: text.uppercased()
         }
+    }
+
+    /// A strip legend's font (a name or kind): `type`'s size, in its weight
+    /// or `weight`, in the theme's legend family and label style (Console's
+    /// technical family, symbiotic-design 0.2.3).
+    func stripLabelFont(_ type: TypeStyle, weight: Font.Weight? = nil) -> Font {
+        themedLabelFont(self, size: type.size, weight: weight ?? type.weight.swiftUI)
     }
 
     /// The number boxes' palette: the readout look (fill, digits) from

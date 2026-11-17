@@ -77,6 +77,16 @@ public extension Theme {
         return Self.contrast(dark, fill) >= Self.contrast(light, fill) ? dark : light
     }
 
+    /// Text on a track swatch such as a region's body: pure black or the
+    /// white key ink, whichever has the higher WCAG contrast with it. Pure
+    /// black, not the near-black key, so every swatch reaches 4.5:1 (plan
+    /// release-fixes Task 9, owner 2026-11-17).
+    func swatchLegend(on fill: NSColor) -> NSColor {
+        let dark = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+        let light = keys.white.nsColor
+        return Self.contrast(dark, fill) >= Self.contrast(light, fill) ? dark : light
+    }
+
     /// The first of `candidates` with at least `ratio` contrast on
     /// `background`; if none has, the one with the most.
     func firstReadable(_ candidates: [ThemeColor], on background: NSColor, ratio: CGFloat) -> NSColor {

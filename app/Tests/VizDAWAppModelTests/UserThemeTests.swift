@@ -82,6 +82,18 @@ import VizDAWCore
         }
     }
 
+    /// Plan release-fixes Task 9: a file's `"legendFamily": "technical"`
+    /// reads (symbiotic-design 0.2.3) and is written back.
+    @Test func technicalLegendsRoundTrip() throws {
+        let r = parse(#"{"name": "Tech", "base": "flat", "style": {"legendFamily": "technical"}}"#)
+        #expect(r.problems == [])
+        let t = try #require(r.theme?.theme)
+        #expect(t.style.legendFamily.rawValue == "technical" && t.style.labels == Theme.flat.style.labels)
+        let back = try #require(
+            JSONSerialization.jsonObject(with: UserThemeFile.encode(t, name: "Tech", base: "flat")) as? [String: Any])
+        #expect((back["style"] as? [String: Any])?["legendFamily"] as? String == "technical")
+    }
+
     /// The parser under hostile files: each problem is listed, nothing
     /// crashes, and a token that does not read keeps the base's.
     @Test func hostileFilesAreListedNotFatal() throws {

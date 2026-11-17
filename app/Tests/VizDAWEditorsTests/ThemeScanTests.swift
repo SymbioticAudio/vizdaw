@@ -353,17 +353,13 @@ enum SourceScan {
         }
     }
 
-    /// Plan release-fixes Task 9: the region names and lit legends draw on
-    /// the track swatches, so each of the eight carries its legend (WCAG
-    /// 4.5:1) in every theme, except the swatches below.
-    /// Swatches on which the better key ink stays under 4.5:1 (the key
-    /// blacks are #1A1A1A and #222222, not pure black): Classic Light's
-    /// orange (4.42), Symbiotic's orange and yellow (4.33, 4.31). Decision
-    /// 7 (darker orange) is not approved, so the tokens are unchanged and
-    /// the token owner decides.
-    static let shortSwatches: Set<String> = ["classic-light orange", "symbiotic orange", "symbiotic yellow"]
-
-    @Test func everySwatchCarriesALegend() {
+    /// Plan release-fixes Task 9: region names draw on the track swatches,
+    /// so each of the eight carries its legend (WCAG 4.5:1) in every theme.
+    /// Swatch legends are pure black or the white key (owner, 2026-11-17):
+    /// the near-black key ink left Classic Light's orange (4.42) and
+    /// Symbiotic's orange and yellow (4.33, 4.31) short. Tokens unchanged.
+    @Test func everySwatchCarriesALegend() throws {
+        let black = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
         for t in Theme.all {
             let s = t.swatch
             let fills: [(String, ThemeColor)] = [
@@ -372,14 +368,42 @@ enum SourceScan {
             ]
             for (name, fill) in fills {
                 let f = fill.nsColor
-                let ratio = Theme.contrast(t.legend(on: f), f)
-                if Self.shortSwatches.contains("\(t.id) \(name)") {
-                    #expect(ratio < 4.5 && ratio >= 4.3, "\(t.id) \(name): \(ratio)")
-                } else {
-                    #expect(ratio >= 4.5, "\(t.id) \(name): \(ratio)")
-                }
+                let ink = t.swatchLegend(on: f)
+                #expect(Theme.contrast(ink, f) >= 4.5, "\(t.id) \(name): \(Theme.contrast(ink, f))")
+                let isBlack = ink.usingColorSpace(.sRGB) == black.usingColorSpace(.sRGB)
+                #expect(isBlack || ink == t.keys.white.nsColor, "\(t.id) \(name): black or the white key")
             }
         }
+        #expect(Theme.classicLight.swatchLegend(on: Theme.classicLight.swatch.orange.nsColor).usingColorSpace(.sRGB)
+            == black.usingColorSpace(.sRGB))
+        let drawing = try String(
+            contentsOf: SourceScan.sourcesRoot.appendingPathComponent("VizDAWEditors/RegionDrawing.swift"),
+            encoding: .utf8)
+        #expect(drawing.contains("theme.swatchLegend(on: palette.body)"), "region names take the swatch legend")
+    }
+
+    /// Plan release-fixes Task 9 (Decision 8): Console's legends are in the
+    /// technical family (symbiotic-design 0.2.3), and every strip legend
+    /// (a `stripLabel` name or kind) takes the theme's legend family through
+    /// `stripLabelFont`, which is `themedLabelFont`.
+    @Test func consoleLegendsUseTheTechnicalFamily() throws {
+        #expect(Theme.console.style.legendFamily.rawValue == "technical")
+        for t in Theme.all where t.id != "console" { #expect(t.style.legendFamily.rawValue == "system", "\(t.id)") }
+        var legends = 0
+        for file in ["VizDAW/ChannelStrip.swift", "VizDAW/MidiStripCells.swift"] {
+            let url = SourceScan.sourcesRoot.appendingPathComponent(file)
+            let lines = try String(contentsOf: url, encoding: .utf8).components(separatedBy: "\n")
+            for (i, line) in lines.enumerated() where line.contains("theme.stripLabel(") {
+                legends += 1
+                // The font is on the same line (a menu face) or the next (a Text).
+                let font = line + (i + 1 < lines.count ? lines[i + 1] : "")
+                #expect(font.contains("theme.stripLabelFont("), "\(file):\(i + 1): \(line)")
+            }
+        }
+        #expect(legends == 5)
+        let strip = try String(
+            contentsOf: SourceScan.sourcesRoot.appendingPathComponent("VizDAW/ChannelStrip.swift"), encoding: .utf8)
+        #expect(strip.contains("themedLabelFont(self, size: type.size"))
     }
 
     /// B5 review M4 and M5: offline text and icons on the window (4.5:1),

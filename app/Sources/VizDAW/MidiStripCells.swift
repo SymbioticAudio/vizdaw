@@ -82,7 +82,7 @@ private struct MidiStripHeader: View {
                     .accessibilityHidden(true)
             }
             if menu, let lane {
-                StripMenu(text: theme.stripLabel(name), centred: true) {
+                StripMenu(text: theme.stripLabel(name), centred: true, font: theme.stripLabelFont(theme.type.caption)) {
                     destinationItem(lane, nil, MidiStripMath.noDestination)
                     Divider()
                     ForEach(model.destinations, id: \.id) { d in
@@ -94,7 +94,7 @@ private struct MidiStripHeader: View {
                 .accessibilityValue(name)
             } else {
                 Text(theme.stripLabel(name))
-                    .font(theme.type.body.font.weight(.semibold))
+                    .font(theme.stripLabelFont(theme.type.body, weight: .semibold))
                     .foregroundStyle(dest == nil ? theme.text.secondary.color : theme.text.primary.color)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -102,7 +102,7 @@ private struct MidiStripHeader: View {
                     .help(name)
             }
             Text(theme.stripLabel(MidiStripMath.kindLabel(channel: dest?.channel, mpe: dest?.mpe)))
-                .font(theme.type.caption.font)
+                .font(theme.stripLabelFont(theme.type.caption))
                 .foregroundStyle(theme.text.secondary.color)
                 .lineLimit(1)
         }
