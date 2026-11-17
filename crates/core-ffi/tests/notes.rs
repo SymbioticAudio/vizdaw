@@ -978,7 +978,7 @@ fn notes_and_folder_results_as_json() {
     };
     assert_eq!(
         result_json(&r),
-        serde_json::json!({"path": "/x/S — Stems — 2026-11-16"})
+        serde_json::json!({"doc": "d1", "path": "/x/S — Stems — 2026-11-16"})
     );
 }
 
