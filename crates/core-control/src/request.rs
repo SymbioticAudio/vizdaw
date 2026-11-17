@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every command name.
-pub const COMMAND_NAMES: [&str; 21] = [
+pub const COMMAND_NAMES: [&str; 22] = [
     "commands.list",
     "command.run",
     "state.get",
@@ -36,6 +36,7 @@ pub const COMMAND_NAMES: [&str; 21] = [
     "co_producer.notes",
     "co_producer.note",
     "co_producer.export_folder",
+    "co_producer.export",
 ];
 
 /// The longest Co-Producer request name, in characters after trimming
@@ -51,6 +52,9 @@ pub const MAX_CLIENT_LABEL: usize = 100;
 pub const MAX_NOTE: usize = 2000;
 /// The most lines in one `co_producer.note` (Ruling 9).
 pub const MAX_NOTE_LINES: usize = 20;
+/// The longest marker name, in characters after trimming (plan 8c
+/// Ruling 4).
+pub const MAX_MARKER_NAME: usize = 64;
 
 /// What a `co_producer.export_folder` is for (plan 8b Ruling 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +375,20 @@ pub enum Command {
         /// Whose document.
         window: Option<WindowRef>,
     },
+    /// Exports the song in one call into a new dated folder (plan 8c
+    /// Ruling 1).
+    CoProducerExport {
+        /// What to export; never [`ExportWhat::Selection`].
+        what: ExportWhat,
+        /// The folder to make the dated folder in; absent: the remembered
+        /// one, else the song's own. Checked by the gate, not here.
+        parent: Option<PathBuf>,
+        /// The strips to bounce, only for stems and other_daw; absent:
+        /// For Another DAW's default strips.
+        strips: Option<Vec<u64>>,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
 }
 
 impl Command {
@@ -392,6 +410,7 @@ impl Command {
                 | Command::CoProducerNotes { .. }
                 | Command::CoProducerNote { .. }
                 | Command::CoProducerExportFolder { .. }
+                | Command::CoProducerExport { .. }
         )
     }
 }
@@ -612,6 +631,26 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 window: p.window()?,
             })
         }
+        "co_producer.export" => {
+            p.only(&["what", "parent", "strips", "window"])?;
+            let what = chore_export_what(&p)?;
+            let strips = match p.opt_str("strips", MAX_STRING)? {
+                None => None,
+                Some(_) if !matches!(what, ExportWhat::Stems | ExportWhat::OtherDaw) => {
+                    return Err(p.error("strips is only for stems and other_daw."));
+                }
+                Some(s) => Some(
+                    crate::co_producer::id_list(&s)
+                        .map_err(|m| p.error(format!("`strips`: {m}")))?,
+                ),
+            };
+            Ok(Command::CoProducerExport {
+                what,
+                parent: export_parent(&p)?,
+                strips,
+                window: p.window()?,
+            })
+        }
         other => Err(ControlError::new(
             ErrorCode::UnknownCommand,
             format!(
@@ -659,7 +698,7 @@ fn command_run(p: &Params<'_>, all: &Map<String, Value>) -> Result<Command, Cont
 
 /// A character a request name may not hold (plan 8a Ruling 4): a C0 or C1
 /// control, a bidi control or mark, or a line or paragraph separator.
-fn refused_in_name(c: char) -> bool {
+pub(crate) fn refused_in_name(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
@@ -767,6 +806,45 @@ fn export_what(p: &Params<'_>) -> Result<ExportWhat, ControlError> {
         let names: Vec<&str> = ExportWhat::ALL.iter().map(|w| w.name()).collect();
         p.error(format!("`what` must be one of {}", names.join(", ")))
     })
+}
+
+/// `co_producer.export`'s `what` (plan 8c Ruling 1): any but `selection`,
+/// which a one-call export cannot bounce.
+fn chore_export_what(p: &Params<'_>) -> Result<ExportWhat, ControlError> {
+    let what = p.str("what", 32)?;
+    match ExportWhat::parse(&what) {
+        Some(ExportWhat::Selection) => {
+            Err(p.error("Bounce a selection with export_folder and file_bounce."))
+        }
+        Some(w) => Ok(w),
+        None => {
+            let names: Vec<&str> = ExportWhat::ALL
+                .iter()
+                .filter(|w| **w != ExportWhat::Selection)
+                .map(|w| w.name())
+                .collect();
+            Err(p.error(format!("`what` must be one of {}", names.join(", "))))
+        }
+    }
+}
+
+/// A marker's `name` (plan 8c Ruling 4): 1 to [`MAX_MARKER_NAME`]
+/// characters after trimming, with a request name's character rules
+/// (plan 8a P11). Answers the trimmed name, or the broken rule.
+pub(crate) fn marker_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("`name` must not be empty".into());
+    }
+    if name.chars().count() > MAX_MARKER_NAME {
+        return Err(format!(
+            "`name` is longer than {MAX_MARKER_NAME} characters"
+        ));
+    }
+    if name.chars().any(refused_in_name) {
+        return Err("`name` must not hold control, direction or line-separator characters".into());
+    }
+    Ok(name.to_string())
 }
 
 /// `co_producer.export_folder`'s optional `parent`: a string of at most

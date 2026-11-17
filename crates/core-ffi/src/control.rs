@@ -539,6 +539,19 @@ pub enum ControlRequest {
         /// Whose document.
         window: Option<WindowRefRow>,
     },
+    /// `co_producer.export` (plan 8c Ruling 1): the whole export in one
+    /// call, into a new dated folder.
+    CoProducerExport {
+        /// What to export; never `Selection`.
+        what: ExportWhatRow,
+        /// The folder to make the dated folder in, already checked by the
+        /// gate.
+        parent: Option<String>,
+        /// The strips, already checked: 1 to 64 unique IDs.
+        strips: Option<Vec<u64>>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
 }
 
 /// Who a Co-Producer call came from (plan 8b Ruling 11): its connection
@@ -1176,6 +1189,17 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
         } => ControlRequest::CoProducerExportFolder {
             what: export_what_row(what),
             parent: parent.map(|p| p.to_string_lossy().into_owned()),
+            window: window_row(window),
+        },
+        Command::CoProducerExport {
+            what,
+            parent,
+            strips,
+            window,
+        } => ControlRequest::CoProducerExport {
+            what: export_what_row(what),
+            parent: parent.map(|p| p.to_string_lossy().into_owned()),
+            strips,
             window: window_row(window),
         },
         Command::CoProducerEnd { window } => ControlRequest::CoProducerEnd {

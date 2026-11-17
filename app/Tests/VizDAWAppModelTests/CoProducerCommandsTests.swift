@@ -320,6 +320,25 @@ import VizDAWCore
         #expect(failure(o)?.code == .noDocument)
     }
 
+    /// Plan 8c Task 1: the one-call export and the six chore commands
+    /// answer "Not ready yet." until Task 4, and reach no session call.
+    @Test func choresAreNotReadyYet() throws {
+        let (s, id, _, f) = try demo()
+        let o = run(.coProducerExport(what: .stems, parent: nil, strips: [2, 3], window: nil), s, id)
+        #expect(failure(o)?.code == .unavailable)
+        #expect(failure(o)?.message == "Not ready yet.")
+        #expect(f.coLog == [])
+        for chore in [
+            "modify.quantize_notes", "modify.transpose_notes", "modify.velocity_notes",
+            "marker.add", "marker.rename", "marker.remove",
+        ] {
+            #expect(ControlCommands.handled.contains(chore), "\(chore)")
+            let r = ControlCommands.run(chore, args: [], doc: (id, try #require(s.model(id))), store: s, host: host)
+            #expect(failure(r)?.code == .unavailable, "\(chore)")
+            #expect(failure(r)?.message == "Not ready yet.", "\(chore)")
+        }
+    }
+
     @Test func requestsTheGateRefusesAreNotAllowedHereToo() throws {
         let (s, id, _, f) = try demo()
         let o = run(.quit, s, id)

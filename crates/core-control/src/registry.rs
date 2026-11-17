@@ -1192,6 +1192,161 @@ const REMOVE_CROSSFADE_PARAMS: &[ParamSpec] = &[
     ),
 ];
 
+/// The quantize grids of `modify.quantize_notes` and their lengths in
+/// ticks at 15 360 per quarter note (plan 8c Ruling 2).
+pub const GRIDS: &[(&str, i64)] = &[
+    ("1/4", 15360),
+    ("1/8", 7680),
+    ("1/16", 3840),
+    ("1/32", 1920),
+    ("1/8t", 5120),
+    ("1/16t", 2560),
+];
+
+/// [`GRIDS`]' names, as `grid`'s choices (a test pins the two together).
+const GRID_NAMES: &[&str] = &["1/4", "1/8", "1/16", "1/32", "1/8t", "1/16t"];
+
+/// The latest tick a note chore or a marker takes.
+const MAX_TICK: i64 = 1 << 40;
+
+/// A required sequence ID of at least 1 (plan 8c Rulings 2 and 4).
+const CHORE_SEQ: ParamSpec = ParamSpec {
+    name: "seq",
+    kind: ParamKind::Int {
+        min: 1,
+        max: i64::MAX / 2,
+    },
+    required: true,
+    help: "The sequence (see state.get document).",
+};
+
+/// The target parameters every note chore shares (plan 8c Ruling 2).
+const NOTE_TARGET_PARAMS: [ParamSpec; 4] = [
+    CHORE_SEQ,
+    ParamSpec {
+        name: "lanes",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Track IDs, comma-separated: 1 to 64, each once (see state.get document).",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: MAX_TICK,
+        },
+        required: false,
+        help: "The range's first tick (give `start` and `end` together, or neither: the whole track).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: MAX_TICK,
+        },
+        required: false,
+        help: "The range's end tick, exclusive and after `start`.",
+    },
+];
+
+/// `modify.quantize_notes` (plan 8c Ruling 2).
+const QUANTIZE_NOTES_PARAMS: &[ParamSpec] = &[
+    NOTE_TARGET_PARAMS[0],
+    NOTE_TARGET_PARAMS[1],
+    NOTE_TARGET_PARAMS[2],
+    NOTE_TARGET_PARAMS[3],
+    ParamSpec {
+        name: "grid",
+        kind: ParamKind::Choice(GRID_NAMES),
+        required: true,
+        help: "The grid: 1/4, 1/8, 1/16, 1/32, 1/8t or 1/16t.",
+    },
+    ParamSpec {
+        name: "strength",
+        kind: ParamKind::Int { min: 1, max: 100 },
+        required: false,
+        help: "How far each note moves toward the grid, in percent (default 100).",
+    },
+];
+
+/// `modify.transpose_notes` (plan 8c Ruling 2).
+const TRANSPOSE_NOTES_PARAMS: &[ParamSpec] = &[
+    NOTE_TARGET_PARAMS[0],
+    NOTE_TARGET_PARAMS[1],
+    NOTE_TARGET_PARAMS[2],
+    NOTE_TARGET_PARAMS[3],
+    ParamSpec {
+        name: "semitones",
+        kind: ParamKind::Int { min: -48, max: 48 },
+        required: true,
+        help: "Semitones up (positive) or down (negative), -48 to 48, not 0.",
+    },
+];
+
+/// `modify.velocity_notes` (plan 8c Ruling 2).
+const VELOCITY_NOTES_PARAMS: &[ParamSpec] = &[
+    NOTE_TARGET_PARAMS[0],
+    NOTE_TARGET_PARAMS[1],
+    NOTE_TARGET_PARAMS[2],
+    NOTE_TARGET_PARAMS[3],
+    ParamSpec {
+        name: "op",
+        kind: ParamKind::Choice(&["set", "add", "scale"]),
+        required: true,
+        help: "set: every velocity to `amount`; add: `amount` to each; scale: each to `amount` percent.",
+    },
+    ParamSpec {
+        name: "amount",
+        kind: ParamKind::Int {
+            min: -126,
+            max: 400,
+        },
+        required: true,
+        help: "set: 1 to 127; add: -126 to 126, not 0; scale: 10 to 400.",
+    },
+];
+
+/// A marker's 1-based place in its sequence, sorted by tick (plan 8c
+/// Ruling 4).
+const MARKER_INDEX: ParamSpec = ParamSpec {
+    name: "index",
+    kind: ParamKind::Int {
+        min: 1,
+        max: i64::MAX / 2,
+    },
+    required: true,
+    help: "The marker, from 1 in tick order (see state.get document `markers`).",
+};
+
+/// A marker's name (plan 8c Ruling 4).
+const MARKER_NAME: ParamSpec = ParamSpec {
+    name: "name",
+    kind: ParamKind::Text,
+    required: true,
+    help: "The marker's name: 1 to 64 characters.",
+};
+
+/// `marker.add` (plan 8c Ruling 4).
+const MARKER_ADD_PARAMS: &[ParamSpec] = &[
+    CHORE_SEQ,
+    ParamSpec {
+        name: "tick",
+        kind: ParamKind::Int {
+            min: 0,
+            max: MAX_TICK,
+        },
+        required: true,
+        help: "Where the marker goes, in ticks.",
+    },
+    MARKER_NAME,
+];
+
+/// `marker.rename` (plan 8c Ruling 4).
+const MARKER_RENAME_PARAMS: &[ParamSpec] = &[CHORE_SEQ, MARKER_INDEX, MARKER_NAME];
+
+/// `marker.remove` (plan 8c Ruling 4).
+const MARKER_REMOVE_PARAMS: &[ParamSpec] = &[CHORE_SEQ, MARKER_INDEX];
+
 /// `track.new_*` (plan tracks Ruling 5).
 const NEW_TRACK_PARAMS: &[ParamSpec] = &[
     opt_id_param("seq", "The sequence (default: the selected one)."),
@@ -2905,6 +3060,68 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: MIXER_SET_COLOUR_PARAMS,
         ..key_only(cmd("mixer.set_colour", "Mixer", "Colour", None, true))
     },
+    // Plan 8c Ruling 2: note chores with explicit values, previewable.
+    CommandSpec {
+        class: Class::Change,
+        params: QUANTIZE_NOTES_PARAMS,
+        ..key_only(cmd(
+            "modify.quantize_notes",
+            "Modify",
+            "Quantize Notes",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: TRANSPOSE_NOTES_PARAMS,
+        ..key_only(cmd(
+            "modify.transpose_notes",
+            "Modify",
+            "Transpose Notes",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: VELOCITY_NOTES_PARAMS,
+        ..key_only(cmd(
+            "modify.velocity_notes",
+            "Modify",
+            "Change Velocity",
+            None,
+            true,
+        ))
+    },
+    // Plan 8c Ruling 4: markers; a rename or removal is previewable.
+    CommandSpec {
+        class: Class::Add,
+        params: MARKER_ADD_PARAMS,
+        ..key_only(cmd("marker.add", "Transport", "Add Marker", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MARKER_RENAME_PARAMS,
+        ..key_only(cmd(
+            "marker.rename",
+            "Transport",
+            "Rename Marker",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: MARKER_REMOVE_PARAMS,
+        ..key_only(cmd(
+            "marker.remove",
+            "Transport",
+            "Remove Marker",
+            None,
+            true,
+        ))
+    },
     // Plan 8a Ruling 10: the Co-Producer switch, for the e2e.
     CommandSpec {
         params: CO_PRODUCER_SWITCH_PARAMS,
@@ -3020,12 +3237,77 @@ pub fn validate_args(
     {
         return Err(p.error("give at least one of `volume`, `pan` and `mute`"));
     }
+    chore_rules(&p, spec.id, &mut out)?;
     for d in spec.dialogs.iter().filter(|d| d.always) {
         if !d.answered_by.iter().any(|a| p.has(a)) {
             return Err(ControlError::dialog(d.name, d.answered_by));
         }
     }
     Ok(out)
+}
+
+fn int_arg(out: &[(String, ArgValue)], name: &str) -> Option<i64> {
+    out.iter().find_map(|(n, v)| match v {
+        ArgValue::Int(i) if n == name => Some(*i),
+        _ => None,
+    })
+}
+
+fn text_arg<'a>(out: &'a [(String, ArgValue)], name: &str) -> Option<&'a str> {
+    out.iter().find_map(|(n, v)| match v {
+        ArgValue::Text(t) if n == name => Some(t.as_str()),
+        _ => None,
+    })
+}
+
+/// Plan 8c Rulings 2 and 4's rules across parameters: a note chore's
+/// `lanes` list, its `start`/`end` pair and its values, and a marker's
+/// name (stored trimmed).
+fn chore_rules(
+    p: &Params<'_>,
+    id: &str,
+    out: &mut [(String, ArgValue)],
+) -> Result<(), ControlError> {
+    let note_chore = matches!(
+        id,
+        "modify.quantize_notes" | "modify.transpose_notes" | "modify.velocity_notes"
+    );
+    if note_chore {
+        if let Some(lanes) = text_arg(out, "lanes") {
+            crate::co_producer::id_list(lanes).map_err(|m| p.error(format!("`lanes`: {m}")))?;
+        }
+        match (int_arg(out, "start"), int_arg(out, "end")) {
+            (None, None) => {}
+            (Some(start), Some(end)) if end > start => {}
+            (Some(_), Some(_)) => return Err(p.error("`end` must be after `start`")),
+            _ => return Err(p.error("give `start` and `end` together, or neither")),
+        }
+    }
+    if id == "modify.transpose_notes" && int_arg(out, "semitones") == Some(0) {
+        return Err(p.error("`semitones` must not be 0"));
+    }
+    if id == "modify.velocity_notes" {
+        let amount = int_arg(out, "amount").unwrap_or(0);
+        let ok = match text_arg(out, "op") {
+            Some("set") => (1..=127).contains(&amount),
+            Some("add") => (-126..=126).contains(&amount) && amount != 0,
+            Some("scale") => (10..=400).contains(&amount),
+            _ => false,
+        };
+        if !ok {
+            return Err(p.error(
+                "`amount` must be 1 to 127 for set, -126 to 126 (not 0) for add, and 10 to 400 for scale",
+            ));
+        }
+    }
+    if matches!(id, "marker.add" | "marker.rename") {
+        for (n, v) in out.iter_mut() {
+            if let (true, ArgValue::Text(t)) = (n == "name", &*v) {
+                *v = ArgValue::Text(crate::request::marker_name(t).map_err(|m| p.error(m))?);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `unknown_id` for a `command.run` id.

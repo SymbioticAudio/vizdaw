@@ -157,6 +157,30 @@ fn co_producer_notes_calls_round_trip() {
     );
     assert_eq!(
         parse(
+            "co_producer.export",
+            json!({"what": "stems", "parent": "/Users/x/Exports", "strips": "2,3"})
+        ),
+        Command::CoProducerExport {
+            what: ExportWhat::Stems,
+            parent: Some("/Users/x/Exports".into()),
+            strips: Some(vec![2, 3]),
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.export",
+            json!({"what": "dawproject", "window": 4})
+        ),
+        Command::CoProducerExport {
+            what: ExportWhat::Dawproject,
+            parent: None,
+            strips: None,
+            window: Some(WindowRef::Number(4))
+        }
+    );
+    assert_eq!(
+        parse(
             "co_producer.begin",
             json!({"name": "Set Up a Drum Bus", "asked": "put my drums on a bus\nwith some parallel compression"})
         ),

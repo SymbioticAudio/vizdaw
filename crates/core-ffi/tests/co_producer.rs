@@ -1053,6 +1053,35 @@ mod control {
                 window: Some(WindowRefRow::Main),
             }
         );
+        // Plan 8c Ruling 1: the one-call export.
+        assert_eq!(
+            of(Command::CoProducerExport {
+                what: ExportWhat::Stems,
+                parent: Some("/Users/x/Exports".into()),
+                strips: Some(vec![2, 3]),
+                window: Some(WindowRef::Key),
+            }),
+            ControlRequest::CoProducerExport {
+                what: ExportWhatRow::Stems,
+                parent: Some("/Users/x/Exports".into()),
+                strips: Some(vec![2, 3]),
+                window: key,
+            }
+        );
+        assert_eq!(
+            of(Command::CoProducerExport {
+                what: ExportWhat::Dawproject,
+                parent: None,
+                strips: None,
+                window: None,
+            }),
+            ControlRequest::CoProducerExport {
+                what: ExportWhatRow::Dawproject,
+                parent: None,
+                strips: None,
+                window: None,
+            }
+        );
     }
 
     #[test]

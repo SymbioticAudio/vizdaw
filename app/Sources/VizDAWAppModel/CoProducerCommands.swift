@@ -109,6 +109,9 @@ public enum CoProducerCommands {
             } catch {
                 return .failed(failure(error))
             }
+        case .coProducerExport:
+            // Plan 8c Task 4 runs the export plan; until then it answers this.
+            return .failed(.of(.unavailable, ControlCommands.notReadyYet))
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }

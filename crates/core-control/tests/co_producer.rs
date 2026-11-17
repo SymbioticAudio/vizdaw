@@ -69,6 +69,7 @@ const ADD: &[&str] = &[
     "media.import",
     "file.import_midi",
     "mixer.new_bus",
+    "marker.add",
 ];
 const OUTWARD: &[&str] = &[
     "file.bounce",
@@ -118,6 +119,7 @@ const CHANGE: &[&str] = &[
     "editors.nudge_later",
     "editors.nudge_up",
     "editors.nudge_down",
+    "marker.rename",
 ];
 const REMOVE: &[&str] = &[
     "track.delete",
@@ -125,6 +127,7 @@ const REMOVE: &[&str] = &[
     "region.remove_fades",
     "region.remove_crossfade",
     "drum.remove_row",
+    "marker.remove",
 ];
 /// Spec §6.5's refused commands (the layout `ui.*` included).
 const SPEC_REFUSED: &[&str] = &[
@@ -176,7 +179,7 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 195);
+    assert_eq!(COMMANDS.len(), 201);
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");
@@ -720,9 +723,11 @@ fn outward_paths_never_replace() {
         output("file.export_dawproject", &[]),
         Some(Output::NewFile(&["dawproject"]))
     );
+    // Plan 8c: every track (no `lanes`) goes into a folder; see
+    // `midi_clips_for_several_tracks_go_into_a_folder`.
     assert_eq!(
         output("file.export_midi_clip", &[]),
-        Some(Output::NewFile(&["midi2"]))
+        Some(Output::IntoFolder)
     );
     for id in [
         "track.new_audio",
@@ -1384,4 +1389,626 @@ fn the_answer_hook_is_never_co_producers() {
         other => panic!("{other:?}"),
     }
     assert!(server.next_call().is_none(), "the app never sees it");
+}
+
+/// Plan 8c Rulings 2 and 4: the six chore commands.
+const NOTE_CHORES: &[&str] = &[
+    "modify.quantize_notes",
+    "modify.transpose_notes",
+    "modify.velocity_notes",
+];
+
+#[test]
+fn chore_commands_have_their_class() {
+    for id in NOTE_CHORES.iter().chain(&["marker.rename"]) {
+        assert_eq!(registry::find(id).unwrap().class, Class::Change, "{id}");
+    }
+    assert_eq!(
+        registry::find("marker.remove").unwrap().class,
+        Class::Remove
+    );
+    assert_eq!(registry::find("marker.add").unwrap().class, Class::Add);
+    for (id, menu, title) in [
+        ("modify.quantize_notes", "Modify", "Quantize Notes"),
+        ("modify.transpose_notes", "Modify", "Transpose Notes"),
+        ("modify.velocity_notes", "Modify", "Change Velocity"),
+        ("marker.add", "Transport", "Add Marker"),
+        ("marker.rename", "Transport", "Rename Marker"),
+        ("marker.remove", "Transport", "Remove Marker"),
+    ] {
+        let c = registry::find(id).unwrap();
+        assert_eq!((c.menu, c.title), (menu, title), "{id}");
+        assert!(!c.menu_item, "{id} is key-only");
+        assert!(c.document, "{id} acts on a document");
+        assert_eq!(c.shortcut, None, "{id}");
+    }
+    let list = co_producer::list_json();
+    let commands = list["commands"].as_array().unwrap();
+    let listed = |id: &str| {
+        commands
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is not listed"))
+            .clone()
+    };
+    for id in NOTE_CHORES
+        .iter()
+        .chain(&["marker.rename", "marker.remove"])
+    {
+        assert!(PREVIEWABLE.contains(id), "{id}");
+        assert_eq!(listed(id)["previewable"], json!(true), "{id}");
+    }
+    assert!(!PREVIEWABLE.contains(&"marker.add"));
+    assert_eq!(listed("marker.add")["previewable"], json!(false));
+    assert_eq!(listed("marker.add")["class"], "add");
+    assert_eq!(
+        PREVIEWABLE,
+        &[
+            "track.rename",
+            "track.delete",
+            "edit.undo",
+            "edit.redo",
+            "file.save",
+            "mixer.set_colour",
+            "modify.quantize_notes",
+            "modify.transpose_notes",
+            "modify.velocity_notes",
+            "marker.rename",
+            "marker.remove",
+        ]
+    );
+}
+
+#[test]
+fn chores_only_through_a_preview() {
+    let direct = |id: &str| {
+        format!(
+            "{id} changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+        )
+    };
+    for (id, params) in [
+        (
+            "modify.transpose_notes",
+            json!({"seq": 1, "lanes": "1", "semitones": 2}),
+        ),
+        (
+            "modify.quantize_notes",
+            json!({"seq": 1, "lanes": "1,2", "grid": "1/16", "strength": 50}),
+        ),
+        (
+            "modify.velocity_notes",
+            json!({"seq": 1, "lanes": "3", "op": "add", "amount": -10, "start": 0, "end": 15360}),
+        ),
+        (
+            "marker.rename",
+            json!({"seq": 1, "index": 1, "name": "Chorus"}),
+        ),
+        ("marker.remove", json!({"seq": 1, "index": 2})),
+    ] {
+        let m = assert_code(
+            "command.run",
+            run(id, params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert_eq!(m, direct(id));
+        assert_eq!(
+            preview(json!([{"id": id, "params": params}])),
+            Ok(()),
+            "{id}"
+        );
+    }
+    assert_eq!(
+        gate(
+            "command.run",
+            run("marker.add", json!({"seq": 1, "tick": 0, "name": "Verse"}))
+        ),
+        Ok(())
+    );
+    // A marker add needs no preview.
+    let e = preview(json!([
+        {"id": "marker.add", "params": {"seq": 1, "tick": 0, "name": "Verse"}}
+    ]))
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotAllowed, "{}", e.message);
+    // Every grid, both velocity ends and both transpose ends are admitted.
+    for grid in ["1/4", "1/8", "1/16", "1/32", "1/8t", "1/16t"] {
+        assert_eq!(
+            preview(
+                json!([{"id": "modify.quantize_notes", "params": {"seq": 1, "lanes": "1", "grid": grid}}])
+            ),
+            Ok(()),
+            "{grid}"
+        );
+    }
+    let grids: Vec<&str> = registry::GRIDS.iter().map(|(g, _)| *g).collect();
+    assert_eq!(grids, ["1/4", "1/8", "1/16", "1/32", "1/8t", "1/16t"]);
+    let ticks: Vec<i64> = registry::GRIDS.iter().map(|(_, t)| *t).collect();
+    assert_eq!(ticks, [15360, 7680, 3840, 1920, 5120, 2560]);
+    for (op, amount) in [
+        ("set", 1),
+        ("set", 127),
+        ("add", -126),
+        ("add", 126),
+        ("add", 1),
+        ("scale", 10),
+        ("scale", 400),
+    ] {
+        assert_eq!(
+            preview(
+                json!([{"id": "modify.velocity_notes", "params": {"seq": 1, "lanes": "1", "op": op, "amount": amount}}])
+            ),
+            Ok(()),
+            "{op} {amount}"
+        );
+    }
+    for semitones in [-48, -1, 1, 48] {
+        assert_eq!(
+            preview(
+                json!([{"id": "modify.transpose_notes", "params": {"seq": 1, "lanes": "1", "semitones": semitones}}])
+            ),
+            Ok(()),
+            "{semitones}"
+        );
+    }
+    let ids = (1..=64)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        preview(
+            json!([{"id": "modify.transpose_notes", "params": {"seq": 1, "lanes": ids, "semitones": 12}}])
+        ),
+        Ok(())
+    );
+}
+
+/// Each of `params` is `invalid_params` for `id`, both run and previewed.
+fn all_invalid(id: &str, cases: &[Value]) {
+    for params in cases {
+        assert_code(
+            "command.run",
+            run(id, params.clone()),
+            ErrorCode::InvalidParams,
+        );
+        let e = preview(json!([{"id": id, "params": params}])).unwrap_err();
+        assert_eq!(
+            e.code,
+            ErrorCode::InvalidParams,
+            "{id} {params}: {}",
+            e.message
+        );
+    }
+}
+
+/// `base` with `key` set to `value` (or removed, for null).
+fn with(base: &Value, key: &str, value: Value) -> Value {
+    let mut v = base.clone();
+    let o = v.as_object_mut().unwrap();
+    if value.is_null() {
+        o.remove(key);
+    } else {
+        o.insert(key.into(), value);
+    }
+    v
+}
+
+#[test]
+fn note_chores_refuse_hostile_input() {
+    let quantize = json!({"seq": 1, "lanes": "1", "grid": "1/16"});
+    let transpose = json!({"seq": 1, "lanes": "1", "semitones": 2});
+    let velocity = json!({"seq": 1, "lanes": "1", "op": "set", "amount": 64});
+    let many = (1..=65)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for (id, base) in [
+        ("modify.quantize_notes", &quantize),
+        ("modify.transpose_notes", &transpose),
+        ("modify.velocity_notes", &velocity),
+    ] {
+        let mut cases = vec![];
+        for lanes in [
+            Value::Null,
+            json!(""),
+            json!("1,1"),
+            json!("0"),
+            json!("a"),
+            json!("1,,2"),
+            json!("-1"),
+            json!("+1"),
+            json!("1.5"),
+            json!(3),
+            json!(["1"]),
+            json!("99999999999999999999999"),
+            json!(many),
+            json!("1".repeat(70_000)),
+            json!("1,\0"),
+        ] {
+            cases.push(with(base, "lanes", lanes));
+        }
+        cases.extend([
+            with(base, "seq", Value::Null),
+            with(base, "seq", json!(0)),
+            with(base, "seq", json!("1")),
+            with(base, "start", json!(10)),
+            with(&with(base, "start", json!(10)), "end", json!(10)),
+            with(&with(base, "start", json!(10)), "end", json!(5)),
+            with(base, "end", json!(10)),
+            with(&with(base, "start", json!(-1)), "end", json!(10)),
+            with(base, "extra", json!(1)),
+        ]);
+        all_invalid(id, &cases);
+    }
+    all_invalid(
+        "modify.quantize_notes",
+        &[
+            with(&quantize, "grid", json!("1/5")),
+            with(&quantize, "grid", Value::Null),
+            with(&quantize, "grid", json!(16)),
+            with(&quantize, "strength", json!(0)),
+            with(&quantize, "strength", json!(101)),
+            with(&quantize, "strength", json!("50")),
+        ],
+    );
+    all_invalid(
+        "modify.transpose_notes",
+        &[
+            with(&transpose, "semitones", json!(0)),
+            with(&transpose, "semitones", json!(49)),
+            with(&transpose, "semitones", json!(-49)),
+            with(&transpose, "semitones", Value::Null),
+            with(&transpose, "semitones", json!(1.5)),
+        ],
+    );
+    let op = |o: &str, a: i64| with(&with(&velocity, "op", json!(o)), "amount", json!(a));
+    all_invalid(
+        "modify.velocity_notes",
+        &[
+            op("set", 0),
+            op("set", 128),
+            op("add", 0),
+            op("add", 127),
+            op("add", -127),
+            op("scale", 9),
+            op("scale", 401),
+            with(&velocity, "op", json!("multiply")),
+            with(&velocity, "op", Value::Null),
+            with(&velocity, "amount", Value::Null),
+            with(&velocity, "amount", json!(i64::MAX)),
+        ],
+    );
+    // The message names the rule broken.
+    for (lanes, rule) in [
+        ("1,1", "twice"),
+        ("0", "1"),
+        ("a", "not an ID"),
+        ("", "1 to 64"),
+    ] {
+        let m = assert_code(
+            "command.run",
+            run(
+                "modify.transpose_notes",
+                with(&transpose, "lanes", json!(lanes)),
+            ),
+            ErrorCode::InvalidParams,
+        );
+        assert!(m.contains("lanes"), "{lanes:?}: {m}");
+        assert!(m.contains(rule), "{lanes:?}: {m}");
+    }
+    let m = assert_code(
+        "command.run",
+        run(
+            "modify.transpose_notes",
+            with(&transpose, "lanes", json!(many)),
+        ),
+        ErrorCode::InvalidParams,
+    );
+    assert!(m.contains("64"), "{m}");
+}
+
+#[test]
+fn id_lists_parse() {
+    use co_producer::id_list;
+    assert_eq!(id_list("1,2,3"), Ok(vec![1, 2, 3]));
+    assert_eq!(id_list("7"), Ok(vec![7]));
+    assert_eq!(id_list(" 4 , 2"), Ok(vec![4, 2]));
+    let ids = (1..=64)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(id_list(&ids).unwrap().len(), 64);
+    for bad in [
+        "",
+        " ",
+        "1,1",
+        "0",
+        "a",
+        "1,",
+        ",1",
+        "1,,2",
+        "-1",
+        "+1",
+        "1 2",
+        "1.0",
+        "0x1",
+        "99999999999999999999999",
+        "\u{0661}",
+    ] {
+        assert!(id_list(bad).is_err(), "{bad:?}");
+    }
+    assert!(id_list(&format!("{ids},65")).is_err());
+    assert!(id_list(&"1,".repeat(70_000)).is_err());
+}
+
+#[test]
+fn marker_commands_refuse_hostile_input() {
+    use core_control::request::MAX_MARKER_NAME;
+    assert_eq!(MAX_MARKER_NAME, 64);
+    let add = json!({"seq": 1, "tick": 0, "name": "Verse"});
+    let rename = json!({"seq": 1, "index": 1, "name": "Verse"});
+    let remove = json!({"seq": 1, "index": 1});
+    assert_eq!(
+        gate(
+            "command.run",
+            run("marker.add", with(&add, "name", json!("x".repeat(64))))
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        gate(
+            "command.run",
+            run("marker.add", with(&add, "name", json!("  Bridge 2 ")))
+        ),
+        Ok(())
+    );
+    let names = [
+        json!(""),
+        json!("   "),
+        json!("x".repeat(65)),
+        json!("x".repeat(70_000)),
+        json!("a\0b"),
+        json!("a\nb"),
+        json!("a\u{202E}b"),
+        json!("a\u{2028}b"),
+        json!("a\u{200F}b"),
+        json!(5),
+        Value::Null,
+    ];
+    for (id, base) in [("marker.add", &add), ("marker.rename", &rename)] {
+        let mut cases: Vec<Value> = names
+            .iter()
+            .map(|n| with(base, "name", n.clone()))
+            .collect();
+        cases.extend([
+            with(base, "seq", json!(0)),
+            with(base, "seq", Value::Null),
+            with(base, "extra", json!(true)),
+        ]);
+        if id == "marker.add" {
+            cases.extend([
+                with(base, "tick", json!(-1)),
+                with(base, "tick", Value::Null),
+                with(base, "tick", json!("0")),
+                with(base, "index", json!(1)),
+            ]);
+        } else {
+            cases.extend([
+                with(base, "index", json!(0)),
+                with(base, "index", Value::Null),
+                with(base, "tick", json!(0)),
+            ]);
+        }
+        // marker.add is class add: its refusals come from validation alone.
+        for params in &cases {
+            assert_code(
+                "command.run",
+                run(id, params.clone()),
+                ErrorCode::InvalidParams,
+            );
+        }
+        if id == "marker.rename" {
+            all_invalid(id, &cases);
+        }
+    }
+    all_invalid(
+        "marker.remove",
+        &[
+            with(&remove, "index", json!(0)),
+            with(&remove, "index", json!(-1)),
+            with(&remove, "index", Value::Null),
+            with(&remove, "seq", Value::Null),
+            with(&remove, "name", json!("x")),
+            with(&remove, "index", json!("1")),
+        ],
+    );
+    // The stored name is trimmed.
+    match validate(&req(
+        "command.run",
+        run("marker.add", with(&add, "name", json!("  Bridge  "))),
+    ))
+    .unwrap()
+    {
+        core_control::Command::CommandRun { args, .. } => {
+            assert!(
+                args.contains(&("name".to_string(), ArgValue::Text("Bridge".into()))),
+                "{args:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+fn chore_export(params: Value) -> Result<(), ControlError> {
+    gate("co_producer.export", params)
+}
+
+#[test]
+fn export_refuses_hostile_input() {
+    use std::os::unix::fs::symlink;
+    for (params, sentence) in [
+        (
+            json!({"what": "selection"}),
+            Some("Bounce a selection with export_folder and file_bounce."),
+        ),
+        (json!({"what": "video"}), None),
+        (json!({}), None),
+        (json!({"strips": "1"}), None),
+        (json!({"what": 3}), None),
+        (json!({"what": "Stems"}), None),
+        (
+            json!({"what": "dawproject", "strips": "1,2"}),
+            Some("strips is only for stems and other_daw."),
+        ),
+        (
+            json!({"what": "mix", "strips": "1"}),
+            Some("strips is only for stems and other_daw."),
+        ),
+        (json!({"what": "stems", "strips": "1,1"}), None),
+        (json!({"what": "stems", "strips": "0"}), None),
+        (json!({"what": "stems", "strips": ""}), None),
+        (json!({"what": "stems", "strips": "a"}), None),
+        (json!({"what": "stems", "strips": [1, 2]}), None),
+        (
+            json!({"what": "stems", "strips": "1,".repeat(35_000)}),
+            None,
+        ),
+        (
+            json!({"what": "stems", "parent": format!("/{}", "x".repeat(70_000))}),
+            None,
+        ),
+        (json!({"what": "stems", "parent": "/tmp/a\0b"}), None),
+        (json!({"what": "stems", "parent": ""}), None),
+        (json!({"what": "stems", "parent": 5}), None),
+        (json!({"what": "stems", "extra": 1}), None),
+        (json!({"what": "stems", "window": 0}), None),
+    ] {
+        let m = assert_code(
+            "co_producer.export",
+            params.clone(),
+            ErrorCode::InvalidParams,
+        );
+        if let Some(s) = sentence {
+            assert!(m.contains(s), "{params}: {m}");
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let plain = dir.join("Exports");
+    std::fs::create_dir(&plain).unwrap();
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let link = dir.join("link");
+    symlink(&plain, &link).unwrap();
+    let package = dir.join("X.vizdaw");
+    std::fs::create_dir_all(package.join("Media")).unwrap();
+    let s = |p: &Path| p.to_str().unwrap().to_string();
+    for (parent, reason) in [
+        ("Exports".to_string(), "absolute"),
+        (s(&dir.join("Exports").join("..").join("Exports")), "`..`"),
+        (s(&file), "not a folder"),
+        (s(&link), "is a link"),
+        (s(&package.join("Media")), "inside a project package"),
+        (s(&package), "inside a project package"),
+    ] {
+        let e = chore_export(json!({"what": "stems", "parent": parent})).unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotAllowed, "{parent}: {}", e.message);
+        assert!(e.message.contains(&parent), "{parent}: {}", e.message);
+        assert!(e.message.contains(reason), "{parent}: {}", e.message);
+    }
+    for params in [
+        json!({"what": "stems", "parent": s(&plain)}),
+        json!({"what": "stems"}),
+        json!({"what": "stems", "strips": "2,3"}),
+        json!({"what": "other_daw", "strips": "1", "parent": s(&plain), "window": 2}),
+        json!({"what": "mix"}),
+        json!({"what": "midi"}),
+        json!({"what": "dawproject"}),
+        json!({"what": "aaf"}),
+        json!({"what": "other_daw"}),
+    ] {
+        assert_eq!(chore_export(params.clone()), Ok(()), "{params}");
+    }
+}
+
+#[test]
+fn export_only_on_the_co_producer_socket() {
+    use core_control::client::{CallError, Client};
+    use core_control::server::{Config, Server};
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let dev = Server::start(&sock, Config::default()).unwrap();
+    let mut c = Client::connect(&sock).unwrap();
+    match c.call(
+        "co_producer.export",
+        json!({"what": "stems"}),
+        std::time::Duration::from_secs(20),
+    ) {
+        Err(CallError::Reply(e)) => {
+            assert_eq!(e.code, ErrorCode::NotAllowed, "{e}");
+            assert!(e.message.contains("only on the Co-Producer socket"), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(dev.next_call().is_none(), "the app never sees it");
+}
+
+#[test]
+fn midi_clips_for_several_tracks_go_into_a_folder() {
+    let lanes = |l: &str| vec![("lanes".to_string(), ArgValue::Text(l.into()))];
+    assert_eq!(
+        output("file.export_midi_clip", &lanes("3")),
+        Some(Output::NewFile(&["midi2"]))
+    );
+    assert_eq!(
+        output("file.export_midi_clip", &lanes("3,4")),
+        Some(Output::IntoFolder)
+    );
+    assert_eq!(
+        output("file.export_midi_clip", &[]),
+        Some(Output::IntoFolder)
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = tmp.path().join("Clips");
+    std::fs::create_dir(&folder).unwrap();
+    let file = tmp.path().join("a.midi2");
+    std::fs::write(&file, b"x").unwrap();
+    let path = |p: &Path| p.to_str().unwrap().to_string();
+    assert_eq!(
+        gate(
+            "command.run",
+            run(
+                "file.export_midi_clip",
+                json!({"path": path(&folder), "lanes": "3,4"})
+            )
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        gate(
+            "command.run",
+            run("file.export_midi_clip", json!({"path": path(&folder)}))
+        ),
+        Ok(())
+    );
+    for params in [
+        json!({"path": path(&file), "lanes": "3,4"}),
+        json!({"path": path(&file), "lanes": "3"}),
+        json!({"path": path(&folder), "lanes": "3"}),
+    ] {
+        assert_code(
+            "command.run",
+            run("file.export_midi_clip", params),
+            ErrorCode::NotAllowed,
+        );
+    }
+    assert_eq!(
+        gate(
+            "command.run",
+            run(
+                "file.export_midi_clip",
+                json!({"path": path(&tmp.path().join("new.midi2")), "lanes": "3"})
+            )
+        ),
+        Ok(())
+    );
 }

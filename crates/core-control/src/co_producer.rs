@@ -3,7 +3,7 @@
 //! validated call through [`admit`] before it reaches the app:
 //!
 //! - only `ping`, `commands.list`, `state.get` (not `input`), `wait`,
-//!   `ui.screenshot` (window and scale only), `command.run` and the eight
+//!   `ui.screenshot` (window and scale only), `command.run` and the nine
 //!   `co_producer.*` commands are allowed;
 //! - `command.run` runs read, add and outward commands only; a change or
 //!   remove goes through `co_producer.preview` and the composer's yes;
@@ -22,7 +22,8 @@ use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 
 /// The change and remove commands Co-Producer can preview (8a Ruling 6;
-/// 8b Ruling 9 adds `mixer.set_colour`).
+/// 8b Ruling 9 adds `mixer.set_colour`; 8c Rulings 2 and 4 add the note
+/// chores and the marker changes).
 pub const PREVIEWABLE: &[&str] = &[
     "track.rename",
     "track.delete",
@@ -30,7 +31,52 @@ pub const PREVIEWABLE: &[&str] = &[
     "edit.redo",
     "file.save",
     "mixer.set_colour",
+    "modify.quantize_notes",
+    "modify.transpose_notes",
+    "modify.velocity_notes",
+    "marker.rename",
+    "marker.remove",
 ];
+
+/// The most IDs in one [`id_list`] (plan 8c Rulings 1 and 2).
+pub const MAX_IDS: usize = 64;
+
+/// The largest ID an [`id_list`] takes, as the registry's ID parameters.
+const MAX_ID: u64 = (i64::MAX / 2) as u64;
+
+/// "1,2,3": 1–64 unique ids, each ≥ 1; the message names the rule broken.
+/// Spaces around an ID are allowed; anything else but ASCII digits is not.
+pub fn id_list(text: &str) -> Result<Vec<u64>, String> {
+    if text.trim().is_empty() {
+        return Err(format!("give 1 to {MAX_IDS} IDs, comma-separated"));
+    }
+    let mut ids = Vec::new();
+    for part in text.split(',') {
+        if ids.len() == MAX_IDS {
+            return Err(format!("give at most {MAX_IDS} IDs"));
+        }
+        let part = part.trim();
+        let id = if !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) {
+            part.parse::<u64>().ok().filter(|i| *i <= MAX_ID)
+        } else {
+            None
+        };
+        let Some(id) = id else {
+            return Err(format!(
+                "{:?} is not an ID: give 1 to {MAX_IDS} IDs, comma-separated",
+                crate::protocol::truncate(part, 32)
+            ));
+        };
+        if id == 0 {
+            return Err("IDs start at 1".into());
+        }
+        if ids.contains(&id) {
+            return Err(format!("ID {id} is given twice"));
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
 
 /// The most commands in one plan (Ruling 11).
 pub const MAX_PLAN: usize = 32;
@@ -89,9 +135,13 @@ pub fn output(id: &str, args: &[(String, ArgValue)]) -> Option<Output> {
     match id {
         "file.export_midi" => Some(Output::NewFile(&["mid"])),
         // The clip export's own Save panel writes `.midi2` (P1: no looser
-        // than the composer's Save dialog). One track only: a folder for
-        // several exists, so the new-file rule refuses it.
-        "file.export_midi_clip" => Some(Output::NewFile(&["midi2"])),
+        // than the composer's Save dialog) for one named track. Several
+        // tracks, or every track (no `lanes`), go into an existing folder
+        // (plan 8c): the app names each file and never replaces one.
+        "file.export_midi_clip" => Some(match text(args, "lanes") {
+            Some(l) if !l.contains(',') => Output::NewFile(&["midi2"]),
+            _ => Output::IntoFolder,
+        }),
         "file.export_dawproject" => Some(Output::NewFile(&["dawproject"])),
         "file.export_for_daw" | "file.export_aaf" => Some(Output::IntoFolder),
         "file.bounce" => Some(match text(args, "source") {
@@ -286,9 +336,15 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
         | Command::CoProducerStatus { .. }
         | Command::CoProducerNotes { .. }
         | Command::CoProducerNote { .. }
-        | Command::CoProducerExportFolder { parent: None, .. } => Ok(()),
-        // Plan 8b Ruling 6: a given parent is checked before the app sees it.
+        | Command::CoProducerExportFolder { parent: None, .. }
+        | Command::CoProducerExport { parent: None, .. } => Ok(()),
+        // Plan 8b Ruling 6 (and 8c Ruling 1 for the one-call export): a
+        // given parent is checked before the app sees it.
         Command::CoProducerExportFolder {
+            parent: Some(parent),
+            ..
+        }
+        | Command::CoProducerExport {
             parent: Some(parent),
             ..
         } => check_output(parent, Output::IntoFolder),

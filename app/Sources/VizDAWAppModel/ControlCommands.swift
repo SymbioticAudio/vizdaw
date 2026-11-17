@@ -288,6 +288,14 @@ public enum ControlCommands {
     static let makeMineStrip = "mixer.make_mine"
     static let setColour = "mixer.set_colour"
     static let strips: Set<String> = [makeMineStrip, setColour]
+    /// Plan 8c's chore commands (Rulings 2 and 4): registered in Task 1,
+    /// run through one Session call from Task 4.
+    static let chores: Set<String> = [
+        "modify.quantize_notes", "modify.transpose_notes", "modify.velocity_notes",
+        "marker.add", "marker.rename", "marker.remove",
+    ]
+    /// What a chore answers until plan 8c Task 4.
+    static let notReadyYet = "Not ready yet."
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
         "transport.go_position": .position, "transport.go_edit_in": .editIn, "transport.go_punch": .punchIn,
@@ -303,7 +311,7 @@ public enum ControlCommands {
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
             .union(MixerCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
-            .union([TrackCommands.setOutput]).union([RegionCommands.setFadeShape])
+            .union([TrackCommands.setOutput]).union([RegionCommands.setFadeShape]).union(chores)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -556,6 +564,8 @@ public enum ControlCommands {
             return MixerCommands.run(id, args: args, docID: docID, m)
         case _ where strips.contains(id):
             return runStrip(id, args, docID, m)
+        case _ where chores.contains(id):
+            return unavailable(notReadyYet)
         case SongNotes.command:
             return SongNotes.run(docID, m)
         case AudioCommands.addMidi:
