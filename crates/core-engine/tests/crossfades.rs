@@ -49,6 +49,23 @@ fn ramp(path: &Path, frames: u64) {
     w.finish().unwrap();
 }
 
+/// The edge fade (plan release-fixes Task 7) at frame `i` of a region of
+/// `n` frames: a linear ramp over its first and last 72 frames (1.5 ms at
+/// 48 kHz). Only hard edges have it: here A's start and B's end; a
+/// crossfaded edge follows the crossfade alone (Ruling 8).
+fn edge(i: u64, n: u64) -> f32 {
+    const E: u64 = 72;
+    let mut g = 1.0;
+    if i < E {
+        g *= i as f32 / E as f32;
+    }
+    let left = n.saturating_sub(i);
+    if left < E {
+        g *= left as f32 / E as f32;
+    }
+    g
+}
+
 fn value(f: u64) -> f32 {
     (f + 1) as f32 / 1e6
 }
@@ -198,7 +215,16 @@ fn golden_renders_for_each_shape() {
                 l[f]
             );
         }
-        for (f, want) in [(0usize, 0.5f32), (799, 0.5), (1200, 0.25), (1799, 0.25)] {
+        // A's start and B's end are hard edges: they ramp over 72 frames.
+        for (f, want) in [
+            (0usize, 0.0f32),
+            (36, 0.25),
+            (72, 0.5),
+            (799, 0.5),
+            (1200, 0.25),
+            (1727, 0.25),
+            (1799, 0.25 / 72.0),
+        ] {
             assert!(
                 (l[f] - want).abs() < 1e-5,
                 "{shape:?} at {f}: {} vs {want}",
@@ -250,13 +276,13 @@ fn null_test_matches_a_hand_mix() {
     let mut worst = 0f64;
     for f in 0..=1800u64 {
         let want = if f < 800 {
-            a(f)
+            a(f) * f64::from(edge(f, 1200))
         } else if f < 1200 {
             let x = (f - 800) as f64 / 400.0;
             let q = std::f64::consts::FRAC_PI_2 * x;
             a(f) * q.cos() + bb(f) * q.sin()
         } else if f < 1800 {
-            bb(f)
+            bb(f) * f64::from(edge(f - 800, 1000))
         } else {
             0.0
         };
@@ -271,8 +297,19 @@ fn a_region_without_a_crossfade_renders_as_before() {
     dc_media(dir.path());
     let (b, _) = pair(Fade::default());
     let l = render(&b, dir.path());
-    assert!(l[..800].iter().all(|x| *x == 0.5));
-    assert!(l[800..1800].iter().all(|x| *x == 0.25));
+    // Every edge is hard, B's start too: each ramps over 72 frames.
+    for (f, x) in l.iter().enumerate() {
+        let f = f as u64;
+        let want = match f {
+            0..800 => 0.5 * edge(f, 1200),
+            800..1800 => 0.25 * edge(f - 800, 1000),
+            _ => 0.0,
+        };
+        assert!((x - want).abs() < 1e-6, "frame {f}: {x} vs {want}");
+    }
+    assert_eq!(l[800], 0.0);
+    assert!(l[72..800].iter().all(|x| *x == 0.5));
+    assert!(l[872..1728].iter().all(|x| *x == 0.25));
     assert!(l[1800..].iter().all(|x| *x == 0.0));
 }
 
@@ -373,15 +410,16 @@ fn model_and_engine_agree_on_fractional_frames() {
 }
 
 /// The DC pair with a 400-frame Linear crossfade, by hand: A (0.5) alone,
-/// then 0.5 (1 − x) + 0.25 x over the span, then B (0.25) alone.
+/// then 0.5 (1 − x) + 0.25 x over the span, then B (0.25) alone; A's
+/// start and B's end ramp (the edge fade).
 fn linear_golden(f: u64) -> f32 {
     match f {
-        0..800 => 0.5,
+        0..800 => 0.5 * edge(f, 1200),
         800..1200 => {
             let x = (f - 800) as f32 / 400.0;
             0.5 * (1.0 - x) + 0.25 * x
         }
-        1200..1800 => 0.25,
+        1200..1800 => 0.25 * edge(f - 800, 1000),
         _ => 0.0,
     }
 }
@@ -490,7 +528,7 @@ fn an_offline_partner_leaves_the_later_region_fading_in_alone() {
         let want = match f {
             0..800 => 0.0,
             800..1200 => 0.25 * (f - 800) as f32 / 400.0,
-            1200..1800 => 0.25,
+            1200..1800 => 0.25 * edge(f as u64 - 800, 1000),
             _ => 0.0,
         };
         assert!((x - want).abs() < 1e-6, "frame {f}: {x} vs {want}");
@@ -535,7 +573,7 @@ fn a_bounce_of_a_crossfade_matches_playback() {
     for (f, (x, y)) in mix.iter().zip(&plain).enumerate() {
         assert_eq!(x, y, "frame {f}");
     }
-    let k = plain[0] / 0.5;
+    let k = plain[100] / 0.5;
     assert!(k > 0.1, "{k}");
     for (f, x) in plain.iter().enumerate() {
         let want = k * linear_golden(f as u64);

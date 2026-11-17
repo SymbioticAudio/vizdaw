@@ -477,6 +477,7 @@ pub fn compile(
         doc,
         &regions,
         &frame_signed,
+        sr,
         &opts.offline_media,
         &mut report,
     );

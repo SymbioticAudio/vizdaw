@@ -23,6 +23,9 @@ use core_model::time::Tick;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The automatic fade at a hard region edge (plan release-fixes Task 7).
+pub const EDGE_FADE_SECONDS: f64 = 0.0015;
+
 /// One stretch of a region an output path plays.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Segment {
@@ -56,6 +59,15 @@ pub struct Segment {
     pub xfade: Fade,
     /// Media frame where the complement starts.
     pub xfade_from: u64,
+    /// The linear ramp at a hard region edge: the rate ×
+    /// [`EDGE_FADE_SECONDS`], rounded (0: none). A region's own fade, or a
+    /// crossfade, at that edge replaces it.
+    pub edge_frames: u64,
+    /// The region's start is a crossfade (its `fade_in` is the curve).
+    pub crossfaded_start: bool,
+    /// The region's end lies under a later region's crossfade: the
+    /// complement is the curve there.
+    pub crossfaded_end: bool,
 }
 
 impl Segment {
@@ -65,18 +77,28 @@ impl Segment {
     }
 
     /// Gain × fade in × fade out (× the crossfade's complement) at media
-    /// frame `f`. // RT
+    /// frame `f`. An edge without a fade or crossfade ramps over
+    /// `edge_frames`. // RT
     pub fn gain_at(&self, f: u64) -> f32 {
         let r = f.saturating_sub(self.region_offset);
         let mut g = self.gain;
+        let edge = self.edge_frames;
         let fi = self.fade_in.length_frames;
-        if fi > 0 && r < fi {
-            g *= fade_curve(self.fade_in.shape, r as f32 / fi as f32);
+        if fi > 0 {
+            if r < fi {
+                g *= fade_curve(self.fade_in.shape, r as f32 / fi as f32);
+            }
+        } else if edge > 0 && !self.crossfaded_start && r < edge {
+            g *= r as f32 / edge as f32;
         }
         let fo = self.fade_out.length_frames;
         let left = self.region_frames.saturating_sub(r);
-        if fo > 0 && left <= fo {
-            g *= fade_curve(self.fade_out.shape, left as f32 / fo as f32);
+        if fo > 0 {
+            if left <= fo {
+                g *= fade_curve(self.fade_out.shape, left as f32 / fo as f32);
+            }
+        } else if edge > 0 && !self.crossfaded_end && left < edge {
+            g *= left as f32 / edge as f32;
         }
         let xf = self.xfade.length_frames;
         if xf > 0 && f >= self.xfade_from {
@@ -240,6 +262,7 @@ fn complements(
     pieces: &[(usize, u64, u64)],
     memo: &mut BTreeMap<TakeKey, BTreeMap<EventId, Overlap>>,
     out: &mut Vec<Segment>,
+    ends_under: &mut BTreeSet<usize>,
 ) {
     for &(i, a, b) in pieces {
         let Some(u) = uses.get(i) else { continue };
@@ -258,15 +281,21 @@ fn complements(
         let Some(partner) = partner_of(doc, u.event, memo) else {
             continue;
         };
-        let Some(p) = uses
+        let Some((pi, p)) = uses
             .iter()
-            .filter(|p| {
+            .enumerate()
+            .filter(|(_, p)| {
                 p.event == partner && p.raw_start < u.raw_start && u.raw_start < p.raw_end()
             })
-            .max_by_key(|p| (p.raw_start, p.order))
+            .max_by_key(|(_, p)| (p.raw_start, p.order))
         else {
             continue;
         };
+        // The partner's end under the span: the complement is its curve.
+        let end_under = p.raw_end() <= span_end;
+        if end_under {
+            ends_under.insert(pi);
+        }
         let lo = lo.max(i64::try_from(p.start).unwrap_or(i64::MAX));
         let hi = hi.min(p.raw_end());
         if lo >= hi {
@@ -279,6 +308,7 @@ fn complements(
         s.frames = hi - lo;
         s.file_frame = p.file_frame.saturating_add(lo - p.start);
         s.xfade = u.fade_in;
+        s.crossfaded_end = end_under;
         s.xfade_from = p
             .seg
             .region_offset
@@ -294,9 +324,12 @@ pub(crate) fn build(
     doc: &Document,
     regions: &[ResolvedEvent],
     frame_of: &dyn Fn(Tick) -> i64,
+    sample_rate: f64,
     offline: &BTreeSet<MediaId>,
     report: &mut CompileReport,
 ) -> AudioSchedule {
+    // Float-to-int `as` saturates (NaN: 0).
+    let edge_frames = (sample_rate * EDGE_FADE_SECONDS).round() as u64;
     type Key = (Vec<EventId>, SeqId, LaneId);
     let mut groups: BTreeMap<Key, (OutputPathId, Vec<Use>)> = BTreeMap::new();
     for (order, r) in regions.iter().enumerate() {
@@ -374,6 +407,9 @@ pub(crate) fn build(
                 top_lane: r.path.first().map_or(last.lane, |p| p.lane),
                 xfade: Fade::default(),
                 xfade_from: 0,
+                edge_frames,
+                crossfaded_start: crossfade,
+                crossfaded_end: false,
             },
         });
     }
@@ -406,6 +442,7 @@ pub(crate) fn build(
                 (None, _) => {}
             }
         }
+        let first = out.len();
         for &(i, a, b) in &pieces {
             if let Some(u) = uses.get(i) {
                 let mut s = u.seg;
@@ -416,7 +453,16 @@ pub(crate) fn build(
             }
         }
         if uses.iter().any(|u| u.crossfade) {
-            complements(doc, &uses, &pieces, &mut memo, out);
+            let mut ends_under = BTreeSet::new();
+            complements(doc, &uses, &pieces, &mut memo, out, &mut ends_under);
+            if !ends_under.is_empty() {
+                // `out[first..]` begins with this group's pieces, in order.
+                for (&(i, _, _), s) in pieces.iter().zip(out.iter_mut().skip(first)) {
+                    if ends_under.contains(&i) {
+                        s.crossfaded_end = true;
+                    }
+                }
+            }
         }
     }
     let paths: Box<[PathSegments]> = per_path

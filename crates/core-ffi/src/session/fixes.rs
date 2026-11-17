@@ -112,3 +112,95 @@ impl Session {
         })
     }
 }
+
+/// The most frames each side [`Session::zero_crossing`] looks (a second
+/// at 48 kHz).
+const MAX_CROSSING_RADIUS: u64 = 48_000;
+
+/// Release fixes (plan release-fixes Task 7).
+#[uniffi::export]
+impl Session {
+    /// The frame of `media` nearest `frame` where the channel-summed signal
+    /// changes sign (s[k-1] and s[k] differ in sign, or s[k] == 0), within
+    /// `radius` frames each side; ties go to the earlier frame. None found,
+    /// or the media offline: `frame`. `frame` past the end clamps to the
+    /// length. Unknown media: UnknownId; radius > 48_000: Invalid. Reads
+    /// with CafReader as Normalize does.
+    pub fn zero_crossing(&self, media: u64, frame: u64, radius: u64) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            use core_model::ids::{AnyId, MediaId};
+            if radius > MAX_CROSSING_RADIUS {
+                return Err(crate::events::bad(&format!(
+                    "the radius must be at most {MAX_CROSSING_RADIUS} frames"
+                )));
+            }
+            let id = MediaId(media);
+            // Under the lock: where the file is. The read is without it.
+            let (file, frames, offline) = {
+                let inner = self.lock_inner();
+                let m = inner
+                    .doc()
+                    .media()
+                    .get(&id)
+                    .ok_or(core_model::ModelError::UnknownId(AnyId::Media(id)))?;
+                (
+                    inner.root(self.id).join(&m.path),
+                    m.length_frames,
+                    inner.offline.contains_key(&id),
+                )
+            };
+            let frame = frame.min(frames);
+            if offline {
+                return Ok(frame);
+            }
+            // A file gone since it was checked keeps the frame, as offline.
+            let Ok(r) = core_media::caf::CafReader::open(&file) else {
+                return Ok(frame);
+            };
+            Ok(nearest_crossing(&r, frame, radius).unwrap_or(frame))
+        })
+    }
+}
+
+/// The frame nearest `frame` (within `radius` each side, the earlier on a
+/// tie) where `r`'s channel sum is 0 or has the opposite sign of the frame
+/// before; None when there is none or the read fails.
+fn nearest_crossing(r: &core_media::caf::CafReader, frame: u64, radius: u64) -> Option<u64> {
+    let ch = usize::from(r.info().channels.max(1));
+    let last = r.info().frames.checked_sub(1)?;
+    let lo = frame.saturating_sub(radius);
+    let hi = frame.saturating_add(radius).min(last);
+    if lo > hi {
+        return None;
+    }
+    // From one frame before `lo`, for its sign.
+    let from = lo.saturating_sub(1);
+    let n = usize::try_from(hi - from + 1).ok()?;
+    let mut buf = vec![0f32; n.checked_mul(ch)?];
+    let got = r.read(from, &mut buf, &mut Vec::new()).ok()?;
+    let sums: Vec<f32> = buf
+        .chunks_exact(ch)
+        .take(got)
+        .map(|c| c.iter().sum())
+        .collect();
+    let at = |k: u64| {
+        k.checked_sub(from)
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| sums.get(i).copied())
+    };
+    let crossing = |k: u64| {
+        let Some(s) = at(k) else {
+            return false;
+        };
+        if s == 0.0 {
+            return true;
+        }
+        k.checked_sub(1)
+            .and_then(at)
+            .is_some_and(|p| p != 0.0 && (p < 0.0) != (s < 0.0) && !p.is_nan() && !s.is_nan())
+    };
+    (0..=radius).find_map(|d| {
+        let before = frame.checked_sub(d).filter(|k| *k >= lo && crossing(*k));
+        before.or_else(|| frame.checked_add(d).filter(|k| *k <= hi && crossing(*k)))
+    })
+}

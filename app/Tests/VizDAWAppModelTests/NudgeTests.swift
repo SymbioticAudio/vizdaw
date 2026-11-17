@@ -197,4 +197,45 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
         d.set("junk", forKey: EditingPreferences.crossfadeKey)
         #expect(EditingPreferences(defaults: d).crossfadeMs == 10)
     }
+
+    // MARK: Zero crossings (plan release-fixes Task 7)
+
+    @Test func zeroCrossingsDefaultOnAndKept() {
+        let d = MemoryDefaults()
+        let p = EditingPreferences(defaults: d)
+        #expect(p.zeroCrossings, "on by default")
+        p.zeroCrossings = false
+        #expect(!EditingPreferences(defaults: d).zeroCrossings, "kept")
+        p.zeroCrossings = true
+        #expect(EditingPreferences(defaults: d).zeroCrossings)
+        d.set("junk", forKey: EditingPreferences.zeroCrossingsKey)
+        #expect(EditingPreferences(defaults: d).zeroCrossings, "a damaged value reads as on")
+        d.set(7, forKey: EditingPreferences.zeroCrossingsKey)
+        #expect(EditingPreferences(defaults: d).zeroCrossings, "a number other than 0 or 1 reads as on")
+    }
+
+    @Test func theSnapperAsksTheCoreWithinThreeMilliseconds() throws {
+        let f = editorFake()
+        f.mediaRows = [mediaRow(7, "kick")]
+        let m = try DocumentModel(session: f)
+        let saved = ZeroCrossing.preferences
+        defer { ZeroCrossing.preferences = saved }
+        let prefs = EditingPreferences(defaults: MemoryDefaults())
+        ZeroCrossing.preferences = prefs
+        f.crossing = { _, frame, _ in frame / 100 * 100 }
+        #expect(ZeroCrossing.snapper(m, media: 7)(1234) == 1200)
+        #expect(f.crossingCalls.count == 1)
+        #expect(f.crossingCalls.first?.media == 7 && f.crossingCalls.first?.radius == 144, "3 ms at 48 kHz")
+        // An error keeps the frame.
+        f.crossing = { _, _, _ in throw VizError.Model(message: "unknown id") }
+        #expect(ZeroCrossing.snapper(m, media: 7)(1234) == 1234)
+        // Unknown media (no rate): the identity, no call.
+        f.crossingCalls = []
+        #expect(ZeroCrossing.snapper(m, media: 99)(1234) == 1234)
+        // Off: the identity, no call.
+        prefs.zeroCrossings = false
+        f.crossing = { _, frame, _ in frame / 100 * 100 }
+        #expect(ZeroCrossing.snapper(m, media: 7)(1234) == 1234)
+        #expect(f.crossingCalls.isEmpty)
+    }
 }

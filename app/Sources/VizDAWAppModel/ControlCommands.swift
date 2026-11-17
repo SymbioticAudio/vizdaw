@@ -281,6 +281,7 @@ public enum ControlCommands {
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
             .union(MixerCommands.ids).union(coProducer).union([TrackCommands.setOutput])
+            .union([RegionCommands.setFadeShape])
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -540,6 +541,8 @@ public enum ControlCommands {
             if let f = failure(RegionCommands.normalize(peakDb: peak, m)) { return f }
         case RegionCommands.crossfade, RegionCommands.removeCrossfade:
             return RegionCommands.runChannel(id, args: args, doc: docID, m, defaultMs: host.crossfadeMs)
+        case RegionCommands.setFadeShape:
+            return RegionCommands.runSetFadeShape(args, doc: docID, m)
         case _ where RegionCommands.ids.contains(id):
             if let f = failure(RegionCommands.run(id, m)) { return f }
         case _ where detail[id] != nil:

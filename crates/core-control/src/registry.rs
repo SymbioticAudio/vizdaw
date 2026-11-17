@@ -1093,6 +1093,34 @@ const CROSSFADE_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `region.set_fade_shape` (plan release-fixes Task 7).
+const SET_FADE_SHAPE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    ParamSpec {
+        name: "fade",
+        kind: ParamKind::Choice(&["in", "out"]),
+        required: true,
+        help: "The fade in or the fade out (a crossfaded start: use region.crossfade's shape).",
+    },
+    ParamSpec {
+        name: "shape",
+        kind: ParamKind::Choice(&["linear", "equal_power", "exponential", "s_curve"]),
+        required: true,
+        help: "The fade's new shape; its length is kept.",
+    },
+];
+
 /// `region.remove_crossfade` (plan 6c Task 5).
 const REMOVE_CROSSFADE_PARAMS: &[ParamSpec] = &[
     opt_id_param(
@@ -2112,6 +2140,17 @@ pub const COMMANDS: &[CommandSpec] = &[
         class: Class::Change,
         params: CROSSFADE_PARAMS,
         ..cmd("region.crossfade", "Region", "Crossfade", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: SET_FADE_SHAPE_PARAMS,
+        ..key_only(cmd(
+            "region.set_fade_shape",
+            "Region",
+            "Set Fade Shape",
+            None,
+            true,
+        ))
     },
     CommandSpec {
         class: Class::Remove,

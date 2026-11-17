@@ -226,9 +226,18 @@ public final class AudioEditorCanvas: NSView, ThemedView {
     }
 
     private func target(_ d: Press, to p: CGPoint, modifiers: NSEvent.ModifierFlags) -> EditCommand? {
-        AudioEditorGeometry.target(
-            d.region.row, d.handle, dx: p.x - d.from.x, dy: p.y - d.from.y, fine: modifiers.contains(.shift),
-            axis: d.axis, mediaFrames: d.mediaFrames, startRoom: d.startRoom, in: d.wave)
+        // A trim's new edge snaps to a zero crossing (plan release-fixes
+        // Task 7); the other handles never call it.
+        let row = d.region.row
+        let snap: (UInt64) -> UInt64 =
+            if (d.handle == .start || d.handle == .end), let media = row.media {
+                ZeroCrossing.snapper(document, media: media)
+            } else {
+                { $0 }
+            }
+        return AudioEditorGeometry.target(
+            row, d.handle, dx: p.x - d.from.x, dy: p.y - d.from.y, fine: modifiers.contains(.shift),
+            axis: d.axis, mediaFrames: d.mediaFrames, startRoom: d.startRoom, in: d.wave, snap: snap)
     }
 
     // MARK: Wheel, pinch and the shape menu

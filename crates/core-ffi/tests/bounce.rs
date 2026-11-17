@@ -302,7 +302,10 @@ fn a_bounce_equals_an_offline_render_of_the_range() {
     let k = left[996] / value(996);
     assert!(k > 0.1, "the strip's pan law is a constant");
     for f in 0..BARS4_FRAMES as usize {
-        let want = k * value(f as u64);
+        // The region (from frame 0) ramps over its first 72 frames: the
+        // edge fade (plan release-fixes Task 7).
+        let edge = (f as f32 / 72.0).min(1.0);
+        let want = k * value(f as u64) * edge;
         assert!(
             (left[f] - want).abs() <= 2.0 * STEP24,
             "left frame {f}: {} vs {want}",

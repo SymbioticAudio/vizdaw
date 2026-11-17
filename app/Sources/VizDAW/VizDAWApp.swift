@@ -74,6 +74,9 @@ struct VizDAWApp: App {
         Icons.register(SymbioticBrand.provider)
         #endif
         appStore.keyBindings = keyBindings
+        // Trims snap to zero crossings by this preference (plan
+        // release-fixes Task 7).
+        ZeroCrossing.preferences = editingPreferences
         // The external sample editor (plan 5f-3 Ruling 5): the stub launches
         // nothing (CI, the e2e).
         let stub = ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub"

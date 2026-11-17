@@ -262,6 +262,74 @@ fn fades_are_relative_to_the_region_as_written() {
 }
 
 #[test]
+fn a_region_without_fades_ramps_its_edges() {
+    // A 0 dB region (DC 1.0 through it is its gain) at 48 kHz: 72 frames.
+    let (mut b, seq, lane) = base();
+    b.region(seq, lane, 0, MediaId(0), 0, QF, 0.0, none(), none())
+        .unwrap();
+    let (s, _) = run(b.doc(), seq, &[]);
+    let g = s.audio.segments(OutputPathId(0))[0];
+    assert_eq!(g.edge_frames, 72);
+    assert_eq!(g.gain_at(0), 0.0);
+    assert!((g.gain_at(36) - 0.5).abs() < 0.02, "{}", g.gain_at(36));
+    assert_eq!(g.gain_at(72), 1.0);
+    assert_eq!(g.gain_at(QF / 2), 1.0);
+    assert!(g.gain_at(QF - 1) < 0.02, "{}", g.gain_at(QF - 1));
+}
+
+#[test]
+fn a_region_fade_overrides_the_edge_fade() {
+    let (mut b, seq, lane) = base();
+    // A 10 ms Linear fade in is 480 frames.
+    b.region(
+        seq,
+        lane,
+        0,
+        MediaId(0),
+        0,
+        QF,
+        0.0,
+        fade(480, FadeShape::Linear),
+        none(),
+    )
+    .unwrap();
+    let (s, _) = run(b.doc(), seq, &[]);
+    let g = s.audio.segments(OutputPathId(0))[0];
+    assert!(
+        (g.gain_at(72) - 72.0 / 480.0).abs() < 0.001,
+        "{}",
+        g.gain_at(72)
+    );
+    assert!((g.gain_at(36) - 36.0 / 480.0).abs() < 0.001);
+}
+
+#[test]
+fn a_crossfaded_start_gets_no_edge_fade() {
+    // Ruling 8: under a crossfade only the crossfade's curves apply.
+    let (mut b, seq, lane) = base();
+    let (_, bb) = pair(&mut b, seq, lane);
+    crossfade(&mut b, bb, CrossfadeLength::Frames(400), FadeShape::Linear);
+    let (s, _) = run(b.doc(), seq, &[]);
+    let all = s.audio.segments(OutputPathId(0));
+    let incoming = all.iter().find(|g| g.media == MediaId(1)).unwrap();
+    assert!((incoming.gain_at(36) - 36.0 / 400.0).abs() < 1e-6);
+    assert!((incoming.gain_at(72) - 72.0 / 400.0).abs() < 1e-6);
+    // The earlier region's end, under the span, follows the complement only.
+    let x = extras(&s.audio)[0];
+    assert!(
+        (x.gain_at(1199) - 1.0 / 400.0).abs() < 1e-6,
+        "{}",
+        x.gain_at(1199)
+    );
+    assert!((x.gain_at(1164) - 36.0 / 400.0).abs() < 1e-6);
+    // The earlier region's own start is a hard edge: it ramps.
+    let first = all.iter().find(|g| g.start == 0).unwrap();
+    assert!((first.gain_at(36) - 0.5).abs() < 0.02);
+    // The incoming region's end is a hard edge: it ramps.
+    assert!(incoming.gain_at(999) < 0.02);
+}
+
+#[test]
 fn fade_curves_at_their_ends_and_middle() {
     for shape in [
         FadeShape::Linear,
@@ -352,6 +420,9 @@ fn segment_gain_combines_fades() {
         top_lane: LaneId(0),
         xfade: none(),
         xfade_from: 0,
+        edge_frames: 0,
+        crossfaded_start: false,
+        crossfaded_end: false,
     };
     // In at 0.5, out (5 frames left of 10) at 0.5: 0.5 × 0.5 × 0.5.
     assert!((g.gain_at(5) - 0.125).abs() < 1e-6);
@@ -569,6 +640,9 @@ fn segment_gain_applies_the_complement() {
         top_lane: LaneId(0),
         xfade: fade(400, FadeShape::Linear),
         xfade_from: 800,
+        edge_frames: 0,
+        crossfaded_start: false,
+        crossfaded_end: false,
     };
     assert_eq!(g.gain_at(800), 1.0);
     assert!((g.gain_at(900) - 0.75).abs() < 1e-6);

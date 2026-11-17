@@ -354,4 +354,126 @@ import VizDAWCore
             #expect(f.edits.last == .audio(edit: .crossfade(event: 11, length: .upTo(frames: 1), shape: .equalPower)))
         }
     }
+
+    // MARK: region.set_fade_shape (plan release-fixes Task 7)
+
+    // Track 3/30 holds A (10), B (11, crossfaded over A) and D (13) with a
+    // 10 ms linear fade out.
+    func fadeShapeModel() throws -> (DocumentModel, FakeSession) {
+        let (m, f) = try crossfadeModel()
+        var events = f.laneEventTable["3/30"]?.events ?? []
+        events.append(regionRow(13, tick: 200_000, duration: 61_440, frames: 96_000, fadeIn: 96, fadeOut: 480))
+        f.laneEventTable["3/30"] = LaneEvents(seq: 3, lane: 30, rev: 1, events: events)
+        return (m, f)
+    }
+
+    func fadeArgs(_ pairs: [(String, ControlValue)]) -> [ControlArg] {
+        pairs.map { ControlArg(name: $0.0, value: $0.1) }
+    }
+
+    func status(_ o: ControlOutcome) -> String? {
+        if case .done(.ran(_, _, _, _, let status)) = o { return status }
+        return nil
+    }
+
+    @Test func setFadeShapeKeepsTheLength() throws {
+        let (m, f) = try fadeShapeModel()
+        let id = RegionCommands.setFadeShape
+        let ids = fadeArgs([("seq", .int(value: 3)), ("lane", .int(value: 30)), ("event", .int(value: 13))])
+        let out = RegionCommands.runSetFadeShape(
+            ids + fadeArgs([("fade", .text(value: "out")), ("shape", .text(value: "s_curve"))]), doc: UUID(), m)
+        #expect(status(out) == "Fade Out: S-Curve", "\(out)")
+        #expect(
+            f.edits == [
+                .audio(
+                    edit: .setFades(
+                        event: 13, fadeIn: FadeRow(length: 96, shape: .linear), fadeOut: FadeRow(length: 480, shape: .sCurve)))
+            ])
+        // The selection, without ids; the fade in of a region that is not
+        // crossfaded.
+        pick(m, [13])
+        let sel = RegionCommands.runSetFadeShape(
+            fadeArgs([("fade", .text(value: "in")), ("shape", .text(value: "exponential"))]), doc: UUID(), m)
+        #expect(status(sel) == "Fade In: Exponential", "\(sel)")
+        #expect(
+            f.edits.last
+                == .audio(
+                    edit: .setFades(
+                        event: 13, fadeIn: FadeRow(length: 96, shape: .exponential),
+                        fadeOut: FadeRow(length: 480, shape: .linear))))
+        // A crossfaded region's fade out is its own.
+        _ = RegionCommands.runSetFadeShape(
+            fadeArgs([
+                ("seq", .int(value: 3)), ("lane", .int(value: 30)), ("event", .int(value: 11)), ("fade", .text(value: "out")),
+                ("shape", .text(value: "equal_power")),
+            ]), doc: UUID(), m)
+        #expect(
+            f.edits.last
+                == .audio(
+                    edit: .setFades(
+                        event: 11, fadeIn: FadeRow(length: 0, shape: .linear), fadeOut: FadeRow(length: 0, shape: .equalPower))))
+        // Through the channel's dispatch.
+        #expect(ControlCommands.handled.contains(id))
+        #expect(!RegionCommands.ids.contains(id), "never a menu item")
+    }
+
+    @Test func setFadeShapeRefusesHostileArguments() throws {
+        let (m, f) = try fadeShapeModel()
+        let ids = fadeArgs([("seq", .int(value: 3)), ("lane", .int(value: 30)), ("event", .int(value: 13))])
+        let good = fadeArgs([("fade", .text(value: "in")), ("shape", .text(value: "linear"))])
+        func refused(_ args: [ControlArg], _ code: ControlErrorCode, _ why: String, mentions: String? = nil) {
+            let out = RegionCommands.runSetFadeShape(args, doc: UUID(), m)
+            guard case .failed(let fail) = out, fail.code == code else {
+                Issue.record("\(why): \(out)")
+                return
+            }
+            if let mentions { #expect(fail.message.contains(mentions), "\(why): \(fail.message)") }
+        }
+        refused(ids + [good[1]], .invalidParams, "missing fade", mentions: "`fade`")
+        refused(ids + [good[0]], .invalidParams, "missing shape", mentions: "`shape`")
+        refused(ids, .invalidParams, "neither", mentions: "`fade`")
+        refused(ids + fadeArgs([("fade", .text(value: "middle")), ("shape", .text(value: "linear"))]), .invalidParams, "middle")
+        refused(ids + fadeArgs([("fade", .text(value: "in")), ("shape", .int(value: 3))]), .invalidParams, "int shape")
+        refused(ids + fadeArgs([("fade", .flag(value: true)), ("shape", .text(value: "linear"))]), .invalidParams, "flag fade")
+        refused(
+            ids + fadeArgs([("fade", .text(value: "in")), ("shape", .text(value: String(repeating: "s", count: 70_000)))]),
+            .invalidParams, "long shape", mentions: "`shape`")
+        refused(ids + fadeArgs([("fade", .text(value: "in")), ("shape", .text(value: "linear\u{0}"))]), .invalidParams, "NUL")
+        refused(ids + fadeArgs([("fade", .text(value: "in\u{0}")), ("shape", .text(value: "linear"))]), .invalidParams, "NUL fade")
+        refused([ids[0]] + good, .invalidParams, "only seq", mentions: "`lane` is missing")
+        refused(ids + good + fadeArgs([("extra", .int(value: 1))]), .invalidParams, "unknown param", mentions: "`extra`")
+        refused(ids + good + [good[0]], .invalidParams, "fade twice", mentions: "`fade`")
+        refused(
+            fadeArgs([("seq", .int(value: 3)), ("lane", .int(value: 30)), ("event", .int(value: 999))]) + good, .unknownId,
+            "event 999")
+        refused(
+            fadeArgs([("seq", .int(value: 3)), ("lane", .int(value: 99)), ("event", .int(value: 13))]) + good, .unknownId,
+            "unknown track")
+        refused(
+            fadeArgs([("seq", .int(value: 3)), ("lane", .int(value: 30)), ("event", .int(value: Int64.max))]) + good,
+            .unknownId, "event at Int64.max")
+        refused(
+            fadeArgs([("seq", .int(value: -1)), ("lane", .int(value: 30)), ("event", .int(value: 13))]) + good,
+            .invalidParams, "negative seq")
+        refused(
+            fadeArgs([("seq", .text(value: "3")), ("lane", .int(value: 30)), ("event", .int(value: 13))]) + good,
+            .invalidParams, "text seq")
+        refused(
+            fadeArgs([("seq", .int(value: 3)), ("lane", .int(value: 31)), ("event", .int(value: 1))]) + good,
+            .invalidParams, "the note", mentions: "`event`")
+        // Decision 9: a crossfaded start's shape is the crossfade's.
+        refused(
+            fadeArgs([("seq", .int(value: 3)), ("lane", .int(value: 30)), ("event", .int(value: 11))]) + good, .failed,
+            "crossfaded", mentions: "This region's start is a crossfade: set its shape with region.crossfade.")
+        // No ids and nothing selected.
+        pick(m, [])
+        refused(good, .unavailable, "no selection")
+        // An open gesture.
+        pick(m, [13])
+        #expect(m.editor.beginGesture("Drag", lanes: [], origin: .other))
+        refused(good, .unavailable, "a gesture")
+        refused(ids + good, .unavailable, "a gesture, by ids")
+        _ = m.editor.cancelGesture()
+        #expect(f.edits.isEmpty, "none of them reached the session's edit")
+    }
 }

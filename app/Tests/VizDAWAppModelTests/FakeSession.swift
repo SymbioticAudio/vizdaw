@@ -1478,6 +1478,16 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = outputPathsError { throw e }
         return outputPathRows
     }
+
+    // MARK: Release fixes (plan release-fixes Task 7)
+
+    /// What `zeroCrossing` answers (nil: the frame itself), and its calls.
+    var crossing: ((UInt64, UInt64, UInt64) throws -> UInt64)?
+    var crossingCalls: [(media: UInt64, frame: UInt64, radius: UInt64)] = []
+    func zeroCrossing(media: UInt64, frame: UInt64, radius: UInt64) throws -> UInt64 {
+        crossingCalls.append((media, frame, radius))
+        return try crossing?(media, frame, radius) ?? frame
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

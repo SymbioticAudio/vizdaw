@@ -21,6 +21,11 @@ public enum RegionCommands {
     public static let crossfade = "region.crossfade"
     public static let removeCrossfade = "region.remove_crossfade"
     public static let crossfadeIds: Set<String> = [crossfade, removeCrossfade]
+    /// A fade's shape on the control channel (plan release-fixes Task 7):
+    /// no menu item, so not in `ids`; through `runSetFadeShape` only.
+    public static let setFadeShape = "region.set_fade_shape"
+    /// Decision 9: a crossfaded start's shape is the crossfade's.
+    public static let crossfadedStart = "This region's start is a crossfade: set its shape with region.crossfade."
 
     public static let ids: Set<String> = [
         normalize, fadeIn, fadeOut, removeFades, openExternal, reloadExternal, crossfade, removeCrossfade,
@@ -287,6 +292,90 @@ extension RegionCommands {
 }
 
 extension RegionCommands {
+    /// `region.set_fade_shape` (plan release-fixes Task 7): `fade` ("in"
+    /// or "out") of the region the ids name, or of the one selected audio
+    /// region, takes `shape`; both lengths are kept (one "Set Region Fades"
+    /// step). Answers "Fade In: S-Curve". Bad arguments are
+    /// `invalid_params`, an id that names nothing `unknown_id`, a
+    /// crossfaded start `failed` (Decision 9), all before any edit. Never a
+    /// dialog.
+    public static func runSetFadeShape(_ args: [ControlArg], doc: UUID, _ m: DocumentModel) -> ControlOutcome {
+        let id = setFadeShape
+        func bad(_ param: String, _ why: String) -> ControlOutcome {
+            .failed(.of(.invalidParams, "\(id): `\(param)` \(why)"))
+        }
+        let names = ["seq", "lane", "event", "fade", "shape"]
+        if let other = args.first(where: { !names.contains($0.name) }) {
+            return bad(String(other.name.prefix(64)), "is not a parameter of \(id)")
+        }
+        for name in names where args.filter({ $0.name == name }).count > 1 {
+            return bad(name, "is given more than once")
+        }
+        let given = ["seq", "lane", "event"].filter { n in args.contains { $0.name == n } }
+        guard given.isEmpty || given.count == 3 else {
+            return bad(
+                ["seq", "lane", "event"].first { !given.contains($0) } ?? "event",
+                "is missing: give `seq`, `lane` and `event` together, or none for the selection")
+        }
+        guard args.contains(where: { $0.name == "fade" }) else { return bad("fade", "is missing: in or out") }
+        guard let fadeText = args.text("fade"), fadeText == "in" || fadeText == "out" else {
+            return bad("fade", "is in or out")
+        }
+        let fadeIn = fadeText == "in"
+        guard args.contains(where: { $0.name == "shape" }) else {
+            return bad("shape", "is missing: linear, equal_power, exponential or s_curve")
+        }
+        guard let shapeText = args.text("shape"), let shape = Self.shape(shapeText) else {
+            return bad("shape", "is linear, equal_power, exponential or s_curve")
+        }
+        let row: EventRow
+        if given.isEmpty {
+            guard m.editor.gesture == nil else { return ControlCommands.unavailable(EditorModel.gestureOpenMessage) }
+            guard let r = selectedRegion(m) else { return ControlCommands.unavailable(oneRegionMessage) }
+            row = r
+        } else {
+            guard let seq = MpeCommands.id(args, "seq") else { return bad("seq", "must be a sequence ID") }
+            guard let lane = MpeCommands.id(args, "lane") else { return bad("lane", "must be a track ID") }
+            guard let event = MpeCommands.id(args, "event") else { return bad("event", "must be a region ID") }
+            guard let rows = m.editor.laneEvents(LaneKey(seq, lane))?.events else {
+                return .failed(.of(.unknownId, "\(id): `lane` names no track of that sequence"))
+            }
+            guard let r = rows.first(where: { $0.id == event }) else {
+                return .failed(.of(.unknownId, "\(id): `event` names no event on that track's active take"))
+            }
+            guard r.kind == .audioRegion else { return bad("event", "must be an audio region") }
+            guard m.editor.gesture == nil else { return ControlCommands.unavailable(EditorModel.gestureOpenMessage) }
+            row = r
+        }
+        if fadeIn, row.crossfade { return .failed(.of(.failed, crossfadedStart)) }
+        var newIn = row.fadeIn
+        var newOut = row.fadeOut
+        if fadeIn { newIn.shape = shape } else { newOut.shape = shape }
+        if newIn != row.fadeIn || newOut != row.fadeOut {
+            do {
+                m.apply(try m.session.edit(cmd: .audio(edit: .setFades(event: row.id, fadeIn: newIn, fadeOut: newOut)), filter: nil))
+                m.editor.refreshSelection()
+            } catch {
+                return .failed(.thrown(error, "Set Fade Shape Failed"))
+            }
+        }
+        let title = fadeShapes.first { $0.0 == shape }?.1 ?? shapeText
+        m.editor.status = "\(fadeIn ? "Fade In" : "Fade Out"): \(title)"
+        return .done(ControlCommands.ran(id, doc, m))
+    }
+
+    /// The one selected event when it is an audio region on a selected
+    /// track's active take.
+    static func selectedRegion(_ m: DocumentModel) -> EventRow? {
+        guard let only = oneRegion(m) else { return nil }
+        for ref in m.editor.selection.lanes {
+            if let r = m.editor.laneEvents(LaneKey(ref.seq, ref.lane))?.events.first(where: { $0.id == only }) {
+                return r.kind == .audioRegion ? r : nil
+            }
+        }
+        return nil
+    }
+
     /// The application `id` opens with: `app` when given, else the
     /// preference; the stub needs none. An application must be an
     /// absolute path to an existing folder ending in `.app` (a bundle),

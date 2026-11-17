@@ -30,6 +30,22 @@ fn value(f: u64) -> f32 {
     ((f % 997) as f32 + 1.0) / 2000.0
 }
 
+/// The edge fade (plan release-fixes Task 7) at frame `i` of a region of
+/// `n` frames without fades: a linear ramp over its first and last 72
+/// frames (1.5 ms at 48 kHz).
+fn edge(i: u64, n: u64) -> f32 {
+    const E: u64 = 72;
+    let mut g = 1.0;
+    if i < E {
+        g *= i as f32 / E as f32;
+    }
+    let left = n.saturating_sub(i);
+    if left < E {
+        g *= left as f32 / E as f32;
+    }
+    g
+}
+
 fn caf(path: &Path) {
     let mut w = CafWriter::create(path, 48_000, 2, BitDepth::Float32, WriteMode::Normal).unwrap();
     let data: Vec<f32> = (0..FRAMES).flat_map(|f| [value(f), -value(f)]).collect();
@@ -248,10 +264,11 @@ fn the_mix_is_the_region_as_heard_with_and_without_latency() {
             mix[..QF as usize].iter().all(|x| *x == 0.0),
             "nothing before beat 1 (L = {l})"
         );
-        let k = mix[QF as usize] / value(100);
+        // Past the edge fade (frame 100 of the region).
+        let k = mix[(QF + 100) as usize] / value(200);
         assert!(k > 0.1, "the strip's pan law is a constant");
         for i in 0..(6 * QF) {
-            let want = k * value(100 + i);
+            let want = k * value(100 + i) * edge(i, 6 * QF);
             assert!(
                 (mix[(QF + i) as usize] - want).abs() < 1e-6,
                 "L = {l}, frame {i}"
@@ -290,7 +307,8 @@ fn stems_line_up_and_add_up_to_the_mix() {
             stem[..QF as usize].iter().all(|x| *x == 0.0),
             "stem {k} starts at beat 1 too"
         );
-        assert!(stem[QF as usize] != 0.0, "stem {k} sounds at beat 1");
+        // Past the edge fade's first frame, which is 0.
+        assert!(stem[QF as usize + 1] != 0.0, "stem {k} sounds at beat 1");
     }
     for f in 0..got[0].len() {
         let sum: f32 = got[1..].iter().map(|s| s[f]).sum();
@@ -300,7 +318,7 @@ fn stems_line_up_and_add_up_to_the_mix() {
         );
     }
     // The ramp really moved the fader: the path's stem is not a constant times the media.
-    let k0 = got[1][QF as usize] / value(100);
+    let k0 = got[1][(QF + 100) as usize] / value(200);
     // Beat 3.5 is the point k = 28 (0.75); beat 1 is k = 8 (0.5).
     let k1 = got[1][(7 * QF / 2) as usize] / value(100 + 5 * QF / 2);
     assert!((k0 - k1).abs() > 1e-3, "{k0} vs {k1}");
@@ -395,7 +413,7 @@ fn heard_stems_respect_mute_and_solo_and_file_stems_do_not() {
             "{how}: the mix is as heard"
         );
         assert!(
-            got[1][QF as usize] != 0.0,
+            got[1][QF as usize + 1] != 0.0,
             "{how}: the file stem ignores it"
         );
         assert!(
@@ -415,7 +433,7 @@ fn heard_stems_respect_mute_and_solo_and_file_stems_do_not() {
             ..spec(8)
         },
     );
-    assert!(got[2][QF as usize] != 0.0);
+    assert!(got[2][QF as usize + 1] != 0.0);
     assert_eq!(
         got[1], got[2],
         "unmuted, the heard stem is the file stem, sample for sample"
