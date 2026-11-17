@@ -2050,6 +2050,11 @@ fn take_edits_wait_while_recording_finishing_or_pending() {
                 lane: d.src.0,
                 take: second,
             },
+            vizdaw_ffi::LaneEdit::SetOutput {
+                seq: d.seq.0,
+                lane: d.src.0,
+                output: None,
+            },
         ]
         .map(|edit| vizdaw_ffi::EditCommand::Lane { edit })
     };
