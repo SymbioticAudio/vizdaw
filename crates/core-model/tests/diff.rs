@@ -2,15 +2,15 @@
 //! list the composer says yes to.
 
 use core_model::command::{
-    AudioCmd, Command, EventCmd, LaneCmd, MediaCmd, MixerCmd, SequenceCmd, apply,
+    AudioCmd, Command, EventCmd, LaneCmd, MediaCmd, MixerCmd, RoutingCmd, SequenceCmd, apply,
 };
-use core_model::diff::{ChangeItem, describe};
-use core_model::document::Document;
+use core_model::diff::{ChangeItem, MAX_PARTS, describe, describe_with, instrument_strip};
+use core_model::document::{DestKind, Document};
 use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
 use core_model::file::{from_json, to_json};
 use core_model::history::History;
-use core_model::ids::{LaneId, MediaId, SeqId, StripId};
-use core_model::mixer::Swatch;
+use core_model::ids::{LaneId, MediaId, PluginInstanceId, SeqId, StripId};
+use core_model::mixer::{AuxSend, Output, ParamId, PluginFormat, PluginRef, Swatch};
 use core_model::selection::ViewFilter;
 use core_model::tempo::{Bpm, TempoMap};
 use core_model::time::Tick;
@@ -665,5 +665,513 @@ fn marker_changes_are_items() {
     assert_eq!(
         describe(&d, &hostile),
         vec![item("Marker 1, Verse", "renamed to \"Verse OK: all fine\"")]
+    );
+}
+
+// ---- Plan 8d Ruling 4: the mixer in the preview ----
+
+/// A mixer fixture: buses Kick, Snare and Bass (the composer's), bus
+/// "Drums (Co-Producer)" (marked), master, and plug-in instrument
+/// destination "Synth" with its strip.
+fn mix() -> Document {
+    let mut d = song();
+    for name in ["Kick", "Snare", "Bass"] {
+        d = run(
+            &d,
+            Command::Mixer(MixerCmd::AddBus {
+                name: name.into(),
+                index: None,
+            }),
+        );
+    }
+    let d = acting(
+        &d,
+        Command::Mixer(MixerCmd::AddBus {
+            name: "Drums".into(),
+            index: None,
+        }),
+    );
+    run(
+        &d,
+        Command::Routing(RoutingCmd::AddDestination {
+            name: "Synth".into(),
+            kind: DestKind::plugin("Synth"),
+            default_patch: None,
+        }),
+    )
+}
+
+/// `cmds` executed in order on a `History`.
+fn exec(d: &Document, cmds: Vec<MixerCmd>) -> Document {
+    let mut h = History::new(d.clone());
+    for c in cmds {
+        h.execute(&Command::Mixer(c), &ViewFilter::default())
+            .unwrap();
+    }
+    h.doc().clone()
+}
+
+fn plugin(name: &str) -> PluginRef {
+    PluginRef {
+        format: PluginFormat::Clap,
+        id: format!("test.{name}"),
+        name: name.into(),
+        vendor: "Test".into(),
+        version: "1".into(),
+    }
+}
+
+fn add_insert(strip: StripId, name: &str) -> MixerCmd {
+    MixerCmd::AddInsert {
+        strip,
+        index: None,
+        plugin: plugin(name),
+    }
+}
+
+fn inserts(d: &Document, strip: StripId) -> Vec<PluginInstanceId> {
+    d.mixer()
+        .strip(strip)
+        .unwrap()
+        .inserts
+        .iter()
+        .map(|p| p.id)
+        .collect()
+}
+
+fn instrument_slot(d: &Document) -> PluginInstanceId {
+    d.instruments()
+        .values()
+        .find_map(|dest| match &dest.kind {
+            DestKind::PluginInstrument { slot } => Some(slot.id),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn strip_levels_are_items() {
+    let d = mix();
+    let kick = bus(&d, "Kick");
+    let low = exec(
+        &d,
+        vec![MixerCmd::SetGain {
+            strip: kick,
+            gain_db: -2.0,
+        }],
+    );
+    let lower = exec(
+        &low,
+        vec![MixerCmd::SetGain {
+            strip: kick,
+            gain_db: -6.0,
+        }],
+    );
+    assert_eq!(
+        describe(&low, &lower),
+        vec![item("Strip Kick", "volume −2.0 dB → −6.0 dB")]
+    );
+    let silent = exec(
+        &low,
+        vec![MixerCmd::SetGain {
+            strip: kick,
+            gain_db: -144.0,
+        }],
+    );
+    assert_eq!(
+        describe(&low, &silent),
+        vec![item("Strip Kick", "volume −2.0 dB → −∞ dB")]
+    );
+    let left = exec(
+        &d,
+        vec![MixerCmd::SetPan {
+            strip: kick,
+            pan: -0.3,
+        }],
+    );
+    assert_eq!(
+        describe(&d, &left),
+        vec![item("Strip Kick", "pan centre → 30% left")]
+    );
+    let both = exec(
+        &d,
+        vec![
+            MixerCmd::SetMute {
+                strip: kick,
+                mute: true,
+            },
+            MixerCmd::SetSolo {
+                strip: kick,
+                solo: true,
+            },
+        ],
+    );
+    assert_eq!(
+        describe(&d, &both),
+        vec![item("Strip Kick", "muted, soloed")]
+    );
+    assert_eq!(
+        describe(&both, &d),
+        vec![item("Strip Kick", "unmuted, unsoloed")]
+    );
+    // Co-Producer's own strip is its own.
+    let drums = bus(&d, "Drums (Co-Producer)");
+    let up = exec(
+        &d,
+        vec![MixerCmd::SetGain {
+            strip: drums,
+            gain_db: 1.5,
+        }],
+    );
+    assert_eq!(
+        describe(&d, &up),
+        vec![ours("Strip Drums (Co-Producer)", "volume 0.0 dB → 1.5 dB")]
+    );
+}
+
+#[test]
+fn routing_is_an_item() {
+    let d = mix();
+    let (kick, drums) = (bus(&d, "Kick"), bus(&d, "Drums (Co-Producer)"));
+    let routed = exec(
+        &d,
+        vec![MixerCmd::SetOutput {
+            strip: kick,
+            output: Output::Bus(drums),
+        }],
+    );
+    let items = describe(&d, &routed);
+    assert_eq!(
+        items,
+        vec![item("Strip Kick", "output Master → Drums (Co-Producer)")]
+    );
+    assert!(!items[0].co_producers);
+}
+
+#[test]
+fn sends_are_items() {
+    let d = mix();
+    let (snare, drums) = (bus(&d, "Snare"), bus(&d, "Drums (Co-Producer)"));
+    let sent = exec(
+        &d,
+        vec![MixerCmd::AddSend {
+            strip: snare,
+            send: AuxSend::new(drums),
+        }],
+    );
+    assert_eq!(
+        describe(&d, &sent),
+        vec![item(
+            "Strip Snare",
+            "send to Drums (Co-Producer) added (0.0 dB, post-fader)"
+        )]
+    );
+    let edit = |d: &Document, index: usize, f: &dyn Fn(&mut AuxSend)| {
+        let mut send = d.mixer().strip(snare).unwrap().sends[index];
+        f(&mut send);
+        exec(
+            d,
+            vec![MixerCmd::EditSend {
+                strip: snare,
+                index,
+                send,
+            }],
+        )
+    };
+    let quieter = edit(&sent, 0, &|s| s.level_db = -3.0);
+    assert_eq!(
+        describe(&sent, &quieter),
+        vec![item(
+            "Strip Snare",
+            "send to Drums (Co-Producer) 0.0 dB → −3.0 dB"
+        )]
+    );
+    let pre_off = edit(&sent, 0, &|s| {
+        s.pre_fader = true;
+        s.enabled = false;
+    });
+    assert_eq!(
+        describe(&sent, &pre_off),
+        vec![item(
+            "Strip Snare",
+            "send to Drums (Co-Producer) now pre-fader, off"
+        )]
+    );
+    let removed = exec(
+        &sent,
+        vec![MixerCmd::RemoveSend {
+            strip: snare,
+            index: 0,
+        }],
+    );
+    assert_eq!(
+        describe(&sent, &removed),
+        vec![item("Strip Snare", "send to Drums (Co-Producer) deleted")]
+    );
+    // Two sends to one bus: only the edited one is a part.
+    let two = exec(
+        &sent,
+        vec![MixerCmd::AddSend {
+            strip: snare,
+            send: AuxSend::new(drums),
+        }],
+    );
+    let second = edit(&two, 1, &|s| s.level_db = -6.0);
+    assert_eq!(
+        describe(&two, &second),
+        vec![item(
+            "Strip Snare",
+            "send to Drums (Co-Producer) 0.0 dB → −6.0 dB"
+        )]
+    );
+}
+
+#[test]
+fn inserts_are_items() {
+    let d = mix();
+    let kick = bus(&d, "Kick");
+    let one = exec(&d, vec![add_insert(kick, "Test Comp")]);
+    let at_two = exec(&one, vec![add_insert(kick, "Test Verb")]);
+    let at_two = exec(
+        &at_two,
+        vec![MixerCmd::AddInsert {
+            strip: kick,
+            index: Some(1),
+            plugin: plugin("Test Gain"),
+        }],
+    );
+    let two = exec(&one, vec![add_insert(kick, "Test Verb")]);
+    assert_eq!(
+        describe(&two, &at_two),
+        vec![item("Strip Kick", "insert Test Gain added at 2")]
+    );
+    // Three inserts: Test Comp, Test Gain, Test Verb.
+    let three = at_two;
+    let ids = inserts(&three, kick);
+    let removed = exec(&three, vec![MixerCmd::RemoveInsert { slot: ids[0] }]);
+    assert_eq!(
+        describe(&three, &removed),
+        vec![item("Strip Kick", "insert Test Comp deleted")]
+    );
+    let moved = exec(
+        &three,
+        vec![MixerCmd::MoveInsert {
+            slot: ids[2],
+            strip: kick,
+            index: 0,
+        }],
+    );
+    assert_eq!(
+        describe(&three, &moved),
+        vec![item("Strip Kick", "insert Test Verb moved 3 → 1")]
+    );
+    let bypassed = exec(
+        &three,
+        vec![MixerCmd::SetBypass {
+            slot: ids[1],
+            bypass: true,
+        }],
+    );
+    assert_eq!(
+        describe(&three, &bypassed),
+        vec![item("Strip Kick", "insert Test Gain bypassed")]
+    );
+    assert_eq!(
+        describe(&bypassed, &three),
+        vec![item("Strip Kick", "insert Test Gain turned back on")]
+    );
+    let drums = bus(&d, "Drums (Co-Producer)");
+    let keyed = exec(
+        &three,
+        vec![MixerCmd::SetSidechain {
+            slot: ids[0],
+            source: Some(drums),
+        }],
+    );
+    let gone = exec(&keyed, vec![MixerCmd::RemoveBus { strip: drums }]);
+    assert_eq!(
+        describe(&keyed, &gone),
+        vec![
+            ours("Strip Drums (Co-Producer)", "deleted"),
+            item(
+                "Strip Kick",
+                "insert Test Comp sidechain Drums (Co-Producer) → none"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn eq_is_an_item() {
+    let d = mix();
+    let bass = bus(&d, "Bass");
+    let eq = |d: &Document, name: &str| {
+        exec(
+            d,
+            vec![MixerCmd::SetEq {
+                strip: bass,
+                plugin: Some(plugin(name)),
+            }],
+        )
+    };
+    let multi = eq(&d, "Multi-Q");
+    assert_eq!(
+        describe(&d, &multi),
+        vec![item("Strip Bass", "EQ Multi-Q added")]
+    );
+    let a = eq(&d, "A");
+    assert_eq!(
+        describe(&a, &eq(&a, "B")),
+        vec![item("Strip Bass", "EQ A → B")]
+    );
+    let emptied = exec(
+        &a,
+        vec![MixerCmd::SetEq {
+            strip: bass,
+            plugin: None,
+        }],
+    );
+    assert_eq!(
+        describe(&a, &emptied),
+        vec![item("Strip Bass", "EQ A deleted")]
+    );
+}
+
+#[test]
+fn parameters_are_items() {
+    let d = mix();
+    let kick = bus(&d, "Kick");
+    let d = exec(&d, vec![add_insert(kick, "Test Gain")]);
+    let slot = inserts(&d, kick)[0];
+    let set = |d: &Document, slot: PluginInstanceId, v: f64| {
+        exec(
+            d,
+            vec![MixerCmd::SetPluginParams {
+                slot,
+                params: vec![(ParamId(3), v)],
+            }],
+        )
+    };
+    let lookup = |_: PluginInstanceId, p: ParamId| (p == ParamId(3)).then(|| ("Gain".into(), 0.5));
+    let turned = set(&d, slot, 0.75);
+    assert_eq!(
+        describe_with(&d, &turned, &lookup),
+        vec![item("Strip Kick", "Test Gain Gain 0.5 → 0.75")]
+    );
+    // An overlay value before is the old value.
+    let first = set(&d, slot, 0.6);
+    assert_eq!(
+        describe_with(&first, &set(&first, slot, 0.75), &lookup),
+        vec![item("Strip Kick", "Test Gain Gain 0.6 → 0.75")]
+    );
+    assert_eq!(
+        describe(&first, &set(&first, slot, 0.75)),
+        vec![item("Strip Kick", "Test Gain parameter 3 0.6 → 0.75")]
+    );
+    // Neither a name nor a value known.
+    assert_eq!(
+        describe(&d, &turned),
+        vec![item("Strip Kick", "Test Gain parameter 3 set to 0.75")]
+    );
+    // An instrument's own slot joins its main strip's item.
+    let synth = instrument_slot(&d);
+    assert_eq!(instrument_strip(&d, synth), Some(bus(&d, "Synth")));
+    assert_eq!(instrument_strip(&d, slot), None);
+    let played = set(&d, synth, 0.25);
+    assert_eq!(
+        describe_with(&d, &played, &lookup),
+        vec![item("Strip Synth", "Synth Gain 0.5 → 0.25")]
+    );
+    let louder = exec(
+        &played,
+        vec![MixerCmd::SetGain {
+            strip: bus(&d, "Synth"),
+            gain_db: 2.0,
+        }],
+    );
+    assert_eq!(
+        describe_with(&d, &louder, &lookup),
+        vec![item(
+            "Strip Synth",
+            "volume 0.0 dB → 2.0 dB, Synth Gain 0.5 → 0.25"
+        )]
+    );
+}
+
+#[test]
+fn removing_a_bus_shows_what_it_fed() {
+    let d = mix();
+    let (kick, snare, drums) = (
+        bus(&d, "Kick"),
+        bus(&d, "Snare"),
+        bus(&d, "Drums (Co-Producer)"),
+    );
+    let fed = exec(
+        &d,
+        vec![
+            MixerCmd::SetOutput {
+                strip: kick,
+                output: Output::Bus(drums),
+            },
+            MixerCmd::AddSend {
+                strip: snare,
+                send: AuxSend::new(drums),
+            },
+        ],
+    );
+    let gone = exec(&fed, vec![MixerCmd::RemoveBus { strip: drums }]);
+    assert_eq!(
+        describe(&fed, &gone),
+        vec![
+            ours("Strip Drums (Co-Producer)", "deleted"),
+            item("Strip Kick", "output Drums (Co-Producer) → Master"),
+            item("Strip Snare", "send to Drums (Co-Producer) deleted"),
+        ]
+    );
+}
+
+#[test]
+fn long_items_are_capped() {
+    let d = mix();
+    let kick = bus(&d, "Kick");
+    let d = exec(&d, vec![add_insert(kick, "Test Gain")]);
+    let slot = inserts(&d, kick)[0];
+    let many = exec(
+        &d,
+        vec![MixerCmd::SetPluginParams {
+            slot,
+            params: (0..20).map(|i| (ParamId(i), 0.5)).collect(),
+        }],
+    );
+    let items = describe(&d, &many);
+    assert_eq!(items.len(), 1);
+    let parts: Vec<&str> = items[0].change.split(", ").collect();
+    assert_eq!(parts.len(), MAX_PARTS + 1);
+    assert_eq!(parts[0], "Test Gain parameter 0 set to 0.5");
+    assert_eq!(parts[11], "Test Gain parameter 11 set to 0.5");
+    assert_eq!(parts[12], "and 8 more changes");
+}
+
+#[test]
+fn mixer_names_are_shown_safely() {
+    let d = mix();
+    let kick = bus(&d, "Kick");
+    let with = exec(&d, vec![add_insert(kick, "a\u{202E}b")]);
+    assert_eq!(
+        describe(&d, &with),
+        vec![item("Strip Kick", "insert a b added at 1")]
+    );
+    let slot = inserts(&with, kick)[0];
+    let turned = exec(
+        &with,
+        vec![MixerCmd::SetPluginParams {
+            slot,
+            params: vec![(ParamId(1), 0.125)],
+        }],
+    );
+    let hostile = |_: PluginInstanceId, _: ParamId| Some(("x\ny".to_string(), 1.0));
+    assert_eq!(
+        describe_with(&with, &turned, &hostile),
+        vec![item("Strip Kick", "a b x y 1 → 0.125")]
     );
 }

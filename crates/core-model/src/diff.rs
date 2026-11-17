@@ -5,11 +5,11 @@
 //! Claude gave a track, sequence or bus can never add or hide lines in
 //! that list.
 
-use crate::document::Document;
+use crate::document::{DestKind, Document};
 use crate::event::{Event, EventBody};
-use crate::ids::{EventId, LaneId, SeqId, StripId};
+use crate::ids::{DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
 use crate::lane::Lane;
-use crate::mixer::Swatch;
+use crate::mixer::{AuxSend, GAIN_FLOOR_DB, Output, ParamId, PluginSlot, Strip, StripKind, Swatch};
 use crate::sequence::{Marker, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -361,7 +361,7 @@ fn colour(c: Option<Swatch>) -> &'static str {
     }
 }
 
-fn strips(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
+fn strips(before: &Document, after: &Document, params: ParamLookup, out: &mut Vec<ChangeItem>) {
     let (b, a) = (before.mixer().strips(), after.mixer().strips());
     for id in strip_order(before) {
         if let (Some(s), None) = (b.get(&id), a.get(&id)) {
@@ -384,6 +384,358 @@ fn strips(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
                 old.co_producer,
             ));
         }
+        let parts = capped(mixer_parts(before, after, old, s, params));
+        if !parts.is_empty() {
+            out.push(item_of(strip(&old.name), parts.join(", "), old.co_producer));
+        }
+    }
+}
+
+/// Name and current value of a running plug-in's parameter, if known.
+pub type ParamLookup<'a> = &'a dyn Fn(PluginInstanceId, ParamId) -> Option<(String, f64)>;
+
+/// The most parts one mixer item lists before "and N more changes"
+/// (plan 8d Ruling 4).
+pub const MAX_PARTS: usize = 12;
+
+/// The strip an instrument's own slot belongs to: its destination's
+/// `Instrument` strip with output 0.
+pub fn instrument_strip(doc: &Document, slot: PluginInstanceId) -> Option<StripId> {
+    let dest = doc
+        .instruments()
+        .values()
+        .find(|d| matches!(&d.kind, DestKind::PluginInstrument { slot: s } if s.id == slot))?;
+    doc.mixer().find_kind(StripKind::Instrument(dest.id))
+}
+
+/// A plug-in instrument destination's own slot.
+fn own_slot(doc: &Document, dest: DestId) -> Option<&PluginSlot> {
+    match &doc.instruments().get(&dest)?.kind {
+        DestKind::PluginInstrument { slot } => Some(slot),
+        DestKind::MidiEndpoint { .. } => None,
+    }
+}
+
+/// `parts`, cut to [`MAX_PARTS`] plus "and N more changes".
+fn capped(mut parts: Vec<String>) -> Vec<String> {
+    if parts.len() > MAX_PARTS {
+        let more = parts.len() - MAX_PARTS;
+        parts.truncate(MAX_PARTS);
+        parts.push(format!(
+            "and {}",
+            count(more, "more change", "more changes")
+        ));
+    }
+    parts
+}
+
+/// `text` with U+2212 for a minus, unless it shows as zero.
+fn signed(negative: bool, text: String) -> String {
+    if negative && text.chars().any(|c| c.is_ascii_digit() && c != '0') {
+        format!("−{text}")
+    } else {
+        text
+    }
+}
+
+/// A level: one decimal, "−∞ dB" at the floor.
+fn db(v: f64) -> String {
+    if v <= GAIN_FLOOR_DB {
+        return "−∞ dB".into();
+    }
+    format!("{} dB", signed(v < 0.0, format!("{:.1}", v.abs())))
+}
+
+/// A pan: "centre", "30% left" or "30% right".
+fn pan(p: f64) -> String {
+    let n = (p * 100.0).round() as i64;
+    match n {
+        0 => "centre".into(),
+        n if n < 0 => format!("{}% left", n.unsigned_abs()),
+        n => format!("{n}% right"),
+    }
+}
+
+/// A parameter value: at most 3 decimals, trailing zeros dropped.
+fn value(v: f64) -> String {
+    if !v.is_finite() || v.abs() >= 1e12 {
+        return format!("{v:.3e}");
+    }
+    let s = format!("{:.3}", v.abs());
+    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    signed(v < 0.0, s)
+}
+
+/// A strip's name as `doc` has it.
+fn strip_name(doc: &Document, id: StripId) -> String {
+    match doc.mixer().strip(id) {
+        Ok(s) => shown_name(&s.name),
+        Err(_) => format!("strip {id}"),
+    }
+}
+
+fn output_name(doc: &Document, o: Output) -> String {
+    match o {
+        Output::Master => strip_name(doc, doc.mixer().master()),
+        Output::Bus(id) => strip_name(doc, id),
+    }
+}
+
+/// A strip named as `before` has it, else as `after` does.
+fn either_name(before: &Document, after: &Document, id: StripId) -> String {
+    if before.mixer().strip(id).is_ok() {
+        strip_name(before, id)
+    } else {
+        strip_name(after, id)
+    }
+}
+
+fn sidechain_name(doc: &Document, s: Option<StripId>) -> String {
+    s.map_or_else(|| "none".into(), |id| strip_name(doc, id))
+}
+
+/// Ruling 4's parts for a strip present before (`old`) and after (`new`).
+fn mixer_parts(
+    before: &Document,
+    after: &Document,
+    old: &Strip,
+    new: &Strip,
+    params: ParamLookup,
+) -> Vec<String> {
+    let mut parts = Vec::new();
+    if old.gain_db != new.gain_db {
+        parts.push(format!("volume {} → {}", db(old.gain_db), db(new.gain_db)));
+    }
+    if old.pan != new.pan {
+        parts.push(format!("pan {} → {}", pan(old.pan), pan(new.pan)));
+    }
+    if old.mute != new.mute {
+        parts.push(if new.mute { "muted" } else { "unmuted" }.into());
+    }
+    if old.solo != new.solo {
+        parts.push(if new.solo { "soloed" } else { "unsoloed" }.into());
+    }
+    if old.output != new.output {
+        parts.push(format!(
+            "output {} → {}",
+            output_name(before, old.output),
+            output_name(after, new.output)
+        ));
+    }
+    sends(before, after, old, new, &mut parts);
+    eq(before, after, old, new, &mut parts);
+    inserts(before, after, old, new, &mut parts);
+    // Parameters, in signal order: the instrument's own slot, the EQ,
+    // then the inserts.
+    if let (StripKind::Instrument(d0), StripKind::Instrument(d1)) = (old.kind, new.kind) {
+        if let (Some(a), Some(b)) = (own_slot(before, d0), own_slot(after, d1)) {
+            if a.id == b.id {
+                param_parts(a, b, params, &mut parts);
+            }
+        }
+    }
+    let old_slots: BTreeMap<PluginInstanceId, &PluginSlot> =
+        old.chain().map(|p| (p.id, p)).collect();
+    for b in new.chain() {
+        if let Some(a) = old_slots.get(&b.id) {
+            param_parts(a, b, params, &mut parts);
+        }
+    }
+    parts
+}
+
+/// Sends, matched by target and then by order among sends to it.
+fn sends(before: &Document, after: &Document, old: &Strip, new: &Strip, parts: &mut Vec<String>) {
+    let group = |s: &Strip| {
+        let mut m: BTreeMap<StripId, Vec<AuxSend>> = BTreeMap::new();
+        for x in &s.sends {
+            m.entry(x.target).or_default().push(*x);
+        }
+        m
+    };
+    let (b, a) = (group(old), group(new));
+    let mut seen = BTreeSet::new();
+    let targets: Vec<StripId> = old
+        .sends
+        .iter()
+        .chain(new.sends.iter())
+        .map(|x| x.target)
+        .filter(|t| seen.insert(*t))
+        .collect();
+    let none = Vec::new();
+    for t in targets {
+        let name = format!("send to {}", either_name(before, after, t));
+        let (bs, as_) = (b.get(&t).unwrap_or(&none), a.get(&t).unwrap_or(&none));
+        for k in 0..bs.len().max(as_.len()) {
+            match (bs.get(k), as_.get(k)) {
+                (Some(x), Some(y)) => {
+                    let mut what = Vec::new();
+                    if x.level_db != y.level_db {
+                        what.push(format!("{} → {}", db(x.level_db), db(y.level_db)));
+                    }
+                    if x.pre_fader != y.pre_fader {
+                        what.push(
+                            if y.pre_fader {
+                                "now pre-fader"
+                            } else {
+                                "now post-fader"
+                            }
+                            .into(),
+                        );
+                    }
+                    if x.enabled != y.enabled {
+                        what.push(if y.enabled { "on" } else { "off" }.into());
+                    }
+                    if !what.is_empty() {
+                        parts.push(format!("{name} {}", what.join(", ")));
+                    }
+                }
+                (Some(_), None) => parts.push(format!("{name} deleted")),
+                (None, Some(y)) => parts.push(format!(
+                    "{name} added ({}, {}{})",
+                    db(y.level_db),
+                    if y.pre_fader {
+                        "pre-fader"
+                    } else {
+                        "post-fader"
+                    },
+                    if y.enabled { "" } else { ", off" }
+                )),
+                (None, None) => {}
+            }
+        }
+    }
+}
+
+/// Bypass and sidechain parts of a slot present before and after.
+fn slot_parts(
+    before: &Document,
+    after: &Document,
+    label: &str,
+    a: &PluginSlot,
+    b: &PluginSlot,
+    parts: &mut Vec<String>,
+) {
+    if a.bypass != b.bypass {
+        let what = if b.bypass {
+            "bypassed"
+        } else {
+            "turned back on"
+        };
+        parts.push(format!("{label} {what}"));
+    }
+    if a.sidechain != b.sidechain {
+        parts.push(format!(
+            "{label} sidechain {} → {}",
+            sidechain_name(before, a.sidechain),
+            sidechain_name(after, b.sidechain)
+        ));
+    }
+}
+
+fn eq(before: &Document, after: &Document, old: &Strip, new: &Strip, parts: &mut Vec<String>) {
+    match (&old.eq, &new.eq) {
+        (None, Some(e)) => parts.push(format!("EQ {} added", shown_name(&e.plugin.name))),
+        (Some(e), None) => parts.push(format!("EQ {} deleted", shown_name(&e.plugin.name))),
+        (Some(a), Some(b)) if a.id != b.id => parts.push(format!(
+            "EQ {} → {}",
+            shown_name(&a.plugin.name),
+            shown_name(&b.plugin.name)
+        )),
+        (Some(a), Some(b)) => {
+            let label = format!("EQ {}", shown_name(&a.plugin.name));
+            slot_parts(before, after, &label, a, b, parts);
+        }
+        (None, None) => {}
+    }
+}
+
+/// Which of `seq` (distinct numbers) stay put: one longest increasing
+/// run, so the fewest slots read as moved.
+fn kept(seq: &[usize]) -> Vec<bool> {
+    let mut tails: Vec<usize> = Vec::new();
+    let mut prev: Vec<Option<usize>> = vec![None; seq.len()];
+    for (i, v) in seq.iter().enumerate() {
+        let k = tails.partition_point(|t| seq.get(*t).is_some_and(|x| x < v));
+        if let (Some(p), Some(t)) = (prev.get_mut(i), k.checked_sub(1)) {
+            *p = tails.get(t).copied();
+        }
+        match tails.get_mut(k) {
+            Some(t) => *t = i,
+            None => tails.push(i),
+        }
+    }
+    let mut keep = vec![false; seq.len()];
+    let mut cur = tails.last().copied();
+    while let Some(i) = cur {
+        if let Some(k) = keep.get_mut(i) {
+            *k = true;
+        }
+        cur = prev.get(i).copied().flatten();
+    }
+    keep
+}
+
+/// Inserts, matched by slot ID: added, deleted, moved (among the slots
+/// present before and after), then bypass and sidechain.
+fn inserts(before: &Document, after: &Document, old: &Strip, new: &Strip, parts: &mut Vec<String>) {
+    let pos = |s: &Strip| -> BTreeMap<PluginInstanceId, usize> {
+        s.inserts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id, i))
+            .collect()
+    };
+    let (bp, ap) = (pos(old), pos(new));
+    let label = |p: &PluginSlot| format!("insert {}", shown_name(&p.plugin.name));
+    for (j, p) in new.inserts.iter().enumerate() {
+        if !bp.contains_key(&p.id) {
+            parts.push(format!("{} added at {}", label(p), j + 1));
+        }
+    }
+    for p in &old.inserts {
+        if !ap.contains_key(&p.id) {
+            parts.push(format!("{} deleted", label(p)));
+        }
+    }
+    // (before position, after position, before slot, after slot) of the
+    // slots in both, in after's order.
+    let both: Vec<(usize, usize, &PluginSlot, &PluginSlot)> = new
+        .inserts
+        .iter()
+        .enumerate()
+        .filter_map(|(j, b)| {
+            let i = *bp.get(&b.id)?;
+            Some((i, j, old.inserts.get(i)?, b))
+        })
+        .collect();
+    let order: Vec<usize> = both.iter().map(|x| x.0).collect();
+    for ((i, j, a, _), stays) in both.iter().zip(kept(&order)) {
+        if !stays {
+            parts.push(format!("{} moved {} → {}", label(a), i + 1, j + 1));
+        }
+    }
+    for (_, _, a, b) in &both {
+        slot_parts(before, after, &label(a), a, b, parts);
+    }
+}
+
+/// One part per overlay value of `b` that differs from `a`'s.
+fn param_parts(a: &PluginSlot, b: &PluginSlot, params: ParamLookup, parts: &mut Vec<String>) {
+    let slot = shown_name(&b.plugin.name);
+    for (id, v) in b.params.iter() {
+        let was = a.params.get(id).copied();
+        if was == Some(*v) {
+            continue;
+        }
+        let known = params(b.id, *id);
+        let name = known
+            .as_ref()
+            .map_or_else(|| format!("parameter {}", id.0), |(n, _)| shown_name(n));
+        match was.or(known.map(|(_, x)| x)) {
+            Some(o) => parts.push(format!("{slot} {name} {} → {}", value(o), value(*v))),
+            None => parts.push(format!("{slot} {name} set to {}", value(*v))),
+        }
     }
 }
 
@@ -392,13 +744,22 @@ fn strips(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
 /// one "The song" / "other changes" when they differ in nothing listed.
 /// "Track N" is the track's 1-based position in its sequence, before the
 /// change for a removal and after it otherwise.
+///
+/// A strip present before and after gets one item for its mixer changes
+/// (plan 8d Ruling 4), after its rename and colour items.
 pub fn describe(before: &Document, after: &Document) -> Vec<ChangeItem> {
+    describe_with(before, after, &|_, _| None)
+}
+
+/// [`describe`], with parameter names and present values from `params`
+/// (plan 8d Ruling 4).
+pub fn describe_with(before: &Document, after: &Document, params: ParamLookup) -> Vec<ChangeItem> {
     if before == after {
         return Vec::new();
     }
     let mut out = Vec::new();
     sequences(before, after, &mut out);
-    strips(before, after, &mut out);
+    strips(before, after, params, &mut out);
     if out.is_empty() {
         out.push(item("The song".into(), "other changes".into()));
     }
