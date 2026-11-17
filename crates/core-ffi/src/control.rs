@@ -69,6 +69,20 @@ fn export_what_row(w: ExportWhat) -> ExportWhatRow {
     }
 }
 
+impl From<ExportWhatRow> for ExportWhat {
+    fn from(w: ExportWhatRow) -> Self {
+        match w {
+            ExportWhatRow::Stems => ExportWhat::Stems,
+            ExportWhatRow::Mix => ExportWhat::Mix,
+            ExportWhatRow::Selection => ExportWhat::Selection,
+            ExportWhatRow::Midi => ExportWhat::Midi,
+            ExportWhatRow::Dawproject => ExportWhat::Dawproject,
+            ExportWhatRow::Aaf => ExportWhat::Aaf,
+            ExportWhatRow::OtherDaw => ExportWhat::OtherDaw,
+        }
+    }
+}
+
 /// An element from `ui.tree`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct ElementRefRow {
@@ -939,6 +953,21 @@ pub enum ControlResult {
         /// The undo label afterwards.
         undo_label: Option<String>,
     },
+    /// `co_producer.notes` (plan 8b Ruling 4). `co_producer.note`
+    /// answers [`ControlResult::CoProducerRequest`].
+    CoProducerNotes {
+        /// Document ID.
+        doc: String,
+        /// The song's notes.
+        notes: crate::session::NotesRow,
+    },
+    /// `co_producer.export_folder` (Ruling 6).
+    CoProducerFolder {
+        /// Document ID.
+        doc: String,
+        /// The new folder.
+        path: String,
+    },
 }
 
 /// Error codes (control spec §5.3).
@@ -1756,6 +1785,10 @@ pub fn result_json(r: &ControlResult) -> Value {
             results,
             undo_label,
         } => json!({ "doc": doc, "results": results, "undo_label": undo_label }),
+        ControlResult::CoProducerNotes { notes, .. } => json!({
+            "text": notes.text, "truncated": notes.truncated, "path": notes.path,
+        }),
+        ControlResult::CoProducerFolder { path, .. } => json!({ "path": path }),
     }
 }
 

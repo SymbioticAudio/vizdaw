@@ -276,6 +276,16 @@ pub(crate) struct Inner {
     co_producer_copied: bool,
     /// The latest preview, until taken or replaced (Ruling 7).
     co_producer_preview: Option<crate::co_producer::PendingPreview>,
+    /// The latest preview needs the composer's yes (plan 8b Ruling 5).
+    co_producer_preview_yes: bool,
+    /// The call now inside took a preview that needed a yes: its items
+    /// are logged "(yes in chat)" (plan 8b Ruling 5).
+    co_producer_yes: bool,
+    /// The open request's log for its notes entry (plan 8b Ruling 5).
+    co_producer_log: Option<crate::notes::RequestLog>,
+    /// The document as the call now inside found it, after the work owed
+    /// to the composer landed: its leave logs what changed since.
+    co_producer_entered: Option<Document>,
     /// An opened Co-Producer copy's name, its title until it is saved
     /// (Ruling 9).
     copy_title: Option<String>,
@@ -423,6 +433,10 @@ impl Inner {
             co_producer_seen: Instant::now(),
             co_producer_copied: false,
             co_producer_preview: None,
+            co_producer_preview_yes: false,
+            co_producer_yes: false,
+            co_producer_log: None,
+            co_producer_entered: None,
             copy_title: None,
         }
     }
@@ -631,12 +645,28 @@ impl Inner {
         if !core_model::document::check_project_id(&id) {
             return Err(crate::events::bad("the project ID is malformed"));
         }
-        Ok(Some(
-            recovery::support_dir()
-                .join("Co-Producer")
-                .join("Untitled")
-                .join(id),
-        ))
+        Ok(Some(stand_in(&id)))
+    }
+
+    /// The song's name, as its title shows it.
+    fn song_name(&self) -> String {
+        title(self.path.as_deref(), self.copy_title.as_deref())
+    }
+
+    /// After a save: the untitled stand-in of this song's project ID, if
+    /// it still exists, moves into the package (plan 8b Ruling 7), under
+    /// the save lock; what stays behind is news.
+    fn move_in_stand_in(&mut self) {
+        let (Some(pkg), Some(id)) = (self.path.clone(), self.doc().settings().project_id.clone())
+        else {
+            return;
+        };
+        if !core_model::document::check_project_id(&id) {
+            return;
+        }
+        let _g = lock(&SAVE_LOCK);
+        let lines = crate::notes::move_in(&stand_in(&id), &pkg);
+        self.news.problems.extend(lines);
     }
 
     /// Recomputes the offline set when the media pool, the format or the
@@ -870,6 +900,15 @@ fn note_lines(notes: Vec<Note>) -> Vec<String> {
     notes.into_iter().map(|(_, l)| l).collect()
 }
 
+/// The folder that stands in for an untitled song's package (Ruling P9):
+/// `<support>/Co-Producer/Untitled/<project id>/`.
+fn stand_in(project_id: &str) -> PathBuf {
+    recovery::support_dir()
+        .join("Co-Producer")
+        .join("Untitled")
+        .join(project_id)
+}
+
 /// "demo" for `/x/demo.vizdaw`, "Untitled" without a path.
 /// The file's name; else an opened copy's name (Ruling 9); else "Untitled".
 fn title(path: Option<&Path>, copy: Option<&str>) -> String {
@@ -899,6 +938,38 @@ pub struct CopiesSizeRow {
     pub count: u64,
     /// Their `project.json` files' bytes.
     pub bytes: u64,
+}
+
+/// The song's notes as Co-Producer reads them (plan 8b Ruling 4).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NotesRow {
+    /// At most the first MiB, as lossy UTF-8.
+    pub text: String,
+    /// The file is longer than `text`.
+    pub truncated: bool,
+    /// The notes file's path.
+    pub path: String,
+}
+
+/// One Co-Producer copy of the song, for Compact's offer (plan 8b Ruling 8).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CopyRow {
+    /// Its folder's name, which removal takes.
+    pub name: String,
+    /// Its folder.
+    pub path: String,
+    /// About what removing it frees: its own files, and the package's
+    /// media and state files only it names.
+    pub bytes: u64,
+}
+
+/// What a removal of copies did (plan 8b Ruling 8).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemovedCopiesRow {
+    /// Copies moved to the Trash.
+    pub removed: u64,
+    /// One line per name skipped or copy kept.
+    pub problems: Vec<String>,
 }
 
 /// Appends `.vizdaw` unless present.
@@ -2156,6 +2227,8 @@ impl Session {
                 message: "the document has no file yet; use Save As".into(),
             })?;
             self.save_to(&mut inner, &path)?;
+            // A stand-in a first save could not empty is tried again.
+            inner.move_in_stand_in();
             // The take lands at Stop: it is saved then too (plan 5d-1
             // Ruling 19, 5c carry M5). Only a Save that worked asks.
             if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
@@ -2330,6 +2403,8 @@ impl Session {
                 inner.reload_host(self.id);
                 self.mark(&mut inner);
             }
+            // An untitled song's notes and copies move in (plan 8b Ruling 7).
+            inner.move_in_stand_in();
             claim.keep();
             Ok(())
         })
@@ -4424,6 +4499,13 @@ fn copy_failed(e: VizError) -> VizError {
 /// "Open a request first (begin_request)." (plan 8a Task 4).
 const OPEN_A_REQUEST: &str = "Open a request first (begin_request).";
 
+/// Adds `label` to the log's undo steps once.
+fn push_label(log: &mut crate::notes::RequestLog, label: String) {
+    if !log.labels.contains(&label) {
+        log.labels.push(label);
+    }
+}
+
 impl Session {
     /// Lands the work owed to the composer (a recording's pass, an
     /// automation pass, controllers' MPE settings, plugin-window gestures)
@@ -4438,6 +4520,73 @@ impl Session {
         self.apply_pending_automation(inner);
         self.apply_mpe_reports(inner);
         self.pump(inner);
+    }
+
+    /// After a Co-Producer call (plan 8b Ruling 5): what it changed since
+    /// its enter goes in the request's log, flagged when it followed a
+    /// yes, with the undo step its group will be.
+    fn log_call(inner: &mut Inner) {
+        let yes = std::mem::take(&mut inner.co_producer_yes);
+        let Some(before) = inner.co_producer_entered.take() else {
+            return;
+        };
+        let items = core_model::diff::describe(&before, inner.doc());
+        let label = inner.history.request().filter(|r| r.group_open).map(|r| {
+            if r.continued {
+                format!("{} (continued)", r.label)
+            } else {
+                r.label
+            }
+        });
+        if let Some(log) = inner.co_producer_log.as_mut() {
+            log.items.extend(items.into_iter().map(|i| (i, yes)));
+            if let Some(l) = label {
+                push_label(log, l);
+            }
+        }
+    }
+
+    /// The request titled `title` ended with `label` (plan 8b Ruling 5):
+    /// its log becomes one entry appended to the song's notes when it
+    /// entered. A failed write is a problem line; the request stays ended.
+    fn write_entry(inner: &mut Inner, title: Option<String>, label: Option<&str>) {
+        inner.co_producer_entered = None;
+        inner.co_producer_yes = false;
+        let Some(mut log) = inner.co_producer_log.take() else {
+            return;
+        };
+        if let Some(l) = label {
+            push_label(&mut log, l.to_string());
+        }
+        let Some(text) = title.and_then(|t| crate::notes::entry(&log, &t)) else {
+            return;
+        };
+        let song = inner.song_name();
+        let written = inner
+            .copies_home(true)
+            .and_then(|h| h.ok_or_else(|| crate::events::bad("the song has no folder")))
+            .and_then(|home| {
+                let _g = lock(&SAVE_LOCK);
+                crate::notes::append(&home, &song, &text)
+            });
+        if let Err(e) = written {
+            inner.news.problems.push(format!(
+                "Song notes not written: {}.",
+                e.to_string().trim_end_matches('.')
+            ));
+        }
+    }
+
+    /// The open request's log, for a call that needs one: `Model` "Open a
+    /// request first (begin_request)." otherwise.
+    fn open_log(inner: &mut Inner) -> Result<&mut crate::notes::RequestLog, VizError> {
+        if inner.history.request().is_none() {
+            return Err(VizError::Model {
+                message: OPEN_A_REQUEST.into(),
+            });
+        }
+        inner.co_producer_seen = Instant::now();
+        Ok(inner.co_producer_log.get_or_insert_with(Default::default))
     }
 
     /// Why Co-Producer cannot act now, if it cannot (Ruling 3).
@@ -4467,22 +4616,28 @@ impl Session {
             let info = inner.history.begin_request(&name)?;
             inner.co_producer_seen = Instant::now();
             inner.co_producer_copied = false;
+            inner.co_producer_log = Some(crate::notes::RequestLog::default());
+            inner.co_producer_entered = None;
+            inner.co_producer_yes = false;
             Ok(info.into())
         })
     }
 
     /// Ends the open request; the label of the step it made, if any.
     /// `Model` when none is open. It only relabels: the document and its
-    /// version stay.
+    /// version stay. A request that entered writes its entry in the song's
+    /// notes (plan 8b Ruling 5).
     pub fn co_producer_end(&self) -> Result<Option<String>, VizError> {
         ffi_guard(|| {
             let mut inner = self.lock_inner();
+            let request = inner.history.request();
             let label = inner.history.end_request()?;
             inner.co_producer_copied = false;
             if label.is_some() {
                 // The Undo menu shows the new label.
                 inner.news.doc_changed = true;
             }
+            Self::write_entry(&mut inner, request.map(|r| r.title), label.as_deref());
             Ok(label)
         })
     }
@@ -4548,12 +4703,26 @@ impl Session {
                     .co_producer_copy(&mut inner, &stamp, &request.title)
                     .map_err(copy_failed)?;
                 inner.co_producer_copied = true;
+                // The request entered: its entry is written at its end,
+                // naming the copy as the package or stand-in holds it.
+                let home = inner.copies_home(false).ok().flatten();
+                let rel = home
+                    .and_then(|h| path.strip_prefix(&h).ok().map(Path::to_path_buf))
+                    .unwrap_or_else(|| path.clone());
+                if let Some(log) = inner.co_producer_log.as_mut() {
+                    if log.stamp.is_none() {
+                        log.stamp = Some(stamp.clone());
+                        log.copy = Some(rel.to_string_lossy().into_owned());
+                    }
+                }
                 Some(path.to_string_lossy().into_owned())
             };
             inner.history.set_acting(true).map_err(|e| VizError::Busy {
                 message: e.to_string(),
             })?;
             inner.co_producer_thread = Some(me);
+            // Only what this call changes is logged (plan 8b Ruling 5).
+            inner.co_producer_entered = Some(inner.doc().clone());
             Ok(copy)
         })
     }
@@ -4568,6 +4737,7 @@ impl Session {
             if inner.history.request().is_some() {
                 inner.co_producer_seen = Instant::now();
             }
+            Self::log_call(&mut inner);
             Ok(())
         });
     }
@@ -4586,6 +4756,7 @@ impl Session {
             }
             // Refused only inside an open transaction: the next check
             // tries again.
+            let request = inner.history.request();
             let Ok(label) = inner.history.end_request() else {
                 return Ok(None);
             };
@@ -4593,6 +4764,7 @@ impl Session {
             if label.is_some() {
                 inner.news.doc_changed = true;
             }
+            Self::write_entry(&mut inner, request.map(|r| r.title), label.as_deref());
             Ok(label)
         })
         .ok()
@@ -4613,6 +4785,7 @@ impl Session {
         ffi_guard(|| {
             let mut inner = self.lock_inner();
             inner.co_producer_preview = None;
+            inner.co_producer_preview_yes = false;
             if inner.history.request().is_some() {
                 inner.co_producer_seen = Instant::now();
             }
@@ -4624,15 +4797,17 @@ impl Session {
             let plan = cp::plan_of(&plan)?;
             let items = cp::preview_items(&inner.history, inner.path.as_deref(), &plan)?;
             let token = cp::fresh_token()?;
+            let needs_yes = items.iter().any(|i| i.composers_work);
             inner.co_producer_preview = Some(cp::PendingPreview {
                 token: token.clone(),
                 version: inner.version,
                 serial: inner.history.present_serial(),
                 canonical: cp::canonical(&plan),
             });
+            inner.co_producer_preview_yes = needs_yes;
             Ok(cp::PreviewRow {
                 token,
-                needs_yes: items.iter().any(|i| i.composers_work),
+                needs_yes,
                 items,
             })
         })
@@ -4657,6 +4832,7 @@ impl Session {
         ffi_guard(|| {
             let mut inner = self.lock_inner();
             let pending = inner.co_producer_preview.take();
+            let yes = std::mem::take(&mut inner.co_producer_preview_yes);
             if inner.history.request().is_some() {
                 inner.co_producer_seen = Instant::now();
             }
@@ -4668,7 +4844,284 @@ impl Session {
                 });
             }
             let (version, serial) = (inner.version, inner.history.present_serial());
-            crate::co_producer::check_take(pending, &token, &plan, version, serial)
+            let taken = crate::co_producer::check_take(pending, &token, &plan, version, serial);
+            if taken.is_ok() {
+                // This call's items were the composer's yes (Ruling 5).
+                inner.co_producer_yes = yes;
+            }
+            taken
+        })
+    }
+}
+
+/// The longest file path `co_producer_file` takes, in bytes.
+const MAX_FILE_PATH: usize = core_control::params::MAX_PATH;
+/// The most notes and files one request's entry keeps.
+const MAX_LOG_NOTES: usize = 100;
+const MAX_LOG_FILES: usize = 200;
+
+/// The song's notes, export folders and the copies offer (plan 8b Task
+/// 3; Rulings 4–8). Every call is hostile input; none opens anything.
+#[uniffi::export]
+impl Session {
+    /// The song's notes file, made when absent (Window › Song Notes; plan
+    /// 8b Ruling 4): `<package>/Notes.md`, or for an untitled song its
+    /// stand-in's, stamping a project ID first. `Model` for a notes file
+    /// that is not a plain file.
+    pub fn notes_path(&self) -> Result<String, VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let home = inner
+                .copies_home(true)?
+                .ok_or_else(|| crate::events::bad("the song has no folder"))?;
+            let song = inner.song_name();
+            let _g = lock(&SAVE_LOCK);
+            Ok(crate::notes::ensure(&home, &song)?
+                .to_string_lossy()
+                .into_owned())
+        })
+    }
+
+    /// The song's notes for Co-Producer (plan 8b Ruling 4), made when
+    /// absent: at most the first MiB.
+    pub fn co_producer_notes(&self) -> Result<NotesRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            if inner.history.request().is_some() {
+                inner.co_producer_seen = Instant::now();
+            }
+            let home = inner
+                .copies_home(true)?
+                .ok_or_else(|| crate::events::bad("the song has no folder"))?;
+            let song = inner.song_name();
+            let _g = lock(&SAVE_LOCK);
+            let n = crate::notes::read(&home, &song)?;
+            Ok(NotesRow {
+                text: n.text,
+                truncated: n.truncated,
+                path: n.path.to_string_lossy().into_owned(),
+            })
+        })
+    }
+
+    /// What the composer asked, in their words, for the open request's
+    /// entry (plan 8b Ruling 5); blank is none. `Model` with no open
+    /// request, or over 500 characters.
+    pub fn co_producer_set_asked(&self, asked: String) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let log = Self::open_log(&mut inner)?;
+            let asked = asked.trim();
+            let max = core_control::request::MAX_ASKED;
+            if asked.chars().count() > max {
+                return Err(crate::events::bad(&format!(
+                    "What was asked is at most {max} characters."
+                )));
+            }
+            log.asked = (!asked.is_empty()).then(|| asked.to_string());
+            Ok(())
+        })
+    }
+
+    /// A note for the open request's entry (plan 8b Ruling 5): 1 to 2000
+    /// characters, not blank, in at most 20 lines, with no control but a
+    /// newline. `Model` otherwise, and with no open request.
+    pub fn co_producer_note(&self, text: String) -> Result<(), VizError> {
+        use core_control::request::{MAX_NOTE, MAX_NOTE_LINES};
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let log = Self::open_log(&mut inner)?;
+            let text = text.trim();
+            if text.is_empty() || text.chars().count() > MAX_NOTE {
+                return Err(crate::events::bad(&format!(
+                    "A note is 1 to {MAX_NOTE} characters."
+                )));
+            }
+            if text.split('\n').count() > MAX_NOTE_LINES {
+                return Err(crate::events::bad(&format!(
+                    "A note is at most {MAX_NOTE_LINES} lines."
+                )));
+            }
+            if text.chars().any(|c| c != '\n' && c.is_control()) {
+                return Err(crate::events::bad(
+                    "A note holds no control character but a newline.",
+                ));
+            }
+            if log.notes.len() >= MAX_LOG_NOTES {
+                return Err(crate::events::bad(&format!(
+                    "This request already has {MAX_LOG_NOTES} notes."
+                )));
+            }
+            log.notes.push(text.to_string());
+            Ok(())
+        })
+    }
+
+    /// A file the open request wrote, for its entry (plan 8b Ruling 5):
+    /// an absolute path of at most 1024 bytes with no NUL. `Model`
+    /// otherwise, and with no open request.
+    pub fn co_producer_file(&self, path: String) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let log = Self::open_log(&mut inner)?;
+            if path.is_empty()
+                || path.len() > MAX_FILE_PATH
+                || path.contains(' ')
+                || !Path::new(&path).is_absolute()
+            {
+                return Err(crate::events::bad(&format!(
+                    "Give the file's absolute path, at most {MAX_FILE_PATH} bytes."
+                )));
+            }
+            if !log.files.contains(&path) {
+                if log.files.len() >= MAX_LOG_FILES {
+                    return Err(crate::events::bad(&format!(
+                        "This request already names {MAX_LOG_FILES} files."
+                    )));
+                }
+                log.files.push(path);
+            }
+            Ok(())
+        })
+    }
+
+    /// A new dated export folder for the open request (plan 8b Ruling 6),
+    /// "<song> — <what> — <date>" (numbered when taken), made in `parent`
+    /// when given (and then remembered in the entry), else in the folder
+    /// the notes remember, else beside the saved package; for an untitled
+    /// song with neither, `Model` asking for a parent. Every folder,
+    /// remembered ones too, passes the Co-Producer output check. `date`
+    /// is "YYYY-MM-DD", the app's local date. Answers the new folder.
+    pub fn co_producer_export_folder(
+        &self,
+        what: crate::control::ExportWhatRow,
+        date: String,
+        parent: Option<String>,
+    ) -> Result<String, VizError> {
+        use core_control::co_producer::{Output, check_output};
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            Self::open_log(&mut inner)?;
+            if !crate::notes::check_date(&date) {
+                return Err(crate::events::bad(
+                    "An export folder's date is \"YYYY-MM-DD\".",
+                ));
+            }
+            let song = inner.song_name();
+            let given = parent.map(PathBuf::from);
+            let folder = match &given {
+                Some(p) => p.clone(),
+                None => {
+                    let home = inner.copies_home(false)?;
+                    let remembered = match home {
+                        Some(h)
+                            if std::fs::symlink_metadata(h.join(crate::notes::NOTES_FILE))
+                                .is_ok() =>
+                        {
+                            let _g = lock(&SAVE_LOCK);
+                            crate::notes::remembered_folder(&crate::notes::read(&h, &song)?.text)
+                        }
+                        _ => None,
+                    };
+                    match remembered.or_else(|| {
+                        inner
+                            .path
+                            .as_deref()
+                            .and_then(Path::parent)
+                            .map(Path::to_path_buf)
+                    }) {
+                        Some(p) => p,
+                        None => {
+                            return Err(VizError::Model {
+                                message: crate::notes::ASK_FOR_FOLDER.into(),
+                            });
+                        }
+                    }
+                }
+            };
+            check_output(&folder, Output::IntoFolder)
+                .map_err(|e| VizError::Model { message: e.message })?;
+            let made = crate::notes::make_export_folder(&folder, &song, what.into(), &date)?;
+            let shown = made.to_string_lossy().into_owned();
+            let log = Self::open_log(&mut inner)?;
+            if !log.files.contains(&shown) && log.files.len() < MAX_LOG_FILES {
+                log.files.push(shown.clone());
+            }
+            if given.is_some() {
+                log.export_folder = Some(folder.to_string_lossy().into_owned());
+            }
+            Ok(shown)
+        })
+    }
+
+    /// The song's Co-Producer copies, oldest first, each with about what
+    /// removing it frees (plan 8b Ruling 8). Empty for an untitled song
+    /// that never had one.
+    pub fn co_producer_copies(&self) -> Result<Vec<CopyRow>, VizError> {
+        ffi_guard(|| {
+            let (home, doc) = {
+                let mut inner = self.lock_inner();
+                (inner.copies_home(false)?, inner.doc().clone())
+            };
+            let Some(home) = home else {
+                return Ok(Vec::new());
+            };
+            Ok(crate::notes::copy_sizes(&home, &doc)?
+                .into_iter()
+                .map(|c| CopyRow {
+                    name: c.name,
+                    path: c.path.to_string_lossy().into_owned(),
+                    bytes: c.bytes,
+                })
+                .collect())
+        })
+    }
+
+    /// Moves the named copies to the Trash, only on the composer's yes in
+    /// Compact's offer (plan 8b Ruling 8): each name must be one
+    /// `co_producer_copies` lists right then, once; any other gives "Not a
+    /// copy of this song: <name>." and nothing moves for it. A copy the
+    /// Trash refuses stays, with a line. The media only removed copies
+    /// used go at the next Save.
+    pub fn remove_co_producer_copies(
+        &self,
+        names: Vec<String>,
+    ) -> Result<RemovedCopiesRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = self.lock_inner();
+            let home = inner.copies_home(false)?;
+            let listed: std::collections::BTreeSet<String> = match &home {
+                Some(h) => file::list_copies(h)
+                    .map_err(VizError::from)?
+                    .iter()
+                    .filter_map(|pj| pj.parent()?.file_name()?.to_str().map(str::to_string))
+                    .collect(),
+                None => Default::default(),
+            };
+            let trash = crate::retention::trash_dir(inner.trash_dir.as_deref());
+            let _g = lock(&SAVE_LOCK);
+            let mut row = RemovedCopiesRow {
+                removed: 0,
+                problems: Vec::new(),
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for name in names {
+                let shown = core_model::diff::shown_name(&name);
+                let (Some(h), true) = (&home, listed.contains(&name) && seen.insert(name.clone()))
+                else {
+                    row.problems
+                        .push(format!("Not a copy of this song: {shown}."));
+                    continue;
+                };
+                let path = h.join(file::COPIES_DIR).join(&name);
+                match crate::retention::trash(trash.as_deref(), &path) {
+                    Ok(()) => row.removed += 1,
+                    Err(e) => row.problems.push(format!(
+                        "The copy {shown} was not moved to the Trash ({e})."
+                    )),
+                }
+            }
+            Ok(row)
         })
     }
 }

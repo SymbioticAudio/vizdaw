@@ -969,6 +969,26 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         coLog.append("take")
         if let e = coTakeError { throw e }
     }
+    /// What the song's notes stubs answer (plan 8b Task 3).
+    var coNotes = NotesRow(text: "# Untitled\n", truncated: false, path: "/tmp/Notes.md")
+    /// What `coProducerCopies` answers.
+    var coCopies: [CopyRow] = []
+    func notesPath() throws -> String { coNotes.path }
+    func coProducerNotes() throws -> NotesRow { coNotes }
+    func coProducerSetAsked(asked: String) throws { coLog.append("asked \(asked)") }
+    func coProducerNote(text: String) throws { coLog.append("note \(text)") }
+    func coProducerFile(path: String) throws { coLog.append("file \(path)") }
+    func coProducerExportFolder(what: ExportWhatRow, date: String, parent: String?) throws -> String {
+        coLog.append("export folder \(date)")
+        return (parent ?? "/tmp") + "/Untitled — Stems — \(date)"
+    }
+    func coProducerCopies() throws -> [CopyRow] { coCopies }
+    func removeCoProducerCopies(names: [String]) throws -> RemovedCopiesRow {
+        coLog.append("remove \(names.count)")
+        let gone = coCopies.filter { names.contains($0.name) }
+        coCopies.removeAll { names.contains($0.name) }
+        return RemovedCopiesRow(removed: UInt64(gone.count), problems: [])
+    }
     func projectId() throws -> String? {
         interchangeLock.lock()
         projectIdCalls += 1

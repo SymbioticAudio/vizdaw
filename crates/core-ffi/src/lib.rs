@@ -48,6 +48,7 @@ pub mod media;
 pub mod mixer;
 pub mod modify;
 pub mod mpe;
+pub mod notes;
 pub mod overviews;
 pub mod passes;
 pub mod plugins;
@@ -147,7 +148,7 @@ pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latenc
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
 pub use selection::{SelectionRow, TickRange};
-pub use session::{OpenOptions, Session};
+pub use session::{CopyRow, NotesRow, OpenOptions, RemovedCopiesRow, Session};
 pub use snapshot::{
     DocSnapshot, IdleUpdate, KeySlotRow, LaneRow, ParamRow, ParamValue, PluginFormatTag,
     PluginRefRow, SeqRow, SlotRow, SlotStatus, TakeRow, TransportState,

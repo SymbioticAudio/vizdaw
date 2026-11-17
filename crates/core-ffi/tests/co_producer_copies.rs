@@ -293,7 +293,14 @@ fn an_untitled_copy_keeps_its_media() {
     s.close().unwrap();
     drop(s);
     assert!(!scratch.exists(), "Save As removed the scratch folder");
-    assert!(own.is_file());
+    // Plan 8b Ruling 7: the first save moved the copy, whole, into the
+    // package.
+    assert!(!own.exists());
+    let copy = dir
+        .path()
+        .join("Song.vizdaw/Co-Producer/Copies")
+        .join(copy.file_name().unwrap());
+    assert!(copy.join(&item.path).is_file());
 
     let c = Session::open_copy(copy.display().to_string()).unwrap();
     let media = c.media().unwrap();
