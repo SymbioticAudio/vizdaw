@@ -247,6 +247,8 @@ pub struct StripView {
     pub meter: (f32, f32),
     /// The strip's kind.
     pub kind: TrackKind,
+    /// The strip's colour, if the user chose one (plan 7b C-1).
+    pub colour: Option<core_model::mixer::Swatch>,
 }
 
 /// The MixerView snapshot (spec §8.1).

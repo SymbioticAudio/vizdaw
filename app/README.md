@@ -1928,6 +1928,7 @@ the detail pane is the bottom pane's editor.
      instead, Mission Control owns ⌃1/⌃2: rebind Arrange View and Mix View
      in Settings › Keys › View.) A sequence's keyboard slot on ⌃1, ⌃2 or
      ⌃⌘←/↓/→ no longer fires: the View command wins (backlog).
+     In the Mix view with no editor showing, the nudges and Modify Again are greyed out, and their keys say why in the status line.
 201. Press ⌃⌘→: the right pane opens beside the bottom pane, under the
      arrangement. Press ⌃⌘↓: the bottom pane hides and the right pane runs
      beside the arrangement for the full height. Press ⌃⌘↓: the bottom
@@ -2474,9 +2475,8 @@ sheets' models (`InterchangeTests`, `ProjectSettingsModelTests`,
      composer, OK; Undo ("Set Song Info") clears them; Save, close and
      reopen: they are there.
 266. Select a region: the inspector's Region name can be typed (one Undo,
-     "Rename Region"); the arrangement shows the new name (in the region's
-     VoiceOver label: the arrangement draws no region names); clearing it
-     shows the file's name again.
+     "Rename Region"); the arrangement shows the new name at the region's
+     top left; clearing it shows the file's name again.
 
 **Owner check (manual, only the owner can do):** export the demo song as a
 MIDI file, open it in the DAW you use that reads MIDI files, and check
@@ -2935,6 +2935,49 @@ refused on the sheet by design, so use "Always allow" with those.
      Control, Voice Control and Screen Sharing. Each is refused by design,
      and the refusal line shows. Record which of these you want allowed
      in a later release.
+
+26.0.0 release fixes:
+
+368. Arm a MIDI track with a 1-bar count-in and press Record. On beat 2, choose
+     another output device in Settings › Audio: the count-in carries on from
+     the next beat and recording starts on the bar, with no doubled click.
+369. Connect two interfaces with the same name, if you have them: Settings ›
+     Audio lists "<name>" and "<name> (2)", and your choice survives a
+     relaunch.
+370. With a slow MIDI setup (or at first launch), open a MIDI track's input
+     picker: the window never stalls. A source plugged in appears the next
+     time the picker opens.
+371. Arm a track while another document's engine winds down: the window stays
+     responsive, and the input is heard within about half a second.
+372. Open a plug-in with a read-only meter parameter, set its strip to Touch,
+     play, and drag that slider: no automation track appears.
+373. Write fader automation, play, and watch the mixer: the fader follows what
+     you hear. Grab it: it starts from there. Stop: it shows the static
+     value.
+374. In the Mix view with no editor pane, press ⌥→: nothing moves, and the
+     status line says why. Edit › Nudge is greyed out.
+375. Rename a region in the inspector: its name shows at the region's top left
+     in the arrangement. Narrow the region: the name truncates, then hides.
+376. Click "→ Audio 1" on an audio track's header: pick another output. One
+     Undo puts it back.
+377. With a keyboard surface connected, colour a track: its LED takes the
+     colour. "No colour" brings back the kind's colour.
+378. Double-click the Built-in Synth slot on an instrument strip: the Built-in
+     Synth window opens. Choose Bass, then Drums, playing a few notes after
+     each: the sound changes, and Drums plays a kit. Undo brings back Bass.
+379. On a track with an external destination, choose Edit Destination…: type a
+     return latency, or press Measure with the synth's return input
+     connected. The field shows the measured value, and one Undo puts the
+     old one back.
+380. Trim the start of an audio region in the middle of a waveform with "Snap
+     audio edits to zero crossings" on (Settings › Editing): zoom in, and the
+     edge sits on a zero crossing. Play: no click at either edge. With the
+     setting off, the edge stays exactly where you dropped it, still without
+     a click.
+381. Give a region a 10 ms fade-in: it sounds exactly as before this build. A
+     crossfaded start sounds as before too.
+382. Choose the Console theme: the strip legends use the new face. Every other
+     theme is unchanged.
 
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on

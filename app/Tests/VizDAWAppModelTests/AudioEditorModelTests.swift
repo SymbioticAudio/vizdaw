@@ -164,6 +164,37 @@ private let toneLane = LaneKey(3, 30)
         #expect(g.edits.isEmpty)
     }
 
+    /// Plan release-fixes Task 7: a typed start or length snaps its new
+    /// edge to a zero crossing (3 ms at the media's rate), held to the same
+    /// bounds; off, it does not ask.
+    @Test func typedTrimsSnapToZeroCrossings() {
+        let (f, m) = audioEditorDocument()
+        let saved = ZeroCrossing.preferences
+        defer { ZeroCrossing.preferences = saved }
+        let prefs = EditingPreferences(defaults: MemoryDefaults())
+        ZeroCrossing.preferences = prefs
+        selectEvents([71], in: m)
+        let a = m.audioEditor
+        f.crossing = { _, frame, _ in frame / 1000 * 1000 }
+        // 0.26 s is media frame 12 480, snapped to 12 000.
+        #expect(a.type(.start, "0.26"))
+        #expect(f.edits.last == .audio(edit: .trim(event: 71, frontFrames: -12_000, backFrames: 0)))
+        #expect(f.crossingCalls.last?.media == 5 && f.crossingCalls.last?.radius == 144)
+        // 1.26 s long ends at 84 480, snapped to 84 000: 60 000 frames.
+        #expect(a.type(.length, "1.26"))
+        #expect(f.edits.last == .audio(edit: .trim(event: 71, frontFrames: 0, backFrames: -12_000)))
+        // A snap past the file is held to it.
+        f.crossing = { _, _, _ in 500_000 }
+        #expect(a.type(.length, "1.26"))
+        #expect(f.edits.last == .audio(edit: .trim(event: 71, frontFrames: 0, backFrames: -24_000)))
+        // Off: the typed frame as it is.
+        prefs.zeroCrossings = false
+        f.crossingCalls = []
+        #expect(a.type(.start, "0.26"))
+        #expect(f.edits.last == .audio(edit: .trim(event: 71, frontFrames: -11_520, backFrames: 0)))
+        #expect(f.crossingCalls.isEmpty)
+    }
+
     @Test func typedStartAndLengthClamp() {
         let (f, m) = audioEditorDocument()
         selectEvents([71], in: m)

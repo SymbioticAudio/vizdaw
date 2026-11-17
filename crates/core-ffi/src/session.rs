@@ -47,6 +47,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod fixes;
+
 /// Package extension.
 pub const EXTENSION: &str = "vizdaw";
 
@@ -2804,6 +2806,7 @@ impl Session {
             if let Some(seq) = owed {
                 self.claim(seq);
             }
+            host::reap_retired();
             let mut inner = self.lock_inner();
             self.apply_pending_pass(&mut inner);
             self.apply_pending_automation(&mut inner);
@@ -3438,6 +3441,7 @@ impl Session {
                         DestKind::PluginInstrument { .. } => None,
                     },
                     mpe: d.mpe.map(Into::into),
+                    builtin_sound: crate::builtin_sound::sound_of(d),
                 })
                 .collect())
         })
@@ -8529,6 +8533,7 @@ impl Session {
     }
 
     fn write_mode_of(&self, inner: &Inner, t: AutomationTarget) -> Option<WriteMode> {
+        self.may_write(inner, t).then_some(())?;
         let w = inner.writing.as_ref()?;
         if crate::automation::suspended() || !self.pass_plays(w) {
             return None;
@@ -13132,6 +13137,7 @@ impl Session {
                 mode: s.automation,
                 meter: (0.0, 0.0),
                 kind: crate::surfaces::track_kind(s.kind),
+                colour: s.colour,
             };
             if shown {
                 v.fader = heard(AutomationTarget::StripFader(id));

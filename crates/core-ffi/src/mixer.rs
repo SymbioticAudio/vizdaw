@@ -192,6 +192,16 @@ pub struct StripRow {
     pub co_producer: bool,
 }
 
+/// One output path of the document, in id order (release-fixes Task 6:
+/// the audio track header's output picker).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OutputPathRow {
+    /// Output path ID.
+    pub id: u64,
+    /// Name.
+    pub name: String,
+}
+
 /// A destination of the instrument list (lanes play through these).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct DestRow {
@@ -217,6 +227,10 @@ pub struct DestRow {
     /// Its MPE output (plan 5g-2 Ruling 7), `None` when off.
     #[uniffi(default)]
     pub mpe: Option<crate::mpe::MpeRow>,
+    /// The Built-in Synth's sound (plan release-fixes Task 8); `None` for
+    /// every destination that is not a Built-in Synth.
+    #[uniffi(default)]
+    pub builtin_sound: Option<crate::builtin_sound::BuiltinSound>,
 }
 
 /// An external destination's MIDI strip mix (plan 5g-1b): controller

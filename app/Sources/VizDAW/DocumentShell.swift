@@ -47,6 +47,7 @@ struct DocumentShell: View {
             StatusLine(editor: model.editor)
         }
         .environment(\.openPluginWindow, { slot in PluginWindows.show(appStore, doc: docID, slot: slot) })
+        .environment(\.openBuiltinSynthWindow, { dest in BuiltinSynthWindows.show(appStore, doc: docID, dest: dest) })
         .environment(\.learnAlertHosted, true)
         .learnAlert(model.learn, shown: !model.learn.showsMaps)
         .frame(minWidth: 700, minHeight: 450)

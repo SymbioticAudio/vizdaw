@@ -22,6 +22,7 @@ pub mod automation;
 pub mod autowrite;
 pub mod blocks;
 pub mod bounce;
+pub mod builtin_sound;
 pub mod bundled;
 pub mod catalog;
 pub mod clock;
@@ -81,6 +82,7 @@ pub use bounce::{
     BounceCheckRow, BounceRangeRow, BounceRequestRow, BounceResultRow, BounceSettingsRow,
     BounceSourceRow, BouncedFileRow, ContainerRow, bounce_settings, set_bounce_settings,
 };
+pub use builtin_sound::BuiltinSound;
 pub use bundled::{
     DefaultEqRow, bundled_au_present, bundled_eq_name, default_eq, default_eq_note, install_multiq,
     new_channel_eq, set_default_eq, set_new_channel_eq,
@@ -135,8 +137,8 @@ pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
 pub use live::InputInfoRow;
 pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
 pub use mixer::{
-    BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow,
-    StripColourRow, StripKindRow, StripRow, SwatchRow,
+    BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, OutputPathRow,
+    SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow,
 };
 pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,

@@ -24,6 +24,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var slots: [SlotRow] = []
 
     init(_ sequences: [SeqRow], version: UInt64 = 0) {
+        // Pickers a fake document opens read no real device (Task 3 review I2).
+        TestDevices.stubbed
         snap = DocSnapshot(
             version: version, title: "Untitled", dirty: false, undoLabel: nil,
             redoLabel: nil, sequences: sequences, warnings: [], laneRevs: [])
@@ -1557,6 +1559,65 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
 
     func automationPreview(target: AutomationTargetRow) throws -> [PreviewPointRow] { previewRows }
+
+    // MARK: Release fixes (plan release-fixes Task 4)
+
+    /// What `releaseChannelTouches` answers, and how often it was called.
+    var channelTouches: UInt32 = 0
+    var releaseChannelCalls = 0
+    /// Thrown by `releaseChannelTouches` (after it is counted) when set.
+    var releaseChannelError: VizError?
+    func releaseChannelTouches() throws -> UInt32 {
+        releaseChannelCalls += 1
+        if let e = releaseChannelError { throw e }
+        return channelTouches
+    }
+
+    /// The heard values `heardValues` answers while playing (none while
+    /// stopped, as the core), and the targets each call asked for.
+    var heard: [AutomationTargetRow: Double] = [:]
+    var heardCalls: [[AutomationTargetRow]] = []
+    func heardValues(targets: [AutomationTargetRow]) throws -> [Double?] {
+        heardCalls.append(targets)
+        return targets.map { state.playing ? heard[$0] : nil }
+    }
+
+    // MARK: Release fixes (plan release-fixes Task 6)
+
+    /// The document's output paths, in id order, as `outputPaths` answers.
+    var outputPathRows: [OutputPathRow] = []
+    /// Thrown by `outputPaths` when set.
+    var outputPathsError: VizError?
+    func outputPaths() throws -> [OutputPathRow] {
+        if let e = outputPathsError { throw e }
+        return outputPathRows
+    }
+
+    // MARK: Release fixes (plan release-fixes Task 7)
+
+    /// What `zeroCrossing` answers (nil: the frame itself), and its calls.
+    var crossing: ((UInt64, UInt64, UInt64) throws -> UInt64)?
+    var crossingCalls: [(media: UInt64, frame: UInt64, radius: UInt64)] = []
+    func zeroCrossing(media: UInt64, frame: UInt64, radius: UInt64) throws -> UInt64 {
+        crossingCalls.append((media, frame, radius))
+        return try crossing?(media, frame, radius) ?? frame
+    }
+
+    // MARK: Release fixes (plan release-fixes Task 8)
+
+    /// Every `setBuiltinSound` call.
+    var builtinSounds: [(dest: UInt64, sound: BuiltinSound)] = []
+    /// Like the core: the row's sound changes and a step is made; thrown
+    /// (once) by `synthError`.
+    func setBuiltinSound(dest: UInt64, sound: BuiltinSound) throws {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        builtinSounds.append((dest, sound))
+        if let i = dests.firstIndex(where: { $0.id == dest }) { dests[i].builtinSound = sound }
+        _ = commandResult()
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

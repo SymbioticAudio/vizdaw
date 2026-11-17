@@ -91,17 +91,21 @@ const CHANGE: &[&str] = &[
     "region.fade_in_to_cursor",
     "region.fade_out_from_cursor",
     "region.crossfade",
+    "region.set_fade_shape",
     "lane.set_input",
     "lane.set_monitor",
+    "lane.set_output",
     "lane.set_input_fx",
     "lane.set_mpe",
     "lane.track_synth",
     "destination.set_midi_mix",
     "destination.set_mpe",
     "destination.set_return_latency",
+    "destination.set_sound",
     "destination.add_midi",
     "automation.set_mode",
     "automation.gesture",
+    "automation.release_all",
     "automation.suspend",
     "drum.add_row",
     "drum.split_row",
@@ -172,7 +176,7 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 191);
+    assert_eq!(COMMANDS.len(), 195);
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");

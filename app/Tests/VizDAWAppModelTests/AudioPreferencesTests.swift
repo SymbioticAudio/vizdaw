@@ -48,7 +48,7 @@ final class FakeAudioSink: AudioSink {
         let p = AudioPreferences(defaults: defaults, sink: sink)
         p.setBufferFrames(256)
         p.setSoftwareMonitoring(false)
-        p.setInputDevice("Studio In")
+        p.setInputDevice(uid: nil, name: "Studio In")
         p.setLatencyTrim(-12)
         p.setStream(cacheMb: 1024, readAheadSeconds: 6)
         p.setDefaultMonitor("off")
@@ -86,6 +86,36 @@ final class FakeAudioSink: AudioSink {
         #expect(p.settings.latencyTrim == 192_000)
         p.setDefaultMonitor("loud")
         #expect(p.settings.defaultMonitor == "off", "an unknown mode changes nothing")
+    }
+
+    /// Release fixes Task 2: a setting saved before devices were kept by
+    /// UID still selects its device by name.
+    @Test func anOldNameOnlySettingStillSelectsTheDevice() throws {
+        let defaults = MemoryDefaults()
+        defaults.set(Data(#"{"inputDevice": "Desk"}"#.utf8), forKey: AudioPreferences.key)
+        let sink = FakeAudioSink()
+        let p = AudioPreferences(defaults: defaults, sink: sink)
+        #expect(p.settings.inputDevice == "Desk")
+        #expect(p.settings.inputDeviceUID == nil)
+        p.applyAll()
+        #expect(sink.calls.contains("input Desk"))
+    }
+
+    /// Release fixes Task 2: the chosen device's UID is kept beside its
+    /// name, and the UID is what the core gets.
+    @Test func inputDeviceUidIsKept() throws {
+        let defaults = MemoryDefaults()
+        let p = AudioPreferences(defaults: defaults, sink: FakeAudioSink())
+        p.setInputDevice(uid: "u2", name: "A")
+        let sink = FakeAudioSink()
+        let again = AudioPreferences(defaults: defaults, sink: sink)
+        #expect(again.settings.inputDeviceUID == "u2" && again.settings.inputDevice == "A")
+        again.applyAll()
+        #expect(sink.calls.contains("input u2"))
+        #expect(!sink.calls.contains("input A"))
+        again.setInputDevice(uid: nil, name: nil)
+        #expect(again.settings.inputDeviceUID == nil && again.settings.inputDevice == nil)
+        #expect(sink.calls.last == "input same")
     }
 
     @Test func damagedSettingsKeepTheirDefaults() throws {

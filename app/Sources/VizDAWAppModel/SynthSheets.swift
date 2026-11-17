@@ -41,6 +41,21 @@ public struct MidiDestinationDraft: Identifiable, Equatable, Sendable {
     public let ports: [String]
 }
 
+/// What the destination editor edits (plan release-fixes Task 8): an
+/// external MIDI destination's return latency, typed as text.
+public struct EditDestinationDraft: Equatable, Sendable {
+    public var dest: UInt64
+    /// The sheet's title.
+    public let name: String
+    public var latencyText: String
+
+    public init(dest: UInt64, name: String, latencyText: String) {
+        self.dest = dest
+        self.name = name
+        self.latencyText = latencyText
+    }
+}
+
 /// The lane menu's Track Synth… and New MIDI Destination… sheets (spec
 /// §6.7, §6.9; plan 5d-2 Task 8). Under the control channel no sheet
 /// opens: the status line names the command to use instead.
@@ -50,6 +65,8 @@ public final class SynthSheets {
     @ObservationIgnored weak var document: DocumentModel?
     public var trackSynth: TrackSynthDraft?
     public var newDestination: MidiDestinationDraft?
+    /// The destination editor's draft (plan release-fixes Task 8).
+    public var editDestination: EditDestinationDraft?
     /// The Measure running for the sheet.
     public private(set) var measuring: MeasureJob?
     /// The last Measure's outcome, or why a sheet's action failed.
@@ -63,6 +80,8 @@ public final class SynthSheets {
     public static let trackSynthOnChannel = "Track Synth opens a sheet: use lane.track_synth over the control channel."
     public static let newDestinationOnChannel =
         "New MIDI Destination opens a sheet: use destination.add_midi over the control channel."
+
+    public static let editDestinationOnChannel = "Use destination.set_return_latency or destination.measure_return."
 
     init(document: DocumentModel) { self.document = document }
 
@@ -121,11 +140,14 @@ public final class SynthSheets {
     }
 
     private func measured(_ r: Result<MeasureRow, any Error>) {
+        let dest = measuring?.dest
         measuring = nil
         guard let m = document else { return }
         switch r {
         case .success(let row):
             SynthCommands.applyMeasured(row, m)
+            // The destination editor's field shows what was measured.
+            if let d = editDestination, d.dest == dest { editDestination?.latencyText = Self.msText(row.returnLatencyMs) }
             message = String(format: "Return latency %.1f ms (%u of 5 notes heard).", row.returnLatencyMs, row.onsets)
         case .failure(let e):
             message = AlertItem(e, title: "").message
@@ -184,5 +206,101 @@ public final class SynthSheets {
     public func closeNewDestination() {
         newDestination = nil
         destinationMessage = nil
+    }
+
+    // MARK: Built-in Synth sounds (plan release-fixes Task 8)
+
+    /// The Built-in Synth's sounds, in the window's order.
+    public static let sounds: [BuiltinSound] = [.piano, .bass, .pad, .lead, .drums]
+
+    /// What the window and the status line call `s`.
+    public static func title(_ s: BuiltinSound) -> String {
+        switch s {
+        case .piano: "Piano"
+        case .bass: "Bass"
+        case .pad: "Pad"
+        case .lead: "Lead"
+        case .drums: "Drums"
+        }
+    }
+
+    public static let notBuiltinSynth = "Only a Built-in Synth has these sounds."
+
+    /// Whether `row` is a Built-in Synth: a MIDI endpoint that is not
+    /// external (its sound may be none of the five, from a file).
+    public static func isBuiltinSynth(_ row: DestRow) -> Bool { row.plugin == nil && !row.external }
+
+    /// The sound Built-in Synth destination `dest` plays; nil for any other
+    /// destination (or when the list cannot be read).
+    public func sound(of dest: UInt64) -> BuiltinSound? {
+        guard let m = document else { return nil }
+        return ((try? m.session.destinations()) ?? []).first { $0.id == dest }?.builtinSound
+    }
+
+    /// Sets Built-in Synth `dest`'s sound: one undo step "Set Built-in Synth
+    /// Sound", heard by every track that plays it (Decision 3).
+    @discardableResult
+    public func setSound(_ s: BuiltinSound, dest: UInt64) -> KeyOutcome {
+        guard let m = document else { return .unavailable(Self.notBuiltinSynth) }
+        guard let row = ((try? m.session.destinations()) ?? []).first(where: { $0.id == dest }),
+            Self.isBuiltinSynth(row)
+        else { return .unavailable(Self.notBuiltinSynth) }
+        do {
+            try m.session.setBuiltinSound(dest: dest, sound: s)
+            m.apply(try m.session.snapshot())
+            return .done
+        } catch VizError.Busy(let message) {
+            m.editor.status = message
+            return .busy(message)
+        } catch {
+            m.editor.report(error)
+            return .refused(m.editor.status ?? "The sound was not set.")
+        }
+    }
+
+    // MARK: Destination editor (plan release-fixes Task 8)
+
+    /// `ms` as the field shows it ("12", "12.5").
+    static func msText(_ ms: Float) -> String { String(format: "%g", ms) }
+
+    /// Opens the destination editor on external destination `dest`; any
+    /// other destination opens nothing. Under the control channel no sheet
+    /// opens: the status line names the commands to use instead.
+    public func beginEditDestination(_ dest: UInt64, channelOn: Bool = MediaModel.channelIsOn()) {
+        guard let m = document else { return }
+        guard !channelOn else {
+            m.editor.status = Self.editDestinationOnChannel
+            return
+        }
+        guard let row = SynthCommands.externalDestinations(m).first(where: { $0.id == dest }) else { return }
+        if measuring == nil { message = nil }
+        editDestination = EditDestinationDraft(dest: dest, name: row.name, latencyText: Self.msText(row.returnLatencyMs))
+    }
+
+    /// Commits the field (Return or Done): parsed with
+    /// `SynthCommands.parseMs`, 0 to 500 ms, one undo step "Set Return
+    /// Latency" (none when unchanged). False, with no call, for any other
+    /// text, or when the core refused it (the message says why).
+    @discardableResult
+    public func commitLatency() -> Bool {
+        guard let m = document, let d = editDestination else { return false }
+        guard let ms = SynthCommands.parseMs(d.latencyText) else {
+            message = "The return latency is 0 to 500 ms."
+            return false
+        }
+        if returnLatency(d.dest) == ms { return true }
+        do {
+            m.apply(try m.session.setReturnLatency(dest: d.dest, ms: ms))
+            if measuring == nil { message = nil }
+            return true
+        } catch {
+            message = AlertItem(error, title: "").message
+            return false
+        }
+    }
+
+    public func closeEditDestination() {
+        editDestination = nil
+        if measuring == nil { message = nil }
     }
 }

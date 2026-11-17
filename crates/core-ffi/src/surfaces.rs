@@ -2764,6 +2764,7 @@ mod tests {
                 mode: AutomationMode::Read,
                 meter: (0.0, 0.0),
                 kind: core_surface::TrackKind::Audio,
+                colour: None,
             }],
             ..MixerView::default()
         }

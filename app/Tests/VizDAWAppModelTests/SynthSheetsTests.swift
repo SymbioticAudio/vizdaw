@@ -172,4 +172,72 @@ import VizDAWCore
         sheets.closeNewDestination()
         #expect(sheets.newDestination == nil)
     }
+
+    // MARK: Built-in Synth sounds and the destination editor (plan release-fixes Task 8)
+
+    /// 7 is the Built-in Synth (Piano), 9 the external "Juno" (12 ms).
+    func soundDemo() throws -> (DocumentModel, FakeSession) {
+        let f = demoFake()
+        f.dests = [
+            DestRow(id: 7, name: "Built-in Synth", plugin: nil, channel: 0, builtinSound: .piano),
+            DestRow(id: 9, name: "Juno", plugin: nil, external: true, returnLatencyMs: 12, channel: 0),
+        ]
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let m = try #require(s.newDemo().flatMap(s.model))
+        return (m, f)
+    }
+
+    @Test func soundsRoundTripThroughTheSession() throws {
+        let (m, f) = try soundDemo()
+        let sheets = m.synth
+        #expect(sheets.sound(of: 7) == .piano)
+        #expect(sheets.sound(of: 9) == nil && sheets.sound(of: 999) == nil)
+        let version = m.snapshot.version
+        #expect(sheets.setSound(.bass, dest: 7) == .done)
+        #expect(f.builtinSounds.count == 1 && f.builtinSounds.last?.dest == 7 && f.builtinSounds.last?.sound == .bass)
+        #expect(sheets.sound(of: 7) == .bass, "read back from the session's row")
+        #expect(m.snapshot.version > version, "the step was applied")
+        // Not a Built-in Synth: no call.
+        #expect(sheets.setSound(.drums, dest: 9) != .done)
+        #expect(sheets.setSound(.drums, dest: 999) != .done)
+        #expect(f.builtinSounds.count == 1)
+        // The core's refusal is said.
+        f.synthError = .Busy(message: "Finish the open edit first.")
+        #expect(sheets.setSound(.lead, dest: 7) == .busy("Finish the open edit first."))
+        #expect(SynthSheets.sounds == [.piano, .bass, .pad, .lead, .drums])
+        #expect(SynthSheets.sounds.map(SynthSheets.title) == ["Piano", "Bass", "Pad", "Lead", "Drums"])
+    }
+
+    @Test func theDestinationEditorCommitsLatencyAndMeasures() async throws {
+        let (m, f) = try soundDemo()
+        let sheets = m.synth
+        sheets.beginEditDestination(9, channelOn: false)
+        let d = try #require(sheets.editDestination)
+        #expect(d.dest == 9 && d.name == "Juno" && d.latencyText == "12")
+        for bad in ["abc", "-1", "501", "1\u{0}"] {
+            sheets.editDestination?.latencyText = bad
+            #expect(!sheets.commitLatency(), "\(bad)")
+        }
+        #expect(f.returnLatencies.isEmpty, "no call for a refused value")
+        sheets.editDestination?.latencyText = "12.5"
+        #expect(sheets.commitLatency())
+        #expect(f.returnLatencies.count == 1 && f.returnLatencies.last?.dest == 9 && f.returnLatencies.last?.ms == 12.5)
+        #expect(sheets.editDestination != nil, "Return keeps the sheet")
+        // Measure, as the Track Synth sheet's: off the main thread.
+        f.measured = 14.5
+        sheets.measure(9)
+        #expect(sheets.measuring != nil && sheets.message == "Measuring…")
+        await settle(sheets)
+        #expect(f.measures == [9] && f.measuredOnMain == [false])
+        #expect(sheets.message == "Return latency 14.5 ms (5 of 5 notes heard).")
+        #expect(sheets.editDestination?.latencyText == "14.5", "the field shows what was measured")
+        sheets.closeEditDestination()
+        #expect(sheets.editDestination == nil && sheets.message == nil)
+        // Only an external destination; never under the control channel.
+        sheets.beginEditDestination(7, channelOn: false)
+        #expect(sheets.editDestination == nil)
+        sheets.beginEditDestination(9, channelOn: true)
+        #expect(sheets.editDestination == nil && m.editor.status == SynthSheets.editDestinationOnChannel)
+        #expect(SynthSheets.editDestinationOnChannel == "Use destination.set_return_latency or destination.measure_return.")
+    }
 }

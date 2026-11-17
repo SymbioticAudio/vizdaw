@@ -57,6 +57,31 @@ import VizDAWCore
         #expect(m.pan(strip) == -0.5)
     }
 
+    /// Release-fixes Task 4: while playing, the fader shows the value
+    /// heard (its automation, or a channel's hold); a live touch here wins;
+    /// stopped, the snapshot's value is back.
+    @Test func aPlayingFaderShowsItsHeardValue() throws {
+        let (m, f) = try model()
+        let strip = try #require(m.strips.first)
+        f.heard = [fader: -12]
+        try f.play(seq: 1)
+        m.document.poll()
+        m.pollAutomation()
+        #expect(m.gainDb(strip) == -12, "the heard value")
+        #expect(f.heardCalls.last?.contains(fader) == true)
+        m.touch(fader)
+        m.move(fader, to: AutomationLaw.faderNorm(-3))
+        #expect(abs(m.gainDb(strip) + 3) < 1e-9, "a live touch wins")
+        m.release(fader)
+        #expect(m.gainDb(strip) == -12)
+        try f.stop()
+        m.document.poll()
+        let calls = f.heardCalls.count
+        m.pollAutomation()
+        #expect(m.gainDb(strip) == 0, "the snapshot's value again")
+        #expect(f.heardCalls.count == calls, "nothing is read while stopped")
+    }
+
     @Test func ringsFollowTheCoresTouchedTargets() throws {
         let (m, f) = try model()
         f.automationRow.touched = [.stripPan(strip: 2)]

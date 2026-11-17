@@ -343,9 +343,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         case .mute: flags(seq, lane.id, mute: !lane.mute)
         case .solo: flags(seq, lane.id, solo: !lane.solo)
         case .arm: flags(seq, lane.id, arm: !lane.arm)
-        // No output picker yet: a click on an audio track's output does
-        // nothing (it must not set a MIDI destination on an audio track).
-        case .destination where lane.kind == .audio: break
+        // An audio track's "→ …" is its output (release-fixes Task 6),
+        // never a MIDI destination.
+        case .destination where lane.kind == .audio: outputClicked(e, seq: seq, lane: lane, at: p)
         case .destination: destinationMenu(seq: seq, lane: lane, at: p)
         case .name where e.clickCount >= 2: beginRename(lane, seq: seq, row: i)
         case .name, .kind, nil: break
@@ -386,8 +386,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         return laneMenu(seq: seq, lane: document.lanes[i])
     }
 
-    /// Track Synth… (spec §6.7) on a
-    /// lane that plays an external synth, New MIDI Destination… (plan
+    /// Track Synth… (spec §6.7) and Edit Destination… (plan release-fixes
+    /// Task 8) on a lane that plays an external synth, New MIDI Destination… (plan
     /// 5d-2 Task 8) and Takes ▸ (plan 5c-2 takes Ruling 5).
     func laneMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let menu = NSMenu()
@@ -395,8 +395,15 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         let sheets = document.synth
         let track = MenuAction(title: "Track Synth…") { sheets.beginTrackSynth(seq: seq, lane: lane) }
         let trackItem = track.item(checked: false)
-        trackItem.isEnabled = sheets.synth(of: lane) != nil
+        let external = sheets.synth(of: lane)
+        trackItem.isEnabled = external != nil
         menu.addItem(trackItem)
+        // The destination editor (plan release-fixes Task 8): return
+        // latency and Measure for an external destination.
+        let edit = MenuAction(title: "Edit Destination…") { if let d = external { sheets.beginEditDestination(d.id) } }
+        let editItem = edit.item(checked: false)
+        editItem.isEnabled = external != nil
+        menu.addItem(editItem)
         let add = MenuAction(title: "New MIDI Destination…") { sheets.beginNewDestination(seq: seq, lane: lane) }
         menu.addItem(add.item(checked: false))
         menu.addItem(TakesMenu.item(document: document, seq: seq, lane: lane))
@@ -453,6 +460,49 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         destinationMenu(seq: seq, lane: lane).popUp(positioning: nil, at: p, in: self)
     }
 
+    /// A click on an audio track's output: the output menu. The control
+    /// channel's click opens none (a menu tracks modally); the status line
+    /// names the command to use instead.
+    func outputClicked(_ e: NSEvent, seq: UInt64, lane: LaneRow, at p: CGPoint) {
+        guard !ControlUI.isChannel(e) else {
+            editor.status = TrackCommands.outputOnChannel
+            return
+        }
+        outputMenu(seq: seq, lane: lane).popUp(positioning: nil, at: p, in: self)
+    }
+
+    /// The output picker (release-fixes Task 6): "No Output", then each of
+    /// the document's output paths by name, the track's checked. Choosing
+    /// one is one undo step, Set Track Output. When the paths cannot be
+    /// read the menu says so (a disabled item), as `destinationMenu`.
+    func outputMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let doc = document
+        let choose = { (output: UInt64?) in
+            _ = TrackCommands.setOutput(seq: seq, lane: lane.id, output: output, doc)
+        }
+        menu.addItem(MenuAction(title: TrackCommands.noOutput) { choose(nil) }.item(checked: lane.audioOut == nil))
+        let paths: [OutputPathRow]
+        do {
+            paths = try document.session.outputPaths()
+        } catch {
+            var busy = false
+            if case .Busy? = error as? VizError { busy = true }
+            if !busy { editor.report(error) }
+            let item = NSMenuItem(
+                title: busy ? "Outputs unavailable (busy)" : "Outputs unavailable", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            return menu
+        }
+        menu.addItem(.separator())
+        for path in paths {
+            menu.addItem(MenuAction(title: path.name) { choose(path.id) }.item(checked: lane.audioOut == path.id))
+        }
+        return menu
+    }
+
     /// "No Destination" and every destination. When they cannot be read the
     /// menu says so (a disabled item) instead of looking empty; a failure
     /// other than Busy also shows in the status line (spec §5).
@@ -497,6 +547,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     /// lane; the lane's input is checked.
     func inputMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let inputs = document.inputs
+        // Reads the sources again off the main thread: the menu lists the
+        // last read, which can be one refresh old (release-fixes Task 3).
         inputs.refreshInfo()
         let menu = NSMenu()
         menu.autoenablesItems = false

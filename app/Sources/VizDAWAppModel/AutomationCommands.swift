@@ -5,7 +5,7 @@ import VizDAWCore
 /// spec §7, Rulings 17 and 20): `automation.set_mode` sets strips' modes
 /// as one undo step, `automation.gesture` touches, moves and releases a
 /// target exactly as the mixer does, `automation.suspend` is the app-wide
-/// switch.
+/// switch, `automation.release_all` frees the channel's touches.
 ///
 /// Errors: every argument is checked here before the core is called (a
 /// missing or wrongly typed one, a mode, target or value not spelt as the
@@ -28,12 +28,14 @@ public enum AutomationCommands {
     public static let setMode = "automation.set_mode"
     public static let gesture = "automation.gesture"
     public static let suspend = "automation.suspend"
+    /// Releases every touch the channel holds (release-fixes Decision 2).
+    public static let releaseAll = "automation.release_all"
     /// The Automation menu's mode commands (plan 5e-2 Task 4).
     public static let modeIDs: [String: AutomationModeRow] = [
         "automation.mode.off": .off, "automation.mode.read": .read, "automation.mode.touch": .touch,
         "automation.mode.latch": .latch, "automation.mode.write": .write, "automation.mode.trim": .trim,
     ]
-    public static let ids: Set<String> = Set([setMode, gesture, suspend]).union(modeIDs.keys)
+    public static let ids: Set<String> = Set([setMode, gesture, suspend, releaseAll]).union(modeIDs.keys)
     /// The title of a failed mode change, wherever it was asked for (the
     /// mixer's popup and Set All, the menu, `automation.set_mode`).
     public static let modeFailed = "Automation Mode Failed"
@@ -116,6 +118,7 @@ public enum AutomationCommands {
         switch id {
         case setMode: return runSetMode(args, doc: doc, m)
         case gesture: return runGesture(args, doc: doc, m)
+        case releaseAll: return runReleaseAll(args, doc: doc, m)
         case _ where modeIDs[id] != nil:
             switch runMode(id, m) {
             case .done: return .done(ControlCommands.ran(id, doc, m))
@@ -178,6 +181,35 @@ public enum AutomationCommands {
     }
 }
 
+extension AutomationCommands {
+    /// What `automation.release_all` says for `n` released touches.
+    public nonisolated static func releasedStatus(_ n: UInt32) -> String {
+        switch n {
+        case 0: "The channel holds no touch."
+        case 1: "Released 1 touch."
+        default: "Released \(n) touches."
+        }
+    }
+
+    /// `automation.release_all` (release-fixes Task 4, Decision 2): the
+    /// core releases every touch the control channel holds, e.g. after a
+    /// script stopped mid-gesture; the mouse's, a surface's, a learned
+    /// control's and a plugin's holds stay. Takes no arguments.
+    static func runReleaseAll(_ args: [ControlArg], doc: UUID?, _ m: DocumentModel) -> ControlOutcome {
+        guard args.isEmpty else { return invalid("automation.release_all takes no parameters") }
+        let n: UInt32
+        do {
+            n = try m.session.releaseChannelTouches()
+        } catch {
+            return .failed(.thrown(error, "Automation Failed"))
+        }
+        // A released static touch commits its step (as `runGesture`).
+        if let s = try? m.session.snapshot(), s.version != m.snapshot.version { m.apply(s) }
+        m.editor.status = releasedStatus(n)
+        return .done(ControlCommands.ran(releaseAll, doc, m))
+    }
+}
+
 /// The Automation menu and the keys (plan 5e-2 Task 4).
 extension AutomationCommands: MenuCommands {
     public static func enabled(_ id: String, _ m: DocumentModel) -> Bool {
@@ -192,6 +224,13 @@ extension AutomationCommands: MenuCommands {
         if id == suspend {
             setAutomationSuspended(on: on ?? !automationSuspended())
             return .done
+        }
+        if id == releaseAll {
+            switch runReleaseAll([], doc: nil, m) {
+            case .failed(let f) where f.code == .busy: return .busy(f.message)
+            case .failed(let f): return .refused(f.message)
+            default: return .done
+            }
         }
         guard modeIDs[id] != nil else { return .refused("VizDAW has no handler for \(id).") }
         switch runMode(id, m) {

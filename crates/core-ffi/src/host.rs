@@ -7,6 +7,7 @@ use crate::error::VizError;
 use crate::guard::lock;
 use crate::plugins;
 use core_engine::backend::{AudioBackend, BackendEvent};
+use core_engine::count_in::CountIn;
 use core_engine::engine::{Engine, EngineConfig, PendingPlay};
 use core_engine::graph::NoInserts;
 use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, MidiSender, MonitorRoute, port_key};
@@ -477,11 +478,12 @@ pub fn hold_next_rebuild() -> RebuildGate {
     RebuildGate { reached, release }
 }
 
-/// The input device live hosts open (`None`: the output device's own
+/// The input device live hosts open, by UID or name (`None`: the output device's own
 /// input; spec §6.1 Settings › Audio "Input device").
 static INPUT_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 
-/// Chooses the audio input device by name (`None`: "Same as output").
+/// Chooses the audio input device by UID, or by name (older settings;
+/// a name two devices share opens neither) (`None`: "Same as output").
 /// Takes effect at once for an open input (it is reopened on the input
 /// thread); while recording or measuring, when the pass or measurement
 /// ends (5d-2 final review I1). A device that
@@ -1167,6 +1169,47 @@ fn audio_input_devices_body() -> Vec<String> {
     }
 }
 
+/// An input device Settings › Audio offers: its name, which two devices
+/// may share, and the UID that tells them apart (release fixes Task 2).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct InputDeviceRow {
+    /// The display name.
+    pub name: String,
+    /// The persistent UID ("" when the device gives none).
+    pub uid: String,
+}
+
+/// The audio input devices Settings › Audio offers, with their UIDs, in
+/// the system's order: every device with input channels on a live host;
+/// none offline. Infallible: the body runs inside `catch_unwind`, so a
+/// panic in the HAL listing answers no devices rather than crossing the
+/// FFI.
+#[uniffi::export]
+pub fn audio_input_device_list() -> Vec<InputDeviceRow> {
+    std::panic::catch_unwind(audio_input_device_list_body).unwrap_or_default()
+}
+
+/// [`audio_input_device_list`]'s body, which may panic.
+fn audio_input_device_list_body() -> Vec<InputDeviceRow> {
+    if offline_mode() {
+        return Vec::new();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform_macos::hal::input_device_list()
+            .into_iter()
+            .map(|d| InputDeviceRow {
+                name: d.name,
+                uid: d.uid,
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
 /// The chosen input device's channels and their names (5d-2 final review
 /// I4), for the input picker before any document holds the engine: read
 /// from the device's properties, so no device is opened, no host made and
@@ -1267,11 +1310,67 @@ fn retire(old: Option<Host>) {
         return;
     };
     std::thread::sleep(DRAIN);
+    drop_retired(old);
+}
+
+/// Drops a stopped host whose drain is over (output first, then the
+/// engine). Call without the host lock.
+fn drop_retired(old: Host) {
     #[cfg(feature = "test-hooks")]
     if let Some(log) = &old.log {
         lock(&RETIRED_LOG).extend(log.drain().iter().map(|r| (r.frame, r.bytes().to_vec())));
     }
     drop(old);
+}
+
+/// Hosts waiting out their drain: (host, drop after). Dropped on the
+/// main thread by reap_retired, never on a background thread.
+static RETIRING: Mutex<Vec<(Host, Instant)>> = Mutex::new(Vec::new());
+
+/// [`retire`] without the wait (release-fixes Task 3): the stopped host
+/// plays its note-offs while parked, and [`reap_retired`] drops it once
+/// `DRAIN` is over. An arm's claim parks, so the edit never sleeps on the
+/// main thread.
+fn park(old: Option<Host>) {
+    if let Some(old) = old {
+        lock(&RETIRING).push((old, Instant::now() + DRAIN));
+    }
+}
+
+/// Drops the parked hosts whose drain is over, without the host lock. Runs
+/// at the top of a claim made with the plugin host, and from [`state`] and
+/// `Session::idle`, all on the main thread.
+pub(crate) fn reap_retired() {
+    let now = Instant::now();
+    let done: Vec<Host> = {
+        let mut parked = lock(&RETIRING);
+        let (done, keep) = std::mem::take(&mut *parked)
+            .into_iter()
+            .partition(|(_, after)| *after <= now);
+        *parked = keep;
+        done.into_iter().map(|(h, _)| h).collect()
+    };
+    for h in done {
+        drop_retired(h);
+    }
+}
+
+/// Waits out every parked host's drain and drops them all (a reset).
+fn reap_all() {
+    let parked = std::mem::take(&mut *lock(&RETIRING));
+    for (h, after) in parked {
+        let left = after.saturating_duration_since(Instant::now());
+        if !left.is_zero() {
+            std::thread::sleep(left);
+        }
+        drop_retired(h);
+    }
+}
+
+/// How many retired hosts still wait out their drain (test hook).
+#[doc(hidden)]
+pub fn retiring_count() -> usize {
+    lock(&RETIRING).len()
 }
 
 /// Drops the host: its engine stops first, so played and auditioned
@@ -1286,6 +1385,7 @@ pub fn reset() {
         let _ = h.engine.stop();
     }
     retire(old);
+    reap_all();
 }
 
 /// While set, the offline driver renders nothing and skips the time held
@@ -1681,6 +1781,10 @@ struct Host {
     /// Where the asked Play stops (Play Selection, plan 4f): a rebuild
     /// resumes with it.
     until: Option<Tick>,
+    /// The count-in the asked Play sent (set by [`finish_play`], cleared
+    /// by [`stop`]): a rebuild before the renderer applied it counts in
+    /// from the start (plan release-fixes Task 1).
+    count_in: Option<CountIn>,
     /// The tick a device rebuild resumed this host from (plan 5e-1
     /// re-review N1: its renderer publishes no position until it runs).
     resumed_at: Option<Tick>,
@@ -1865,6 +1969,7 @@ impl Host {
             looped: false,
             want_play: false,
             until: None,
+            count_in: None,
             resumed_at: None,
             epoch: next_epoch(),
             device: device.to_string(),
@@ -2461,6 +2566,10 @@ struct Rebuild {
     old: Host,
     at: Tick,
     playing: bool,
+    /// The count-in still playing and its clicks started: the rebuilt
+    /// engine plays only the beats left (plan release-fixes Task 1, owner
+    /// decision 1).
+    count_in: Option<(CountIn, u32)>,
     /// The device still renders: its note-offs get `DRAIN` to play.
     drain: bool,
 }
@@ -2496,6 +2605,13 @@ fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
                 // and Stop a block late, so its state can lag it). A song in
                 // its release tail is past its end: a Play would restart it.
                 let playing = old.want_play && old.engine.state() != PlayState::Tail;
+                // Read before the Stop below ends it. A counted Play the
+                // renderer has not applied yet counts in from the start.
+                let count_in = old.engine.count_in_progress().or_else(|| {
+                    old.count_in
+                        .filter(|_| old.want_play && old.engine.state() == PlayState::Stopped)
+                        .map(|c| (c, 0))
+                });
                 let drain = !matches!(ev, BackendEvent::DeviceLost);
                 if drain {
                     let _ = old.engine.stop();
@@ -2505,6 +2621,7 @@ fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
                     old,
                     at,
                     playing,
+                    count_in,
                     drain,
                 }));
             }
@@ -2518,21 +2635,35 @@ fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
 /// processors go back to the plugin host), makes a new host for the
 /// owner, recompiles and resumes at the same tick. The owner's plugins
 /// follow the new engine's rate (`attach`). A failed rebuild leaves no
-/// host; a host another call made meanwhile wins.
-fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Result<(), VizError> {
+/// host; a host another call made meanwhile wins. With `park` (an arm's
+/// claim, release-fixes Task 3) the old host drains parked rather than
+/// in a sleep, and the MIDI sources connect on a thread of their own:
+/// the caller never waits for either.
+fn rebuild(
+    r: Rebuild,
+    doc: &Document,
+    plugins: Option<&mut PluginHost>,
+    park: bool,
+) -> Result<(), VizError> {
     let Rebuild {
         old,
         at,
         playing,
+        count_in,
         drain,
     } = r;
     let (owner, seq, looped, until) = (old.owner, old.seq, old.looped, old.until);
-    if drain {
+    if drain && !park {
         std::thread::sleep(DRAIN);
     }
-    // Read once the old output has stopped (dropped first, below).
+    // Read once the old output has stopped (dropped first, below), or,
+    // parked, once its engine has stopped.
     let overrides = old.engine.overrides();
-    drop(old);
+    if drain && park {
+        self::park(Some(old));
+    } else {
+        drop(old);
+    }
     #[cfg(feature = "test-hooks")]
     if let Some((reached, release)) = lock(&REBUILD_GATE).take() {
         let _ = reached.send(());
@@ -2540,8 +2671,8 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     }
     let mut new = Host::create(project_rate(doc))?;
     // Without the host lock (a cold CoreMIDI server is slow; M7: live
-    // hosts only).
-    if new.is_live() {
+    // hosts only). Parked: once the new host is in, off this thread.
+    if new.is_live() && !park {
         let fault = connect_midi_sources();
         note_midi_fault(&mut new, fault);
     }
@@ -2556,12 +2687,15 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     new.engine.locate_tick(at)?;
     new.resumed_at = Some(at);
     if playing {
-        match until {
-            Some(t) => new.engine.play_until(t)?,
-            None => new.engine.play()?,
+        let mut p = new.engine.begin_play(until);
+        if let Some((c, done)) = count_in {
+            p.resume_count_in(c, done);
         }
+        p.wait();
+        new.engine.finish_play(p)?;
         new.want_play = true;
         new.until = until;
+        new.count_in = count_in.map(|(c, _)| c);
     }
     new.owner = owner;
     new.seq = seq;
@@ -2574,6 +2708,9 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     };
     drop(slot);
     drop(spare);
+    if park {
+        listen_to_midi_sources_soon();
+    }
     Ok(())
 }
 
@@ -2628,6 +2765,8 @@ pub struct HostPlay {
     owner: u64,
     epoch: u64,
     pending: PendingPlay,
+    /// The count-in [`HostPlay::count_in`] set.
+    count_in: Option<CountIn>,
     /// The host is live: `finish_play` connects the MIDI sources, without
     /// the host lock (M7, Task 12 review).
     connect_midi: bool,
@@ -2665,6 +2804,13 @@ fn claim_host(
     idle: Idle,
 ) -> Result<(HostGuard, bool), VizError> {
     let idle_only = idle != Idle::Any;
+    // An arm's claim never waits out a drain (release-fixes Task 3).
+    let park = idle == Idle::Untouched;
+    // Only on the plugin thread (the main one): a claim with no plugin
+    // host may come from a background task (Measure).
+    if plugins.is_some() {
+        reap_retired();
+    }
     let project = project_rate(doc);
     let mut slot = loop {
         let mut slot = lock_host();
@@ -2703,7 +2849,7 @@ fn claim_host(
             // The drain and the rebuild run without the host lock; then
             // start over (another call may have changed the host).
             drop(slot);
-            rebuild(r, doc, plugins.as_deref_mut())?;
+            rebuild(r, doc, plugins.as_deref_mut(), park)?;
             continue;
         }
         // Another session's plugins played here, or the host was opened for
@@ -2730,7 +2876,11 @@ fn claim_host(
             // Then start over: another call may have changed the host
             // meanwhile.
             drop(slot);
-            retire(old);
+            if park {
+                self::park(old);
+            } else {
+                retire(old);
+            }
             continue;
         }
         break slot;
@@ -2805,11 +2955,14 @@ pub fn play(
     let pending = host.engine.begin_play(until);
     host.want_play = true;
     host.until = until;
+    // Until `finish_play` sends this Play's count-in, none is asked.
+    host.count_in = None;
     host.epoch = next_epoch();
     Ok(HostPlay {
         owner,
         epoch: host.epoch,
         pending,
+        count_in: None,
         connect_midi: host.is_live(),
         located,
     })
@@ -2818,8 +2971,9 @@ pub fn play(
 impl HostPlay {
     /// Plays count-in `c` before the transport rolls (Record's, plan 5d-1
     /// Ruling 7).
-    pub fn count_in(&mut self, c: Option<core_engine::count_in::CountIn>) {
+    pub fn count_in(&mut self, c: Option<CountIn>) {
         self.pending.set_count_in(c);
+        self.count_in = c;
     }
 
     /// The tick this Play located to; `None` when it resumes where the
@@ -2841,6 +2995,7 @@ pub fn finish_play(p: HostPlay) -> Result<(), VizError> {
     let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == p.owner && h.epoch == p.epoch => {
+            h.count_in = p.count_in;
             Ok(h.engine.finish_play(p.pending)?)
         }
         _ => Ok(()),
@@ -2854,6 +3009,7 @@ pub fn stop(owner: u64) -> Result<(), VizError> {
         Some(h) if h.owner == owner => {
             h.want_play = false;
             h.until = None;
+            h.count_in = None;
             h.epoch = next_epoch();
             Ok(h.engine.stop()?)
         }
@@ -3119,6 +3275,7 @@ pub fn state(
     doc: &Document,
     plugins: Option<&mut PluginHost>,
 ) -> Result<Option<HostState>, VizError> {
+    reap_retired();
     let mut slot = lock_host();
     match slot.as_ref() {
         Some(h) if h.owner == owner => {}
@@ -3126,7 +3283,7 @@ pub fn state(
     }
     if let Some(r) = handle_events(&mut slot)? {
         drop(slot);
-        rebuild(r, doc, plugins)?;
+        rebuild(r, doc, plugins, false)?;
         slot = lock_host();
     }
     let Some(h) = slot.as_mut().filter(|h| h.owner == owner) else {

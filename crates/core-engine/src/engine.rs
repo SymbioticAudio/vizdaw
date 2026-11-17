@@ -104,6 +104,9 @@ pub struct PendingPlay {
     until: Option<Tick>,
     /// The count-in to play before rolling (plan 5d-1 Ruling 7).
     count_in: Option<crate::count_in::CountIn>,
+    /// Its clicks played before a device rebuild (plan release-fixes
+    /// Task 1).
+    count_in_done: u32,
 }
 
 impl PendingPlay {
@@ -123,6 +126,13 @@ impl PendingPlay {
     /// Plays `c` before rolling (Record's count-in, plan 5d-1 Ruling 7).
     pub fn set_count_in(&mut self, c: Option<crate::count_in::CountIn>) {
         self.count_in = c;
+        self.count_in_done = 0;
+    }
+
+    /// A count-in resumed after `done` clicks (plan release-fixes Task 1).
+    pub fn resume_count_in(&mut self, c: crate::count_in::CountIn, done: u32) {
+        self.count_in = Some(c);
+        self.count_in_done = done;
     }
 }
 
@@ -239,6 +249,8 @@ pub struct Engine {
     /// no `stop` since), as this engine commanded it, not as the renderer
     /// has published yet.
     commanded_playing: bool,
+    /// The count-in the last Play sent (plan release-fixes Task 1).
+    count_in: Option<crate::count_in::CountIn>,
     /// A Stop or Locate was sent since the last Play: the next Play waits
     /// for the disk.
     moved_since_play: bool,
@@ -401,6 +413,7 @@ impl Engine {
             active_loop: None,
             selection: false,
             commanded_playing: false,
+            count_in: None,
             moved_since_play: false,
             stream_seen: (AtomicU64::new(0), AtomicU64::new(0)),
             input_spec: crate::input::InputSpec::default(),
@@ -1263,6 +1276,7 @@ impl Engine {
             wait: at.map(|a| (self.streamer.waiter(), a)),
             until,
             count_in: None,
+            count_in_done: 0,
         }
     }
 
@@ -1274,7 +1288,9 @@ impl Engine {
         self.push(EngineCmd::Play {
             until,
             count_in: p.count_in,
+            count_in_done: p.count_in_done,
         })?;
+        self.count_in = p.count_in;
         self.commanded_playing = true;
         self.moved_since_play = false;
         Ok(())
@@ -1379,6 +1395,14 @@ impl Engine {
     /// Ruling 7).
     pub fn counting_in(&self) -> bool {
         self.shared.counting_in()
+    }
+
+    /// `Some((count_in, clicks_started))` while counting in, else `None`
+    /// (plan release-fixes Task 1: a device rebuild resumes it).
+    pub fn count_in_progress(&self) -> Option<(crate::count_in::CountIn, u32)> {
+        self.count_in
+            .filter(|_| self.shared.counting_in())
+            .map(|c| (c, self.shared.count_in_clicks()))
     }
 
     /// Reads and clears the fault bits.

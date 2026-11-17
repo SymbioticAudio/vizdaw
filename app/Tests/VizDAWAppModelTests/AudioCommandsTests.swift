@@ -66,6 +66,31 @@ import VizDAWCore
         #expect(failure(run("audio.set", [("buffer_frames", .int(value: 512))], s, nil))?.code == .busy)
     }
 
+    /// Release fixes Task 2: `input_device` is a UID, or a name no other
+    /// device has; an ambiguous name is refused and changes nothing.
+    @Test func audioSetRefusesAnAmbiguousDeviceName() throws {
+        let (s, _, _, _) = try demo()
+        host.inputDevices = [
+            InputDeviceRow(name: "A", uid: "u1"), InputDeviceRow(name: "A", uid: "u2"),
+            InputDeviceRow(name: "B", uid: "u3"),
+        ]
+        let f = failure(run("audio.set", [("input_device", .text(value: "A"))], s, nil))
+        #expect(f?.code == .failed)
+        #expect(
+            f?.message
+                == "Two input devices are named \u{201C}A\u{201D}: choose one in Settings › Audio, or give its uid.")
+        #expect(host.audio.isEmpty, "nothing applied")
+        #expect(failure(run("audio.set", [("input_device", .text(value: "u2"))], s, nil)) == nil)
+        #expect(host.audio.last?.inputDevice == .some("A"))
+        #expect(host.audio.last?.inputDeviceUID == .some("u2"))
+        // A unique name finds its device's UID.
+        #expect(failure(run("audio.set", [("input_device", .text(value: "B"))], s, nil)) == nil)
+        #expect(host.audio.last?.inputDeviceUID == .some("u3"))
+        // Blank is still "Same as output", for both.
+        #expect(failure(run("audio.set", [("input_device", .text(value: ""))], s, nil)) == nil)
+        #expect(host.audio.last?.inputDevice == .some(nil) && host.audio.last?.inputDeviceUID == .some(nil))
+    }
+
     @Test func addMidiDestinationChecksItsValues() throws {
         let (s, id, _, f) = try demo()
         #expect(

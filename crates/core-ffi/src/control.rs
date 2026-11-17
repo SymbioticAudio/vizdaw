@@ -1433,6 +1433,18 @@ fn transport_json(doc: &str, t: &TransportState) -> Value {
     })
 }
 
+/// A Built-in Synth sound as `destination.set_sound` spells it.
+fn builtin_sound_text(s: crate::BuiltinSound) -> &'static str {
+    use crate::BuiltinSound as S;
+    match s {
+        S::Piano => "piano",
+        S::Bass => "bass",
+        S::Pad => "pad",
+        S::Lead => "lead",
+        S::Drums => "drums",
+    }
+}
+
 /// A fade shape as `state.get audio_editor` spells it.
 fn fade_shape_text(s: crate::events::FadeShapeRow) -> &'static str {
     use crate::events::FadeShapeRow as S;
@@ -1704,6 +1716,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "events": l.midi_event_count, "regions": l.region_count,
                 "references": l.reference_count, "mute": l.mute, "solo": l.solo, "arm": l.arm,
                 "takes": l.take_count, "active_take": l.active_take,
+                "audio_out": l.audio_out,
                 "take_list": l.takes.iter().map(|t| json!({
                     "id": t.id, "name": t.name, "active": t.id == l.active_take_id,
                 })).collect::<Vec<_>>(),
@@ -1723,6 +1736,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "return_latency_ms": (f64::from(d.return_latency_ms) * 1000.0).round() / 1000.0,
                 "midi_volume": d.midi_mix.volume, "midi_pan": d.midi_mix.pan,
                 "midi_mute": d.midi_mix.mute,
+                "sound": d.builtin_sound.map(builtin_sound_text),
                 "mpe": crate::mpe::mpe_json(d.mpe),
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,

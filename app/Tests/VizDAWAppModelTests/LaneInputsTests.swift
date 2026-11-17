@@ -10,11 +10,19 @@ import VizDAWCore
 @MainActor
 @Suite(.serialized) struct LaneInputsTests {
     /// Song (3) with `lanes`, shown.
-    func doc(_ lanes: [LaneRow]) throws -> (DocumentModel, FakeSession) {
+    func doc(_ lanes: [LaneRow], keepLastRead: Bool = false) throws -> (DocumentModel, FakeSession) {
         let f = demoFake()
         f.laneTable[3] = lanes
-        // No device read from the HAL in tests (final review I4).
-        LaneInputs.deviceChannels = { nil }
+        // No device read from the HAL in tests (final review I4), and no
+        // real MIDI source (a refresh reads them; release-fixes Task 3).
+        TestDevices.stubbed
+        if !keepLastRead {
+            LaneInputs.deviceChannels = { nil }
+            LaneInputs.midiPorts = { [] }
+            // No read carried over from another test (review I1).
+            LaneInputs.lastSources = []
+            LaneInputs.lastDevice = nil
+        }
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
         let m = try #require(s.newDemo().flatMap(s.model))
         m.select(3)
@@ -76,13 +84,14 @@ import VizDAWCore
     /// picker lists the chosen device's own channels and names (read
     /// without the engine); a mono input offers In 1 alone; with nothing
     /// known, In 1, In 2 and In 1+2.
-    @Test func thePickerListsTheDevicesChannelsBeforeTheEngine() throws {
+    @Test func thePickerListsTheDevicesChannelsBeforeTheEngine() async throws {
         let l = audioLane(30, nil)
         let (m, f) = try doc([l])
         let inputs = m.inputs
         LaneInputs.deviceChannels = { InputChannelsRow(channels: 4, names: ["Mic", "", "Synth L", "Synth R"]) }
         defer { LaneInputs.deviceChannels = { nil } }
         inputs.refreshInfo()
+        await inputs.refreshSources()
         #expect(
             titles(inputs.groups(for: l))["Audio"] == [
                 "In 1 (Mic)", "In 2", "In 3 (Synth L)", "In 4 (Synth R)", "In 1+2", "In 3+4",
@@ -92,6 +101,7 @@ import VizDAWCore
         f.inputRow = InputInfoRow(
             device: "Fake", channels: 1, names: ["Mono"], inputLatencyFrames: 0, outputLatencyFrames: 0)
         inputs.refreshInfo()
+        await inputs.refreshSources()
         #expect(titles(inputs.groups(for: l))["Audio"] == ["In 1 (Mono)"])
         #expect(inputs.knownChannels == 1)
         // Nothing known: the two-channel guess.
@@ -99,6 +109,7 @@ import VizDAWCore
             device: "", channels: 0, names: [], inputLatencyFrames: 0, outputLatencyFrames: 0)
         LaneInputs.deviceChannels = { nil }
         inputs.refreshInfo()
+        await inputs.refreshSources()
         #expect(titles(inputs.groups(for: l))["Audio"] == ["In 1", "In 2", "In 1+2"])
         #expect(inputs.knownChannels == nil)
     }
@@ -119,13 +130,14 @@ import VizDAWCore
         #expect(f.edits.count == count)
     }
 
-    @Test func midiChoicesAreSourcesAndChannels() throws {
-        LaneInputs.midiPorts = { ["Keystation", "Pads"] }
-        defer { LaneInputs.midiPorts = { midiSourcePorts() } }
+    @Test func midiChoicesAreSourcesAndChannels() async throws {
         var l = lane(31, "Keys")
         l.midiDest = 1
         l.input = .midi(port: "Pads", channel: nil)
         let (m, f) = try doc([l])
+        LaneInputs.midiPorts = { ["Keystation", "Pads"] }
+        defer { LaneInputs.midiPorts = { [] } }
+        await m.inputs.refreshSources()
         let g = titles(m.inputs.groups(for: l))
         #expect(g["Audio"] == nil)
         #expect(g["MIDI Input"] == ["All MIDI Inputs", "Keystation", "Pads"])
@@ -142,18 +154,56 @@ import VizDAWCore
 
     /// Plan 5f-1 Ruling 17: a surface's port hears nothing in a lane, and
     /// the picker says why.
-    @Test func aSurfacesPortIsMarkedInThePicker() throws {
-        LaneInputs.midiPorts = { ["Keystation", "MCU In"] }
-        LaneInputs.claimedPorts = { ["MCU In"] }
-        defer {
-            LaneInputs.midiPorts = { midiSourcePorts() }
-            LaneInputs.claimedPorts = { [] }
-        }
+    @Test func aSurfacesPortIsMarkedInThePicker() async throws {
         var l = lane(31, "Keys")
         l.midiDest = 1
         let (m, _) = try doc([l])
+        LaneInputs.midiPorts = { ["Keystation", "MCU In"] }
+        LaneInputs.claimedPorts = { ["MCU In"] }
+        defer {
+            LaneInputs.midiPorts = { [] }
+            LaneInputs.claimedPorts = { [] }
+        }
+        await m.inputs.refreshSources()
         let g = titles(m.inputs.groups(for: l))
         #expect(g["MIDI Input"] == ["All MIDI Inputs", "Keystation", "MCU In (used by a surface)"])
+    }
+
+    /// Release-fixes Task 3: the picker never reads the MIDI sources on the
+    /// main thread (a cold CoreMIDI server can take seconds). It lists the
+    /// sources the last refresh read, off the main thread.
+    @Test func theSourceListIsReadOffTheMainThread() async throws {
+        var l = lane(31, "Keys")
+        l.midiDest = 1
+        let (m, _) = try doc([l])
+        let calls = SourceReads()
+        LaneInputs.midiPorts = {
+            calls.note(onMain: Thread.isMainThread)
+            return ["Keys", "Pads"]
+        }
+        defer { LaneInputs.midiPorts = { [] } }
+        let before = titles(m.inputs.groups(for: l))
+        #expect(calls.reads.isEmpty, "the picker read the sources itself")
+        #expect(before["MIDI Input"] == ["All MIDI Inputs"])
+        await m.inputs.refreshSources()
+        #expect(calls.reads == [false], "one read, off the main thread")
+        #expect(titles(m.inputs.groups(for: l))["MIDI Input"] == ["All MIDI Inputs", "Keys", "Pads"])
+        #expect(calls.reads.count == 1, "the picker reads the cache")
+    }
+
+    /// Task 3 review I1: a new document's first picker lists the sources
+    /// the last read found (the app warms them at launch), before its own
+    /// refresh has run.
+    @Test func aNewDocumentsFirstMenuListsTheWarmedSources() async throws {
+        var l = lane(31, "Keys")
+        l.midiDest = 1
+        _ = try doc([l])
+        LaneInputs.midiPorts = { ["Keys", "Pads"] }
+        defer { LaneInputs.midiPorts = { [] } }
+        await LaneInputs.warmSources()
+        let (m, _) = try doc([l], keepLastRead: true)
+        #expect(m.inputs.midiSources == ["Keys", "Pads"], "seeded before any refresh")
+        #expect(titles(m.inputs.groups(for: l))["MIDI Input"] == ["All MIDI Inputs", "Keys", "Pads"])
     }
 
     @Test func theMonitorButtonCyclesAutoInputOff() throws {
@@ -283,5 +333,24 @@ import VizDAWCore
         m.inputs.pollMeters()
         #expect(m.inputs.opening)
         #expect(m.editor.status?.hasPrefix("Lane Audio 30") == true)
+    }
+}
+
+/// The MIDI source reads a test saw, and whether each ran on the main
+/// thread.
+final class SourceReads: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [Bool] = []
+
+    func note(onMain: Bool) {
+        lock.lock()
+        seen.append(onMain)
+        lock.unlock()
+    }
+
+    var reads: [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return seen
     }
 }

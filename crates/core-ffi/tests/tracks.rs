@@ -485,3 +485,61 @@ fn a_new_empty_sequence_has_no_tracks_and_is_one_undo_step() {
     assert_eq!(s.lanes(kit).unwrap().len(), 1);
     s.close().unwrap();
 }
+
+/// Release-fixes Task 6: the output picker's list is the document's output
+/// paths in id order; setting an unknown one changes nothing.
+#[test]
+fn output_paths_list_the_documents_paths() {
+    use vizdaw_ffi::{EditCommand, LaneEdit, OutputPathRow};
+    let _g = serial();
+    let mut b = Builder::new();
+    let (seq, lane) = b.sequence("S", "Vox", None).unwrap();
+    let mut add = |name: &str, reference: &str| {
+        b.run(Command::Routing(RoutingCmd::AddOutput {
+            name: name.into(),
+            reference: reference.into(),
+        }))
+        .unwrap()
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(o.0),
+            _ => None,
+        })
+        .unwrap()
+    };
+    let one = add("Main", "audio:1-2");
+    let two = add("Cue", "audio:3-4");
+    let s = Session::from_document(b.finish()).unwrap();
+    assert_eq!(
+        s.output_paths().unwrap(),
+        [
+            OutputPathRow {
+                id: one,
+                name: "Main".into()
+            },
+            OutputPathRow {
+                id: two,
+                name: "Cue".into()
+            },
+        ]
+    );
+    let seq = seq.0;
+    let lanes = s.lanes(seq).unwrap();
+    let before = s.snapshot().unwrap();
+    let bad = s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetOutput {
+                seq,
+                lane: lane.0,
+                output: Some(u64::MAX),
+            },
+        },
+        None,
+    );
+    assert!(bad.is_err());
+    assert_eq!(s.lanes(seq).unwrap(), lanes, "the document is unchanged");
+    assert_eq!(s.snapshot().unwrap().undo_label, before.undo_label);
+    assert_eq!(s.output_paths().unwrap().len(), 2);
+    s.close().unwrap();
+}

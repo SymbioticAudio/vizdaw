@@ -20,6 +20,20 @@ public enum TrackCommands {
     public static let makeMine = "track.make_mine"
     public static let ids: Set<String> = [newAudio, newInstrument, newMidi, duplicate, delete, rename, makeMine]
 
+    /// Set Track Output (release-fixes Task 6): an audio track's output
+    /// path, or none. Key-only; the header's output menu runs it too.
+    public static let setOutput = "lane.set_output"
+    /// The output menu's first item, and the status after choosing it.
+    public static let noOutput = "No Output"
+    /// Why a MIDI or instrument track has no output to set.
+    public static let notAudio = "Only an audio track has an output."
+    /// Why the output waits for Stop.
+    public static let recordingOutput = "Stop recording to change a track's output."
+    /// A channel click on an audio track's output: the menu tracks modally,
+    /// so the channel opens none.
+    public static let outputOnChannel =
+        "The output menu opens on a click: use lane.set_output over the control channel."
+
     static let noSequence = "Select a sequence first."
     static let noTrack = "Select a track in the arrangement first."
     /// Rename Track needs the arrangement's header on screen (Ruling 5, I11).
@@ -181,6 +195,7 @@ public enum TrackCommands {
     /// to the selection's first track; ids that name nothing are refused in
     /// track wording, and a blank `name` is the core's refusal, passed on.
     public static func run(_ id: String, args: [ControlArg], doc: UUID, _ m: DocumentModel) -> ControlOutcome {
+        if id == setOutput { return runSetOutput(args, doc: doc, m) }
         let seqArg = number(args, "seq"), laneArg = number(args, "lane"), afterArg = number(args, "after")
         if seqArg.bad { return badNumber(id, "seq") }
         if laneArg.bad { return badNumber(id, "lane") }
@@ -199,6 +214,85 @@ public enum TrackCommands {
         let seq = t.seq
         if id == rename, name == nil { return .failed(.dialog("Rename Track", "name")) }
         let outcome = execute(id, seq: seq, lane: lane, after: afterArg.value, name: name, m)
+        if let f = ControlCommands.failure(outcome) { return f }
+        return .done(ControlCommands.ran(id, doc, m))
+    }
+
+    /// Sets track `lane`'s output to `output` (nil: none) as one undo step,
+    /// Set Track Output; the status names the output, or "No Output".
+    /// Refused during an open drag or a recording, and for an output the
+    /// document does not have, with nothing sent.
+    @discardableResult
+    public static func setOutput(seq: UInt64, lane: UInt64, output: UInt64?, _ m: DocumentModel) -> KeyOutcome {
+        if let refused = outputWait(m) { return refused }
+        var name = noOutput
+        if let output {
+            let path = pathName(output, m)
+            if let refused = path.refused { return refused }
+            guard let found = path.name else { return .refused(unknownOutput(output)) }
+            name = found
+        }
+        guard m.editor.edit(.lane(edit: .setOutput(seq: seq, lane: lane, output: output))) else {
+            return .refused(m.editor.status ?? "Set Track Output was refused.")
+        }
+        m.editor.status = name
+        return .done
+    }
+
+    /// Why the output cannot change now: an open drag, or a recording
+    /// (which shows in the status line).
+    static func outputWait(_ m: DocumentModel) -> KeyOutcome? {
+        guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
+        m.record.refresh(quiet: true)
+        guard !m.record.isRecording else {
+            m.editor.status = recordingOutput
+            return .busy(recordingOutput)
+        }
+        return nil
+    }
+
+    /// Output path `id`'s name (nil when the document has none such), or
+    /// why the paths could not be read.
+    static func pathName(_ id: UInt64, _ m: DocumentModel) -> (name: String?, refused: KeyOutcome?) {
+        do {
+            return (try m.session.outputPaths().first { $0.id == id }?.name, nil)
+        } catch VizError.Busy(let message) {
+            m.editor.status = message
+            return (nil, .busy(message))
+        } catch {
+            m.editor.report(error)
+            return (nil, .refused(m.editor.status ?? "Set Track Output was refused."))
+        }
+    }
+
+    /// "There is no output `n`."
+    static func unknownOutput(_ n: UInt64) -> String { "There is no output \(n)." }
+
+    /// The channel's `lane.set_output`: `seq` and `lane` default as the
+    /// Track commands' do; `output` is an id or null (the text "none").
+    public static func runSetOutput(_ args: [ControlArg], doc: UUID, _ m: DocumentModel) -> ControlOutcome {
+        let id = setOutput
+        let seqArg = number(args, "seq"), laneArg = number(args, "lane")
+        if seqArg.bad { return badNumber(id, "seq") }
+        if laneArg.bad { return badNumber(id, "lane") }
+        let given = args.filter { $0.name == "output" }
+        let output: UInt64?
+        switch (given.count, given.first?.value) {
+        case (1, .int(let v)?) where v >= 0: output = UInt64(v)
+        case (1, .text(let t)?) where t == SynthCommands.unsetText: output = nil
+        default: return .failed(.of(.invalidParams, "\(id): `output` is an output id from 0, or null for none"))
+        }
+        let t = target(seq: seqArg.value, lane: laneArg.value, m)
+        if let refusal = t.refusal { return refusal }
+        guard let row = t.row else { return ControlCommands.unavailable(noTrack) }
+        guard row.kind == .audio else { return .failed(.of(.failed, notAudio)) }
+        if let refused = outputWait(m), let f = ControlCommands.failure(refused) { return f }
+        if let output {
+            let path = pathName(output, m)
+            if let refused = path.refused, let f = ControlCommands.failure(refused) { return f }
+            if path.name == nil { return .failed(.of(.unknownId, unknownOutput(output))) }
+        }
+        let outcome = setOutput(seq: t.seq, lane: row.id, output: output, m)
         if let f = ControlCommands.failure(outcome) { return f }
         return .done(ControlCommands.ran(id, doc, m))
     }

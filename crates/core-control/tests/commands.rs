@@ -546,8 +546,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        191,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer"
+        195,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1152,6 +1152,44 @@ fn record_and_lane_commands_check_their_params() {
     }
 }
 
+/// Release-fixes Task 6: `lane.set_output` takes an output id or null;
+/// hostile values never reach the app.
+#[test]
+fn set_output_checks_its_params() {
+    let run = |params: Value| json!({ "id": "lane.set_output", "params": params });
+    for params in [
+        json!({ "seq": 1, "lane": 2, "output": 3 }),
+        json!({ "seq": 1, "lane": 2, "output": null }),
+        json!({ "output": 3 }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{params}"
+        );
+    }
+    for params in [
+        json!({ "seq": 1, "lane": 2 }),
+        json!({ "seq": 1, "lane": 2, "output": "3" }),
+        json!({ "seq": 1, "lane": 2, "output": true }),
+        json!({ "seq": 1, "lane": 2, "output": -1 }),
+        json!({ "seq": 1, "lane": 2, "output": 1e30 }),
+        json!({ "seq": 1, "lane": 2, "output": "x".repeat(70_000) }),
+        json!({ "seq": 1, "lane": 2, "output": "a\u{0}b" }),
+        json!({ "seq": -1, "lane": 2, "output": 3 }),
+        json!({ "seq": 1, "lane": "2", "output": 3 }),
+        json!({ "seq": 1, "lane": 2, "output": 3, "bus": 1 }),
+    ] {
+        let (code, _) = err("command.run", run(params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}");
+    }
+    let spec = registry::find("lane.set_output").unwrap();
+    assert!(!spec.menu_item && spec.document, "key only, on a document");
+    assert_eq!(spec.class, registry::Class::Change);
+}
+
 /// Plan 5c-2 Task 10: the synth-tracking commands, and `lane.set_input`'s
 /// `return_of`, take their parameters by type and range; hostile values
 /// never reach the app.
@@ -1609,6 +1647,35 @@ fn automation_menu_commands_take_no_params() {
     }
     let s = registry::find("automation.suspend").unwrap();
     assert!(s.menu_item && s.menu == "Automation" && !s.document);
+}
+
+/// Release-fixes Task 4 (Decision 2): `automation.release_all` takes no
+/// parameters; anything given is refused before it reaches the app. A
+/// document command, key-only, with no menu item.
+#[test]
+fn release_all_takes_no_params() {
+    let run = |params: Value| json!({ "id": "automation.release_all", "params": params });
+    assert!(matches!(
+        ok("command.run", run(json!({}))),
+        Command::CommandRun { .. }
+    ));
+    assert!(matches!(
+        ok("command.run", json!({ "id": "automation.release_all" })),
+        Command::CommandRun { .. }
+    ));
+    for params in [
+        json!({ "x": 1 }),
+        json!({ "all": true }),
+        json!({ "all": "\u{0}" }),
+        json!({ "target": "x".repeat(70_000) }),
+        json!({ "strip": 99_999 }),
+    ] {
+        let (code, _) = err("command.run", run(params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}");
+    }
+    let spec = registry::find("automation.release_all").unwrap();
+    assert!(spec.document && !spec.menu_item && spec.params.is_empty());
+    assert_eq!(spec.class, registry::Class::Change);
 }
 
 /// Plan 5f-1 Task 9: the surface commands take their parameters by type
@@ -2127,6 +2194,96 @@ fn crossfade_commands_check_their_params() {
             .title,
         "Crossfade"
     );
+}
+
+/// Plan release-fixes Task 7: `region.set_fade_shape` names its fade and
+/// shape exactly; the region is optional, all three or none.
+#[test]
+fn set_fade_shape_checks_its_params() {
+    let run = |params: Value| json!({ "id": "region.set_fade_shape", "params": params });
+    for good in [
+        json!({ "fade": "in", "shape": "linear" }),
+        json!({ "fade": "out", "shape": "s_curve" }),
+        json!({ "fade": "out", "shape": "equal_power", "seq": 1, "lane": 2, "event": 3 }),
+        json!({ "fade": "in", "shape": "exponential", "seq": 1 }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    let long = "x".repeat(70_000);
+    for bad in [
+        json!({}),
+        json!({ "fade": "in" }),
+        json!({ "shape": "linear" }),
+        json!({ "fade": "middle", "shape": "linear" }),
+        json!({ "fade": "In", "shape": "linear" }),
+        json!({ "fade": "in", "shape": "cubic" }),
+        json!({ "fade": "in", "shape": 3 }),
+        json!({ "fade": 1, "shape": "linear" }),
+        json!({ "fade": "in", "shape": long }),
+        json!({ "fade": "in", "shape": "linear\u{0}" }),
+        json!({ "fade": "in\u{0}", "shape": "linear" }),
+        json!({ "fade": "in", "shape": "linear", "event": -1 }),
+        json!({ "fade": "in", "shape": "linear", "event": "3" }),
+        json!({ "fade": "in", "shape": "linear", "length_ms": "5" }),
+        json!({ "fade": "in", "shape": "linear", "extra": 1 }),
+    ] {
+        let (code, _) = err("command.run", run(bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    let c = COMMANDS
+        .iter()
+        .find(|c| c.id == "region.set_fade_shape")
+        .unwrap();
+    assert!(c.document && c.menu == "Region" && !c.menu_item);
+    assert!(c.dialogs.is_empty(), "never a dialog");
+    assert_eq!(c.class, registry::Class::Change);
+}
+
+/// Plan release-fixes Task 8: `destination.set_sound` names a destination
+/// and one of the Built-in Synth's five sounds exactly.
+#[test]
+fn set_sound_checks_its_params() {
+    let run = |params: Value| json!({ "id": "destination.set_sound", "params": params });
+    for sound in ["piano", "bass", "pad", "lead", "drums"] {
+        let good = json!({ "dest": 7, "sound": sound });
+        assert!(
+            matches!(
+                ok("command.run", run(good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    let long = "x".repeat(70_000);
+    for bad in [
+        json!({}),
+        json!({ "dest": 7 }),
+        json!({ "sound": "drums" }),
+        json!({ "dest": 7, "sound": "kazoo" }),
+        json!({ "dest": 7, "sound": "Drums" }),
+        json!({ "dest": 7, "sound": 3 }),
+        json!({ "dest": "7", "sound": "drums" }),
+        json!({ "dest": -1, "sound": "drums" }),
+        json!({ "dest": 7, "sound": long }),
+        json!({ "dest": 7, "sound": "drums\u{0}" }),
+        json!({ "dest": 7, "sound": "drums", "extra": 1 }),
+    ] {
+        let (code, _) = err("command.run", run(bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    let c = COMMANDS
+        .iter()
+        .find(|c| c.id == "destination.set_sound")
+        .unwrap();
+    assert!(c.document && c.menu == "Destination" && !c.menu_item);
+    assert!(c.dialogs.is_empty(), "never a dialog");
+    assert_eq!(c.class, registry::Class::Change);
 }
 
 /// Plan 5f-4 Ruling 2: `surface.add` takes the Kontrol type.

@@ -104,6 +104,13 @@ private struct DocumentSheets: ViewModifier {
             ) { approval in
                 CoProducerApprovalSheet(model: approval)
             }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.synth.editDestination != nil },
+                    set: { if !$0 { model.synth.closeEditDestination() } })
+            ) {
+                DestinationEditorSheet(sheets: model.synth, editor: model.editor)
+            }
     }
 }
 

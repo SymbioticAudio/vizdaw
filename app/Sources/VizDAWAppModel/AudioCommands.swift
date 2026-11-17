@@ -3,20 +3,24 @@ import VizDAWCore
 
 /// What `audio.set` changes (plan 5d-1 Ruling 26): each field set is one
 /// setting, nil leaves it. `inputDevice` set to `.some(nil)` is "Same as
-/// output".
+/// output"; `inputDeviceUID` is the chosen device's UID (release fixes
+/// Task 2), read only with `inputDevice` (nil: a name alone, as older
+/// settings and devices not connected have).
 public struct AudioChange: Equatable, Sendable {
     public var softwareMonitoring: Bool?
     public var bufferFrames: UInt32?
     public var inputDevice: String??
+    public var inputDeviceUID: String?
     public var latencyTrim: Int32?
 
     public init(
         softwareMonitoring: Bool? = nil, bufferFrames: UInt32? = nil, inputDevice: String?? = nil,
-        latencyTrim: Int32? = nil
+        inputDeviceUID: String? = nil, latencyTrim: Int32? = nil
     ) {
         self.softwareMonitoring = softwareMonitoring
         self.bufferFrames = bufferFrames
         self.inputDevice = inputDevice
+        self.inputDeviceUID = inputDeviceUID
         self.latencyTrim = latencyTrim
     }
 
@@ -71,14 +75,35 @@ public enum AudioCommands {
         return c.isEmpty ? nil : c
     }
 
+    /// `key` as the device it names in `list` (release fixes Task 2): by
+    /// UID, else by a name no other device has. A key no device has stays
+    /// a name (a device not connected). nil: two devices have that name.
+    static func resolve(_ key: String, in list: [InputDeviceRow]) -> (name: String, uid: String?)? {
+        if let d = list.first(where: { !$0.uid.isEmpty && $0.uid == key }) { return (d.name, d.uid) }
+        let named = list.filter { $0.name == key }
+        guard named.count <= 1 else { return nil }
+        return (key, named.first.flatMap { $0.uid.isEmpty ? nil : $0.uid })
+    }
+
     /// `audio.set`: applies `args` through `host` (the app's preferences).
     public static func runSet(_ args: [ControlArg], host: any ControlHost) -> ControlOutcome {
-        guard let c = change(args) else {
+        guard var c = change(args) else {
             return .failed(
                 .of(
                     .invalidParams,
                     "audio.set: give software_monitoring, buffer_frames (32, 64, 128, 256, 512 or 1024), input_device or latency_trim (±192000)"
                 ))
+        }
+        if case .some(.some(let key)) = c.inputDevice {
+            guard let d = resolve(key, in: host.inputDeviceList()) else {
+                return .failed(
+                    .of(
+                        .failed,
+                        "Two input devices are named \u{201C}\(key)\u{201D}: choose one in Settings › Audio, or give its uid."
+                    ))
+            }
+            c.inputDevice = .some(d.name)
+            c.inputDeviceUID = d.uid
         }
         do {
             try host.applyAudio(c)

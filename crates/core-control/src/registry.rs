@@ -1148,6 +1148,34 @@ const CROSSFADE_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `region.set_fade_shape` (plan release-fixes Task 7).
+const SET_FADE_SHAPE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    ParamSpec {
+        name: "fade",
+        kind: ParamKind::Choice(&["in", "out"]),
+        required: true,
+        help: "The fade in or the fade out (a crossfaded start: use region.crossfade's shape).",
+    },
+    ParamSpec {
+        name: "shape",
+        kind: ParamKind::Choice(&["linear", "equal_power", "exponential", "s_curve"]),
+        required: true,
+        help: "The fade's new shape; its length is kept.",
+    },
+];
+
 /// `region.remove_crossfade` (plan 6c Task 5).
 const REMOVE_CROSSFADE_PARAMS: &[ParamSpec] = &[
     opt_id_param(
@@ -1395,6 +1423,17 @@ const RETURN_LATENCY_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `destination.set_sound` (plan release-fixes Task 8).
+const SET_SOUND_PARAMS: &[ParamSpec] = &[
+    id_param("dest", "The Built-in Synth destination."),
+    ParamSpec {
+        name: "sound",
+        kind: ParamKind::Choice(&["piano", "bass", "pad", "lead", "drums"]),
+        required: true,
+        help: "Its sound; every track that plays this Built-in Synth changes.",
+    },
+];
+
 /// `destination.set_midi_mix` (plan 5g-1b Task 4).
 const MIDI_MIX_PARAMS: &[ParamSpec] = &[
     id_param("dest", "The external MIDI destination."),
@@ -1436,7 +1475,7 @@ const AUDIO_SET_PARAMS: &[ParamSpec] = &[
         name: "input_device",
         kind: ParamKind::Text,
         required: false,
-        help: "The audio input device by name (\"\": the output device's own input).",
+        help: "The input device's uid, or its name if no other device has that name.",
     },
     ParamSpec {
         name: "latency_trim",
@@ -1593,6 +1632,24 @@ const SET_MONITOR_PARAMS: &[ParamSpec] = &[
         kind: ParamKind::Choice(&["auto", "input", "off"]),
         required: true,
         help: "When the track's input is heard: auto (armed, stopped or recording in range), input (always) or off.",
+    },
+];
+
+/// `lane.set_output` (plan release-fixes Task 6).
+const SET_OUTPUT_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The track's sequence (default: the shown one)."),
+    opt_id_param(
+        "lane",
+        "The audio track (default: the selection's first track).",
+    ),
+    ParamSpec {
+        name: "output",
+        kind: ParamKind::IntOrNull {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: true,
+        help: "The output path's id (state.get mixer), or null for no output.",
     },
 ];
 
@@ -2153,6 +2210,17 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("region.crossfade", "Region", "Crossfade", None, true)
     },
     CommandSpec {
+        class: Class::Change,
+        params: SET_FADE_SHAPE_PARAMS,
+        ..key_only(cmd(
+            "region.set_fade_shape",
+            "Region",
+            "Set Fade Shape",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
         class: Class::Remove,
         params: REMOVE_CROSSFADE_PARAMS,
         ..cmd(
@@ -2428,6 +2496,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         class: Class::Change,
+        params: SET_OUTPUT_PARAMS,
+        ..key_only(cmd(
+            "lane.set_output",
+            "Track",
+            "Set Track Output",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
         params: SET_INPUT_FX_PARAMS,
         ..key_only(cmd(
             "lane.set_input_fx",
@@ -2458,6 +2537,17 @@ pub const COMMANDS: &[CommandSpec] = &[
             "destination.set_return_latency",
             "Destination",
             "Set Return Latency",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: SET_SOUND_PARAMS,
+        ..key_only(cmd(
+            "destination.set_sound",
+            "Destination",
+            "Set Built-in Synth Sound",
             None,
             true,
         ))
@@ -2523,6 +2613,18 @@ pub const COMMANDS: &[CommandSpec] = &[
             "automation.gesture",
             "Mixer",
             "Automation Gesture",
+            None,
+            true,
+        ))
+    },
+    // Release every touch the control channel holds, e.g. after a script
+    // stopped mid-gesture (release-fixes Task 4, Decision 2).
+    CommandSpec {
+        class: Class::Change,
+        ..key_only(cmd(
+            "automation.release_all",
+            "Mixer",
+            "Release Channel Touches",
             None,
             true,
         ))

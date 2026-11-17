@@ -26,6 +26,22 @@ fn value(f: u64) -> f32 {
     ((f % 997) as f32 + 1.0) / 2000.0
 }
 
+/// The edge fade (plan release-fixes Task 7) at frame `i` of a region of
+/// `n` frames without fades: a linear ramp over its first and last 72
+/// frames (1.5 ms at 48 kHz).
+fn edge(i: u64, n: u64) -> f32 {
+    const E: u64 = 72;
+    let mut g = 1.0;
+    if i < E {
+        g *= i as f32 / E as f32;
+    }
+    let left = n.saturating_sub(i);
+    if left < E {
+        g *= left as f32 / E as f32;
+    }
+    g
+}
+
 fn caf(path: &Path) {
     let mut w = CafWriter::create(path, 48_000, 2, BitDepth::Float32, WriteMode::Normal).unwrap();
     let data: Vec<f32> = (0..FILE_FRAMES)
@@ -120,11 +136,13 @@ fn a_region_plays_through_the_engine() {
     let left = r.render(200, false);
     assert!(left[..QF as usize].iter().all(|x| *x == 0.0));
     // The strip's pan law scales by a constant k.
-    let k = left[QF as usize] / value(100);
+    // Past the edge fade (frame 100 of the region).
+    let k = left[(QF + 100) as usize] / value(200);
     assert!(k > 0.5 && k <= 1.0, "{k}");
-    for i in [0u64, 1, 999, QF, 2 * QF - 1] {
+    for i in [0u64, 1, 36, 999, QF, 2 * QF - 36, 2 * QF - 1] {
         let got = left[(QF + i) as usize];
-        assert!((got - k * value(100 + i)).abs() < 1e-6, "frame {i}: {got}");
+        let want = k * value(100 + i) * edge(i, 2 * QF);
+        assert!((got - want).abs() < 1e-6, "frame {i}: {got}");
     }
     assert_eq!(left[(3 * QF) as usize], 0.0);
     assert!(
@@ -244,10 +262,11 @@ fn selection_then_edit(edit: impl FnOnce(&mut Rig, &Document, SeqId)) {
     assert_eq!(lp, None, "the streamer loops during Play Selection");
     // 400 blocks run past the loop end (192 000) without wrapping.
     let left = r.render(400, false);
-    let k = left[0] / value(0);
+    let k = left[100] / value(100);
     assert!(k > 0.5 && k <= 1.0, "{k}");
     for (i, x) in left.iter().enumerate() {
-        assert!((x - k * value(i as u64)).abs() < 1e-6, "selection {i}: {x}");
+        let want = k * value(i as u64) * edge(i as u64, 16 * QF);
+        assert!((x - want).abs() < 1e-6, "selection {i}: {x}");
     }
     let f = r.engine.faults();
     assert!(f.is_empty(), "{:?}", f.names());
@@ -261,7 +280,8 @@ fn selection_then_edit(edit: impl FnOnce(&mut Rig, &Document, SeqId)) {
     let left = r.render(blocks, false);
     for (i, x) in left.iter().enumerate() {
         let f = i as u64 % le;
-        assert!((x - k * value(f)).abs() < 1e-6, "loop {i}: {x}");
+        let want = k * value(f) * edge(f, 16 * QF);
+        assert!((x - want).abs() < 1e-6, "loop {i}: {x}");
     }
     let f = r.engine.faults();
     assert!(f.is_empty(), "{:?}", f.names());
@@ -294,7 +314,7 @@ fn stop_locate_play_while_playing_waits_for_the_disk() {
     let mut r = rig(&d, seq, false, true);
     r.engine.play().unwrap();
     let left = r.render(4, false);
-    let k = left[0] / value(0);
+    let k = left[100] / value(100);
     r.engine.faults();
     r.engine.stop().unwrap();
     r.engine.locate_frame(5 * QF).unwrap();
@@ -336,12 +356,14 @@ fn caf_shifted(path: &Path, shift: u64) {
 }
 
 /// Checks `left` (rendered from schedule frame `from`, the region at 0
-/// offset 0) against `value(f + shift)` times the pan constant `k`.
+/// offset 0 for 8 beats) against `value(f + shift)` times the pan
+/// constant `k` and the edge fade.
 fn assert_plays(left: &[f32], from: u64, shift: u64, k: f32) {
     for (i, x) in left.iter().enumerate() {
-        let f = from + i as u64 + shift;
+        let r = from + i as u64;
+        let f = r + shift;
         assert!(
-            (x - k * value(f)).abs() < 1e-6,
+            (x - k * value(f) * edge(r, 8 * QF)).abs() < 1e-6,
             "frame {}: {x}",
             from + i as u64
         );
@@ -363,7 +385,7 @@ fn media_that_failed_mid_play_plays_again_once_restored() {
         }];
         r.engine.play().unwrap();
         let left = r.render(4, false);
-        let k = left[0] / value(0);
+        let k = left[100] / value(100);
         assert!(k > 0.5 && k <= 1.0, "{k}");
         if cached {
             // The file goes away; the cache lets go of it (dropped and
@@ -418,7 +440,7 @@ fn a_new_path_for_the_same_media_plays_the_new_file() {
         caf_shifted(&other, 333);
         r.engine.play().unwrap();
         let left = r.render(4, false);
-        let k = left[0] / value(0);
+        let k = left[100] / value(100);
         assert_plays(&left, 0, 0, k);
         r.engine.set_media(vec![MediaFile {
             id: MediaId(0),

@@ -136,6 +136,9 @@ struct VizDAWApp: App {
         Icons.register(SymbioticBrand.provider)
         #endif
         appStore.keyBindings = keyBindings
+        // Trims snap to zero crossings by this preference (plan
+        // release-fixes Task 7).
+        ZeroCrossing.preferences = editingPreferences
         // The external sample editor (plan 5f-3 Ruling 5): the stub launches
         // nothing (CI, the e2e).
         let stub = ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub"
@@ -173,6 +176,7 @@ struct VizDAWApp: App {
         }
         appStore.willClose = {
             PluginWindows.closeDocument($0)
+            BuiltinSynthWindows.closeDocument($0)
             EditorWindows.closeDocument($0)
             ModifyPanels.close($0)
         }
@@ -357,6 +361,10 @@ enum AppSetup {
         // it; lanes mark surface ports.
         try? surfacesLoad()
         LaneInputs.claimedPorts = { Set(surfaceList().map(\.input)) }
+        // The pickers' first menus list the MIDI sources and the device's
+        // channels (release-fixes Task 3 review I1), read off the main
+        // thread. Not in `--smoke` runs, which read no device.
+        if !LaunchArguments.smokeRun { Task { await LaneInputs.warmSources() } }
         appPlugins.start(config: AppPlugins.config(supportDir: dir, scanner: scanner), scan: false)
     }
 

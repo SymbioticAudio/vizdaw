@@ -467,3 +467,128 @@ fn a_resting_touch_takes_the_mode_set_while_it_rests() {
         .collect();
     assert!(values.iter().any(|v| (v - 0.3).abs() < 1e-9), "{values:?}");
 }
+
+/// Release-fixes Task 4 (Decision 2): `release_channel_touches` frees
+/// only the control channel's holds; the mouse keeps its own. The
+/// channel's static fader touch ends as a release does, so its step
+/// commits and undoes.
+#[test]
+fn release_all_frees_only_the_channels_touches() {
+    let _g = serial();
+    // Two strips besides master (listed last): the synth's and a bus.
+    let (s, _, b) = automated_bus();
+    let strips = s.mixer().unwrap().strips;
+    let a = strips[..strips.len() - 1]
+        .iter()
+        .find(|x| x.id != b)
+        .unwrap()
+        .id;
+    let fader = Target::StripFader { strip: a };
+    let pan = Target::StripPan { strip: b };
+    let before = gain(&s, a);
+    s.gesture_from(
+        fader,
+        Phase::Touch {
+            value: Some(core_model::automation::fader_norm(-6.0)),
+        },
+        H::Channel,
+    )
+    .unwrap();
+    s.gesture(pan, Phase::Touch { value: None }).unwrap();
+    assert_eq!(s.release_channel_touches().unwrap(), 1);
+    assert_eq!(s.automation_state().unwrap().touched, vec![pan]);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader")
+    );
+    assert!((gain(&s, a) + 6.0).abs() < 1e-6, "{}", gain(&s, a));
+    s.undo().unwrap();
+    assert!((gain(&s, a) - before).abs() < 1e-9, "the step undoes");
+    assert_eq!(s.release_channel_touches().unwrap(), 0);
+    s.gesture(pan, Phase::Release).unwrap();
+    assert!(s.automation_state().unwrap().touched.is_empty());
+}
+
+/// A session whose bus fader is automated flat at -12 dB: `(session,
+/// sequence, bus strip)`.
+fn automated_bus() -> (Arc<Session>, u64, u64) {
+    use core_engine::fixtures::{Builder, Q as FQ};
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::event::EventBody;
+    let mut b = Builder::new();
+    let synth_dest = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(synth_dest)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0x8000, 64 * FQ)]).unwrap();
+    let bus = b.bus("Bus").unwrap();
+    let auto = b.lane(seq, "Auto", None).unwrap();
+    b.event(
+        seq,
+        auto,
+        0,
+        EventBody::Automation {
+            target: AutomationTarget::StripFader(bus),
+            value: fader_norm(-12.0),
+        },
+    )
+    .unwrap();
+    (Session::from_document(b.finish()).unwrap(), seq.0, bus.0)
+}
+
+/// Release-fixes Task 4: while playing, `heard_values` gives each
+/// target's heard value (the Read lane's -12 dB, the static pan) in the
+/// mixer's units; stopped, none. More than 4096 targets is refused; an
+/// unknown strip has none.
+#[test]
+fn heard_values_follow_automation_while_playing() {
+    let _g = serial();
+    let (s, seq, bus) = automated_bus();
+    let targets = vec![
+        Target::StripFader { strip: bus },
+        Target::StripPan { strip: bus },
+    ];
+    let pan = s
+        .mixer()
+        .unwrap()
+        .strips
+        .iter()
+        .find(|x| x.id == bus)
+        .unwrap()
+        .pan;
+    assert_eq!(s.heard_values(targets.clone()).unwrap(), vec![None, None]);
+    s.play(seq).unwrap();
+    wait_until("the automation heard", || {
+        s.heard_values(targets.clone())
+            .unwrap()
+            .first()
+            .copied()
+            .flatten()
+            .is_some_and(|d| (d + 12.0).abs() < 0.01)
+    });
+    let heard = s.heard_values(targets.clone()).unwrap();
+    assert_eq!(heard.len(), 2);
+    assert!(
+        heard[1].is_some_and(|p| (p - pan).abs() < 1e-9),
+        "{heard:?}"
+    );
+    assert_eq!(
+        s.heard_values(vec![Target::StripFader { strip: 999 }])
+            .unwrap(),
+        vec![None],
+        "an unknown strip"
+    );
+    assert!(
+        s.heard_values(vec![Target::StripFader { strip: bus }; 4097])
+            .is_err()
+    );
+    assert_eq!(
+        s.heard_values(vec![Target::StripFader { strip: bus }; 4096])
+            .unwrap()
+            .len(),
+        4096
+    );
+    s.stop().unwrap();
+    wait_until("the stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    assert_eq!(s.heard_values(targets).unwrap(), vec![None, None]);
+    s.close().unwrap();
+}

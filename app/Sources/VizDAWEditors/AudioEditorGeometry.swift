@@ -144,24 +144,36 @@ public enum AudioEditorGeometry {
 
     /// A trim drag's full target (Ruling 6): `front` is held within
     /// `−min(source_offset, startRoom) … frames − 1`, `back` within
-    /// `min(0, −(media − offset − frames)) … frames − 1`. Nil: not a trim
-    /// handle, a non-finite `dx`, or no change.
+    /// `min(0, −(media − offset − frames)) … frames − 1`. `snap` moves the
+    /// region's new start or end, in media frames, first (zero crossings,
+    /// plan release-fixes Task 7); the result is held to the same bounds.
+    /// Nil: not a trim handle, a non-finite `dx`, or no change.
     public static func trimCommand(
-        _ r: EventRow, _ h: AudioEditorHandle, dx: CGFloat, framesPerPoint: Double, mediaFrames: UInt64, startRoom: UInt64
+        _ r: EventRow, _ h: AudioEditorHandle, dx: CGFloat, framesPerPoint: Double, mediaFrames: UInt64, startRoom: UInt64,
+        snap: (UInt64) -> UInt64 = { $0 }
     ) -> EditCommand? {
         guard dx.isFinite, framesPerPoint.isFinite, framesPerPoint > 0, r.frames > 0 else { return nil }
         let raw = (Double(dx) * framesPerPoint).rounded()
         let delta = Int64(min(max(raw, -1e15), 1e15))
         let len = frames(r.frames)
+        let offset = frames(r.sourceOffset)
         switch h {
         case .start:
-            let low = -min(frames(r.sourceOffset), frames(startRoom))
-            let front = min(max(delta, low), len - 1)
+            let low = -min(offset, frames(startRoom))
+            var front = min(max(delta, low), len - 1)
+            guard front != 0 else { return nil }
+            // offset + front ≥ 0: `low` is at least −offset.
+            let start = frames(snap(UInt64(offset + front)))
+            front = min(max(start - offset, low), len - 1)
             return front == 0 ? nil : .audio(edit: .trim(event: r.id, frontFrames: front, backFrames: 0))
         case .end:
-            let tail = frames(mediaFrames) - frames(r.sourceOffset) - len
+            let tail = frames(mediaFrames) - offset - len
             let low = min(0, -tail)
-            let back = min(max(-delta, low), len - 1)
+            var back = min(max(-delta, low), len - 1)
+            guard back != 0 else { return nil }
+            // offset + len − back ≥ offset + 1: `back` is below len.
+            let end = frames(snap(UInt64(offset + len - back)))
+            back = min(max(offset + len - end, low), len - 1)
             return back == 0 ? nil : .audio(edit: .trim(event: r.id, frontFrames: 0, backFrames: back))
         case .gain, .fadeIn, .fadeOut, .crossfade:
             return nil
@@ -171,7 +183,7 @@ public enum AudioEditorGeometry {
     /// A drag's full target, `dx`/`dy` points from the press (nil: no change).
     public static func target(
         _ r: EventRow, _ h: AudioEditorHandle, dx: CGFloat, dy: CGFloat, fine: Bool, axis: FrameAxis, mediaFrames: UInt64,
-        startRoom: UInt64, in wave: CGRect
+        startRoom: UInt64, in wave: CGRect, snap: (UInt64) -> UInt64 = { $0 }
     ) -> EditCommand? {
         switch h {
         case .gain:
@@ -185,7 +197,8 @@ public enum AudioEditorGeometry {
             return RegionHandles.fadeCommand(r, handle, dx: min(max(dx, -limit), limit), in: rect)
         case .start, .end:
             return trimCommand(
-                r, h, dx: dx, framesPerPoint: axis.framesPerPoint, mediaFrames: mediaFrames, startRoom: startRoom)
+                r, h, dx: dx, framesPerPoint: axis.framesPerPoint, mediaFrames: mediaFrames, startRoom: startRoom,
+                snap: snap)
         }
     }
 

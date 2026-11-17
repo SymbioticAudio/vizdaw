@@ -200,8 +200,9 @@ fn a_located_lead_path_starts_silent_and_aligned() {
     let mut r = rig(&d, seq, true);
     r.engine.play().unwrap();
     let (before, _) = r.render(100);
-    // Heard from beat 1 plus L: the pan law scales by a constant k.
-    let k = before[(QF + L) as usize] / value(100);
+    // Heard from beat 1 plus L: the pan law scales by a constant k (read
+    // past the region's 72-frame edge fade, plan release-fixes Task 7).
+    let k = before[(QF + L + 100) as usize] / value(200);
     assert!(k > 0.5 && k <= 1.0, "{k}");
     r.engine.locate_frame(4 * QF).unwrap();
     let (after, _) = r.render(40);

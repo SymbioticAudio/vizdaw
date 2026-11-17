@@ -224,7 +224,7 @@ struct AppCommands: Commands {
             }
             .keyboardShortcut(KeyMenu.shortcut("modify.again"))
             .help(SelectModifyModel.modifyAgainHelp)
-            .disabled(!(doc?.selectModify.canModifyAgain ?? false))
+            .disabled(!(doc?.selectModify.canModifyAgain ?? false) || doc?.selectionHidden == true)
             Menu("Templates") {
                 ForEach(doc?.editor.modifyTemplates() ?? [], id: \.name) { t in
                     Button(t.name) { doc?.selectModify.run(t) }
@@ -407,7 +407,8 @@ struct AppCommands: Commands {
         Button(title) { doc?.editor.nudge(dir, settings: editingPreferences.nudge) }
             .keyboardShortcut(KeyMenu.shortcut(id))
             .disabled(
-                doc == nil || !(doc?.transportKeysEnabled ?? false) || (doc?.editor.selection.events.isEmpty ?? true))
+                doc == nil || !(doc?.transportKeysEnabled ?? false) || (doc?.editor.selection.events.isEmpty ?? true)
+                    || doc?.selectionHidden == true)
     }
 
     /// A Drum menu command (Plan 4e Ruling 13); a refusal shows in the

@@ -5883,3 +5883,202 @@ fn co_producer_approval_over_mcp() {
     );
     app.quit();
 }
+
+/// README steps 368 to 382 through the channel (plan release-fixes): a
+/// region's fade shape, a track's output, a Built-in Synth's sound, a
+/// held channel touch released, and the Mix view refusing nudges.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn release_fixes_over_the_channel() {
+    use core_control::ErrorCode;
+    use core_engine::fixtures::Builder;
+    use core_model::command::{Command, LaneCmd, RoutingCmd};
+    use core_model::event::{EventBody, Fade, FadeShape};
+    use core_model::ids::AnyId;
+    let mut app = App::start();
+    // One audio track "Tone" with a region (10 ms = 480 frames fade-out)
+    // on output "Audio 1", a second output "Audio 2", a MIDI track on an
+    // external destination, and an instrument track on the Built-in Synth.
+    let mut b = Builder::new();
+    let synth = b.dest("Built-in Synth", "builtin:synth", 0).unwrap();
+    let ext = b.dest("Hardware", "hw:synth", 0).unwrap();
+    let (seq, _) = b.sequence("Song", "Piano", Some(synth)).unwrap();
+    let midi = b.lane(seq, "Pads", Some(ext)).unwrap();
+    let mut outputs = Vec::new();
+    for (name, reference) in [("Audio 1", "audio:1-2"), ("Audio 2", "audio:3-4")] {
+        let r = b
+            .run(Command::Routing(RoutingCmd::AddOutput {
+                name: name.into(),
+                reference: reference.into(),
+            }))
+            .unwrap();
+        outputs.push(
+            r.created
+                .iter()
+                .find_map(|id| match id {
+                    AnyId::Output(o) => Some(o.0),
+                    _ => None,
+                })
+                .unwrap(),
+        );
+    }
+    let media = b.media("Media/tone.wav", 96_000, 1).unwrap();
+    let tone = b.lane(seq, "Tone", None).unwrap();
+    b.run(Command::Lane(LaneCmd::SetOutput {
+        seq,
+        lane: tone,
+        output: b.doc().outputs().keys().next().copied(),
+    }))
+    .unwrap();
+    let region = b
+        .event(
+            seq,
+            tone,
+            0,
+            EventBody::AudioRegion {
+                media,
+                source_offset: 0,
+                length: 96_000,
+                gain_db: 0.0,
+                fade_in: Fade::default(),
+                fade_out: Fade {
+                    length_frames: 480,
+                    shape: FadeShape::Linear,
+                },
+                name: Some("Tone".into()),
+                crossfade: false,
+            },
+        )
+        .unwrap();
+    let path = app.launched.home.join("ReleaseFixes.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    let fail = |app: &mut App, id: &str, params: Value| {
+        app.call_err(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    let (seq, tone, midi, region) = (seq.0, tone.0, midi.0, region.0);
+
+    // 1. The fade-out's shape: "Fade Out: S-Curve", in the editor's
+    // state, and Undo brings the old shape back.
+    let (el, label) = wait_for_label_like(&mut app, &w, "Region Tone on ", "");
+    app.call("ui.click", json!({"window": w, "element": el}));
+    run(&mut app, "editors.audio_editor", json!({}));
+    let fade_out = |app: &mut App| {
+        wait_for_state(app, &w, "audio_editor", |s| s["region"]["event"] == region)["region"]
+            ["fade_out"]
+            .clone()
+    };
+    assert_eq!(
+        fade_out(&mut app),
+        json!({"frames": 480, "shape": "linear"}),
+        "{label}"
+    );
+    let r = run(
+        &mut app,
+        "region.set_fade_shape",
+        json!({"seq": seq, "lane": tone, "event": region, "fade": "out", "shape": "s_curve"}),
+    );
+    assert_eq!(r["status"], "Fade Out: S-Curve", "{r}");
+    assert_eq!(
+        fade_out(&mut app),
+        json!({"frames": 480, "shape": "s_curve"})
+    );
+    run(&mut app, "edit.undo", json!({}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        s["region"]["fade_out"]["shape"] == "linear"
+    });
+
+    // 2. A track's output: the second path, then none; a MIDI track fails.
+    let audio_out = |app: &mut App, name: &str| lane_named(app, &w, name)["audio_out"].clone();
+    assert_eq!(audio_out(&mut app, "Tone"), json!(outputs[0]));
+    run(
+        &mut app,
+        "lane.set_output",
+        json!({"seq": seq, "lane": tone, "output": outputs[1]}),
+    );
+    assert_eq!(audio_out(&mut app, "Tone"), json!(outputs[1]));
+    let r = run(
+        &mut app,
+        "lane.set_output",
+        json!({"seq": seq, "lane": tone, "output": null}),
+    );
+    assert_eq!(r["status"], "No Output", "{r}");
+    assert_eq!(audio_out(&mut app, "Tone"), Value::Null);
+    let e = fail(
+        &mut app,
+        "lane.set_output",
+        json!({"seq": seq, "lane": midi, "output": outputs[0]}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+
+    // 3. The Built-in Synth's sound: Drums, then Undo.
+    let sound = |app: &mut App| {
+        let doc = app.call("state.get", json!({"target": "document", "window": w}));
+        doc["destinations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == "Built-in Synth")
+            .unwrap_or_else(|| panic!("no Built-in Synth in {doc}"))["sound"]
+            .clone()
+    };
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let dest = doc["destinations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "Built-in Synth")
+        .unwrap()["id"]
+        .clone();
+    let before = sound(&mut app);
+    let r = run(
+        &mut app,
+        "destination.set_sound",
+        json!({"dest": dest, "sound": "drums"}),
+    );
+    assert_eq!(r["status"], "Drums", "{r}");
+    assert_eq!(sound(&mut app), json!("drums"));
+    run(&mut app, "edit.undo", json!({}));
+    assert_eq!(sound(&mut app), before);
+
+    // 4. A touch with no release, on a stopped transport, then released.
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    let strip = state["modes"][0]["strip"].as_u64().expect("a strip");
+    run(
+        &mut app,
+        "automation.gesture",
+        json!({"target": format!("fader:{strip}"), "phase": "touch", "value": "0.5"}),
+    );
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["touched"].as_array().unwrap().len(), 1, "{state}");
+    let r = run(&mut app, "automation.release_all", json!({}));
+    assert_eq!(r["status"], "Released 1 touch.", "{r}");
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["touched"], json!([]), "{state}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let step = doc["undo"].clone();
+    assert!(step.is_string(), "the touch is one undo step: {doc}");
+    run(&mut app, "edit.undo", json!({}));
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(doc["redo"], step, "{doc}");
+
+    // 5. The Mix view with no editor refuses a nudge; Arrange restores it.
+    run(&mut app, "ui.view_mix", json!({}));
+    let e = fail(&mut app, "editors.nudge_later", json!({}));
+    assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
+    assert!(e.message.contains("The Mix view shows no editor"), "{e:?}");
+    run(&mut app, "ui.view_arrange", json!({}));
+    let r = run(&mut app, "editors.nudge_later", json!({}));
+    assert_eq!(r["undo"], "Nudge Events", "Arrange restores the nudge: {r}");
+    app.quit();
+}

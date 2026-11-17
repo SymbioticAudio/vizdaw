@@ -289,6 +289,21 @@ pub fn color(kind: TrackKind) -> &'static str {
     }
 }
 
+/// A fixed LED hue per swatch (release-fixes Decision 6), `"#RRGGBB"`.
+pub fn swatch_color(s: core_model::mixer::Swatch) -> &'static str {
+    use core_model::mixer::Swatch;
+    match s {
+        Swatch::Red => "#E6463C",
+        Swatch::Orange => "#E68C28",
+        Swatch::Yellow => "#E6C83C",
+        Swatch::Green => "#46B45A",
+        Swatch::Teal => "#28B4B4",
+        Swatch::Blue => "#3C8CE6",
+        Swatch::Purple => "#9650DC",
+        Swatch::Pink => "#E650A0",
+    }
+}
+
 /// Ruling 8's track type (`None`: an empty slot).
 pub fn track_type(kind: Option<TrackKind>) -> u8 {
     match kind {
@@ -759,7 +774,12 @@ impl Kontrol {
                 CMD_COLOR,
                 0,
                 slot,
-                kind.map(|k| color(k).as_bytes()).unwrap_or_default(),
+                s.map(|s| {
+                    s.colour
+                        .map_or_else(|| color(s.kind), swatch_color)
+                        .as_bytes()
+                })
+                .unwrap_or_default(),
             );
             tx.cc(0x50 + slot, s.map_or(0, |s| ring(s.fader)));
             tx.cc(0x58 + slot, s.map_or(0, |s| ring(s.pan)));

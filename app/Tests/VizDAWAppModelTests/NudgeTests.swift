@@ -101,6 +101,34 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
         #expect(e.status == EditorModel.gestureOpenMessage)
     }
 
+    /// Owner decision 5 (plan release-fixes Task 5): in the Mix view with
+    /// no editor showing, the nudges wait and say why; a key says it in the
+    /// status line.
+    @Test func nudgesWaitWhileTheMixViewHidesTheSelection() throws {
+        let f = rollFake()
+        let store = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in rollFake() })
+        let id = try #require(store.newDemo())
+        let m = try #require(store.model(id))
+        let host = FakeControlHost()
+        func run(_ c: String) -> ControlOutcome { ControlCommands.run(c, args: [], doc: (id, m), store: store, host: host) }
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 31)], events: [1, 2]))
+        guard case .done = run("ui.view_mix") else { Issue.record("ui.view_mix failed"); return }
+        let before = f.edits.count
+        for c in ["editors.nudge_earlier", "editors.nudge_later", "editors.nudge_up", "editors.nudge_down"] {
+            guard case .failed(let why) = run(c) else { Issue.record("\(c) ran"); continue }
+            #expect(why.code == .unavailable && why.message == DocumentModel.hiddenSelection, "\(c)")
+        }
+        #expect(f.edits.count == before)
+        // A key press says why in the status line.
+        #expect(KeyDispatch.command("editors.nudge_later", doc: (id, m), store: store, host: host) == .handled)
+        #expect(m.editor.status == DocumentModel.hiddenSelection)
+        #expect(f.edits.count == before)
+        // The Editor shown in the Mix view's bottom pane: the nudge runs.
+        m.editor.updateLayout { $0.views.mix.bottom = PaneState(shown: true, view: .editor, size: 260) }
+        guard case .done = run("editors.nudge_later") else { Issue.record("the nudge was refused"); return }
+        #expect(f.edits.last == .event(edit: .nudge(events: [1, 2], ticks: 15_360, semitones: 0)))
+    }
+
     @Test func theAnchorIsTheRangeStartElseTheEarliestSelectedEvent() throws {
         let (_, e) = try selected([2])
         #expect(e.nudgeAnchor()?.tick == 15_360)
@@ -168,5 +196,46 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
         #expect(EditingPreferences(defaults: d).crossfadeMs == 1, "a stored value is clamped on read")
         d.set("junk", forKey: EditingPreferences.crossfadeKey)
         #expect(EditingPreferences(defaults: d).crossfadeMs == 10)
+    }
+
+    // MARK: Zero crossings (plan release-fixes Task 7)
+
+    @Test func zeroCrossingsDefaultOnAndKept() {
+        let d = MemoryDefaults()
+        let p = EditingPreferences(defaults: d)
+        #expect(p.zeroCrossings, "on by default")
+        p.zeroCrossings = false
+        #expect(!EditingPreferences(defaults: d).zeroCrossings, "kept")
+        p.zeroCrossings = true
+        #expect(EditingPreferences(defaults: d).zeroCrossings)
+        d.set("junk", forKey: EditingPreferences.zeroCrossingsKey)
+        #expect(EditingPreferences(defaults: d).zeroCrossings, "a damaged value reads as on")
+        d.set(7, forKey: EditingPreferences.zeroCrossingsKey)
+        #expect(EditingPreferences(defaults: d).zeroCrossings, "a number other than 0 or 1 reads as on")
+    }
+
+    @Test func theSnapperAsksTheCoreWithinThreeMilliseconds() throws {
+        let f = editorFake()
+        f.mediaRows = [mediaRow(7, "kick")]
+        let m = try DocumentModel(session: f)
+        let saved = ZeroCrossing.preferences
+        defer { ZeroCrossing.preferences = saved }
+        let prefs = EditingPreferences(defaults: MemoryDefaults())
+        ZeroCrossing.preferences = prefs
+        f.crossing = { _, frame, _ in frame / 100 * 100 }
+        #expect(ZeroCrossing.snapper(m, media: 7)(1234) == 1200)
+        #expect(f.crossingCalls.count == 1)
+        #expect(f.crossingCalls.first?.media == 7 && f.crossingCalls.first?.radius == 144, "3 ms at 48 kHz")
+        // An error keeps the frame.
+        f.crossing = { _, _, _ in throw VizError.Model(message: "unknown id") }
+        #expect(ZeroCrossing.snapper(m, media: 7)(1234) == 1234)
+        // Unknown media (no rate): the identity, no call.
+        f.crossingCalls = []
+        #expect(ZeroCrossing.snapper(m, media: 99)(1234) == 1234)
+        // Off: the identity, no call.
+        prefs.zeroCrossings = false
+        f.crossing = { _, frame, _ in frame / 100 * 100 }
+        #expect(ZeroCrossing.snapper(m, media: 7)(1234) == 1234)
+        #expect(f.crossingCalls.isEmpty)
     }
 }

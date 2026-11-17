@@ -394,4 +394,43 @@ import VizDAWCore
     @Test func theSynthCommandsAreHandled() {
         #expect(SynthCommands.ids.isSubset(of: ControlCommands.handled))
     }
+
+    /// Plan release-fixes Task 8: `destination.set_sound` on the Built-in
+    /// Synth (7); Juno (9) is external.
+    @Test func setSoundRefusesHostileInput() throws {
+        let f = demoFake()
+        f.dests = [
+            DestRow(id: 7, name: "Built-in Synth", plugin: nil, channel: 0, builtinSound: .piano),
+            DestRow(id: 9, name: "Juno", plugin: nil, external: true, channel: 0),
+        ]
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        let cmd = "destination.set_sound"
+        let good = run(cmd, [("dest", .int(value: 7)), ("sound", .text(value: "drums"))], m, s, id)
+        guard case .done(.ran(_, _, _, _, let status)) = good else {
+            Issue.record("\(good)")
+            return
+        }
+        #expect(status == "Drums")
+        #expect(f.builtinSounds.count == 1 && f.builtinSounds.last?.sound == .drums)
+        let d: (String, ControlValue) = ("dest", .int(value: 7))
+        for args: [(String, ControlValue)] in [
+            [d, ("sound", .text(value: "kazoo"))], [d, ("sound", .text(value: "Drums"))], [d, ("sound", .int(value: 3))],
+            [("dest", .text(value: "7")), ("sound", .text(value: "drums"))], [("sound", .text(value: "drums"))], [d],
+            [d, ("sound", .text(value: String(repeating: "x", count: 70_000)))],
+            [d, ("sound", .text(value: "drums\u{0}"))],
+            [("dest", .int(value: -7)), ("sound", .text(value: "drums"))],
+            [d, ("sound", .text(value: "drums")), ("extra", .int(value: 1))],
+            [d, ("sound", .text(value: "drums")), ("sound", .text(value: "bass"))],
+        ] {
+            #expect(failure(run(cmd, args, m, s, id))?.code == .invalidParams, "\(args)")
+        }
+        #expect(failure(run(cmd, [("dest", .int(value: 999)), ("sound", .text(value: "drums"))], m, s, id))?.code == .unknownId)
+        let ext = failure(run(cmd, [("dest", .int(value: 9)), ("sound", .text(value: "drums"))], m, s, id))
+        #expect(ext?.code == .failed && ext?.message == "Only a Built-in Synth has these sounds.")
+        #expect(f.builtinSounds.count == 1, "no call for any refusal")
+        #expect(m.synth.editDestination == nil && m.synth.trackSynth == nil, "nothing opens")
+        #expect(SynthCommands.ids.contains(cmd) && ControlCommands.handled.contains(cmd))
+    }
 }

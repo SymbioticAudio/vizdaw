@@ -51,6 +51,12 @@ struct EditingSettingsView: View {
             })
     }
 
+    /// The zero-crossing toggle's title (its accessibility label too) and
+    /// help (plan release-fixes Task 7).
+    static let zeroCrossingsTitle = "Snap audio edits to zero crossings"
+    static let zeroCrossingsHelp =
+        "Moves a trimmed start or end to the nearest zero crossing within 3 ms, so the cut does not click."
+
     /// "10 ms", "12.5 ms": one decimal place only when there is one.
     private static func msText(_ v: Double) -> String {
         let t = v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
@@ -110,6 +116,10 @@ struct EditingSettingsView: View {
                             .foregroundStyle(theme.text.secondary.color)
                     }
                 }
+                // Plan release-fixes Task 7: trims snap to zero crossings.
+                Toggle(Self.zeroCrossingsTitle, isOn: $prefs.zeroCrossings)
+                    .help(Self.zeroCrossingsHelp)
+                    .accessibilityLabel(Self.zeroCrossingsTitle)
             }
             // Plan 5f-3 Ruling 5: applications only, chosen with a panel.
             Section("External Sample Editor") {

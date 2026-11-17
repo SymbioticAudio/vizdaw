@@ -47,6 +47,9 @@ pub struct Counting {
     /// Frames rendered since it started.
     elapsed: u64,
     rolled: bool,
+    /// Clicks played before a device rebuild (plan release-fixes Task 1):
+    /// this count-in starts at click `first`.
+    first: u32,
     /// The first click not started yet: a latency change moves only these
     /// (Task 5 parked N1).
     next: u32,
@@ -57,11 +60,16 @@ pub struct Counting {
 
 impl Counting {
     /// A count-in for `c` at `rate` Hz with graph latency `latency`, for a
-    /// Play that stops at `until`.
-    pub fn new(c: CountIn, until: Option<u64>, rate: f64, latency: u64) -> Counting {
+    /// Play that stops at `until`. `done`: clicks already played before a
+    /// rebuild; clicks 0..done are skipped and click `done` sounds first,
+    /// at the start. Accents still follow the click's index k
+    /// (k % per_bar == 0).
+    pub fn new(c: CountIn, until: Option<u64>, rate: f64, latency: u64, done: u32) -> Counting {
+        let beats = c.beats.max(1);
+        let first = done.min(beats);
         Counting {
             c: CountIn {
-                beats: c.beats.max(1),
+                beats,
                 per_bar: c.per_bar.max(1),
                 beat_frames: if c.beat_frames.is_finite() {
                     c.beat_frames.max(1.0)
@@ -75,7 +83,8 @@ impl Counting {
             pad: None,
             elapsed: 0,
             rolled: false,
-            next: 0,
+            first,
+            next: first,
             last: None,
         }
     }
@@ -97,16 +106,22 @@ impl Counting {
         self.rolled
     }
 
+    /// Clicks started so far, counting those played before a rebuild.
+    pub fn started(&self) -> u32 {
+        self.next
+    }
+
     /// Frames from the first click to the roll.
     fn total(&self) -> u64 {
-        (f64::from(self.c.beats) * self.c.beat_frames).round() as u64
+        (f64::from(self.c.beats - self.first) * self.c.beat_frames).round() as u64
     }
 
     /// Where click `k` starts, in frames since the count-in started.
     fn click_at(&self, k: u32) -> u64 {
         let pad = self.pad.unwrap_or(0);
-        pad.saturating_add(self.delay)
-            .saturating_add((f64::from(k) * self.c.beat_frames).round() as u64)
+        pad.saturating_add(self.delay).saturating_add(
+            (f64::from(k.saturating_sub(self.first)) * self.c.beat_frames).round() as u64,
+        )
     }
 
     fn click_len(&self) -> u64 {
@@ -128,9 +143,11 @@ impl Counting {
 
     /// Adds this block's clicks to channels 0–1 of `out` and advances.
     /// A click that has started keeps its start; one not started yet is
-    /// placed by the current latency, and never before this block (a fall
-    /// in latency makes it late rather than dropping it; Task 5 parked
-    /// N1). // RT
+    /// placed by the current latency, never before this block (a fall in
+    /// latency makes it late rather than dropping it; Task 5 parked N1),
+    /// and never less than a beat after the click before it (a fall of
+    /// more than a beat plays one click per beat, not two at once; plan
+    /// release-fixes Task 1). // RT
     pub fn render(&mut self, out: &mut [&mut [f32]], frames: u32) {
         let from = self.elapsed;
         let to = from.saturating_add(u64::from(frames));
@@ -139,7 +156,9 @@ impl Counting {
         }
         while self.next < self.c.beats {
             let k = self.next;
-            let at = self.click_at(k).max(from);
+            let beat = self.c.beat_frames.round() as u64;
+            let floor = self.last.map_or(0, |(_, at)| at.saturating_add(beat));
+            let at = self.click_at(k).max(from).max(floor);
             if at >= to {
                 break;
             }

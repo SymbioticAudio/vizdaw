@@ -143,6 +143,11 @@ public final class MixerModel {
 
     /// Shown values of touched targets (normalised) once moved, Ruling 2.
     public private(set) var live: [AutomationTargetRow: Double] = [:]
+    /// The values heard while the transport plays (automation, or a
+    /// channel's or surface's hold), in the mixer's units: dB for faders
+    /// and sends, -1…1 for pans (release-fixes Task 4). Filled by
+    /// `pollAutomation`, emptied at Stop.
+    public private(set) var heard: [AutomationTargetRow: Double] = [:]
     /// Targets touched here (mouse down to mouse up) whose touch the core
     /// took.
     private var touches: Set<AutomationTargetRow> = []
@@ -688,33 +693,61 @@ public final class MixerModel {
         touches.contains(t) || coreTouched.contains(t)
     }
 
-    /// The fader dB as shown (live while touched).
+    /// The fader dB as shown (live while touched, else heard while playing).
     public func gainDb(_ s: StripRow) -> Double {
-        live[.stripFader(strip: s.id)].map(AutomationLaw.faderDb) ?? s.gainDb
+        let t = AutomationTargetRow.stripFader(strip: s.id)
+        return live[t].map(AutomationLaw.faderDb) ?? heard[t] ?? s.gainDb
     }
 
-    /// The pan as shown (live while touched).
+    /// The pan as shown (live while touched, else heard while playing).
     public func pan(_ s: StripRow) -> Double {
-        live[.stripPan(strip: s.id)].map(AutomationLaw.pan) ?? s.pan
+        let t = AutomationTargetRow.stripPan(strip: s.id)
+        return live[t].map(AutomationLaw.pan) ?? heard[t] ?? s.pan
     }
 
     /// A send's position as the automation target spells it.
     public static func sendIndex(_ index: Int) -> UInt16 { UInt16(clamping: index) }
 
-    /// Send `index`'s level as shown (live while touched).
+    /// Send `index`'s level as shown (live while touched, else heard while
+    /// playing).
     public func sendLevelDb(_ s: StripRow, _ index: Int) -> Double {
-        if let v = live[.sendLevel(strip: s.id, send: Self.sendIndex(index))] {
-            return AutomationLaw.faderDb(v)
-        }
+        let t = AutomationTargetRow.sendLevel(strip: s.id, send: Self.sendIndex(index))
+        if let v = live[t] { return AutomationLaw.faderDb(v) }
+        if let v = heard[t] { return v }
         return index >= 0 && index < s.sends.count ? s.sends[index].levelDb : MixerMath.floorDb
     }
 
     /// Reads the core's touched targets (the window calls it with the
-    /// meters); `Busy` and errors keep the last.
+    /// meters); `Busy` and errors keep the last. While the transport plays
+    /// it reads the heard values too; stopped, they are dropped.
     public func pollAutomation() {
+        pollHeard()
         guard let a = try? session.automationState() else { return }
         let now = Set(a.touched)
         if now != coreTouched { coreTouched = now }
+    }
+
+    /// Every strip's fader, pan and send levels (the heard values' targets).
+    private var heardTargets: [AutomationTargetRow] {
+        snapshot.strips.flatMap { s -> [AutomationTargetRow] in
+            var out: [AutomationTargetRow] = [.stripFader(strip: s.id), .stripPan(strip: s.id)]
+            out += s.sends.indices.map { .sendLevel(strip: s.id, send: Self.sendIndex($0)) }
+            return out
+        }
+    }
+
+    /// `heard` from the core while playing (`Busy` and errors keep the
+    /// last); empty while stopped.
+    private func pollHeard() {
+        guard document.isPlaying else {
+            if !heard.isEmpty { heard = [:] }
+            return
+        }
+        let targets = heardTargets
+        guard let values = try? session.heardValues(targets: targets) else { return }
+        var now: [AutomationTargetRow: Double] = [:]
+        for (t, v) in zip(targets, values) { if let v { now[t] = v } }
+        if now != heard { heard = now }
     }
 
     // MARK: Typed values (Ruling 15)

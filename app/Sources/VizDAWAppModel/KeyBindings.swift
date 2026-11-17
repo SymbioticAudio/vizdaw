@@ -242,7 +242,9 @@ public enum KeyDispatch {
             // No editor chosen (plan 5f-3, owner answer 2026-11-03): the
             // key or surface button says so; passed on, it would reach the
             // menu item, which opens the chooser.
-            case .unavailable where f.message == RegionCommands.noEditor:
+            // The Mix view hides the selection (plan release-fixes Task 5):
+            // the key says why rather than reach its greyed-out menu item.
+            case .unavailable where f.message == RegionCommands.noEditor || f.message == DocumentModel.hiddenSelection:
                 doc?.editor.status = f.message
                 return .handled
             case .unavailable, .dialogRequired, .unknownId, .noDocument: return .pass

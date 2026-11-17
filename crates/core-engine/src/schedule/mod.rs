@@ -7,7 +7,7 @@ mod mpe;
 pub mod targets;
 pub mod tempo;
 
-pub use audio::{AudioSchedule, Segment, fade_curve};
+pub use audio::{AudioSchedule, EDGE_FADE_SECONDS, Segment, fade_curve};
 pub use automation::{
     AutoDest, AutoLane, AutoPoint, Automation, MAX_AUTO_LANES, MIN_RUN, StripParam,
 };

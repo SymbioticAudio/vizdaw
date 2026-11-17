@@ -211,6 +211,9 @@ public protocol ControlHost: AnyObject {
     /// Applies `audio.set`'s change to the app's audio settings (plan
     /// 5d-1 Ruling 26); the core's refusal is thrown.
     func applyAudio(_ change: AudioChange) throws
+    /// The input devices `audio.set`'s `input_device` is looked up in
+    /// (release fixes Task 2; tests give a fake list).
+    func inputDeviceList() -> [InputDeviceRow]
     /// The core's process-wide surfaces, command maps and learn state
     /// (plan 5f-1; tests pass a fake, pre-flight M25).
     var surfaces: any SurfaceCore { get }
@@ -225,6 +228,11 @@ public protocol ControlHost: AnyObject {
     /// Settings › Co-Producer (plan 8a Ruling 10): `settings.co_producer`
     /// sets it.
     var coProducer: CoProducerSettings { get }
+}
+
+extension ControlHost {
+    /// Settings › Audio's list: the core's devices.
+    public func inputDeviceList() -> [InputDeviceRow] { AudioPreferences.inputDeviceList() }
 }
 
 /// Which window's transport fields the P, E and U keys focus (plan 7d
@@ -295,6 +303,7 @@ public enum ControlCommands {
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
             .union(MixerCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
+            .union([TrackCommands.setOutput]).union([RegionCommands.setFadeShape])
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -537,7 +546,7 @@ public enum ControlCommands {
             return InputFxCommands.run(id, args: args, doc: docID, m)
         case _ where MpeCommands.ids.contains(id):
             return MpeCommands.run(id, args: args, doc: docID, m)
-        case _ where TrackCommands.ids.contains(id):
+        case _ where TrackCommands.ids.contains(id) || id == TrackCommands.setOutput:
             return TrackCommands.run(id, args: args, doc: docID, m)
         case _ where TakeCommands.ids.contains(id):
             return TakeCommands.run(id, args: args, doc: docID, m)
@@ -561,6 +570,8 @@ public enum ControlCommands {
             if let f = failure(RegionCommands.normalize(peakDb: peak, m)) { return f }
         case RegionCommands.crossfade, RegionCommands.removeCrossfade:
             return RegionCommands.runChannel(id, args: args, doc: docID, m, defaultMs: host.crossfadeMs)
+        case RegionCommands.setFadeShape:
+            return RegionCommands.runSetFadeShape(args, doc: docID, m)
         case _ where RegionCommands.ids.contains(id):
             if let f = failure(RegionCommands.run(id, m)) { return f }
         case _ where detail[id] != nil:
@@ -576,6 +587,8 @@ public enum ControlCommands {
             }
             list.insert()
         case _ where nudges[id] != nil:
+            // Owner decision 5 (plan release-fixes Task 5).
+            guard !m.selectionHidden else { return unavailable(DocumentModel.hiddenSelection) }
             guard m.transportKeysEnabled, !m.editor.selection.events.isEmpty else {
                 return unavailable("Nudge needs selected events and no text being edited.")
             }
@@ -585,6 +598,7 @@ public enum ControlCommands {
         case _ where panels[id] != nil:
             m.selectModify.open(panels[id] ?? .change)
         case "modify.again":
+            guard !m.selectionHidden else { return unavailable(DocumentModel.hiddenSelection) }
             guard m.selectModify.canModifyAgain else { return unavailable("There is no modification to repeat.") }
             if !m.selectModify.modifyAgain() {
                 return .failed(.of(.failed, m.editor.status ?? "Modify Again was refused."))
