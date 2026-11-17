@@ -1,6 +1,6 @@
 # Sub-project 8 — Co-Producer
 
-Status: draft from the owner's decisions of 2026-11-11, the brainstorm of 2026-11-14 and the owner's answers the same day, with the builder-check settlements, for the owner's review.
+Status: draft from the owner's decisions of 2026-11-11, the brainstorm of 2026-11-14 and the owner's answers the same day, with the builder-check settlements, for the owner's review. Amended 2026-11-16 with the owner's decision on VizDAW's own approval (§6.8).
 Parent spec: `docs/superpowers/specs/2026-10-15-vizdaw-design.md` (§11 step 8). Builds on `2026-10-18-control-channel-design.md` (the protocol, the command registry, §7 dialogs and Busy, §8 security, the hostile-input rules) and the backlog row "Co-Producer over MCP" in `docs/feature-backlog.md`. Runs after sub-project 6; in the 1.0 release (owner, 2026-11-11).
 
 Throughout, **(owner)** marks the owner's decision, **(controller's call, owner saw it)** a guess the controller showed the owner without objection (it counts as decided), **(controller's call)** a decision made while writing this that the owner may overturn, and anything else is left to the builder (§11).
@@ -42,7 +42,7 @@ What it is for, in the owner's order (owner, 2026-11-14):
 
 ## 4. Anti-goals (never, in any version)
 
-- **Destructive edits, deletions or overwriting the composer's creative work without a yes** (owner). No hidden or silent route around §6 may exist: not a "trust me" setting, not a batch mode.
+- **Destructive edits, deletions or overwriting the composer's creative work without a yes** (owner). No hidden or silent route around §6 may exist: not a "trust me" setting, not a batch mode. The one standing grant is the owner's per-app approval (§6.8, owner 2026-11-16). The composer gives it on VizDAW's own sheet, for one identified app, and Settings lists it and can revoke it, so it is neither hidden nor silent.
 - **Replacing a file.** Co-Producer never writes over an existing file, inside or outside the project (owner).
 - **Interrupting.** Coaching and suggestions come only when the composer asks (controller's call, owner saw it).
 - **Sending the composer's data anywhere by itself.** Metrics and notes stay on the Mac; Claude sees them only when the composer asks through Co-Producer (controller's call, owner saw it).
@@ -50,7 +50,7 @@ What it is for, in the owner's order (owner, 2026-11-14):
 ## 5. Constraints
 
 - **GPL-3.0**, as the whole repo. Any MCP SDK or crate used must be compatible (MIT or Apache-2.0 is fine). The Storytold Rust DAW (MIT/Apache) has an MCP server worth reading for ideas (memory note).
-- **Builds on the control channel** and keeps its rules (control-channel spec §3, §7, §8): JSON lines over a private Unix socket, 0600 file permissions, no network port; parsing in Rust; no call opens a dialog; Busy answers `busy`; hostile input returns an error and never crashes the app.
+- **Builds on the control channel** and keeps its rules (control-channel spec §3, §7, §8): JSON lines over a private Unix socket, 0600 file permissions, no network port; parsing in Rust; no call opens a dialog, with one owner-approved exception, VizDAW's approval sheet (§6.8); Busy answers `busy`; hostile input returns an error and never crashes the app.
 - **The banned-name list** in the name scans applies to everything Co-Producer shows or writes, including undo names, notes and export folder names.
 - **UI text says "track", never "lane"** (the name scans check it).
 - **Project format.** Co-Producer marks (§7.2) and the notes file are a format change. Sub-project 6 owns versions 8 and 9, so Co-Producer takes the next free version (10, unless SP6 ends with another) (controller's call).
@@ -125,6 +125,7 @@ Before a change or remove on the composer's work runs, Co-Producer shows the com
 - Claude first asks VizDAW for a **preview** of the planned commands. VizDAW works it out without changing the document and answers a plain list: each item names the thing ("Track 3, Lead Vox"), what happens to it ("volume −2.0 dB → −6.0 dB", "deleted: 4 notes in bar 12"), and whether it is the composer's work. The change-preview view (§6.3) shows the same list.
 - The preview carries a one-time **token** tied to the document's current revision. **Apply** needs that token; it fails if the document changed in between, if the token was used, or if the planned commands differ from the previewed ones.
 - **Who says yes** (controller's call): where the MCP host supports MCP elicitation (the server asking the user directly in the host's own UI), `vizdaw-mcp` asks the composer that way, so the yes comes from the composer and not from Claude. Otherwise the token is handed back to Claude, and the tool's description tells Claude it must show the list and get the composer's explicit yes in chat first. The builder checks which hosts support elicitation (§11).
+- **VizDAW has the last word** (owner, 2026-11-16). Whichever of the two the host uses, the yes it gives is the first prompt only. The change applies after VizDAW's own approval sheet, or a standing approval for the asking app (§6.8).
 - Adds need no yes, but every request's reply still lists what was added, so nothing arrives unseen.
 
 ### 6.7 A saved copy before each request; files never replaced (owner)
@@ -134,6 +135,73 @@ Before a change or remove on the composer's work runs, Co-Producer shows the com
 - **Projects never saved** (controller's call). Co-Producer may work in an untitled project. Its notes and copies are kept in VizDAW's support folder for that untitled document and move into the package on its first save.
 - **Saving** (controller's call). Co-Producer may ask to save the project. Save writes over the project file, so it is a change and needs a yes (§6.6). The first save of an untitled project always goes through the composer's own Save dialog: Co-Producer never opens dialogs, so it asks the composer to save, or answers that the project needs saving first. Autosave works as it does today.
 - **Files never replaced.** Every outward command writes into a new file or a new folder. Today's exports already refuse or number a taken name (bounce stems, AAF and other-DAW exports number their folders); for the rest, a Co-Producer call with a path that exists is refused in Rust before it reaches the app (controller's call). "File writing goes through the same checks as the menus" (controller's call, owner saw it): Co-Producer never gets a looser path than the composer's own Save dialog would.
+
+### 6.8 VizDAW's own approval, or a standing approval per app (owner, 2026-11-16)
+
+**Why.** The 8a final review found that any program running on the Mac as the composer, with a shell (an AI coding agent, for example), can connect to the Co-Producer socket itself. It can call `co_producer.preview` and then `co_producer.apply`, and so skip the yes that §6.6 puts in the host (elicitation, or the chat fallback). The owner's answer: **"VizDAW asks, or you can grant blanket approval app by app"** (owner, 2026-11-16).
+
+**VizDAW's own approval sheet (owner).**
+- Before VizDAW applies a change or remove that needs a yes (a preview with `needs_yes`, §6.6), it shows its own small sheet on the document's window. The sheet lists exactly what the preview listed and has two buttons, **Allow** and **Don't Allow**.
+- Only two things count as the composer's yes: a click on Allow in that sheet, or a standing approval for the asking app (below). The host's elicitation, or the yes in chat, stays as the first prompt. VizDAW's sheet is what actually authorises the change.
+- This is a deliberate exception, approved by the owner, to the rule that programmatic calls never open dialogs (§5; control-channel spec §3). It covers this one sheet only, and no other call opens anything.
+- **Which applies get the sheet** (controller's call). Only an apply whose preview has `needs_yes` gets it. A change or remove that touches only Co-Producer's own additions, not yet taken over, needs no yes (§6.5), so it needs no sheet either.
+- **The wording** (controller's call):
+  - the title is "Allow Co-Producer to Change Your Song?";
+  - the text is "<App> asks to make these changes to "<song>":", then the preview's list;
+  - **Don't Allow** is the default button and Esc, so pressing Return never allows;
+  - the sheet does not bring VizDAW to the front. It asks for attention once, with an informational Dock bounce.
+- **A real press only** (controller's call). Allow counts only when AppKit delivers it as the composer's own mouse click or key press. An accessibility "press" that comes with no input event, or an event that another process posted, is refused. A program the composer has given Accessibility access can drive any app, so this check is a backstop and not a guarantee. The builder checks what macOS lets VizDAW tell apart (§11).
+
+**"Always allow <App>" (owner).**
+- The sheet offers a checkbox, unticked, "Always allow <App>". Allow with the box ticked grants that app a standing approval and applies the change. From then on, a request from that app that needs a yes applies with no sheet.
+- The box carries one line of explanation: "Anything <App> runs can then change your songs without VizDAW asking. You can stop this in Settings › Co-Producer." (controller's call).
+- The box appears only for an app VizDAW can identify strongly (below). For any other caller the sheet says instead: "VizDAW cannot confirm which app is asking, so it asks every time."
+- **Settings › Co-Producer** lists every standing approval: the app's name, its team ID and identifier, and the date it was granted. Each one has a **Revoke** button, and there is a **Revoke All**. With none, the list reads "None. VizDAW asks before every change." A revoked approval stops at once, and the next request asks again.
+- Approvals stay when the Co-Producer switch goes off (controller's call); only Revoke removes them.
+- **Where approvals are kept** (controller's call). They are kept in the login Keychain as one generic-password item that VizDAW creates, not in preferences or a file. An agent could write those with a single `defaults` or `echo` command. The Keychain makes the system ask the composer before another program reads or changes VizDAW's item. That is stronger, but it is not proof against a determined program running as the composer (see "What this cannot stop").
+
+**How VizDAW identifies the app (controller's call).**
+- **The decision.** A standing approval is keyed on the code-signed host app: its team ID and its bundle identifier. VizDAW finds the host from the socket connection, not from anything the caller says. A caller that VizDAW cannot trace to a strongly signed host is "unknown". An unknown caller always gets the sheet, and is never offered "Always allow".
+- **What is feasible without new crates.**
+  1. **Who is on the socket.** When the Co-Producer socket accepts a connection, it reads the peer's audit token with `getsockopt(LOCAL_PEERTOKEN)`. The kernel fills it in, so the caller cannot forge it, and unlike a bare pid (`LOCAL_PEERPID`) it cannot be confused with a reused pid.
+     - This needs one system call. `core-control` forbids unsafe code, and std's `peer_cred` is not stable, so the call lives in `platform-macos` as a hand-declared `extern "C"`. That crate already declares system calls this way. `core-control` gets a safe hook for it.
+     - The token travels with every call on that connection.
+  2. **Is it VizDAW's own `vizdaw-mcp`?** VizDAW asks Security (`SecCodeCopyGuestWithAttributes` with the audit token) for the peer's code, and checks it with `SecCodeCheckValidity`. Its code-directory hash must equal that of the `vizdaw-mcp` inside VizDAW's own bundle.
+     - A raw client, such as an agent's script, a copy of `vizctl`, or any other binary, fails here and is unknown.
+  3. **Who started it?** The host is `vizdaw-mcp`'s parent. VizDAW walks the chain of parents (`proc_pidinfo`) up to `launchd` and checks each process's code by pid (`SecCodeCopyGuestWithAttributes`). It reads each process's start time before and after the check, so a pid reused in between is caught.
+     - The identity is strong only when all of these hold:
+       - every process from the parent up to, but not including, `launchd` is validly signed with one and the same non-empty team ID;
+       - the topmost one is the main executable of an `.app` bundle, and its parent is `launchd`, so it was started from the Finder, the Dock or Launch Services, not from a shell;
+       - it runs with the hardened runtime and has no `get-task-allow` entitlement;
+       - its launch arguments and environment (`sysctl KERN_PROCARGS2`) hold no `DYLD_*`, `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect…` or `--remote-debugging…`.
+     - The app's key is its team ID and bundle identifier, and its shown name comes from that bundle's `Info.plist`.
+     - Security (`SecCode…`) and Darwin (`proc_pidinfo`, `sysctl`) are system frameworks that Swift calls directly, so this takes no new dependency.
+  4. **The `clientInfo` name that the host reports at `initialize`** can be forged, so it is a display label only. The sheet shows it in quotes ("calls itself …") next to the identified app, or alone for an unknown caller. It never keys, grants or matches an approval.
+- **What this means in practice.**
+  - A program on the raw socket is unknown.
+  - So is a `vizdaw-mcp` started from a shell, or by a command-line host, even a signed one, because a shell or terminal sits in its parent chain. These get the sheet every time.
+  - A signed, hardened desktop app started from the Finder or Dock can be identified and approved.
+- **What this cannot stop, said plainly.** A standing approval trusts the approved app, and whatever can run as that app. A program running as the composer with full shell access can still act as an approved app in ways VizDAW cannot see. For example:
+  - it can rewrite the app's own MCP configuration so that a relay in front of `vizdaw-mcp` feeds it input;
+  - it can steer an app whose own launch can be made to run other code.
+
+  It cannot forge the sheet's click (short of Accessibility access, above), and it cannot use the raw socket. VizDAW and `vizdaw-mcp` are ad-hoc signed today and do not use the hardened runtime. Code injected into VizDAW itself, for example by relaunching it with `DYLD_*` in its environment, defeats any check inside VizDAW. A release signed with Developer ID and the hardened runtime closes that route (backlog). The developer control channel (§6.1) is separate: when the launch flag turns it on, it runs every command with no yes, and this sheet does not cover it.
+
+**The sheet waits at most 10 minutes (owner).** An unanswered sheet counts as a no after 10 minutes, as an unanswered elicitation does (8a Ruling P6). The sheet also closes as a no when:
+- the document changes while it is open, since the list would be out of date and the token is bound to the revision;
+- the caller disconnects;
+- the Co-Producer switch goes off;
+- the document closes;
+- VizDAW quits.
+
+While a sheet is open, the request's idle close (§6.2) waits.
+
+**Never a dialog without a request (owner).** The sheet appears only for an apply that is waiting for a yes:
+- an open request (§6.2);
+- a valid, unused token for the document's current revision, with the same plan as the preview;
+- a preview with `needs_yes`.
+
+Every other call is refused or answered at once, without a sheet, whatever it asks for: a bad, used or stale token, a different plan, no request, or a read. At most one sheet is open per document, and a second apply while it is open answers `busy`.
 
 ## 7. The librarian (owner)
 
@@ -247,7 +315,11 @@ The owner's order is chores first, creative second. These chores map onto today'
 12. The tool names and descriptions Claude sees, written so Claude follows §6 (show the list, wait for a yes).
 13. How a starter template chooses instruments and a drum kit from the installed plug-ins, and what it does when none fits.
 14. Whether `ui.screenshot` on the Co-Producer socket needs any extra limit (size, rate).
-15. Tests: hostile input on the Co-Producer socket and through `vizdaw-mcp`; a property test that, with no hand edits in between, a request then its one Undo returns exactly the original document; a test that a hand edit during a request closes the group and a later step is named "(continued)"; a test that Save's pruning and Compact keep everything a Co-Producer copy uses; a test that no Co-Producer path can replace an existing file; a test that every change or remove on the composer's work without a valid token is refused; the switch off refuses everything; an end-to-end test that drives `vizdaw-mcp` against the built app, as the control channel's E2E test does.
+15. For VizDAW's approval (§6.8):
+    - what the audit token, `SecCode` and `proc_pidinfo` really report for the hosts in use;
+    - whether AppKit can tell a real click from an accessibility press or a posted event;
+    - how the Keychain item's access behaves with ad-hoc builds.
+16. Tests: hostile input on the Co-Producer socket and through `vizdaw-mcp`; a property test that, with no hand edits in between, a request then its one Undo returns exactly the original document; a test that a hand edit during a request closes the group and a later step is named "(continued)"; a test that Save's pruning and Compact keep everything a Co-Producer copy uses; a test that no Co-Producer path can replace an existing file; a test that every change or remove on the composer's work without a valid token is refused; the switch off refuses everything; an end-to-end test that drives `vizdaw-mcp` against the built app, as the control channel's E2E test does; and for §6.8, a forged `clientInfo`, an unsigned parent, a revoked approval and an apply without the sheet's click are each refused, with the e2e answering the sheet through a test-only hook, never a GUI.
 
 ## 12. Implementation plans
 
@@ -256,7 +328,7 @@ Chores and safety come first (owner's order). Each plan is its own spec check, p
 | Plan | Scope | Depends on |
 |---|---|---|
 | **8a — Safety and the server** | The Co-Producer socket and Settings switch; `vizdaw-mcp` with tools from the registry and `state.get` resources; command classes and the allow-list; named requests as one undo step; preview, token and apply, with elicitation where the host has it; saved copy before each request; the never-replace check on paths. Read-only and add commands only at first, then change and remove behind the yes. | — |
-| **8b — The librarian** | `Notes.md` (read, append, Window > Song Notes); the Co-Producer-added mark, name, colour and badge; Make Mine; the project format change; dated export folders; untitled projects' notes and copies, moved in on first save. Includes the track colours gap. | 8a |
+| **8b — The librarian** | `Notes.md` (read, append, Window > Song Notes); the Co-Producer-added mark, name, colour and badge; Make Mine; the project format change; dated export folders; untitled projects' notes and copies, moved in on first save. Includes the track colours gap, and VizDAW's own approval sheet with standing per-app approvals (§6.8, owner 2026-11-16). | 8a |
 | **8c — Chores** | The existing exports and bounces end to end through Co-Producer with dated folders and notes; direct Modify with parameters; markers; the track list, export result and change-preview views (MCP Apps). This is where the owner's first chores ("export all as DAWproject", "bounce to stems") work. | 8a, 8b |
 | **8d — Mixer and plug-ins** | The mixer editing gap (buses, sends, inserts, plug-in loading, fader, pan, plug-in parameters); the installed plug-in list; the mixer snapshot view. Enables mix recipes. | 8a, 8b |
 | **8e — Creative** | Automation points and the automation preview view; fade shapes; writing notes and regions; arpeggio, humanise and variation edits on new tracks; mix recipes; starter templates. | 8c, 8d |
@@ -266,4 +338,4 @@ Suggested order: **8a → 8b → 8c → 8d → 8e**, with **8f** after 8c (it is
 
 ## 13. Open questions
 
-None. The owner answered all of them on 2026-11-14: Co-Producer is off by default (§6.4); routing and sound changes on the composer's tracks need a yes (§6.5); copies stay complete and Compact asks before removing them (§6.7); starter projects cover sounds and routing only (§8). Saving, hand edits during a request and untitled projects are settled as controller's calls (§6.2, §6.7).
+None. On 2026-11-16 the owner decided that VizDAW asks too, or the composer grants a standing approval app by app (§6.8). The owner answered the rest on 2026-11-14: Co-Producer is off by default (§6.4); routing and sound changes on the composer's tracks need a yes (§6.5); copies stay complete and Compact asks before removing them (§6.7); starter projects cover sounds and routing only (§8). Saving, hand edits during a request and untitled projects are settled as controller's calls (§6.2, §6.7).

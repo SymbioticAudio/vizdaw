@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Each song keeps a `Notes.md` that the composer and Co-Producer both write: Co-Producer logs one entry per request, reads the notes first, and only ever appends. What Co-Producer adds is named, coloured, badged and marked until the composer takes it over (Make Mine, or a rename). Exports get clearly named, dated folders. An untitled song's notes and copies move into its package on its first save. Compact Media offers to remove old Co-Producer copies, listing each with its size, and removes nothing without the composer's yes.
+**Goal:** Each song keeps a `Notes.md` that the composer and Co-Producer both write: Co-Producer logs one entry per request, reads the notes first, and only ever appends. What Co-Producer adds is named, coloured, badged and marked until the composer takes it over (Make Mine, or a rename). Exports get clearly named, dated folders. An untitled song's notes and copies move into its package on its first save. Compact Media offers to remove old Co-Producer copies, listing each with its size, and removes nothing without the composer's yes. A change that needs the composer's yes applies only after VizDAW's own approval sheet, or a standing approval for an app VizDAW identified by its code signature (spec §6.8, owner 2026-11-16).
 
 **Architecture:**
 - **`core-control`.** Four registry commands (`track.make_mine`, `mixer.make_mine`, `mixer.set_colour`, `window.song_notes`). Three protocol commands on the Co-Producer socket (`co_producer.notes`, `co_producer.note`, `co_producer.export_folder`), and `co_producer.begin` gains `asked`. `mixer.set_colour` becomes previewable.
@@ -10,13 +10,19 @@
 - **`core-ffi`.** Rows and state JSON carry the mark, and Make Mine is a Session call. Previews stop asking for a yes for Co-Producer's own things. A new `notes` module holds the notes file, the request's log and its entry, the dated export folder, and the first-save move-in of an untitled song's notes and copies. The Session also lists and removes copies for Compact's offer.
 - **`vizdaw-mcp`.** New tools `read_notes`, `add_note` and `export_folder`. `begin_request` takes `asked`, and its first answer per song carries the notes.
 - **Swift.** Window › Song Notes; the Co-Producer badge and colour on track headers and mixer strips; Track › Make Mine and the strip's Make Mine; the four registry handlers; Compact's copy-removal sheet; and `CoProducerCommands` running the new calls and recording the files outward commands wrote.
+- **VizDAW's own approval (Task 6, Ruling 11).**
+  - `platform-macos` reads the socket peer's audit token, and `core-control`'s server carries it on each call. `co_producer.apply` gains a `client` label.
+  - The Session checks a token without taking it, and its take needs VizDAW's approval for a yes.
+  - Swift identifies the host app by code signature, shows the approval sheet, keeps standing approvals in the Keychain, and lists them in Settings › Co-Producer.
+  - `vizdaw-mcp` forwards `clientInfo.name` as the label.
+  - A developer-channel test hook answers the sheet for the e2e.
 
 **Tech Stack:**
 - Rust 2024: `core-control`, `core-model`, `core-ffi` with UniFFI 0.32.2, `vizdaw-mcp`, `vizctl`.
 - Swift 6.1 / SwiftPM with Swift Testing, macOS 14+.
 - **No new third-party dependency.**
 
-**Spec:** `docs/superpowers/specs/2026-11-14-co-producer-design.md`, approved by the owner on 2026-11-14, is binding. This plan builds its §12 row **8b** (§7 in full; §6.7's copies offer and untitled projects). It builds on plan 8a, `docs/superpowers/plans/2026-11-14-co-producer-8a.md`, whose Rulings 1–13 and pre-flight rulings P1–P11 (`.superpowers/sdd/2026-11-14-co-producer-8a/preflight.md`) stay in force. Executors read both.
+**Spec:** `docs/superpowers/specs/2026-11-14-co-producer-design.md`, approved by the owner on 2026-11-14, is binding. This plan builds its §12 row **8b** (§7 in full; §6.7's copies offer and untitled projects; §6.8, VizDAW's own approval, added by the owner on 2026-11-16 after 8a's final review). It builds on plan 8a, `docs/superpowers/plans/2026-11-14-co-producer-8a.md`, whose Rulings 1–13 and pre-flight rulings P1–P11 (`.superpowers/sdd/2026-11-14-co-producer-8a/preflight.md`) stay in force. Executors read both.
 
 **Not in this plan:**
 - Marks on regions, notes and automation that Co-Producer writes onto the composer's tracks. No 8b command writes them; **8e**, which first does, adds the marks with them (spec §7.2's last line).
@@ -141,6 +147,64 @@ These are this plan's decisions where the spec or 8a leaves a choice. Each one n
     - **The server's instructions** add: "Read the song's notes first (read_notes) and follow what the composer wrote there."
     - **`change`'s description** adds "colouring a strip" to its examples.
     - **Cost if wrong:** a long notes file costs up to 64 KiB of context once per song per session.
+11. **VizDAW's own approval (spec §6.8; owner, 2026-11-16).** The yes that the host's elicitation or the chat gives is the first prompt only. A take whose preview has `needs_yes` needs one of two approvals: a real Allow click on VizDAW's sheet, or a standing approval for the identified host app.
+    - **The flow.**
+      1. An apply arrives.
+      2. Outside the stretch, Swift calls `co_producer_pending(token, plan)`. It checks the token as `check_take` does (unused, same version and serial, same canonical plan) but does not take it, and answers the preview's row.
+      3. A bad token, or `needs_yes: false`, goes straight to 8a's stretch, with no sheet.
+      4. Otherwise, a standing approval for the caller's identity runs the stretch with `Standing`.
+      5. Otherwise, the sheet opens. The call is answered later: its timeout is extended to `APPROVAL_WAIT` plus 30 s, inside `vizdaw-mcp`'s `CALL_TIMEOUT` of 660 s.
+      6. On Allow, 8a's stretch runs (enter, take, plan, leave) with `Sheet`.
+    - **The answer when it is not allowed.** "The composer did not allow this in VizDAW." is `failed`, in the cases spec §6.8 lists:
+      - Don't Allow;
+      - 10 minutes (`APPROVAL_WAIT`);
+      - a document revision change;
+      - the caller gone (`is_waiting` false);
+      - switch off, document closed, or quit.
+
+      The token is then dropped, so a new preview is needed.
+    - **One at a time.** At most one sheet per document. A second apply while one is open is `busy` "VizDAW is already asking the composer about another change.". While the sheet is open, `tidy` does not idle-close that document's request.
+    - **The Rust backstop.** `co_producer_take` gains `approval: CoProducerApproval`. With a `needs_yes` preview and `approval == None`, it refuses with "VizDAW's own approval is needed for this change." The token is used up by that refusal, as 8a's take always does. So no Swift path that forgets the sheet can apply.
+    - **Identity** (spec §6.8, "How VizDAW identifies the app"):
+      - **The peer.** The audit token is read at accept by `platform_macos::peer::audit_token`.
+      - **VizDAW's own `vizdaw-mcp`.** Its code is found by audit token, and its cdhash must equal the bundled `Contents/MacOS/vizdaw-mcp`'s.
+      - **The parent chain** up to `launchd` must have:
+        - one non-empty team ID;
+        - a top that is an `.app` main executable whose parent is pid 1;
+        - the hardened runtime, and no `get-task-allow`;
+        - no `DYLD_*`, `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect…` or `--remote-debugging…` in its launch arguments.
+      - **Pid reuse.** Start times are read before and after each check.
+      - **The key and the name.** The key is `"<team ID>:<bundle identifier>"`, and the name is the bundle's `CFBundleDisplayName`, else `CFBundleName`.
+      - **Anything else is unknown.** The identity is worked out once per connection, on the first apply that needs a yes, and cached by connection number. Connection numbers are never reused.
+      - **The label.** `client` (from `clientInfo.name`) is a label only. It is shown as "calls itself "<label>"", and it never keys or matches an approval.
+    - **The sheet** (`CoProducerApprovalSheet`):
+      - the title "Allow Co-Producer to Change Your Song?";
+      - the text "<App> asks to make these changes to "<song>":", or "An app VizDAW cannot identify (it calls itself "<label>") asks to make these changes to "<song>":";
+      - the preview's items as 8a's list (at most 40 lines, then "and N more");
+      - for a strong identity, the unticked checkbox "Always allow <App>" with spec §6.8's line;
+      - for an unknown one, the line "VizDAW cannot confirm which app is asking, so it asks every time.";
+      - **Don't Allow** (default and Esc) and **Allow**.
+
+      The sheet does not activate VizDAW. It calls `NSApp.requestUserAttention(.informationalRequest)` once.
+    - **A real press.** Allow counts only when `NSApp.currentEvent` is a left-mouse-up or key-down whose `CGEvent` source process ID (`.eventSourceUnixProcessID`) is 0 or VizDAW's own pid. That is a pure function, `CoProducerApproval.isRealPress`. The builder checks what a real click and an accessibility press report on this Mac. If the two cannot be told apart, the task report says so and the owner decides; the check stays as a backstop either way.
+    - **The store.** Standing approvals are `[StandingApproval {key, team, identifier, name, granted}]`, JSON in one login-Keychain generic-password item: service "VizDAW Co-Producer approvals", account "approvals".
+      - It sits behind `protocol CoProducerApprovalStore`. Tests use `MemoryApprovalStore`.
+      - It is read only for a strong identity and when Settings › Co-Producer shows the list, so an unknown caller, such as the e2e's, never touches the Keychain.
+      - A store that cannot be read counts as empty, so VizDAW asks.
+    - **Settings › Co-Producer** gains the list "Apps that may change songs without asking":
+      - each row reads "<name> — team <team> · <identifier> · since <date>", with **Revoke**;
+      - a **Revoke All** button;
+      - with no approvals, "None. VizDAW asks before every change.".
+    - **The test hook.** `settings.co_producer_answer {allow: Bool, required; always: Bool}` is a registry command: `key_only`, class refused, so it is never on the Co-Producer socket. It answers the open sheet of the front document, or of `window`, as a real press would.
+      - It works only on the developer channel, and only when VizDAW was launched with `VIZDAW_TEST_HOOKS=1`. Otherwise it is `not_allowed` "test hook".
+      - Its answer is `{app, known, label, items}`.
+      - With no sheet open it is `failed` "No Co-Producer approval is waiting.".
+      - `always: true` for an unknown caller is `not_allowed` "Always allow is offered only for an app VizDAW can identify.", and the sheet stays open.
+      - It opens no new route: the developer channel already runs every command with no yes.
+      - With `VIZDAW_TEST_HOOKS=1` only, the launch variable `VIZDAW_APPROVAL_WAIT_MS` shortens `APPROVAL_WAIT`, to 1000 ms at least, for the e2e's unanswered sheet. It can never lengthen it.
+    - **Cost if wrong:**
+      - a composer using a command-line host sees the sheet on every change;
+      - a host that is not hardened, or is launched with debugging flags, can never be approved.
 
 ## Global Constraints
 
@@ -159,6 +223,7 @@ Every task's requirements include these.
   - Socket tests use a private temp folder under `/tmp`, as `server.rs`'s `private_tmp` does. `vizdaw-mcp` tests set `VIZDAW_SUPPORT_DIR` on the child they spawn, never in their own process.
   - Every `core-ffi` test file calls `force_offline()` through its `serial` helper, and points the support folder at a temp folder as `co_producer_copies.rs` does.
   - Swift tests that make a real `Session` set `TestSupportDir.shared`.
+  - Tests never touch the Keychain. Approvals in tests go through `MemoryApprovalStore`, and identities through `FakeClientFacts`.
   - Tests that load real plug-ins run in a child process whose `HOME` and `CFFIXED_USER_HOME` are a temp folder, through `crates/core-host/tests/support/temp_home.rs`. This plan adds none.
   - Linux CI has no AU or CoreFoundation, so any test that needs either is `#[cfg(target_os = "macos")]`. `vizdaw-mcp`, the `core-control` tests and the `core-model` marks tests are plain Unix and run on Linux.
   - The e2e uses vizctl's throwaway home.
@@ -168,6 +233,7 @@ Every task's requirements include these.
   - Never use `dangerouslyDisableSandbox`.
   - Never read `~/workspace/SVP/research`.
 - **Programmatic calls open nothing.** Control-channel and Co-Producer calls, and programmatic calls, never open dialogs, sheets, alerts, panels, menus or windows. They also never launch another app: `window.song_notes` over a channel only answers the path.
+  - **The one exception** is approved by the owner (spec §6.8): VizDAW's approval sheet, for an apply that is waiting for a yes (Ruling 11). Tests never show it. They answer it through `FakeApprover`, or in the e2e through `settings.co_producer_answer`.
 - **Hostile input.**
   - Every MCP input is hostile: every MCP message, every tool argument, every Co-Producer call, and every file Co-Producer reads (`Notes.md`, copies, the remembered export folder).
   - Every new FFI export runs inside `ffi_guard` (and so `catch_unwind`). It returns `Result<_, VizError>`, or a safe default for the never-failing ones.
@@ -175,7 +241,7 @@ Every task's requirements include these.
   - Each new command and call gets hostile-input tests: wrong types, unknown params, missing required params, a 70 000-character string, a NUL, IDs out of range.
   - Every item a call skips or leaves behind gets a report or problem line (Rulings 7 and 8).
 - **Counts.** Check every count at the start of Task 1, and report each task's change against it.
-  - The registry grows by **4**, from the count measured at the start: 186 plus whatever 8a Tasks 6–8 added, which is expected to be 186.
+  - The registry grows by **5**, from the count measured at the start: 186 plus whatever 8a Tasks 6–8 added, which is expected to be 186. Task 1 adds 4, and Task 6 adds `settings.co_producer_answer`.
   - `COMMAND_NAMES` goes from 18 to **21**. `ErrorCode::ALL` stays 16.
 - **Names.**
   - The repo and UI never name the vendors and DAWs on the project's banned list. The list lives only in the name scans (`app/Tests/VizDAWAppModelTests/NameScanTests.swift`, `crates/core-control/tests/names.rs`); read them, keep all new text clear of them, and never copy the list.
@@ -205,13 +271,13 @@ Every task's requirements include these.
     - `cargo clippy --workspace --all-targets -- -D warnings`;
     - the Linux clippy: `cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu --target-dir target/linux-check -- -D warnings`;
     - `cargo test` for the crates the task touches.
-  - Tasks 1, 2, 3 and 5 also run `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`.
+  - Tasks 1, 2, 3, 5 and 6 also run `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`.
   - Known flaky: the `damaged_files` and `dawproject_fuzz` proptests, `platform-macos/tests/midi.rs`, `core-ffi` catalog tests under load, and the latency e2e timing. Re-run once before investigating, and say so in the report.
   - **Baseline:** measure at the start of Task 1. HEAD is 8a's last commit on `takes-and-co-producer`, or this plan's pre-flight commit if there is one. Record the registry count (expected 186), `COMMAND_NAMES` 18, `ErrorCode::ALL` 16, the last README step (expected 344, after 8a Task 8), the e2e's ignored tests (expected 33) and `VERSION` 9. If 8a Tasks 6–8 are not all committed, stop and say so.
 
 ## Review Focus
 
-These are the five failure modes a composer is most likely to hit, most likely first. Each is pinned by named tests in its task.
+These are the six failure modes a composer is most likely to hit, most likely first. Each is pinned by named tests in its task.
 
 1. **The composer has `Notes.md` open in an editor while Co-Producer appends.**
    - Examples:
@@ -266,6 +332,20 @@ These are the five failure modes a composer is most likely to hit, most likely f
      - Keep All removes nothing;
      - media still in use stay after the next Save.
    - Pinned by Task 3's `copies_are_removed_only_by_name_and_to_the_trash` and Task 5's `copiesOfferOnlyFromTheMenu` and `keepAllRemovesNothing`.
+6. **A program skips the composer's yes (spec §6.8).**
+   - Examples:
+     - an agent with a shell previews and applies on the raw socket;
+     - a host forges `clientInfo` as an approved app's name;
+     - `vizdaw-mcp` is started from a shell or an unsigned parent;
+     - an approval is revoked;
+     - a sheet is left open, or is answered after the song changed.
+   - Expected:
+     - no change applies without a real Allow or a standing approval for a strongly identified app;
+     - the label never grants anything;
+     - unknown callers always get the sheet and are never offered "Always allow";
+     - an unanswered or stale sheet is a no;
+     - no sheet ever opens without a waiting yes.
+   - Pinned by Task 6's `forgedClientInfoIsOnlyALabel`, `unknownParentsAlwaysGetTheSheet`, `revokedApprovalAsksAgain`, `applyWithoutTheClickIsRefused`, `noSheetWithoutAWaitingYes`, `take_needs_vizdaw_approval_for_a_yes`, and Task 7's `co_producer_approval_over_mcp`.
 
 ---
 
@@ -659,7 +739,195 @@ These are the five failure modes a composer is most likely to hit, most likely f
 - [ ] **Step 4: Run** the Step 2 command, then `scripts/swift.sh test`. Expected: PASS.
 - [ ] **Step 5: End-of-task checks**, including `scripts/make-app.sh`. **Commit** `feat(app): Song Notes, the Co-Producer badge and colour, Make Mine, and Compact's offer to remove old copies (plan 8b Task 5)`.
 
-### Task 6: README checks, the e2e, the backlog and the gates
+### Task 6: VizDAW's own approval, and standing approvals per app (`platform-macos`, `core-control`, `core-ffi`, `vizdaw-mcp`, Swift)
+
+**Files:**
+- Create:
+  - `crates/platform-macos/src/peer.rs`, `crates/platform-macos/tests/peer.rs`;
+  - `app/Sources/VizDAWAppModel/CoProducerApproval.swift` (the pending approval, `CoProducerApprover`, `isRealPress`, the sheet's model);
+  - `app/Sources/VizDAWAppModel/CoProducerClients.swift` (`ClientFacts`, `ClientIdentity.decide`, `CoProducerApprovalStore`, `MemoryApprovalStore`, `StandingApproval`);
+  - `app/Sources/VizDAW/DarwinClientFacts.swift` (Security and Darwin calls);
+  - `app/Sources/VizDAW/KeychainApprovalStore.swift`;
+  - `app/Sources/VizDAW/CoProducerApprovalSheet.swift`;
+  - `app/Tests/VizDAWAppModelTests/CoProducerApprovalTests.swift`, `CoProducerClientsTests.swift`, `FakeClientFacts.swift`, `FakeApprover.swift`.
+- Modify:
+  - `crates/platform-macos/src/lib.rs`;
+  - `crates/core-control/src/server.rs` (`Config.peer`, `Call.conn`, `Call.audit_token`);
+  - `crates/core-control/src/request.rs` (`co_producer.apply` gains `client`, `MAX_CLIENT_LABEL`);
+  - `crates/core-control/src/registry.rs` (`settings.co_producer_answer`);
+  - `crates/core-control/tests/co_producer.rs`, `tests/commands.rs`, `tests/protocol.rs`;
+  - `crates/core-ffi/src/control.rs` (`ControlCall.peer`, `PeerRow`, `client` on `CoProducerApply`, the peer hook in `start_co_producer`);
+  - `crates/core-ffi/src/co_producer.rs` (`CoProducerApproval`; the pending preview keeps `needs_yes`);
+  - `crates/core-ffi/src/session.rs` (`co_producer_pending`, `approval` on `co_producer_take`);
+  - `crates/core-ffi/tests/co_producer.rs` (8a's three `co_producer_take` calls pass `CoProducerApproval::Sheet`; the new tests);
+  - `crates/vizdaw-mcp/src/lib.rs`, `src/tools.rs`, `tests/server.rs`, `tests/support/fake_app.rs`;
+  - `app/Sources/VizDAWAppModel/CoProducerCommands.swift` (`run` takes `peer` and `approver`; the pending apply);
+  - `app/Sources/VizDAWAppModel/ControlCommands.swift` (`ControlOutcome.awaitingApproval`);
+  - `app/Sources/VizDAWAppModel/CoProducerSettings.swift` (the approvals list, revoke);
+  - `app/Sources/VizDAW/ControlChannel.swift` (passes `call.peer`, extends the timeout, answers when the sheet ends);
+  - `app/Sources/VizDAW/CoProducerSettingsView.swift` (the list);
+  - `app/Sources/VizDAW/DocumentView.swift` (presents `CoProducerApprovalSheet` while `m.coProducerApproval` is set);
+  - `app/Tests/VizDAWAppModelTests/CoProducerCommandsTests.swift` (8a's apply tests pass `FakeApprover(.allow)`), `FakeSession.swift`.
+
+**Interfaces:**
+- Consumes:
+  - Task 1's `co_producer.apply` parse, which this task extends with `client`, keeping Task 1's other shapes and `COMMAND_NAMES` at 21;
+  - Task 2's `needs_yes` rule (Ruling 2), so that Co-Producer's own things get no sheet;
+  - 8a's `check_take`, `PreviewRow`, `PlannedRow`, Ruling 13's stretch, and `ControlServer.extendTimeout`/`isWaiting`.
+- Produces:
+  ```rust
+  // platform-macos/src/peer.rs (macOS only; a hand-declared getsockopt, no crate)
+  /// The connected peer's audit token (LOCAL_PEERTOKEN), or None.
+  pub fn audit_token(fd: std::os::fd::RawFd) -> Option<[u32; 8]>;
+  // core-control/src/server.rs
+  pub type PeerHook = fn(std::os::fd::RawFd) -> Option<[u32; 8]>;
+  // Config gains `pub peer: Option<PeerHook>` (default None), called once at accept.
+  // Call gains `pub conn: u64` and `pub audit_token: Option<[u32; 8]>`.
+  // request.rs
+  pub const MAX_CLIENT_LABEL: usize = 100;
+  // CoProducerApply gains `client: Option<String>` (trimmed; controls and P11's characters refused).
+  // core-ffi
+  #[derive(uniffi::Record)] pub struct PeerRow { pub conn: u64, pub audit_token: Vec<u32> }
+  // ControlCall gains `pub peer: Option<PeerRow>`; ControlRequest::CoProducerApply gains `client: Option<String>`.
+  #[derive(uniffi::Enum)] pub enum CoProducerApproval { None, Sheet, Standing }
+  impl Session {
+      /// Ruling 11: check_take's checks without taking; the preview's row.
+      pub fn co_producer_pending(&self, token: String, plan: Vec<PlannedRow>) -> Result<PreviewRow, VizError>;
+      pub fn co_producer_take(&self, token: String, plan: Vec<PlannedRow>,
+                              approval: CoProducerApproval) -> Result<(), VizError>;
+  }
+  ```
+  ```swift
+  public struct CodeFacts: Equatable, Sendable {
+      public let pid: Int32; public let parent: Int32; public let started: UInt64
+      public let valid: Bool; public let team: String?; public let identifier: String?
+      public let cdhash: Data?; public let hardened: Bool; public let getTaskAllow: Bool
+      public let appBundle: URL?             // when it is an .app's main executable
+      public let launch: [String]            // argv and environment, KERN_PROCARGS2
+  }
+  public protocol ClientFacts {             // DarwinClientFacts; FakeClientFacts in tests
+      func peer(auditToken: [UInt32]) -> CodeFacts?
+      func process(pid: Int32) -> CodeFacts?
+      func bundledMcpHash() -> Data?
+      func bundleName(_ app: URL) -> String?
+  }
+  public enum ClientIdentity: Equatable {
+      case known(key: String, team: String, identifier: String, name: String)
+      case unknown
+      public static func decide(peer: PeerRow?, facts: any ClientFacts) -> ClientIdentity
+  }
+  public struct StandingApproval: Codable, Equatable { public let key, team, identifier, name: String; public let granted: Date }
+  public protocol CoProducerApprovalStore { func load() -> [StandingApproval]; func save(_ all: [StandingApproval]) throws }
+  public enum ApprovalAnswer { case allow(always: Bool), deny }
+  @MainActor public protocol CoProducerApprover {
+      /// Opens the sheet for `pending`; calls `done` exactly once.
+      func ask(_ pending: PendingApproval, done: @escaping @MainActor (ApprovalAnswer) -> Void)
+      func cancel(doc: UUID)
+  }
+  public struct PendingApproval: Equatable {
+      public let doc: UUID; public let identity: ClientIdentity
+      public let label: String?; public let items: [ChangeItemRow]
+  }
+  public enum CoProducerApproval { public static func isRealPress(type: NSEvent.EventType?, sourcePid: Int64, ownPid: Int64) -> Bool }
+  public static let approvalWait: TimeInterval = 600   // CoProducerCommands.approvalWait
+  // ControlOutcome gains `.awaitingApproval(doc: UUID)`; CoProducerCommands.run gains
+  //   `peer: PeerRow?` and `approver: any CoProducerApprover`, both without defaults.
+  ```
+
+- [ ] **Step 1: Write the failing Rust tests.**
+  - In `platform-macos/tests/peer.rs` (`#[cfg(target_os = "macos")]`):
+    - `peer_token_names_this_process`: on a `UnixStream::pair()`, `audit_token` of one end gives a token whose pid word (index 5) is `std::process::id()`;
+    - a regular file's fd, and `-1`, give `None`.
+  - In `core-control/tests/co_producer.rs`:
+    - `the_peer_reaches_every_call`: a Co-Producer server whose `Config.peer` is a fake that returns `[1, 2, 3, 4, 5, 6, 7, 8]` gives that token and the same `conn` on two calls of one connection, and a different `conn` on a second connection. With `peer: None` the token is `None`;
+    - `apply_takes_a_client_label`: `client: "Helper Chat"` parses. `client` of 101 characters, with a NUL, with `"\u{202E}"`, or as a number is `invalid_params`;
+    - `the_answer_hook_is_never_co_producers`: `settings.co_producer_answer` is class refused, absent from `list_json()`, and `not_allowed` through `command.run` on the Co-Producer socket.
+  - In `tests/commands.rs`: the registry count is the baseline plus 5.
+  - In `core-ffi/tests/co_producer.rs`:
+    - `take_needs_vizdaw_approval_for_a_yes`, inside a request with a hand track:
+      - preview `track.rename` of it (`needs_yes: true`), then `co_producer_take(token, plan, None)`, which is `Err` with Ruling 11's sentence. The track keeps its name, and the same token taken again with `Sheet` is `Err`, because the token is used up;
+      - a fresh preview taken with `Sheet` succeeds, and so does one taken with `Standing`;
+      - a `needs_yes: false` preview (Task 2: a Co-Producer track) taken with `None` succeeds.
+    - `pending_checks_without_taking`:
+      - `co_producer_pending` with the preview's token and plan answers its row, and a later take with `Sheet` still succeeds;
+      - a wrong token, a changed plan, a hand edit in between, and a used token are each `Err`, and none of them consumes a good token.
+  - **8a's tests.** The three `co_producer_take(token, plan)` calls in `tests/co_producer.rs` become `co_producer_take(token, plan, CoProducerApproval::Sheet)`. That is the test hook: a test grants VizDAW's approval as the sheet's Allow would. Their assertions are unchanged.
+  - In `vizdaw-mcp/tests/server.rs`:
+    - `apply_sends_the_client_label`: after `initialize` with `clientInfo: {name: "Helper Chat"}`, `apply_change` and an accepted `change` send `co_producer.apply` with `client: "Helper Chat"`;
+    - a `clientInfo.name` of 300 characters is cut to 100 at a character boundary;
+    - one with controls or P11's characters is sent without `client`.
+    - `vizdaws_no_reaches_the_model`: the fake app answers apply `failed` "The composer did not allow this in VizDAW.". The tool result is `isError: true` with that text, and `change`'s and `apply_change`'s descriptions say "VizDAW then asks the composer too, unless they always allow this app."
+- [ ] **Step 2: Run** `cargo test -p platform-macos --test peer`, `cargo test -p core-control`, `cargo test -p core-ffi --test co_producer` and `cargo test -p vizdaw-mcp`. Expected: FAIL.
+- [ ] **Step 3: Implement the Rust side** (Ruling 11).
+  - **`peer.rs`.** `getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, …)` comes from a hand-declared `unsafe extern "C"`, with a `// SAFETY:` comment, as `trash.rs` declares its calls.
+  - **The server.** It calls `Config.peer` once in `accept` with `stream.as_raw_fd()`, which is safe code, while the stream is open. It stores the token with the connection, and copies the connection number and token onto each `Call`.
+  - **`start_co_producer`** sets `peer: Some(platform_macos::peer::audit_token)` on macOS. The developer server keeps `None`.
+  - **The Session.** The pending preview keeps `needs_yes`. `co_producer_pending` peeks it, and `co_producer_take` checks `approval` after 8a's checks.
+  - **`vizdaw-mcp`** remembers `clientInfo.name` from `initialize`, cleaned as above, and adds it as `client` to every `co_producer.apply`. The descriptions gain Step 1's sentence. Its `CALL_TIMEOUT` of 660 s already covers the 10-minute sheet.
+  - **The registry** gains `settings.co_producer_answer`.
+- [ ] **Step 4: Run** the Step 2 command, then `cargo test -p core-control -p core-ffi -p vizdaw-mcp`. Expected: PASS, including Task 1's tests (`COMMAND_NAMES` stays 21) and 8a's.
+- [ ] **Step 5: Write the failing Swift tests**, with `FakeSession`, `FakeClientFacts`, `MemoryApprovalStore`, `MemoryDefaults()`, a fake clock, and `FakeApprover`. `FakeApprover` records each `ask` and answers when the test says so, or at once with `.allow` or `.deny`.
+  - In `CoProducerClientsTests`, the fixture is a good chain:
+    - the peer: VizDAW's `vizdaw-mcp`, its cdhash equal to `bundledMcpHash()`;
+    - its parent: a helper with team "ABCDE12345";
+    - above that: the app `/Applications/Helper Chat.app`, team "ABCDE12345", identifier "com.example.chat", hardened, whose parent is 1.
+
+    The tests:
+    - `aSignedHostIsKnown`: `decide` gives `.known(key: "ABCDE12345:com.example.chat", …, name: "Helper Chat")`.
+    - `unknownParentsAlwaysGetTheSheet`. Each of these gives `.unknown`:
+      - no peer row;
+      - a peer whose cdhash differs (a raw client, or `vizctl`);
+      - a peer with no code;
+      - a parent that is unsigned, ad-hoc signed (no team) or a shell that ships with macOS (a platform binary, no team);
+      - a parent of 1, because `vizdaw-mcp` was reparented;
+      - a chain that mixes teams (signed app, then a shell, then the same signed app);
+      - a top that is not an `.app` main executable;
+      - a top whose parent is not 1;
+      - not hardened, or with `getTaskAllow`;
+      - a launch list holding `DYLD_INSERT_LIBRARIES=…`, `ELECTRON_RUN_AS_NODE=1`, `NODE_OPTIONS=…`, `--inspect=9229` or `--remote-debugging-port=1`;
+      - a start time that differs between the two reads;
+      - a chain longer than 32 processes.
+    - `forgedClientInfoIsOnlyALabel`:
+      - with a standing approval for "ABCDE12345:com.example.chat" stored, an apply from an unsigned parent whose `client` is "Helper Chat" still asks;
+      - the `PendingApproval` is `.unknown`, with label "Helper Chat";
+      - the sheet's text is the unknown sentence with "calls itself "Helper Chat"", and it offers no "Always allow".
+    - `revokedApprovalAsksAgain`: a known host with a standing approval applies with no `ask`, and the Session sees `Standing`. After `CoProducerSettings.revoke(key)`, the next apply asks. `revokeAll()` empties the store.
+    - `anUnreadableStoreAsks`: a store whose `load` finds bad JSON is empty, so the apply asks.
+  - In `CoProducerApprovalTests`:
+    - `applyWithoutTheClickIsRefused`, with a hand track's `needs_yes` preview from an unknown caller:
+      - `run(.coProducerApply…)` answers `.awaitingApproval`, and `coProducerTake` is not called;
+      - on `.deny` the deferred answer is `failed` "The composer did not allow this in VizDAW.", and `coProducerTake` is never called;
+      - on `.allow(always: false)`, enter, take with `Sheet`, the plan and leave run in that order, and the store is unchanged;
+      - with no answer, the fake clock at 600 s gives the same no;
+      - a document revision change, the caller gone, the switch off or the document closed each give the same no and `cancel(doc:)`.
+    - `alwaysAllowGrantsOnlyAKnownApp`:
+      - for a known host, `.allow(always: true)` stores one `StandingApproval` with today's date and applies with `Sheet`;
+      - for an unknown one, the hook's `always: true` is refused with Ruling 11's sentence, nothing is stored, and the sheet stays open.
+    - `noSheetWithoutAWaitingYes`. No `ask` happens for any of these:
+      - `begin`, `preview`, `status` or a read;
+      - an apply with a bad, used or stale token, or a changed plan, which is answered `failed` at once;
+      - an apply whose preview has `needs_yes: false`, which runs at once with `None`;
+      - an apply with no open request.
+
+      A second apply while a sheet is open is `busy` with Ruling 11's sentence. `tidy` does not idle-close a request whose document has a sheet open.
+    - `isRealPressRefusesSynthesizedInput`: a left-mouse-up or key-down from source pid 0, or from VizDAW's own pid, is a real press. No event (an accessibility press), another pid, or another event type is not.
+    - `theAnswerHookNeedsTheLaunchFlag`: `settings.co_producer_answer` without `VIZDAW_TEST_HOOKS=1` in the injected environment is `not_allowed` "test hook". With it, and no sheet open, it is `failed` "No Co-Producer approval is waiting.". With a sheet open it answers `{app, known, label, items}` and resolves the sheet as Allow or Don't Allow. `VIZDAW_APPROVAL_WAIT_MS=2000` shortens the wait only together with `VIZDAW_TEST_HOOKS=1`, and is ignored above 600 000 and without the flag.
+  - **8a's `CoProducerCommandsTests`** apply tests pass `approver: FakeApprover(.allow)` and `peer: nil`, which is the test hook that grants VizDAW's approval. A test whose preview needs a yes then also asserts that the take got `Sheet`. Their other assertions are unchanged.
+  - **`NameScanTests` and `noLaneInWhatTheAppShows`** pass with the sheet's and Settings' text. Test fixtures use made-up app names only.
+- [ ] **Step 6: Run** `scripts/build-ffi.sh && scripts/swift.sh test --filter 'CoProducerApproval|CoProducerClients|CoProducerCommands|ControlCommands'`. Expected: FAIL.
+- [ ] **Step 7: Implement the Swift side** (Ruling 11).
+  - **`DarwinClientFacts`.**
+    - The code: `SecCodeCopyGuestWithAttributes` with `kSecGuestAttributeAudit`, or with `kSecGuestAttributePid` for the parents. Then `SecCodeCheckValidity`, and `SecCodeCopySigningInformation` for the team ID, the identifier, the `unique` cdhash, the runtime flag and the entitlements.
+    - The process facts: `proc_pidinfo(PROC_PIDTBSDINFO)` for the parent and the start time, and `sysctl(KERN_PROCARGS2)` for the launch list. `SecStaticCodeCreateWithPath` on `Bundle.main`'s `vizdaw-mcp` gives `bundledMcpHash`.
+    - All of it is in the `VizDAW` target, with no new dependency.
+  - **`KeychainApprovalStore`** uses `SecItemCopyMatching`, `SecItemAdd` and `SecItemUpdate` on the one item.
+  - **`CoProducerCommands.run`** handles the apply by Ruling 11's flow. `ControlChannel` answers `.awaitingApproval` by extending the call's timeout to 630 s. It answers the call when `done` fires, after running the stretch on Allow, and passes `call.peer`.
+  - **The sheet** is presented on the document's window, with Ruling 11's text, accessibility labels on every control, and theme tokens. The press check runs in Allow's action.
+  - **Settings › Co-Producer** shows the list, Revoke and Revoke All.
+- [ ] **Step 8: Run** the Step 6 command, then `scripts/swift.sh test`. Expected: PASS.
+- [ ] **Step 9: End-of-task checks**, including the Swift build and test and `scripts/make-app.sh`. **Commit** `feat(co-producer): VizDAW's own approval sheet, and standing approvals for code-signed apps (plan 8b Task 6)`.
+
+### Task 7: README checks, the e2e, the backlog and the gates
 
 **Files:**
 - Modify:
@@ -668,9 +936,17 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `docs/feature-backlog.md`.
 
 **Interfaces:**
-- Consumes: Tasks 1–5. No production code, unless a step finds a bug. Such a bug is fixed in its owner's module, with a regression test.
+- Consumes: Tasks 1–6. No production code, unless a step finds a bug. Such a bug is fixed in its owner's module, with a regression test.
 
-- [ ] **Step 1: Update 8a's e2e** `co_producer_over_mcp` for Ruling 2. The track it renames with a token, and the one it deletes through elicitation, are made over the developer channel (`track.new_audio`), so they are the composer's and still need a yes. Its other assertions stay as they are. Two expectations change: the tracks Claude adds are named "… (Co-Producer)", and the undo labels are unchanged.
+- [ ] **Step 1: Update 8a's e2e** `co_producer_over_mcp` for Rulings 2 and 11.
+  - **Ruling 2.** The track it renames with a token, and the one it deletes through elicitation, are made over the developer channel (`track.new_audio`), so they are the composer's and still need a yes. The tracks Claude adds are named "… (Co-Producer)". The undo labels are unchanged.
+  - **Ruling 11.** `App::start` launches the app with `VIZDAW_TEST_HOOKS=1`. The e2e's `vizdaw-mcp` has the test binary as its parent, so it is unknown, and every apply that needs a yes now waits for VizDAW's sheet. A helper `answer_sheet(app, allow)` grants it through the test-only hook, never a GUI:
+    - it sends `command.run settings.co_producer_answer {allow}` over the developer channel;
+    - it retries `failed` "No Co-Producer approval is waiting." every 100 ms, for up to 10 s.
+
+    The token's `apply_change`, and the accepted elicitation's `change`, are sent with `McpProc::send`. Then `answer_sheet(&mut app, true)` runs, then `recv`.
+  - **Calls that open no sheet.** The bad-token apply and the used-token apply are refused at once, and the declined elicitation sends no apply. For each, `settings.co_producer_answer` is `failed` "No Co-Producer approval is waiting.".
+  - Its other assertions stay as they are.
 - [ ] **Step 2: Add the e2e** `co_producer_librarian_over_mcp`, `#[ignore]`, in the style of `co_producer_over_mcp` and with its MCP helper.
   - **Start.** Launch the app, switch Co-Producer on over the developer channel, then `file.new` and `file.save {path: <home>/Song.vizdaw}`.
   - **The first request.**
@@ -697,7 +973,24 @@ These are the five failure modes a composer is most likely to hit, most likely f
     3. `file.save {path: <home>/Second.vizdaw}`.
     4. Both are now inside `Second.vizdaw`, and the stand-in folder is gone.
   - **The gate.** A raw client on the Co-Producer socket gets `not_allowed` for `command.run track.make_mine`, `command.run window.song_notes` and `command.run mixer.set_colour`.
-- [ ] **Step 3: Write the README steps** in `app/README.md`, after the last step, under a heading "Plan 8b, the Co-Producer notes file and the librarian:". Each step states what to do and what is seen, and says "track":
+- [ ] **Step 3: Add the e2e** `co_producer_approval_over_mcp`, `#[ignore]`, with Step 1's `answer_sheet`. It covers Ruling 11 against the built app, all through the developer channel's hook.
+  - **Start.** Co-Producer on, a saved song with one track made over the developer channel (the composer's).
+  - **Raw socket, no click.**
+    1. A raw `Client` on the Co-Producer socket sends `co_producer.begin`, then `co_producer.preview` of `track.rename` of that track (`needs_yes: true`).
+    2. On a second thread, it sends `co_producer.apply` with the token.
+    3. `answer_sheet(false)` answers `{known: false, …}`, and its `items` hold the rename.
+    4. The raw apply gets `failed` "The composer did not allow this in VizDAW.", and the track keeps its name.
+    5. Applying the same token again is refused at once, with no sheet.
+  - **A forged label.** An `McpProc` started with `clientInfo: {name: "Helper Chat"}` asks for the same rename with `apply_change`. Then:
+    - `settings.co_producer_answer {allow: true, always: true}` is `not_allowed` "Always allow is offered only for an app VizDAW can identify.", and the sheet stays open;
+    - `answer_sheet(true)` then answers `{known: false, label: "Helper Chat"}` and the rename applies.
+  - **Always for an unknown caller.** The next change from the same process asks again: `answer_sheet` finds a sheet.
+  - **No yes needed, no sheet.** In a request, `change` with `track.rename` of a track Claude added applies at once, and `settings.co_producer_answer` is `failed` "No Co-Producer approval is waiting.".
+  - **Unanswered.** This needs the launch override `VIZDAW_APPROVAL_WAIT_MS=2000`, honoured only with `VIZDAW_TEST_HOOKS=1`. With it, an apply nobody answers is `failed` with the no after about 2 s, and the document is unchanged.
+  - **Clean up.** `pgrep -lf vizdaw-mcp` prints nothing after the test.
+
+  A signed, hardened host and a revoked standing approval cannot be built in the e2e's throwaway home, so Task 6's `revokedApprovalAsksAgain` and `aSignedHostIsKnown` pin them, and README steps 12–14 check them by hand.
+- [ ] **Step 4: Write the README steps** in `app/README.md`, after the last step, under a heading "Plan 8b, the Co-Producer notes file and the librarian:". Each step states what to do and what is seen, and says "track":
   1. Window › Song Notes on a saved song: `Notes.md` opens in the Mac's default Markdown editor, with the song's name as its heading. Write "never touch the piano part" and save.
   2. Ask Claude for something new ("add a reverb bus"). Claude first reads the notes and mentions your rule. When it is done, Window › Song Notes shows one new entry at the end: what you asked, what was added, the undo step and the saved copy. Your own text is untouched.
   3. Keep `Notes.md` open in the editor, type a line, and ask Claude for another change without saving first. After saving, both your line and Claude's new entry are there.
@@ -709,7 +1002,10 @@ These are the five failure modes a composer is most likely to hit, most likely f
   9. In a new untitled song, ask Claude to add a track, then File › Save: the song's package now holds `Notes.md` and `Co-Producer/Copies`.
   10. With a song that has Co-Producer copies, Media Pool › Compact: after Compact, a sheet lists each copy with its size, none ticked. Keep All removes nothing. Tick one and Remove Selected: it goes to the Trash. After the next Save, the files only it used go too.
   11. Compact Media asked of Claude is still refused, and no sheet appears.
-- [ ] **Step 4: Update the backlog** (`docs/feature-backlog.md`).
+  12. Ask Claude, in Claude's desktop app, to rename one of your own tracks. After Claude's own question (or your yes in chat), VizDAW shows "Allow Co-Producer to Change Your Song?" on the song's window, with the rename listed and the app's name. Don't Allow leaves the track as it was. Ask again and click Allow: the track is renamed. Pressing Return on the sheet never allows.
+  13. Ask again and tick "Always allow <App>" before Allow. The next change from that app applies with no VizDAW sheet. Settings › Co-Producer lists the app, its team and identifier, and today's date. Click Revoke: the next change shows the sheet again.
+  14. From Terminal, start `VizDAW.app/Contents/MacOS/vizdaw-mcp` yourself and ask for a change through it: the sheet says VizDAW cannot confirm which app is asking, and it offers no "Always allow". Leave a sheet open for 10 minutes: it closes, and the change is not made.
+- [ ] **Step 5: Update the backlog** (`docs/feature-backlog.md`).
   - In the "Co-Producer over MCP" row, note 8b's delivery: `Notes.md` with one entry per request, the marks and badge, Make Mine, format 10, dated export folders, the move-in on first save, and Compact's offer.
   - Close or mark done 8a's rows "Compact Media offers to remove old Co-Producer copies…" and "Move an untitled project's Co-Producer copies into its package on first save…".
   - In the "User track colours" row, note `mixer.set_colour`.
@@ -720,8 +1016,12 @@ These are the five failure modes a composer is most likely to hit, most likely f
     - "Untitled songs closed unsaved leave a stand-in folder of notes and copies in the support folder; show and clear them in Settings";
     - "A copy whose name clashes stays in the stand-in at first save";
     - "Open Notes.md with `O_NOFOLLOW` once a way without a libc dependency is found";
+    - "Sign VizDAW and vizdaw-mcp with Developer ID and the hardened runtime, so code cannot be injected into VizDAW itself (spec §6.8)";
+    - "Name in each Co-Producer notes entry whether VizDAW's sheet or a standing approval allowed it";
+    - "Limit how often one caller may open VizDAW's approval sheet after Don't Allow";
     - any narrow edge cases the task reports listed, at the owner's review pace.
-- [ ] **Step 5: Run the gates:**
+  - In the "Co-Producer over MCP" row, also note VizDAW's own approval sheet and the standing approvals per app (owner, 2026-11-16).
+- [ ] **Step 6: Run the gates:**
   - `cargo test --workspace`;
   - both clippies;
   - `cargo clippy -p core-ffi --lib -- -D warnings`;
@@ -730,10 +1030,10 @@ These are the five failure modes a composer is most likely to hit, most likely f
   - `scripts/swift.sh test`;
   - the no-brand build, `VIZDAW_NO_BRAND=1 scripts/swift.sh build --scratch-path <fresh temp dir>`;
   - `scripts/make-app.sh`;
-  - the e2e, `VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1`: the baseline's ignored tests plus one run, and all pass.
+  - the e2e, `VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1`: the baseline's ignored tests plus two run (`co_producer_librarian_over_mcp`, `co_producer_approval_over_mcp`), and all pass.
 
-  Then `pgrep -lf MacOS/VizDAW` and `pgrep -lf vizdaw-mcp` print nothing. Report against the baseline: registry +4, `COMMAND_NAMES` 21, error codes 16, README +11, e2e +1, `VERSION` 10.
-- [ ] **Step 6: Commit** `docs(app): Co-Producer notes and librarian README checks, e2e and backlog (plan 8b Task 6)`.
+  Then `pgrep -lf MacOS/VizDAW` and `pgrep -lf vizdaw-mcp` print nothing. Report against the baseline: registry +5, `COMMAND_NAMES` 21, error codes 16, README +14, e2e +2 (35 ignored tests, if the baseline is 33), `VERSION` 10.
+- [ ] **Step 7: Commit** `docs(app): Co-Producer notes, librarian and approval README checks, e2e and backlog (plan 8b Task 7)`.
 
 ## Self-Review
 
@@ -753,6 +1053,13 @@ These are the five failure modes a composer is most likely to hit, most likely f
    - **Compact's offer** (§6.7; moved from 8a): Ruling 8 and Tasks 3 and 5.
    - **The track colours gap** (§10 item 6): `mixer.set_colour`, Ruling 3.
    - **Deferred by 8a's ledger to 8b:** Compact's offer, the move-in, and the untitled copies' media need (8a backlog row), all covered.
+   - **VizDAW's own approval** (§6.8, owner 2026-11-16). Ruling 11 and Task 6 cover:
+     - the sheet, and the Rust backstop on take;
+     - "Always allow" for identified apps, with Settings' list and Revoke;
+     - identity by audit token and code signature, with the label never trusted;
+     - the 10-minute no, and no sheet without a waiting yes.
+
+     Task 7's e2e answers the sheet through the test-only hook.
 2. **Steps.** Every test step names its tests and assertions with the plan's values: sentences, file names, folder names, counts and dates. Code steps give signatures and point to the ruling. The notes entry, the tool descriptions and the sheet copy are written out, because the spec leaves them to the plan (§7.1 "controller's call on the layout", §11.12).
 3. **Type consistency.** These names are spelled the same in every task:
    - `ExportWhat`/`ExportWhatRow`, `MAX_ASKED`, `MAX_NOTE`, `MAX_NOTE_LINES`;
@@ -762,10 +1069,14 @@ These are the five failure modes a composer is most likely to hit, most likely f
    - `NotesRow`, `CopyRow`, `RemovedCopiesRow`;
    - `notes_path`, `co_producer_notes`, `co_producer_set_asked`, `co_producer_note`, `co_producer_file`, `co_producer_export_folder`, `co_producer_copies`, `remove_co_producer_copies`;
    - `SongNotes.open`, `CopiesOffer`, `MediaModel.compactFromMenu`, `AppIcon.coProducerBadge`;
-   - the ids `track.make_mine`, `mixer.make_mine`, `mixer.set_colour`, `window.song_notes`, `co_producer.notes`, `co_producer.note`, `co_producer.export_folder`.
-4. **Review Focus.** Each of the five lines names the tests that pin it, in Tasks 1, 2, 3 and 5.
-5. **Proportion.** Six tasks, as the owner asked for 26.0.0 by 2026-11-20. Code appears only as signatures, and the entry and copy text the spec leaves to the plan. The plan reuses `fill_new_eqs`'s place in `execute` for the marks, 8a's `IntoFolder` check for every export folder, `copies_home`'s stand-in, `create_dir`'s never-replace, retention's Trash for copies, and 8a's MCP helper in the e2e.
-6. **Owner decisions.** None are open. Three calls are stated for the owner's review:
+   - the ids `track.make_mine`, `mixer.make_mine`, `mixer.set_colour`, `window.song_notes`, `co_producer.notes`, `co_producer.note`, `co_producer.export_folder`, `settings.co_producer_answer`;
+   - `peer::audit_token`, `PeerHook`, `Call.conn`, `Call.audit_token`, `MAX_CLIENT_LABEL`, `PeerRow`, `CoProducerApproval`, `co_producer_pending`;
+   - `CodeFacts`, `ClientFacts`, `ClientIdentity.decide`, `StandingApproval`, `CoProducerApprovalStore`, `CoProducerApprover`, `PendingApproval`, `ApprovalAnswer`, `ControlOutcome.awaitingApproval`.
+4. **Review Focus.** Each of the six lines names the tests that pin it, in Tasks 1, 2, 3, 5, 6 and 7.
+5. **Proportion.** Seven tasks: the six the owner asked for 26.0.0 by 2026-11-20, plus Task 6 for the owner's decision of 2026-11-16. Code appears only as signatures, and the entry and copy text the spec leaves to the plan. The plan reuses `fill_new_eqs`'s place in `execute` for the marks, 8a's `IntoFolder` check for every export folder, `copies_home`'s stand-in, `create_dir`'s never-replace, retention's Trash for copies, and 8a's MCP helper in the e2e.
+6. **Owner decisions.** None are open. These calls are stated for the owner's review:
+   - command-line hosts, and any `vizdaw-mcp` with a shell in its parent chain, are always unknown, so they get the sheet every time and are never offered "Always allow" (Ruling 11);
+   - an apply that touches only Co-Producer's own things needs no yes, so it gets no sheet (Ruling 11; spec §6.8);
    - a Co-Producer track that holds regions or notes needs a yes to delete, which is stricter than spec §6.5 (Ruling 2);
    - with no Settings export location yet, an untitled song with no remembered folder asks the composer (Ruling 6);
    - the Co-Producer colour is the theme's accent (Ruling 3).
