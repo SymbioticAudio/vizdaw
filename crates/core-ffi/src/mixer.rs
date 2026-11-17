@@ -188,6 +188,16 @@ pub struct StripRow {
     pub colour: Option<SwatchRow>,
 }
 
+/// One output path of the document, in id order (release-fixes Task 6:
+/// the audio track header's output picker).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OutputPathRow {
+    /// Output path ID.
+    pub id: u64,
+    /// Name.
+    pub name: String,
+}
+
 /// A destination of the instrument list (lanes play through these).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct DestRow {

@@ -20,6 +20,7 @@ pub fn strip(id: u64, name: &str) -> StripView {
         mode: AutomationMode::Read,
         meter: (0.0, 0.0),
         kind: TrackKind::Audio,
+        colour: None,
     }
 }
 

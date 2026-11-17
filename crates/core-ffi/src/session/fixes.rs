@@ -91,3 +91,24 @@ impl Session {
         })
     }
 }
+
+/// Release fixes (plan release-fixes Task 6).
+#[uniffi::export]
+impl Session {
+    /// The document's output paths in id order, for an audio track's
+    /// output picker.
+    pub fn output_paths(&self) -> Result<Vec<crate::mixer::OutputPathRow>, VizError> {
+        ffi_guard(|| {
+            let inner = self.lock_inner();
+            Ok(inner
+                .doc()
+                .outputs()
+                .values()
+                .map(|p| crate::mixer::OutputPathRow {
+                    id: p.id.0,
+                    name: p.name.clone(),
+                })
+                .collect())
+        })
+    }
+}

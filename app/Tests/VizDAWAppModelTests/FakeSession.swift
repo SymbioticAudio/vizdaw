@@ -1467,6 +1467,17 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         heardCalls.append(targets)
         return targets.map { state.playing ? heard[$0] : nil }
     }
+
+    // MARK: Release fixes (plan release-fixes Task 6)
+
+    /// The document's output paths, in id order, as `outputPaths` answers.
+    var outputPathRows: [OutputPathRow] = []
+    /// Thrown by `outputPaths` when set.
+    var outputPathsError: VizError?
+    func outputPaths() throws -> [OutputPathRow] {
+        if let e = outputPathsError { throw e }
+        return outputPathRows
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

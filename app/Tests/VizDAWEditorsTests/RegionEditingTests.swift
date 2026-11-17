@@ -217,6 +217,40 @@ private let box = CGRect(x: 0, y: 10, width: 160, height: 40)
     }
 }
 
+/// Release-fixes Task 6: the arrangement draws a region's name at its top
+/// left, after the fade-in handle and under the gain band.
+@MainActor
+@Suite struct RegionNameLabelTests {
+    let font = NSFont.systemFont(ofSize: 10)
+
+    @Test func nameLabelRectFitsOrHides() throws {
+        let rect = CGRect(x: 0, y: 0, width: 200, height: 60)
+        let label = try #require(RegionDrawing.nameLabelRect("Vocal take", in: rect, font: font))
+        #expect(rect.contains(label), "\(label) inside the region")
+        #expect(label.minX > rect.minX + RegionHandles.size / 2, "after the fade-in handle")
+        #expect(label.minY >= rect.minY + RegionHandles.band, "under the gain band")
+        // A long fade in moves it past its handle.
+        let faded = try #require(RegionDrawing.nameLabelRect("Vocal take", in: rect, font: font, fadeInX: 50))
+        #expect(faded.minX > 50 + RegionHandles.size / 2)
+        // A long name is cut to the region's width.
+        let long = try #require(RegionDrawing.nameLabelRect(String(repeating: "Vocal take ", count: 40), in: rect, font: font))
+        #expect(long.maxX <= rect.maxX)
+        #expect(RegionDrawing.nameLabelRect("Vocal take", in: CGRect(x: 0, y: 0, width: 20, height: 60), font: font) == nil)
+        #expect(RegionDrawing.nameLabelRect("", in: rect, font: font) == nil)
+    }
+
+    @Test func theArrangementDrawsTheRegionsName() {
+        let files: [UInt64: String] = [7: "vocal.wav"]
+        var r = region()
+        #expect(ArrangementView.regionName(r) { files[$0] } == "vocal.wav", "an unnamed region: its file's name")
+        r.regionName = "Lead vocal"
+        #expect(ArrangementView.regionName(r) { files[$0] } == "Lead vocal", "a renamed region: its own")
+        r.regionName = nil
+        r.media = 8
+        #expect(ArrangementView.regionName(r) { files[$0] } == "audio")
+    }
+}
+
 /// A crossfaded region (plan 6c Task 6): `region` with its fade in a
 /// crossfade over `overlap` frames of the earlier region.
 private func crossfaded(fadeIn: Int64 = 12_000, fadeOut: Int64 = 24_000, overlap: UInt64 = 30_000) -> EventRow {

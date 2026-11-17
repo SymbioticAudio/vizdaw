@@ -280,8 +280,15 @@ public final class ArrangementView: EditorCanvas {
                 height: max(rect.height - RegionHandles.band - 2, 1))
             RegionDrawing.draw(
                 r, in: rect, rows: rows, waveRect: wave, offline: offline, selected: editor.isSelected(event: r.id),
-                handles: editor.tool == .arrow, theme: theme, tint: tint(row))
+                handles: editor.tool == .arrow, name: Self.regionName(r) { media.row($0)?.name }, theme: theme,
+                tint: tint(row))
         }
+    }
+
+    /// The name the arrangement draws on region `r` (release-fixes Task 6):
+    /// its own, else its file's (`mediaName` of its media), else "audio".
+    static func regionName(_ r: EventRow, mediaName: (UInt64) -> String?) -> String {
+        RegionA11y.name(r, mediaName: r.media.flatMap(mediaName))
     }
 
     /// The audio regions of a lane's active take.

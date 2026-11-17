@@ -12551,6 +12551,7 @@ impl Session {
                 mode: s.automation,
                 meter: (0.0, 0.0),
                 kind: crate::surfaces::track_kind(s.kind),
+                colour: s.colour,
             };
             if shown {
                 v.fader = heard(AutomationTarget::StripFader(id));

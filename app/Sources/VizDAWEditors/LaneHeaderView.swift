@@ -333,9 +333,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         case .mute: flags(seq, lane.id, mute: !lane.mute)
         case .solo: flags(seq, lane.id, solo: !lane.solo)
         case .arm: flags(seq, lane.id, arm: !lane.arm)
-        // No output picker yet: a click on an audio track's output does
-        // nothing (it must not set a MIDI destination on an audio track).
-        case .destination where lane.kind == .audio: break
+        // An audio track's "→ …" is its output (release-fixes Task 6),
+        // never a MIDI destination.
+        case .destination where lane.kind == .audio: outputClicked(e, seq: seq, lane: lane, at: p)
         case .destination: destinationMenu(seq: seq, lane: lane, at: p)
         case .name where e.clickCount >= 2: beginRename(lane, seq: seq, row: i)
         case .name, .kind, nil: break
@@ -433,6 +433,49 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
 
     private func destinationMenu(seq: UInt64, lane: LaneRow, at p: CGPoint) {
         destinationMenu(seq: seq, lane: lane).popUp(positioning: nil, at: p, in: self)
+    }
+
+    /// A click on an audio track's output: the output menu. The control
+    /// channel's click opens none (a menu tracks modally); the status line
+    /// names the command to use instead.
+    func outputClicked(_ e: NSEvent, seq: UInt64, lane: LaneRow, at p: CGPoint) {
+        guard !ControlUI.isChannel(e) else {
+            editor.status = TrackCommands.outputOnChannel
+            return
+        }
+        outputMenu(seq: seq, lane: lane).popUp(positioning: nil, at: p, in: self)
+    }
+
+    /// The output picker (release-fixes Task 6): "No Output", then each of
+    /// the document's output paths by name, the track's checked. Choosing
+    /// one is one undo step, Set Track Output. When the paths cannot be
+    /// read the menu says so (a disabled item), as `destinationMenu`.
+    func outputMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let doc = document
+        let choose = { (output: UInt64?) in
+            _ = TrackCommands.setOutput(seq: seq, lane: lane.id, output: output, doc)
+        }
+        menu.addItem(MenuAction(title: TrackCommands.noOutput) { choose(nil) }.item(checked: lane.audioOut == nil))
+        let paths: [OutputPathRow]
+        do {
+            paths = try document.session.outputPaths()
+        } catch {
+            var busy = false
+            if case .Busy? = error as? VizError { busy = true }
+            if !busy { editor.report(error) }
+            let item = NSMenuItem(
+                title: busy ? "Outputs unavailable (busy)" : "Outputs unavailable", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            return menu
+        }
+        menu.addItem(.separator())
+        for path in paths {
+            menu.addItem(MenuAction(title: path.name) { choose(path.id) }.item(checked: lane.audioOut == path.id))
+        }
+        return menu
     }
 
     /// "No Destination" and every destination. When they cannot be read the

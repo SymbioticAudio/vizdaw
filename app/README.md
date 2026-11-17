@@ -2475,9 +2475,8 @@ sheets' models (`InterchangeTests`, `ProjectSettingsModelTests`,
      composer, OK; Undo ("Set Song Info") clears them; Save, close and
      reopen: they are there.
 266. Select a region: the inspector's Region name can be typed (one Undo,
-     "Rename Region"); the arrangement shows the new name (in the region's
-     VoiceOver label: the arrangement draws no region names); clearing it
-     shows the file's name again.
+     "Rename Region"); the arrangement shows the new name at the region's
+     top left; clearing it shows the file's name again.
 
 **Owner check (manual, only the owner can do):** export the demo song as a
 MIDI file, open it in the DAW you use that reads MIDI files, and check

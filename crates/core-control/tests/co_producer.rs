@@ -92,6 +92,7 @@ const CHANGE: &[&str] = &[
     "region.crossfade",
     "lane.set_input",
     "lane.set_monitor",
+    "lane.set_output",
     "lane.set_input_fx",
     "lane.set_mpe",
     "lane.track_synth",
@@ -172,7 +173,7 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 187);
+    assert_eq!(COMMANDS.len(), 188);
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");

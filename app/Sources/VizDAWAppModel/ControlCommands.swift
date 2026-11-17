@@ -280,7 +280,7 @@ public enum ControlCommands {
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(TakeCommands.ids)
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
-            .union(MixerCommands.ids).union(coProducer)
+            .union(MixerCommands.ids).union(coProducer).union([TrackCommands.setOutput])
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -520,7 +520,7 @@ public enum ControlCommands {
             return InputFxCommands.run(id, args: args, doc: docID, m)
         case _ where MpeCommands.ids.contains(id):
             return MpeCommands.run(id, args: args, doc: docID, m)
-        case _ where TrackCommands.ids.contains(id):
+        case _ where TrackCommands.ids.contains(id) || id == TrackCommands.setOutput:
             return TrackCommands.run(id, args: args, doc: docID, m)
         case _ where TakeCommands.ids.contains(id):
             return TakeCommands.run(id, args: args, doc: docID, m)

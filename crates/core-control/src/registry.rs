@@ -1541,6 +1541,24 @@ const SET_MONITOR_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `lane.set_output` (plan release-fixes Task 6).
+const SET_OUTPUT_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The track's sequence (default: the shown one)."),
+    opt_id_param(
+        "lane",
+        "The audio track (default: the selection's first track).",
+    ),
+    ParamSpec {
+        name: "output",
+        kind: ParamKind::IntOrNull {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: true,
+        help: "The output path's id (state.get mixer), or null for no output.",
+    },
+];
+
 const INJECT_PARAMS: &[ParamSpec] = &[
     ParamSpec {
         name: "port",
@@ -2365,6 +2383,17 @@ pub const COMMANDS: &[CommandSpec] = &[
             "lane.set_monitor",
             "Track",
             "Set Track Monitor",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: SET_OUTPUT_PARAMS,
+        ..key_only(cmd(
+            "lane.set_output",
+            "Track",
+            "Set Track Output",
             None,
             true,
         ))
