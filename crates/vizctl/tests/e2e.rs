@@ -5037,3 +5037,306 @@ fn takes_and_layered_midi_loop_over_the_channel() {
     assert_eq!(e.code, core_control::ErrorCode::UnknownId, "{e:?}");
     app.quit();
 }
+
+/// `vizdaw-mcp` in the app bundle, spoken to over its pipes (plan 8a).
+struct McpProc {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    out: std::sync::mpsc::Receiver<String>,
+    next: i64,
+}
+
+impl McpProc {
+    /// Spawns it with the launch's support folder and home, and sends
+    /// `initialize` with `capabilities`, then `initialized`.
+    fn start(app: &App, capabilities: Value) -> McpProc {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let exe = std::env::var("VIZDAW_E2E_APP").expect("VIZDAW_E2E_APP");
+        let exe = PathBuf::from(exe);
+        let exe = if exe.is_absolute() {
+            exe
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(exe)
+        };
+        let bundle = if exe.extension().is_some_and(|e| e == "app") {
+            exe
+        } else {
+            exe.ancestors()
+                .nth(3)
+                .expect("the app bundle")
+                .to_path_buf()
+        };
+        let mcp = bundle.join("Contents/MacOS/vizdaw-mcp");
+        assert!(mcp.exists(), "{} is in the app", mcp.display());
+        let mut child = Command::new(mcp)
+            .env("HOME", &app.launched.home)
+            .env("VIZDAW_SUPPORT_DIR", app.launched.home.join("support"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, out) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { return };
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        let mut m = McpProc {
+            stdin: child.stdin.take(),
+            child,
+            out,
+            next: 1,
+        };
+        let r = m.request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": capabilities,
+                "clientInfo": {"name": "e2e", "version": "1"}}),
+        );
+        assert!(r.get("error").is_none(), "{r}");
+        m.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        m
+    }
+
+    fn send(&mut self, v: &Value) {
+        use std::io::Write;
+        let w = self.stdin.as_mut().unwrap();
+        writeln!(w, "{v}").unwrap();
+        w.flush().unwrap();
+    }
+
+    fn recv(&self) -> Value {
+        let line = self
+            .out
+            .recv_timeout(Duration::from_millis(WAIT_MS))
+            .expect("vizdaw-mcp answered");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"))
+    }
+
+    /// Sends a request and returns its reply.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        let r = self.recv();
+        assert_eq!(r["id"], id, "{r}");
+        r
+    }
+
+    /// A tool call: its result (`content`, `isError`).
+    fn tool(&mut self, name: &str, arguments: Value) -> Value {
+        let r = self.request("tools/call", json!({"name": name, "arguments": arguments}));
+        assert!(r.get("error").is_none(), "{name}: {r}");
+        r["result"].clone()
+    }
+
+    /// A tool call that must answer without an error.
+    fn ok(&mut self, name: &str, arguments: Value) -> String {
+        let r = self.tool(name, arguments);
+        assert_eq!(r["isError"], false, "{name}: {r}");
+        mcp_text(&r)
+    }
+}
+
+impl Drop for McpProc {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.wait();
+    }
+}
+
+fn mcp_text(result: &Value) -> String {
+    result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{result}"))
+        .to_string()
+}
+
+/// Waits (a condition, not a sleep) until `path` exists.
+fn wait_for_path(path: &std::path::Path, present: bool) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    while path.exists() != present {
+        assert!(
+            Instant::now() < deadline,
+            "{} did not {} within {WAIT_MS} ms",
+            path.display(),
+            if present { "appear" } else { "go" }
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Plan 8a README steps 334-344 through `vizdaw-mcp`: off by default, the
+/// socket and its modes, one undo step and one copy per request, the
+/// token flow, the socket's refusals, elicitation, Undo from VizDAW, and
+/// off again. Everything stays in the throwaway home.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn co_producer_over_mcp() {
+    use core_control::ErrorCode;
+    use std::os::unix::fs::PermissionsExt;
+    const OFF: &str = "Co-Producer is turned off in VizDAW's Settings.";
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let support = home.join("support");
+    let sock = support.join("co-producer.sock");
+    let mut mcp = McpProc::start(&app, json!({}));
+
+    // Off on a fresh install: a tool call says so (step 334).
+    let r = mcp.tool("begin_request", json!({"name": "add two tracks"}));
+    assert_eq!(mcp_text(&r), OFF, "{r}");
+    assert!(!sock.exists());
+
+    // On: the socket exists at 0600 in a 0700 folder.
+    let r = app.call(
+        "command.run",
+        json!({"id": "settings.co_producer", "params": {"on": true}}),
+    );
+    assert!(r.is_object(), "{r}");
+    wait_for_path(&sock, true);
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&sock), 0o600);
+    assert_eq!(mode(&support), 0o700);
+
+    // The song, saved so its copies have a package.
+    let made = app.call("command.run", json!({"id": "file.new"}));
+    let w = made["window"].clone();
+    let song = home.join("Song.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save", "params": {"path": song.display().to_string()}, "window": w}),
+    );
+    let doc = |app: &mut App| app.call("state.get", json!({"target": "document", "window": w}));
+    let lanes = |app: &mut App| -> Vec<Value> { doc(app)["lanes"].as_array().unwrap().clone() };
+
+    // A request in the initialize era, no elicitation (step 335).
+    mcp.ok("begin_request", json!({"name": "add two tracks"}));
+    mcp.ok("track_new_audio", json!({"window": w}));
+    mcp.ok("track_new_audio", json!({"window": w}));
+    mcp.ok("end_request", json!({}));
+    wait_for_undo(&mut app, &w, "Co-Producer: Add Two Tracks");
+    assert_eq!(lanes(&mut app).len(), 2);
+    let copies = song.join("Co-Producer/Copies");
+    let count = |p: &std::path::Path| std::fs::read_dir(p).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(count(&copies), 1, "one copy per request");
+
+    // A change with a token (steps 337, 338).
+    let d = doc(&mut app);
+    let seq = d["selected_seq"].clone();
+    let first = lanes(&mut app)[0]["id"].clone();
+    let rename =
+        json!([{"id": "track.rename", "params": {"seq": seq, "lane": first, "name": "Kick"}}]);
+    mcp.ok("begin_request", json!({"name": "rename the first track"}));
+    let listed = mcp.ok("change", json!({"commands": rename, "window": w}));
+    let token = listed
+        .split_whitespace()
+        .skip_while(|t| *t != "token")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no token in {listed}"))
+        .trim_end_matches(['.', ','])
+        .to_string();
+    assert_eq!(token.len(), 32, "{listed}");
+    assert!(lanes(&mut app).iter().all(|l| l["name"] != "Kick"));
+    let r = mcp.tool(
+        "apply_change",
+        json!({"token": "0".repeat(32), "commands": rename, "window": w}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(lanes(&mut app).iter().all(|l| l["name"] != "Kick"));
+    mcp.ok(
+        "apply_change",
+        json!({"token": token, "commands": rename, "window": w}),
+    );
+    assert_eq!(lanes(&mut app)[0]["name"], "Kick");
+    let r = mcp.tool(
+        "apply_change",
+        json!({"token": token, "commands": rename, "window": w}),
+    );
+    assert_eq!(r["isError"], true, "the token is used up: {r}");
+    mcp.ok("end_request", json!({}));
+    wait_for_undo(&mut app, &w, "Co-Producer: Rename the First Track");
+
+    // The socket's own gate (steps 339 and 340).
+    let mut raw = Client::connect(&sock).expect("the Co-Producer socket");
+    let exists = home.join("exists.mid");
+    std::fs::write(&exists, b"keep").unwrap();
+    let t = Duration::from_secs(30);
+    for (cmd, params) in [
+        (
+            "ui.click",
+            json!({"window": w, "element": {"x": 1, "y": 1}}),
+        ),
+        ("command.run", json!({"id": "media.compact", "window": w})),
+        (
+            "command.run",
+            json!({"id": "track.delete", "params": {"seq": seq, "lane": first}, "window": w}),
+        ),
+        (
+            "command.run",
+            json!({"id": "file.export_midi", "params": {"path": exists.display().to_string()}, "window": w}),
+        ),
+    ] {
+        match raw.call(cmd, params.clone(), t) {
+            Err(CallError::Reply(e)) => {
+                assert_eq!(e.code, ErrorCode::NotAllowed, "{cmd} {params}: {e:?}")
+            }
+            other => panic!("{cmd} {params}: expected not_allowed, got {other:?}"),
+        }
+    }
+    assert_eq!(std::fs::read(&exists).unwrap(), b"keep");
+    drop(raw);
+
+    // A second process that can ask the composer (step 337).
+    let mut ask = McpProc::start(&app, json!({"elicitation": {}}));
+    let kick = lanes(&mut app)[0]["id"].clone();
+    let delete = json!([{"id": "track.delete", "params": {"seq": seq, "lane": kick}}]);
+    ask.ok("begin_request", json!({"name": "delete the kick"}));
+    let answer = |ask: &mut McpProc, id: i64, result: Value| -> Value {
+        ask.send(
+            &json!({"jsonrpc": "2.0", "id": 1000 + id, "method": "tools/call",
+            "params": {"name": "change", "arguments": {"commands": delete, "window": w}}}),
+        );
+        let e = ask.recv();
+        assert_eq!(e["method"], "elicitation/create", "{e}");
+        ask.send(&json!({"jsonrpc": "2.0", "id": e["id"], "result": result}));
+        let r = ask.recv();
+        assert_eq!(r["id"], 1000 + id, "{r}");
+        r["result"].clone()
+    };
+    answer(&mut ask, 1, json!({"action": "decline"}));
+    assert_eq!(lanes(&mut app).len(), 2, "declined: the track stays");
+    let r = answer(
+        &mut ask,
+        2,
+        json!({"action": "accept", "content": {"allow": true}}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(lanes(&mut app).len(), 1, "one step deletes it");
+    ask.ok("end_request", json!({}));
+    wait_for_undo(&mut app, &w, "Co-Producer: Delete the Kick");
+    drop(ask);
+
+    // Undo from VizDAW brings the track back.
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    let back = lanes(&mut app);
+    assert_eq!(back.len(), 2, "{back:?}");
+    assert!(back.iter().any(|l| l["name"] == "Kick"), "{back:?}");
+
+    // Off again: the next call says so, and the socket file goes.
+    app.call(
+        "command.run",
+        json!({"id": "settings.co_producer", "params": {"on": false}}),
+    );
+    wait_for_path(&sock, false);
+    let r = mcp.tool("begin_request", json!({"name": "one more"}));
+    assert_eq!(mcp_text(&r), OFF, "{r}");
+    drop(mcp);
+    app.quit();
+}

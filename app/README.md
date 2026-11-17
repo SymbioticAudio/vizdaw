@@ -2805,6 +2805,40 @@ Plan 5c-2 takes, choosing takes and MIDI loop recording that layers:
      the mixer window: the mode switch sits between Record and ⌄, and nothing
      is clipped or overlaps.
 
+Plan 8a, Co-Producer safety and the server:
+
+334. Settings › Co-Producer: the switch is off on a fresh install. Turn it
+     on: the status says it is on and shows the path of `vizdaw-mcp`. "Copy
+     Path" copies it.
+335. Add the copied path to Claude Code as an MCP server (`claude mcp add
+     vizdaw -- <path>`), and ask Claude to "add two audio tracks". Two
+     tracks appear. Edit › Undo once: both go together. The undo item reads
+     "Undo Co-Producer: Add Two Audio Tracks", or the name Claude gave.
+336. While Claude is adding things, rename one of your tracks by hand. Undo
+     twice: first Claude's later steps, "(continued)", go; then your rename
+     goes on its own.
+337. Ask Claude to rename one of your tracks. Claude Code asks you directly,
+     with the exact change listed. Say no: nothing changes. Ask again and
+     say yes: it is renamed, as one undo step.
+338. In a host that cannot ask you itself (Claude's desktop app, as of
+     2026-11), ask for the same: Claude shows the list in the chat and
+     waits for your yes before applying it.
+339. Ask Claude to delete a track, or to compact media, or to record:
+     deleting goes through your yes; Compact Media and recording are
+     refused.
+340. Ask Claude to export MIDI to a file that already exists: it is
+     refused, and the file is unchanged.
+341. After a request, File › Open Co-Producer Copy…: the copy named "<date>
+     <time> before <request>" opens as a new untitled project, as the song
+     was before the request. Close it without saving.
+342. Delete the track Claude added, Compact Media and Save, then open the
+     copy again: it still opens complete, with its audio.
+343. Turn Co-Producer off in Settings while Claude is connected. Claude's
+     next action says Co-Producer is turned off in VizDAW's Settings. Turn
+     it back on: Claude works again.
+344. Settings › Co-Producer shows the number and size of saved copies in
+     your open projects.
+
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;
