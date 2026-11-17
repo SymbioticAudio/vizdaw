@@ -122,3 +122,54 @@ struct NewMidiDestinationSheet: View {
         }
     }
 }
+
+/// The destination editor (plan release-fixes Task 8): an external MIDI
+/// destination's return latency, typed (committed on Return or Done) or
+/// measured.
+struct DestinationEditorSheet: View {
+    @Environment(\.symbioticTheme) private var theme
+    @Bindable var sheets: SynthSheets
+    let editor: EditorModel
+
+    var body: some View {
+        if let d = sheets.editDestination {
+            VStack(alignment: .leading, spacing: theme.spacing.m) {
+                Text(d.name).font(theme.type.title.font)
+                Form {
+                    TextField(
+                        "Return latency (ms)",
+                        text: Binding(get: { d.latencyText }, set: { sheets.editDestination?.latencyText = $0 })
+                    )
+                    .onSubmit { sheets.commitLatency() }
+                    .accessibilityLabel("Return latency (ms)")
+                }
+                HStack {
+                    Spacer()
+                    if sheets.measuring != nil { ProgressView().controlSize(.small).accessibilityLabel("Measuring") }
+                    Button("Measure") { sheets.measure(d.dest) }
+                        .disabled(sheets.measuring != nil)
+                        .help("Plays five notes to the synth with the transport stopped and times its return")
+                        .accessibilityLabel("Measure")
+                }
+                if let msg = sheets.message {
+                    Text(msg)
+                        .font(theme.type.body.font)
+                        .foregroundStyle(theme.text.primary.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack {
+                    Spacer()
+                    // Return commits the field (and keeps the sheet); Done
+                    // commits and closes.
+                    Button("Done") { if sheets.commitLatency() { sheets.closeEditDestination() } }
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityLabel("Done")
+                }
+            }
+            .padding(theme.spacing.xl)
+            .frame(width: 360)
+            .onAppear { editor.beginTextEditing("destinationEditor") }
+            .onDisappear { editor.endTextEditing("destinationEditor") }
+        }
+    }
+}

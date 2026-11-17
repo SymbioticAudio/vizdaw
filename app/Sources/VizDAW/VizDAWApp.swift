@@ -114,6 +114,7 @@ struct VizDAWApp: App {
         }
         appStore.willClose = {
             PluginWindows.closeDocument($0)
+            BuiltinSynthWindows.closeDocument($0)
             EditorWindows.closeDocument($0)
             ModifyPanels.close($0)
         }

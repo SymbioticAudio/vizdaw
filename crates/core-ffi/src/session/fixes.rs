@@ -204,3 +204,77 @@ fn nearest_crossing(r: &core_media::caf::CafReader, frame: u64, radius: u64) -> 
         before.or_else(|| frame.checked_add(d).filter(|k| *k <= hi && crossing(*k)))
     })
 }
+
+/// Release fixes (plan release-fixes Task 8).
+#[uniffi::export]
+impl Session {
+    /// Sets Built-in Synth destination `dest`'s sound: one
+    /// `RoutingCmd::EditDestination` giving its kind the sound's channel and
+    /// `default_patch = Some(Patch { program, bank: None })`, one undo step
+    /// "Set Built-in Synth Sound". Every track that plays it changes
+    /// (Decision 3). Another destination: `Model` "Only a Built-in Synth
+    /// has these sounds."; an unknown one: `Model` (unknown ID).
+    pub fn set_builtin_sound(
+        &self,
+        dest: u64,
+        sound: crate::builtin_sound::BuiltinSound,
+    ) -> Result<(), VizError> {
+        ffi_guard(|| {
+            use core_model::command::{Command, RoutingCmd};
+            use core_model::document::{DestKind, Patch};
+            use core_model::ids::{AnyId, DestId};
+            let id = DestId(dest);
+            let mut inner = self.lock_inner();
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(super::edit_open_busy());
+            }
+            let d = inner
+                .doc()
+                .instruments()
+                .get(&id)
+                .ok_or(core_model::ModelError::UnknownId(AnyId::Dest(id)))?;
+            let DestKind::MidiEndpoint {
+                endpoint_ref,
+                group,
+                ..
+            } = &d.kind
+            else {
+                return Err(crate::events::bad(NOT_BUILTIN));
+            };
+            if !d.kind.is_builtin_synth() {
+                return Err(crate::events::bad(NOT_BUILTIN));
+            }
+            let (program, channel) = sound.program_and_channel();
+            let cmd = Command::Routing(RoutingCmd::EditDestination {
+                dest: id,
+                kind: DestKind::MidiEndpoint {
+                    endpoint_ref: endpoint_ref.clone(),
+                    group: *group,
+                    channel,
+                },
+                default_patch: Some(Patch {
+                    program,
+                    bank: None,
+                }),
+            });
+            inner.history.begin("Set Built-in Synth Sound")?;
+            match inner
+                .history
+                .execute(&cmd, &core_model::selection::ViewFilter::default())
+            {
+                Ok(_) => inner.history.commit()?,
+                Err(e) => {
+                    inner.history.abort()?;
+                    return Err(e.into());
+                }
+            }
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            Ok(())
+        })
+    }
+}
+
+/// [`Session::set_builtin_sound`]'s refusal of another destination.
+const NOT_BUILTIN: &str = "Only a Built-in Synth has these sounds.";

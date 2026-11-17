@@ -3328,6 +3328,7 @@ impl Session {
                         DestKind::PluginInstrument { .. } => None,
                     },
                     mpe: d.mpe.map(Into::into),
+                    builtin_sound: crate::builtin_sound::sound_of(d),
                 })
                 .collect())
         })

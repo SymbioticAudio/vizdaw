@@ -223,6 +223,10 @@ pub struct DestRow {
     /// Its MPE output (plan 5g-2 Ruling 7), `None` when off.
     #[uniffi(default)]
     pub mpe: Option<crate::mpe::MpeRow>,
+    /// The Built-in Synth's sound (plan release-fixes Task 8); `None` for
+    /// every destination that is not a Built-in Synth.
+    #[uniffi(default)]
+    pub builtin_sound: Option<crate::builtin_sound::BuiltinSound>,
 }
 
 /// An external destination's MIDI strip mix (plan 5g-1b): controller

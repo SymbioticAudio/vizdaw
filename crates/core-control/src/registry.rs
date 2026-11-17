@@ -1368,6 +1368,17 @@ const RETURN_LATENCY_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `destination.set_sound` (plan release-fixes Task 8).
+const SET_SOUND_PARAMS: &[ParamSpec] = &[
+    id_param("dest", "The Built-in Synth destination."),
+    ParamSpec {
+        name: "sound",
+        kind: ParamKind::Choice(&["piano", "bass", "pad", "lead", "drums"]),
+        required: true,
+        help: "Its sound; every track that plays this Built-in Synth changes.",
+    },
+];
+
 /// `destination.set_midi_mix` (plan 5g-1b Task 4).
 const MIDI_MIX_PARAMS: &[ParamSpec] = &[
     id_param("dest", "The external MIDI destination."),
@@ -2469,6 +2480,17 @@ pub const COMMANDS: &[CommandSpec] = &[
             "destination.set_return_latency",
             "Destination",
             "Set Return Latency",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: SET_SOUND_PARAMS,
+        ..key_only(cmd(
+            "destination.set_sound",
+            "Destination",
+            "Set Built-in Synth Sound",
             None,
             true,
         ))

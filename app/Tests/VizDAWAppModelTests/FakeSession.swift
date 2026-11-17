@@ -1488,6 +1488,22 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         crossingCalls.append((media, frame, radius))
         return try crossing?(media, frame, radius) ?? frame
     }
+
+    // MARK: Release fixes (plan release-fixes Task 8)
+
+    /// Every `setBuiltinSound` call.
+    var builtinSounds: [(dest: UInt64, sound: BuiltinSound)] = []
+    /// Like the core: the row's sound changes and a step is made; thrown
+    /// (once) by `synthError`.
+    func setBuiltinSound(dest: UInt64, sound: BuiltinSound) throws {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        builtinSounds.append((dest, sound))
+        if let i = dests.firstIndex(where: { $0.id == dest }) { dests[i].builtinSound = sound }
+        _ = commandResult()
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

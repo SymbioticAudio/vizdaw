@@ -706,6 +706,7 @@ fn document_state_reports_the_midi_mix_per_destination() {
         midi_mix: mix,
         channel: None,
         mpe: None,
+        builtin_sound: None,
     };
     let v = result_json(&ControlResult::Document {
         doc: "D".into(),
@@ -1253,6 +1254,7 @@ fn document_state_reports_mpe_per_track_and_destination() {
         midi_mix: MidiMixRow::default(),
         channel: Some(0),
         mpe,
+        builtin_sound: None,
     };
     let v = result_json(&ControlResult::Document {
         doc: "D".into(),

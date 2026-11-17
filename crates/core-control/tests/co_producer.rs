@@ -100,6 +100,7 @@ const CHANGE: &[&str] = &[
     "destination.set_midi_mix",
     "destination.set_mpe",
     "destination.set_return_latency",
+    "destination.set_sound",
     "destination.add_midi",
     "automation.set_mode",
     "automation.gesture",
@@ -174,7 +175,7 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 189);
+    assert_eq!(COMMANDS.len(), 190);
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");

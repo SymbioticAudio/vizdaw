@@ -93,6 +93,13 @@ private struct DocumentSheets: ViewModifier {
             ) { _ in
                 NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
             }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.synth.editDestination != nil },
+                    set: { if !$0 { model.synth.closeEditDestination() } })
+            ) {
+                DestinationEditorSheet(sheets: model.synth, editor: model.editor)
+            }
     }
 }
 

@@ -376,8 +376,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         return laneMenu(seq: seq, lane: document.lanes[i])
     }
 
-    /// Track Synth… (spec §6.7) on a
-    /// lane that plays an external synth, New MIDI Destination… (plan
+    /// Track Synth… (spec §6.7) and Edit Destination… (plan release-fixes
+    /// Task 8) on a lane that plays an external synth, New MIDI Destination… (plan
     /// 5d-2 Task 8) and Takes ▸ (plan 5c-2 takes Ruling 5).
     func laneMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let menu = NSMenu()
@@ -385,8 +385,15 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         let sheets = document.synth
         let track = MenuAction(title: "Track Synth…") { sheets.beginTrackSynth(seq: seq, lane: lane) }
         let trackItem = track.item(checked: false)
-        trackItem.isEnabled = sheets.synth(of: lane) != nil
+        let external = sheets.synth(of: lane)
+        trackItem.isEnabled = external != nil
         menu.addItem(trackItem)
+        // The destination editor (plan release-fixes Task 8): return
+        // latency and Measure for an external destination.
+        let edit = MenuAction(title: "Edit Destination…") { if let d = external { sheets.beginEditDestination(d.id) } }
+        let editItem = edit.item(checked: false)
+        editItem.isEnabled = external != nil
+        menu.addItem(editItem)
         let add = MenuAction(title: "New MIDI Destination…") { sheets.beginNewDestination(seq: seq, lane: lane) }
         menu.addItem(add.item(checked: false))
         menu.addItem(TakesMenu.item(document: document, seq: seq, lane: lane))
