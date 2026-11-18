@@ -13,7 +13,7 @@ use crate::error::VizError;
 use crate::guard::ffi_guard;
 use crate::snapshot::DocSnapshot;
 use crate::starter::{
-    CoProducerStarterRow, NEEDS_A_NEW_SONG, answer, build, new_song_seq, resolve,
+    CoProducerStarterRow, NEEDS_A_NEW_SONG, answer, build, new_song_seq, resolve_with_eq,
 };
 use core_control::registry::{self, CREATIVE_IDS};
 use core_model::diff::shown_name;
@@ -137,7 +137,6 @@ impl Session {
             let value = serde_json::from_str(&spec).unwrap_or(serde_json::Value::Null);
             let spec = core_control::starter::parse(&value).map_err(bad)?;
             let host = LiveLookup(self.id);
-            let resolved = resolve(&spec, &host);
             let monitor = crate::audio::default_monitor();
             let label = request_label(&format!("start {}", spec.title))
                 .map(|(_, label)| label)
@@ -155,6 +154,9 @@ impl Session {
             let mut notes = Vec::new();
             let h = &mut inner.history;
             crate::bundled::arm(h);
+            // Resolved against the EQ the armed History gives new strips
+            // (the catalog's lock is a leaf: it takes no session's).
+            let resolved = resolve_with_eq(&spec, h.new_strip_eq(), &host);
             h.begin(&label)?;
             let built = match build(h, seq, &spec, &resolved, monitor, &mut notes) {
                 Ok(b) => b,
@@ -163,7 +165,11 @@ impl Session {
                     return Err(e);
                 }
             };
-            h.commit()?;
+            if let Err(e) = h.commit() {
+                // An open transaction would answer Busy to every later edit.
+                let _ = h.abort();
+                return Err(e.into());
+            }
             let undo_label = h.undo_label().unwrap_or(&label).to_string();
             inner.version += 1;
             crate::host::clear_input_failure_of(self.id);

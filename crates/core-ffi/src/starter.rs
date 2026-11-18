@@ -95,20 +95,30 @@ fn shares_with(instruments: &[PluginChoice], i: usize) -> Option<usize> {
 }
 
 /// `refs` resolved as effects on strip `strip`: an unusable one gets
-/// Multi-Q in its place while the strip has no Multi-Q insert yet, and is
-/// left out otherwise (or when Multi-Q is not usable either).
+/// Multi-Q in its place while the strip has no Multi-Q yet, and is left
+/// out otherwise (or when Multi-Q is not usable either). `eq_is_multiq`:
+/// the strip gets Multi-Q as its default EQ, which then stands in for the
+/// first unusable effect without a second Multi-Q.
 fn effects_of(
     strip: &str,
     refs: &[String],
+    eq_is_multiq: bool,
     host: &dyn PluginLookup,
     lines: &mut Vec<String>,
 ) -> Vec<PluginRef> {
     let mut out: Vec<PluginRef> = Vec::with_capacity(refs.len());
+    // The strip's EQ already stood in for an unusable effect.
+    let mut eq_used = false;
     for r in refs {
         match host.resolve(r, PluginKind::Effect) {
             Ok(p) => out.push(p),
             Err(e) => {
-                let mq = if out.iter().any(is_multiq) {
+                if eq_is_multiq && !eq_used && !out.iter().any(is_multiq) {
+                    eq_used = true;
+                    lines.push(format!("{strip}: {e}; its Multi-Q EQ is in its place."));
+                    continue;
+                }
+                let mq = if eq_used || out.iter().any(is_multiq) {
                     None
                 } else {
                     host.resolve("multi-q", PluginKind::Effect).ok()
@@ -129,12 +139,32 @@ fn effects_of(
 /// Ruling 5's "using what is installed": every reference of `spec`
 /// resolved through `host` (8d Ruling 3), with the Built-in Synth in place
 /// of an unusable instrument and Multi-Q, or nothing, in place of an
-/// unusable effect, each with its line. Never fails.
+/// unusable effect, each with its line. Every new strip gets the default
+/// EQ new channels get now ([`crate::bundled::new_strip_eq`]); when that is
+/// Multi-Q, it stands in for an unusable effect, and no second Multi-Q is
+/// added. Never fails.
 pub fn resolve(spec: &StarterSpec, host: &dyn PluginLookup) -> Resolved {
+    let eq = crate::bundled::new_strip_eq();
+    resolve_with_eq(spec, eq.as_ref(), host)
+}
+
+/// [`resolve`], with `eq` the EQ every new strip gets (None: none).
+pub fn resolve_with_eq(
+    spec: &StarterSpec,
+    eq: Option<&PluginRef>,
+    host: &dyn PluginLookup,
+) -> Resolved {
+    let eq_is_multiq = eq.is_some_and(is_multiq);
     let mut lines = Vec::new();
     let mut effects = Vec::with_capacity(spec.buses.len() + spec.tracks.len());
     for b in &spec.buses {
-        effects.push(effects_of(&b.name, &b.effects, host, &mut lines));
+        effects.push(effects_of(
+            &b.name,
+            &b.effects,
+            eq_is_multiq,
+            host,
+            &mut lines,
+        ));
     }
     let mut instruments: Vec<PluginChoice> = Vec::with_capacity(spec.tracks.len());
     for (i, t) in spec.tracks.iter().enumerate() {
@@ -164,7 +194,13 @@ pub fn resolve(spec: &StarterSpec, host: &dyn PluginLookup) -> Resolved {
                 }
                 effects.push(Vec::new());
             }
-            None => effects.push(effects_of(&t.name, &t.effects, host, &mut lines)),
+            None => effects.push(effects_of(
+                &t.name,
+                &t.effects,
+                eq_is_multiq,
+                host,
+                &mut lines,
+            )),
         }
     }
     if instruments.contains(&PluginChoice::BuiltinSynth) {

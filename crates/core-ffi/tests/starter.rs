@@ -427,7 +427,9 @@ fn starters_fall_back_to_built_ins() {
     assert!(!plays_builtin(&d, "Drums (Co-Producer)"));
     assert_eq!(row.tracks[1].plays, "Built-in Synth");
 
-    // An effect turned off in the Plugin Manager: Multi-Q in its place.
+    // An effect turned off in the Plugin Manager: Multi-Q in its place,
+    // on a song whose new strips get no EQ.
+    set_new_channel_eq(false);
     let s = new_song();
     enable("vizdaw.test.gain", false);
     let row = start(&s, &synthwave());
@@ -441,6 +443,31 @@ fn starters_fall_back_to_built_ins() {
     let reverb = strip_named(&d, "Reverb (Co-Producer)");
     assert_eq!(insert_ids(&d, reverb.id), vec![MULTIQ_CLAP_ID]);
     assert_eq!(row.buses[0].effects, vec!["Multi-Q"]);
+    assert!(reverb.eq.is_none());
+
+    // With Multi-Q as the default EQ, the bus's EQ stands in: no second
+    // Multi-Q, and the line says so.
+    set_new_channel_eq(true);
+    let s = new_song();
+    enable("vizdaw.test.gain", false);
+    let row = start(&s, &synthwave());
+    enable("vizdaw.test.gain", true);
+    let row = row.unwrap();
+    assert_eq!(
+        row.lines,
+        vec![
+            "Reverb: Test Gain is turned off in the Plugin Manager.; its Multi-Q EQ is in its place."
+        ]
+    );
+    let d = doc(&s);
+    let reverb = strip_named(&d, "Reverb (Co-Producer)");
+    assert!(insert_ids(&d, reverb.id).is_empty());
+    assert_eq!(
+        reverb.eq.as_ref().map(|e| e.plugin.id.as_str()),
+        Some(MULTIQ_CLAP_ID)
+    );
+    assert!(row.buses[0].effects.is_empty());
+    set_new_channel_eq(false);
 
     // Two unusable effects on one strip: one Multi-Q, one left out.
     let s = new_song();
@@ -527,6 +554,7 @@ fn starters_never_fail_over_a_plugin() {
         return;
     }
     let _g = serial();
+    set_new_channel_eq(false);
     let s = new_song();
     let spec = json!({
         "title": "Nothing Fits",
