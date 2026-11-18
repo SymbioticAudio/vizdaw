@@ -452,3 +452,80 @@ fn co_producer_plugin_calls_round_trip() {
         Command::CoProducerPlugins { kind: None }
     );
 }
+
+/// Plan 8e: the starter and the two reads go over the wire and back.
+#[test]
+fn co_producer_creative_calls_round_trip() {
+    use core_control::params::WindowRef;
+    use core_control::{Command, validate};
+    let parse = |cmd: &str, params: Value| {
+        let line = request_line(&RequestId::Num(9), cmd, &params);
+        let raw = read_request(line.as_bytes()).unwrap();
+        assert_eq!(raw.cmd, cmd);
+        validate(&raw).unwrap()
+    };
+    assert_eq!(
+        parse(
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "start": 0, "end": 61440})
+        ),
+        Command::CoProducerMidiNotes {
+            seq: 1,
+            lane: 2,
+            range: Some((0, 61440)),
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "window": "main"})
+        ),
+        Command::CoProducerMidiNotes {
+            seq: 1,
+            lane: 2,
+            range: None,
+            window: Some(WindowRef::Main)
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 61440})
+        ),
+        Command::CoProducerAutomation {
+            seq: 1,
+            target: "fader:3".into(),
+            start: 0,
+            end: 61440,
+            window: None
+        }
+    );
+    let spec = json!({
+        "title": "Synthwave",
+        "tempo": "118",
+        "meter": "4/4",
+        "markers": [
+            {"bar": 1, "name": "Intro"},
+            {"bar": 9, "name": "Verse"},
+            {"bar": 17, "name": "Chorus"},
+            {"bar": 33, "name": "Bridge"},
+            {"bar": 41, "name": "Outro"}
+        ],
+        "buses": [
+            {"name": "Reverb", "effects": ["clap:vizdaw.test.gain"]},
+            {"name": "Delay", "output": "Reverb"}
+        ],
+        "tracks": [
+            {"name": "Drums", "kind": "instrument"},
+            {"name": "Bass", "kind": "instrument"},
+            {"name": "Pad", "kind": "instrument", "sends": [{"bus": "Reverb", "level_db": "-12"}]},
+            {"name": "Lead", "kind": "instrument"},
+            {"name": "Arp", "kind": "instrument"}
+        ]
+    });
+    assert_eq!(
+        parse("co_producer.starter", json!({ "spec": spec })),
+        Command::CoProducerStarter { spec }
+    );
+}

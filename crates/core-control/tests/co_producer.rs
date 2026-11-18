@@ -130,6 +130,7 @@ const CHANGE: &[&str] = &[
     "mixer.set_bypass",
     "mixer.set_eq",
     "mixer.set_param",
+    "automation.write",
 ];
 const REMOVE: &[&str] = &[
     "track.delete",
@@ -192,7 +193,11 @@ fn listed_class(id: &str) -> Option<Class> {
 
 #[test]
 fn every_command_has_the_spec_class() {
-    assert_eq!(COMMANDS.len(), 214, "plan 8d adds thirteen");
+    assert_eq!(
+        COMMANDS.len(),
+        215,
+        "plan 8d adds thirteen; 8e adds automation.write"
+    );
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
             assert!(registry::find(id).is_some(), "{id} is not registered");
@@ -1484,6 +1489,7 @@ fn chore_commands_have_their_class() {
             "mixer.set_eq",
             "mixer.set_param",
             "mixer.remove_bus",
+            "automation.write",
         ]
     );
 }
@@ -2511,6 +2517,339 @@ fn plugin_calls_refuse_hostile_input() {
         ("co_producer.params", json!({"slot": 1u64 << 53})),
         ("co_producer.params", json!({"slot": 4, "window": 0})),
         ("co_producer.params", json!({"slot": 4, "extra": 1})),
+    ] {
+        let e = validate(&req(cmd, params.clone())).unwrap_err();
+        assert_eq!(
+            e.code,
+            ErrorCode::InvalidParams,
+            "{cmd} {params}: {}",
+            e.message
+        );
+    }
+}
+
+/// A valid `automation.write`: a fade over bar 1 to 2 on strip 3.
+fn fade() -> Value {
+    json!({"seq": 1, "target": "fader:3", "start": 0, "end": 61440, "points": "0:0 61440:-144"})
+}
+
+#[test]
+fn creative_commands_have_their_class() {
+    assert_eq!(registry::CREATIVE_IDS, &["automation.write"]);
+    let c = registry::find("automation.write").unwrap();
+    assert_eq!(c.class, Class::Change);
+    assert_eq!(c.title, "Write Automation");
+    assert_eq!(c.menu, "Mixer");
+    assert!(!c.menu_item, "key-only");
+    assert!(c.document);
+    assert_eq!(c.shortcut, None);
+    assert!(PREVIEWABLE.contains(&"automation.write"));
+    assert_eq!(PREVIEWABLE.len(), 25, "8e adds automation.write");
+    let list = co_producer::list_json();
+    let listed = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "automation.write")
+        .expect("listed")
+        .clone();
+    assert_eq!(listed["previewable"], json!(true));
+    assert_eq!(listed["class"], "change");
+}
+
+#[test]
+fn co_producer_writes_no_notes() {
+    // Owner, 2026-11-16: no Co-Producer notes in 1.0.
+    assert_eq!(registry::CREATIVE_IDS, &["automation.write"]);
+    for id in ["midi.new_part", "midi.add_notes"] {
+        assert!(registry::find(id).is_none(), "{id} is registered");
+        assert!(!PREVIEWABLE.contains(&id), "{id}");
+        let params = json!({"seq": 1, "lane": 2, "notes": "0:60:3840:100"});
+        let e = refused("command.run", run(id, params.clone()));
+        assert_eq!(e.code, ErrorCode::UnknownId, "{id}: {}", e.message);
+        let e = preview(json!([{"id": id, "params": params}])).unwrap_err();
+        assert_eq!(e.code, ErrorCode::UnknownId, "{id}: {}", e.message);
+        // As any unregistered id is.
+        let other = refused("command.run", run("midi.no_such", json!({})));
+        assert_eq!(e.code, other.code);
+    }
+    assert!(
+        !COMMANDS
+            .iter()
+            .any(|c| c.id.starts_with("midi.") && c.id != "midi.inject"),
+        "no midi.* writer"
+    );
+}
+
+#[test]
+fn creative_changes_only_through_a_preview() {
+    let m = assert_code(
+        "command.run",
+        run("automation.write", fade()),
+        ErrorCode::NotAllowed,
+    );
+    assert_eq!(
+        m,
+        "automation.write changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+    );
+    let plan = json!([{"id": "automation.write", "params": fade()}]);
+    assert_eq!(preview(plan.clone()), Ok(()));
+    assert_eq!(
+        gate(
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": plan})
+        ),
+        Ok(())
+    );
+    // Every target form, and an empty list that clears the range.
+    for target in [
+        "fader:3",
+        "pan:3",
+        "mute:3",
+        "solo:3",
+        "send:3:1",
+        "param:9:4",
+    ] {
+        let p = with(&with(&fade(), "target", json!(target)), "points", json!(""));
+        assert_eq!(
+            preview(json!([{"id": "automation.write", "params": p}])),
+            Ok(()),
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn creative_commands_refuse_hostile_input() {
+    let base = fade();
+    let mut cases = vec![];
+    for seq in [
+        Value::Null,
+        json!(0),
+        json!(-1),
+        json!("2"),
+        json!(1u64 << 53),
+        json!(1.5),
+    ] {
+        cases.push(with(&base, "seq", seq));
+    }
+    for (key, value) in [
+        ("end", json!(0)),
+        ("end", Value::Null),
+        ("start", Value::Null),
+        ("start", json!(-1)),
+        ("start", json!("0")),
+        ("target", json!("fader:x")),
+        ("target", json!("vel:1")),
+        ("target", json!("fader:")),
+        ("target", json!("fader:3:1")),
+        ("target", json!("send:3")),
+        ("target", json!("send:3:0")),
+        ("target", json!("param:9")),
+        ("target", json!("fader:-3")),
+        ("target", json!("fader: 3")),
+        ("target", json!("fader:3\u{0}")),
+        ("target", json!("")),
+        ("target", json!(3)),
+        ("target", Value::Null),
+        ("target", json!("1".repeat(70_000))),
+        ("target", json!(format!("fader:{}", "1".repeat(70)))),
+        ("points", Value::Null),
+        ("points", json!(1)),
+        ("points", json!("1".repeat(32_769))),
+        ("points", json!("0:1e3")),
+        ("points", json!("61441:0")),
+        ("points", json!("0:0 0:1")),
+        ("extra", json!(1)),
+    ] {
+        cases.push(with(&base, key, value));
+    }
+    // `end` equal to `start`, and before it.
+    cases.push(json!({"seq": 1, "target": "fader:3", "start": 3840, "end": 3840, "points": ""}));
+    cases.push(json!({"seq": 1, "target": "fader:3", "start": 3840, "end": 0, "points": ""}));
+    all_invalid("automation.write", &cases);
+    // A point list near its byte limit, but of too many points.
+    let many: Vec<String> = (0..=1024).map(|i| format!("{i}:0")).collect();
+    all_invalid(
+        "automation.write",
+        &[with(
+            &with(&base, "points", json!(many.join(" "))),
+            "end",
+            json!(2000),
+        )],
+    );
+    // 1024 points of long values fit the list's 32 768 bytes.
+    let full: Vec<String> = (0..1024)
+        .map(|i| format!("{}:-123456.123456", i * 60))
+        .collect();
+    let text = full.join(" ");
+    assert!(text.len() > 4096 && text.len() <= registry::LIST_TEXT_MAX);
+    assert_eq!(
+        preview(json!([{"id": "automation.write", "params": with(&base, "points", json!(text))}])),
+        Ok(())
+    );
+}
+
+#[test]
+fn starter_and_reads_only_on_the_co_producer_socket() {
+    use core_control::client::{CallError, Client};
+    use core_control::server::{Config, Server};
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let dev = Server::start(&sock, Config::default()).unwrap();
+    let mut c = Client::connect(&sock).unwrap();
+    let starter = json!({"spec": {"title": "Demo", "tempo": "120", "meter": "4/4",
+        "tracks": [{"name": "Keys", "kind": "instrument"}]}});
+    let calls = [
+        ("co_producer.starter", starter),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "start": 0, "end": 61440}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 61440}),
+        ),
+    ];
+    for (cmd, params) in &calls {
+        match c.call(cmd, params.clone(), std::time::Duration::from_secs(20)) {
+            Err(CallError::Reply(e)) => {
+                assert_eq!(e.code, ErrorCode::NotAllowed, "{cmd}: {e}");
+                assert!(e.message.contains("only on the Co-Producer socket"), "{e}");
+            }
+            other => panic!("{cmd}: {other:?}"),
+        }
+    }
+    assert!(dev.next_call().is_none(), "the app never sees them");
+    // The gate admits each with no request open.
+    let mut admitted = calls.to_vec();
+    admitted.extend([
+        ("co_producer.midi_notes", json!({"seq": 1, "lane": 2})),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "window": "key"}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "param:9:4", "start": 0, "end": 1, "window": 3}),
+        ),
+    ]);
+    for (cmd, params) in admitted {
+        assert_eq!(gate(cmd, params.clone()), Ok(()), "{cmd} {params}");
+        assert!(
+            validate(&req(cmd, params)).unwrap().is_co_producer(),
+            "{cmd}"
+        );
+    }
+    // The gate checks the whole spec, so the app never sees a bad one.
+    let e = refused(
+        "co_producer.starter",
+        json!({"spec": {"title": "Demo", "tempo": "120", "meter": "4/3",
+            "tracks": [{"name": "Keys", "kind": "instrument"}]}}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{}", e.message);
+    let e = refused(
+        "co_producer.starter",
+        json!({"spec": {"title": "Demo", "tempo": "120", "meter": "4/4", "extra": 1,
+            "tracks": [{"name": "Keys", "kind": "instrument"}]}}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    assert!(
+        e.message
+            .ends_with("Unknown key extra in the starter project."),
+        "{}",
+        e.message
+    );
+    for params in [
+        json!({}),
+        json!({"spec": "x"}),
+        json!({"spec": []}),
+        json!({"spec": {"title": "Demo"}, "window": 1}),
+        json!({"spec": {}, "extra": 1}),
+    ] {
+        let e = refused("co_producer.starter", params.clone());
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {}", e.message);
+    }
+}
+
+#[test]
+fn reads_refuse_hostile_input() {
+    let long = "1".repeat(70_000);
+    for (cmd, params) in [
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "start": 0}),
+        ),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "end": 10}),
+        ),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "start": 10, "end": 10}),
+        ),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "start": 10, "end": 5}),
+        ),
+        ("co_producer.midi_notes", json!({"lane": 2})),
+        ("co_producer.midi_notes", json!({"seq": 1})),
+        ("co_producer.midi_notes", json!({"seq": 0, "lane": 2})),
+        ("co_producer.midi_notes", json!({"seq": 1, "lane": 0})),
+        ("co_producer.midi_notes", json!({"seq": "1", "lane": 2})),
+        ("co_producer.midi_notes", json!({"seq": 1, "lane": -2})),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 1u64 << 53}),
+        ),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "extra": 1}),
+        ),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "window": long}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "start": 0, "end": 10}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 10, "end": 10}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 10, "end": 0}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 10, "extra": 1}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "vel:1", "start": 0, "end": 10}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": long, "start": 0, "end": 10}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3\u{0}", "start": 0, "end": 10}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 0, "target": "fader:3", "start": 0, "end": 10}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"target": "fader:3", "start": 0, "end": 10}),
+        ),
     ] {
         let e = validate(&req(cmd, params.clone())).unwrap_err();
         assert_eq!(

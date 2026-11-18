@@ -68,12 +68,21 @@ fn every_command_validates_its_minimal_form() {
         ("co_producer.export", json!({"what": "dawproject"})),
         ("co_producer.plugins", json!({})),
         ("co_producer.params", json!({"slot": 1})),
+        (
+            "co_producer.starter",
+            json!({"spec": {"title": "Demo", "tempo": "120", "meter": "4/4", "tracks": [{"name": "Keys", "kind": "instrument"}]}}),
+        ),
+        ("co_producer.midi_notes", json!({"seq": 1, "lane": 2})),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 3840}),
+        ),
     ];
     assert_eq!(minimal.len(), COMMAND_NAMES.len());
     assert_eq!(
         COMMAND_NAMES.len(),
-        24,
-        "plan 8c adds co_producer.export; 8d adds co_producer.plugins and co_producer.params"
+        27,
+        "plan 8c adds co_producer.export; 8d adds co_producer.plugins and co_producer.params; 8e adds co_producer.starter, co_producer.midi_notes and co_producer.automation"
     );
     for (cmd, params) in minimal {
         assert!(
@@ -553,8 +562,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        214,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument"
+        215,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -3390,4 +3399,86 @@ fn decimal_parses_only_plain_decimals() {
     }
     let e = registry::decimal("2", 0.0, 1.0).unwrap_err();
     assert!(e.contains("0 to 1"), "{e}");
+}
+
+/// Plan 8e Ruling 1's point list.
+#[test]
+fn point_lists_parse_strictly() {
+    use registry::{LIST_TEXT_MAX, MAX_POINTS, point_list};
+    assert_eq!(
+        point_list("0:-6 3840:0", 0, 3840),
+        Ok(vec![(0, -6.0), (3840, 0.0)])
+    );
+    assert_eq!(point_list("", 0, 3840), Ok(vec![]));
+    assert_eq!(point_list("   ", 0, 3840), Ok(vec![]));
+    // One or more spaces between entries; decimals as `decimal` spells them.
+    assert_eq!(
+        point_list(" 10:0.5   20:-144  30:999999.5 ", 0, 3840),
+        Ok(vec![(10, 0.5), (20, -144.0), (30, 999_999.5)])
+    );
+    assert_eq!(point_list("100:1", 100, 200), Ok(vec![(100, 1.0)]));
+    assert_eq!(point_list("200:1", 100, 200), Ok(vec![(200, 1.0)]));
+    // Ruling 1's sentences.
+    assert_eq!(
+        point_list("0:1 99:2", 100, 200),
+        Err("Point 1 is outside start to end.".to_string())
+    );
+    assert_eq!(
+        point_list("100:1 201:2", 100, 200),
+        Err("Point 2 is outside start to end.".to_string())
+    );
+    assert_eq!(
+        point_list("0:1 10:1 10:2", 0, 3840),
+        Err("Point 3 is not after point 2.".to_string())
+    );
+    assert_eq!(
+        point_list("0:1 20:1 10:2", 0, 3840),
+        Err("Point 3 is not after point 2.".to_string())
+    );
+    for bad in [
+        "0:1e3",
+        "0:NaN",
+        "0:",
+        ":1",
+        "0",
+        "0:1:2",
+        "+0:1",
+        "-1:1",
+        "0:+1",
+        "0:inf",
+        "0:1,5",
+        "0x10:1",
+        "0:1000001",
+        "0:-1000001",
+        "0:\u{0}",
+        "a:1",
+        "1.5:1",
+        "99999999999999999999999:1",
+        "0:1\t10:1",
+        "0:1\n10:1",
+    ] {
+        assert_eq!(
+            point_list(bad, 0, 3840),
+            Err("Point 1 is not tick:value.".to_string()),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        point_list("0:1 1:x", 0, 3840),
+        Err("Point 2 is not tick:value.".to_string())
+    );
+    // At most MAX_POINTS points and LIST_TEXT_MAX bytes.
+    let n = |count: usize| {
+        (0..count)
+            .map(|i| format!("{i}:0"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(MAX_POINTS, 1024);
+    assert_eq!(LIST_TEXT_MAX, 32_768);
+    assert_eq!(point_list(&n(1024), 0, 3840).unwrap().len(), 1024);
+    assert!(point_list(&n(1025), 0, 3840).is_err());
+    let long = format!("0:0{}", " ".repeat(LIST_TEXT_MAX - 2));
+    assert!(point_list(&long, 0, 3840).is_err());
+    assert!(point_list(&long[..LIST_TEXT_MAX], 0, 3840).is_ok());
 }

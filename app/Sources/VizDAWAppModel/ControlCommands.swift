@@ -329,7 +329,7 @@ public enum ControlCommands {
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(TakeCommands.ids)
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
-            .union(MixerCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
+            .union(MixerCommands.ids).union(CreativeCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
             .union([TrackCommands.setOutput]).union([RegionCommands.setFadeShape]).union(chores)
     }
 
@@ -581,6 +581,8 @@ public enum ControlCommands {
             return AutomationCommands.run(id, args: args, doc: docID, m)
         case _ where MixerCommands.ids.contains(id):
             return MixerCommands.run(id, args: args, docID: docID, m)
+        case _ where CreativeCommands.ids.contains(id):
+            return CreativeCommands.run(id, args: args, docID: docID, m)
         case _ where strips.contains(id):
             return runStrip(id, args, docID, m)
         case _ where chores.contains(id):

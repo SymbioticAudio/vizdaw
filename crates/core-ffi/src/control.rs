@@ -568,6 +568,39 @@ pub enum ControlRequest {
         /// Whose document.
         window: Option<WindowRefRow>,
     },
+    /// `co_producer.starter` (plan 8e Ruling 5): a new untitled song set
+    /// up from a spec.
+    CoProducerStarter {
+        /// The spec's JSON text, already checked by `starter::parse`.
+        spec: String,
+    },
+    /// `co_producer.midi_notes` (plan 8e Ruling 3): a track's notes.
+    CoProducerMidiNotes {
+        /// The sequence, already checked: at least 1.
+        seq: u64,
+        /// The track, already checked: at least 1.
+        lane: u64,
+        /// The first tick, given with `end` or not at all.
+        start: Option<u64>,
+        /// The end tick, after `start`.
+        end: Option<u64>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.automation` (plan 8e Ruling 7): a target's automation.
+    CoProducerAutomation {
+        /// The sequence, already checked: at least 1.
+        seq: u64,
+        /// The target, already checked against `automation.gesture`'s
+        /// grammar.
+        target: String,
+        /// The first tick.
+        start: u64,
+        /// The last tick, after `start`.
+        end: u64,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
 }
 
 /// Who a Co-Producer call came from (plan 8b Ruling 11): its connection
@@ -1255,6 +1288,34 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
         },
         Command::CoProducerParams { slot, window } => ControlRequest::CoProducerParams {
             slot,
+            window: window_row(window),
+        },
+        Command::CoProducerStarter { spec } => ControlRequest::CoProducerStarter {
+            spec: spec.to_string(),
+        },
+        Command::CoProducerMidiNotes {
+            seq,
+            lane,
+            range,
+            window,
+        } => ControlRequest::CoProducerMidiNotes {
+            seq,
+            lane,
+            start: range.map(|r| r.0),
+            end: range.map(|r| r.1),
+            window: window_row(window),
+        },
+        Command::CoProducerAutomation {
+            seq,
+            target,
+            start,
+            end,
+            window,
+        } => ControlRequest::CoProducerAutomation {
+            seq,
+            target,
+            start,
+            end,
             window: window_row(window),
         },
         Command::CoProducerEnd { window } => ControlRequest::CoProducerEnd {

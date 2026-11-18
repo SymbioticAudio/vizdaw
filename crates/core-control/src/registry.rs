@@ -696,6 +696,88 @@ const NEW_PLUGIN_INSTRUMENT_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// Plan 8e Ruling 1's creative commands. No command writes notes (owner,
+/// 2026-11-16): `midi.new_part` and `midi.add_notes` move to 27.1.0.
+pub const CREATIVE_IDS: &[&str] = &["automation.write"];
+
+/// The most points in one point list (plan 8e Ruling 1).
+pub const MAX_POINTS: usize = 1024;
+
+/// The longest point list, in bytes (plan 8e Ruling 1).
+pub const LIST_TEXT_MAX: usize = 32_768;
+
+/// The longest automation target text, as the app parses it.
+const MAX_TARGET_TEXT: usize = 64;
+
+/// A tick of plan 8e's commands: 0 to the largest tick a control call
+/// takes.
+const TICK_MAX: i64 = i64::MAX / 2;
+
+/// Ruling 1's point list: entries `<tick>:<value>` separated by one or
+/// more ASCII spaces; 0..=[`MAX_POINTS`] points in at most
+/// [`LIST_TEXT_MAX`] bytes, ticks of ASCII digits in `start..=end` and
+/// strictly rising, values as [`decimal`] spells them within ±1 000 000.
+/// The values are in the target's own units, which the app checks.
+pub fn point_list(text: &str, start: u64, end: u64) -> Result<Vec<(u64, f64)>, String> {
+    if text.len() > LIST_TEXT_MAX {
+        return Err(format!(
+            "The point list is longer than {LIST_TEXT_MAX} bytes."
+        ));
+    }
+    let mut points: Vec<(u64, f64)> = Vec::new();
+    for (i, entry) in text.split(' ').filter(|e| !e.is_empty()).enumerate() {
+        let n = i + 1;
+        if n > MAX_POINTS {
+            return Err(format!("The point list has more than {MAX_POINTS} points."));
+        }
+        let shape = || format!("Point {n} is not tick:value.");
+        let (tick, value) = entry.split_once(':').ok_or_else(shape)?;
+        if tick.is_empty() || !tick.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(shape());
+        }
+        let tick: u64 = tick.parse().map_err(|_| shape())?;
+        let value = decimal(value, PARAM_VALUE.0, PARAM_VALUE.1).map_err(|_| shape())?;
+        if !(start..=end).contains(&tick) {
+            return Err(format!("Point {n} is outside start to end."));
+        }
+        if points.last().is_some_and(|(t, _)| tick <= *t) {
+            return Err(format!("Point {n} is not after point {}.", n - 1));
+        }
+        points.push((tick, value));
+    }
+    Ok(points)
+}
+
+/// `automation.gesture`'s target grammar, the shape only (the app's
+/// `parse_automation_target`): `fader:<strip>`, `pan:<strip>`,
+/// `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or
+/// `param:<slot>:<param>`, IDs in ASCII digits, at most 64 characters.
+pub fn automation_target(text: &str) -> Result<(), String> {
+    let refuse = || {
+        "must be fader:<strip>, pan:<strip>, mute:<strip>, solo:<strip>, send:<strip>:<n> (n from 1) or param:<slot>:<param>".to_string()
+    };
+    let number = |t: &str| -> Option<u64> {
+        if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        t.parse().ok()
+    };
+    if text.len() > MAX_TARGET_TEXT {
+        return Err(refuse());
+    }
+    let parts: Vec<&str> = text.split(':').collect();
+    let ok = match parts.as_slice() {
+        [kind, id] => matches!(*kind, "fader" | "pan" | "mute" | "solo") && number(id).is_some(),
+        ["send", strip, n] => {
+            number(strip).is_some()
+                && number(n).is_some_and(|n| (1..=u64::from(u16::MAX) + 1).contains(&n))
+        }
+        ["param", slot, param] => number(slot).is_some() && number(param).is_some(),
+        _ => false,
+    };
+    if ok { Ok(()) } else { Err(refuse()) }
+}
+
 /// Ruling 3's shape of a plug-in reference: `multi-q`, `clap:<id>` or
 /// `au:<id>` with a non-empty rest (and `built-in-synth` when
 /// `instrument`), at most [`PLUGIN_REF_MAX`] characters, with no control,
@@ -2109,6 +2191,41 @@ const INJECT_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `automation.write` (plan 8e Ruling 1).
+const AUTOMATION_WRITE_PARAMS: &[ParamSpec] = &[
+    mixer_id("seq", "The sequence (a top-level one)."),
+    ParamSpec {
+        name: "target",
+        kind: ParamKind::Text,
+        required: true,
+        help: "`fader:<strip>`, `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or `param:<slot>:<param>`.",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: TICK_MAX,
+        },
+        required: true,
+        help: "The range's first tick (15360 ticks per quarter note).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: TICK_MAX,
+        },
+        required: true,
+        help: "The range's last tick, after `start`.",
+    },
+    ParamSpec {
+        name: "points",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Points as \"<tick>:<value> …\", separated by spaces, ticks rising within start to end, at most 1024 points in 32768 bytes; values in the target's units (dB for fader and send, -144 to 12; percent for pan; 0 or 1 for mute and solo; the parameter's own range). Empty clears the range.",
+    },
+];
+
 /// Every menu command, in menu order.
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
@@ -3070,6 +3187,18 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         ))
     },
+    // Plan 8e Ruling 1: automation as real points, through a preview.
+    CommandSpec {
+        class: Class::Change,
+        params: AUTOMATION_WRITE_PARAMS,
+        ..key_only(cmd(
+            "automation.write",
+            "Mixer",
+            "Write Automation",
+            None,
+            true,
+        ))
+    },
     CommandSpec {
         class: Class::Change,
         ..cmd("automation.mode.off", "Automation", "Off", None, true)
@@ -3564,7 +3693,9 @@ pub fn validate_args(
     let mut out = Vec::new();
     for s in spec.params {
         let v = match s.kind {
-            ParamKind::Text => p.opt_str(s.name, MAX_STRING)?.map(ArgValue::Text),
+            ParamKind::Text => p
+                .opt_str(s.name, text_limit(spec.id, s.name))?
+                .map(ArgValue::Text),
             ParamKind::Path(ext) => p
                 .opt_path(s.name, ext)?
                 .map(|path| ArgValue::Text(path.to_string_lossy().into_owned())),
@@ -3622,12 +3753,49 @@ pub fn validate_args(
     }
     mixer_rules(&p, spec.id, &out)?;
     chore_rules(&p, spec.id, &mut out)?;
+    creative_rules(&p, spec.id, &out)?;
     for d in spec.dialogs.iter().filter(|d| d.always) {
         if !d.answered_by.iter().any(|a| p.has(a)) {
             return Err(ControlError::dialog(d.name, d.answered_by));
         }
     }
     Ok(out)
+}
+
+/// The longest text parameter `name` of command `id` takes, in
+/// characters: [`MAX_STRING`], but a point list's own limit (plan 8e
+/// Ruling 1; [`point_list`] counts its bytes).
+fn text_limit(id: &str, name: &str) -> usize {
+    if CREATIVE_IDS.contains(&id) && name == "points" {
+        LIST_TEXT_MAX
+    } else {
+        MAX_STRING
+    }
+}
+
+/// Plan 8e Ruling 1's rules across parameters, for both sockets: the
+/// target's grammar, `end` after `start`, and the point list within them.
+fn creative_rules(
+    p: &Params<'_>,
+    id: &str,
+    out: &[(String, ArgValue)],
+) -> Result<(), ControlError> {
+    if !CREATIVE_IDS.contains(&id) {
+        return Ok(());
+    }
+    if let Some(t) = text_arg(out, "target") {
+        automation_target(t).map_err(|m| p.error(format!("`target` {m}")))?;
+    }
+    let (Some(start), Some(end)) = (int_arg(out, "start"), int_arg(out, "end")) else {
+        return Err(p.error("give `start` and `end`"));
+    };
+    if end <= start {
+        return Err(p.error("`end` must be after `start`"));
+    }
+    if let Some(t) = text_arg(out, "points") {
+        point_list(t, start as u64, end as u64).map_err(|m| p.error(m))?;
+    }
+    Ok(())
 }
 
 fn int_arg(out: &[(String, ArgValue)], name: &str) -> Option<i64> {

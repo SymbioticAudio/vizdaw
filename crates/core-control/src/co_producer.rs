@@ -3,7 +3,7 @@
 //! validated call through [`admit`] before it reaches the app:
 //!
 //! - only `ping`, `commands.list`, `state.get` (not `input`), `wait`,
-//!   `ui.screenshot` (window and scale only), `command.run` and the eleven
+//!   `ui.screenshot` (window and scale only), `command.run` and the fourteen
 //!   `co_producer.*` commands are allowed;
 //! - `command.run` runs read, add and outward commands only; a change or
 //!   remove goes through `co_producer.preview` and the composer's yes;
@@ -24,7 +24,7 @@ use std::path::{Component, Path, PathBuf};
 /// The change and remove commands Co-Producer can preview (8a Ruling 6;
 /// 8b Ruling 9 adds `mixer.set_colour`; 8c Rulings 2 and 4 add the note
 /// chores and the marker changes; 8d Ruling 1 adds `mixer.new_bus` with a
-/// `strip` and the twelve mixer edits).
+/// `strip` and the twelve mixer edits; 8e Ruling 1 adds `automation.write`).
 pub const PREVIEWABLE: &[&str] = &[
     "track.rename",
     "track.delete",
@@ -50,6 +50,7 @@ pub const PREVIEWABLE: &[&str] = &[
     "mixer.set_eq",
     "mixer.set_param",
     "mixer.remove_bus",
+    "automation.write",
 ];
 
 /// The most IDs in one [`id_list`] (plan 8c Rulings 1 and 2).
@@ -354,6 +355,8 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
         | Command::CoProducerNote { .. }
         | Command::CoProducerPlugins { .. }
         | Command::CoProducerParams { .. }
+        | Command::CoProducerMidiNotes { .. }
+        | Command::CoProducerAutomation { .. }
         | Command::CoProducerExportFolder { parent: None, .. }
         | Command::CoProducerExport { parent: None, .. } => Ok(()),
         // Plan 8b Ruling 6 (and 8c Ruling 1 for the one-call export): a
@@ -366,6 +369,11 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
             parent: Some(parent),
             ..
         } => check_output(parent, Output::IntoFolder),
+        // Plan 8e Ruling 5: the whole spec is checked before the app sees
+        // it, so a bad spec opens no window.
+        Command::CoProducerStarter { spec } => crate::starter::parse(spec)
+            .map(|_| ())
+            .map_err(|m| ControlError::params("co_producer.starter", m)),
         Command::StateGet { target, .. } => match target {
             StateTarget::Input => Err(ControlError::not_allowed(
                 "Co-Producer does not listen: state.get input is not available to it.",

@@ -130,6 +130,9 @@ public enum CoProducerCommands {
             } catch {
                 return .failed(failure(error))
             }
+        case .coProducerStarter, .coProducerMidiNotes, .coProducerAutomation:
+            // Plan 8e Tasks 1–4 build these; the app answers them in Task 5.
+            return .failed(.of(.unavailable, CreativeCommands.notReady))
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }
@@ -194,10 +197,11 @@ public enum CoProducerCommands {
 
     /// Whether `id` with `args` changes or removes the composer's work, so
     /// runs only through `co_producer.apply` after its take: the chores,
-    /// plan 8d's twelve mixer edits, and a new bus fed from a strip
-    /// (8d Ruling 1). A new plug-in instrument track only adds.
+    /// plan 8d's twelve mixer edits, a new bus fed from a strip (8d
+    /// Ruling 1), and plan 8e's `automation.write`. A new plug-in instrument track only adds.
     static func changesWork(_ id: String, _ args: [ControlArg]) -> Bool {
         if changesWork.contains(id) { return true }
+        if CreativeCommands.ids.contains(id) { return true }
         if id == MixerCommands.newBus { return args.contains { $0.name == "strip" } }
         return MixerCommands.coProducerEdits.contains(id) && id != MixerCommands.newPluginInstrument
     }

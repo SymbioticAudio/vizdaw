@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every command name.
-pub const COMMAND_NAMES: [&str; 24] = [
+pub const COMMAND_NAMES: [&str; 27] = [
     "commands.list",
     "command.run",
     "state.get",
@@ -39,6 +39,9 @@ pub const COMMAND_NAMES: [&str; 24] = [
     "co_producer.export",
     "co_producer.plugins",
     "co_producer.params",
+    "co_producer.starter",
+    "co_producer.midi_notes",
+    "co_producer.automation",
 ];
 
 /// The longest Co-Producer request name, in characters after trimming
@@ -129,6 +132,9 @@ pub enum PluginKindArg {
     /// Processes audio.
     Effect,
 }
+
+/// The largest tick plan 8e's reads take, as the registry's ticks.
+const TICK_MAX: i64 = i64::MAX / 2;
 
 /// A preview token's length: 32 lowercase hex characters (Ruling 7).
 pub const TOKEN_LEN: usize = 32;
@@ -413,6 +419,38 @@ pub enum Command {
         /// Whose document.
         window: Option<WindowRef>,
     },
+    /// Makes a new untitled song set up from a starter spec (plan 8e
+    /// Ruling 5): an add, in a new window.
+    CoProducerStarter {
+        /// The spec as sent; the gate checks it with
+        /// [`crate::starter::parse`] before the app sees it.
+        spec: Value,
+    },
+    /// Reads a track's notes (plan 8e Ruling 3): a read.
+    CoProducerMidiNotes {
+        /// The sequence.
+        seq: u64,
+        /// The track.
+        lane: u64,
+        /// Only notes starting in `start..end`; None: all.
+        range: Option<(u64, u64)>,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Reads a target's automation in `start..=end`, in the target's units
+    /// (plan 8e Ruling 7): a read.
+    CoProducerAutomation {
+        /// The sequence.
+        seq: u64,
+        /// The target, as `automation.gesture` spells it.
+        target: String,
+        /// The first tick.
+        start: u64,
+        /// The last tick, after `start`.
+        end: u64,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
 }
 
 impl Command {
@@ -437,6 +475,9 @@ impl Command {
                 | Command::CoProducerExport { .. }
                 | Command::CoProducerPlugins { .. }
                 | Command::CoProducerParams { .. }
+                | Command::CoProducerStarter { .. }
+                | Command::CoProducerMidiNotes { .. }
+                | Command::CoProducerAutomation { .. }
         )
     }
 }
@@ -691,6 +732,54 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
             p.only(&["slot", "window"])?;
             Ok(Command::CoProducerParams {
                 slot: p.int("slot", 1, registry::MAX_EXACT_ID)? as u64,
+                window: p.window()?,
+            })
+        }
+        "co_producer.starter" => {
+            p.only(&["spec"])?;
+            match p.raw("spec") {
+                Some(spec @ Value::Object(_)) => {
+                    Ok(Command::CoProducerStarter { spec: spec.clone() })
+                }
+                Some(_) => Err(p.error("`spec` must be an object")),
+                None => Err(p.error("missing `spec`")),
+            }
+        }
+        "co_producer.midi_notes" => {
+            p.only(&["seq", "lane", "start", "end", "window"])?;
+            let seq = p.int("seq", 1, registry::MAX_EXACT_ID)? as u64;
+            let lane = p.int("lane", 1, registry::MAX_EXACT_ID)? as u64;
+            let range = match (
+                p.opt_int("start", 0, TICK_MAX)?,
+                p.opt_int("end", 0, TICK_MAX)?,
+            ) {
+                (None, None) => None,
+                (Some(start), Some(end)) if end > start => Some((start as u64, end as u64)),
+                (Some(_), Some(_)) => return Err(p.error("`end` must be after `start`")),
+                _ => return Err(p.error("give `start` and `end` together, or neither")),
+            };
+            Ok(Command::CoProducerMidiNotes {
+                seq,
+                lane,
+                range,
+                window: p.window()?,
+            })
+        }
+        "co_producer.automation" => {
+            p.only(&["seq", "target", "start", "end", "window"])?;
+            let seq = p.int("seq", 1, registry::MAX_EXACT_ID)? as u64;
+            let target = p.str("target", MAX_STRING)?;
+            registry::automation_target(&target).map_err(|m| p.error(format!("`target` {m}")))?;
+            let start = p.int("start", 0, TICK_MAX)?;
+            let end = p.int("end", 0, TICK_MAX)?;
+            if end <= start {
+                return Err(p.error("`end` must be after `start`"));
+            }
+            Ok(Command::CoProducerAutomation {
+                seq,
+                target,
+                start: start as u64,
+                end: end as u64,
                 window: p.window()?,
             })
         }
