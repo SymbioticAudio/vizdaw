@@ -1555,6 +1555,135 @@ fn note_and_folder_refuse_when_the_front_song_changed() {
     );
 }
 
+/// The window a call carried, as a number.
+fn window_of(c: &Command) -> Option<i64> {
+    let w = match c {
+        Command::CoProducerBegin { window, .. }
+        | Command::CoProducerStatus { window }
+        | Command::CoProducerPreview { window, .. }
+        | Command::CoProducerApply { window, .. } => window,
+        _ => return None,
+    };
+    match w {
+        Some(core_control::params::WindowRef::Number(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Plan 8e final review Minors 1 and 6: `begin_request` names its song by
+/// `window`, and `change` and `apply_change` without one go to that song,
+/// not to the front one.
+#[test]
+fn changes_go_to_the_begun_song() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let r = m.call("begin_request", json!({"name": "x", "window": 7}));
+    assert!(!is_error(&r), "{r}");
+    let r = m.call("change", json!({"commands": two_changes()}));
+    assert!(!is_error(&r), "{r}");
+    let r = m.call(
+        "apply_change",
+        json!({"token": preview_token(1), "commands": two_changes()}),
+    );
+    assert!(!is_error(&r), "{r}");
+    let seen = app.seen();
+    let sent: Vec<(&str, Option<i64>)> = seen
+        .iter()
+        .filter_map(|c| match c {
+            Command::CoProducerBegin { .. } => Some(("begin", window_of(c))),
+            Command::CoProducerPreview { .. } => Some(("preview", window_of(c))),
+            Command::CoProducerApply { .. } => Some(("apply", window_of(c))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [("begin", Some(7)), ("preview", Some(7)), ("apply", Some(7))],
+        "{seen:?}"
+    );
+}
+
+/// `begin_request` takes the song's `window`, and says what it does.
+#[test]
+fn begin_request_names_its_song() {
+    let d = support_dir();
+    let mut m = Mcp::spawn(d.path());
+    let r = m.result("tools/list", json!({}));
+    let begin = r["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "begin_request")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        begin["inputSchema"]["properties"]["window"]["type"],
+        "integer"
+    );
+    let said = begin["description"].as_str().unwrap();
+    assert!(
+        said.contains(
+            "Pass window to name the song: change and apply_change without a window then go to it."
+        ),
+        "{said}"
+    );
+}
+
+/// A `change` or `apply_change` aimed at another song than the begun one
+/// is refused in a sentence before anything reaches it, as `add_note`
+/// and `export_folder` are; the begun song by its own window goes on.
+#[test]
+fn changes_refuse_another_song_than_the_begun_one() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let r = m.call("begin_request", json!({"name": "x"}));
+    assert!(!is_error(&r), "{r}");
+    // Window 9 holds d2: status names it, so nothing is previewed.
+    app.script(Answer::Ok(json!({"doc": "d2", "request": null})));
+    let r = m.call("change", json!({"commands": two_changes(), "window": 9}));
+    assert!(is_error(&r), "{r}");
+    assert!(
+        text(&r).contains("not the song this request began in"),
+        "{r}"
+    );
+    app.script(Answer::Ok(json!({"doc": "d2", "request": null})));
+    let r = m.call(
+        "apply_change",
+        json!({"token": preview_token(1), "commands": two_changes(), "window": 9}),
+    );
+    assert!(is_error(&r), "{r}");
+    assert!(
+        text(&r).contains("not the song this request began in"),
+        "{r}"
+    );
+    // Without a window, the front song is checked: it is d2 now.
+    app.script(Answer::Ok(json!({"doc": "d2", "request": null})));
+    let r = m.call("change", json!({"commands": two_changes()}));
+    assert!(is_error(&r), "{r}");
+    let seen = app.seen();
+    assert!(
+        !seen.iter().any(|c| matches!(
+            c,
+            Command::CoProducerPreview { .. } | Command::CoProducerApply { .. }
+        )),
+        "{seen:?}"
+    );
+    let statuses: Vec<Option<i64>> = seen
+        .iter()
+        .filter(|c| matches!(c, Command::CoProducerStatus { .. }))
+        .map(window_of)
+        .collect();
+    assert_eq!(statuses, [Some(9), Some(9), None], "{seen:?}");
+    // Window 3 holds the begun song: the change goes there.
+    app.script(Answer::Ok(json!({"doc": "d1", "request": null})));
+    let r = m.call("change", json!({"commands": two_changes(), "window": 3}));
+    assert!(!is_error(&r), "{r}");
+    let previews: Vec<Option<i64>> = previews(&app).iter().map(window_of).collect();
+    assert_eq!(previews, [Some(3)]);
+}
+
 const EXPORT_DESCRIPTION: &str = "Export the song in one step into a new dated folder, \"<song> \u{2014} <what> \u{2014} <date>\": stems (one audio file per strip; pass strips to choose them), mix (one audio file), midi (one MIDI file), dawproject (a DAWproject file that other music apps open), aaf, or other_daw (stems plus MIDI files). Without parent it uses the folder remembered in the song's notes, else the folder the song is in; for an untitled song with neither, ask the composer where exports should go and pass parent. Never replaces a file. Needs an open request (begin_request). Answers what was written.";
 
 #[test]
@@ -2810,7 +2939,8 @@ fn starters_reach_the_app() {
          Buses:\n- Reverb: Multi-Q, Echo\n- Delay: none\n\
          Drums: No instrument clap:x is installed; it plays the Built-in Synth instead.\n\
          Pad: shares its strip with Drums; its effects, output and sends are left out.\n\
-         Tracks on the Built-in Synth share its one sound for now."
+         Tracks on the Built-in Synth share its one sound for now.\n\
+         To work in this song, pass window 4 to begin_request."
     );
 }
 

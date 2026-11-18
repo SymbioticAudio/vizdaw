@@ -1046,6 +1046,28 @@ import VizDAWCore
         #expect(failure(run(.coProducerStarter(spec: Self.spec), s, id))?.code == .failed)
     }
 
+    /// Plan 8e final review Minor 4: a starter whose window never appears
+    /// answers the timeout and closes its new song quietly, as a refused
+    /// build does; the next starter may then run.
+    @Test func aStarterThatNeverShowsClosesItsSong() throws {
+        let n = FakeSession([])
+        n.starterRow = Self.starterRow
+        let (s, id, _, _) = try starterStore(n)
+        host.windowsAppear = false
+        guard case .pending = run(.coProducerStarter(spec: Self.spec), s, id) else {
+            Issue.record("the starter answered at once")
+            return
+        }
+        let newID = try #require(s.coProducerStarter)
+        #expect(CoProducerCommands.starterShown(newID, Self.starterRow, s, host, expired: false) == nil)
+        let o = CoProducerCommands.starterShown(newID, Self.starterRow, s, host, expired: true)
+        #expect(o.flatMap { failure($0) }?.code == .timeout)
+        #expect(n.closeCalls == 1)
+        #expect(Array(s.documents.keys) == [id])
+        #expect(s.alert == nil)
+        #expect(s.coProducerStarter == nil)
+    }
+
     /// The two reads answer for the resolved document with their
     /// arguments; a throw is `failed` in its words; neither enters.
     @Test func readsAnswerForTheDocument() throws {

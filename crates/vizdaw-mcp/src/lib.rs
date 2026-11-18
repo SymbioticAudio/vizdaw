@@ -136,6 +136,10 @@ pub struct Server {
     /// The document of the latest begin: a note or an export folder sent
     /// without `window` must land there, not in the front document.
     begun: Option<String>,
+    /// The window the latest begin named, if it named one: a `change` or
+    /// `apply_change` sent without `window` goes there (plan 8e final
+    /// review Minors 1 and 6).
+    begun_window: Option<i64>,
     /// What the client called itself at `initialize`, cleaned: every
     /// `co_producer.apply` carries it as `client` (plan 8b Ruling 11).
     client: Option<String>,
@@ -193,6 +197,7 @@ impl Server {
             tokens: VecDeque::new(),
             noted: VecDeque::new(),
             begun: None,
+            begun_window: None,
             client: None,
         }
     }
@@ -502,11 +507,15 @@ impl Server {
         args: &Map<String, Value>,
         views: bool,
     ) -> Done {
-        let a = match tools::change_args(args, false)
+        let mut a = match tools::change_args(args, false)
             .and_then(|a| tools::listed(&self.commands, &a.commands).map(|()| a))
         {
             Ok(a) => a,
             Err(m) => return Done::Result(tool_error(m)),
+        };
+        a.window = match self.begun_target(a.window) {
+            Ok(w) => w,
+            Err(e) => return Done::Result(e),
         };
         if params.contains_key("requestState") || params.contains_key("inputResponses") {
             return Done::Result(self.retry(params, &a, views));
@@ -612,11 +621,15 @@ impl Server {
     /// The fallback's second half: a token `change` gave the model in this
     /// conversation, used once.
     fn apply_change(&mut self, args: &Map<String, Value>) -> Value {
-        let a = match tools::change_args(args, true)
+        let mut a = match tools::change_args(args, true)
             .and_then(|a| tools::listed(&self.commands, &a.commands).map(|()| a))
         {
             Ok(a) => a,
             Err(m) => return tool_error(m),
+        };
+        a.window = match self.begun_target(a.window) {
+            Ok(w) => w,
+            Err(e) => return e,
         };
         let token = a.token.clone().unwrap_or_default();
         let Some(at) = self.tokens.iter().position(|t| *t == token) else {
@@ -751,6 +764,11 @@ impl Server {
         let mut text = begun.to_string();
         let doc = begun.get("doc").and_then(Value::as_str).unwrap_or("");
         self.begun = begun.get("doc").and_then(Value::as_str).map(str::to_string);
+        // `pass` already refused a `window` that is not a window number.
+        self.begun_window = args
+            .get("window")
+            .and_then(|w| tools::window_arg(w).ok())
+            .flatten();
         if !self.noted.iter().any(|d| d == doc) {
             // A failed read leaves the answer as it is; the next request tries again.
             let window: Map<String, Value> = args
@@ -802,6 +820,7 @@ impl Server {
             Ok(r) => {
                 if r.get("doc").and_then(Value::as_str) == self.begun.as_deref() {
                     self.begun = None;
+                    self.begun_window = None;
                 }
                 tool_text(r.to_string(), false)
             }
@@ -822,6 +841,31 @@ impl Server {
         match status.get("doc").and_then(Value::as_str) {
             Some(d) if d != want => Err(other_song()),
             _ => Ok(()),
+        }
+    }
+
+    /// Plan 8e final review Minors 1 and 6: the window a `change` or
+    /// `apply_change` goes to. Without `window` it is the begin's window
+    /// when the begin named one; else the front song, which must be the
+    /// begin's. A `window` other than the begin's must hold the begin's
+    /// song. Err is the refusal; nothing reached the song.
+    fn begun_target(&mut self, window: Option<i64>) -> Result<Option<i64>, Value> {
+        let Some(want) = self.begun.clone() else {
+            return Ok(window);
+        };
+        let window = window.or(self.begun_window);
+        if window.is_some() && window == self.begun_window {
+            return Ok(window);
+        }
+        let mut p = Map::new();
+        if let Some(w) = window {
+            p.insert("window".into(), json!(w));
+        }
+        let status = self.pass("co_producer.status", &p, &[])?;
+        match (status.get("doc").and_then(Value::as_str), window) {
+            (Some(d), Some(w)) if d != want => Err(another_song(w)),
+            (Some(d), None) if d != want => Err(other_song()),
+            _ => Ok(window),
         }
     }
 
@@ -1181,6 +1225,13 @@ fn take_screenshot(support: &Path, path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// The refusal when a note or an export folder would land in another song.
+/// Window `w` holds another song than the open request's.
+fn another_song(w: i64) -> Value {
+    tool_error(format!(
+        "Window {w} is not the song this request began in. Work in that song, or end this request and begin one in window {w}."
+    ))
+}
+
 fn other_song() -> Value {
     tool_error(
         "The front song is not the one this request began in. Bring that song's window forward, or name its `window`.",

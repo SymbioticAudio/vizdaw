@@ -545,6 +545,9 @@ extension CoProducerCommands {
         }
         guard expired else { return nil }
         store.coProducerStarter = nil
+        // Plan 8e final review Minor 4: the song goes quietly, as a refused
+        // build's does, so its window cannot show after the call failed.
+        store.close(id)
         return .failed(.of(.timeout, "the new song's window did not appear within 30 s"))
     }
 

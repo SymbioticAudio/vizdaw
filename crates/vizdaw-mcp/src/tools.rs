@@ -308,7 +308,7 @@ fn own_tools() -> Vec<Value> {
     vec![
         own_tool(
             BEGIN_REQUEST,
-            "Start one thing the composer asked for, before any command that adds or changes anything. Name it in a few plain words, with no product or company names, as the composer would say it (\"set up a drum bus\"). Everything until end_request becomes one undo step, \"Co-Producer: <Name>\". Only one request is open per song. Pass the composer's own words as asked: they go in the song's notes.",
+            "Start one thing the composer asked for, before any command that adds or changes anything. Name it in a few plain words, with no product or company names, as the composer would say it (\"set up a drum bus\"). Everything until end_request becomes one undo step, \"Co-Producer: <Name>\". Only one request is open per song. Pass window to name the song: change and apply_change without a window then go to it. Pass the composer's own words as asked: they go in the song's notes.",
             &[
                 (
                     "name",
@@ -1659,6 +1659,13 @@ pub fn starter_answer(result: &Value) -> String {
     for l in rows(result, "lines").iter().take(MAX_SHOWN) {
         text.push('\n');
         text.push_str(&safe(l.as_str().unwrap_or("?"), MAX_LINE_SHOWN, true));
+    }
+    // Plan 8e final review Minor 6: a request begun without `window`
+    // opens in whichever song is in front.
+    if window != "?" {
+        text.push_str(&format!(
+            "\nTo work in this song, pass window {window} to begin_request."
+        ));
     }
     text
 }

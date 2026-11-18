@@ -664,3 +664,46 @@ fn every_synth_sound_previews_by_its_title() {
     s.close().unwrap();
     let _: PathBuf = t.dir.path().to_path_buf();
 }
+
+/// Plan 8e final review Minor 2: routing Co-Producer's track into a strip
+/// that is not Co-Producer's asks, as 8d's routing into a composer's bus
+/// does; routing it into its own strip stays free.
+#[test]
+fn routing_our_track_into_the_composers_strip_asks() {
+    let _g = serial();
+    let t = song();
+    let s = &t.s;
+    let tone_out = lane_row(s, t.seq, t.tone).audio_out.unwrap();
+    let ours_out = lane_row(s, t.seq, t.ours).audio_out.unwrap();
+    assert_ne!(tone_out, ours_out, "each audio track has its own path");
+    let strip_of = |o: u64| {
+        doc(s)
+            .mixer()
+            .strips()
+            .values()
+            .find(|x| {
+                x.kind == core_model::mixer::StripKind::AudioPath(core_model::ids::OutputPathId(o))
+            })
+            .map(|x| x.co_producer)
+    };
+    assert_eq!(strip_of(tone_out), Some(false));
+    assert_eq!(strip_of(ours_out), Some(true));
+    s.co_producer_begin("route the loop".into()).unwrap();
+    let row = s
+        .co_producer_preview(vec![output(t.seq, t.ours, Some(tone_out))])
+        .unwrap();
+    assert!(row.needs_yes, "{row:?}");
+    assert!(row.items.iter().any(|i| i.composers_work), "{row:?}");
+    // Off its path, then back onto its own: free.
+    let plan = vec![output(t.seq, t.ours, None)];
+    let row = s.co_producer_preview(plan.clone()).unwrap();
+    assert!(!row.needs_yes, "{row:?}");
+    take_and_run(s, row.token, &plan).unwrap();
+    let row = s
+        .co_producer_preview(vec![output(t.seq, t.ours, Some(ours_out))])
+        .unwrap();
+    assert!(!row.needs_yes, "{row:?}");
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+    drop(t.dir);
+}

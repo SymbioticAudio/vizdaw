@@ -6890,9 +6890,18 @@ fn co_producer_creative_over_mcp() {
     let reverb_id = reverb["id"].as_u64().unwrap();
     let w_seq = wd["selected_seq"].clone();
 
-    // Automation on Co-Producer's own bus, in W: no question.
+    // Automation on Co-Producer's own bus, in W: no question. The request
+    // names W's window, as the starter's answer says (plan 8e final
+    // review Minor 6), so the composer's focus does not matter.
+    assert!(
+        made.contains(&format!("pass window {w} to begin_request")),
+        "{made}"
+    );
     let target = format!("fader:{reverb_id}");
-    mcp.ok("begin_request", json!({"name": "fade the reverb in"}));
+    mcp.ok(
+        "begin_request",
+        json!({"name": "fade the reverb in", "window": w}),
+    );
     let r = mcp.tool(
         "preview_automation",
         json!({"seq": w_seq, "target": target, "start": 0, "end": 61440,

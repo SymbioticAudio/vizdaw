@@ -260,6 +260,26 @@ fn rows(items: Vec<ChangeItem>, composers_work: bool) -> impl Iterator<Item = Ch
     })
 }
 
+/// True when `cmd` sets a track's output to a path whose strip in
+/// `before` is not Co-Producer's (plan 8e final review Minor 2).
+fn into_composers_strip(
+    before: &core_model::document::Document,
+    cmd: &core_model::command::Command,
+) -> bool {
+    use core_model::command::{Command, LaneCmd};
+    let Command::Lane(LaneCmd::SetOutput {
+        output: Some(o), ..
+    }) = cmd
+    else {
+        return false;
+    };
+    before
+        .mixer()
+        .strips()
+        .values()
+        .any(|s| s.kind == core_model::mixer::StripKind::AudioPath(*o) && !s.co_producer)
+}
+
 /// Items whose own flag says whether each is the composer's work (Ruling
 /// 2): what was Co-Producer's, and loses nothing, needs no yes.
 fn own_rows(items: Vec<ChangeItem>) -> impl Iterator<Item = ChangeItemRow> {
@@ -814,7 +834,14 @@ pub fn preview_items(
                 };
                 let before = h.doc().clone();
                 h.execute(&cmd, &filter)?;
-                out.extend(own_rows(diff::describe(&before, h.doc())));
+                // Plan 8e final review Minor 2: routing a track into a
+                // strip that is not Co-Producer's asks, as 8d's routing
+                // into a composer's bus does.
+                let theirs = into_composers_strip(&before, &cmd);
+                out.extend(own_rows(diff::describe(&before, h.doc())).map(|mut r| {
+                    r.composers_work |= theirs;
+                    r
+                }));
             }
             "edit.undo" | "edit.redo" => {
                 let undo = p.id == "edit.undo";
