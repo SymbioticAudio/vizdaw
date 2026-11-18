@@ -370,6 +370,20 @@ fn solo_changes(
         .collect()
 }
 
+/// The running plug-ins' parameter names and values, as `describe_with`
+/// reads them.
+fn param_lookup(
+    host: &dyn crate::mixer_chores::PluginLookup,
+) -> impl Fn(core_model::ids::PluginInstanceId, core_model::mixer::ParamId) -> Option<(String, f64)> + '_
+{
+    move |slot, param| {
+        host.params(slot)?
+            .into_iter()
+            .find(|r| r.id == param.0)
+            .map(|r| (r.name, r.value))
+    }
+}
+
 /// What `plan` would change (Ruling 6), worked out in order on a clone of
 /// `history` with Co-Producer acting, as the apply will run it. `package`
 /// is the song's file, if saved; `host` resolves plug-ins and reads the
@@ -419,12 +433,7 @@ pub fn preview_items(
                 for cmd in &cmds {
                     h.execute(cmd, &filter)?;
                 }
-                let lookup = |slot, param: core_model::mixer::ParamId| {
-                    host.params(slot)?
-                        .into_iter()
-                        .find(|r| r.id == param.0)
-                        .map(|r| (r.name, r.value))
-                };
+                let lookup = param_lookup(host);
                 let theirs = crate::mixer_chores::feeds_composers_bus(&before, h.doc());
                 let soloed = solo_changes(&before, h.doc());
                 out.extend(
@@ -451,6 +460,22 @@ pub fn preview_items(
                         composers_work: true,
                     }
                 }));
+            }
+            id if registry::CREATIVE_IDS.contains(&id) => {
+                // Plan 8e Ruling 4: the target's strip decides, by 8d
+                // Ruling 2; a new automation track is "added". A write
+                // over points of a track not Co-Producer's asks (the
+                // strip item says so).
+                let cmds = crate::creative::commands_for(h.doc(), id, &p.args, host)?;
+                let before = h.doc().clone();
+                for cmd in &cmds {
+                    h.execute(cmd, &filter)?;
+                }
+                let lookup = param_lookup(host);
+                out.extend(mixer_rows(
+                    diff::describe_with(&before, h.doc(), &lookup),
+                    false,
+                ));
             }
             "edit.undo" | "edit.redo" => {
                 let undo = p.id == "edit.undo";

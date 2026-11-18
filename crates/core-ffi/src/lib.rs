@@ -29,6 +29,7 @@ pub mod chores;
 pub mod clock;
 pub mod co_producer;
 pub mod control;
+pub mod creative;
 pub mod dawproject;
 pub mod drum;
 pub mod edit;
@@ -103,6 +104,7 @@ pub use control::{
     ViewPanesRow, WaitConditionRow, WaitFactsRow, WindowKindRow, WindowRefRow, WindowRow,
     control_command_ids, control_element_check, control_host_busy, control_wait_met,
 };
+pub use creative::{CoProducerCurveRow, CoProducerNotesRow, CurvePointRow, NoteRow};
 pub use dawproject::{
     DawprojectExportRequestRow, DawprojectImportRequestRow, DawprojectInfoRow,
     DawprojectMergeRequestRow, MergePreviewRow, MergeStepRow, RegionGainRow, SnapshotRow,

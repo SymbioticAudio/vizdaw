@@ -1074,6 +1074,21 @@ pub enum ControlResult {
         /// The slot, its plug-in and its parameters.
         row: crate::session::co_producer_mixer::CoProducerParamsRow,
     },
+    /// `co_producer.midi_notes` (plan 8e Ruling 3): a track's notes.
+    CoProducerMidiNotes {
+        /// Document ID.
+        doc: String,
+        /// The track and its notes.
+        row: crate::creative::CoProducerNotesRow,
+    },
+    /// `co_producer.automation` (plan 8e Ruling 7): a target's
+    /// automation in its own units.
+    CoProducerAutomation {
+        /// Document ID.
+        doc: String,
+        /// The target, its units, bars and points.
+        row: crate::creative::CoProducerCurveRow,
+    },
     /// `settings.co_producer_answer` (plan 8b Ruling 11): what the
     /// approval sheet it answered asked.
     CoProducerApprovalAnswered {
@@ -2011,6 +2026,20 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "default": p.default, "value": p.value, "stepped": p.stepped,
                 "automatable": p.automatable,
             })).collect::<Vec<_>>(),
+        }),
+        ControlResult::CoProducerMidiNotes { doc, row } => json!({
+            "doc": doc, "seq": row.seq, "lane": row.lane, "name": row.name,
+            "notes": row.notes.iter()
+                .map(|n| json!([n.start, n.pitch, n.length, n.velocity]))
+                .collect::<Vec<_>>(),
+            "truncated": row.truncated,
+        }),
+        ControlResult::CoProducerAutomation { doc, row } => json!({
+            "doc": doc, "target": row.target, "target_name": row.target_name,
+            "unit": row.unit, "min": row.min, "max": row.max,
+            "start_bar": row.start_bar, "end_bar": row.end_bar,
+            "points": row.points.iter().map(|p| json!([p.tick, p.value])).collect::<Vec<_>>(),
+            "truncated": row.truncated,
         }),
         ControlResult::CoProducerExported {
             doc,

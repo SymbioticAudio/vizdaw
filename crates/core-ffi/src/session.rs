@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod co_producer_creative;
 pub mod co_producer_mixer;
 mod fixes;
 

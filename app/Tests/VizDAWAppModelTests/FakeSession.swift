@@ -445,6 +445,42 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return CoProducerParamsRow(
             slot: slot, plugin: "clap:fake", running: true, params: rows.filter { !$0.hidden })
     }
+    /// Plan 8e Task 3: every `runCreative` call, with its arguments as given.
+    var creativeRuns: [(id: String, args: [ControlArg])] = []
+    /// Plan 8e Task 3's one call: logged in `coLog` ("runCreative <id>")
+    /// and `calls`, and recorded in `creativeRuns` before `mixerError`
+    /// throws.
+    func runCreative(id: String, args: [ControlArg]) throws -> DocSnapshot {
+        coLog.append("runCreative \(id)")
+        creativeRuns.append((id, args))
+        return try mixerCall("runCreative \(id)")
+    }
+    /// Plan 8e Task 3: the notes read answers from `notesTable` by track;
+    /// any other track is not in the sequence.
+    var notesTable: [UInt64: [NoteRow]] = [:]
+    func coProducerMidiNotes(seq: UInt64, lane: UInt64, start: UInt64?, end: UInt64?) throws
+        -> CoProducerNotesRow
+    {
+        guard let notes = notesTable[lane] else {
+            throw VizError.Model(message: "Track \(lane) is not in sequence \(seq).")
+        }
+        let shown = notes.filter { n in
+            guard let start, let end else { return true }
+            return n.start >= start && n.start < end
+        }
+        return CoProducerNotesRow(seq: seq, lane: lane, name: "Track \(lane)", notes: shown, truncated: false)
+    }
+    /// Plan 8e Task 3: the automation read answers from `curveTable` by
+    /// target; any other target is not in this song.
+    var curveTable: [String: CoProducerCurveRow] = [:]
+    func coProducerAutomation(seq: UInt64, target: String, start: UInt64, end: UInt64) throws
+        -> CoProducerCurveRow
+    {
+        guard let row = curveTable[target] else {
+            throw VizError.Model(message: "This song has no \(target).")
+        }
+        return row
+    }
     func setParam(slot: UInt64, param: UInt64, value: Double) throws {
         liveSets.append((slot, param, value))
     }
