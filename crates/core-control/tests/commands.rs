@@ -77,12 +77,13 @@ fn every_command_validates_its_minimal_form() {
             "co_producer.automation",
             json!({"seq": 1, "target": "fader:3", "start": 0, "end": 3840}),
         ),
+        ("co_producer.metrics", json!({})),
     ];
     assert_eq!(minimal.len(), COMMAND_NAMES.len());
     assert_eq!(
         COMMAND_NAMES.len(),
-        27,
-        "plan 8c adds co_producer.export; 8d adds co_producer.plugins and co_producer.params; 8e adds co_producer.starter, co_producer.midi_notes and co_producer.automation"
+        28,
+        "plan 8c adds co_producer.export; 8d adds co_producer.plugins and co_producer.params; 8e adds co_producer.starter, co_producer.midi_notes and co_producer.automation; 8f adds co_producer.metrics"
     );
     for (cmd, params) in minimal {
         assert!(
@@ -562,8 +563,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        215,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write"
+        217,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -3482,4 +3483,48 @@ fn point_lists_parse_strictly() {
     let long = format!("0:0{}", " ".repeat(LIST_TEXT_MAX - 2));
     assert!(point_list(&long, 0, 3840).is_err());
     assert!(point_list(&long[..LIST_TEXT_MAX], 0, 3840).is_ok());
+}
+
+/// Plan 8f Ruling 1: the time-counting switch takes a required `on` flag;
+/// delete-all takes nothing.
+#[test]
+fn time_settings_check_their_params() {
+    let spec = registry::find(registry::METRICS_SETTING).unwrap();
+    assert_eq!(spec.menu, "Settings");
+    assert_eq!(spec.title, "Count Where My Time Goes");
+    assert!(!spec.menu_item && !spec.document);
+    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
+    assert_eq!(names, ["on"]);
+    assert!(spec.params[0].required);
+    let spec = registry::find(registry::DELETE_TIME_RECORDS).unwrap();
+    assert_eq!(spec.menu, "Settings");
+    assert_eq!(spec.title, "Delete All Time Records");
+    assert!(!spec.menu_item && !spec.document && spec.params.is_empty());
+    let run = |id: &str, params: Value| json!({"id": id, "params": params});
+    for params in [
+        json!({}),
+        json!({"on": "yes"}),
+        json!({"on": 1}),
+        json!({"on": null}),
+        json!({"on": true, "extra": 1}),
+        json!({"on": "x".repeat(70_000)}),
+    ] {
+        let (code, msg) = err(
+            "command.run",
+            run(registry::METRICS_SETTING, params.clone()),
+        );
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}: {msg}");
+    }
+    for on in [true, false] {
+        ok(
+            "command.run",
+            run(registry::METRICS_SETTING, json!({ "on": on })),
+        );
+    }
+    ok("command.run", run(registry::DELETE_TIME_RECORDS, json!({})));
+    let (code, msg) = err(
+        "command.run",
+        run(registry::DELETE_TIME_RECORDS, json!({"all": true})),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams, "{msg}");
 }

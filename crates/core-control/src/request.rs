@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every command name.
-pub const COMMAND_NAMES: [&str; 27] = [
+pub const COMMAND_NAMES: [&str; 28] = [
     "commands.list",
     "command.run",
     "state.get",
@@ -42,7 +42,11 @@ pub const COMMAND_NAMES: [&str; 27] = [
     "co_producer.starter",
     "co_producer.midi_notes",
     "co_producer.automation",
+    "co_producer.metrics",
 ];
+
+/// The most days `co_producer.metrics` reads back (plan 8f Ruling 6).
+pub const METRICS_DAYS_MAX: u32 = 3650;
 
 /// The longest Co-Producer request name, in characters after trimming
 /// (plan 8a Ruling 11).
@@ -451,6 +455,15 @@ pub enum Command {
         /// Whose document.
         window: Option<WindowRef>,
     },
+    /// Reads where the composer's time has gone (plan 8f Ruling 6): a
+    /// read, only on request.
+    CoProducerMetrics {
+        /// Today and the `days - 1` before it, 1 to [`METRICS_DAYS_MAX`];
+        /// None: all time.
+        days: Option<u32>,
+        /// Whose document is "this song".
+        window: Option<WindowRef>,
+    },
 }
 
 impl Command {
@@ -478,6 +491,7 @@ impl Command {
                 | Command::CoProducerStarter { .. }
                 | Command::CoProducerMidiNotes { .. }
                 | Command::CoProducerAutomation { .. }
+                | Command::CoProducerMetrics { .. }
         )
     }
 }
@@ -781,6 +795,20 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 target,
                 start: start as u64,
                 end: end as u64,
+                window: p.window()?,
+            })
+        }
+        "co_producer.metrics" => {
+            p.only(&["days", "window"])?;
+            // A null is not "all time": leave `days` out for that.
+            if raw.params.get("days").is_some_and(Value::is_null) {
+                return Err(p.error("`days` must be an integer; leave it out for all time"));
+            }
+            let days = p
+                .opt_int("days", 1, i64::from(METRICS_DAYS_MAX))?
+                .map(|d| d as u32);
+            Ok(Command::CoProducerMetrics {
+                days,
                 window: p.window()?,
             })
         }

@@ -3,7 +3,7 @@
 //! validated call through [`admit`] before it reaches the app:
 //!
 //! - only `ping`, `commands.list`, `state.get` (not `input`), `wait`,
-//!   `ui.screenshot` (window and scale only), `command.run` and the fourteen
+//!   `ui.screenshot` (window and scale only), `command.run` and the fifteen
 //!   `co_producer.*` commands are allowed;
 //! - `command.run` runs read, add and outward commands only; a change or
 //!   remove goes through `co_producer.preview` and the composer's yes;
@@ -373,6 +373,8 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
         | Command::CoProducerParams { .. }
         | Command::CoProducerMidiNotes { .. }
         | Command::CoProducerAutomation { .. }
+        // Plan 8f Ruling 6: the time-record read, with no request open.
+        | Command::CoProducerMetrics { .. }
         | Command::CoProducerExportFolder { parent: None, .. }
         | Command::CoProducerExport { parent: None, .. } => Ok(()),
         // Plan 8b Ruling 6 (and 8c Ruling 1 for the one-call export): a

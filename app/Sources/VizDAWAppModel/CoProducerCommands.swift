@@ -14,6 +14,12 @@ import VizDAWCore
 public enum CoProducerCommands {
     public static let setting = "settings.co_producer"
     public static let openCopy = "file.open_copy"
+    /// Settings › Co-Producer › Count where my time goes (plan 8f Ruling 1).
+    public static let metricsSetting = "settings.co_producer_metrics"
+    /// Delete All Time Records (plan 8f Ruling 1).
+    public static let deleteTimeRecords = "settings.delete_time_records"
+    /// The answer of plan 8f's calls until Task 3 wires them.
+    static let notReady = ControlOutcome.failed(.of(.unavailable, "Not ready yet."))
     /// The line of a planned command after one that failed.
     public static let notRun = "not run (an earlier command failed)"
 
@@ -149,6 +155,9 @@ public enum CoProducerCommands {
             } catch {
                 return .failed(failure(error))
             }
+        case .coProducerMetrics:
+            // Plan 8f Task 3 reads the time records.
+            return notReady
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }
@@ -431,6 +440,9 @@ public enum CoProducerCommands {
                 return .failed(.of(.failed, host.coProducer.problem ?? "Co-Producer could not start."))
             }
             return .done(ControlCommands.ran(id, nil))
+        case metricsSetting, deleteTimeRecords:
+            // Plan 8f Task 3 wires the switch and delete-all.
+            return notReady
         case openCopy:
             guard let path = args.text("path") else { return .failed(.dialog("Open", "path")) }
             let before = store.alert?.id

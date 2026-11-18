@@ -1110,6 +1110,31 @@ mod control {
         );
     }
 
+    /// Plan 8f Task 1: the time-record read reaches the app as a row.
+    #[test]
+    fn the_metrics_read_reaches_the_app_as_a_row() {
+        assert_eq!(
+            of(Command::CoProducerMetrics {
+                days: None,
+                window: None,
+            }),
+            ControlRequest::CoProducerMetrics {
+                days: None,
+                window: None,
+            }
+        );
+        assert_eq!(
+            of(Command::CoProducerMetrics {
+                days: Some(30),
+                window: Some(WindowRef::Number(2)),
+            }),
+            ControlRequest::CoProducerMetrics {
+                days: Some(30),
+                window: Some(WindowRefRow::Number { number: 2 }),
+            }
+        );
+    }
+
     #[test]
     fn co_producer_results_are_json() {
         let r = ControlResult::CoProducerRequest {

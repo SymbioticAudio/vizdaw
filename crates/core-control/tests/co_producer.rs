@@ -194,8 +194,8 @@ fn listed_class(id: &str) -> Option<Class> {
 fn every_command_has_the_spec_class() {
     assert_eq!(
         COMMANDS.len(),
-        215,
-        "plan 8d adds thirteen; 8e adds automation.write"
+        217,
+        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings"
     );
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
@@ -230,6 +230,8 @@ fn every_command_has_the_spec_class() {
         "settings.co_producer",
         "file.open_copy",
         "settings.co_producer_answer",
+        "settings.co_producer_metrics",
+        "settings.delete_time_records",
     ] {
         assert_eq!(registry::find(id).unwrap().class, Class::Refused, "{id}");
     }
@@ -3077,4 +3079,194 @@ fn fixes_commands_refuse_hostile_input() {
         "lane.set_output",
         &[json!({"seq": 1, "lane": 2, "strip": 5})],
     );
+}
+
+/// Plan 8f Task 1: sends `cmd` on `stream` and answers it from `server`;
+/// returns the call the app saw.
+fn app_sees(
+    server: &core_control::server::Server,
+    stream: &mut std::os::unix::net::UnixStream,
+    cmd: &str,
+    params: Value,
+) -> core_control::server::Call {
+    use std::io::{BufRead, BufReader, Write};
+    let line = core_control::protocol::request_line(&RequestId::Num(1), cmd, &params);
+    stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let call = loop {
+        if let Some(c) = server.next_call() {
+            break c;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{cmd} {params} never reached the app"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    assert!(server.reply(call.token, Ok(json!({}))));
+    let mut reply = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut reply)
+        .unwrap();
+    assert!(reply.contains("\"ok\":true"), "{reply}");
+    call
+}
+
+/// Plan 8f Ruling 1: only the composer turns counting on or off, or
+/// deletes the records.
+#[test]
+fn time_settings_are_never_co_producers() {
+    use core_control::client::{CallError, Client};
+    use core_control::server::{Config, Role, Server};
+    use std::os::unix::net::UnixStream;
+    assert_eq!(registry::METRICS_SETTING, "settings.co_producer_metrics");
+    assert_eq!(
+        registry::DELETE_TIME_RECORDS,
+        "settings.delete_time_records"
+    );
+    let cases = [
+        (registry::METRICS_SETTING, json!({"on": true})),
+        (registry::DELETE_TIME_RECORDS, json!({})),
+    ];
+    for (id, _) in &cases {
+        let spec = registry::find(id).unwrap_or_else(|| panic!("{id} is not registered"));
+        assert_eq!(spec.class, Class::Refused, "{id}");
+        assert_eq!(effective_class(spec, &[]), Class::Refused, "{id}");
+    }
+    let list = co_producer::list_json();
+    let listed = list["commands"].as_array().unwrap();
+    for (id, _) in &cases {
+        assert!(listed.iter().all(|c| c["id"] != *id), "{id} is listed");
+    }
+    for (id, params) in &cases {
+        assert_code(
+            "command.run",
+            run(id, params.clone()),
+            ErrorCode::NotAllowed,
+        );
+    }
+    // Through the Co-Producer socket itself: the app never sees them.
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let server = Server::start(
+        &sock,
+        Config {
+            role: Role::CoProducer,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    let mut c = Client::connect(&sock).unwrap();
+    for (id, params) in &cases {
+        match c.call(
+            "command.run",
+            run(id, params.clone()),
+            std::time::Duration::from_secs(20),
+        ) {
+            Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::NotAllowed, "{id}: {e}"),
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+    assert!(server.next_call().is_none(), "the app never sees them");
+    drop(server);
+    // On the developer socket both reach the app.
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let dev = Server::start(&sock, Config::default()).unwrap();
+    let mut s = UnixStream::connect(&sock).unwrap();
+    for (id, params) in &cases {
+        let call = app_sees(&dev, &mut s, "command.run", run(id, params.clone()));
+        match call.command {
+            core_control::Command::CommandRun { id: got, .. } => assert_eq!(got, *id),
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+}
+
+/// Plan 8f Ruling 6: the read is the Co-Producer socket's alone.
+#[test]
+fn metrics_reads_only_on_the_co_producer_socket() {
+    use core_control::client::{CallError, Client};
+    use core_control::server::{Config, Server};
+    let d = private_tmp();
+    let sock = d.path().join("ctl").join("s.sock");
+    let dev = Server::start(&sock, Config::default()).unwrap();
+    let mut c = Client::connect(&sock).unwrap();
+    for params in [json!({}), json!({"days": 7})] {
+        match c.call(
+            "co_producer.metrics",
+            params.clone(),
+            std::time::Duration::from_secs(20),
+        ) {
+            Err(CallError::Reply(e)) => {
+                assert_eq!(e.code, ErrorCode::NotAllowed, "{params}: {e}");
+                assert!(e.message.contains("only on the Co-Producer socket"), "{e}");
+            }
+            other => panic!("{params}: {other:?}"),
+        }
+    }
+    assert!(dev.next_call().is_none(), "the app never sees it");
+    // The gate admits it with no request open: it only reads.
+    for params in [
+        json!({}),
+        json!({"days": 7, "window": 3}),
+        json!({"days": 1}),
+        json!({"days": 3650}),
+        json!({"window": "key"}),
+        json!({"window": "main"}),
+    ] {
+        assert_eq!(
+            gate("co_producer.metrics", params.clone()),
+            Ok(()),
+            "{params}"
+        );
+        assert!(
+            validate(&req("co_producer.metrics", params))
+                .unwrap()
+                .is_co_producer()
+        );
+    }
+}
+
+/// Plan 8f Task 1: every hostile `co_producer.metrics` is `invalid_params`.
+#[test]
+fn metrics_read_refuses_hostile_input() {
+    use core_control::request::METRICS_DAYS_MAX;
+    assert_eq!(METRICS_DAYS_MAX, 3650);
+    let long = json!("x".repeat(70_000));
+    let mut cases = vec![];
+    for days in [
+        json!(0),
+        json!(3651),
+        json!(-1),
+        json!("7"),
+        json!(7.5),
+        Value::Null,
+        json!(1u64 << 53),
+        json!(true),
+        json!([7]),
+        json!("7\u{0}"),
+        long.clone(),
+    ] {
+        cases.push(json!({ "days": days }));
+    }
+    for window in [
+        json!("Key"),
+        json!("3"),
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!(true),
+        json!("key\u{0}"),
+        json!(1u64 << 63),
+        long.clone(),
+    ] {
+        cases.push(json!({ "window": window }));
+    }
+    cases.push(json!({"extra": 1}));
+    cases.push(json!({"days": 7, "song": "x"}));
+    for params in cases {
+        let e = refused("co_producer.metrics", params.clone());
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {}", e.message);
+    }
 }

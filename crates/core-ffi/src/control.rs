@@ -601,6 +601,15 @@ pub enum ControlRequest {
         /// Whose document.
         window: Option<WindowRefRow>,
     },
+    /// `co_producer.metrics` (plan 8f Ruling 6): where the composer's time
+    /// has gone.
+    CoProducerMetrics {
+        /// Today and the `days - 1` before it, already checked: 1 to
+        /// 3650; None: all time.
+        days: Option<u32>,
+        /// Whose document is "this song".
+        window: Option<WindowRefRow>,
+    },
 }
 
 /// Who a Co-Producer call came from (plan 8b Ruling 11): its connection
@@ -1340,6 +1349,10 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
             target,
             start,
             end,
+            window: window_row(window),
+        },
+        Command::CoProducerMetrics { days, window } => ControlRequest::CoProducerMetrics {
+            days,
             window: window_row(window),
         },
         Command::CoProducerEnd { window } => ControlRequest::CoProducerEnd {

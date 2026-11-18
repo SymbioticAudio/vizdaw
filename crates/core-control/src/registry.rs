@@ -358,6 +358,19 @@ const CO_PRODUCER_SWITCH_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "Turn Co-Producer on (true) or off (false).",
 }];
 
+/// `settings.co_producer_metrics`'s parameter (plan 8f Ruling 1).
+const METRICS_SWITCH_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "on",
+    kind: ParamKind::Flag,
+    required: true,
+    help: "Turn time counting on (true) or off (false).",
+}];
+
+/// The time-counting switch's ID (plan 8f Ruling 1).
+pub const METRICS_SETTING: &str = "settings.co_producer_metrics";
+/// Delete All Time Records' ID (plan 8f Ruling 1).
+pub const DELETE_TIME_RECORDS: &str = "settings.delete_time_records";
+
 /// `settings.co_producer_answer`'s parameters (plan 8b Ruling 11): the
 /// e2e's answer to VizDAW's own approval sheet.
 const CO_PRODUCER_ANSWER_PARAMS: &[ParamSpec] = &[
@@ -3683,6 +3696,25 @@ pub const COMMANDS: &[CommandSpec] = &[
             false,
         )
     },
+    // Plan 8f Ruling 1: the composer's own time-record settings, refused
+    // to Co-Producer by class.
+    CommandSpec {
+        params: METRICS_SWITCH_PARAMS,
+        ..key_only(cmd(
+            METRICS_SETTING,
+            "Settings",
+            "Count Where My Time Goes",
+            None,
+            false,
+        ))
+    },
+    key_only(cmd(
+        DELETE_TIME_RECORDS,
+        "Settings",
+        "Delete All Time Records",
+        None,
+        false,
+    )),
 ];
 
 /// The command with `id`.

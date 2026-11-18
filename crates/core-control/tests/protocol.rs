@@ -529,3 +529,30 @@ fn co_producer_creative_calls_round_trip() {
         Command::CoProducerStarter { spec }
     );
 }
+
+/// Plan 8f Ruling 6: the time-record read goes over the wire and back.
+#[test]
+fn co_producer_metrics_round_trips() {
+    use core_control::params::WindowRef;
+    use core_control::{Command, validate};
+    let parse = |params: Value| {
+        let line = request_line(&RequestId::Num(9), "co_producer.metrics", &params);
+        let raw = read_request(line.as_bytes()).unwrap();
+        assert_eq!(raw.cmd, "co_producer.metrics");
+        validate(&raw).unwrap()
+    };
+    assert_eq!(
+        parse(json!({})),
+        Command::CoProducerMetrics {
+            days: None,
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(json!({"days": 30, "window": 2})),
+        Command::CoProducerMetrics {
+            days: Some(30),
+            window: Some(WindowRef::Number(2))
+        }
+    );
+}

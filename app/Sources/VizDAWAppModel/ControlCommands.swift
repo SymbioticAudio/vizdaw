@@ -305,10 +305,12 @@ public enum ControlCommands {
         "media.relink", "media.compact", "media.rename", "window.media_pool",
         "record.set", "record.recover", "lane.set_input", "lane.set_monitor", "midi.inject",
     ]
-    /// Co-Producer's two registry ids (plan 8a Ruling 10): the switch and
-    /// opening a saved copy, both app-wide.
+    /// Co-Producer's app-wide registry ids: the switch and opening a saved
+    /// copy (plan 8a Ruling 10), the approval answer hook (8b Ruling 11),
+    /// and the time-record switch and delete-all (8f Ruling 1).
     static let coProducer: Set<String> = [
         CoProducerCommands.setting, CoProducerCommands.openCopy, CoProducerCommands.answerHook,
+        CoProducerCommands.metricsSetting, CoProducerCommands.deleteTimeRecords,
     ]
     /// Plan 8b's strip commands (Rulings 1 and 3): Make Mine of a strip and
     /// a strip's own colour. `track.make_mine` is `TrackCommands`'s.
