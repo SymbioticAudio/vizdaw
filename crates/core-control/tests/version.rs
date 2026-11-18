@@ -9,7 +9,10 @@ fn bundle_and_crate_versions_agree() {
         "/../../scripts/make-app.sh"
     ))
     .expect("read scripts/make-app.sh");
-    for line in script.lines().filter(|l| l.contains("CFBundleShortVersionString")) {
+    for line in script
+        .lines()
+        .filter(|l| l.contains("CFBundleShortVersionString"))
+    {
         assert!(
             !line.contains("<string>"),
             "CFBundleShortVersionString must not be a literal: {line}"
@@ -23,7 +26,10 @@ fn bundle_and_crate_versions_agree() {
         script.contains("[workspace.package]") && script.contains("Cargo.toml"),
         "make-app.sh must read the version from the workspace Cargo.toml"
     );
-    assert!(!script.contains("<string>0."), "literal 0.x version in make-app.sh");
+    assert!(
+        !script.contains("<string>0."),
+        "literal 0.x version in make-app.sh"
+    );
 
     let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
         .expect("read Cargo.toml");
