@@ -189,19 +189,147 @@ import VizDAWCore
         #expect(failure(refused)?.message == "What was asked is over 500 characters.")
     }
 
-    /// Plan 8d Task 1: the plug-in reads answer "Not ready yet." until
-    /// Task 5, and reach nothing.
-    @Test func pluginReadsAreNotReadyYet() throws {
+    /// Plan 8d Task 5: `co_producer.plugins` answers the list the core
+    /// gives for its kind, and `truncated`.
+    @Test func pluginsAnswerTheList() throws {
+        let (s, id, _, _) = try demo()
+        var asked: [PluginKindTag?] = []
+        let rows = [
+            CoProducerPluginRow(plugin: "multi-q", name: "Multi-Q", maker: "VizDAW", format: "clap", kind: .effect, version: "1")
+        ]
+        host.coProducer.pluginList = { kind in
+            asked.append(kind)
+            return CoProducerPluginsRow(plugins: rows, truncated: true)
+        }
+        guard case .coProducerPlugins(let plugins, let truncated) = result(run(.coProducerPlugins(kind: .effect), s, id))
+        else {
+            Issue.record("no plug-ins")
+            return
+        }
+        #expect(plugins == rows)
+        #expect(truncated)
+        #expect(asked == [.effect])
+        _ = run(.coProducerPlugins(kind: nil), s, id)
+        #expect(asked == [.effect, nil])
+    }
+
+    /// `co_producer.params` is the resolved document's
+    /// `coProducerParams(slot:)`; its refusal is `failed` in its words.
+    @Test func paramsAnswerForTheDocument() throws {
         let (s, id, _, f) = try demo()
+        let p = ParamRow(
+            id: 3, name: "Gain", module: "", min: 0, max: 1, default: 0.5, value: 0.5, stepped: false,
+            automatable: true, hidden: false)
+        f.paramTable[7] = [p]
+        guard case .coProducerParams(let doc, let row) = result(run(.coProducerParams(slot: 7, window: nil), s, id))
+        else {
+            Issue.record("no parameters")
+            return
+        }
+        #expect(doc == id.uuidString)
+        #expect(row.slot == 7)
+        #expect(row.params == [p])
+        let refused = run(.coProducerParams(slot: 8, window: nil), s, id)
+        #expect(failure(refused)?.code == .failed)
+        #expect(failure(refused)?.message == "This song has no slot 8.")
+        f.readBusy = true
+        #expect(failure(run(.coProducerParams(slot: 7, window: nil), s, id))?.code == .busy)
+        // No document: no_document.
+        let none = CoProducerCommands.run(
+            .coProducerParams(slot: 7, window: nil), doc: nil, store: s, host: host, stamp: stamp, peer: nil,
+            approver: FakeApprover(.allow))
+        #expect(failure(none)?.code == .noDocument)
+    }
+
+    /// The two reads enter nothing.
+    @Test func readsEnterNothing() throws {
+        let (s, id, _, f) = try demo()
+        f.paramTable[7] = []
+        host.coProducer.pluginList = { _ in CoProducerPluginsRow(plugins: [], truncated: false) }
         for r in [
             ControlRequest.coProducerPlugins(kind: nil), .coProducerPlugins(kind: .effect),
-            .coProducerPlugins(kind: .instrument), .coProducerParams(slot: 4, window: nil),
+            .coProducerPlugins(kind: .instrument), .coProducerParams(slot: 7, window: nil),
+            .coProducerParams(slot: 4, window: nil),
         ] {
-            let o = run(r, s, id)
-            #expect(failure(o)?.code == .unavailable, "\(r): \(o)")
-            #expect(failure(o)?.message == "Not ready yet.", "\(r)")
+            _ = run(r, s, id)
         }
         #expect(f.coLog.isEmpty)
+        #expect(f.mixerRuns.isEmpty)
+    }
+
+    func mixerPlan(_ id: String = "mixer.set_strip") -> [PlannedRow] {
+        [PlannedRow(id: id, args: [int("strip", 1), ControlArg(name: "gain_db", value: .text(value: "-3"))])]
+    }
+
+    /// Plan 8d Task 5: a failing `runMixer` reached through
+    /// `co_producer.apply` is its line, and no sheet opens (8a Ruling 13).
+    @Test func noSheetsForMixerEdits() throws {
+        let (s, id, m, f) = try demo()
+        f.mixerError = .Model(message: "Strip 9 is not in this song.")
+        let token = String(repeating: "c", count: 32)
+        let o = run(.coProducerApply(token: token, plan: mixerPlan() + mixerPlan("mixer.remove_bus"), window: nil, client: nil), s, id)
+        guard case .coProducerApplied(_, let lines, _) = result(o) else {
+            Issue.record("not applied: \(o)")
+            return
+        }
+        #expect(lines == [
+            "mixer.set_strip: Strip 9 is not in this song.", "mixer.remove_bus: not run (an earlier command failed)",
+        ])
+        #expect(m.alert == nil)
+        #expect(m.coProducerApproval == nil)
+    }
+
+    /// Plan 8d Task 5 (Task 4's carry): a mixer edit runs only after a
+    /// take. `command.run` of one is refused before enter; through
+    /// `co_producer.apply` it runs between the take and leave; a refused
+    /// take or the composer's no runs nothing.
+    @Test func mixerEditsRunOnlyAfterATake() throws {
+        let (s, id, m, f) = try demo()
+        let strip = int("strip", 1)
+        for edit in MixerCommands.coProducerEdits where edit != "track.new_plugin_instrument" {
+            let o = run(command(edit, [strip]), s, id)
+            #expect(failure(o)?.code == .notAllowed, "\(edit): \(o)")
+        }
+        // A new bus fed from a strip changes that strip: a change.
+        #expect(failure(run(command(MixerCommands.newBus, [strip]), s, id))?.code == .notAllowed)
+        #expect(f.coLog.isEmpty)
+        #expect(f.mixerRuns.isEmpty)
+        #expect(f.calls.isEmpty)
+
+        // A new plug-in instrument track adds: it runs between enter and leave.
+        let added = run(
+            command("track.new_plugin_instrument", [ControlArg(name: "plugin", value: .text(value: "built-in-synth"))]),
+            s, id)
+        #expect(failure(added) == nil, "\(added)")
+        #expect(f.coLog == ["enter \(stamp)", "runMixer track.new_plugin_instrument", "leave"])
+
+        // After the take.
+        f.coLog = []
+        let token = String(repeating: "d", count: 32)
+        let applied = run(.coProducerApply(token: token, plan: mixerPlan(), window: nil, client: nil), s, id)
+        guard case .coProducerApplied(_, let lines, _) = result(applied) else {
+            Issue.record("not applied: \(applied)")
+            return
+        }
+        #expect(lines == ["mixer.set_strip: done"])
+        #expect(f.coLog == ["enter \(stamp)", "take", "runMixer mixer.set_strip", "leave"])
+
+        // A refused take runs nothing.
+        f.coLog = []
+        f.coTakeError = .Model(message: "This preview was already used or replaced.")
+        _ = run(.coProducerApply(token: token, plan: mixerPlan(), window: nil, client: nil), s, id)
+        #expect(f.coLog == ["enter \(stamp)", "take", "leave"])
+        f.coTakeError = nil
+
+        // The composer's no runs nothing, and takes nothing.
+        f.coLog = []
+        let runs = f.mixerRuns.count
+        let denied = CoProducerCommands.run(
+            .coProducerApply(token: token, plan: mixerPlan(), window: nil, client: nil), doc: (id, m), store: s,
+            host: host, stamp: stamp, peer: nil, approver: FakeApprover(.deny))
+        #expect(failure(denied)?.message == CoProducerCommands.notAllowed)
+        #expect(f.coLog.isEmpty)
+        #expect(f.mixerRuns.count == runs)
     }
 
     /// Plan 8b Task 5: the notes, a note and an export folder reach the

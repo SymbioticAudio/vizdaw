@@ -53,6 +53,11 @@ public final class CoProducerSettings {
     @ObservationIgnored public var environment: [String: String]
     /// The clock approvals are dated and timed by.
     @ObservationIgnored public var now: @MainActor () -> Date = { Date() }
+    /// The plug-ins Co-Producer may use (`co_producer.plugins`, plan 8d
+    /// Ruling 5): the core's list; tests give their own.
+    @ObservationIgnored public var pluginList: @MainActor (PluginKindTag?) -> CoProducerPluginsRow = {
+        coProducerPlugins(kind: $0)
+    }
     /// Identities worked out this listening session, by connection and
     /// label (Ruling 11). Connection numbers restart with the server, so
     /// this is emptied whenever the switch turns on or off.

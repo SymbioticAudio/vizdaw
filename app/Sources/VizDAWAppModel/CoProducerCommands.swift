@@ -40,7 +40,7 @@ public enum CoProducerCommands {
             }
             // The gate refuses these first; the app refuses them again, so a
             // change to the composer's work runs only after a yes (8c Ruling 3).
-            if changesWork.contains(id) {
+            if changesWork(id, args) {
                 return .failed(.of(
                     .notAllowed,
                     "\(id) changes your work: preview it with co_producer.preview and apply it with the composer's yes."))
@@ -119,9 +119,17 @@ public enum CoProducerCommands {
         case .coProducerExport(let what, let parent, let strips, _):
             guard let (docID, m) = doc else { return noDocument }
             return export(what, parent: parent, strips: strips, docID, m, store, host, stamp: stamp)
-        case .coProducerPlugins, .coProducerParams:
-            // Plan 8d Task 5 answers these.
-            return .failed(.of(.unavailable, "Not ready yet."))
+        case .coProducerPlugins(let kind):
+            // A read of the catalog: no document, nothing entered.
+            let list = host.coProducer.pluginList(kind)
+            return .done(.coProducerPlugins(plugins: list.plugins, truncated: list.truncated))
+        case .coProducerParams(let slot, _):
+            guard let (docID, m) = doc else { return noDocument }
+            do {
+                return .done(.coProducerParams(doc: docID.uuidString, row: try m.session.coProducerParams(slot: slot)))
+            } catch {
+                return .failed(failure(error))
+            }
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }
@@ -183,6 +191,16 @@ public enum CoProducerCommands {
     /// The chores that change or remove the composer's work (plan 8c
     /// Rulings 2–4): only through `co_producer.apply`, after a yes.
     static let changesWork: Set<String> = ControlCommands.chores.subtracting(["marker.add"])
+
+    /// Whether `id` with `args` changes or removes the composer's work, so
+    /// runs only through `co_producer.apply` after its take: the chores,
+    /// plan 8d's twelve mixer edits, and a new bus fed from a strip
+    /// (8d Ruling 1). A new plug-in instrument track only adds.
+    static func changesWork(_ id: String, _ args: [ControlArg]) -> Bool {
+        if changesWork.contains(id) { return true }
+        if id == MixerCommands.newBus { return args.contains { $0.name == "strip" } }
+        return MixerCommands.coProducerEdits.contains(id) && id != MixerCommands.newPluginInstrument
+    }
 
     /// The file outward command `id` writes: its `path`, unless it is a dry
     /// run, which writes nothing.

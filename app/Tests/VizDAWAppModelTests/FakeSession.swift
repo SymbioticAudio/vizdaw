@@ -412,11 +412,31 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if readBusy { throw VizError.Busy(message: "plugin host is busy") }
         return paramTable[slot] ?? []
     }
+    /// Plan 8d Task 5: every `runMixer` call, with its arguments as given.
+    var mixerRuns: [(id: String, args: [ControlArg])] = []
+    /// Plan 8d Task 4's one call: logged in `coLog` ("runMixer <id>") and
+    /// `calls`, and recorded in `mixerRuns` before `mixerError` throws.
+    /// `track.new_plugin_instrument` adds an "Inst N" row to `seq` (below
+    /// `after` when it names a row), as `newTrack` does.
+    func runMixer(id: String, args: [ControlArg]) throws -> DocSnapshot {
+        coLog.append("runMixer \(id)")
+        mixerRuns.append((id, args))
+        let r = try mixerCall("runMixer \(id)")
+        func whole(_ name: String) -> UInt64? {
+            guard case .int(let v) = args.first(where: { $0.name == name })?.value else { return nil }
+            return UInt64(exactly: v)
+        }
+        if id == "track.new_plugin_instrument", let seq = whole("seq"), var rows = laneTable[seq] {
+            var row = lane((rows.map(\.id).max() ?? 0) + 1, "Inst \(rows.count + 1)", kind: .instrument)
+            row.midiDest = 1
+            let at = whole("after").flatMap { a in rows.firstIndex { $0.id == a } }.map { $0 + 1 } ?? rows.count
+            rows.insert(row, at: at)
+            laneTable[seq] = rows
+        }
+        return r
+    }
     /// Plan 8d Task 3: a slot of `paramTable` answers running with its
     /// shown parameters; any other slot is not in this song.
-    func runMixer(id: String, args: [ControlArg]) throws -> DocSnapshot {
-        try mixerCall("runMixer \(id)")
-    }
     func coProducerParams(slot: UInt64) throws -> CoProducerParamsRow {
         if readBusy { throw VizError.Busy(message: "plugin host is busy") }
         guard let rows = paramTable[slot] else {
