@@ -490,6 +490,179 @@ fn solo_changes(
         .collect()
 }
 
+/// How a change to a Co-Producer bus cuts off what feeds it (owner,
+/// 2026-11-17; plan 8e Task 6c): it goes silent, or its output goes
+/// elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Cut {
+    /// Muted, or its fader set to −∞, by hand or by automation.
+    Silent,
+    /// Its output changed to this.
+    Rerouted(core_model::mixer::Output),
+}
+
+/// The strips that feed strip `bus` in `doc`, by output or send, directly
+/// or through other buses, in display order; never `bus` itself.
+fn feeders(
+    doc: &core_model::document::Document,
+    bus: core_model::ids::StripId,
+) -> Vec<core_model::ids::StripId> {
+    use core_model::mixer::Output;
+    let m = doc.mixer();
+    let mut reached = std::collections::BTreeSet::from([bus]);
+    let mut todo = vec![bus];
+    while let Some(t) = todo.pop() {
+        for s in m.strips().values() {
+            let feeds = s.output == Output::Bus(t) || s.sends.iter().any(|x| x.target == t);
+            if feeds && reached.insert(s.id) {
+                todo.push(s.id);
+            }
+        }
+    }
+    reached.remove(&bus);
+    let mut ids: Vec<_> = m
+        .order()
+        .iter()
+        .copied()
+        .filter(|id| reached.contains(id))
+        .collect();
+    ids.extend(reached.into_iter().filter(|id| !m.order().contains(id)));
+    ids
+}
+
+/// "Kick", "Kick and Snare", "Kick, Snare and Bass", "Kick, Snare, Bass
+/// and 2 more"; with whether it names more than one.
+fn names_text(names: &[String]) -> (String, bool) {
+    const SHOWN: usize = 3;
+    let plural = names.len() > 1;
+    let text = match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        _ if names.len() > SHOWN => format!(
+            "{} and {} more",
+            names
+                .iter()
+                .take(SHOWN)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            names.len() - SHOWN
+        ),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    };
+    (text, plural)
+}
+
+/// Plan 8e Task 6c: each Co-Producer bus (in `before`) that the step from
+/// `before` to `after` mutes, sets to −∞ or re-routes, or whose automation
+/// in `cmds` mutes it (a point of 1) or sets its fader to −∞, while a strip
+/// not Co-Producer's feeds it, directly or through other buses. Each is
+/// its item's thing ("Strip <name>") and the line its item adds. Unmuting,
+/// other fader moves and everything else stay free.
+fn cut_lines(
+    before: &core_model::document::Document,
+    after: &core_model::document::Document,
+    cmds: &[core_model::command::Command],
+) -> Vec<(String, String)> {
+    use core_model::automation::{AutomationTarget, fader_db, switch_on};
+    use core_model::command::Command;
+    use core_model::mixer::{GAIN_FLOOR_DB, Output, StripKind};
+    let automated = |bus: core_model::ids::StripId| {
+        cmds.iter().any(|c| match c {
+            Command::WriteAutomation(w) => match w.target {
+                AutomationTarget::StripMute(s) if s == bus => {
+                    w.points.iter().any(|(_, v)| switch_on(*v))
+                }
+                AutomationTarget::StripFader(s) if s == bus => {
+                    w.points.iter().any(|(_, v)| fader_db(*v) <= GAIN_FLOOR_DB)
+                }
+                _ => false,
+            },
+            _ => false,
+        })
+    };
+    let mut out = Vec::new();
+    for id in before.mixer().order() {
+        let Ok(b) = before.mixer().strip(*id) else {
+            continue;
+        };
+        if b.kind != StripKind::Bus || !b.co_producer {
+            continue;
+        }
+        let Ok(a) = after.mixer().strip(*id) else {
+            continue;
+        };
+        let silent = (!b.mute && a.mute)
+            || (b.gain_db > GAIN_FLOOR_DB && a.gain_db <= GAIN_FLOOR_DB)
+            || automated(*id);
+        let cut = if silent {
+            Cut::Silent
+        } else if b.output != a.output {
+            Cut::Rerouted(a.output)
+        } else {
+            continue;
+        };
+        let names: Vec<String> = feeders(before, *id)
+            .into_iter()
+            .filter_map(|f| before.mixer().strip(f).ok())
+            .filter(|f| !f.co_producer)
+            .map(|f| diff::shown_name(&f.name))
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        let (who, plural) = names_text(&names);
+        let line = match cut {
+            Cut::Silent => {
+                format!(
+                    "{who} {} silent through it",
+                    if plural { "go" } else { "goes" }
+                )
+            }
+            Cut::Rerouted(o) => {
+                let to = match o {
+                    Output::Master => after.mixer().master(),
+                    Output::Bus(x) => x,
+                };
+                let to = after
+                    .mixer()
+                    .strip(to)
+                    .map(|x| diff::shown_name(&x.name))
+                    .unwrap_or_else(|_| "another strip".into());
+                format!(
+                    "{who} now {} {to} through it",
+                    if plural { "reach" } else { "reaches" }
+                )
+            }
+        };
+        out.push((format!("Strip {}", diff::shown_name(&b.name)), line));
+    }
+    out
+}
+
+/// `rows` with each of `lines` added after its strip item's parts (the
+/// last item of that thing), which then asks; an item of its own when
+/// the step lists none for it.
+fn with_cut_lines(
+    mut rows: Vec<ChangeItemRow>,
+    lines: Vec<(String, String)>,
+) -> Vec<ChangeItemRow> {
+    for (thing, line) in lines {
+        match rows.iter_mut().rev().find(|r| r.thing == thing) {
+            Some(r) => {
+                r.change = format!("{}; {line}", r.change);
+                r.composers_work = true;
+            }
+            None => rows.push(ChangeItemRow {
+                thing,
+                change: line,
+                composers_work: true,
+            }),
+        }
+    }
+    rows
+}
+
 /// The running plug-ins' parameter names and values, as `describe_with`
 /// reads them.
 fn param_lookup(
@@ -556,18 +729,20 @@ pub fn preview_items(
                 let lookup = param_lookup(host);
                 let theirs = crate::mixer_chores::feeds_composers_bus(&before, h.doc());
                 let soloed = solo_changes(&before, h.doc());
-                out.extend(
-                    mixer_rows(diff::describe_with(&before, h.doc(), &lookup), theirs).map(
-                        |mut r| {
+                let step: Vec<ChangeItemRow> =
+                    mixer_rows(diff::describe_with(&before, h.doc(), &lookup), theirs)
+                        .map(|mut r| {
                             // A solo change's strip item asks, whoever's
                             // strip it is.
                             if soloed.iter().any(|(thing, _)| *thing == r.thing) {
                                 r.composers_work = true;
                             }
                             r
-                        },
-                    ),
-                );
+                        })
+                        .collect();
+                // Plan 8e Task 6c: silencing or re-routing a Co-Producer
+                // bus the composer's tracks feed asks.
+                out.extend(with_cut_lines(step, cut_lines(&before, h.doc(), &cmds)));
                 out.extend(soloed.into_iter().map(|(thing, on)| {
                     ChangeItemRow {
                         thing,
@@ -609,16 +784,19 @@ pub fn preview_items(
                         _ => None,
                     })
                     .collect();
-                out.extend(
-                    mixer_rows(diff::describe_with(&before, h.doc(), &lookup), false).map(
-                        |mut r| {
+                let step: Vec<ChangeItemRow> =
+                    mixer_rows(diff::describe_with(&before, h.doc(), &lookup), false)
+                        .map(|mut r| {
                             if soloed.contains(&r.thing) {
                                 r.composers_work = true;
                             }
                             r
-                        },
-                    ),
-                );
+                        })
+                        .collect();
+                // Plan 8e Task 6c: automation that mutes a Co-Producer bus
+                // the composer's tracks feed, or sets its fader to −∞,
+                // asks.
+                out.extend(with_cut_lines(step, cut_lines(&before, h.doc(), &cmds)));
                 out.extend(soloed.into_iter().map(|thing| ChangeItemRow {
                     thing,
                     change: "soloed: other tracks are silent while it's on".into(),

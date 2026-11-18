@@ -1329,15 +1329,16 @@ mod task4 {
         let p = s.co_producer_preview(plan.clone()).unwrap();
         take_and_run(s, p.token, &plan).unwrap();
         assert_eq!(strip_row(s, t.kick).output, Some(t.drums));
-        // A plan on Co-Producer's own strips needs no approval.
+        // A plan on Co-Producer's own strips needs no approval. (Muting
+        // Drums would ask now that Kick feeds it: plan 8e Task 6c.)
         let free = vec![planned(
             "mixer.set_strip",
-            vec![id("strip", t.drums), flag("mute", true)],
+            vec![id("strip", t.drums), text("gain_db", "-3")],
         )];
         let p = s.co_producer_preview(free.clone()).unwrap();
         assert!(!p.needs_yes);
         take_with(s, p.token, &free, CoProducerApproval::None).unwrap();
-        assert!(strip_row(s, t.drums).mute);
+        assert_eq!(strip_row(s, t.drums).gain_db, -3.0);
         s.co_producer_end().unwrap();
         t.s.close().unwrap();
     }
