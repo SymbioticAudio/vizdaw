@@ -348,6 +348,28 @@ fn mixer_rows(items: Vec<ChangeItem>, feeds_theirs: bool) -> impl Iterator<Item 
     })
 }
 
+/// The strips whose solo changed from `before` to `after`, as the list
+/// names them ("Strip <name>", by the name before), with the solo now.
+/// Controller ruling (plan 8d Task 4 review): every solo change asks, on
+/// any strip, on or off, since a solo silences every strip outside its
+/// reach, the composer's tracks included.
+fn solo_changes(
+    before: &core_model::document::Document,
+    after: &core_model::document::Document,
+) -> Vec<(String, bool)> {
+    let now = after.mixer().strips();
+    before
+        .mixer()
+        .order()
+        .iter()
+        .chain(std::iter::once(&before.mixer().master()))
+        .filter_map(|id| {
+            let (b, a) = (before.mixer().strip(*id).ok()?, now.get(id)?);
+            (b.solo != a.solo).then(|| (format!("Strip {}", diff::shown_name(&b.name)), a.solo))
+        })
+        .collect()
+}
+
 /// What `plan` would change (Ruling 6), worked out in order on a clone of
 /// `history` with Co-Producer acting, as the apply will run it. `package`
 /// is the song's file, if saved; `host` resolves plug-ins and reads the
@@ -404,10 +426,31 @@ pub fn preview_items(
                         .map(|r| (r.name, r.value))
                 };
                 let theirs = crate::mixer_chores::feeds_composers_bus(&before, h.doc());
-                out.extend(mixer_rows(
-                    diff::describe_with(&before, h.doc(), &lookup),
-                    theirs,
-                ));
+                let soloed = solo_changes(&before, h.doc());
+                out.extend(
+                    mixer_rows(diff::describe_with(&before, h.doc(), &lookup), theirs).map(
+                        |mut r| {
+                            // A solo change's strip item asks, whoever's
+                            // strip it is.
+                            if soloed.iter().any(|(thing, _)| *thing == r.thing) {
+                                r.composers_work = true;
+                            }
+                            r
+                        },
+                    ),
+                );
+                out.extend(soloed.into_iter().map(|(thing, on)| {
+                    ChangeItemRow {
+                        thing,
+                        change: if on {
+                            "soloed: other tracks are silent while it's on"
+                        } else {
+                            "unsoloed: other tracks play again"
+                        }
+                        .into(),
+                        composers_work: true,
+                    }
+                }));
             }
             "edit.undo" | "edit.redo" => {
                 let undo = p.id == "edit.undo";

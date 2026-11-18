@@ -1249,6 +1249,59 @@ mod task4 {
     }
 
     #[test]
+    fn every_solo_change_asks() {
+        if !in_temp_home("task4::every_solo_change_asks") {
+            return;
+        }
+        let _g = serial();
+        let t = song();
+        let s = &t.s;
+        s.co_producer_begin("solo the drums".into()).unwrap();
+        let solo = |on: bool| {
+            vec![planned(
+                "mixer.set_strip",
+                vec![id("strip", t.drums), flag("solo", on)],
+            )]
+        };
+        // Soloing Co-Producer's own Drums silences the composer's tracks.
+        let p = s.co_producer_preview(solo(true)).unwrap();
+        assert!(p.needs_yes, "{p:?}");
+        assert!(
+            items(&p).contains(&(
+                "Strip Drums (Co-Producer)".into(),
+                "soloed: other tracks are silent while it's on".into(),
+                true
+            )),
+            "{p:?}"
+        );
+        assert!(p.items.iter().all(|i| i.composers_work), "{p:?}");
+        take_and_run(s, p.token, &solo(true)).unwrap();
+        assert!(strip_row(s, t.drums).solo);
+        // Unsoloing it asks too.
+        let p = s.co_producer_preview(solo(false)).unwrap();
+        assert!(p.needs_yes, "{p:?}");
+        assert!(
+            items(&p).contains(&(
+                "Strip Drums (Co-Producer)".into(),
+                "unsoloed: other tracks play again".into(),
+                true
+            )),
+            "{p:?}"
+        );
+        take_and_run(s, p.token, &solo(false)).unwrap();
+        // A mute of Co-Producer's own strip silences only it: free.
+        let p = s
+            .co_producer_preview(vec![planned(
+                "mixer.set_strip",
+                vec![id("strip", t.drums), flag("mute", true)],
+            )])
+            .unwrap();
+        assert!(!p.needs_yes, "{p:?}");
+        s.co_producer_end().unwrap();
+        t.s.close().unwrap();
+    }
+
+    #[test]
     fn a_composers_strip_needs_a_granted_take() {
         if !in_temp_home("task4::a_composers_strip_needs_a_granted_take") {
             return;
