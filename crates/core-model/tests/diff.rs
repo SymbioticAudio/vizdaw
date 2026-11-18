@@ -1,10 +1,12 @@
 //! What a change does, in plain items (plan 8a Task 4, Ruling 6): the
 //! list the composer says yes to.
 
+use core_model::automation::{AutomationTarget, SendIndex};
 use core_model::command::{
-    AudioCmd, Command, EventCmd, LaneCmd, MediaCmd, MixerCmd, RoutingCmd, SequenceCmd, apply,
+    AudioCmd, AutomationWrite, Command, EventCmd, LaneCmd, MediaCmd, MixerCmd, RoutingCmd,
+    SequenceCmd, apply,
 };
-use core_model::diff::{ChangeItem, MAX_PARTS, describe, describe_with, instrument_strip};
+use core_model::diff::{ChangeItem, MAX_PARTS, bar_of, describe, describe_with, instrument_strip};
 use core_model::document::{DestKind, Document};
 use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
 use core_model::file::{from_json, to_json};
@@ -1197,5 +1199,203 @@ fn an_instruments_own_slot_is_listed() {
     assert_eq!(
         describe(&off, &d),
         vec![item("Strip Synth", "instrument Synth turned back on")]
+    );
+}
+
+// ---- Plan 8e Ruling 4: automation in the preview ----
+
+/// One 4/4 bar.
+const BAR: i64 = 4 * core_model::time::PPQ;
+
+/// A write of `n` points of `target` spread over bars 9–12 of
+/// sequence 0 (none for a clear), over the whole of those bars.
+fn automate(target: AutomationTarget, n: i64) -> Command {
+    Command::WriteAutomation(AutomationWrite {
+        seq: SeqId(0),
+        target,
+        start: Tick(8 * BAR),
+        end: Tick(12 * BAR - 1),
+        points: (0..n)
+            .map(|i| (Tick(8 * BAR + i * (4 * BAR / n.max(1))), 0.5))
+            .collect(),
+        lane_name: "Automation".into(),
+    })
+}
+
+/// The item about strip `name`.
+fn strip_item(items: &[ChangeItem], name: &str) -> ChangeItem {
+    let thing = format!("Strip {name}");
+    items
+        .iter()
+        .find(|i| i.thing == thing)
+        .unwrap_or_else(|| panic!("no {thing} in {items:?}"))
+        .clone()
+}
+
+#[test]
+fn automation_is_a_strip_part() {
+    let d = mix();
+    let kick = bus(&d, "Kick");
+    let written = run(&d, automate(AutomationTarget::StripFader(kick), 12));
+    assert_eq!(
+        describe(&d, &written),
+        vec![
+            item("Track 3, Automation", "added"),
+            item(
+                "Strip Kick",
+                "fader automation 0 points → 12 points, bars 9–12"
+            ),
+        ]
+    );
+    let cleared = run(&written, automate(AutomationTarget::StripFader(kick), 0));
+    assert_eq!(
+        describe(&written, &cleared),
+        vec![item("Strip Kick", "fader automation cleared, bars 9–12")]
+    );
+    // Pan, mute and solo have their own labels.
+    for (target, label) in [
+        (AutomationTarget::StripPan(kick), "pan"),
+        (AutomationTarget::StripMute(kick), "mute"),
+        (AutomationTarget::StripSolo(kick), "solo"),
+    ] {
+        let after = run(&d, automate(target, 4));
+        assert_eq!(
+            strip_item(&describe(&d, &after), "Kick").change,
+            format!("{label} automation 0 points → 4 points, bars 9–12")
+        );
+    }
+    // A send names its bus.
+    let drums = bus(&d, "Drums (Co-Producer)");
+    let sent = exec(
+        &d,
+        vec![MixerCmd::AddSend {
+            strip: kick,
+            send: AuxSend::new(drums),
+        }],
+    );
+    let send = run(
+        &sent,
+        automate(AutomationTarget::SendLevel(kick, SendIndex(0)), 12),
+    );
+    assert_eq!(
+        strip_item(&describe(&sent, &send), "Kick"),
+        item(
+            "Strip Kick",
+            "send to Drums (Co-Producer) automation 0 points → 12 points, bars 9–12"
+        )
+    );
+    // A parameter names its slot and, from the lookup, itself.
+    let lookup =
+        |_: PluginInstanceId, p: ParamId| (p == ParamId(3)).then(|| ("Cutoff".into(), 0.5));
+    let with = exec(&d, vec![add_insert(kick, "Test Gain")]);
+    let slot = inserts(&with, kick)[0];
+    let swept = run(
+        &with,
+        automate(AutomationTarget::PluginParam(slot, ParamId(3)), 12),
+    );
+    assert_eq!(
+        strip_item(&describe_with(&with, &swept, &lookup), "Kick").change,
+        "Test Gain Cutoff automation 0 points → 12 points, bars 9–12"
+    );
+    assert_eq!(
+        strip_item(&describe(&with, &swept), "Kick").change,
+        "Test Gain parameter 3 automation 0 points → 12 points, bars 9–12"
+    );
+    // An instrument slot's parameter joins its main strip's item.
+    let synth = instrument_slot(&d);
+    let played = run(
+        &d,
+        automate(AutomationTarget::PluginParam(synth, ParamId(3)), 12),
+    );
+    assert_eq!(
+        strip_item(&describe_with(&d, &played, &lookup), "Synth"),
+        item(
+            "Strip Synth",
+            "Synth Cutoff automation 0 points → 12 points, bars 9–12"
+        )
+    );
+    // On Co-Producer's own bus the item is Co-Producer's.
+    let own = run(&d, automate(AutomationTarget::StripFader(drums), 12));
+    assert_eq!(
+        strip_item(&describe(&d, &own), "Drums (Co-Producer)"),
+        ours(
+            "Strip Drums (Co-Producer)",
+            "fader automation 0 points → 12 points, bars 9–12"
+        )
+    );
+    // Rewriting part of a curve counts the points of the changed bars.
+    let redone = run(
+        &written,
+        Command::WriteAutomation(AutomationWrite {
+            seq: SeqId(0),
+            target: AutomationTarget::StripFader(kick),
+            start: Tick(10 * BAR),
+            end: Tick(11 * BAR - 1),
+            points: vec![(Tick(10 * BAR), 0.25)],
+            lane_name: "Automation".into(),
+        }),
+    );
+    assert_eq!(
+        describe(&written, &redone),
+        vec![item(
+            "Strip Kick",
+            "fader automation 3 points → 1 point, bars 11–11"
+        )]
+    );
+}
+
+#[test]
+fn bars_follow_the_meter() {
+    use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
+    let d = song();
+    let q = core_model::time::PPQ;
+    assert_eq!(bar_of(&d, SeqId(0), Tick(0)), 1);
+    assert_eq!(bar_of(&d, SeqId(0), Tick(3 * q)), 1);
+    assert_eq!(bar_of(&d, SeqId(0), Tick(4 * q)), 2);
+    let waltz = run(
+        &d,
+        Command::Sequence(SequenceCmd::SetMeter {
+            seq: SeqId(0),
+            meter: MeterMap::new(vec![MeterEntry {
+                tick: Tick(0),
+                meter: Meter { num: 3, den: 4 },
+                key: KeySig::default(),
+            }])
+            .unwrap(),
+        }),
+    );
+    assert_eq!(bar_of(&waltz, SeqId(0), Tick(3 * 15_360)), 2);
+    assert_eq!(bar_of(&waltz, SeqId(0), Tick(3 * 15_360 - 1)), 1);
+    // Before bar 1 and in an unknown sequence it is bar 1.
+    assert_eq!(bar_of(&waltz, SeqId(0), Tick(-q)), 1);
+    assert_eq!(bar_of(&waltz, SeqId(9), Tick(10 * q)), 1);
+}
+
+#[test]
+fn automation_parts_count_toward_the_cap() {
+    let d = mix();
+    let kick = bus(&d, "Kick");
+    let d = exec(&d, vec![add_insert(kick, "Test Gain")]);
+    let slot = inserts(&d, kick)[0];
+    let mut h = History::new(d.clone());
+    for i in 0..20 {
+        h.execute(
+            &automate(AutomationTarget::PluginParam(slot, ParamId(i)), 1),
+            &ViewFilter::default(),
+        )
+        .unwrap();
+    }
+    let item = strip_item(&describe(&d, h.doc()), "Kick");
+    // An automation part holds ", bars", so the parts are told apart by
+    // how each starts.
+    let parts: Vec<&str> = item.change.split(", Test Gain ").collect();
+    assert_eq!(parts.len(), MAX_PARTS);
+    assert_eq!(
+        parts[0],
+        "Test Gain parameter 0 automation 0 points → 1 point, bars 9–9"
+    );
+    assert_eq!(
+        parts[11],
+        "parameter 11 automation 0 points → 1 point, bars 9–9, and 8 more changes"
     );
 }

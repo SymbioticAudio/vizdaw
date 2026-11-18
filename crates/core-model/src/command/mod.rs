@@ -100,6 +100,10 @@ pub enum Command {
     Settings(SettingsCmd),
     /// A finished recording pass, applied whole (sub-project 5 spec §4.7).
     Record(RecordPass),
+    /// Writes points over a range of one target, as a Write pass does
+    /// (plan 8e Ruling 2): the target's points in `start..=end` go and the
+    /// new ones take their place. Name "Write Automation".
+    WriteAutomation(AutomationWrite),
     /// Select events by rule, then optionally modify them (or copies).
     SelectAndModify {
         /// Rule; `None` uses the current selection as is.
@@ -142,6 +146,7 @@ impl Command {
             Command::Mixer(c) => c.name(),
             Command::Settings(c) => c.name(),
             Command::Record(p) => p.name(),
+            Command::WriteAutomation(_) => "Write Automation",
             Command::SelectAndModify { modify, .. } => {
                 modify.as_ref().map_or("Select", Modify::name)
             }
@@ -212,6 +217,10 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
         }
         Command::Record(p) => {
             record::apply(&mut d, p, &mut report)?;
+            None
+        }
+        Command::WriteAutomation(w) => {
+            record::write_automation(&mut d, w, &mut report)?;
             None
         }
         Command::SelectAndModify {

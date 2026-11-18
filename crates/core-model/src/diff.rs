@@ -5,12 +5,14 @@
 //! Claude gave a track, sequence or bus can never add or hide lines in
 //! that list.
 
+use crate::automation::{AutomationTarget, strip_of};
 use crate::document::{DestKind, Document};
 use crate::event::{Event, EventBody};
 use crate::ids::{DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
 use crate::lane::Lane;
 use crate::mixer::{AuxSend, GAIN_FLOOR_DB, Output, ParamId, PluginSlot, Strip, StripKind, Swatch};
 use crate::sequence::{Marker, Sequence};
+use crate::time::Tick;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One thing a change does.
@@ -362,6 +364,7 @@ fn colour(c: Option<Swatch>) -> &'static str {
 }
 
 fn strips(before: &Document, after: &Document, params: ParamLookup, out: &mut Vec<ChangeItem>) {
+    let mut automation = automation_parts(before, after, params);
     let (b, a) = (before.mixer().strips(), after.mixer().strips());
     for id in strip_order(before) {
         if let (Some(s), None) = (b.get(&id), a.get(&id)) {
@@ -384,7 +387,9 @@ fn strips(before: &Document, after: &Document, params: ParamLookup, out: &mut Ve
                 old.co_producer,
             ));
         }
-        let parts = capped(mixer_parts(before, after, old, s, params));
+        let mut parts = mixer_parts(before, after, old, s, params);
+        parts.extend(automation.remove(&id).unwrap_or_default());
+        let parts = capped(parts);
         if !parts.is_empty() {
             out.push(item_of(strip(&old.name), parts.join(", "), old.co_producer));
         }
@@ -749,6 +754,134 @@ fn param_parts(a: &PluginSlot, b: &PluginSlot, params: ParamLookup, parts: &mut 
     }
 }
 
+/// The 1-based bar a tick falls in, from `seq`'s meter: bar 1 for a
+/// tick before it, or a sequence `doc` does not have.
+pub fn bar_of(doc: &Document, seq: SeqId, tick: Tick) -> u32 {
+    let Ok(s) = doc.sequence(seq) else { return 1 };
+    u32::try_from(s.meter.tick_to_bbu(tick, 1).bar)
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// Every automation point of `doc`, by target and sequence, then by ID:
+/// its tick and value. Points of every take of every lane count.
+type Points = BTreeMap<(AutomationTarget, SeqId), BTreeMap<EventId, (Tick, f64)>>;
+
+fn automation_points(doc: &Document) -> Points {
+    let mut out: Points = BTreeMap::new();
+    for (id, seq) in doc.sequences() {
+        for e in seq
+            .lanes
+            .iter()
+            .flat_map(|l| l.takes.iter())
+            .flat_map(|t| t.events.values())
+        {
+            if let EventBody::Automation { target, value } = e.body {
+                out.entry((target, *id))
+                    .or_default()
+                    .insert(e.id, (e.tick, value));
+            }
+        }
+    }
+    out
+}
+
+/// What a target's automation part calls it (plan 8e Ruling 4): `fader`,
+/// `pan`, `mute`, `solo`, `send to <bus>` or `<slot name> <param name>`;
+/// `None` for a target no strip shows.
+fn automation_label(
+    before: &Document,
+    after: &Document,
+    target: AutomationTarget,
+    params: ParamLookup,
+) -> Option<String> {
+    Some(match target {
+        AutomationTarget::StripFader(_) => "fader".into(),
+        AutomationTarget::StripPan(_) => "pan".into(),
+        AutomationTarget::StripMute(_) => "mute".into(),
+        AutomationTarget::StripSolo(_) => "solo".into(),
+        AutomationTarget::SendLevel(s, i) => {
+            let send_to = |d: &Document| {
+                d.mixer()
+                    .strip(s)
+                    .ok()
+                    .and_then(|x| x.sends.get(usize::from(i.0)))
+                    .map(|x| x.target)
+            };
+            match send_to(after).or_else(|| send_to(before)) {
+                Some(t) => format!("send to {}", either_name(before, after, t)),
+                None => format!("send {}", u32::from(i.0) + 1),
+            }
+        }
+        AutomationTarget::PluginParam(p, id) => {
+            let slot = after.plugin_slot(p).or_else(|| before.plugin_slot(p))?;
+            let name = params(p, id)
+                .map_or_else(|| format!("parameter {}", id.0), |(n, _)| shown_name(&n));
+            format!("{} {name}", shown_name(&slot.plugin.name))
+        }
+        AutomationTarget::VelocityScale(_) => return None,
+    })
+}
+
+/// Ruling 4's automation parts, by the strip whose item they join: for
+/// each target and sequence whose points differ, `<label> automation <n>
+/// points → <m> points, bars <a>–<b>` (or `<label> automation cleared,
+/// bars <a>–<b>` when none are left), over the ticks from the first to
+/// the last point that went, came or changed.
+fn automation_parts(
+    before: &Document,
+    after: &Document,
+    params: ParamLookup,
+) -> BTreeMap<StripId, Vec<String>> {
+    let (b, a) = (automation_points(before), automation_points(after));
+    let keys: BTreeSet<(AutomationTarget, SeqId)> = b.keys().chain(a.keys()).copied().collect();
+    let none = BTreeMap::new();
+    let mut out: BTreeMap<StripId, Vec<String>> = BTreeMap::new();
+    for key in keys {
+        let (target, seq) = key;
+        let (old, new) = (b.get(&key).unwrap_or(&none), a.get(&key).unwrap_or(&none));
+        let differ = |x: &BTreeMap<EventId, (Tick, f64)>, y: &BTreeMap<EventId, (Tick, f64)>| {
+            x.iter()
+                .filter(|(id, p)| y.get(id) != Some(p))
+                .map(|(_, (t, _))| *t)
+                .collect::<Vec<Tick>>()
+        };
+        let mut changed = differ(old, new);
+        changed.extend(differ(new, old));
+        let (Some(lo), Some(hi)) = (changed.iter().min().copied(), changed.iter().max().copied())
+        else {
+            continue;
+        };
+        let Some(strip) = strip_of(after, target).or_else(|| strip_of(before, target)) else {
+            continue;
+        };
+        let Some(label) = automation_label(before, after, target, params) else {
+            continue;
+        };
+        let within = |m: &BTreeMap<EventId, (Tick, f64)>| {
+            m.values().filter(|(t, _)| (lo..=hi).contains(t)).count()
+        };
+        let (n, m) = (within(old), within(new));
+        let doc = if after.sequence(seq).is_ok() {
+            after
+        } else {
+            before
+        };
+        let bars = format!("bars {}–{}", bar_of(doc, seq, lo), bar_of(doc, seq, hi));
+        let part = if m == 0 {
+            format!("{label} automation cleared, {bars}")
+        } else {
+            format!(
+                "{label} automation {} → {}, {bars}",
+                count(n, "point", "points"),
+                count(m, "point", "points")
+            )
+        };
+        out.entry(strip).or_default().push(part);
+    }
+    out
+}
+
 /// Plain items for what differs from `before` to `after` (Ruling 6): by
 /// sequence then track order, then strips; `[]` when they are equal, and
 /// one "The song" / "other changes" when they differ in nothing listed.
@@ -756,7 +889,8 @@ fn param_parts(a: &PluginSlot, b: &PluginSlot, params: ParamLookup, parts: &mut 
 /// change for a removal and after it otherwise.
 ///
 /// A strip present before and after gets one item for its mixer changes
-/// (plan 8d Ruling 4), after its rename and colour items.
+/// (plan 8d Ruling 4), after its rename and colour items; its automation
+/// changes (plan 8e Ruling 4) follow the parameters in that item.
 pub fn describe(before: &Document, after: &Document) -> Vec<ChangeItem> {
     describe_with(before, after, &|_, _| None)
 }
