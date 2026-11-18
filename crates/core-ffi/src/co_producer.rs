@@ -495,7 +495,7 @@ fn solo_changes(
 /// elsewhere.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Cut {
-    /// Muted, or its fader set to −∞, by hand or by automation.
+    /// Removed, muted, or its fader set to −∞, by hand or by automation.
     Silent,
     /// Its output changed to this.
     Rerouted(core_model::mixer::Output),
@@ -554,7 +554,7 @@ fn names_text(names: &[String]) -> (String, bool) {
 }
 
 /// Plan 8e Task 6c: each Co-Producer bus (in `before`) that the step from
-/// `before` to `after` mutes, sets to −∞ or re-routes, or whose automation
+/// `before` to `after` removes, mutes, sets to −∞ or re-routes, or whose automation
 /// in `cmds` mutes it (a point of 1) or sets its fader to −∞, while a strip
 /// not Co-Producer's feeds it, directly or through other buses. Each is
 /// its item's thing ("Strip <name>") and the line its item adds. Unmuting,
@@ -589,18 +589,19 @@ fn cut_lines(
         if b.kind != StripKind::Bus || !b.co_producer {
             continue;
         }
-        let Ok(a) = after.mixer().strip(*id) else {
-            continue;
-        };
-        let silent = (!b.mute && a.mute)
-            || (b.gain_db > GAIN_FLOOR_DB && a.gain_db <= GAIN_FLOOR_DB)
-            || automated(*id);
-        let cut = if silent {
-            Cut::Silent
-        } else if b.output != a.output {
-            Cut::Rerouted(a.output)
-        } else {
-            continue;
+        // Fix round 1: a removed bus silences what reaches it, as a mute
+        // does.
+        let cut = match after.mixer().strip(*id) {
+            Err(_) => Cut::Silent,
+            Ok(a)
+                if (!b.mute && a.mute)
+                    || (b.gain_db > GAIN_FLOOR_DB && a.gain_db <= GAIN_FLOOR_DB)
+                    || automated(*id) =>
+            {
+                Cut::Silent
+            }
+            Ok(a) if b.output != a.output => Cut::Rerouted(a.output),
+            Ok(_) => continue,
         };
         let names: Vec<String> = feeders(before, *id)
             .into_iter()

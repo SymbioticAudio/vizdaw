@@ -1369,7 +1369,13 @@ mod task4 {
         assert_eq!(
             items(&p),
             vec![
-                ("Strip Drums (Co-Producer)".into(), "deleted".into(), false),
+                // Plan 8e Task 6c, fix round 1: removing a Co-Producer
+                // bus the composer's Kick reaches asks, as a mute does.
+                (
+                    "Strip Drums (Co-Producer)".into(),
+                    "deleted; Kick goes silent through it".into(),
+                    true
+                ),
                 (
                     "Strip Kick".into(),
                     "output Drums (Co-Producer) → Master".into(),
@@ -1475,10 +1481,21 @@ mod task4 {
                     .find(|r| r.id == param.0)
                     .map(|r| (r.name.clone(), r.value))
             };
+            // Plan 8e Task 6c: removing Drums, which Kick still reaches,
+            // adds its line to Drums's item.
             let said: Vec<(String, String)> =
                 core_model::diff::describe_with(&start, &doc(s), &lookup)
                     .into_iter()
-                    .map(|i| (i.thing, i.change))
+                    .map(|i| {
+                        let line = if which == "mixer.remove_bus"
+                            && i.thing == "Strip Drums (Co-Producer)"
+                        {
+                            "; Kick goes silent through it"
+                        } else {
+                            ""
+                        };
+                        (i.thing, format!("{}{line}", i.change))
+                    })
                     .collect();
             let shown: Vec<(String, String)> =
                 p.items.into_iter().map(|i| (i.thing, i.change)).collect();

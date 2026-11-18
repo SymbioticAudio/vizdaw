@@ -437,3 +437,30 @@ fn a_silencing_preview_matches_what_the_apply_does() {
     s.co_producer_end().unwrap();
     s.close().unwrap();
 }
+
+/// Fix round 1: removing a Co-Producer bus the composer's sound reaches,
+/// here through another bus's send, asks as muting it does.
+#[test]
+fn removing_a_bus_the_composer_reaches_through_a_send_asks() {
+    let _g = serial();
+    let t = song();
+    let s = &t.s;
+    // Kick → Verb (Co-Producer's), and Verb sends to Drums.
+    s.set_output(t.kick, Some(t.verb)).unwrap();
+    s.co_producer_begin("send the verb".into()).unwrap();
+    let send = planned(
+        "mixer.add_send",
+        vec![id("strip", t.verb), id("bus", t.drums)],
+    );
+    let p = s.co_producer_preview(vec![send.clone()]).unwrap();
+    take_with(s, p.token, &[send], CoProducerApproval::Sheet).unwrap();
+    let remove = planned("mixer.remove_bus", vec![id("strip", t.drums)]);
+    let p = s.co_producer_preview(vec![remove]).unwrap();
+    assert!(p.needs_yes, "{p:?}");
+    assert_eq!(
+        item_of(&p, DRUMS),
+        ("deleted; Kick goes silent through it".into(), true)
+    );
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}

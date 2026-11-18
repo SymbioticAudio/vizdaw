@@ -180,9 +180,14 @@ fn a_removed_track_says_what_it_held() {
             lane: LaneId(0),
         }),
     );
+    // Its regions gave it an output path of its own, which goes with it
+    // (plan 8e Task 6c, fix round 1).
     assert_eq!(
         describe(&both, &gone),
-        vec![item("Track 1, Kick", "deleted, with 2 regions and 1 note")]
+        vec![
+            item("Track 1, Kick", "deleted, with 2 regions and 1 note"),
+            item("Strip Audio 1", "deleted"),
+        ]
     );
 }
 
