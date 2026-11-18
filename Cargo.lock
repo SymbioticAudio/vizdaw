@@ -425,7 +425,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-control"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "proptest",
  "serde_json",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "core-editor"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "core-model",
  "proptest",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "core-engine"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "core-engine",
  "core-media",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "core-ffi"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "core-control",
  "core-editor",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "core-host"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "clack-extensions",
  "clack-host",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "core-io"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "cfb",
  "core-engine",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "core-media"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "blake3",
  "core-model",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "core-model"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "criterion",
  "im",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "core-surface"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "core-model",
  "serde",
@@ -1085,7 +1085,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform-macos"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "block2",
  "core-engine",
@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "test-plugins"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "clack-extensions",
  "clack-host",
@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-bindgen"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "uniffi",
 ]
@@ -1795,7 +1795,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vizctl"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "core-control",
  "core-engine",
@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "vizdaw-mcp"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "core-control",
  "serde_json",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "vizdaw-play"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "clap",
  "core-engine",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "vizdaw-scan"
-version = "0.1.0"
+version = "26.0.0"
 dependencies = [
  "core-engine",
  "core-host",

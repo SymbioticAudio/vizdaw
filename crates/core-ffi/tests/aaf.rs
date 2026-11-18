@@ -1223,7 +1223,7 @@ fn options(seq: SeqId, embed: bool, stereo: ax::Stereo) -> ax::AafOptions {
 #[cfg(target_os = "macos")]
 fn env() -> ax::ExportEnv<'static> {
     ax::ExportEnv {
-        app_version: "0.1.0",
+        app_version: env!("CARGO_PKG_VERSION"),
         export_id: "00000000-0000-4000-8000-000000000001",
         modified: 1_700_000_000,
     }

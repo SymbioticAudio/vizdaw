@@ -68,7 +68,6 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>VizDAW</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
@@ -158,7 +157,11 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-# The build, as About VizDAW shows it ("Version 0.1.0 (abc1234 · date)"),
+# The version comes from one place: [workspace.package] in the root Cargo.toml.
+version="$(awk '/^\[/{s=($0=="[workspace.package]")} s&&/^version[[:space:]]*=/{gsub(/.*=[[:space:]]*"|".*/,"");print;exit}' Cargo.toml)"
+[ -n "$version" ] || { echo "make-app.sh: no version in Cargo.toml [workspace.package]" >&2; exit 1; }
+plutil -insert CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
+# The build, as About VizDAW shows it ("Version 26.0.0 (abc1234 · date)"),
 # so every bug report names the build it came from. "+" marks uncommitted
 # changes.
 build="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
