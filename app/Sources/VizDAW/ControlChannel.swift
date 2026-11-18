@@ -296,7 +296,7 @@ enum ControlChannel {
                 if coProducer { _ = CoProducerCommands.takeNewAlert(m, before: alertBefore) }
                 CoProducerCommands.jobEnded(doc: doc, job: job, m)
                 InterchangeCommands.jobEnded(doc, failed: true, store: appStore) { id in
-                    if let w = ControlWindows.window(of: id) { w.performClose(nil) } else { appStore.close(id) }
+                    ControlWindows.closeQuietly(id)
                 }
                 _ = try? server.fail(token: token, failure: .of(.failed, message))
                 return true
@@ -501,6 +501,8 @@ enum ControlChannel {
             answer(server, token, ControlOpen.open(path: path, answers: answers, store: appStore))
         case .quit:
             _ = try? server.reply(token: token, result: .quitting)
+            // A programmatic quit never asks to save (release gate B1).
+            QuitPrompts.quiet = true
             // Next turn: the reply is on its way before the app tears down.
             DispatchQueue.main.async { NSApp.terminate(nil) }
         case .wait(let condition, let window, let timeoutMs):
@@ -726,6 +728,16 @@ enum ControlWindows {
         }
     }
 
+    /// Closes document `doc`'s window, or the document when it has none,
+    /// without the save prompt (release gate B1): `close()` skips
+    /// `windowShouldClose`, and the window's will-close closes the document.
+    static func closeQuietly(_ doc: UUID) {
+        if let w = window(of: doc) {
+            w.close()
+        }
+        appStore.close(doc)
+    }
+
     static func openDocument(_ doc: UUID) {
         guard window(of: doc) == nil else { return }
         if let openWindow {
@@ -800,13 +812,7 @@ final class AppControlHost: ControlHost {
     func documentWindow(_ doc: UUID) -> Int64? { ControlWindows.window(of: doc).map { Int64($0.windowNumber) } }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { EditorWindows.tearOff(appStore, doc: doc, kind: kind) }
 
-    func closeDocument(_ doc: UUID) {
-        if let w = ControlWindows.window(of: doc) {
-            w.performClose(nil)
-        } else {
-            appStore.close(doc)
-        }
-    }
+    func closeDocument(_ doc: UUID) { ControlWindows.closeQuietly(doc) }
 
     var nudge: NudgeSettings { editingPreferences.nudge }
     var crossfadeMs: Double { editingPreferences.crossfadeMs }

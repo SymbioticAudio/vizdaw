@@ -1411,10 +1411,10 @@ a copy, not one you care about.
 153. Save while recording (plan 5d-1 Ruling 19): in a saved project,
      press ⌘S while recording: the status line says "Saved. The take is
      saved when recording stops."; Stop: close the window, no unsaved
-     changes are asked about, and reopening shows the take. VizDAW never
-     asks when a window closes: after ⌘S during a pass, closing the
-     window keeps the take that was announced (it is saved), even with no
-     Save after Stop. ⇧⌘S (Save As) while recording says "Stop recording
+     changes are asked about, and reopening shows the take. Closing asks
+     only about unsaved changes (checks 433–436): after ⌘S during a pass,
+     closing the window keeps the take that was announced (it is saved),
+     even with no Save after Stop. ⇧⌘S (Save As) while recording says "Stop recording
      to use Save As: the take is being written into this project." and
      opens no panel; so does ⌘S in an untitled project.
 154. The growing take: while recording, a red region grows on every
@@ -3140,6 +3140,31 @@ Plan 8f, Co-Producer time tracking and coaching:
      folder appears.
 432. In a host that offers prompts, the coaching prompt is in the list
      beside the other recipes.
+
+26.0.0 release gate, unsaved changes:
+
+433. Make a new untitled song and add a track. The close button shows the
+     edited dot within a second. Press ⌘W: a sheet asks "Do you want to
+     save the changes you made to “Untitled”?" with "Your changes will be
+     lost if you don't save them.", and Save (Return), Don't Save (⌘D) and
+     Cancel (Escape). Click Save: the Save panel opens. Cancel it: the
+     window stays open with the track. Undo back to the start: the dot goes
+     and ⌘W closes without asking.
+434. Open a saved song, move a region, and click the red close button.
+     Click Don't Save: the window closes, and reopening the song shows the
+     region where it was. Repeat with Save: it closes, and reopening shows
+     the move. File › Close and Window › Close ask the same way; Cancel
+     keeps the window open.
+435. Edit two songs and press ⌘Q. An alert reads "You have 2 VizDAW
+     documents with unsaved changes. Do you want to review these changes
+     before quitting?" with Review Changes…, Discard Changes and Cancel.
+     Click Review Changes…: the first song comes to the front with its
+     sheet. Click Don't Save (it closes), then Cancel at the second: VizDAW
+     keeps running with the second song open and still edited. ⌘Q again
+     with one edited song shows only that song's sheet; Save or Don't Save
+     quits.
+436. With an edited song, close it with `vizctl run file.close`, then
+     edit another and `vizctl quit`: neither asks.
 
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on

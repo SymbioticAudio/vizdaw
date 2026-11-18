@@ -2278,6 +2278,13 @@ impl Session {
         ffi_guard(|| Ok(self.lock_inner().save_after_pass))
     }
 
+    /// Whether the song has changes a close would lose: the document
+    /// differs from the one last opened or saved, or a plugin changed its
+    /// own state (release gate B1; the close and quit prompts ask on it).
+    pub fn has_unsaved_changes(&self) -> Result<bool, VizError> {
+        ffi_guard(|| Ok(self.lock_inner().unsaved()))
+    }
+
     /// Why Save As would be refused before its panel opens: the sentence
     /// while a merge is held (plan 6e Task 10 fix round 1), else nil. A
     /// model-only check under the lock; no I/O.

@@ -28,7 +28,7 @@ struct DocumentWindow: View {
                     .background(WindowTag(kind: .document, doc: id))
                     // The document goes as its window closes: SwiftUI's
                     // onDisappear does not always come for the last window.
-                    .background(WindowFrameKeeper(model: model, onClose: { store.close(id) }))
+                    .background(WindowFrameKeeper(model: model, doc: id, onClose: { store.close(id) }))
                     .focusedSceneValue(\.documentModel, model)
                     .focusedSceneValue(\.documentID, id)
                     .task(id: PollKey(key: activeState == .key, playing: model.isPlaying || model.record.isRecording)) {
@@ -36,8 +36,15 @@ struct DocumentWindow: View {
                         // events are handled (O27), and so does a
                         // recording until the poll sees it finished.
                         guard activeState == .key || model.isPlaying || model.record.isRecording else { return }
+                        // The close button's edited dot follows the song,
+                        // read at most twice a second (release gate B1).
+                        var dotRead = ContinuousClock.now - .seconds(1)
                         while !Task.isCancelled {
                             model.poll()
+                            if ContinuousClock.now - dotRead >= .milliseconds(500) {
+                                dotRead = ContinuousClock.now
+                                CloseHooks.hook(for: id)?.refresh()
+                            }
                             try? await Task.sleep(for: model.pollInterval)
                         }
                     }
@@ -97,8 +104,10 @@ struct KeyDoc: Equatable {
 
 /// Restores the document window's saved frame once and saves it after each
 /// move or resize (plan 7a Ruling 11), in `ui.json` with the panes.
+/// It also installs the window's close hook (release gate B1).
 struct WindowFrameKeeper: NSViewRepresentable {
     let model: DocumentModel
+    let doc: UUID
     /// Runs when the window will close.
     var onClose: @MainActor @Sendable () -> Void = {}
 
@@ -112,6 +121,9 @@ struct WindowFrameKeeper: NSViewRepresentable {
 
         var editor: EditorModel?
         var onClose: @MainActor @Sendable () -> Void = {}
+        /// The window's close hook, held here (the window holds its
+        /// delegate weakly).
+        var hook: CloseHook?
         private var applied = false
         private var observers: [NSObjectProtocol] = []
 
@@ -123,6 +135,7 @@ struct WindowFrameKeeper: NSViewRepresentable {
             super.viewDidMoveToWindow()
             removeObservers()
             guard let w = window, let editor else { return }
+            hook?.install(on: w)
             // Swift 6.1: the closures capture only strong lets made here,
             // never the window or a weak self (plan 7a Global Constraints).
             let view = self
@@ -189,6 +202,9 @@ struct WindowFrameKeeper: NSViewRepresentable {
         let k = Keeper()
         k.editor = model.editor
         k.onClose = onClose
+        let hook = CloseHook(doc: doc, model: model)
+        k.hook = hook
+        CloseHooks.register(hook)
         return k
     }
 
@@ -196,5 +212,149 @@ struct WindowFrameKeeper: NSViewRepresentable {
 
     static func dismantleNSView(_ k: Keeper, coordinator: ()) {
         k.removeObservers()
+        if let hook = k.hook { CloseHooks.unregister(hook) }
+    }
+}
+
+/// The document windows' close hooks by document, held weakly (each
+/// window's keeper holds its own).
+@MainActor
+enum CloseHooks {
+    private final class Weak {
+        weak var hook: CloseHook?
+        init(_ h: CloseHook) { hook = h }
+    }
+
+    private static var hooks: [UUID: Weak] = [:]
+
+    static func register(_ h: CloseHook) { hooks[h.doc] = Weak(h) }
+
+    static func unregister(_ h: CloseHook) {
+        if hooks[h.doc]?.hook === h { hooks[h.doc] = nil }
+    }
+
+    static func hook(for doc: UUID) -> CloseHook? { hooks[doc]?.hook }
+}
+
+/// A document window's delegate in front of SwiftUI's (release gate B1).
+/// It answers `windowShouldClose(_:)`: a song with unsaved changes asks
+/// Save, Don't Save or Cancel in a sheet first; a clean one closes as
+/// before. Every other delegate call goes to SwiftUI's delegate unchanged.
+/// Covers ⌘W, File › Close, Window › Close and the red close button; the
+/// control channel's closes call `close()`, which never asks.
+@MainActor
+final class CloseHook: NSObject, NSWindowDelegate {
+    let doc: UUID
+    let model: DocumentModel
+    private(set) weak var window: NSWindow?
+    /// SwiftUI's delegate, which every other call goes to. Read by the
+    /// nonisolated forwarding overrides; only set on the main actor.
+    nonisolated(unsafe) private weak var original: NSObjectProtocol?
+
+    init(doc: UUID, model: DocumentModel) {
+        self.doc = doc
+        self.model = model
+    }
+
+    /// Puts the hook in front of `w`'s delegate (again, if SwiftUI set
+    /// its own since).
+    func install(on w: NSWindow) {
+        window = w
+        guard w.delegate !== self else { return }
+        original = w.delegate
+        w.delegate = self
+    }
+
+    /// The edited dot follows the song; the hook is put back if SwiftUI
+    /// replaced it.
+    func refresh() {
+        guard let w = window else { return }
+        install(on: w)
+        let edited = model.hasUnsavedChanges
+        if w.isDocumentEdited != edited { w.isDocumentEdited = edited }
+    }
+
+    nonisolated override func responds(to aSelector: Selector!) -> Bool {
+        super.responds(to: aSelector) || original?.responds(to: aSelector) == true
+    }
+
+    nonisolated override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if let o = original, o.responds(to: aSelector) { return o }
+        return super.forwardingTarget(for: aSelector)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        let clean = (original as? NSWindowDelegate)?.windowShouldClose?(sender) ?? true
+        guard clean else { return false }
+        guard model.hasUnsavedChanges else { return true }
+        // One sheet at a time; a second ⌘W while it shows does nothing.
+        guard sender.attachedSheet == nil else { return false }
+        ask { _, _ in }
+        return false
+    }
+
+    /// Asks this song's sheet; Save (when it saved) and Don't Save close
+    /// the window. `done` gets the choice and whether the window closed.
+    func ask(_ done: @escaping @MainActor (CloseChoice, Bool) -> Void) {
+        let hook = self
+        CloseSheet.ask(model: model, window: window) { choice in
+            switch choice {
+            case .cancel:
+                done(.cancel, false)
+            case .dontSave:
+                hook.closeQuietly()
+                done(.dontSave, true)
+            case .save:
+                let saved = SaveFlow.save(hook.model, forceAs: false)
+                if saved { hook.closeQuietly() }
+                done(.save, saved)
+            }
+        }
+    }
+
+    /// Closes the window without asking (its will-close closes the
+    /// document), or the document when the window is gone.
+    func closeQuietly() {
+        if let w = window {
+            w.isDocumentEdited = false
+            w.close()
+        }
+        appStore.close(doc)
+    }
+}
+
+/// The "save the changes?" alert: a sheet on the song's window, or an
+/// app-modal alert when it has none.
+@MainActor
+enum CloseSheet {
+    static func ask(model: DocumentModel, window: NSWindow?, _ answer: @escaping @MainActor (CloseChoice) -> Void) {
+        let text = ClosePrompts.sheetText(name: model.snapshot.title)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = text.message
+        alert.informativeText = text.informative
+        // The first button is the default (Return).
+        alert.addButton(withTitle: ClosePrompts.save)
+        let dont = alert.addButton(withTitle: ClosePrompts.dontSave)
+        dont.keyEquivalent = "d"
+        dont.keyEquivalentModifierMask = .command
+        let cancel = alert.addButton(withTitle: ClosePrompts.cancel)
+        cancel.keyEquivalent = "\u{1b}"
+        guard let window, window.isVisible || window.isMiniaturized else {
+            answer(choice(alert.runModal()))
+            return
+        }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        alert.beginSheetModal(for: window) { response in
+            MainActor.assumeIsolated { answer(choice(response)) }
+        }
+    }
+
+    private static func choice(_ r: NSApplication.ModalResponse) -> CloseChoice {
+        switch r {
+        case .alertFirstButtonReturn: return .save
+        case .alertSecondButtonReturn: return .dontSave
+        default: return .cancel
+        }
     }
 }

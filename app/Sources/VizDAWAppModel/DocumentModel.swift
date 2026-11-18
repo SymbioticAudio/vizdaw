@@ -881,6 +881,11 @@ public final class DocumentModel {
     /// True when Save needs a path first (untitled).
     public var needsSaveAs: Bool { ((try? session.path()) ?? nil) == nil }
 
+    /// Whether closing would lose changes (release gate B1): read from the
+    /// core each time. A session that cannot answer counts as unsaved, so
+    /// the close asks rather than losing work.
+    public var hasUnsavedChanges: Bool { (try? session.hasUnsavedChanges()) ?? true }
+
     public func save() {
         editor.storeLayout()
         perform("Save Failed") { try $0.save() }

@@ -217,6 +217,8 @@ public protocol ControlHost: AnyObject {
     func showMixer(_ doc: UUID)
     func showPluginManager()
     func tearOff(_ doc: UUID, kind: DetailEditorKind)
+    /// Closes document `doc`'s window without its save prompt (release
+    /// gate B1: programmatic closes never ask).
     func closeDocument(_ doc: UUID)
     /// Opens document `doc`'s media pool window (plan 5b).
     func showMediaPool(_ doc: UUID)
@@ -406,7 +408,10 @@ public enum ControlCommands {
         let before = m.alert?.id
         switch id {
         case "file.close":
+            // Never asks (release gate B1): the window closes without its
+            // save prompt and the document goes, saved or not.
             host.closeDocument(docID)
+            store.close(docID)
             return .done(ran(id, docID))
         case "file.save":
             if m.needsSaveAs {

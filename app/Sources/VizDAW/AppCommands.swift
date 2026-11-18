@@ -95,6 +95,8 @@ struct AppCommands: Commands {
                 Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
             }
             CommandGroup(replacing: .saveItem) {
+                // `performClose` asks the window's close hook, which asks
+                // to save a song with unsaved changes (release gate B1).
                 Button("Close") { NSApp.keyWindow?.performClose(nil) }
                     .keyboardShortcut(KeyMenu.shortcut("file.close"))
                 Button("Save") { save(as: false) }
@@ -479,16 +481,30 @@ struct AppCommands: Commands {
 
     private func save(as forceAs: Bool) {
         guard let doc else { return }
+        _ = SaveFlow.save(doc, forceAs: forceAs)
+    }
+}
+
+/// File › Save and Save As, and the close prompt's Save (release gate B1).
+@MainActor
+enum SaveFlow {
+    /// Saves `doc`, through the Save As panel when it is untitled (or
+    /// `forceAs`). True when it saved: false when the panel was cancelled,
+    /// the save was refused (its status shows) or failed (its alert shows).
+    @discardableResult
+    static func save(_ doc: DocumentModel, forceAs: Bool) -> Bool {
+        let alertBefore = doc.alert?.id
         switch doc.saveAction(forceAs: forceAs) {
         case .panel:
-            if let path = Panels.chooseSaveLocation(title: doc.snapshot.title) {
-                doc.saveAs(path: path)
-            }
+            guard let path = Panels.chooseSaveLocation(title: doc.snapshot.title) else { return false }
+            doc.saveAs(path: path)
         case .save:
             doc.save()
         case .refused(let why):
             doc.editor.status = why
+            return false
         }
+        return doc.alert?.id == alertBefore && !doc.hasUnsavedChanges
     }
 }
 
