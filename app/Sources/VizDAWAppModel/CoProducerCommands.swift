@@ -130,9 +130,25 @@ public enum CoProducerCommands {
             } catch {
                 return .failed(failure(error))
             }
-        case .coProducerStarter, .coProducerMidiNotes, .coProducerAutomation:
-            // Plan 8e Tasks 1–4 build these; the app answers them in Task 5.
-            return .failed(.of(.unavailable, CreativeCommands.notReady))
+        case .coProducerStarter(let spec):
+            // A new song of its own: the composer's document is not used.
+            return starter(spec, store, host, stamp: stamp)
+        case .coProducerMidiNotes(let seq, let lane, let start, let end, _):
+            guard let (docID, m) = doc else { return noDocument }
+            do {
+                let row = try m.session.coProducerMidiNotes(seq: seq, lane: lane, start: start, end: end)
+                return .done(.coProducerMidiNotes(doc: docID.uuidString, row: row))
+            } catch {
+                return .failed(failure(error))
+            }
+        case .coProducerAutomation(let seq, let target, let start, let end, _):
+            guard let (docID, m) = doc else { return noDocument }
+            do {
+                let row = try m.session.coProducerAutomation(seq: seq, target: target, start: start, end: end)
+                return .done(.coProducerAutomation(doc: docID.uuidString, row: row))
+            } catch {
+                return .failed(failure(error))
+            }
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }
@@ -434,6 +450,91 @@ public enum CoProducerCommands {
     /// The document again after its request ended (the Undo title).
     static func refresh(_ m: DocumentModel) {
         if let s = try? m.session.snapshot() { m.apply(s) }
+    }
+}
+
+// MARK: Starter projects (plan 8e Ruling 5)
+
+extension CoProducerCommands {
+    /// The answer to a starter while another is being made.
+    public static let starterBusy = "A starter project is being made."
+    /// How long a starter waits for its new song's window.
+    static let starterWindowWait: Duration = .seconds(30)
+
+    /// `co_producer.starter {spec}` (Ruling 5's steps 2–3; the gate already
+    /// ran step 1, `starter::parse`): a new untitled song as File › New
+    /// makes it, in the default format; in it the request "start <title>"
+    /// is begun, entered, built as one step, left and ended, in one stretch
+    /// on the main thread. Only then does its window open: the one window a
+    /// Co-Producer call opens. A refused begin, enter or build closes the
+    /// new song with no sheet and no save question, so nothing is left.
+    /// One at a time: a second while one is being made (until its window is
+    /// up) is `busy`. The answer carries the new song's window.
+    static func starter(_ spec: String, _ store: DocumentStore, _ host: any ControlHost, stamp: String)
+        -> ControlOutcome
+    {
+        if store.coProducerStarter != nil { return .failed(.of(.busy, starterBusy)) }
+        guard let title = starterTitle(spec) else {
+            return .failed(.of(.invalidParams, "The starter project is not a JSON object with a title."))
+        }
+        let before = store.alert?.id
+        guard let id = store.newProject(store.defaultFormat), let m = store.model(id) else {
+            // File › New's own failure, taken as the call's (no sheet).
+            if let a = store.alert, a.id != before {
+                _ = store.takeAlert()
+                return .failed(.of(.failed, a.message))
+            }
+            return .failed(.of(.failed, "No new song was made."))
+        }
+        let row: CoProducerStarterRow
+        do {
+            _ = try m.session.coProducerBegin(name: "start \(title)")
+            try m.session.coProducerSetStamp(stamp: stamp)
+            _ = try m.session.coProducerEnter(stamp: stamp)
+            defer { m.session.coProducerLeave() }
+            row = try m.session.coProducerStarter(spec: spec)
+        } catch {
+            // No window was opened: the song goes quietly.
+            store.close(id)
+            return .failed(failure(error))
+        }
+        _ = try? m.session.coProducerEnd()
+        refresh(m)
+        store.coProducerStarter = id
+        host.showDocument(id)
+        return .pending(PendingOutcome(wait: starterWindowWait) { expired in
+            starterShown(id, row, store, host, expired: expired)
+        })
+    }
+
+    /// The starter's answer once song `id`'s window is up (nil until then,
+    /// unless `expired`); the next starter may then begin.
+    static func starterShown(
+        _ id: UUID, _ row: CoProducerStarterRow, _ store: DocumentStore, _ host: any ControlHost, expired: Bool
+    ) -> ControlOutcome? {
+        guard store.model(id) != nil else {
+            store.coProducerStarter = nil
+            return .failed(.of(.noDocument, "the new song closed"))
+        }
+        if let window = host.documentWindow(id) {
+            store.coProducerStarter = nil
+            return .done(.coProducerStarter(doc: id.uuidString, window: window, row: row))
+        }
+        guard expired else { return nil }
+        store.coProducerStarter = nil
+        return .failed(.of(.timeout, "the new song's window did not appear within 30 s"))
+    }
+
+    /// The spec's title, trimmed as `starter::parse` trims it; nil when the
+    /// text is not a JSON object with a text title (the gate refuses that
+    /// before it gets here).
+    static func starterTitle(_ spec: String) -> String? {
+        guard let data = spec.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let title = object["title"] as? String
+        else { return nil }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

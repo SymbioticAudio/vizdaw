@@ -873,4 +873,208 @@ import VizDAWCore
         #expect(s.open(path: path) != nil)
         #expect(opened == [path])
     }
+
+    // MARK: Plan 8e Task 5: creative edits, reads and starter projects
+
+    /// A spec as the gate passes it (already checked by `starter::parse`).
+    static let spec = #"{"title":"  Night Drive ","tempo":"118","meter":"4/4","tracks":[{"name":"Bass","kind":"instrument"}]}"#
+
+    static let starterRow = CoProducerStarterRow(
+        title: "Night Drive", undoLabel: "Co-Producer: Start Night Drive",
+        tracks: [StarterStripRow(name: "Bass (Co-Producer)", plays: "Built-in Synth", effects: [])], buses: [],
+        lines: ["Tracks on the Built-in Synth share its one sound for now."])
+
+    /// The composer's demo, and a store whose File › New makes `starter`
+    /// (each format it was asked for in `made`).
+    func starterStore(_ starter: FakeSession) throws -> (DocumentStore, UUID, FakeSession, Box<[ProjectFormatRow]>) {
+        let (s, id, _, f) = try demo()
+        let made = Box<[ProjectFormatRow]>([])
+        s.makeProject = { format in
+            made.value.append(format)
+            return starter
+        }
+        return (s, id, f, made)
+    }
+
+    func starterOutcome(_ o: ControlOutcome) async -> ControlOutcome {
+        guard case .pending(let p) = o else { return o }
+        await p.settle()
+        return p.outcome ?? o
+    }
+
+    /// `co_producer.starter` makes exactly one new song in the default
+    /// format, and in it begins "start <title>", enters, builds, leaves and
+    /// ends, in that order. The answer names that song's window; the
+    /// composer's own song and request are untouched.
+    @Test func starterOpensOneNewSong() async throws {
+        let n = FakeSession([])
+        n.starterRow = Self.starterRow
+        let (s, id, f, made) = try starterStore(n)
+        _ = run(.coProducerBegin(name: "mix the drums", asked: nil, window: nil), s, id)
+        f.coLog = []
+        let o = await starterOutcome(run(.coProducerStarter(spec: Self.spec), s, id))
+        guard case .done(.coProducerStarter(let doc, let window, let row)) = o else {
+            Issue.record("no starter: \(o)")
+            return
+        }
+        let newID = try #require(UUID(uuidString: doc))
+        #expect(newID != id)
+        #expect(s.documents.count == 2)
+        #expect(made.value == [s.defaultFormat])
+        #expect(window == FakeControlHost.windowNumber)
+        #expect(host.shownDocuments == [newID])
+        #expect(row == Self.starterRow)
+        #expect(n.coLog == [
+            "begin start Night Drive", "stamp \(stamp)", "enter \(stamp)", "coProducerStarter", "leave", "end",
+        ])
+        #expect(n.starterSpecs == [Self.spec])
+        #expect(n.coRequest == nil)
+        // The composer's song: nothing entered, its request still open.
+        #expect(f.coLog == [])
+        #expect(f.coRequest?.name == "mix the drums")
+        #expect(s.alert == nil)
+        #expect(s.model(newID)?.alert == nil)
+        #expect(host.calls.isEmpty)
+    }
+
+    /// A refused build closes the new song with no sheet and no save
+    /// question: no window, no document left, `failed` with its words.
+    @Test func badStarterOpensNoWindow() async throws {
+        let n = FakeSession([])
+        let (s, id, f, _) = try starterStore(n)
+        let o = run(.coProducerStarter(spec: Self.spec), s, id)
+        #expect(failure(o)?.code == .failed)
+        #expect(failure(o)?.message == "A starter project needs a new song.")
+        #expect(n.coLog == ["begin start Night Drive", "stamp \(stamp)", "enter \(stamp)", "coProducerStarter", "leave"])
+        #expect(n.closeCalls == 1)
+        #expect(Array(s.documents.keys) == [id])
+        #expect(host.shownDocuments.isEmpty)
+        #expect(s.alert == nil)
+        #expect(f.coLog == [])
+
+        // Busy stays busy; a refused begin or enter closes the song too.
+        n.coLog = []
+        n.starterRow = nil
+        n.coBeginError = .Busy(message: "A request is already open.")
+        #expect(failure(run(.coProducerStarter(spec: Self.spec), s, id))?.code == .busy)
+        n.coBeginError = nil
+        n.coEnterError = .Model(message: "The copy could not be written.")
+        let entered = run(.coProducerStarter(spec: Self.spec), s, id)
+        #expect(failure(entered)?.message == "The copy could not be written.")
+        #expect(n.starterSpecs.count == 1)
+        #expect(n.closeCalls == 3)
+        #expect(Array(s.documents.keys) == [id])
+        #expect(host.shownDocuments.isEmpty)
+
+        // Hostile text the gate would refuse makes no song here either.
+        for bad in ["", "{", "[1]", #"{"title":7}"#, String(repeating: "{", count: 70_000), "\u{0}"] {
+            let refused = run(.coProducerStarter(spec: bad), s, id)
+            #expect(failure(refused)?.code == .invalidParams, "\(bad.prefix(20))")
+        }
+        #expect(n.closeCalls == 3)
+        #expect(Array(s.documents.keys) == [id])
+        #expect(s.alert == nil)
+    }
+
+    /// A second starter while the first is being made (its window not up
+    /// yet) is `busy`, and makes nothing.
+    @Test func oneStarterAtATime() async throws {
+        let n = FakeSession([])
+        n.starterRow = Self.starterRow
+        let (s, id, _, made) = try starterStore(n)
+        host.windowsAppear = false
+        let first = run(.coProducerStarter(spec: Self.spec), s, id)
+        guard case .pending = first else {
+            Issue.record("the first starter answered at once: \(first)")
+            return
+        }
+        let second = run(.coProducerStarter(spec: Self.spec), s, id)
+        #expect(failure(second)?.code == .busy)
+        #expect(failure(second)?.message == "A starter project is being made.")
+        #expect(made.value.count == 1)
+        #expect(n.starterSpecs.count == 1)
+        #expect(s.documents.count == 2)
+        host.windowsAppear = true
+        guard case .done(.coProducerStarter) = await starterOutcome(first) else {
+            Issue.record("the first starter did not answer")
+            return
+        }
+        // Once answered, the next one may start.
+        n.starterRow = nil
+        #expect(failure(run(.coProducerStarter(spec: Self.spec), s, id))?.code == .failed)
+    }
+
+    /// The two reads answer for the resolved document with their
+    /// arguments; a throw is `failed` in its words; neither enters.
+    @Test func readsAnswerForTheDocument() throws {
+        let (s, id, _, f) = try demo()
+        let note = NoteRow(start: 0, pitch: 60, length: 3840, velocity: 100)
+        f.notesTable[5] = [note, NoteRow(start: 15_360, pitch: 62, length: 3840, velocity: 90)]
+        let notes = run(.coProducerMidiNotes(seq: 3, lane: 5, start: 0, end: 15_360, window: nil), s, id)
+        guard case .coProducerMidiNotes(let doc, let row) = result(notes) else {
+            Issue.record("no notes: \(notes)")
+            return
+        }
+        #expect(doc == id.uuidString)
+        #expect(row.seq == 3)
+        #expect(row.lane == 5)
+        #expect(row.notes == [note])
+        let notIn = run(.coProducerMidiNotes(seq: 3, lane: 9, start: nil, end: nil, window: nil), s, id)
+        #expect(failure(notIn)?.code == .failed)
+        #expect(failure(notIn)?.message == "Track 9 is not in sequence 3.")
+
+        let curve = CoProducerCurveRow(
+            target: "fader:1", targetName: "Synth fader", unit: "dB", min: -144, max: 12, startBar: 1, endBar: 5,
+            points: [CurvePointRow(tick: 0, value: -6)], truncated: false)
+        f.curveTable["fader:1"] = curve
+        let read = run(.coProducerAutomation(seq: 3, target: "fader:1", start: 0, end: 61_440, window: nil), s, id)
+        guard case .coProducerAutomation(let d, let r) = result(read) else {
+            Issue.record("no curve: \(read)")
+            return
+        }
+        #expect(d == id.uuidString)
+        #expect(r == curve)
+        let hostile = String(repeating: "x", count: 70_000) + "\u{0}"
+        let unknown = run(.coProducerAutomation(seq: 3, target: hostile, start: 0, end: 1, window: nil), s, id)
+        #expect(failure(unknown)?.code == .failed)
+        #expect(f.coLog.isEmpty, "reads enter nothing")
+        #expect(f.creativeRuns.isEmpty)
+        // No document: no_document.
+        for r in [
+            ControlRequest.coProducerMidiNotes(seq: 3, lane: 5, start: nil, end: nil, window: nil),
+            .coProducerAutomation(seq: 3, target: "fader:1", start: 0, end: 1, window: nil),
+        ] {
+            let none = CoProducerCommands.run(
+                r, doc: nil, store: s, host: host, stamp: stamp, peer: nil, approver: FakeApprover(.allow))
+            #expect(failure(none)?.code == .noDocument)
+        }
+    }
+
+    /// A failing `runCreative` reached through `co_producer.apply` is its
+    /// line, and no sheet opens (8a Ruling 13); `command.run` of it is
+    /// refused before enter.
+    @Test func noSheetsForCreativeEdits() throws {
+        let (s, id, m, f) = try demo()
+        let direct = run(command(CreativeCommands.writeAutomation, CreativeCommandsTests.given), s, id)
+        #expect(failure(direct)?.code == .notAllowed)
+        #expect(f.coLog.isEmpty)
+        f.mixerError = .Model(message: "This song has no fader:9.")
+        let plan = [PlannedRow(id: CreativeCommands.writeAutomation, args: CreativeCommandsTests.given)]
+        let token = String(repeating: "d", count: 32)
+        let o = run(.coProducerApply(token: token, plan: plan, window: nil, client: nil), s, id)
+        guard case .coProducerApplied(_, let lines, _) = result(o) else {
+            Issue.record("not applied: \(o)")
+            return
+        }
+        #expect(lines == ["automation.write: This song has no fader:9."])
+        #expect(f.coLog == ["enter \(stamp)", "take", "runCreative automation.write", "leave"])
+        #expect(m.alert == nil)
+        #expect(m.coProducerApproval == nil)
+    }
+}
+
+/// A value a test closure fills in.
+final class Box<T> {
+    var value: T
+    init(_ value: T) { self.value = value }
 }

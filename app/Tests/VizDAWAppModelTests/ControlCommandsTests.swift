@@ -36,6 +36,15 @@ final class FakeControlHost: ControlHost {
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { calls.append("tear \(kind.rawValue)") }
     func closeDocument(_ doc: UUID) { calls.append("close") }
     func showMediaPool(_ doc: UUID) { calls.append("media pool") }
+    /// The documents whose window `showDocument` opened (plan 8e Task 5),
+    /// and whether their windows come up.
+    var shownDocuments: [UUID] = []
+    var windowsAppear = true
+    static let windowNumber: Int64 = 4242
+    func showDocument(_ doc: UUID) { shownDocuments.append(doc) }
+    func documentWindow(_ doc: UUID) -> Int64? {
+        windowsAppear && shownDocuments.contains(doc) ? Self.windowNumber : nil
+    }
     /// What `audio.set` applied (plan 5d-1 Task 12), and its refusal.
     var audio: [AudioChange] = []
     var audioError: VizError?

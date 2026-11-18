@@ -267,6 +267,9 @@ public final class DocumentStore {
         }
     }
 
+    /// The song a Co-Producer starter is making, until its window is up
+    /// (plan 8e Ruling 5: one at a time).
+    @ObservationIgnored var coProducerStarter: UUID?
     /// Documents whose mixer failed and has alerted (`mixer`).
     @ObservationIgnored private var mixerAlerted: Set<UUID> = []
 

@@ -220,6 +220,12 @@ public protocol ControlHost: AnyObject {
     func closeDocument(_ doc: UUID)
     /// Opens document `doc`'s media pool window (plan 5b).
     func showMediaPool(_ doc: UUID)
+    /// Opens document `doc`'s window, as File › New's opens (plan 8e
+    /// Ruling 5: the one window a Co-Producer call opens, a starter's new
+    /// song). Asked once per document.
+    func showDocument(_ doc: UUID)
+    /// Document `doc`'s window number once it is on screen, else nil.
+    func documentWindow(_ doc: UUID) -> Int64?
     var nudge: NudgeSettings { get }
     /// Settings › Editing's default crossfade in milliseconds (plan 6c
     /// Task 5).
