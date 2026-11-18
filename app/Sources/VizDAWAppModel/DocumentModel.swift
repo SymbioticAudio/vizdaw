@@ -8,7 +8,18 @@ import VizDAWCore
 @MainActor
 public final class DocumentModel {
     public let session: any SessionProtocol
-    public private(set) var snapshot: DocSnapshot
+    public private(set) var snapshot: DocSnapshot {
+        // Steps, undos and redos for the time records (plan 8f Ruling 4):
+        // one comparison when nothing moved.
+        didSet {
+            if let e = stepWatch.observe(step: snapshot.step, undoLabel: snapshot.undoLabel) { onStep?(e) }
+        }
+    }
+    /// The highest and last history step seen (plan 8f Ruling 4).
+    @ObservationIgnored private var stepWatch = StepWatch()
+    /// Told each new step, undo and redo (`DocumentStore` sets it from its
+    /// `stepObserver`).
+    @ObservationIgnored public var onStep: (@MainActor (StepEvent) -> Void)?
     /// The editors (plan 4a).
     public let editor: EditorModel
     /// The select-and-modify panel (plan 4c).
@@ -73,6 +84,10 @@ public final class DocumentModel {
     public var slotDraft: KeySlotDraft?
     public var pendingDelete: UInt64?
     public var alert: AlertItem?
+    /// VizDAW's own approval sheet for a Co-Producer change that needs the
+    /// composer's yes (plan 8b Ruling 11); set and cleared only by
+    /// `CoProducerCommands`.
+    public internal(set) var coProducerApproval: CoProducerApprovalSheetModel?
     /// The mixer's selected strips (plan 5e-2 Ruling 5), for `automation.mode.<mode>`.
     /// The surfaces show it (plan 5f-1 Ruling 12).
     public var selectedStrips: Set<UInt64> = [] {
@@ -518,6 +533,7 @@ public final class DocumentModel {
         }
         clock.update(transport, pollInterval: Self.pollSeconds(playing: transport.playing))
         updatePlayKey()
+        // The first snapshot through `didSet` starts the step watch.
         apply(snap)
         projectInfo = try? session.projectInfo()
         editor.applySnapshot = { [weak self] in self?.apply($0) }
@@ -564,6 +580,18 @@ public final class DocumentModel {
     /// or reference field is edited, so typing a space types a space. A
     /// surface's button is no key (ruling T9-1): it acts regardless.
     public var transportKeysEnabled: Bool { surfaceActing || !textFieldHasKeyboard }
+    /// True in the Mix view when the bottom pane shows neither the Editor nor
+    /// the Audio Editor (Decision 5): views.main == .mix && !(views.mix.bottom.shown
+    /// && [.editor, .audioEditor].contains(views.mix.bottom.view)). A torn-off
+    /// editor window does not count as showing the selection.
+    public var selectionHidden: Bool {
+        let views = editor.layout.views
+        return views.main == .mix
+            && !(views.mix.bottom.shown && [.editor, .audioEditor].contains(views.mix.bottom.view))
+    }
+    /// Why the nudges and Modify Again wait while `selectionHidden`.
+    public static let hiddenSelection =
+        "The Mix view shows no editor: press ⌃1, or show the Editor in the bottom pane, to edit the selection."
     /// A name, comment, slot, reference or panel field is edited. Commands
     /// that move the keyboard focus wait for it even from a surface
     /// (review M1): taking the focus would cut the edit short.

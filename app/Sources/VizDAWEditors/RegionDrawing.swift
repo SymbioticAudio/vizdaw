@@ -63,6 +63,50 @@ public enum RegionDrawing {
         return label
     }
 
+    /// The region name's font.
+    static func nameFont(_ t: Theme) -> NSFont { t.font(t.type.caption) }
+
+    /// Where an arrangement region's name goes (release-fixes Task 6): at
+    /// the top left, after the fade-in handle (at `fadeInX`, else the
+    /// region's start) and under the gain band, as `offlineLabelRect`. As
+    /// wide as the name, or the room there is: the text is truncated with
+    /// "…". nil for an empty name, or when fewer than 3 characters fit.
+    public static func nameLabelRect(
+        _ name: String, in rect: CGRect, font: NSFont, fadeInX: CGFloat? = nil
+    ) -> CGRect? {
+        guard !name.isEmpty else { return nil }
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let width = { (s: String) in ceil(NSString(string: s).size(withAttributes: attrs).width) }
+        let least = width(name.count > 3 ? String(name.prefix(3)) + "…" : name)
+        let x = max(rect.minX + 4, (fadeInX ?? rect.minX) + RegionHandles.size / 2 + 2)
+        let height = ceil(font.boundingRectForFont.height)
+        let room = rect.maxX - 2 - x
+        let y = rect.minY + RegionHandles.band + 2
+        guard room >= least, y + height <= rect.maxY - 2 else { return nil }
+        return CGRect(x: x, y: y, width: min(width(name), room), height: height)
+    }
+
+    /// The name's rect and the "Offline" pill's for a region (Task 6): the
+    /// name first, then the pill after it; when both do not fit, only the
+    /// pill (at `offlineLabelRect`).
+    static func labelRects(
+        _ r: EventRow, name: String?, in rect: CGRect, font: NSFont, pill: CGSize?
+    ) -> (name: CGRect?, pill: CGRect?) {
+        let fadeInX = r.fadeIn.length > 0 ? RegionHandles.fadeInX(r, in: rect) : nil
+        guard let pill else {
+            return (name.flatMap { nameLabelRect($0, in: rect, font: font, fadeInX: fadeInX) }, nil)
+        }
+        let alone = offlineLabelRect(r, in: rect, size: pill)
+        guard let name, let alone else { return (nil, alone) }
+        let gap: CGFloat = 4
+        let shorter = CGRect(
+            x: rect.minX, y: rect.minY, width: max(rect.width - alone.width - gap, 0), height: rect.height)
+        guard let n = nameLabelRect(name, in: shorter, font: font, fadeInX: fadeInX) else { return (nil, alone) }
+        let after = CGRect(x: n.maxX + gap, y: alone.minY, width: alone.width, height: alone.height)
+        guard after.maxX <= rect.maxX - 2 else { return (nil, alone) }
+        return (n, after)
+    }
+
     /// A crossfade's X over the fade-in area (plan 6c): the rising and the
     /// falling line, from the region's start to where the fade in ends;
     /// none without a crossfade.
@@ -81,15 +125,20 @@ public enum RegionDrawing {
     /// `handles`, its corner handles. An offline region is hatched instead
     /// of showing a waveform and, with `offlineLabel`, says "Offline" when
     /// it has room (the region strip puts it in its own label instead;
-    /// final review V1).
+    /// final review V1). With `name` (the arrangement's), the name is drawn
+    /// at the top left in the legend colour of the fill as drawn: the body
+    /// composited over `under`, the opaque colour beneath the region (the
+    /// canvas when nil).
     public static func draw(
         _ r: EventRow, in rect: CGRect, rows: OverviewRows?, waveRect: CGRect, offline: Bool, selected: Bool,
-        handles: Bool, offlineLabel: Bool = true, theme: Theme, tint: NSColor? = nil
+        handles: Bool, offlineLabel: Bool = true, name: String? = nil, theme: Theme, tint: NSColor? = nil,
+        under: NSColor? = nil
     ) {
         let palette = RegionPalette(theme, tint: tint)
         let body = NSBezierPath(
             roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: theme.radius.s, yRadius: theme.radius.s)
-        palette.body.withAlphaComponent(palette.body.alphaComponent * (r.mute ? 0.4 : 1)).setFill()
+        let bodyFill = palette.body.withAlphaComponent(palette.body.alphaComponent * (r.mute ? 0.4 : 1))
+        bodyFill.setFill()
         body.fill()
         NSGraphicsContext.saveGraphicsState()
         body.addClip()
@@ -136,15 +185,25 @@ public enum RegionDrawing {
             palette.handle.setFill()
             for (h, box) in RegionHandles.rects(r, in: rect) where h != .gain { NSBezierPath(rect: box).fill() }
         }
-        if offline, offlineLabel {
+        let pillAttrs: [NSAttributedString.Key: Any] = [
+            .font: offlineFont(theme), .foregroundColor: palette.offline,
+        ]
+        let pillText = NSString(string: "Offline")
+        let showPill = offline && offlineLabel
+        let font = nameFont(theme)
+        let boxes = labelRects(
+            r, name: name, in: rect, font: font, pill: showPill ? pillText.size(withAttributes: pillAttrs) : nil)
+        if let name, let box = boxes.name {
+            let style = NSMutableParagraphStyle()
+            style.lineBreakMode = .byTruncatingTail
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: offlineFont(theme), .foregroundColor: palette.offline,
+                .font: font, .foregroundColor: theme.regionNameInk(fill: bodyFill, under: under ?? theme.canvas),
+                .paragraphStyle: style,
             ]
-            let text = NSString(string: "Offline")
-            if let box = offlineLabelRect(r, in: rect, size: text.size(withAttributes: attrs)) {
-                pill(text, in: box, attrs: attrs, palette)
-            }
+            NSString(string: name).draw(
+                with: box, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
         }
+        if let box = boxes.pill { pill(pillText, in: box, attrs: pillAttrs, palette) }
     }
 
     /// `text` on the offline label background in `box`.

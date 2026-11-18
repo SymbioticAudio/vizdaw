@@ -1194,7 +1194,8 @@ the channel steps stay as they are.
      Overdub) merges a second pass; Replace with Punch on clears only
      the punch range. With an external MIDI synth mixed into the same
      monitors as VizDAW's audio, its clicks and VizDAW's line up by ear.
-134. Loop passes: turn Loop on and record over a short sequence for
+134. Loop passes: arm an audio track (a MIDI track makes takes only with
+     MIDI passes as takes on: step 328), turn Loop on and record over a short sequence for
      three passes; after the first pass run `$V run record.keep_pass`,
      after the second `$V run record.discard_pass`, then Stop: the track
      has two new takes ("Take 2", "Take 3"), the last plays, and one
@@ -1320,7 +1321,7 @@ a copy, not one you care about.
      refusal (no track armed with an input, step entry on) shows in the
      status line. The chevron's popover holds Replace/Overdub, Punch with
      its In and Out fields, Loop, Count-in (off to 4 bars), Pre-roll (off
-     to 8 bars) and Passes as takes. Type `3` in Punch In and press
+     to 8 bars) and MIDI passes as takes. Type `3` in Punch In and press
      Return: the punch starts at bar 3, as the transport bar's field
      shows; typing R or Space in the field types it (no transport key
      fires). With Overdub chosen and an audio track armed, the popover says
@@ -1400,7 +1401,7 @@ a copy, not one you care about.
      relaunch: every setting is kept (they are app preferences, never in
      a project).
 152. Settings › Recording: the sample rate and bit depth are what File >
-     New offers first. Count-in, Pre-roll and Passes as takes are what
+     New offers first. Count-in, Pre-roll and MIDI passes as takes are what
      the next opened document's popover starts with (open documents keep
      theirs). Monitoring for new tracks set to Input: "+ Add Track" makes a
      track of any kind (audio, instrument, MIDI) showing I, and one Undo
@@ -1927,6 +1928,7 @@ the detail pane is the bottom pane's editor.
      instead, Mission Control owns ⌃1/⌃2: rebind Arrange View and Mix View
      in Settings › Keys › View.) A sequence's keyboard slot on ⌃1, ⌃2 or
      ⌃⌘←/↓/→ no longer fires: the View command wins (backlog).
+     In the Mix view with no editor showing, the nudges and Modify Again are greyed out, and their keys say why in the status line.
 201. Press ⌃⌘→: the right pane opens beside the bottom pane, under the
      arrangement. Press ⌃⌘↓: the bottom pane hides and the right pane runs
      beside the arrangement for the full height. Press ⌃⌘↓: the bottom
@@ -2473,9 +2475,8 @@ sheets' models (`InterchangeTests`, `ProjectSettingsModelTests`,
      composer, OK; Undo ("Set Song Info") clears them; Save, close and
      reopen: they are there.
 266. Select a region: the inspector's Region name can be typed (one Undo,
-     "Rename Region"); the arrangement shows the new name (in the region's
-     VoiceOver label: the arrangement draws no region names); clearing it
-     shows the file's name again.
+     "Rename Region"); the arrangement shows the new name at the region's
+     top left; clearing it shows the file's name again.
 
 **Owner check (manual, only the owner can do):** export the demo song as a
 MIDI file, open it in the DAW you use that reads MIDI files, and check
@@ -2773,6 +2774,372 @@ Plan 6g-2, the chosen default EQ and New Bus:
 325. Look at a narrow channel strip, in the arrange window and in the mixer:
      the ＋ and "New Bus" sit inside the strip, and nothing is clipped or
      overlaps the fader, the pan or the next strip.
+
+Plan 5c-2 takes, choosing takes and MIDI loop recording that layers:
+
+326. File › New: the transport bar shows "Overdub" beside Record. Pencil four
+     notes into a MIDI track. Turn Loop on and record three passes, playing
+     different notes each time. Everything plays together from one take, the
+     pencilled notes are still there, and the header shows no take name. One
+     Undo removes only what you played.
+327. Click "Overdub" on the bar: it reads "Replace", and the Record ⌄
+     popover's Mode says Replace too. Loop-record over the same range: the
+     notes in the loop range are replaced by what you played across the
+     passes, and notes outside the loop stay. Click back to "Overdub".
+328. Settings › Recording › New Documents: turn on "MIDI passes as takes",
+     then make a new project, or turn it on in the Record ⌄ popover.
+     Loop-record two MIDI passes. Right-click the track's header › Takes:
+     "Take 1" to "Take 3", with the last checked, and the header reads
+     "<track> · Take 3". Choose Take 1: the pencilled notes play again.
+329. Takes › Rename "Take 1"…: type "Verse". The header shows it. Undo puts the
+     old name back. Right-click a region on the track: the same Takes menu.
+330. Takes › Delete "Verse": the take goes, and the one before it plays, or the
+     next when it was first. Undo brings it back with its notes. On a track
+     with one take, Delete is greyed out.
+331. Arm an audio track and loop-record two passes with "MIDI passes as takes"
+     off: you get two takes anyway. Choose between them in Takes, and each
+     plays its pass.
+332. Open a project saved before this build that recorded in Replace: the bar
+     shows "Replace" before you press Record.
+333. Look at the transport bar at its narrowest, in the document window and in
+     the mixer window: the mode switch sits between Record and ⌄, and nothing
+     is clipped or overlaps.
+
+Plan 8a, Co-Producer safety and the server:
+
+334. Settings › Co-Producer: the switch is off on a fresh install. Turn it
+     on: the status says it is on and shows the path of `vizdaw-mcp`. "Copy
+     Path" copies it.
+335. Add the copied path to Claude Code as an MCP server (`claude mcp add
+     vizdaw -- <path>`), and ask Claude to "add two audio tracks". Two
+     tracks appear. Edit › Undo once: both go together. The undo item reads
+     "Undo Co-Producer: Add Two Audio Tracks", or the name Claude gave.
+336. While Claude is adding things, rename one of your tracks by hand. Undo
+     twice: first Claude's later steps, "(continued)", go; then your rename
+     goes on its own.
+337. Ask Claude to rename one of your tracks. Claude Code asks you directly,
+     with the exact change listed. Say no: nothing changes. Ask again and
+     say yes: it is renamed, as one undo step.
+338. In a host that cannot ask you itself (Claude's desktop app, as of
+     2026-11), ask for the same: Claude shows the list in the chat and
+     waits for your yes before applying it.
+339. Ask Claude to delete a track, or to compact media, or to record:
+     deleting goes through your yes; Compact Media and recording are
+     refused.
+340. Ask Claude to export MIDI to a file that already exists: it is
+     refused, and the file is unchanged.
+341. After a request, File › Open Co-Producer Copy…: the copy named "<date>
+     <time> before <request>" opens as a new untitled project, as the song
+     was before the request. Close it without saving.
+342. Delete the track Claude added, Compact Media and Save, then open the
+     copy again: it still opens complete, with its audio.
+343. Turn Co-Producer off in Settings while Claude is connected. Claude's
+     next action says Co-Producer is turned off in VizDAW's Settings. Turn
+     it back on: Claude works again.
+344. Settings › Co-Producer shows the number and size of saved copies in
+     your open projects.
+
+Plan 8b, the Co-Producer notes file and the librarian:
+345. Window › Song Notes on a saved song: `Notes.md` opens in the Mac's
+     default Markdown editor, with the song's name as its heading. Write
+     "never touch the piano part" and save.
+346. Ask Claude for something new ("add a reverb bus"). Claude first reads
+     the notes and mentions your rule. When it is done, Window › Song
+     Notes shows one new entry at the end: what you asked, what was
+     added, the undo step and the saved copy. Your own text is untouched.
+347. Keep `Notes.md` open in the editor, type a line, and ask Claude for
+     another change without saving first. After saving, both your line
+     and Claude's new entry are there.
+348. The tracks and buses Claude added are named "… (Co-Producer)", drawn
+     in the theme's accent colour, and show the small Co-Producer badge
+     on the track header and the mixer strip. Check this in each theme.
+349. Ask Claude to rename or colour one of its own tracks: it happens
+     without asking you. Then record a few notes on that track and ask
+     Claude to delete it: now it asks for your yes first.
+350. Track › Make Mine on a Co-Producer track: the badge and the
+     "(Co-Producer)" text go, and the track uses its kind's colour again.
+     Undo brings them back. Renaming a Co-Producer track yourself also
+     makes it yours.
+351. Duplicate a Co-Producer track yourself: the copy is yours, with no
+     badge.
+352. Ask Claude to export stems: the folder is "<song> — Stems — <date>",
+     next to the song or where you told Claude the first time. A second
+     export the same day makes "… 2". Exports never include `Notes.md`.
+353. In a new untitled song, ask Claude to add a track, then File › Save:
+     the song's package now holds `Notes.md` and `Co-Producer/Copies`.
+354. With a song that has Co-Producer copies, Media Pool › Compact: after
+     Compact, a sheet lists each copy with its size, none ticked. Keep
+     All removes nothing. Tick one and Remove Selected: it goes to the
+     Trash. After the next Save, the files only it used go too.
+355. Compact Media asked of Claude is still refused, and no sheet appears.
+356. Ask Claude, in Claude's desktop app, to rename one of your own
+     tracks. After Claude's own question (or your yes in chat), VizDAW
+     shows "Allow Co-Producer to Change Your Song?" on the song's
+     window, with the rename listed and the app's name. Don't Allow
+     leaves the track as it was. Ask again and click Allow: the track is
+     renamed. Pressing Return on the sheet never allows.
+357. Ask again and tick "Always allow <App>" before Allow. The next
+     change from that app applies with no VizDAW sheet. Settings ›
+     Co-Producer lists the app, its team and identifier, and today's
+     date. Click Revoke: the next change shows the sheet again.
+358. Use a command-line host, or start
+     `VizDAW.app/Contents/MacOS/vizdaw-mcp` yourself from Terminal, and
+     ask for a change through it. The sheet says VizDAW cannot identify
+     the app, and still offers "Always allow". Tick it and click Allow:
+     the warning "VizDAW can't check which program this is. Any program
+     you run from Terminal could use this approval." appears. Cancel
+     saves nothing. Always Allow Anyway saves it, and Settings ›
+     Co-Producer lists it marked "unverified". Revoke it, and the next
+     change asks again. Leave a sheet open for 10 minutes: it closes,
+     and the change is not made.
+
+The approval sheet, by hand on a real Mac (an ad-hoc build, and a signed
+one for step 364). Watch the log with
+`log stream --predicate 'subsystem == "VizDAW" AND category == "co-producer-approval"'`.
+Presses from VoiceOver, Switch Control, Voice Control and Screen Sharing are
+refused on the sheet by design, so use "Always allow" with those.
+359. A real click: with Co-Producer on and no developer channel, ask Claude
+     for a change to one of your own tracks, then click Allow. The change
+     applies and nothing is logged. If it is refused, note the logged
+     type, pid and age.
+360. The keyboard: run the change again, Tab to Allow and press Space.
+     Then repeat with Return on a focused Allow (this needs Full Keyboard
+     Access). Both apply. If either is refused, record the logged type
+     and key, which shows whether AppKit fires on key-down or key-up.
+361. Return and Esc with nothing focused are both Don't Allow, and Claude
+     reports "The composer did not allow this in VizDAW."
+362. An accessibility press is refused. With the sheet open, run
+     `osascript -e 'tell application "System Events" to tell process "VizDAW" to click button "Allow" of sheet 1 of window 1'`
+     (Terminal needs Accessibility access). Nothing applies, the sheet
+     says "That press didn't come from your mouse or keyboard. Click
+     Allow yourself.", and the log shows type none (or a stale or
+     other-window event).
+363. A posted click is refused. Post a click at Allow's position from
+     another process (a small `CGEventPost` tool, or a remote-control or
+     gesture utility). It is refused, and the log shows the poster's
+     source pid.
+364. A signed app: Always allow a signed, hardened host app. Settings lists
+     it with its team and identifier. Revoke makes the next change ask
+     again, and Revoke All empties the list.
+365. The Keychain after an ad-hoc rebuild: Always allow an app, rebuild
+     with `scripts/make-app.sh`, relaunch, and ask for another change.
+     Note whether macOS asks for the Keychain item "VizDAW Co-Producer
+     approvals". With Deny, VizDAW just asks on the sheet. Note whether
+     the approval survives Always Allow. Repeat with a Developer-ID-signed
+     build.
+366. Stale and timed-out sheets. Leave the sheet unanswered for 10
+     minutes: Claude reports VizDAW's no. Make a hand edit while the
+     sheet is open: it closes with the same no. Close the document, or
+     turn Co-Producer off, while it is open: the same no.
+367. Assistive input, accepted knowingly: try Allow with VoiceOver, Switch
+     Control, Voice Control and Screen Sharing. Each is refused by design,
+     and the refusal line shows. Record which of these you want allowed
+     in a later release.
+
+26.0.0 release fixes:
+
+368. Arm a MIDI track with a 1-bar count-in and press Record. On beat 2, choose
+     another output device in Settings › Audio: the count-in carries on from
+     the next beat and recording starts on the bar, with no doubled click.
+369. Connect two interfaces with the same name, if you have them: Settings ›
+     Audio lists "<name>" and "<name> (2)", and your choice survives a
+     relaunch.
+370. With a slow MIDI setup (or at first launch), open a MIDI track's input
+     picker: the window never stalls. A source plugged in appears the next
+     time the picker opens.
+371. Arm a track while another document's engine winds down: the window stays
+     responsive, and the input is heard within about half a second.
+372. Open a plug-in with a read-only meter parameter, set its strip to Touch,
+     play, and drag that slider: no automation track appears.
+373. Write fader automation, play, and watch the mixer: the fader follows what
+     you hear. Grab it: it starts from there. Stop: it shows the static
+     value.
+374. In the Mix view with no editor pane, press ⌥→: nothing moves, and the
+     status line says why. Edit › Nudge is greyed out.
+375. Rename a region in the inspector: its name shows at the region's top left
+     in the arrangement. Narrow the region: the name truncates, then hides.
+376. Click "→ Audio 1" on an audio track's header: pick another output. One
+     Undo puts it back.
+377. With a keyboard surface connected, colour a track: its LED takes the
+     colour. "No colour" brings back the kind's colour.
+378. Double-click the Built-in Synth slot on an instrument strip: the Built-in
+     Synth window opens. Choose Bass, then Drums, playing a few notes after
+     each: the sound changes, and Drums plays a kit. Undo brings back Bass.
+379. On a track with an external destination, choose Edit Destination…: type a
+     return latency, or press Measure with the synth's return input
+     connected. The field shows the measured value, and one Undo puts the
+     old one back.
+380. Trim the start of an audio region in the middle of a waveform with "Snap
+     audio edits to zero crossings" on (Settings › Editing): zoom in, and the
+     edge sits on a zero crossing. Play: no click at either edge. With the
+     setting off, the edge stays exactly where you dropped it, still without
+     a click.
+381. Give a region a 10 ms fade-in: it sounds exactly as before this build. A
+     crossfaded start sounds as before too.
+382. Choose the Console theme: the strip legends use the new face. Every other
+     theme is unchanged.
+
+Plan 8c, Co-Producer chores:
+
+383. On a saved song, ask Claude to "export all tracks as a DAWproject". A
+     folder "<song> — DAWproject — <date>" appears next to the song,
+     holding "<song>.dawproject". Open that file in another music app: the
+     tracks are there. Window › Song Notes shows the entry, with the file
+     under "Files".
+384. Ask Claude to "bounce to stems". A folder "<song> — Stems — <date>"
+     holds one audio file per strip. Ask again: a second folder "… 2"
+     appears, and the first is untouched.
+385. Tell Claude to put exports in another folder, then ask for a mix. The
+     mix goes there, and the next export goes there too, without asking.
+386. Ask Claude for an AAF and for "a folder for another DAW": each lands in
+     its own dated folder, and Claude reports what did not transfer.
+387. Ask Claude to "quantize the bass to sixteenths". It first shows exactly
+     which track and how many notes change. Say no: nothing changes. Ask
+     again and say yes: the notes move, as one undo step "Co-Producer: …".
+388. Ask Claude to transpose a track up two semitones, and to set the
+     velocities of another to 100. Each asks first, and Undo takes each
+     back.
+389. Ask Claude to add markers "Verse" and "Chorus": they appear at once.
+     Ask it to rename "Chorus" to "Hook": it asks first.
+390. Ask Claude to bounce a track's stem onto a new track. The new track is
+     named "… (Co-Producer)", has the badge, and one Undo removes it with
+     the rest of the request.
+391. In Claude's desktop app or another host that shows MCP Apps views, ask
+     Claude to "show my tracks". A small list shows each track and strip,
+     with Co-Producer's marked. Ask for a change to your work: a preview
+     shows each item before you answer. After an export, a result view
+     shows the files and "Show in Finder".
+392. In a host without views, the same requests answer in plain text with
+     the same lists.
+393. Ask Claude to export into the song's own package, or over an existing
+     file: it is refused, and nothing is written.
+394. In Claude's desktop app, ask for a change to your work, "show my
+     tracks", and an export. The change preview, the track list and the
+     export result views each draw, and follow the app's light and dark
+     mode (switch it and ask again). In the export result, "Show in
+     Finder" opens the export folder.
+
+Plan 8d, Co-Producer mixer and plug-ins:
+
+395. Ask Claude which plug-ins it can use. It lists your installed
+     instruments and effects and the built-in Multi-Q and Built-in Synth.
+     Turn a plug-in off in the Plugin Manager and ask again: it is gone.
+396. Ask Claude to "set up a drum bus". A bus "Drums (Co-Producer)"
+     appears with the badge. Claude then shows exactly which of your
+     tracks' strips will go to it, and waits. Say no: your strips stay
+     where they were, and the bus stays. Ask again and say yes: they go to
+     the bus, as one undo step "Co-Producer: …".
+397. Ask Claude to put an EQ or compressor on its own bus: it happens
+     without a question. Ask it to put one on your vocal track: it asks
+     first.
+398. Ask Claude to add a reverb send from your snare to a new reverb bus.
+     It asks first, and shows the send's level and whether it is
+     pre-fader.
+399. Ask Claude to turn your bass down 3 dB and pan it a little left. It
+     shows "volume … → …" and "pan …", and asks.
+400. Open the plug-in window of an insert Co-Producer added to your track,
+     and ask Claude to change one of its settings. It asks first, because
+     the track is yours. The control moves when you say yes, and Undo puts
+     it back.
+401. Ask Claude to remove its own bus while your tracks feed it. It asks,
+     and lists your strips that go back to the master.
+402. Ask Claude for a new instrument track with a named installed
+     instrument. It appears named "… (Co-Producer)", playing that
+     instrument.
+403. Ask Claude to load a plug-in you turned off, or an instrument as an
+     effect: it says why not, and nothing changes.
+404. In Claude's desktop app or another host that shows MCP Apps views,
+     ask Claude to "show the mixer". A view shows each strip's volume,
+     pan, routing, EQ, inserts and sends, with Co-Producer's strips
+     marked. In a host without views, the same answer comes as text.
+405. Make Multi-Q the bus EQ through Claude, change the audio sample rate,
+     and play: the EQ still shapes the sound, as it does when you load it
+     yourself.
+406. Ask Claude to solo one of its own tracks, or to mute and solo any
+     track. Every solo change asks first, and says "other tracks are
+     silent". Say no: nothing is soloed, and your tracks still play.
+407. Ask Claude to send one of its own tracks into a bus of yours. It asks
+     first, because it changes what your bus plays. Say no: the track
+     stays where it was.
+
+Plan 8e, Co-Producer creative help and starter projects:
+
+408. Ask Claude to "set up a new template project in a sort of 80s synthwave
+     style". A new untitled song opens with a tempo, meter, section
+     markers, instrument tracks for drums, bass, pad, lead and arpeggio,
+     and reverb and delay buses, all with the Co-Producer badge. No track
+     holds any notes.
+409. Look at which instruments and effects it chose: they are plug-ins you
+     have installed. Claude tells you which roles fell back to the
+     Built-in Synth or Multi-Q, and that tracks on the Built-in Synth
+     share one sound for now.
+410. Turn off every instrument in the Plugin Manager and ask for another
+     starter project: it still opens, on the Built-in Synth, and says so.
+411. Undo once in the new song: it goes back to an empty new song.
+412. Ask Claude to "help me figure out how to mix my drums". It makes a drum
+     bus, shows exactly which of your drum tracks' strips will go to it,
+     and waits for your yes. It talks about levels from the faders, and
+     asks you to play and read the meters.
+413. Ask for a shared reverb, then for parallel compression on the drums,
+     then for a delay into the reverb. Each new bus appears without a
+     question. Sends from your tracks are listed first and wait for your
+     yes.
+414. Ask Claude to fade out the song's last four bars. In a host that shows
+     views, a curve appears first. It asks before writing on your master
+     or track strips, and the fade plays as real automation points you can
+     edit.
+415. Ask Claude for a filter sweep on a filter plug-in Co-Producer added to
+     one of your tracks. It asks first, because the track is yours.
+416. Ask Claude to turn the held chords on your piano track into an
+     arpeggio. Claude reads your piano's notes and describes an arpeggio
+     idea in the chat. No track is added, and no track's notes change, the
+     piano's included.
+417. In a host that offers prompts, open the prompt list: the recipes are
+     there, and the starter project prompt takes a style.
+418. In a host without MCP Apps views, ask for the automation curve: the same
+     answer comes as text.
+419. Add an audio track, then another. Each has its own mixer channel in
+     the Mix view. Delete one of them and its channel goes with it; one
+     Undo brings the track and its channel back together.
+420. Ask Claude to mute, pull to silence, send elsewhere or remove a bus it
+     made, while your tracks feed that bus. It asks first and names the
+     tracks that go silent or move. Say no: the bus stays as it was.
+
+Plan 8f, Co-Producer time tracking and coaching:
+
+421. Open Settings > Co-Producer on a fresh install: "Count where my time
+     goes" is off, and the overview reads "No time records.". No `Metrics`
+     folder is in VizDAW's support folder.
+422. Turn counting on with Co-Producer itself off. Work in a piano roll with
+     the pencil for a few minutes, then in the mixer. The overview line
+     shows one song and some minutes.
+423. Look at `~/Library/Application Support/VizDAW/Metrics/time.json` in
+     Terminal (`ls -l`): it is readable and writable by you alone, and the
+     folder is yours alone. The file holds the song's name, dates, minutes
+     and VizDAW's own command names, and nothing about your notes, your
+     track names or other files.
+424. Leave VizDAW untouched for five minutes without playing: the overview
+     total does not grow.
+425. Undo quickly six times, rename tracks one after another a dozen times,
+     and leave a menu open for ten seconds before choosing something.
+426. Turn Co-Producer on and ask Claude "where does my time go?". Claude
+     tells you the time per category for this song and all songs, and names
+     the undo bursts, the repeated renames and the long menu hunt. It
+     suggests at most three chores it could take over and starts none until
+     you pick one.
+427. Work on for a while without asking. Claude never mentions your time
+     unless you ask again.
+428. Ask "what could you help with this week?": the answer covers only the
+     last seven days.
+429. Turn Co-Producer off and ask again: Claude says Co-Producer is off in
+     Settings and cannot read anything.
+430. Click Delete All Time Records...: it asks first. Cancel keeps
+     everything. Delete removes the `Metrics` folder, and the overview
+     reads "No time records.".
+431. Turn counting off, work for a few minutes, and check that no `Metrics`
+     folder appears.
+432. In a host that offers prompts, the coaching prompt is in the list
+     beside the other recipes.
 
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on

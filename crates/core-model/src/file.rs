@@ -1,6 +1,6 @@
 //! The `.vizdaw` package: `project.json`, `Media/` and `Autosave/`.
 //!
-//! `project.json` is `{ "format": "vizdaw-project", "version": 9,
+//! `project.json` is `{ "format": "vizdaw-project", "version": 10,
 //! "document": { … } }`. Loading migrates older versions step by step,
 //! refuses newer ones, rejects unknown fields and runs every integrity
 //! check. Saving writes a temporary file, syncs it, renames it over the old
@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
 /// The version this build writes.
-pub const VERSION: u64 = 9;
+pub const VERSION: u64 = 10;
 /// The oldest version this build can migrate from.
 pub const FIRST_VERSION: u64 = 1;
 /// The project file name inside a package.
@@ -46,6 +46,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migrate_v6_to_v7,
     migrate_v7_to_v8,
     migrate_v8_to_v9,
+    migrate_v9_to_v10,
 ];
 
 /// The project rate a migrated project gets (5a Ruling 2): the most
@@ -70,6 +71,15 @@ fn fade_frames(tempo: &TempoMap, start: i64, ticks: i64, rate: f64) -> u64 {
     let e = tempo.tick_to_seconds(Tick(start.saturating_add(ticks.max(0))));
     // Float-to-int `as` saturates (and maps NaN to 0).
     ((e - s) * rate).round().max(0.0) as u64
+}
+
+/// Version 9 → 10 (plan 8b): tracks, strips, sends and plug-in slots gain
+/// an optional `co_producer` mark, and one without it is unmarked, so the
+/// document is unchanged. The bump makes an older build refuse a
+/// version-10 project with its `NewerFormat` message rather than an
+/// unknown-field error.
+pub fn migrate_v9_to_v10(v: Value) -> Result<Value> {
+    Ok(v)
 }
 
 /// Version 8 → 9 (plan 6c): audio regions gain an optional `crossfade`
@@ -384,11 +394,17 @@ fn write_states(doc: &Document, package: &Path) -> Result<()> {
 }
 
 /// Best-effort: deletes blob files referenced neither by `doc` nor by any
-/// autosave. If any autosave cannot be listed, read or parsed, or the
-/// folder cannot be read, nothing is deleted. A failed delete is ignored.
+/// autosave nor by any Co-Producer copy (copies stay complete, plan 8a
+/// Ruling 9). If any autosave or copy cannot be listed, read or parsed,
+/// or the folder cannot be read, nothing is deleted. A failed delete is
+/// ignored.
 fn prune_states(doc: &Document, package: &Path) -> Option<()> {
     let mut keep = doc.referenced_states();
-    for a in list_autosaves(package).ok()? {
+    let saved = list_autosaves(package)
+        .ok()?
+        .into_iter()
+        .chain(list_copies(package).ok()?);
+    for a in saved {
         keep.extend(try_states_in_json(&fs::read_to_string(&a).ok()?)?);
     }
     let dir = package.join(STATE_DIR);
@@ -463,6 +479,249 @@ pub fn list_autosaves(package: &Path) -> Result<Vec<PathBuf>> {
     v.sort();
     v.reverse();
     Ok(v)
+}
+
+/// Where a package keeps Co-Producer's saved copies (plan 8a Ruling 9).
+pub const COPIES_DIR: &str = "Co-Producer/Copies";
+
+/// Most bytes of the title a copy's name keeps: the name stays well
+/// inside a file name's 255 bytes.
+const COPY_TITLE_BYTES: usize = 180;
+
+/// True when `stamp` is "YYYY-MM-DD HH-MM".
+fn check_stamp(stamp: &str) -> bool {
+    stamp.len() == 16
+        && stamp.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 | 13 => b == b'-',
+            10 => b == b' ',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+/// `title` made safe for a file name and a media path: `/`, `:`, `\`
+/// and control characters become `-`, leading dots go, and it is cut to [`COPY_TITLE_BYTES`].
+fn copy_title(title: &str) -> String {
+    let mut out = String::new();
+    for c in title
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | ':' | '\\') || c.is_control() {
+                '-'
+            } else {
+                c
+            }
+        })
+        .skip_while(|c| *c == '.')
+    {
+        if out.len() + c.len_utf8() > COPY_TITLE_BYTES {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Ruling 9's name: "<stamp> before <title>.vizdaw", with " 2", " 3"…
+/// when taken in `dir`. `stamp` must be "YYYY-MM-DD HH-MM" (digits
+/// checked), else Invalid.
+pub fn copy_name(dir: &Path, stamp: &str, title: &str) -> Result<String> {
+    if !check_stamp(stamp) {
+        return Err(ModelError::invalid(
+            "a copy's stamp is \"YYYY-MM-DD HH-MM\"",
+        ));
+    }
+    let base = format!("{stamp} before {}", copy_title(title));
+    for n in 1..=10_000u32 {
+        let name = if n == 1 {
+            format!("{base}.vizdaw")
+        } else {
+            format!("{base} {n}.vizdaw")
+        };
+        // A link (even a dangling one) counts as taken.
+        if fs::symlink_metadata(dir.join(&name)).is_err() {
+            return Ok(name);
+        }
+    }
+    Err(ModelError::invalid("no free name for the copy"))
+}
+
+/// Writes `doc`'s blobs into the package's state folder and a new
+/// `<COPIES_DIR>/<name>/project.json`; never replaces (the folder is
+/// created with `create_dir`, which fails if it exists). Returns the
+/// copy's path.
+pub fn write_copy(doc: &Document, package: &Path, stamp: &str, title: &str) -> Result<PathBuf> {
+    write_copy_from(doc, package, stamp, title, None)
+}
+
+/// [`write_copy`] for a document whose media live outside `package` (an
+/// untitled song's scratch root `media_root`; plan 8a Task 3 fix round 1):
+/// each media file that is there is copied (`std::fs::copy`, which clones
+/// on APFS) into the copy's own folder at the same relative path, and the
+/// copy's project names it there (`<COPIES_DIR>/<name>/<path>`). A file
+/// that is missing or not a regular file stays named where it was
+/// (offline already). `media_root` is only read. On any failure nothing
+/// of this copy is left.
+pub fn write_copy_with_media(
+    doc: &Document,
+    package: &Path,
+    stamp: &str,
+    title: &str,
+    media_root: &Path,
+) -> Result<PathBuf> {
+    write_copy_from(doc, package, stamp, title, Some(media_root))
+}
+
+/// The regular media files of `doc` under `root`, as (package-relative
+/// path, bytes): what [`write_copy_with_media`] copies.
+pub fn copy_media_files(doc: &Document, root: &Path) -> Result<Vec<(String, u64)>> {
+    let mut out = Vec::new();
+    for m in doc.media().values() {
+        match fs::symlink_metadata(root.join(&m.path)) {
+            Ok(md) if md.is_file() => out.push((m.path.clone(), md.len())),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(out)
+}
+
+fn write_copy_from(
+    doc: &Document,
+    package: &Path,
+    stamp: &str,
+    title: &str,
+    media_root: Option<&Path>,
+) -> Result<PathBuf> {
+    let dir = package.join(COPIES_DIR);
+    // Checked before anything is written.
+    copy_name(&dir, stamp, title)?;
+    fs::create_dir_all(&dir)?;
+    write_states(doc, package)?;
+    // Another writer may take the free name first: try the next one.
+    let mut tries = 0;
+    let (copy, name) = loop {
+        let name = copy_name(&dir, stamp, title)?;
+        let copy = dir.join(&name);
+        match fs::create_dir(&copy) {
+            Ok(()) => break (copy, name),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => tries += 1,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let pj = copy.join(PROJECT_FILE);
+    let written = match media_root {
+        None => to_json(doc).and_then(|t| write_atomic(&pj, t.as_bytes())),
+        Some(root) => with_own_media(doc, root, &copy, &name)
+            .and_then(|d| to_json(&d))
+            .and_then(|t| write_atomic(&pj, t.as_bytes())),
+    };
+    if let Err(e) = written {
+        // This call's own folder, made by its `create_dir`: a half-made
+        // copy would stop every later prune.
+        if media_root.is_some() {
+            let _ = fs::remove_dir_all(&copy);
+        } else {
+            let mut tmp = pj.into_os_string();
+            tmp.push(".tmp");
+            let _ = fs::remove_file(PathBuf::from(tmp));
+            let _ = fs::remove_dir(&copy);
+        }
+        return Err(e);
+    }
+    Ok(copy)
+}
+
+/// `doc` with each media file under `root` copied into `copy` (named
+/// `name` in [`COPIES_DIR`]) and named there.
+fn with_own_media(doc: &Document, root: &Path, copy: &Path, name: &str) -> Result<Document> {
+    let mut out = doc.clone();
+    let files: std::collections::BTreeSet<String> = copy_media_files(doc, root)?
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    for (id, m) in doc.media().iter() {
+        if !files.contains(&m.path) {
+            continue;
+        }
+        let to = copy.join(&m.path);
+        if let Some(d) = to.parent() {
+            fs::create_dir_all(d)?;
+        }
+        // Several items may name one file: it is copied once.
+        if fs::symlink_metadata(&to).is_err() {
+            fs::copy(root.join(&m.path), &to)?;
+        }
+        let path = format!("{COPIES_DIR}/{name}/{}", m.path);
+        crate::rules::check_media_path(&path)?;
+        if let Some(item) = out.media_mut().get_mut(id) {
+            item.path = path;
+        }
+    }
+    Ok(out)
+}
+
+/// The copies' `project.json` paths, sorted; Err when the folder cannot
+/// be read.
+pub fn list_copies(package: &Path) -> Result<Vec<PathBuf>> {
+    let dir = package.join(COPIES_DIR);
+    if fs::symlink_metadata(&dir).is_err() {
+        return Ok(Vec::new());
+    }
+    let mut v = Vec::new();
+    for e in fs::read_dir(&dir)? {
+        let path = e?.path();
+        let copy = path
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("vizdaw"))
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| !n.starts_with('.'))
+            && path.is_dir();
+        if copy {
+            v.push(path.join(PROJECT_FILE));
+        }
+    }
+    v.sort();
+    Ok(v)
+}
+
+/// The package a copy belongs to, when `path` is
+/// `<pkg>/Co-Producer/Copies/<x>.vizdaw` (`<pkg>` is a `.vizdaw` package,
+/// or the folder that stands in for an untitled one, Ruling P9). Names are
+/// compared without case, as macOS volumes do.
+pub fn copy_parent(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut parts: Vec<Component<'_>> = path
+        .components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect();
+    let named = |c: Option<Component<'_>>, want: &str| matches!(c, Some(Component::Normal(n)) if n.to_str().is_some_and(|n| n.eq_ignore_ascii_case(want)));
+    let Some(Component::Normal(last)) = parts.pop() else {
+        return None;
+    };
+    let last = Path::new(last);
+    let is_copy = last
+        .extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case("vizdaw"))
+        && last.file_stem().is_some_and(|s| !s.is_empty());
+    if !is_copy || !named(parts.pop(), "Copies") || !named(parts.pop(), "Co-Producer") {
+        return None;
+    }
+    if !matches!(parts.last(), Some(Component::Normal(_))) {
+        return None;
+    }
+    Some(parts.iter().collect())
+}
+
+/// The copy's document with the parent's blobs (like `load_autosave`).
+pub fn load_copy(copy: &Path) -> Result<Document> {
+    let package =
+        copy_parent(copy).ok_or_else(|| ModelError::invalid("that is not a Co-Producer copy"))?;
+    let mut doc = from_json(&fs::read_to_string(copy.join(PROJECT_FILE))?)?;
+    read_states(&mut doc, &package);
+    Ok(doc)
 }
 
 /// Writes a timestamped copy to `Autosave/` and keeps the newest

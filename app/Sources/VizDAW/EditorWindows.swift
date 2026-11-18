@@ -54,6 +54,12 @@ enum EditorWindows {
         for w in model.editor.layout.windows { show(store, doc: doc, window: w) }
     }
 
+    /// A torn-off editor window's own editor kind (plan 8f Ruling 3); nil
+    /// for any other window.
+    static func kind(of window: NSWindow) -> DetailEditorKind? {
+        open.values.first { !$0.closed && $0.window === window }?.detailKind
+    }
+
     /// The document is closing: its windows close but stay in its layout.
     static func closeDocument(_ doc: UUID) {
         for (key, c) in open where key.doc == doc { c.closeForDocument() }
@@ -101,6 +107,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// The editor this window shows, from the document's layout.
+    var detailKind: DetailEditorKind? { model.editor.layout.windows.first { $0.id == id }?.detail.kind }
 
     func closeForDocument() {
         guard !closed else { return }

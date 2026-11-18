@@ -58,6 +58,69 @@ final class LivePluginSettingsSink: PluginSettingsSink {
 /// Components folder (nil), only when asked.
 @MainActor let pluginSettings = PluginSettings(defaults: MemoryDefaults.appStore(), sink: LivePluginSettingsSink())
 
+/// The Co-Producer switch's live side (plan 8a Ruling 10): the second
+/// control server, the support folder's owner and mode, and the off marker
+/// `vizdaw-mcp` reads.
+@MainActor
+final class LiveCoProducerSink: CoProducerSink {
+    let supportDir: URL
+    init(supportDir: URL) { self.supportDir = supportDir }
+
+    private var marker: String { supportDir.appendingPathComponent("co-producer.off").path }
+
+    /// The folder must be this user's; it becomes 0700, so the socket's
+    /// folder passes the server's own checks (control spec §8).
+    func start(path: String) -> String? {
+        let dir = URL(fileURLWithPath: (path as NSString).deletingLastPathComponent, isDirectory: true)
+        if let why = SupportFolder.makePrivate(dir) { return why }
+        return ControlChannel.startCoProducer(path: path)
+    }
+
+    func stop() { ControlChannel.stopCoProducer() }
+
+    /// Writes the empty marker only where nothing is (a link is never
+    /// followed or replaced); removes whatever is there.
+    func markOff(_ off: Bool) {
+        let fm = FileManager.default
+        if off {
+            guard (try? fm.attributesOfItem(atPath: marker)) == nil else { return }
+            try? fm.createDirectory(at: supportDir, withIntermediateDirectories: true)
+            _ = fm.createFile(atPath: marker, contents: Data())
+        } else {
+            try? fm.removeItem(atPath: marker)
+        }
+    }
+}
+
+/// Settings › Co-Producer (plan 8a Ruling 10): off unless the composer
+/// turned it on; made after the support folder exists, and it starts the
+/// socket then when on. Turning it off ends every open request.
+///
+/// VizDAW's own approval (plan 8b Ruling 11): callers are identified by
+/// `DarwinClientFacts`, and standing approvals live in the login Keychain,
+/// or in memory until quit with `VIZDAW_TEST_HOOKS=1`, so the e2e never
+/// touches the Keychain.
+@MainActor let coProducerSettings: CoProducerSettings = {
+    let dir = AppSetup.coProducerSupportDir
+    let env = ProcessInfo.processInfo.environment
+    let approvals: any CoProducerApprovalStore =
+        env["VIZDAW_TEST_HOOKS"] == "1" ? MemoryApprovalStore() : KeychainApprovalStore()
+    let s = CoProducerSettings(
+        defaults: MemoryDefaults.appStore(), supportDir: dir, sink: LiveCoProducerSink(supportDir: dir),
+        facts: DarwinClientFacts(), approvals: approvals, environment: env)
+    s.didTurnOff = { CoProducerCommands.tidy(appStore, all: true) }
+    return s
+}()
+
+/// Settings › Co-Producer › Count where my time goes (plan 8f Ruling 1):
+/// off unless the composer turned it on; independent of the Co-Producer
+/// switch. Made at launch; `MetricsProbe` samples only while it is on.
+@MainActor let coProducerMetrics = CoProducerMetrics(
+    defaults: MemoryDefaults.appStore(), supportDir: AppSetup.coProducerSupportDir,
+    environment: ProcessInfo.processInfo.environment,
+    makePrivate: { SupportFolder.makePrivate($0) },
+    open: { try MetricsRecorder.open(support: $0.path, blockMs: $1, sampleMs: $2) })
+
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
 @MainActor let noteInputHub = NoteInputHub(input: NoteInput())
@@ -74,6 +137,9 @@ struct VizDAWApp: App {
         Icons.register(SymbioticBrand.provider)
         #endif
         appStore.keyBindings = keyBindings
+        // Trims snap to zero crossings by this preference (plan
+        // release-fixes Task 7).
+        ZeroCrossing.preferences = editingPreferences
         // The external sample editor (plan 5f-3 Ruling 5): the stub launches
         // nothing (CI, the e2e).
         let stub = ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub"
@@ -105,12 +171,13 @@ struct VizDAWApp: App {
                 {
                 case .failed(let f): m.editor.status = f.message
                 case .opened(_, let d): ControlWindows.openDocument(d)
-                case .done, .job, .measure, .pending: break
+                case .done, .job, .measure, .pending, .awaitingApproval: break
                 }
             }
         }
         appStore.willClose = {
             PluginWindows.closeDocument($0)
+            BuiltinSynthWindows.closeDocument($0)
             EditorWindows.closeDocument($0)
             ModifyPanels.close($0)
         }
@@ -149,6 +216,11 @@ struct VizDAWApp: App {
             ControlChannel.start(path: path)
         }
         AppSetup.openCatalog()
+        // Co-Producer's socket, when its switch is on (Ruling 10).
+        _ = coProducerSettings
+        // Time counting, when its switch is on (plan 8f Ruling 1): a stored
+        // on that fails to start goes off, and Settings says why.
+        _ = coProducerMetrics
         LaunchArguments.apply(ControlLaunch.strip(CommandLine.arguments), to: appStore)
     }
 
@@ -194,6 +266,8 @@ struct VizDAWApp: App {
                     .tabItem { AppIcon.settingsSurfaces.label("Surfaces") }
                 PluginSettingsView(settings: pluginSettings)
                     .tabItem { AppIcon.settingsPlugins.label("Plug-ins") }
+                CoProducerSettingsView(settings: coProducerSettings, metrics: coProducerMetrics, store: appStore)
+                    .tabItem { AppIcon.settingsCoProducer.label("Co-Producer") }
             }
             .themedRoot()
         }
@@ -216,6 +290,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeyMonitor.start()
         AppSetup.startScan()
         PluginTicker.start(appStore)
+        // Samples only while Count where my time goes is on.
+        MetricsProbe.follow(coProducerMetrics, store: appStore)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -227,7 +303,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // A clean quit leaves no crash markers.
         MainActor.assumeIsolated {
-            // Pending control calls are answered before the documents go.
+            // Pending control calls are answered before the documents go;
+            // Co-Producer's requests end first (Ruling 10).
+            coProducerSettings.quit()
+            // Time counting writes what is pending; the open block is dropped.
+            MetricsProbe.stop()
+            coProducerMetrics.quit()
             ControlChannel.stop()
             appStore.closeAll()
             // Stop the engine so no plugin host is dropped while it renders.
@@ -259,6 +340,18 @@ enum AppSetup {
         return base.appendingPathComponent("VizDAW")
     }
 
+    /// Co-Producer's folder (plan 8a Task 5 carry): the very path
+    /// `vizdaw-mcp` derives, or it refuses the screenshots it is sent.
+    /// `--smoke` runs keep their temporary folder; without a folder
+    /// `vizdaw-mcp` could find, the app's own.
+    static var coProducerSupportDir: URL {
+        if LaunchArguments.smokeRun { return supportDir }
+        if let p = CoProducerSettings.supportPath(environment: ProcessInfo.processInfo.environment) {
+            return URL(fileURLWithPath: p, isDirectory: true)
+        }
+        return supportDir
+    }
+
     /// `VIZDAW_SCANNER` (scripts/swift.sh sets it), else `vizdaw-scan` next
     /// to the app's executable (the bundle).
     static var scanner: String {
@@ -277,6 +370,10 @@ enum AppSetup {
         // it; lanes mark surface ports.
         try? surfacesLoad()
         LaneInputs.claimedPorts = { Set(surfaceList().map(\.input)) }
+        // The pickers' first menus list the MIDI sources and the device's
+        // channels (release-fixes Task 3 review I1), read off the main
+        // thread. Not in `--smoke` runs, which read no device.
+        if !LaunchArguments.smokeRun { Task { await LaneInputs.warmSources() } }
         appPlugins.start(config: AppPlugins.config(supportDir: dir, scanner: scanner), scan: false)
     }
 

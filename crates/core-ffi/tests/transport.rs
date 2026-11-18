@@ -608,3 +608,100 @@ fn loop_wraps_with_an_audio_track() {
     assert!(st.playing, "{st:?}");
     assert!(st.tick < len - PPQ, "did not wrap: {}", st.tick);
 }
+
+/// Sequence "S", 8 bars at 120 BPM: track "Keys" on the built-in synth,
+/// MIDI input from "Keys", armed.
+fn armed_keys() -> (std::sync::Arc<Session>, u64) {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, SequenceCmd};
+    use core_model::lane::LaneInput;
+    use core_model::sequence::SeqLength;
+    use core_model::time::Tick;
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("S", "Keys", Some(synth)).unwrap();
+    b.run(Command::Lane(LaneCmd::SetInput {
+        seq,
+        lane: keys,
+        input: Some(LaneInput::Midi {
+            port: Some("Keys".into()),
+            channel: None,
+        }),
+    }))
+    .unwrap();
+    b.run(Command::Lane(LaneCmd::SetFlags {
+        seq,
+        lane: keys,
+        mute: None,
+        solo: None,
+        arm: Some(true),
+    }))
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(8 * 4 * Q)),
+    }))
+    .unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    (s, seq.0)
+}
+
+/// Plan release-fixes Task 1 (owner decision 1): a device rebuild during
+/// Record's count-in resumes it from the next beat: the timeline still
+/// stands at the record start, and the transport rolls after the beats
+/// left.
+fn a_rebuild_during_the_count_in(event: BackendEvent) {
+    use core_engine::fixtures::Q;
+    let (s, seq) = armed_keys();
+    s.locate(4 * Q).unwrap();
+    s.record(
+        seq,
+        vizdaw_ffi::RecordSpecRow {
+            replace: true,
+            punch: None,
+            looped: false,
+            count_in_bars: 1,
+            pre_roll_bars: 0,
+            passes_as_takes: true,
+        },
+    )
+    .unwrap();
+    // One 4/4 bar at 120 BPM: a click each 500 ms. The first has sounded.
+    assert!(wait_for(&s, |st| st.counting_in), "no count-in");
+    ms(100);
+    let created = hosts_created();
+    simulate_event(event);
+    t(&s);
+    assert_eq!(hosts_created(), created + 1, "no rebuild");
+    let rebuilt = Instant::now();
+    assert!(
+        wait_for(&s, |st| st.counting_in),
+        "the count-in did not resume"
+    );
+    let st = t(&s);
+    assert!(!st.playing);
+    assert_eq!(st.tick, 4 * Q, "the timeline moved");
+    assert!(wait_for(&s, |st| st.playing), "it never rolled");
+    // Three beats left: 1.5 s, give or take a block and the polling.
+    let took = rebuilt.elapsed();
+    assert!(
+        took >= Duration::from_millis(1450) && took < Duration::from_millis(2200),
+        "rolled after {took:?}"
+    );
+    // A rebuild still ends the recording pass (backlog, 27.1.0): only the
+    // count-in is asserted here.
+    s.stop().unwrap();
+    s.close().unwrap();
+}
+
+#[test]
+fn a_rebuild_during_the_count_in_keeps_counting() {
+    let _g = serial();
+    a_rebuild_during_the_count_in(BackendEvent::DefaultDeviceChanged);
+}
+
+#[test]
+fn a_rebuild_during_the_count_in_keeps_counting_after_a_rate_change() {
+    let _g = serial();
+    a_rebuild_during_the_count_in(BackendEvent::SampleRateChanged(48_000.0));
+}

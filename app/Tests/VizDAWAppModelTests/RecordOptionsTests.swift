@@ -37,7 +37,9 @@ import VizDAWCore
         let (m, _) = try demo()
         m.select(3)
         let r = m.record
-        #expect(r.replaces && !r.punches)
+        #expect(!r.replaces && !r.punches)
+        r.setReplace(true)
+        #expect(r.replaces && r.spec().replace)
         r.setReplace(false)
         r.setPunch(true)
         #expect(m.editor.layout.transport.overdub && m.editor.layout.transport.punch)
@@ -59,6 +61,34 @@ import VizDAWCore
         // Only the punch fields keep drafts (Task 2 review M5).
         r.setPunchText(.position, "9")
         #expect(r.punchText(.position) == m.fieldText(.position))
+    }
+
+    /// Plan 5c-2 takes Ruling 7: the bar's Replace/Overdub switch is the
+    /// transport's mode, the same one `transport.overdub` and `record.set`
+    /// set, and it waits while a text field has the keyboard.
+    @Test func theBarSwitchIsTheTransportsMode() throws {
+        let f = demoFake()
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        m.select(3)
+        let r = m.record
+        #expect(r.modeTitle == "Overdub" && r.modeLabel == "Record mode: Overdub")
+        #expect(r.toggleMode() == .done)
+        #expect(r.modeTitle == "Replace" && r.modeLabel == "Record mode: Replace")
+        #expect(r.replaces && r.spec().replace)
+        let args = [ControlArg(name: "replace", value: .flag(value: false))]
+        _ = ControlCommands.run("record.set", args: args, doc: (id, m), store: s, host: FakeControlHost())
+        #expect(r.modeTitle == "Overdub" && !r.replaces)
+        m.beginRename(3)
+        #expect(r.toggleMode() == .unavailable("A text field has the keyboard."))
+        #expect(r.modeTitle == "Overdub" && !r.replaces)
+        m.cancelRename()
+        #expect(RecordModel.modeHelp == "Replace removes the notes in the recorded range; Overdub keeps them (transport.overdub)")
+        #expect(
+            RecordModel.midiTakesHelp
+                == "Loop recording: each MIDI pass becomes a new take. Off: passes layer into the playing take. Audio passes always become takes."
+        )
     }
 
     /// Plan 7a final review I2: the mixer window's transport bar has its own
@@ -390,6 +420,7 @@ import VizDAWCore
     @Test func loopCountersAndTheOverdubNote() throws {
         let (m, f) = try armed()
         let r = m.record
+        r.setReplace(true)
         #expect(r.overdubNote == nil)
         r.setReplace(false)
         #expect(r.overdubNote == RecordModel.overdubNote)

@@ -218,6 +218,16 @@ pub enum LaneCmd {
         /// Also arm the MIDI lane (to record the performance as well).
         arm_midi: bool,
     },
+    /// Make Mine (plan 8b Ruling 1): the track and the strip it plays
+    /// through ([`crate::marks::lane_strip`]), with that strip's sends and
+    /// plug-in slots, become the composer's; the names it unmarks lose
+    /// their " (Co-Producer)".
+    MakeMine {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+    },
 }
 
 impl LaneCmd {
@@ -244,6 +254,7 @@ impl LaneCmd {
             LaneCmd::SetInputFx { .. } => "Set Input Effects",
             LaneCmd::SetMpe { .. } => "Set Track MPE",
             LaneCmd::TrackSynth { .. } => "Track Synth",
+            LaneCmd::MakeMine { .. } => "Make Mine",
         }
     }
 }
@@ -266,6 +277,9 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
                     .extend(t.events.keys().map(|(_, id)| AnyId::Event(*id)));
             }
             r.removed.push(AnyId::Lane(*lane));
+            if let Some(out) = l.audio_out {
+                remove_unused_output(d, out, r);
+            }
         }
         LaneCmd::Reorder { seq, lane, to } => {
             let s = d.seq_mut(*seq)?;
@@ -417,8 +431,26 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
             channels,
             arm_midi,
         } => track_synth(d, *seq, *lane, *channels, *arm_midi, r)?,
+        LaneCmd::MakeMine { seq, lane } => crate::marks::make_lane_mine(d, *seq, *lane)?,
     }
     Ok(())
+}
+
+/// Plan 8e Task 6c (fix round 1): each new audio track has its own
+/// output path, so a deleted track's path and its strip go with it, in
+/// the same step, when no track left in the song plays through it. A
+/// path another track still uses (a duplicate's, an old song's shared
+/// one) stays.
+fn remove_unused_output(d: &mut Document, out: OutputPathId, r: &mut Report) {
+    let used = d
+        .sequences()
+        .values()
+        .any(|s| s.lanes.iter().any(|l| l.audio_out == Some(out)));
+    if used || d.outputs_mut().remove(&out).is_none() {
+        return;
+    }
+    r.removed.push(AnyId::Output(out));
+    super::strips::remove_kind(d, crate::mixer::StripKind::AudioPath(out), r);
 }
 
 /// [`LaneCmd::Duplicate`].

@@ -385,3 +385,54 @@ fn a_redone_arm_is_heard_before_play() {
     assert!(!s.transport().unwrap().playing, "nothing played");
     s.close().unwrap();
 }
+
+/// Release-fixes Task 3: an arm that retires another window's idle engine
+/// (opened for another project rate) parks it for its drain and returns at
+/// once: the edit never waits out `DRAIN` (300 ms) on the main thread. The
+/// input is heard once the claim lands, and idle ticks drop the parked
+/// engine after its drain.
+#[test]
+fn arming_while_an_engine_retires_does_not_wait_for_the_drain() {
+    let _g = serial();
+    let a = Session::new_project(vizdaw_ffi::ProjectFormatRow {
+        sample_rate: 96_000,
+        depth: vizdaw_ffi::BitDepthRow::Float32,
+    })
+    .unwrap();
+    let snap = a
+        .edit(
+            EditCommand::Sequence {
+                edit: vizdaw_ffi::SequenceEdit::New {
+                    name: "Song".into(),
+                },
+            },
+            None,
+        )
+        .unwrap();
+    a.play(snap.sequences[0].id).unwrap();
+    a.stop().unwrap();
+    wait_until("a stops", || !a.transport().unwrap().playing);
+    let owner = holder();
+    assert!(owner.is_some(), "a holds an idle 96 kHz engine");
+    let b = Session::new_demo_audio().unwrap();
+    let seq = song(&b);
+    let lp = inputs(&b, seq, true);
+    let t = Instant::now();
+    arm(&b, seq, lp, true);
+    let took = t.elapsed();
+    assert!(
+        took < Duration::from_millis(150),
+        "the arm waited {took:?} for the old engine's drain"
+    );
+    wait_until("b's claim to be heard", || {
+        b.debug_input_open() == Some(true)
+    });
+    assert_ne!(holder(), owner, "b took the engine");
+    assert_eq!(b.debug_engine_inputs().unwrap().monitor.len(), 1);
+    wait_until("the parked engine to go", || {
+        b.idle().unwrap();
+        vizdaw_ffi::host::retiring_count() == 0
+    });
+    a.close().unwrap();
+    b.close().unwrap();
+}

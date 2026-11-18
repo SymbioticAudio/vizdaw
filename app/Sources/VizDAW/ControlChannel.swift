@@ -11,10 +11,20 @@ import VizDAWEditors
 /// menu items, clicks and keys would, and answers. Calls that must wait
 /// (a window to appear, posted events to be handled, a `wait`) are kept
 /// as deferred answers and checked on every tick.
+///
+/// Co-Producer's socket (plan 8a Ruling 10) is a second server on the same
+/// timer, on while Settings › Co-Producer is: its calls go through
+/// `CoProducerCommands.run`, and its deferred answers go back through it.
+/// `active` is the developer channel's alone, so with only Co-Producer on
+/// the composer's own sheets and alerts show as usual.
 @MainActor
 enum ControlChannel {
     private(set) static var server: ControlServer?
+    /// The Co-Producer server, while the switch is on.
+    private(set) static var coProducer: ControlServer?
     private static var timer: Timer?
+    /// Timer ticks, for the idle check every 100 (5 s).
+    private static var ticks = 0
     /// App-level alerts the channel kept from showing (newest last).
     private(set) static var alerts: [AlertItem] = []
     private static var deferred: [Deferred] = []
@@ -25,6 +35,8 @@ enum ControlChannel {
     /// A call answered later: `step(expired)` answers and returns true
     /// when done (`expired`: its time is up, it must answer now).
     struct Deferred {
+        /// The server the call came on: each numbers its calls from 1.
+        let server: ControlServer
         let token: UInt64
         let deadline: ContinuousClock.Instant
         let step: @MainActor (_ expired: Bool) -> Bool
@@ -46,14 +58,47 @@ enum ControlChannel {
             exit(2)
         }
         FileHandle.standardError.write(Data("vizdaw: control channel on \(path)\n".utf8))
+        startTimer()
+    }
+
+    private static func startTimer() {
+        guard timer == nil else { return }
         let t = Timer(timeInterval: 0.05, repeats: true) { _ in MainActor.assumeIsolated { pump() } }
         // Common modes: answers keep coming while a menu or a drag tracks.
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
 
-    /// The app quits: pending calls get `shutting_down`, the socket goes.
+    /// Starts the Co-Producer server at `path`: nil when it listens, else
+    /// why it could not (`LiveCoProducerSink`).
+    static func startCoProducer(path: String) -> String? {
+        guard coProducer == nil else { return nil }
+        do {
+            coProducer = try ControlServer.startCoProducer(path: path, appTimeoutMs: 60_000)
+        } catch {
+            return AlertItem(error, title: "Co-Producer").message
+        }
+        FileHandle.standardError.write(Data("vizdaw: Co-Producer on \(path)\n".utf8))
+        startTimer()
+        return nil
+    }
+
+    /// Stops the Co-Producer server: its queued and waiting calls get
+    /// `shutting_down`, its connections drop, its socket goes.
+    static func stopCoProducer() {
+        guard let c = coProducer else { return }
+        try? c.stop()
+        coProducer = nil
+        deferred.removeAll { $0.server === c }
+        if server == nil {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    /// The app quits: pending calls get `shutting_down`, the sockets go.
     static func stop() {
+        stopCoProducer()
         timer?.invalidate()
         timer = nil
         try? server?.stop()
@@ -68,22 +113,36 @@ enum ControlChannel {
     }
 
     static func pump() {
-        guard let server else { return }
+        guard server != nil || coProducer != nil else { return }
         let now = clock.now
         // Swap the queue out first: a step may queue another deferred step
         // (via `later`), which must survive this tick.
         let running = deferred
         deferred = []
         let kept = running.filter { d in
-            guard server.isWaiting(token: d.token) else { return false }
+            guard d.server.isWaiting(token: d.token) else { return false }
             return !d.step(now >= d.deadline)
         }
         deferred = kept + deferred
-        for _ in 0..<8 {
-            guard let call = (try? server.nextCall()) ?? nil else { break }
-            execute(call, server)
+        if let server {
+            for _ in 0..<8 {
+                guard let call = (try? server.nextCall()) ?? nil else { break }
+                execute(call, server)
+            }
         }
-        noteDocumentAlerts()
+        if let coProducer {
+            for _ in 0..<8 {
+                guard let call = (try? coProducer.nextCall()) ?? nil else { break }
+                execute(call, coProducer, coProducer: true)
+            }
+            // VizDAW's approval sheets: out of time, stale or orphaned is a
+            // no (plan 8b Ruling 11).
+            CoProducerCommands.checkApprovals(store: appStore, host: AppControlHost.shared, now: Date())
+            // A request idle for 5 minutes ends (Ruling 3), checked every 5 s.
+            ticks += 1
+            if ticks % 100 == 0 { CoProducerCommands.tidy(appStore, all: false) }
+        }
+        if active { noteDocumentAlerts() }
     }
 
     /// Reports each document alert once (their sheets do not open while
@@ -94,7 +153,9 @@ enum ControlChannel {
         for a in documentAlerts.unreported(current) { note(a) }
     }
 
-    static func answer(_ server: ControlServer, _ token: UInt64, _ outcome: ControlOutcome) {
+    /// Answers `outcome` on `server`; `coProducer`: a Co-Producer call, whose
+    /// job's failure alert is its failure (Ruling P8).
+    static func answer(_ server: ControlServer, _ token: UInt64, _ outcome: ControlOutcome, coProducer: Bool = false) {
         switch outcome {
         case .done(let r): _ = try? server.reply(token: token, result: r)
         case .failed(let f): _ = try? server.fail(token: token, failure: f)
@@ -102,15 +163,17 @@ enum ControlChannel {
         case .job(let command, let doc, let job):
             // The server's app timeout is for stalls; a job gets its own.
             _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
-            whenJobEnds(server, token, command: command, doc: doc, job: job)
+            whenJobEnds(server, token, command: command, doc: doc, job: job, coProducer: coProducer)
         case .measure(let doc, let job):
             whenMeasured(server, token, doc: doc, job: job)
+        case .awaitingApproval(let doc):
+            whenApproved(server, token, doc: doc)
         case .pending(let p):
             // A file read or a render: as long as a job may take.
             _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
-            later(token, seconds: Double(jobWait) / 1000) { expired in
+            later(server, token, seconds: Double(jobWait) / 1000) { expired in
                 if let o = p.outcome {
-                    answer(server, token, o)
+                    answer(server, token, o, coProducer: coProducer)
                     return true
                 }
                 if expired { _ = try? server.fail(token: token, failure: .of(.timeout, "the call did not end in time")) }
@@ -119,11 +182,33 @@ enum ControlChannel {
         }
     }
 
+    /// Answers a Co-Producer apply once the composer answered VizDAW's
+    /// approval sheet (plan 8b Ruling 11): the call waits the sheet's time
+    /// plus 30 s, within `vizdaw-mcp`'s 660 s, and its sheet is a no once
+    /// nobody waits for it.
+    static func whenApproved(_ server: ControlServer, _ token: UInt64, doc: UUID) {
+        guard let w = CoProducerCommands.approvalWait(for: doc) else {
+            _ = try? server.fail(token: token, failure: .of(.failed, CoProducerCommands.notAllowed))
+            return
+        }
+        let seconds = AppControlHost.shared.coProducer.approvalWait + 30
+        _ = try? server.extendTimeout(token: token, timeoutMs: UInt64(seconds * 1000))
+        w.callerWaiting = { server.isWaiting(token: token) }
+        later(server, token, seconds: seconds) { expired in
+            if let o = w.outcome {
+                answer(server, token, o, coProducer: true)
+                return true
+            }
+            if expired { _ = try? server.fail(token: token, failure: .of(.failed, CoProducerCommands.notAllowed)) }
+            return expired
+        }
+    }
+
     /// Answers once Measure `job` ended: about 13 s at most (the core's 3 s
     /// input wait, then its 10 s measure wait), so a 2 s margin within the
     /// 15 s the call's timeout was extended to (`SynthCommands.extraTimeMs`).
     static func whenMeasured(_ server: ControlServer, _ token: UInt64, doc: UUID, job: MeasureJob) {
-        later(token, seconds: 15) { expired in
+        later(server, token, seconds: 15) { expired in
             guard let m = appStore.model(doc) else {
                 _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
                 return true
@@ -140,29 +225,45 @@ enum ControlChannel {
     }
 
     /// Answers once job `job` of `doc` ended (an import or conversion may
-    /// take minutes; `jobWait` at most).
-    static func whenJobEnds(_ server: ControlServer, _ token: UInt64, command: String, doc: UUID, job: UInt64) {
+    /// take minutes; `jobWait` at most). `coProducer`: an alert the job
+    /// left on its document is the call's failure, and is cleared, so no
+    /// sheet opens for it (Ruling P8).
+    static func whenJobEnds(
+        _ server: ControlServer, _ token: UInt64, command: String, doc: UUID, job: UInt64, coProducer: Bool = false
+    ) {
         // A project an import made shows its window once the import
         // succeeded (as `file.new`'s does); a failed one closes unseen.
         var opened = false
-        later(token, seconds: Double(jobWait) / 1000) { expired in
+        let alertBefore = appStore.model(doc)?.alert?.id
+        later(server, token, seconds: Double(jobWait) / 1000) { expired in
             guard let m = appStore.model(doc) else {
+                CoProducerCommands.jobEnded(doc: doc, job: job, nil)
                 _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
                 return true
             }
             guard let j = try? m.session.job(id: job) else {
+                CoProducerCommands.jobEnded(doc: doc, job: job, m)
                 _ = try? server.fail(token: token, failure: .of(.failed, "the job is unknown"))
                 return true
             }
             switch m.jobAnswer(j) {
             case .wait:
                 if expired {
+                    CoProducerCommands.jobEnded(doc: doc, job: job, m)
                     _ = try? server.fail(
                         token: token, failure: .of(.timeout, ControlJobs.expiredMessage(j)))
                 }
                 return expired
             case .ok(let status):
                 m.refreshAfterJob()
+                if coProducer, let a = CoProducerCommands.takeNewAlert(m, before: alertBefore) {
+                    CoProducerCommands.jobEnded(doc: doc, job: job, m)
+                    _ = try? server.fail(token: token, failure: .alert(a))
+                    return true
+                }
+                // An outward job Co-Producer ran: the files it wrote go in
+                // the request's entry (plan 8b Ruling 5, 8c Task 4).
+                CoProducerCommands.jobEnded(doc: doc, job: job, m)
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
                 if j.kind == .importMidi || j.kind == .exportMidi || j.kind == .exportProject || j.kind == .exportDawproject || j.kind == .importProject
                     || j.kind == .mergeDawproject || j.kind == .exportAaf || j.kind == .importAaf
@@ -192,6 +293,8 @@ enum ControlChannel {
             case .failed(let message):
                 // A failed import may still have changed nothing; a refresh is harmless.
                 m.refreshAfterJob()
+                if coProducer { _ = CoProducerCommands.takeNewAlert(m, before: alertBefore) }
+                CoProducerCommands.jobEnded(doc: doc, job: job, m)
                 InterchangeCommands.jobEnded(doc, failed: true, store: appStore) { id in
                     if let w = ControlWindows.window(of: id) { w.performClose(nil) } else { appStore.close(id) }
                 }
@@ -262,16 +365,20 @@ enum ControlChannel {
     /// Whether a live capture's call was answered already.
     @MainActor final class LiveReply { var done = false }
 
-    static func later(_ token: UInt64, seconds: Double, _ step: @escaping @MainActor (Bool) -> Bool) {
+    /// Runs `step` now and, until it is done, on every tick: answered on
+    /// `server`, the server the call came on.
+    static func later(
+        _ server: ControlServer, _ token: UInt64, seconds: Double, _ step: @escaping @MainActor (Bool) -> Bool
+    ) {
         if !step(false) {
-            deferred.append(Deferred(token: token, deadline: clock.now + .seconds(seconds), step: step))
+            deferred.append(Deferred(server: server, token: token, deadline: clock.now + .seconds(seconds), step: step))
         }
     }
 
     /// Opens `doc`'s window and answers once it is on screen.
     static func whenShown(_ server: ControlServer, _ token: UInt64, command: String?, doc: UUID) {
         ControlWindows.openDocument(doc)
-        later(token, seconds: 30) { expired in
+        later(server, token, seconds: 30) { expired in
             if let w = ControlWindows.window(of: doc) {
                 let r: ControlResult =
                     command.map {
@@ -287,7 +394,7 @@ enum ControlChannel {
         }
     }
 
-    static func execute(_ call: ControlCall, _ server: ControlServer) {
+    static func execute(_ call: ControlCall, _ server: ControlServer, coProducer: Bool = false) {
         let token = call.token
         // Its client was already answered `timeout` while it was queued:
         // running it now would change what nobody waits for (5c-2 final
@@ -299,6 +406,23 @@ enum ControlChannel {
             return
         }
         if staleWindow(call.request) { return answer(server, token, noWindow) }
+        if coProducer {
+            switch call.request {
+            case .state(.input, _), .screenshot(_, _, _, true):
+                // The gate refuses these already (Ruling 11).
+                return answer(server, token, .failed(.of(.notAllowed, "Co-Producer cannot make that call.")))
+            case .state, .wait, .screenshot:
+                break  // read as the developer channel reads them, below
+            default:
+                // Commands and requests: between enter and leave, in one
+                // stretch on this thread (Ruling 13).
+                let doc = ControlWindows.document(requestWindow(call.request))
+                let outcome = CoProducerCommands.run(
+                    call.request, doc: doc, store: appStore, host: AppControlHost.shared,
+                    stamp: CoProducerCommands.stamp(Date()), peer: call.peer, approver: SheetApprover.shared)
+                return answer(server, token, outcome, coProducer: true)
+            }
+        }
         switch call.request {
         case .runCommand(let id, let args, let window):
             // A call that blocks (Measure) gets the time it blocks for from
@@ -382,7 +506,7 @@ enum ControlChannel {
         case .wait(let condition, let window, let timeoutMs):
             let start = clock.now
             var last = facts(window)
-            later(token, seconds: Double(timeoutMs) / 1000) { expired in
+            later(server, token, seconds: Double(timeoutMs) / 1000) { expired in
                 last = facts(window)
                 if controlWaitMet(condition: condition, facts: last) {
                     let ms = (clock.now - start).components
@@ -395,6 +519,24 @@ enum ControlChannel {
                 _ = try? server.waitTimedOut(token: token, condition: condition, facts: last, timeoutMs: timeoutMs)
                 return true
             }
+        case .coProducerBegin, .coProducerEnd, .coProducerStatus, .coProducerPreview, .coProducerApply,
+            .coProducerNotes, .coProducerNote, .coProducerExportFolder, .coProducerExport, .coProducerPlugins,
+            .coProducerParams, .coProducerStarter, .coProducerMidiNotes, .coProducerAutomation, .coProducerMetrics:
+            // The developer server's gate refuses these (Ruling 11).
+            answer(server, token, .failed(.of(.notAllowed, "only on the Co-Producer socket")))
+        }
+    }
+
+    /// The window a command or Co-Producer request names.
+    static func requestWindow(_ request: ControlRequest) -> WindowRefRow? {
+        switch request {
+        case .runCommand(_, _, let w), .coProducerBegin(_, _, let w), .coProducerEnd(let w), .coProducerStatus(let w),
+            .coProducerPreview(_, let w), .coProducerApply(_, _, let w, _), .coProducerNotes(let w),
+            .coProducerNote(_, let w), .coProducerExportFolder(_, _, let w), .coProducerExport(_, _, _, let w),
+            .coProducerParams(_, let w), .coProducerMidiNotes(_, _, _, _, let w),
+            .coProducerAutomation(_, _, _, _, let w), .coProducerMetrics(_, let w):
+            w
+        default: nil
         }
     }
 
@@ -404,13 +546,17 @@ enum ControlChannel {
         let window: WindowRefRow?
         switch request {
         case .runCommand(_, _, let w), .state(_, let w): window = w
+        case .coProducerBegin, .coProducerEnd, .coProducerStatus, .coProducerPreview, .coProducerApply,
+            .coProducerNotes, .coProducerNote, .coProducerExportFolder, .coProducerExport, .coProducerParams,
+            .coProducerMidiNotes, .coProducerAutomation, .coProducerMetrics:
+            window = requestWindow(request)
         case .wait(let c, let w, _): window = ControlWindowCheck.waitReadsDocument(c) ? w : nil
         default: return false
         }
         return ControlWindowCheck.namesNoWindow(window) { ControlWindows.window(.number(number: $0)) != nil }
     }
 
-    static let noWindow = ControlOutcome.failed(.of(.noWindow, "No such VizDAW window (see state.get windows)."))
+    static let noWindow = CoProducerCommands.noWindow
     static let noElement = ControlOutcome.failed(
         .of(.noElement, "The element is gone or changed (read ui.tree again)."))
 
@@ -434,7 +580,7 @@ enum ControlChannel {
         let editable = focusing && !events.isEmpty && ControlUI.mayEdit(at: p, in: w)
         let mayEdit = ControlUI.post(events, to: w) && editable
         var handled: ContinuousClock.Instant?
-        later(token, seconds: 5) { expired in
+        later(server, token, seconds: 5) { expired in
             guard expired || !ControlUI.eventsPending else { return false }
             if mayEdit, !expired {
                 let now = clock.now
@@ -479,7 +625,7 @@ enum ControlChannel {
                 case .failed(let f):
                     _ = try? server.fail(token: token, failure: f)
                     return
-                case .done, .opened, .job, .measure, .pending:
+                case .done, .opened, .job, .measure, .pending, .awaitingApproval:
                     if case .opened(_, let doc) = outcome { ControlWindows.openDocument(doc) }
                     sent += 1
                     continue
@@ -650,6 +796,8 @@ final class AppControlHost: ControlHost {
     func showMixer(_ doc: UUID) { ControlWindows.openWindow?(id: "mixer", value: doc) }
     func showPluginManager() { ControlWindows.openWindow?(id: "plugins") }
     func showMediaPool(_ doc: UUID) { ControlWindows.openWindow?(id: "media-pool", value: doc) }
+    func showDocument(_ doc: UUID) { ControlWindows.openDocument(doc) }
+    func documentWindow(_ doc: UUID) -> Int64? { ControlWindows.window(of: doc).map { Int64($0.windowNumber) } }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { EditorWindows.tearOff(appStore, doc: doc, kind: kind) }
 
     func closeDocument(_ doc: UUID) {
@@ -667,6 +815,10 @@ final class AppControlHost: ControlHost {
     var appearance: AppearancePreferences { appearancePreferences }
     /// `plugins.*`'s settings (plan 6g Task 4).
     var plugins: PluginSettings { pluginSettings }
+    /// `settings.co_producer`'s switch (plan 8a Ruling 10).
+    var coProducer: CoProducerSettings { coProducerSettings }
+    /// `settings.co_producer_metrics`'s switch (plan 8f Ruling 1).
+    var metrics: CoProducerMetrics { coProducerMetrics }
     var externalEditor: ExternalEditorChoice {
         if ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub" { return .stub }
         return editingPreferences.externalEditor.map { .app($0) } ?? .none

@@ -50,6 +50,36 @@ private let media: UInt64 = 96_000
         #expect(AudioEditorGeometry.label(.end) == "Trim End")
     }
 
+    /// Zero-crossing snapping (plan release-fixes Task 7): the new start and
+    /// end, in media frames, snap before front and back are worked out.
+    @Test func trimSnapsBothEdges() {
+        let r = region()
+        let snap: (UInt64) -> UInt64 = { $0 / 100 * 100 }
+        func trim(_ h: AudioEditorHandle, _ dx: CGFloat, room: UInt64 = 100_000) -> EditCommand? {
+            AudioEditorGeometry.trimCommand(
+                r, h, dx: dx, framesPerPoint: 100, mediaFrames: media, startRoom: room, snap: snap)
+        }
+        func cmd(_ front: Int64, _ back: Int64) -> EditCommand { .audio(edit: .trim(event: 4, frontFrames: front, backFrames: back)) }
+        // The start moves to 25 023, snapped to 25 000: front 1 000.
+        #expect(trim(.start, 10.23) == cmd(1000, 0))
+        // The end moves to 70 963, snapped to 70 900: back 1 100.
+        #expect(trim(.end, -10.37) == cmd(0, 1100))
+        #expect(trim(.start, -10.23) == cmd(-1100, 0))
+        // A snap back onto the edge is no change.
+        #expect(trim(.start, 0.5) == nil)
+        // A snap is still held to the room before the region.
+        #expect(trim(.start, -1.5, room: 120) == cmd(-120, 0))
+        // Through the drag's target too.
+        #expect(
+            AudioEditorGeometry.target(
+                r, .start, dx: 10.23, dy: 0, fine: false, axis: axis, mediaFrames: media, startRoom: 100_000, in: wave,
+                snap: snap) == cmd(1000, 0))
+        // Without a snapper: as before.
+        #expect(
+            AudioEditorGeometry.trimCommand(r, .start, dx: 10.23, framesPerPoint: 100, mediaFrames: media, startRoom: 100_000)
+                == cmd(1023, 0))
+    }
+
     /// 480 points wide at 100 frames per point.
     private let wave = CGRect(x: 44, y: 18, width: 600, height: 100)
     private var axis: FrameAxis { FrameAxis(framesPerPoint: 100, originFrame: 0) }

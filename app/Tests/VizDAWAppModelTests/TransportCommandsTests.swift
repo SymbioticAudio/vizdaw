@@ -202,7 +202,7 @@ import VizDAWCore
             #expect(failure(run(cmd, s, id)) == .of(.unavailable, "A text field has the keyboard."), "\(cmd)")
             #expect(!TransportCommands.enabled(cmd, m), "\(cmd)")
         }
-        #expect(!m.editor.layout.transport.overdub && m.editor.layout.snap.enabled)
+        #expect(m.editor.layout.transport.overdub && m.editor.layout.snap.enabled)
         #expect(m.editor.layout.transport.locator(3) == nil && f.playsFrom.isEmpty)
         m.cancelRename()
         #expect(failure(run("locator.set_3", s, id)) == nil)

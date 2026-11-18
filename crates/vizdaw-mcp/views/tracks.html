@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The song's tracks</title>
+</head>
+<body>
+<main id="view"></main>
+<script>
+<!--BRIDGE-->
+</script>
+<script>
+"use strict";
+// The track list (plan 8c Ruling 7): the tracks and the mixer strips, with
+// a tag on what Co-Producer added.
+(function () {
+  const el = Bridge.el;
+  const str = Bridge.str;
+
+  function row(text, added) {
+    const li = el("li");
+    const name = el("span", null, "name");
+    name.textContent = text;
+    li.appendChild(name);
+    if (added) {
+      li.appendChild(el("span", "Co-Producer", "tag"));
+    }
+    return li;
+  }
+
+  function list(root, heading, items, line) {
+    root.appendChild(el("h2", heading));
+    const ul = el("ul");
+    for (const item of items) {
+      const i = item && typeof item === "object" ? item : {};
+      ul.appendChild(row(line(i), i.co_producer === true));
+    }
+    if (items.length === 0) {
+      ul.appendChild(el("li", "None.", "muted"));
+    }
+    root.appendChild(ul);
+  }
+
+  function render(sc, root) {
+    if (!Array.isArray(sc.tracks) || !Array.isArray(sc.strips)) {
+      return false;
+    }
+    root.appendChild(el("h1", "Song: " + str(sc.title, "Untitled")));
+    list(root, "Tracks", sc.tracks, function (t) {
+      const n = Number.isInteger(t.n) ? t.n : "?";
+      return "Track " + n + ", " + str(t.name, "?") + ": " + str(t.kind, "?");
+    });
+    list(root, "Strips", sc.strips, function (s) {
+      return str(s.name, "?") + ": " + str(s.kind, "?") + ", colour " + str(s.colour, "none");
+    });
+    return true;
+  }
+
+  Bridge.start("tracks", document.getElementById("view"), render);
+})();
+</script>
+</body>
+</html>

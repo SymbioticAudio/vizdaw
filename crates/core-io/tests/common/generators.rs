@@ -674,6 +674,7 @@ pub fn build(s: &Spec) -> (Document, SeqId) {
                     level_db: f64::from(db) / 2.0,
                     pre_fader: pre,
                     enabled,
+                    co_producer: false,
                 },
             })
             .unwrap();
@@ -717,6 +718,7 @@ pub fn build(s: &Spec) -> (Document, SeqId) {
                     level_db: f64::from(db) / 2.0,
                     pre_fader: pre,
                     enabled,
+                    co_producer: false,
                 },
             })
             .unwrap();

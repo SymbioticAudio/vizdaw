@@ -173,6 +173,9 @@ pub struct Shared {
     regions_muted: AtomicBool,
     /// A count-in is playing (plan 5d-1 Ruling 7).
     counting: AtomicBool,
+    /// Its clicks started so far, those before a rebuild included (plan
+    /// release-fixes Task 1).
+    count_in_clicks: AtomicU32,
     position: AtomicU64,
     transport_pos: AtomicU64,
     state: AtomicU8,
@@ -220,6 +223,7 @@ impl Default for Shared {
         Shared {
             regions_muted: AtomicBool::new(false),
             counting: AtomicBool::new(false),
+            count_in_clicks: AtomicU32::new(0),
             position: AtomicU64::new(0),
             transport_pos: AtomicU64::new(0),
             state: AtomicU8::new(0),
@@ -291,6 +295,12 @@ impl Shared {
     /// Whether a count-in plays before the transport rolls.
     pub fn counting_in(&self) -> bool {
         self.counting.load(Ordering::Relaxed)
+    }
+
+    /// The count-in's clicks started so far (meaningful while
+    /// [`Shared::counting_in`]).
+    pub fn count_in_clicks(&self) -> u32 {
+        self.count_in_clicks.load(Ordering::Relaxed)
     }
 
     /// True once after playback reached the end and the tail finished.
@@ -519,6 +529,9 @@ pub enum EngineCmd {
         until: Option<u64>,
         /// The count-in to play before rolling.
         count_in: Option<CountIn>,
+        /// Its clicks played before a device rebuild: they are skipped
+        /// (plan release-fixes Task 1; 0 for a new count-in).
+        count_in_done: u32,
     },
     /// Stop (note-offs are sent).
     Stop,
@@ -1859,12 +1872,21 @@ impl Renderer {
                 // New inserts need their automated values.
                 self.auto_last.fill(f64::NAN);
             }
-            EngineCmd::Play { until, count_in } => {
+            EngineCmd::Play {
+                until,
+                count_in,
+                count_in_done,
+            } => {
                 match count_in {
                     // Counted in: the transport rolls when it ends.
                     Some(c) if self.transport.state != PlayState::Playing => {
-                        self.counting =
-                            Some(Counting::new(c, until, self.cfg.sample_rate, self.latency));
+                        self.counting = Some(Counting::new(
+                            c,
+                            until,
+                            self.cfg.sample_rate,
+                            self.latency,
+                            count_in_done,
+                        ));
                     }
                     // A plain Play during a count-in takes over: the clicks stop.
                     _ => {
@@ -2437,6 +2459,8 @@ impl Renderer {
             self.counting.is_some_and(|c| !c.rolled()),
             Ordering::Relaxed,
         );
+        s.count_in_clicks
+            .store(self.counting.map_or(0, |c| c.started()), Ordering::Relaxed);
         s.position.store(
             self.transport.pos.saturating_sub(self.latency),
             Ordering::Relaxed,

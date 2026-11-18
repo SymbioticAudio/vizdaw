@@ -62,7 +62,9 @@ import VizDAWCore
         #expect(f.mpeCalls.count == 1 && f.mpeCalls.last?.0 == 4 && f.mpeCalls.last?.1 == full)
         MpeMenus.chooseOutput(MpeChoice(title: "Lower Zone", mpe: full, checked: true), dest: 4, m)
         #expect(f.mpeCalls.count == 1, "re-choosing the checked output item is no step")
-        // The header's input menu shows the section.
+        // The header's input menu shows the section; it reads no real MIDI
+        // source or device (Task 3 review I2).
+        TestDevices.stubbed
         let h = LaneHeaderView(document: m)
         let titles = h.inputMenu(seq: 3, lane: m.lanes[1]).items.map(\.title)
         #expect(titles.contains("MPE Input") && titles.contains("Upper Zone"))

@@ -12,6 +12,8 @@ import VizDAWCore
     /// Song's Chords lane (31) plays to an audio path; the device has two
     /// named channels.
     func header(armed: Bool = false) throws -> (DocumentModel, FakeSession, LaneHeaderView) {
+        // The input menu reads no real MIDI source or device (Task 3 review I2).
+        TestDevices.stubbed
         let f = editorFake()
         f.laneTable[3]?[1].audioOut = 7
         if armed {
@@ -127,25 +129,51 @@ import VizDAWCore
         #expect(h.addTrackMenu().items.map(\.title) == ["New Audio Track", "New Instrument Track", "New MIDI Track"])
     }
 
-    /// An audio track's header names its output with no menu: a click on it
-    /// sends nothing, and never sets a MIDI destination on the track.
-    @Test func anAudioHeaderShowsItsOutputAndItsClickDoesNothing() throws {
+    /// Release-fixes Task 6: an audio track's header offers the document's
+    /// output paths; choosing one sets the track's output, and "No Output"
+    /// clears it. It never sets a MIDI destination on the track.
+    @Test func anAudioHeadersOutputClickOffersThePaths() throws {
         let f = editorFake()
         var audio = lane(40, "A", kind: .audio)
-        audio.audioOut = 7
+        audio.audioOut = 5
         audio.audioOutName = "Audio 1"
         f.laneTable[3] = [audio]
+        f.outputPathRows = [OutputPathRow(id: 5, name: "Audio 1"), OutputPathRow(id: 6, name: "Audio 2")]
         let m = try DocumentModel(session: f)
         let h = LaneHeaderView(document: m)
+        let menu = h.outputMenu(seq: 3, lane: audio)
+        let items = menu.items.filter { !$0.isSeparatorItem }
+        #expect(items.map(\.title) == ["No Output", "Audio 1", "Audio 2"])
+        #expect(items.map(\.state) == [.off, .on, .off])
+        #expect(menu.items.count == 4 && menu.items[1].isSeparatorItem)
+        _ = items[2].target?.perform(items[2].action)
+        #expect(f.edits.last == .lane(edit: .setOutput(seq: 3, lane: 40, output: 6)))
+        _ = items[0].target?.perform(items[0].action)
+        #expect(f.edits.last == .lane(edit: .setOutput(seq: 3, lane: 40, output: nil)))
+        #expect(!f.edits.contains { if case .lane(edit: .setDest) = $0 { true } else { false } })
+
+        // Unreadable paths say so, as the destination menu does.
+        f.outputPathsError = .Busy(message: "busy")
+        #expect(h.outputMenu(seq: 3, lane: audio).items.map(\.title) == ["No Output", "Outputs unavailable (busy)"])
+        f.outputPathsError = .Model(message: "gone")
+        let failed = h.outputMenu(seq: 3, lane: audio).items
+        #expect(failed.map(\.title) == ["No Output", "Outputs unavailable"])
+        #expect(!failed[1].isEnabled)
+        f.outputPathsError = nil
+
+        // A channel click on the output opens no menu (it would track
+        // modally): the status line names the command to use.
         h.frame = NSRect(x: 0, y: 0, width: LaneHeaderLayout.width, height: 300)
         let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(0), theme: h.theme).first { $0.0 == .destination }?.1)
         let e = try #require(
             NSEvent.mouseEvent(
                 with: .leftMouseDown, location: h.convert(CGPoint(x: r.midX, y: r.midY), to: nil), modifierFlags: [],
-                timestamp: 1, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
-        let calls = f.calls.count
-        h.mouseDown(with: e)  // would pop up the destination menu, which tracks modally
-        #expect(f.calls.count == calls && f.edits.isEmpty)
+                timestamp: 1, windowNumber: 0, context: nil, eventNumber: ControlUI.channelEventBase + 1,
+                clickCount: 1, pressure: 1))
+        let edits = f.edits.count
+        h.mouseDown(with: e)
+        #expect(m.editor.status == "The output menu opens on a click: use lane.set_output over the control channel.")
+        #expect(f.edits.count == edits)
         #expect(ArrangementA11y.header(audio) == "A, output Audio 1")
         audio.audioOutName = nil
         #expect(ArrangementA11y.header(audio) == "A, output none")

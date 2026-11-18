@@ -27,6 +27,20 @@ import VizDAWCore
         return nil
     }
 
+    /// Plan 5c-2 takes Rulings 1–2: a new document overdubs, and its MIDI
+    /// loop passes layer into the playing take; a saved mode is kept.
+    @Test func aNewDocumentOverdubsAndLayersMidiPasses() throws {
+        let (_, _, m, _) = try demo()
+        let spec = m.record.spec()
+        #expect(!spec.replace && !spec.passesAsTakes)
+        let decode = { (json: String) in
+            try JSONDecoder().decode(TransportMarks.self, from: Data(json.utf8)).overdub
+        }
+        #expect(TransportMarks().overdub)
+        #expect(try decode("{}"))
+        #expect(try !decode(#"{"overdub": false}"#))
+    }
+
     @Test func recordAsksWithTheTransportsModesAndStopsOnTheSecondPress() throws {
         let (s, id, m, f) = try demo()
         m.select(3)
@@ -46,7 +60,7 @@ import VizDAWCore
             call.spec
                 == RecordSpecRow(
                     replace: false, punch: TickRange(start: 15_360, end: 61_440), looped: true, countInBars: 0,
-                    preRollBars: 2, passesAsTakes: true))
+                    preRollBars: 2, passesAsTakes: false))
         #expect(m.record.isRecording && m.record.isLoopRecording)
         // Keep and discard while loop recording.
         #expect(TransportCommands.enabled("record.keep_pass", m))
@@ -247,12 +261,12 @@ import VizDAWCore
                 "record.set",
                 [
                     ("replace", .flag(value: false)), ("punch", .flag(value: true)), ("loop", .flag(value: true)),
-                    ("pre_roll", .int(value: 2)), ("passes_as_takes", .flag(value: false)),
+                    ("pre_roll", .int(value: 2)), ("passes_as_takes", .flag(value: true)),
                 ], m, s, id) == nil)
         #expect(m.editor.layout.transport.overdub && m.editor.layout.transport.punch && m.looping)
-        #expect(m.record.preRollBars == 2 && !m.record.passesAsTakes)
+        #expect(m.record.preRollBars == 2 && m.record.midiPassesAsTakes)
         let spec = m.record.spec()
-        #expect(!spec.replace && spec.looped && spec.punch != nil && !spec.passesAsTakes)
+        #expect(!spec.replace && spec.looped && spec.punch != nil && spec.passesAsTakes)
         // Loop already on stays on.
         _ = run("record.set", [("loop", .flag(value: true))], m, s, id)
         #expect(m.looping)

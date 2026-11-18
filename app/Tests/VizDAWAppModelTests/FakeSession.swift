@@ -24,8 +24,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var slots: [SlotRow] = []
 
     init(_ sequences: [SeqRow], version: UInt64 = 0) {
+        // Pickers a fake document opens read no real device (Task 3 review I2).
+        TestDevices.stubbed
         snap = DocSnapshot(
-            version: version, title: "Untitled", dirty: false, undoLabel: nil,
+            version: version, step: 0, title: "Untitled", dirty: false, undoLabel: nil,
             redoLabel: nil, sequences: sequences, warnings: [], laneRevs: [])
     }
 
@@ -341,6 +343,17 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         }
         return r
     }
+    /// Make Mine (plan 8b Ruling 1): records the call; the fake's rows
+    /// carry no marks.
+    func makeMineTrack(seq: UInt64, lane: UInt64) throws -> DocSnapshot {
+        try mixerCall("makeMineTrack \(seq) \(lane)")
+    }
+    func makeMineStrip(strip: UInt64) throws -> DocSnapshot {
+        guard mixerSnap.strips.contains(where: { $0.id == strip }) else {
+            throw VizError.Model(message: "unknown id strip\(strip)")
+        }
+        return try mixerCall("makeMineStrip \(strip)")
+    }
     func setSidechain(slot: UInt64, source: UInt64?) throws -> DocSnapshot {
         try mixerCall("sidechain \(slot) \(source.map(String.init) ?? "none")")
     }
@@ -398,6 +411,87 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func params(slot: UInt64) throws -> [ParamRow] {
         if readBusy { throw VizError.Busy(message: "plugin host is busy") }
         return paramTable[slot] ?? []
+    }
+    /// Plan 8d Task 5: every `runMixer` call, with its arguments as given.
+    var mixerRuns: [(id: String, args: [ControlArg])] = []
+    /// Plan 8d Task 4's one call: logged in `coLog` ("runMixer <id>") and
+    /// `calls`, and recorded in `mixerRuns` before `mixerError` throws.
+    /// `track.new_plugin_instrument` adds an "Inst N" row to `seq` (below
+    /// `after` when it names a row), as `newTrack` does.
+    func runMixer(id: String, args: [ControlArg]) throws -> DocSnapshot {
+        coLog.append("runMixer \(id)")
+        mixerRuns.append((id, args))
+        let r = try mixerCall("runMixer \(id)")
+        func whole(_ name: String) -> UInt64? {
+            guard case .int(let v) = args.first(where: { $0.name == name })?.value else { return nil }
+            return UInt64(exactly: v)
+        }
+        if id == "track.new_plugin_instrument", let seq = whole("seq"), var rows = laneTable[seq] {
+            var row = lane((rows.map(\.id).max() ?? 0) + 1, "Inst \(rows.count + 1)", kind: .instrument)
+            row.midiDest = 1
+            let at = whole("after").flatMap { a in rows.firstIndex { $0.id == a } }.map { $0 + 1 } ?? rows.count
+            rows.insert(row, at: at)
+            laneTable[seq] = rows
+        }
+        return r
+    }
+    /// Plan 8d Task 3: a slot of `paramTable` answers running with its
+    /// shown parameters; any other slot is not in this song.
+    func coProducerParams(slot: UInt64) throws -> CoProducerParamsRow {
+        if readBusy { throw VizError.Busy(message: "plugin host is busy") }
+        guard let rows = paramTable[slot] else {
+            throw VizError.Model(message: "This song has no slot \(slot).")
+        }
+        return CoProducerParamsRow(
+            slot: slot, plugin: "clap:fake", running: true, params: rows.filter { !$0.hidden })
+    }
+    /// Plan 8e Task 3: every `runCreative` call, with its arguments as given.
+    var creativeRuns: [(id: String, args: [ControlArg])] = []
+    /// Plan 8e Task 3's one call: logged in `coLog` ("runCreative <id>")
+    /// and `calls`, and recorded in `creativeRuns` before `mixerError`
+    /// throws.
+    func runCreative(id: String, args: [ControlArg]) throws -> DocSnapshot {
+        coLog.append("runCreative \(id)")
+        creativeRuns.append((id, args))
+        return try mixerCall("runCreative \(id)")
+    }
+    /// Plan 8e Task 3: the notes read answers from `notesTable` by track;
+    /// any other track is not in the sequence.
+    var notesTable: [UInt64: [NoteRow]] = [:]
+    func coProducerMidiNotes(seq: UInt64, lane: UInt64, start: UInt64?, end: UInt64?) throws
+        -> CoProducerNotesRow
+    {
+        guard let notes = notesTable[lane] else {
+            throw VizError.Model(message: "Track \(lane) is not in sequence \(seq).")
+        }
+        let shown = notes.filter { n in
+            guard let start, let end else { return true }
+            return n.start >= start && n.start < end
+        }
+        return CoProducerNotesRow(seq: seq, lane: lane, name: "Track \(lane)", notes: shown, truncated: false)
+    }
+    /// Plan 8e Task 3: the automation read answers from `curveTable` by
+    /// target; any other target is not in this song.
+    var curveTable: [String: CoProducerCurveRow] = [:]
+    func coProducerAutomation(seq: UInt64, target: String, start: UInt64, end: UInt64) throws
+        -> CoProducerCurveRow
+    {
+        guard let row = curveTable[target] else {
+            throw VizError.Model(message: "This song has no \(target).")
+        }
+        return row
+    }
+    /// Plan 8e Task 4: every `coProducerStarter` spec, as given.
+    var starterSpecs: [String] = []
+    /// Plan 8e Task 4: what `coProducerStarter` answers; nil refuses.
+    var starterRow: CoProducerStarterRow?
+    func coProducerStarter(spec: String) throws -> CoProducerStarterRow {
+        coLog.append("coProducerStarter")
+        starterSpecs.append(spec)
+        guard let row = starterRow else {
+            throw VizError.Model(message: "A starter project needs a new song.")
+        }
+        return row
     }
     func setParam(slot: UInt64, param: UInt64, value: Double) throws {
         liveSets.append((slot, param, value))
@@ -670,6 +764,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func bounce(req: BounceRequestRow) throws -> UInt64 {
         if let e = bounceError { throw e }
         bounces.append(req)
+        // In the Co-Producer log too, so a test sees it ran inside enter and leave.
+        coLog.append("bounce")
         let id = UInt64(3000 + bounces.count)
         jobRows[id] = JobRow(
             id: id, kind: .bounce, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
@@ -907,6 +1003,153 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         hold?.wait()
         return try snapshotsAnswer.get()
     }
+    // MARK: Co-Producer (plan 8a Task 7)
+
+    /// Co-Producer calls in order ("enter <stamp>", "take", "leave",
+    /// "begin <name>", "end", "idle <ms>", "preview <n>"), with the edits
+    /// ("rename", "delete", "edit") and new tracks ("newTrack <kind>") made
+    /// between them.
+    var coLog: [String] = []
+    /// The open request.
+    var coRequest: CoProducerRequestRow?
+    var coBeginError: VizError?
+    var coEnterError: VizError?
+    var coTakeError: VizError?
+    var coPreviewError: VizError?
+    /// What `coProducerPreview` answers.
+    var coPreview = PreviewRow(token: String(repeating: "a", count: 32), needsYes: true, items: [])
+    /// What `coProducerIdle` answers (a label: it ended the request).
+    var coIdleLabel: String?
+    /// What `coProducerCopiesSize` answers.
+    var copies = CopiesSizeRow(count: 0, bytes: 0)
+    func coProducerCopiesSize() throws -> CopiesSizeRow { copies }
+    func coProducerBegin(name: String) throws -> CoProducerRequestRow {
+        coLog.append("begin \(name)")
+        if let e = coBeginError { throw e }
+        let row = CoProducerRequestRow(name: name, label: "Co-Producer: \(name)", groupOpen: false, continued: false)
+        coRequest = row
+        return row
+    }
+    /// Thrown by `coProducerEnd` (plan 8e Task 5 fix round 1).
+    var coEndError: VizError?
+    func coProducerEnd() throws -> String? {
+        coLog.append("end")
+        if let e = coEndError { throw e }
+        guard let r = coRequest else { throw VizError.Model(message: "No request is open.") }
+        coRequest = nil
+        return r.label
+    }
+    func coProducerRequest() -> CoProducerRequestRow? { coRequest }
+    func coProducerEnter(stamp: String) throws -> String? {
+        coLog.append("enter \(stamp)")
+        if let e = coEnterError { throw e }
+        return nil
+    }
+    func coProducerLeave() { coLog.append("leave") }
+    func coProducerIdle(idleMs: UInt64) -> String? {
+        coLog.append("idle \(idleMs)")
+        if coIdleLabel != nil { coRequest = nil }
+        return coIdleLabel
+    }
+    func coProducerPreview(plan: [PlannedRow]) throws -> PreviewRow {
+        coLog.append("preview \(plan.count)")
+        if let e = coPreviewError { throw e }
+        return coPreview
+    }
+    /// Each take's approval, in order (plan 8b Task 6).
+    var coTakeApprovals: [CoProducerApproval] = []
+    /// Thrown by `coProducerPending` (a bad, used or stale token, or no
+    /// open request); it is not logged in `coLog`.
+    var coPendingError: VizError?
+    /// The tokens `coProducerForget` dropped.
+    var coForgotten: [String] = []
+    func coProducerTake(token: String, plan: [PlannedRow], approval: CoProducerApproval) throws {
+        coLog.append("take")
+        coTakeApprovals.append(approval)
+        if let e = coTakeError { throw e }
+    }
+    func coProducerPending(token: String, plan: [PlannedRow]) throws -> PreviewRow {
+        if let e = coPendingError { throw e }
+        return coPreview
+    }
+    func coProducerForget(token: String) { coForgotten.append(token) }
+    /// What the song's notes stubs answer (plan 8b Task 3).
+    var coNotes = NotesRow(text: "# Untitled\n", truncated: false, path: "/tmp/Notes.md")
+    /// What `coProducerCopies` answers.
+    var coCopies: [CopyRow] = []
+    /// Thrown by `notesPath` and `coProducerNotes` (plan 8b Task 5).
+    var coNotesError: VizError?
+    /// Thrown by `coProducerNote`, `coProducerExportFolder`, `coProducerExportPlan` and
+    /// `coProducerSetAsked`.
+    var coNoteError: VizError?
+    /// What `removeCoProducerCopies` adds as its problems.
+    var coRemoveProblems: [String] = []
+    /// The names each `removeCoProducerCopies` was given.
+    var coRemoved: [[String]] = []
+    func notesPath() throws -> String {
+        coLog.append("notes path")
+        if let e = coNotesError { throw e }
+        return coNotes.path
+    }
+    func coProducerNotes() throws -> NotesRow {
+        coLog.append("notes")
+        if let e = coNotesError { throw e }
+        return coNotes
+    }
+    func coProducerSetAsked(asked: String) throws {
+        coLog.append("asked \(asked)")
+        if let e = coNoteError { throw e }
+    }
+    func coProducerSetStamp(stamp: String) throws { coLog.append("stamp \(stamp)") }
+    func coProducerNote(text: String) throws {
+        coLog.append("note \(text)")
+        if let e = coNoteError { throw e }
+    }
+    func coProducerFile(path: String) throws { coLog.append("file \(path)") }
+    func coProducerExportFolder(what: ExportWhatRow, date: String, parent: String?) throws -> String {
+        coLog.append("export folder \(what) \(date) \(parent ?? "-")")
+        if let e = coNoteError { throw e }
+        return (parent ?? "/tmp") + "/Untitled — Stems — \(date)"
+    }
+    /// What `coProducerExportPlan` answers instead of its mix bounce (plan 8c Task 4).
+    var coExportPlan: ExportPlanRow?
+    func coProducerExportPlan(
+        what: ExportWhatRow, date: String, parent: String?, strips: [UInt64]?
+    ) throws -> ExportPlanRow {
+        let shownStrips = strips.map { $0.map(String.init).joined(separator: ",") } ?? "-"
+        coLog.append("export plan \(what) \(date) \(parent ?? "-") \(shownStrips)")
+        if let e = coNoteError { throw e }
+        if let plan = coExportPlan { return plan }
+        let folder = (parent ?? "/tmp") + "/Untitled — Mix — \(date)"
+        return ExportPlanRow(
+            folder: folder, id: "file.bounce",
+            args: [
+                ControlArg(name: "source", value: .text(value: "mix")),
+                ControlArg(name: "path", value: .text(value: folder + "/Untitled.wav")),
+            ])
+    }
+    /// Each folder `coProducerDropExport` was asked to drop (plan 8c final review).
+    func coProducerDropExport(folder: String) throws -> Bool {
+        coLog.append("drop \(folder)")
+        return true
+    }
+    /// Each `runChore` call (plan 8c Task 4); `choreError` is thrown instead.
+    var chores: [(id: String, args: [ControlArg])] = []
+    var choreError: VizError?
+    func runChore(id: String, args: [ControlArg]) throws -> DocSnapshot {
+        coLog.append("chore \(id)")
+        if let e = choreError { throw e }
+        chores.append((id, args))
+        return try snapshot()
+    }
+    func coProducerCopies() throws -> [CopyRow] { coCopies }
+    func removeCoProducerCopies(names: [String]) throws -> RemovedCopiesRow {
+        coLog.append("remove \(names.count)")
+        coRemoved.append(names)
+        let gone = coCopies.filter { names.contains($0.name) }
+        coCopies.removeAll { names.contains($0.name) }
+        return RemovedCopiesRow(removed: UInt64(gone.count), problems: coRemoveProblems)
+    }
     func projectId() throws -> String? {
         interchangeLock.lock()
         projectIdCalls += 1
@@ -1139,6 +1382,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var editError: VizError?
     var editFilters: [ViewFilterRow?] = []
     func edit(cmd: EditCommand, filter: ViewFilterRow?) throws -> DocSnapshot {
+        switch cmd {
+        case .lane(.rename): coLog.append("rename")
+        case .lane(.remove): coLog.append("delete")
+        default: coLog.append("edit")
+        }
         if let e = editError { throw e }
         edits.append(cmd)
         editFilters.append(filter)
@@ -1210,7 +1458,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var duplicateError: VizError?
     /// A new track: a row with the given kind appended (below `after`
     /// when it names a row), `midiDest == nil` for MIDI.
+    /// Thrown by `newTrack` (after it is logged) when set.
+    var newTrackError: VizError?
     func newTrack(seq: UInt64, kind: TrackKindRow, after: UInt64?) throws -> DocSnapshot {
+        coLog.append("newTrack \(kind)")
+        if let e = newTrackError { throw e }
         newTracks.append((seq, kind, after))
         guard var rows = laneTable[seq] else {
             throw VizError.Model(message: "unknown id seq\(seq)")
@@ -1425,6 +1677,65 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
 
     func automationPreview(target: AutomationTargetRow) throws -> [PreviewPointRow] { previewRows }
+
+    // MARK: Release fixes (plan release-fixes Task 4)
+
+    /// What `releaseChannelTouches` answers, and how often it was called.
+    var channelTouches: UInt32 = 0
+    var releaseChannelCalls = 0
+    /// Thrown by `releaseChannelTouches` (after it is counted) when set.
+    var releaseChannelError: VizError?
+    func releaseChannelTouches() throws -> UInt32 {
+        releaseChannelCalls += 1
+        if let e = releaseChannelError { throw e }
+        return channelTouches
+    }
+
+    /// The heard values `heardValues` answers while playing (none while
+    /// stopped, as the core), and the targets each call asked for.
+    var heard: [AutomationTargetRow: Double] = [:]
+    var heardCalls: [[AutomationTargetRow]] = []
+    func heardValues(targets: [AutomationTargetRow]) throws -> [Double?] {
+        heardCalls.append(targets)
+        return targets.map { state.playing ? heard[$0] : nil }
+    }
+
+    // MARK: Release fixes (plan release-fixes Task 6)
+
+    /// The document's output paths, in id order, as `outputPaths` answers.
+    var outputPathRows: [OutputPathRow] = []
+    /// Thrown by `outputPaths` when set.
+    var outputPathsError: VizError?
+    func outputPaths() throws -> [OutputPathRow] {
+        if let e = outputPathsError { throw e }
+        return outputPathRows
+    }
+
+    // MARK: Release fixes (plan release-fixes Task 7)
+
+    /// What `zeroCrossing` answers (nil: the frame itself), and its calls.
+    var crossing: ((UInt64, UInt64, UInt64) throws -> UInt64)?
+    var crossingCalls: [(media: UInt64, frame: UInt64, radius: UInt64)] = []
+    func zeroCrossing(media: UInt64, frame: UInt64, radius: UInt64) throws -> UInt64 {
+        crossingCalls.append((media, frame, radius))
+        return try crossing?(media, frame, radius) ?? frame
+    }
+
+    // MARK: Release fixes (plan release-fixes Task 8)
+
+    /// Every `setBuiltinSound` call.
+    var builtinSounds: [(dest: UInt64, sound: BuiltinSound)] = []
+    /// Like the core: the row's sound changes and a step is made; thrown
+    /// (once) by `synthError`.
+    func setBuiltinSound(dest: UInt64, sound: BuiltinSound) throws {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        builtinSounds.append((dest, sound))
+        if let i = dests.firstIndex(where: { $0.id == dest }) { dests[i].builtinSound = sound }
+        _ = commandResult()
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

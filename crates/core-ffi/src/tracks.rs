@@ -10,9 +10,9 @@ use core_model::command::{Command, Report};
 use core_model::document::{DestKind, Document};
 use core_model::event::EventBody;
 use core_model::history::History;
-use core_model::ids::{AnyId, DestId, LaneId, OutputPathId, SeqId};
+use core_model::ids::{AnyId, DestId, LaneId, OutputPathId, PluginInstanceId, SeqId};
 use core_model::lane::{InputChannels, LaneInput, MonitorMode};
-use core_model::mixer::BUILTIN_SYNTH_REF;
+use core_model::mixer::{BUILTIN_SYNTH_REF, PluginRef, PluginSlot};
 use core_model::selection::ViewFilter;
 
 /// What a track is for, as the track header's icon shows it.
@@ -121,17 +121,19 @@ fn created_lane(r: &Report) -> Result<LaneId, VizError> {
         .ok_or_else(|| bad("no track was added"))
 }
 
-/// The first output path in id order, else a new "Audio 1" (`audio:1-2`,
-/// the values Track Synth uses).
-fn output_path(history: &mut History, notes: &mut Vec<String>) -> Result<OutputPathId, VizError> {
-    if let Some(o) = history.doc().outputs().keys().next() {
-        return Ok(*o);
-    }
+/// A new output path named `name` (`audio:1-2`, the values Track Synth
+/// uses), with its own strip routed to master: each new audio track gets
+/// its own mixer channel (owner, 2026-11-17; plan 8e Task 6c).
+fn new_output_path(
+    history: &mut History,
+    notes: &mut Vec<String>,
+    name: &str,
+) -> Result<OutputPathId, VizError> {
     let r = step(
         history,
         notes,
         Command::Routing(RoutingCmd::AddOutput {
-            name: "Audio 1".into(),
+            name: name.into(),
             reference: "audio:1-2".into(),
         }),
     )?;
@@ -181,7 +183,8 @@ fn synth_dest(history: &mut History, notes: &mut Vec<String>) -> Result<DestId, 
 /// Makes a track of `kind` in `seq` (at `index`, else last) from the
 /// existing commands, inside the caller's open transaction (the caller
 /// aborts it on error). Every kind gets the monitor `monitor`; Audio the first input
-/// channel and an output path; Instrument the built-in synth; MIDI the
+/// channel and a new output path of its own, named after it, whose strip
+/// goes to master; Instrument the built-in synth; MIDI the
 /// first external destination, if any. Returns the new lane; the steps'
 /// warning lines (a default EQ's fallback note, plan 6g-2 Ruling 4) are
 /// added to `notes`.
@@ -193,11 +196,99 @@ pub(crate) fn build_track(
     monitor: MonitorMode,
     notes: &mut Vec<String>,
 ) -> Result<LaneId, VizError> {
+    build(history, seq, kind, index, monitor, None, notes)
+}
+
+/// The longest name a new plug-in instrument destination gets (plan 8d
+/// Ruling 1).
+const MAX_DEST_NAME: usize = 64;
+
+/// `plugin`'s name as a destination's: cut to [`MAX_DEST_NAME`]
+/// characters, with what the preview would not show as a space, trimmed;
+/// "Plug-in Instrument" when nothing is left.
+fn dest_name(plugin: &str) -> String {
+    let clean: String = plugin
+        .chars()
+        .take(MAX_DEST_NAME)
+        .map(|c| {
+            let mut b = [0u8; 4];
+            let one: &str = c.encode_utf8(&mut b);
+            if core_model::diff::shown_name(one) == one {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    match clean.trim() {
+        "" => "Plug-in Instrument".into(),
+        t => t.into(),
+    }
+}
+
+/// `track.new_plugin_instrument` (plan 8d Ruling 1): a plug-in instrument
+/// destination playing `plugin`, named after it (and its instrument
+/// strip), then an instrument track playing it, as [`build_track`] makes
+/// an instrument track; inside the caller's open transaction.
+pub(crate) fn build_plugin_instrument_track(
+    history: &mut History,
+    seq: SeqId,
+    plugin: PluginRef,
+    index: Option<usize>,
+    monitor: MonitorMode,
+    notes: &mut Vec<String>,
+) -> Result<LaneId, VizError> {
+    let name = dest_name(&plugin.name);
+    let r = step(
+        history,
+        notes,
+        Command::Routing(RoutingCmd::AddDestination {
+            name,
+            kind: DestKind::PluginInstrument {
+                slot: PluginSlot::new(PluginInstanceId(0), plugin),
+            },
+            default_patch: None,
+        }),
+    )?;
+    let dest = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Dest(d) => Some(*d),
+            _ => None,
+        })
+        .ok_or_else(|| bad("no destination was added"))?;
+    build(
+        history,
+        seq,
+        TrackKindRow::Instrument,
+        index,
+        monitor,
+        Some(dest),
+        notes,
+    )
+}
+
+/// [`build_track`], with an instrument track playing `dest` when given
+/// (else the built-in synth).
+fn build(
+    history: &mut History,
+    seq: SeqId,
+    kind: TrackKindRow,
+    index: Option<usize>,
+    monitor: MonitorMode,
+    dest: Option<DestId>,
+    notes: &mut Vec<String>,
+) -> Result<LaneId, VizError> {
     let name = next_name(history.doc(), seq, kind)?;
     let lane = created_lane(&step(
         history,
         notes,
-        Command::Lane(LaneCmd::Add { seq, name, index }),
+        Command::Lane(LaneCmd::Add {
+            seq,
+            name: name.clone(),
+            index,
+        }),
     )?)?;
     // Every kind takes the "Monitoring for new tracks" default.
     step(
@@ -219,7 +310,7 @@ pub(crate) fn build_track(
                     }),
                 }),
             )?;
-            let output = Some(output_path(history, notes)?);
+            let output = Some(new_output_path(history, notes, &name)?);
             step(
                 history,
                 notes,
@@ -227,7 +318,10 @@ pub(crate) fn build_track(
             )?;
         }
         TrackKindRow::Instrument => {
-            let dest = Some(synth_dest(history, notes)?);
+            let dest = match dest {
+                Some(d) => Some(d),
+                None => Some(synth_dest(history, notes)?),
+            };
             step(
                 history,
                 notes,

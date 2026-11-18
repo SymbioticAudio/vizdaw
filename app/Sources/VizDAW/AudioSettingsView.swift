@@ -16,11 +16,11 @@ struct AudioSettingsView: View {
             Section("Input") {
                 Picker(
                     "Input device",
-                    selection: Binding(get: { prefs.settings.inputDevice }, set: { prefs.setInputDevice($0) })
+                    selection: Binding(get: { prefs.inputDeviceTag() }, set: { prefs.selectInputDevice(tag: $0) })
                 ) {
-                    // By position: two devices may share a name (final review m3).
+                    // Tagged by UID: two devices may share a name (release fixes Task 2).
                     ForEach(Array(prefs.inputDeviceChoices().enumerated()), id: \.offset) { _, c in
-                        Text(c.title).tag(c.name)
+                        Text(c.title).tag(AudioPreferences.tag(of: c))
                     }
                 }
                 Text("A new device takes effect at once; while recording or measuring, once that stops.")
@@ -161,7 +161,7 @@ struct RecordingSettingsView: View {
                         set: {
                             prefs.setRecordDefaults(
                                 countIn: $0, preRoll: prefs.settings.preRollBars,
-                                passesAsTakes: prefs.settings.passesAsTakes)
+                                midiPassesAsTakes: prefs.settings.midiPassesAsTakes)
                         }),
                     in: 0...4)
                 Stepper(
@@ -171,18 +171,20 @@ struct RecordingSettingsView: View {
                         set: {
                             prefs.setRecordDefaults(
                                 countIn: prefs.settings.countInBars, preRoll: $0,
-                                passesAsTakes: prefs.settings.passesAsTakes)
+                                midiPassesAsTakes: prefs.settings.midiPassesAsTakes)
                         }),
                     in: 0...8)
                 Toggle(
-                    "Passes as takes",
+                    "MIDI passes as takes",
                     isOn: Binding(
-                        get: { prefs.settings.passesAsTakes },
+                        get: { prefs.settings.midiPassesAsTakes },
                         set: {
                             prefs.setRecordDefaults(
                                 countIn: prefs.settings.countInBars, preRoll: prefs.settings.preRollBars,
-                                passesAsTakes: $0)
-                        }))
+                                midiPassesAsTakes: $0)
+                        })
+                )
+                .help(RecordModel.midiTakesHelp)
                 Picker(
                     "Monitoring for new tracks",
                     selection: Binding(get: { prefs.settings.defaultMonitor }, set: { prefs.setDefaultMonitor($0) })

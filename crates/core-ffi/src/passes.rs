@@ -174,7 +174,9 @@ pub struct Captured<'a> {
     pub looped: bool,
     /// Replace (else overdub).
     pub replace: bool,
-    /// Kept passes become takes (spec §6.4).
+    /// Kept MIDI passes become takes (spec §6.4); off, they merge into the
+    /// active take. MIDI only: audio loop passes become takes either way.
+    /// Off by default in the app (plan 5c-2 takes Ruling 1).
     pub passes_as_takes: bool,
     /// Each pass's fate, by pass number (missing: undecided).
     pub fates: &'a [PassFate],

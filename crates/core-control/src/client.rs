@@ -31,6 +31,19 @@ impl std::fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
+/// The most bytes of a line's first write (see [`Client::send_counted`]).
+const FIRST_WRITE: usize = 512;
+
+/// A failed send: the error, and how many bytes of the line went out
+/// before it.
+#[derive(Debug)]
+pub struct SendError {
+    /// What failed.
+    pub error: io::Error,
+    /// Bytes of the line (newline included) written before the failure.
+    pub written: usize,
+}
+
 /// One connection.
 pub struct Client {
     reader: BufReader<UnixStream>,
@@ -65,11 +78,43 @@ impl Client {
 
     /// Sends a raw line (tests send malformed ones).
     pub fn send_line(&mut self, line: &str) -> Result<(), CallError> {
+        self.send_counted(line).map_err(|e| CallError::Io(e.error))
+    }
+
+    /// Sends `line` and its newline as one buffer, and on failure says how
+    /// many of its bytes were written first. A caller that resends must
+    /// know none were: the server runs an unterminated last line at the
+    /// end of input.
+    pub fn send_counted(&mut self, line: &str) -> Result<(), SendError> {
+        let mut buf = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+        let mut written = 0;
+        while let Some(rest) = buf.get(written..).filter(|r| !r.is_empty()) {
+            // A blocking write that fails partway may report only the
+            // error, not the bytes it sent. The first write is small
+            // enough for an empty socket buffer, so it is all or nothing:
+            // `written == 0` then truly means nothing went out.
+            let rest = if written == 0 {
+                rest.get(..FIRST_WRITE).unwrap_or(rest)
+            } else {
+                rest
+            };
+            match self.writer.write(rest) {
+                Ok(0) => {
+                    return Err(SendError {
+                        error: io::Error::new(io::ErrorKind::WriteZero, "the socket took no bytes"),
+                        written,
+                    });
+                }
+                Ok(n) => written += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(SendError { error, written }),
+            }
+        }
         self.writer
-            .write_all(line.as_bytes())
-            .and_then(|()| self.writer.write_all(b"\n"))
-            .and_then(|()| self.writer.flush())
-            .map_err(CallError::Io)
+            .flush()
+            .map_err(|error| SendError { error, written })
     }
 
     /// Reads replies until the one for `id` (or a reply without id, which

@@ -4,8 +4,9 @@ import VizDAWCore
 /// Settings › Audio's and › Recording's readouts and choices (plan 5d-2
 /// Task 7; spec §6.6, §6.9).
 extension AudioPreferences {
-    /// The input devices the picker offers (tests replace it).
-    public static var inputDevices: () -> [String] = { audioInputDevices() }
+    /// The input devices the picker offers, with their UIDs (tests
+    /// replace it).
+    public static var inputDeviceList: () -> [InputDeviceRow] = { audioInputDeviceList() }
 
     /// The RAM cache sizes offered, MiB (64–8192; spec §5.5: 512).
     public static let cacheChoices: [UInt32] = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
@@ -17,15 +18,42 @@ extension AudioPreferences {
     }
 
     /// The input device picker: "Same as output" (nil), every device, and
-    /// the chosen one when it is not connected.
-    public func inputDeviceChoices() -> [(title: String, name: String?)] {
-        let devices = Self.inputDevices()
-        var out: [(title: String, name: String?)] = [("Same as output", nil)]
-        out += devices.map { ($0, $0) }
-        if let chosen = settings.inputDevice, !devices.contains(chosen) {
-            out.append(("\(chosen) (not connected)", chosen))
+    /// the chosen one when it is not connected. Two devices with one name
+    /// are "<name>" and "<name> (2)", in list order (release fixes Task 2).
+    public func inputDeviceChoices() -> [(title: String, uid: String?, name: String?)] {
+        var out: [(title: String, uid: String?, name: String?)] = [("Same as output", nil, nil)]
+        var seen: [String: Int] = [:]
+        for d in Self.inputDeviceList() {
+            let n = (seen[d.name] ?? 0) + 1
+            seen[d.name] = n
+            out.append((n == 1 ? d.name : "\(d.name) (\(n))", d.uid.isEmpty ? nil : d.uid, d.name))
+        }
+        let chosen = inputDeviceTag()
+        if let chosen, !out.contains(where: { Self.tag(of: $0) == chosen }) {
+            let s = settings
+            out.append(("\(s.inputDevice ?? chosen) (not connected)", s.inputDeviceUID, s.inputDevice))
         }
         return out
+    }
+
+    /// A choice's picker tag: its UID, else its name (nil: "Same as
+    /// output").
+    public static func tag(of c: (title: String, uid: String?, name: String?)) -> String? { c.uid ?? c.name }
+
+    /// The chosen device's picker tag: its UID; for a name alone (older
+    /// settings), the UID of the only listed device with that name, else
+    /// the name.
+    public func inputDeviceTag() -> String? {
+        if let uid = settings.inputDeviceUID { return uid }
+        guard let name = settings.inputDevice else { return nil }
+        let named = Self.inputDeviceList().filter { $0.name == name && !$0.uid.isEmpty }
+        return named.count == 1 ? named.first?.uid : name
+    }
+
+    /// The picker's choice tagged `tag`.
+    public func selectInputDevice(tag: String?) {
+        guard let c = inputDeviceChoices().first(where: { Self.tag(of: $0) == tag }) else { return }
+        setInputDevice(uid: c.uid, name: c.name)
     }
 
     /// The first open session whose device has opened an input: the one

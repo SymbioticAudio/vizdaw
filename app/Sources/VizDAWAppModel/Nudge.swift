@@ -108,6 +108,16 @@ public final class EditingPreferences {
         }
     }
 
+    /// Zero-crossing snapping for trims (plan release-fixes Task 7).
+    public static let zeroCrossingsKey = "VizDAW.zeroCrossings"
+
+    /// A trimmed audio start or end moves to the nearest zero crossing
+    /// within `ZeroCrossing.radiusSeconds` (on by default; a damaged value
+    /// reads as on).
+    public var zeroCrossings: Bool {
+        didSet { defaults.set(zeroCrossings, forKey: Self.zeroCrossingsKey) }
+    }
+
     static func clampCrossfade(_ v: Double) -> Double {
         guard !v.isNaN else { return defaultCrossfadeMs }
         return min(max(v, crossfadeRange.lowerBound), crossfadeRange.upperBound)
@@ -117,6 +127,7 @@ public final class EditingPreferences {
         self.defaults = defaults
         crossfadeMs = (defaults.object(forKey: Self.crossfadeKey) as? Double).map(Self.clampCrossfade)
             ?? Self.defaultCrossfadeMs
+        zeroCrossings = defaults.object(forKey: Self.zeroCrossingsKey) as? Bool ?? true
         nudge =
             defaults.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(NudgeSettings.self, from: $0) }
             ?? NudgeSettings()

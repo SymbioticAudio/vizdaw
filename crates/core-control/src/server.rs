@@ -51,6 +51,10 @@ pub enum Role {
     CoProducer,
 }
 
+/// Reads a connected peer's audit token (plan 8b Ruling 11):
+/// `platform_macos::peer::audit_token` on macOS, a fake in tests.
+pub type PeerHook = fn(std::os::fd::RawFd) -> Option<[u32; 8]>;
+
 /// The shortest time between two Co-Producer screenshots.
 pub const SCREENSHOT_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -70,6 +74,9 @@ pub struct Config {
     pub write_timeout: Duration,
     /// Which socket this is.
     pub role: Role,
+    /// Called once per connection at accept, while its stream is open:
+    /// the peer's audit token for every call of it. None reads nothing.
+    pub peer: Option<PeerHook>,
 }
 
 impl Default for Config {
@@ -81,6 +88,7 @@ impl Default for Config {
             idle_timeout: Duration::from_secs(300),
             write_timeout: Duration::from_secs(30),
             role: Role::Developer,
+            peer: None,
         }
     }
 }
@@ -92,6 +100,18 @@ pub struct Call {
     pub token: u64,
     /// What to do.
     pub command: Command,
+    /// The connection it came on: numbered from 1 per server, never
+    /// reused (plan 8b Ruling 11).
+    pub conn: u64,
+    /// The peer's audit token, read at accept by [`Config::peer`].
+    pub audit_token: Option<[u32; 8]>,
+}
+
+/// Who a connection's calls come from.
+#[derive(Debug, Clone, Copy)]
+struct Peer {
+    conn: u64,
+    audit_token: Option<[u32; 8]>,
 }
 
 type Outcome = Result<Value, ControlError>;
@@ -430,6 +450,12 @@ fn accept(s: &Arc<Shared>, listener: &UnixListener) {
             continue;
         }
         let conn = s.next_conn.fetch_add(1, Ordering::Relaxed);
+        // Once, while the stream is open: the process that connected.
+        let audit_token = s
+            .config
+            .peer
+            .and_then(|read| read(std::os::fd::AsRawFd::as_raw_fd(&stream)));
+        let peer = Peer { conn, audit_token };
         if let Ok(c) = stream.try_clone() {
             lock(&s.streams).insert(conn, c);
         }
@@ -437,7 +463,7 @@ fn accept(s: &Arc<Shared>, listener: &UnixListener) {
         let spawned = std::thread::Builder::new()
             .name("vizdaw-control-conn".into())
             .spawn(move || {
-                serve(&s2, stream);
+                serve(&s2, stream, peer);
                 lock(&s2.streams).remove(&conn);
                 s2.connections.fetch_sub(1, Ordering::SeqCst);
             });
@@ -503,7 +529,7 @@ fn read_line_capped(r: &mut impl BufRead, max: usize) -> io::Result<Option<Line>
     }
 }
 
-fn serve(s: &Arc<Shared>, stream: UnixStream) {
+fn serve(s: &Arc<Shared>, stream: UnixStream, peer: Peer) {
     let _ = stream.set_read_timeout(Some(s.config.idle_timeout));
     let _ = stream.set_write_timeout(Some(s.config.write_timeout));
     let Ok(read_half) = stream.try_clone() else {
@@ -525,7 +551,7 @@ fn serve(s: &Arc<Shared>, stream: UnixStream) {
                 if line.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
-                handle(s, &line)
+                handle(s, &line, peer)
             }
         };
         #[cfg(test)]
@@ -548,7 +574,11 @@ fn serve(s: &Arc<Shared>, stream: UnixStream) {
     }
 }
 
-fn handle(s: &Arc<Shared>, line: &[u8]) -> (Option<RequestId>, Result<Value, ControlError>) {
+fn handle(
+    s: &Arc<Shared>,
+    line: &[u8],
+    peer: Peer,
+) -> (Option<RequestId>, Result<Value, ControlError>) {
     let raw = match read_request(line) {
         Ok(r) => r,
         Err(e) => return (e.id, Err(e.error)),
@@ -601,7 +631,12 @@ fn handle(s: &Arc<Shared>, line: &[u8]) -> (Option<RequestId>, Result<Value, Con
             )),
         );
     }
-    lock(&s.queue).push_back(Call { token, command });
+    lock(&s.queue).push_back(Call {
+        token,
+        command,
+        conn: peer.conn,
+        audit_token: peer.audit_token,
+    });
     let mut deadline = Instant::now() + timeout;
     let outcome = loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {

@@ -202,9 +202,90 @@ fn a_latency_change_mid_count_in_neither_repeats_nor_skips_a_click() {
         beat_frames: 4800.0,
     };
     // Rises by 1000 frames while click 2 sounds (it starts at 4800).
-    let up = counted(Counting::new(c, None, 48_000.0, 0), 30_000, 4900, 1000);
+    let up = counted(Counting::new(c, None, 48_000.0, 0, 0), 30_000, 4900, 1000);
     assert_eq!(bursts(&up), 4, "a rise repeats no click");
     // Falls by 2000 frames just before click 3 (due at 2000 + 9600).
-    let down = counted(Counting::new(c, None, 48_000.0, 2000), 30_000, 11_100, 0);
+    let down = counted(Counting::new(c, None, 48_000.0, 2000, 0), 30_000, 11_100, 0);
     assert_eq!(bursts(&down), 4, "a fall skips no click");
+}
+
+/// Where each click starts: the first sounding frame after at least 100
+/// silent ones.
+fn onsets(left: &[f32]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut quiet = usize::MAX;
+    for (f, x) in left.iter().enumerate() {
+        if *x != 0.0 {
+            if quiet >= 100 {
+                out.push(f);
+            }
+            quiet = 0;
+        } else {
+            quiet = quiet.saturating_add(1);
+        }
+    }
+    out
+}
+
+/// Plan release-fixes Task 1: a latency that falls by more than a beat
+/// makes the clicks due meanwhile late, one beat apart, never two in one
+/// block.
+#[test]
+fn a_latency_drop_of_two_beats_plays_one_click_per_beat() {
+    use core_engine::count_in::Counting;
+    let c = CountIn {
+        beats: 4,
+        per_bar: 4,
+        beat_frames: 4800.0,
+    };
+    // The first click starts at 256 + 12 000; the latency falls to 0 in
+    // the next block, when clicks 1 and 2 are already due.
+    let left = counted(
+        Counting::new(c, None, 48_000.0, 12_000, 0),
+        40_000,
+        12_800,
+        0,
+    );
+    assert_eq!(bursts(&left), 4, "{:?}", onsets(&left));
+    let at = onsets(&left);
+    assert_eq!(at.len(), 4, "{at:?}");
+    for w in at.windows(2) {
+        assert!(w[1] - w[0] >= 4800, "clicks closer than a beat: {at:?}");
+    }
+    for w in at.windows(2) {
+        assert_ne!(w[0] / 512, w[1] / 512, "two clicks in one block: {at:?}");
+    }
+}
+
+/// Plan release-fixes Task 1: a count-in resumed after `done` clicks (a
+/// device rebuild) plays only the beats left, the next one first.
+#[test]
+fn a_resumed_count_in_plays_only_the_beats_left() {
+    use core_engine::count_in::Counting;
+    // 10 blocks a beat, so the roll needs no pad and the first click is
+    // at the start.
+    let c = CountIn {
+        beats: 4,
+        per_bar: 4,
+        beat_frames: 5120.0,
+    };
+    let left = counted(Counting::new(c, None, 48_000.0, 0, 1), 30_000, 0, 0);
+    assert_eq!(bursts(&left), 3);
+    let at = onsets(&left);
+    assert!(at[0] <= 2, "the first click starts the count-in: {at:?}");
+    // Click 1 of the bar, not its downbeat: unaccented.
+    assert!(
+        (peak(&left, at[0]) - BEAT_LEVEL).abs() < 0.05,
+        "{}",
+        peak(&left, at[0])
+    );
+    // All four played already: it rolls at once and clicks no more.
+    let mut all = Counting::new(c, None, 48_000.0, 0, 4);
+    assert!(all.rolls(512), "rolls at the first block");
+    let mut l = vec![0.0f32; 512];
+    let mut r = vec![0.0f32; 512];
+    let mut out: [&mut [f32]; 2] = [&mut l, &mut r];
+    all.render(&mut out, 512);
+    assert!(all.done());
+    assert_eq!(bursts(&l), 0);
 }

@@ -60,6 +60,14 @@ struct AppCommands: Commands {
                 .keyboardShortcut(KeyMenu.shortcut("file.new"))
                 Button("Open…") { if let path = Panels.chooseProject() { show(store.open(path: path)) } }
                     .keyboardShortcut(KeyMenu.shortcut("file.open"))
+                // A saved Co-Producer copy of the front project, as a new
+                // untitled project (plan 8a Ruling 9).
+                Button("Open Co-Producer Copy…") {
+                    guard let package = copiesPackage, let path = Panels.chooseCoProducerCopy(in: package) else { return }
+                    show(store.openCopy(path: path))
+                }
+                .keyboardShortcut(KeyMenu.shortcut(CoProducerCommands.openCopy))
+                .disabled(copiesPackage == nil)
                 Button("Import Audio…") {
                     let paths = Panels.chooseAudio()
                     doc?.importAudio(paths: paths)
@@ -149,6 +157,13 @@ struct AppCommands: Commands {
                 Button("Media Pool") { if let docID { openWindow(id: "media-pool", value: docID) } }
                     .keyboardShortcut(KeyMenu.shortcut("window.media_pool"))
                     .disabled(docID == nil)
+                // Plan 8b Ruling 4: the song's Notes.md in the composer's
+                // editor; what fails is the window's alert.
+                Button(keyBindings.row(SongNotes.command)?.title ?? "Song Notes") {
+                    if let doc { SongNotes.openFromMenu(doc) { NSWorkspace.shared.open($0) } }
+                }
+                .keyboardShortcut(KeyMenu.shortcut(SongNotes.command))
+                .disabled(doc == nil)
                 Divider()
             }
             CommandGroup(before: .toolbar) {
@@ -209,7 +224,7 @@ struct AppCommands: Commands {
             }
             .keyboardShortcut(KeyMenu.shortcut("modify.again"))
             .help(SelectModifyModel.modifyAgainHelp)
-            .disabled(!(doc?.selectModify.canModifyAgain ?? false))
+            .disabled(!(doc?.selectModify.canModifyAgain ?? false) || doc?.selectionHidden == true)
             Menu("Templates") {
                 ForEach(doc?.editor.modifyTemplates() ?? [], id: \.name) { t in
                     Button(t.name) { doc?.selectModify.run(t) }
@@ -242,6 +257,8 @@ struct AppCommands: Commands {
             trackItem(TrackCommands.duplicate)
             trackItem(TrackCommands.delete)
             trackItem(TrackCommands.rename)
+            Divider()
+            trackItem(TrackCommands.makeMine)
         }
         CommandMenu("Region") {
             Button(keyBindings.row(RegionCommands.normalize)?.title ?? "Normalize…") { if let doc { normalize(doc) } }
@@ -390,7 +407,8 @@ struct AppCommands: Commands {
         Button(title) { doc?.editor.nudge(dir, settings: editingPreferences.nudge) }
             .keyboardShortcut(KeyMenu.shortcut(id))
             .disabled(
-                doc == nil || !(doc?.transportKeysEnabled ?? false) || (doc?.editor.selection.events.isEmpty ?? true))
+                doc == nil || !(doc?.transportKeysEnabled ?? false) || (doc?.editor.selection.events.isEmpty ?? true)
+                    || doc?.selectionHidden == true)
     }
 
     /// A Drum menu command (Plan 4e Ruling 13); a refusal shows in the
@@ -446,6 +464,15 @@ struct AppCommands: Commands {
         report(RegionCommands.normalize(peakDb: peak, doc), doc)
     }
 
+    /// The front project's package when it is saved and has Co-Producer
+    /// copies (File › Open Co-Producer Copy… is enabled).
+    private var copiesPackage: String? {
+        guard let doc, let path = (try? doc.session.path()) ?? nil,
+            ((try? doc.session.coProducerCopiesSize())?.count ?? 0) > 0
+        else { return nil }
+        return path
+    }
+
     private func show(_ id: UUID?) {
         if let id { openWindow(value: id) }
     }
@@ -488,6 +515,21 @@ enum Panels {
             [UTType("org.vizdaw.project"), UTType.folder].compactMap { $0 } + midiTypes + dawprojectTypes + aafTypes
         panel.prompt = "Open"
         panel.message = "Choose a VizDAW project, a MIDI file, a DAWproject file or an AAF file"
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// File › Open Co-Producer Copy…: a copy in `package`'s
+    /// `Co-Producer/Copies`, chosen as a whole package.
+    static func chooseCoProducerCopy(in package: String) -> String? {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(fileURLWithPath: package).appendingPathComponent("Co-Producer/Copies", isDirectory: true)
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType("org.vizdaw.project")].compactMap { $0 }
+        panel.prompt = "Open Copy"
+        panel.message = "Choose a saved Co-Producer copy: it opens as a new untitled project."
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 

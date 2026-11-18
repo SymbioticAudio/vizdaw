@@ -146,6 +146,7 @@ public final class DocumentStore {
             open: { try Session.open(path: $0) }
         )
         s.makeDemoAudio = { try Session.newDemoAudio() }
+        s.openCopySession = { try Session.openCopy(path: $0) }
         s.makeProject = { try Session.newProject(format: $0) }
         s.recoverUntitled = { try recoverUntitledRecordings() }
         s.defaults = MemoryDefaults.appStore()
@@ -266,6 +267,9 @@ public final class DocumentStore {
         }
     }
 
+    /// The song a Co-Producer starter is making, until its window is up
+    /// (plan 8e Ruling 5: one at a time).
+    @ObservationIgnored var coProducerStarter: UUID?
     /// Documents whose mixer failed and has alerted (`mixer`).
     @ObservationIgnored private var mixerAlerted: Set<UUID> = []
 
@@ -275,6 +279,14 @@ public final class DocumentStore {
     public func newProject(_ format: ProjectFormatRow) -> UUID? {
         guard let make = makeProject else { return newEmpty() }
         return add("New Document Failed") { try make(format) }
+    }
+
+    /// `newProject` without its alert (plan 8e Task 5 fix round 1: a
+    /// Co-Producer starter's new song): the failure is thrown, never posted
+    /// or queued, so no sheet shows it later.
+    func newProjectQuietly(_ format: ProjectFormatRow) throws -> UUID {
+        guard let make = makeProject else { return try adding(makeEmpty) }
+        return try adding { try make(format) }
     }
 
     public func newDemo() -> UUID? { add("Demo Project Failed", makeDemo) }
@@ -310,6 +322,9 @@ public final class DocumentStore {
             openAaf(path)
             return nil
         }
+        // A saved Co-Producer copy (from Finder, say) opens as a new
+        // untitled project, never in place (plan 8a Ruling 9).
+        if Self.isCopy(path) { return openCopy(path: path) }
         guard (path as NSString).pathExtension == "vizdaw" else {
             postAlert(AlertItem(
                 title: "Open Failed",
@@ -327,6 +342,37 @@ public final class DocumentStore {
         }
         guard let options = recovery.options(for: path) else { return nil }
         return add("Open Failed") { try recovery.openWith(path, options) }
+    }
+
+    /// Opens a Co-Producer copy (set by `live()`; tests set a fake).
+    @ObservationIgnored public var openCopySession: Open?
+
+    /// Whether `path` is a saved Co-Producer copy,
+    /// `<package>/Co-Producer/Copies/<name>.vizdaw`, as given or as its real
+    /// place (names compared without case, as the core does).
+    public nonisolated static func isCopy(_ path: String) -> Bool {
+        func shaped(_ p: String) -> Bool {
+            let parts = (p as NSString).pathComponents.filter { $0 != "." && $0 != "/" }
+            guard parts.count >= 4, let last = parts.last else { return false }
+            let name = last as NSString
+            return name.pathExtension.lowercased() == "vizdaw" && !name.deletingPathExtension.isEmpty
+                && parts[parts.count - 2].lowercased() == "copies"
+                && parts[parts.count - 3].lowercased() == "co-producer"
+        }
+        return shaped(path) || shaped(URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
+    }
+
+    /// File › Open Co-Producer Copy… (plan 8a Ruling 9): the copy at
+    /// `path` as a new untitled project, titled with the copy's name; the
+    /// copy and its package are never written. Anything else is refused
+    /// with an alert.
+    public func openCopy(path: String) -> UUID? {
+        guard Self.isCopy(path) else {
+            postAlert(AlertItem(title: "Open Failed", message: "That is not a Co-Producer copy."))
+            return nil
+        }
+        guard let make = openCopySession else { return nil }
+        return add("Open Failed") { try make(path) }
     }
 
     /// The import sheet's Import with "a new project" chosen: the sheet
@@ -510,6 +556,22 @@ public final class DocumentStore {
     /// Every new model, before any window shows it (set by the app: the
     /// surfaces' core and command sinks, plan 5f-1 Task 10).
     public var didMake: ((UUID, DocumentModel) -> Void)?
+    /// Told every document's new steps, undos and redos, with its ID (plan
+    /// 8f Ruling 4: the time records' friction). Set on each document as it
+    /// is added, and on those already open when it changes.
+    @ObservationIgnored public var stepObserver: (@MainActor (UUID, StepEvent) -> Void)? {
+        didSet {
+            for (id, m) in documents { m.onStep = Self.forward(stepObserver, id) }
+        }
+    }
+
+    /// `observer` for document `id`; it holds no reference to the store.
+    private static func forward(_ observer: (@MainActor (UUID, StepEvent) -> Void)?, _ id: UUID)
+        -> (@MainActor (StepEvent) -> Void)?
+    {
+        guard let observer else { return nil }
+        return { observer(id, $0) }
+    }
 
     /// The open document saved at `path` (same file, ignoring case and
     /// symbolic links), if any.
@@ -634,19 +696,25 @@ public final class DocumentStore {
 
     private func add(_ title: String, _ make: Make) -> UUID? {
         do {
-            let model = try DocumentModel(session: make())
-            model.listPreferences = listPreferences
-            model.keys = keyBindings
-            model.externalTools = externalTools
-            let id = UUID()
-            didMake?(id, model)
-            documents[id] = model
-            added.append(id)
-            model.mixerProvider = { [weak self] in self?.mixer(id) }
-            return id
+            return try adding(make)
         } catch {
             postAlert(AlertItem(error, title: title))
             return nil
         }
+    }
+
+    /// The document `make` makes, added; its failure is thrown, never posted.
+    private func adding(_ make: Make) throws -> UUID {
+        let model = try DocumentModel(session: make())
+        model.listPreferences = listPreferences
+        model.keys = keyBindings
+        model.externalTools = externalTools
+        let id = UUID()
+        didMake?(id, model)
+        model.onStep = Self.forward(stepObserver, id)
+        documents[id] = model
+        added.append(id)
+        model.mixerProvider = { [weak self] in self?.mixer(id) }
+        return id
     }
 }

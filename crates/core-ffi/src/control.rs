@@ -13,8 +13,10 @@ use core_control::element::{self as el, ElementRef};
 use core_control::keys::{KeyStroke, Modifiers};
 use core_control::params::WindowRef;
 use core_control::registry::{self, ArgValue};
-use core_control::request::{Button, Command, CrashAnswer, Pointer, StateTarget};
-use core_control::server::{Config, Server};
+use core_control::request::{
+    Button, Command, CrashAnswer, ExportWhat, PluginKindArg, Pointer, StateTarget,
+};
+use core_control::server::{Config, Role, Server};
 use core_control::wait::{self, DocFacts, Facts, WaitCondition};
 use core_control::{ControlError, ErrorCode};
 use serde_json::{Map, Value, json};
@@ -35,6 +37,52 @@ pub enum WindowRefRow {
     Key,
     /// The main window.
     Main,
+}
+
+/// What a `co_producer.export_folder` is for (plan 8b Ruling 6); mirrors
+/// `core_control::request::ExportWhat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum ExportWhatRow {
+    /// Stems.
+    Stems,
+    /// A mix.
+    Mix,
+    /// A selection.
+    Selection,
+    /// MIDI.
+    Midi,
+    /// A DAWproject file.
+    Dawproject,
+    /// AAF.
+    Aaf,
+    /// The export for another DAW.
+    OtherDaw,
+}
+
+fn export_what_row(w: ExportWhat) -> ExportWhatRow {
+    match w {
+        ExportWhat::Stems => ExportWhatRow::Stems,
+        ExportWhat::Mix => ExportWhatRow::Mix,
+        ExportWhat::Selection => ExportWhatRow::Selection,
+        ExportWhat::Midi => ExportWhatRow::Midi,
+        ExportWhat::Dawproject => ExportWhatRow::Dawproject,
+        ExportWhat::Aaf => ExportWhatRow::Aaf,
+        ExportWhat::OtherDaw => ExportWhatRow::OtherDaw,
+    }
+}
+
+impl From<ExportWhatRow> for ExportWhat {
+    fn from(w: ExportWhatRow) -> Self {
+        match w {
+            ExportWhatRow::Stems => ExportWhat::Stems,
+            ExportWhatRow::Mix => ExportWhat::Mix,
+            ExportWhatRow::Selection => ExportWhat::Selection,
+            ExportWhatRow::Midi => ExportWhat::Midi,
+            ExportWhatRow::Dawproject => ExportWhat::Dawproject,
+            ExportWhatRow::Aaf => ExportWhat::Aaf,
+            ExportWhatRow::OtherDaw => ExportWhat::OtherDaw,
+        }
+    }
 }
 
 /// An element from `ui.tree`.
@@ -435,6 +483,143 @@ pub enum ControlRequest {
         /// At most this long.
         timeout_ms: u64,
     },
+    /// `co_producer.begin` (plan 8a Task 4).
+    CoProducerBegin {
+        /// What the composer asked for.
+        name: String,
+        /// The composer's own words for the notes (plan 8b Ruling 9).
+        asked: Option<String>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.end`.
+    CoProducerEnd {
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.status`.
+    CoProducerStatus {
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.preview`.
+    CoProducerPreview {
+        /// The planned commands, in order.
+        plan: Vec<crate::co_producer::PlannedRow>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.apply`.
+    CoProducerApply {
+        /// The preview's one-time token.
+        token: String,
+        /// The previewed commands, again.
+        plan: Vec<crate::co_producer::PlannedRow>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+        /// What the host calls itself: a label only (plan 8b Ruling 11).
+        client: Option<String>,
+    },
+    /// `co_producer.notes` (plan 8b Ruling 9).
+    CoProducerNotes {
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.note`.
+    CoProducerNote {
+        /// The note, already checked.
+        text: String,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.export_folder` (Ruling 6).
+    CoProducerExportFolder {
+        /// What the export is.
+        what: ExportWhatRow,
+        /// The folder to make it in, already checked by the gate.
+        parent: Option<String>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.export` (plan 8c Ruling 1): the whole export in one
+    /// call, into a new dated folder.
+    CoProducerExport {
+        /// What to export; never `Selection`.
+        what: ExportWhatRow,
+        /// The folder to make the dated folder in, already checked by the
+        /// gate.
+        parent: Option<String>,
+        /// The strips, already checked: 1 to 64 unique IDs.
+        strips: Option<Vec<u64>>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.plugins` (plan 8d Ruling 5): the plug-ins Co-Producer
+    /// may use.
+    CoProducerPlugins {
+        /// Only instruments or only effects; None: both.
+        kind: Option<crate::catalog::PluginKindTag>,
+    },
+    /// `co_producer.params` (plan 8d Ruling 5): a loaded plug-in's
+    /// parameters.
+    CoProducerParams {
+        /// The slot, already checked: at least 1.
+        slot: u64,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.starter` (plan 8e Ruling 5): a new untitled song set
+    /// up from a spec.
+    CoProducerStarter {
+        /// The spec's JSON text, already checked by `starter::parse`.
+        spec: String,
+    },
+    /// `co_producer.midi_notes` (plan 8e Ruling 3): a track's notes.
+    CoProducerMidiNotes {
+        /// The sequence, already checked: 0 or more.
+        seq: u64,
+        /// The track, already checked: 0 or more.
+        lane: u64,
+        /// The first tick, given with `end` or not at all.
+        start: Option<u64>,
+        /// The end tick, after `start`.
+        end: Option<u64>,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.automation` (plan 8e Ruling 7): a target's automation.
+    CoProducerAutomation {
+        /// The sequence, already checked: 0 or more.
+        seq: u64,
+        /// The target, already checked against `automation.gesture`'s
+        /// grammar.
+        target: String,
+        /// The first tick.
+        start: u64,
+        /// The last tick, after `start`.
+        end: u64,
+        /// Whose document.
+        window: Option<WindowRefRow>,
+    },
+    /// `co_producer.metrics` (plan 8f Ruling 6): where the composer's time
+    /// has gone.
+    CoProducerMetrics {
+        /// Today and the `days - 1` before it, already checked: 1 to
+        /// 3650; None: all time.
+        days: Option<u32>,
+        /// Whose document is "this song".
+        window: Option<WindowRefRow>,
+    },
+}
+
+/// Who a Co-Producer call came from (plan 8b Ruling 11): its connection
+/// and the audit token read when it connected.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PeerRow {
+    /// The connection, numbered from 1 per server and never reused.
+    pub conn: u64,
+    /// The peer's `audit_token_t`: eight words, its pid in word 5.
+    pub audit_token: Vec<u32>,
 }
 
 /// A request and the token to answer it with.
@@ -444,6 +629,9 @@ pub struct ControlCall {
     pub token: u64,
     /// The request.
     pub request: ControlRequest,
+    /// The peer, when the server read one (the Co-Producer socket on
+    /// macOS); None on the developer channel.
+    pub peer: Option<PeerRow>,
 }
 
 /// An alert the app would have shown.
@@ -750,6 +938,8 @@ pub enum ControlResult {
         selected_seq: Option<u64>,
         /// That sequence's lanes.
         lanes: Vec<LaneRow>,
+        /// That sequence's markers, in order (plan 8c Ruling 4).
+        markers: Vec<crate::events::MarkerRow>,
         /// The destinations, with their return latency and MIDI mix.
         destinations: Vec<crate::mixer::DestRow>,
         /// The alert its window would show.
@@ -825,6 +1015,120 @@ pub enum ControlResult {
         /// How long it took.
         elapsed_ms: u64,
     },
+    /// `co_producer.begin`, `co_producer.end` and `co_producer.status`
+    /// (plan 8a Task 4).
+    CoProducerRequest {
+        /// Document ID.
+        doc: String,
+        /// The open request, if any.
+        request: Option<crate::co_producer::CoProducerRequestRow>,
+        /// The undo label afterwards.
+        undo_label: Option<String>,
+    },
+    /// `co_producer.preview`.
+    CoProducerPreview {
+        /// Document ID.
+        doc: String,
+        /// What would change, and the token.
+        preview: crate::co_producer::PreviewRow,
+    },
+    /// `co_producer.apply`.
+    CoProducerApplied {
+        /// Document ID.
+        doc: String,
+        /// One line per planned command: done, its failure, or not run.
+        results: Vec<String>,
+        /// The undo label afterwards.
+        undo_label: Option<String>,
+    },
+    /// `co_producer.notes` (plan 8b Ruling 4). `co_producer.note`
+    /// answers [`ControlResult::CoProducerRequest`].
+    CoProducerNotes {
+        /// Document ID.
+        doc: String,
+        /// The song's notes.
+        notes: crate::session::NotesRow,
+    },
+    /// `co_producer.export_folder` (Ruling 6).
+    CoProducerFolder {
+        /// Document ID.
+        doc: String,
+        /// The new folder.
+        path: String,
+    },
+    /// `co_producer.export` (plan 8c Ruling 1), when its job ended.
+    CoProducerExported {
+        /// Document ID.
+        doc: String,
+        /// The new dated folder.
+        folder: String,
+        /// The files the job wrote.
+        written: Vec<String>,
+        /// The interchange report's summary for DAWproject, AAF and MIDI.
+        summary: Option<String>,
+    },
+    /// `co_producer.plugins` (plan 8d Ruling 5): the plug-ins Co-Producer
+    /// may use.
+    CoProducerPlugins {
+        /// Built-ins first, then instruments, then effects.
+        plugins: Vec<crate::mixer_chores::CoProducerPluginRow>,
+        /// More were usable than listed.
+        truncated: bool,
+    },
+    /// `co_producer.params` (plan 8d Ruling 5): a loaded plug-in's
+    /// parameters.
+    CoProducerParams {
+        /// Document ID.
+        doc: String,
+        /// The slot, its plug-in and its parameters.
+        row: crate::session::co_producer_mixer::CoProducerParamsRow,
+    },
+    /// `co_producer.midi_notes` (plan 8e Ruling 3): a track's notes.
+    CoProducerMidiNotes {
+        /// Document ID.
+        doc: String,
+        /// The track and its notes.
+        row: crate::creative::CoProducerNotesRow,
+    },
+    /// `co_producer.automation` (plan 8e Ruling 7): a target's
+    /// automation in its own units.
+    CoProducerAutomation {
+        /// Document ID.
+        doc: String,
+        /// The target, its units, bars and points.
+        row: crate::creative::CoProducerCurveRow,
+    },
+    /// `co_producer.starter` (plan 8e Ruling 5): the new song it made.
+    CoProducerStarter {
+        /// The new document's ID.
+        doc: String,
+        /// Its window.
+        window: i64,
+        /// What the starter made, and its fallback lines.
+        row: crate::starter::CoProducerStarterRow,
+    },
+    /// `settings.co_producer_answer` (plan 8b Ruling 11): what the
+    /// approval sheet it answered asked.
+    CoProducerApprovalAnswered {
+        /// The asking app as the sheet names it.
+        app: String,
+        /// "known", "unverified" or "unknown".
+        kind: String,
+        /// What the app calls itself, if anything.
+        label: Option<String>,
+        /// The host's path, when VizDAW could read it.
+        path: Option<String>,
+        /// The preview's items the sheet listed.
+        items: Vec<crate::co_producer::ChangeItemRow>,
+    },
+    /// `co_producer.metrics` (plan 8f Ruling 6): where the composer's time
+    /// has gone.
+    CoProducerMetrics {
+        /// Counting is on now.
+        on: bool,
+        /// The summary.
+        row: crate::metrics::MetricsSummaryRow,
+    },
 }
 
 /// Error codes (control spec §5.3).
@@ -860,6 +1164,8 @@ pub enum ControlErrorCode {
     ShuttingDown,
     /// `internal` (`Internal` is a Swift keyword when lower-cased).
     InternalFailure,
+    /// `not_allowed` (plan 8a Ruling 11).
+    NotAllowed,
 }
 
 /// A failed call.
@@ -890,6 +1196,7 @@ fn code_of(c: ControlErrorCode) -> ErrorCode {
         ControlErrorCode::Timeout => ErrorCode::Timeout,
         ControlErrorCode::ShuttingDown => ErrorCode::ShuttingDown,
         ControlErrorCode::InternalFailure => ErrorCode::Internal,
+        ControlErrorCode::NotAllowed => ErrorCode::NotAllowed,
     }
 }
 
@@ -977,14 +1284,112 @@ fn facts_of(f: WaitFactsRow) -> Facts {
 pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<ControlRequest> {
     Some(match c {
         Command::CommandsList | Command::Ping => return None,
-        // The developer socket refuses these before they are queued
-        // (plan 8a Ruling 11); the Co-Producer socket's rows come with its
-        // server (Task 4).
-        Command::CoProducerBegin { .. }
-        | Command::CoProducerEnd { .. }
-        | Command::CoProducerStatus { .. }
-        | Command::CoProducerPreview { .. }
-        | Command::CoProducerApply { .. } => return None,
+        // Only the Co-Producer socket queues these (plan 8a Ruling 11).
+        Command::CoProducerBegin {
+            name,
+            asked,
+            window,
+        } => ControlRequest::CoProducerBegin {
+            name,
+            asked,
+            window: window_row(window),
+        },
+        Command::CoProducerNotes { window } => ControlRequest::CoProducerNotes {
+            window: window_row(window),
+        },
+        Command::CoProducerNote { text, window } => ControlRequest::CoProducerNote {
+            text,
+            window: window_row(window),
+        },
+        Command::CoProducerExportFolder {
+            what,
+            parent,
+            window,
+        } => ControlRequest::CoProducerExportFolder {
+            what: export_what_row(what),
+            parent: parent.map(|p| p.to_string_lossy().into_owned()),
+            window: window_row(window),
+        },
+        Command::CoProducerExport {
+            what,
+            parent,
+            strips,
+            window,
+        } => ControlRequest::CoProducerExport {
+            what: export_what_row(what),
+            parent: parent.map(|p| p.to_string_lossy().into_owned()),
+            strips,
+            window: window_row(window),
+        },
+        Command::CoProducerPlugins { kind } => ControlRequest::CoProducerPlugins {
+            kind: kind.map(|k| match k {
+                PluginKindArg::Instrument => crate::catalog::PluginKindTag::Instrument,
+                PluginKindArg::Effect => crate::catalog::PluginKindTag::Effect,
+            }),
+        },
+        Command::CoProducerParams { slot, window } => ControlRequest::CoProducerParams {
+            slot,
+            window: window_row(window),
+        },
+        Command::CoProducerStarter { spec } => ControlRequest::CoProducerStarter {
+            spec: spec.to_string(),
+        },
+        Command::CoProducerMidiNotes {
+            seq,
+            lane,
+            range,
+            window,
+        } => ControlRequest::CoProducerMidiNotes {
+            seq,
+            lane,
+            start: range.map(|r| r.0),
+            end: range.map(|r| r.1),
+            window: window_row(window),
+        },
+        Command::CoProducerAutomation {
+            seq,
+            target,
+            start,
+            end,
+            window,
+        } => ControlRequest::CoProducerAutomation {
+            seq,
+            target,
+            start,
+            end,
+            window: window_row(window),
+        },
+        Command::CoProducerMetrics { days, window } => ControlRequest::CoProducerMetrics {
+            days,
+            window: window_row(window),
+        },
+        Command::CoProducerEnd { window } => ControlRequest::CoProducerEnd {
+            window: window_row(window),
+        },
+        Command::CoProducerStatus { window } => ControlRequest::CoProducerStatus {
+            window: window_row(window),
+        },
+        Command::CoProducerPreview { plan, window } => ControlRequest::CoProducerPreview {
+            plan: plan
+                .into_iter()
+                .map(crate::co_producer::planned_row)
+                .collect(),
+            window: window_row(window),
+        },
+        Command::CoProducerApply {
+            token,
+            plan,
+            window,
+            client,
+        } => ControlRequest::CoProducerApply {
+            token,
+            plan: plan
+                .into_iter()
+                .map(crate::co_producer::planned_row)
+                .collect(),
+            window: window_row(window),
+            client,
+        },
         Command::CommandRun { id, args, window } => ControlRequest::RunCommand {
             id,
             args: args
@@ -1213,6 +1618,18 @@ fn transport_json(doc: &str, t: &TransportState) -> Value {
     })
 }
 
+/// A Built-in Synth sound as `destination.set_sound` spells it.
+fn builtin_sound_text(s: crate::BuiltinSound) -> &'static str {
+    use crate::BuiltinSound as S;
+    match s {
+        S::Piano => "piano",
+        S::Bass => "bass",
+        S::Pad => "pad",
+        S::Lead => "lead",
+        S::Drums => "drums",
+    }
+}
+
 /// A fade shape as `state.get audio_editor` spells it.
 fn fade_shape_text(s: crate::events::FadeShapeRow) -> &'static str {
     use crate::events::FadeShapeRow as S;
@@ -1254,16 +1671,31 @@ fn audio_editor_json(doc: &str, e: &AudioEditorStateRow) -> Value {
     })
 }
 
-/// A slot as `state.get mixer` spells it.
+/// A slot as `state.get mixer` spells it; `plugin` is its reference
+/// text (plan 8d Ruling 5).
 fn slot_json(s: &crate::snapshot::SlotRow) -> Value {
-    json!({ "slot": s.id, "name": s.plugin.name, "bypass": s.bypass })
+    let plugin = crate::mixer_chores::plugin_ref_text(&(&s.plugin).into());
+    json!({ "slot": s.id, "name": s.plugin.name, "plugin": plugin, "bypass": s.bypass })
 }
 
-/// A strip as `state.get mixer` spells it (plan 7b Ruling 11).
-fn strip_json(s: &crate::mixer::StripRow) -> Value {
-    use crate::mixer::{StripColourRow as K, SwatchRow as W};
+/// A strip as `state.get mixer` spells it (plan 7b Ruling 11), with its
+/// output's name (plan 8d Ruling 5): "Master", the bus's name, or null
+/// for master itself. `all` is every strip of the snapshot.
+fn strip_json(s: &crate::mixer::StripRow, all: &[crate::mixer::StripRow]) -> Value {
+    use crate::mixer::{StripColourRow as K, StripKindRow, SwatchRow as W};
+    let output_name = match s.output {
+        _ if s.kind == StripKindRow::Master => None,
+        None => Some("Master".to_string()),
+        Some(id) => Some(
+            all.iter()
+                .find(|x| x.id == id)
+                .map_or_else(|| format!("Strip {id}"), |x| x.name.clone()),
+        ),
+    };
     json!({
+        "output_name": output_name,
         "id": s.id, "name": s.name, "kind_label": s.kind_label,
+        "co_producer": s.co_producer,
         "kind_colour": match s.kind_colour {
             K::Channel => "channel",
             K::Instrument => "instrument",
@@ -1402,7 +1834,7 @@ pub fn result_json(r: &ControlResult) -> Value {
         }),
         ControlResult::Mixer { doc, mixer } => json!({
             "doc": doc,
-            "strips": mixer.strips.iter().map(strip_json).collect::<Vec<_>>(),
+            "strips": mixer.strips.iter().map(|x| strip_json(x, &mixer.strips)).collect::<Vec<_>>(),
         }),
         ControlResult::AudioEditor { doc, editor } => audio_editor_json(doc, editor),
         ControlResult::Surfaces { doc, state } => json!({
@@ -1468,6 +1900,7 @@ pub fn result_json(r: &ControlResult) -> Value {
             snapshot: s,
             selected_seq,
             lanes,
+            markers,
             destinations,
             alert,
         } => json!({
@@ -1479,9 +1912,11 @@ pub fn result_json(r: &ControlResult) -> Value {
             })).collect::<Vec<_>>(),
             "lanes": lanes.iter().map(|l| json!({
                 "id": l.id, "name": l.name, "destination": l.destination,
+                "co_producer": l.co_producer,
                 "events": l.midi_event_count, "regions": l.region_count,
                 "references": l.reference_count, "mute": l.mute, "solo": l.solo, "arm": l.arm,
                 "takes": l.take_count, "active_take": l.active_take,
+                "audio_out": l.audio_out,
                 "take_list": l.takes.iter().map(|t| json!({
                     "id": t.id, "name": t.name, "active": t.id == l.active_take_id,
                 })).collect::<Vec<_>>(),
@@ -1495,12 +1930,17 @@ pub fn result_json(r: &ControlResult) -> Value {
                     crate::tracks::TrackKindRow::Midi => "midi",
                 },
             })).collect::<Vec<_>>(),
+            // `index` is what marker.rename and marker.remove take.
+            "markers": markers.iter().enumerate().map(|(i, m)| json!({
+                "index": i + 1, "tick": m.tick, "name": m.name,
+            })).collect::<Vec<_>>(),
             "destinations": destinations.iter().map(|d| json!({
                 "id": d.id, "name": d.name, "external": d.external,
                 // Thousandths: an f32 printed as f64 would show its rounding.
                 "return_latency_ms": (f64::from(d.return_latency_ms) * 1000.0).round() / 1000.0,
                 "midi_volume": d.midi_mix.volume, "midi_pan": d.midi_mix.pan,
                 "midi_mute": d.midi_mix.mute,
+                "sound": d.builtin_sound.map(builtin_sound_text),
                 "mpe": crate::mpe::mpe_json(d.mpe),
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
@@ -1569,7 +2009,129 @@ pub fn result_json(r: &ControlResult) -> Value {
             condition,
             elapsed_ms,
         } => json!({ "condition": condition, "elapsed_ms": elapsed_ms }),
+        ControlResult::CoProducerRequest {
+            doc,
+            request,
+            undo_label,
+        } => json!({
+            "doc": doc,
+            "request": request.as_ref().map(|r| json!({
+                "name": r.name, "label": r.label,
+                "group_open": r.group_open, "continued": r.continued,
+            })),
+            "undo_label": undo_label,
+        }),
+        ControlResult::CoProducerPreview { doc, preview } => json!({
+            "doc": doc,
+            "token": preview.token,
+            "needs_yes": preview.needs_yes,
+            "items": preview.items.iter().map(|i| json!({
+                "thing": i.thing, "change": i.change, "composers_work": i.composers_work,
+            })).collect::<Vec<_>>(),
+        }),
+        ControlResult::CoProducerApplied {
+            doc,
+            results,
+            undo_label,
+        } => json!({ "doc": doc, "results": results, "undo_label": undo_label }),
+        ControlResult::CoProducerNotes { doc, notes } => json!({
+            "doc": doc, "text": notes.text, "truncated": notes.truncated, "path": notes.path,
+        }),
+        ControlResult::CoProducerFolder { doc, path } => json!({ "doc": doc, "path": path }),
+        ControlResult::CoProducerPlugins { plugins, truncated } => json!({
+            "plugins": plugins.iter().map(|p| json!({
+                "plugin": p.plugin, "name": p.name, "maker": p.maker, "format": p.format,
+                "kind": match p.kind {
+                    crate::catalog::PluginKindTag::Instrument => "instrument",
+                    crate::catalog::PluginKindTag::Effect => "effect",
+                },
+                "version": p.version,
+            })).collect::<Vec<_>>(),
+            "truncated": truncated,
+        }),
+        ControlResult::CoProducerParams { doc, row } => json!({
+            "doc": doc, "slot": row.slot, "plugin": row.plugin, "running": row.running,
+            "params": row.params.iter().map(|p| json!({
+                "id": p.id, "name": p.name, "module": p.module, "min": p.min, "max": p.max,
+                "default": p.default, "value": p.value, "stepped": p.stepped,
+                "automatable": p.automatable,
+            })).collect::<Vec<_>>(),
+        }),
+        ControlResult::CoProducerMidiNotes { doc, row } => json!({
+            "doc": doc, "seq": row.seq, "lane": row.lane, "name": row.name,
+            "notes": row.notes.iter()
+                .map(|n| json!([n.start, n.pitch, n.length, n.velocity]))
+                .collect::<Vec<_>>(),
+            "truncated": row.truncated,
+        }),
+        ControlResult::CoProducerAutomation { doc, row } => json!({
+            "doc": doc, "target": row.target, "target_name": row.target_name,
+            "unit": row.unit, "min": row.min, "max": row.max,
+            "start_bar": row.start_bar, "end_bar": row.end_bar,
+            "points": row.points.iter().map(|p| json!([p.tick, p.value])).collect::<Vec<_>>(),
+            "truncated": row.truncated,
+        }),
+        ControlResult::CoProducerStarter { doc, window, row } => json!({
+            "doc": doc, "window": window, "title": row.title, "undo_label": row.undo_label,
+            "tracks": row.tracks.iter()
+                .map(|t| json!({ "name": t.name, "plays": t.plays }))
+                .collect::<Vec<_>>(),
+            "buses": row.buses.iter()
+                .map(|b| json!({ "name": b.name, "effects": b.effects }))
+                .collect::<Vec<_>>(),
+            "lines": row.lines,
+        }),
+        ControlResult::CoProducerExported {
+            doc,
+            folder,
+            written,
+            summary,
+        } => json!({ "doc": doc, "folder": folder, "written": written, "summary": summary }),
+        ControlResult::CoProducerApprovalAnswered {
+            app,
+            kind,
+            label,
+            path,
+            items,
+        } => json!({
+            "app": app, "kind": kind, "label": label, "path": path,
+            "items": items.iter().map(|i| json!({
+                "thing": i.thing, "change": i.change, "composers_work": i.composers_work,
+            })).collect::<Vec<_>>(),
+        }),
+        ControlResult::CoProducerMetrics { on, row } => json!({
+            "on": on, "since": row.since, "days": row.days, "all": metrics_totals_json(&row.all),
+            "songs": row.songs.iter().map(|s| {
+                let mut v = metrics_totals_json(&s.totals);
+                if let Value::Object(m) = &mut v {
+                    m.insert("name".into(), json!(s.name));
+                    m.insert("this_song".into(), json!(s.this_song));
+                    m.insert("untitled".into(), json!(s.untitled));
+                }
+                v
+            }).collect::<Vec<_>>(),
+            "more_songs": row.more_songs,
+        }),
     }
+}
+
+/// Time records' totals as `{seconds: {...}, undo_bursts, repeats:
+/// [[label, n]], hunts, hunt_ends: [[label, n]]}` (plan 8f Ruling 6).
+fn metrics_totals_json(t: &crate::metrics::MetricsTotalsRow) -> Value {
+    let pairs = |l: &[crate::metrics::MetricsCountRow]| {
+        l.iter()
+            .map(|c| json!([c.label, c.count]))
+            .collect::<Vec<_>>()
+    };
+    let s = &t.seconds;
+    json!({
+        "seconds": {
+            "composing": s.composing, "recording": s.recording, "editing": s.editing,
+            "mixing": s.mixing, "other": s.other,
+        },
+        "undo_bursts": t.undo_bursts, "repeats": pairs(&t.repeats), "hunts": t.hunts,
+        "hunt_ends": pairs(&t.hunt_ends),
+    })
 }
 
 /// A report as `{summary, items: [{kind, what, count, details}]}`.
@@ -1603,11 +2165,25 @@ fn window_kind(k: WindowKindRow) -> &'static str {
     }
 }
 
-/// The control socket the app listens on (`--control` / `VIZDAW_CONTROL`).
+/// The control socket the app listens on (`--control` / `VIZDAW_CONTROL`),
+/// or the Co-Producer socket.
 #[derive(uniffi::Object)]
 pub struct ControlServer {
     server: Mutex<Server>,
     path: String,
+}
+
+impl ControlServer {
+    fn with(path: String, config: Config) -> Result<Arc<ControlServer>, VizError> {
+        let server =
+            Server::start(std::path::Path::new(&path), config).map_err(|e| VizError::Io {
+                message: e.to_string(),
+            })?;
+        Ok(Arc::new(ControlServer {
+            server: Mutex::new(server),
+            path,
+        }))
+    }
 }
 
 #[uniffi::export]
@@ -1617,18 +2193,39 @@ impl ControlServer {
     #[uniffi::constructor]
     pub fn start(path: String, app_timeout_ms: u64) -> Result<Arc<ControlServer>, VizError> {
         ffi_guard(|| {
-            let config = Config {
-                app_timeout: Duration::from_millis(app_timeout_ms.max(1)),
-                ..Config::default()
-            };
-            let server =
-                Server::start(std::path::Path::new(&path), config).map_err(|e| VizError::Io {
-                    message: e.to_string(),
-                })?;
-            Ok(Arc::new(ControlServer {
-                server: Mutex::new(server),
+            ControlServer::with(
                 path,
-            }))
+                Config {
+                    app_timeout: Duration::from_millis(app_timeout_ms.max(1)),
+                    ..Config::default()
+                },
+            )
+        })
+    }
+
+    /// The Co-Producer socket at `path` (plan 8a Rulings 10, 11): only
+    /// what `core_control::co_producer::admit` allows reaches the app, and
+    /// an idle connection stays open 15 minutes (a composer's yes may take
+    /// a while). A call the app does not answer within `app_timeout_ms` is
+    /// answered `timeout`.
+    #[uniffi::constructor]
+    pub fn start_co_producer(
+        path: String,
+        app_timeout_ms: u64,
+    ) -> Result<Arc<ControlServer>, VizError> {
+        ffi_guard(|| {
+            ControlServer::with(
+                path,
+                Config {
+                    role: Role::CoProducer,
+                    app_timeout: Duration::from_millis(app_timeout_ms.max(1)),
+                    idle_timeout: Duration::from_secs(900),
+                    // Plan 8b Ruling 11: who connected, read at accept.
+                    #[cfg(target_os = "macos")]
+                    peer: Some(platform_macos::peer::audit_token),
+                    ..Config::default()
+                },
+            )
         })
     }
 
@@ -1643,8 +2240,16 @@ impl ControlServer {
             let server = lock(&self.server);
             while let Some(call) = server.next_call() {
                 let token = call.token;
+                let peer = call.audit_token.map(|t| PeerRow {
+                    conn: call.conn,
+                    audit_token: t.to_vec(),
+                });
                 if let Some(request) = request_of(call.command, || server.screenshot_path()) {
-                    return Ok(Some(ControlCall { token, request }));
+                    return Ok(Some(ControlCall {
+                        token,
+                        request,
+                        peer,
+                    }));
                 }
             }
             Ok(None)
@@ -1725,6 +2330,15 @@ pub fn control_command_ids() -> Vec<String> {
         .iter()
         .map(|c| c.id.to_string())
         .collect()
+}
+
+/// Whether registry command `id` only reads or plays (Co-Producer class
+/// `read`, plan 8a Ruling 5): the app runs those without entering the
+/// request. False for an unknown ID.
+#[uniffi::export]
+pub fn control_command_reads(id: String) -> bool {
+    ffi_guard(|| Ok(registry::find(&id).is_some_and(|c| c.class == registry::Class::Read)))
+        .unwrap_or(false)
 }
 
 /// Whether a plugin call is on this (the main) thread's stack: a control

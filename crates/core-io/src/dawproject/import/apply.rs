@@ -216,6 +216,7 @@ fn apply_mix(
                         level_db: s.level_db,
                         pre_fader: s.pre,
                         enabled: s.enabled,
+                        co_producer: false,
                     },
                 }),
             )?;

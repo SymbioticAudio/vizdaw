@@ -107,6 +107,23 @@ private func centre(_ h: AudioEditorHandle, _ m: DocumentModel) throws -> CGPoin
         #expect(f.gestureEdits.last == .audio(edit: .trim(event: 71, frontFrames: -24_000, backFrames: 0)))
     }
 
+    /// Plan release-fixes Task 7: a trim drag's new edge snaps to a zero
+    /// crossing the core finds.
+    @Test func aTrimDragSnapsToAZeroCrossing() throws {
+        let (f, m, c, w) = audioCanvas()
+        defer { w.close() }
+        let saved = ZeroCrossing.preferences
+        defer { ZeroCrossing.preferences = saved }
+        ZeroCrossing.preferences = EditingPreferences(defaults: MemoryDefaults())
+        f.crossing = { _, _, _ in 30_000 }
+        let p = try centre(.start, m)
+        c.press(p, clicks: 1, modifiers: [])
+        c.drag(CGPoint(x: p.x + 10, y: p.y), modifiers: [])
+        c.release(CGPoint(x: p.x + 10, y: p.y), modifiers: [])
+        #expect(f.gestureEdits.last == .audio(edit: .trim(event: 71, frontFrames: 6_000, backFrames: 0)))
+        #expect(f.crossingCalls.last?.media == 5)
+    }
+
     @Test func anEscapeCancelsTheDrag() throws {
         let (f, m, c, w) = audioCanvas()
         defer { w.close() }

@@ -9,17 +9,19 @@ import VizDAWAppModel
 /// `Button` and `Toggle` are not in that tree. With `icon` it shows the
 /// icon only (its SymbioticAudio icon, chosen in AppIcon: plan 7b Task B3
 /// and the final fix wave, as a template image); without,
-/// the title. It never takes the keyboard (Full Keyboard Access stays on the editors;
+/// the title. `label` names it in the tree instead of `title` when given.
+/// It never takes the keyboard (Full Keyboard Access stays on the editors;
 /// Task 7 review M4).
 public struct AppKitButton: View {
     let button: BarButton
 
     public init(
         _ title: String, icon: AppIcon? = nil, isOn: Bool? = nil, enabled: Bool = true, help: String,
-        tint: NSColor? = nil, action: @escaping @MainActor () -> Void
+        tint: NSColor? = nil, label: String? = nil, action: @escaping @MainActor () -> Void
     ) {
         button = BarButton(
-            title: title, icon: icon, isOn: isOn, enabled: enabled, help: help, tint: tint, action: action)
+            title: title, icon: icon, isOn: isOn, enabled: enabled, help: help, tint: tint, label: label ?? title,
+            action: action)
     }
 
     // SwiftUI sets a hosted control's `isEnabled` from the environment, so
@@ -35,6 +37,8 @@ struct BarButton: NSViewRepresentable {
     let enabled: Bool
     let help: String
     let tint: NSColor?
+    /// The accessibility label.
+    let label: String
     let action: @MainActor () -> Void
 
     @MainActor
@@ -79,7 +83,13 @@ struct BarButton: NSViewRepresentable {
             b.imagePosition = .noImage
             b.title = title
         }
-        b.setAccessibilityLabel(title)
+        b.setAccessibilityLabel(label)
+        // A titled button's own label and title are what its cell says, so
+        // a label that differs from the title goes on the cell too.
+        if icon == nil {
+            b.cell?.setAccessibilityLabel(label)
+            b.cell?.setAccessibilityTitle(label)
+        }
         b.toolTip = help
         b.isEnabled = enabled
         if let isOn { b.state = isOn ? .on : .off }

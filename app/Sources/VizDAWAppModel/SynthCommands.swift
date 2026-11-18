@@ -29,7 +29,9 @@ public enum SynthCommands {
     public static let measureReturn = "destination.measure_return"
     /// A MIDI destination's strip mix (plan 5g-1b Task 4).
     public static let setMidiMix = "destination.set_midi_mix"
-    public static let ids: Set<String> = [trackSynth, setReturnLatency, setMidiMix, measureReturn]
+    /// The Built-in Synth's sound (plan release-fixes Task 8).
+    public static let setSound = "destination.set_sound"
+    public static let ids: Set<String> = [trackSynth, setReturnLatency, setMidiMix, measureReturn, setSound]
 
     /// What the channel sends for a null volume or pan: unset.
     static let unsetText = "none"
@@ -199,9 +201,47 @@ public enum SynthCommands {
                 if case .success(let row) = r, let m { applyMeasured(row, m) }
             }
             return .measure(doc: doc, job: job)
+        case setSound:
+            return runSetSound(args, doc: doc, m)
         default:
             return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }
+        return .done(ControlCommands.ran(id, doc, m))
+    }
+
+    /// The `sound` values `destination.set_sound` takes, in the window's order.
+    static let soundNames: [(String, BuiltinSound)] = [
+        ("piano", .piano), ("bass", .bass), ("pad", .pad), ("lead", .lead), ("drums", .drums),
+    ]
+
+    /// `destination.set_sound` (plan release-fixes Task 8): Built-in Synth
+    /// `dest` plays `sound`; answers the sound's title ("Drums"). Bad
+    /// arguments are `invalid_params`, a destination that is not there
+    /// `unknown_id`, one that is not a Built-in Synth `failed`, all before
+    /// any call. Never a window.
+    static func runSetSound(_ args: [ControlArg], doc: UUID, _ m: DocumentModel) -> ControlOutcome {
+        let id = setSound
+        func bad(_ why: String) -> ControlOutcome { .failed(.of(.invalidParams, "\(id): \(why)")) }
+        let names = ["dest", "sound"]
+        if let other = args.first(where: { !names.contains($0.name) }) {
+            return bad("`\(other.name.prefix(64))` is not a parameter")
+        }
+        for name in names where args.filter({ $0.name == name }).count > 1 {
+            return bad("`\(name)` is given more than once")
+        }
+        guard let dest = Self.id(args, "dest") else { return bad("`dest` names a destination") }
+        guard let text = args.text("sound"), let sound = soundNames.first(where: { $0.0 == text })?.1 else {
+            return bad("`sound` is piano, bass, pad, lead or drums")
+        }
+        guard let all = try? m.session.destinations() else {
+            return .failed(.of(.failed, "Set Built-in Synth Sound Failed: the destinations cannot be read"))
+        }
+        guard let row = all.first(where: { $0.id == dest }) else {
+            return .failed(.of(.unknownId, "\(id): there is no destination \(dest)"))
+        }
+        guard SynthSheets.isBuiltinSynth(row) else { return .failed(.of(.failed, SynthSheets.notBuiltinSynth)) }
+        if let f = ControlCommands.failure(m.synth.setSound(sound, dest: dest)) { return f }
+        m.editor.status = SynthSheets.title(sound)
         return .done(ControlCommands.ran(id, doc, m))
     }
 }

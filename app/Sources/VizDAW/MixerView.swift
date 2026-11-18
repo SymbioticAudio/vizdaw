@@ -37,6 +37,7 @@ struct MixerWindow: View {
                 MixerView(model: mixer, placement: .window)
             }
             .environment(\.openPluginWindow, { slot in PluginWindows.show(store, doc: id, slot: slot) })
+            .environment(\.openBuiltinSynthWindow, { dest in BuiltinSynthWindows.show(store, doc: id, dest: dest) })
             .focusedSceneValue(\.documentModel, mixer.document)
             .focusedSceneValue(\.documentID, id)
             .navigationTitle("Mixer — \(mixer.document.snapshot.title)")
@@ -404,11 +405,12 @@ struct LearnItem: View {
 }
 
 /// The instrument row of a built-in synth strip: "Built-in Synth" where a
-/// plugin's slot would be; a click opens the instrument menu (the synth
-/// has no editor window yet).
+/// plugin's slot would be; a click opens the instrument menu, a double
+/// click its window of sounds (plan release-fixes Task 8).
 struct BuiltinSynthSlotView: View {
     @Environment(\.symbioticTheme) private var theme
     @Environment(\.openPluginWindow) private var openWindow
+    @Environment(\.openBuiltinSynthWindow) private var openSynthWindow
     @Bindable var model: MixerModel
     let strip: StripRow
 
@@ -426,10 +428,13 @@ struct BuiltinSynthSlotView: View {
         .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.surface.inset.color))
         .overlay(RoundedRectangle(cornerRadius: theme.radius.s).strokeBorder(theme.surface.separator.color))
         .contentShape(Rectangle())
-        .help("Built-in Synth: click to choose a plugin instrument")
+        .help("Built-in Synth: click to choose a plugin instrument, double-click to choose its sound")
+        .onTapGesture(count: 2) { if let d = model.instrumentDestination(for: strip) { openSynthWindow(d) } }
+        // After the double tap's, as `SlotView`'s: a double click opens the
+        // window only.
         .onTapGesture { InstrumentMenu.popUp(model: model, strip: strip, current: nil, openEditor: nil, openWindow: openWindow) }
         .accessibilityLabel("Built-in Synth, instrument")
-        .accessibilityHint("Opens the instrument menu to choose a plugin")
+        .accessibilityHint("Opens the instrument menu to choose a plugin; double-click for its sounds")
         .accessibilityAddTraits(.isButton)
     }
 }

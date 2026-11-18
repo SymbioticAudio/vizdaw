@@ -124,9 +124,13 @@ fn a_region_plays_its_frames_with_gain_and_fades() {
     // Silence before the region.
     assert!(l[..512].iter().all(|x| *x == 0.0));
     // Frame k of the region reads media frame 10 + k at half gain, faded in
-    // over 100 frames.
-    for k in [0usize, 50, 99, 100, 1999] {
-        let want = value(10 + k as u64) * 0.5 * if k < 100 { k as f32 / 100.0 } else { 1.0 };
+    // over 100 frames; the end has no fade, so the edge fade ramps its last
+    // 72 frames (plan release-fixes Task 7).
+    for k in [0usize, 50, 99, 100, 1927, 1964, 1999] {
+        let fade_in = if k < 100 { k as f32 / 100.0 } else { 1.0 };
+        let left = 2000 - k as u64;
+        let edge = if left < 72 { left as f32 / 72.0 } else { 1.0 };
+        let want = value(10 + k as u64) * 0.5 * fade_in * edge;
         assert!(
             (l[512 + k] - want).abs() < 1e-9,
             "left {k}: {} vs {want}",
@@ -170,8 +174,10 @@ fn mono_plays_on_both_channels_and_misses_count() {
     s.service();
     run.set_regions(Arc::clone(&audio), r, 0);
     let (l, rr) = run.render(512, &[512]);
-    assert_eq!(l[7], value(7));
-    assert_eq!(rr[7], value(7));
+    // Past the edge fade's 72 frames (plan release-fixes Task 7).
+    assert_eq!(l[100], value(100));
+    assert_eq!(rr[100], value(100));
+    assert_eq!(l[0], 0.0);
 }
 
 #[test]

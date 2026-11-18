@@ -48,12 +48,12 @@ final class FakeAudioSink: AudioSink {
         let p = AudioPreferences(defaults: defaults, sink: sink)
         p.setBufferFrames(256)
         p.setSoftwareMonitoring(false)
-        p.setInputDevice("Studio In")
+        p.setInputDevice(uid: nil, name: "Studio In")
         p.setLatencyTrim(-12)
         p.setStream(cacheMb: 1024, readAheadSeconds: 6)
         p.setDefaultMonitor("off")
-        p.setRecordDefaults(countIn: 2, preRoll: 1, passesAsTakes: false)
-        #expect(RecordModel.defaults.countInBars == 2 && !RecordModel.defaults.passesAsTakes)
+        p.setRecordDefaults(countIn: 2, preRoll: 1, midiPassesAsTakes: true)
+        #expect(RecordModel.defaults.countInBars == 2 && RecordModel.defaults.midiPassesAsTakes)
         RecordModel.defaults = RecordDefaults()
         // Read back from the preferences.
         let again = AudioPreferences(defaults: defaults, sink: FakeAudioSink())
@@ -67,7 +67,7 @@ final class FakeAudioSink: AudioSink {
         want.defaultMonitor = "off"
         want.countInBars = 2
         want.preRollBars = 1
-        want.passesAsTakes = false
+        want.midiPassesAsTakes = true
         #expect(again.settings == want)
         // Refused while recording: the setting stays and says why.
         sink.bufferError = .Busy(message: "Stop recording to change the I/O buffer size.")
@@ -88,6 +88,36 @@ final class FakeAudioSink: AudioSink {
         #expect(p.settings.defaultMonitor == "off", "an unknown mode changes nothing")
     }
 
+    /// Release fixes Task 2: a setting saved before devices were kept by
+    /// UID still selects its device by name.
+    @Test func anOldNameOnlySettingStillSelectsTheDevice() throws {
+        let defaults = MemoryDefaults()
+        defaults.set(Data(#"{"inputDevice": "Desk"}"#.utf8), forKey: AudioPreferences.key)
+        let sink = FakeAudioSink()
+        let p = AudioPreferences(defaults: defaults, sink: sink)
+        #expect(p.settings.inputDevice == "Desk")
+        #expect(p.settings.inputDeviceUID == nil)
+        p.applyAll()
+        #expect(sink.calls.contains("input Desk"))
+    }
+
+    /// Release fixes Task 2: the chosen device's UID is kept beside its
+    /// name, and the UID is what the core gets.
+    @Test func inputDeviceUidIsKept() throws {
+        let defaults = MemoryDefaults()
+        let p = AudioPreferences(defaults: defaults, sink: FakeAudioSink())
+        p.setInputDevice(uid: "u2", name: "A")
+        let sink = FakeAudioSink()
+        let again = AudioPreferences(defaults: defaults, sink: sink)
+        #expect(again.settings.inputDeviceUID == "u2" && again.settings.inputDevice == "A")
+        again.applyAll()
+        #expect(sink.calls.contains("input u2"))
+        #expect(!sink.calls.contains("input A"))
+        again.setInputDevice(uid: nil, name: nil)
+        #expect(again.settings.inputDeviceUID == nil && again.settings.inputDevice == nil)
+        #expect(sink.calls.last == "input same")
+    }
+
     @Test func damagedSettingsKeepTheirDefaults() throws {
         let defaults = MemoryDefaults()
         let damaged = #"{"bufferFrames": 100, "cacheMb": 9, "readAheadSeconds": "x", "defaultMonitor": "loud", "latencyTrim": 999999, "countInBars": 9, "softwareMonitoring": false}"#
@@ -105,13 +135,33 @@ final class FakeAudioSink: AudioSink {
         var d = RecordDefaults()
         d.countInBars = 2
         d.preRollBars = 1
-        d.passesAsTakes = false
+        d.midiPassesAsTakes = true
         RecordModel.defaults = d
         defer { RecordModel.defaults = RecordDefaults() }
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() })
         let m = try #require(s.newDemo().flatMap(s.model))
-        #expect(m.record.countInBars == 2 && m.record.preRollBars == 1 && !m.record.passesAsTakes)
+        #expect(m.record.countInBars == 2 && m.record.preRollBars == 1 && m.record.midiPassesAsTakes)
         #expect(m.record.spec().countInBars == 2)
+    }
+
+    /// Plan 5c-2 takes Ruling 1: "MIDI passes as takes" is off by default,
+    /// under a new key; a `passesAsTakes` saved by an earlier build is not
+    /// read.
+    @Test func midiPassesAsTakesDefaultsOffAndIgnoresTheOldKey() throws {
+        #expect(!AudioSettings().midiPassesAsTakes)
+        #expect(!RecordDefaults().midiPassesAsTakes)
+        let decode = { (json: String) in
+            try JSONDecoder().decode(AudioSettings.self, from: Data(json.utf8)).midiPassesAsTakes
+        }
+        #expect(try !decode(#"{"passesAsTakes": true}"#))
+        #expect(try decode(#"{"midiPassesAsTakes": true}"#))
+        #expect(try !decode(#"{"midiPassesAsTakes": "yes"}"#))
+        let defaults = MemoryDefaults()
+        let p = AudioPreferences(defaults: defaults, sink: FakeAudioSink())
+        defer { RecordModel.defaults = RecordDefaults() }
+        p.setRecordDefaults(countIn: 0, preRoll: 0, midiPassesAsTakes: true)
+        #expect(p.settings.midiPassesAsTakes && RecordModel.defaults.midiPassesAsTakes)
+        #expect(AudioPreferences(defaults: defaults, sink: FakeAudioSink()).settings.midiPassesAsTakes)
     }
 
     @Test func scriptsAndTestsNeverWriteTheRealPreferences() {

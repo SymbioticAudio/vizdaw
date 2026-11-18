@@ -41,7 +41,11 @@ enum KeyMonitor {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
             // Key events arrive on the main thread.
             nonisolated(unsafe) let event = e
-            let used = MainActor.assumeIsolated { consume(event) }
+            let used = MainActor.assumeIsolated {
+                // Time counting sees the key even when it is used up here.
+                MetricsProbe.noteInput()
+                return consume(event)
+            }
             return used ? nil : e
         }
         upMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { e in

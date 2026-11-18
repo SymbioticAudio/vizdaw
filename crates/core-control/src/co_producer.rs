@@ -3,7 +3,7 @@
 //! validated call through [`admit`] before it reaches the app:
 //!
 //! - only `ping`, `commands.list`, `state.get` (not `input`), `wait`,
-//!   `ui.screenshot` (window and scale only), `command.run` and the five
+//!   `ui.screenshot` (window and scale only), `command.run` and the fifteen
 //!   `co_producer.*` commands are allowed;
 //! - `command.run` runs read, add and outward commands only; a change or
 //!   remove goes through `co_producer.preview` and the composer's yes;
@@ -21,14 +21,82 @@ use crate::request::{Command, StateTarget};
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 
-/// The change and remove commands 8a can preview (Ruling 6).
+/// The change and remove commands Co-Producer can preview (8a Ruling 6;
+/// 8b Ruling 9 adds `mixer.set_colour`; 8c Rulings 2 and 4 add the note
+/// chores and the marker changes; 8d Ruling 1 adds `mixer.new_bus` with a
+/// `strip` and the twelve mixer edits; 8e Ruling 1 adds `automation.write`;
+/// 8e Task 6b adds the release-fixes fade shape, Built-in Synth sound and
+/// track output).
 pub const PREVIEWABLE: &[&str] = &[
     "track.rename",
     "track.delete",
     "edit.undo",
     "edit.redo",
     "file.save",
+    "mixer.set_colour",
+    "modify.quantize_notes",
+    "modify.transpose_notes",
+    "modify.velocity_notes",
+    "marker.rename",
+    "marker.remove",
+    "mixer.new_bus",
+    "mixer.set_strip",
+    "mixer.set_output",
+    "mixer.add_send",
+    "mixer.set_send",
+    "mixer.remove_send",
+    "mixer.add_insert",
+    "mixer.remove_insert",
+    "mixer.move_insert",
+    "mixer.set_bypass",
+    "mixer.set_eq",
+    "mixer.set_param",
+    "mixer.remove_bus",
+    "automation.write",
+    "region.set_fade_shape",
+    "destination.set_sound",
+    "lane.set_output",
 ];
+
+/// The most IDs in one [`id_list`] (plan 8c Rulings 1 and 2).
+pub const MAX_IDS: usize = 64;
+
+/// The largest ID an [`id_list`] takes, as the registry's ID parameters.
+const MAX_ID: u64 = (i64::MAX / 2) as u64;
+
+/// "1,2,3": 1–64 unique ids, each ≥ 1; the message names the rule broken.
+/// Spaces around an ID are allowed; anything else but ASCII digits is not.
+pub fn id_list(text: &str) -> Result<Vec<u64>, String> {
+    if text.trim().is_empty() {
+        return Err(format!("give 1 to {MAX_IDS} IDs, comma-separated"));
+    }
+    let mut ids = Vec::new();
+    for part in text.split(',') {
+        if ids.len() == MAX_IDS {
+            return Err(format!("give at most {MAX_IDS} IDs"));
+        }
+        let part = part.trim();
+        let id = if !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) {
+            part.parse::<u64>().ok().filter(|i| *i <= MAX_ID)
+        } else {
+            None
+        };
+        let Some(id) = id else {
+            return Err(format!(
+                "{:?} is not an ID: give 1 to {MAX_IDS} IDs, comma-separated",
+                crate::protocol::truncate(part, 32)
+            ));
+        };
+        if id == 0 {
+            return Err("IDs start at 1".into());
+        }
+        if ids.contains(&id) {
+            return Err(format!("ID {id} is given twice"));
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
 
 /// The most commands in one plan (Ruling 11).
 pub const MAX_PLAN: usize = 32;
@@ -87,9 +155,13 @@ pub fn output(id: &str, args: &[(String, ArgValue)]) -> Option<Output> {
     match id {
         "file.export_midi" => Some(Output::NewFile(&["mid"])),
         // The clip export's own Save panel writes `.midi2` (P1: no looser
-        // than the composer's Save dialog). One track only: a folder for
-        // several exists, so the new-file rule refuses it.
-        "file.export_midi_clip" => Some(Output::NewFile(&["midi2"])),
+        // than the composer's Save dialog) for one named track. Several
+        // tracks, or every track (no `lanes`), go into an existing folder
+        // (plan 8c): the app names each file and never replaces one.
+        "file.export_midi_clip" => Some(match text(args, "lanes") {
+            Some(l) if !l.contains(',') => Output::NewFile(&["midi2"]),
+            _ => Output::IntoFolder,
+        }),
         "file.export_dawproject" => Some(Output::NewFile(&["dawproject"])),
         "file.export_for_daw" | "file.export_aaf" => Some(Output::IntoFolder),
         "file.bounce" => Some(match text(args, "source") {
@@ -245,7 +317,9 @@ fn admit_planned(p: &Planned) -> Result<(), ControlError> {
     let id = p.id.as_str();
     let spec = spec_of(id)?;
     never_replaces(&p.args)?;
-    if !PREVIEWABLE.contains(&id) {
+    // A free bus is an add (8d Ruling 1): only its `strip` form previews.
+    let free_bus = id == "mixer.new_bus" && arg(&p.args, "strip").is_none();
+    if !PREVIEWABLE.contains(&id) || free_bus {
         return Err(match effective_class(spec, &p.args) {
             Class::Change | Class::Remove => {
                 ControlError::not_allowed(format!("Co-Producer cannot preview {id} yet."))
@@ -257,12 +331,23 @@ fn admit_planned(p: &Planned) -> Result<(), ControlError> {
         });
     }
     match id {
-        "track.rename" | "track.delete"
+        "track.rename" | "track.delete" | "lane.set_output"
             if arg(&p.args, "seq").is_none() || arg(&p.args, "lane").is_none() =>
         {
             Err(ControlError::params(
                 id,
                 "name the track's `seq` and `lane`",
+            ))
+        }
+        // Not the composer's selection (plan 8e Task 6b).
+        "region.set_fade_shape"
+            if ["seq", "lane", "event"]
+                .iter()
+                .any(|n| arg(&p.args, n).is_none()) =>
+        {
+            Err(ControlError::params(
+                id,
+                "name the region's `seq`, `lane` and `event`",
             ))
         }
         "file.save" if arg(&p.args, "path").is_some() => Err(ControlError::not_allowed(
@@ -281,7 +366,32 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
         | Command::Wait { .. }
         | Command::CoProducerBegin { .. }
         | Command::CoProducerEnd { .. }
-        | Command::CoProducerStatus { .. } => Ok(()),
+        | Command::CoProducerStatus { .. }
+        | Command::CoProducerNotes { .. }
+        | Command::CoProducerNote { .. }
+        | Command::CoProducerPlugins { .. }
+        | Command::CoProducerParams { .. }
+        | Command::CoProducerMidiNotes { .. }
+        | Command::CoProducerAutomation { .. }
+        // Plan 8f Ruling 6: the time-record read, with no request open.
+        | Command::CoProducerMetrics { .. }
+        | Command::CoProducerExportFolder { parent: None, .. }
+        | Command::CoProducerExport { parent: None, .. } => Ok(()),
+        // Plan 8b Ruling 6 (and 8c Ruling 1 for the one-call export): a
+        // given parent is checked before the app sees it.
+        Command::CoProducerExportFolder {
+            parent: Some(parent),
+            ..
+        }
+        | Command::CoProducerExport {
+            parent: Some(parent),
+            ..
+        } => check_output(parent, Output::IntoFolder),
+        // Plan 8e Ruling 5: the whole spec is checked before the app sees
+        // it, so a bad spec opens no window.
+        Command::CoProducerStarter { spec } => crate::starter::parse(spec)
+            .map(|_| ())
+            .map_err(|m| ControlError::params("co_producer.starter", m)),
         Command::StateGet { target, .. } => match target {
             StateTarget::Input => Err(ControlError::not_allowed(
                 "Co-Producer does not listen: state.get input is not available to it.",

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The export</title>
+</head>
+<body>
+<main id="view"></main>
+<script>
+<!--BRIDGE-->
+</script>
+<script>
+"use strict";
+// The export result (plan 8c Ruling 7): the folder, the files and the
+// report. "Show in Finder" asks the host to open the folder with
+// "ui/open-link"; VizDAW itself never launches anything.
+(function () {
+  const el = Bridge.el;
+  const str = Bridge.str;
+
+  function fileUrl(folder) {
+    return "file://" + folder.split("/").map(encodeURIComponent).join("/");
+  }
+
+  function render(sc, root) {
+    if (typeof sc.folder !== "string" || !Array.isArray(sc.written)) {
+      return false;
+    }
+    const folder = sc.folder;
+    root.appendChild(el("h1", "Exported"));
+    const where = el("p");
+    where.appendChild(el("span", "Folder: "));
+    where.appendChild(el("span", folder, "path"));
+    root.appendChild(where);
+    root.appendChild(el("h2", "Files"));
+    const ul = el("ul");
+    for (const f of sc.written) {
+      ul.appendChild(el("li", str(f, "?"), "path"));
+    }
+    if (sc.written.length === 0) {
+      ul.appendChild(el("li", "None.", "muted"));
+    }
+    root.appendChild(ul);
+    if (typeof sc.summary === "string") {
+      root.appendChild(el("p", "Report: " + sc.summary));
+    }
+    const show = el("button", "Show in Finder");
+    show.type = "button";
+    show.setAttribute("aria-label", "Show the export folder in Finder");
+    const refused = el("p", null, "path");
+    refused.hidden = true;
+    const fallback = function () {
+      refused.textContent = "Open it in Finder: " + folder;
+      refused.hidden = false;
+    };
+    show.addEventListener("click", function () {
+      let url;
+      try {
+        url = fileUrl(folder);
+      } catch (e) {
+        fallback();
+        return;
+      }
+      Bridge.request("ui/open-link", { url: url }).then(function (r) {
+        if (r && typeof r === "object" && r.isError === true) {
+          fallback();
+        }
+      }, fallback);
+    });
+    root.appendChild(show);
+    root.appendChild(refused);
+    return true;
+  }
+
+  Bridge.start("export", document.getElementById("view"), render);
+})();
+</script>
+</body>
+</html>

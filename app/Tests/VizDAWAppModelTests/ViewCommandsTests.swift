@@ -233,6 +233,40 @@ fileprivate extension ControlOutcome {
         #expect(keys.row("editors.piano_roll")?.menuModifiers.command == true)
         #expect(keys.row("editors.piano_roll")?.menuModifiers.control == false)
     }
+    /// Owner decision 5 (plan release-fixes Task 5): Modify Again waits
+    /// while the Mix view hides the selection.
+    @Test func modifyAgainWaitsInTheMixView() throws {
+        let f = laneOnStrip10()
+        let store = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let doc = try #require(store.newDemo().flatMap { id in store.model(id).map { (id, $0) } })
+        f.lastModifyRow = .move(delta: 5)
+        doc.1.editor.edit(.modifyAgain)  // one Modify
+        #expect(doc.1.selectModify.canModifyAgain)
+        #expect(run("ui.view_mix", [], doc, store).isDone)
+        let before = f.edits.count
+        let r = run("modify.again", [], doc, store)
+        #expect(r.code == .unavailable && r.message == DocumentModel.hiddenSelection)
+        #expect(f.edits.count == before)
+        #expect(run("ui.view_arrange", [], doc, store).isDone)
+        #expect(run("modify.again", [], doc, store).isDone)
+        #expect(f.edits.count == before + 1 && f.edits.last == .modifyAgain)
+    }
+    @Test func selectionHiddenFollowsTheView() {
+        let (doc, store) = storeDocument()
+        let m = doc.model
+        #expect(!m.selectionHidden)
+        _ = run("ui.view_mix", [], doc, store)
+        #expect(!m.editor.layout.views.mix.bottom.shown)
+        #expect(m.selectionHidden)
+        m.editor.updateLayout { $0.views.mix.bottom = PaneState(shown: true, view: .audioEditor, size: 260) }
+        #expect(!m.selectionHidden)
+        m.editor.updateLayout { $0.views.mix.bottom = PaneState(shown: true, view: .mixer, size: 260) }
+        #expect(m.selectionHidden, "a bottom pane showing no editor still hides the selection")
+        // A torn-off editor window does not count as showing the selection.
+        m.editor.updateLayout { $0.views.mix.bottom.shown = false }
+        _ = run("editors.piano_roll_window", [], doc, store)
+        #expect(m.selectionHidden)
+    }
     /// Task 4 review: stale controllers keys alone are reason enough to prune.
     @Test func pruningDropsControllersKeysOfGoneLanes() throws {
         let m = try DocumentModel(session: editorFake())  // sequence 3 holds lanes 30 and 31

@@ -6,7 +6,7 @@ use crate::co_producer::{MAX_PLAN, Planned};
 use crate::element::{self, ElementRef};
 use crate::error::{ControlError, ErrorCode};
 use crate::keys::{KeyStroke, Modifiers, named_key, text_strokes};
-use crate::params::{MAX_STRING, Params, WindowRef};
+use crate::params::{MAX_PATH, MAX_STRING, Params, WindowRef};
 use crate::protocol::{RawRequest, truncate};
 use crate::registry::{self, ArgValue, OPEN_DIALOGS};
 use crate::wait::{DEFAULT_TIMEOUT_MS, DETAIL_KINDS, MAX_TIMEOUT_MS, WaitCondition};
@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every command name.
-pub const COMMAND_NAMES: [&str; 18] = [
+pub const COMMAND_NAMES: [&str; 28] = [
     "commands.list",
     "command.run",
     "state.get",
@@ -33,11 +33,113 @@ pub const COMMAND_NAMES: [&str; 18] = [
     "co_producer.status",
     "co_producer.preview",
     "co_producer.apply",
+    "co_producer.notes",
+    "co_producer.note",
+    "co_producer.export_folder",
+    "co_producer.export",
+    "co_producer.plugins",
+    "co_producer.params",
+    "co_producer.starter",
+    "co_producer.midi_notes",
+    "co_producer.automation",
+    "co_producer.metrics",
 ];
+
+/// The most days `co_producer.metrics` reads back (plan 8f Ruling 6).
+pub const METRICS_DAYS_MAX: u32 = 3650;
 
 /// The longest Co-Producer request name, in characters after trimming
 /// (plan 8a Ruling 11).
 pub const MAX_REQUEST_NAME: usize = 200;
+/// The longest `asked` of `co_producer.begin`, in characters after
+/// trimming (plan 8b Ruling 9).
+pub const MAX_ASKED: usize = 500;
+/// The longest `client` label of `co_producer.apply`, in characters after
+/// trimming (plan 8b Ruling 11).
+pub const MAX_CLIENT_LABEL: usize = 100;
+/// The longest `co_producer.note` text, in characters (Ruling 9).
+pub const MAX_NOTE: usize = 2000;
+/// The most lines in one `co_producer.note` (Ruling 9).
+pub const MAX_NOTE_LINES: usize = 20;
+/// The longest marker name, in characters after trimming (plan 8c
+/// Ruling 4).
+pub const MAX_MARKER_NAME: usize = 64;
+
+/// What a `co_producer.export_folder` is for (plan 8b Ruling 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportWhat {
+    /// Stems.
+    Stems,
+    /// A mix.
+    Mix,
+    /// A selection.
+    Selection,
+    /// MIDI.
+    Midi,
+    /// A DAWproject file.
+    Dawproject,
+    /// AAF.
+    Aaf,
+    /// The export for another DAW.
+    OtherDaw,
+}
+
+impl ExportWhat {
+    /// Every value, in the order the protocol lists them.
+    pub const ALL: [ExportWhat; 7] = [
+        ExportWhat::Stems,
+        ExportWhat::Mix,
+        ExportWhat::Selection,
+        ExportWhat::Midi,
+        ExportWhat::Dawproject,
+        ExportWhat::Aaf,
+        ExportWhat::OtherDaw,
+    ];
+
+    /// Its protocol name.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExportWhat::Stems => "stems",
+            ExportWhat::Mix => "mix",
+            ExportWhat::Selection => "selection",
+            ExportWhat::Midi => "midi",
+            ExportWhat::Dawproject => "dawproject",
+            ExportWhat::Aaf => "aaf",
+            ExportWhat::OtherDaw => "other_daw",
+        }
+    }
+
+    /// The value named `s` (`"stems"` … `"other_daw"`), exactly.
+    pub fn parse(s: &str) -> Option<ExportWhat> {
+        ExportWhat::ALL.into_iter().find(|w| w.name() == s)
+    }
+
+    /// How a folder name shows it (Ruling 6): "Stems" … "Other DAW".
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportWhat::Stems => "Stems",
+            ExportWhat::Mix => "Mix",
+            ExportWhat::Selection => "Selection",
+            ExportWhat::Midi => "MIDI",
+            ExportWhat::Dawproject => "DAWproject",
+            ExportWhat::Aaf => "AAF",
+            ExportWhat::OtherDaw => "Other DAW",
+        }
+    }
+}
+
+/// The kind of plug-in `co_producer.plugins` lists (plan 8d Ruling 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginKindArg {
+    /// Takes notes, makes audio.
+    Instrument,
+    /// Processes audio.
+    Effect,
+}
+
+/// The largest tick plan 8e's reads take, as the registry's ticks.
+const TICK_MAX: i64 = i64::MAX / 2;
+
 /// A preview token's length: 32 lowercase hex characters (Ruling 7).
 pub const TOKEN_LEN: usize = 32;
 
@@ -236,6 +338,9 @@ pub enum Command {
     CoProducerBegin {
         /// What the composer asked for, trimmed.
         name: String,
+        /// The composer's own words for the notes (plan 8b Ruling 9):
+        /// trimmed, newlines as spaces; None when absent or blank.
+        asked: Option<String>,
         /// Whose document.
         window: Option<WindowRef>,
     },
@@ -264,6 +369,100 @@ pub enum Command {
         plan: Vec<Planned>,
         /// Whose document.
         window: Option<WindowRef>,
+        /// What the host calls itself (`vizdaw-mcp` passes its client's
+        /// `clientInfo.name`): a label VizDAW shows, never proof of who
+        /// is asking (plan 8b Ruling 11).
+        client: Option<String>,
+    },
+    /// Reads the song's notes (plan 8b Ruling 9).
+    CoProducerNotes {
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Adds a note to the open request's entry.
+    CoProducerNote {
+        /// 1 to [`MAX_NOTE`] characters in at most [`MAX_NOTE_LINES`] lines.
+        text: String,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Makes a new dated export folder (Ruling 6).
+    CoProducerExportFolder {
+        /// What the export is.
+        what: ExportWhat,
+        /// The folder to make it in; absent: the remembered one, else the
+        /// song's own. Checked by the gate, not here.
+        parent: Option<PathBuf>,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Exports the song in one call into a new dated folder (plan 8c
+    /// Ruling 1).
+    CoProducerExport {
+        /// What to export; never [`ExportWhat::Selection`].
+        what: ExportWhat,
+        /// The folder to make the dated folder in; absent: the remembered
+        /// one, else the song's own. Checked by the gate, not here.
+        parent: Option<PathBuf>,
+        /// The strips to bounce, only for stems and other_daw; absent:
+        /// For Another DAW's default strips.
+        strips: Option<Vec<u64>>,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Lists the installed plug-ins Co-Producer may use (plan 8d
+    /// Ruling 5): a read.
+    CoProducerPlugins {
+        /// Only instruments or only effects; absent: both.
+        kind: Option<PluginKindArg>,
+    },
+    /// Reads a loaded plug-in's parameters (plan 8d Ruling 5): a read.
+    CoProducerParams {
+        /// The slot, from 1.
+        slot: u64,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Makes a new untitled song set up from a starter spec (plan 8e
+    /// Ruling 5): an add, in a new window.
+    CoProducerStarter {
+        /// The spec as sent; the gate checks it with
+        /// [`crate::starter::parse`] before the app sees it.
+        spec: Value,
+    },
+    /// Reads a track's notes (plan 8e Ruling 3): a read.
+    CoProducerMidiNotes {
+        /// The sequence.
+        seq: u64,
+        /// The track.
+        lane: u64,
+        /// Only notes starting in `start..end`; None: all.
+        range: Option<(u64, u64)>,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Reads a target's automation in `start..=end`, in the target's units
+    /// (plan 8e Ruling 7): a read.
+    CoProducerAutomation {
+        /// The sequence.
+        seq: u64,
+        /// The target, as `automation.gesture` spells it.
+        target: String,
+        /// The first tick.
+        start: u64,
+        /// The last tick, after `start`.
+        end: u64,
+        /// Whose document.
+        window: Option<WindowRef>,
+    },
+    /// Reads where the composer's time has gone (plan 8f Ruling 6): a
+    /// read, only on request.
+    CoProducerMetrics {
+        /// Today and the `days - 1` before it, 1 to [`METRICS_DAYS_MAX`];
+        /// None: all time.
+        days: Option<u32>,
+        /// Whose document is "this song".
+        window: Option<WindowRef>,
     },
 }
 
@@ -283,6 +482,16 @@ impl Command {
                 | Command::CoProducerStatus { .. }
                 | Command::CoProducerPreview { .. }
                 | Command::CoProducerApply { .. }
+                | Command::CoProducerNotes { .. }
+                | Command::CoProducerNote { .. }
+                | Command::CoProducerExportFolder { .. }
+                | Command::CoProducerExport { .. }
+                | Command::CoProducerPlugins { .. }
+                | Command::CoProducerParams { .. }
+                | Command::CoProducerStarter { .. }
+                | Command::CoProducerMidiNotes { .. }
+                | Command::CoProducerAutomation { .. }
+                | Command::CoProducerMetrics { .. }
         )
     }
 }
@@ -447,9 +656,10 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
         }
         "wait" => wait(&p),
         "co_producer.begin" => {
-            p.only(&["name", "window"])?;
+            p.only(&["name", "asked", "window"])?;
             Ok(Command::CoProducerBegin {
                 name: request_name(&p)?,
+                asked: asked(&p)?,
                 window: p.window()?,
             })
         }
@@ -473,10 +683,132 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
             })
         }
         "co_producer.apply" => {
-            p.only(&["token", "commands", "window"])?;
+            p.only(&["token", "commands", "window", "client"])?;
             Ok(Command::CoProducerApply {
                 token: token(&p)?,
                 plan: plan(&p)?,
+                window: p.window()?,
+                client: client(&p)?,
+            })
+        }
+        "co_producer.notes" => {
+            p.only(&["window"])?;
+            Ok(Command::CoProducerNotes {
+                window: p.window()?,
+            })
+        }
+        "co_producer.note" => {
+            p.only(&["text", "window"])?;
+            Ok(Command::CoProducerNote {
+                text: note(&p)?,
+                window: p.window()?,
+            })
+        }
+        "co_producer.export_folder" => {
+            p.only(&["what", "parent", "window"])?;
+            Ok(Command::CoProducerExportFolder {
+                what: export_what(&p)?,
+                parent: export_parent(&p)?,
+                window: p.window()?,
+            })
+        }
+        "co_producer.export" => {
+            p.only(&["what", "parent", "strips", "window"])?;
+            let what = chore_export_what(&p)?;
+            let strips = match p.opt_str("strips", MAX_STRING)? {
+                None => None,
+                Some(_) if !matches!(what, ExportWhat::Stems | ExportWhat::OtherDaw) => {
+                    return Err(p.error("strips is only for stems and other_daw."));
+                }
+                Some(s) => Some(
+                    crate::co_producer::id_list(&s)
+                        .map_err(|m| p.error(format!("`strips`: {m}")))?,
+                ),
+            };
+            Ok(Command::CoProducerExport {
+                what,
+                parent: export_parent(&p)?,
+                strips,
+                window: p.window()?,
+            })
+        }
+        "co_producer.plugins" => {
+            p.only(&["kind"])?;
+            let kind = match p.opt_str("kind", 32)?.as_deref() {
+                None => None,
+                Some("instrument") => Some(PluginKindArg::Instrument),
+                Some("effect") => Some(PluginKindArg::Effect),
+                Some(_) => return Err(p.error("`kind` must be instrument or effect")),
+            };
+            Ok(Command::CoProducerPlugins { kind })
+        }
+        "co_producer.params" => {
+            p.only(&["slot", "window"])?;
+            Ok(Command::CoProducerParams {
+                slot: p.int("slot", 1, registry::MAX_EXACT_ID)? as u64,
+                window: p.window()?,
+            })
+        }
+        "co_producer.starter" => {
+            p.only(&["spec"])?;
+            match p.raw("spec") {
+                Some(spec @ Value::Object(_)) => {
+                    Ok(Command::CoProducerStarter { spec: spec.clone() })
+                }
+                Some(_) => Err(p.error("`spec` must be an object")),
+                None => Err(p.error("missing `spec`")),
+            }
+        }
+        "co_producer.midi_notes" => {
+            p.only(&["seq", "lane", "start", "end", "window"])?;
+            // A new song's first sequence and track are 0.
+            let seq = p.int("seq", 0, registry::MAX_EXACT_ID)? as u64;
+            let lane = p.int("lane", 0, registry::MAX_EXACT_ID)? as u64;
+            let range = match (
+                p.opt_int("start", 0, TICK_MAX)?,
+                p.opt_int("end", 0, TICK_MAX)?,
+            ) {
+                (None, None) => None,
+                (Some(start), Some(end)) if end > start => Some((start as u64, end as u64)),
+                (Some(_), Some(_)) => return Err(p.error("`end` must be after `start`")),
+                _ => return Err(p.error("give `start` and `end` together, or neither")),
+            };
+            Ok(Command::CoProducerMidiNotes {
+                seq,
+                lane,
+                range,
+                window: p.window()?,
+            })
+        }
+        "co_producer.automation" => {
+            p.only(&["seq", "target", "start", "end", "window"])?;
+            let seq = p.int("seq", 0, registry::MAX_EXACT_ID)? as u64;
+            let target = p.str("target", MAX_STRING)?;
+            registry::automation_target(&target).map_err(|m| p.error(format!("`target` {m}")))?;
+            let start = p.int("start", 0, TICK_MAX)?;
+            let end = p.int("end", 0, TICK_MAX)?;
+            if end <= start {
+                return Err(p.error("`end` must be after `start`"));
+            }
+            Ok(Command::CoProducerAutomation {
+                seq,
+                target,
+                start: start as u64,
+                end: end as u64,
+                window: p.window()?,
+            })
+        }
+        "co_producer.metrics" => {
+            p.only(&["days", "window"])?;
+            // A null is not "all time": leave `days` out for that.
+            if raw.params.get("days").is_some_and(Value::is_null) {
+                return Err(p.error("`days` must be an integer; leave it out for all time"));
+            }
+            let days = p
+                .opt_int("days", 1, i64::from(METRICS_DAYS_MAX))?
+                .map(|d| d as u32);
+            Ok(Command::CoProducerMetrics {
+                days,
                 window: p.window()?,
             })
         }
@@ -527,7 +859,7 @@ fn command_run(p: &Params<'_>, all: &Map<String, Value>) -> Result<Command, Cont
 
 /// A character a request name may not hold (plan 8a Ruling 4): a C0 or C1
 /// control, a bidi control or mark, or a line or paragraph separator.
-fn refused_in_name(c: char) -> bool {
+pub(crate) fn refused_in_name(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
@@ -558,6 +890,138 @@ fn request_name(p: &Params<'_>) -> Result<String, ControlError> {
         return Err(p.error("`name` must not hold control, direction or line-separator characters"));
     }
     Ok(name.to_string())
+}
+
+/// `co_producer.begin`'s optional `asked`: at most [`MAX_ASKED`] characters
+/// after trimming, newlines as spaces, and no other control, bidi or
+/// separator character (plan 8b Ruling 9). Blank is absent.
+fn asked(p: &Params<'_>) -> Result<Option<String>, ControlError> {
+    let Some(raw) = p.opt_str("asked", MAX_STRING)? else {
+        return Ok(None);
+    };
+    let asked = raw.trim().replace('\n', " ");
+    if asked.is_empty() {
+        return Ok(None);
+    }
+    if asked.chars().count() > MAX_ASKED {
+        return Err(p.error(format!("`asked` is longer than {MAX_ASKED} characters")));
+    }
+    if asked.chars().any(refused_in_name) {
+        return Err(
+            p.error("`asked` must not hold control, direction or line-separator characters")
+        );
+    }
+    Ok(Some(asked))
+}
+
+/// `co_producer.apply`'s optional `client`: at most [`MAX_CLIENT_LABEL`]
+/// characters after trimming, with no control, bidi or separator
+/// character (plan 8b Ruling 11). Blank is absent.
+fn client(p: &Params<'_>) -> Result<Option<String>, ControlError> {
+    let Some(raw) = p.opt_str("client", MAX_STRING)? else {
+        return Ok(None);
+    };
+    let client = raw.trim();
+    if client.is_empty() {
+        return Ok(None);
+    }
+    if client.chars().count() > MAX_CLIENT_LABEL {
+        return Err(p.error(format!(
+            "`client` is longer than {MAX_CLIENT_LABEL} characters"
+        )));
+    }
+    if client.chars().any(refused_in_name) {
+        return Err(
+            p.error("`client` must not hold control, direction or line-separator characters")
+        );
+    }
+    Ok(Some(client.to_string()))
+}
+
+/// `co_producer.note`'s `text`: 1 to [`MAX_NOTE`] characters, not blank,
+/// in at most [`MAX_NOTE_LINES`] lines, with no control but `\n` and no
+/// bidi or separator character (plan 8b Ruling 9).
+fn note(p: &Params<'_>) -> Result<String, ControlError> {
+    let text = p.str("text", MAX_STRING)?;
+    if text.trim().is_empty() {
+        return Err(p.error("`text` must not be empty"));
+    }
+    if text.chars().count() > MAX_NOTE {
+        return Err(p.error(format!("`text` is longer than {MAX_NOTE} characters")));
+    }
+    if text.split('\n').count() > MAX_NOTE_LINES {
+        return Err(p.error(format!("`text` has more than {MAX_NOTE_LINES} lines")));
+    }
+    if text.chars().any(|c| c != '\n' && refused_in_name(c)) {
+        return Err(p.error(
+            "`text` must not hold control (but newline), direction or line-separator characters",
+        ));
+    }
+    Ok(text)
+}
+
+/// `co_producer.export_folder`'s `what`.
+fn export_what(p: &Params<'_>) -> Result<ExportWhat, ControlError> {
+    let what = p.str("what", 32)?;
+    ExportWhat::parse(&what).ok_or_else(|| {
+        let names: Vec<&str> = ExportWhat::ALL.iter().map(|w| w.name()).collect();
+        p.error(format!("`what` must be one of {}", names.join(", ")))
+    })
+}
+
+/// `co_producer.export`'s `what` (plan 8c Ruling 1): any but `selection`,
+/// which a one-call export cannot bounce.
+fn chore_export_what(p: &Params<'_>) -> Result<ExportWhat, ControlError> {
+    let what = p.str("what", 32)?;
+    match ExportWhat::parse(&what) {
+        Some(ExportWhat::Selection) => {
+            Err(p.error("Bounce a selection with export_folder and file_bounce."))
+        }
+        Some(w) => Ok(w),
+        None => {
+            let names: Vec<&str> = ExportWhat::ALL
+                .iter()
+                .filter(|w| **w != ExportWhat::Selection)
+                .map(|w| w.name())
+                .collect();
+            Err(p.error(format!("`what` must be one of {}", names.join(", "))))
+        }
+    }
+}
+
+/// A marker's `name` (plan 8c Ruling 4): 1 to [`MAX_MARKER_NAME`]
+/// characters after trimming, with a request name's character rules
+/// (plan 8a P11). Answers the trimmed name, or the broken rule.
+pub(crate) fn marker_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("`name` must not be empty".into());
+    }
+    if name.chars().count() > MAX_MARKER_NAME {
+        return Err(format!(
+            "`name` is longer than {MAX_MARKER_NAME} characters"
+        ));
+    }
+    if name.chars().any(refused_in_name) {
+        return Err("`name` must not hold control, direction or line-separator characters".into());
+    }
+    Ok(name.to_string())
+}
+
+/// `co_producer.export_folder`'s optional `parent`: a string of at most
+/// [`MAX_PATH`] bytes with no NUL. Whether it is a folder Co-Producer may
+/// write in is the gate's check (`co_producer::check_output`), so a
+/// relative or linked one is `not_allowed`, not `invalid_params`.
+fn export_parent(p: &Params<'_>) -> Result<Option<PathBuf>, ControlError> {
+    let Some(s) = p.opt_str("parent", MAX_PATH)? else {
+        return Ok(None);
+    };
+    if s.len() > MAX_PATH || s.contains('\0') || s.is_empty() {
+        return Err(p.error(format!(
+            "`parent` must be a folder's path of 1 to {MAX_PATH} bytes"
+        )));
+    }
+    Ok(Some(PathBuf::from(s)))
 }
 
 /// `co_producer.apply`'s `token`: [`TOKEN_LEN`] lowercase hex characters.

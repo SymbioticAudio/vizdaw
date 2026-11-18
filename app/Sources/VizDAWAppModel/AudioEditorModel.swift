@@ -274,17 +274,29 @@ public final class AudioEditorModel {
             guard let s = AudioEditorEntry.duration(text, bare: .s) else { return nil }
             let low = max(0, offset - Int64(clamping: startRoom))
             let high = max(low, offset + frames - 1)
-            let start = min(max(AudioEditorEntry.frames(s, rate: rate), low), high)
+            var start = min(max(AudioEditorEntry.frames(s, rate: rate), low), high)
+            // A moved start snaps to a zero crossing (plan release-fixes
+            // Task 7), held to the same bounds.
+            if start != offset { start = min(max(snapped(start, row), low), high) }
             let front = start - offset
             return .some(front == 0 ? nil : .audio(edit: .trim(event: row.id, frontFrames: front, backFrames: 0)))
         case .length:
             guard let s = AudioEditorEntry.duration(text, bare: .s) else { return nil }
             let media = Int64(clamping: r.media?.frames ?? 0)
             let high = max(1, media - offset)
-            let length = min(max(AudioEditorEntry.frames(s, rate: rate), 1), high)
+            var length = min(max(AudioEditorEntry.frames(s, rate: rate), 1), high)
+            // A moved end snaps to a zero crossing, held to the same bounds.
+            if length != frames { length = min(max(snapped(offset + length, row) - offset, 1), high) }
             let back = frames - length
             return .some(back == 0 ? nil : .audio(edit: .trim(event: row.id, frontFrames: 0, backFrames: back)))
         }
+    }
+
+    /// Media frame `f` (0 or more) of `row`'s media, snapped to a zero
+    /// crossing when the preference is on.
+    private func snapped(_ f: Int64, _ row: EventRow) -> Int64 {
+        guard let media = row.media else { return f }
+        return Int64(clamping: ZeroCrossing.snapper(document, media: media)(UInt64(clamping: f)))
     }
 
     /// A new shape for `.fadeIn`, `.fadeOut` or `.crossfade`, keeping its

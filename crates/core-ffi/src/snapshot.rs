@@ -17,6 +17,9 @@ pub const UNITS_PER_BEAT: u32 = 960;
 pub struct DocSnapshot {
     /// Increases with every applied command, undo and redo; never saved.
     pub version: u64,
+    /// The present step's serial (`History::present_serial`): a new step
+    /// raises it, undo and redo return to the step's own (plan 8f Ruling 4).
+    pub step: u64,
     /// File name without `.vizdaw`, or "Untitled".
     pub title: String,
     /// Differs from the last opened or saved document.
@@ -125,6 +128,10 @@ pub struct LaneRow {
     /// The active take's ID.
     #[uniffi(default)]
     pub active_take_id: u64,
+    /// Co-Producer made it and the composer has not taken it over (plan
+    /// 8b Ruling 1).
+    #[uniffi(default)]
+    pub co_producer: bool,
 }
 
 /// One take of a lane, in order (plan 5c-2 takes Task 1).
@@ -277,6 +284,7 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                 mpe: l.mpe.map(Into::into),
                 takes,
                 active_take_id: l.active_take.0,
+                co_producer: l.co_producer,
             })
         })
         .collect()

@@ -3804,3 +3804,105 @@ fn a_move_then_stop_in_one_block_is_written() {
     );
     s.close().unwrap();
 }
+
+/// The demo with a running Test Gain on the built-in synth, saved and
+/// reopened (no undo history), its strip in Touch, playing: (temp dir,
+/// session, synth strip, slot, sequence).
+fn touch_playing_gain() -> (tempfile::TempDir, Arc<Session>, u64, u64, u64) {
+    use vizdaw_ffi::{PluginFormatTag, PluginRefRow, SlotStatus};
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.vizdaw").to_string_lossy().into_owned();
+    {
+        let s = Session::new_demo().unwrap();
+        let synth = s.mixer().unwrap().strips[0].id;
+        s.add_insert(
+            synth,
+            None,
+            PluginRefRow {
+                format: PluginFormatTag::Clap,
+                id: "vizdaw.test.gain".into(),
+                name: "Test Gain".into(),
+                vendor: "VizDAW".into(),
+                version: "1.0.0".into(),
+            },
+        )
+        .unwrap();
+        s.save_as(path.clone()).unwrap();
+    }
+    let s = Session::open(path).unwrap();
+    let slot = s.plugin_slots().unwrap()[0].id;
+    let synth = s.mixer().unwrap().strips[0].id;
+    let song = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "Song")
+        .unwrap()
+        .id;
+    s.set_automation_mode(vec![synth], Mode::Touch).unwrap();
+    s.play(song).unwrap();
+    wait_until("the plugin live and playing", || {
+        s.idle().unwrap();
+        s.plugin_slots().unwrap()[0].status == SlotStatus::Live
+            && s.transport().unwrap().report.is_empty()
+            && s.transport().unwrap().playing
+    });
+    (dir, s, synth, slot, song)
+}
+
+/// Every automation point of `t` in `seq`'s lanes.
+fn points_of(s: &Session, seq: u64, t: Target) -> usize {
+    s.lanes(seq)
+        .unwrap()
+        .into_iter()
+        .flat_map(|l| s.lane_events(seq, l.id).unwrap().events)
+        .filter(|e| e.automation.is_some_and(|a| a.target == t))
+        .count()
+}
+
+/// Release-fixes Task 4: a gesture on a parameter its plug-in marks not
+/// automatable (Test Gain's Wiggle, no flags) reaches the plug-in but,
+/// on a Touch strip while playing, writes no lane: it takes the static
+/// path. The same gesture on Gain (automatable) writes its lane. Both
+/// range 0–2, so 0.7 is 1.4.
+#[test]
+fn a_non_automatable_parameter_never_writes_a_lane() {
+    const GAIN: u64 = 0;
+    const WIGGLE: u64 = 2;
+    let _g = serial();
+    for (param, name, writes) in [
+        (WIGGLE, "Built-in Synth Wiggle", false),
+        (GAIN, "Built-in Synth Gain", true),
+    ] {
+        let (_d, s, _, slot, song) = touch_playing_gain();
+        let t = Target::PluginParam { slot, param };
+        s.gesture(t, Phase::Touch { value: None }).unwrap();
+        pace(&s);
+        s.gesture(t, Phase::Value { value: 0.7 }).unwrap();
+        pace(&s);
+        wait_until("the plugin to hear 0.7", || {
+            s.idle().unwrap();
+            s.params(slot)
+                .unwrap()
+                .iter()
+                .any(|p| p.id == param && (p.value - 1.4).abs() < 1e-6)
+        });
+        s.gesture(t, Phase::Release).unwrap();
+        pace(&s);
+        stop_and_land(&s);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(100) {
+            s.idle().unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            lane_named(&s, song, name).is_some(),
+            writes,
+            "{name}: a lane only for an automatable parameter"
+        );
+        assert_eq!(points_of(&s, song, t) > 0, writes, "{name}");
+        s.close().unwrap();
+    }
+}

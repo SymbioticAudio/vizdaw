@@ -93,6 +93,24 @@ private struct DocumentSheets: ViewModifier {
             ) { _ in
                 NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
             }
+            // VizDAW's own approval of a Co-Producer change (plan 8b Ruling
+            // 11): the one sheet a Co-Producer call may open, and only for an
+            // apply waiting for a yes. Under the developer channel the e2e
+            // answers it with `settings.co_producer_answer` instead.
+            .sheet(
+                item: Binding(
+                    get: { ControlChannel.active ? nil : model.coProducerApproval },
+                    set: { if $0 == nil { model.coProducerApproval?.deny() } })
+            ) { approval in
+                CoProducerApprovalSheet(model: approval)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.synth.editDestination != nil },
+                    set: { if !$0 { model.synth.closeEditDestination() } })
+            ) {
+                DestinationEditorSheet(sheets: model.synth, editor: model.editor)
+            }
     }
 }
 

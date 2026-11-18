@@ -401,16 +401,15 @@ fn input_names(dev: AudioObjectID, n: u32) -> Vec<String> {
         .collect()
 }
 
-/// A device by name.
-fn find_device(name: &str) -> Result<AudioObjectID, BackendError> {
-    get_ids(
-        SYSTEM,
-        kAudioHardwarePropertyDevices,
-        kAudioObjectPropertyScopeGlobal,
-    )?
-    .into_iter()
-    .find(|d| name_of(*d).as_deref() == Some(name))
-    .ok_or(BackendError::NoDevice)
+/// The input device `key` names: by UID, else by a name no other input
+/// device has ([`pick`]).
+fn find_device(key: &str) -> Result<AudioObjectID, BackendError> {
+    let devices = input_device_ids()?;
+    let list: Vec<InputDevice> = devices.iter().map(|(_, d)| d.clone()).collect();
+    pick_index(&list, key)
+        .and_then(|k| devices.get(k))
+        .map(|(id, _)| *id)
+        .ok_or(BackendError::NoDevice)
 }
 
 /// The description of a private aggregate device (spec §6.1) named
@@ -568,25 +567,78 @@ pub fn output_devices() -> Vec<String> {
 
 /// Names of every device with input channels.
 pub fn input_devices() -> Vec<String> {
-    get_ids(
+    input_device_list().into_iter().map(|d| d.name).collect()
+}
+
+/// A device with input channels: its display name, which two devices may
+/// share, and its persistent UID, which tells them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDevice {
+    /// The display name.
+    pub name: String,
+    /// The persistent UID ("" when the device gives none).
+    pub uid: String,
+}
+
+/// Every device with input channels, in the system's order.
+pub fn input_device_list() -> Vec<InputDevice> {
+    input_device_ids()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, d)| d)
+        .collect()
+}
+
+/// Every device with input channels and its object ID.
+fn input_device_ids() -> Result<Vec<(AudioObjectID, InputDevice)>, BackendError> {
+    Ok(get_ids(
         SYSTEM,
         kAudioHardwarePropertyDevices,
         kAudioObjectPropertyScopeGlobal,
-    )
-    .unwrap_or_default()
+    )?
     .into_iter()
     .filter(|d| layout(*d, kAudioObjectPropertyScopeInput).is_ok_and(|l| l.iter().sum::<u32>() > 0))
-    .filter_map(name_of)
-    .collect()
+    .filter_map(|d| {
+        let name = name_of(d)?;
+        let uid = uid_of(d).unwrap_or_default();
+        Some((d, InputDevice { name, uid }))
+    })
+    .collect())
 }
 
-/// The input channels of device `name` (`None`: the default output
-/// device's own input) and one name per channel, as an open would give
-/// them (at most `MAX_INPUT_CHANNELS`), read from its properties: the
-/// device is not opened and no I/O starts, so no microphone permission is
-/// asked (5d-2 final review I4). `None` for a device not connected.
-pub fn input_channels_of(name: Option<&str>) -> Option<(u32, Vec<String>)> {
-    let dev = match name {
+/// The device whose uid is `key`, else the only device named `key`.
+/// Two devices with that name and no uid match is None.
+pub fn pick<'a>(list: &'a [InputDevice], key: &str) -> Option<&'a InputDevice> {
+    pick_index(list, key).and_then(|k| list.get(k))
+}
+
+/// [`pick`]'s position in `list`.
+fn pick_index(list: &[InputDevice], key: &str) -> Option<usize> {
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(k) = list.iter().position(|d| d.uid == key) {
+        return Some(k);
+    }
+    let mut named = list
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.name == key)
+        .map(|(k, _)| k);
+    match (named.next(), named.next()) {
+        (Some(k), None) => Some(k),
+        _ => None,
+    }
+}
+
+/// The input channels of the device `key` names, by UID or a unique name
+/// ([`pick`]; `None`: the default output device's own input) and one name
+/// per channel, as an open would give them (at most `MAX_INPUT_CHANNELS`),
+/// read from its properties: the device is not opened and no I/O starts,
+/// so no microphone permission is asked (5d-2 final review I4). `None`
+/// for a device not connected.
+pub fn input_channels_of(key: Option<&str>) -> Option<(u32, Vec<String>)> {
+    let dev = match key {
         None => get::<AudioObjectID>(
             SYSTEM,
             kAudioHardwarePropertyDefaultOutputDevice,
@@ -1117,9 +1169,19 @@ impl AudioBackend for CoreAudioBackend {
         let mut device = device;
         let mut input_source = None;
         if cfg.input_enabled {
-            match &cfg.input_device {
-                Some(name) if name_of(output).as_deref() != Some(name.as_str()) => {
-                    let input = find_device(name)?;
+            // The device by UID or a unique name; the output device itself
+            // (by UID or name, as before devices were kept by UID) is its
+            // own input.
+            let is_output = |key: &str| {
+                uid_of(output).as_deref() == Some(key) || name_of(output).as_deref() == Some(key)
+            };
+            let chosen = match cfg.input_device.as_deref() {
+                Some(key) if !is_output(key) => Some((key, find_device(key)?)),
+                _ => None,
+            };
+            match chosen.filter(|(_, input)| *input != output) {
+                Some((key, input)) => {
+                    let name = name_of(input).unwrap_or_else(|| key.to_owned());
                     // Pre-flight M15: the input device runs at the
                     // output's rate (the project's, unless the output
                     // refused it) before the aggregate joins them, or
@@ -1131,7 +1193,7 @@ impl AudioBackend for CoreAudioBackend {
                     )?;
                     match_rate(
                         &mut HalRate(input),
-                        name,
+                        &name,
                         rate,
                         std::time::Duration::from_secs(1),
                     )?;
@@ -1419,6 +1481,23 @@ fn settle_rate<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Release fixes Task 2: a device is found by its UID first, then by
+    /// a name no other device has; two devices with one name are never
+    /// guessed between.
+    #[test]
+    fn pick_prefers_the_uid_and_refuses_an_ambiguous_name() {
+        let dev = |name: &str, uid: &str| InputDevice {
+            name: name.into(),
+            uid: uid.into(),
+        };
+        let list = [dev("A", "u1"), dev("A", "u2"), dev("B", "u3")];
+        assert_eq!(pick(&list, "u2"), list.get(1));
+        assert_eq!(pick(&list, "B").map(|d| d.uid.as_str()), Some("u3"));
+        assert_eq!(pick(&list, "A"), None, "two devices are named A");
+        assert_eq!(pick(&list, ""), None);
+        assert_eq!(pick(&list, "a\u{0}"), None);
+    }
 
     /// An `AudioBufferList` with two trailing buffers, laid out as
     /// CoreAudio does.

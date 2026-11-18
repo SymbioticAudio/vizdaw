@@ -5,7 +5,8 @@
 //! registry and wait conditions (Task 3); the Unix-socket server and
 //! client (Task 4); key bindings over the registry (plan 4f); the
 //! Co-Producer socket's gate, command classes and never-replace path
-//! check (plan 8a, [`co_producer`]).
+//! check (plan 8a, [`co_producer`]); starter project specs (plan 8e,
+//! [`starter`]).
 //! Platform-neutral Unix code: the app executes what needs its windows.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -30,6 +31,7 @@ pub mod protocol;
 pub mod registry;
 pub mod request;
 pub mod server;
+pub mod starter;
 pub mod wait;
 
 pub use error::{ControlError, ErrorCode};

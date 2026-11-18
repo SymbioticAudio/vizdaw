@@ -939,6 +939,9 @@ pub(crate) struct ParamInfo {
     pub default: f64,
     /// Whole values only.
     pub stepped: bool,
+    /// The plug-in lets the host automate it (release-fixes Task 4: a
+    /// touch of one that is not writes no lane).
+    pub automatable: bool,
     /// Its name.
     pub name: String,
     /// Its current plain value.
@@ -1018,6 +1021,7 @@ pub(crate) fn param_info(owner: u64, t: AutomationTarget) -> Option<ParamInfo> {
             max: i.max,
             default: i.default,
             stepped: i.stepped,
+            automatable: i.automatable,
             name: i.name,
             value: inst.param_value(param),
         })

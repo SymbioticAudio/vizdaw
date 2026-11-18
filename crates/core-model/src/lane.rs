@@ -62,6 +62,10 @@ pub struct Lane {
     /// absent in files when off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mpe: Option<crate::mpe::MpeConfig>,
+    /// Co-Producer made it and the composer has not taken it over (plan
+    /// 8b Ruling 1); absent in files when not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub co_producer: bool,
 }
 
 impl Lane {
@@ -87,6 +91,7 @@ impl Lane {
             monitor: MonitorMode::Auto,
             input_fx: Vector::new(),
             mpe: None,
+            co_producer: false,
         }
     }
 

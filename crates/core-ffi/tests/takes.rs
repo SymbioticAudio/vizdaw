@@ -128,6 +128,7 @@ fn lane_rows_list_takes() {
         snapshot: s.snapshot().unwrap(),
         selected_seq: Some(f.s.0),
         lanes: s.lanes(f.s.0).unwrap(),
+        markers: vec![],
         destinations: vec![],
         alert: None,
     });

@@ -22,10 +22,14 @@ pub mod automation;
 pub mod autowrite;
 pub mod blocks;
 pub mod bounce;
+pub mod builtin_sound;
 pub mod bundled;
 pub mod catalog;
+pub mod chores;
 pub mod clock;
+pub mod co_producer;
 pub mod control;
+pub mod creative;
 pub mod dawproject;
 pub mod drum;
 pub mod edit;
@@ -44,9 +48,12 @@ pub mod jobs;
 pub mod keys;
 pub mod live;
 pub mod media;
+pub mod metrics;
 pub mod mixer;
+pub mod mixer_chores;
 pub mod modify;
 pub mod mpe;
+pub mod notes;
 pub mod overviews;
 pub mod passes;
 pub mod plugins;
@@ -59,6 +66,7 @@ pub mod revs;
 pub mod selection;
 pub mod session;
 pub mod snapshot;
+pub mod starter;
 pub mod step;
 pub mod strip;
 pub mod surfaces;
@@ -79,6 +87,7 @@ pub use bounce::{
     BounceCheckRow, BounceRangeRow, BounceRequestRow, BounceResultRow, BounceSettingsRow,
     BounceSourceRow, BouncedFileRow, ContainerRow, bounce_settings, set_bounce_settings,
 };
+pub use builtin_sound::BuiltinSound;
 pub use bundled::{
     DefaultEqRow, bundled_au_present, bundled_eq_name, default_eq, default_eq_note, install_multiq,
     new_channel_eq, set_default_eq, set_new_channel_eq,
@@ -87,15 +96,17 @@ pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
     ScanProgress,
 };
+pub use co_producer::{ChangeItemRow, CoProducerRequestRow, PlannedRow, PreviewRow};
 pub use control::{
     AlertRow, AudioEditorBoxRow, AudioEditorRegionRow, AudioEditorStateRow, ControlArg,
     ControlCall, ControlErrorCode, ControlFailure, ControlRequest, ControlResult, ControlServer,
     ControlValue, CrashAnswerRow, DetailRow, DocFactsRow, EditorStateRow, ElementRefRow,
-    KeyStrokeRow, LayoutStateRow, ModifiersRow, MouseButtonRow, PaneRow, PointerRow,
+    ExportWhatRow, KeyStrokeRow, LayoutStateRow, ModifiersRow, MouseButtonRow, PaneRow, PointerRow,
     RecoveryAnswersRow, StateTargetRow, StepEntryStateRow, TornRow, TransportMarksRow, UiNodeRow,
     ViewPanesRow, WaitConditionRow, WaitFactsRow, WindowKindRow, WindowRefRow, WindowRow,
     control_command_ids, control_element_check, control_host_busy, control_wait_met,
 };
+pub use creative::{CoProducerCurveRow, CoProducerNotesRow, CurvePointRow, NoteRow};
 pub use dawproject::{
     DawprojectExportRequestRow, DawprojectImportRequestRow, DawprojectInfoRow,
     DawprojectMergeRequestRow, MergePreviewRow, MergeStepRow, RegionGainRow, SnapshotRow,
@@ -131,10 +142,16 @@ pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
 pub use live::InputInfoRow;
 pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
-pub use mixer::{
-    BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow,
-    StripColourRow, StripKindRow, StripRow, SwatchRow,
+pub use metrics::{
+    MetricsCategoryRow, MetricsClockRow, MetricsCountRow, MetricsOverviewRow, MetricsRecorder,
+    MetricsSecondsRow, MetricsSongRow, MetricsSongTotalsRow, MetricsSummaryRow, MetricsTotalsRow,
+    metrics_delete_all, metrics_overview, metrics_summary,
 };
+pub use mixer::{
+    BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, OutputPathRow,
+    SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow,
+};
+pub use mixer_chores::{CoProducerPluginRow, CoProducerPluginsRow, co_producer_plugins};
 pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,
     NoteMapEntry, RuleRow, SelectModeRow, SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
@@ -145,7 +162,8 @@ pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latenc
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
 pub use selection::{SelectionRow, TickRange};
-pub use session::{OpenOptions, Session};
+pub use session::co_producer_mixer::CoProducerParamsRow;
+pub use session::{CopyRow, NotesRow, OpenOptions, RemovedCopiesRow, Session};
 pub use snapshot::{
     DocSnapshot, IdleUpdate, KeySlotRow, LaneRow, ParamRow, ParamValue, PluginFormatTag,
     PluginRefRow, SeqRow, SlotRow, SlotStatus, TakeRow, TransportState,

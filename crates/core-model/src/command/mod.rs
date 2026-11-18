@@ -31,10 +31,11 @@ pub use settings::SettingsCmd;
 
 use crate::document::Document;
 use crate::error::Result;
-use crate::ids::AnyId;
+use crate::ids::{AnyId, LaneId, SeqId};
 use crate::modify::Modify;
 use crate::rule::{Rule, SelectMode};
 use crate::selection::{Selection, ViewFilter};
+use crate::time::Tick;
 
 /// What a command did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -99,6 +100,10 @@ pub enum Command {
     Settings(SettingsCmd),
     /// A finished recording pass, applied whole (sub-project 5 spec §4.7).
     Record(RecordPass),
+    /// Writes points over a range of one target, as a Write pass does
+    /// (plan 8e Ruling 2): the target's points in `start..=end` go and the
+    /// new ones take their place. Name "Write Automation".
+    WriteAutomation(AutomationWrite),
     /// Select events by rule, then optionally modify them (or copies).
     SelectAndModify {
         /// Rule; `None` uses the current selection as is.
@@ -109,6 +114,20 @@ pub enum Command {
         modify: Option<Modify>,
         /// Modify copies inserted beside the originals.
         to_copy: bool,
+    },
+    /// Modify the notes of named tracks (plan 8c Ruling 2): the notes of
+    /// each lane's active take that start in `range` (`[start, end)`, or
+    /// the whole track), whatever the selection. The selection and Modify
+    /// Again's memory stay as they were.
+    ModifyNotes {
+        /// The sequence.
+        seq: SeqId,
+        /// Its tracks, each needing a note in range.
+        lanes: Vec<LaneId>,
+        /// `[start, end)`; `None` is the whole track.
+        range: Option<(Tick, Tick)>,
+        /// What to do to the notes.
+        modify: Modify,
     },
 }
 
@@ -127,9 +146,11 @@ impl Command {
             Command::Mixer(c) => c.name(),
             Command::Settings(c) => c.name(),
             Command::Record(p) => p.name(),
+            Command::WriteAutomation(_) => "Write Automation",
             Command::SelectAndModify { modify, .. } => {
                 modify.as_ref().map_or("Select", Modify::name)
             }
+            Command::ModifyNotes { modify, .. } => modify.name(),
         }
     }
 }
@@ -198,6 +219,10 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
             record::apply(&mut d, p, &mut report)?;
             None
         }
+        Command::WriteAutomation(w) => {
+            record::write_automation(&mut d, w, &mut report)?;
+            None
+        }
         Command::SelectAndModify {
             rule,
             mode,
@@ -212,6 +237,30 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
             *to_copy,
             &mut report,
         )?),
+        Command::ModifyNotes {
+            seq,
+            lanes,
+            range,
+            modify,
+        } => {
+            let selection = select::notes_of(&d, *seq, lanes, *range)?;
+            let filter = ViewFilter::default();
+            let ctx = Context {
+                selection: &selection,
+                filter: &filter,
+            };
+            // The selection it makes is dropped: the document's stays.
+            select::apply(
+                &mut d,
+                ctx,
+                None,
+                SelectMode::Select,
+                Some(modify),
+                false,
+                &mut report,
+            )?;
+            None
+        }
     };
     crate::crossfade::settle(doc, &mut d, &mut report)?;
     Ok(Applied {

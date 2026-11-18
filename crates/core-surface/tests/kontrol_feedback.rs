@@ -457,3 +457,34 @@ fn a_tempo_that_comes_back_is_sent_again() {
     assert_eq!(k.feedback(&v, 0, now), vec![msg(120.0)], "back to A");
     assert!(k.feedback(&v, 0, now).is_empty());
 }
+
+/// Release-fixes Task 6 (Decision 6): a strip the user coloured lights its
+/// swatch's fixed hue; an uncoloured one keeps its kind's.
+#[test]
+fn a_coloured_strip_lights_its_colour() {
+    let mut v = view(3);
+    v.strips[1].colour = Some(core_model::mixer::Swatch::Purple);
+    let (_, _, sent) = fed(&v, 0);
+    has(&sent, &sysex(0x4B, 0, 1, b"#9650DC"));
+    has(&sent, &sysex(0x4B, 0, 0, b"#46B45A"));
+    use core_model::mixer::Swatch as S;
+    let table: Vec<_> = [
+        S::Red,
+        S::Orange,
+        S::Yellow,
+        S::Green,
+        S::Teal,
+        S::Blue,
+        S::Purple,
+        S::Pink,
+    ]
+    .into_iter()
+    .map(kontrol::swatch_color)
+    .collect();
+    assert_eq!(
+        table,
+        [
+            "#E6463C", "#E68C28", "#E6C83C", "#46B45A", "#28B4B4", "#3C8CE6", "#9650DC", "#E650A0"
+        ]
+    );
+}

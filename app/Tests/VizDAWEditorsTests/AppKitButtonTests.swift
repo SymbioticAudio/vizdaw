@@ -47,6 +47,17 @@ import Testing
         #expect(b.first { $0.accessibilityLabel() == "Loop" }?.toolTip == "Loop")
     }
 
+    /// A titled button whose label differs from its title (the Record bar's
+    /// mode switch) is named by that label in the channel's tree.
+    @Test func aTitledButtonWithALabelIsNamedByIt() throws {
+        let w = hosted(
+            AppKitButton("Overdub", isOn: true, help: "Mode", label: "Record mode: Overdub") {})
+        defer { w.close() }
+        let nodes = ControlUI.tree(of: w, maxDepth: 64).nodes
+        let n = try #require(nodes.first { $0.label == "Record mode: Overdub" || $0.title == "Record mode: Overdub" })
+        #expect(n.actions == ["press"])
+    }
+
     @Test func aPressRunsTheActionAndAToggleShowsTheModel() throws {
         var pressed = 0
         let w = hosted(AppKitButton("Loop", icon: .loop, isOn: false, help: "Loop") { pressed += 1 })

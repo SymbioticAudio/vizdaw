@@ -72,6 +72,8 @@ fn a_state_call_round_trips_as_typed_rows() {
             window: Some(vizdaw_ffi::WindowRefRow::Number { number: 9 })
         }
     ));
+    // The developer channel reads no peer (plan 8b Task 6).
+    assert_eq!(call.peer, None);
     let session = Session::new_demo().unwrap();
     let snapshot = session.snapshot().unwrap();
     let r = ControlResult::Document {
@@ -80,6 +82,7 @@ fn a_state_call_round_trips_as_typed_rows() {
         snapshot,
         selected_seq: None,
         lanes: vec![],
+        markers: vec![],
         destinations: vec![],
         alert: Some(AlertRow {
             title: "Play Failed".into(),
@@ -636,6 +639,7 @@ fn lanes_show_takes_input_and_monitor() {
         snapshot,
         selected_seq: Some(seq),
         lanes,
+        markers: vec![],
         destinations: vec![],
         alert: None,
     });
@@ -682,6 +686,7 @@ fn document_state_lanes_carry_kind() {
         snapshot: session.snapshot().unwrap(),
         selected_seq: Some(seq),
         lanes: session.lanes(seq).unwrap(),
+        markers: vec![],
         destinations: vec![],
         alert: None,
     });
@@ -706,6 +711,7 @@ fn document_state_reports_the_midi_mix_per_destination() {
         midi_mix: mix,
         channel: None,
         mpe: None,
+        builtin_sound: None,
     };
     let v = result_json(&ControlResult::Document {
         doc: "D".into(),
@@ -713,6 +719,7 @@ fn document_state_reports_the_midi_mix_per_destination() {
         snapshot: session.snapshot().unwrap(),
         selected_seq: None,
         lanes: vec![],
+        markers: vec![],
         destinations: vec![
             row(
                 4,
@@ -737,6 +744,46 @@ fn document_state_reports_the_midi_mix_per_destination() {
     assert_eq!(d[0]["midi_mute"], json!(true));
     assert_eq!(d[1]["midi_volume"], Value::Null);
     assert_eq!(d[1]["midi_mute"], json!(false));
+}
+
+/// Plan release-fixes Task 10: `state.get document` names a track's output
+/// path (null for none) and a Built-in Synth destination's sound.
+#[test]
+fn document_state_shows_outputs_and_synth_sounds() {
+    use vizdaw_ffi::{BuiltinSound, DestRow, MidiMixRow, TrackKindRow};
+    let session = Session::new_empty().unwrap();
+    let seq = session.snapshot().unwrap().sequences[0].id;
+    session.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    session.new_track(seq, TrackKindRow::Midi, None).unwrap();
+    let lanes = session.lanes(seq).unwrap();
+    let row = |id, sound| DestRow {
+        id,
+        name: format!("D{id}"),
+        plugin: None,
+        external: false,
+        return_latency_ms: 0.0,
+        midi_mix: MidiMixRow::default(),
+        channel: None,
+        mpe: None,
+        builtin_sound: sound,
+    };
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot: session.snapshot().unwrap(),
+        selected_seq: Some(seq),
+        lanes: lanes.clone(),
+        markers: vec![],
+        destinations: vec![row(1, Some(BuiltinSound::Drums)), row(2, None)],
+        alert: None,
+    });
+    let l = v["lanes"].as_array().unwrap();
+    assert_eq!(l[0]["audio_out"], json!(lanes[0].audio_out));
+    assert!(l[0]["audio_out"].is_number(), "{}", l[0]);
+    assert_eq!(l[1]["audio_out"], Value::Null);
+    let d = v["destinations"].as_array().unwrap();
+    assert_eq!(d[0]["sound"], json!("drums"));
+    assert_eq!(d[1]["sound"], Value::Null);
 }
 
 /// Plan 5d-1 Task 12 (Ruling 26): `state.get transport` says whether a
@@ -906,7 +953,7 @@ fn layout_result_json() {
 }
 
 /// Plan 7b Ruling 11: `state.get mixer` answers each strip with exactly
-/// the ruling's keys; the demo's synth has no EQ, the instrument kind
+/// the ruling's keys (plus plan 8b's `co_producer`); the demo's synth has no EQ, the instrument kind
 /// colour and no colour of its own.
 #[test]
 fn state_get_mixer_answers_json() {
@@ -939,11 +986,13 @@ fn state_get_mixer_answers_json() {
         "kind_label",
         "kind_colour",
         "colour",
+        "co_producer",
         "gain_db",
         "pan",
         "mute",
         "solo",
         "output",
+        "output_name",
         "automation",
         "eq",
         "inserts",
@@ -963,6 +1012,9 @@ fn state_get_mixer_answers_json() {
     assert_eq!(synth["eq"], Value::Null);
     assert_eq!(synth["colour"], Value::Null);
     assert_eq!(synth["output"], Value::Null);
+    // Plan 8d Ruling 5: where it goes, by name; master goes nowhere.
+    assert_eq!(synth["output_name"], "Master");
+    assert_eq!(strips[1]["output_name"], Value::Null);
     assert_eq!(synth["automation"], "read");
     assert_eq!(synth["gain_db"], 0.0);
     assert_eq!(synth["inserts"], json!([]));
@@ -1014,10 +1066,14 @@ fn state_get_mixer_spells_slots_sends_and_colours() {
         mixer: m,
     });
     let s = &j["strips"][0];
-    assert_eq!(s["eq"], json!({"slot": 9, "name": "Tone", "bypass": true}));
+    // Plan 8d Ruling 5: each slot names its plug-in by reference text.
+    assert_eq!(
+        s["eq"],
+        json!({"slot": 9, "name": "Tone", "plugin": "clap:x", "bypass": true})
+    );
     assert_eq!(
         s["inserts"],
-        json!([{"slot": 10, "name": "Gain", "bypass": false}])
+        json!([{"slot": 10, "name": "Gain", "plugin": "clap:x", "bypass": false}])
     );
     assert_eq!(
         s["sends"],
@@ -1025,6 +1081,8 @@ fn state_get_mixer_spells_slots_sends_and_colours() {
     );
     assert_eq!(s["colour"], "pink");
     assert_eq!(s["output"], 7);
+    // No strip 7 in this snapshot: its ID stands in for the name.
+    assert_eq!(s["output_name"], "Strip 7");
     assert_eq!(j["strips"][1]["kind_colour"], "aux_return");
 }
 
@@ -1253,6 +1311,7 @@ fn document_state_reports_mpe_per_track_and_destination() {
         midi_mix: MidiMixRow::default(),
         channel: Some(0),
         mpe,
+        builtin_sound: None,
     };
     let v = result_json(&ControlResult::Document {
         doc: "D".into(),
@@ -1260,6 +1319,7 @@ fn document_state_reports_mpe_per_track_and_destination() {
         snapshot,
         selected_seq: Some(seq),
         lanes,
+        markers: vec![],
         destinations: vec![dest(4, Some(setting)), dest(5, None)],
         alert: None,
     });

@@ -62,9 +62,29 @@ fn every_command_validates_its_minimal_form() {
             "co_producer.apply",
             json!({"token": "0123456789abcdef0123456789abcdef", "commands": [{"id": "edit.undo"}]}),
         ),
+        ("co_producer.notes", json!({})),
+        ("co_producer.note", json!({"text": "keep the verse dry"})),
+        ("co_producer.export_folder", json!({"what": "stems"})),
+        ("co_producer.export", json!({"what": "dawproject"})),
+        ("co_producer.plugins", json!({})),
+        ("co_producer.params", json!({"slot": 1})),
+        (
+            "co_producer.starter",
+            json!({"spec": {"title": "Demo", "tempo": "120", "meter": "4/4", "tracks": [{"name": "Keys", "kind": "instrument"}]}}),
+        ),
+        ("co_producer.midi_notes", json!({"seq": 1, "lane": 2})),
+        (
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 3840}),
+        ),
+        ("co_producer.metrics", json!({})),
     ];
     assert_eq!(minimal.len(), COMMAND_NAMES.len());
-    assert_eq!(COMMAND_NAMES.len(), 18);
+    assert_eq!(
+        COMMAND_NAMES.len(),
+        28,
+        "plan 8c adds co_producer.export; 8d adds co_producer.plugins and co_producer.params; 8e adds co_producer.starter, co_producer.midi_notes and co_producer.automation; 8f adds co_producer.metrics"
+    );
     for (cmd, params) in minimal {
         assert!(
             validate(&req(cmd, params.clone())).is_ok(),
@@ -543,8 +563,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        186,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take"
+        217,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1149,6 +1169,44 @@ fn record_and_lane_commands_check_their_params() {
     }
 }
 
+/// Release-fixes Task 6: `lane.set_output` takes an output id or null;
+/// hostile values never reach the app.
+#[test]
+fn set_output_checks_its_params() {
+    let run = |params: Value| json!({ "id": "lane.set_output", "params": params });
+    for params in [
+        json!({ "seq": 1, "lane": 2, "output": 3 }),
+        json!({ "seq": 1, "lane": 2, "output": null }),
+        json!({ "output": 3 }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{params}"
+        );
+    }
+    for params in [
+        json!({ "seq": 1, "lane": 2 }),
+        json!({ "seq": 1, "lane": 2, "output": "3" }),
+        json!({ "seq": 1, "lane": 2, "output": true }),
+        json!({ "seq": 1, "lane": 2, "output": -1 }),
+        json!({ "seq": 1, "lane": 2, "output": 1e30 }),
+        json!({ "seq": 1, "lane": 2, "output": "x".repeat(70_000) }),
+        json!({ "seq": 1, "lane": 2, "output": "a\u{0}b" }),
+        json!({ "seq": -1, "lane": 2, "output": 3 }),
+        json!({ "seq": 1, "lane": "2", "output": 3 }),
+        json!({ "seq": 1, "lane": 2, "output": 3, "bus": 1 }),
+    ] {
+        let (code, _) = err("command.run", run(params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}");
+    }
+    let spec = registry::find("lane.set_output").unwrap();
+    assert!(!spec.menu_item && spec.document, "key only, on a document");
+    assert_eq!(spec.class, registry::Class::Change);
+}
+
 /// Plan 5c-2 Task 10: the synth-tracking commands, and `lane.set_input`'s
 /// `return_of`, take their parameters by type and range; hostile values
 /// never reach the app.
@@ -1606,6 +1664,36 @@ fn automation_menu_commands_take_no_params() {
     }
     let s = registry::find("automation.suspend").unwrap();
     assert!(s.menu_item && s.menu == "Automation" && !s.document);
+}
+
+/// Release-fixes Task 4 (Decision 2): `automation.release_all` takes no
+/// parameters; anything given is refused before it reaches the app. A
+/// document command, key-only, with no menu item.
+#[test]
+fn release_all_takes_no_params() {
+    let run = |params: Value| json!({ "id": "automation.release_all", "params": params });
+    assert!(matches!(
+        ok("command.run", run(json!({}))),
+        Command::CommandRun { .. }
+    ));
+    assert!(matches!(
+        ok("command.run", json!({ "id": "automation.release_all" })),
+        Command::CommandRun { .. }
+    ));
+    for params in [
+        json!({ "x": 1 }),
+        json!({ "all": true }),
+        json!({ "all": "\u{0}" }),
+        json!({ "target": "x".repeat(70_000) }),
+        json!({ "strip": 99_999 }),
+    ] {
+        let (code, _) = err("command.run", run(params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}");
+    }
+    let spec = registry::find("automation.release_all").unwrap();
+    assert!(spec.document && !spec.menu_item && spec.params.is_empty());
+    // Plan 8e Task 6b: app-wide, so refused to Co-Producer.
+    assert_eq!(spec.class, registry::Class::Refused);
 }
 
 /// Plan 5f-1 Task 9: the surface commands take their parameters by type
@@ -2124,6 +2212,96 @@ fn crossfade_commands_check_their_params() {
             .title,
         "Crossfade"
     );
+}
+
+/// Plan release-fixes Task 7: `region.set_fade_shape` names its fade and
+/// shape exactly; the region is optional, all three or none.
+#[test]
+fn set_fade_shape_checks_its_params() {
+    let run = |params: Value| json!({ "id": "region.set_fade_shape", "params": params });
+    for good in [
+        json!({ "fade": "in", "shape": "linear" }),
+        json!({ "fade": "out", "shape": "s_curve" }),
+        json!({ "fade": "out", "shape": "equal_power", "seq": 1, "lane": 2, "event": 3 }),
+        json!({ "fade": "in", "shape": "exponential", "seq": 1 }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    let long = "x".repeat(70_000);
+    for bad in [
+        json!({}),
+        json!({ "fade": "in" }),
+        json!({ "shape": "linear" }),
+        json!({ "fade": "middle", "shape": "linear" }),
+        json!({ "fade": "In", "shape": "linear" }),
+        json!({ "fade": "in", "shape": "cubic" }),
+        json!({ "fade": "in", "shape": 3 }),
+        json!({ "fade": 1, "shape": "linear" }),
+        json!({ "fade": "in", "shape": long }),
+        json!({ "fade": "in", "shape": "linear\u{0}" }),
+        json!({ "fade": "in\u{0}", "shape": "linear" }),
+        json!({ "fade": "in", "shape": "linear", "event": -1 }),
+        json!({ "fade": "in", "shape": "linear", "event": "3" }),
+        json!({ "fade": "in", "shape": "linear", "length_ms": "5" }),
+        json!({ "fade": "in", "shape": "linear", "extra": 1 }),
+    ] {
+        let (code, _) = err("command.run", run(bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    let c = COMMANDS
+        .iter()
+        .find(|c| c.id == "region.set_fade_shape")
+        .unwrap();
+    assert!(c.document && c.menu == "Region" && !c.menu_item);
+    assert!(c.dialogs.is_empty(), "never a dialog");
+    assert_eq!(c.class, registry::Class::Change);
+}
+
+/// Plan release-fixes Task 8: `destination.set_sound` names a destination
+/// and one of the Built-in Synth's five sounds exactly.
+#[test]
+fn set_sound_checks_its_params() {
+    let run = |params: Value| json!({ "id": "destination.set_sound", "params": params });
+    for sound in ["piano", "bass", "pad", "lead", "drums"] {
+        let good = json!({ "dest": 7, "sound": sound });
+        assert!(
+            matches!(
+                ok("command.run", run(good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    let long = "x".repeat(70_000);
+    for bad in [
+        json!({}),
+        json!({ "dest": 7 }),
+        json!({ "sound": "drums" }),
+        json!({ "dest": 7, "sound": "kazoo" }),
+        json!({ "dest": 7, "sound": "Drums" }),
+        json!({ "dest": 7, "sound": 3 }),
+        json!({ "dest": "7", "sound": "drums" }),
+        json!({ "dest": -1, "sound": "drums" }),
+        json!({ "dest": 7, "sound": long }),
+        json!({ "dest": 7, "sound": "drums\u{0}" }),
+        json!({ "dest": 7, "sound": "drums", "extra": 1 }),
+    ] {
+        let (code, _) = err("command.run", run(bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    let c = COMMANDS
+        .iter()
+        .find(|c| c.id == "destination.set_sound")
+        .unwrap();
+    assert!(c.document && c.menu == "Destination" && !c.menu_item);
+    assert!(c.dialogs.is_empty(), "never a dialog");
+    assert_eq!(c.class, registry::Class::Change);
 }
 
 /// Plan 5f-4 Ruling 2: `surface.add` takes the Kontrol type.
@@ -3066,4 +3244,287 @@ fn settings_co_producer_and_open_copy_check_their_params() {
     let o = registry::find("file.open_copy").unwrap();
     assert!(o.menu_item && !o.document);
     assert_eq!((o.menu, o.title), ("File", "Open Co-Producer Copy…"));
+}
+
+/// Plan 8b Ruling 9: Make Mine, strip colours and Song Notes.
+#[test]
+fn make_mine_colour_and_song_notes_are_registered() {
+    let spec = |id: &str| registry::find(id).unwrap_or_else(|| panic!("{id}"));
+    let shape = |id: &str| {
+        let s = spec(id);
+        (s.menu, s.title, s.menu_item, s.document, s.shortcut)
+    };
+    assert_eq!(
+        shape("track.make_mine"),
+        ("Track", "Make Mine", true, true, None)
+    );
+    assert_eq!(
+        shape("mixer.make_mine"),
+        ("Mixer", "Make Mine", false, true, None)
+    );
+    assert_eq!(
+        shape("mixer.set_colour"),
+        ("Mixer", "Colour", false, true, None)
+    );
+    assert_eq!(
+        shape("window.song_notes"),
+        ("Window", "Song Notes", true, true, None)
+    );
+    assert!(spec("window.song_notes").params.is_empty());
+    let names = |id: &str| spec(id).params.iter().map(|p| p.name).collect::<Vec<_>>();
+    assert_eq!(names("track.make_mine"), ["seq", "lane"]);
+    assert_eq!(names("mixer.make_mine"), ["strip"]);
+    assert_eq!(names("mixer.set_colour"), ["strip", "colour"]);
+    for id in [
+        "track.make_mine",
+        "mixer.make_mine",
+        "mixer.set_colour",
+        "window.song_notes",
+    ] {
+        assert!(spec(id).dialogs.is_empty(), "{id}");
+    }
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    assert_eq!(
+        ok(
+            "command.run",
+            run("track.make_mine", json!({"seq": 1, "lane": 2}))
+        ),
+        Command::CommandRun {
+            id: "track.make_mine".into(),
+            args: vec![
+                ("seq".into(), ArgValue::Int(1)),
+                ("lane".into(), ArgValue::Int(2)),
+            ],
+            window: None,
+        }
+    );
+    assert_eq!(
+        ok("command.run", run("mixer.make_mine", json!({"strip": 4}))),
+        Command::CommandRun {
+            id: "mixer.make_mine".into(),
+            args: vec![("strip".into(), ArgValue::Int(4))],
+            window: None,
+        }
+    );
+    for colour in [
+        "none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+    ] {
+        assert_eq!(
+            ok(
+                "command.run",
+                run("mixer.set_colour", json!({"strip": 2, "colour": colour}))
+            ),
+            Command::CommandRun {
+                id: "mixer.set_colour".into(),
+                args: vec![
+                    ("strip".into(), ArgValue::Int(2)),
+                    ("colour".into(), ArgValue::Text(colour.into())),
+                ],
+                window: None,
+            }
+        );
+    }
+    assert_eq!(
+        ok("command.run", run("window.song_notes", json!({}))),
+        Command::CommandRun {
+            id: "window.song_notes".into(),
+            args: vec![],
+            window: None,
+        }
+    );
+    let huge = "x".repeat(70_000);
+    for (id, params) in [
+        ("mixer.make_mine", json!({})),
+        ("mixer.make_mine", json!({"strip": 0})),
+        ("mixer.make_mine", json!({"strip": "1"})),
+        ("mixer.make_mine", json!({"strip": 1, "extra": 1})),
+        ("mixer.set_colour", json!({"strip": 1})),
+        ("mixer.set_colour", json!({"colour": "red"})),
+        ("mixer.set_colour", json!({"strip": 1, "colour": "mauve"})),
+        ("mixer.set_colour", json!({"strip": 1, "colour": "Red"})),
+        ("mixer.set_colour", json!({"strip": 1, "colour": huge})),
+        ("mixer.set_colour", json!({"strip": 1, "colour": "red\0"})),
+        ("mixer.set_colour", json!({"strip": -1, "colour": "red"})),
+        ("track.make_mine", json!({"seq": -1})),
+        ("track.make_mine", json!({"lane": "x"})),
+        ("track.make_mine", json!({"name": "x"})),
+        ("window.song_notes", json!({"path": "/tmp/Notes.md"})),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+}
+
+/// Plan 8d Ruling 1: decimals as text, `-?[0-9]{1,6}(\.[0-9]{1,6})?` only.
+#[test]
+fn decimal_parses_only_plain_decimals() {
+    for (text, want) in [
+        ("-6", -6.0),
+        ("-6.5", -6.5),
+        ("0", 0.0),
+        ("12", 12.0),
+        ("-144", -144.0),
+        ("-143.999999", -143.999999),
+        ("000012", 12.0),
+    ] {
+        assert_eq!(registry::decimal(text, -144.0, 12.0), Ok(want), "{text}");
+    }
+    let long = "1".repeat(70_000);
+    for bad in [
+        "13",
+        "-145",
+        "1e3",
+        "NaN",
+        "nan",
+        "inf",
+        "-inf",
+        "+1",
+        "0x10",
+        "1,5",
+        "",
+        " 1",
+        "1 ",
+        "1.",
+        ".5",
+        "-",
+        "--1",
+        "1234567",
+        "1.1234567",
+        "1.2.3",
+        "\u{0}",
+        "1\u{0}",
+        "\u{0661}",
+        long.as_str(),
+    ] {
+        let e = registry::decimal(bad, -144.0, 12.0).unwrap_err();
+        assert!(e.contains("-144") && e.contains("12"), "{bad:?}: {e}");
+    }
+    let e = registry::decimal("2", 0.0, 1.0).unwrap_err();
+    assert!(e.contains("0 to 1"), "{e}");
+}
+
+/// Plan 8e Ruling 1's point list.
+#[test]
+fn point_lists_parse_strictly() {
+    use registry::{LIST_TEXT_MAX, MAX_POINTS, point_list};
+    assert_eq!(
+        point_list("0:-6 3840:0", 0, 3840),
+        Ok(vec![(0, -6.0), (3840, 0.0)])
+    );
+    assert_eq!(point_list("", 0, 3840), Ok(vec![]));
+    assert_eq!(point_list("   ", 0, 3840), Ok(vec![]));
+    // One or more spaces between entries; decimals as `decimal` spells them.
+    assert_eq!(
+        point_list(" 10:0.5   20:-144  30:999999.5 ", 0, 3840),
+        Ok(vec![(10, 0.5), (20, -144.0), (30, 999_999.5)])
+    );
+    assert_eq!(point_list("100:1", 100, 200), Ok(vec![(100, 1.0)]));
+    assert_eq!(point_list("200:1", 100, 200), Ok(vec![(200, 1.0)]));
+    // Ruling 1's sentences.
+    assert_eq!(
+        point_list("0:1 99:2", 100, 200),
+        Err("Point 1 is outside start to end.".to_string())
+    );
+    assert_eq!(
+        point_list("100:1 201:2", 100, 200),
+        Err("Point 2 is outside start to end.".to_string())
+    );
+    assert_eq!(
+        point_list("0:1 10:1 10:2", 0, 3840),
+        Err("Point 3 is not after point 2.".to_string())
+    );
+    assert_eq!(
+        point_list("0:1 20:1 10:2", 0, 3840),
+        Err("Point 3 is not after point 2.".to_string())
+    );
+    for bad in [
+        "0:1e3",
+        "0:NaN",
+        "0:",
+        ":1",
+        "0",
+        "0:1:2",
+        "+0:1",
+        "-1:1",
+        "0:+1",
+        "0:inf",
+        "0:1,5",
+        "0x10:1",
+        "0:1000001",
+        "0:-1000001",
+        "0:\u{0}",
+        "a:1",
+        "1.5:1",
+        "99999999999999999999999:1",
+        "0:1\t10:1",
+        "0:1\n10:1",
+    ] {
+        assert_eq!(
+            point_list(bad, 0, 3840),
+            Err("Point 1 is not tick:value.".to_string()),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        point_list("0:1 1:x", 0, 3840),
+        Err("Point 2 is not tick:value.".to_string())
+    );
+    // At most MAX_POINTS points and LIST_TEXT_MAX bytes.
+    let n = |count: usize| {
+        (0..count)
+            .map(|i| format!("{i}:0"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(MAX_POINTS, 1024);
+    assert_eq!(LIST_TEXT_MAX, 32_768);
+    assert_eq!(point_list(&n(1024), 0, 3840).unwrap().len(), 1024);
+    assert!(point_list(&n(1025), 0, 3840).is_err());
+    let long = format!("0:0{}", " ".repeat(LIST_TEXT_MAX - 2));
+    assert!(point_list(&long, 0, 3840).is_err());
+    assert!(point_list(&long[..LIST_TEXT_MAX], 0, 3840).is_ok());
+}
+
+/// Plan 8f Ruling 1: the time-counting switch takes a required `on` flag;
+/// delete-all takes nothing.
+#[test]
+fn time_settings_check_their_params() {
+    let spec = registry::find(registry::METRICS_SETTING).unwrap();
+    assert_eq!(spec.menu, "Settings");
+    assert_eq!(spec.title, "Count Where My Time Goes");
+    assert!(!spec.menu_item && !spec.document);
+    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
+    assert_eq!(names, ["on"]);
+    assert!(spec.params[0].required);
+    let spec = registry::find(registry::DELETE_TIME_RECORDS).unwrap();
+    assert_eq!(spec.menu, "Settings");
+    assert_eq!(spec.title, "Delete All Time Records");
+    assert!(!spec.menu_item && !spec.document && spec.params.is_empty());
+    let run = |id: &str, params: Value| json!({"id": id, "params": params});
+    for params in [
+        json!({}),
+        json!({"on": "yes"}),
+        json!({"on": 1}),
+        json!({"on": null}),
+        json!({"on": true, "extra": 1}),
+        json!({"on": "x".repeat(70_000)}),
+    ] {
+        let (code, msg) = err(
+            "command.run",
+            run(registry::METRICS_SETTING, params.clone()),
+        );
+        assert_eq!(code, ErrorCode::InvalidParams, "{params}: {msg}");
+    }
+    for on in [true, false] {
+        ok(
+            "command.run",
+            run(registry::METRICS_SETTING, json!({ "on": on })),
+        );
+    }
+    ok("command.run", run(registry::DELETE_TIME_RECORDS, json!({})));
+    let (code, msg) = err(
+        "command.run",
+        run(registry::DELETE_TIME_RECORDS, json!({"all": true})),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams, "{msg}");
 }

@@ -53,9 +53,9 @@ pub struct AudioConfig {
     /// Open input too (spec §6.1: only while a lane is armed or
     /// monitored).
     pub input_enabled: bool,
-    /// The input device by name; `None`: the output device (one duplex
-    /// stream). Another device is joined to the output in a private
-    /// aggregate device.
+    /// The input device: the device's UID, else its name, from older
+    /// settings; `None`: the output device (one duplex stream). Another
+    /// device is joined to the output in a private aggregate device.
     pub input_device: Option<String>,
 }
 

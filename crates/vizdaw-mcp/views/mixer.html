@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The mixer</title>
+</head>
+<body>
+<main id="view"></main>
+<script>
+<!--BRIDGE-->
+</script>
+<script>
+"use strict";
+// The mixer (plan 8d Ruling 5): one column per strip. It is a picture:
+// no controls. Every value is drawn as text.
+(function () {
+  const el = Bridge.el;
+  const str = Bridge.str;
+
+  function num(v, digits) {
+    return typeof v === "number" && isFinite(v) ? v.toFixed(digits) : "?";
+  }
+
+  function level(db) {
+    if (typeof db !== "number" || !isFinite(db)) {
+      return "? dB";
+    }
+    if (db <= -144) {
+      return "−∞ dB";
+    }
+    return (db < -0.05 ? "−" : "") + Math.abs(db).toFixed(1) + " dB";
+  }
+
+  function pan(p) {
+    const n = typeof p === "number" && isFinite(p) ? Math.round(p * 100) : 0;
+    return n === 0 ? "centre" : Math.abs(n) + "% " + (n < 0 ? "left" : "right");
+  }
+
+  function field(card, label, value) {
+    const row = el("div");
+    row.appendChild(el("span", label + " ", "muted"));
+    row.appendChild(el("span", value, "name"));
+    card.appendChild(row);
+  }
+
+  function slots(card, label, list, line) {
+    const rows = Array.isArray(list) ? list : [];
+    if (rows.length === 0) {
+      field(card, label, "none");
+      return;
+    }
+    card.appendChild(el("div", label, "muted"));
+    for (const r of rows) {
+      const i = r && typeof r === "object" ? r : {};
+      card.appendChild(el("div", line(i), "name"));
+    }
+  }
+
+  function strip(s) {
+    const card = el("section", null, "strip");
+    const head = el("h2");
+    head.appendChild(el("span", str(s.name, "?"), "name"));
+    if (s.co_producer === true) {
+      head.appendChild(el("span", "Co-Producer", "tag"));
+    }
+    card.appendChild(head);
+    field(card, "ID", Number.isInteger(s.id) ? s.id : "?");
+    field(card, "Kind", str(s.kind, "?"));
+    field(card, "Volume", level(s.gain_db));
+    field(card, "Pan", pan(s.pan));
+    const flags = [];
+    if (s.mute === true) { flags.push("muted"); }
+    if (s.solo === true) { flags.push("soloed"); }
+    field(card, "State", flags.length ? flags.join(", ") : "on");
+    field(card, "To", str(s.output_name, "the main output"));
+    const eq = s.eq && typeof s.eq === "object" ? s.eq : null;
+    field(card, "EQ", eq ? str(eq.name, "?") + (eq.bypass === true ? " (bypassed)" : "") : "none");
+    slots(card, "Inserts", s.inserts, function (i) {
+      return "slot " + (Number.isInteger(i.slot) ? i.slot : "?") + " " + str(i.name, "?")
+        + (i.bypass === true ? " (bypassed)" : "");
+    });
+    slots(card, "Sends", s.sends, function (x) {
+      return str(x.target_name, "?") + " " + level(x.level_db)
+        + (x.pre_fader === true ? " pre" : "") + (x.enabled === true ? "" : " off");
+    });
+    return card;
+  }
+
+  function render(sc, root) {
+    if (!Array.isArray(sc.strips)) {
+      return false;
+    }
+    root.appendChild(el("h1", "Mixer"));
+    const row = el("div", null, "strips");
+    for (const s of sc.strips) {
+      row.appendChild(strip(s && typeof s === "object" ? s : {}));
+    }
+    if (sc.strips.length === 0) {
+      row.appendChild(el("p", "No strips.", "muted"));
+    }
+    root.appendChild(row);
+    return true;
+  }
+
+  const style = document.createElement("style");
+  style.textContent = [
+    ".strips { display: flex; gap: 8px; overflow-x: auto; align-items: flex-start; }",
+    ".strip { flex: 0 0 150px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }",
+    ".strip h2 { margin: 0 0 4px; color: var(--fg); }",
+  ].join("\n");
+  document.head.appendChild(style);
+
+  Bridge.start("mixer", document.getElementById("view"), render);
+})();
+</script>
+</body>
+</html>

@@ -288,7 +288,7 @@ pub(crate) fn apply(d: &mut Document, pass: &RecordPass, r: &mut Report) -> Resu
 }
 
 /// Checks `w` against the document before anything changes.
-fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
+pub(crate) fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
     d.sequence(w.seq)?;
     if w.lane_name.trim().is_empty() {
         return Err(ModelError::invalid(
@@ -338,7 +338,11 @@ fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
 /// lane's solo it is silent until the solo clears.
 /// Automation inside referenced sequences is left: their lanes cannot
 /// record (spec Ruling 15).
-fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Result<()> {
+pub(crate) fn write_automation(
+    d: &mut Document,
+    w: &AutomationWrite,
+    r: &mut Report,
+) -> Result<()> {
     check_write(d, w)?;
     let is_target =
         |b: &EventBody| matches!(b, EventBody::Automation { target, .. } if *target == w.target);

@@ -19,6 +19,10 @@ public enum ControlOutcome {
     /// final review I2, M4): the app answers with its outcome once it is
     /// there, which may itself be a job.
     case pending(PendingOutcome)
+    /// A Co-Producer apply waits for the composer on VizDAW's own approval
+    /// sheet (plan 8b Ruling 11): the app answers with
+    /// `CoProducerCommands.approvalWait(for: doc)`'s outcome once it is set.
+    case awaitingApproval(doc: UUID)
 }
 
 /// A control call's answer computed off the main actor: `work` runs on a
@@ -37,6 +41,35 @@ public final class PendingOutcome {
         task = Task { @MainActor in
             let r = await detached.value
             self.outcome = then(r)
+        }
+    }
+
+    /// `first`'s answer, once it is there, through `then`.
+    public init(after first: PendingOutcome, then: @escaping @MainActor (ControlOutcome) -> ControlOutcome) {
+        task = Task { @MainActor in
+            await first.settle()
+            self.outcome = first.outcome.map(then)
+        }
+    }
+
+    /// `poll`'s answer, asked on the main actor now and every `every`
+    /// until it gives one; once `wait` is up `poll` is told it expired and
+    /// must answer then. For a job whose answer is built when it ends (plan
+    /// 8c Task 4).
+    public init(
+        every: Duration = .milliseconds(100), wait: Duration,
+        poll: @escaping @MainActor (_ expired: Bool) -> ControlOutcome?
+    ) {
+        task = Task { @MainActor in
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: wait)
+            while true {
+                if let o = poll(clock.now >= deadline) {
+                    self.outcome = o
+                    return
+                }
+                try? await Task.sleep(for: every)
+            }
         }
     }
 
@@ -187,6 +220,12 @@ public protocol ControlHost: AnyObject {
     func closeDocument(_ doc: UUID)
     /// Opens document `doc`'s media pool window (plan 5b).
     func showMediaPool(_ doc: UUID)
+    /// Opens document `doc`'s window, as File › New's opens (plan 8e
+    /// Ruling 5: the one window a Co-Producer call opens, a starter's new
+    /// song). Asked once per document.
+    func showDocument(_ doc: UUID)
+    /// Document `doc`'s window number once it is on screen, else nil.
+    func documentWindow(_ doc: UUID) -> Int64?
     var nudge: NudgeSettings { get }
     /// Settings › Editing's default crossfade in milliseconds (plan 6c
     /// Task 5).
@@ -199,6 +238,9 @@ public protocol ControlHost: AnyObject {
     /// Applies `audio.set`'s change to the app's audio settings (plan
     /// 5d-1 Ruling 26); the core's refusal is thrown.
     func applyAudio(_ change: AudioChange) throws
+    /// The input devices `audio.set`'s `input_device` is looked up in
+    /// (release fixes Task 2; tests give a fake list).
+    func inputDeviceList() -> [InputDeviceRow]
     /// The core's process-wide surfaces, command maps and learn state
     /// (plan 5f-1; tests pass a fake, pre-flight M25).
     var surfaces: any SurfaceCore { get }
@@ -210,6 +252,18 @@ public protocol ControlHost: AnyObject {
     var appearance: AppearancePreferences { get }
     /// Settings › Plug-ins (plan 6g Task 4): `plugins.*` set it.
     var plugins: PluginSettings { get }
+    /// Settings › Co-Producer (plan 8a Ruling 10): `settings.co_producer`
+    /// sets it.
+    var coProducer: CoProducerSettings { get }
+    /// Settings › Co-Producer › Count where my time goes (plan 8f Ruling
+    /// 1): `settings.co_producer_metrics` and `settings.delete_time_records`
+    /// set it; `co_producer.metrics` reads it.
+    var metrics: CoProducerMetrics { get }
+}
+
+extension ControlHost {
+    /// Settings › Audio's list: the core's devices.
+    public func inputDeviceList() -> [InputDeviceRow] { AudioPreferences.inputDeviceList() }
 }
 
 /// Which window's transport fields the P, E and U keys focus (plan 7d
@@ -254,10 +308,24 @@ public enum ControlCommands {
         "file.project_settings", "media.import", "media.convert",
         "media.relink", "media.compact", "media.rename", "window.media_pool",
         "record.set", "record.recover", "lane.set_input", "lane.set_monitor", "midi.inject",
-        // Plan 8a Task 1's two registry ids, handled here only so the
-        // registry and the handlers stay in step; they answer "no handler"
-        // until Task 3 replaces them with their real handlers.
-        "settings.co_producer", "file.open_copy",
+    ]
+    /// Co-Producer's app-wide registry ids: the switch and opening a saved
+    /// copy (plan 8a Ruling 10), the approval answer hook (8b Ruling 11),
+    /// and the time-record switch and delete-all (8f Ruling 1).
+    static let coProducer: Set<String> = [
+        CoProducerCommands.setting, CoProducerCommands.openCopy, CoProducerCommands.answerHook,
+        CoProducerCommands.metricsSetting, CoProducerCommands.deleteTimeRecords,
+    ]
+    /// Plan 8b's strip commands (Rulings 1 and 3): Make Mine of a strip and
+    /// a strip's own colour. `track.make_mine` is `TrackCommands`'s.
+    static let makeMineStrip = "mixer.make_mine"
+    static let setColour = "mixer.set_colour"
+    static let strips: Set<String> = [makeMineStrip, setColour]
+    /// Plan 8c's chore commands (Rulings 2 and 4), each one Session call
+    /// (`runChore`), which reads and checks the arguments again.
+    static let chores: Set<String> = [
+        "modify.quantize_notes", "modify.transpose_notes", "modify.velocity_notes",
+        "marker.add", "marker.rename", "marker.remove",
     ]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
@@ -273,7 +341,8 @@ public enum ControlCommands {
             .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids).union(TakeCommands.ids)
             .union(InputFxCommands.ids)
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
-            .union(MixerCommands.ids)
+            .union(MixerCommands.ids).union(CreativeCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
+            .union([TrackCommands.setOutput]).union([RegionCommands.setFadeShape]).union(chores)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -323,6 +392,11 @@ public enum ControlCommands {
         case _ where SurfaceCommands.ids.contains(id):
             // Process-wide or per document (plan 5f-1 Task 9).
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
+        case CoProducerCommands.answerHook:
+            // Plan 8b Ruling 11's test hook: the target document's sheet.
+            return CoProducerCommands.runAnswerHook(args, doc: doc, store: store, host: host)
+        case _ where coProducer.contains(id):
+            return CoProducerCommands.runAppWide(id, args: args, store: store, host: host)
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }
@@ -448,7 +522,7 @@ public enum ControlCommands {
             if let punch = args.flag("punch") { m.editor.updateLayout { $0.transport.punch = punch } }
             if let n = args.int("count_in") { m.record.countInBars = UInt8(clamping: n) }
             if let n = args.int("pre_roll") { m.record.preRollBars = UInt8(clamping: n) }
-            if let on = args.flag("passes_as_takes") { m.record.passesAsTakes = on }
+            if let on = args.flag("passes_as_takes") { m.record.midiPassesAsTakes = on }
         case "record.recover":
             let found = (try? m.session.recoveredRecordings()) ?? []
             guard !found.isEmpty else { return unavailable("There are no recovered recordings.") }
@@ -511,7 +585,7 @@ public enum ControlCommands {
             return InputFxCommands.run(id, args: args, doc: docID, m)
         case _ where MpeCommands.ids.contains(id):
             return MpeCommands.run(id, args: args, doc: docID, m)
-        case _ where TrackCommands.ids.contains(id):
+        case _ where TrackCommands.ids.contains(id) || id == TrackCommands.setOutput:
             return TrackCommands.run(id, args: args, doc: docID, m)
         case _ where TakeCommands.ids.contains(id):
             return TakeCommands.run(id, args: args, doc: docID, m)
@@ -519,6 +593,14 @@ public enum ControlCommands {
             return AutomationCommands.run(id, args: args, doc: docID, m)
         case _ where MixerCommands.ids.contains(id):
             return MixerCommands.run(id, args: args, docID: docID, m)
+        case _ where CreativeCommands.ids.contains(id):
+            return CreativeCommands.run(id, args: args, docID: docID, m)
+        case _ where strips.contains(id):
+            return runStrip(id, args, docID, m)
+        case _ where chores.contains(id):
+            return runChore(id, args, docID, m)
+        case SongNotes.command:
+            return SongNotes.run(docID, m)
         case AudioCommands.addMidi:
             return AudioCommands.runAddMidi(args, doc: docID, m)
         case RegionCommands.openExternal, RegionCommands.reloadExternal:
@@ -531,6 +613,8 @@ public enum ControlCommands {
             if let f = failure(RegionCommands.normalize(peakDb: peak, m)) { return f }
         case RegionCommands.crossfade, RegionCommands.removeCrossfade:
             return RegionCommands.runChannel(id, args: args, doc: docID, m, defaultMs: host.crossfadeMs)
+        case RegionCommands.setFadeShape:
+            return RegionCommands.runSetFadeShape(args, doc: docID, m)
         case _ where RegionCommands.ids.contains(id):
             if let f = failure(RegionCommands.run(id, m)) { return f }
         case _ where detail[id] != nil:
@@ -546,6 +630,8 @@ public enum ControlCommands {
             }
             list.insert()
         case _ where nudges[id] != nil:
+            // Owner decision 5 (plan release-fixes Task 5).
+            guard !m.selectionHidden else { return unavailable(DocumentModel.hiddenSelection) }
             guard m.transportKeysEnabled, !m.editor.selection.events.isEmpty else {
                 return unavailable("Nudge needs selected events and no text being edited.")
             }
@@ -555,6 +641,7 @@ public enum ControlCommands {
         case _ where panels[id] != nil:
             m.selectModify.open(panels[id] ?? .change)
         case "modify.again":
+            guard !m.selectionHidden else { return unavailable(DocumentModel.hiddenSelection) }
             guard m.selectModify.canModifyAgain else { return unavailable("There is no modification to repeat.") }
             if !m.selectModify.modifyAgain() {
                 return .failed(.of(.failed, m.editor.status ?? "Modify Again was refused."))
@@ -629,6 +716,50 @@ public enum ControlCommands {
     }
 
     static func unavailable(_ message: String) -> ControlOutcome { .failed(.of(.unavailable, message)) }
+
+    /// `mixer.make_mine {strip}` and `mixer.set_colour {strip, colour}`:
+    /// the arguments are checked here; a strip the song lacks is the
+    /// session's refusal, in its words.
+    static func runStrip(_ id: String, _ args: [ControlArg], _ docID: UUID, _ m: DocumentModel) -> ControlOutcome {
+        guard let strip = args.int("strip").flatMap({ UInt64(exactly: $0) }) else {
+            return .failed(.of(.invalidParams, "\(id): `strip` is a strip ID (see state.get mixer)"))
+        }
+        var colour: SwatchRow?
+        if id == setColour {
+            let name = args.text("colour")
+            guard let name, name == "none" || StripPalette.swatch(named: name) != nil else {
+                return .failed(.of(
+                    .invalidParams, "\(id): `colour` is none, red, orange, yellow, green, teal, blue, purple or pink"))
+            }
+            colour = StripPalette.swatch(named: name)
+        }
+        guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+        do {
+            if id == makeMineStrip {
+                m.apply(try m.session.makeMineStrip(strip: strip))
+            } else {
+                m.apply(try m.session.setStripColour(strip: strip, colour: colour))
+            }
+        } catch {
+            return .failed(CoProducerCommands.failure(error))
+        }
+        return .done(ran(id, docID, m))
+    }
+
+    /// A note chore or a marker command (plan 8c Rulings 2 and 4): one
+    /// `runChore` call with the arguments as given, one undo step. A
+    /// refusal is `failed` in the session's words (Busy stays `busy`), and
+    /// raises no alert.
+    static func runChore(_ id: String, _ args: [ControlArg], _ docID: UUID, _ m: DocumentModel) -> ControlOutcome {
+        guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+        do {
+            m.apply(try m.session.runChore(id: id, args: args))
+        } catch {
+            return .failed(CoProducerCommands.failure(error))
+        }
+        m.editor.refreshSelection()
+        return .done(ran(id, docID, m))
+    }
 
     /// A command's outcome as the channel's failure; nil when it ran.
     static func failure(_ o: KeyOutcome) -> ControlOutcome? {
@@ -788,6 +919,7 @@ public enum ControlStates {
             return .document(
                 doc: doc, path: (try? m.session.path()) ?? nil, snapshot: m.snapshot,
                 selectedSeq: m.selectedSeq, lanes: m.lanes,
+                markers: m.selectedSeq.flatMap { try? m.session.sequenceInfo(seq: $0).markers } ?? [],
                 destinations: (try? m.session.destinations()) ?? [],
                 alert: m.alert.map { AlertRow(title: $0.title, message: $0.message) })
         case .editor:

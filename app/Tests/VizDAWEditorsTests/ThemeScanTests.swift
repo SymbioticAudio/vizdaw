@@ -353,6 +353,94 @@ enum SourceScan {
         }
     }
 
+    /// Plan release-fixes Task 9: region names draw on the track swatches,
+    /// so each of the eight carries its legend (WCAG 4.5:1) in every theme.
+    /// Swatch legends are pure black or the white key (owner, 2026-11-17):
+    /// the near-black key ink left Classic Light's orange (4.42) and
+    /// Symbiotic's orange and yellow (4.33, 4.31) short. Tokens unchanged.
+    @Test func everySwatchCarriesALegend() throws {
+        let black = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+        for t in Theme.all {
+            let s = t.swatch
+            let fills: [(String, ThemeColor)] = [
+                ("red", s.red), ("orange", s.orange), ("yellow", s.yellow), ("green", s.green),
+                ("teal", s.teal), ("blue", s.blue), ("purple", s.purple), ("pink", s.pink),
+            ]
+            for (name, fill) in fills {
+                let f = fill.nsColor
+                let ink = t.swatchLegend(on: f)
+                #expect(Theme.contrast(ink, f) >= 4.5, "\(t.id) \(name): \(Theme.contrast(ink, f))")
+                let isBlack = ink.usingColorSpace(.sRGB) == black.usingColorSpace(.sRGB)
+                #expect(isBlack || ink == t.keys.white.nsColor, "\(t.id) \(name): black or the white key")
+            }
+        }
+        #expect(Theme.classicLight.swatchLegend(on: Theme.classicLight.swatch.orange.nsColor).usingColorSpace(.sRGB)
+            == black.usingColorSpace(.sRGB))
+        let drawing = try String(
+            contentsOf: SourceScan.sourcesRoot.appendingPathComponent("VizDAWEditors/RegionDrawing.swift"),
+            encoding: .utf8)
+        #expect(
+            drawing.contains("theme.regionNameInk(fill: bodyFill, under: under ?? theme.canvas)"),
+            "region names take the legend of the fill as drawn")
+        let arrangement = try String(
+            contentsOf: SourceScan.sourcesRoot.appendingPathComponent("VizDAWEditors/ArrangementView.swift"),
+            encoding: .utf8)
+        #expect(arrangement.contains("tint: tint(row), under: under)"), "the arrangement passes its block fill")
+    }
+
+    /// Final review (region names): the fills are translucent, so the ink is
+    /// chosen on the colour drawn, the region body over the events block's
+    /// fill over the canvas (as the arrangement draws it), and over the
+    /// canvas alone. Untinted and every swatch tint, muted or not, reach
+    /// 4.5:1 in every theme.
+    @Test func regionNamesReadOnTheDrawnFill() {
+        for t in Theme.all {
+            let s = t.swatch
+            let tints: [(String, NSColor?)] = [
+                ("untinted", nil), ("red", s.red.nsColor), ("orange", s.orange.nsColor),
+                ("yellow", s.yellow.nsColor), ("green", s.green.nsColor), ("teal", s.teal.nsColor),
+                ("blue", s.blue.nsColor), ("purple", s.purple.nsColor), ("pink", s.pink.nsColor),
+            ]
+            for (name, tint) in tints {
+                for mute in [false, true] {
+                    let base = t.regionFill(tint: tint)
+                    let fill = base.withAlphaComponent(base.alphaComponent * (mute ? 0.4 : 1))
+                    let block = Theme.composite(fill, over: t.canvas)
+                    for (place, under) in [("arrangement", block), ("canvas", t.canvas)] {
+                        let drawn = Theme.composite(fill, over: under)
+                        let ink = t.regionNameInk(fill: fill, under: under)
+                        let c = Theme.contrast(ink, drawn)
+                        #expect(c >= 4.5, "\(t.id) \(name) mute \(mute) \(place): \(c)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Plan release-fixes Task 9 (Decision 8): Console's legends are in the
+    /// technical family (symbiotic-design 0.2.3), and every strip legend
+    /// (a `stripLabel` name or kind) takes the theme's legend family through
+    /// `stripLabelFont`, which is `themedLabelFont`.
+    @Test func consoleLegendsUseTheTechnicalFamily() throws {
+        #expect(Theme.console.style.legendFamily.rawValue == "technical")
+        for t in Theme.all where t.id != "console" { #expect(t.style.legendFamily.rawValue == "system", "\(t.id)") }
+        var legends = 0
+        for file in ["VizDAW/ChannelStrip.swift", "VizDAW/MidiStripCells.swift"] {
+            let url = SourceScan.sourcesRoot.appendingPathComponent(file)
+            let lines = try String(contentsOf: url, encoding: .utf8).components(separatedBy: "\n")
+            for (i, line) in lines.enumerated() where line.contains("theme.stripLabel(") {
+                legends += 1
+                // The font is on the same line (a menu face) or the next (a Text).
+                let font = line + (i + 1 < lines.count ? lines[i + 1] : "")
+                #expect(font.contains("theme.stripLabelFont("), "\(file):\(i + 1): \(line)")
+            }
+        }
+        #expect(legends == 5)
+        let strip = try String(
+            contentsOf: SourceScan.sourcesRoot.appendingPathComponent("VizDAW/ChannelStrip.swift"), encoding: .utf8)
+        #expect(strip.contains("themedLabelFont(self, size: type.size"))
+    }
+
     /// B5 review M4 and M5: offline text and icons on the window (4.5:1),
     /// the key recorder's ring on the window and a tool overlay on the
     /// canvas (3:1, non-text), in every theme.

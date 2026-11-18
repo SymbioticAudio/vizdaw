@@ -110,6 +110,123 @@ fn replies_round_trip() {
     assert_eq!(read_request(req.as_bytes()).unwrap().cmd, "app.quit");
 }
 
+/// Plan 8b Ruling 9: each new Co-Producer command, and `begin` with
+/// `asked`, goes over the wire and back to the same command.
+#[test]
+fn co_producer_notes_calls_round_trip() {
+    use core_control::params::WindowRef;
+    use core_control::request::ExportWhat;
+    use core_control::{Command, validate};
+    let parse = |cmd: &str, params: Value| {
+        let line = request_line(&RequestId::Num(9), cmd, &params);
+        let raw = read_request(line.as_bytes()).unwrap();
+        assert_eq!(raw.cmd, cmd);
+        validate(&raw).unwrap()
+    };
+    assert_eq!(
+        parse("co_producer.notes", json!({"window": 3})),
+        Command::CoProducerNotes {
+            window: Some(WindowRef::Number(3))
+        }
+    );
+    assert_eq!(
+        parse("co_producer.note", json!({"text": "dry verse\nwet chorus"})),
+        Command::CoProducerNote {
+            text: "dry verse\nwet chorus".into(),
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.export_folder",
+            json!({"what": "other_daw", "parent": "/Users/x/Exports", "window": "main"})
+        ),
+        Command::CoProducerExportFolder {
+            what: ExportWhat::OtherDaw,
+            parent: Some("/Users/x/Exports".into()),
+            window: Some(WindowRef::Main)
+        }
+    );
+    assert_eq!(
+        parse("co_producer.export_folder", json!({"what": "aaf"})),
+        Command::CoProducerExportFolder {
+            what: ExportWhat::Aaf,
+            parent: None,
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.export",
+            json!({"what": "stems", "parent": "/Users/x/Exports", "strips": "2,3"})
+        ),
+        Command::CoProducerExport {
+            what: ExportWhat::Stems,
+            parent: Some("/Users/x/Exports".into()),
+            strips: Some(vec![2, 3]),
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.export",
+            json!({"what": "dawproject", "window": 4})
+        ),
+        Command::CoProducerExport {
+            what: ExportWhat::Dawproject,
+            parent: None,
+            strips: None,
+            window: Some(WindowRef::Number(4))
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.begin",
+            json!({"name": "Set Up a Drum Bus", "asked": "put my drums on a bus\nwith some parallel compression"})
+        ),
+        Command::CoProducerBegin {
+            name: "Set Up a Drum Bus".into(),
+            asked: Some("put my drums on a bus with some parallel compression".into()),
+            window: None
+        }
+    );
+    assert_eq!(
+        parse("co_producer.begin", json!({"name": "x"})),
+        Command::CoProducerBegin {
+            name: "x".into(),
+            asked: None,
+            window: None
+        }
+    );
+}
+
+/// Plan 8b Task 6: `co_producer.apply`'s `client` label goes over the
+/// wire and back, trimmed; without it there is none.
+#[test]
+fn co_producer_apply_carries_its_client() {
+    use core_control::{Command, validate};
+    let parse = |params: Value| {
+        let line = request_line(&RequestId::Num(9), "co_producer.apply", &params);
+        validate(&read_request(line.as_bytes()).unwrap()).unwrap()
+    };
+    let token = "0123456789abcdef0123456789abcdef";
+    match parse(
+        json!({"token": token, "commands": [{"id": "edit.undo"}], "client": " Helper Chat"}),
+    ) {
+        Command::CoProducerApply {
+            token: t, client, ..
+        } => {
+            assert_eq!(t, token);
+            assert_eq!(client.as_deref(), Some("Helper Chat"));
+        }
+        other => panic!("{other:?}"),
+    }
+    match parse(json!({"token": token, "commands": [{"id": "edit.undo"}], "client": "   "})) {
+        Command::CoProducerApply { client, .. } => assert_eq!(client, None),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn every_error_code_has_a_distinct_wire_name() {
     let names: std::collections::BTreeSet<_> = ErrorCode::ALL.iter().map(|c| c.as_str()).collect();
@@ -290,4 +407,152 @@ mod fuzz {
             }
         }
     }
+}
+
+/// Plan 8d Ruling 5: the plug-in reads go over the wire and back.
+#[test]
+fn co_producer_plugin_calls_round_trip() {
+    use core_control::params::WindowRef;
+    use core_control::request::PluginKindArg;
+    use core_control::{Command, validate};
+    let parse = |cmd: &str, params: Value| {
+        let line = request_line(&RequestId::Num(9), cmd, &params);
+        let raw = read_request(line.as_bytes()).unwrap();
+        assert_eq!(raw.cmd, cmd);
+        validate(&raw).unwrap()
+    };
+    assert_eq!(
+        parse("co_producer.params", json!({"slot": 7})),
+        Command::CoProducerParams {
+            slot: 7,
+            window: None
+        }
+    );
+    assert_eq!(
+        parse("co_producer.params", json!({"slot": 7, "window": "main"})),
+        Command::CoProducerParams {
+            slot: 7,
+            window: Some(WindowRef::Main)
+        }
+    );
+    assert_eq!(
+        parse("co_producer.plugins", json!({"kind": "effect"})),
+        Command::CoProducerPlugins {
+            kind: Some(PluginKindArg::Effect)
+        }
+    );
+    assert_eq!(
+        parse("co_producer.plugins", json!({"kind": "instrument"})),
+        Command::CoProducerPlugins {
+            kind: Some(PluginKindArg::Instrument)
+        }
+    );
+    assert_eq!(
+        parse("co_producer.plugins", json!({})),
+        Command::CoProducerPlugins { kind: None }
+    );
+}
+
+/// Plan 8e: the starter and the two reads go over the wire and back.
+#[test]
+fn co_producer_creative_calls_round_trip() {
+    use core_control::params::WindowRef;
+    use core_control::{Command, validate};
+    let parse = |cmd: &str, params: Value| {
+        let line = request_line(&RequestId::Num(9), cmd, &params);
+        let raw = read_request(line.as_bytes()).unwrap();
+        assert_eq!(raw.cmd, cmd);
+        validate(&raw).unwrap()
+    };
+    assert_eq!(
+        parse(
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "start": 0, "end": 61440})
+        ),
+        Command::CoProducerMidiNotes {
+            seq: 1,
+            lane: 2,
+            range: Some((0, 61440)),
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.midi_notes",
+            json!({"seq": 1, "lane": 2, "window": "main"})
+        ),
+        Command::CoProducerMidiNotes {
+            seq: 1,
+            lane: 2,
+            range: None,
+            window: Some(WindowRef::Main)
+        }
+    );
+    assert_eq!(
+        parse(
+            "co_producer.automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 61440})
+        ),
+        Command::CoProducerAutomation {
+            seq: 1,
+            target: "fader:3".into(),
+            start: 0,
+            end: 61440,
+            window: None
+        }
+    );
+    let spec = json!({
+        "title": "Synthwave",
+        "tempo": "118",
+        "meter": "4/4",
+        "markers": [
+            {"bar": 1, "name": "Intro"},
+            {"bar": 9, "name": "Verse"},
+            {"bar": 17, "name": "Chorus"},
+            {"bar": 33, "name": "Bridge"},
+            {"bar": 41, "name": "Outro"}
+        ],
+        "buses": [
+            {"name": "Reverb", "effects": ["clap:vizdaw.test.gain"]},
+            {"name": "Delay", "output": "Reverb"}
+        ],
+        "tracks": [
+            {"name": "Drums", "kind": "instrument"},
+            {"name": "Bass", "kind": "instrument"},
+            {"name": "Pad", "kind": "instrument", "sends": [{"bus": "Reverb", "level_db": "-12"}]},
+            {"name": "Lead", "kind": "instrument"},
+            {"name": "Arp", "kind": "instrument"}
+        ]
+    });
+    assert_eq!(
+        parse("co_producer.starter", json!({ "spec": spec })),
+        Command::CoProducerStarter { spec }
+    );
+}
+
+/// Plan 8f Ruling 6: the time-record read goes over the wire and back.
+#[test]
+fn co_producer_metrics_round_trips() {
+    use core_control::params::WindowRef;
+    use core_control::{Command, validate};
+    let parse = |params: Value| {
+        let line = request_line(&RequestId::Num(9), "co_producer.metrics", &params);
+        let raw = read_request(line.as_bytes()).unwrap();
+        assert_eq!(raw.cmd, "co_producer.metrics");
+        validate(&raw).unwrap()
+    };
+    assert_eq!(
+        parse(json!({})),
+        Command::CoProducerMetrics {
+            days: None,
+            window: None
+        }
+    );
+    assert_eq!(
+        parse(json!({"days": 30, "window": 2})),
+        Command::CoProducerMetrics {
+            days: Some(30),
+            window: Some(WindowRef::Number(2))
+        }
+    );
 }

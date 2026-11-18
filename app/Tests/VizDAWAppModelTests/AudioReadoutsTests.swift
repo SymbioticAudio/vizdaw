@@ -38,14 +38,37 @@ import VizDAWCore
     }
 
     @Test func theDevicePickerKeepsADisconnectedChoice() {
-        AudioPreferences.inputDevices = { ["Studio In", "Mic"] }
-        defer { AudioPreferences.inputDevices = { audioInputDevices() } }
+        AudioPreferences.inputDeviceList = {
+            [InputDeviceRow(name: "Studio In", uid: "s1"), InputDeviceRow(name: "Mic", uid: "m1")]
+        }
+        defer { AudioPreferences.inputDeviceList = { audioInputDeviceList() } }
         let p = AudioPreferences(defaults: MemoryDefaults(), sink: FakeAudioSink())
         #expect(p.inputDeviceChoices().map(\.title) == ["Same as output", "Studio In", "Mic"])
-        p.setInputDevice("Gone")
+        p.setInputDevice(uid: nil, name: "Gone")
         let c = p.inputDeviceChoices()
         #expect(c.map(\.title) == ["Same as output", "Studio In", "Mic", "Gone (not connected)"])
         #expect(c.last?.name == "Gone" && c.first?.name == nil)
+    }
+
+    /// Release fixes Task 2: two devices with one name are two choices,
+    /// kept apart by UID; a saved device that is gone is still offered.
+    @Test func twoDevicesWithOneNameAreKeptApart() {
+        AudioPreferences.inputDeviceList = {
+            [InputDeviceRow(name: "A", uid: "u1"), InputDeviceRow(name: "A", uid: "u2")]
+        }
+        defer { AudioPreferences.inputDeviceList = { audioInputDeviceList() } }
+        let p = AudioPreferences(defaults: MemoryDefaults(), sink: FakeAudioSink())
+        let c = p.inputDeviceChoices().dropFirst()
+        #expect(c.map(\.title) == ["A", "A (2)"])
+        #expect(c.map(\.uid) == ["u1", "u2"])
+        #expect(c.map(\.name) == ["A", "A"])
+        p.setInputDevice(uid: "u9", name: "Old")
+        let gone = p.inputDeviceChoices()
+        #expect(gone.map(\.title) == ["Same as output", "A", "A (2)", "Old (not connected)"])
+        #expect(gone.last?.uid == "u9" && gone.last?.name == "Old")
+        // A listed UID is not "not connected", whatever name was saved.
+        p.setInputDevice(uid: "u2", name: "Renamed")
+        #expect(p.inputDeviceChoices().map(\.title) == ["Same as output", "A", "A (2)"])
     }
 
     @Test func trimAndDeviceReadouts() throws {

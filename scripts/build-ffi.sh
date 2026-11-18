@@ -16,7 +16,7 @@ if [[ "${1:-}" == "--debug" ]]; then
     flag=
 fi
 
-cargo build -p core-ffi -p vizdaw-scan $flag
+cargo build -p core-ffi -p vizdaw-scan -p vizdaw-mcp $flag
 lib="target/$profile/libvizdaw_ffi"
 gen="target/ffi/gen"
 rm -rf "$gen"
@@ -26,6 +26,8 @@ cargo run -q -p uniffi-bindgen -- generate --library "$lib.dylib" \
 cp "$lib.a" target/ffi/libvizdaw_ffi.a
 # The plugin scanner the app runs (one process per plugin, spec §8).
 cp "target/$profile/vizdaw-scan" target/ffi/vizdaw-scan
+# The Co-Producer's stdio MCP server, bundled beside the app (plan 8a).
+cp "target/$profile/vizdaw-mcp" target/ffi/vizdaw-mcp
 
 for f in vizdaw_ffi.swift vizdaw_ffiFFI.h vizdaw_ffiFFI.modulemap; do
     if [[ ! -f "$gen/$f" ]]; then

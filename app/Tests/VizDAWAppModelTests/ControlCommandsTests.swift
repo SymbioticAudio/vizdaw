@@ -20,6 +20,23 @@ final class FakeControlHost: ControlHost {
     let plugins = PluginSettings(
         defaults: MemoryDefaults(), sink: FakePluginSettingsSink(),
         installDestination: FileManager.default.temporaryDirectory.path)
+    /// Settings › Co-Producer (plan 8a Task 7), through a sink that opens
+    /// no socket and writes no file.
+    let coProducer = CoProducerSettings(
+        defaults: MemoryDefaults(), supportDir: URL(fileURLWithPath: "/tmp/vizdaw-fake-host-support"),
+        sink: FakeCoProducerSink())
+    /// Settings › Co-Producer › Count where my time goes (plan 8f Task 3):
+    /// a fake recorder in a temp support folder of this host's own, made
+    /// on first use. `metricsPrivateProblem` is what `makePrivate` answers.
+    let metricsRecorder = FakeMetricsRecorder()
+    let metricsPrivateProblem = Box<String?>(nil)
+    lazy var metrics: CoProducerMetrics = {
+        let dir = (try? metricsSupportDir()) ?? FileManager.default.temporaryDirectory
+        return CoProducerMetrics(
+            defaults: MemoryDefaults(), supportDir: dir, environment: [:],
+            makePrivate: { [problem = metricsPrivateProblem] _ in problem.value },
+            open: { [recorder = metricsRecorder] _, _, _ in recorder })
+    }()
     /// Whether `focus` finds the fields.
     var fieldsShown = true
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {
@@ -31,6 +48,15 @@ final class FakeControlHost: ControlHost {
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { calls.append("tear \(kind.rawValue)") }
     func closeDocument(_ doc: UUID) { calls.append("close") }
     func showMediaPool(_ doc: UUID) { calls.append("media pool") }
+    /// The documents whose window `showDocument` opened (plan 8e Task 5),
+    /// and whether their windows come up.
+    var shownDocuments: [UUID] = []
+    var windowsAppear = true
+    static let windowNumber: Int64 = 4242
+    func showDocument(_ doc: UUID) { shownDocuments.append(doc) }
+    func documentWindow(_ doc: UUID) -> Int64? {
+        windowsAppear && shownDocuments.contains(doc) ? Self.windowNumber : nil
+    }
     /// What `audio.set` applied (plan 5d-1 Task 12), and its refusal.
     var audio: [AudioChange] = []
     var audioError: VizError?
@@ -38,6 +64,9 @@ final class FakeControlHost: ControlHost {
         if let e = audioError { throw e }
         audio.append(change)
     }
+    /// The input devices `audio.set` resolves `input_device` against.
+    var inputDevices: [InputDeviceRow] = []
+    func inputDeviceList() -> [InputDeviceRow] { inputDevices }
 }
 
 @MainActor
@@ -577,5 +606,106 @@ final class FakeControlHost: ControlHost {
         #expect(u.region?.mediaFrames == 0)
         #expect(u.region?.sampleRate == 0)
         #expect(u.region?.offline == true)
+    }
+
+    /// Plan 8b Task 5: Make Mine of a track and of a strip, and a strip's
+    /// colour, over the channel.
+    @Test func makeMineAndColourHandlers() throws {
+        let (s, id, m, f) = try demo()
+        f.mixerSnap = MixerSnapshot(
+            version: f.snap.version, strips: [stripRow(4, "Drums (Co-Producer)"), stripRow(0, "Master", kind: .master)],
+            buses: [])
+        func int(_ n: String, _ v: Int64) -> ControlArg { ControlArg(name: n, value: .int(value: v)) }
+        func text(_ n: String, _ v: String) -> ControlArg { ControlArg(name: n, value: .text(value: v)) }
+        let track = run(TrackCommands.makeMine, [int("seq", 3), int("lane", 31)], s, id)
+        #expect(failure(track) == nil, "\(track)")
+        #expect(f.calls.last == "makeMineTrack 3 31")
+        let strip = run("mixer.make_mine", [int("strip", 4)], s, id)
+        #expect(failure(strip) == nil, "\(strip)")
+        #expect(f.calls.last == "makeMineStrip 4")
+        let none = run("mixer.set_colour", [int("strip", 4), text("colour", "none")], s, id)
+        #expect(failure(none) == nil, "\(none)")
+        #expect(f.calls.last == "setStripColour 4 none")
+        let blue = run("mixer.set_colour", [int("strip", 4), text("colour", "blue")], s, id)
+        #expect(failure(blue) == nil, "\(blue)")
+        #expect(f.calls.last == "setStripColour 4 blue")
+        #expect(m.alert == nil)
+
+        // A missing strip is the session's refusal, in its words.
+        let missing = run("mixer.make_mine", [int("strip", 99)], s, id)
+        #expect(failure(missing)?.code == .failed)
+        #expect(failure(missing)?.message == "unknown id strip99")
+        #expect(m.alert == nil)
+        // A missing track is the track wording's refusal.
+        #expect(failure(run(TrackCommands.makeMine, [int("seq", 3), int("lane", 99)], s, id))?.code == .failed)
+
+        // Hostile input never reaches the session.
+        let before = f.calls
+        for args in [
+            [ControlArg](), [text("strip", "4")], [int("strip", -1)], [int("strip", 4), int("colour", 3)],
+            [int("strip", 4), text("colour", "beige")], [int("strip", 4), text("colour", String(repeating: "a", count: 70_000))],
+            [int("strip", 4), text("colour", "blue\u{0}")], [int("strip", 4)],
+        ] {
+            let o = run("mixer.set_colour", args, s, id)
+            #expect(failure(o)?.code == .invalidParams, "\(args)")
+        }
+        for args in [[ControlArg](), [text("strip", "4")], [int("strip", -1)]] {
+            #expect(failure(run("mixer.make_mine", args, s, id))?.code == .invalidParams, "\(args)")
+        }
+        #expect(failure(run(TrackCommands.makeMine, [int("seq", 3), text("lane", "x")], s, id))?.code == .invalidParams)
+        #expect(f.calls == before)
+        // No document.
+        #expect(failure(run("mixer.make_mine", [int("strip", 4)], s, nil))?.code == .noDocument)
+    }
+
+    /// Plan 8c Task 4: each of the six chores is one `runChore` call, with
+    /// its ID and its arguments as given; the core checks them again.
+    @Test func choresRunThroughOneCall() throws {
+        let (s, id, m, f) = try demo()
+        let args = [
+            ControlArg(name: "seq", value: .int(value: 1)), ControlArg(name: "lanes", value: .text(value: "1,2")),
+            ControlArg(name: "semitones", value: .int(value: -3)),
+            ControlArg(name: "name", value: .text(value: "Verse \u{0}")),
+        ]
+        for chore in [
+            "modify.quantize_notes", "modify.transpose_notes", "modify.velocity_notes",
+            "marker.add", "marker.rename", "marker.remove",
+        ] {
+            f.chores = []
+            f.snap.undoLabel = "Undo \(chore)"
+            let o = run(chore, args, s, id)
+            #expect(failure(o) == nil, "\(chore)")
+            #expect(f.chores.map(\.id) == [chore])
+            #expect(f.chores.first?.args == args, "\(chore)")
+            guard case .done(.ran(let command, let doc, _, let undo, _)) = o else {
+                Issue.record("\(chore) did not run: \(o)")
+                continue
+            }
+            #expect(command == chore)
+            #expect(doc == id.uuidString)
+            // The document took the session's answer.
+            #expect(undo == "Undo \(chore)")
+            #expect(m.snapshot.undoLabel == "Undo \(chore)")
+        }
+        // No document: no call.
+        f.chores = []
+        #expect(failure(run("marker.add", args, s, nil))?.code == .noDocument)
+        #expect(f.chores.isEmpty)
+    }
+
+    /// A refused chore is the call's failure, in the session's own words.
+    @Test func aRefusedChoreIsFailed() throws {
+        let (s, id, m, f) = try demo()
+        f.snap.undoLabel = "before"
+        m.apply(try f.snapshot())
+        f.choreError = .Model(message: "Track 4 has no notes there.")
+        let o = run("modify.transpose_notes", [ControlArg(name: "seq", value: .int(value: 1))], s, id)
+        #expect(failure(o)?.code == .failed)
+        #expect(failure(o)?.message == "Track 4 has no notes there.")
+        #expect(f.chores.isEmpty)
+        #expect(m.alert == nil)
+        // Busy stays busy.
+        f.choreError = .Busy(message: "Finish the drag first.")
+        #expect(failure(run("marker.remove", [], s, id))?.code == .busy)
     }
 }

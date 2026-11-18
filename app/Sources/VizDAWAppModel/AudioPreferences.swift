@@ -9,8 +9,13 @@ import VizDAWCore
 public struct AudioSettings: Codable, Equatable, Sendable {
     public var softwareMonitoring = true
     public var bufferFrames: UInt32 = 128
-    /// The input device by name; nil: "Same as output".
+    /// The input device's name; nil: "Same as output". Kept beside the
+    /// UID for the picker's "(not connected)" title, and alone in settings
+    /// saved before devices were kept by UID.
     public var inputDevice: String?
+    /// The input device's UID (release fixes Task 2): what the core gets
+    /// when set, so two devices with one name are kept apart.
+    public var inputDeviceUID: String?
     public var latencyTrim: Int32 = 0
     public var cacheMb: UInt32 = 512
     public var readAheadSeconds: UInt32 = 3
@@ -18,15 +23,18 @@ public struct AudioSettings: Codable, Equatable, Sendable {
     public var defaultMonitor = "auto"
     public var countInBars: UInt8 = 0
     public var preRollBars: UInt8 = 0
-    public var passesAsTakes = true
+    /// Loop recording: each MIDI pass becomes a take (plan 5c-2 takes
+    /// Ruling 1). Stored under `midiPassesAsTakes`; the old
+    /// `passesAsTakes` key is not read, so the new default holds.
+    public var midiPassesAsTakes = false
     /// The bounce's longest tail in seconds, 0–30 (plan 5f-2 Ruling 4).
     public var bounceTailSeconds: UInt32 = 10
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case softwareMonitoring, bufferFrames, inputDevice, latencyTrim, cacheMb, readAheadSeconds
-        case defaultMonitor, countInBars, preRollBars, passesAsTakes, bounceTailSeconds
+        case softwareMonitoring, bufferFrames, inputDevice, inputDeviceUID, latencyTrim, cacheMb, readAheadSeconds
+        case defaultMonitor, countInBars, preRollBars, midiPassesAsTakes, bounceTailSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -36,6 +44,8 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         let b: UInt32 = c.field(.bufferFrames, d.bufferFrames)
         bufferFrames = Self.bufferSizes.contains(b) ? b : d.bufferFrames
         inputDevice = c.field(.inputDevice, d.inputDevice)
+        let uid: String? = c.field(.inputDeviceUID, d.inputDeviceUID)
+        inputDeviceUID = uid?.isEmpty == false ? uid : nil
         let t: Int32 = c.field(.latencyTrim, d.latencyTrim)
         latencyTrim = Int64(t).magnitude <= UInt64(Self.maxTrim) ? t : 0
         let mb: UInt32 = c.field(.cacheMb, d.cacheMb)
@@ -46,7 +56,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         defaultMonitor = AudioSettings.monitors.contains(m) ? m : d.defaultMonitor
         countInBars = min(c.field(.countInBars, d.countInBars), 4)
         preRollBars = min(c.field(.preRollBars, d.preRollBars), 8)
-        passesAsTakes = c.field(.passesAsTakes, d.passesAsTakes)
+        midiPassesAsTakes = c.field(.midiPassesAsTakes, d.midiPassesAsTakes)
         let tail: UInt32 = c.field(.bounceTailSeconds, d.bounceTailSeconds)
         bounceTailSeconds = tail <= 30 ? tail : d.bounceTailSeconds
     }
@@ -74,6 +84,7 @@ public protocol AudioSink: AnyObject {
     func softwareMonitoring(_ on: Bool)
     /// `Busy` while recording.
     func bufferFrames(_ frames: UInt32) throws
+    /// The input device's UID, else its name; nil: "Same as output".
     func inputDevice(_ name: String?)
     func latencyTrim(_ frames: Int32)
     func stream(cacheMb: UInt32, readAheadSeconds: UInt32) throws
@@ -111,7 +122,7 @@ public final class AudioPreferences {
     public func applyAll() {
         let s = settings
         sink.softwareMonitoring(s.softwareMonitoring)
-        sink.inputDevice(s.inputDevice)
+        sink.inputDevice(s.inputDeviceUID ?? s.inputDevice)
         sink.latencyTrim(s.latencyTrim)
         sink.defaultMonitor(s.monitorRow)
         sink.bounceTail(ms: s.bounceTailSeconds * 1000)
@@ -143,8 +154,11 @@ public final class AudioPreferences {
             s.softwareMonitoring = on
         }
         if let d = c.inputDevice {
-            sink.inputDevice(d)
+            // A new name without a UID drops the old device's UID.
+            let uid = d == nil ? nil : c.inputDeviceUID
+            sink.inputDevice(uid ?? d)
             s.inputDevice = d
+            s.inputDeviceUID = uid
         }
         if let t = c.latencyTrim {
             sink.latencyTrim(t)
@@ -165,7 +179,10 @@ public final class AudioPreferences {
 
     public func setSoftwareMonitoring(_ on: Bool) { change(AudioChange(softwareMonitoring: on)) }
     public func setBufferFrames(_ frames: UInt32) { change(AudioChange(bufferFrames: frames)) }
-    public func setInputDevice(_ name: String?) { change(AudioChange(inputDevice: .some(name))) }
+    /// The device with `uid` and `name` (nil, nil: "Same as output").
+    public func setInputDevice(uid: String?, name: String?) {
+        change(AudioChange(inputDevice: .some(name), inputDeviceUID: uid))
+    }
     public func setLatencyTrim(_ frames: Int32) {
         let t = max(-AudioSettings.maxTrim, min(AudioSettings.maxTrim, Int64(frames)))
         change(AudioChange(latencyTrim: Int32(clamping: t)))
@@ -203,11 +220,11 @@ public final class AudioPreferences {
     }
 
     /// Settings › Recording's defaults for new documents' record options.
-    public func setRecordDefaults(countIn: UInt8, preRoll: UInt8, passesAsTakes: Bool) {
+    public func setRecordDefaults(countIn: UInt8, preRoll: UInt8, midiPassesAsTakes: Bool) {
         var s = settings
         s.countInBars = min(countIn, 4)
         s.preRollBars = min(preRoll, 8)
-        s.passesAsTakes = passesAsTakes
+        s.midiPassesAsTakes = midiPassesAsTakes
         save(s)
         RecordModel.defaults = RecordDefaults(s)
     }
@@ -218,13 +235,13 @@ public final class AudioPreferences {
 public struct RecordDefaults: Equatable, Sendable {
     public var countInBars: UInt8 = 0
     public var preRollBars: UInt8 = 0
-    public var passesAsTakes = true
+    public var midiPassesAsTakes = false
 
     public init() {}
 
     public init(_ s: AudioSettings) {
         countInBars = s.countInBars
         preRollBars = s.preRollBars
-        passesAsTakes = s.passesAsTakes
+        midiPassesAsTakes = s.midiPassesAsTakes
     }
 }

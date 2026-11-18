@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Co-Producer's change</title>
+</head>
+<body>
+<main id="view" aria-live="polite"></main>
+<script>
+<!--BRIDGE-->
+</script>
+<script>
+"use strict";
+// The change preview (plan 8c Ruling 7). It shows the list and the state
+// of the question, and has no button: the yes comes from the composer,
+// through the host's question or in the chat, never from this view.
+(function () {
+  const STATES = {
+    ask_in_chat: "Say yes in the chat to apply these changes, or no to leave everything as it is.",
+    applied: "Applied with your yes.",
+    said_no: "You said no. Nothing changed.",
+    applied_without_asking: "Applied: only Co-Producer's own things.",
+  };
+  const el = Bridge.el;
+  const str = Bridge.str;
+
+  function render(sc, root) {
+    if (typeof sc.state !== "string" || !Object.prototype.hasOwnProperty.call(STATES, sc.state)
+      || !Array.isArray(sc.items)) {
+      return false;
+    }
+    root.appendChild(el("h1", "Co-Producer's change"));
+    const table = el("table");
+    const head = el("tr");
+    for (const h of ["Thing", "Change", "Your work"]) {
+      head.appendChild(el("th", h));
+    }
+    table.appendChild(el("thead")).appendChild(head);
+    const body = table.appendChild(el("tbody"));
+    for (const item of sc.items) {
+      const i = item && typeof item === "object" ? item : {};
+      const row = el("tr");
+      row.appendChild(el("td", str(i.thing, "?"), "name"));
+      row.appendChild(el("td", str(i.change, "?"), "name"));
+      row.appendChild(el("td", i.composers_work === true ? "Yes" : "No"));
+      body.appendChild(row);
+    }
+    root.appendChild(table);
+    const state = el("p", null, "state");
+    state.setAttribute("role", "status");
+    state.textContent = STATES[sc.state];
+    root.appendChild(state);
+    if (typeof sc.undo_label === "string" && sc.state !== "said_no" && sc.state !== "ask_in_chat") {
+      root.appendChild(el("p", "Undo step: " + sc.undo_label, "muted"));
+    }
+    return true;
+  }
+
+  Bridge.start("change", document.getElementById("view"), render);
+})();
+</script>
+</body>
+</html>

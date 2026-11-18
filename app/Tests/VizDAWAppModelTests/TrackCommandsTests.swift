@@ -67,7 +67,28 @@ import VizDAWCore
         }
         let (full, _) = try demo()
         selectTrack(full, 31)
-        for id in TrackCommands.ids.sorted() { #expect(TrackCommands.enabled(id, full), "\(id)") }
+        for id in TrackCommands.ids.subtracting([TrackCommands.makeMine]).sorted() {
+            #expect(TrackCommands.enabled(id, full), "\(id)")
+        }
+    }
+
+    /// Plan 8b Ruling 1: Make Mine is enabled only for a Co-Producer track,
+    /// and acts on the selection's first track, or the header's.
+    @Test func makeMineNeedsACoProducerTrack() throws {
+        let (plain, _) = try demo()
+        selectTrack(plain, 31)
+        #expect(!TrackCommands.enabled(TrackCommands.makeMine, plain))
+        let f = editorFake()
+        let i = try #require(f.laneTable[3]?.firstIndex { $0.id == 31 })
+        f.laneTable[3]?[i].coProducer = true
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        selectTrack(m, 31)
+        #expect(TrackCommands.enabled(TrackCommands.makeMine, m))
+        #expect(TrackCommands.perform(TrackCommands.makeMine, m) == .done)
+        #expect(f.calls.last == "makeMineTrack 3 31")
+        TrackCommands.makeMineFromMenu(seq: 3, lane: 30, m)
+        #expect(f.calls.last == "makeMineTrack 3 30")
     }
 
     @Test func aMidiTrackWithoutDestinationSaysSo() throws {
@@ -145,5 +166,49 @@ import VizDAWCore
         }
         #expect(m.editor.status == busy)
         #expect(f.edits.isEmpty && f.newTracks.isEmpty && f.duplicated.isEmpty)
+    }
+
+    /// Release-fixes Task 6: `lane.set_output` sets an audio track's
+    /// output, or none, as one edit; hostile values send nothing.
+    @Test func setOutputRefusesHostileInput() throws {
+        let f = editorFake()
+        f.laneTable[3]?[1].kind = .audio
+        f.laneTable[3]?[1].audioOut = 5
+        f.outputPathRows = [OutputPathRow(id: 5, name: "Audio 1"), OutputPathRow(id: 6, name: "Audio 2")]
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        let id = UUID()
+        let run = { (args: [ControlArg]) in TrackCommands.run(TrackCommands.setOutput, args: args, doc: id, m) }
+        let none = ControlArg(name: "output", value: .text(value: "none"))
+        // Wrong types, out of range, unknown ids and the wrong kind of
+        // track: refused, nothing sent.
+        #expect(failure(run([arg("lane", 31), arg("output", 999)]))?.code == .unknownId)
+        #expect(failure(run([arg("lane", 31), arg("output", 999)]))?.message == "There is no output 999.")
+        for bad in [arg("output", "5"), arg("output", -1), arg("output", "1e30"), ControlArg(name: "output", value: .flag(value: true))] {
+            #expect(failure(run([arg("lane", 31), bad]))?.code == .invalidParams, "\(bad)")
+        }
+        #expect(failure(run([arg("lane", 31)]))?.code == .invalidParams, "no output")
+        #expect(failure(run([arg("lane", -1), arg("output", 5)]))?.code == .invalidParams)
+        #expect(failure(run([arg("lane", 999), arg("output", 5)]))?.message == "There is no track 999 in this sequence.")
+        let midi = failure(run([arg("lane", 30), arg("output", 5)]))
+        #expect(midi?.code == .failed)
+        #expect(midi?.message == "Only an audio track has an output.")
+        #expect(f.edits.isEmpty)
+
+        // The named track, or the selected one; status names the output.
+        guard case .done = run([arg("lane", 31), arg("output", 6)]) else { Issue.record("not run"); return }
+        #expect(f.edits.last == .lane(edit: .setOutput(seq: 3, lane: 31, output: 6)))
+        #expect(m.editor.status == "Audio 2")
+        selectTrack(m, 31)
+        guard case .done = run([none]) else { Issue.record("not run"); return }
+        #expect(f.edits.last == .lane(edit: .setOutput(seq: 3, lane: 31, output: nil)))
+        #expect(m.editor.status == "No Output")
+        let sent = f.edits.count
+
+        // While recording: Busy, and nothing is sent.
+        f.recordRow.recording = true
+        m.record.refresh()
+        #expect(failure(run([arg("lane", 31), arg("output", 5)]))?.code == .busy)
+        #expect(f.edits.count == sent)
     }
 }

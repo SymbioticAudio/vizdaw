@@ -358,6 +358,42 @@ const CO_PRODUCER_SWITCH_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "Turn Co-Producer on (true) or off (false).",
 }];
 
+/// `settings.co_producer_metrics`'s parameter (plan 8f Ruling 1).
+const METRICS_SWITCH_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "on",
+    kind: ParamKind::Flag,
+    required: true,
+    help: "Turn time counting on (true) or off (false).",
+}];
+
+/// The time-counting switch's ID (plan 8f Ruling 1).
+pub const METRICS_SETTING: &str = "settings.co_producer_metrics";
+/// Delete All Time Records' ID (plan 8f Ruling 1).
+pub const DELETE_TIME_RECORDS: &str = "settings.delete_time_records";
+
+/// `settings.co_producer_answer`'s parameters (plan 8b Ruling 11): the
+/// e2e's answer to VizDAW's own approval sheet.
+const CO_PRODUCER_ANSWER_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "allow",
+        kind: ParamKind::Flag,
+        required: true,
+        help: "Allow (true) or Don't Allow (false) the change the open Co-Producer approval sheet asks about.",
+    },
+    ParamSpec {
+        name: "always",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "With allow: tick Always allow for the asking app.",
+    },
+    ParamSpec {
+        name: "confirm",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "With always, for an app VizDAW cannot verify: Always Allow Anyway on the warning.",
+    },
+];
+
 /// `file.open_copy`'s parameter (plan 8a Ruling 9).
 const OPEN_COPY_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "path",
@@ -379,6 +415,405 @@ const MIXER_NEW_BUS_PARAMS: &[ParamSpec] = &[
         help: "The bus's name (default: the next free Bus N).",
     },
 ];
+
+/// A required strip ID of `mixer.make_mine` and `mixer.set_colour`
+/// (plan 8b Ruling 9).
+const STRIP_PARAM: ParamSpec = ParamSpec {
+    name: "strip",
+    kind: ParamKind::Int {
+        min: 1,
+        max: i64::MAX / 2,
+    },
+    required: true,
+    help: "The strip (see state.get mixer).",
+};
+
+/// `mixer.make_mine` (plan 8b Ruling 1).
+const MIXER_MAKE_MINE_PARAMS: &[ParamSpec] = &[STRIP_PARAM];
+
+/// The strip colours `mixer.set_colour` takes (plan 8b Ruling 3): `none`
+/// clears the strip's own colour.
+pub const STRIP_COLOURS: &[&str] = &[
+    "none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+];
+
+/// `mixer.set_colour` (plan 8b Ruling 3).
+const MIXER_SET_COLOUR_PARAMS: &[ParamSpec] = &[
+    STRIP_PARAM,
+    ParamSpec {
+        name: "colour",
+        kind: ParamKind::Choice(STRIP_COLOURS),
+        required: true,
+        help: "The strip's colour; none clears it.",
+    },
+];
+
+/// The largest strip, slot, bus or index plan 8d's mixer commands take:
+/// the largest integer a JSON number carries exactly (2^53 − 1).
+pub const MAX_EXACT_ID: i64 = (1 << 53) - 1;
+
+/// The longest plug-in reference, in characters (plan 8d Ruling 3).
+pub const PLUGIN_REF_MAX: usize = 512;
+
+/// Plan 8d Ruling 1's thirteen commands: the twelve mixer edits, then
+/// `track.new_plugin_instrument`.
+pub const MIXER_IDS: &[&str] = &[
+    "mixer.set_strip",
+    "mixer.set_output",
+    "mixer.add_send",
+    "mixer.set_send",
+    "mixer.remove_send",
+    "mixer.add_insert",
+    "mixer.remove_insert",
+    "mixer.move_insert",
+    "mixer.set_bypass",
+    "mixer.set_eq",
+    "mixer.set_param",
+    "mixer.remove_bus",
+    "track.new_plugin_instrument",
+];
+
+/// A fader or send level's range in dB (plan 8d Ruling 1; −144 is −∞).
+const LEVEL_DB: (f64, f64) = (-144.0, 12.0);
+
+/// `mixer.set_param`'s `value` range in the registry: everything
+/// [`decimal`]'s shape can spell. The plug-in's own range is the app's
+/// check.
+const PARAM_VALUE: (f64, f64) = (-1_000_000.0, 1_000_000.0);
+
+/// Ruling 1: `-?[0-9]{1,6}(\.[0-9]{1,6})?` within `min..=max`; the message
+/// names the range. So exponents, `NaN`, `inf`, a leading `+`, hex, a
+/// comma, spaces and the empty text are all refused.
+pub fn decimal(text: &str, min: f64, max: f64) -> Result<f64, String> {
+    let refuse = || format!("must be a plain decimal from {min} to {max}, such as \"-6.5\"");
+    let digits = |s: &str| (1..=6).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    let body = text.strip_prefix('-').unwrap_or(text);
+    let shaped = match body.split_once('.') {
+        Some((whole, frac)) => digits(whole) && digits(frac),
+        None => digits(body),
+    };
+    if !shaped {
+        return Err(refuse());
+    }
+    match text.parse::<f64>() {
+        Ok(v) if v.is_finite() && (min..=max).contains(&v) => Ok(v),
+        _ => Err(refuse()),
+    }
+}
+
+/// A required mixer target of plan 8d (a strip, slot or bus): 1 to
+/// [`MAX_EXACT_ID`].
+const fn mixer_id(name: &'static str, help: &'static str) -> ParamSpec {
+    ParamSpec {
+        name,
+        kind: ParamKind::Int {
+            min: 1,
+            max: MAX_EXACT_ID,
+        },
+        required: true,
+        help,
+    }
+}
+
+/// An optional [`mixer_id`].
+const fn opt_mixer_id(name: &'static str, help: &'static str) -> ParamSpec {
+    ParamSpec {
+        required: false,
+        ..mixer_id(name, help)
+    }
+}
+
+const MIXER_STRIP: ParamSpec = mixer_id("strip", "The strip (see state.get mixer).");
+const MIXER_SLOT: ParamSpec = mixer_id(
+    "slot",
+    "The plug-in slot: an insert, an EQ or an instrument (see state.get mixer).",
+);
+
+/// `mixer.set_strip` (plan 8d Ruling 1).
+const MIXER_SET_STRIP_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    ParamSpec {
+        name: "gain_db",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The fader in dB as text, -144 (silent) to 12, such as \"-6.5\". At least one of gain_db, pan, mute and solo is required.",
+    },
+    ParamSpec {
+        name: "pan",
+        kind: ParamKind::Int {
+            min: -100,
+            max: 100,
+        },
+        required: false,
+        help: "Pan in percent, -100 (left) to 100 (right); 0 is the centre.",
+    },
+    ParamSpec {
+        name: "mute",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Mute (true) or unmute (false).",
+    },
+    ParamSpec {
+        name: "solo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Solo (true) or unsolo (false).",
+    },
+];
+
+/// `mixer.set_output` (plan 8d Ruling 1).
+const MIXER_SET_OUTPUT_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    ParamSpec {
+        name: "bus",
+        kind: ParamKind::IntOrNull {
+            min: 1,
+            max: MAX_EXACT_ID,
+        },
+        required: true,
+        help: "The bus strip to route to, or null for master.",
+    },
+];
+
+const SEND_LEVEL: ParamSpec = ParamSpec {
+    name: "level_db",
+    kind: ParamKind::Text,
+    required: false,
+    help: "The send level in dB as text, -144 (silent) to 12 (default \"0\").",
+};
+
+const PRE_FADER: ParamSpec = ParamSpec {
+    name: "pre_fader",
+    kind: ParamKind::Flag,
+    required: false,
+    help: "Send before the fader (default false: after it).",
+};
+
+const SEND_INDEX: ParamSpec = mixer_id("index", "The send, counting from 1 (see state.get mixer).");
+
+/// `mixer.add_send` (plan 8d Ruling 1).
+const MIXER_ADD_SEND_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    mixer_id("bus", "The bus strip the send feeds."),
+    SEND_LEVEL,
+    PRE_FADER,
+];
+
+/// `mixer.set_send` (plan 8d Ruling 1).
+const MIXER_SET_SEND_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    SEND_INDEX,
+    ParamSpec {
+        help: "The send level in dB as text, -144 (silent) to 12. At least one of level_db, pre_fader and enabled is required.",
+        ..SEND_LEVEL
+    },
+    ParamSpec {
+        help: "Send before the fader (true) or after it (false).",
+        ..PRE_FADER
+    },
+    ParamSpec {
+        name: "enabled",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Turn the send on (true) or off (false).",
+    },
+];
+
+/// `mixer.remove_send` (plan 8d Ruling 1).
+const MIXER_REMOVE_SEND_PARAMS: &[ParamSpec] = &[MIXER_STRIP, SEND_INDEX];
+
+const PLUGIN_REF: ParamSpec = ParamSpec {
+    name: "plugin",
+    kind: ParamKind::Text,
+    required: true,
+    help: "multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see co_producer.plugins).",
+};
+
+/// `mixer.add_insert` (plan 8d Ruling 1).
+const MIXER_ADD_INSERT_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    PLUGIN_REF,
+    opt_mixer_id(
+        "index",
+        "Where the insert goes, counting from 1 (default: after the last).",
+    ),
+];
+
+/// `mixer.remove_insert` (plan 8d Ruling 1).
+const MIXER_SLOT_PARAMS: &[ParamSpec] = &[MIXER_SLOT];
+
+/// `mixer.move_insert` (plan 8d Ruling 1).
+const MIXER_MOVE_INSERT_PARAMS: &[ParamSpec] = &[
+    MIXER_SLOT,
+    mixer_id(
+        "index",
+        "The insert's new place on its own strip, counting from 1.",
+    ),
+];
+
+/// `mixer.set_bypass` (plan 8d Ruling 1).
+const MIXER_SET_BYPASS_PARAMS: &[ParamSpec] = &[
+    MIXER_SLOT,
+    ParamSpec {
+        name: "bypass",
+        kind: ParamKind::Flag,
+        required: true,
+        help: "Bypass the insert (true) or turn it back on (false).",
+    },
+];
+
+/// `mixer.set_eq` (plan 8d Ruling 1).
+const MIXER_SET_EQ_PARAMS: &[ParamSpec] = &[
+    MIXER_STRIP,
+    ParamSpec {
+        help: "The strip's EQ: multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see co_producer.plugins).",
+        ..PLUGIN_REF
+    },
+];
+
+/// `mixer.set_param` (plan 8d Ruling 1).
+const MIXER_SET_PARAM_PARAMS: &[ParamSpec] = &[
+    MIXER_SLOT,
+    ParamSpec {
+        name: "param",
+        kind: ParamKind::Int {
+            min: 0,
+            max: u32::MAX as i64,
+        },
+        required: true,
+        help: "The parameter's id (see co_producer.params).",
+    },
+    ParamSpec {
+        name: "value",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The value as text, such as \"0.75\", within the parameter's own range; a stepped parameter takes whole values.",
+    },
+];
+
+/// `mixer.remove_bus` (plan 8d Ruling 1).
+const MIXER_REMOVE_BUS_PARAMS: &[ParamSpec] = &[mixer_id("strip", "The bus strip to remove.")];
+
+/// `track.new_plugin_instrument` (plan 8d Ruling 1).
+const NEW_PLUGIN_INSTRUMENT_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param(
+        "after",
+        "The track to put the new one below (default: the selection's first track, else the end).",
+    ),
+    ParamSpec {
+        name: "plugin",
+        kind: ParamKind::Text,
+        required: true,
+        help: "built-in-synth, or clap:<id> or au:<type/subtype/manufacturer> of an installed instrument (see co_producer.plugins).",
+    },
+];
+
+/// Plan 8e Ruling 1's creative commands. No command writes notes (owner,
+/// 2026-11-16): `midi.new_part` and `midi.add_notes` move to 27.1.0.
+pub const CREATIVE_IDS: &[&str] = &["automation.write"];
+
+/// The most points in one point list (plan 8e Ruling 1).
+pub const MAX_POINTS: usize = 1024;
+
+/// The longest point list, in bytes (plan 8e Ruling 1).
+pub const LIST_TEXT_MAX: usize = 32_768;
+
+/// The longest automation target text, as the app parses it.
+const MAX_TARGET_TEXT: usize = 64;
+
+/// A tick of plan 8e's commands: 0 to the largest tick a control call
+/// takes.
+const TICK_MAX: i64 = i64::MAX / 2;
+
+/// Ruling 1's point list: entries `<tick>:<value>` separated by one or
+/// more ASCII spaces; 0..=[`MAX_POINTS`] points in at most
+/// [`LIST_TEXT_MAX`] bytes, ticks of ASCII digits in `start..=end` and
+/// strictly rising, values as [`decimal`] spells them within ±1 000 000.
+/// The values are in the target's own units, which the app checks.
+pub fn point_list(text: &str, start: u64, end: u64) -> Result<Vec<(u64, f64)>, String> {
+    if text.len() > LIST_TEXT_MAX {
+        return Err(format!(
+            "The point list is longer than {LIST_TEXT_MAX} bytes."
+        ));
+    }
+    let mut points: Vec<(u64, f64)> = Vec::new();
+    for (i, entry) in text.split(' ').filter(|e| !e.is_empty()).enumerate() {
+        let n = i + 1;
+        if n > MAX_POINTS {
+            return Err(format!("The point list has more than {MAX_POINTS} points."));
+        }
+        let shape = || format!("Point {n} is not tick:value.");
+        let (tick, value) = entry.split_once(':').ok_or_else(shape)?;
+        if tick.is_empty() || !tick.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(shape());
+        }
+        let tick: u64 = tick.parse().map_err(|_| shape())?;
+        let value = decimal(value, PARAM_VALUE.0, PARAM_VALUE.1).map_err(|_| shape())?;
+        if !(start..=end).contains(&tick) {
+            return Err(format!("Point {n} is outside start to end."));
+        }
+        if points.last().is_some_and(|(t, _)| tick <= *t) {
+            return Err(format!("Point {n} is not after point {}.", n - 1));
+        }
+        points.push((tick, value));
+    }
+    Ok(points)
+}
+
+/// `automation.gesture`'s target grammar, the shape only (the app's
+/// `parse_automation_target`): `fader:<strip>`, `pan:<strip>`,
+/// `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or
+/// `param:<slot>:<param>`, IDs in ASCII digits, at most 64 characters.
+pub fn automation_target(text: &str) -> Result<(), String> {
+    let refuse = || {
+        "must be fader:<strip>, pan:<strip>, mute:<strip>, solo:<strip>, send:<strip>:<n> (n from 1) or param:<slot>:<param>".to_string()
+    };
+    let number = |t: &str| -> Option<u64> {
+        if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        t.parse().ok()
+    };
+    if text.len() > MAX_TARGET_TEXT {
+        return Err(refuse());
+    }
+    let parts: Vec<&str> = text.split(':').collect();
+    let ok = match parts.as_slice() {
+        [kind, id] => matches!(*kind, "fader" | "pan" | "mute" | "solo") && number(id).is_some(),
+        ["send", strip, n] => {
+            number(strip).is_some()
+                && number(n).is_some_and(|n| (1..=u64::from(u16::MAX) + 1).contains(&n))
+        }
+        ["param", slot, param] => number(slot).is_some() && number(param).is_some(),
+        _ => false,
+    };
+    if ok { Ok(()) } else { Err(refuse()) }
+}
+
+/// Ruling 3's shape of a plug-in reference: `multi-q`, `clap:<id>` or
+/// `au:<id>` with a non-empty rest (and `built-in-synth` when
+/// `instrument`), at most [`PLUGIN_REF_MAX`] characters, with no control,
+/// bidi or line-separator character. Resolving it is the app's.
+pub fn plugin_ref(text: &str, instrument: bool) -> Result<(), String> {
+    let named = text == "multi-q" || (instrument && text == "built-in-synth");
+    let prefixed = ["clap:", "au:"]
+        .iter()
+        .any(|p| text.strip_prefix(p).is_some_and(|rest| !rest.is_empty()));
+    if text.chars().count() > PLUGIN_REF_MAX || text.chars().any(crate::request::refused_in_name) {
+        return Err(format!(
+            "must be at most {PLUGIN_REF_MAX} characters with no control character"
+        ));
+    }
+    if named || prefixed {
+        return Ok(());
+    }
+    Err(if instrument {
+        "must be built-in-synth, multi-q, clap:<id> or au:<type/subtype/manufacturer>".into()
+    } else {
+        "must be multi-q, clap:<id> or au:<type/subtype/manufacturer>".into()
+    })
+}
 
 /// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
 const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
@@ -1093,6 +1528,34 @@ const CROSSFADE_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `region.set_fade_shape` (plan release-fixes Task 7).
+const SET_FADE_SHAPE_PARAMS: &[ParamSpec] = &[
+    opt_id_param(
+        "seq",
+        "The sequence of the region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "lane",
+        "The region's track (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    opt_id_param(
+        "event",
+        "The region (give `seq`, `lane` and `event` together, or none: the selection).",
+    ),
+    ParamSpec {
+        name: "fade",
+        kind: ParamKind::Choice(&["in", "out"]),
+        required: true,
+        help: "The fade in or the fade out (a crossfaded start: use region.crossfade's shape).",
+    },
+    ParamSpec {
+        name: "shape",
+        kind: ParamKind::Choice(&["linear", "equal_power", "exponential", "s_curve"]),
+        required: true,
+        help: "The fade's new shape; its length is kept.",
+    },
+];
+
 /// `region.remove_crossfade` (plan 6c Task 5).
 const REMOVE_CROSSFADE_PARAMS: &[ParamSpec] = &[
     opt_id_param(
@@ -1108,6 +1571,162 @@ const REMOVE_CROSSFADE_PARAMS: &[ParamSpec] = &[
         "The later region (give `seq`, `lane` and `event` together, or none: the selection).",
     ),
 ];
+
+/// The quantize grids of `modify.quantize_notes` and their lengths in
+/// ticks at 15 360 per quarter note (plan 8c Ruling 2).
+pub const GRIDS: &[(&str, i64)] = &[
+    ("1/4", 15360),
+    ("1/8", 7680),
+    ("1/16", 3840),
+    ("1/32", 1920),
+    ("1/8t", 5120),
+    ("1/16t", 2560),
+];
+
+/// [`GRIDS`]' names, as `grid`'s choices (a test pins the two together).
+const GRID_NAMES: &[&str] = &["1/4", "1/8", "1/16", "1/32", "1/8t", "1/16t"];
+
+/// The latest tick a note chore or a marker takes.
+const MAX_TICK: i64 = 1 << 40;
+
+/// A required sequence ID (plan 8c Rulings 2 and 4). A song's first
+/// sequence is 0, so 0 is allowed (plan 8c Task 2).
+const CHORE_SEQ: ParamSpec = ParamSpec {
+    name: "seq",
+    kind: ParamKind::Int {
+        min: 0,
+        max: i64::MAX / 2,
+    },
+    required: true,
+    help: "The sequence (see state.get document).",
+};
+
+/// The target parameters every note chore shares (plan 8c Ruling 2).
+const NOTE_TARGET_PARAMS: [ParamSpec; 4] = [
+    CHORE_SEQ,
+    ParamSpec {
+        name: "lanes",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Track IDs, comma-separated: 1 to 64, each once (see state.get document).",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: MAX_TICK,
+        },
+        required: false,
+        help: "The range's first tick (give `start` and `end` together, or neither: the whole track).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: MAX_TICK,
+        },
+        required: false,
+        help: "The range's end tick, exclusive and after `start`.",
+    },
+];
+
+/// `modify.quantize_notes` (plan 8c Ruling 2).
+const QUANTIZE_NOTES_PARAMS: &[ParamSpec] = &[
+    NOTE_TARGET_PARAMS[0],
+    NOTE_TARGET_PARAMS[1],
+    NOTE_TARGET_PARAMS[2],
+    NOTE_TARGET_PARAMS[3],
+    ParamSpec {
+        name: "grid",
+        kind: ParamKind::Choice(GRID_NAMES),
+        required: true,
+        help: "The grid: 1/4, 1/8, 1/16, 1/32, 1/8t or 1/16t.",
+    },
+    ParamSpec {
+        name: "strength",
+        kind: ParamKind::Int { min: 1, max: 100 },
+        required: false,
+        help: "How far each note moves toward the grid, in percent (default 100).",
+    },
+];
+
+/// `modify.transpose_notes` (plan 8c Ruling 2).
+const TRANSPOSE_NOTES_PARAMS: &[ParamSpec] = &[
+    NOTE_TARGET_PARAMS[0],
+    NOTE_TARGET_PARAMS[1],
+    NOTE_TARGET_PARAMS[2],
+    NOTE_TARGET_PARAMS[3],
+    ParamSpec {
+        name: "semitones",
+        kind: ParamKind::Int { min: -48, max: 48 },
+        required: true,
+        help: "Semitones up (positive) or down (negative), -48 to 48, not 0.",
+    },
+];
+
+/// `modify.velocity_notes` (plan 8c Ruling 2).
+const VELOCITY_NOTES_PARAMS: &[ParamSpec] = &[
+    NOTE_TARGET_PARAMS[0],
+    NOTE_TARGET_PARAMS[1],
+    NOTE_TARGET_PARAMS[2],
+    NOTE_TARGET_PARAMS[3],
+    ParamSpec {
+        name: "op",
+        kind: ParamKind::Choice(&["set", "add", "scale"]),
+        required: true,
+        help: "set: every velocity to `amount`; add: `amount` to each; scale: each to `amount` percent.",
+    },
+    ParamSpec {
+        name: "amount",
+        kind: ParamKind::Int {
+            min: -126,
+            max: 400,
+        },
+        required: true,
+        help: "set: 1 to 127; add: -126 to 126, not 0; scale: 10 to 400.",
+    },
+];
+
+/// A marker's 1-based place in its sequence, sorted by tick (plan 8c
+/// Ruling 4).
+const MARKER_INDEX: ParamSpec = ParamSpec {
+    name: "index",
+    kind: ParamKind::Int {
+        min: 1,
+        max: i64::MAX / 2,
+    },
+    required: true,
+    help: "The marker, from 1 in tick order (see state.get document `markers`).",
+};
+
+/// A marker's name (plan 8c Ruling 4).
+const MARKER_NAME: ParamSpec = ParamSpec {
+    name: "name",
+    kind: ParamKind::Text,
+    required: true,
+    help: "The marker's name: 1 to 64 characters.",
+};
+
+/// `marker.add` (plan 8c Ruling 4).
+const MARKER_ADD_PARAMS: &[ParamSpec] = &[
+    CHORE_SEQ,
+    ParamSpec {
+        name: "tick",
+        kind: ParamKind::Int {
+            min: 0,
+            max: MAX_TICK,
+        },
+        required: true,
+        help: "Where the marker goes, in ticks.",
+    },
+    MARKER_NAME,
+];
+
+/// `marker.rename` (plan 8c Ruling 4).
+const MARKER_RENAME_PARAMS: &[ParamSpec] = &[CHORE_SEQ, MARKER_INDEX, MARKER_NAME];
+
+/// `marker.remove` (plan 8c Ruling 4).
+const MARKER_REMOVE_PARAMS: &[ParamSpec] = &[CHORE_SEQ, MARKER_INDEX];
 
 /// `track.new_*` (plan tracks Ruling 5).
 const NEW_TRACK_PARAMS: &[ParamSpec] = &[
@@ -1192,7 +1811,7 @@ const RECORD_SET_PARAMS: &[ParamSpec] = &[
         name: "passes_as_takes",
         kind: ParamKind::Flag,
         required: false,
-        help: "Kept loop passes become takes.",
+        help: "MIDI loop passes become takes (audio always does).",
     },
 ];
 
@@ -1340,6 +1959,17 @@ const RETURN_LATENCY_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `destination.set_sound` (plan release-fixes Task 8).
+const SET_SOUND_PARAMS: &[ParamSpec] = &[
+    id_param("dest", "The Built-in Synth destination."),
+    ParamSpec {
+        name: "sound",
+        kind: ParamKind::Choice(&["piano", "bass", "pad", "lead", "drums"]),
+        required: true,
+        help: "Its sound; every track that plays this Built-in Synth changes.",
+    },
+];
+
 /// `destination.set_midi_mix` (plan 5g-1b Task 4).
 const MIDI_MIX_PARAMS: &[ParamSpec] = &[
     id_param("dest", "The external MIDI destination."),
@@ -1381,7 +2011,7 @@ const AUDIO_SET_PARAMS: &[ParamSpec] = &[
         name: "input_device",
         kind: ParamKind::Text,
         required: false,
-        help: "The audio input device by name (\"\": the output device's own input).",
+        help: "The input device's uid, or its name if no other device has that name.",
     },
     ParamSpec {
         name: "latency_trim",
@@ -1541,6 +2171,24 @@ const SET_MONITOR_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `lane.set_output` (plan release-fixes Task 6).
+const SET_OUTPUT_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The track's sequence (default: the shown one)."),
+    opt_id_param(
+        "lane",
+        "The audio track (default: the selection's first track).",
+    ),
+    ParamSpec {
+        name: "output",
+        kind: ParamKind::IntOrNull {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: true,
+        help: "The output path's id (state.get mixer), or null for no output.",
+    },
+];
+
 const INJECT_PARAMS: &[ParamSpec] = &[
     ParamSpec {
         name: "port",
@@ -1553,6 +2201,50 @@ const INJECT_PARAMS: &[ParamSpec] = &[
         kind: ParamKind::Text,
         required: true,
         help: "Channel messages as hex bytes, e.g. \"90 3c 64 80 3c 00\".",
+    },
+];
+
+/// `automation.write` (plan 8e Ruling 1).
+const AUTOMATION_WRITE_PARAMS: &[ParamSpec] = &[
+    // A new song's first sequence is 0.
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: MAX_EXACT_ID,
+        },
+        required: true,
+        help: "The sequence (a top-level one).",
+    },
+    ParamSpec {
+        name: "target",
+        kind: ParamKind::Text,
+        required: true,
+        help: "`fader:<strip>`, `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or `param:<slot>:<param>`.",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: TICK_MAX,
+        },
+        required: true,
+        help: "The range's first tick (15360 ticks per quarter note).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: TICK_MAX,
+        },
+        required: true,
+        help: "The range's last tick, after `start`.",
+    },
+    ParamSpec {
+        name: "points",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Points as \"<tick>:<value> …\", separated by spaces, ticks rising within start to end, at most 1024 points in 32768 bytes; values in the target's units (dB for fader and send, -144 to 12; percent for pan; 0 or 1 for mute and solo; the parameter's own range). Empty clears the range.",
     },
 ];
 
@@ -1815,6 +2507,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
     ),
     cmd("window.media_pool", "Window", "Media Pool", None, true),
+    // Plan 8b Ruling 9: over a channel it only answers the notes' path.
+    cmd("window.song_notes", "Window", "Song Notes", None, true),
     cmd("ui.view_arrange", "View", "Arrange View", Some("⌃1"), true),
     cmd("ui.view_mix", "View", "Mix View", Some("⌃2"), true),
     CommandSpec {
@@ -2096,6 +2790,17 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("region.crossfade", "Region", "Crossfade", None, true)
     },
     CommandSpec {
+        class: Class::Change,
+        params: SET_FADE_SHAPE_PARAMS,
+        ..key_only(cmd(
+            "region.set_fade_shape",
+            "Region",
+            "Set Fade Shape",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
         class: Class::Remove,
         params: REMOVE_CROSSFADE_PARAMS,
         ..cmd(
@@ -2371,6 +3076,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         class: Class::Change,
+        params: SET_OUTPUT_PARAMS,
+        ..key_only(cmd(
+            "lane.set_output",
+            "Track",
+            "Set Track Output",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
         params: SET_INPUT_FX_PARAMS,
         ..key_only(cmd(
             "lane.set_input_fx",
@@ -2401,6 +3117,17 @@ pub const COMMANDS: &[CommandSpec] = &[
             "destination.set_return_latency",
             "Destination",
             "Set Return Latency",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: SET_SOUND_PARAMS,
+        ..key_only(cmd(
+            "destination.set_sound",
+            "Destination",
+            "Set Built-in Synth Sound",
             None,
             true,
         ))
@@ -2466,6 +3193,30 @@ pub const COMMANDS: &[CommandSpec] = &[
             "automation.gesture",
             "Mixer",
             "Automation Gesture",
+            None,
+            true,
+        ))
+    },
+    // Release every touch the control channel holds, e.g. after a script
+    // stopped mid-gesture (release-fixes Task 4, Decision 2). App-wide,
+    // so refused to Co-Producer (plan 8e Task 6b; 8a Ruling 5).
+    CommandSpec {
+        ..key_only(cmd(
+            "automation.release_all",
+            "Mixer",
+            "Release Channel Touches",
+            None,
+            true,
+        ))
+    },
+    // Plan 8e Ruling 1: automation as real points, through a preview.
+    CommandSpec {
+        class: Class::Change,
+        params: AUTOMATION_WRITE_PARAMS,
+        ..key_only(cmd(
+            "automation.write",
+            "Mixer",
+            "Write Automation",
             None,
             true,
         ))
@@ -2673,6 +3424,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         }],
         ..cmd("track.rename", "Track", "Rename Track", None, true)
     },
+    // Plan 8b Ruling 1: the composer's act alone, so refused to Co-Producer.
+    CommandSpec {
+        params: TRACK_PARAMS,
+        ..cmd("track.make_mine", "Track", "Make Mine", None, true)
+    },
     // Plan 5c-2 takes Ruling 6: the Takes menu's three, without dialogs.
     CommandSpec {
         class: Class::Change,
@@ -2730,6 +3486,176 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: MIXER_NEW_BUS_PARAMS,
         ..key_only(cmd("mixer.new_bus", "Mixer", "New Bus", None, true))
     },
+    // Plan 8b Ruling 1: the composer's act alone.
+    CommandSpec {
+        params: MIXER_MAKE_MINE_PARAMS,
+        ..key_only(cmd("mixer.make_mine", "Mixer", "Make Mine", None, true))
+    },
+    // Plan 8b Ruling 3: a strip's colour, previewable for Co-Producer.
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_COLOUR_PARAMS,
+        ..key_only(cmd("mixer.set_colour", "Mixer", "Colour", None, true))
+    },
+    // Plan 8c Ruling 2: note chores with explicit values, previewable.
+    CommandSpec {
+        class: Class::Change,
+        params: QUANTIZE_NOTES_PARAMS,
+        ..key_only(cmd(
+            "modify.quantize_notes",
+            "Modify",
+            "Quantize Notes",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: TRANSPOSE_NOTES_PARAMS,
+        ..key_only(cmd(
+            "modify.transpose_notes",
+            "Modify",
+            "Transpose Notes",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: VELOCITY_NOTES_PARAMS,
+        ..key_only(cmd(
+            "modify.velocity_notes",
+            "Modify",
+            "Change Velocity",
+            None,
+            true,
+        ))
+    },
+    // Plan 8c Ruling 4: markers; a rename or removal is previewable.
+    CommandSpec {
+        class: Class::Add,
+        params: MARKER_ADD_PARAMS,
+        ..key_only(cmd("marker.add", "Transport", "Add Marker", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MARKER_RENAME_PARAMS,
+        ..key_only(cmd(
+            "marker.rename",
+            "Transport",
+            "Rename Marker",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: MARKER_REMOVE_PARAMS,
+        ..key_only(cmd(
+            "marker.remove",
+            "Transport",
+            "Remove Marker",
+            None,
+            true,
+        ))
+    },
+    // Plan 8d Ruling 1: Co-Producer's mixer edits, each previewable, and
+    // a new track on a plug-in instrument.
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_STRIP_PARAMS,
+        ..key_only(cmd("mixer.set_strip", "Mixer", "Set Strip", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_OUTPUT_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_output",
+            "Mixer",
+            "Set Strip Output",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_ADD_SEND_PARAMS,
+        ..key_only(cmd("mixer.add_send", "Mixer", "Add Send", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_SEND_PARAMS,
+        ..key_only(cmd("mixer.set_send", "Mixer", "Set Send", None, true))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: MIXER_REMOVE_SEND_PARAMS,
+        ..key_only(cmd("mixer.remove_send", "Mixer", "Remove Send", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_ADD_INSERT_PARAMS,
+        ..key_only(cmd("mixer.add_insert", "Mixer", "Add Insert", None, true))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: MIXER_SLOT_PARAMS,
+        ..key_only(cmd(
+            "mixer.remove_insert",
+            "Mixer",
+            "Remove Insert",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_MOVE_INSERT_PARAMS,
+        ..key_only(cmd("mixer.move_insert", "Mixer", "Move Insert", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_BYPASS_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_bypass",
+            "Mixer",
+            "Bypass Insert",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_EQ_PARAMS,
+        ..key_only(cmd("mixer.set_eq", "Mixer", "Set EQ", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: MIXER_SET_PARAM_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_param",
+            "Mixer",
+            "Set Plug-in Parameter",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: MIXER_REMOVE_BUS_PARAMS,
+        ..key_only(cmd("mixer.remove_bus", "Mixer", "Remove Bus", None, true))
+    },
+    CommandSpec {
+        class: Class::Add,
+        params: NEW_PLUGIN_INSTRUMENT_PARAMS,
+        ..key_only(cmd(
+            "track.new_plugin_instrument",
+            "Track",
+            "New Plug-in Instrument Track",
+            None,
+            true,
+        ))
+    },
     // Plan 8a Ruling 10: the Co-Producer switch, for the e2e.
     CommandSpec {
         params: CO_PRODUCER_SWITCH_PARAMS,
@@ -2739,6 +3665,18 @@ pub const COMMANDS: &[CommandSpec] = &[
             "Co-Producer",
             None,
             false,
+        ))
+    },
+    // Plan 8b Ruling 11: the e2e's answer to VizDAW's approval sheet,
+    // only with VIZDAW_TEST_HOOKS=1 and never on the Co-Producer socket.
+    CommandSpec {
+        params: CO_PRODUCER_ANSWER_PARAMS,
+        ..key_only(cmd(
+            "settings.co_producer_answer",
+            "Settings",
+            "Answer Co-Producer Approval",
+            None,
+            true,
         ))
     },
     // Plan 8a Ruling 9: a saved copy opens as a project of its own.
@@ -2758,6 +3696,25 @@ pub const COMMANDS: &[CommandSpec] = &[
             false,
         )
     },
+    // Plan 8f Ruling 1: the composer's own time-record settings, refused
+    // to Co-Producer by class.
+    CommandSpec {
+        params: METRICS_SWITCH_PARAMS,
+        ..key_only(cmd(
+            METRICS_SETTING,
+            "Settings",
+            "Count Where My Time Goes",
+            None,
+            false,
+        ))
+    },
+    key_only(cmd(
+        DELETE_TIME_RECORDS,
+        "Settings",
+        "Delete All Time Records",
+        None,
+        false,
+    )),
 ];
 
 /// The command with `id`.
@@ -2777,7 +3734,9 @@ pub fn validate_args(
     let mut out = Vec::new();
     for s in spec.params {
         let v = match s.kind {
-            ParamKind::Text => p.opt_str(s.name, MAX_STRING)?.map(ArgValue::Text),
+            ParamKind::Text => p
+                .opt_str(s.name, text_limit(spec.id, s.name))?
+                .map(ArgValue::Text),
             ParamKind::Path(ext) => p
                 .opt_path(s.name, ext)?
                 .map(|path| ArgValue::Text(path.to_string_lossy().into_owned())),
@@ -2833,12 +3792,145 @@ pub fn validate_args(
     {
         return Err(p.error("give at least one of `volume`, `pan` and `mute`"));
     }
+    mixer_rules(&p, spec.id, &out)?;
+    chore_rules(&p, spec.id, &mut out)?;
+    creative_rules(&p, spec.id, &out)?;
     for d in spec.dialogs.iter().filter(|d| d.always) {
         if !d.answered_by.iter().any(|a| p.has(a)) {
             return Err(ControlError::dialog(d.name, d.answered_by));
         }
     }
     Ok(out)
+}
+
+/// The longest text parameter `name` of command `id` takes, in
+/// characters: [`MAX_STRING`], but a point list's own limit (plan 8e
+/// Ruling 1; [`point_list`] counts its bytes).
+fn text_limit(id: &str, name: &str) -> usize {
+    if CREATIVE_IDS.contains(&id) && name == "points" {
+        LIST_TEXT_MAX
+    } else {
+        MAX_STRING
+    }
+}
+
+/// Plan 8e Ruling 1's rules across parameters, for both sockets: the
+/// target's grammar, `end` after `start`, and the point list within them.
+fn creative_rules(
+    p: &Params<'_>,
+    id: &str,
+    out: &[(String, ArgValue)],
+) -> Result<(), ControlError> {
+    if !CREATIVE_IDS.contains(&id) {
+        return Ok(());
+    }
+    if let Some(t) = text_arg(out, "target") {
+        automation_target(t).map_err(|m| p.error(format!("`target` {m}")))?;
+    }
+    let (Some(start), Some(end)) = (int_arg(out, "start"), int_arg(out, "end")) else {
+        return Err(p.error("give `start` and `end`"));
+    };
+    if end <= start {
+        return Err(p.error("`end` must be after `start`"));
+    }
+    if let Some(t) = text_arg(out, "points") {
+        point_list(t, start as u64, end as u64).map_err(|m| p.error(m))?;
+    }
+    Ok(())
+}
+
+fn int_arg(out: &[(String, ArgValue)], name: &str) -> Option<i64> {
+    out.iter().find_map(|(n, v)| match v {
+        ArgValue::Int(i) if n == name => Some(*i),
+        _ => None,
+    })
+}
+
+fn text_arg<'a>(out: &'a [(String, ArgValue)], name: &str) -> Option<&'a str> {
+    out.iter().find_map(|(n, v)| match v {
+        ArgValue::Text(t) if n == name => Some(t.as_str()),
+        _ => None,
+    })
+}
+
+/// Plan 8c Rulings 2 and 4's rules across parameters: a note chore's
+/// `lanes` list, its `start`/`end` pair and its values, and a marker's
+/// name (stored trimmed).
+fn chore_rules(
+    p: &Params<'_>,
+    id: &str,
+    out: &mut [(String, ArgValue)],
+) -> Result<(), ControlError> {
+    let note_chore = matches!(
+        id,
+        "modify.quantize_notes" | "modify.transpose_notes" | "modify.velocity_notes"
+    );
+    if note_chore {
+        if let Some(lanes) = text_arg(out, "lanes") {
+            crate::co_producer::id_list(lanes).map_err(|m| p.error(format!("`lanes`: {m}")))?;
+        }
+        match (int_arg(out, "start"), int_arg(out, "end")) {
+            (None, None) => {}
+            (Some(start), Some(end)) if end > start => {}
+            (Some(_), Some(_)) => return Err(p.error("`end` must be after `start`")),
+            _ => return Err(p.error("give `start` and `end` together, or neither")),
+        }
+    }
+    if id == "modify.transpose_notes" && int_arg(out, "semitones") == Some(0) {
+        return Err(p.error("`semitones` must not be 0"));
+    }
+    if id == "modify.velocity_notes" {
+        let amount = int_arg(out, "amount").unwrap_or(0);
+        let ok = match text_arg(out, "op") {
+            Some("set") => (1..=127).contains(&amount),
+            Some("add") => (-126..=126).contains(&amount) && amount != 0,
+            Some("scale") => (10..=400).contains(&amount),
+            _ => false,
+        };
+        if !ok {
+            return Err(p.error(
+                "`amount` must be 1 to 127 for set, -126 to 126 (not 0) for add, and 10 to 400 for scale",
+            ));
+        }
+    }
+    if matches!(id, "marker.add" | "marker.rename") {
+        for (n, v) in out.iter_mut() {
+            if let (true, ArgValue::Text(t)) = (n == "name", &*v) {
+                *v = ArgValue::Text(crate::request::marker_name(t).map_err(|m| p.error(m))?);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Plan 8d Rulings 1 and 3's rules across parameters, for both sockets:
+/// at least one of `mixer.set_strip`'s and `mixer.set_send`'s settings,
+/// decimals as [`decimal`] spells them, and a plug-in reference's shape.
+fn mixer_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(), ControlError> {
+    if !MIXER_IDS.contains(&id) {
+        return Ok(());
+    }
+    let none_of = |keys: &[&str]| !keys.iter().any(|k| out.iter().any(|(n, _)| n == k));
+    if id == "mixer.set_strip" && none_of(&["gain_db", "pan", "mute", "solo"]) {
+        return Err(p.error("give at least one of `gain_db`, `pan`, `mute` and `solo`"));
+    }
+    if id == "mixer.set_send" && none_of(&["level_db", "pre_fader", "enabled"]) {
+        return Err(p.error("give at least one of `level_db`, `pre_fader` and `enabled`"));
+    }
+    for (name, (min, max)) in [
+        ("gain_db", LEVEL_DB),
+        ("level_db", LEVEL_DB),
+        ("value", PARAM_VALUE),
+    ] {
+        if let Some(t) = text_arg(out, name) {
+            decimal(t, min, max).map_err(|m| p.error(format!("`{name}` {m}")))?;
+        }
+    }
+    if let Some(t) = text_arg(out, "plugin") {
+        plugin_ref(t, id == "track.new_plugin_instrument")
+            .map_err(|m| p.error(format!("`plugin` {m}")))?;
+    }
+    Ok(())
 }
 
 /// `unknown_id` for a `command.run` id.
