@@ -2711,7 +2711,7 @@ fn mixer_view_draws_names_as_text() {
 const STARTER_DESCRIPTION: &str = "Make a new untitled song set up in a style: tempo, meter, section markers, instrument and audio tracks, buses, effects, outputs and sends. It writes no notes or beats. Use plug-ins from list_plugins; an instrument or effect that is not usable falls back to the Built-in Synth or Multi-Q, and the answer says which. Pass window from the answer to later tools to work in the new song. Read the starter_project recipe first.";
 const NOTES_DESCRIPTION: &str = "Read a track's notes as start:pitch:length:velocity, in ticks at 15360 per quarter note, to advise on the composer's part in chat. Co-Producer writes no notes. Changes nothing.";
 const AUTOMATION_DESCRIPTION: &str = "Show the automation curve you plan to write over the one that is there now, before writing it with automation.write through change. Values are in the target's own units: dB for fader and send, percent for pan (negative is left), 0 or 1 for mute and solo, and the plug-in's own range for a param. Changes nothing.";
-const RECIPES_DESCRIPTION: &str = "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb and automation moves. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing.";
+const RECIPES_DESCRIPTION: &str = "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb, automation moves and coaching on where the composer's time goes. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing.";
 const CHANGE_ADDED: &str = "creative writes: automation points with automation.write. On Co-Producer's own tracks and buses these apply without asking.";
 const CREATIVE_INSTRUCTIONS: &str = "For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat.";
 const RECIPE_NAMES: [&str; 7] = [
@@ -3528,7 +3528,7 @@ fn time_report_reads_plainly() {
     );
     let night = t.find("- Night Drive (this song): 3 h 0 min").expect(&t);
     let sketch = t
-        .find("- Sketch: 20 min \u{2014} mixing 20 min; 1 undo bursts; 2 long menu hunts")
+        .find("- Sketch: 20 min \u{2014} mixing 20 min; 1 undo burst; 2 long menu hunts")
         .expect(&t);
     assert!(night < sketch, "{t}");
     assert!(t.contains("Songs, most time first:"), "{t}");

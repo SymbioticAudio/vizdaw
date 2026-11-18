@@ -3105,6 +3105,42 @@ Plan 8e, Co-Producer creative help and starter projects:
      made, while your tracks feed that bus. It asks first and names the
      tracks that go silent or move. Say no: the bus stays as it was.
 
+Plan 8f, Co-Producer time tracking and coaching:
+
+421. Open Settings > Co-Producer on a fresh install: "Count where my time
+     goes" is off, and the overview reads "No time records.". No `Metrics`
+     folder is in VizDAW's support folder.
+422. Turn counting on with Co-Producer itself off. Work in a piano roll with
+     the pencil for a few minutes, then in the mixer. The overview line
+     shows one song and some minutes.
+423. Look at `~/Library/Application Support/VizDAW/Metrics/time.json` in
+     Terminal (`ls -l`): it is readable and writable by you alone, and the
+     folder is yours alone. The file holds the song's name, dates, minutes
+     and VizDAW's own command names, and nothing about your notes, your
+     track names or other files.
+424. Leave VizDAW untouched for five minutes without playing: the overview
+     total does not grow.
+425. Undo quickly six times, rename tracks one after another a dozen times,
+     and leave a menu open for ten seconds before choosing something.
+426. Turn Co-Producer on and ask Claude "where does my time go?". Claude
+     tells you the time per category for this song and all songs, and names
+     the undo bursts, the repeated renames and the long menu hunt. It
+     suggests at most three chores it could take over and starts none until
+     you pick one.
+427. Work on for a while without asking. Claude never mentions your time
+     unless you ask again.
+428. Ask "what could you help with this week?": the answer covers only the
+     last seven days.
+429. Turn Co-Producer off and ask again: Claude says Co-Producer is off in
+     Settings and cannot read anything.
+430. Click Delete All Time Records...: it asks first. Cancel keeps
+     everything. Delete removes the `Metrics` folder, and the overview
+     reads "No time records.".
+431. Turn counting off, work for a few minutes, and check that no `Metrics`
+     folder appears.
+432. In a host that offers prompts, the coaching prompt is in the list
+     beside the other recipes.
+
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;

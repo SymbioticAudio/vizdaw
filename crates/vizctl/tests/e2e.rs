@@ -7154,3 +7154,174 @@ fn release_fixes_over_the_channel() {
     assert_eq!(r["undo"], "Nudge Events", "Arrange restores the nudge: {r}");
     app.quit();
 }
+
+/// README steps for plan 8f through `vizdaw-mcp`: time counting is off
+/// until the composer turns it on, counts transport time and friction with
+/// Co-Producer off from reading it, keeps a private file with nothing of
+/// the song's inside, stops sampling when the switch goes off, is read only
+/// on the Co-Producer socket, and Delete All removes it.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn co_producer_time_over_mcp() {
+    use core_control::ErrorCode;
+    use std::os::unix::fs::PermissionsExt;
+    let mut app = App::start_with(&[("VIZDAW_METRICS_FAST", "1")]);
+    let home = app.launched.home.clone();
+    let support = home.join("support");
+    let metrics = support.join("Metrics");
+    let time_json = metrics.join("time.json");
+    let sock = support.join("co-producer.sock");
+    let mut mcp = McpProc::start(
+        &app,
+        json!({"elicitation": {},
+            "extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}),
+    );
+    app.call(
+        "command.run",
+        json!({"id": "settings.co_producer", "params": {"on": true}}),
+    );
+    wait_for_path(&sock, true);
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let song = home.join("Song.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save", "params": {"path": song.display().to_string()}, "window": w}),
+    );
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    let play_for = |app: &mut App, secs: u64| {
+        run(app, "transport.play", json!({}));
+        std::thread::sleep(Duration::from_secs(secs));
+        run(app, "transport.stop", json!({}));
+    };
+    let counting = |app: &mut App, on: bool| {
+        app.call(
+            "command.run",
+            json!({"id": "settings.co_producer_metrics", "params": {"on": on}}),
+        )
+    };
+    let t = Duration::from_secs(30);
+
+    // Off by default: nothing is written and nothing is counted.
+    play_for(&mut app, 3);
+    assert!(!metrics.exists(), "no Metrics folder while counting is off");
+    let off_text = mcp.ok("time_report", json!({}));
+    assert!(off_text.starts_with("Time counting is off."), "{off_text}");
+
+    // Counting: three fast blocks of play, then six of one task and undos.
+    counting(&mut app, true);
+    play_for(&mut app, 6);
+    for _ in 0..6 {
+        run(&mut app, "track.new_audio", json!({}));
+    }
+    for _ in 0..5 {
+        run(&mut app, "edit.undo", json!({}));
+    }
+    // A host that asks for MCP Apps gets the text and the data of the
+    // "time" view although no ui:// resource exists for it.
+    let shown = mcp.tool("time_report", json!({}));
+    assert_eq!(shown["isError"], false, "{shown}");
+    assert_eq!(shown["structuredContent"]["view"], "time", "{shown}");
+    assert!(shown["_meta"]["ui"].is_null(), "{shown}");
+    let text = mcp_text(&shown);
+    assert!(text.contains("- Song: "), "{text}");
+    let bursts = text
+        .split_once("undo burst")
+        .and_then(|(head, _)| head.trim_end().rsplit(' ').next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("an undo burst count in {text}"));
+    assert!(bursts >= 1, "{text}");
+    assert!(
+        text.contains("repeated tasks: ") && !text.contains("repeated tasks: none"),
+        "{text}"
+    );
+    let ui = mcp.request("resources/read", json!({"uri": "ui://vizdaw/time"}));
+    assert!(ui.get("error").is_some(), "no time view resource: {ui}");
+    // The developer channel cannot read the records: that is Co-Producer's.
+    let e = app.call_err("co_producer.metrics", json!({}));
+    assert_eq!(e.code, ErrorCode::NotAllowed, "{e:?}");
+
+    // Private: modes, and nothing of the song's in the file.
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&support), 0o700);
+    assert_eq!(mode(&metrics), 0o700);
+    assert_eq!(mode(&time_json), 0o600);
+    let bytes = std::fs::read(&time_json).unwrap();
+    let body = String::from_utf8(bytes.clone()).expect("UTF-8");
+    assert!(!body.contains('/'), "no path in {body}");
+    assert!(!body.contains(".vizdaw"), "no file name in {body}");
+    let demo_doc = app.call("state.get", json!({"target": "document", "window": w}));
+    for lane in demo_doc["lanes"].as_array().unwrap() {
+        let name = lane["name"].as_str().unwrap_or_default();
+        if name.len() > 2 {
+            assert!(!body.contains(name), "track name {name} in {body}");
+        }
+    }
+    let store: Value = serde_json::from_str(&body).unwrap();
+    let mut keys: Vec<&str> = store
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["since", "songs", "untitled", "version"], "{body}");
+    assert_eq!(store["version"], 1, "{body}");
+    assert_eq!(store["songs"].as_object().unwrap().len(), 1, "{body}");
+
+    // Only the composer: the Co-Producer socket cannot change the settings.
+    let mut raw = Client::connect(&sock).expect("the Co-Producer socket");
+    for (id, params) in [
+        ("settings.delete_time_records", json!({})),
+        ("settings.co_producer_metrics", json!({"on": false})),
+    ] {
+        match raw.call("command.run", json!({"id": id, "params": params}), t) {
+            Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::NotAllowed, "{id}: {e:?}"),
+            other => panic!("{id}: expected not_allowed, got {other:?}"),
+        }
+    }
+    assert!(time_json.exists(), "the refusals deleted nothing");
+    drop(raw);
+
+    // Switching off stops the sampling: the file does not move while play
+    // goes on, and the earlier records still read.
+    counting(&mut app, false);
+    let frozen = std::fs::read(&time_json).unwrap();
+    let frozen_at = std::fs::metadata(&time_json).unwrap().modified().unwrap();
+    play_for(&mut app, 4);
+    assert_eq!(
+        std::fs::read(&time_json).unwrap(),
+        frozen,
+        "sampling stopped"
+    );
+    assert_eq!(
+        std::fs::metadata(&time_json).unwrap().modified().unwrap(),
+        frozen_at
+    );
+    let earlier = mcp.ok("time_report", json!({}));
+    assert!(earlier.contains("Counting is off now"), "{earlier}");
+
+    // Delete all, over the developer channel.
+    counting(&mut app, true);
+    app.call(
+        "command.run",
+        json!({"id": "settings.delete_time_records", "params": {}}),
+    );
+    wait_for_path(&metrics, false);
+    assert_eq!(
+        mcp.ok("time_report", json!({})),
+        "No time has been counted yet."
+    );
+
+    // Off again: nothing is written.
+    counting(&mut app, false);
+    play_for(&mut app, 3);
+    assert!(!metrics.exists(), "no Metrics folder after switching off");
+    drop(mcp);
+    app.quit();
+}

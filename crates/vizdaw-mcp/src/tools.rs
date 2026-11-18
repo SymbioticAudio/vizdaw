@@ -605,7 +605,7 @@ fn recipes_tool() -> Value {
     );
     json!({
         "name": RECIPES,
-        "description": "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb and automation moves. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing.",
+        "description": "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb, automation moves and coaching on where the composer's time goes. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing.",
         "inputSchema": object_schema(props, Vec::new()),
         "annotations": {"readOnlyHint": true},
     })
@@ -1974,7 +1974,8 @@ pub fn time_parts(result: &Value) -> Option<(String, Value)> {
         parts(&all_seconds)
     ));
     text.push_str(&format!(
-        "\nFriction: {all_bursts} undo bursts; repeated tasks: {}; long menu hunts: {all_hunts}, ending at {}.",
+        "\nFriction: {}; repeated tasks: {}; long menu hunts: {all_hunts}, ending at {}.",
+        bursts_text(all_bursts),
         pairs_text(&all_repeats),
         pairs_text(&all_ends)
     ));
@@ -1992,9 +1993,10 @@ pub fn time_parts(result: &Value) -> Option<(String, Value)> {
             used.join(", ")
         };
         text.push_str(&format!(
-            "\n- {name}{}: {} \u{2014} {used}; {bursts} undo bursts; {hunts} long menu hunts",
+            "\n- {name}{}: {} \u{2014} {used}; {}; {hunts} long menu hunts",
             if *this { " (this song)" } else { "" },
             duration_text(secs.iter().sum()),
+            bursts_text(*bursts),
         ));
     }
     if more > 0 {
@@ -2004,6 +2006,15 @@ pub fn time_parts(result: &Value) -> Option<(String, Value)> {
         text.push_str("\nCounting is off now; these are earlier records.");
     }
     Some((text, structured))
+}
+
+/// "1 undo burst" or "N undo bursts".
+fn bursts_text(n: u64) -> String {
+    if n == 1 {
+        "1 undo burst".into()
+    } else {
+        format!("{n} undo bursts")
+    }
 }
 
 /// Ruling 6's text from the app's answer, or [`TIME_UNREADABLE`].
