@@ -71,23 +71,9 @@ final class LiveCoProducerSink: CoProducerSink {
     /// The folder must be this user's; it becomes 0700, so the socket's
     /// folder passes the server's own checks (control spec §8).
     func start(path: String) -> String? {
-        if let why = Self.makePrivate((path as NSString).deletingLastPathComponent) { return why }
+        let dir = URL(fileURLWithPath: (path as NSString).deletingLastPathComponent, isDirectory: true)
+        if let why = SupportFolder.makePrivate(dir) { return why }
         return ControlChannel.startCoProducer(path: path)
-    }
-
-    /// Makes `dir` (creating it) mode 0700 when this user owns it; else the
-    /// reason. Time counting shares it (plan 8f Ruling 1).
-    static func makePrivate(_ dir: String) -> String? {
-        let fm = FileManager.default
-        do {
-            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            let owner = (try fm.attributesOfItem(atPath: dir)[.ownerAccountID] as? NSNumber)?.uint32Value
-            guard owner == getuid() else { return "the folder \(dir) belongs to another user" }
-            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir)
-        } catch {
-            return AlertItem(error, title: "Co-Producer").message
-        }
-        return nil
     }
 
     func stop() { ControlChannel.stopCoProducer() }
@@ -128,11 +114,11 @@ final class LiveCoProducerSink: CoProducerSink {
 
 /// Settings › Co-Producer › Count where my time goes (plan 8f Ruling 1):
 /// off unless the composer turned it on; independent of the Co-Producer
-/// switch. Task 4 makes it at launch and starts the probe with it.
+/// switch. Made at launch; `MetricsProbe` samples only while it is on.
 @MainActor let coProducerMetrics = CoProducerMetrics(
     defaults: MemoryDefaults.appStore(), supportDir: AppSetup.coProducerSupportDir,
     environment: ProcessInfo.processInfo.environment,
-    makePrivate: { LiveCoProducerSink.makePrivate($0.path) },
+    makePrivate: { SupportFolder.makePrivate($0) },
     open: { try MetricsRecorder.open(support: $0.path, blockMs: $1, sampleMs: $2) })
 
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
@@ -232,6 +218,9 @@ struct VizDAWApp: App {
         AppSetup.openCatalog()
         // Co-Producer's socket, when its switch is on (Ruling 10).
         _ = coProducerSettings
+        // Time counting, when its switch is on (plan 8f Ruling 1): a stored
+        // on that fails to start goes off, and Settings says why.
+        _ = coProducerMetrics
         LaunchArguments.apply(ControlLaunch.strip(CommandLine.arguments), to: appStore)
     }
 
@@ -277,7 +266,7 @@ struct VizDAWApp: App {
                     .tabItem { AppIcon.settingsSurfaces.label("Surfaces") }
                 PluginSettingsView(settings: pluginSettings)
                     .tabItem { AppIcon.settingsPlugins.label("Plug-ins") }
-                CoProducerSettingsView(settings: coProducerSettings, store: appStore)
+                CoProducerSettingsView(settings: coProducerSettings, metrics: coProducerMetrics, store: appStore)
                     .tabItem { AppIcon.settingsCoProducer.label("Co-Producer") }
             }
             .themedRoot()
@@ -301,6 +290,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeyMonitor.start()
         AppSetup.startScan()
         PluginTicker.start(appStore)
+        // Samples only while Count where my time goes is on.
+        MetricsProbe.follow(coProducerMetrics, store: appStore)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -315,6 +306,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Pending control calls are answered before the documents go;
             // Co-Producer's requests end first (Ruling 10).
             coProducerSettings.quit()
+            // Time counting writes what is pending; the open block is dropped.
+            MetricsProbe.stop()
+            coProducerMetrics.quit()
             ControlChannel.stop()
             appStore.closeAll()
             // Stop the engine so no plugin host is dropped while it renders.

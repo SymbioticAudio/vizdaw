@@ -5,10 +5,12 @@ import VizDAWAppModel
 
 /// Settings › Co-Producer (plan 8a Ruling 10): the switch, what it means,
 /// where `vizdaw-mcp` is, and how many saved copies the open projects
-/// hold. All state lives in `CoProducerSettings`; the view only reads it.
+/// hold; then Time (plan 8f Ruling 1). All state lives in
+/// `CoProducerSettings` and `CoProducerMetrics`; the view only reads it.
 struct CoProducerSettingsView: View {
     @Environment(\.symbioticTheme) private var theme
     @Bindable var settings: CoProducerSettings
+    @Bindable var metrics: CoProducerMetrics
     let store: DocumentStore
 
     /// `vizdaw-mcp`, next to the app's executable in the bundle.
@@ -54,12 +56,55 @@ struct CoProducerSettingsView: View {
                     .accessibilityLabel(problem)
             }
             approvals
+            time
         }
         .formStyle(.grouped)
         .frame(width: 500)
         .onAppear {
             settings.readCopies(store)
             settings.readApprovals()
+            metrics.refreshOverview()
+        }
+        // Only the composer's own click asks; the control channel's delete
+        // opens nothing.
+        .alert("Delete all time records?", isPresented: $metrics.confirmingDelete) {
+            Button("Delete", role: .destructive) { metrics.deleteAll() }
+                .accessibilityLabel("Delete all time records")
+            Button("Cancel", role: .cancel) { metrics.confirmingDelete = false }
+                .accessibilityLabel("Cancel")
+        } message: {
+            Text("This deletes everything VizDAW has counted about where your time goes, for every song. It cannot be undone.")
+        }
+    }
+
+    /// Time (plan 8f Ruling 1): Count where my time goes, what it means,
+    /// what is kept, and Delete All Time Records….
+    private var time: some View {
+        Section {
+            Toggle(CoProducerMetrics.label, isOn: Binding(get: { metrics.on }, set: { metrics.setOn($0) }))
+                .accessibilityLabel("Count where my time goes")
+            Text(CoProducerMetrics.caption)
+                .font(theme.type.caption.font)
+                .foregroundStyle(theme.text.secondary.color)
+            Text(metrics.overviewLine)
+                .foregroundStyle(theme.text.primary.color)
+                .accessibilityLabel(metrics.overviewLine)
+            HStack {
+                Spacer()
+                Button("Delete All Time Records…") { metrics.confirmingDelete = true }
+                    .disabled(metrics.overview == nil)
+                    .accessibilityLabel("Delete all time records")
+            }
+            if let problem = metrics.problem {
+                Text(problem)
+                    .foregroundStyle(theme.state.warning.color)
+                    .accessibilityLabel(problem)
+            }
+        } header: {
+            Text("Time")
+                .font(theme.type.body.font)
+                .foregroundStyle(theme.text.primary.color)
+                .accessibilityLabel("Time")
         }
     }
 
