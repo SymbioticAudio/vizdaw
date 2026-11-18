@@ -100,7 +100,7 @@ extension CoProducerApproval {
 
     /// AppKit's current event, described for `isRealPress`, against the
     /// sheet's `window`.
-    public static func currentPress(window: NSWindow?) -> PressFacts {
+    @MainActor public static func currentPress(window: NSWindow?) -> PressFacts {
         let e = NSApp.currentEvent
         let isKey = e.map { $0.type == .keyDown || $0.type == .keyUp } ?? false
         return PressFacts(
