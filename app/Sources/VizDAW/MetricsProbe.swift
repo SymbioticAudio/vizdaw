@@ -75,7 +75,9 @@ enum MetricsProbe {
                 }
             })
         observers.append(
-            center.addObserver(forName: NSMenu.didSendActionNotification, object: nil, queue: .main) { note in
+            // Before the action runs, so one that runs a modal loop keeps
+            // its label.
+            center.addObserver(forName: NSMenu.willSendActionNotification, object: nil, queue: .main) { note in
                 nonisolated(unsafe) let n = note
                 MainActor.assumeIsolated {
                     guard let item = n.userInfo?["MenuItem"] as? NSMenuItem else { return }
@@ -110,6 +112,13 @@ enum MetricsProbe {
         store = nil
         metrics = nil
         lastKey = nil
+    }
+
+    /// Input happened (KeyMonitor's bound keys, which it swallows); only
+    /// its time is kept, and only while the probe runs.
+    static func noteInput() {
+        guard running else { return }
+        ticker.input(at: now().ms)
     }
 
     private static func now() -> MetricsClockRow { CoProducerMetrics.clock(Date()) }
