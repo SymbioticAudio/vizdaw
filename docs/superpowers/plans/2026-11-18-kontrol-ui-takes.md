@@ -50,22 +50,21 @@ The name rule in practice: Rust string literals and Swift string literals are sc
 4. **A saved audio-editor zoom never shows an empty or out-of-file view.** That covers a hand-edited or stale `ui.json` (NaN, negative or huge values) and a region trimmed shorter since the save. (Task 13: `aSavedViewIsClampedToTheRegionAsItIsNow`.)
 5. **Replace after an undo during recording lands in the take that was playing when Record was pressed.** It never clears another take's notes. (Task 16: `replace_lands_in_the_take_that_was_playing_at_record`.)
 
-## Rulings (provisional, for the owner's review of this plan)
+## Rulings (provisional unless marked owner-confirmed, for the owner's review of this plan)
 
-- **R1 (rows 61, 62).** These two rows are not built:
+- **R1 (rows 61, 62).** The NKS hand-off and the Quantize and Clear buttons are not built:
   - The NKS hand-off needs the keyboard maker's NKS protocol, which is not public and not in the repo.
-  - Metro stays dark: VizDAW still has no metronome.
   - Quantize stays dark: its only key command opens a sheet, and `modify.quantize_notes` needs explicit tracks and a grid.
   - Clear stays dark: it still has no counterpart.
 
-  Both rows stay in the backlog with this note.
+  Metro is built in Task 2 (owner, 2026-11-18): it runs `transport.click`, the metronome that the groups/VCAs/transport plan adds to 26.0.0 before this plan runs. Row 61 stays in the backlog with this note, and so does row 62's Quantize and Clear part.
 - **R2 (row 66).** `TEMPO_RUN` (500 ms) and `TAP_RESET` (2 s) stay until the owner runs README 198. The plan found that taps are already stamped where the MIDI arrives (`enqueue` stamps `at` on CoreMIDI's thread, and `route` passes `item.at`), not on the 60 Hz idle. Task 1 goes further and uses the packet's host time when it has one.
 - **R3 (rows 64, 67, 68).** These rows need facts only the owner's keyboard can give, so each one stops at the testable part:
   - Task 2 builds the keep-alive and the press-only track buttons as unit options. Both are off by default, so behaviour is unchanged.
   - Task 2 also adds a "heard" log to each surface's feedback row, which lets the owner see what the keyboard sends.
   - High-resolution knob deltas are not built: the format of the 0x7F delta messages is not in the repo, and the plan invents no bytes.
   - README steps tell the owner what to capture. A follow-up turns each option on, or decodes the deltas, from the capture.
-- **R4 (row 63).** When the playhead is strictly inside a ramp (the point in effect has `ramp: true`, and a later point exists), the keyboard's first turn adds a point at the playhead. The new point has the new tempo and `ramp: true`, so the ramp still reaches the next point. The rest of that gesture edits the same point. On a constant segment, or exactly on a point's tick, it edits the point in effect, as today. The owner should confirm this.
+- **R4 (row 63).** When the playhead is strictly inside a ramp (the point in effect has `ramp: true`, and a later point exists), the keyboard's first turn adds a point at the playhead. The new point has the new tempo and `ramp: true`, so the ramp still reaches the next point. The rest of that gesture edits the same point. On a constant segment, or exactly on a point's tick, it edits the point in effect, as today. **Confirmed by the owner (2026-11-18):** a tempo turn inside a ramp writes a tempo change as a point at the playhead.
 - **R5 (row 73).** Page arrangements are app-wide preferences, one per plug-in (format and id). They live in a core-owned `plugin-pages.json` in the support folder. Keeping them out of `surfaces.json` means older builds never set that file aside.
 - **R6 (row 98).** The wheel works on the strip's fader, pan knob and send knobs, and on the MIDI strip's fader and pan knob. A notched wheel moves 0.01 per notch; a trackpad moves 0.002 per point. ⌥ moves a tenth of that. Scrolling up raises the value, whatever the scroll-direction setting. A run ends 0.4 s after the last event. Mostly-horizontal scrolls pass through, so the mixer still scrolls sideways.
 - **R7 (row 105).** The zoom is saved per region, and only the 64 most recently shown regions are kept.
@@ -111,14 +110,17 @@ The name rule in practice: Rust string literals and Swift string literals are sc
 - [ ] **Step 5: Update the README.** Extend step 198 with: "Turn the tempo control up one step and straight back: the screen and VizDAW both end at the first value. Report whether 500 ms between turns and 2 s between tap series feel right." Name the new test in step 194's list.
 - [ ] **Step 6: Commit** as `fix(kontrol): an echo drops older sent tempos, so a turn back is kept; taps use the packet time`.
 
-### Task 2: Kontrol hardware-dependent options and the heard log (rows 64, 67, 68; Ruling R3)
+### Task 2: Kontrol Metro, the hardware-dependent options and the heard log (rows 62, 64, 67, 68; Rulings R1, R3)
 
 **Files:**
-- Modify: `crates/core-surface/src/kontrol.rs` (fields, `command` ~670, `answer` ~712, `feedback` ~961, `tick`)
+- Modify: `crates/core-surface/src/kontrol.rs` (fields, `control` ~559, `command` ~670, `answer` ~712, `send_state`, `feedback` ~961, `tick`), `crates/core-surface/src/lib.rs` (`MixerView.click`)
+- Modify: `crates/core-ffi/src/session.rs` (`surface_view`: `click`)
 - Modify: `crates/core-ffi/src/surfaces.rs` (`Unit` ~391, `feedback_row` ~441, `route` ~1327, `SurfaceFeedbackRow` ~182), `crates/core-ffi/src/control.rs:1854` (`"heard"`)
 - Test: `crates/core-surface/tests/kontrol_input.rs`, `crates/core-ffi/tests/kontrol.rs`
 
 **Interfaces:**
+- Consumes, from the groups/VCAs/transport plan (`docs/superpowers/plans/2026-11-18-groups-vcas-transport.md`), which runs first: the registry command `transport.click` (a toggle) and the click's on/off state. Read that state wherever that plan keeps it: if it is core state, `surface_view` reads it directly; if it is the app's, the app passes it the way it passes count-in (`Session::set_surface_count_in`). `transport.set_click_level` and `transport.set_click_mode` are not used.
+- Produces: `MixerView.click: bool`, which is true while the metronome is on.
 - Produces, on `Kontrol`:
   - `pub fn set_press_only(&mut self, on: bool)`;
   - `pub fn set_keep_alive(&mut self, every: Option<Duration>)`;
@@ -126,6 +128,12 @@ The name rule in practice: Rust string literals and Swift string literals are sc
 - Produces: `SurfaceFeedbackRow.heard: Vec<String>`, the last 64 messages heard from the unit, in hex.
 
 - [ ] **Step 1: Write the failing tests:**
+  - `metro_toggles_the_click_and_lights_with_it` (kontrol_input.rs):
+    - `BF 17 01` gives `[Command("transport.click")]`;
+    - `BF 17 00` (the release) gives nothing;
+    - feedback with `v.click = true` holds `BF 17 01`, and with `false`, `BF 17 00`;
+    - Quantize (`BF 22`) and Clear (`BF 15`) still do nothing, are not counted, and stay dark.
+  - `the_metro_button_reaches_the_app_as_a_command` (core-ffi kontrol.rs): inject `BF 17 01`; `take_surface_events` holds `Command { id: "transport.click", programmatic: true }`.
   - `track_buttons_act_on_every_message_by_default`: a mute SysEx (0x43) with value 1, then one with value 0, toggles twice. This pins today's behaviour.
   - `press_only_track_buttons_ignore_a_release`: after `set_press_only(true)`, the same pair toggles once; select, solo and arm with value 0 do nothing and are not counted as ignored.
   - `keep_alive_is_off_by_default`: online, feedback every 20 ms for 60 s sends no `BF 01 04`.
@@ -136,6 +144,9 @@ The name rule in practice: Rust string literals and Swift string literals are sc
   - `the_feedback_row_lists_what_the_unit_sent` (core-ffi): inject `BF 10 01`; the focused session's `surface_state()` feedback row for the unit has `heard` ending in `midi::hex(&[0xBF, 0x10, 0x01])`.
 - [ ] **Step 2: Confirm they fail.** Run `cargo test -p core-surface --test kontrol_input` and `cargo test -p core-ffi --test kontrol the_feedback_row`.
 - [ ] **Step 3: Implement.**
+  - In `control`, CC 0x17 joins the press-only command arm and pushes `Command("transport.click")`. Remove 0x17 from the do-nothing list.
+  - In `send_state`, `tx.cc(0x17, 0)` becomes `tx.cc(0x17, on(view.click))`.
+  - `surface_view` fills `click`, which is false until the other plan's state exists.
   - `command` reads `value`: with `press_only`, a value of 0 on 0x42–0x45 returns early.
   - Keep-alive uses two new fields, `alive_due: Option<Instant>` and `alive_wait: Option<Instant>`:
     - while online, `feedback` sends the hello when `alive_due` has passed and sets `alive_wait = now + HELLO_EVERY`;
@@ -144,11 +155,11 @@ The name rule in practice: Rust string literals and Swift string literals are sc
   - The registry's `Unit` gets `heard: VecDeque<String>` (`LOG_LIMIT`). `route` pushes the hex of each message it hands to a unit.
   - `Unit::new` sets neither option (Ruling R3).
 - [ ] **Step 4: Confirm they pass.** Run `cargo test -p core-surface -p core-ffi --test kontrol`.
-- [ ] **Step 5: Update the README.** Add three hardware captures to step 198. Each one runs `target/debug/vizctl state surfaces` and reads the unit's `heard` list:
+- [ ] **Step 5: Update the README.** In step 191, replace "Metro and Quantize stay dark and do nothing" with "Press Metro: the metronome turns on and the button lights; press again: off and dark; turn the click on in VizDAW: the light follows. Quantize stays dark and does nothing." Then add three hardware captures to step 198. Each one runs `target/debug/vizctl state surfaces` and reads the unit's `heard` list:
   - (a) press a track's Mute once: one 0x43 message, or two (with which value bytes);
   - (b) switch the keyboard to MIDI mode: does `heard` show a goodbye (`BF 02`)? If not, remove the surface and add it again, which sends a hello: does `heard` show an answer `BF 01 …`, and does the keyboard come back to DAW mode? That decides whether the keep-alive can be turned on;
   - (c) high-resolution knob deltas are not built (Ruling R3); the step records this as an open hardware question for a later build.
-- [ ] **Step 6: Commit** as `feat(kontrol): press-only track buttons and a keep-alive behind unit options; a heard log per surface`.
+- [ ] **Step 6: Commit** as `feat(kontrol): Metro runs the click and lights with it; press-only track buttons and a keep-alive behind unit options; a heard log per surface`.
 
 ### Task 3: Kontrol session fixes: tempo after a ride, ramps, the preset cache (rows 70, 63, 69)
 
@@ -188,7 +199,7 @@ The name rule in practice: Rust string literals and Swift string literals are sc
   - Ramps: choose the point as Ruling R4 says. With `new_step == false` and the same unit, edit the point at the gesture's stored tick.
   - Presets: drop the `params_changed` term from `fresh` in `sync_presets`. In `pump`, set `inner.surfaces.presets = None` when `r.loaded` or `r.restart` names the cached slot. Count calls in `plugins::presets`.
 - [ ] **Step 4: Confirm they pass.** Run `cargo test -p core-ffi --test kontrol` and `cargo test -p core-ffi`.
-- [ ] **Step 5: Update the README.** Step 194 loses "wait 1 s after any knob turn" and gains: "Turn knob 1, then the tempo control at once: both change, and two Undos undo the tempo, then the fader." Add to step 194: "On a song with a tempo ramp, play inside the ramp and turn the tempo: a new tempo point appears at the playhead, and the ramp still ends where it did." Mark that line *(provisional, Ruling R4)*.
+- [ ] **Step 5: Update the README.** Step 194 loses "wait 1 s after any knob turn" and gains: "Turn knob 1, then the tempo control at once: both change, and two Undos undo the tempo, then the fader." Add to step 194: "On a song with a tempo ramp, play inside the ramp and turn the tempo: a new tempo point appears at the playhead, and the ramp still ends where it did." Mark that line *(Ruling R4, owner-confirmed)*.
 - [ ] **Step 6: Commit** as `fix(kontrol): a ride's idle hold yields to a tempo turn; a turn inside a ramp adds a point; presets re-read only on load`.
 
 ### Task 4: Plug-in pages the user arranges, in the core (rows 73, 65)
@@ -661,8 +672,9 @@ Delete Take is disabled with one take. Both submenus are disabled under an empty
 
 - [ ] **Step 1: Update the backlog.**
   - Prefix each built row's Notes with `**Done (26.0.0 beta, plan kontrol-ui-takes Task N):**`.
-  - Prefix rows 63, 64, 66 and 68 with `**Partly done (26.0.0 beta, Task N; Ruling R3/R4):** waits for README 198`, adding what is left.
-  - Prefix rows 61, 62 and 67 with `**Not built (26.0.0 beta, Ruling R1/R3):**` and the reason.
+  - Prefix rows 64, 66 and 68 with `**Partly done (26.0.0 beta, Task N; Ruling R2/R3):** waits for README 198`, adding what is left. Row 63 is done (Task 3; Ruling R4, owner-confirmed).
+  - Prefix row 62 with "**Partly done (26.0.0 beta, Task 2):** Metro runs `transport.click`; Quantize and Clear are not built (Ruling R1)."
+  - Prefix rows 61 and 67 with `**Not built (26.0.0 beta, Ruling R1/R3):**` and the reason.
   - Add `- Beta (owner, 2026-11-18): plan 2026-11-18-kontrol-ui-takes.md.` to the 26.0.0 list.
 - [ ] **Step 2: Verify the whole branch.**
   - Run `cargo test --workspace`, Linux clippy, `scripts/build-ffi.sh`, `scripts/swift.sh test` (the name scans included) and `scripts/make-app.sh`.
