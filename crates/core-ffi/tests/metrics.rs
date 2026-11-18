@@ -921,3 +921,47 @@ fn metrics_result_json() {
         json!({"on": true, "since": DAY, "days": 7, "all": totals, "songs": [song], "more_songs": 2})
     );
 }
+
+#[test]
+fn clear_and_delete_all_holds_the_lock() {
+    let _g = serial();
+    let d = Support::new();
+    let r = d.open();
+    for i in 0..5 {
+        r.note_undo(at(T0 + i), song(A));
+    }
+    r.flush().unwrap();
+    assert!(d.store().exists());
+    for i in 0..5 {
+        r.note_undo(at(T0 + 200_000 + i), song(A));
+    }
+    for i in 0..11 {
+        r.sample(at(T0 + i * SAMPLE_MS), Some(Cat::Editing), song(A));
+    }
+    r.clear_and_delete_all().unwrap();
+    assert!(!d.metrics().exists(), "the records are gone");
+    r.sample(at(T0 + BLOCK_MS), None, None);
+    r.flush().unwrap();
+    assert!(!d.metrics().exists(), "nothing pending survived");
+    r.clear_and_delete_all().unwrap();
+    for i in 0..5 {
+        r.note_undo(at(T0 + 400_000 + i), song(B));
+    }
+    r.flush().unwrap();
+    let v = d.json();
+    assert_eq!(bursts(&v, Some(B)), 1, "counting goes on into a fresh file");
+    assert!(v["songs"].get(A).is_none());
+    assert_eq!(mode(&d.metrics()), 0o700);
+}
+
+#[test]
+fn every_registry_title_fits_the_label_bound() {
+    for c in core_control::registry::COMMANDS {
+        let t = c.title.strip_suffix('…').unwrap_or(c.title);
+        assert!(
+            t.chars().count() <= vizdaw_ffi::metrics::NAME_MAX,
+            "{t:?} is longer than a stored label may be"
+        );
+        assert!(!t.chars().any(char::is_control), "{t:?}");
+    }
+}

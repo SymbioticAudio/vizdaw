@@ -387,6 +387,19 @@ impl MetricsRecorder {
             Ok(())
         });
     }
+
+    /// Delete All Time Records… while counting is on: drops everything
+    /// pending and deletes `<support>/Metrics` under the recorder's own
+    /// lock, so no count or write slips between the two. Counting goes on
+    /// into a fresh file. With no recorder open, use [`metrics_delete_all`].
+    pub fn clear_and_delete_all(&self) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut s = self.state.lock().map_err(|_| poisoned())?;
+            (s.blocks, s.friction) = self.fresh();
+            s.pending = Store::default();
+            file::delete_all(&self.support)
+        })
+    }
 }
 
 fn poisoned() -> VizError {
