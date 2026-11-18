@@ -7,8 +7,8 @@
 
 use crate::automation::{AutomationTarget, strip_of};
 use crate::document::{DestKind, Document};
-use crate::event::{Event, EventBody};
-use crate::ids::{DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
+use crate::event::{Event, EventBody, FadeShape};
+use crate::ids::{DestId, EventId, LaneId, OutputPathId, PluginInstanceId, SeqId, StripId};
 use crate::lane::Lane;
 use crate::mixer::{AuxSend, GAIN_FLOOR_DB, Output, ParamId, PluginSlot, Strip, StripKind, Swatch};
 use crate::sequence::{Marker, Sequence};
@@ -113,8 +113,66 @@ fn lanes_of(s: &Sequence) -> BTreeMap<LaneId, (usize, &Lane)> {
         .collect()
 }
 
+/// A fade shape as the Region menu titles it, in the list's lower case.
+fn shape(s: FadeShape) -> &'static str {
+    match s {
+        FadeShape::Linear => "linear",
+        FadeShape::EqualPower => "equal power",
+        FadeShape::Exponential => "exponential",
+        FadeShape::SCurve => "s-curve",
+    }
+}
+
+/// A lane's audio regions' fades over all its takes, by ID.
+fn fades(l: &Lane) -> BTreeMap<EventId, (FadeShape, FadeShape)> {
+    l.takes
+        .iter()
+        .flat_map(|t| t.events.values())
+        .filter_map(|e| match &e.body {
+            EventBody::AudioRegion {
+                fade_in, fade_out, ..
+            } => Some((e.id, (fade_in.shape, fade_out.shape))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// "fade in linear → s-curve" for each region kept whose fade shapes
+/// changed (plan 8e Task 6b).
+fn changed_fades(before: &Lane, after: &Lane) -> Vec<String> {
+    let old = fades(before);
+    let mut parts = Vec::new();
+    for (id, (fin, fout)) in fades(after) {
+        let Some((oin, oout)) = old.get(&id) else {
+            continue;
+        };
+        for (edge, was, now) in [("in", *oin, fin), ("out", *oout, fout)] {
+            if was != now {
+                parts.push(format!("fade {edge} {} → {}", shape(was), shape(now)));
+            }
+        }
+    }
+    parts
+}
+
+/// An output path's name as the list shows it; "none" for no output.
+fn path_name(doc: &Document, o: Option<OutputPathId>) -> String {
+    match o {
+        None => "none".into(),
+        Some(id) => doc
+            .outputs()
+            .get(&id)
+            .map_or_else(|| format!("output {}", id.0), |p| shown_name(&p.name)),
+    }
+}
+
 /// The track items of one sequence present before and after.
-fn tracks(before: &Sequence, after: &Sequence, out: &mut Vec<ChangeItem>) {
+fn tracks(
+    docs: (&Document, &Document),
+    before: &Sequence,
+    after: &Sequence,
+    out: &mut Vec<ChangeItem>,
+) {
     let (b, a) = (lanes_of(before), lanes_of(after));
     for (i, l) in before.lanes.iter().enumerate() {
         if a.contains_key(&l.id) {
@@ -171,6 +229,15 @@ fn tracks(before: &Sequence, after: &Sequence, out: &mut Vec<ChangeItem>) {
         let kept = changed.is_empty();
         if !kept {
             parts.push(changed);
+        }
+        // Neither a fade shape nor an output takes work away.
+        parts.extend(changed_fades(old, l));
+        if old.audio_out != l.audio_out {
+            parts.push(format!(
+                "output {} → {}",
+                path_name(docs.0, old.audio_out),
+                path_name(docs.1, l.audio_out)
+            ));
         }
         if !parts.is_empty() {
             // A falling count, or a changed note, takes the composer's work
@@ -321,7 +388,7 @@ fn sequences(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
                     out.push(item(sequence(i, &b.name), renamed(&a.name)));
                 }
                 if b != a {
-                    tracks(b, a, out);
+                    tracks((before, after), b, a, out);
                     markers(b, a, out);
                 }
             }
@@ -394,6 +461,48 @@ fn strips(before: &Document, after: &Document, params: ParamLookup, out: &mut Ve
         if !parts.is_empty() {
             let ours = old.co_producer && !theirs;
             out.push(item_of(strip(&old.name), parts.join(", "), ours));
+        }
+    }
+}
+
+/// A Built-in Synth's sound by its title (plan release-fixes Scope 1:
+/// a General MIDI program and channel, with no bank), as its window names
+/// it; "another sound" for any other patch.
+fn synth_sound(d: &crate::document::Destination) -> &'static str {
+    let DestKind::MidiEndpoint { channel, .. } = &d.kind else {
+        return "another sound";
+    };
+    let program = match d.default_patch {
+        Some(p) if p.bank.is_some() => return "another sound",
+        p => p.map_or(0, |p| p.program),
+    };
+    match (program, *channel) {
+        (0, 0) => "Piano",
+        (33, 0) => "Bass",
+        (89, 0) => "Pad",
+        (80, 0) => "Lead",
+        (0, 9) => "Drums",
+        _ => "another sound",
+    }
+}
+
+/// "Built-in Synth" / "sound Piano → Pad" for each Built-in Synth whose
+/// sound changed (plan 8e Task 6b). Every track that plays it changes, so
+/// it is never Co-Producer's alone.
+fn synth_sounds(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
+    for (id, old) in before.instruments().iter() {
+        let Some(new) = after.instruments().get(id) else {
+            continue;
+        };
+        if !(old.kind.is_builtin_synth() && new.kind.is_builtin_synth()) {
+            continue;
+        }
+        let (was, now) = (synth_sound(old), synth_sound(new));
+        if was != now {
+            out.push(item(
+                "Built-in Synth".into(),
+                format!("sound {was} → {now}"),
+            ));
         }
     }
 }
@@ -905,6 +1014,11 @@ fn automation_parts(
 /// A strip present before and after gets one item for its mixer changes
 /// (plan 8d Ruling 4), after its rename and colour items; its automation
 /// changes (plan 8e Ruling 4) follow the parameters in that item.
+///
+/// A track's item also lists its regions' fade shapes ("fade in linear →
+/// s-curve") and its output ("output Audio 1 → none"); a Built-in Synth
+/// whose sound changed is one "Built-in Synth" / "sound Piano → Pad" item
+/// after the strips (plan 8e Task 6b).
 pub fn describe(before: &Document, after: &Document) -> Vec<ChangeItem> {
     describe_with(before, after, &|_, _| None)
 }
@@ -918,6 +1032,7 @@ pub fn describe_with(before: &Document, after: &Document, params: ParamLookup) -
     let mut out = Vec::new();
     sequences(before, after, &mut out);
     strips(before, after, params, &mut out);
+    synth_sounds(before, after, &mut out);
     if out.is_empty() {
         out.push(item("The song".into(), "other changes".into()));
     }

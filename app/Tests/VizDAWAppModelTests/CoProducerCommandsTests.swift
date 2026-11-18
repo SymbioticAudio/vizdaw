@@ -1092,6 +1092,29 @@ import VizDAWCore
         }
     }
 
+    /// Plan 8e Task 6b: a fade shape, the Built-in Synth's sound and a
+    /// track's output change the composer's work, so `command.run` refuses
+    /// each here as the gate does, with no enter and nothing sent.
+    @Test func fixesChangesAreRefusedOnCommandRun() throws {
+        let (s, id, _, f) = try demo()
+        let editsBefore = f.edits.count
+        for (cmd, args) in [
+            (RegionCommands.setFadeShape,
+             [int("seq", 1), int("lane", 2), int("event", 3), text("fade", "in"), text("shape", "s_curve")]),
+            (SynthCommands.setSound, [int("dest", 1), text("sound", "pad")]),
+            (TrackCommands.setOutput, [int("seq", 1), int("lane", 2), int("output", 0)]),
+        ] {
+            f.coLog = []
+            let o = run(command(cmd, args), s, id)
+            #expect(failure(o)?.code == .notAllowed, "\(cmd)")
+            #expect(failure(o)?.message
+                == "\(cmd) changes your work: preview it with co_producer.preview and apply it with the composer's yes.")
+            #expect(f.coLog == [], "\(cmd)")
+        }
+        #expect(f.edits.count == editsBefore)
+        #expect(f.builtinSounds.isEmpty)
+    }
+
     /// A failing `runCreative` reached through `co_producer.apply` is its
     /// line, and no sheet opens (8a Ruling 13); `command.run` of it is
     /// refused before enter.

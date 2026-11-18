@@ -24,7 +24,9 @@ use std::path::{Component, Path, PathBuf};
 /// The change and remove commands Co-Producer can preview (8a Ruling 6;
 /// 8b Ruling 9 adds `mixer.set_colour`; 8c Rulings 2 and 4 add the note
 /// chores and the marker changes; 8d Ruling 1 adds `mixer.new_bus` with a
-/// `strip` and the twelve mixer edits; 8e Ruling 1 adds `automation.write`).
+/// `strip` and the twelve mixer edits; 8e Ruling 1 adds `automation.write`;
+/// 8e Task 6b adds the release-fixes fade shape, Built-in Synth sound and
+/// track output).
 pub const PREVIEWABLE: &[&str] = &[
     "track.rename",
     "track.delete",
@@ -51,6 +53,9 @@ pub const PREVIEWABLE: &[&str] = &[
     "mixer.set_param",
     "mixer.remove_bus",
     "automation.write",
+    "region.set_fade_shape",
+    "destination.set_sound",
+    "lane.set_output",
 ];
 
 /// The most IDs in one [`id_list`] (plan 8c Rulings 1 and 2).
@@ -326,12 +331,23 @@ fn admit_planned(p: &Planned) -> Result<(), ControlError> {
         });
     }
     match id {
-        "track.rename" | "track.delete"
+        "track.rename" | "track.delete" | "lane.set_output"
             if arg(&p.args, "seq").is_none() || arg(&p.args, "lane").is_none() =>
         {
             Err(ControlError::params(
                 id,
                 "name the track's `seq` and `lane`",
+            ))
+        }
+        // Not the composer's selection (plan 8e Task 6b).
+        "region.set_fade_shape"
+            if ["seq", "lane", "event"]
+                .iter()
+                .any(|n| arg(&p.args, n).is_none()) =>
+        {
+            Err(ControlError::params(
+                id,
+                "name the region's `seq`, `lane` and `event`",
             ))
         }
         "file.save" if arg(&p.args, "path").is_some() => Err(ControlError::not_allowed(

@@ -1691,7 +1691,8 @@ fn release_all_takes_no_params() {
     }
     let spec = registry::find("automation.release_all").unwrap();
     assert!(spec.document && !spec.menu_item && spec.params.is_empty());
-    assert_eq!(spec.class, registry::Class::Change);
+    // Plan 8e Task 6b: app-wide, so refused to Co-Producer.
+    assert_eq!(spec.class, registry::Class::Refused);
 }
 
 /// Plan 5f-1 Task 9: the surface commands take their parameters by type

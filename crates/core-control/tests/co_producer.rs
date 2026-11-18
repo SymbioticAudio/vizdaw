@@ -107,7 +107,6 @@ const CHANGE: &[&str] = &[
     "destination.add_midi",
     "automation.set_mode",
     "automation.gesture",
-    "automation.release_all",
     "automation.suspend",
     "drum.add_row",
     "drum.split_row",
@@ -1490,6 +1489,9 @@ fn chore_commands_have_their_class() {
             "mixer.set_param",
             "mixer.remove_bus",
             "automation.write",
+            "region.set_fade_shape",
+            "destination.set_sound",
+            "lane.set_output",
         ]
     );
 }
@@ -2544,7 +2546,11 @@ fn creative_commands_have_their_class() {
     assert!(c.document);
     assert_eq!(c.shortcut, None);
     assert!(PREVIEWABLE.contains(&"automation.write"));
-    assert_eq!(PREVIEWABLE.len(), 25, "8e adds automation.write");
+    assert_eq!(
+        PREVIEWABLE.len(),
+        28,
+        "8e adds automation.write; Task 6b adds the three release-fixes changes"
+    );
     let list = co_producer::list_json();
     let listed = list["commands"]
         .as_array()
@@ -2881,4 +2887,194 @@ fn reads_refuse_hostile_input() {
             e.message
         );
     }
+}
+
+/// Plan 8e Task 6b: the release-fixes changes, each with valid explicit
+/// targets.
+fn fixes_changes() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "region.set_fade_shape",
+            json!({"seq": 1, "lane": 2, "event": 3, "fade": "in", "shape": "s_curve"}),
+        ),
+        ("destination.set_sound", json!({"dest": 4, "sound": "pad"})),
+        ("lane.set_output", json!({"seq": 1, "lane": 2, "output": 5})),
+        (
+            "lane.set_output",
+            json!({"seq": 0, "lane": 0, "output": null}),
+        ),
+    ]
+}
+
+#[test]
+fn fixes_commands_have_their_class() {
+    for id in [
+        "region.set_fade_shape",
+        "destination.set_sound",
+        "lane.set_output",
+    ] {
+        let c = registry::find(id).unwrap();
+        assert_eq!(c.class, Class::Change, "{id}");
+        assert!(PREVIEWABLE.contains(&id), "{id}");
+    }
+    // App-wide, as 8a Ruling 5's refused list: the channel's touches are
+    // not the song's.
+    let c = registry::find("automation.release_all").unwrap();
+    assert_eq!(c.class, Class::Refused);
+    assert!(!PREVIEWABLE.contains(&"automation.release_all"));
+    let m = assert_code(
+        "command.run",
+        run("automation.release_all", json!({})),
+        ErrorCode::NotAllowed,
+    );
+    assert_eq!(m, "Co-Producer cannot run automation.release_all.");
+    let e = preview(json!([{"id": "automation.release_all", "params": {}}])).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotAllowed);
+    assert_eq!(e.message, "Co-Producer cannot run automation.release_all.");
+    let list = co_producer::list_json();
+    let commands = list["commands"].as_array().unwrap();
+    assert!(commands.iter().all(|c| c["id"] != "automation.release_all"));
+    for id in [
+        "region.set_fade_shape",
+        "destination.set_sound",
+        "lane.set_output",
+    ] {
+        let c = commands.iter().find(|c| c["id"] == id).unwrap();
+        assert_eq!(c["previewable"], json!(true), "{id}");
+        assert_eq!(c["class"], "change", "{id}");
+    }
+}
+
+#[test]
+fn fixes_changes_only_through_a_preview() {
+    for (id, params) in fixes_changes() {
+        let m = assert_code(
+            "command.run",
+            run(id, params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert_eq!(
+            m,
+            format!(
+                "{id} changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+            )
+        );
+        assert_eq!(
+            preview(json!([{"id": id, "params": params}])),
+            Ok(()),
+            "{id} {params}"
+        );
+    }
+    let plan: Vec<Value> = fixes_changes()
+        .into_iter()
+        .map(|(id, params)| json!({"id": id, "params": params}))
+        .collect();
+    assert_eq!(preview(Value::Array(plan.clone())), Ok(()));
+    assert_eq!(
+        gate(
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": plan})
+        ),
+        Ok(())
+    );
+    // A plan names its targets: the selection is the composer's, not
+    // Co-Producer's.
+    for (id, params, want) in [
+        (
+            "region.set_fade_shape",
+            json!({"fade": "in", "shape": "linear"}),
+            "region.set_fade_shape: name the region's `seq`, `lane` and `event`",
+        ),
+        (
+            "region.set_fade_shape",
+            json!({"seq": 1, "fade": "in", "shape": "linear"}),
+            "region.set_fade_shape: name the region's `seq`, `lane` and `event`",
+        ),
+        (
+            "lane.set_output",
+            json!({"output": 3}),
+            "lane.set_output: name the track's `seq` and `lane`",
+        ),
+        (
+            "lane.set_output",
+            json!({"lane": 2, "output": 3}),
+            "lane.set_output: name the track's `seq` and `lane`",
+        ),
+    ] {
+        let e = preview(json!([{"id": id, "params": params}])).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{id} {params}");
+        assert!(e.message.contains(want), "{id} {params}: {}", e.message);
+    }
+}
+
+#[test]
+fn fixes_commands_refuse_hostile_input() {
+    let long = json!("x".repeat(70_000));
+    let fade = json!({"seq": 1, "lane": 2, "event": 3, "fade": "in", "shape": "s_curve"});
+    let mut cases = vec![];
+    for (key, value) in [
+        ("fade", Value::Null),
+        ("shape", Value::Null),
+        ("fade", json!("middle")),
+        ("fade", json!("In")),
+        ("fade", json!(1)),
+        ("fade", json!("in\u{0}")),
+        ("shape", json!("cubic")),
+        ("shape", json!("s_curve\u{0}")),
+        ("shape", long.clone()),
+        ("event", json!(-1)),
+        ("event", json!("3")),
+        ("event", json!(1u64 << 63)),
+        ("seq", json!(1.5)),
+        ("lane", json!(true)),
+        ("extra", json!(1)),
+    ] {
+        cases.push(with(&fade, key, value));
+    }
+    all_invalid("region.set_fade_shape", &cases);
+    let sound = json!({"dest": 4, "sound": "pad"});
+    let mut cases = vec![];
+    for (key, value) in [
+        ("dest", Value::Null),
+        ("sound", Value::Null),
+        ("dest", json!("4")),
+        ("dest", json!(-1)),
+        ("dest", json!(1u64 << 63)),
+        ("sound", json!("Pad")),
+        ("sound", json!("kazoo")),
+        ("sound", json!("pad\u{0}")),
+        ("sound", json!(3)),
+        ("sound", long.clone()),
+        ("extra", json!(1)),
+    ] {
+        cases.push(with(&sound, key, value));
+    }
+    all_invalid("destination.set_sound", &cases);
+    let output = json!({"seq": 1, "lane": 2, "output": 5});
+    let mut cases = vec![];
+    for (key, value) in [
+        ("output", Value::Null),
+        ("output", json!("5")),
+        ("output", json!(-1)),
+        ("output", json!(true)),
+        ("output", json!(1e30)),
+        ("output", json!("a\u{0}b")),
+        ("output", long.clone()),
+        ("seq", json!(-1)),
+        ("lane", json!("2")),
+        ("bus", json!(1)),
+    ] {
+        cases.push(with(&output, key, value));
+    }
+    all_invalid("lane.set_output", &cases);
+    // A strip, a slot or a bus is not a destination or an output: the
+    // wrong key is refused, as any unknown key.
+    all_invalid(
+        "destination.set_sound",
+        &[json!({"strip": 4, "sound": "pad"})],
+    );
+    all_invalid(
+        "lane.set_output",
+        &[json!({"seq": 1, "lane": 2, "strip": 5})],
+    );
 }

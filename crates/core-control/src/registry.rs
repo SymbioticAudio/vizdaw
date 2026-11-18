@@ -3185,9 +3185,9 @@ pub const COMMANDS: &[CommandSpec] = &[
         ))
     },
     // Release every touch the control channel holds, e.g. after a script
-    // stopped mid-gesture (release-fixes Task 4, Decision 2).
+    // stopped mid-gesture (release-fixes Task 4, Decision 2). App-wide,
+    // so refused to Co-Producer (plan 8e Task 6b; 8a Ruling 5).
     CommandSpec {
-        class: Class::Change,
         ..key_only(cmd(
             "automation.release_all",
             "Mixer",

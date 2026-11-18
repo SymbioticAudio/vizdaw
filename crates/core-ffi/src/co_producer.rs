@@ -334,6 +334,126 @@ fn colour_command(p: &Planned) -> Result<core_model::command::Command, VizError>
     }))
 }
 
+/// The release-fixes changes Co-Producer previews (plan 8e Task 6b).
+const FIXES: &[&str] = &[
+    "region.set_fade_shape",
+    "destination.set_sound",
+    "lane.set_output",
+];
+
+/// The app's refusal of a fade in on a crossfaded start (release-fixes
+/// Decision 9).
+const CROSSFADED_START: &str =
+    "This region's start is a crossfade: set its shape with region.crossfade.";
+
+fn text_arg<'a>(p: &'a Planned, name: &str) -> Option<&'a str> {
+    match p.args.iter().find(|(n, _)| n == name) {
+        Some((_, ArgValue::Text(t))) => Some(t),
+        _ => None,
+    }
+}
+
+/// The core-model command the app's handler for one of [`FIXES`] builds
+/// on `doc`, refused with the handler's words when the handler would
+/// refuse it; `None` when the handler changes nothing (a fade already of
+/// that shape).
+fn fixes_command(
+    doc: &core_model::document::Document,
+    p: &Planned,
+) -> Result<Option<core_model::command::Command>, VizError> {
+    use core_model::command::{AudioCmd, Command, LaneCmd};
+    use core_model::event::{EventBody, Fade, FadeShape};
+    use core_model::ids::{DestId, EventId, LaneId, OutputPathId, SeqId};
+    let id = p.id.as_str();
+    match id {
+        "region.set_fade_shape" => {
+            let (seq, lane) = (id_arg(p, "seq")?, id_arg(p, "lane")?);
+            let event = EventId(id_arg(p, "event")?);
+            let l = doc
+                .lane(SeqId(seq), LaneId(lane))
+                .map_err(|_| model(format!("{id}: `lane` names no track of that sequence")))?;
+            let ev = l
+                .active()
+                .and_then(|t| t.events.values().find(|e| e.id == event))
+                .ok_or_else(|| {
+                    model(format!(
+                        "{id}: `event` names no event on that track's active take"
+                    ))
+                })?;
+            let EventBody::AudioRegion {
+                fade_in,
+                fade_out,
+                crossfade,
+                ..
+            } = &ev.body
+            else {
+                return Err(model(format!("{id}: `event` must be an audio region")));
+            };
+            let shape = match text_arg(p, "shape") {
+                Some("linear") => FadeShape::Linear,
+                Some("equal_power") => FadeShape::EqualPower,
+                Some("exponential") => FadeShape::Exponential,
+                Some("s_curve") => FadeShape::SCurve,
+                _ => return Err(model(format!("{id}: give the fade's `shape`"))),
+            };
+            let fade_in_edge = match text_arg(p, "fade") {
+                Some("in") => true,
+                Some("out") => false,
+                _ => return Err(model(format!("{id}: give the `fade`, in or out"))),
+            };
+            if fade_in_edge && *crossfade {
+                return Err(model(CROSSFADED_START));
+            }
+            let with = |f: &Fade| Fade { shape, ..*f };
+            let (new_in, new_out) = if fade_in_edge {
+                (with(fade_in), *fade_out)
+            } else {
+                (*fade_in, with(fade_out))
+            };
+            if (new_in, new_out) == (*fade_in, *fade_out) {
+                return Ok(None);
+            }
+            Ok(Some(Command::Audio(AudioCmd::SetFades {
+                event,
+                fade_in: new_in,
+                fade_out: new_out,
+            })))
+        }
+        "destination.set_sound" => {
+            let dest = DestId(id_arg(p, "dest")?);
+            let sound = text_arg(p, "sound")
+                .and_then(crate::builtin_sound::BuiltinSound::named)
+                .ok_or_else(|| model(format!("{id}: give the `sound`")))?;
+            crate::builtin_sound::sound_command(doc, dest, sound).map(Some)
+        }
+        "lane.set_output" => {
+            let (seq, lane) = (id_arg(p, "seq")?, id_arg(p, "lane")?);
+            let kind = crate::tracks::track_kind(doc, SeqId(seq), LaneId(lane))?;
+            if kind != crate::tracks::TrackKindRow::Audio {
+                return Err(model("Only an audio track has an output."));
+            }
+            let output = match p.args.iter().find(|(n, _)| n == "output") {
+                Some((_, ArgValue::Text(t))) if t == registry::NULL_TEXT => None,
+                Some((_, ArgValue::Int(o))) => {
+                    let o = u64::try_from(*o)
+                        .map_err(|_| model(format!("{id}: `output` is out of range")))?;
+                    if !doc.outputs().contains_key(&OutputPathId(o)) {
+                        return Err(model(format!("There is no output {o}.")));
+                    }
+                    Some(OutputPathId(o))
+                }
+                _ => return Err(model(format!("{id}: give the `output`, or null"))),
+            };
+            Ok(Some(Command::Lane(LaneCmd::SetOutput {
+                seq: SeqId(seq),
+                lane: LaneId(lane),
+                output,
+            })))
+        }
+        other => Err(model(format!("Co-Producer cannot preview {other} yet."))),
+    }
+}
+
 /// Mixer items by plan 8d Ruling 2: the strip an item names decides. It
 /// is the composer's work unless that strip was Co-Producer's before the
 /// change, or is new (an item "added": an acting step made it). So a send
@@ -504,6 +624,18 @@ pub fn preview_items(
                     change: "soloed: other tracks are silent while it's on".into(),
                     composers_work: true,
                 }));
+            }
+            id if FIXES.contains(&id) => {
+                // Plan 8e Task 6b: a fade shape or an output is its
+                // track's item, so the track decides (8b Ruling 1); the
+                // Built-in Synth's sound is every track's that plays it,
+                // so its item always asks.
+                let Some(cmd) = fixes_command(h.doc(), p)? else {
+                    continue;
+                };
+                let before = h.doc().clone();
+                h.execute(&cmd, &filter)?;
+                out.extend(own_rows(diff::describe(&before, h.doc())));
             }
             "edit.undo" | "edit.redo" => {
                 let undo = p.id == "edit.undo";

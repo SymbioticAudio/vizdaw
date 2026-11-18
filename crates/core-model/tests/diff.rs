@@ -1453,3 +1453,221 @@ fn automation_over_the_composers_points_needs_a_yes() {
     assert_eq!(it.change, "fader automation 1 point → 12 points, bars 9–12");
     assert!(it.co_producers);
 }
+
+/// The region on `lane` of sequence 0 (the first one).
+fn region_on(d: &Document, lane: LaneId) -> core_model::ids::EventId {
+    d.sequence(SeqId(0))
+        .unwrap()
+        .lanes
+        .iter()
+        .find(|l| l.id == lane)
+        .unwrap()
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .find(|e| matches!(e.body, EventBody::AudioRegion { .. }))
+        .unwrap()
+        .id
+}
+
+fn fades_of(d: &Document, event: core_model::ids::EventId) -> (Fade, Fade) {
+    match d.event(event).unwrap().0.body {
+        EventBody::AudioRegion {
+            fade_in, fade_out, ..
+        } => (fade_in, fade_out),
+        _ => panic!("not a region"),
+    }
+}
+
+/// Plan 8e Task 6b: a region's fade shape is its track's item, in the
+/// shapes' menu titles; a Co-Producer track's needs no yes.
+#[test]
+fn fade_shapes_are_track_items() {
+    let d = regions(&song(), 1, 1);
+    let event = region_on(&d, LaneId(1));
+    let (fade_in, fade_out) = fades_of(&d, event);
+    let shaped = |d: &Document, fin: FadeShape, fout: FadeShape| {
+        run(
+            d,
+            Command::Audio(AudioCmd::SetFades {
+                event,
+                fade_in: Fade {
+                    shape: fin,
+                    ..fade_in
+                },
+                fade_out: Fade {
+                    shape: fout,
+                    ..fade_out
+                },
+            }),
+        )
+    };
+    assert_eq!(
+        describe(&d, &shaped(&d, FadeShape::SCurve, FadeShape::Linear)),
+        vec![item("Track 2, Lead Vox", "fade in linear → s-curve")]
+    );
+    assert_eq!(
+        describe(&d, &shaped(&d, FadeShape::Linear, FadeShape::EqualPower)),
+        vec![item("Track 2, Lead Vox", "fade out linear → equal power")]
+    );
+    let both = shaped(&d, FadeShape::Exponential, FadeShape::SCurve);
+    assert_eq!(
+        describe(&d, &both),
+        vec![item(
+            "Track 2, Lead Vox",
+            "fade in linear → exponential, fade out linear → s-curve"
+        )]
+    );
+    // On a track Co-Producer made, the item is Co-Producer's.
+    let made = acting(
+        &d,
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Loop".into(),
+            index: None,
+        }),
+    );
+    let lane = lane_id(&made, "Loop (Co-Producer)");
+    let made = regions(&made, lane.0, 1);
+    let event = region_on(&made, lane);
+    let (fade_in, fade_out) = fades_of(&made, event);
+    let after = run(
+        &made,
+        Command::Audio(AudioCmd::SetFades {
+            event,
+            fade_in: Fade {
+                shape: FadeShape::SCurve,
+                ..fade_in
+            },
+            fade_out,
+        }),
+    );
+    assert_eq!(
+        describe(&made, &after),
+        vec![ours(
+            "Track 3, Loop (Co-Producer)",
+            "fade in linear → s-curve"
+        )]
+    );
+}
+
+/// Plan 8e Task 6b: a track's output is its track's item, by the outputs'
+/// names; none is "none".
+#[test]
+fn track_outputs_are_track_items() {
+    let add = |d: &Document, name: &str| {
+        run(
+            d,
+            Command::Routing(RoutingCmd::AddOutput {
+                name: name.into(),
+                reference: format!("hw:{name}"),
+            }),
+        )
+    };
+    let d = add(&add(&song(), "Main Out"), "Cue \u{202E}Out");
+    let ids: Vec<_> = d.outputs().keys().copied().collect();
+    let (main, cue) = (ids[ids.len() - 2], ids[ids.len() - 1]);
+    let set = |d: &Document, lane: LaneId, output| {
+        run(
+            d,
+            Command::Lane(LaneCmd::SetOutput {
+                seq: SeqId(0),
+                lane,
+                output,
+            }),
+        )
+    };
+    let vox = lane_id(&d, "Lead Vox");
+    let routed = set(&d, vox, Some(main));
+    assert_eq!(
+        describe(&d, &routed),
+        vec![item("Track 2, Lead Vox", "output none → Main Out")]
+    );
+    assert_eq!(
+        describe(&routed, &set(&routed, vox, Some(cue))),
+        vec![item("Track 2, Lead Vox", "output Main Out → Cue  Out")]
+    );
+    assert_eq!(
+        describe(&routed, &set(&routed, vox, None)),
+        vec![item("Track 2, Lead Vox", "output Main Out → none")]
+    );
+    let made = acting(
+        &d,
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Loop".into(),
+            index: None,
+        }),
+    );
+    let lane = lane_id(&made, "Loop (Co-Producer)");
+    assert_eq!(
+        describe(&made, &set(&made, lane, Some(main))),
+        vec![ours(
+            "Track 3, Loop (Co-Producer)",
+            "output none → Main Out"
+        )]
+    );
+}
+
+/// Plan 8e Task 6b: the Built-in Synth's sound is one item, by its title.
+#[test]
+fn the_synth_sound_is_an_item() {
+    use core_model::document::Patch;
+    use core_model::mixer::BUILTIN_SYNTH_REF;
+    let d = run(
+        &song(),
+        Command::Routing(RoutingCmd::AddDestination {
+            name: "Built-in Synth".into(),
+            kind: DestKind::MidiEndpoint {
+                endpoint_ref: BUILTIN_SYNTH_REF.into(),
+                group: 0,
+                channel: 0,
+            },
+            default_patch: None,
+        }),
+    );
+    let dest = *d
+        .instruments()
+        .iter()
+        .find(|(_, x)| x.kind.is_builtin_synth())
+        .unwrap()
+        .0;
+    let sound = |d: &Document, program: u8, channel: u8| {
+        run(
+            d,
+            Command::Routing(RoutingCmd::EditDestination {
+                dest,
+                kind: DestKind::MidiEndpoint {
+                    endpoint_ref: BUILTIN_SYNTH_REF.into(),
+                    group: 0,
+                    channel,
+                },
+                default_patch: Some(Patch {
+                    program,
+                    bank: None,
+                }),
+            }),
+        )
+    };
+    let pad = sound(&d, 89, 0);
+    assert_eq!(
+        describe(&d, &pad),
+        vec![item("Built-in Synth", "sound Piano → Pad")]
+    );
+    for (program, channel, title) in [(33, 0, "Bass"), (80, 0, "Lead"), (0, 9, "Drums")] {
+        assert_eq!(
+            describe(&pad, &sound(&pad, program, channel)),
+            vec![item("Built-in Synth", &format!("sound Pad → {title}"))]
+        );
+    }
+    // Piano again, and a program no sound uses.
+    assert_eq!(
+        describe(&pad, &sound(&pad, 0, 0)),
+        vec![item("Built-in Synth", "sound Pad → Piano")]
+    );
+    assert_eq!(
+        describe(&pad, &sound(&pad, 5, 0)),
+        vec![item("Built-in Synth", "sound Pad → another sound")]
+    );
+}

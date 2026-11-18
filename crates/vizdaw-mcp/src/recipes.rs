@@ -36,6 +36,7 @@ pub const RECIPES: &[Recipe] = &[
             "Call starter_project once.",
             "Never write notes or beats.",
             "Read its lines aloud: they say which roles fell back to the Built-in Synth or Multi-Q.",
+            "To choose the Built-in Synth's one sound, use destination.set_sound through change.",
             END,
         ],
     },
@@ -94,6 +95,7 @@ pub const RECIPES: &[Recipe] = &[
             "Then write it with change and automation.write.",
             "A fade is fader points from the level to \u{2212}144 dB; a ride is a few fader points across a phrase, a dB or two up or down; a sweep is points on a filter's cutoff parameter from plugin_params.",
             "Use the target's own units.",
+            "For a region's own fade, set its shape with region.set_fade_shape through change.",
             END,
         ],
     },
@@ -232,6 +234,28 @@ mod tests {
         for r in RECIPES {
             assert_eq!(r.steps.first(), Some(&BEGIN), "{}", r.name);
             assert_eq!(r.steps.last(), Some(&END), "{}", r.name);
+        }
+    }
+
+    /// Plan 8e Task 6b: the release-fixes changes in their recipes, each
+    /// once, before the request ends.
+    #[test]
+    fn fixes_changes_are_in_their_recipes() {
+        for (name, line) in [
+            (
+                "automation_moves",
+                "For a region's own fade, set its shape with region.set_fade_shape through change.",
+            ),
+            (
+                "starter_project",
+                "To choose the Built-in Synth's one sound, use destination.set_sound through change.",
+            ),
+        ] {
+            let r = find(name).unwrap();
+            assert_eq!(r.steps.iter().filter(|s| **s == line).count(), 1, "{name}");
+            assert_eq!(r.steps.get(r.steps.len() - 2), Some(&line), "{name}");
+            let text = recipes_answer(Some(name)).unwrap();
+            assert!(text.contains(&format!("\n- {line}")), "{text}");
         }
     }
 }

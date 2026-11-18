@@ -211,12 +211,19 @@ public enum CoProducerCommands {
     /// Rulings 2–4): only through `co_producer.apply`, after a yes.
     static let changesWork: Set<String> = ControlCommands.chores.subtracting(["marker.add"])
 
+    /// The release-fixes changes Co-Producer previews (plan 8e Task 6b): a
+    /// region's fade shape, the Built-in Synth's sound and a track's output.
+    static let fixesChanges: Set<String> = [
+        RegionCommands.setFadeShape, SynthCommands.setSound, TrackCommands.setOutput,
+    ]
+
     /// Whether `id` with `args` changes or removes the composer's work, so
     /// runs only through `co_producer.apply` after its take: the chores,
     /// plan 8d's twelve mixer edits, a new bus fed from a strip (8d
-    /// Ruling 1), and plan 8e's `automation.write`. A new plug-in instrument track only adds.
+    /// Ruling 1), plan 8e's `automation.write` and the release-fixes
+    /// changes. A new plug-in instrument track only adds.
     static func changesWork(_ id: String, _ args: [ControlArg]) -> Bool {
-        if changesWork.contains(id) { return true }
+        if changesWork.contains(id) || fixesChanges.contains(id) { return true }
         if CreativeCommands.ids.contains(id) { return true }
         if id == MixerCommands.newBus { return args.contains { $0.name == "strip" } }
         return MixerCommands.coProducerEdits.contains(id) && id != MixerCommands.newPluginInstrument

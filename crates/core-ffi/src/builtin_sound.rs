@@ -3,7 +3,13 @@
 //! (Decision 3: a sound belongs to the destination, so every track that
 //! plays it changes with it).
 
-use core_model::document::{DestKind, Destination};
+use crate::error::VizError;
+use core_model::command::{Command, RoutingCmd};
+use core_model::document::{DestKind, Destination, Document, Patch};
+use core_model::ids::{AnyId, DestId};
+
+/// [`sound_command`]'s refusal of another destination.
+pub(crate) const NOT_BUILTIN: &str = "Only a Built-in Synth has these sounds.";
 
 /// A Built-in Synth sound (plan release-fixes Scope 1): a GM program and channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -41,6 +47,18 @@ impl BuiltinSound {
         }
     }
 
+    /// The sound `destination.set_sound` names `name` ("piano" … "drums").
+    pub fn named(name: &str) -> Option<BuiltinSound> {
+        match name {
+            "piano" => Some(BuiltinSound::Piano),
+            "bass" => Some(BuiltinSound::Bass),
+            "pad" => Some(BuiltinSound::Pad),
+            "lead" => Some(BuiltinSound::Lead),
+            "drums" => Some(BuiltinSound::Drums),
+            _ => None,
+        }
+    }
+
     /// The sound a destination's (default_patch program, channel) is, if any.
     /// A default_patch of None on channel 0 is Piano (no program change
     /// plays program 0).
@@ -64,4 +82,45 @@ pub(crate) fn sound_of(d: &Destination) -> Option<BuiltinSound> {
         }
         _ => None,
     }
+}
+
+/// The one command that gives Built-in Synth `dest` of `doc` `sound`
+/// (Decision 3): a `RoutingCmd::EditDestination` with the sound's channel
+/// and `default_patch = Some(Patch { program, bank: None })`. Another
+/// destination: `Model` [`NOT_BUILTIN`]; an unknown one: `Model` (unknown
+/// ID). Set Built-in Synth Sound and Co-Producer's preview (plan 8e Task
+/// 6b) both build it here.
+pub(crate) fn sound_command(
+    doc: &Document,
+    dest: DestId,
+    sound: BuiltinSound,
+) -> Result<Command, VizError> {
+    let d = doc
+        .instruments()
+        .get(&dest)
+        .ok_or(core_model::ModelError::UnknownId(AnyId::Dest(dest)))?;
+    let DestKind::MidiEndpoint {
+        endpoint_ref,
+        group,
+        ..
+    } = &d.kind
+    else {
+        return Err(crate::events::bad(NOT_BUILTIN));
+    };
+    if !d.kind.is_builtin_synth() {
+        return Err(crate::events::bad(NOT_BUILTIN));
+    }
+    let (program, channel) = sound.program_and_channel();
+    Ok(Command::Routing(RoutingCmd::EditDestination {
+        dest,
+        kind: DestKind::MidiEndpoint {
+            endpoint_ref: endpoint_ref.clone(),
+            group: *group,
+            channel,
+        },
+        default_patch: Some(Patch {
+            program,
+            bank: None,
+        }),
+    }))
 }

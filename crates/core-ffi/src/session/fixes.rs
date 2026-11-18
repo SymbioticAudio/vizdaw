@@ -220,43 +220,15 @@ impl Session {
         sound: crate::builtin_sound::BuiltinSound,
     ) -> Result<(), VizError> {
         ffi_guard(|| {
-            use core_model::command::{Command, RoutingCmd};
-            use core_model::document::{DestKind, Patch};
-            use core_model::ids::{AnyId, DestId};
-            let id = DestId(dest);
             let mut inner = self.lock_inner();
             if inner.edit_label.is_some() || inner.history.in_transaction() {
                 return Err(super::edit_open_busy());
             }
-            let d = inner
-                .doc()
-                .instruments()
-                .get(&id)
-                .ok_or(core_model::ModelError::UnknownId(AnyId::Dest(id)))?;
-            let DestKind::MidiEndpoint {
-                endpoint_ref,
-                group,
-                ..
-            } = &d.kind
-            else {
-                return Err(crate::events::bad(NOT_BUILTIN));
-            };
-            if !d.kind.is_builtin_synth() {
-                return Err(crate::events::bad(NOT_BUILTIN));
-            }
-            let (program, channel) = sound.program_and_channel();
-            let cmd = Command::Routing(RoutingCmd::EditDestination {
-                dest: id,
-                kind: DestKind::MidiEndpoint {
-                    endpoint_ref: endpoint_ref.clone(),
-                    group: *group,
-                    channel,
-                },
-                default_patch: Some(Patch {
-                    program,
-                    bank: None,
-                }),
-            });
+            let cmd = crate::builtin_sound::sound_command(
+                inner.doc(),
+                core_model::ids::DestId(dest),
+                sound,
+            )?;
             inner.history.begin("Set Built-in Synth Sound")?;
             match inner
                 .history
@@ -275,6 +247,3 @@ impl Session {
         })
     }
 }
-
-/// [`Session::set_builtin_sound`]'s refusal of another destination.
-const NOT_BUILTIN: &str = "Only a Built-in Synth has these sounds.";
