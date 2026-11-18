@@ -6176,14 +6176,9 @@ fn co_producer_chores_over_mcp() {
     app.quit();
 }
 
-/// README steps for plan 8d through `vizdaw-mcp`: the plug-in list, a drum
-/// bus set up with a decline then an accept, a plug-in parameter, the
-/// composer's fader, a plug-in instrument track, the mixer view, and the
-/// Co-Producer socket's gate.
-#[test]
-#[ignore = "needs a window server and VIZDAW_E2E_APP"]
-fn co_producer_mixer_over_mcp() {
-    use core_control::ErrorCode;
+/// An app whose catalog holds the bundle's Multi-Q, as a scan would record
+/// it (the app launches with `--no-scan`, so its catalog starts empty).
+fn app_with_multiq() -> App {
     // The app launches with `--no-scan`, so its catalog is empty. Seed the
     // throwaway home's catalog with the bundle's Multi-Q, as a scan would
     // record it, so the built-in EQ is usable. Nothing is loaded here.
@@ -6202,7 +6197,7 @@ fn co_producer_mixer_over_mcp() {
             p.ancestors().nth(3).expect("the app bundle").to_path_buf()
         }
     };
-    let mut app = App::start_seeded(&[], |support| {
+    App::start_seeded(&[], |support| {
         use core_host::catalog::{Catalog, CatalogEntry, ScanStatus, Source};
         use core_model::mixer::{PluginFormat, PluginRef};
         // The path as the app sees its own: not canonical, so it stays
@@ -6228,7 +6223,18 @@ fn co_producer_mixer_over_mcp() {
         catalog
             .save(&support.join("plugins.json"))
             .expect("the seeded catalog");
-    });
+    })
+}
+
+/// README steps for plan 8d through `vizdaw-mcp`: the plug-in list, a drum
+/// bus set up with a decline then an accept, a plug-in parameter, the
+/// composer's fader, a plug-in instrument track, the mixer view, and the
+/// Co-Producer socket's gate.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn co_producer_mixer_over_mcp() {
+    use core_control::ErrorCode;
+    let mut app = app_with_multiq();
     let home = app.launched.home.clone();
     let sock = home.join("support").join("co-producer.sock");
     let mut mcp = McpProc::start(
@@ -6544,6 +6550,398 @@ fn co_producer_mixer_over_mcp() {
         }
         other => panic!("expected failed, got {other:?}"),
     }
+    drop(raw);
+    drop(mcp);
+    app.quit();
+}
+
+/// README steps for plan 8e through `vizdaw-mcp`: the recipes, a starter
+/// project in a new window, automation on Co-Producer's own bus (no
+/// question) and on the composer's strip (a decline, then a yes), notes
+/// read and never written, the new audio track's own strip, a bus the
+/// composer feeds asking before it is muted, and the Co-Producer
+/// socket's gate.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn co_producer_creative_over_mcp() {
+    use core_control::ErrorCode;
+    let mut app = app_with_multiq();
+    let home = app.launched.home.clone();
+    let sock = home.join("support").join("co-producer.sock");
+    let mut mcp = McpProc::start(
+        &app,
+        json!({"elicitation": {},
+            "extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}),
+    );
+    app.call(
+        "command.run",
+        json!({"id": "settings.co_producer", "params": {"on": true}}),
+    );
+    wait_for_path(&sock, true);
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let demo_w = demo["window"].clone();
+    let song = home.join("Song.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save", "params": {"path": song.display().to_string()}, "window": demo_w}),
+    );
+    let doc = |app: &mut App, w: &Value| {
+        app.call("state.get", json!({"target": "document", "window": w}))
+    };
+    let mixer =
+        |app: &mut App, w: &Value| app.call("state.get", json!({"target": "mixer", "window": w}));
+    let strip_named = |m: &Value, name: &str| -> Value {
+        m["strips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("no strip {name} in {m}"))
+            .clone()
+    };
+    let demo_doc = doc(&mut app, &demo_w);
+    let seq = demo_doc["selected_seq"].clone();
+    // An instrument track P with notes, and its strip.
+    let p_lane = demo_doc["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "instrument" && l["events"].as_u64().unwrap_or(0) > 0)
+        .unwrap_or_else(|| panic!("no instrument track with notes in {demo_doc}"))
+        .clone();
+    let p_events = p_lane["events"].clone();
+    let p_strip = {
+        let m = mixer(&mut app, &demo_w);
+        let strips = m["strips"].as_array().unwrap();
+        strips
+            .iter()
+            .find(|s| s["name"] == p_lane["name"] && s["co_producer"] != true)
+            .or_else(|| {
+                strips
+                    .iter()
+                    .find(|s| s["kind_colour"] == "instrument" && s["co_producer"] != true)
+            })
+            .unwrap_or_else(|| panic!("no strip for the track in {m}"))["id"]
+            .as_u64()
+            .unwrap()
+    };
+
+    // The recipes: six, and a prompt that takes a style.
+    let recipes = mcp.ok("recipes", json!({}));
+    for name in [
+        "starter_project",
+        "mix_drums",
+        "shared_reverb",
+        "parallel_compression",
+        "delay_into_reverb",
+        "automation_moves",
+    ] {
+        assert!(recipes.contains(name), "{name} in {recipes}");
+    }
+    assert!(!recipes.contains("new_part"), "{recipes}");
+    let prompts = mcp.request("prompts/list", json!({}));
+    let starter_prompt = prompts["result"]["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "starter_project")
+        .unwrap_or_else(|| panic!("no starter_project prompt in {prompts}"))
+        .clone();
+    assert_eq!(
+        starter_prompt["arguments"][0]["name"], "style",
+        "{starter_prompt}"
+    );
+
+    // Automation on the composer's strip, in the demo window: it asks.
+    let points = "0:-144 61440:0";
+    let write = |seq: &Value, target: &str, window: &Value| {
+        json!({"commands": [{"id": "automation.write",
+            "params": {"seq": seq, "target": target, "start": 0, "end": 61440, "points": points}}],
+            "window": window})
+    };
+    let ask = |mcp: &mut McpProc, app: &mut App, n: i64, args: &Value, result: Value| {
+        mcp.send(
+            &json!({"jsonrpc": "2.0", "id": 4000 + n, "method": "tools/call",
+            "params": {"name": "change", "arguments": args}}),
+        );
+        let e = mcp.recv();
+        assert_eq!(e["method"], "elicitation/create", "{e}");
+        let message = e["params"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let accepted = result["action"] == "accept";
+        mcp.send(&json!({"jsonrpc": "2.0", "id": e["id"], "result": result}));
+        if accepted {
+            answer_sheet(app, true);
+        }
+        let r = mcp.recv();
+        assert_eq!(r["id"], 4000 + n, "{r}");
+        (message, r["result"].clone())
+    };
+    let p_target = format!("fader:{p_strip}");
+    let on_p = write(&seq, &p_target, &demo_w);
+    mcp.ok("begin_request", json!({"name": "ride the lead"}));
+    let (message, r) = ask(&mut mcp, &mut app, 1, &on_p, json!({"action": "decline"}));
+    assert!(
+        message.contains("fader automation 0 points \u{2192} 2 points"),
+        "{message}"
+    );
+    assert_eq!(
+        mcp_text(&r),
+        "The composer said no. Nothing changed.",
+        "{r}"
+    );
+    let curve = |mcp: &mut McpProc| {
+        mcp.ok(
+            "preview_automation",
+            json!({"seq": seq, "target": p_target, "start": 0, "end": 61440,
+                "points": points, "window": demo_w}),
+        )
+    };
+    assert!(curve(&mut mcp).contains("now 0 points"), "nothing written");
+    let (_, r) = ask(
+        &mut mcp,
+        &mut app,
+        2,
+        &on_p,
+        json!({"action": "accept", "content": {"allow": true}}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    mcp.ok("end_request", json!({}));
+    wait_for_undo(&mut app, &demo_w, "Co-Producer: Ride the Lead");
+    assert!(curve(&mut mcp).contains("now 2 points"), "written");
+
+    // Notes are read, never written.
+    let read = mcp.ok(
+        "read_midi_notes",
+        json!({"seq": seq, "lane": p_lane["id"], "window": demo_w}),
+    );
+    assert!(read.contains(':'), "{read}");
+    assert_eq!(
+        lane_named(&mut app, &demo_w, p_lane["name"].as_str().unwrap())["events"],
+        p_events
+    );
+    let listed = mcp.request("tools/list", json!({}));
+    for t in listed["result"]["tools"].as_array().unwrap() {
+        let name = t["name"].as_str().unwrap_or_default();
+        assert!(
+            name != "midi_new_part" && name != "midi_add_notes",
+            "{name}"
+        );
+    }
+
+    // One undo takes back the request that held the accepted write.
+    app.call("command.run", json!({"id": "edit.undo", "window": demo_w}));
+    mcp.ok("begin_request", json!({"name": "look"}));
+    assert!(curve(&mut mcp).contains("now 0 points"), "undone");
+    mcp.ok("end_request", json!({}));
+
+    // Each new audio track gets its own strip, and deleting it takes the
+    // strip in the same undo step (plan 8e Task 6c).
+    let strips = |app: &mut App| mixer(app, &demo_w)["strips"].as_array().unwrap().len();
+    let lane_ids = |app: &mut App| -> Vec<u64> {
+        doc(app, &demo_w)["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|l| l["id"].as_u64())
+            .collect()
+    };
+    let (strips0, lanes0) = (strips(&mut app), lane_ids(&mut app));
+    app.call(
+        "command.run",
+        json!({"id": "track.new_audio", "window": demo_w}),
+    );
+    assert_eq!(strips(&mut app), strips0 + 1, "its own strip");
+    let new_lane = lane_ids(&mut app)
+        .into_iter()
+        .find(|id| !lanes0.contains(id))
+        .expect("the new track");
+    app.call(
+        "command.run",
+        json!({"id": "track.delete", "params": {"seq": seq, "lane": new_lane}, "window": demo_w}),
+    );
+    assert_eq!(strips(&mut app), strips0, "its strip went with it");
+    app.call("command.run", json!({"id": "edit.undo", "window": demo_w}));
+    assert_eq!(strips(&mut app), strips0 + 1, "one undo brings both back");
+
+    // A bus the composer's strip feeds asks before it is muted.
+    mcp.ok("begin_request", json!({"name": "echo bus"}));
+    mcp.ok("mixer_new_bus", json!({"name": "Echo", "window": demo_w}));
+    let echo = strip_named(&mixer(&mut app, &demo_w), "Echo (Co-Producer)")["id"]
+        .as_u64()
+        .unwrap();
+    let route = json!({"commands": [{"id": "mixer.set_output",
+        "params": {"strip": p_strip, "bus": echo}}], "window": demo_w});
+    let (_, r) = ask(
+        &mut mcp,
+        &mut app,
+        3,
+        &route,
+        json!({"action": "accept", "content": {"allow": true}}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    let mute = json!({"commands": [{"id": "mixer.set_strip",
+        "params": {"strip": echo, "mute": true}}], "window": demo_w});
+    let (message, r) = ask(&mut mcp, &mut app, 4, &mute, json!({"action": "decline"}));
+    assert!(message.contains("silent through it"), "{message}");
+    assert_eq!(
+        mcp_text(&r),
+        "The composer said no. Nothing changed.",
+        "{r}"
+    );
+    mcp.ok("end_request", json!({}));
+
+    // A starter project, in a new window.
+    let spec = json!({
+        "title": "Synthwave",
+        "tempo": "118",
+        "meter": "4/4",
+        "markers": [
+            {"bar": 1, "name": "Intro"}, {"bar": 9, "name": "Verse"},
+            {"bar": 17, "name": "Chorus"}, {"bar": 33, "name": "Bridge"},
+            {"bar": 41, "name": "Outro"}
+        ],
+        "buses": [
+            {"name": "Reverb", "effects": ["clap:vizdaw.e2e.none"]},
+            {"name": "Delay", "output": "Reverb"}
+        ],
+        "tracks": [
+            {"name": "Drums", "kind": "instrument"},
+            {"name": "Bass", "kind": "instrument", "plugin": "clap:vizdaw.e2e.none"},
+            {"name": "Pad", "kind": "instrument",
+             "sends": [{"bus": "Reverb", "level_db": "-12"}]},
+            {"name": "Lead", "kind": "instrument"},
+            {"name": "Arp", "kind": "instrument"}
+        ]
+    });
+    let demo_undo = doc(&mut app, &demo_w)["undo"].clone();
+    let windows_before = window_numbers(&mut app).len();
+    mcp.ok("begin_request", json!({"name": "start synthwave"}));
+    // The starter ends its own request: the new song holds its undo step.
+    let made = mcp.ok("starter_project", json!({"spec": spec}));
+    let w = {
+        let n: u64 = made
+            .split("in window ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no window in {made}"))
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        json!(n)
+    };
+    assert!(
+        made.contains("Bass: ") && made.contains("Built-in Synth"),
+        "{made}"
+    );
+    assert!(
+        made.contains("Reverb: ") && made.contains("Multi-Q"),
+        "{made}"
+    );
+    assert_eq!(window_numbers(&mut app).len(), windows_before + 1);
+    wait_for_undo(&mut app, &w, "Co-Producer: Start Synthwave");
+    let wd = doc(&mut app, &w);
+    assert_eq!(wd["markers"].as_array().unwrap().len(), 5, "{wd}");
+    let tracks: Vec<&Value> = wd["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| {
+            l["name"]
+                .as_str()
+                .is_some_and(|n| n.ends_with(" (Co-Producer)"))
+        })
+        .collect();
+    assert_eq!(tracks.len(), 5, "{wd}");
+    for t in &tracks {
+        assert_eq!(t["events"], 0, "{t}");
+    }
+    assert_eq!(
+        doc(&mut app, &demo_w)["undo"],
+        demo_undo,
+        "the demo's history"
+    );
+    // Tempo and meter, from the song as saved.
+    let w_path = home.join("Synthwave.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save", "params": {"path": w_path.display().to_string()}, "window": w}),
+    );
+    {
+        use core_model::meter::Meter;
+        use core_model::tempo::Bpm;
+        let saved = core_model::file::load(&w_path).expect("the saved starter");
+        let q = saved.sequences().values().next().expect("a sequence");
+        let tempo: Vec<Bpm> = q.tempo.points().iter().map(|p| p.bpm).collect();
+        assert_eq!(tempo, vec![Bpm(118_000)]);
+        let meter: Vec<Meter> = q.meter.entries().iter().map(|e| e.meter).collect();
+        assert_eq!(meter, vec![Meter { num: 4, den: 4 }]);
+    }
+    let m = mixer(&mut app, &w);
+    let reverb = strip_named(&m, "Reverb (Co-Producer)");
+    let delay = strip_named(&m, "Delay (Co-Producer)");
+    assert_eq!(delay["output"], reverb["id"], "{m}");
+    // The fallback is the bus's own Multi-Q EQ, not a second insert.
+    assert_eq!(reverb["eq"]["plugin"], "multi-q", "{m}");
+    assert_eq!(reverb["inserts"], json!([]), "{m}");
+    let reverb_id = reverb["id"].as_u64().unwrap();
+    let w_seq = wd["selected_seq"].clone();
+
+    // Automation on Co-Producer's own bus, in W: no question.
+    let target = format!("fader:{reverb_id}");
+    mcp.ok("begin_request", json!({"name": "fade the reverb in"}));
+    let r = mcp.tool(
+        "preview_automation",
+        json!({"seq": w_seq, "target": target, "start": 0, "end": 61440,
+            "points": points, "window": w}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(mcp_text(&r).contains("planned 2 points"), "{r}");
+    assert_eq!(r["structuredContent"]["view"], "automation", "{r}");
+    let r = mcp.tool("change", write(&w_seq, &target, &w));
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(
+        r["structuredContent"]["state"], "applied_without_asking",
+        "{r}"
+    );
+    mcp.ok("end_request", json!({}));
+
+    // The gate: a raw client on the Co-Producer socket.
+    let mut raw = Client::connect(&sock).expect("the Co-Producer socket");
+    let t = Duration::from_secs(30);
+    let params = json!({"id": "automation.write", "window": demo_w,
+        "params": {"seq": seq, "target": p_target, "start": 0, "end": 61440, "points": points}});
+    match raw.call("command.run", params, t) {
+        Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::NotAllowed, "{e:?}"),
+        other => panic!("expected not_allowed, got {other:?}"),
+    }
+    for id in ["midi.new_part", "midi.add_notes"] {
+        match raw.call(
+            "command.run",
+            json!({"id": id, "params": {}, "window": demo_w}),
+            t,
+        ) {
+            Err(CallError::Reply(e)) => assert!(
+                matches!(e.code, ErrorCode::UnknownCommand | ErrorCode::UnknownId),
+                "{id}: {e:?}"
+            ),
+            other => panic!("{id}: expected a refusal, got {other:?}"),
+        }
+    }
+    let windows = window_numbers(&mut app).len();
+    let cycle = json!({"spec": {
+        "title": "Loop",
+        "buses": [{"name": "A", "output": "B"}, {"name": "B", "output": "A"}],
+        "tracks": [{"name": "Keys", "kind": "instrument"}]
+    }});
+    match raw.call("co_producer.starter", cycle, t) {
+        Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}"),
+        other => panic!("expected invalid_params, got {other:?}"),
+    }
+    assert_eq!(window_numbers(&mut app).len(), windows, "no new window");
     drop(raw);
     drop(mcp);
     app.quit();

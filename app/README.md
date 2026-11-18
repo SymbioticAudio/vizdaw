@@ -3062,6 +3062,49 @@ Plan 8d, Co-Producer mixer and plug-ins:
      first, because it changes what your bus plays. Say no: the track
      stays where it was.
 
+Plan 8e, Co-Producer creative help and starter projects:
+
+408. Ask Claude to "set up a new template project in a sort of 80s synthwave
+     style". A new untitled song opens with a tempo, meter, section
+     markers, instrument tracks for drums, bass, pad, lead and arpeggio,
+     and reverb and delay buses, all with the Co-Producer badge. No track
+     holds any notes.
+409. Look at which instruments and effects it chose: they are plug-ins you
+     have installed. Claude tells you which roles fell back to the
+     Built-in Synth or Multi-Q, and that tracks on the Built-in Synth
+     share one sound for now.
+410. Turn off every instrument in the Plugin Manager and ask for another
+     starter project: it still opens, on the Built-in Synth, and says so.
+411. Undo once in the new song: it goes back to an empty new song.
+412. Ask Claude to "help me figure out how to mix my drums". It makes a drum
+     bus, shows exactly which of your drum tracks' strips will go to it,
+     and waits for your yes. It talks about levels from the faders, and
+     asks you to play and read the meters.
+413. Ask for a shared reverb, then for parallel compression on the drums,
+     then for a delay into the reverb. Each new bus appears without a
+     question. Sends from your tracks are listed first and wait for your
+     yes.
+414. Ask Claude to fade out the song's last four bars. In a host that shows
+     views, a curve appears first. It asks before writing on your master
+     or track strips, and the fade plays as real automation points you can
+     edit.
+415. Ask Claude for a filter sweep on a filter plug-in Co-Producer added to
+     one of your tracks. It asks first, because the track is yours.
+416. Ask Claude to turn the held chords on your piano track into an
+     arpeggio. Claude reads your piano's notes and describes an arpeggio
+     idea in the chat. No track is added, and no track's notes change, the
+     piano's included.
+417. In a host that offers prompts, open the prompt list: the recipes are
+     there, and the starter project prompt takes a style.
+418. In a host without MCP Apps views, ask for the automation curve: the same
+     answer comes as text.
+419. Add an audio track, then another. Each has its own mixer channel in
+     the Mix view. Delete one of them and its channel goes with it; one
+     Undo brings the track and its channel back together.
+420. Ask Claude to mute, pull to silence, send elsewhere or remove a bus it
+     made, while your tracks feed that bus. It asks first and names the
+     tracks that go silent or move. Say no: the bus stays as it was.
+
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;
