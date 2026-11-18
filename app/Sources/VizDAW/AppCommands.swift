@@ -47,6 +47,10 @@ struct AppCommands: Commands {
         // Older SDKs (CI's macos-15 Xcode) take at most 10 items per
         // builder, so the standard groups go in one Group.
         Group {
+            // VizDAW › Licences…, after About (release gate Task 4).
+            CommandGroup(after: .appInfo) {
+                Button("Licences…") { openWindow(id: "licences") }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New") {
                     if let f = FormatPanel.run(

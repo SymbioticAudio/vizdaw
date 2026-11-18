@@ -47,6 +47,12 @@ diff -r "$multiq/licences" "$licences" >/dev/null || {
 # The licence, with its GPL section 7 permission for the branded icons
 # (plan 7b Ruling 6): the conveyed app carries it.
 cp LICENSE "$app/Contents/Resources/LICENSE"
+# VizDAW › Licences… (release gate Task 4) shows Resources/Licences: the
+# licence again, the third-party notices (written into target/, never the
+# repo: they name copyright holders) and Multi-Q's folder above.
+scripts/third-party-notices.sh target/third-party/THIRD-PARTY.txt
+cp LICENSE "$app/Contents/Resources/Licences/LICENSE"
+cp target/third-party/THIRD-PARTY.txt "$app/Contents/Resources/Licences/THIRD-PARTY.txt"
 # The app icon: the SymbioticAudio mark (glyph-39, the figure with a cube head), drawn from the
 # symbiotic-design checkout. VIZDAW_NO_BRAND=1 (forks) keeps the default icon.
 glyph="app/.build/checkouts/symbiotic-design/icons/svg/glyph-39.svg"

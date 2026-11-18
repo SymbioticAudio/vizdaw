@@ -17,6 +17,8 @@ import SymbioticBrand
 
 /// The Plugin Manager window's model.
 @MainActor let pluginManager = PluginManagerModel(plugins: appPlugins)
+/// VizDAW › Licences… (release gate Task 4): the bundle's Licences folder.
+@MainActor let licencesModel = LicencesModel(folder: LicencesModel.bundled)
 
 /// Editing preferences: the nudge steps (Plan 4b Ruling 16).
 @MainActor let editingPreferences = EditingPreferences(defaults: MemoryDefaults.appStore())
@@ -248,6 +250,11 @@ struct VizDAWApp: App {
             PluginManagerView(model: pluginManager)
                 .themedRoot()
         }
+        Window("Licences", id: "licences") {
+            LicencesView(model: licencesModel)
+                .themedRoot()
+        }
+        .defaultSize(width: 900, height: 600)
         Settings {
             TabView {
                 AppearanceSettingsView(prefs: appearancePreferences)

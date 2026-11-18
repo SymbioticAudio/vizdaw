@@ -100,11 +100,11 @@ See [app/README.md](app/README.md) for more.
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+GPL-3.0-only — see [LICENSE](LICENSE). VizDAW bundles Dusk Audio Multi-Q, which includes parts under the GNU AGPLv3 (JUCE).
 
 VizDAW's own build links SymbioticAudio's branded icons under a GPL section 7 additional permission (see LICENSE). The artwork stays all rights reserved and is not covered by the GPL; forks build without it with `VIZDAW_NO_BRAND=1`.
 
-The VizDAW.app bundle also carries Dusk Audio Multi-Q (GPL-3.0-only), built with JUCE (AGPLv3) and clap-juce-extensions (MIT); their licence texts and the source offer are in Contents/Resources/Licences/Multi-Q/.
+The VizDAW.app bundle also carries Dusk Audio Multi-Q (GPL-3.0-only), built with JUCE (AGPLv3) and clap-juce-extensions (MIT); their licence texts and the source offer are in Contents/Resources/Licences/Multi-Q/. The notices of the other third-party code it carries (Rust crates, data files, Swift packages) are in Contents/Resources/Licences/THIRD-PARTY.txt, written by `scripts/third-party-notices.sh`; VizDAW › Licences… shows them all.
 
 ## Disclaimer
 
