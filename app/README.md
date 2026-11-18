@@ -3019,6 +3019,49 @@ Plan 8c, Co-Producer chores:
      mode (switch it and ask again). In the export result, "Show in
      Finder" opens the export folder.
 
+Plan 8d, Co-Producer mixer and plug-ins:
+
+395. Ask Claude which plug-ins it can use. It lists your installed
+     instruments and effects and the built-in Multi-Q and Built-in Synth.
+     Turn a plug-in off in the Plugin Manager and ask again: it is gone.
+396. Ask Claude to "set up a drum bus". A bus "Drums (Co-Producer)"
+     appears with the badge. Claude then shows exactly which of your
+     tracks' strips will go to it, and waits. Say no: your strips stay
+     where they were, and the bus stays. Ask again and say yes: they go to
+     the bus, as one undo step "Co-Producer: …".
+397. Ask Claude to put an EQ or compressor on its own bus: it happens
+     without a question. Ask it to put one on your vocal track: it asks
+     first.
+398. Ask Claude to add a reverb send from your snare to a new reverb bus.
+     It asks first, and shows the send's level and whether it is
+     pre-fader.
+399. Ask Claude to turn your bass down 3 dB and pan it a little left. It
+     shows "volume … → …" and "pan …", and asks.
+400. Open the plug-in window of an insert Co-Producer added to your track,
+     and ask Claude to change one of its settings. It asks first, because
+     the track is yours. The control moves when you say yes, and Undo puts
+     it back.
+401. Ask Claude to remove its own bus while your tracks feed it. It asks,
+     and lists your strips that go back to the master.
+402. Ask Claude for a new instrument track with a named installed
+     instrument. It appears named "… (Co-Producer)", playing that
+     instrument.
+403. Ask Claude to load a plug-in you turned off, or an instrument as an
+     effect: it says why not, and nothing changes.
+404. In Claude's desktop app or another host that shows MCP Apps views,
+     ask Claude to "show the mixer". A view shows each strip's volume,
+     pan, routing, EQ, inserts and sends, with Co-Producer's strips
+     marked. In a host without views, the same answer comes as text.
+405. Make Multi-Q the bus EQ through Claude, change the audio sample rate,
+     and play: the EQ still shapes the sound, as it does when you load it
+     yourself.
+406. Ask Claude to solo one of its own tracks, or to mute and solo any
+     track. Every solo change asks first, and says "other tracks are
+     silent". Say no: nothing is soloed, and your tracks still play.
+407. Ask Claude to send one of its own tracks into a bus of yours. It asks
+     first, because it changes what your bus plays. Say no: the track
+     stays where it was.
+
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;
