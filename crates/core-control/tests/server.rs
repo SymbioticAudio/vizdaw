@@ -408,3 +408,119 @@ fn the_co_producer_socket_gates_and_the_developer_socket_refuses_co_producer_cal
             .any(|c| c["id"] == "ui.theme" && c["class"] == "refused")
     );
 }
+
+/// A last line with no newline at the end of input is never run: the
+/// client may have been cut off partway through it (release gate Task 5).
+#[test]
+fn unterminated_last_line_is_not_run() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let d = private_dir();
+    let server = Server::start(&sock(&d), Config::default()).unwrap();
+    let mut raw = UnixStream::connect(sock(&d)).unwrap();
+    raw.write_all(br#"{"id":1,"cmd":"state.get","params":{"target":"transport"}}"#)
+        .unwrap();
+    raw.shutdown(std::net::Shutdown::Write).unwrap();
+    raw.set_read_timeout(Some(LONG)).unwrap();
+    let mut text = String::new();
+    raw.read_to_string(&mut text).unwrap();
+    assert!(text.contains("parse_error"), "{text}");
+    assert!(text.contains("newline"), "{text}");
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        server.next_call().is_none(),
+        "the cut-off line reached the app"
+    );
+    // A whole line just before the end still runs.
+    let mut raw = UnixStream::connect(sock(&d)).unwrap();
+    raw.write_all(b"{\"id\":2,\"cmd\":\"state.get\",\"params\":{\"target\":\"transport\"}}\n")
+        .unwrap();
+    raw.shutdown(std::net::Shutdown::Write).unwrap();
+    let deadline = Instant::now() + LONG;
+    while server.next_call().is_none() {
+        assert!(Instant::now() < deadline, "the whole line never arrived");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A peer that answers with an endless line is refused at the server's
+/// own line cap, not read into memory without end.
+#[test]
+fn client_refuses_an_overlong_reply() {
+    use std::io::Write;
+    let d = private_dir();
+    std::fs::create_dir(d.path().join("ctl")).unwrap();
+    let listener = UnixListener::bind(sock(&d)).unwrap();
+    let peer = thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let chunk = vec![b'x'; 64 * 1024];
+        // Up to four times the cap, then hold the connection open.
+        for _ in 0..(4 * MAX_LINE / chunk.len()) {
+            if s.write_all(&chunk).is_err() {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
+    });
+    let mut c = Client::connect(&sock(&d)).unwrap();
+    match c.call("ping", json!({}), LONG) {
+        Err(CallError::Protocol(m)) => assert!(m.contains("longer than"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    drop(c);
+    peer.join().unwrap();
+}
+
+/// A screenshot the app could not take gives its slot back: the next one
+/// may go at once (release gate Task 5).
+#[test]
+fn failed_screenshot_keeps_the_slot() {
+    use core_control::ControlError;
+    use core_control::server::Role;
+    let d = private_dir();
+    let config = Config {
+        role: Role::CoProducer,
+        ..Config::default()
+    };
+    let server = Arc::new(std::sync::Mutex::new(
+        Server::start(&sock(&d), config).unwrap(),
+    ));
+    let stop = Arc::new(AtomicBool::new(false));
+    let app = {
+        let (server, stop) = (Arc::clone(&server), Arc::clone(&stop));
+        let failed = Arc::new(AtomicBool::new(false));
+        thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let call = server.lock().unwrap().next_call();
+                let Some(c) = call else {
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                };
+                // The first screenshot fails, the rest work.
+                let outcome = if failed.swap(true, Ordering::SeqCst) {
+                    Ok(json!({"path": "/x.png"}))
+                } else {
+                    Err(ControlError::new(ErrorCode::Failed, "no window to take"))
+                };
+                server.lock().unwrap().reply(c.token, outcome);
+            }
+        })
+    };
+    let mut c = Client::connect(&sock(&d)).unwrap();
+    match c.call("ui.screenshot", json!({}), LONG) {
+        Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::Failed, "{e}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        c.call("ui.screenshot", json!({}), LONG).unwrap(),
+        json!({"path": "/x.png"}),
+        "the failed screenshot used up the slot"
+    );
+    // A screenshot that worked keeps it.
+    match c.call("ui.screenshot", json!({}), LONG) {
+        Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::Busy, "{e}"),
+        other => panic!("{other:?}"),
+    }
+    stop.store(true, Ordering::SeqCst);
+    app.join().unwrap();
+}

@@ -67,6 +67,12 @@ pub fn support_dir_from_env() -> Result<PathBuf, String> {
         if !d.is_absolute() {
             return Err("vizdaw-mcp: VIZDAW_SUPPORT_DIR must be an absolute path.".into());
         }
+        if !core_control::co_producer::is_normal(&d) {
+            return Err(
+                "vizdaw-mcp: VIZDAW_SUPPORT_DIR must be in normal form, with no `.` part, no doubled `/` and no `/` at the end."
+                    .into(),
+            );
+        }
         return Ok(d);
     }
     match std::env::var_os("HOME").map(PathBuf::from) {
@@ -1209,9 +1215,34 @@ fn is_screenshot_name(name: &str) -> bool {
         .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Opens `path` for reading without following a final link and without
+/// blocking on a FIFO (`O_NOFOLLOW | O_NONBLOCK`), then requires, on the
+/// open file, a regular file of this user's: nothing can be swapped in
+/// between the check and the read.
+fn open_screenshot(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| format!("it cannot be opened as a file ({e})"))?;
+    let m = f
+        .metadata()
+        .map_err(|e| format!("it cannot be checked ({e})"))?;
+    if !m.file_type().is_file() {
+        return Err("it is not a regular file".into());
+    }
+    match app::my_uid() {
+        Ok(uid) if uid == m.uid() => Ok(f),
+        Ok(_) => Err("it belongs to another user".into()),
+        Err(e) => Err(format!("this user cannot be told from others ({e})")),
+    }
+}
+
 /// Reads and deletes the screenshot VizDAW answered (Ruling 12). Only a
-/// regular file `<support>/screenshot-<digits>.png`, not a link, is read
-/// and deleted; any other path is refused and left alone.
+/// regular file `<support>/screenshot-<digits>.png` of this user's, in a
+/// support folder that passes the connect check, is read and deleted; a
+/// link, a FIFO or any other path is refused and left alone.
 fn take_screenshot(support: &Path, path: &Path) -> Result<Vec<u8>, String> {
     let refuse = || {
         format!(
@@ -1223,22 +1254,34 @@ fn take_screenshot(support: &Path, path: &Path) -> Result<Vec<u8>, String> {
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(is_screenshot_name);
-    if !named || path.parent() != Some(support) {
+    // `file_name` and `parent` read past a final `/` or a `.` part, which
+    // the system would not (it follows a final link then).
+    let normal = core_control::co_producer::is_normal(path);
+    if !normal || !named || path.parent() != Some(support) {
         return Err(refuse());
     }
-    match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_file() => {}
-        _ => return Err(refuse()),
+    match app::support_is_safe(support) {
+        Ok(true) => {}
+        Ok(false) => return Err(refuse()),
+        Err(e) => {
+            return Err(format!(
+                "The screenshot was not read: {}.",
+                match e {
+                    app::AppError::Unsafe(why) => why,
+                    _ => "its folder is not safe".into(),
+                }
+            ));
+        }
     }
-    let read = std::fs::File::open(path).and_then(|f| {
-        let mut bytes = Vec::new();
-        f.take(MAX_SCREENSHOT + 1).read_to_end(&mut bytes)?;
-        Ok(bytes)
-    });
+    let Ok(f) = open_screenshot(path) else {
+        return Err(refuse());
+    };
+    let mut bytes = Vec::new();
+    let read = f.take(MAX_SCREENSHOT + 1).read_to_end(&mut bytes);
     let _ = std::fs::remove_file(path);
     match read {
-        Ok(b) if b.len() as u64 > MAX_SCREENSHOT => Err("The screenshot is too large.".into()),
-        Ok(b) => Ok(b),
+        Ok(_) if bytes.len() as u64 > MAX_SCREENSHOT => Err("The screenshot is too large.".into()),
+        Ok(_) => Ok(bytes),
         Err(e) => Err(format!("The screenshot could not be read ({e}).")),
     }
 }
@@ -1260,6 +1303,7 @@ fn other_song() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn screenshot_names() {
@@ -1271,6 +1315,100 @@ mod tests {
             "x-1.png",
         ] {
             assert!(!is_screenshot_name(bad), "{bad}");
+        }
+    }
+
+    fn private_tmp() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::Builder::new()
+            .prefix("vzs")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        d
+    }
+
+    /// A link, a FIFO or a folder with a screenshot's name is refused and
+    /// left alone; opening never follows the link and never blocks on the
+    /// FIFO (release gate Task 5).
+    #[test]
+    fn screenshot_symlink_is_refused() {
+        let d = private_tmp();
+        let elsewhere = private_tmp();
+        let target = elsewhere.path().join("secret.png");
+        std::fs::write(&target, b"keep").unwrap();
+        let link = d.path().join("screenshot-1.png");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let e = take_screenshot(d.path(), &link).unwrap_err();
+        assert!(e.contains("not its own screenshot file"), "{e}");
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "the link is left");
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+
+        let fifo = d.path().join("screenshot-2.png");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (sup, at) = (d.path().to_path_buf(), fifo.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(take_screenshot(&sup, &at));
+        });
+        let r = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opening the FIFO blocked");
+        assert!(r.unwrap_err().contains("not its own screenshot file"));
+        assert!(std::fs::symlink_metadata(&fifo).is_ok(), "the FIFO is left");
+        // The open itself refuses both, so a swap after any check is
+        // refused too.
+        assert!(open_screenshot(&link).is_err());
+        assert!(open_screenshot(&fifo).is_err());
+
+        let folder = d.path().join("screenshot-3.png");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(take_screenshot(d.path(), &folder).is_err());
+        assert!(folder.is_dir());
+
+        let real = d.path().join("screenshot-4.png");
+        std::fs::write(&real, b"png").unwrap();
+        assert_eq!(take_screenshot(d.path(), &real).unwrap(), b"png");
+        assert!(
+            std::fs::symlink_metadata(&real).is_err(),
+            "read and deleted"
+        );
+    }
+
+    /// A final `/` or a `.` part makes the system follow a final link that
+    /// `symlink_metadata` and `parent` would not see: the support folder
+    /// and the screenshot path must be in normal form (release gate
+    /// Task 5, as the developer socket's export paths are).
+    #[test]
+    fn trailing_slash_path_is_refused() {
+        let d = private_tmp();
+        let link_dir = private_tmp();
+        let link = link_dir.path().join("support");
+        std::os::unix::fs::symlink(d.path(), &link).unwrap();
+        let uid = std::fs::symlink_metadata(d.path()).unwrap().uid();
+        for p in [
+            format!("{}/", link.display()),
+            format!("{}/.", link.display()),
+        ] {
+            match app::folder_check(Path::new(&p), uid) {
+                Err(app::AppError::Unsafe(why)) => assert!(why.contains("normal form"), "{why}"),
+                other => panic!("{p}: {other:?}"),
+            }
+        }
+        let real = d.path().join("screenshot-5.png");
+        std::fs::write(&real, b"keep").unwrap();
+        for p in [
+            format!("{}/./screenshot-5.png", d.path().display()),
+            format!("{}//screenshot-5.png", d.path().display()),
+            format!("{}/screenshot-5.png/", d.path().display()),
+        ] {
+            let e = take_screenshot(d.path(), Path::new(&p)).unwrap_err();
+            assert!(e.contains("not its own screenshot file"), "{p}: {e}");
+            assert_eq!(std::fs::read(&real).unwrap(), b"keep", "{p}");
         }
     }
 

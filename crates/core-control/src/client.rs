@@ -1,9 +1,9 @@
 //! A blocking client of the control socket (`vizctl`, tests).
 
 use crate::error::ControlError;
-use crate::protocol::{RequestId, read_reply, request_line};
+use crate::protocol::{MAX_LINE, RequestId, read_reply, request_line};
 use serde_json::Value;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -83,8 +83,8 @@ impl Client {
 
     /// Sends `line` and its newline as one buffer, and on failure says how
     /// many of its bytes were written first. A caller that resends must
-    /// know none were: the server runs an unterminated last line at the
-    /// end of input.
+    /// know none were: a line cut off before its newline is not run, but
+    /// one whose newline went out may have been.
     pub fn send_counted(&mut self, line: &str) -> Result<(), SendError> {
         let mut buf = Vec::with_capacity(line.len() + 1);
         buf.extend_from_slice(line.as_bytes());
@@ -136,15 +136,25 @@ impl Client {
         }
     }
 
-    /// The next raw line.
+    /// The next raw line, at most [`MAX_LINE`] bytes before its newline
+    /// (the server's own cap). A longer one is refused once the cap is
+    /// read, without reading the rest: the connection is then of no
+    /// further use.
     pub fn read_line(&mut self) -> Result<String, CallError> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
+        let mut line = Vec::new();
+        let cap = u64::try_from(MAX_LINE)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        match (&mut self.reader).take(cap).read_until(b'\n', &mut line) {
             Ok(0) => Err(CallError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "VizDAW closed the connection",
             ))),
-            Ok(_) => Ok(line),
+            Ok(_) if line.len() > MAX_LINE && line.last() != Some(&b'\n') => Err(
+                CallError::Protocol(format!("the reply is longer than {MAX_LINE} bytes")),
+            ),
+            Ok(_) => String::from_utf8(line)
+                .map_err(|_| CallError::Protocol("the reply is not UTF-8".into())),
             Err(e) => Err(CallError::Io(e)),
         }
     }

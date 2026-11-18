@@ -3,6 +3,9 @@
 //! the pass, a copy opens only as a new untitled project, and Settings can
 //! count them.
 
+// `im` maps nest deeply: sending a `Session` to a thread needs more depth.
+#![recursion_limit = "256"]
+
 mod common;
 
 use core_media::caf::{CafWriter, WriteMode};
@@ -350,4 +353,96 @@ fn a_busy_capture_writes_no_copy() {
     assert!(core_model::file::list_copies(&pkg).unwrap().is_empty());
     s.debug_capture_busy(false);
     s.close().unwrap();
+}
+
+/// Runs `open_copy` on another thread: a FIFO must never block it.
+fn open_copy_soon(copy: &Path) -> Result<Arc<Session>, VizError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = copy.display().to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(Session::open_copy(p));
+    });
+    rx.recv_timeout(common::wait_limit())
+        .expect("open_copy blocked on a FIFO")
+}
+
+fn mkfifo(p: &Path) {
+    let _ = std::fs::remove_file(p);
+    let ok = std::process::Command::new("mkfifo")
+        .arg(p)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+}
+
+/// Inside a package, `open_copy` reads only regular files: a media file,
+/// a plug-in state or the copy's `project.json` that is a link or a FIFO
+/// is never followed or waited on (release gate Task 5).
+#[test]
+fn copy_that_is_a_fifo_or_link_is_refused() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (pkg, copy, rel) = set_up(dir.path());
+    let secret = dir.path().join("secret.caf");
+    std::fs::write(&secret, b"not the song's").unwrap();
+    let media = pkg.join(&rel);
+
+    // A media file that is a link: not copied, a problem line.
+    std::fs::remove_file(&media).unwrap();
+    std::os::unix::fs::symlink(&secret, &media).unwrap();
+    let c = open_copy_soon(&copy).unwrap();
+    let file = PathBuf::from(c.media_file(c.media().unwrap()[0].id).unwrap());
+    assert_ne!(
+        std::fs::read(&file).ok().as_deref(),
+        Some(&b"not the song's"[..]),
+        "the link was followed"
+    );
+    let problems = c.idle().unwrap().problems;
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with(&format!("{rel} was not copied"))),
+        "{problems:?}"
+    );
+    c.close().unwrap();
+
+    // A media folder that is a link: the same.
+    let media_dir = media.parent().unwrap().to_path_buf();
+    let moved = dir.path().join("moved-media");
+    std::fs::rename(&media_dir, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &media_dir).unwrap();
+    let c = open_copy_soon(&copy).unwrap();
+    let problems = c.idle().unwrap().problems;
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with(&format!("{rel} was not copied"))),
+        "{problems:?}"
+    );
+    c.close().unwrap();
+    std::fs::remove_file(&media_dir).unwrap();
+    std::fs::rename(&moved, &media_dir).unwrap();
+
+    // A media file that is a FIFO: not waited on.
+    mkfifo(&media);
+    let c = open_copy_soon(&copy).unwrap();
+    let problems = c.idle().unwrap().problems;
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with(&format!("{rel} was not copied"))),
+        "{problems:?}"
+    );
+    c.close().unwrap();
+
+    // The copy's project.json as a FIFO or a link: refused, plainly.
+    let pj = copy.join("project.json");
+    let kept = dir.path().join("kept.json");
+    std::fs::rename(&pj, &kept).unwrap();
+    mkfifo(&pj);
+    let e = open_copy_soon(&copy).unwrap_err();
+    assert!(!e.to_string().is_empty());
+    std::fs::remove_file(&pj).unwrap();
+    std::os::unix::fs::symlink(&kept, &pj).unwrap();
+    assert!(open_copy_soon(&copy).is_err(), "the link was followed");
 }

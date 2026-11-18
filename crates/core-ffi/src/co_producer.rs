@@ -175,6 +175,9 @@ pub struct PendingPreview {
     pub version: u64,
     /// The present step's serial when it was made.
     pub serial: u64,
+    /// The song's path when it was made (None: untitled). A Save As ends
+    /// the preview; a take or a check under another path is [`USED`].
+    pub path: Option<std::path::PathBuf>,
     /// The plan's canonical text.
     pub canonical: String,
     /// Some item is the composer's work (plan 8b Ruling 11: a take then
@@ -223,24 +226,36 @@ pub fn check_take(
     pending: Option<PendingPreview>,
     token: &str,
     plan: &[PlannedRow],
-    version: u64,
-    serial: u64,
+    now: Now<'_>,
 ) -> Result<(), VizError> {
-    check_pending(pending.as_ref(), token, plan, version, serial)
+    check_pending(pending.as_ref(), token, plan, now)
+}
+
+/// The session as a take finds it: its version, the present step's
+/// serial and the song's path.
+#[derive(Debug, Clone, Copy)]
+pub struct Now<'a> {
+    /// The session's version.
+    pub version: u64,
+    /// The present step's serial.
+    pub serial: u64,
+    /// The song's path (None: untitled).
+    pub path: Option<&'a Path>,
 }
 
 /// [`check_take`]'s checks on a preview still in the session (plan 8b
-/// Ruling 11): nothing is taken.
+/// Ruling 11): nothing is taken. A preview made under another path (the
+/// song was saved as another since) is [`USED`] (release gate Task 5).
 pub fn check_pending(
     pending: Option<&PendingPreview>,
     token: &str,
     plan: &[PlannedRow],
-    version: u64,
-    serial: u64,
+    now: Now<'_>,
 ) -> Result<(), VizError> {
-    let Some(p) = pending.filter(|p| p.token == token) else {
+    let Some(p) = pending.filter(|p| p.token == token && p.path.as_deref() == now.path) else {
         return Err(model(USED));
     };
+    let (version, serial) = (now.version, now.serial);
     if p.version != version || p.serial != serial {
         return Err(model(CHANGED));
     }

@@ -586,6 +586,35 @@ pub fn copy_media_files(doc: &Document, root: &Path) -> Result<Vec<(String, u64)
     Ok(out)
 }
 
+/// Refuses when a folder of `rel` under `base` (each of its parts in
+/// turn, `base` itself not included) is a link or not a folder, so a
+/// write there never goes through a link (release gate Task 5). Parts
+/// not made yet are fine; checked again once they are made.
+pub fn refuse_linked_folders(base: &Path, rel: &Path) -> Result<()> {
+    let mut at = base.to_path_buf();
+    for part in rel.components() {
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(ModelError::invalid(format!(
+                    "{} is a link; Co-Producer does not write through it",
+                    at.display()
+                )));
+            }
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => {
+                return Err(ModelError::invalid(format!(
+                    "{} is not a folder",
+                    at.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 fn write_copy_from(
     doc: &Document,
     package: &Path,
@@ -595,8 +624,11 @@ fn write_copy_from(
 ) -> Result<PathBuf> {
     let dir = package.join(COPIES_DIR);
     // Checked before anything is written.
+    refuse_linked_folders(package, Path::new(COPIES_DIR))?;
     copy_name(&dir, stamp, title)?;
     fs::create_dir_all(&dir)?;
+    // A link swapped in while the folders were made.
+    refuse_linked_folders(package, Path::new(COPIES_DIR))?;
     write_states(doc, package)?;
     // Another writer may take the free name first: try the next one.
     let mut tries = 0;
@@ -715,12 +747,48 @@ pub fn copy_parent(path: &Path) -> Option<PathBuf> {
     Some(parts.iter().collect())
 }
 
+/// Opens `path` for reading only when it is a regular file: a final link
+/// is not followed and a FIFO is not waited on (`O_NOFOLLOW |
+/// `O_NONBLOCK`), and the open file itself is checked, so nothing can be
+/// swapped in between the check and the read (release gate Task 5).
+pub fn open_regular(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !f.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::other("it is not a regular file"));
+    }
+    Ok(f)
+}
+
+/// The bytes of the regular file `path` ([`open_regular`]).
+fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    open_regular(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// The copy's document with the parent's blobs (like `load_autosave`).
+/// Only regular files are read: inside a package, a `project.json` or a
+/// blob that is a link or a FIFO is refused or missing.
 pub fn load_copy(copy: &Path) -> Result<Document> {
     let package =
         copy_parent(copy).ok_or_else(|| ModelError::invalid("that is not a Co-Producer copy"))?;
-    let mut doc = from_json(&fs::read_to_string(copy.join(PROJECT_FILE))?)?;
-    read_states(&mut doc, &package);
+    refuse_linked_folders(&package, Path::new(COPIES_DIR))?;
+    let text = String::from_utf8(read_regular(&copy.join(PROJECT_FILE))?)
+        .map_err(|_| ModelError::invalid("the copy's project.json is not UTF-8"))?;
+    let mut doc = from_json(&text)?;
+    if refuse_linked_folders(&package, Path::new(STATE_DIR)).is_ok() {
+        let dir = package.join(STATE_DIR);
+        for id in doc.referenced_states() {
+            if let Ok(bytes) = read_regular(&dir.join(blob_file_name(id))) {
+                doc.states_mut().insert(id, Arc::from(bytes));
+            }
+        }
+    }
     Ok(doc)
 }
 

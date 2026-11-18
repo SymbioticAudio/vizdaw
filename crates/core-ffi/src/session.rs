@@ -658,6 +658,10 @@ impl Inner {
         if !core_model::document::check_project_id(&id) {
             return Err(crate::events::bad("the project ID is malformed"));
         }
+        // Never written through a linked `Co-Producer` folder of the
+        // support folder (release gate Task 5).
+        let rel = Path::new("Co-Producer").join("Untitled").join(&id);
+        file::refuse_linked_folders(&recovery::support_dir(), &rel)?;
         Ok(Some(stand_in(&id)))
     }
 
@@ -935,6 +939,24 @@ fn title(path: Option<&Path>, copy: Option<&str>) -> String {
 /// Why `open` refuses a Co-Producer copy (plan 8a Ruling 9).
 pub const COPY_NOT_A_PROJECT: &str =
     "That is a Co-Producer copy: open it with File › Open Co-Producer Copy….";
+
+/// Copies the package file `rel` to `to` only when it is a regular file
+/// in real folders of `package`: no link is followed, a FIFO is never
+/// waited on (release gate Task 5). The open file is the one checked.
+fn copy_regular(package: &Path, rel: &str, to: &Path) -> std::io::Result<u64> {
+    let rel = Path::new(rel);
+    if let Some(folders) = rel.parent() {
+        file::refuse_linked_folders(package, folders)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+    let from = file::open_regular(&package.join(rel))?;
+    // Through the checked descriptor (`/dev/fd/N` opens that same file),
+    // so the copy still clones on APFS as `std::fs::copy` does.
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&from);
+    let copied = std::fs::copy(format!("/dev/fd/{fd}"), to);
+    drop(from);
+    copied
+}
 
 /// True when `p`, as given or as its real place, is a Co-Producer copy.
 fn is_copy(p: &Path) -> bool {
@@ -2219,7 +2241,7 @@ impl Session {
                     Some(d) => std::fs::create_dir_all(d),
                     None => Ok(()),
                 }
-                .and_then(|()| std::fs::copy(package.join(&rel), &to));
+                .and_then(|()| copy_regular(&package, &rel, &to));
                 if let Err(e) = done {
                     problems.push(format!("{rel} was not copied ({e})."));
                 }
@@ -2363,6 +2385,9 @@ impl Session {
                 }
             }
             self.save_to(&mut inner, &p)?;
+            // A Save As ends the pending preview (release gate Task 5): its
+            // yes was for the song under its old name.
+            inner.co_producer_preview = None;
             if inner.path.as_deref() != Some(p.as_path()) {
                 // The marker follows the project to its new place (not
                 // after `close`).
@@ -4935,6 +4960,7 @@ impl Session {
                 token,
                 version: inner.version,
                 serial: inner.history.present_serial(),
+                path: inner.path.clone(),
                 canonical: cp::canonical(&plan),
                 needs_yes,
                 items,
@@ -4984,8 +5010,12 @@ impl Session {
                             .into(),
                 });
             }
-            let (version, serial) = (inner.version, inner.history.present_serial());
-            crate::co_producer::check_take(pending, &token, &plan, version, serial)?;
+            let now = crate::co_producer::Now {
+                version: inner.version,
+                serial: inner.history.present_serial(),
+                path: inner.path.as_deref(),
+            };
+            crate::co_producer::check_take(pending, &token, &plan, now)?;
             if yes && approval == CoProducerApproval::None {
                 return Err(VizError::Model {
                     message: NEEDS_APPROVAL.into(),
@@ -5016,9 +5046,13 @@ impl Session {
                     message: OPEN_A_REQUEST.into(),
                 });
             }
-            let (version, serial) = (inner.version, inner.history.present_serial());
+            let now = cp::Now {
+                version: inner.version,
+                serial: inner.history.present_serial(),
+                path: inner.path.as_deref(),
+            };
             let pending = inner.co_producer_preview.as_ref();
-            cp::check_pending(pending, &token, &plan, version, serial)?;
+            cp::check_pending(pending, &token, &plan, now)?;
             pending.map(cp::PendingPreview::row).ok_or(VizError::Model {
                 message: cp::USED.into(),
             })

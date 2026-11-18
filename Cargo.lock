@@ -534,6 +534,7 @@ dependencies = [
  "criterion",
  "im",
  "insta",
+ "libc",
  "proptest",
  "serde",
  "serde_json",
@@ -1811,6 +1812,7 @@ name = "vizdaw-mcp"
 version = "26.0.0"
 dependencies = [
  "core-control",
+ "libc",
  "serde_json",
  "tempfile",
 ]

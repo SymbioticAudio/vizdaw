@@ -11,6 +11,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 im = { version = "15", features = ["serde"] }
 thiserror = "2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 proptest = "1"
 criterion = "0.5"

@@ -143,3 +143,43 @@ fn a_damaged_copy_stops_pruning() {
     assert!(blobs.join(blob_file_name(new)).is_file());
     std::fs::remove_dir_all(&pkg).unwrap();
 }
+
+/// A `Co-Producer` or `Copies` folder that is a link is never written
+/// through: the copy is refused and nothing lands where the link points
+/// (release gate Task 5).
+#[test]
+fn symlinked_copies_folder_is_refused() {
+    use core_model::file::refuse_linked_folders;
+    let doc = pad();
+    for linked in ["Co-Producer", "Co-Producer/Copies"] {
+        let pkg = temp_package("linked");
+        save(&doc, &pkg).unwrap();
+        let elsewhere = temp_package("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let at = pkg.join(linked);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &at).unwrap();
+        let e = write_copy(&doc, &pkg, STAMP, "Tidy Up").unwrap_err();
+        assert!(e.to_string().contains("is a link"), "{linked}: {e}");
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "{linked}: written through the link"
+        );
+        assert!(matches!(
+            refuse_linked_folders(&pkg, Path::new(COPIES_DIR)),
+            Err(ModelError::Invalid { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&pkg);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+    // A file where a folder goes is refused too; folders not made yet
+    // are fine.
+    let pkg = temp_package("file");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("Co-Producer"), b"x").unwrap();
+    assert!(refuse_linked_folders(&pkg, Path::new(COPIES_DIR)).is_err());
+    std::fs::remove_file(pkg.join("Co-Producer")).unwrap();
+    assert!(refuse_linked_folders(&pkg, Path::new(COPIES_DIR)).is_ok());
+    let _ = std::fs::remove_dir_all(&pkg);
+}
