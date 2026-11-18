@@ -58,6 +58,14 @@ pub const PREVIEWABLE: &[&str] = &[
     "lane.set_output",
 ];
 
+/// The adds Co-Producer cannot run in any form in 26.0.0 (release gate
+/// B2): each writes notes, and Co-Producer writes none. `file.import_midi`
+/// lands a file's notes on a track and `track.duplicate` copies a track's
+/// notes. The developer channel keeps their registry class; the
+/// Co-Producer gate ([`effective_class`]) and its list ([`list_json`])
+/// both read this one list, so they cannot disagree.
+pub const REFUSED_IN_26: &[&str] = &["file.import_midi", "track.duplicate"];
+
 /// The most IDs in one [`id_list`] (plan 8c Rulings 1 and 2).
 pub const MAX_IDS: usize = 64;
 
@@ -138,13 +146,16 @@ fn flag(args: &[(String, ArgValue)], name: &str) -> bool {
     matches!(arg(args, name), Some(ArgValue::Flag(true)))
 }
 
-/// The class of `spec` run with `args` (Ruling 5, P3): a new bus with a
-/// send from the composer's `strip` is a change, and importing MIDI into a
-/// new project (which opens a window) is refused.
+/// The class of `spec` run with `args` on the Co-Producer socket (Ruling
+/// 5, P3): a new bus with a send from the composer's `strip` is a change.
+/// Release gate B2 refuses [`REFUSED_IN_26`] in every form, and an audio
+/// import with a `lane`, whose region would play over what is on that
+/// track; without one it goes on new tracks.
 pub fn effective_class(spec: &CommandSpec, args: &[(String, ArgValue)]) -> Class {
     match spec.id {
+        id if REFUSED_IN_26.contains(&id) => Class::Refused,
         "mixer.new_bus" if arg(args, "strip").is_some() => Class::Change,
-        "file.import_midi" if flag(args, "new_project") => Class::Refused,
+        "media.import" if arg(args, "lane").is_some() => Class::Refused,
         _ => spec.class,
     }
 }
@@ -431,11 +442,12 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
 }
 
 /// The Co-Producer's `commands.list`: every command it may run, each with
-/// its `class` and whether 8a can preview it.
+/// its `class` and whether 8a can preview it. A command [`effective_class`]
+/// refuses with no args ([`REFUSED_IN_26`]) is not listed.
 pub fn list_json() -> Value {
     let commands: Vec<Value> = COMMANDS
         .iter()
-        .filter(|c| c.class != Class::Refused)
+        .filter(|c| effective_class(c, &[]) != Class::Refused)
         .map(|c| {
             let mut v = registry::command_json(c);
             if let Some(o) = v.as_object_mut() {

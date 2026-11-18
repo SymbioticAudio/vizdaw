@@ -247,25 +247,179 @@ fn mixer_new_bus_with_a_strip_is_a_change() {
     );
 }
 
+/// A temp folder holding `a.mid` and `a.wav`, both real files.
+fn import_files() -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let mid = dir.path().join("a.mid");
+    std::fs::write(&mid, b"MThd").unwrap();
+    let wav = dir.path().join("a.wav");
+    std::fs::write(&wav, b"RIFF").unwrap();
+    let (mid, wav) = (mid.to_str().unwrap().into(), wav.to_str().unwrap().into());
+    (dir, mid, wav)
+}
+
 #[test]
-fn import_midi_into_a_new_project_is_refused() {
+fn import_midi_is_refused_in_every_form() {
+    // Release gate B2: Co-Producer writes no notes in 26.0.0, and an
+    // import lands notes on the composer's track.
     let spec = registry::find("file.import_midi").unwrap();
     let path = ("path".to_string(), ArgValue::Text("/tmp/a.mid".into()));
     assert_eq!(
         effective_class(spec, std::slice::from_ref(&path)),
-        Class::Add
+        Class::Refused
     );
-    assert_eq!(
-        effective_class(
-            spec,
-            &[path.clone(), ("new_project".into(), ArgValue::Flag(false))]
-        ),
-        Class::Add
-    );
+    assert_eq!(effective_class(spec, &[]), Class::Refused);
     assert_eq!(
         effective_class(spec, &[path, ("new_project".into(), ArgValue::Flag(true))]),
         Class::Refused
     );
+    let (_dir, mid, _) = import_files();
+    for params in [
+        json!({"path": mid}),
+        json!({"path": mid, "seq": 1, "lane": 2, "tick": 0}),
+        json!({"path": mid, "new_project": true}),
+        json!({"path": mid, "new_project": false}),
+    ] {
+        let m = assert_code(
+            "command.run",
+            run("file.import_midi", params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert!(m.contains("cannot run file.import_midi"), "{params}: {m}");
+        let e = preview(json!([{"id": "file.import_midi", "params": params}])).unwrap_err();
+        assert!(
+            e.message.contains("cannot run file.import_midi"),
+            "{}",
+            e.message
+        );
+    }
+    // The developer channel's class is unchanged.
+    assert_eq!(spec.class, Class::Add);
+}
+
+#[test]
+fn media_import_onto_an_existing_track_is_refused() {
+    let spec = registry::find("media.import").unwrap();
+    assert_eq!(effective_class(spec, &[]), Class::Add);
+    assert_eq!(
+        effective_class(spec, &[("lane".into(), ArgValue::Int(0))]),
+        Class::Refused
+    );
+    let (_dir, _, wav) = import_files();
+    for params in [
+        json!({"path": wav, "seq": 1, "lane": 2, "tick": 0}),
+        json!({"path": wav, "lane": 0}),
+        json!({"path": wav, "seq": 1, "lane": 1}),
+    ] {
+        let m = assert_code(
+            "command.run",
+            run("media.import", params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert!(m.contains("cannot run media.import"), "{params}: {m}");
+    }
+    // Without a `lane` the import goes on new tracks: still an add.
+    for params in [
+        json!({"path": wav}),
+        json!({"path": wav, "seq": 1, "tick": 0}),
+        json!({"path": wav, "lane": null}),
+    ] {
+        assert_eq!(
+            gate("command.run", run("media.import", params.clone())),
+            Ok(()),
+            "{params}"
+        );
+    }
+    // Hostile `lane`s: each is refused, none panics.
+    for lane in [
+        json!("2"),
+        json!(1.5),
+        json!(-1),
+        json!(i64::MIN),
+        json!(i64::MAX),
+        json!(u64::MAX),
+        json!(1e300),
+        json!(true),
+        json!([2]),
+        json!({"lane": 2}),
+    ] {
+        let params = json!({"path": wav, "seq": 1, "lane": lane, "tick": 0});
+        assert!(
+            gate("command.run", run("media.import", params.clone())).is_err(),
+            "{params}"
+        );
+    }
+    assert_eq!(spec.class, Class::Add);
+}
+
+#[test]
+fn track_duplicate_is_refused() {
+    // A duplicate copies the composer's notes onto a new track.
+    let spec = registry::find("track.duplicate").unwrap();
+    assert_eq!(effective_class(spec, &[]), Class::Refused);
+    for params in [json!({}), json!({"seq": 1, "lane": 2})] {
+        let m = assert_code(
+            "command.run",
+            run("track.duplicate", params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert!(m.contains("cannot run track.duplicate"), "{params}: {m}");
+    }
+    let list = co_producer::list_json();
+    for id in co_producer::REFUSED_IN_26 {
+        assert!(
+            list["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["id"] != *id),
+            "{id} is listed"
+        );
+    }
+    assert_eq!(spec.class, Class::Add);
+}
+
+/// The adds Co-Producer may run, sorted. None of them creates notes:
+/// the new tracks start empty, `media.import` (without `lane`) puts audio
+/// on new tracks, `mixer.new_bus` (without `strip`) is a free bus and
+/// `marker.add` is a marker. The adds that do create notes,
+/// `file.import_midi` and `track.duplicate`, are refused (release gate
+/// B2). A new add fails `no_add_command_writes_notes` until a reviewer
+/// classifies it here or refuses it.
+const NOTELESS_ADDS: &[&str] = &[
+    "marker.add",
+    "media.import",
+    "mixer.new_bus",
+    "track.new_audio",
+    "track.new_instrument",
+    "track.new_midi",
+    "track.new_plugin_instrument",
+];
+
+#[test]
+fn no_add_command_writes_notes() {
+    let mut adds: Vec<&str> = COMMANDS
+        .iter()
+        .filter(|c| effective_class(c, &[]) == Class::Add)
+        .map(|c| c.id)
+        .collect();
+    adds.sort_unstable();
+    assert_eq!(adds, NOTELESS_ADDS, "classify every new add here");
+    let mut sorted = NOTELESS_ADDS.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(sorted, NOTELESS_ADDS, "keep the list sorted");
+    // Every add of the registry is either one of these or refused.
+    for c in COMMANDS.iter().filter(|c| c.class == Class::Add) {
+        assert!(
+            NOTELESS_ADDS.contains(&c.id) || co_producer::REFUSED_IN_26.contains(&c.id),
+            "{}",
+            c.id
+        );
+    }
+    for id in ["file.import_midi", "track.duplicate"] {
+        let spec = registry::find(id).unwrap();
+        assert_eq!(effective_class(spec, &[]), Class::Refused, "{id}");
+    }
 }
 
 #[test]
@@ -295,10 +449,6 @@ fn the_gate_admits_only_the_allow_list() {
         (
             "command.run",
             run("mixer.new_bus", json!({"name": "Drums"})),
-        ),
-        (
-            "command.run",
-            run("file.import_midi", json!({"path": existing})),
         ),
     ] {
         assert_eq!(gate(cmd, params.clone()), Ok(()), "{cmd} {params}");
@@ -862,7 +1012,7 @@ fn the_filtered_list_has_classes() {
     let commands = list["commands"].as_array().unwrap();
     let want = COMMANDS
         .iter()
-        .filter(|c| c.class != Class::Refused)
+        .filter(|c| c.class != Class::Refused && !co_producer::REFUSED_IN_26.contains(&c.id))
         .count();
     assert_eq!(commands.len(), want);
     let mut previewable = Vec::new();

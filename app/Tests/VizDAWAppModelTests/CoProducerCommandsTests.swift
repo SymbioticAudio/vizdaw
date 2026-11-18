@@ -1114,6 +1114,31 @@ import VizDAWCore
         }
     }
 
+    /// Release gate B2: Co-Producer writes no notes in 26.0.0, so a MIDI
+    /// import (any form), an audio import onto a track and a track
+    /// duplicate are refused here as the gate refuses them, with no enter.
+    /// An audio import with no `lane` goes on new tracks and still runs.
+    @Test func coProducerImportOntoATrackIsRefused() throws {
+        let (s, id, _, f) = try demo()
+        for (cmd, args) in [
+            ("file.import_midi", [text("path", "/tmp/a.mid")]),
+            ("file.import_midi", [text("path", "/tmp/a.mid"), int("seq", 1), int("lane", 2), int("tick", 0)]),
+            ("file.import_midi", [text("path", "/tmp/a.mid"), ControlArg(name: "new_project", value: .flag(value: true))]),
+            ("media.import", [text("path", "/tmp/a.wav"), int("seq", 1), int("lane", 2), int("tick", 0)]),
+            ("media.import", [text("path", "/tmp/a.wav"), int("lane", 0)]),
+            ("track.duplicate", []),
+            ("track.duplicate", [int("seq", 1), int("lane", 2)]),
+        ] {
+            f.coLog = []
+            let o = run(command(cmd, args), s, id)
+            #expect(failure(o)?.code == .notAllowed, "\(cmd) \(args)")
+            #expect(failure(o)?.message == "Co-Producer cannot run \(cmd).", "\(cmd) \(args)")
+            #expect(f.coLog == [], "\(cmd) \(args)")
+        }
+        #expect(!CoProducerCommands.refusedIn26("media.import", [text("path", "/tmp/a.wav"), int("seq", 1)]))
+        #expect(!CoProducerCommands.refusedIn26("track.new_midi", []))
+    }
+
     /// Plan 8e Task 6b: a fade shape, the Built-in Synth's sound and a
     /// track's output change the composer's work, so `command.run` refuses
     /// each here as the gate does, with no enter and nothing sent.

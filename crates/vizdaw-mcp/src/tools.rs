@@ -128,9 +128,14 @@ fn string_limit(name: &str) -> usize {
 }
 
 /// A param Co-Producer's tool does not offer: `mixer.new_bus`'s `strip`
-/// form changes the composer's routing, so it goes through `change`.
+/// form changes the composer's routing, so it goes through `change`, and
+/// `media.import`'s `lane` form is refused (release gate B2: its region
+/// would play over what is on that track).
 fn barred(spec: &Value, param: &str) -> bool {
-    str_of(spec, "id") == "mixer.new_bus" && param == "strip"
+    matches!(
+        (str_of(spec, "id"), param),
+        ("mixer.new_bus", "strip") | ("media.import", "lane")
+    )
 }
 
 /// One param's schema; None for `replace`, which Co-Producer refuses.
@@ -2115,6 +2120,56 @@ mod tests {
             let e = listed(&list, &plan(id)).unwrap_err();
             assert!(!e.contains('\u{202E}'), "{e}");
         }
+    }
+
+    #[test]
+    fn refused_imports_are_not_offered_as_tools() {
+        // Release gate B2: Co-Producer writes no notes in 26.0.0.
+        let list = list_json();
+        let ids: Vec<&str> = list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| str_of(c, "id"))
+            .collect();
+        let tools = command_tools(&list);
+        for id in ["file.import_midi", "track.duplicate"] {
+            assert!(!ids.contains(&id), "{id} is listed");
+            assert!(
+                tools.iter().all(|(n, _)| *n != tool_name(id)),
+                "{id} is a tool"
+            );
+            assert!(listed(&list, &json!([{"id": id}])).is_err(), "{id}");
+        }
+        // An audio import goes on new tracks only: its tool has no `lane`.
+        let (_, import) = tools
+            .iter()
+            .find(|(n, _)| n == "media_import")
+            .expect("media_import is a tool");
+        let tool = command_tool(import);
+        assert!(
+            tool["inputSchema"]["properties"].get("lane").is_none(),
+            "{tool}"
+        );
+        assert!(
+            tool["inputSchema"]["properties"].get("seq").is_some(),
+            "{tool}"
+        );
+        let args = |v: Value| v.as_object().unwrap().clone();
+        for lane in [
+            json!(2),
+            json!("2"),
+            json!(-1),
+            json!(u64::MAX),
+            json!(null),
+        ] {
+            let e = arguments_to_params(import, &args(json!({"path": "/tmp/a.wav", "lane": lane})))
+                .unwrap_err();
+            assert!(e.contains("lane"), "{e}");
+        }
+        assert!(
+            arguments_to_params(import, &args(json!({"path": "/tmp/a.wav", "seq": 1}))).is_ok()
+        );
     }
 
     #[test]

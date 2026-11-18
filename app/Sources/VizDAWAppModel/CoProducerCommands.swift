@@ -45,6 +45,11 @@ public enum CoProducerCommands {
             if controlCommandReads(id: id) {
                 return ControlCommands.run(id, args: args, doc: doc, store: store, host: host)
             }
+            // Release gate B2: the gate refuses these first; the app refuses
+            // them again, so Co-Producer writes no notes.
+            if refusedIn26(id, args) {
+                return .failed(.of(.notAllowed, "Co-Producer cannot run \(id)."))
+            }
             // The gate refuses these first; the app refuses them again, so a
             // change to the composer's work runs only after a yes (8c Ruling 3).
             if changesWork(id, args) {
@@ -237,6 +242,19 @@ public enum CoProducerCommands {
     static let fixesChanges: Set<String> = [
         RegionCommands.setFadeShape, SynthCommands.setSound, TrackCommands.setOutput,
     ]
+
+    /// The adds Co-Producer cannot run in any form in 26.0.0 (release gate
+    /// B2), as the Rust gate's `REFUSED_IN_26`: each writes notes.
+    static let refusedAdds: Set<String> = ["file.import_midi", "track.duplicate"]
+
+    /// Whether Co-Producer may not run `id` with `args` at all in 26.0.0
+    /// (release gate B2): a MIDI import, a track duplicate, or an audio
+    /// import onto a track (`lane`), whose region would play over what is
+    /// there. An audio import with no `lane` goes on new tracks.
+    static func refusedIn26(_ id: String, _ args: [ControlArg]) -> Bool {
+        if refusedAdds.contains(id) { return true }
+        return id == "media.import" && args.contains { $0.name == "lane" }
+    }
 
     /// Whether `id` with `args` changes or removes the composer's work, so
     /// runs only through `co_producer.apply` after its take: the chores,
