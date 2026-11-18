@@ -556,7 +556,7 @@ enum ControlChannel {
         return ControlWindowCheck.namesNoWindow(window) { ControlWindows.window(.number(number: $0)) != nil }
     }
 
-    static let noWindow = ControlOutcome.failed(.of(.noWindow, "No such VizDAW window (see state.get windows)."))
+    static let noWindow = CoProducerCommands.noWindow
     static let noElement = ControlOutcome.failed(
         .of(.noElement, "The element is gone or changed (read ui.tree again)."))
 
@@ -817,6 +817,8 @@ final class AppControlHost: ControlHost {
     var plugins: PluginSettings { pluginSettings }
     /// `settings.co_producer`'s switch (plan 8a Ruling 10).
     var coProducer: CoProducerSettings { coProducerSettings }
+    /// `settings.co_producer_metrics`'s switch (plan 8f Ruling 1).
+    var metrics: CoProducerMetrics { coProducerMetrics }
     var externalEditor: ExternalEditorChoice {
         if ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub" { return .stub }
         return editingPreferences.externalEditor.map { .app($0) } ?? .none

@@ -556,6 +556,22 @@ public final class DocumentStore {
     /// Every new model, before any window shows it (set by the app: the
     /// surfaces' core and command sinks, plan 5f-1 Task 10).
     public var didMake: ((UUID, DocumentModel) -> Void)?
+    /// Told every document's new steps, undos and redos, with its ID (plan
+    /// 8f Ruling 4: the time records' friction). Set on each document as it
+    /// is added, and on those already open when it changes.
+    @ObservationIgnored public var stepObserver: (@MainActor (UUID, StepEvent) -> Void)? {
+        didSet {
+            for (id, m) in documents { m.onStep = Self.forward(stepObserver, id) }
+        }
+    }
+
+    /// `observer` for document `id`; it holds no reference to the store.
+    private static func forward(_ observer: (@MainActor (UUID, StepEvent) -> Void)?, _ id: UUID)
+        -> (@MainActor (StepEvent) -> Void)?
+    {
+        guard let observer else { return nil }
+        return { observer(id, $0) }
+    }
 
     /// The open document saved at `path` (same file, ignoring case and
     /// symbolic links), if any.
@@ -695,6 +711,7 @@ public final class DocumentStore {
         model.externalTools = externalTools
         let id = UUID()
         didMake?(id, model)
+        model.onStep = Self.forward(stepObserver, id)
         documents[id] = model
         added.append(id)
         model.mixerProvider = { [weak self] in self?.mixer(id) }

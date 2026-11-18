@@ -25,6 +25,18 @@ final class FakeControlHost: ControlHost {
     let coProducer = CoProducerSettings(
         defaults: MemoryDefaults(), supportDir: URL(fileURLWithPath: "/tmp/vizdaw-fake-host-support"),
         sink: FakeCoProducerSink())
+    /// Settings › Co-Producer › Count where my time goes (plan 8f Task 3):
+    /// a fake recorder in a temp support folder of this host's own, made
+    /// on first use. `metricsPrivateProblem` is what `makePrivate` answers.
+    let metricsRecorder = FakeMetricsRecorder()
+    let metricsPrivateProblem = Box<String?>(nil)
+    lazy var metrics: CoProducerMetrics = {
+        let dir = (try? metricsSupportDir()) ?? FileManager.default.temporaryDirectory
+        return CoProducerMetrics(
+            defaults: MemoryDefaults(), supportDir: dir, environment: [:],
+            makePrivate: { [problem = metricsPrivateProblem] _ in problem.value },
+            open: { [recorder = metricsRecorder] _, _, _ in recorder })
+    }()
     /// Whether `focus` finds the fields.
     var fieldsShown = true
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {

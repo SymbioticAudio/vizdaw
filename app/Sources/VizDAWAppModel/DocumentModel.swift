@@ -8,7 +8,18 @@ import VizDAWCore
 @MainActor
 public final class DocumentModel {
     public let session: any SessionProtocol
-    public private(set) var snapshot: DocSnapshot
+    public private(set) var snapshot: DocSnapshot {
+        // Steps, undos and redos for the time records (plan 8f Ruling 4):
+        // one comparison when nothing moved.
+        didSet {
+            if let e = stepWatch.observe(step: snapshot.step, undoLabel: snapshot.undoLabel) { onStep?(e) }
+        }
+    }
+    /// The highest and last history step seen (plan 8f Ruling 4).
+    @ObservationIgnored private var stepWatch = StepWatch()
+    /// Told each new step, undo and redo (`DocumentStore` sets it from its
+    /// `stepObserver`).
+    @ObservationIgnored public var onStep: (@MainActor (StepEvent) -> Void)?
     /// The editors (plan 4a).
     public let editor: EditorModel
     /// The select-and-modify panel (plan 4c).
@@ -522,6 +533,7 @@ public final class DocumentModel {
         }
         clock.update(transport, pollInterval: Self.pollSeconds(playing: transport.playing))
         updatePlayKey()
+        // The first snapshot through `didSet` starts the step watch.
         apply(snap)
         projectInfo = try? session.projectInfo()
         editor.applySnapshot = { [weak self] in self?.apply($0) }

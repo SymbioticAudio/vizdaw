@@ -255,6 +255,10 @@ public protocol ControlHost: AnyObject {
     /// Settings › Co-Producer (plan 8a Ruling 10): `settings.co_producer`
     /// sets it.
     var coProducer: CoProducerSettings { get }
+    /// Settings › Co-Producer › Count where my time goes (plan 8f Ruling
+    /// 1): `settings.co_producer_metrics` and `settings.delete_time_records`
+    /// set it; `co_producer.metrics` reads it.
+    var metrics: CoProducerMetrics { get }
 }
 
 extension ControlHost {

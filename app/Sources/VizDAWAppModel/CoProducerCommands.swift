@@ -18,8 +18,9 @@ public enum CoProducerCommands {
     public static let metricsSetting = "settings.co_producer_metrics"
     /// Delete All Time Records (plan 8f Ruling 1).
     public static let deleteTimeRecords = "settings.delete_time_records"
-    /// The answer of plan 8f's calls until Task 3 wires them.
-    static let notReady = ControlOutcome.failed(.of(.unavailable, "Not ready yet."))
+    /// A `window` that names no document (8a's window rules).
+    public static let noWindow = ControlOutcome.failed(
+        .of(.noWindow, "No such VizDAW window (see state.get windows)."))
     /// The line of a planned command after one that failed.
     public static let notRun = "not run (an earlier command failed)"
 
@@ -155,9 +156,20 @@ public enum CoProducerCommands {
             } catch {
                 return .failed(failure(error))
             }
-        case .coProducerMetrics:
-            // Plan 8f Task 3 reads the time records.
-            return notReady
+        case .coProducerMetrics(let days, let window):
+            // A read of the time records (plan 8f Ruling 6): nothing is
+            // entered, and the song is the window's when one is named.
+            var songID: String?
+            if window != nil {
+                guard let (_, m) = doc else { return noWindow }
+                songID = try? m.session.projectId()
+            }
+            do {
+                let read = try host.metrics.read(days: days, songID: songID)
+                return .done(.coProducerMetrics(on: read.on, row: read.row))
+            } catch {
+                return .failed(failure(error))
+            }
         default:
             return .failed(.of(.notAllowed, "Co-Producer cannot make that call."))
         }
@@ -440,9 +452,21 @@ public enum CoProducerCommands {
                 return .failed(.of(.failed, host.coProducer.problem ?? "Co-Producer could not start."))
             }
             return .done(ControlCommands.ran(id, nil))
-        case metricsSetting, deleteTimeRecords:
-            // Plan 8f Task 3 wires the switch and delete-all.
-            return notReady
+        case metricsSetting:
+            guard let want = args.flag("on") else {
+                return .failed(.of(.invalidParams, "\(metricsSetting): `on` is true or false"))
+            }
+            host.metrics.setOn(want)
+            if want, !host.metrics.on {
+                return .failed(.of(.failed, host.metrics.problem ?? "Time counting could not start."))
+            }
+            return .done(ControlCommands.ran(id, nil))
+        case deleteTimeRecords:
+            // Programmatic calls open nothing: no alert asks first.
+            guard host.metrics.deleteAll() else {
+                return .failed(.of(.failed, host.metrics.problem ?? "The time records could not be deleted."))
+            }
+            return .done(ControlCommands.ran(id, nil))
         case openCopy:
             guard let path = args.text("path") else { return .failed(.dialog("Open", "path")) }
             let before = store.alert?.id

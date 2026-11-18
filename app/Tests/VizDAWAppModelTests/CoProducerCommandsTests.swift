@@ -1158,6 +1158,123 @@ import VizDAWCore
         #expect(m.alert == nil)
         #expect(m.coProducerApproval == nil)
     }
+
+    // MARK: Time records (plan 8f Ruling 6)
+
+    static let summaryRow = MetricsSummaryRow(
+        since: "2026-11-16", days: 7,
+        all: MetricsTotalsRow(
+            seconds: MetricsSecondsRow(composing: 600, recording: 0, editing: 120, mixing: 60, other: 0),
+            undoBursts: 1, repeats: [MetricsCountRow(label: "Rename Track", count: 1)], hunts: 0, huntEnds: []),
+        songs: [], moreSongs: 0)
+
+    /// Every summary call: support, today, days, song ID.
+    func recordSummaries() -> Box<[String]> {
+        let calls = Box<[String]>([])
+        host.metrics.summary = { support, today, days, song in
+            calls.value.append("\(support) \(today) \(days.map { String($0) } ?? "nil") \(song ?? "nil")")
+            return Self.summaryRow
+        }
+        return calls
+    }
+
+    @Test func metricsReadAnswersTotals() throws {
+        let (s, id, _, f) = try demo()
+        f.projectIdAnswer = "0123456789abcdef0123456789abcdef"
+        host.metrics.now = {
+            var c = DateComponents()
+            (c.year, c.month, c.day, c.hour) = (2026, 11, 18, 12)
+            return Calendar.current.date(from: c) ?? Date()
+        }
+        let calls = recordSummaries()
+        let support = host.metrics.supportDir.path
+
+        // Off: the records are read, and no recorder is called.
+        let off = run(.coProducerMetrics(days: 7, window: .number(number: 3)), s, id)
+        #expect(result(off) == .coProducerMetrics(on: false, row: Self.summaryRow))
+        #expect(host.metricsRecorder.log.isEmpty)
+        #expect(calls.value == ["\(support) 2026-11-18 7 0123456789abcdef0123456789abcdef"])
+
+        // On: flushed first, so the answer holds the minute so far.
+        host.metrics.setOn(true)
+        #expect(host.metrics.on)
+        calls.value = []
+        let on = run(.coProducerMetrics(days: 7, window: .number(number: 3)), s, id)
+        #expect(result(on) == .coProducerMetrics(on: true, row: Self.summaryRow))
+        #expect(host.metricsRecorder.log == ["flush"])
+        #expect(calls.value == ["\(support) 2026-11-18 7 0123456789abcdef0123456789abcdef"])
+
+        // No window: all time and no song of its own; a read enters nothing.
+        calls.value = []
+        _ = run(.coProducerMetrics(days: nil, window: nil), s, id)
+        #expect(calls.value == ["\(support) 2026-11-18 nil nil"])
+        #expect(f.coLog == [])
+
+        // An unsaved song has no project ID.
+        f.projectIdAnswer = nil
+        calls.value = []
+        _ = run(.coProducerMetrics(days: 1, window: .key), s, id)
+        #expect(calls.value == ["\(support) 2026-11-18 1 nil"])
+
+        // A read the core refuses says why.
+        host.metrics.summary = { _, _, _, _ in throw VizError.Model(message: "days is 1 to 3650") }
+        let refused = run(.coProducerMetrics(days: 0, window: nil), s, id)
+        #expect(failure(refused)?.message == "days is 1 to 3650")
+        #expect(s.alert == nil)
+        #expect(host.calls.isEmpty)
+    }
+
+    @Test func metricsReadNeedsAKnownWindow() throws {
+        let (s, _, _, f) = try demo()
+        let calls = recordSummaries()
+        let o = CoProducerCommands.run(
+            .coProducerMetrics(days: 7, window: .number(number: 99)), doc: nil, store: s, host: host, stamp: stamp,
+            peer: nil, approver: FakeApprover(.allow))
+        #expect(failure(o)?.code == .noWindow)
+        #expect(failure(o)?.message == "No such VizDAW window (see state.get windows).")
+        #expect(calls.value.isEmpty)
+        #expect(f.coLog == [])
+    }
+
+    @Test func timeSettingsOverTheDeveloperChannel() throws {
+        let (s, _, _, _) = try demo()
+        func run(_ id: String, _ args: [ControlArg]) -> ControlOutcome {
+            ControlCommands.run(id, args: args, doc: nil, store: s, host: host)
+        }
+        let on = run(CoProducerCommands.metricsSetting, [ControlArg(name: "on", value: .flag(value: true))])
+        #expect(failure(on) == nil)
+        #expect(host.metrics.on)
+
+        // Hostile input: a missing or wrongly typed `on` changes nothing.
+        let noOn = run(CoProducerCommands.metricsSetting, [])
+        #expect(failure(noOn)?.code == .invalidParams)
+        for bad: ControlValue in [
+            .text(value: "yes"), .text(value: String(repeating: "a", count: 70_000)), .text(value: "\0"),
+            .int(value: 1),
+        ] {
+            let o = run(CoProducerCommands.metricsSetting, [ControlArg(name: "on", value: bad)])
+            #expect(failure(o)?.code == .invalidParams)
+        }
+        #expect(host.metrics.on)
+
+        // Delete All without the alert: programmatic calls open nothing.
+        let delete = run(CoProducerCommands.deleteTimeRecords, [])
+        #expect(failure(delete) == nil)
+        #expect(host.metricsRecorder.log == ["clearAndDeleteAll"])
+        #expect(!host.metrics.confirmingDelete)
+        #expect(host.metrics.on)
+
+        // Off; a start that fails is a failure with its reason.
+        let off = run(CoProducerCommands.metricsSetting, [ControlArg(name: "on", value: .flag(value: false))])
+        #expect(failure(off) == nil)
+        #expect(!host.metrics.on)
+        host.metricsPrivateProblem.value = "the folder belongs to another user"
+        let refused = run(CoProducerCommands.metricsSetting, [ControlArg(name: "on", value: .flag(value: true))])
+        #expect(failure(refused)?.message == "Time counting could not start: the folder belongs to another user")
+        #expect(!host.metrics.on)
+        #expect(s.alert == nil)
+        #expect(host.calls.isEmpty)
+    }
 }
 
 /// A value a test closure fills in.

@@ -71,8 +71,14 @@ final class LiveCoProducerSink: CoProducerSink {
     /// The folder must be this user's; it becomes 0700, so the socket's
     /// folder passes the server's own checks (control spec §8).
     func start(path: String) -> String? {
+        if let why = Self.makePrivate((path as NSString).deletingLastPathComponent) { return why }
+        return ControlChannel.startCoProducer(path: path)
+    }
+
+    /// Makes `dir` (creating it) mode 0700 when this user owns it; else the
+    /// reason. Time counting shares it (plan 8f Ruling 1).
+    static func makePrivate(_ dir: String) -> String? {
         let fm = FileManager.default
-        let dir = (path as NSString).deletingLastPathComponent
         do {
             try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
             let owner = (try fm.attributesOfItem(atPath: dir)[.ownerAccountID] as? NSNumber)?.uint32Value
@@ -81,7 +87,7 @@ final class LiveCoProducerSink: CoProducerSink {
         } catch {
             return AlertItem(error, title: "Co-Producer").message
         }
-        return ControlChannel.startCoProducer(path: path)
+        return nil
     }
 
     func stop() { ControlChannel.stopCoProducer() }
@@ -119,6 +125,15 @@ final class LiveCoProducerSink: CoProducerSink {
     s.didTurnOff = { CoProducerCommands.tidy(appStore, all: true) }
     return s
 }()
+
+/// Settings › Co-Producer › Count where my time goes (plan 8f Ruling 1):
+/// off unless the composer turned it on; independent of the Co-Producer
+/// switch. Task 4 makes it at launch and starts the probe with it.
+@MainActor let coProducerMetrics = CoProducerMetrics(
+    defaults: MemoryDefaults.appStore(), supportDir: AppSetup.coProducerSupportDir,
+    environment: ProcessInfo.processInfo.environment,
+    makePrivate: { LiveCoProducerSink.makePrivate($0.path) },
+    open: { try MetricsRecorder.open(support: $0.path, blockMs: $1, sampleMs: $2) })
 
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
