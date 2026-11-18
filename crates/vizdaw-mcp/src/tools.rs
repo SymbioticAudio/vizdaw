@@ -861,6 +861,9 @@ pub const UNREADABLE: &str = "The composer's answer could not be read. Nothing c
 pub const EXPIRED: &str = "This question expired; call change again.";
 /// A token `change` did not hand out in this conversation.
 pub const NOT_OUR_TOKEN: &str = "Use the token change returned in this conversation.";
+/// A token sent with other commands (or another window) than `change`
+/// handed it out for: it is used up (release gate Task 6).
+pub const FOR_OTHER_COMMANDS: &str = "This token was for other commands, and is now used up. Call change again with the commands you want.";
 
 /// `change` and `apply_change`'s checked arguments.
 #[derive(Debug, Clone, PartialEq)]

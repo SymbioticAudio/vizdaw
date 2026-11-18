@@ -18,7 +18,9 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 /// A resource VizDAW could not give (it is not running, or it refused).
 pub const APP_ERROR: i64 = -32000;
-/// A resource that does not exist (a view URI not served).
+/// A resource that does not exist (a view URI not served), in the
+/// `initialize` era; 2026-07-28 uses [`INVALID_PARAMS`] and must not send
+/// this code.
 pub const RESOURCE_NOT_FOUND: i64 = -32002;
 /// A request that came while the composer is being asked, when no more
 /// can be kept until the answer.
@@ -265,11 +267,31 @@ pub fn form_elicitation(caps: Option<&Value>) -> bool {
     }
 }
 
-/// Whether a 2026-07-28 request's client declared form elicitation, in
-/// `_meta` or beside it.
+/// A 2026-07-28 request's client capabilities: only in `_meta` (the
+/// final text, checked 2026-11-18); a `clientCapabilities` beside `_meta`
+/// is not read.
+fn request_capabilities(params: &Map<String, Value>) -> Option<&Value> {
+    params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|m| m.get(CAPABILITIES_META))
+}
+
+/// 2026-07-28 requires every request's client capabilities in `_meta`, as
+/// an object: a request without them is malformed, `-32602`.
+pub fn check_modern(params: &Map<String, Value>) -> Result<(), RpcError> {
+    match request_capabilities(params) {
+        Some(Value::Object(_)) => Ok(()),
+        _ => Err(RpcError::new(
+            INVALID_PARAMS,
+            format!("A {MODERN} request needs `_meta.{CAPABILITIES_META}`, an object."),
+        )),
+    }
+}
+
+/// Whether a 2026-07-28 request's client declared form elicitation.
 pub fn request_elicitation(params: &Map<String, Value>) -> bool {
-    let in_meta = params.get("_meta").and_then(|m| m.get(CAPABILITIES_META));
-    form_elicitation(in_meta) || form_elicitation(params.get("clientCapabilities"))
+    form_elicitation(request_capabilities(params))
 }
 
 /// The `initialize` revision from before client extensions: no views.
@@ -281,14 +303,9 @@ pub fn initialize_views(version: &str, caps: Option<&Value>) -> bool {
     version != BEFORE_EXTENSIONS && caps.is_some_and(crate::views::wants_views)
 }
 
-/// Whether a 2026-07-28 request's client asks for views, in `_meta` or
-/// beside it.
+/// Whether a 2026-07-28 request's client asks for views.
 pub fn request_views(params: &Map<String, Value>) -> bool {
-    let in_meta = params.get("_meta").and_then(|m| m.get(CAPABILITIES_META));
-    in_meta.is_some_and(crate::views::wants_views)
-        || params
-            .get("clientCapabilities")
-            .is_some_and(crate::views::wants_views)
+    request_capabilities(params).is_some_and(crate::views::wants_views)
 }
 
 /// What the composer answered an elicitation.

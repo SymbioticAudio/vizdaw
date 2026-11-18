@@ -127,15 +127,17 @@ pub struct Server {
     /// The client asked for MCP Apps views at `initialize` (Ruling 7).
     views: bool,
     ask_timeout: Duration,
-    /// The question in flight, if any; lines meanwhile wait in `queue`.
+    /// The question in flight, if any; lines meanwhile wait in `queue`,
+    /// each with its request id (None for a notification).
     wait: Option<Wait>,
-    queue: VecDeque<String>,
+    queue: VecDeque<(Option<Value>, String)>,
     queued_bytes: usize,
     next_elicit: u64,
     /// 2026-07-28 questions awaiting their retry, oldest first.
     held: Vec<Held>,
-    /// Tokens handed to the model (the fallback), oldest first.
-    tokens: VecDeque<String>,
+    /// Tokens handed to the model (the fallback), oldest first, each with
+    /// the commands and window it was handed out for.
+    tokens: VecDeque<Pending>,
     /// The documents whose notes the first answer already gave, oldest
     /// first, at most [`MAX_NOTED`].
     noted: VecDeque<String>,
@@ -259,19 +261,19 @@ impl Server {
                 }
             }
             Ok(Message::Request { method, .. }) if method == "ping" => self.dispatch(line),
-            Ok(Message::Notification { method, params })
-                if method == "notifications/cancelled"
-                    && params.get("requestId") == Some(&call) =>
-            {
-                self.wait = None;
-                Vec::new()
+            Ok(Message::Notification { method, params }) if method == "notifications/cancelled" => {
+                self.cancelled(params.get("requestId"), &call, &elicit)
             }
             Ok(m) => {
                 if self.queue.len() < MAX_QUEUED
                     && self.queued_bytes.saturating_add(line.len()) <= MAX_QUEUED_BYTES
                 {
+                    let id = match &m {
+                        Message::Request { id, .. } => Some(id.clone()),
+                        _ => None,
+                    };
                     self.queued_bytes = self.queued_bytes.saturating_add(line.len());
-                    self.queue.push_back(line.to_string());
+                    self.queue.push_back((id, line.to_string()));
                     return Vec::new();
                 }
                 match m {
@@ -288,12 +290,36 @@ impl Server {
         }
     }
 
+    /// A client's cancel while the composer is asked. For the waiting call:
+    /// the wait ends with no reply, and the form still open on the host is
+    /// withdrawn with `notifications/cancelled` naming the elicitation
+    /// (2025-11-25 lets either side cancel its own request). For a kept
+    /// call: it is dropped and never runs. Anything else is ignored.
+    fn cancelled(&mut self, id: Option<&Value>, call: &Value, elicit: &str) -> Vec<String> {
+        let Some(id) = id.filter(|v| v.is_string() || v.is_number()) else {
+            return Vec::new();
+        };
+        if id == call {
+            self.wait = None;
+            return vec![rpc::notification_line(
+                "notifications/cancelled",
+                json!({ "requestId": elicit, "reason": "The call this question was for was cancelled." }),
+            )];
+        }
+        let before = self.queue.len();
+        self.queue.retain(|(q, _)| q.as_ref() != Some(id));
+        if self.queue.len() != before {
+            self.queued_bytes = self.queue.iter().map(|(_, l)| l.len()).sum();
+        }
+        Vec::new()
+    }
+
     /// Lines kept during a question, handled once it ends, until another
     /// question starts.
     fn drain(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         while self.wait.is_none() {
-            let Some(line) = self.queue.pop_front() else {
+            let Some((_, line)) = self.queue.pop_front() else {
                 break;
             };
             self.queued_bytes = self.queued_bytes.saturating_sub(line.len());
@@ -377,6 +403,20 @@ impl Server {
         params: &Map<String, Value>,
     ) -> Result<Done, RpcError> {
         let era = rpc::era(params)?;
+        if era == Era::Modern {
+            rpc::check_modern(params)?;
+            if method == "initialize" {
+                // The eras do not mix in one request: 2026-07-28 has no
+                // `initialize`, and what was declared before stays.
+                return Err(RpcError::new(
+                    rpc::INVALID_PARAMS,
+                    format!(
+                        "`initialize` is not part of {}: send it without that version in `_meta`, or send requests without `initialize`.",
+                        rpc::MODERN
+                    ),
+                ));
+            }
+        }
         if method == "tools/call" {
             return self.call_tool(id, era, params);
         }
@@ -409,7 +449,7 @@ impl Server {
             "resources/templates/list" => (Kind::Cacheable, json!({ "resourceTemplates": [] })),
             "prompts/list" => (Kind::Cacheable, recipes::prompts_list()),
             "prompts/get" => (Kind::Cacheable, recipes::prompt_get(params)?),
-            "resources/read" => (Kind::Cacheable, self.read_resource(params)?),
+            "resources/read" => (Kind::Cacheable, self.read_resource(era, params)?),
             _ => {
                 return Err(RpcError::new(
                     rpc::METHOD_NOT_FOUND,
@@ -591,12 +631,13 @@ impl Server {
                 while self.tokens.len() >= MAX_HELD {
                     self.tokens.pop_front();
                 }
-                self.tokens.push_back(pending.token.clone());
                 // The token is only in the text, never in the view.
-                Done::Result(with_view(
+                let answer = with_view(
                     tool_text(tools::list_for_the_model(items, &pending.token), false),
                     views.then(|| tools::change_view("ask_in_chat", items, None)),
-                ))
+                );
+                self.tokens.push_back(pending);
+                Done::Result(answer)
             }
         }
     }
@@ -626,7 +667,9 @@ impl Server {
     }
 
     /// The fallback's second half: a token `change` gave the model in this
-    /// conversation, used once.
+    /// conversation, used once, and only for the commands and window it
+    /// was handed out for (VizDAW binds it to the song as well). A token
+    /// sent with other commands is used up and nothing is applied.
     fn apply_change(&mut self, args: &Map<String, Value>) -> Value {
         let mut a = match tools::change_args(args, true)
             .and_then(|a| tools::listed(&self.commands, &a.commands).map(|()| a))
@@ -639,19 +682,16 @@ impl Server {
             Err(e) => return e,
         };
         let token = a.token.clone().unwrap_or_default();
-        let Some(at) = self.tokens.iter().position(|t| *t == token) else {
+        let Some(at) = self.tokens.iter().position(|p| p.token == token) else {
             return tool_error(tools::NOT_OUR_TOKEN);
         };
-        self.tokens.remove(at);
-        self.apply(
-            &Pending {
-                token,
-                commands: a.commands,
-                window: a.window,
-                items: Vec::new(),
-            },
-            None,
-        )
+        let Some(pending) = self.tokens.remove(at) else {
+            return tool_error(tools::NOT_OUR_TOKEN);
+        };
+        if pending.commands != a.commands || pending.window != a.window {
+            return tool_error(tools::FOR_OTHER_COMMANDS);
+        }
+        self.apply(&pending, None)
     }
 
     /// Sends `co_producer.apply` and answers its results; with the change
@@ -1106,7 +1146,7 @@ impl Server {
         }
     }
 
-    fn read_resource(&mut self, params: &Map<String, Value>) -> Result<Value, RpcError> {
+    fn read_resource(&mut self, era: Era, params: &Map<String, Value>) -> Result<Value, RpcError> {
         let Some(uri) = params.get("uri").and_then(Value::as_str) else {
             return Err(RpcError::new(
                 rpc::INVALID_PARAMS,
@@ -1118,7 +1158,10 @@ impl Server {
             return match views::read(uri) {
                 Some(c) => Ok(json!({ "contents": [c] })),
                 None => Err(RpcError::new(
-                    rpc::RESOURCE_NOT_FOUND,
+                    match era {
+                        Era::Legacy => rpc::RESOURCE_NOT_FOUND,
+                        Era::Modern => rpc::INVALID_PARAMS,
+                    },
                     format!("No resource {:?}.", rpc::truncate(uri, 128)),
                 )),
             };
