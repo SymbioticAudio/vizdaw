@@ -388,10 +388,12 @@ fn strips(before: &Document, after: &Document, params: ParamLookup, out: &mut Ve
             ));
         }
         let mut parts = mixer_parts(before, after, old, s, params);
-        parts.extend(automation.remove(&id).unwrap_or_default());
+        let (auto, theirs) = automation.remove(&id).unwrap_or_default();
+        parts.extend(auto);
         let parts = capped(parts);
         if !parts.is_empty() {
-            out.push(item_of(strip(&old.name), parts.join(", "), old.co_producer));
+            let ours = old.co_producer && !theirs;
+            out.push(item_of(strip(&old.name), parts.join(", "), ours));
         }
     }
 }
@@ -764,22 +766,26 @@ pub fn bar_of(doc: &Document, seq: SeqId, tick: Tick) -> u32 {
 }
 
 /// Every automation point of `doc`, by target and sequence, then by ID:
-/// its tick and value. Points of every take of every lane count.
-type Points = BTreeMap<(AutomationTarget, SeqId), BTreeMap<EventId, (Tick, f64)>>;
+/// its tick and value, and whether its lane is Co-Producer's. Points of
+/// every take of every lane count.
+type Points = BTreeMap<(AutomationTarget, SeqId), BTreeMap<EventId, Point>>;
+
+/// One point: tick, value, and its lane's Co-Producer mark.
+type Point = (Tick, f64, bool);
 
 fn automation_points(doc: &Document) -> Points {
     let mut out: Points = BTreeMap::new();
     for (id, seq) in doc.sequences() {
-        for e in seq
+        for (lane, e) in seq
             .lanes
             .iter()
-            .flat_map(|l| l.takes.iter())
-            .flat_map(|t| t.events.values())
+            .flat_map(|l| l.takes.iter().map(move |t| (l, t)))
+            .flat_map(|(l, t)| t.events.values().map(move |e| (l, e)))
         {
             if let EventBody::Automation { target, value } = e.body {
                 out.entry((target, *id))
                     .or_default()
-                    .insert(e.id, (e.tick, value));
+                    .insert(e.id, (e.tick, value, lane.co_producer));
             }
         }
     }
@@ -827,27 +833,33 @@ fn automation_label(
 /// each target and sequence whose points differ, `<label> automation <n>
 /// points → <m> points, bars <a>–<b>` (or `<label> automation cleared,
 /// bars <a>–<b>` when none are left), over the ticks from the first to
-/// the last point that went, came or changed.
+/// the last point that went, came or changed. With each strip's parts,
+/// whether they take away or change a point of a track that is not
+/// Co-Producer's (8e Task 2 fix round 1): then the item needs a yes.
 fn automation_parts(
     before: &Document,
     after: &Document,
     params: ParamLookup,
-) -> BTreeMap<StripId, Vec<String>> {
+) -> BTreeMap<StripId, (Vec<String>, bool)> {
     let (b, a) = (automation_points(before), automation_points(after));
     let keys: BTreeSet<(AutomationTarget, SeqId)> = b.keys().chain(a.keys()).copied().collect();
     let none = BTreeMap::new();
-    let mut out: BTreeMap<StripId, Vec<String>> = BTreeMap::new();
+    let mut out: BTreeMap<StripId, (Vec<String>, bool)> = BTreeMap::new();
     for key in keys {
         let (target, seq) = key;
         let (old, new) = (b.get(&key).unwrap_or(&none), a.get(&key).unwrap_or(&none));
-        let differ = |x: &BTreeMap<EventId, (Tick, f64)>, y: &BTreeMap<EventId, (Tick, f64)>| {
+        // The points of `x` that `y` does not have at the same tick
+        // and value.
+        let differ = |x: &BTreeMap<EventId, Point>, y: &BTreeMap<EventId, Point>| {
             x.iter()
-                .filter(|(id, p)| y.get(id) != Some(p))
-                .map(|(_, (t, _))| *t)
-                .collect::<Vec<Tick>>()
+                .filter(|(id, (t, v, _))| y.get(id).is_none_or(|(t1, v1, _)| (t, v) != (t1, v1)))
+                .map(|(_, p)| *p)
+                .collect::<Vec<Point>>()
         };
-        let mut changed = differ(old, new);
-        changed.extend(differ(new, old));
+        let gone = differ(old, new);
+        let theirs = gone.iter().any(|(_, _, ours)| !ours);
+        let mut changed: Vec<Tick> = gone.iter().map(|p| p.0).collect();
+        changed.extend(differ(new, old).iter().map(|p| p.0));
         let (Some(lo), Some(hi)) = (changed.iter().min().copied(), changed.iter().max().copied())
         else {
             continue;
@@ -858,8 +870,8 @@ fn automation_parts(
         let Some(label) = automation_label(before, after, target, params) else {
             continue;
         };
-        let within = |m: &BTreeMap<EventId, (Tick, f64)>| {
-            m.values().filter(|(t, _)| (lo..=hi).contains(t)).count()
+        let within = |m: &BTreeMap<EventId, Point>| {
+            m.values().filter(|(t, _, _)| (lo..=hi).contains(t)).count()
         };
         let (n, m) = (within(old), within(new));
         let doc = if after.sequence(seq).is_ok() {
@@ -877,7 +889,9 @@ fn automation_parts(
                 count(m, "point", "points")
             )
         };
-        out.entry(strip).or_default().push(part);
+        let entry = out.entry(strip).or_default();
+        entry.0.push(part);
+        entry.1 |= theirs;
     }
     out
 }

@@ -1399,3 +1399,57 @@ fn automation_parts_count_toward_the_cap() {
         "parameter 11 automation 0 points → 1 point, bars 9–9, and 8 more changes"
     );
 }
+
+/// Fix round 1: a write on Co-Producer's own strip that takes away
+/// points from a track that is not Co-Producer's needs a yes; points
+/// from Co-Producer's own track do not.
+#[test]
+fn automation_over_the_composers_points_needs_a_yes() {
+    let d = mix();
+    let drums = bus(&d, "Drums (Co-Producer)");
+    let fader = AutomationTarget::StripFader(drums);
+    let point_in = |d: &Document, lane: LaneId| {
+        run(
+            d,
+            Command::Event(EventCmd::Insert {
+                seq: SeqId(0),
+                lane,
+                events: vec![EventSpec::new(
+                    Tick(9 * BAR),
+                    EventBody::Automation {
+                        target: fader,
+                        value: 0.25,
+                    },
+                )],
+            }),
+        )
+    };
+    // A point drawn on the composer's Kick track.
+    let drawn = point_in(&d, lane_id(&d, "Kick"));
+    let over = run(&drawn, automate(fader, 12));
+    let it = strip_item(&describe(&drawn, &over), "Drums (Co-Producer)");
+    assert_eq!(it.change, "fader automation 1 point → 12 points, bars 9–12");
+    assert!(!it.co_producers);
+    // The same point on a track Co-Producer made.
+    let made = acting(
+        &d,
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Ideas".into(),
+            index: None,
+        }),
+    );
+    let ours_lane = made
+        .sequence(SeqId(0))
+        .unwrap()
+        .lanes
+        .iter()
+        .find(|l| l.co_producer)
+        .unwrap()
+        .id;
+    let drawn = point_in(&made, ours_lane);
+    let over = run(&drawn, automate(fader, 12));
+    let it = strip_item(&describe(&drawn, &over), "Drums (Co-Producer)");
+    assert_eq!(it.change, "fader automation 1 point → 12 points, bars 9–12");
+    assert!(it.co_producers);
+}
