@@ -261,7 +261,9 @@ final class CloseHook: NSObject, NSWindowDelegate {
     func install(on w: NSWindow) {
         window = w
         guard w.delegate !== self else { return }
-        original = w.delegate
+        // Never chain to another hook (review M-2): take the delegate it was
+        // in front of.
+        original = (w.delegate as? CloseHook)?.original ?? w.delegate
         w.delegate = self
     }
 
@@ -284,18 +286,20 @@ final class CloseHook: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        let clean = (original as? NSWindowDelegate)?.windowShouldClose?(sender) ?? true
-        guard clean else { return false }
-        guard model.hasUnsavedChanges else { return true }
         // One sheet at a time; a second ⌘W while it shows does nothing.
         guard sender.attachedSheet == nil else { return false }
+        guard model.hasUnsavedChanges else {
+            // SwiftUI's own answer, asked only on a close that goes ahead
+            // (review M-3).
+            return (original as? NSWindowDelegate)?.windowShouldClose?(sender) ?? true
+        }
         ask { _, _ in }
         return false
     }
 
     /// Asks this song's sheet; Save (when it saved) and Don't Save close
     /// the window. `done` gets the choice and whether the window closed.
-    func ask(_ done: @escaping @MainActor (CloseChoice, Bool) -> Void) {
+    func ask(_ done: @escaping @MainActor @Sendable (CloseChoice, Bool) -> Void) {
         let hook = self
         CloseSheet.ask(model: model, window: window) { choice in
             switch choice {
@@ -316,6 +320,9 @@ final class CloseHook: NSObject, NSWindowDelegate {
     /// document), or the document when the window is gone.
     func closeQuietly() {
         if let w = window {
+            // A sheet still up gets its Cancel first, so whoever waits on it
+            // (a quit) is answered (fix round 1, I-1).
+            if let sheet = w.attachedSheet { w.endSheet(sheet, returnCode: .cancel) }
             w.isDocumentEdited = false
             w.close()
         }
@@ -327,33 +334,40 @@ final class CloseHook: NSObject, NSWindowDelegate {
 /// app-modal alert when it has none.
 @MainActor
 enum CloseSheet {
-    static func ask(model: DocumentModel, window: NSWindow?, _ answer: @escaping @MainActor (CloseChoice) -> Void) {
-        let text = ClosePrompts.sheetText(name: model.snapshot.title)
+    static func ask(
+        model: DocumentModel, window: NSWindow?, _ answer: @escaping @MainActor @Sendable (CloseChoice) -> Void
+    ) {
+        // A Save made while recording lands with the pass and saves the
+        // whole song: no Don't Save then (fix round 1, I-2).
+        let text = ClosePrompts.sheetText(name: model.snapshot.title, savePending: model.saveAfterPassPending)
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = text.message
         alert.informativeText = text.informative
         // The first button is the default (Return).
         alert.addButton(withTitle: ClosePrompts.save)
-        let dont = alert.addButton(withTitle: ClosePrompts.dontSave)
-        dont.keyEquivalent = "d"
-        dont.keyEquivalentModifierMask = .command
+        if text.offersDontSave {
+            let dont = alert.addButton(withTitle: ClosePrompts.dontSave)
+            dont.keyEquivalent = "d"
+            dont.keyEquivalentModifierMask = .command
+        }
         let cancel = alert.addButton(withTitle: ClosePrompts.cancel)
         cancel.keyEquivalent = "\u{1b}"
+        let dontSave = text.offersDontSave
         guard let window, window.isVisible || window.isMiniaturized else {
-            answer(choice(alert.runModal()))
+            answer(choice(alert.runModal(), offersDontSave: dontSave))
             return
         }
         if window.isMiniaturized { window.deminiaturize(nil) }
         alert.beginSheetModal(for: window) { response in
-            MainActor.assumeIsolated { answer(choice(response)) }
+            MainActor.assumeIsolated { answer(choice(response, offersDontSave: dontSave)) }
         }
     }
 
-    private static func choice(_ r: NSApplication.ModalResponse) -> CloseChoice {
+    private static func choice(_ r: NSApplication.ModalResponse, offersDontSave: Bool) -> CloseChoice {
         switch r {
         case .alertFirstButtonReturn: return .save
-        case .alertSecondButtonReturn: return .dontSave
+        case .alertSecondButtonReturn where offersDontSave: return .dontSave
         default: return .cancel
         }
     }

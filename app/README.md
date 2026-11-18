@@ -1412,7 +1412,7 @@ a copy, not one you care about.
      press ⌘S while recording: the status line says "Saved. The take is
      saved when recording stops."; Stop: close the window, no unsaved
      changes are asked about, and reopening shows the take. Closing asks
-     only about unsaved changes (checks 433–436): after ⌘S during a pass,
+     only about unsaved changes (checks 433–438): after ⌘S during a pass,
      closing the window keeps the take that was announced (it is saved),
      even with no Save after Stop. ⇧⌘S (Save As) while recording says "Stop recording
      to use Save As: the take is being written into this project." and
@@ -3165,6 +3165,15 @@ Plan 8f, Co-Producer time tracking and coaching:
      quits.
 436. With an edited song, close it with `vizctl run file.close`, then
      edit another and `vizctl quit`: neither asks.
+437. Edit a song, press ⌘W, and while its sheet shows press ⌘Q: VizDAW
+     brings that window to the front and does not quit. Click Don't Save:
+     the window closes and VizDAW keeps running normally (menus work; ⌘Q
+     then quits). It is never stuck. In a saved song, press ⌘S while
+     recording, move a fader, then press ⌘W: the sheet reads "Recording is
+     still going. The take and your changes will be saved when it stops."
+     and offers only Save and Cancel.
+438. Edit song A, click song B's window, then click A's red close button
+     without clicking into A first: it still asks.
 
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on

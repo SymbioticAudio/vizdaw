@@ -25,6 +25,22 @@ public enum ClosePrompts {
          "Your changes will be lost if you don't save them.")
     }
 
+    /// The sheet while a Save made during recording is still to land
+    /// (fix round 1, I-2): its informative text says the song will be
+    /// saved, and it offers no Don't Save (closing lands the pass and
+    /// saves the whole song).
+    public static let savePendingInformative =
+        "Recording is still going. The take and your changes will be saved when it stops."
+
+    /// Message, informative text and whether Don't Save is offered, for a
+    /// song whose save-after-pass is (`savePending`) or is not pending.
+    public static func sheetText(name: String, savePending: Bool)
+        -> (message: String, informative: String, offersDontSave: Bool)
+    {
+        let t = sheetText(name: name)
+        return savePending ? (t.message, savePendingInformative, false) : (t.message, t.informative, true)
+    }
+
     /// The quit alert's message with `count` (two or more) dirty documents.
     public static func quitAlertText(count: Int) -> String {
         "You have \(count) VizDAW documents with unsaved changes. Do you want to review these changes before quitting?"
@@ -57,6 +73,14 @@ public struct QuitWalk: Sendable {
 
     /// The song to ask about next (nil once finished).
     public var current: UUID? { result == nil ? open.first : nil }
+
+    /// The current song cannot be asked (its window already shows a
+    /// sheet, or it closed mid-walk): the quit stops, so it is always
+    /// answered (fix round 1, I-1).
+    public mutating func windowGone() {
+        guard current != nil else { return }
+        result = .cancel
+    }
 
     /// The answer for `current`; `saved` is whether a `.save` saved.
     public mutating func answer(_ choice: CloseChoice, saved: Bool = false) {

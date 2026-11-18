@@ -343,7 +343,14 @@ enum QuitPrompts {
 
     static func shouldTerminate() -> NSApplication.TerminateReply {
         let dirty = dirtyDocuments()
-        switch ClosePrompts.quitStep(dirty: dirty, testHooks: testHooks || quiet) {
+        let step = ClosePrompts.quitStep(dirty: dirty, testHooks: testHooks || quiet)
+        // A song's close sheet is already up: it is answered first, and the
+        // quit stops rather than queue a sheet behind it (fix round 1, I-1).
+        if step != .quitNow, let w = sheetWindow() {
+            w.makeKeyAndOrderFront(nil)
+            return .terminateCancel
+        }
+        switch step {
         case .quitNow:
             return .terminateNow
         case .cancel:
@@ -371,6 +378,11 @@ enum QuitPrompts {
         }
     }
 
+    /// A document window with a sheet up, if any.
+    static func sheetWindow() -> NSWindow? {
+        ControlWindows.windows().first { ControlWindows.tagOf($0).kind == .document && $0.attachedSheet != nil }
+    }
+
     /// The songs with unsaved changes, front window first; songs with no
     /// window come last.
     static func dirtyDocuments() -> [UUID] {
@@ -396,14 +408,15 @@ enum QuitPrompts {
             NSApp.reply(toApplicationShouldTerminate: walk.result == .quitNow)
             return
         }
-        guard let model = appStore.model(id) else {
-            // Closed meanwhile: nothing left to lose.
+        // Closed mid-walk, or its window already shows a sheet: the quit
+        // stops, so the reply always comes (fix round 1, I-1).
+        guard let model = appStore.model(id), CloseHooks.hook(for: id)?.window?.attachedSheet == nil else {
             var next = walk
-            next.answer(.dontSave)
+            next.windowGone()
             step(next)
             return
         }
-        let answered: @MainActor (CloseChoice, Bool) -> Void = { choice, closed in
+        let answered: @MainActor @Sendable (CloseChoice, Bool) -> Void = { choice, closed in
             var next = walk
             next.answer(choice, saved: closed)
             step(next)

@@ -733,6 +733,9 @@ enum ControlWindows {
     /// `windowShouldClose`, and the window's will-close closes the document.
     static func closeQuietly(_ doc: UUID) {
         if let w = window(of: doc) {
+            // A sheet still up gets its Cancel first, so a quit waiting on
+            // it is answered (fix round 1, I-1).
+            if let sheet = w.attachedSheet { w.endSheet(sheet, returnCode: .cancel) }
             w.close()
         }
         appStore.close(doc)

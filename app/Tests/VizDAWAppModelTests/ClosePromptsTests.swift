@@ -56,6 +56,26 @@ struct ClosePromptsTests {
         #expect(walk.open.isEmpty)
     }
 
+    @Test func a_window_gone_mid_walk_ends_cancelled() {
+        var walk = QuitWalk([a, b])
+        walk.answer(.dontSave)
+        walk.windowGone()
+        #expect(walk.result == .cancel)
+        #expect(walk.current == nil)
+        #expect(walk.closed == [a])
+        #expect(walk.open == [b])
+    }
+
+    @Test func pending_save_after_pass_offers_no_dont_save() {
+        let t = ClosePrompts.sheetText(name: "Take", savePending: true)
+        #expect(t.message == "Do you want to save the changes you made to \u{201C}Take\u{201D}?")
+        #expect(t.informative == "Recording is still going. The take and your changes will be saved when it stops.")
+        #expect(!t.offersDontSave)
+        let plain = ClosePrompts.sheetText(name: "Take", savePending: false)
+        #expect(plain.informative == "Your changes will be lost if you don't save them.")
+        #expect(plain.offersDontSave)
+    }
+
     @Test func cancelled_save_panel_keeps_the_window() {
         var walk = QuitWalk([a])
         walk.answer(.save, saved: false)

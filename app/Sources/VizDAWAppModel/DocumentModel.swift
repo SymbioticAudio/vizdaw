@@ -886,6 +886,10 @@ public final class DocumentModel {
     /// the close asks rather than losing work.
     public var hasUnsavedChanges: Bool { (try? session.hasUnsavedChanges()) ?? true }
 
+    /// A Save made while recording that lands with the pass: closing then
+    /// saves the song whatever the sheet says (fix round 1, I-2).
+    public var saveAfterPassPending: Bool { (try? session.savesAfterPass()) == true }
+
     public func save() {
         editor.storeLayout()
         perform("Save Failed") { try $0.save() }
