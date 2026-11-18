@@ -106,7 +106,14 @@ pub fn validated(id: &str, args: &[ControlArg]) -> Result<Vec<(String, ArgValue)
     let spec = registry::find(id).ok_or_else(|| model(registry::unknown(id).message))?;
     let mut params = Map::new();
     for a in args {
+        // A null `IntOrNull` reaches the app as the registry's `none`
+        // (`mixer.set_output`'s master): it is null again here.
+        let nullable = spec
+            .params
+            .iter()
+            .any(|p| p.name == a.name && matches!(p.kind, registry::ParamKind::IntOrNull { .. }));
         let v = match &a.value {
+            ControlValue::Text { value } if nullable && value == registry::NULL_TEXT => Value::Null,
             ControlValue::Text { value } => Value::from(value.as_str()),
             ControlValue::Flag { value } => Value::from(*value),
             ControlValue::Int { value } => Value::from(*value),
@@ -327,13 +334,30 @@ fn colour_command(p: &Planned) -> Result<core_model::command::Command, VizError>
     }))
 }
 
+/// Mixer items by plan 8d Ruling 2: the strip an item names decides. It
+/// is the composer's work unless that strip was Co-Producer's before the
+/// change, or is new (an item "added": an acting step made it). So a send
+/// or insert Co-Producer itself put on a composer's strip still asks. With
+/// `feeds_theirs` (the change alters what feeds a bus of the composer's)
+/// every item but a new strip's is.
+fn mixer_rows(items: Vec<ChangeItem>, feeds_theirs: bool) -> impl Iterator<Item = ChangeItemRow> {
+    items.into_iter().map(move |i| ChangeItemRow {
+        composers_work: i.change != "added" && (feeds_theirs || !i.co_producers),
+        thing: i.thing,
+        change: i.change,
+    })
+}
+
 /// What `plan` would change (Ruling 6), worked out in order on a clone of
 /// `history` with Co-Producer acting, as the apply will run it. `package`
-/// is the song's file, if saved. Nothing outside the clone changes.
+/// is the song's file, if saved; `host` resolves plug-ins and reads the
+/// running ones' parameters (plan 8d), changing nothing. Nothing outside
+/// the clone changes.
 pub fn preview_items(
     history: &History,
     package: Option<&Path>,
     plan: &[Planned],
+    host: &dyn crate::mixer_chores::PluginLookup,
 ) -> Result<Vec<ChangeItemRow>, VizError> {
     let mut h = history.clone();
     if let Some(why) = h.acting_refusal() {
@@ -363,6 +387,27 @@ pub fn preview_items(
                 let before = h.doc().clone();
                 h.execute(&cmd, &filter)?;
                 out.extend(rows(diff::describe(&before, h.doc()), true));
+            }
+            id if crate::mixer_chores::builds(id) => {
+                // Plan 8d Ruling 1: new strips get the EQ the apply gives
+                // them, so the clone is armed first.
+                crate::bundled::arm(&mut h);
+                let cmds = crate::mixer_chores::commands_for(h.doc(), id, &p.args, host)?;
+                let before = h.doc().clone();
+                for cmd in &cmds {
+                    h.execute(cmd, &filter)?;
+                }
+                let lookup = |slot, param: core_model::mixer::ParamId| {
+                    host.params(slot)?
+                        .into_iter()
+                        .find(|r| r.id == param.0)
+                        .map(|r| (r.name, r.value))
+                };
+                let theirs = crate::mixer_chores::feeds_composers_bus(&before, h.doc());
+                out.extend(mixer_rows(
+                    diff::describe_with(&before, h.doc(), &lookup),
+                    theirs,
+                ));
             }
             "edit.undo" | "edit.redo" => {
                 let undo = p.id == "edit.undo";

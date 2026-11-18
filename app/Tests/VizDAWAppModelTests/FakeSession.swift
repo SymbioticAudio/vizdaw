@@ -414,6 +414,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     /// Plan 8d Task 3: a slot of `paramTable` answers running with its
     /// shown parameters; any other slot is not in this song.
+    func runMixer(id: String, args: [ControlArg]) throws -> DocSnapshot {
+        try mixerCall("runMixer \(id)")
+    }
     func coProducerParams(slot: UInt64) throws -> CoProducerParamsRow {
         if readBusy { throw VizError.Busy(message: "plugin host is busy") }
         guard let rows = paramTable[slot] else {

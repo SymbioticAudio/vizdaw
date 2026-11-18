@@ -10,9 +10,9 @@ use core_model::command::{Command, Report};
 use core_model::document::{DestKind, Document};
 use core_model::event::EventBody;
 use core_model::history::History;
-use core_model::ids::{AnyId, DestId, LaneId, OutputPathId, SeqId};
+use core_model::ids::{AnyId, DestId, LaneId, OutputPathId, PluginInstanceId, SeqId};
 use core_model::lane::{InputChannels, LaneInput, MonitorMode};
-use core_model::mixer::BUILTIN_SYNTH_REF;
+use core_model::mixer::{BUILTIN_SYNTH_REF, PluginRef, PluginSlot};
 use core_model::selection::ViewFilter;
 
 /// What a track is for, as the track header's icon shows it.
@@ -193,6 +193,90 @@ pub(crate) fn build_track(
     monitor: MonitorMode,
     notes: &mut Vec<String>,
 ) -> Result<LaneId, VizError> {
+    build(history, seq, kind, index, monitor, None, notes)
+}
+
+/// The longest name a new plug-in instrument destination gets (plan 8d
+/// Ruling 1).
+const MAX_DEST_NAME: usize = 64;
+
+/// `plugin`'s name as a destination's: cut to [`MAX_DEST_NAME`]
+/// characters, with what the preview would not show as a space, trimmed;
+/// "Plug-in Instrument" when nothing is left.
+fn dest_name(plugin: &str) -> String {
+    let clean: String = plugin
+        .chars()
+        .take(MAX_DEST_NAME)
+        .map(|c| {
+            let mut b = [0u8; 4];
+            let one: &str = c.encode_utf8(&mut b);
+            if core_model::diff::shown_name(one) == one {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    match clean.trim() {
+        "" => "Plug-in Instrument".into(),
+        t => t.into(),
+    }
+}
+
+/// `track.new_plugin_instrument` (plan 8d Ruling 1): a plug-in instrument
+/// destination playing `plugin`, named after it (and its instrument
+/// strip), then an instrument track playing it, as [`build_track`] makes
+/// an instrument track; inside the caller's open transaction.
+pub(crate) fn build_plugin_instrument_track(
+    history: &mut History,
+    seq: SeqId,
+    plugin: PluginRef,
+    index: Option<usize>,
+    monitor: MonitorMode,
+    notes: &mut Vec<String>,
+) -> Result<LaneId, VizError> {
+    let name = dest_name(&plugin.name);
+    let r = step(
+        history,
+        notes,
+        Command::Routing(RoutingCmd::AddDestination {
+            name,
+            kind: DestKind::PluginInstrument {
+                slot: PluginSlot::new(PluginInstanceId(0), plugin),
+            },
+            default_patch: None,
+        }),
+    )?;
+    let dest = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Dest(d) => Some(*d),
+            _ => None,
+        })
+        .ok_or_else(|| bad("no destination was added"))?;
+    build(
+        history,
+        seq,
+        TrackKindRow::Instrument,
+        index,
+        monitor,
+        Some(dest),
+        notes,
+    )
+}
+
+/// [`build_track`], with an instrument track playing `dest` when given
+/// (else the built-in synth).
+fn build(
+    history: &mut History,
+    seq: SeqId,
+    kind: TrackKindRow,
+    index: Option<usize>,
+    monitor: MonitorMode,
+    dest: Option<DestId>,
+    notes: &mut Vec<String>,
+) -> Result<LaneId, VizError> {
     let name = next_name(history.doc(), seq, kind)?;
     let lane = created_lane(&step(
         history,
@@ -227,7 +311,10 @@ pub(crate) fn build_track(
             )?;
         }
         TrackKindRow::Instrument => {
-            let dest = Some(synth_dest(history, notes)?);
+            let dest = match dest {
+                Some(d) => Some(d),
+                None => Some(synth_dest(history, notes)?),
+            };
             step(
                 history,
                 notes,

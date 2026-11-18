@@ -4918,7 +4918,8 @@ impl Session {
                 });
             }
             let plan = cp::plan_of(&plan)?;
-            let items = cp::preview_items(&inner.history, inner.path.as_deref(), &plan)?;
+            let host = co_producer_mixer::LiveLookup(self.id);
+            let items = cp::preview_items(&inner.history, inner.path.as_deref(), &plan, &host)?;
             let token = cp::fresh_token()?;
             let needs_yes = items.iter().any(|i| i.composers_work);
             let pending = cp::PendingPreview {
