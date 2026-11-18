@@ -412,6 +412,16 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if readBusy { throw VizError.Busy(message: "plugin host is busy") }
         return paramTable[slot] ?? []
     }
+    /// Plan 8d Task 3: a slot of `paramTable` answers running with its
+    /// shown parameters; any other slot is not in this song.
+    func coProducerParams(slot: UInt64) throws -> CoProducerParamsRow {
+        if readBusy { throw VizError.Busy(message: "plugin host is busy") }
+        guard let rows = paramTable[slot] else {
+            throw VizError.Model(message: "This song has no slot \(slot).")
+        }
+        return CoProducerParamsRow(
+            slot: slot, plugin: "clap:fake", running: true, params: rows.filter { !$0.hidden })
+    }
     func setParam(slot: UInt64, param: UInt64, value: Double) throws {
         liveSets.append((slot, param, value))
     }

@@ -992,6 +992,7 @@ fn state_get_mixer_answers_json() {
         "mute",
         "solo",
         "output",
+        "output_name",
         "automation",
         "eq",
         "inserts",
@@ -1011,6 +1012,9 @@ fn state_get_mixer_answers_json() {
     assert_eq!(synth["eq"], Value::Null);
     assert_eq!(synth["colour"], Value::Null);
     assert_eq!(synth["output"], Value::Null);
+    // Plan 8d Ruling 5: where it goes, by name; master goes nowhere.
+    assert_eq!(synth["output_name"], "Master");
+    assert_eq!(strips[1]["output_name"], Value::Null);
     assert_eq!(synth["automation"], "read");
     assert_eq!(synth["gain_db"], 0.0);
     assert_eq!(synth["inserts"], json!([]));
@@ -1062,10 +1066,14 @@ fn state_get_mixer_spells_slots_sends_and_colours() {
         mixer: m,
     });
     let s = &j["strips"][0];
-    assert_eq!(s["eq"], json!({"slot": 9, "name": "Tone", "bypass": true}));
+    // Plan 8d Ruling 5: each slot names its plug-in by reference text.
+    assert_eq!(
+        s["eq"],
+        json!({"slot": 9, "name": "Tone", "plugin": "clap:x", "bypass": true})
+    );
     assert_eq!(
         s["inserts"],
-        json!([{"slot": 10, "name": "Gain", "bypass": false}])
+        json!([{"slot": 10, "name": "Gain", "plugin": "clap:x", "bypass": false}])
     );
     assert_eq!(
         s["sends"],
@@ -1073,6 +1081,8 @@ fn state_get_mixer_spells_slots_sends_and_colours() {
     );
     assert_eq!(s["colour"], "pink");
     assert_eq!(s["output"], 7);
+    // No strip 7 in this snapshot: its ID stands in for the name.
+    assert_eq!(s["output_name"], "Strip 7");
     assert_eq!(j["strips"][1]["kind_colour"], "aux_return");
 }
 

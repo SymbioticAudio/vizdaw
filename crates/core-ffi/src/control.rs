@@ -1025,6 +1025,22 @@ pub enum ControlResult {
         /// The interchange report's summary for DAWproject, AAF and MIDI.
         summary: Option<String>,
     },
+    /// `co_producer.plugins` (plan 8d Ruling 5): the plug-ins Co-Producer
+    /// may use.
+    CoProducerPlugins {
+        /// Built-ins first, then instruments, then effects.
+        plugins: Vec<crate::mixer_chores::CoProducerPluginRow>,
+        /// More were usable than listed.
+        truncated: bool,
+    },
+    /// `co_producer.params` (plan 8d Ruling 5): a loaded plug-in's
+    /// parameters.
+    CoProducerParams {
+        /// Document ID.
+        doc: String,
+        /// The slot, its plug-in and its parameters.
+        row: crate::session::co_producer_mixer::CoProducerParamsRow,
+    },
     /// `settings.co_producer_answer` (plan 8b Ruling 11): what the
     /// approval sheet it answered asked.
     CoProducerApprovalAnswered {
@@ -1549,15 +1565,29 @@ fn audio_editor_json(doc: &str, e: &AudioEditorStateRow) -> Value {
     })
 }
 
-/// A slot as `state.get mixer` spells it.
+/// A slot as `state.get mixer` spells it; `plugin` is its reference
+/// text (plan 8d Ruling 5).
 fn slot_json(s: &crate::snapshot::SlotRow) -> Value {
-    json!({ "slot": s.id, "name": s.plugin.name, "bypass": s.bypass })
+    let plugin = crate::mixer_chores::plugin_ref_text(&(&s.plugin).into());
+    json!({ "slot": s.id, "name": s.plugin.name, "plugin": plugin, "bypass": s.bypass })
 }
 
-/// A strip as `state.get mixer` spells it (plan 7b Ruling 11).
-fn strip_json(s: &crate::mixer::StripRow) -> Value {
-    use crate::mixer::{StripColourRow as K, SwatchRow as W};
+/// A strip as `state.get mixer` spells it (plan 7b Ruling 11), with its
+/// output's name (plan 8d Ruling 5): "Master", the bus's name, or null
+/// for master itself. `all` is every strip of the snapshot.
+fn strip_json(s: &crate::mixer::StripRow, all: &[crate::mixer::StripRow]) -> Value {
+    use crate::mixer::{StripColourRow as K, StripKindRow, SwatchRow as W};
+    let output_name = match s.output {
+        _ if s.kind == StripKindRow::Master => None,
+        None => Some("Master".to_string()),
+        Some(id) => Some(
+            all.iter()
+                .find(|x| x.id == id)
+                .map_or_else(|| format!("Strip {id}"), |x| x.name.clone()),
+        ),
+    };
     json!({
+        "output_name": output_name,
         "id": s.id, "name": s.name, "kind_label": s.kind_label,
         "co_producer": s.co_producer,
         "kind_colour": match s.kind_colour {
@@ -1698,7 +1728,7 @@ pub fn result_json(r: &ControlResult) -> Value {
         }),
         ControlResult::Mixer { doc, mixer } => json!({
             "doc": doc,
-            "strips": mixer.strips.iter().map(strip_json).collect::<Vec<_>>(),
+            "strips": mixer.strips.iter().map(|x| strip_json(x, &mixer.strips)).collect::<Vec<_>>(),
         }),
         ControlResult::AudioEditor { doc, editor } => audio_editor_json(doc, editor),
         ControlResult::Surfaces { doc, state } => json!({
@@ -1902,6 +1932,25 @@ pub fn result_json(r: &ControlResult) -> Value {
             "doc": doc, "text": notes.text, "truncated": notes.truncated, "path": notes.path,
         }),
         ControlResult::CoProducerFolder { doc, path } => json!({ "doc": doc, "path": path }),
+        ControlResult::CoProducerPlugins { plugins, truncated } => json!({
+            "plugins": plugins.iter().map(|p| json!({
+                "plugin": p.plugin, "name": p.name, "maker": p.maker, "format": p.format,
+                "kind": match p.kind {
+                    crate::catalog::PluginKindTag::Instrument => "instrument",
+                    crate::catalog::PluginKindTag::Effect => "effect",
+                },
+                "version": p.version,
+            })).collect::<Vec<_>>(),
+            "truncated": truncated,
+        }),
+        ControlResult::CoProducerParams { doc, row } => json!({
+            "doc": doc, "slot": row.slot, "plugin": row.plugin, "running": row.running,
+            "params": row.params.iter().map(|p| json!({
+                "id": p.id, "name": p.name, "module": p.module, "min": p.min, "max": p.max,
+                "default": p.default, "value": p.value, "stepped": p.stepped,
+                "automatable": p.automatable,
+            })).collect::<Vec<_>>(),
+        }),
         ControlResult::CoProducerExported {
             doc,
             folder,

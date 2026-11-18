@@ -48,6 +48,7 @@ pub mod keys;
 pub mod live;
 pub mod media;
 pub mod mixer;
+pub mod mixer_chores;
 pub mod modify;
 pub mod mpe;
 pub mod notes;
@@ -141,6 +142,7 @@ pub use mixer::{
     BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, OutputPathRow,
     SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow,
 };
+pub use mixer_chores::{CoProducerPluginRow, CoProducerPluginsRow, co_producer_plugins};
 pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,
     NoteMapEntry, RuleRow, SelectModeRow, SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
@@ -151,6 +153,7 @@ pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latenc
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
 pub use selection::{SelectionRow, TickRange};
+pub use session::co_producer_mixer::CoProducerParamsRow;
 pub use session::{CopyRow, NotesRow, OpenOptions, RemovedCopiesRow, Session};
 pub use snapshot::{
     DocSnapshot, IdleUpdate, KeySlotRow, LaneRow, ParamRow, ParamValue, PluginFormatTag,
