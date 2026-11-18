@@ -976,6 +976,48 @@ import VizDAWCore
         #expect(s.alert == nil)
     }
 
+    /// Fix round 1: a File › New that fails for a starter is the call's
+    /// failure and posts no store alert, not even one queued behind an
+    /// alert already up; File › New itself still alerts.
+    @Test func aFailedNewSongPostsNoAlert() throws {
+        let (s, id, _, _) = try demo()
+        s.makeProject = { _ in throw VizError.Model(message: "The disk is full.") }
+        s.postAlert(AlertItem(title: "Earlier", message: "already up"))
+        let o = run(.coProducerStarter(spec: Self.spec), s, id)
+        #expect(failure(o)?.code == .failed)
+        #expect(failure(o)?.message == "The disk is full.")
+        #expect(s.takeAlert()?.title == "Earlier")
+        #expect(s.takeAlert() == nil, "nothing queued behind it")
+        #expect(Array(s.documents.keys) == [id])
+        #expect(host.shownDocuments.isEmpty)
+        // File › New's own behaviour is unchanged.
+        #expect(s.newProject(s.defaultFormat) == nil)
+        #expect(s.takeAlert()?.title == "New Document Failed")
+    }
+
+    /// Fix round 1: a refused end closes the new song quietly, so no song
+    /// is left with its request open.
+    @Test func aRefusedEndClosesTheNewSong() throws {
+        let n = FakeSession([])
+        n.starterRow = Self.starterRow
+        n.coEndError = .Model(message: "The notes could not be written.")
+        let (s, id, _, _) = try starterStore(n)
+        let o = run(.coProducerStarter(spec: Self.spec), s, id)
+        #expect(failure(o)?.code == .failed)
+        #expect(failure(o)?.message == "The notes could not be written.")
+        #expect(n.coLog.last == "end")
+        #expect(n.closeCalls == 1)
+        #expect(Array(s.documents.keys) == [id])
+        #expect(host.shownDocuments.isEmpty)
+        #expect(s.alert == nil)
+        // The flag was not left set: the next starter runs.
+        n.coEndError = nil
+        guard case .pending = run(.coProducerStarter(spec: Self.spec), s, id) else {
+            Issue.record("the next starter did not run")
+            return
+        }
+    }
+
     /// A second starter while the first is being made (its window not up
     /// yet) is `busy`, and makes nothing.
     @Test func oneStarterAtATime() async throws {

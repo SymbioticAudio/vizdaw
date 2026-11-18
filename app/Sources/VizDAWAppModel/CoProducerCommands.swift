@@ -467,7 +467,8 @@ extension CoProducerCommands {
     /// is begun, entered, built as one step, left and ended, in one stretch
     /// on the main thread. Only then does its window open: the one window a
     /// Co-Producer call opens. A refused begin, enter or build closes the
-    /// new song with no sheet and no save question, so nothing is left.
+    /// new song with no sheet and no save question, so nothing is left;
+    /// so does a refused end, and a failed File › New posts no alert.
     /// One at a time: a second while one is being made (until its window is
     /// up) is `busy`. The answer carries the new song's window.
     static func starter(_ spec: String, _ store: DocumentStore, _ host: any ControlHost, stamp: String)
@@ -477,28 +478,31 @@ extension CoProducerCommands {
         guard let title = starterTitle(spec) else {
             return .failed(.of(.invalidParams, "The starter project is not a JSON object with a title."))
         }
-        let before = store.alert?.id
-        guard let id = store.newProject(store.defaultFormat), let m = store.model(id) else {
-            // File › New's own failure, taken as the call's (no sheet).
-            if let a = store.alert, a.id != before {
-                _ = store.takeAlert()
-                return .failed(.of(.failed, a.message))
-            }
-            return .failed(.of(.failed, "No new song was made."))
+        // File › New's failure is the call's, and posts no alert (no sheet,
+        // not even one queued behind an alert already up).
+        let id: UUID
+        do {
+            id = try store.newProjectQuietly(store.defaultFormat)
+        } catch {
+            return .failed(failure(error))
         }
+        guard let m = store.model(id) else { return .failed(.of(.failed, "No new song was made.")) }
         let row: CoProducerStarterRow
         do {
             _ = try m.session.coProducerBegin(name: "start \(title)")
             try m.session.coProducerSetStamp(stamp: stamp)
-            _ = try m.session.coProducerEnter(stamp: stamp)
-            defer { m.session.coProducerLeave() }
-            row = try m.session.coProducerStarter(spec: spec)
+            do {
+                _ = try m.session.coProducerEnter(stamp: stamp)
+                defer { m.session.coProducerLeave() }
+                row = try m.session.coProducerStarter(spec: spec)
+            }
+            // A refused end would leave the song with its request open.
+            _ = try m.session.coProducerEnd()
         } catch {
             // No window was opened: the song goes quietly.
             store.close(id)
             return .failed(failure(error))
         }
-        _ = try? m.session.coProducerEnd()
         refresh(m)
         store.coProducerStarter = id
         host.showDocument(id)

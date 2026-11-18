@@ -1030,8 +1030,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         coRequest = row
         return row
     }
+    /// Thrown by `coProducerEnd` (plan 8e Task 5 fix round 1).
+    var coEndError: VizError?
     func coProducerEnd() throws -> String? {
         coLog.append("end")
+        if let e = coEndError { throw e }
         guard let r = coRequest else { throw VizError.Model(message: "No request is open.") }
         coRequest = nil
         return r.label

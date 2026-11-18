@@ -281,6 +281,14 @@ public final class DocumentStore {
         return add("New Document Failed") { try make(format) }
     }
 
+    /// `newProject` without its alert (plan 8e Task 5 fix round 1: a
+    /// Co-Producer starter's new song): the failure is thrown, never posted
+    /// or queued, so no sheet shows it later.
+    func newProjectQuietly(_ format: ProjectFormatRow) throws -> UUID {
+        guard let make = makeProject else { return try adding(makeEmpty) }
+        return try adding { try make(format) }
+    }
+
     public func newDemo() -> UUID? { add("Demo Project Failed", makeDemo) }
 
     /// Makes the demo with an audio lane (Plan 4b Ruling 19); set by `live()`.
@@ -672,19 +680,24 @@ public final class DocumentStore {
 
     private func add(_ title: String, _ make: Make) -> UUID? {
         do {
-            let model = try DocumentModel(session: make())
-            model.listPreferences = listPreferences
-            model.keys = keyBindings
-            model.externalTools = externalTools
-            let id = UUID()
-            didMake?(id, model)
-            documents[id] = model
-            added.append(id)
-            model.mixerProvider = { [weak self] in self?.mixer(id) }
-            return id
+            return try adding(make)
         } catch {
             postAlert(AlertItem(error, title: title))
             return nil
         }
+    }
+
+    /// The document `make` makes, added; its failure is thrown, never posted.
+    private func adding(_ make: Make) throws -> UUID {
+        let model = try DocumentModel(session: make())
+        model.listPreferences = listPreferences
+        model.keys = keyBindings
+        model.externalTools = externalTools
+        let id = UUID()
+        didMake?(id, model)
+        documents[id] = model
+        added.append(id)
+        model.mixerProvider = { [weak self] in self?.mixer(id) }
+        return id
     }
 }
