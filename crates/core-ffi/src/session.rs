@@ -5624,8 +5624,9 @@ impl Session {
     /// A new track of `kind` in sequence `seq`, below track `after` (an
     /// unknown or absent `after`: at the end), as one undo step named "New
     /// Audio Track", "New Instrument Track" or "New MIDI Track" (plan
-    /// tracks Ruling 4). It may add the built-in synth destination or the
-    /// first audio output path in the same step. `Model` for an unknown
+    /// tracks Ruling 4). It may add the built-in synth destination, and an
+    /// audio track adds its own output path and strip, in the same step
+    /// (plan 8e Task 6c). `Model` for an unknown
     /// sequence; `Busy` while an edit is open or recording.
     pub fn new_track(
         &self,

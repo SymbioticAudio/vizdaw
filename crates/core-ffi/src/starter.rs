@@ -8,10 +8,10 @@
 //! A starter sets up sounds and routing only. It writes no notes, regions
 //! or automation (owner, 2026-11-16).
 //!
-//! Tracks on the Built-in Synth share its one strip, and audio tracks the
-//! song's one output path's strip. The first track on a shared strip sets
-//! it up; a later one's effects, output and sends are left out, with a
-//! line, rather than stacked on the first's.
+//! Tracks on the Built-in Synth share its one strip; each audio track has
+//! its own (plan 8e Task 6c). The first track on the shared strip sets it
+//! up; a later one's effects, output and sends are left out, with a line,
+//! rather than stacked on the first's.
 
 use crate::error::VizError;
 use crate::mixer_chores::{self, PluginLookup, plugin_ref_text};
@@ -76,12 +76,12 @@ fn is_multiq(p: &PluginRef) -> bool {
 }
 
 /// Which strip a track of `choice` plays through, when it is shared: the
-/// Built-in Synth's, or the one output path's.
+/// Built-in Synth's. A plug-in instrument and an audio track each have
+/// their own.
 fn shared_group(choice: &PluginChoice) -> Option<u8> {
     match choice {
-        PluginChoice::Plugin(_) => None,
+        PluginChoice::Plugin(_) | PluginChoice::Audio => None,
         PluginChoice::BuiltinSynth => Some(0),
-        PluginChoice::Audio => Some(1),
     }
 }
 

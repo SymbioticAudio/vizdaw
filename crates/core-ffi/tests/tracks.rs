@@ -543,3 +543,121 @@ fn output_paths_list_the_documents_paths() {
     assert_eq!(s.output_paths().unwrap().len(), 2);
     s.close().unwrap();
 }
+
+/// The AudioPath strip of lane `lane`'s output path.
+fn audio_strip(s: &Session, seq: u64, lane: u64) -> vizdaw_ffi::StripRow {
+    let out = s
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.id == lane)
+        .unwrap()
+        .audio_out
+        .expect("an output path");
+    s.mixer()
+        .unwrap()
+        .strips
+        .into_iter()
+        .find(|x| x.kind == StripKindRow::AudioPath { path: out })
+        .expect("the path's strip")
+}
+
+/// Owner, 2026-11-17 (plan 8e Task 6c): every new audio track gets its own
+/// output path and strip, named after it and routed to master.
+#[test]
+fn each_new_audio_track_gets_its_own_strip() {
+    let _g = serial();
+    let s = Session::new_empty().unwrap();
+    let seq = first_seq(&s);
+    s.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    s.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    let l = s.lanes(seq).unwrap();
+    assert_eq!(l.len(), 2);
+    assert_ne!(l[0].audio_out, l[1].audio_out, "each has its own path");
+    assert_eq!(outputs(&s), 2);
+    let (a, b) = (audio_strip(&s, seq, l[0].id), audio_strip(&s, seq, l[1].id));
+    assert_ne!(a.id, b.id);
+    assert_eq!(a.name, "Audio 1");
+    assert_eq!(b.name, "Audio 2");
+    assert_eq!(l[1].audio_out_name.as_deref(), Some("Audio 2"));
+    assert_eq!(a.output, None, "routed to master");
+    assert_eq!(b.output, None, "routed to master");
+    // Instrument tracks still share the Built-in Synth's one strip.
+    s.new_track(seq, TrackKindRow::Instrument, None).unwrap();
+    s.new_track(seq, TrackKindRow::Instrument, None).unwrap();
+    let synth = s
+        .mixer()
+        .unwrap()
+        .strips
+        .iter()
+        .filter(|x| x.kind == StripKindRow::BuiltinSynth)
+        .count();
+    assert_eq!(synth, 1);
+    assert_eq!(outputs(&s), 2);
+    s.close().unwrap();
+}
+
+/// One undo takes away the new audio track and its strip together.
+#[test]
+fn one_undo_removes_a_new_audio_track_and_its_strip() {
+    let _g = serial();
+    let s = Session::new_empty().unwrap();
+    let seq = first_seq(&s);
+    s.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    let strips = s.mixer().unwrap().strips.len();
+    let snap = s.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("New Audio Track"));
+    assert_eq!(s.mixer().unwrap().strips.len(), strips + 1);
+    assert_eq!(s.output_paths().unwrap().len(), 2);
+    s.undo().unwrap();
+    assert_eq!(s.lanes(seq).unwrap().len(), 1);
+    assert_eq!(s.mixer().unwrap().strips.len(), strips);
+    assert_eq!(s.output_paths().unwrap().len(), 1);
+    s.redo().unwrap();
+    assert_eq!(s.output_paths().unwrap().len(), 2);
+    s.close().unwrap();
+}
+
+/// A song saved with two audio tracks on one path loads with exactly that
+/// routing: nothing splits them.
+#[test]
+fn an_old_song_with_a_shared_audio_strip_loads_unchanged() {
+    let _g = serial();
+    let mut b = Builder::new();
+    let (seq, one) = b.sequence("S", "Vox", None).unwrap();
+    let two = b.lane(seq, "Gtr", None).unwrap();
+    let out = b
+        .run(Command::Routing(RoutingCmd::AddOutput {
+            name: "Audio 1".into(),
+            reference: "audio:1-2".into(),
+        }))
+        .unwrap()
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .unwrap();
+    for lane in [one, two] {
+        b.run(Command::Lane(LaneCmd::SetOutput {
+            seq,
+            lane,
+            output: Some(out),
+        }))
+        .unwrap();
+    }
+    let s = Session::from_document(b.finish()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.vizdaw");
+    s.save_as(path.display().to_string()).unwrap();
+    let mixer = s.mixer().unwrap().strips;
+    s.close().unwrap();
+    let back = Session::open(path.display().to_string()).unwrap();
+    let l = back.lanes(seq.0).unwrap();
+    assert_eq!(l[0].audio_out, Some(out.0));
+    assert_eq!(l[1].audio_out, Some(out.0));
+    assert_eq!(back.output_paths().unwrap().len(), 1);
+    assert_eq!(back.mixer().unwrap().strips, mixer);
+    back.close().unwrap();
+}

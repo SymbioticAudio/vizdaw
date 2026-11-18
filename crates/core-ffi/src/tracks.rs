@@ -121,17 +121,19 @@ fn created_lane(r: &Report) -> Result<LaneId, VizError> {
         .ok_or_else(|| bad("no track was added"))
 }
 
-/// The first output path in id order, else a new "Audio 1" (`audio:1-2`,
-/// the values Track Synth uses).
-fn output_path(history: &mut History, notes: &mut Vec<String>) -> Result<OutputPathId, VizError> {
-    if let Some(o) = history.doc().outputs().keys().next() {
-        return Ok(*o);
-    }
+/// A new output path named `name` (`audio:1-2`, the values Track Synth
+/// uses), with its own strip routed to master: each new audio track gets
+/// its own mixer channel (owner, 2026-11-17; plan 8e Task 6c).
+fn new_output_path(
+    history: &mut History,
+    notes: &mut Vec<String>,
+    name: &str,
+) -> Result<OutputPathId, VizError> {
     let r = step(
         history,
         notes,
         Command::Routing(RoutingCmd::AddOutput {
-            name: "Audio 1".into(),
+            name: name.into(),
             reference: "audio:1-2".into(),
         }),
     )?;
@@ -181,7 +183,8 @@ fn synth_dest(history: &mut History, notes: &mut Vec<String>) -> Result<DestId, 
 /// Makes a track of `kind` in `seq` (at `index`, else last) from the
 /// existing commands, inside the caller's open transaction (the caller
 /// aborts it on error). Every kind gets the monitor `monitor`; Audio the first input
-/// channel and an output path; Instrument the built-in synth; MIDI the
+/// channel and a new output path of its own, named after it, whose strip
+/// goes to master; Instrument the built-in synth; MIDI the
 /// first external destination, if any. Returns the new lane; the steps'
 /// warning lines (a default EQ's fallback note, plan 6g-2 Ruling 4) are
 /// added to `notes`.
@@ -281,7 +284,11 @@ fn build(
     let lane = created_lane(&step(
         history,
         notes,
-        Command::Lane(LaneCmd::Add { seq, name, index }),
+        Command::Lane(LaneCmd::Add {
+            seq,
+            name: name.clone(),
+            index,
+        }),
     )?)?;
     // Every kind takes the "Monitoring for new tracks" default.
     step(
@@ -303,7 +310,7 @@ fn build(
                     }),
                 }),
             )?;
-            let output = Some(output_path(history, notes)?);
+            let output = Some(new_output_path(history, notes, &name)?);
             step(
                 history,
                 notes,

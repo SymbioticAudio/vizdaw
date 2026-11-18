@@ -113,9 +113,13 @@ fn build_tracks(want: Option<&str>) -> Arc<Session> {
     assert_eq!(check_channels(&s, want), 2);
     s.add_plugin_instrument("Keys".into(), synth4()).unwrap();
     assert_eq!(check_channels(&s, want), 3);
-    let before = eqs(&s);
-    // Later tracks share those strips; a MIDI track has none.
+    // A later audio track gets its own strip, with the EQ (plan 8e Task
+    // 6c).
     s.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    assert_eq!(check_channels(&s, want), 4);
+    let before = eqs(&s);
+    // Later instrument tracks share the synth's strip; a MIDI track has
+    // none.
     s.new_track(seq, TrackKindRow::Instrument, None).unwrap();
     s.new_track(seq, TrackKindRow::Midi, None).unwrap();
     assert_eq!(eqs(&s), before);
@@ -138,8 +142,8 @@ fn new_tracks_get_multiq() {
         assert!(eq.state.is_none() && eq.params.is_empty() && !eq.bypass);
         filled += 1;
     }
-    // Three channels and the new project's master (plan 6g-2 Ruling 2).
-    assert_eq!(filled, 4);
+    // Four channels and the new project's master (plan 6g-2 Ruling 2).
+    assert_eq!(filled, 5);
     s.close().unwrap();
     debug_clear_multiq();
 }

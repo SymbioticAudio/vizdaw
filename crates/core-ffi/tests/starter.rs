@@ -548,6 +548,51 @@ fn starters_fall_back_to_built_ins() {
     assert!(d.mixer().strip(keys).unwrap().sends.is_empty());
 }
 
+/// Owner, 2026-11-17 (plan 8e Task 6c): each audio track has its own
+/// strip, so two audio tracks each keep their own effects, output and
+/// sends, with no "shares its strip" line.
+#[test]
+fn a_starter_with_two_audio_tracks_gives_two_strips() {
+    if !in_temp_home("a_starter_with_two_audio_tracks_gives_two_strips") {
+        return;
+    }
+    let _g = serial();
+    set_new_channel_eq(false);
+    let s = new_song();
+    let spec = json!({
+        "title": "Duo",
+        "tempo": "120",
+        "meter": "4/4",
+        "buses": [{"name": "Room"}],
+        "tracks": [
+            {"name": "Vox", "kind": "audio", "effects": [GAIN]},
+            {"name": "Gtr", "kind": "audio", "effects": [GAIN, GAIN],
+             "output": "Room"}
+        ]
+    });
+    let row = start(&s, &spec).unwrap();
+    assert!(row.lines.is_empty(), "{:?}", row.lines);
+    let d = doc(&s);
+    let vox = strip_of_track(&d, "Vox (Co-Producer)");
+    let gtr = strip_of_track(&d, "Gtr (Co-Producer)");
+    assert_ne!(vox, gtr, "each audio track has its own strip");
+    let (v, g) = (d.mixer().strip(vox).unwrap(), d.mixer().strip(gtr).unwrap());
+    assert!(matches!(v.kind, StripKind::AudioPath(_)));
+    assert!(matches!(g.kind, StripKind::AudioPath(_)));
+    assert_eq!(v.name, "Vox (Co-Producer)");
+    assert_eq!(g.name, "Gtr (Co-Producer)");
+    assert_eq!(insert_ids(&d, vox), vec!["vizdaw.test.gain"]);
+    assert_eq!(
+        insert_ids(&d, gtr),
+        vec!["vizdaw.test.gain", "vizdaw.test.gain"]
+    );
+    assert_eq!(v.output, Output::Master);
+    assert_eq!(
+        g.output,
+        Output::Bus(strip_named(&d, "Room (Co-Producer)").id)
+    );
+}
+
 #[test]
 fn starters_never_fail_over_a_plugin() {
     if !in_temp_home("starters_never_fail_over_a_plugin") {
