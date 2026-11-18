@@ -135,7 +135,7 @@ fn run_of(id: &str, args: Vec<(&str, ArgValue)>) -> Command {
     }
 }
 
-const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request.";
+const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request. For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat.";
 
 #[test]
 fn initialize_era_handshake() {
@@ -1995,6 +1995,7 @@ fn view_sources() -> Vec<(String, String)> {
         "tracks.html",
         "export.html",
         "mixer.html",
+        "automation.html",
     ]
     .iter()
     .map(|f| (f.to_string(), std::fs::read_to_string(dir.join(f)).unwrap()))
@@ -2574,4 +2575,710 @@ fn mixer_view_draws_names_as_text() {
     let html = r["contents"][0]["text"].as_str().unwrap();
     assert!(html.starts_with("<!DOCTYPE html>"));
     assert!(!html.contains("<!--"));
+}
+
+// --- Creative tools, recipes and prompts (plan 8e Task 6, Rulings 6 and 7) ---
+
+const STARTER_DESCRIPTION: &str = "Make a new untitled song set up in a style: tempo, meter, section markers, instrument and audio tracks, buses, effects, outputs and sends. It writes no notes or beats. Use plug-ins from list_plugins; an instrument or effect that is not usable falls back to the Built-in Synth or Multi-Q, and the answer says which. Pass window from the answer to later tools to work in the new song. Read the starter_project recipe first.";
+const NOTES_DESCRIPTION: &str = "Read a track's notes as start:pitch:length:velocity, in ticks at 15360 per quarter note, to advise on the composer's part in chat. Co-Producer writes no notes. Changes nothing.";
+const AUTOMATION_DESCRIPTION: &str = "Show the automation curve you plan to write over the one that is there now, before writing it with automation.write through change. Values are in the target's own units: dB for fader and send, percent for pan (negative is left), 0 or 1 for mute and solo, and the plug-in's own range for a param. Changes nothing.";
+const RECIPES_DESCRIPTION: &str = "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb and automation moves. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing.";
+const CHANGE_ADDED: &str = "creative writes: automation points with automation.write. On Co-Producer's own tracks and buses these apply without asking.";
+const CREATIVE_INSTRUCTIONS: &str = "For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat.";
+const RECIPE_NAMES: [&str; 6] = [
+    "starter_project",
+    "mix_drums",
+    "shared_reverb",
+    "parallel_compression",
+    "delay_into_reverb",
+    "automation_moves",
+];
+const NO_FITTING: &str = "If list_plugins has no fitting effect, say so, set up the bus with multi-q only, and suggest the kind of plug-in to install.";
+
+fn starter_spec() -> Value {
+    json!({
+        "title": "Synthwave",
+        "tempo": "118",
+        "meter": "4/4",
+        "markers": [{"bar": 1, "name": "Intro"}, {"bar": 9, "name": "Verse"}],
+        "buses": [{"name": "Reverb", "effects": ["multi-q"]}],
+        "tracks": [
+            {"name": "Drums", "kind": "instrument", "sends": [{"bus": "Reverb", "level_db": "-12"}]},
+            {"name": "Vox", "kind": "audio", "output": "Reverb"},
+        ],
+    })
+}
+
+fn starter_answer(track: &str) -> Answer {
+    Answer::Ok(json!({
+        "doc": "d9", "window": 4, "title": "Synthwave", "undo_label": "Co-Producer: Start Synthwave",
+        "tracks": [{"name": track, "plays": "Built-in Synth"}, {"name": "Vox", "plays": "audio"}],
+        "buses": [{"name": "Reverb", "effects": ["Multi-Q", "Echo"]}, {"name": "Delay", "effects": []}],
+        "lines": [
+            "Drums: No instrument clap:x is installed; it plays the Built-in Synth instead.",
+            "Pad: shares its strip with Drums; its effects, output and sends are left out.",
+            "Tracks on the Built-in Synth share its one sound for now.",
+        ],
+    }))
+}
+
+fn notes_answer_of(name: &str, n: usize, truncated: bool) -> Answer {
+    let notes: Vec<Value> = (0..n)
+        .map(|i| json!([i * 3840, 60 + (i % 12), 3840, 100]))
+        .collect();
+    Answer::Ok(json!({
+        "doc": "d1", "seq": 1, "lane": 2, "name": name, "notes": notes, "truncated": truncated,
+    }))
+}
+
+fn curve_of(name: &str, n: usize, truncated: bool) -> Answer {
+    let points: Vec<Value> = (0..n).map(|i| json!([i * 10, -6.0])).collect();
+    Answer::Ok(json!({
+        "doc": "d1", "target": "fader:3", "target_name": name, "unit": "dB",
+        "min": -144.0, "max": 12.0, "start_bar": 1, "end_bar": 2,
+        "points": points, "truncated": truncated,
+    }))
+}
+
+fn automation_args(points: &str) -> Value {
+    json!({"seq": 1, "target": "fader:3", "start": 0, "end": 61440, "points": points})
+}
+
+/// Every object schema in `v` says `additionalProperties: false`.
+fn closed_everywhere(v: &Value, at: &str) {
+    match v {
+        Value::Object(o) => {
+            if o.get("type") == Some(&json!("object")) {
+                assert_eq!(o.get("additionalProperties"), Some(&json!(false)), "{at}");
+            }
+            for (k, x) in o {
+                closed_everywhere(x, &format!("{at}/{k}"));
+            }
+        }
+        Value::Array(a) => {
+            for (i, x) in a.iter().enumerate() {
+                closed_everywhere(x, &format!("{at}/{i}"));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn disguised(s: &str) -> bool {
+    s.chars().any(|c| {
+        (c.is_control() && c != '\n')
+            || matches!(
+                c,
+                '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}'
+            )
+            || ('\u{202A}'..='\u{202E}').contains(&c)
+            || ('\u{2066}'..='\u{2069}').contains(&c)
+    })
+}
+
+#[test]
+fn creative_tools_are_listed() {
+    let d = support_dir();
+    let _app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let starter = tool_named(&mut m, "starter_project");
+    assert_eq!(starter["description"], STARTER_DESCRIPTION);
+    assert_eq!(starter["annotations"]["destructiveHint"], false);
+    let schema = &starter["inputSchema"];
+    closed_everywhere(schema, "starter_project");
+    assert_eq!(schema["required"], json!(["spec"]));
+    let spec = &schema["properties"]["spec"];
+    assert_eq!(spec["type"], "object");
+    assert_eq!(spec["properties"]["tracks"]["minItems"], 1);
+    assert_eq!(spec["properties"]["tracks"]["maxItems"], 32);
+    assert_eq!(
+        spec["properties"]["tracks"]["items"]["properties"]["kind"]["enum"],
+        json!(["instrument", "audio"])
+    );
+    for (name, description) in [
+        ("read_midi_notes", NOTES_DESCRIPTION),
+        ("preview_automation", AUTOMATION_DESCRIPTION),
+        ("recipes", RECIPES_DESCRIPTION),
+    ] {
+        let t = tool_named(&mut m, name);
+        assert_eq!(t["description"], description, "{name}");
+        assert_eq!(t["annotations"]["readOnlyHint"], true, "{name}");
+        closed_everywhere(&t["inputSchema"], name);
+    }
+    let auto = tool_named(&mut m, "preview_automation");
+    assert_eq!(
+        auto["inputSchema"]["properties"]["points"]["maxLength"],
+        32_768
+    );
+    assert!(tool_named(&mut m, "automation_write").is_null());
+    let change = tool_named(&mut m, "change")["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(change.contains(CHANGE_ADDED), "{change}");
+    let r = m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+    );
+    assert!(
+        r["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(CREATIVE_INSTRUCTIONS),
+        "{r}"
+    );
+}
+
+#[test]
+fn no_tool_writes_notes() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let tools = m.result("tools/list", json!({}));
+    let tools = tools["tools"].as_array().unwrap();
+    let banned = ["midi_new_part", "midi.new_part", "midi.add_notes"];
+    for t in tools {
+        let name = t["name"].as_str().unwrap();
+        assert!(
+            name != "midi_new_part" && name != "midi_add_notes",
+            "{name}"
+        );
+        let description = t["description"].as_str().unwrap();
+        for b in banned {
+            assert!(!description.contains(b), "{name} names {b}");
+        }
+    }
+    let r = m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+    );
+    for b in banned {
+        assert!(!r["instructions"].as_str().unwrap().contains(b), "{b}");
+    }
+    let prompts = m.result("prompts/list", json!({}));
+    for p in prompts["prompts"].as_array().unwrap() {
+        let name = p["name"].as_str().unwrap();
+        assert_ne!(name, "new_part");
+        let got = m.result("prompts/get", json!({"name": name}));
+        let t = got["messages"][0]["content"]["text"].as_str().unwrap();
+        for b in banned {
+            assert!(!t.contains(b), "prompt {name} names {b}");
+        }
+    }
+    let list = text(&m.call("recipes", json!({})));
+    assert!(!list.contains("new_part"), "{list}");
+    for name in RECIPE_NAMES {
+        let steps = text(&m.call("recipes", json!({"name": name})));
+        for b in banned {
+            assert!(!steps.contains(b), "recipe {name} names {b}");
+        }
+    }
+    assert!(is_error(&m.call("recipes", json!({"name": "new_part"}))));
+    let r = m.call(
+        "change",
+        json!({"commands": [{"id": "midi.add_notes", "params": {"seq": 1, "lane": 2, "notes": "0:60:3840:100"}}]}),
+    );
+    assert!(is_error(&r), "{r}");
+    let r = m.call(
+        "apply_change",
+        json!({"token": preview_token(1), "commands": [{"id": "midi.new_part"}]}),
+    );
+    assert!(is_error(&r), "{r}");
+    m.ping_answers();
+    assert!(app.seen().is_empty(), "no socket call: {:?}", app.seen());
+}
+
+#[test]
+fn starters_reach_the_app() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(starter_answer("Drums"));
+    let r = m.call("starter_project", json!({"spec": starter_spec()}));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        app.seen(),
+        vec![Command::CoProducerStarter {
+            spec: starter_spec()
+        }]
+    );
+    let t = text(&r);
+    assert_eq!(
+        t,
+        "Made a new song, \"Synthwave\", in window 4. Undo step: \"Co-Producer: Start Synthwave\".\n\
+         Tracks:\n- Drums: Built-in Synth\n- Vox: audio\n\
+         Buses:\n- Reverb: Multi-Q, Echo\n- Delay: none\n\
+         Drums: No instrument clap:x is installed; it plays the Built-in Synth instead.\n\
+         Pad: shares its strip with Drums; its effects, output and sends are left out.\n\
+         Tracks on the Built-in Synth share its one sound for now."
+    );
+}
+
+#[test]
+fn notes_reach_the_app() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(notes_answer_of("Keys", 2, false));
+    let r = m.call("read_midi_notes", json!({"seq": 1, "lane": 2}));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        app.seen(),
+        vec![Command::CoProducerMidiNotes {
+            seq: 1,
+            lane: 2,
+            range: None,
+            window: None
+        }]
+    );
+    let t = text(&r);
+    assert_eq!(
+        t,
+        "Track 2, Keys: 2 notes (start:pitch:length:velocity, 15360 ticks per quarter note):\n0:60:3840:100 3840:61:3840:100"
+    );
+    app.script(notes_answer_of("Keys", 200, true));
+    let r = m.call(
+        "read_midi_notes",
+        json!({"seq": 0, "lane": 0, "start": 0, "end": 15360, "window": 2}),
+    );
+    let t = text(&r);
+    let lines: Vec<&str> = t.lines().collect();
+    assert_eq!(lines.len(), 5, "{t}");
+    assert!(lines[0].starts_with("Track 2, Keys: 200 notes"), "{t}");
+    assert_eq!(lines[1].split(' ').count(), 80);
+    assert_eq!(lines[2].split(' ').count(), 80);
+    assert_eq!(lines[3].split(' ').count(), 40);
+    assert_eq!(lines[4], "- and more; read a shorter range");
+    assert!(matches!(
+        app.seen().last(),
+        Some(Command::CoProducerMidiNotes {
+            seq: 0,
+            lane: 0,
+            range: Some((0, 15360)),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn automation_previews_both_curves() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": ui_caps(MIME)}),
+    );
+    app.script(curve_of("Keys fader", 3, false));
+    let r = m.call("preview_automation", automation_args("0:-6 30720:-144.5"));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        app.seen(),
+        vec![Command::CoProducerAutomation {
+            seq: 1,
+            target: "fader:3".into(),
+            start: 0,
+            end: 61440,
+            window: None
+        }]
+    );
+    let t = text(&r);
+    assert_eq!(
+        t,
+        "Keys fader, bars 1\u{2013}2: now 3 points, planned 2 points.\nPlanned:\n- tick 0: \u{2212}6 dB\n- tick 30720: \u{2212}144.5 dB"
+    );
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["view"], "automation");
+    assert_eq!(sc["target_name"], "Keys fader");
+    assert_eq!(sc["unit"], "dB");
+    assert_eq!(
+        (sc["min"].clone(), sc["max"].clone()),
+        (json!(-144.0), json!(12.0))
+    );
+    assert_eq!(
+        (sc["start"].clone(), sc["end"].clone()),
+        (json!(0), json!(61440))
+    );
+    assert_eq!(sc["existing"], json!([[0, -6.0], [10, -6.0], [20, -6.0]]));
+    assert_eq!(sc["planned"], json!([[0, -6.0], [30720, -144.5]]));
+    let before = app.seen().len();
+    for (bad, word) in [
+        ("1:x", "Point 1 is not tick:value."),
+        ("70000:1", "Point 1 is outside start to end."),
+        ("5:1 5:2", "Point 2 is not after point 1."),
+    ] {
+        let r = m.call("preview_automation", automation_args(bad));
+        assert!(is_error(&r), "{bad}: {r}");
+        assert!(text(&r).contains(word), "{bad}: {r}");
+    }
+    assert_eq!(app.seen().len(), before, "no socket call for a bad list");
+}
+
+#[test]
+fn recipes_are_a_tool_and_prompts() {
+    let d = support_dir();
+    let _app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let list = text(&m.call("recipes", json!({})));
+    let lines: Vec<&str> = list.lines().collect();
+    assert_eq!(lines[0], "Recipes:");
+    let names: Vec<&str> = lines[1..]
+        .iter()
+        .map(|l| l.strip_prefix("- ").unwrap().split(':').next().unwrap())
+        .collect();
+    assert_eq!(names, RECIPE_NAMES);
+    assert!(list.contains("- mix_drums: Help me mix my drums"), "{list}");
+    let drums = text(&m.call("recipes", json!({"name": "mix_drums"})));
+    let steps: Vec<&str> = drums.lines().collect();
+    assert_eq!(steps[0], "Help me mix my drums:");
+    assert_eq!(steps[1], "- Start a request with begin_request.");
+    assert_eq!(
+        *steps.last().unwrap(),
+        "- End the request with end_request, and tell the composer what was added and what changed."
+    );
+    for name in [
+        "mix_drums",
+        "shared_reverb",
+        "parallel_compression",
+        "delay_into_reverb",
+    ] {
+        let t = text(&m.call("recipes", json!({"name": name})));
+        assert!(t.contains(&format!("- {NO_FITTING}")), "{name}: {t}");
+    }
+    let starter = text(&m.call("recipes", json!({"name": "starter_project"})));
+    assert!(starter.contains("Never write notes or beats."), "{starter}");
+    let init = m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+    );
+    assert_eq!(
+        init["capabilities"]["prompts"],
+        json!({"listChanged": false})
+    );
+    let prompts = m.result("prompts/list", json!({}));
+    let prompts = prompts["prompts"].as_array().unwrap();
+    let names: Vec<&str> = prompts
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, RECIPE_NAMES);
+    for p in prompts {
+        assert_eq!(p["description"], p["title"], "{p}");
+        if p["name"] == "starter_project" {
+            assert_eq!(p["arguments"][0]["name"], "style", "{p}");
+            assert_eq!(p["arguments"][0]["required"], false, "{p}");
+            assert_eq!(p["arguments"].as_array().unwrap().len(), 1);
+        } else {
+            assert!(
+                p.get("arguments")
+                    .is_none_or(|a| a.as_array().is_some_and(Vec::is_empty)),
+                "{p}"
+            );
+        }
+    }
+    let got = m.result(
+        "prompts/get",
+        json!({"name": "starter_project", "arguments": {"style": "80s synthwave"}}),
+    );
+    let messages = got["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"]["type"], "text");
+    let t = messages[0]["content"]["text"].as_str().unwrap();
+    assert!(
+        t.starts_with(
+            "Set up a starter project in a style.\n- Start a request with begin_request."
+        ),
+        "{t}"
+    );
+    assert!(t.ends_with("The style: 80s synthwave."), "{t}");
+    let got = m.result("prompts/get", json!({"name": "mix_drums"}));
+    let t = got["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(t.starts_with("Help me mix my drums.\n"), "{t}");
+    assert!(!t.contains("The style"), "{t}");
+}
+
+#[test]
+fn recipes_and_prompts_refuse_hostile_input() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let r = m.call("recipes", json!({"name": "x".repeat(70_000)}));
+    assert!(is_error(&r), "{r}");
+    let t = text(&r);
+    assert!(t.starts_with("No recipe x"), "{t}");
+    assert!(t.len() < 400, "the name is cut: {} bytes", t.len());
+    assert!(
+        t.ends_with("Call recipes with no name for the list."),
+        "{t}"
+    );
+    for bad in [
+        json!({"name": 1}),
+        json!({"extra": 1}),
+        json!({"name": null}),
+    ] {
+        let r = m.call("recipes", bad.clone());
+        assert!(is_error(&r), "{bad}: {r}");
+    }
+    let r = m.call("recipes", json!({"name": "a\u{202E}b\u{0}"}));
+    assert!(is_error(&r), "{r}");
+    assert!(!disguised(&text(&r)), "{r}");
+    for bad in [
+        json!({"name": "starter_project", "arguments": {"style": "x".repeat(201)}}),
+        json!({"name": "starter_project", "arguments": {"style": "a\u{0}b"}}),
+        json!({"name": "starter_project", "arguments": {"style": "a\u{202E}b"}}),
+        json!({"name": "starter_project", "arguments": {"style": 3}}),
+        json!({"name": "starter_project", "arguments": 3}),
+        json!({"name": "mix_drums", "arguments": {"style": "rock"}}),
+        json!({"name": "nope"}),
+        json!({"name": "a\u{202E}b"}),
+        json!({"name": "y".repeat(70_000)}),
+        json!({"name": 3}),
+        json!({}),
+    ] {
+        let r = m.request("prompts/get", bad.clone());
+        assert_eq!(r["error"]["code"], -32602, "{bad}: {r}");
+        let message = r["error"]["message"].as_str().unwrap();
+        assert!(!disguised(message), "{message:?}");
+        assert!(message.len() < 400, "{} bytes", message.len());
+    }
+    let r = m.request("prompts/get", json!({"name": "nope"}));
+    assert_eq!(r["error"]["message"], "No prompt nope.");
+    let r = m.request(
+        "prompts/get",
+        json!({"name": "starter_project", "arguments": {"style": "a\u{0}b"}}),
+    );
+    assert_eq!(
+        r["error"]["message"],
+        "style is up to 200 characters of plain text."
+    );
+    let ok = m.result(
+        "prompts/get",
+        json!({"name": "starter_project", "arguments": {"style": "x".repeat(200)}}),
+    );
+    assert!(ok["messages"][0]["content"]["text"].is_string());
+    m.ping_answers();
+    assert!(app.seen().is_empty(), "no socket call: {:?}", app.seen());
+}
+
+#[test]
+fn creative_tools_refuse_hostile_arguments() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let mut big = starter_spec();
+    big["tracks"] = json!(
+        (0..33)
+            .map(|i| json!({"name": format!("T{i}"), "kind": "audio"}))
+            .collect::<Vec<_>>()
+    );
+    let mut long_title = starter_spec();
+    long_title["title"] = json!("x".repeat(70_000));
+    let mut nul = starter_spec();
+    nul["title"] = json!("a\u{0}b");
+    let mut extra = starter_spec();
+    extra["tracks"][0]["notes"] = json!("0:60:3840:100");
+    let mut plugin_on_audio = starter_spec();
+    plugin_on_audio["tracks"][1]["plugin"] = json!("multi-q");
+    for (tool, args) in [
+        ("starter_project", json!({})),
+        ("starter_project", json!({"spec": 3})),
+        ("starter_project", json!({"spec": "x"})),
+        ("starter_project", json!({"spec": big})),
+        ("starter_project", json!({"spec": long_title})),
+        ("starter_project", json!({"spec": nul})),
+        ("starter_project", json!({"spec": extra})),
+        ("starter_project", json!({"spec": plugin_on_audio})),
+        (
+            "starter_project",
+            json!({"spec": starter_spec(), "window": 1}),
+        ),
+        (
+            "starter_project",
+            json!({"spec": starter_spec(), "extra": 1}),
+        ),
+        ("read_midi_notes", json!({})),
+        ("read_midi_notes", json!({"seq": 1})),
+        ("read_midi_notes", json!({"seq": 1, "lane": -1})),
+        ("read_midi_notes", json!({"seq": 1, "lane": "2"})),
+        ("read_midi_notes", json!({"seq": 1, "lane": 2, "start": 0})),
+        ("read_midi_notes", json!({"seq": 1, "lane": 2, "end": 5})),
+        (
+            "read_midi_notes",
+            json!({"seq": 1, "lane": 2, "start": 5, "end": 5}),
+        ),
+        ("read_midi_notes", json!({"seq": 1, "lane": 2, "extra": 1})),
+        ("read_midi_notes", json!({"seq": 1, "lane": 2, "window": 0})),
+        ("read_midi_notes", json!({"seq": 1, "lane": 1u64 << 60})),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "fader:3", "start": 5, "end": 5, "points": ""}),
+        ),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 10}),
+        ),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "x".repeat(70_000), "start": 0, "end": 10, "points": ""}),
+        ),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "volume:3", "start": 0, "end": 10, "points": ""}),
+        ),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 10, "points": "x".repeat(70_000)}),
+        ),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 10, "points": "1:\u{0}"}),
+        ),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 10, "points": 3}),
+        ),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "fader:3", "start": -1, "end": 10, "points": ""}),
+        ),
+        (
+            "preview_automation",
+            json!({"seq": 1, "target": "fader:3", "start": 0, "end": 10, "points": "", "extra": 1}),
+        ),
+    ] {
+        let r = m.call(tool, args.clone());
+        assert!(is_error(&r), "{tool} {args}: {r}");
+        assert!(text(&r).len() < 1000, "{tool}: the answer is short");
+    }
+    m.ping_answers();
+    assert!(app.seen().is_empty(), "no socket call: {:?}", app.seen());
+}
+
+#[test]
+fn long_curves_are_capped() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": ui_caps(MIME)}),
+    );
+    app.script(curve_of("Keys fader", 4096, true));
+    let planned: Vec<String> = (0..1024).map(|i| format!("{}:-3", i * 60)).collect();
+    let r = m.call("preview_automation", automation_args(&planned.join(" ")));
+    assert!(!is_error(&r), "{r}");
+    let t = text(&r);
+    assert!(t.contains("now 4096 points"), "{t}");
+    assert!(t.contains("planned 1024 points"), "{t}");
+    assert!(t.contains("truncated"), "{t}");
+    let after: Vec<&str> = t.split("Planned:\n").nth(1).unwrap().lines().collect();
+    assert_eq!(after.len(), 41, "{t}");
+    assert_eq!(after[0], "- tick 0: \u{2212}3 dB");
+    assert_eq!(after[40], "- and 984 more");
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["existing"].as_array().unwrap().len(), 4096);
+    assert_eq!(sc["planned"].as_array().unwrap().len(), 1024);
+}
+
+#[test]
+fn creative_names_are_shown_safely() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": ui_caps(MIME)}),
+    );
+    app.script(curve_of("a\u{202E}b", 1, false));
+    let r = m.call("preview_automation", automation_args(""));
+    assert!(text(&r).starts_with("a\u{FFFD}b, bars"), "{r}");
+    assert_eq!(r["structuredContent"]["target_name"], "a\u{FFFD}b");
+    app.script(notes_answer_of("x\u{2028}y", 1, false));
+    let r = m.call("read_midi_notes", json!({"seq": 1, "lane": 2}));
+    assert!(text(&r).starts_with("Track 2, x\u{FFFD}y: 1 notes"), "{r}");
+    app.script(starter_answer("x\u{2028}y\n- forged: audio"));
+    let r = m.call("starter_project", json!({"spec": starter_spec()}));
+    let t = text(&r);
+    assert!(t.contains("- x\u{FFFD}y"), "{t}");
+    assert!(!t.contains("\n- forged"), "{t}");
+    assert!(!disguised(&t), "{t}");
+}
+
+#[test]
+fn the_automation_view_only_for_hosts_that_ask() {
+    let run = |version: &str, caps: Value| {
+        let d = support_dir();
+        let app = FakeApp::start(d.path());
+        let mut m = Mcp::spawn(d.path());
+        m.result(
+            "initialize",
+            json!({"protocolVersion": version, "capabilities": caps}),
+        );
+        let tool = tool_named(&mut m, "preview_automation");
+        let res = m.result("resources/list", json!({}));
+        let listed: Vec<Value> = res["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["uri"] == "ui://vizdaw/automation")
+            .cloned()
+            .collect();
+        app.script(curve_of("Keys fader", 3, false));
+        let r = m.call("preview_automation", automation_args("0:-6 30720:0"));
+        (tool, listed, r)
+    };
+    let (tool, listed, with) = run("2025-11-25", ui_caps(MIME));
+    assert_eq!(tool["_meta"]["ui"]["resourceUri"], "ui://vizdaw/automation");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["mimeType"], MIME);
+    assert_eq!(with["structuredContent"]["view"], "automation");
+    for (version, caps) in [
+        ("2025-11-25", json!({})),
+        ("2025-11-25", ui_caps("text/html")),
+        ("2025-03-26", ui_caps(MIME)),
+    ] {
+        let (tool, listed, r) = run(version, caps);
+        assert!(tool.get("_meta").is_none(), "{tool}");
+        assert!(listed.is_empty());
+        assert!(r.get("structuredContent").is_none(), "{r}");
+        assert_eq!(text(&r), text(&with));
+        assert_eq!(r["content"], with["content"]);
+    }
+}
+
+#[test]
+fn automation_view_draws_names_as_text() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("views");
+    let s = std::fs::read_to_string(dir.join("automation.html")).unwrap();
+    for bad in [
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+        "new Function",
+        "http:",
+        "https:",
+        "src=",
+        "<link",
+    ] {
+        assert!(!s.contains(bad), "automation.html holds {bad}");
+    }
+    for good in [
+        "textContent",
+        "createElementNS",
+        "Number.isFinite",
+        "<!--BRIDGE-->",
+    ] {
+        assert!(s.contains(good), "automation.html lacks {good}");
+    }
+    let d = support_dir();
+    let _app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let r = m.result("resources/read", json!({"uri": "ui://vizdaw/automation"}));
+    let html = r["contents"][0]["text"].as_str().unwrap();
+    assert!(html.starts_with("<!DOCTYPE html>"));
+    assert!(!html.contains("<!--"));
+    assert_eq!(r["contents"][0]["mimeType"], MIME);
 }

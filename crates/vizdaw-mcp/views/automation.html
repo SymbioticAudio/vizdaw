@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Automation</title>
+</head>
+<body>
+<main id="view"></main>
+<script>
+<!--BRIDGE-->
+</script>
+<script>
+"use strict";
+// The automation curve (plan 8e Ruling 7): the points there now and the
+// planned ones, as two lines on one chart. It is a picture: no controls.
+// Every name is set with textContent, and every attribute that comes
+// from the result is a finite number.
+(function () {
+  const el = Bridge.el;
+  const str = Bridge.str;
+  // The SVG namespace, spelled in parts so the page holds no URL.
+  const NS = ["http", "//www.w3.org/2000/svg"].join(":");
+  const W = 600;
+  const H = 220;
+  const PAD = 28;
+
+  function svg(tag, attrs) {
+    const e = document.createElementNS(NS, tag);
+    for (const k of Object.keys(attrs)) {
+      e.setAttribute(k, attrs[k]);
+    }
+    return e;
+  }
+
+  function finite(v) {
+    return typeof v === "number" && Number.isFinite(v);
+  }
+
+  function num(v) {
+    if (!finite(v)) {
+      return "?";
+    }
+    const s = String(Math.round(Math.abs(v) * 1000) / 1000);
+    return (v < 0 && s !== "0" ? "−" : "") + s;
+  }
+
+  // The points of `list` that are [finite tick, finite value].
+  function points(list) {
+    const out = [];
+    for (const p of Array.isArray(list) ? list : []) {
+      if (Array.isArray(p) && finite(p[0]) && finite(p[1])) {
+        out.push([p[0], p[1]]);
+      }
+    }
+    return out;
+  }
+
+  function line(list, sc, cls) {
+    const span = sc.end - sc.start;
+    const range = sc.max - sc.min;
+    const coords = [];
+    for (const p of list) {
+      const x = PAD + ((p[0] - sc.start) / span) * (W - 2 * PAD);
+      const v = Math.min(sc.max, Math.max(sc.min, p[1]));
+      const y = PAD + ((sc.max - v) / range) * (H - 2 * PAD);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        coords.push(x.toFixed(1) + "," + y.toFixed(1));
+      }
+    }
+    const shape = svg("polyline", { "class": cls, "points": coords.join(" ") });
+    return shape;
+  }
+
+  function label(text, x, y, anchor) {
+    const t = svg("text", { "x": x, "y": y, "text-anchor": anchor, "class": "axis" });
+    t.textContent = text;
+    return t;
+  }
+
+  function render(sc, root) {
+    if (!finite(sc.start) || !finite(sc.end) || !finite(sc.min) || !finite(sc.max)
+      || sc.end <= sc.start || sc.max <= sc.min
+      || !Array.isArray(sc.existing) || !Array.isArray(sc.planned)) {
+      return false;
+    }
+    const unit = str(sc.unit, "");
+    root.appendChild(el("h1", str(sc.target_name, "?"), "name"));
+    root.appendChild(el("p", "Ticks " + num(sc.start) + " to " + num(sc.end)
+      + (unit === "" ? "" : ", in " + unit) + ".", "muted"));
+    const existing = points(sc.existing);
+    const planned = points(sc.planned);
+    const chart = svg("svg", { "viewBox": "0 0 " + W + " " + H, "width": "100%", "role": "img" });
+    const title = svg("title", {});
+    title.textContent = "Automation now and planned";
+    chart.appendChild(title);
+    chart.appendChild(svg("rect", {
+      "x": PAD, "y": PAD, "width": W - 2 * PAD, "height": H - 2 * PAD, "class": "frame",
+    }));
+    chart.appendChild(label(num(sc.max), PAD - 4, PAD + 4, "end"));
+    chart.appendChild(label(num(sc.min), PAD - 4, H - PAD + 4, "end"));
+    chart.appendChild(line(existing, sc, "existing"));
+    chart.appendChild(line(planned, sc, "planned"));
+    root.appendChild(chart);
+    const key = el("p", null, "muted");
+    key.appendChild(el("span", "— now, " + existing.length + " points", "now-key"));
+    key.appendChild(el("span", "  "));
+    key.appendChild(el("span", "— planned, " + planned.length + " points", "planned-key"));
+    root.appendChild(key);
+    return true;
+  }
+
+  const style = document.createElement("style");
+  style.textContent = [
+    "svg { display: block; max-width: 640px; }",
+    ".frame { fill: none; stroke: var(--line); }",
+    ".axis { fill: var(--muted); font-size: 10px; }",
+    "polyline { fill: none; stroke-width: 2; }",
+    ".existing { stroke: var(--muted); }",
+    ".planned { stroke: var(--tag-fg); }",
+    ".now-key { color: var(--muted); }",
+    ".planned-key { color: var(--tag-fg); }",
+  ].join("\n");
+  document.head.appendChild(style);
+
+  Bridge.start("automation", document.getElementById("view"), render);
+})();
+</script>
+</body>
+</html>

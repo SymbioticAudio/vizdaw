@@ -1,5 +1,5 @@
 //! MCP Apps views (plan 8c Ruling 7): the change preview, the track list,
-//! the export result and the mixer. Each page is static HTML built into the binary;
+//! the export result, the mixer and the automation curve. Each page is static HTML built into the binary;
 //! it holds no song data and loads nothing. Data reaches a view only as
 //! the `structuredContent` of a tool result, which the page draws with
 //! `textContent`. Views are offered only to a client that asks for them.
@@ -16,6 +16,7 @@ pub const VIEWS: &[(&str, &str)] = &[
     ("ui://vizdaw/tracks", "show_tracks"),
     ("ui://vizdaw/export", "export"),
     ("ui://vizdaw/mixer", "show_mixer"),
+    ("ui://vizdaw/automation", "preview_automation"),
 ];
 
 /// Where each page takes the bridge.
@@ -25,6 +26,7 @@ const CHANGE: &str = include_str!("../views/change.html");
 const TRACKS: &str = include_str!("../views/tracks.html");
 const EXPORT: &str = include_str!("../views/export.html");
 const MIXER: &str = include_str!("../views/mixer.html");
+const AUTOMATION: &str = include_str!("../views/automation.html");
 
 /// True when `caps` (a client's capabilities) lists MIME under EXTENSION's
 /// mimeTypes.
@@ -44,6 +46,7 @@ pub fn html(uri: &str) -> Option<String> {
         "ui://vizdaw/tracks" => TRACKS,
         "ui://vizdaw/export" => EXPORT,
         "ui://vizdaw/mixer" => MIXER,
+        "ui://vizdaw/automation" => AUTOMATION,
         _ => return None,
     };
     Some(page.replacen(MARK, BRIDGE, 1))
@@ -67,6 +70,7 @@ pub fn resources_json() -> Vec<Value> {
         "show_mixer" => {
             "The mixer: each strip with its volume, pan, output, EQ, inserts and sends."
         }
+        "preview_automation" => "An automation curve: the one there now and the one planned.",
         _ => "What an export wrote, and where.",
     };
     VIEWS
@@ -118,7 +122,7 @@ mod tests {
 
     #[test]
     fn pages_hold_the_bridge_and_load_nothing() {
-        for s in [BRIDGE, CHANGE, TRACKS, EXPORT, MIXER] {
+        for s in [BRIDGE, CHANGE, TRACKS, EXPORT, MIXER, AUTOMATION] {
             for bad in [
                 "fetch(",
                 "XMLHttpRequest",
@@ -141,7 +145,7 @@ mod tests {
         for bad in ["<!--", "<script", "</script", "-->"] {
             assert!(!BRIDGE.contains(bad), "bridge.js holds {bad}");
         }
-        for page in [CHANGE, TRACKS, EXPORT, MIXER] {
+        for page in [CHANGE, TRACKS, EXPORT, MIXER, AUTOMATION] {
             assert_eq!(page.matches(MARK).count(), 1);
         }
         for (uri, _) in VIEWS {

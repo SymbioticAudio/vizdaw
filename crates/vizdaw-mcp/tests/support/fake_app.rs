@@ -120,6 +120,19 @@ fn canned(server: &Server, c: &Command, previews: usize) -> Value {
             "results": plan.iter().map(|p| json!({"id": p.id, "status": "ran"})).collect::<Vec<_>>(),
             "undo_label": "Co-Producer: Tidy Up",
         }),
+        Command::CoProducerStarter { .. } => json!({
+            "doc": "d2", "window": 2, "title": "Song", "undo_label": "Co-Producer: Start Song",
+            "tracks": [{"name": "Keys", "plays": "Built-in Synth"}], "buses": [], "lines": [],
+        }),
+        Command::CoProducerMidiNotes { seq, lane, .. } => json!({
+            "doc": "d1", "seq": seq, "lane": lane, "name": "Keys",
+            "notes": [[0, 60, 3840, 100]], "truncated": false,
+        }),
+        Command::CoProducerAutomation { target, .. } => json!({
+            "doc": "d1", "target": target, "target_name": "Keys fader", "unit": "dB",
+            "min": -144.0, "max": 12.0, "start_bar": 1, "end_bar": 2,
+            "points": [[0, -6.0], [15360, -3.0], [30720, 0.0]], "truncated": false,
+        }),
         Command::UiScreenshot { .. } => {
             let path = server.screenshot_path();
             std::fs::write(&path, PNG).unwrap();

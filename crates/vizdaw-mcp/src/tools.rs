@@ -9,7 +9,7 @@ use core_control::request::{ExportWhat, MAX_ASKED, MAX_NOTE, MAX_REQUEST_NAME, T
 use serde_json::{Map, Value, json};
 
 /// The server's instructions (Ruling 12).
-pub const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request.";
+pub const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request. For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat.";
 
 /// Starts a request.
 pub const BEGIN_REQUEST: &str = "begin_request";
@@ -41,6 +41,21 @@ pub const MAX_SHOWN: usize = 200;
 const MAX_STRIPS_ARG: usize = 512;
 /// A picture of a window.
 pub const SCREENSHOT: &str = "screenshot";
+/// Makes a new song set up in a style (plan 8e Ruling 7).
+pub const STARTER_PROJECT: &str = "starter_project";
+/// Reads a track's notes (plan 8e Ruling 7).
+pub const READ_MIDI_NOTES: &str = "read_midi_notes";
+/// Shows a planned automation curve over the one there now (plan 8e
+/// Ruling 7).
+pub const PREVIEW_AUTOMATION: &str = "preview_automation";
+/// Reads Co-Producer's recipes (plan 8e Ruling 6).
+pub const RECIPES: &str = "recipes";
+/// The most notes on one line of `read_midi_notes`' text.
+const NOTES_PER_LINE: usize = 80;
+/// The most points of a curve the answer and the view carry.
+const MAX_CURVE: usize = 4096;
+/// The largest tick plan 8e's calls take, as the app's gate has it.
+const TICK_MAX: i64 = i64::MAX / 2;
 
 /// The `state.get` targets offered as resources: all but `input`, because
 /// Co-Producer does not listen.
@@ -100,10 +115,11 @@ fn window_schema() -> Value {
 /// The longest a string param may be: a plug-in reference has its own
 /// limit (plan 8d Ruling 3).
 fn string_limit(name: &str) -> usize {
-    if name == "plugin" {
-        core_control::registry::PLUGIN_REF_MAX
-    } else {
-        MAX_STRING
+    match name {
+        "plugin" => core_control::registry::PLUGIN_REF_MAX,
+        // A point list (plan 8e Ruling 1).
+        "points" => core_control::registry::LIST_TEXT_MAX,
+        _ => MAX_STRING,
     }
 }
 
@@ -315,7 +331,7 @@ fn own_tools() -> Vec<Value> {
         ),
         own_tool(
             CHANGE,
-            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save, quantizing, transposing or changing the velocity of notes, and renaming or removing a marker, and mixer changes: routing a strip to a bus, adding or changing a send or insert, setting an EQ, the volume, pan, mute, solo or a plug-in parameter, and removing a send, insert or bus. Make new buses first with mixer_new_bus and read their IDs with show_mixer; mixer changes on Co-Producer's own buses apply without asking. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
+            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save, quantizing, transposing or changing the velocity of notes, and renaming or removing a marker, and mixer changes: routing a strip to a bus, adding or changing a send or insert, setting an EQ, the volume, pan, mute, solo or a plug-in parameter, and removing a send, insert or bus. Make new buses first with mixer_new_bus and read their IDs with show_mixer; mixer changes on Co-Producer's own buses apply without asking. creative writes: automation points with automation.write. On Co-Producer's own tracks and buses these apply without asking. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
             &[("commands", plan_schema())],
             &["commands"],
             json!({"destructiveHint": true}),
@@ -414,7 +430,166 @@ fn own_tools() -> Vec<Value> {
             &[],
             json!({"readOnlyHint": true}),
         ),
+        starter_tool(),
+        own_tool(
+            READ_MIDI_NOTES,
+            "Read a track's notes as start:pitch:length:velocity, in ticks at 15360 per quarter note, to advise on the composer's part in chat. Co-Producer writes no notes. Changes nothing.",
+            &[
+                (
+                    "seq",
+                    id_schema("The sequence's ID, from the document state."),
+                ),
+                (
+                    "lane",
+                    id_schema("The track's ID, from the document state."),
+                ),
+                (
+                    "start",
+                    tick_schema("Only notes starting from this tick; give end too."),
+                ),
+                (
+                    "end",
+                    tick_schema("Only notes starting before this tick; give start too."),
+                ),
+            ],
+            &["seq", "lane"],
+            json!({"readOnlyHint": true}),
+        ),
+        own_tool(
+            PREVIEW_AUTOMATION,
+            "Show the automation curve you plan to write over the one that is there now, before writing it with automation.write through change. Values are in the target's own units: dB for fader and send, percent for pan (negative is left), 0 or 1 for mute and solo, and the plug-in's own range for a param. Changes nothing.",
+            &[
+                (
+                    "seq",
+                    id_schema("The sequence's ID, from the document state."),
+                ),
+                (
+                    "target",
+                    json!({"type": "string", "minLength": 1, "maxLength": 64, "description": "fader:<strip>, pan:<strip>, mute:<strip>, solo:<strip>, send:<strip>:<n> (n from 1) or param:<slot>:<param>, with IDs from show_mixer and plugin_params."}),
+                ),
+                (
+                    "start",
+                    tick_schema("The first tick of the range, at 15360 per quarter note."),
+                ),
+                (
+                    "end",
+                    tick_schema("The last tick of the range, after start."),
+                ),
+                (
+                    "points",
+                    json!({"type": "string", "maxLength": core_control::registry::LIST_TEXT_MAX, "description": "The planned curve: up to 1024 tick:value points separated by spaces, ticks rising within start to end, values in the target's own units. An empty list clears the range."}),
+                ),
+            ],
+            &["seq", "target", "start", "end", "points"],
+            json!({"readOnlyHint": true}),
+        ),
+        recipes_tool(),
     ]
+}
+
+/// An ID argument of plan 8e's calls: from 0, as a new song's first
+/// sequence and track are.
+fn id_schema(description: &str) -> Value {
+    json!({"type": "integer", "minimum": 0, "maximum": core_control::registry::MAX_EXACT_ID, "description": description})
+}
+
+fn tick_schema(description: &str) -> Value {
+    json!({"type": "integer", "minimum": 0, "maximum": TICK_MAX, "description": description})
+}
+
+/// A strip name in a starter spec.
+fn starter_name(description: &str) -> Value {
+    use core_control::starter::MAX_NAME;
+    json!({"type": "string", "minLength": 1, "maxLength": MAX_NAME, "description": description})
+}
+
+fn effects_schema() -> Value {
+    json!({
+        "type": "array",
+        "maxItems": core_control::starter::MAX_EFFECTS,
+        "description": "Effects from list_plugins, in insert order.",
+        "items": {"type": "string", "minLength": 1, "maxLength": core_control::registry::PLUGIN_REF_MAX},
+    })
+}
+
+/// `starter_project`: only `spec`, whose shape is Ruling 5's, closed at
+/// every level. No window: it opens its own.
+fn starter_tool() -> Value {
+    use core_control::starter::{MAX_BAR, MAX_BUSES, MAX_MARKERS, MAX_SENDS, MAX_TRACKS};
+    let closed = |properties: Value, required: Value| json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false});
+    let marker = closed(
+        json!({
+            "bar": {"type": "integer", "minimum": 1, "maximum": MAX_BAR, "description": "The bar it starts, from 1."},
+            "name": {"type": "string", "minLength": 1, "maxLength": core_control::request::MAX_MARKER_NAME, "description": "The section's name."},
+        }),
+        json!(["bar", "name"]),
+    );
+    let bus = closed(
+        json!({
+            "name": starter_name("The bus's name."),
+            "effects": effects_schema(),
+            "output": starter_name("The bus it goes to (default: master)."),
+        }),
+        json!(["name"]),
+    );
+    let send = closed(
+        json!({
+            "bus": starter_name("The bus it feeds."),
+            "level_db": {"type": "string", "maxLength": 32, "description": "Its level in dB as text, -144 (silent) to 12 (default \"0\")."},
+        }),
+        json!(["bus"]),
+    );
+    let track = closed(
+        json!({
+            "name": starter_name("The track's name."),
+            "kind": {"type": "string", "enum": ["instrument", "audio"]},
+            "plugin": {"type": "string", "minLength": 1, "maxLength": core_control::registry::PLUGIN_REF_MAX, "description": "Only for instrument tracks: an instrument from list_plugins (default: the Built-in Synth)."},
+            "effects": effects_schema(),
+            "output": starter_name("The bus it goes to (default: master)."),
+            "sends": {"type": "array", "maxItems": MAX_SENDS, "items": send},
+        }),
+        json!(["name", "kind"]),
+    );
+    let mut spec = closed(
+        json!({
+            "title": starter_name("The song's title."),
+            "tempo": {"type": "string", "maxLength": 32, "description": "The tempo in bpm as text, 20 to 300, such as \"118\"."},
+            "meter": {"type": "string", "maxLength": 5, "description": "<beats>/<value>, with 1 to 32 beats and a value of 1, 2, 4, 8, 16 or 32, such as \"4/4\"."},
+            "markers": {"type": "array", "maxItems": MAX_MARKERS, "items": marker},
+            "buses": {"type": "array", "maxItems": MAX_BUSES, "items": bus},
+            "tracks": {"type": "array", "minItems": 1, "maxItems": MAX_TRACKS, "items": track},
+        }),
+        json!(["title", "tempo", "meter", "tracks"]),
+    );
+    if let Some(o) = spec.as_object_mut() {
+        o.insert(
+            "description".into(),
+            json!("The starter project: no notes, regions or automation."),
+        );
+    }
+    let mut properties = Map::new();
+    properties.insert("spec".into(), spec);
+    json!({
+        "name": STARTER_PROJECT,
+        "description": "Make a new untitled song set up in a style: tempo, meter, section markers, instrument and audio tracks, buses, effects, outputs and sends. It writes no notes or beats. Use plug-ins from list_plugins; an instrument or effect that is not usable falls back to the Built-in Synth or Multi-Q, and the answer says which. Pass window from the answer to later tools to work in the new song. Read the starter_project recipe first.",
+        "inputSchema": object_schema(properties, vec![json!("spec")]),
+        "annotations": {"destructiveHint": false, "openWorldHint": false},
+    })
+}
+
+/// `recipes`: only `name`; no window, the recipes are not a song's.
+fn recipes_tool() -> Value {
+    let mut props = Map::new();
+    props.insert(
+        "name".into(),
+        json!({"type": "string", "maxLength": 64, "description": "The recipe's name, from the list (default: the list)."}),
+    );
+    json!({
+        "name": RECIPES,
+        "description": "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb and automation moves. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing.",
+        "inputSchema": object_schema(props, Vec::new()),
+        "annotations": {"readOnlyHint": true},
+    })
 }
 
 /// The commands of `commands` (a Co-Producer `commands.list` result) that
@@ -740,7 +915,7 @@ pub fn change_args(args: &Map<String, Value>, with_token: bool) -> Result<Change
 
 /// Whether `c` could disguise a line of the list: a control, a bidi
 /// control or mark, or a line or paragraph separator.
-fn disguises(c: char) -> bool {
+pub(crate) fn disguises(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
@@ -1280,6 +1455,323 @@ pub fn change_view(state: &str, items: &[Value], undo_label: Option<&str>) -> Va
     })
 }
 
+/// `s` with each disguising character replaced by U+FFFD, for a message
+/// that quotes input.
+pub(crate) fn safe_text(s: &str) -> String {
+    safe(s, usize::MAX, false)
+}
+
+/// Whether every command of a checked plan (`ChangeArgs::commands`) is in
+/// `list`, Co-Producer's command list. Err names the first that is not,
+/// so a command the app does not have, a note write among them, is
+/// refused before anything is sent.
+pub fn listed(list: &Value, plan: &Value) -> Result<(), String> {
+    let known: Vec<&str> = list
+        .get("commands")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(|c| str_of(c, "id"))
+        .collect();
+    for (i, c) in plan
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .enumerate()
+    {
+        let id = str_of(c, "id");
+        if !known.contains(&id) {
+            return Err(format!(
+                "`commands[{i}]`: Co-Producer has no command {}; read the command list (vizdaw://commands).",
+                safe_text(&crate::rpc::truncate(id, 64))
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// An integer argument in `min..=max`, or None when absent or null.
+fn int_arg(
+    args: &Map<String, Value>,
+    key: &str,
+    min: i64,
+    max: i64,
+) -> Result<Option<i64>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => match v.as_i64() {
+            Some(n) if (min..=max).contains(&n) => Ok(Some(n)),
+            _ => Err(format!("`{key}` must be an integer from {min} to {max}")),
+        },
+    }
+}
+
+fn unknown_arg(args: &Map<String, Value>, allowed: &[&str]) -> Result<(), String> {
+    match args.keys().find(|k| !allowed.contains(&k.as_str())) {
+        Some(k) => Err(format!(
+            "unknown argument `{}`",
+            crate::rpc::truncate(k, 64)
+        )),
+        None => Ok(()),
+    }
+}
+
+fn required(v: Option<i64>, key: &str) -> Result<i64, String> {
+    v.ok_or_else(|| format!("missing `{key}`"))
+}
+
+/// `starter_project`'s arguments as `co_producer.starter`'s params: the
+/// spec unchanged, once `starter::parse` takes it, so a bad spec is
+/// refused here and opens nothing.
+pub fn starter_params(args: &Map<String, Value>) -> Result<Value, String> {
+    unknown_arg(args, &["spec"])?;
+    match args.get("spec") {
+        Some(spec @ Value::Object(_)) => {
+            core_control::starter::parse(spec)?;
+            Ok(json!({ "spec": spec }))
+        }
+        Some(_) => Err("`spec` must be an object".into()),
+        None => Err("missing `spec`".into()),
+    }
+}
+
+/// `read_midi_notes`' arguments as `co_producer.midi_notes`' params.
+pub fn midi_notes_params(args: &Map<String, Value>) -> Result<Value, String> {
+    unknown_arg(args, &["seq", "lane", "start", "end", "window"])?;
+    let id_max = core_control::registry::MAX_EXACT_ID;
+    let mut p = Map::new();
+    p.insert(
+        "seq".into(),
+        json!(required(int_arg(args, "seq", 0, id_max)?, "seq")?),
+    );
+    p.insert(
+        "lane".into(),
+        json!(required(int_arg(args, "lane", 0, id_max)?, "lane")?),
+    );
+    match (
+        int_arg(args, "start", 0, TICK_MAX)?,
+        int_arg(args, "end", 0, TICK_MAX)?,
+    ) {
+        (None, None) => {}
+        (Some(start), Some(end)) if end > start => {
+            p.insert("start".into(), json!(start));
+            p.insert("end".into(), json!(end));
+        }
+        (Some(_), Some(_)) => return Err("`end` must be after `start`".into()),
+        _ => return Err("give `start` and `end` together, or neither".into()),
+    }
+    if let Some(w) = args.get("window").map(window_arg).transpose()?.flatten() {
+        p.insert("window".into(), json!(w));
+    }
+    Ok(Value::Object(p))
+}
+
+/// `preview_automation`'s arguments: `co_producer.automation`'s params
+/// (all but `points`), and the planned points, checked by
+/// `registry::point_list`.
+pub fn automation_params(args: &Map<String, Value>) -> Result<(Value, Vec<(u64, f64)>), String> {
+    unknown_arg(args, &["seq", "target", "start", "end", "points", "window"])?;
+    let seq = required(
+        int_arg(args, "seq", 0, core_control::registry::MAX_EXACT_ID)?,
+        "seq",
+    )?;
+    let target = match args.get("target") {
+        Some(Value::String(t)) => {
+            core_control::registry::automation_target(t).map_err(|m| format!("`target` {m}"))?;
+            t.clone()
+        }
+        Some(_) => return Err("`target` must be a string".into()),
+        None => return Err("missing `target`".into()),
+    };
+    let start = required(int_arg(args, "start", 0, TICK_MAX)?, "start")?;
+    let end = required(int_arg(args, "end", 0, TICK_MAX)?, "end")?;
+    if end <= start {
+        return Err("`end` must be after `start`".into());
+    }
+    let points = match args.get("points") {
+        Some(Value::String(t)) => core_control::registry::point_list(t, start as u64, end as u64)?,
+        Some(_) => return Err("`points` must be a string".into()),
+        None => return Err("missing `points`".into()),
+    };
+    let mut p = Map::new();
+    p.insert("seq".into(), json!(seq));
+    p.insert("target".into(), json!(target));
+    p.insert("start".into(), json!(start));
+    p.insert("end".into(), json!(end));
+    if let Some(w) = args.get("window").map(window_arg).transpose()?.flatten() {
+        p.insert("window".into(), json!(w));
+    }
+    Ok((Value::Object(p), points))
+}
+
+/// `recipes`' one argument, `name`: None for the list.
+pub fn recipe_name(args: &Map<String, Value>) -> Result<Option<&str>, String> {
+    unknown_arg(args, &["name"])?;
+    match args.get("name") {
+        None => Ok(None),
+        Some(Value::String(n)) => Ok(Some(n)),
+        Some(_) => Err("`name` must be a recipe's name, a string".into()),
+    }
+}
+
+/// The longest line of the starter's answer shown.
+const MAX_LINE_SHOWN: usize = 2000;
+
+fn rows<'a>(v: &'a Value, key: &str) -> &'a [Value] {
+    v.get(key)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+/// Ruling 7: `starter_project`'s text, from `co_producer.starter`'s
+/// result: the song, its tracks and buses, then each fallback line.
+pub fn starter_answer(result: &Value) -> String {
+    let window = result
+        .get("window")
+        .and_then(Value::as_u64)
+        .map_or("?".to_string(), |w| w.to_string());
+    let mut text = format!(
+        "Made a new song, \"{}\", in window {window}. Undo step: \"{}\".",
+        shown(result.get("title"), "Untitled"),
+        shown(result.get("undo_label"), "?"),
+    );
+    text.push_str("\nTracks:");
+    for t in rows(result, "tracks").iter().take(MAX_SHOWN) {
+        text.push_str(&format!(
+            "\n- {}: {}",
+            shown(t.get("name"), "?"),
+            shown(t.get("plays"), "?")
+        ));
+    }
+    text.push_str("\nBuses:");
+    for b in rows(result, "buses").iter().take(MAX_SHOWN) {
+        let effects: Vec<String> = rows(b, "effects")
+            .iter()
+            .take(MAX_SHOWN)
+            .map(|e| shown(Some(e), "?"))
+            .collect();
+        text.push_str(&format!(
+            "\n- {}: {}",
+            shown(b.get("name"), "?"),
+            joined(&effects, rows(b, "effects").len())
+        ));
+    }
+    for l in rows(result, "lines").iter().take(MAX_SHOWN) {
+        text.push('\n');
+        text.push_str(&safe(l.as_str().unwrap_or("?"), MAX_LINE_SHOWN, true));
+    }
+    text
+}
+
+/// Ruling 7: `read_midi_notes`' text, from `co_producer.midi_notes`'
+/// result: a header, then the notes as `start:pitch:length:velocity`,
+/// [`NOTES_PER_LINE`] to a line.
+pub fn notes_answer(result: &Value) -> String {
+    let notes: Vec<String> = rows(result, "notes")
+        .iter()
+        .take(MAX_CURVE)
+        .map(|n| {
+            let part = |i: usize| {
+                n.get(i)
+                    .and_then(Value::as_u64)
+                    .map_or("?".to_string(), |v| v.to_string())
+            };
+            format!("{}:{}:{}:{}", part(0), part(1), part(2), part(3))
+        })
+        .collect();
+    let lane = result
+        .get("lane")
+        .and_then(Value::as_u64)
+        .map_or("?".to_string(), |l| l.to_string());
+    let mut text = format!(
+        "Track {lane}, {}: {} notes (start:pitch:length:velocity, 15360 ticks per quarter note):",
+        shown(result.get("name"), "?"),
+        notes.len()
+    );
+    for line in notes.chunks(NOTES_PER_LINE) {
+        text.push('\n');
+        text.push_str(&line.join(" "));
+    }
+    if result.get("truncated").and_then(Value::as_bool) == Some(true) {
+        text.push_str("\n- and more; read a shorter range");
+    }
+    text
+}
+
+/// A value and its unit, as the text shows them.
+fn with_unit(v: f64, unit: &str) -> String {
+    if unit.is_empty() {
+        number(v)
+    } else {
+        format!("{} {unit}", number(v))
+    }
+}
+
+/// Ruling 7: `preview_automation`'s text and `structuredContent`, from
+/// `co_producer.automation`'s result (`current`, to which the caller adds
+/// the `start` and `end` it asked for) and the planned points. Both
+/// curves keep at most 4096 points, with finite values only.
+pub fn automation_answer(current: &Value, planned: &[(u64, f64)]) -> (String, Value) {
+    let name = shown(current.get("target_name"), "?");
+    let unit = safe(str_of(current, "unit"), 32, false);
+    let bar = |k: &str| {
+        current
+            .get(k)
+            .and_then(Value::as_u64)
+            .map_or("?".to_string(), |b| b.to_string())
+    };
+    let existing: Vec<Value> = rows(current, "points")
+        .iter()
+        .filter_map(|p| {
+            let tick = p.get(0).and_then(Value::as_u64)?;
+            let value = p.get(1).and_then(Value::as_f64).filter(|v| v.is_finite())?;
+            Some(json!([tick, value]))
+        })
+        .take(MAX_CURVE)
+        .collect();
+    let plan: Vec<Value> = planned
+        .iter()
+        .filter(|(_, v)| v.is_finite())
+        .take(MAX_CURVE)
+        .map(|(t, v)| json!([t, v]))
+        .collect();
+    let mut text = format!(
+        "{name}, bars {}\u{2013}{}: now {} points, planned {} points.",
+        bar("start_bar"),
+        bar("end_bar"),
+        existing.len(),
+        planned.len()
+    );
+    if current.get("truncated").and_then(Value::as_bool) == Some(true) {
+        text.push_str(&format!(
+            " The curve there now is truncated: only its first {} points are shown.",
+            existing.len()
+        ));
+    }
+    text.push_str("\nPlanned:");
+    if planned.is_empty() {
+        text.push_str("\n- none: the range is cleared");
+    }
+    for (t, v) in planned.iter().take(MAX_LISTED) {
+        text.push_str(&format!("\n- tick {t}: {}", with_unit(*v, &unit)));
+    }
+    if planned.len() > MAX_LISTED {
+        text.push_str(&format!("\n- and {} more", planned.len() - MAX_LISTED));
+    }
+    let structured = json!({
+        "view": "automation",
+        "target_name": name,
+        "unit": unit,
+        "min": finite(current.get("min")),
+        "max": finite(current.get("max")),
+        "start": current.get("start").cloned().filter(Value::is_u64).unwrap_or(Value::Null),
+        "end": current.get("end").cloned().filter(Value::is_u64).unwrap_or(Value::Null),
+        "existing": existing,
+        "planned": plan,
+    });
+    (text, structured)
+}
+
 /// The resources: a state resource per target, and the command list.
 pub fn resources_json() -> Vec<Value> {
     let mut out: Vec<Value> = STATE_TARGETS
@@ -1360,6 +1852,28 @@ mod tests {
         assert_eq!(item_lines(&items), vec!["- A - B: kept: x y ", "- ?: ?"]);
         let long = vec![json!({"thing": "t".repeat(70_000), "change": "c"})];
         assert_eq!(item_lines(&long)[0].chars().count(), 2 + MAX_ITEM_PART + 3);
+    }
+
+    #[test]
+    fn plans_name_listed_commands_only() {
+        let list = list_json();
+        let plan = |id: &str| json!([{"id": id}]);
+        for id in [
+            "edit.undo",
+            "track.rename",
+            "track.delete",
+            "mixer.add_insert",
+            "mixer.set_colour",
+            "mixer.set_param",
+            "modify.transpose_notes",
+            "automation.write",
+        ] {
+            assert_eq!(listed(&list, &plan(id)), Ok(()), "{id}");
+        }
+        for id in ["midi.add_notes", "nope", "a\u{202E}b"] {
+            let e = listed(&list, &plan(id)).unwrap_err();
+            assert!(!e.contains('\u{202E}'), "{e}");
+        }
     }
 
     #[test]

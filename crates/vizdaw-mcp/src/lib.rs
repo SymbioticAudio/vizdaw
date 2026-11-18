@@ -18,6 +18,7 @@
 
 pub mod app;
 pub mod base64;
+pub mod recipes;
 pub mod rpc;
 pub mod tools;
 pub mod views;
@@ -395,6 +396,8 @@ impl Server {
                 (Kind::Cacheable, json!({ "resources": resources }))
             }
             "resources/templates/list" => (Kind::Cacheable, json!({ "resourceTemplates": [] })),
+            "prompts/list" => (Kind::Cacheable, recipes::prompts_list()),
+            "prompts/get" => (Kind::Cacheable, recipes::prompt_get(params)?),
             "resources/read" => (Kind::Cacheable, self.read_resource(params)?),
             _ => {
                 return Err(RpcError::new(
@@ -464,6 +467,15 @@ impl Server {
             tools::LIST_PLUGINS => done(self.list_plugins(args)),
             tools::PLUGIN_PARAMS => done(self.plugin_params(args)),
             tools::SCREENSHOT => done(self.screenshot(args)),
+            tools::STARTER_PROJECT => done(self.starter_project(args)),
+            tools::READ_MIDI_NOTES => done(self.read_midi_notes(args)),
+            tools::PREVIEW_AUTOMATION => done(self.preview_automation(args, views)),
+            tools::RECIPES => done(
+                match tools::recipe_name(args).and_then(recipes::recipes_answer) {
+                    Ok(t) => tool_text(t, false),
+                    Err(m) => tool_error(m),
+                },
+            ),
             tools::CHANGE => match self.change(id, era, params, args, views) {
                 Done::Result(v) => done(v),
                 ask => Ok(ask),
@@ -490,7 +502,9 @@ impl Server {
         args: &Map<String, Value>,
         views: bool,
     ) -> Done {
-        let a = match tools::change_args(args, false) {
+        let a = match tools::change_args(args, false)
+            .and_then(|a| tools::listed(&self.commands, &a.commands).map(|()| a))
+        {
             Ok(a) => a,
             Err(m) => return Done::Result(tool_error(m)),
         };
@@ -598,7 +612,9 @@ impl Server {
     /// The fallback's second half: a token `change` gave the model in this
     /// conversation, used once.
     fn apply_change(&mut self, args: &Map<String, Value>) -> Value {
-        let a = match tools::change_args(args, true) {
+        let a = match tools::change_args(args, true)
+            .and_then(|a| tools::listed(&self.commands, &a.commands).map(|()| a))
+        {
             Ok(a) => a,
             Err(m) => return tool_error(m),
         };
@@ -946,6 +962,51 @@ impl Server {
         }
     }
 
+    /// Plan 8e Ruling 7: a new song from a starter spec, checked here
+    /// first so a bad spec opens nothing.
+    fn starter_project(&mut self, args: &Map<String, Value>) -> Value {
+        let params = match tools::starter_params(args) {
+            Ok(p) => p,
+            Err(m) => return tool_error(m),
+        };
+        match self.app.call("co_producer.starter", params) {
+            Ok(r) => tool_text(tools::starter_answer(&r), false),
+            Err(e) => self.failed(&e),
+        }
+    }
+
+    /// Plan 8e Ruling 7: a track's notes, read only.
+    fn read_midi_notes(&mut self, args: &Map<String, Value>) -> Value {
+        let params = match tools::midi_notes_params(args) {
+            Ok(p) => p,
+            Err(m) => return tool_error(m),
+        };
+        match self.app.call("co_producer.midi_notes", params) {
+            Ok(r) => tool_text(tools::notes_answer(&r), false),
+            Err(e) => self.failed(&e),
+        }
+    }
+
+    /// Plan 8e Ruling 7: the planned curve, checked here, over the one
+    /// there now.
+    fn preview_automation(&mut self, args: &Map<String, Value>, views: bool) -> Value {
+        let (params, planned) = match tools::automation_params(args) {
+            Ok(p) => p,
+            Err(m) => return tool_error(m),
+        };
+        let mut current = match self.app.call("co_producer.automation", params.clone()) {
+            Ok(r) => r,
+            Err(e) => return self.failed(&e),
+        };
+        if let Some(o) = current.as_object_mut() {
+            for k in ["start", "end"] {
+                o.insert(k.into(), params.get(k).cloned().unwrap_or(Value::Null));
+            }
+        }
+        let (text, structured) = tools::automation_answer(&current, &planned);
+        with_view(tool_text(text, false), views.then_some(structured))
+    }
+
     fn screenshot(&mut self, args: &Map<String, Value>) -> Value {
         let mut params = Map::new();
         for (k, v) in args {
@@ -1058,10 +1119,11 @@ fn random_hex(n: usize) -> Option<String> {
 /// The server's capabilities; with the MCP Apps extension when the
 /// client asked for views.
 fn capabilities(views: bool) -> Value {
+    let prompts = json!({ "listChanged": false });
     if views {
-        json!({ "tools": {}, "resources": {}, "extensions": { views::EXTENSION: {} } })
+        json!({ "tools": {}, "resources": {}, "prompts": prompts, "extensions": { views::EXTENSION: {} } })
     } else {
-        json!({ "tools": {}, "resources": {} })
+        json!({ "tools": {}, "resources": {}, "prompts": prompts })
     }
 }
 
