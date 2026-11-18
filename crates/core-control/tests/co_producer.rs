@@ -2601,6 +2601,9 @@ fn creative_changes_only_through_a_preview() {
         ),
         Ok(())
     );
+    // A new song's first sequence is 0.
+    let main = json!([{"id": "automation.write", "params": with(&fade(), "seq", json!(0))}]);
+    assert_eq!(preview(main), Ok(()));
     // Every target form, and an empty list that clears the range.
     for target in [
         "fader:3",
@@ -2625,7 +2628,6 @@ fn creative_commands_refuse_hostile_input() {
     let mut cases = vec![];
     for seq in [
         Value::Null,
-        json!(0),
         json!(-1),
         json!("2"),
         json!(1u64 << 53),
@@ -2733,6 +2735,12 @@ fn starter_and_reads_only_on_the_co_producer_socket() {
             "co_producer.automation",
             json!({"seq": 1, "target": "param:9:4", "start": 0, "end": 1, "window": 3}),
         ),
+        // A new song's first sequence and track are 0.
+        ("co_producer.midi_notes", json!({"seq": 0, "lane": 0})),
+        (
+            "co_producer.automation",
+            json!({"seq": 0, "target": "fader:0", "start": 0, "end": 1}),
+        ),
     ]);
     for (cmd, params) in admitted {
         assert_eq!(gate(cmd, params.clone()), Ok(()), "{cmd} {params}");
@@ -2794,8 +2802,14 @@ fn reads_refuse_hostile_input() {
         ),
         ("co_producer.midi_notes", json!({"lane": 2})),
         ("co_producer.midi_notes", json!({"seq": 1})),
-        ("co_producer.midi_notes", json!({"seq": 0, "lane": 2})),
-        ("co_producer.midi_notes", json!({"seq": 1, "lane": 0})),
+        ("co_producer.midi_notes", json!({"seq": -1, "lane": 2})),
+        ("co_producer.midi_notes", json!({"seq": 1, "lane": -1})),
+        ("co_producer.midi_notes", json!({"seq": "2", "lane": 2})),
+        ("co_producer.midi_notes", json!({"seq": 1, "lane": "2"})),
+        (
+            "co_producer.midi_notes",
+            json!({"seq": 1u64 << 53, "lane": 2}),
+        ),
         ("co_producer.midi_notes", json!({"seq": "1", "lane": 2})),
         ("co_producer.midi_notes", json!({"seq": 1, "lane": -2})),
         (
@@ -2844,7 +2858,15 @@ fn reads_refuse_hostile_input() {
         ),
         (
             "co_producer.automation",
-            json!({"seq": 0, "target": "fader:3", "start": 0, "end": 10}),
+            json!({"seq": -1, "target": "fader:3", "start": 0, "end": 10}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": "2", "target": "fader:3", "start": 0, "end": 10}),
+        ),
+        (
+            "co_producer.automation",
+            json!({"seq": 1u64 << 53, "target": "fader:3", "start": 0, "end": 10}),
         ),
         (
             "co_producer.automation",

@@ -2193,7 +2193,16 @@ const INJECT_PARAMS: &[ParamSpec] = &[
 
 /// `automation.write` (plan 8e Ruling 1).
 const AUTOMATION_WRITE_PARAMS: &[ParamSpec] = &[
-    mixer_id("seq", "The sequence (a top-level one)."),
+    // A new song's first sequence is 0.
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: MAX_EXACT_ID,
+        },
+        required: true,
+        help: "The sequence (a top-level one).",
+    },
     ParamSpec {
         name: "target",
         kind: ParamKind::Text,

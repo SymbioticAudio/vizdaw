@@ -576,9 +576,9 @@ pub enum ControlRequest {
     },
     /// `co_producer.midi_notes` (plan 8e Ruling 3): a track's notes.
     CoProducerMidiNotes {
-        /// The sequence, already checked: at least 1.
+        /// The sequence, already checked: 0 or more.
         seq: u64,
-        /// The track, already checked: at least 1.
+        /// The track, already checked: 0 or more.
         lane: u64,
         /// The first tick, given with `end` or not at all.
         start: Option<u64>,
@@ -589,7 +589,7 @@ pub enum ControlRequest {
     },
     /// `co_producer.automation` (plan 8e Ruling 7): a target's automation.
     CoProducerAutomation {
-        /// The sequence, already checked: at least 1.
+        /// The sequence, already checked: 0 or more.
         seq: u64,
         /// The target, already checked against `automation.gesture`'s
         /// grammar.

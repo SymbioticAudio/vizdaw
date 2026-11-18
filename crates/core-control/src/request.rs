@@ -747,8 +747,9 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
         }
         "co_producer.midi_notes" => {
             p.only(&["seq", "lane", "start", "end", "window"])?;
-            let seq = p.int("seq", 1, registry::MAX_EXACT_ID)? as u64;
-            let lane = p.int("lane", 1, registry::MAX_EXACT_ID)? as u64;
+            // A new song's first sequence and track are 0.
+            let seq = p.int("seq", 0, registry::MAX_EXACT_ID)? as u64;
+            let lane = p.int("lane", 0, registry::MAX_EXACT_ID)? as u64;
             let range = match (
                 p.opt_int("start", 0, TICK_MAX)?,
                 p.opt_int("end", 0, TICK_MAX)?,
@@ -767,7 +768,7 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
         }
         "co_producer.automation" => {
             p.only(&["seq", "target", "start", "end", "window"])?;
-            let seq = p.int("seq", 1, registry::MAX_EXACT_ID)? as u64;
+            let seq = p.int("seq", 0, registry::MAX_EXACT_ID)? as u64;
             let target = p.str("target", MAX_STRING)?;
             registry::automation_target(&target).map_err(|m| p.error(format!("`target` {m}")))?;
             let start = p.int("start", 0, TICK_MAX)?;

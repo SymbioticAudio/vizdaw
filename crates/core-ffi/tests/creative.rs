@@ -1078,7 +1078,6 @@ fn run_creative_refuses_hostile_input() {
             },
         ),
         with("seq", int("seq", i64::MAX)),
-        with("seq", int("seq", 0)),
         with("seq", text("seq", "1")),
         with("target", text("target", &long)),
         with("target", text("target", "fader:1\0")),
@@ -1176,4 +1175,85 @@ fn creative_results_json() {
             "points": [[0, -6.0], [61440, 0.0]], "truncated": false,
         })
     );
+}
+
+#[test]
+fn solo_automation_always_asks() {
+    if !in_temp_home("solo_automation_always_asks") {
+        return;
+    }
+    let _g = serial();
+    let t = song();
+    let s = &t.s;
+    s.co_producer_begin("solo the drums".into()).unwrap();
+    // On Co-Producer's own bus too: a solo silences the composer's tracks.
+    let p = s
+        .co_producer_preview(vec![planned(
+            "automation.write",
+            write(t.seq, &format!("solo:{}", t.drums), "0:1 61440:0"),
+        )])
+        .unwrap();
+    assert!(p.needs_yes, "{p:?}");
+    assert!(
+        items(&p).contains(&(
+            "Strip Drums (Co-Producer)".into(),
+            "soloed: other tracks are silent while it's on".into(),
+            true
+        )),
+        "{p:?}"
+    );
+    assert!(
+        items(&p)
+            .iter()
+            .any(|(thing, change, yes)| thing == "Strip Drums (Co-Producer)"
+                && change.starts_with("solo automation")
+                && *yes),
+        "{p:?}"
+    );
+    // A fader write on the same bus stays free.
+    let p = s
+        .co_producer_preview(vec![planned(
+            "automation.write",
+            write(t.seq, &format!("fader:{}", t.drums), "0:-6"),
+        )])
+        .unwrap();
+    assert!(!p.needs_yes, "{p:?}");
+    s.co_producer_end().unwrap();
+    t.s.close().unwrap();
+}
+
+#[test]
+fn automation_writes_in_a_new_songs_first_sequence() {
+    if !in_temp_home("automation_writes_in_a_new_songs_first_sequence") {
+        return;
+    }
+    let _g = serial();
+    let s = Session::new_empty().unwrap();
+    let seq = s.snapshot().unwrap().sequences[0].id;
+    assert_eq!(seq, 0, "a new song's first sequence is 0");
+    let lane = track(&s, seq, TrackKindRow::Midi, "Keys");
+    let master = strips(&s)
+        .into_iter()
+        .find(|x| x.kind == StripKindRow::Master)
+        .unwrap()
+        .id;
+    let fader = format!("fader:{master}");
+    // Through a preview and the composer's yes, as the app applies it.
+    s.co_producer_begin("fade out".into()).unwrap();
+    let plan = vec![planned(
+        "automation.write",
+        write(seq, &fader, "0:0 61440:-144"),
+    )];
+    let p = s.co_producer_preview(plan.clone()).unwrap();
+    assert!(p.needs_yes, "{p:?}");
+    take_and_run(&s, p.token, &plan).unwrap();
+    s.co_producer_end().unwrap();
+    let c = s.co_producer_automation(seq, fader, 0, BAR).unwrap();
+    let ticks: Vec<u64> = c.points.iter().map(|p| p.tick).collect();
+    assert_eq!(ticks, vec![0, BAR]);
+    assert_eq!(c.points[1].value, -144.0);
+    // The first track's notes read too.
+    let row = s.co_producer_midi_notes(seq, lane, None, None).unwrap();
+    assert!(row.notes.is_empty());
+    s.close().unwrap();
 }

@@ -472,10 +472,38 @@ pub fn preview_items(
                     h.execute(cmd, &filter)?;
                 }
                 let lookup = param_lookup(host);
-                out.extend(mixer_rows(
-                    diff::describe_with(&before, h.doc(), &lookup),
-                    false,
-                ));
+                // A solo target asks on any strip, as every solo change
+                // does (plan 8d): a solo silences every strip outside its
+                // reach, the composer's tracks included.
+                let soloed: Vec<String> = cmds
+                    .iter()
+                    .filter_map(|c| match c {
+                        core_model::command::Command::WriteAutomation(w) => match w.target {
+                            core_model::automation::AutomationTarget::StripSolo(strip) => before
+                                .mixer()
+                                .strip(strip)
+                                .ok()
+                                .map(|s| format!("Strip {}", diff::shown_name(&s.name))),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                out.extend(
+                    mixer_rows(diff::describe_with(&before, h.doc(), &lookup), false).map(
+                        |mut r| {
+                            if soloed.contains(&r.thing) {
+                                r.composers_work = true;
+                            }
+                            r
+                        },
+                    ),
+                );
+                out.extend(soloed.into_iter().map(|thing| ChangeItemRow {
+                    thing,
+                    change: "soloed: other tracks are silent while it's on".into(),
+                    composers_work: true,
+                }));
             }
             "edit.undo" | "edit.redo" => {
                 let undo = p.id == "edit.undo";
