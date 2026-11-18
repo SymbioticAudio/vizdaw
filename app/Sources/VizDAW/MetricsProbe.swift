@@ -53,7 +53,10 @@ enum MetricsProbe {
         timer = t
         // Only that input happened; the event goes on unchanged.
         monitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+            matching: [
+                .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel,
+                .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+            ]
         ) { e in
             MainActor.assumeIsolated { ticker.input(at: now().ms) }
             return e

@@ -1879,6 +1879,11 @@ fn time_seconds(row: &Value) -> Option<[u64; 5]> {
     Some(out)
 }
 
+/// The five categories' total, saturating: the app's numbers are hostile input.
+fn sum_seconds(secs: &[u64; 5]) -> u64 {
+    secs.iter().fold(0, |a, v| a.saturating_add(*v))
+}
+
 /// `[[label, n], ...]` as safe labels with counts.
 fn time_pairs(v: &Value) -> Option<Vec<(String, u64)>> {
     v.as_array()?
@@ -1970,7 +1975,7 @@ pub fn time_parts(result: &Value) -> Option<(String, Value)> {
     };
     text.push_str(&format!(
         "\nAll songs: {} \u{2014} {}.",
-        duration_text(all_seconds.iter().sum()),
+        duration_text(sum_seconds(&all_seconds)),
         parts(&all_seconds)
     ));
     text.push_str(&format!(
@@ -1995,7 +2000,7 @@ pub fn time_parts(result: &Value) -> Option<(String, Value)> {
         text.push_str(&format!(
             "\n- {name}{}: {} \u{2014} {used}; {}; {hunts} long menu hunts",
             if *this { " (this song)" } else { "" },
-            duration_text(secs.iter().sum()),
+            duration_text(sum_seconds(secs)),
             bursts_text(*bursts),
         ));
     }
@@ -2026,6 +2031,20 @@ pub fn time_answer(result: &Value) -> String {
 mod tests {
     use super::*;
     use core_control::co_producer::list_json;
+
+    #[test]
+    fn time_sums_saturate_near_u64_max() {
+        assert_eq!(sum_seconds(&[u64::MAX, u64::MAX, 1, 2, 3]), u64::MAX);
+        assert_eq!(sum_seconds(&[u64::MAX - 1, 1, 0, 0, 0]), u64::MAX);
+        let row = |v: u64| {
+            json!({"seconds": {"composing": v, "recording": v, "editing": v, "mixing": v, "other": v},
+            "undo_bursts": 0, "hunts": 0, "repeats": [], "hunt_ends": []})
+        };
+        let result = json!({"on": true, "since": "2026-11-01", "days": null, "all": row(u64::MAX),
+            "songs": [{"name": "A", "this_song": true, "seconds": row(u64::MAX)["seconds"],
+            "undo_bursts": 0, "hunts": 0, "repeats": [], "hunt_ends": []}], "more_songs": 0});
+        assert!(time_parts(&result).is_some());
+    }
 
     #[test]
     fn every_param_kind_has_a_schema() {

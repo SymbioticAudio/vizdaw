@@ -22,6 +22,41 @@ public protocol MetricsRecording: AnyObject {
 
 extension MetricsRecorder: MetricsRecording {}
 
+/// One cached "yyyy-MM-dd" formatter, rebuilt when the time zone changes.
+private final class DayFormatterCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cached: DateFormatter?
+    private var observer: NSObjectProtocol?
+
+    init() {
+        observer = NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange, object: nil, queue: nil
+        ) { [weak self] _ in self?.reset() }
+    }
+
+    private func reset() {
+        lock.lock()
+        cached = nil
+        lock.unlock()
+    }
+
+    func formatter() -> DateFormatter {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached { return cached }
+        NSTimeZone.resetSystemTimeZone()
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        cached = f
+        return f
+    }
+}
+
+private let dayFormatter = DayFormatterCache()
+
 /// Settings › Co-Producer › Count where my time goes (plan 8f Ruling 1):
 /// off unless the composer turned it on, a preference of this Mac, and
 /// independent of the Co-Producer switch. While off no recorder exists and
@@ -158,11 +193,7 @@ public final class CoProducerMetrics {
     /// The recorder's clock at `date`: wall-clock milliseconds, so a sleep
     /// shows as a gap, and the local day "yyyy-MM-dd".
     public static func clock(_ date: Date) -> MetricsClockRow {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.calendar = Calendar(identifier: .gregorian)
-        f.timeZone = .current
-        f.dateFormat = "yyyy-MM-dd"
+        let f = dayFormatter.formatter()
         let ms = max(date.timeIntervalSince1970, 0) * 1000
         return MetricsClockRow(ms: UInt64(ms), day: f.string(from: date))
     }
