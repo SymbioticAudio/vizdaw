@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Linked fader groups, VCA faders, and a transport bar the user can rearrange, trim and extend with command buttons. The bar always fits on one row, and anything that doesn't fit goes into a » menu.
+**Goal:** Linked fader groups, VCA faders, and a transport bar the user can rearrange, trim and extend with command buttons, and a metronome. The bar always fits on one row, and anything that doesn't fit goes into a » menu.
 
 **Architecture:**
 - **`core-model`.** Groups and VCAs live in the `Mixer`, with their own IDs. A new `groups` module holds the group-move and heard-level arithmetic. A new `command/groups.rs` holds `GroupCmd`. The format goes to VERSION 11.
@@ -12,11 +12,12 @@
   - the gesture path does the same, through a new child module `session/groups.rs`.
 
   So the mouse, surfaces, the channel, automation writing and Co-Producer all follow it.
+- **Metronome.** The renderer plays the count-in's click on every beat while the transport plays (or only while recording), from a beat grid built off the audio thread with the schedule. Its settings are saved per project. Bounces and exports never contain it.
 - **Swift.** The mixer gets group tags, a VCA section, VCA offset readouts and a Mixer menu. The transport bar becomes a list of items, laid out on one row by an AppKit container driven by a pure fit function. A customize sheet edits that list, and the list is saved in preferences.
 
 **Tech Stack:** Rust 2024 (workspace, UniFFI 0.32.2), Swift 6.1 / SwiftUI + AppKit (macOS 14+), Swift Testing. No new third-party dependency.
 
-**Spec:** `docs/superpowers/specs/2026-11-18-groups-vcas-transport-design.md`, approved by the owner, is binding. That includes its "Settled after the builder check" section (§2a). The owner added on 2026-11-18 that the transport bar is always one row, with a » overflow (spec §5 "Room"). The Co-Producer gate follows the rules of plan 8d (`docs/superpowers/plans/2026-11-16-co-producer-8d.md`): Ruling 1's command shape and Ruling 2's "the strip decides". Executors read both documents.
+**Spec:** `docs/superpowers/specs/2026-11-18-groups-vcas-transport-design.md`, approved by the owner, is binding. That includes its "Settled after the builder check" section (§2a). The owner added on 2026-11-18 that the transport bar is always one row, with a » overflow (spec §5 "Room"). The Co-Producer gate follows the rules of plan 8d (`docs/superpowers/plans/2026-11-16-co-producer-8d.md`): Ruling 1's command shape and Ruling 2's "the strip decides". The owner also said yes to a metronome in 26.0.0 (2026-11-18). The controller's calls on it are Ruling 19, binding as the spec is. Executors read both documents.
 
 ## Global Constraints
 
@@ -26,10 +27,11 @@
   - In 26.0.0 Co-Producer never writes MIDI notes, on any track, its own included (owner, 2026-11-16).
   - Changing or deleting the composer's work, routing or sound needs an approval-sheet yes.
   - A Co-Producer bus's own send going to −∞, or being retargeted, needs no yes (owner, 2026-11-18).
+- The metronome is never rendered into a bounce, a stem, an export or an offline file render (owner, 2026-11-18; Task 10's `clicks_never_reach_a_bounce`).
 - Programmatic and control-channel calls never open dialogs. The only exceptions are the import's new-project window, Co-Producer's approval sheet (only for a pending request) and the starter project's one new song window. A transport command button is a user click (spec §5), not a programmatic call.
 - New commands get hostile-input tests. New FFI goes inside `ffi_guard`. Every new UniFFI record field gets `#[uniffi(default)]`, so Swift fakes keep building.
 - Audio thread: no allocation and no lock in anything marked `// RT`. Two kinds of test guard this:
-  - the counting-allocator tests (`crates/core-engine/tests/rt_alloc_*.rs`, armed around `OfflineBackend::block`), extended in Tasks 4 and 6;
+  - the counting-allocator tests (`crates/core-engine/tests/rt_alloc_*.rs`, armed around `OfflineBackend::block`), extended in Tasks 4, 6 and 10;
   - Task 4's source scan `controls_take_no_lock`.
 - Swift: build and test only through `scripts/swift.sh`, `scripts/build-ffi.sh` and `scripts/make-app.sh`. Swift 6.1 rules:
   - no `weak self` or non-Sendable values inside `MainActor.assumeIsolated`;
@@ -61,8 +63,8 @@
 1. **A group drag past the top and back must keep the balance.** A member at +10 stops a +6 move at +2. Dragging back down must land every member where it started, not where the stop left it, because the move is measured from the bases taken at touch. (Task 2: `a_group_drag_past_the_top_and_back_keeps_the_balance`.)
 2. **A member another hand holds stays with that hand.** Take a group member whose fader is held on a control surface. Dragging another member with the mouse must not move it or double-move it. When the surface lets go, the member must not jump. (Task 2: `a_member_held_by_another_hand_is_not_moved`.)
 3. **Deleting a track whose strip is a member is one undo step, and Undo brings the membership back.** That covers the last member of a VCA too: the VCA stays, empty, and Undo puts the strip back in it. (Task 5: `deleting_a_member_strip_is_one_step_and_undo_restores_membership`.)
-4. **A damaged or newer transport preference must not cost the user their bar.** Garbage JSON, or a layout version this build does not know, shows the default bar. It must not crash, and it must not overwrite the stored preference until the user changes the bar. (Task 9: `aDamagedPreferenceGivesTheDefaultAndIsKept`.)
-5. **The mixer window at 300 pt shows the play cluster and », and every other item is in ».** Widening the window brings them back in order, and none is lost on the way. (Task 9: `theMixerWindowRowAt300KeepsEverything`.)
+4. **A damaged or newer transport preference must not cost the user their bar.** Garbage JSON, or a layout version this build does not know, shows the default bar. It must not crash, and it must not overwrite the stored preference until the user changes the bar. (Task 11: `aDamagedPreferenceGivesTheDefaultAndIsKept`.)
+5. **The mixer window at 300 pt shows the play cluster and », and every other item is in ».** Widening the window brings them back in order, and none is lost on the way. (Task 11: `theMixerWindowRowAt300KeepsEverything`.)
 
 ## Plan Rulings
 
@@ -104,10 +106,10 @@ These are this plan's decisions where the spec leaves a choice. Each one names i
 11. **An absent `strips` is always empty.** The Mixer menu and the key path pass the selection explicitly (`KeyDispatch` fills `strips` for `mixer.new_group` and `mixer.new_vca`). So no channel or Co-Producer call ever acts on the composer's selection.
 12. **The Mixer menu.** A new `CommandMenu("Mixer")` holds **Group**, **Ungroup**, **New VCA**, **Assign to VCA ›** (each VCA, then "New VCA") and **Remove from VCA ›**. None has a default shortcut.
 13. **Transport items.**
-    - **Click** is not an item, because VizDAW has no metronome outside count-in. A backlog row covers it.
+    - **Click** is a toggle item (`transport.click`), in the default, just after Loop. A right-click on it, or its ⌄, opens a menu: **Level ›** (0, −3, −6, −12, −18, −24, −36, −48 and −60 dB, the current one checked) and **Mode ›** (Play and Record, Record Only). Folded into », it is an action with a check, plus those two submenus.
     - **Count-in** is a toggle item (`RecordModel.toggleCountIn`). It is not in the default.
     - **The fixed cluster** is Return to Start, Rewind, Fast Forward, Play/Stop (one button, as today) and Record, with Record's counting-in, pass and time-left readouts.
-    - **The default** is today's bar, with Loop just after the cluster (cost: Loop sits after Record instead of before it).
+    - **The default** is today's bar, with Loop just after the cluster and Click after Loop (cost: Loop sits after Record instead of before it).
     - **DSP load** is an item, not in the default. It polls `session.levels()` through the document's `MixerModel` at most 4 times a second while shown.
     - **The faults button, the main-view tabs and the pane toggles** are document-window items. The mixer window skips them: they are neither shown nor listed in ».
 14. **The one-row container** is AppKit: `TransportRowView` in `VizDAWEditors`, driven by `TransportRowFit`.
@@ -124,9 +126,18 @@ These are this plan's decisions where the spec leaves a choice. Each one names i
     - `ui.set_transport_bar {items}` and `ui.reset_transport_bar` are the channel's way to change the bar.
     - All three are Refused to Co-Producer (app-wide preferences).
 
-## Commands added (registry 217 → 234)
+19. **The metronome** (the controller's calls, 2026-11-18).
+    - **Sound and path.** It is `count_in.rs`'s click: the same shape (`CLICK_SECONDS`, `DECAY_SECONDS`), and the same accent, which is both higher pitch and louder (`ACCENT_HZ` at `ACCENT_LEVEL` against `BEAT_HZ` at `BEAT_LEVEL`). It is added to channels 0–1 of the device output at the count-in's place in `render.rs` (~1387), before `clamp_master`, and delayed by the graph latency as the count-in's clicks are. The click level in dB scales both peaks.
+    - **When.** Every beat while the transport plays in `play_and_record`, or only while a record pass runs (from its roll, pre-roll included) in `record_only`. A count-in keeps its own clicks and its own setting; the metronome takes over at the roll, without a doubled click on the downbeat.
+    - **Beats.** They follow the tempo map, ramps included, and the meter map. A beat is the meter's denominator note. The first beat of each bar is accented. Each beat starts on the exact frame `TempoTable::tick_to_frame` gives its tick.
+    - **Settings.** They are `Settings.click: ClickSettings { on: false, level_db: -6.0, mode: PlayAndRecord }`, saved per project and skipped when default. They fit under Task 1's VERSION 11 (its migration doc names `click`). Each change is one undo step ("Click On", "Click Off", "Click Level", "Click Mode") and marks the song unsaved, as other project settings do.
+    - **Never rendered.** Only the live engine's renderer gets a metronome (`Engine::set_click`). The bounce and every export build their renderer without one, so there is nothing to turn off.
+    - **Co-Producer** is Refused all three commands (they change the composer's monitoring, not the song).
+    - **Cost if wrong:** a listener who wants clicks in a bounce records them some other way; a backlog row covers it.
 
-All are `key_only` unless marked (menu), `document: true` except the `ui.*` three, menu "Mixer" or "View". IDs are `mixer_id`s (1 to `MAX_EXACT_ID`). `strips` is Text through `co_producer::id_list` (1–64 IDs). Levels are Text through `registry::decimal` (−144..12). Colours are `GROUP_COLOURS`, the eight swatch names without `none`.
+## Commands added (registry 217 → 237)
+
+All are `key_only` unless marked (menu), `document: true` except the `ui.*` three, menu "Mixer", "Transport" or "View". IDs are `mixer_id`s (1 to `MAX_EXACT_ID`). `strips` is Text through `co_producer::id_list` (1–64 IDs). Levels are Text through `registry::decimal` (−144..12). Colours are `GROUP_COLOURS`, the eight swatch names without `none`.
 
 | id | params | class | title |
 |---|---|---|---|
@@ -144,7 +155,10 @@ All are `key_only` unless marked (menu), `document: true` except the `ui.*` thre
 | `mixer.unassign_vca` | `vca`, `strips` | change | "Remove from VCA" |
 | `mixer.set_vca` | `vca`; `gain_db?`, `mute?`, `solo?`, `mode?` (Choice `off read touch latch`); at least one | change | "Set VCA" |
 | `mixer.delete_vca` | `vca` | remove | "Delete VCA" |
-| `ui.set_transport_bar` | `items` (Text, Task 9's grammar) | refused | "Set Transport Bar" |
+| `transport.click` (menu "Transport") | `on?` (Flag; absent toggles) | refused | "Click" |
+| `transport.set_click_level` | `level_db` (Text through `registry::decimal`, −60..0) | refused | "Click Level" |
+| `transport.set_click_mode` | `mode` (Choice `play_and_record record_only`) | refused | "Click Mode" |
+| `ui.set_transport_bar` | `items` (Text, Task 11's grammar) | refused | "Set Transport Bar" |
 | `ui.reset_transport_bar` | none | refused | "Reset Transport Bar" |
 | `ui.customize_transport` (menu "View") | none; `DialogSpec` "Customize Transport Bar", always | refused | "Customize Transport Bar…" |
 
@@ -156,13 +170,13 @@ Existing commands gain:
 
 ## Not in this plan
 
-These are backlog rows, added in Task 12:
+These are backlog rows, added in Task 13:
 - nested VCAs, spill, and group modes beyond the one (spec non-goals);
 - per-project transport layouts;
 - VCAs on control surfaces;
 - VCA Write and Trim modes;
 - per-member VCA lane alignment;
-- a Click item once VizDAW has a metronome;
+- a metronome in bounces (Ruling 19), its own sound, and a separate output for it;
 - command buttons for Co-Producer recipes;
 - the Record ⌄ popover rethink (backlog row 93's second half).
 
@@ -673,7 +687,88 @@ These are backlog rows, added in Task 12:
 - [ ] **Step 4: Run** `scripts/swift.sh test` and `scripts/make-app.sh`. Expected: PASS.
 - [ ] **Step 5: End-of-task checks. Commit** `feat(app): group tags, the VCA section and offsets, and the Mixer menu`.
 
-### Task 10: The transport bar as items, on one row with »
+### Task 10: The metronome (`core-model`, `core-engine`, `core-control`, `core-ffi`, Swift commands)
+
+**Files:**
+- Create: `crates/core-engine/src/metronome.rs` (`BeatGrid`, `Metronome`), `crates/core-engine/tests/metronome.rs`, `crates/core-ffi/tests/click.rs`
+- Modify:
+  - `crates/core-model/src/document.rs`: `Settings.click`, with `#[serde(default, skip_serializing_if = "ClickSettings::is_default")]`; `ClickSettings`; `ClickMode`;
+  - `crates/core-model/src/command/settings.rs` (`SettingsCmd::SetClick`);
+  - `crates/core-model/src/file.rs` (the v11 migration doc names `settings.click`);
+  - `crates/core-engine/src/count_in.rs`: `click_sample(k_in_bar, offset, rate, gain) -> f32`, shared with the metronome so the sound is one function;
+  - `crates/core-engine/src/schedule/mod.rs` and `compile.rs` (`Schedule.beats: BeatGrid`, built from the sequence's `MeterMap` and `TempoTable`);
+  - `crates/core-engine/src/render.rs`: the `Metronome` beside `counting` (~1387); a renderer command `SetClick(ClickSpec)`;
+  - `crates/core-engine/src/engine.rs` (`Engine::set_click`);
+  - `crates/core-engine/tests/rt_alloc.rs` and `rt_alloc_record.rs`;
+  - `crates/core-ffi/src/session.rs`, or a child `session/click.rs`: `set_click`; `ClickRow` in the transport snapshot; the host sends `ClickSpec` after every load and change;
+  - `crates/core-control/src/registry.rs`: the three entries after `transport.punch`; count 234; `CLICK_MODES`;
+  - `crates/core-ffi/src/control.rs` (`state.get transport` gains `click: {on, level_db, mode}`);
+  - the count tests in `crates/core-control/tests/{commands,co_producer}.rs`, with all three in `SPEC_REFUSED`;
+  - `app/Sources/VizDAWAppModel/TransportCommands.swift` (the three ids; `enabled`, and `isOn` for `transport.click`);
+  - `app/Sources/VizDAW/AppCommands.swift` (Transport › Click, a toggle);
+  - `app/Tests/VizDAWAppModelTests/FakeSession.swift`.
+
+**Interfaces:**
+- Consumes: `count_in.rs`'s constants; `TempoTable::tick_to_frame` and `frame_to_tick`; `MeterEntry::beat_ticks`.
+- Produces:
+  ```rust
+  // core-model
+  pub enum ClickMode { PlayAndRecord, RecordOnly }               // serde snake_case; default PlayAndRecord
+  pub struct ClickSettings { pub on: bool, pub level_db: f64, pub mode: ClickMode }  // default false, -6.0, PlayAndRecord
+  pub const CLICK_LEVEL_MIN_DB: f64 = -60.0; pub const CLICK_LEVEL_MAX_DB: f64 = 0.0;
+  SettingsCmd::SetClick { click: ClickSettings }   // names "Click On" / "Click Off" (only `on` changed), "Click Level", "Click Mode"
+  // core-engine metronome.rs
+  /// Per meter segment: start tick, end tick, beat ticks, beats per bar. Built off the audio thread.
+  pub struct BeatGrid { segments: Box<[BeatSegment]> }
+  impl BeatGrid { pub fn build(meter: &MeterMap, end: Tick) -> BeatGrid;
+                  /// Each beat starting in frames [from, to), as (frame, accented). // RT
+                  pub fn beats_in(&self, tempo: &TempoTable, from: u64, to: u64, out: &mut impl FnMut(u64, bool)); }
+  #[derive(Clone, Copy)] pub struct ClickSpec { pub on: bool, pub gain: f32, pub record_only: bool }
+  pub struct Metronome { /* ClickSpec, the sounding click's start and accent; Copy */ }
+  impl Metronome { /// Adds this block's clicks to channels 0–1 of `out`. // RT
+                   pub fn render(&mut self, out: &mut [&mut [f32]], grid: &BeatGrid, tempo: &TempoTable,
+                                 run: Option<(u64, u64)>, recording: bool, latency: u64, frames: u32); }
+  impl Engine { pub fn set_click(&mut self, c: ClickSpec); }
+  // core-ffi
+  pub struct ClickRow { pub on: bool, pub level_db: f64, pub mode: ClickModeRow }
+  impl Session { pub fn set_click(&self, click: ClickRow) -> Result<DocSnapshot, VizError>; }
+  ```
+  - **`run`** is the timeline frames this block plays: `None` when stopped or counting in. A loop wrap passes two runs, one after the other, so the first beat after the wrap sounds.
+  - **The beat grid.** `beats_in` walks only the segments overlapping the run's ticks, so it never allocates. A tempo ramp needs nothing special, because each beat's frame comes from its tick.
+  - **Bounces and exports.** `bounce.rs`'s renderer never gets `SetClick`, and nor does any export. The FFI sends `ClickSpec` only to the live engine (Ruling 19).
+
+- [ ] **Step 1: Write the failing tests.**
+  - `crates/core-engine/tests/metronome.rs`, on `OfflineBackend` at 48 kHz with the click on at 0 dB:
+    - `clicks_fall_on_every_beat_across_a_tempo_change`. The song is 120 BPM, a change to 90 BPM at bar 3, and a ramp from 90 to 150 over bars 5–6. The first non-zero sample of each click is at `tempo.tick_to_frame(beat tick) + latency`, exactly, for every beat through bar 8.
+    - `clicks_follow_a_meter_change`. 4/4, then 7/8 at bar 3. The accents fall on each bar's first beat (an `ACCENT_HZ` click at `ACCENT_LEVEL` peak). 7/8 bars click 7 times, on eighth notes.
+    - `the_level_scales_the_click`: −6 dB gives peaks of `ACCENT_LEVEL · 10^(−6/20)`, within 1e−6. Off gives silence.
+    - `record_only_clicks_only_while_recording`: silent while playing; clicking during a record pass's pre-roll and roll.
+    - `the_count_in_hands_over_without_a_double_click`: with a 1-bar count-in and the click on, there is exactly one click at the roll's downbeat.
+    - `a_loop_wrap_clicks_its_first_beat`.
+  - `crates/core-engine/tests/bounce.rs`: `clicks_never_reach_a_bounce`. With the live engine's click on, a bounce of the same document is equal, sample for sample, to a bounce with it off. A live block over the same span is not equal to either.
+  - `rt_alloc.rs`: `the_metronome_never_allocates`. Armed blocks across the tempo ramp, the meter change, a loop wrap, a Locate, a `SetClick` change and a Stop leave `rt_check::count()` unchanged. In `rt_alloc_record.rs`, a record pass in `record_only` does the same.
+  - `rt_source_scan.rs` (Task 4) also scans `metronome.rs`.
+  - `crates/core-ffi/tests/click.rs`:
+    - `click_settings_are_saved_per_project`: a new song has `on: false`, −6 dB and `play_and_record`. After `set_click`, save and reopen, they are kept. A document with default settings writes no `click` key.
+    - `each_click_change_is_one_step`: the undo labels "Click On", "Click Level" and "Click Mode". The song is unsaved after each.
+    - `clicks_never_reach_exports`: with the click on, `file.bounce` (mix and stems) and `file.export_for_daw` write the same audio as with it off.
+    - `click_commands_refuse_hostile_input`, through the registry and the app path. Each of these is `invalid_params` with nothing changed:
+      - `level_db` of `"0.5"`, `"-60.5"`, `"NaN"`, `"1e1"`, `""` and `"-6,0"`;
+      - `mode` of `"always"` and `""`;
+      - `on` of `"yes"` and `1`;
+      - an unknown param.
+
+      `set_click` with `level_db: f64::NAN` or `+inf` is `Err`.
+  - `crates/core-control/tests/commands.rs`: `click_commands_are_registered`. `transport.click` has a menu item, and all three are Refused to Co-Producer.
+  - Swift, in `TransportCommandsTests.swift`:
+    - `clickTogglesAndShowsItsCheck`: `isOn("transport.click")` follows the snapshot, and `run` without `on` flips it;
+    - `clickLevelAndModeReachTheSession`.
+- [ ] **Step 2: Run** `cargo test -p core-engine --test metronome --test bounce --test rt_alloc --test rt_alloc_record`, `cargo test -p core-ffi --test click`, `cargo test -p core-control` and `scripts/swift.sh test --filter TransportCommands`. Expected: FAIL.
+- [ ] **Step 3: Implement** the Interfaces block and Ruling 19. `Counting` and `Metronome` call the same `click_sample`. The metronome's beats are delayed by `latency` as the count-in's are, and a click that starts in one block plays its tail into the next.
+- [ ] **Step 4: Run** `cargo test --workspace`, `cargo test -p core-engine --features rt-check` and `scripts/swift.sh test`. Expected: PASS.
+- [ ] **Step 5: End-of-task checks**, Swift included. **Commit** `feat(transport): a metronome on the count-in's click, saved per project, never in bounces`.
+
+### Task 11: The transport bar as items, on one row with »
 
 **Files:**
 - Create:
@@ -691,21 +786,21 @@ These are backlog rows, added in Task 12:
   - `app/Sources/VizDAW/RecordControls.swift`, split into the cluster's Record part, `replaceOverdub` and `recordOptions`;
   - `app/Sources/VizDAWAppModel/DocumentStore.swift` (`transportLayout: TransportLayoutStore`);
   - `app/Sources/VizDAW/VizDAWApp.swift` (created with `MemoryDefaults.appStore()`);
-  - `crates/core-control/src/registry.rs`: the two `ui.*` entries; count 233;
+  - `crates/core-control/src/registry.rs`: the two `ui.*` entries; count 236;
   - `app/Tests/VizDAWAppModelTests/TransportFieldsTests.swift:40` and `TransportReadoutsTests.swift:147`, whose two-row tests are replaced by this task's.
 
 **Interfaces:**
 - Produces:
   ```swift
   public enum TransportItemID: String, Codable, CaseIterable, Sendable {
-      case cluster, loop, replaceOverdub, recordOptions, countIn, summary, bar, time, tempo, signature,
+      case cluster, loop, click, replaceOverdub, recordOptions, countIn, summary, bar, time, tempo, signature,
            positionField, editFields, punchFields, dspLoad, device, faults, mainView, panes, space, separator
       public var title: String                   // palette and » titles: "Loop", "Replace/Overdub", "Position in Bars", …
       public var sizes: Bool                     // bar, time, tempo
       public var documentOnly: Bool              // faults, mainView, panes
   }
   public enum ReadoutSize: String, Codable, Sendable { case small, large }
-  public enum TransportItem: Codable, Equatable, Sendable { case builtIn(TransportItemID, ReadoutSize?) }  // Task 11 adds .command
+  public enum TransportItem: Codable, Equatable, Sendable { case builtIn(TransportItemID, ReadoutSize?) }  // Task 12 adds .command
   public struct TransportLayout: Codable, Equatable, Sendable {
       public static let version = 1
       public var items: [TransportItem]
@@ -735,16 +830,16 @@ These are backlog rows, added in Task 12:
   ```
   - **`TransportRowView`.** It lays out on `layout()` with `TransportRowFit`. Folded views are hidden, not removed, so the fields view is never remade. The » is an `AppKitButton` labelled "More Transport Items", which builds its `NSMenu` from the folded items' `TransportMenuEntry`s.
   - **Large readouts** use `theme.type.title`'s digits font.
-  - **The right-click menu** holds "Customize Transport Bar…", which Task 11 wires.
+  - **The right-click menu** holds "Customize Transport Bar…", which Task 12 wires.
 
 - [ ] **Step 1: Write the failing tests** in `TransportRowTests.swift`:
-  - `nothingIsCut`. For widths 0 to 2000 in steps of 10, and for `.nan`, `-1` and `.infinity`, on the standard layout's 17 pieces with fixed test widths:
+  - `nothingIsCut`. For widths 0 to 2000 in steps of 10, and for `.nan`, `-1` and `.infinity`, on the standard layout's 18 pieces with fixed test widths:
     - `shown ∪ folded` is every content piece, and the two are disjoint;
     - `shown` keeps bar order, and the cluster is in it;
     - for finite widths, `shown` widths plus spacing, plus the chevron when `folded` is non-empty, fit `width`, or `shown` is just the cluster.
   - `foldsTheLastItemFirst`: `[a, cluster, b, c]` folds `c`, then `b`, then `a`, as the width shrinks.
   - `spacesAndSeparatorsAreNeverListed`, and a separator next to » is hidden.
-  - `theDefaultLayoutIsTodaysBar`: `standard.items` maps to `[cluster, loop, replaceOverdub, recordOptions, summary, bar, time, tempo, signature, positionField, editFields, punchFields, space, device, faults, mainView, panes]`.
+  - `theDefaultLayoutIsTodaysBar`: `standard.items` maps to `[cluster, loop, click, replaceOverdub, recordOptions, summary, bar, time, tempo, signature, positionField, editFields, punchFields, space, device, faults, mainView, panes]`.
   - `aDamagedPreferenceGivesTheDefaultAndIsKept` (Review Focus 4): with `MemoryDefaults` holding `"{not json"`, then `{"version":99,"items":[]}`, `layout == .standard` and the stored string is unchanged. After `set(...)` it is rewritten.
   - `itemsTextParses`:
     - `"cluster,loop,bar:large"` parses;
@@ -761,13 +856,14 @@ These are backlog rows, added in Task 12:
 
     At 1600 pt, nothing is folded and » is hidden.
   - `largeReadoutsUseTheLargeFont`.
+  - `theClickItemSetsLevelAndMode`: the Click item's menu checks −6 dB and Play and Record on a new song; choosing −12 dB runs `transport.set_click_level {level_db: "-12"}`, and choosing Record Only runs `transport.set_click_mode {mode: "record_only"}`; the item's toggle runs `transport.click`. Folded into », its entry has the same check and submenus.
   - `setTransportBarOverTheChannel`: `TransportLayoutCommands.run("ui.set_transport_bar", items: "cluster,loop")` sets the store. A bad text is `invalid_params`, with the error and the store unchanged. `ui.reset_transport_bar` restores `.standard`.
 - [ ] **Step 2: Run** `scripts/swift.sh test --filter TransportRow`. Expected: FAIL.
 - [ ] **Step 3: Implement** the Interfaces block. Delete the old two-row layouts and their tests. Both windows build the row from `store.transportLayout.layout`. The mixer window passes `documentWindow: false`.
 - [ ] **Step 4: Run** `cargo test -p core-control`, `scripts/swift.sh test` and `scripts/make-app.sh`. Expected: PASS.
 - [ ] **Step 5: End-of-task checks. Commit** `feat(app): the transport bar as items on one row, with a » overflow`.
 
-### Task 11: The customize sheet and command buttons
+### Task 12: The customize sheet and command buttons
 
 **Files:**
 - Create:
@@ -780,10 +876,10 @@ These are backlog rows, added in Task 12:
   - `app/Sources/VizDAW/TransportItemViews.swift` (the command button view);
   - `app/Sources/VizDAW/AppCommands.swift` (View › "Customize Transport Bar…");
   - `app/Sources/VizDAWEditors/TransportRowView.swift` (the right-click item);
-  - `crates/core-control/src/registry.rs` (`ui.customize_transport`; count 234; its `DialogSpec`).
+  - `crates/core-control/src/registry.rs` (`ui.customize_transport`; count 237; its `DialogSpec`).
 
 **Interfaces:**
-- Consumes: Task 10's `TransportLayout`, `TransportLayoutStore`, `TransportRowView`; `KeyBindings.rows`, `KeyDispatch.command`.
+- Consumes: Task 11's `TransportLayout`, `TransportLayoutStore`, `TransportRowView`; `KeyBindings.rows`, `KeyDispatch.command`.
 - Produces:
   ```swift
   @Observable @MainActor public final class TransportCustomizeModel {
@@ -833,7 +929,7 @@ These are backlog rows, added in Task 12:
 - [ ] **Step 4: Run** `cargo test -p core-control`, `scripts/swift.sh test` and `scripts/make-app.sh`. Expected: PASS.
 - [ ] **Step 5: End-of-task checks. Commit** `feat(app): customize the transport bar, with command buttons`.
 
-### Task 12: README manual checks, e2e and backlog
+### Task 13: README manual checks, e2e and backlog
 
 **Files:** `app/README.md` (a new section "### Fader groups, VCAs and the transport bar (plan groups-vcas-transport)" after the last section), `crates/vizctl/tests/e2e.rs`, `docs/feature-backlog.md`
 
@@ -851,14 +947,18 @@ These are backlog rows, added in Task 12:
   11. Add a Command button for Bounce…: clicking it opens the Bounce sheet.
   12. Narrow the mixer window to its smallest: the bar stays one row, and » lists the rest.
   13. Quit and reopen: the bar is the same in both windows.
+  14. Turn Click on and play: a click on every beat, the downbeat higher and louder, through a tempo change and a meter change.
+  15. Set Click to Record Only: silent while playing, clicking while recording; set its level to −24 dB and hear it drop.
+  16. Bounce the song with Click on: the file has no clicks. Save, close and reopen: the click settings are kept.
 - [ ] **Step 2: Add the e2e case** `groups_vcas_and_transport_bar_over_the_channel`:
   - two strips; `mixer.new_group`, then `mixer.set_strip {gain_db: "-3"}`;
   - `state.get mixer` shows both moved, and the undo title is "Move Group Group 1";
   - `mixer.new_vca` and `mixer.set_vca {gain_db: "-6"}` give `vca_offset_db: -6` and unchanged `gain_db`;
   - `ui.set_transport_bar {items: "cluster,command:window.mixer"}`, then `ui.click` on the transport bar's "Mixer" element opens a mixer window (the window count rises);
-  - `ui.reset_transport_bar`.
+  - `ui.reset_transport_bar`;
+  - `transport.click {on: true}`, `transport.set_click_level {level_db: "-12"}` and `transport.set_click_mode {mode: "record_only"}`, then `state.get transport`'s `click` shows them; `transport.set_click_level {level_db: "6"}` is `invalid_params`.
 - [ ] **Step 3: Update the backlog.**
-  - Mark Done: "Linked fader groups and VCAs", "Customize the transport bar" (its Record ⌄ rethink stays as a row of its own), and "The mixer window's transport bar at narrow widths".
+  - Mark Done: "Linked fader groups and VCAs", "Customize the transport bar" (its Click example included) (its Record ⌄ rethink stays as a row of its own), and "The mixer window's transport bar at narrow widths".
   - In "DAWproject: send pan, VCA channels and folder tracks", VCA channels are now done, with Ruling 8's limit; send pan and folders stay.
   - Remove "linked fader groups and VCAs" and "a customisable transport bar" from the 27.1.0 list (line 20).
   - Add the rows in "Not in this plan".
@@ -871,10 +971,10 @@ These are backlog rows, added in Task 12:
   - the e2e, as `VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1`.
 
   Report against the baseline:
-  - registry +17 (217 → 234);
+  - registry +20 (217 → 237);
   - `PREVIEWABLE` +14;
   - VERSION 10 → 11;
-  - README +13;
+  - README +16;
   - e2e +1;
   - no change under `crates/core-host` or `crates/platform-macos`.
 - [ ] **Step 5: Commit** `docs: manual checks, e2e and backlog for groups, VCAs and the transport bar`.
