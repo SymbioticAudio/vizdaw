@@ -443,32 +443,30 @@ fn unterminated_last_line_is_not_run() {
     }
 }
 
-/// A peer that answers with an endless line is refused at the server's
-/// own line cap, not read into memory without end.
+/// A reply over the server's request cap is read whole: replies such as
+/// `state.get document` for a big song are larger than any request
+/// (release gate Task 5, the coordinator's ruling).
 #[test]
-fn client_refuses_an_overlong_reply() {
-    use std::io::Write;
+fn client_accepts_a_reply_over_the_request_cap() {
     let d = private_dir();
-    std::fs::create_dir(d.path().join("ctl")).unwrap();
-    let listener = UnixListener::bind(sock(&d)).unwrap();
-    let peer = thread::spawn(move || {
-        let (mut s, _) = listener.accept().unwrap();
-        let chunk = vec![b'x'; 64 * 1024];
-        // Up to four times the cap, then hold the connection open.
-        for _ in 0..(4 * MAX_LINE / chunk.len()) {
-            if s.write_all(&chunk).is_err() {
-                return;
-            }
-        }
-        thread::sleep(Duration::from_millis(500));
-    });
+    let server = Arc::new(std::sync::Mutex::new(
+        Server::start(&sock(&d), Config::default()).unwrap(),
+    ));
+    let stop = Arc::new(AtomicBool::new(false));
+    let big = "x".repeat(2 * MAX_LINE);
+    let app = {
+        let big = big.clone();
+        fake_app(Arc::clone(&server), Arc::clone(&stop), move |_| {
+            Some(json!({ "text": big }))
+        })
+    };
     let mut c = Client::connect(&sock(&d)).unwrap();
-    match c.call("ping", json!({}), LONG) {
-        Err(CallError::Protocol(m)) => assert!(m.contains("longer than"), "{m}"),
-        other => panic!("{other:?}"),
-    }
-    drop(c);
-    peer.join().unwrap();
+    let v = c
+        .call("state.get", json!({"target": "document"}), LONG)
+        .unwrap();
+    assert_eq!(v["text"].as_str().map(str::len), Some(big.len()));
+    stop.store(true, Ordering::SeqCst);
+    app.join().unwrap();
 }
 
 /// A screenshot the app could not take gives its slot back: the next one
