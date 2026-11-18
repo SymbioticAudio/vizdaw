@@ -1089,6 +1089,15 @@ pub enum ControlResult {
         /// The target, its units, bars and points.
         row: crate::creative::CoProducerCurveRow,
     },
+    /// `co_producer.starter` (plan 8e Ruling 5): the new song it made.
+    CoProducerStarter {
+        /// The new document's ID.
+        doc: String,
+        /// Its window.
+        window: i64,
+        /// What the starter made, and its fallback lines.
+        row: crate::starter::CoProducerStarterRow,
+    },
     /// `settings.co_producer_answer` (plan 8b Ruling 11): what the
     /// approval sheet it answered asked.
     CoProducerApprovalAnswered {
@@ -2040,6 +2049,16 @@ pub fn result_json(r: &ControlResult) -> Value {
             "start_bar": row.start_bar, "end_bar": row.end_bar,
             "points": row.points.iter().map(|p| json!([p.tick, p.value])).collect::<Vec<_>>(),
             "truncated": row.truncated,
+        }),
+        ControlResult::CoProducerStarter { doc, window, row } => json!({
+            "doc": doc, "window": window, "title": row.title, "undo_label": row.undo_label,
+            "tracks": row.tracks.iter()
+                .map(|t| json!({ "name": t.name, "plays": t.plays }))
+                .collect::<Vec<_>>(),
+            "buses": row.buses.iter()
+                .map(|b| json!({ "name": b.name, "effects": b.effects }))
+                .collect::<Vec<_>>(),
+            "lines": row.lines,
         }),
         ControlResult::CoProducerExported {
             doc,

@@ -481,6 +481,18 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         }
         return row
     }
+    /// Plan 8e Task 4: every `coProducerStarter` spec, as given.
+    var starterSpecs: [String] = []
+    /// Plan 8e Task 4: what `coProducerStarter` answers; nil refuses.
+    var starterRow: CoProducerStarterRow?
+    func coProducerStarter(spec: String) throws -> CoProducerStarterRow {
+        coLog.append("coProducerStarter")
+        starterSpecs.append(spec)
+        guard let row = starterRow else {
+            throw VizError.Model(message: "A starter project needs a new song.")
+        }
+        return row
+    }
     func setParam(slot: UInt64, param: UInt64, value: Double) throws {
         liveSets.append((slot, param, value))
     }
