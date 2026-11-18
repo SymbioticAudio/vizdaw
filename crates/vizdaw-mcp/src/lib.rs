@@ -460,6 +460,9 @@ impl Server {
             tools::EXPORT_FOLDER => done(self.export_folder(args)),
             tools::EXPORT => done(self.export(args, views)),
             tools::SHOW_TRACKS => done(self.show_tracks(args, views)),
+            tools::SHOW_MIXER => done(self.show_mixer(args, views)),
+            tools::LIST_PLUGINS => done(self.list_plugins(args)),
+            tools::PLUGIN_PARAMS => done(self.plugin_params(args)),
             tools::SCREENSHOT => done(self.screenshot(args)),
             tools::CHANGE => match self.change(id, era, params, args, views) {
                 Done::Result(v) => done(v),
@@ -902,6 +905,45 @@ impl Server {
         }
         let (text, structured) = tools::tracks_answer(&document, &mixer);
         with_view(tool_text(text, false), views.then_some(structured))
+    }
+
+    /// Plan 8d Ruling 5: the mixer, from one state read.
+    fn show_mixer(&mut self, args: &Map<String, Value>, views: bool) -> Value {
+        if let Some(k) = args.keys().next() {
+            return tool_error(format!(
+                "show_mixer takes no arguments (got `{}`)",
+                rpc::truncate(k, 64)
+            ));
+        }
+        match self.app.call("state.get", json!({"target": "mixer"})) {
+            Ok(mixer) => {
+                let (text, structured) = tools::mixer_answer(&mixer);
+                with_view(tool_text(text, false), views.then_some(structured))
+            }
+            Err(e) => self.failed(&e),
+        }
+    }
+
+    /// Plan 8d Ruling 5: the plug-ins Co-Producer may use.
+    fn list_plugins(&mut self, args: &Map<String, Value>) -> Value {
+        if let Err(m) = tools::check_plugin_args(tools::LIST_PLUGINS, args) {
+            return tool_error(m);
+        }
+        match self.pass("co_producer.plugins", args, &["kind"]) {
+            Ok(r) => tool_text(tools::plugins_answer(&r), false),
+            Err(e) => e,
+        }
+    }
+
+    /// Plan 8d Ruling 5: a loaded plug-in's parameters.
+    fn plugin_params(&mut self, args: &Map<String, Value>) -> Value {
+        if let Err(m) = tools::check_plugin_args(tools::PLUGIN_PARAMS, args) {
+            return tool_error(m);
+        }
+        match self.pass("co_producer.params", args, &["slot"]) {
+            Ok(r) => tool_text(tools::params_answer(&r), false),
+            Err(e) => e,
+        }
     }
 
     fn screenshot(&mut self, args: &Map<String, Value>) -> Value {

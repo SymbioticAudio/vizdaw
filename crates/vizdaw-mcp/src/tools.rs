@@ -29,6 +29,12 @@ pub const EXPORT_FOLDER: &str = "export_folder";
 pub const EXPORT: &str = "export";
 /// Lists the song's tracks and mixer strips.
 pub const SHOW_TRACKS: &str = "show_tracks";
+/// Lists the installed plug-ins Co-Producer may use (plan 8d Ruling 5).
+pub const LIST_PLUGINS: &str = "list_plugins";
+/// Lists a loaded plug-in's parameters.
+pub const PLUGIN_PARAMS: &str = "plugin_params";
+/// Shows the mixer.
+pub const SHOW_MIXER: &str = "show_mixer";
 /// The most tracks, strips or files a chore answer lists (Ruling 8).
 pub const MAX_SHOWN: usize = 200;
 /// The longest `strips` list `export` takes.
@@ -91,6 +97,22 @@ fn window_schema() -> Value {
     })
 }
 
+/// The longest a string param may be: a plug-in reference has its own
+/// limit (plan 8d Ruling 3).
+fn string_limit(name: &str) -> usize {
+    if name == "plugin" {
+        core_control::registry::PLUGIN_REF_MAX
+    } else {
+        MAX_STRING
+    }
+}
+
+/// A param Co-Producer's tool does not offer: `mixer.new_bus`'s `strip`
+/// form changes the composer's routing, so it goes through `change`.
+fn barred(spec: &Value, param: &str) -> bool {
+    str_of(spec, "id") == "mixer.new_bus" && param == "strip"
+}
+
 /// One param's schema; None for `replace`, which Co-Producer refuses.
 fn param_schema(p: &Value, outward: bool) -> Option<Value> {
     let name = str_of(p, "name");
@@ -101,7 +123,7 @@ fn param_schema(p: &Value, outward: bool) -> Option<Value> {
     let min = p.get("min").cloned().unwrap_or(Value::Null);
     let max = p.get("max").cloned().unwrap_or(Value::Null);
     let schema = match str_of(p, "type") {
-        "string" => json!({"type": "string", "maxLength": MAX_STRING, "description": help}),
+        "string" => json!({"type": "string", "maxLength": string_limit(name), "description": help}),
         "path" => {
             let extra = if outward { OUTWARD_PATH } else { IMPORT_PATH };
             json!({"type": "string", "maxLength": MAX_PATH, "description": format!("{help} {extra}")})
@@ -147,6 +169,9 @@ fn command_tool(c: &Value) -> Value {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for p in params_of(c) {
+        if barred(c, str_of(p, "name")) {
+            continue;
+        }
         let Some(schema) = param_schema(p, outward) else {
             continue;
         };
@@ -236,6 +261,31 @@ fn show_tracks_tool() -> Value {
     })
 }
 
+/// `show_mixer`: it takes no argument at all, not even `window`.
+fn show_mixer_tool() -> Value {
+    json!({
+        "name": SHOW_MIXER,
+        "description": "Show the mixer: every strip with its ID, volume, pan, mute and solo, where it goes, its EQ, inserts (with slot IDs) and sends, and which strips Co-Producer added. Changes nothing.",
+        "inputSchema": object_schema(Map::new(), Vec::new()),
+        "annotations": {"readOnlyHint": true},
+    })
+}
+
+/// `list_plugins`: only `kind`; no window, the catalogue is not a song's.
+fn list_plugins_tool() -> Value {
+    let mut props = Map::new();
+    props.insert(
+        "kind".into(),
+        json!({"type": "string", "enum": ["instrument", "effect"], "description": "Only instruments or only effects (default: both)."}),
+    );
+    json!({
+        "name": LIST_PLUGINS,
+        "description": "List the installed plug-ins Co-Producer may use: instruments and effects the composer has not turned off in the Plugin Manager, and VizDAW's built-ins (multi-q, the EQ; built-in-synth). Pass a line's first part as plugin to mixer.add_insert, mixer.set_eq or track_new_plugin_instrument. Changes nothing.",
+        "inputSchema": object_schema(props, Vec::new()),
+        "annotations": {"readOnlyHint": true},
+    })
+}
+
 /// Co-Producer's own tools, with Ruling 12's descriptions.
 fn own_tools() -> Vec<Value> {
     let quiet = || json!({"destructiveHint": false, "openWorldHint": false});
@@ -265,7 +315,7 @@ fn own_tools() -> Vec<Value> {
         ),
         own_tool(
             CHANGE,
-            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save, quantizing, transposing or changing the velocity of notes, and renaming or removing a marker. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
+            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save, quantizing, transposing or changing the velocity of notes, and renaming or removing a marker, and mixer changes: routing a strip to a bus, adding or changing a send or insert, setting an EQ, the volume, pan, mute, solo or a plug-in parameter, and removing a send, insert or bus. Make new buses first with mixer_new_bus and read their IDs with show_mixer; mixer changes on Co-Producer's own buses apply without asking. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
             &[("commands", plan_schema())],
             &["commands"],
             json!({"destructiveHint": true}),
@@ -345,6 +395,18 @@ fn own_tools() -> Vec<Value> {
             quiet(),
         ),
         show_tracks_tool(),
+        show_mixer_tool(),
+        list_plugins_tool(),
+        own_tool(
+            PLUGIN_PARAMS,
+            "List a loaded plug-in's parameters with their current values and ranges, for mixer.set_param. Slots are in show_mixer. Changes nothing.",
+            &[(
+                "slot",
+                json!({"type": "integer", "minimum": 1, "maximum": core_control::registry::MAX_EXACT_ID, "description": "The slot's ID, from show_mixer."}),
+            )],
+            &["slot"],
+            json!({"readOnlyHint": true}),
+        ),
         own_tool(
             SCREENSHOT,
             "A picture of a VizDAW window, for reading what is on screen. It cannot click or type.",
@@ -401,8 +463,8 @@ pub fn window_arg(v: &Value) -> Result<Option<i64>, String> {
 fn check_arg(p: &Value, name: &str, v: &Value) -> Result<(), String> {
     let bad = |what: &str| Err(format!("`{name}` must be {what}"));
     match (str_of(p, "type"), v) {
-        ("string", Value::String(s)) if s.chars().count() <= MAX_STRING => Ok(()),
-        ("string", Value::String(_)) => bad(&format!("at most {MAX_STRING} characters")),
+        ("string", Value::String(s)) if s.chars().count() <= string_limit(name) => Ok(()),
+        ("string", Value::String(_)) => bad(&format!("at most {} characters", string_limit(name))),
         ("path", Value::String(s)) if s.len() <= MAX_PATH => Ok(()),
         ("path", Value::String(_)) => bad(&format!("a path of at most {MAX_PATH} bytes")),
         ("string" | "path", _) => bad("a string"),
@@ -458,7 +520,7 @@ pub fn arguments_to_params(
         let shown = || crate::rpc::truncate(name, 64);
         let Some(p) = specs
             .iter()
-            .find(|p| str_of(p, "name") == name && name != "replace")
+            .find(|p| str_of(p, "name") == name && name != "replace" && !barred(spec, name))
         else {
             return Err(format!("unknown argument `{}`", shown()));
         };
@@ -888,6 +950,312 @@ pub fn tracks_answer(document: &Value, mixer: &Value) -> (String, Value) {
     }
     let structured = json!({"view": "tracks", "title": title, "tracks": tracks, "strips": rows});
     (text, structured)
+}
+
+/// Checks `list_plugins`' or `plugin_params`' arguments: only the names
+/// the tool has, each of its kind, `slot` present. Err names what is wrong.
+pub fn check_plugin_args(tool: &str, args: &Map<String, Value>) -> Result<(), String> {
+    for (k, v) in args {
+        match (tool, k.as_str()) {
+            (LIST_PLUGINS, "kind") if matches!(v.as_str(), Some("instrument" | "effect")) => {}
+            (LIST_PLUGINS, "kind") => return Err("`kind` must be instrument or effect".into()),
+            (PLUGIN_PARAMS, "window") => {
+                window_arg(v)?;
+            }
+            (PLUGIN_PARAMS, "slot")
+                if v.as_i64()
+                    .is_some_and(|n| (1..=core_control::registry::MAX_EXACT_ID).contains(&n)) => {}
+            (PLUGIN_PARAMS, "slot") => {
+                return Err("`slot` must be a slot ID, an integer from 1".into());
+            }
+            _ => {
+                return Err(format!(
+                    "unknown argument `{}`",
+                    crate::rpc::truncate(k, 64)
+                ));
+            }
+        }
+    }
+    if tool == PLUGIN_PARAMS && !args.contains_key("slot") {
+        return Err("missing `slot`".into());
+    }
+    Ok(())
+}
+
+/// The head of `list_plugins`' text.
+const PLUGINS_HEAD: &str = "Plug-ins you may use (pass the first part as plugin):";
+
+/// Ruling 5: `list_plugins`' text, from `co_producer.plugins`' result.
+pub fn plugins_answer(result: &Value) -> String {
+    let rows: &[Value] = result
+        .get("plugins")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let mut text = String::from(PLUGINS_HEAD);
+    for r in rows.iter().take(MAX_SHOWN) {
+        let kind = shown(r.get("kind"), "?");
+        let name = shown(r.get("name"), "?");
+        let maker = shown(r.get("maker"), "");
+        let who = if str_of(r, "format") == "built_in" {
+            format!("{name}, built in")
+        } else if maker.is_empty() {
+            name
+        } else {
+            format!("{name} by {maker}")
+        };
+        text.push_str(&format!(
+            "\n- {}: {who}, {kind}",
+            shown(r.get("plugin"), "?")
+        ));
+    }
+    let more = rows.len().saturating_sub(MAX_SHOWN);
+    if more > 0 {
+        text.push_str(&format!(
+            "\n- and {more} more; pass kind to narrow the list"
+        ));
+    } else if result.get("truncated").and_then(Value::as_bool) == Some(true) {
+        text.push_str("\n- and more; pass kind to narrow the list");
+    } else if rows.is_empty() {
+        text.push_str("\n- none");
+    }
+    text
+}
+
+/// A number as the views and the text show it: at most 3 decimals,
+/// trailing zeros dropped.
+fn number(v: f64) -> String {
+    if !v.is_finite() || v.abs() >= 1e12 {
+        return format!("{v:.3e}");
+    }
+    let s = format!("{:.3}", v.abs());
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if v < 0.0 && s != "0" {
+        format!("\u{2212}{s}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Ruling 5: `plugin_params`' text, from `co_producer.params`' result.
+pub fn params_answer(result: &Value) -> String {
+    let slot = result.get("slot").and_then(Value::as_u64).unwrap_or(0);
+    if result.get("running").and_then(Value::as_bool) != Some(true) {
+        return format!(
+            "The plug-in in slot {slot} is not running yet, so its parameters are not known. Try again in a moment."
+        );
+    }
+    let rows: &[Value] = result
+        .get("params")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let mut text = format!("Slot {slot}, {}:", shown(result.get("plugin"), "?"));
+    let n = |p: &Value, k: &str| p.get(k).and_then(Value::as_f64).map_or("?".into(), number);
+    for p in rows.iter().take(MAX_SHOWN) {
+        let steps = if p.get("stepped").and_then(Value::as_bool) == Some(true) {
+            ", whole values"
+        } else {
+            ""
+        };
+        text.push_str(&format!(
+            "\n- {}: {} = {} ({} to {}{steps})",
+            p.get("id").and_then(Value::as_u64).unwrap_or(0),
+            shown(p.get("name"), "?"),
+            n(p, "value"),
+            n(p, "min"),
+            n(p, "max"),
+        ));
+    }
+    if rows.len() > MAX_SHOWN {
+        text.push_str(&format!("\n- and {} more", rows.len() - MAX_SHOWN));
+    }
+    text
+}
+
+/// A level: one decimal, "\u{2212}\u{221E} dB" at the floor.
+fn level(v: Option<f64>) -> String {
+    match v {
+        Some(v) if v > -144.0 => format!(
+            "{}{:.1} dB",
+            if v < -0.05 { "\u{2212}" } else { "" },
+            v.abs()
+        ),
+        Some(_) => "\u{2212}\u{221E} dB".into(),
+        None => "? dB".into(),
+    }
+}
+
+/// A pan: "centre", "30% left" or "30% right".
+fn pan_text(p: Option<f64>) -> String {
+    let n = (p.unwrap_or(0.0) * 100.0).round() as i64;
+    match n {
+        0 => "centre".into(),
+        n if n < 0 => format!("{}% left", n.unsigned_abs()),
+        n => format!("{n}% right"),
+    }
+}
+
+fn finite(v: Option<&Value>) -> Value {
+    v.and_then(Value::as_f64)
+        .filter(|f| f.is_finite())
+        .map_or(Value::Null, |f| json!(f))
+}
+
+fn flag_of(v: &Value, key: &str) -> bool {
+    v.get(key).and_then(Value::as_bool) == Some(true)
+}
+
+/// A strip's slot (EQ or insert) as the view has it.
+fn slot_view(s: &Value) -> Value {
+    json!({
+        "slot": s.get("slot").cloned().filter(Value::is_u64).unwrap_or(Value::Null),
+        "name": shown(s.get("name"), "?"),
+        "bypass": flag_of(s, "bypass"),
+    })
+}
+
+fn slot_text(s: &Value) -> String {
+    let bypassed = if s["bypass"] == json!(true) {
+        " (bypassed)"
+    } else {
+        ""
+    };
+    format!("{}{bypassed}", s["name"].as_str().unwrap_or("?"))
+}
+
+/// `items` joined by ", ", or "none"; at most [`MAX_SHOWN`], then "and N more".
+fn joined(items: &[String], total: usize) -> String {
+    if items.is_empty() {
+        return "none".into();
+    }
+    let mut out = items.join(", ");
+    if total > items.len() {
+        out.push_str(&format!(", and {} more", total - items.len()));
+    }
+    out
+}
+
+/// Ruling 5: `show_mixer`'s text and `structuredContent`, from
+/// `state.get mixer`. Both stop at [`MAX_SHOWN`] strips, then "- and N
+/// more". Master's `output_name` is null and is shown as the main output.
+pub fn mixer_answer(mixer: &Value) -> (String, Value) {
+    let strips: &[Value] = mixer
+        .get("strips")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let name_of = |id: Option<&Value>| -> String {
+        let found = strips.iter().find(|s| s.get("id") == id);
+        match (found, id.and_then(Value::as_u64)) {
+            (Some(s), _) => shown(s.get("name"), "?"),
+            (None, Some(n)) => format!("strip {n}"),
+            (None, None) => "?".into(),
+        }
+    };
+    let mut text = String::from("Mixer:");
+    let mut rows = Vec::new();
+    for s in strips.iter().take(MAX_SHOWN) {
+        let name = shown(s.get("name"), "?");
+        let kind = shown(s.get("kind_label"), "?");
+        let id = s
+            .get("id")
+            .cloned()
+            .filter(Value::is_u64)
+            .unwrap_or(Value::Null);
+        let output_name = s
+            .get("output_name")
+            .and_then(Value::as_str)
+            .map(|o| safe(o, MAX_ITEM_PART, false));
+        let eq = s.get("eq").filter(|e| e.is_object()).map(slot_view);
+        let list = |key: &str| -> &[Value] {
+            s.get(key)
+                .and_then(Value::as_array)
+                .map_or(&[], Vec::as_slice)
+        };
+        let inserts: Vec<Value> = list("inserts")
+            .iter()
+            .take(MAX_SHOWN)
+            .map(slot_view)
+            .collect();
+        let sends: Vec<Value> = list("sends")
+            .iter()
+            .take(MAX_SHOWN)
+            .map(|x| {
+                json!({
+                    "target": x.get("target").cloned().filter(Value::is_u64).unwrap_or(Value::Null),
+                    "target_name": name_of(x.get("target")),
+                    "level_db": finite(x.get("level_db")),
+                    "pre_fader": flag_of(x, "pre_fader"),
+                    "enabled": flag_of(x, "enabled"),
+                })
+            })
+            .collect();
+        let colour = s
+            .get("colour")
+            .and_then(Value::as_str)
+            .map(|c| safe(c, 32, false));
+        let (gain, pan) = (finite(s.get("gain_db")), finite(s.get("pan")));
+        let (muted, soloed) = (flag_of(s, "mute"), flag_of(s, "solo"));
+        let mut line = format!(
+            "\n- [{}] {name} ({kind}): volume {}, pan {}",
+            s.get("id").and_then(Value::as_u64).unwrap_or(0),
+            level(gain.as_f64()),
+            pan_text(pan.as_f64()),
+        );
+        if muted {
+            line.push_str(", muted");
+        }
+        if soloed {
+            line.push_str(", soloed");
+        }
+        line.push_str(&format!(
+            ", to {}",
+            output_name.as_deref().unwrap_or("the main output")
+        ));
+        let ins: Vec<String> = inserts
+            .iter()
+            .map(|i| format!("slot {} {}", i["slot"], slot_text(i)))
+            .collect();
+        let snd: Vec<String> = sends
+            .iter()
+            .map(|x| {
+                format!(
+                    "{} {}{}{}",
+                    x["target_name"].as_str().unwrap_or("?"),
+                    level(x["level_db"].as_f64()),
+                    if x["pre_fader"] == json!(true) {
+                        " pre"
+                    } else {
+                        ""
+                    },
+                    if x["enabled"] == json!(true) {
+                        ""
+                    } else {
+                        " off"
+                    },
+                )
+            })
+            .collect();
+        line.push_str(&format!(
+            "; EQ {}; inserts {}; sends {}",
+            eq.as_ref().map_or("none".into(), slot_text),
+            joined(&ins, list("inserts").len()),
+            joined(&snd, list("sends").len()),
+        ));
+        if flag(s) {
+            line.push_str(ADDED);
+        }
+        text.push_str(&line);
+        rows.push(json!({
+            "id": id, "name": name, "kind": kind, "colour": colour,
+            "gain_db": gain, "pan": pan, "mute": muted, "solo": soloed,
+            "output": s.get("output").cloned().filter(Value::is_u64).unwrap_or(Value::Null),
+            "output_name": output_name, "eq": eq, "inserts": inserts, "sends": sends,
+            "co_producer": flag(s),
+        }));
+    }
+    if strips.len() > MAX_SHOWN {
+        text.push_str(&format!("\n- and {} more", strips.len() - MAX_SHOWN));
+    }
+    (text, json!({"view": "mixer", "strips": rows}))
 }
 
 /// Ruling 8: `change`'s `structuredContent`. `state` is `ask_in_chat`,

@@ -1989,10 +1989,16 @@ fn views_are_served() {
 
 fn view_sources() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("views");
-    ["bridge.js", "change.html", "tracks.html", "export.html"]
-        .iter()
-        .map(|f| (f.to_string(), std::fs::read_to_string(dir.join(f)).unwrap()))
-        .collect()
+    [
+        "bridge.js",
+        "change.html",
+        "tracks.html",
+        "export.html",
+        "mixer.html",
+    ]
+    .iter()
+    .map(|f| (f.to_string(), std::fs::read_to_string(dir.join(f)).unwrap()))
+    .collect()
 }
 
 #[test]
@@ -2170,4 +2176,402 @@ fn change_view_states() {
         );
         assert_eq!(state(&r), want, "{r}");
     }
+}
+
+// --- Plug-in tools and the mixer (plan 8d Task 6, Ruling 5) ---
+
+const PLUGINS_HEAD: &str = "Plug-ins you may use (pass the first part as plugin):";
+const NOT_RUNNING: &str = "The plug-in in slot 7 is not running yet, so its parameters are not known. Try again in a moment.";
+
+fn tool_named(m: &mut Mcp, name: &str) -> Value {
+    let tools = m.result("tools/list", json!({}));
+    tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+#[test]
+fn plugin_tools_are_listed() {
+    let d = support_dir();
+    let _app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let list = tool_named(&mut m, "list_plugins");
+    assert_eq!(
+        list["description"],
+        "List the installed plug-ins Co-Producer may use: instruments and effects the composer has not turned off in the Plugin Manager, and VizDAW's built-ins (multi-q, the EQ; built-in-synth). Pass a line's first part as plugin to mixer.add_insert, mixer.set_eq or track_new_plugin_instrument. Changes nothing."
+    );
+    assert_eq!(list["annotations"]["readOnlyHint"], true);
+    assert_eq!(
+        list["inputSchema"]["properties"]["kind"]["enum"],
+        json!(["instrument", "effect"])
+    );
+    let params = tool_named(&mut m, "plugin_params");
+    assert_eq!(
+        params["description"],
+        "List a loaded plug-in's parameters with their current values and ranges, for mixer.set_param. Slots are in show_mixer. Changes nothing."
+    );
+    assert_eq!(params["annotations"]["readOnlyHint"], true);
+    assert_eq!(
+        params["inputSchema"]["properties"]["slot"]["type"],
+        "integer"
+    );
+    assert_eq!(params["inputSchema"]["properties"]["slot"]["minimum"], 1);
+    assert_eq!(params["inputSchema"]["required"], json!(["slot"]));
+    let show = tool_named(&mut m, "show_mixer");
+    assert_eq!(
+        show["description"],
+        "Show the mixer: every strip with its ID, volume, pan, mute and solo, where it goes, its EQ, inserts (with slot IDs) and sends, and which strips Co-Producer added. Changes nothing."
+    );
+    assert_eq!(show["annotations"]["readOnlyHint"], true);
+    assert_eq!(show["inputSchema"]["properties"], json!({}));
+    let inst = tool_named(&mut m, "track_new_plugin_instrument");
+    assert_eq!(
+        inst["inputSchema"]["properties"]["plugin"]["maxLength"],
+        512
+    );
+    let bus = tool_named(&mut m, "mixer_new_bus");
+    assert!(!bus.is_null());
+    assert!(bus["inputSchema"]["properties"].get("strip").is_none());
+    let tools = m.result("tools/list", json!({}));
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for n in [
+        "mixer_set_output",
+        "mixer_add_send",
+        "mixer_set_send",
+        "mixer_remove_send",
+        "mixer_add_insert",
+        "mixer_remove_insert",
+        "mixer_set_eq",
+        "mixer_set_gain",
+        "mixer_set_pan",
+        "mixer_set_mute",
+        "mixer_set_solo",
+        "mixer_set_param",
+        "mixer_remove_bus",
+        "mixer_remove_strip",
+    ] {
+        assert!(!names.contains(&n), "{n} is not a tool");
+    }
+    let change = tool_named(&mut m, "change")["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        change.contains(
+            "mixer changes: routing a strip to a bus, adding or changing a send or insert, setting an EQ, the volume, pan, mute, solo or a plug-in parameter, and removing a send, insert or bus. Make new buses first with mixer_new_bus and read their IDs with show_mixer; mixer changes on Co-Producer's own buses apply without asking."
+        ),
+        "{change}"
+    );
+}
+
+fn plugin_row(plugin: &str, name: &str, maker: &str, format: &str, kind: &str) -> Value {
+    json!({"plugin": plugin, "name": name, "maker": maker, "format": format, "kind": kind, "version": "1"})
+}
+
+#[test]
+fn plugins_reach_the_app() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::Ok(json!({"plugins": [
+        plugin_row("multi-q", "Multi-Q", "VizDAW", "built_in", "effect"),
+        plugin_row("clap:vizdaw.test.gain", "Test Gain", "Acme", "clap", "effect"),
+        plugin_row("au:aufx/gain/Acme", "Plain", "", "au", "effect"),
+    ], "truncated": false})));
+    let r = m.call("list_plugins", json!({"kind": "effect"}));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        app.seen(),
+        vec![Command::CoProducerPlugins {
+            kind: Some(core_control::request::PluginKindArg::Effect)
+        }]
+    );
+    let t = text(&r);
+    assert_eq!(t.lines().next().unwrap(), PLUGINS_HEAD);
+    assert!(t.contains("\n- multi-q: Multi-Q, built in, effect"), "{t}");
+    assert!(
+        t.contains("\n- clap:vizdaw.test.gain: Test Gain by Acme, effect"),
+        "{t}"
+    );
+    assert!(t.contains("\n- au:aufx/gain/Acme: Plain, effect"), "{t}");
+    assert!(!t.contains("Plain by"), "{t}");
+}
+
+fn param_row(id: u64, name: &str, value: f64, stepped: bool) -> Value {
+    json!({"id": id, "name": name, "module": "", "min": 0.0, "max": 1.0, "default": 0.0,
+        "value": value, "stepped": stepped, "automatable": true})
+}
+
+#[test]
+fn params_reach_the_app() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::Ok(json!({"doc": "d1", "slot": 7, "plugin": "clap:vizdaw.test.gain",
+        "running": true, "params": [param_row(3, "Gain", 0.5, false), param_row(4, "Mode", 1.0, true)]})));
+    let r = m.call("plugin_params", json!({"slot": 7}));
+    assert!(!is_error(&r), "{r}");
+    assert!(matches!(
+        app.seen().as_slice(),
+        [Command::CoProducerParams { slot: 7, .. }]
+    ));
+    let t = text(&r);
+    assert!(t.starts_with("Slot 7, clap:vizdaw.test.gain:"), "{t}");
+    assert!(t.contains("\n- 3: Gain = 0.5 (0 to 1)\n"), "{t}");
+    assert!(t.ends_with("\n- 4: Mode = 1 (0 to 1, whole values)"), "{t}");
+    app.script(Answer::Ok(
+        json!({"doc": "d1", "slot": 7, "plugin": "multi-q",
+        "running": false, "params": []}),
+    ));
+    let r = m.call("plugin_params", json!({"slot": 7}));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(text(&r), NOT_RUNNING);
+}
+
+fn strip_row(id: u64, name: &str, kind: &str, extra: Value) -> Value {
+    let mut s = json!({"id": id, "name": name, "kind_label": kind, "colour": null,
+        "co_producer": false, "gain_db": 0.0, "pan": 0.0, "mute": false, "solo": false,
+        "output": null, "output_name": "Master", "eq": null, "inserts": [], "sends": []});
+    for (k, v) in extra.as_object().unwrap() {
+        s[k] = v.clone();
+    }
+    s
+}
+
+#[test]
+fn show_mixer_lists_strips() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(mixer_state(json!([
+        strip_row(
+            1,
+            "Master",
+            "Master",
+            json!({"output": null, "output_name": null})
+        ),
+        strip_row(
+            2,
+            "Kick",
+            "Audio",
+            json!({
+                "gain_db": -6.0, "output": 9, "output_name": "Drums (Co-Producer)",
+                "eq": {"slot": 4, "name": "Multi-Q", "plugin": "multi-q", "bypass": false},
+            })
+        ),
+        strip_row(
+            9,
+            "Drums (Co-Producer)",
+            "Bus",
+            json!({"co_producer": true,
+                "mute": true, "solo": true, "pan": -0.3,
+                "inserts": [{"slot": 5, "name": "Comp", "plugin": "clap:x", "bypass": false}],
+                "sends": [{"target": 2, "level_db": -12.5, "pre_fader": true, "enabled": false}],
+            })
+        ),
+    ])));
+    let r = m.call("show_mixer", json!({}));
+    assert!(!is_error(&r), "{r}");
+    assert!(matches!(app.seen().as_slice(), [Command::StateGet { .. }]));
+    let t = text(&r);
+    assert!(t.starts_with("Mixer:"), "{t}");
+    assert!(
+        t.contains("\n- [2] Kick (Audio): volume \u{2212}6.0 dB, pan centre, to Drums (Co-Producer); EQ Multi-Q; inserts none; sends none\n"),
+        "{t}"
+    );
+    let bus = t.lines().find(|l| l.starts_with("- [9]")).unwrap();
+    assert!(bus.ends_with(" \u{2014} added by Co-Producer"), "{bus}");
+    assert!(bus.contains("pan 30% left, muted, soloed"), "{bus}");
+    assert!(bus.contains("inserts slot 5 Comp"), "{bus}");
+    assert!(bus.contains("sends Kick \u{2212}12.5 dB pre off"), "{bus}");
+    // Master has no output name.
+    let master = t.lines().find(|l| l.starts_with("- [1]")).unwrap();
+    assert!(
+        !master.contains("to null") && !master.contains("None"),
+        "{master}"
+    );
+}
+
+#[test]
+fn long_mixers_are_capped() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let strips: Vec<Value> = (0..500)
+        .map(|i| strip_row(i + 1, &format!("S{i}"), "Audio", json!({})))
+        .collect();
+    app.script(mixer_state(json!(strips)));
+    let t = text(&m.call("show_mixer", json!({})));
+    assert_eq!(t.matches("\n- [").count(), 200, "{t}");
+    assert!(t.ends_with("\n- and 300 more"), "{t}");
+    let rows: Vec<Value> = (0..300)
+        .map(|i| plugin_row(&format!("clap:p{i}"), "P", "M", "clap", "effect"))
+        .collect();
+    app.script(Answer::Ok(json!({"plugins": rows, "truncated": false})));
+    let t = text(&m.call("list_plugins", json!({})));
+    assert_eq!(t.matches("\n- clap:").count(), 200, "{t}");
+    assert!(
+        t.ends_with("\n- and 100 more; pass kind to narrow the list"),
+        "{t}"
+    );
+}
+
+#[test]
+fn plugin_tools_refuse_hostile_arguments() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    for (tool, args) in [
+        ("list_plugins", json!({"kind": "synth"})),
+        ("list_plugins", json!({"kind": 3})),
+        ("list_plugins", json!({"extra": 1})),
+        ("list_plugins", json!({"window": 1})),
+        ("plugin_params", json!({})),
+        ("plugin_params", json!({"slot": 0})),
+        ("plugin_params", json!({"slot": "7"})),
+        ("plugin_params", json!({"slot": 1.5})),
+        ("plugin_params", json!({"slot": 7, "extra": 1})),
+        ("plugin_params", json!({"slot": 7, "window": 0})),
+        ("show_mixer", json!({"extra": 1})),
+        ("show_mixer", json!({"window": 1})),
+        ("mixer_new_bus", json!({"strip": 2})),
+        (
+            "track_new_plugin_instrument",
+            json!({"plugin": "x".repeat(70_000)}),
+        ),
+        (
+            "track_new_plugin_instrument",
+            json!({"plugin": "x".repeat(513)}),
+        ),
+    ] {
+        let r = m.call(tool, args.clone());
+        assert!(is_error(&r), "{tool} {args}: {r}");
+    }
+    m.ping_answers();
+    assert!(app.seen().is_empty(), "no socket call: {:?}", app.seen());
+}
+
+#[test]
+fn mixer_names_are_shown_safely() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": ui_caps(MIME)}),
+    );
+    app.script(mixer_state(json!([strip_row(
+        1,
+        "a\u{202E}b",
+        "Audio",
+        json!({
+            "inserts": [{"slot": 3, "name": "x\u{2028}y", "plugin": "clap:z", "bypass": false}],
+        })
+    ),])));
+    let r = m.call("show_mixer", json!({}));
+    let t = text(&r);
+    assert!(t.contains("a\u{FFFD}b (Audio)"), "{t}");
+    assert!(t.contains("x\u{FFFD}y"), "{t}");
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["view"], "mixer");
+    assert_eq!(sc["strips"][0]["name"], "a\u{FFFD}b");
+    assert_eq!(sc["strips"][0]["inserts"][0]["name"], "x\u{FFFD}y");
+    assert_eq!(sc["strips"][0]["output_name"], "Master");
+    app.script(mixer_state(json!([strip_row(
+        1,
+        "Master",
+        "Master",
+        json!({"output_name": null})
+    ),])));
+    let r = m.call("show_mixer", json!({}));
+    assert!(r["structuredContent"]["strips"][0]["output_name"].is_null());
+}
+
+#[test]
+fn the_mixer_view_only_for_hosts_that_ask() {
+    let run = |version: &str, caps: Value| {
+        let d = support_dir();
+        let app = FakeApp::start(d.path());
+        let mut m = Mcp::spawn(d.path());
+        let init = m.result(
+            "initialize",
+            json!({"protocolVersion": version, "capabilities": caps}),
+        );
+        let tools = m.result("tools/list", json!({}));
+        let show = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "show_mixer")
+            .unwrap()
+            .clone();
+        let res = m.result("resources/list", json!({}));
+        let listed = res["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["uri"] == "ui://vizdaw/mixer");
+        app.script(mixer_state(json!([strip_row(
+            2,
+            "Kick",
+            "Audio",
+            json!({})
+        )])));
+        let r = m.call("show_mixer", json!({}));
+        let _ = init;
+        (show, listed, r)
+    };
+    let (show, listed, with) = run("2025-11-25", ui_caps(MIME));
+    assert_eq!(show["_meta"]["ui"]["resourceUri"], "ui://vizdaw/mixer");
+    assert!(listed);
+    assert_eq!(with["structuredContent"]["view"], "mixer");
+    for (version, caps) in [
+        ("2025-11-25", json!({})),
+        ("2025-11-25", ui_caps("text/html")),
+        ("2025-03-26", ui_caps(MIME)),
+    ] {
+        let (show, listed, r) = run(version, caps);
+        assert!(show.get("_meta").is_none(), "{show}");
+        assert!(!listed);
+        assert!(r.get("structuredContent").is_none(), "{r}");
+        assert_eq!(r["content"], with["content"]);
+    }
+}
+
+#[test]
+fn mixer_view_draws_names_as_text() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("views");
+    let s = std::fs::read_to_string(dir.join("mixer.html")).unwrap();
+    for bad in [
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+        "new Function",
+        "http:",
+        "https:",
+        "src=",
+        "<link",
+    ] {
+        assert!(!s.contains(bad), "mixer.html holds {bad}");
+    }
+    assert!(s.contains("textContent"));
+    assert!(s.contains("<!--BRIDGE-->"));
+    let d = support_dir();
+    let _app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let r = m.result("resources/read", json!({"uri": "ui://vizdaw/mixer"}));
+    let html = r["contents"][0]["text"].as_str().unwrap();
+    assert!(html.starts_with("<!DOCTYPE html>"));
+    assert!(!html.contains("<!--"));
 }
