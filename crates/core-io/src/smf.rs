@@ -473,9 +473,7 @@ impl Reader<'_> {
             if &kind != b"MTrk" {
                 continue;
             }
-            let Some(n) = count_track(body, self.limits.max_events.saturating_sub(total)) else {
-                break;
-            };
+            let (n, intact) = count_track(body, self.limits.max_events.saturating_sub(total));
             total = total.saturating_add(n);
             self.counted.push(n);
             if total > self.limits.max_events {
@@ -483,6 +481,9 @@ impl Reader<'_> {
                     "This MIDI file can't be read: it has more than {} events.",
                     group(self.limits.max_events as u64)
                 )));
+            }
+            if !intact {
+                break;
             }
         }
         Ok(())
@@ -517,15 +518,21 @@ impl Reader<'_> {
 
 /// Counts the events of one track body the way [`Reader::track`] does, with
 /// no allocation. Stops counting at `room + 1` events (enough to know the
-/// limit is passed) and returns `None` at damage, which the parse reports.
-fn count_track(body: &[u8], room: usize) -> Option<usize> {
+/// limit is passed). Returns the events counted, the damaged one included,
+/// and whether the track was intact; the parse reports the damage.
+fn count_track(body: &[u8], room: usize) -> (usize, bool) {
+    let mut n = 0usize;
+    let intact = count_walk(body, room, &mut n).is_some();
+    (n, intact)
+}
+
+fn count_walk(body: &[u8], room: usize, n: &mut usize) -> Option<()> {
     let mut cur = Cursor::new(body);
     let mut running: Option<u8> = None;
-    let mut n = 0usize;
     while !cur.at_end() {
-        n += 1;
-        if n > room {
-            return Some(n);
+        *n += 1;
+        if *n > room {
+            return Some(());
         }
         cur.vlq().ok()?;
         let status = cur.byte()?;
@@ -552,7 +559,7 @@ fn count_track(body: &[u8], room: usize) -> Option<usize> {
             }
         }
     }
-    Some(n)
+    Some(())
 }
 
 /// How many data bytes a channel message with `status` has.
