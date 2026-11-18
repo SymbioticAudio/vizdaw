@@ -239,8 +239,10 @@ pub fn read(
         limits,
         cancel,
         events: 0,
+        counted: Vec::new(),
         report: Report::default(),
     };
+    r.count_all(cur.bytes.get(cur.pos..).unwrap_or_default())?;
     let mut tracks = Vec::new();
     while !cur.at_end() {
         if cancelled(cancel) {
@@ -264,7 +266,8 @@ pub fn read(
                 )));
             }
             let n = tracks.len().saturating_add(1);
-            tracks.push(r.track(body.ok_or_else(|| truncated(n))?, n)?);
+            let expect = r.counted.get(n - 1).copied().unwrap_or(0);
+            tracks.push(r.track(body.ok_or_else(|| truncated(n))?, n, expect)?);
         } else {
             let name: String = kind
                 .iter()
@@ -316,6 +319,8 @@ struct Reader<'l> {
     cancel: &'l AtomicBool,
     /// Events read so far, all tracks together.
     events: usize,
+    /// Events found in each track by the counting pass, for reserving.
+    counted: Vec<usize>,
     report: Report,
 }
 
@@ -332,9 +337,9 @@ struct OpenSysEx {
 
 impl Reader<'_> {
     /// Reads track `n` (1-based) from its chunk body.
-    fn track(&mut self, body: &[u8], n: usize) -> Result<SmfTrack, IoError> {
+    fn track(&mut self, body: &[u8], n: usize, expect: usize) -> Result<SmfTrack, IoError> {
         let mut cur = Cursor::new(body);
-        let mut events: Vec<(u64, SmfEvent)> = Vec::new();
+        let mut events: Vec<(u64, SmfEvent)> = Vec::with_capacity(expect);
         // Indices of SysEx events found unfinished or too long, ascending;
         // removed once the track is read.
         let mut dead: Vec<usize> = Vec::new();
@@ -447,6 +452,42 @@ impl Reader<'_> {
         Ok(SmfTrack { events })
     }
 
+    /// The counting pass: walks the chunks after the header and counts each
+    /// track's events without allocating per event, refusing a file over
+    /// the limit before anything is reserved for it. Stops quietly at
+    /// anything damaged (the parse that follows names the damage) and at the
+    /// track limit.
+    fn count_all(&mut self, rest: &[u8]) -> Result<(), IoError> {
+        let mut cur = Cursor::new(rest);
+        let mut total = 0usize;
+        while !cur.at_end() && self.counted.len() < self.limits.max_tracks {
+            if cancelled(self.cancel) {
+                return Err(IoError::Cancelled);
+            }
+            let Some((kind, len)) = cur.chunk_head() else {
+                break;
+            };
+            let Some(body) = usize::try_from(len).ok().and_then(|len| cur.take(len)) else {
+                break;
+            };
+            if &kind != b"MTrk" {
+                continue;
+            }
+            let Some(n) = count_track(body, self.limits.max_events.saturating_sub(total)) else {
+                break;
+            };
+            total = total.saturating_add(n);
+            self.counted.push(n);
+            if total > self.limits.max_events {
+                return Err(refused(format!(
+                    "This MIDI file can't be read: it has more than {} events.",
+                    group(self.limits.max_events as u64)
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Counts one event against the limit, looking at the cancel flag every
     /// [`CANCEL_EVERY`] events.
     fn count(&mut self) -> Result<(), IoError> {
@@ -472,6 +513,46 @@ impl Reader<'_> {
         self.report
             .add(ItemKind::LeftOut, SYSEX_UNFINISHED, Some(at));
     }
+}
+
+/// Counts the events of one track body the way [`Reader::track`] does, with
+/// no allocation. Stops counting at `room + 1` events (enough to know the
+/// limit is passed) and returns `None` at damage, which the parse reports.
+fn count_track(body: &[u8], room: usize) -> Option<usize> {
+    let mut cur = Cursor::new(body);
+    let mut running: Option<u8> = None;
+    let mut n = 0usize;
+    while !cur.at_end() {
+        n += 1;
+        if n > room {
+            return Some(n);
+        }
+        cur.vlq().ok()?;
+        let status = cur.byte()?;
+        match status {
+            0xFF => {
+                let kind = cur.byte()?;
+                cur.data(0).ok()?;
+                running = None;
+                if kind == END_OF_TRACK {
+                    break;
+                }
+            }
+            0xF0 | 0xF7 => {
+                cur.data(0).ok()?;
+                running = None;
+            }
+            0x80..=0xEF => {
+                running = Some(status);
+                cur.take(data_len(status))?;
+            }
+            0xF1..=0xFE => return None,
+            _ => {
+                cur.take(data_len(running?).checked_sub(1)?)?;
+            }
+        }
+    }
+    Some(n)
 }
 
 /// How many data bytes a channel message with `status` has.
