@@ -9,7 +9,7 @@ use core_control::request::{ExportWhat, MAX_ASKED, MAX_NOTE, MAX_REQUEST_NAME, T
 use serde_json::{Map, Value, json};
 
 /// The server's instructions (Ruling 12).
-pub const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request. For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat.";
+pub const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request. For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat. Only call time_report when the composer asks where their time goes or what you could help with; never raise it yourself.";
 
 /// Starts a request.
 pub const BEGIN_REQUEST: &str = "begin_request";
@@ -50,6 +50,10 @@ pub const READ_MIDI_NOTES: &str = "read_midi_notes";
 pub const PREVIEW_AUTOMATION: &str = "preview_automation";
 /// Reads Co-Producer's recipes (plan 8e Ruling 6).
 pub const RECIPES: &str = "recipes";
+/// Reads where the composer's time has gone (plan 8f Ruling 6).
+pub const TIME_REPORT: &str = "time_report";
+/// The most days `time_report` takes.
+const MAX_DAYS: i64 = 3650;
 /// The most notes on one line of `read_midi_notes`' text.
 const NOTES_PER_LINE: usize = 80;
 /// The most points of a curve the answer and the view carry.
@@ -302,6 +306,20 @@ fn list_plugins_tool() -> Value {
     })
 }
 
+/// `time_report` (plan 8f Ruling 6): `days` and `window`, read only.
+fn time_report_tool() -> Value {
+    own_tool(
+        TIME_REPORT,
+        "Read where the composer's time has gone in VizDAW, counted on their Mac if they turned it on: time composing, recording, editing, mixing and other, per song and across all songs, with friction signals (bursts of undos, tasks repeated many times, long hunts through the menus). Call it only when the composer asks about their time or habits, or what you could help with. Never bring it up yourself. Read the coaching recipe first. Changes nothing.",
+        &[(
+            "days",
+            json!({"type": "integer", "minimum": 1, "maximum": MAX_DAYS, "description": "Only today and the days before it, up to this many (default: all time)."}),
+        )],
+        &[],
+        json!({"readOnlyHint": true}),
+    )
+}
+
 /// Co-Producer's own tools, with Ruling 12's descriptions.
 fn own_tools() -> Vec<Value> {
     let quiet = || json!({"destructiveHint": false, "openWorldHint": false});
@@ -413,6 +431,7 @@ fn own_tools() -> Vec<Value> {
         show_tracks_tool(),
         show_mixer_tool(),
         list_plugins_tool(),
+        time_report_tool(),
         own_tool(
             PLUGIN_PARAMS,
             "List a loaded plug-in's parameters with their current values and ranges, for mixer.set_param. Slots are in show_mixer. Changes nothing.",
@@ -1805,6 +1824,191 @@ pub fn resources_json() -> Vec<Value> {
 pub fn state_target(uri: &str) -> Option<&'static str> {
     let t = uri.strip_prefix(STATE_URI)?;
     STATE_TARGETS.iter().find(|x| **x == t).copied()
+}
+
+/// Checks `time_report`'s arguments: only `days` (an integer from 1 to
+/// 3650) and `window`. Err names what is wrong.
+pub fn check_time_args(args: &Map<String, Value>) -> Result<(), String> {
+    for (k, v) in args {
+        match k.as_str() {
+            "window" => {
+                window_arg(v)?;
+            }
+            "days" if v.as_i64().is_some_and(|n| (1..=MAX_DAYS).contains(&n)) => {}
+            "days" => return Err(format!("`days` must be an integer from 1 to {MAX_DAYS}")),
+            _ => {
+                return Err(format!(
+                    "unknown argument `{}`",
+                    crate::rpc::truncate(k, 64)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What `time_report` says when the app's answer cannot be read.
+pub const TIME_UNREADABLE: &str = "VizDAW's answer could not be read.";
+
+/// "4 h 12 min", "12 min", or "under a minute".
+pub fn duration_text(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, 0) => "under a minute".into(),
+        (0, m) => format!("{m} min"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
+/// A song's name or a label, as one safe line.
+fn time_name(v: &Value) -> Option<String> {
+    let s = v.as_str()?;
+    Some(crate::rpc::truncate(&safe(s, 128, true), 128))
+}
+
+/// The five categories, in the order the text names them.
+const CATEGORIES: [&str; 5] = ["composing", "recording", "editing", "mixing", "other"];
+
+/// One row's seconds, in [`CATEGORIES`] order.
+fn time_seconds(row: &Value) -> Option<[u64; 5]> {
+    let seconds = row.get("seconds")?.as_object()?;
+    let mut out = [0; 5];
+    for (slot, name) in out.iter_mut().zip(CATEGORIES) {
+        *slot = seconds.get(name)?.as_u64()?;
+    }
+    Some(out)
+}
+
+/// `[[label, n], ...]` as safe labels with counts.
+fn time_pairs(v: &Value) -> Option<Vec<(String, u64)>> {
+    v.as_array()?
+        .iter()
+        .take(MAX_SHOWN)
+        .map(|p| {
+            let p = p.as_array()?;
+            Some((time_name(p.first()?)?, p.get(1)?.as_u64()?))
+        })
+        .collect()
+}
+
+/// "a ×2, b ×1", or "none".
+fn pairs_text(pairs: &[(String, u64)]) -> String {
+    if pairs.is_empty() {
+        return "none".into();
+    }
+    pairs
+        .iter()
+        .map(|(l, n)| format!("{l} \u{d7}{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Ruling 6: `time_report`'s text and `structuredContent` from
+/// `co_producer.metrics`' answer. None when a key is missing or of the
+/// wrong type. Every name and label is made safe.
+pub fn time_parts(result: &Value) -> Option<(String, Value)> {
+    let on = result.get("on")?.as_bool()?;
+    let since = match result.get("since")? {
+        Value::Null => None,
+        v => Some(time_name(v)?),
+    };
+    let days = match result.get("days")? {
+        Value::Null => None,
+        v => Some(v.as_u64()?),
+    };
+    let all = result.get("all")?;
+    let all_seconds = time_seconds(all)?;
+    let all_bursts = all.get("undo_bursts")?.as_u64()?;
+    let all_hunts = all.get("hunts")?.as_u64()?;
+    let all_repeats = time_pairs(all.get("repeats")?)?;
+    let all_ends = time_pairs(all.get("hunt_ends")?)?;
+    let songs = result.get("songs")?.as_array()?;
+    let more = result.get("more_songs")?.as_u64()?;
+    let mut rows = Vec::new();
+    for s in songs.iter().take(MAX_SHOWN) {
+        rows.push((
+            time_name(s.get("name")?)?,
+            s.get("this_song")?.as_bool()?,
+            time_seconds(s)?,
+            s.get("undo_bursts")?.as_u64()?,
+            s.get("hunts")?.as_u64()?,
+            time_pairs(s.get("repeats")?)?,
+            time_pairs(s.get("hunt_ends")?)?,
+        ));
+    }
+    let structured = json!({
+        "view": "time", "on": on, "since": since, "days": days,
+        "all": {
+            "seconds": CATEGORIES.iter().zip(all_seconds).map(|(k, v)| ((*k).to_string(), json!(v))).collect::<Map<String, Value>>(),
+            "undo_bursts": all_bursts, "hunts": all_hunts,
+            "repeats": all_repeats, "hunt_ends": all_ends,
+        },
+        "songs": rows.iter().map(|(name, this, secs, bursts, hunts, repeats, ends)| json!({
+            "name": name, "this_song": this,
+            "seconds": CATEGORIES.iter().zip(secs).map(|(k, v)| ((*k).to_string(), json!(v))).collect::<Map<String, Value>>(),
+            "undo_bursts": bursts, "hunts": hunts, "repeats": repeats, "hunt_ends": ends,
+        })).collect::<Vec<_>>(),
+        "more_songs": more,
+    });
+    let Some(since) = since else {
+        let text = if on {
+            "No time has been counted yet."
+        } else {
+            "Time counting is off. The composer can turn it on in VizDAW's Settings \u{203a} Co-Producer \u{203a} Count where my time goes."
+        };
+        return Some((text.into(), structured));
+    };
+    let span = days.map_or("all time".to_string(), |n| format!("the last {n} days"));
+    let mut text = format!("Time counted on this Mac since {since} ({span}):");
+    let parts = |secs: &[u64; 5]| {
+        CATEGORIES
+            .iter()
+            .zip(secs)
+            .map(|(k, v)| format!("{k} {}", duration_text(*v)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    text.push_str(&format!(
+        "\nAll songs: {} \u{2014} {}.",
+        duration_text(all_seconds.iter().sum()),
+        parts(&all_seconds)
+    ));
+    text.push_str(&format!(
+        "\nFriction: {all_bursts} undo bursts; repeated tasks: {}; long menu hunts: {all_hunts}, ending at {}.",
+        pairs_text(&all_repeats),
+        pairs_text(&all_ends)
+    ));
+    text.push_str("\nSongs, most time first:");
+    for (name, this, secs, bursts, hunts, _, _) in &rows {
+        let used: Vec<String> = CATEGORIES
+            .iter()
+            .zip(secs)
+            .filter(|(_, v)| **v > 0)
+            .map(|(k, v)| format!("{k} {}", duration_text(*v)))
+            .collect();
+        let used = if used.is_empty() {
+            "no time".to_string()
+        } else {
+            used.join(", ")
+        };
+        text.push_str(&format!(
+            "\n- {name}{}: {} \u{2014} {used}; {bursts} undo bursts; {hunts} long menu hunts",
+            if *this { " (this song)" } else { "" },
+            duration_text(secs.iter().sum()),
+        ));
+    }
+    if more > 0 {
+        text.push_str(&format!("\n- and {more} more songs"));
+    }
+    if !on {
+        text.push_str("\nCounting is off now; these are earlier records.");
+    }
+    Some((text, structured))
+}
+
+/// Ruling 6's text from the app's answer, or [`TIME_UNREADABLE`].
+pub fn time_answer(result: &Value) -> String {
+    time_parts(result).map_or_else(|| TIME_UNREADABLE.to_string(), |(text, _)| text)
 }
 
 #[cfg(test)]

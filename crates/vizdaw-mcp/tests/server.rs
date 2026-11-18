@@ -135,7 +135,7 @@ fn run_of(id: &str, args: Vec<(&str, ArgValue)>) -> Command {
     }
 }
 
-const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request. For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat.";
+const INSTRUCTIONS: &str = "VizDAW's Co-Producer. Adds are free; anything that changes or deletes the composer's own work goes through the change tool and their yes. Read the song's notes first (read_notes) and follow what the composer wrote there. Start every request with begin_request and finish it with end_request. For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat. Only call time_report when the composer asks where their time goes or what you could help with; never raise it yourself.";
 
 #[test]
 fn initialize_era_handshake() {
@@ -2714,13 +2714,14 @@ const AUTOMATION_DESCRIPTION: &str = "Show the automation curve you plan to writ
 const RECIPES_DESCRIPTION: &str = "Read Co-Producer's recipes for creative help: starter projects, mixing drums, a shared reverb, parallel compression, delay into reverb and automation moves. Call it with no name for the list, then with a name for its steps, before you start. Changes nothing.";
 const CHANGE_ADDED: &str = "creative writes: automation points with automation.write. On Co-Producer's own tracks and buses these apply without asking.";
 const CREATIVE_INSTRUCTIONS: &str = "For creative help (a starter project, mixing, automation), read the matching recipe with the recipes tool first. Co-Producer writes no notes: for an arpeggio, a reharmonisation or a variation, read the notes with read_midi_notes and describe the idea in chat.";
-const RECIPE_NAMES: [&str; 6] = [
+const RECIPE_NAMES: [&str; 7] = [
     "starter_project",
     "mix_drums",
     "shared_reverb",
     "parallel_compression",
     "delay_into_reverb",
     "automation_moves",
+    "coaching",
 ];
 const NO_FITTING: &str = "If list_plugins has no fitting effect, say so, set up the bus with multi-q only, and suggest the kind of plug-in to install.";
 
@@ -3411,4 +3412,295 @@ fn automation_view_draws_names_as_text() {
     assert!(html.starts_with("<!DOCTYPE html>"));
     assert!(!html.contains("<!--"));
     assert_eq!(r["contents"][0]["mimeType"], MIME);
+}
+
+// --- time_report and the coaching recipe (plan 8f Task 5, Rulings 6 and 7) ---
+
+const TIME_DESCRIPTION: &str = "Read where the composer's time has gone in VizDAW, counted on their Mac if they turned it on: time composing, recording, editing, mixing and other, per song and across all songs, with friction signals (bursts of undos, tasks repeated many times, long hunts through the menus). Call it only when the composer asks about their time or habits, or what you could help with. Never bring it up yourself. Read the coaching recipe first. Changes nothing.";
+const TIME_INSTRUCTIONS: &str = "Only call time_report when the composer asks where their time goes or what you could help with; never raise it yourself.";
+const COACHING_STEPS: [&str; 6] = [
+    "Call time_report. If counting is off, say where to turn it on, once, and stop.",
+    "Tell the composer in a few plain sentences where their time went, overall and for the song they are on, without judging.",
+    "Point to the friction signals: bursts of undos, repeated tasks by name, and long menu hunts and what they ended at.",
+    "Suggest at most three chores Co-Producer could take over, each tied to a signal. For example: many repeated renames or colours are one request; long hunts ending at a bounce or export are a chore to ask for; heavy mixing time fits the mix recipes; heavy editing time fits quantize, transpose and velocity chores.",
+    "Offer, do not start: begin a request only after the composer picks one.",
+    "Do not bring the time records up again unless the composer asks.",
+];
+
+fn secs(c: u64, r: u64, e: u64, x: u64, o: u64) -> Value {
+    json!({"composing": c, "recording": r, "editing": e, "mixing": x, "other": o})
+}
+
+fn time_song(name: &str, this: bool, seconds: Value) -> Value {
+    json!({
+        "name": name, "this_song": this, "untitled": false, "seconds": seconds,
+        "undo_bursts": 1, "repeats": [], "hunts": 2, "hunt_ends": [],
+    })
+}
+
+fn time_answer_of(songs: Value, more: u64) -> Value {
+    json!({
+        "on": true, "since": "2026-11-01", "days": 7,
+        "all": {
+            "seconds": secs(5400, 2400, 3720, 3000, 600),
+            "undo_bursts": 3,
+            "repeats": [["Rename Track", 2]],
+            "hunts": 4,
+            "hunt_ends": [["Quantize", 2], ["nothing chosen", 2]],
+        },
+        "songs": songs, "more_songs": more,
+    })
+}
+
+#[test]
+fn time_report_is_listed() {
+    let d = support_dir();
+    let _app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let t = tool_named(&mut m, "time_report");
+    assert_eq!(t["description"], TIME_DESCRIPTION);
+    assert_eq!(t["annotations"]["readOnlyHint"], true);
+    closed_everywhere(&t["inputSchema"], "time_report");
+    let props = t["inputSchema"]["properties"].as_object().unwrap();
+    let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["days", "window"]);
+    assert_eq!(props["days"]["type"], "integer");
+    assert_eq!(props["days"]["minimum"], 1);
+    assert_eq!(props["days"]["maximum"], 3650);
+    assert_eq!(t["inputSchema"]["additionalProperties"], false);
+    let r = m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+    );
+    assert!(
+        r["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(TIME_INSTRUCTIONS),
+        "{r}"
+    );
+    let res = m.result("resources/list", json!({}));
+    for x in res["resources"].as_array().unwrap() {
+        let uri = x["uri"].as_str().unwrap();
+        assert!(!uri.contains("time") && !uri.contains("metrics"), "{uri}");
+    }
+}
+
+#[test]
+fn time_report_reaches_the_app() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::Ok(time_answer_of(json!([]), 0)));
+    let r = m.call("time_report", json!({"days": 7}));
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        app.seen(),
+        vec![Command::CoProducerMetrics {
+            days: Some(7),
+            window: None
+        }]
+    );
+}
+
+#[test]
+fn time_report_reads_plainly() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    app.script(Answer::Ok(time_answer_of(
+        json!([
+            time_song("Night Drive", true, secs(7200, 0, 3600, 0, 0)),
+            time_song("Sketch", false, secs(0, 0, 0, 1200, 0)),
+        ]),
+        0,
+    )));
+    let t = text(&m.call("time_report", json!({"days": 7})));
+    assert!(t.contains("since 2026-11-01 (the last 7 days):"), "{t}");
+    assert!(
+        t.contains("All songs: 4 h 12 min \u{2014} composing 1 h 30 min, recording 40 min, editing 1 h 2 min, mixing 50 min, other 10 min."),
+        "{t}"
+    );
+    assert!(
+        t.contains("Friction: 3 undo bursts; repeated tasks: Rename Track \u{d7}2; long menu hunts: 4, ending at Quantize \u{d7}2, nothing chosen \u{d7}2."),
+        "{t}"
+    );
+    let night = t.find("- Night Drive (this song): 3 h 0 min").expect(&t);
+    let sketch = t
+        .find("- Sketch: 20 min \u{2014} mixing 20 min; 1 undo bursts; 2 long menu hunts")
+        .expect(&t);
+    assert!(night < sketch, "{t}");
+    assert!(t.contains("Songs, most time first:"), "{t}");
+    assert!(!t.contains("Counting is off now"), "{t}");
+    assert!(!t.contains("more songs"), "{t}");
+    // No days: all time.
+    app.script(Answer::Ok(json!({
+        "on": true, "since": "2026-11-01", "days": null,
+        "all": {"seconds": secs(0, 0, 0, 0, 0), "undo_bursts": 0, "repeats": [], "hunts": 0, "hunt_ends": []},
+        "songs": [], "more_songs": 0,
+    })));
+    let t = text(&m.call("time_report", json!({})));
+    assert!(t.contains("since 2026-11-01 (all time):"), "{t}");
+    assert!(
+        t.contains("repeated tasks: none; long menu hunts: 0, ending at none."),
+        "{t}"
+    );
+    // Off, with earlier records.
+    let mut off = time_answer_of(json!([]), 0);
+    off["on"] = json!(false);
+    app.script(Answer::Ok(off));
+    let t = text(&m.call("time_report", json!({})));
+    assert!(
+        t.ends_with("Counting is off now; these are earlier records."),
+        "{t}"
+    );
+    // Nothing counted: by `on`.
+    for (on, want) in [
+        (
+            false,
+            "Time counting is off. The composer can turn it on in VizDAW's Settings \u{203a} Co-Producer \u{203a} Count where my time goes.",
+        ),
+        (true, "No time has been counted yet."),
+    ] {
+        app.script(Answer::Ok(json!({
+            "on": on, "since": null, "days": null,
+            "all": {"seconds": secs(0, 0, 0, 0, 0), "undo_bursts": 0, "repeats": [], "hunts": 0, "hunt_ends": []},
+            "songs": [], "more_songs": 0,
+        })));
+        let r = m.call("time_report", json!({}));
+        assert!(!is_error(&r), "{r}");
+        assert_eq!(text(&r), want);
+    }
+    assert_eq!(
+        m.result("tools/list", json!({}))["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["name"] == "time_report")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn time_report_is_shown_safely() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let mut ans = time_answer_of(
+        json!([
+            time_song("a\u{202E}b", true, secs(600, 0, 0, 0, 0)),
+            time_song(&"n".repeat(70_000), false, secs(60, 0, 0, 0, 0)),
+        ]),
+        480,
+    );
+    ans["all"]["repeats"] = json!([["x\u{2028}y", 2]]);
+    app.script(Answer::Ok(ans));
+    let r = m.call("time_report", json!({}));
+    let t = text(&r);
+    assert!(t.contains("a\u{FFFD}b"), "{t}");
+    assert!(t.contains("x\u{FFFD}y \u{d7}2"), "{t}");
+    assert!(!disguised(&t.replace('\n', "")), "{t}");
+    assert!(t.chars().count() < 3000, "{}", t.chars().count());
+    assert!(t.ends_with("\n- and 480 more songs"), "{t}");
+}
+
+#[test]
+fn time_report_refuses_hostile_input() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    for bad in [
+        json!({"days": 0}),
+        json!({"days": 3651}),
+        json!({"days": "7"}),
+        json!({"days": 7.5}),
+        json!({"days": null}),
+        json!({"extra": 1}),
+        json!({"window": 0}),
+        json!({"window": "1"}),
+    ] {
+        let r = m.call("time_report", bad.clone());
+        assert!(is_error(&r), "{bad}: {r}");
+    }
+    assert!(app.seen().is_empty(), "no socket call for a bad argument");
+    for bad in [
+        json!({"on": true, "since": "2026-11-01", "days": 7, "songs": [], "more_songs": 0}),
+        json!({"on": true, "since": "2026-11-01", "days": 7, "more_songs": 0,
+               "all": {"seconds": {"composing": "5", "recording": 0, "editing": 0, "mixing": 0, "other": 0},
+                       "undo_bursts": 0, "repeats": [], "hunts": 0, "hunt_ends": []}, "songs": []}),
+        json!("nope"),
+    ] {
+        app.script(Answer::Ok(bad.clone()));
+        let r = m.call("time_report", json!({}));
+        assert!(is_error(&r), "{bad}: {r}");
+        assert_eq!(text(&r), "VizDAW's answer could not be read.");
+    }
+}
+
+#[test]
+fn time_report_needs_co_producer() {
+    let d = support_dir();
+    std::fs::write(d.path().join("co-producer.off"), b"").unwrap();
+    let mut m = Mcp::spawn(d.path());
+    let r = m.call("time_report", json!({}));
+    assert!(is_error(&r), "{r}");
+    assert_eq!(text(&r), "Co-Producer is turned off in VizDAW's Settings.");
+}
+
+#[test]
+fn coaching_is_a_recipe_and_a_prompt() {
+    let d = support_dir();
+    let _app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let list = text(&m.call("recipes", json!({})));
+    let lines: Vec<&str> = list.lines().collect();
+    assert_eq!(lines.len(), 8, "{list}");
+    assert_eq!(
+        *lines.last().unwrap(),
+        "- coaching: Where does my time go, and what could you help with?"
+    );
+    let t = text(&m.call("recipes", json!({"name": "coaching"})));
+    let mut want = String::from("Where does my time go, and what could you help with?:");
+    for s in COACHING_STEPS {
+        want.push_str("\n- ");
+        want.push_str(s);
+    }
+    assert_eq!(t, want);
+    assert!(
+        !t.contains("begin_request") && !t.contains("end_request"),
+        "{t}"
+    );
+    let prompts = m.result("prompts/list", json!({}));
+    let prompts = prompts["prompts"].as_array().unwrap();
+    assert_eq!(prompts.len(), 7);
+    let p = prompts.iter().find(|p| p["name"] == "coaching").unwrap();
+    assert!(
+        p.get("arguments")
+            .is_none_or(|a| a.as_array().is_some_and(Vec::is_empty)),
+        "{p}"
+    );
+    let got = m.result("prompts/get", json!({"name": "coaching"}));
+    let t = got["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(
+        t.starts_with("Where does my time go, and what could you help with?.\n- Call time_report."),
+        "{t}"
+    );
+}
+
+#[test]
+fn mcp_never_opens_the_records() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut seen = 0;
+    for e in std::fs::read_dir(&src).unwrap() {
+        let path = e.unwrap().path();
+        if path.extension().is_some_and(|x| x == "rs") {
+            let s = std::fs::read_to_string(&path).unwrap();
+            assert!(!s.contains("\"Metrics\""), "{}", path.display());
+            assert!(!s.contains("time.json"), "{}", path.display());
+            seen += 1;
+        }
+    }
+    assert!(seen >= 5);
 }

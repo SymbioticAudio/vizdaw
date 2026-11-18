@@ -470,6 +470,7 @@ impl Server {
             tools::SHOW_TRACKS => done(self.show_tracks(args, views)),
             tools::SHOW_MIXER => done(self.show_mixer(args, views)),
             tools::LIST_PLUGINS => done(self.list_plugins(args)),
+            tools::TIME_REPORT => done(self.time_report(args, views)),
             tools::PLUGIN_PARAMS => done(self.plugin_params(args)),
             tools::SCREENSHOT => done(self.screenshot(args)),
             tools::STARTER_PROJECT => done(self.starter_project(args)),
@@ -992,6 +993,24 @@ impl Server {
         match self.pass("co_producer.plugins", args, &["kind"]) {
             Ok(r) => tool_text(tools::plugins_answer(&r), false),
             Err(e) => e,
+        }
+    }
+
+    /// Plan 8f Ruling 6: where the composer's time has gone, read from the
+    /// app on request. Only the app opens the records.
+    fn time_report(&mut self, args: &Map<String, Value>, views: bool) -> Value {
+        if let Err(m) = tools::check_time_args(args) {
+            return tool_error(m);
+        }
+        let r = match self.pass("co_producer.metrics", args, &["days"]) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        match tools::time_parts(&r) {
+            Some((text, structured)) => {
+                with_view(tool_text(text, false), views.then_some(structured))
+            }
+            None => tool_error(tools::TIME_UNREADABLE),
         }
     }
 

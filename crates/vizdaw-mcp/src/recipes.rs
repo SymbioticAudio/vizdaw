@@ -22,7 +22,7 @@ const END: &str =
     "End the request with end_request, and tell the composer what was added and what changed.";
 const NO_FITTING: &str = "If list_plugins has no fitting effect, say so, set up the bus with multi-q only, and suggest the kind of plug-in to install.";
 
-/// Ruling 6's six recipes, in its order.
+/// Ruling 6's six recipes, in its order, then plan 8f's `coaching`.
 pub const RECIPES: &[Recipe] = &[
     Recipe {
         name: "starter_project",
@@ -97,6 +97,18 @@ pub const RECIPES: &[Recipe] = &[
             "Use the target's own units.",
             "For a region's own fade, set its shape with region.set_fade_shape through change.",
             END,
+        ],
+    },
+    Recipe {
+        name: "coaching",
+        title: "Where does my time go, and what could you help with?",
+        steps: &[
+            "Call time_report. If counting is off, say where to turn it on, once, and stop.",
+            "Tell the composer in a few plain sentences where their time went, overall and for the song they are on, without judging.",
+            "Point to the friction signals: bursts of undos, repeated tasks by name, and long menu hunts and what they ended at.",
+            "Suggest at most three chores Co-Producer could take over, each tied to a signal. For example: many repeated renames or colours are one request; long hunts ending at a bounce or export are a chore to ask for; heavy mixing time fits the mix recipes; heavy editing time fits quantize, transpose and velocity chores.",
+            "Offer, do not start: begin a request only after the composer picks one.",
+            "Do not bring the time records up again unless the composer asks.",
         ],
     },
 ];
@@ -230,8 +242,13 @@ mod tests {
 
     #[test]
     fn every_recipe_begins_and_ends_a_request() {
-        assert_eq!(RECIPES.len(), 6);
+        assert_eq!(RECIPES.len(), 7);
         for r in RECIPES {
+            // Coaching reads the time records and starts no request.
+            if r.name == "coaching" {
+                assert!(!r.steps.contains(&BEGIN) && !r.steps.contains(&END));
+                continue;
+            }
             assert_eq!(r.steps.first(), Some(&BEGIN), "{}", r.name);
             assert_eq!(r.steps.last(), Some(&END), "{}", r.name);
         }
