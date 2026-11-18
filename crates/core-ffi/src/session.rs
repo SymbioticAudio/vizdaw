@@ -864,6 +864,7 @@ impl Inner {
         Ok(DocSnapshot {
             lane_revs: self.revs.rows(),
             version: self.version,
+            step: self.history.present_serial(),
             title: title(self.path.as_deref(), self.copy_title.as_deref()),
             dirty: self.unsaved(),
             undo_label: self.history.undo_label().map(str::to_string),

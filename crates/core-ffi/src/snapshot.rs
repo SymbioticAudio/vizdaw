@@ -17,6 +17,9 @@ pub const UNITS_PER_BEAT: u32 = 960;
 pub struct DocSnapshot {
     /// Increases with every applied command, undo and redo; never saved.
     pub version: u64,
+    /// The present step's serial (`History::present_serial`): a new step
+    /// raises it, undo and redo return to the step's own (plan 8f Ruling 4).
+    pub step: u64,
     /// File name without `.vizdaw`, or "Untitled".
     pub title: String,
     /// Differs from the last opened or saved document.

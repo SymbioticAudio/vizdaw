@@ -48,6 +48,7 @@ pub mod jobs;
 pub mod keys;
 pub mod live;
 pub mod media;
+pub mod metrics;
 pub mod mixer;
 pub mod mixer_chores;
 pub mod modify;
@@ -141,6 +142,11 @@ pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
 pub use live::InputInfoRow;
 pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
+pub use metrics::{
+    MetricsCategoryRow, MetricsClockRow, MetricsCountRow, MetricsOverviewRow, MetricsRecorder,
+    MetricsSecondsRow, MetricsSongRow, MetricsSongTotalsRow, MetricsSummaryRow, MetricsTotalsRow,
+    metrics_delete_all, metrics_overview, metrics_summary,
+};
 pub use mixer::{
     BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, OutputPathRow,
     SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow,

@@ -1121,6 +1121,14 @@ pub enum ControlResult {
         /// The preview's items the sheet listed.
         items: Vec<crate::co_producer::ChangeItemRow>,
     },
+    /// `co_producer.metrics` (plan 8f Ruling 6): where the composer's time
+    /// has gone.
+    CoProducerMetrics {
+        /// Counting is on now.
+        on: bool,
+        /// The summary.
+        row: crate::metrics::MetricsSummaryRow,
+    },
 }
 
 /// Error codes (control spec §5.3).
@@ -2091,7 +2099,39 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "thing": i.thing, "change": i.change, "composers_work": i.composers_work,
             })).collect::<Vec<_>>(),
         }),
+        ControlResult::CoProducerMetrics { on, row } => json!({
+            "on": on, "since": row.since, "days": row.days, "all": metrics_totals_json(&row.all),
+            "songs": row.songs.iter().map(|s| {
+                let mut v = metrics_totals_json(&s.totals);
+                if let Value::Object(m) = &mut v {
+                    m.insert("name".into(), json!(s.name));
+                    m.insert("this_song".into(), json!(s.this_song));
+                    m.insert("untitled".into(), json!(s.untitled));
+                }
+                v
+            }).collect::<Vec<_>>(),
+            "more_songs": row.more_songs,
+        }),
     }
+}
+
+/// Time records' totals as `{seconds: {...}, undo_bursts, repeats:
+/// [[label, n]], hunts, hunt_ends: [[label, n]]}` (plan 8f Ruling 6).
+fn metrics_totals_json(t: &crate::metrics::MetricsTotalsRow) -> Value {
+    let pairs = |l: &[crate::metrics::MetricsCountRow]| {
+        l.iter()
+            .map(|c| json!([c.label, c.count]))
+            .collect::<Vec<_>>()
+    };
+    let s = &t.seconds;
+    json!({
+        "seconds": {
+            "composing": s.composing, "recording": s.recording, "editing": s.editing,
+            "mixing": s.mixing, "other": s.other,
+        },
+        "undo_bursts": t.undo_bursts, "repeats": pairs(&t.repeats), "hunts": t.hunts,
+        "hunt_ends": pairs(&t.hunt_ends),
+    })
 }
 
 /// A report as `{summary, items: [{kind, what, count, details}]}`.

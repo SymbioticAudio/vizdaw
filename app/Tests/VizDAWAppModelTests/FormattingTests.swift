@@ -61,7 +61,7 @@ import VizDAWCore
 
     @Test func windowTitleMarksEdits() {
         var s = DocSnapshot(
-            version: 0, title: "demo", dirty: false, undoLabel: nil, redoLabel: nil,
+            version: 0, step: 0, title: "demo", dirty: false, undoLabel: nil, redoLabel: nil,
             sequences: [], warnings: [], laneRevs: [])
         #expect(Formatting.windowTitle(s) == "demo")
         s.dirty = true
