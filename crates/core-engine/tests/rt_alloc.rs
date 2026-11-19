@@ -161,10 +161,17 @@ fn automation_document(doc: &Document, song: SeqId) -> Document {
     b.finish()
 }
 
-/// One test, so no other test thread allocates while the global counter
-/// is compared.
+/// The tests take turns, so no other test thread allocates while the
+/// global counter is compared.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn render_path_never_allocates() {
+    let _g = serial();
     // The counter works: one allocation and one free.
     let before = rt_check::count();
     rt_check::arm();
@@ -482,4 +489,78 @@ fn render_path_never_allocates() {
         "allocations while counting in"
     );
     assert_eq!(engine.state(), PlayState::Playing, "the count-in rolled");
+}
+
+/// Groups-vcas-transport Ruling 19: the metronome clicks across a tempo
+/// ramp, a meter change, a loop wrap, a Locate, a `SetClick` change and a
+/// Stop without allocating, in blocks of every size.
+#[test]
+fn the_metronome_never_allocates() {
+    use core_engine::metronome::ClickSpec;
+    use core_model::command::{Command, SequenceCmd};
+    use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
+    let _g = serial();
+    const Q: i64 = core_engine::fixtures::Q;
+    let mut b = Builder::new();
+    let (seq, _) = b.sequence("Song", "Track", None).unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: core_model::sequence::SeqLength::Locked(Tick(16 * Q)),
+    }))
+    .unwrap();
+    // A ramp over bars 2–3 and 7/8 from bar 3.
+    b.tempo(
+        seq,
+        &[(0, 120, false), (4 * Q, 120, true), (12 * Q, 180, false)],
+    )
+    .unwrap();
+    let entry = |tick: i64, num: u8, den: u8| MeterEntry {
+        tick: Tick(tick),
+        meter: Meter { num, den },
+        key: KeySig::default(),
+    };
+    let meter = MeterMap::new(vec![entry(0, 4, 4), entry(8 * Q, 7, 8)]).unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetMeter { seq, meter }))
+        .unwrap();
+    let bus = b.bus("Latent").unwrap();
+    b.insert(bus, TestInserts::plugin("latency=700")).unwrap();
+    let doc = b.finish();
+    let (mut engine, renderer) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(OfflineSinks::new(64))).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.load(&doc, seq).unwrap();
+    let mut out = OfflineBackend::new(48_000.0, 512);
+    out.start(renderer).unwrap();
+    out.reserve(1024);
+    let on = ClickSpec {
+        on: true,
+        gain: 0.5,
+        record_only: false,
+    };
+    engine.set_click(on);
+    // Warm up: the first blocks settle the graph.
+    engine.play().unwrap();
+    for _ in 0..4 {
+        out.block(512);
+    }
+    let before = rt_check::count();
+    let mut peak = 0f32;
+    for i in 0..1_500u32 {
+        let n = 1 + (i * 37) % 1024;
+        armed_block(&mut out, n);
+        let (l, _) = out.output(n);
+        peak = l.iter().fold(peak, |m, x| m.max(x.abs()));
+        match i {
+            // A loop around the meter change, wrapping mid-block.
+            300 => engine.set_loop_range(Some((150_000, 260_123))).unwrap(),
+            700 => engine.locate_frame(10_000).unwrap(),
+            800 => engine.set_click(ClickSpec { gain: 1.0, ..on }),
+            900 => engine.set_click(ClickSpec { on: false, ..on }),
+            1000 => engine.set_click(on),
+            1300 => engine.stop().unwrap(),
+            _ => {}
+        }
+    }
+    assert_eq!(rt_check::count() - before, 0, "allocations while clicking");
+    assert!(peak > 0.1, "it clicked: {peak}");
 }

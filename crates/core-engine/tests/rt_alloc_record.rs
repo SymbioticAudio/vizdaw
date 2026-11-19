@@ -36,10 +36,17 @@ fn armed_block(b: &mut OfflineBackend, frames: u32) {
     rt_check::disarm();
 }
 
-/// One test, so no other test thread allocates while the global counter
-/// is compared.
+/// The tests take turns, so no other test thread allocates while the
+/// global counter is compared.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn recording_never_allocates() {
+    let _g = serial();
     let mut bld = Builder::new();
     let synth = bld.dest("Synth", "builtin:synth", 0).unwrap();
     let (seq, lane) = bld.sequence("Bar", "Notes", Some(synth)).unwrap();
@@ -329,4 +336,55 @@ fn recording_never_allocates() {
         "allocations while measuring and while the fake synth plays"
     );
     drop(sbk.stop().unwrap());
+}
+
+/// Groups-vcas-transport Ruling 19: a record pass in `record_only` clicks
+/// through its pre-roll and roll, a loop wrap and a Stop without
+/// allocating.
+#[test]
+fn a_record_only_click_never_allocates() {
+    use core_engine::metronome::ClickSpec;
+    let _g = serial();
+    let mut bld = Builder::new();
+    let (seq, _) = bld.sequence("Bar", "Notes", None).unwrap();
+    let doc = bld.finish();
+    let (mut engine, renderer) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(OfflineSinks::new(64))).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.load(&doc, seq).unwrap();
+    engine.set_click(ClickSpec {
+        on: true,
+        gain: 1.0,
+        record_only: true,
+    });
+    let mut b = OfflineBackend::new(48_000.0, 512);
+    b.start(renderer).unwrap();
+    b.reserve(1024);
+    engine.set_loop_range(Some((0, 61_000))).unwrap();
+    let mut h = engine
+        .start_recording(&RecordRequest {
+            channels: vec![],
+            range: Some((30_000, 60_000)),
+            ring_frames: 48_000,
+        })
+        .unwrap();
+    engine.play().unwrap();
+    for _ in 0..4 {
+        b.block(512);
+    }
+    let before = rt_check::count();
+    let mut peak = 0f32;
+    for i in 0..600u32 {
+        let n = 1 + (i * 37) % 1024;
+        armed_block(&mut b, n);
+        let (l, _) = b.output(n);
+        peak = l.iter().fold(peak, |m, x| m.max(x.abs()));
+        while h.midi.pop().is_ok() {}
+        while h.marks.pop().is_ok() {}
+        if i == 500 {
+            engine.stop().unwrap();
+        }
+    }
+    assert_eq!(rt_check::count() - before, 0, "allocations while clicking");
+    assert!(peak > 0.1, "the pass clicked: {peak}");
 }

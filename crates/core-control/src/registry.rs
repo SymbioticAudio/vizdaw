@@ -727,6 +727,30 @@ pub const GROUP_IDS: &[&str] = &[
 /// Write and Trim are not among them.
 pub const VCA_MODE_NAMES: &[&str] = &["off", "read", "touch", "latch"];
 
+/// The metronome's modes (groups-vcas-transport Ruling 19), as
+/// `transport.set_click_mode` spells them.
+pub const CLICK_MODES: &[&str] = &["play_and_record", "record_only"];
+
+/// The metronome's level range in dB (`core_model`'s
+/// `CLICK_LEVEL_MIN_DB` and `CLICK_LEVEL_MAX_DB`).
+pub const CLICK_LEVEL_DB: (f64, f64) = (-60.0, 0.0);
+
+/// `transport.set_click_level`.
+const CLICK_LEVEL_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "level_db",
+    kind: ParamKind::Text,
+    required: true,
+    help: "The click level in dB as text, such as \"-12\" (-60 to 0).",
+}];
+
+/// `transport.set_click_mode`.
+const CLICK_MODE_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "mode",
+    kind: ParamKind::Choice(CLICK_MODES),
+    required: true,
+    help: "When it clicks: play_and_record (every beat while playing) or record_only (only while recording, pre-roll included).",
+}];
+
 /// The colours a group takes (groups-vcas-transport Ruling 4): the eight
 /// swatches, without `none`.
 pub const GROUP_COLOURS: &[&str] = &[
@@ -3140,6 +3164,30 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("transport.punch", "Transport", "Punch", Some("I"), true)
     },
     CommandSpec {
+        params: ON,
+        ..cmd("transport.click", "Transport", "Click", None, true)
+    },
+    CommandSpec {
+        params: CLICK_LEVEL_PARAMS,
+        ..key_only(cmd(
+            "transport.set_click_level",
+            "Transport",
+            "Click Level",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: CLICK_MODE_PARAMS,
+        ..key_only(cmd(
+            "transport.set_click_mode",
+            "Transport",
+            "Click Mode",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
         class: Class::Read,
         ..cmd(
             "transport.go_position",
@@ -4103,6 +4151,12 @@ pub fn validate_args(
     }
     mixer_rules(&p, spec.id, &out)?;
     group_rules(&p, spec.id, &out)?;
+    if spec.id == "transport.set_click_level"
+        && let Some(t) = text_arg(&out, "level_db")
+    {
+        let (min, max) = CLICK_LEVEL_DB;
+        decimal(t, min, max).map_err(|m| p.error(format!("`level_db` {m}")))?;
+    }
     chore_rules(&p, spec.id, &mut out)?;
     creative_rules(&p, spec.id, &out)?;
     for d in spec.dialogs.iter().filter(|d| d.always) {

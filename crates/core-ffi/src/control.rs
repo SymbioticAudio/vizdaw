@@ -1615,6 +1615,10 @@ fn transport_json(doc: &str, t: &TransportState) -> Value {
         "position": t.position_bbu, "seconds": t.seconds, "sample_rate": t.sample_rate,
         "device": t.device, "faults": t.faults, "report": t.report,
         "rate_mismatch": t.rate_mismatch, "counting_in": t.counting_in,
+        "click": t.click.map(|c| json!({
+            "on": c.on, "level_db": c.level_db,
+            "mode": crate::session::click::mode_text(c.mode),
+        })),
     })
 }
 

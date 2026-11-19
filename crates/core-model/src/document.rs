@@ -44,6 +44,68 @@ pub struct Settings {
     /// Absent in files until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// The metronome (groups-vcas-transport Ruling 19; format version
+    /// 11). Absent in files while it is the default.
+    #[serde(default, skip_serializing_if = "ClickSettings::is_default")]
+    pub click: ClickSettings,
+}
+
+/// The quietest click level in dB.
+pub const CLICK_LEVEL_MIN_DB: f64 = -60.0;
+/// The loudest click level in dB.
+pub const CLICK_LEVEL_MAX_DB: f64 = 0.0;
+
+/// When the metronome clicks (Ruling 19).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickMode {
+    /// Every beat while the transport plays.
+    #[default]
+    PlayAndRecord,
+    /// Only while a record pass runs, its pre-roll included.
+    RecordOnly,
+}
+
+/// The project's metronome settings (Ruling 19): saved per project.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClickSettings {
+    /// Whether it clicks.
+    pub on: bool,
+    /// Its level in dB, [`CLICK_LEVEL_MIN_DB`] to [`CLICK_LEVEL_MAX_DB`]:
+    /// it scales both the accent's and the other beats' peaks.
+    pub level_db: f64,
+    /// When it clicks.
+    pub mode: ClickMode,
+}
+
+impl Default for ClickSettings {
+    fn default() -> Self {
+        ClickSettings {
+            on: false,
+            level_db: -6.0,
+            mode: ClickMode::PlayAndRecord,
+        }
+    }
+}
+
+impl ClickSettings {
+    /// Whether these are the defaults (then a file leaves them out).
+    pub fn is_default(&self) -> bool {
+        *self == ClickSettings::default()
+    }
+
+    /// `ModelError::Range` for a level that is not finite or not within
+    /// [`CLICK_LEVEL_MIN_DB`]..=[`CLICK_LEVEL_MAX_DB`].
+    pub fn check(&self) -> Result<()> {
+        if self.level_db.is_finite()
+            && (CLICK_LEVEL_MIN_DB..=CLICK_LEVEL_MAX_DB).contains(&self.level_db)
+        {
+            Ok(())
+        } else {
+            Err(ModelError::range("click.level_db", self.level_db))
+        }
+    }
 }
 
 /// The longest song-info field, and the longest region name, in bytes.
@@ -159,6 +221,7 @@ impl Default for Settings {
             learn: Vec::new(),
             info: SongInfo::default(),
             project_id: None,
+            click: ClickSettings::default(),
         }
     }
 }

@@ -840,3 +840,46 @@ fn live_bounce_and_render_agree_with_a_vca() {
         );
     }
 }
+
+/// Ruling 19: the metronome never reaches a bounce. With the live
+/// engine's click on, a bounce of the same song is the same, sample for
+/// sample, as one with it off; live blocks over the same span click.
+#[test]
+fn clicks_never_reach_a_bounce() {
+    use core_engine::metronome::ClickSpec;
+    let (d, seq) = doc(0, None);
+    let end = Tick(15 * Q / 2);
+    let bounced = |click: bool| {
+        let mut r = rig(&d, seq);
+        r.engine.set_click(ClickSpec {
+            on: click,
+            gain: 1.0,
+            record_only: false,
+        });
+        let (got, stats) = run(&mut r, &BounceSpec { end, ..spec(0) });
+        (got.into_iter().next().unwrap(), stats)
+    };
+    let (with, stats) = bounced(true);
+    let (without, _) = bounced(false);
+    assert!(without.iter().any(|x| *x != 0.0));
+    same(&with, &without, "a bounce with the click on and off");
+    let mut b = rig(&d, seq);
+    b.engine.set_click(ClickSpec {
+        on: true,
+        gain: 1.0,
+        record_only: false,
+    });
+    b.engine.play().unwrap();
+    let mut live = Vec::new();
+    while (live.len() as u64) < stats.range {
+        b.engine.streamer().service();
+        b.out.block(BLOCK);
+        live.extend_from_slice(b.out.output(BLOCK).0);
+    }
+    live.truncate(stats.range as usize);
+    let n = live.len();
+    assert!(
+        live.iter().zip(&with[..n]).any(|(x, y)| x != y),
+        "live blocks click"
+    );
+}

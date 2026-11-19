@@ -332,6 +332,7 @@ struct AppCommands: Commands {
                 .disabled(doc == nil)
             commandToggle("transport.overdub", TransportCommands.self)
             commandToggle("transport.punch", TransportCommands.self)
+            commandToggle(TransportCommands.click, TransportCommands.self)
             Divider()
             fieldItem("transport.go_position")
             fieldItem("transport.go_edit_in")

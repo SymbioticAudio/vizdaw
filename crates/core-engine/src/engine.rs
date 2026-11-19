@@ -251,6 +251,9 @@ pub struct Engine {
     commanded_playing: bool,
     /// The count-in the last Play sent (plan release-fixes Task 1).
     count_in: Option<crate::count_in::CountIn>,
+    /// The metronome's settings last asked for, and whether the renderer
+    /// still has to be sent them (the command ring was full).
+    click: (crate::metronome::ClickSpec, bool),
     /// A Stop or Locate was sent since the last Play: the next Play waits
     /// for the disk.
     moved_since_play: bool,
@@ -414,6 +417,7 @@ impl Engine {
             selection: false,
             commanded_playing: false,
             count_in: None,
+            click: (crate::metronome::ClickSpec::OFF, false),
             moved_since_play: false,
             stream_seen: (AtomicU64::new(0), AtomicU64::new(0)),
             input_spec: crate::input::InputSpec::default(),
@@ -1063,6 +1067,10 @@ impl Engine {
     }
 
     fn push(&mut self, cmd: EngineCmd) -> Result<(), EngineError> {
+        if self.click.1 && self.cmds.push(EngineCmd::SetClick(self.click.0)).is_ok() {
+            self.click.1 = false;
+            self.cmds_sent.fetch_add(1, Ordering::Release);
+        }
         self.cmds.push(cmd).map_err(|_| EngineError::Busy)?;
         // Counted once queued: a gesture sent from now on waits for it.
         self.cmds_sent.fetch_add(1, Ordering::Release);
@@ -1336,6 +1344,24 @@ impl Engine {
         self.active_loop = range;
         self.sync_stream_loop();
         Ok(())
+    }
+
+    /// The metronome's settings (groups-vcas-transport Ruling 19). Only
+    /// the live engine is sent them: a bounce or an export never is, so
+    /// its renderer stays silent. A full command ring sends them with the
+    /// next command instead.
+    pub fn set_click(&mut self, c: crate::metronome::ClickSpec) {
+        self.click = (c, false);
+        if self.cmds.push(EngineCmd::SetClick(c)).is_ok() {
+            self.cmds_sent.fetch_add(1, Ordering::Release);
+        } else {
+            self.click.1 = true;
+        }
+    }
+
+    /// The metronome's settings last asked for.
+    pub fn click(&self) -> crate::metronome::ClickSpec {
+        self.click.0
     }
 
     /// Loops an explicit frame range, or stops looping.

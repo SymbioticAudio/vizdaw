@@ -8,6 +8,7 @@ use crate::graph::regions::InputCopy;
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
 use crate::input::{InputRoutes, MIDI_IN_PER_BLOCK, MidiIn};
 use crate::measure::MeasureTap;
+use crate::metronome::{ClickSpec, Metronome};
 use crate::midi1::Midi1Msg;
 use crate::mpe::MpeEncoder;
 use crate::notes::ActiveNotes;
@@ -569,7 +570,14 @@ pub enum EngineCmd {
     /// installed (it goes back through the retire ring; its status reads
     /// closed).
     Gestures(Option<Box<GestureTap>>),
+    /// The metronome's settings (groups-vcas-transport Ruling 19): only
+    /// the live engine sends it; a bounce never does.
+    SetClick(ClickSpec),
 }
+
+/// The played runs a block can hand the metronome: a loop shorter than
+/// an eighth of a block loses the clicks of its later wraps.
+const CLICK_RUNS: usize = 8;
 
 /// Something the renderer hands back for freeing off the audio thread.
 #[derive(Debug)]
@@ -696,6 +704,12 @@ pub struct Renderer {
     /// The count-in playing before the transport rolls, and its last
     /// clicks after (Ruling 7).
     counting: Option<Counting>,
+    /// The metronome (Ruling 19), silent until a `SetClick`.
+    metronome: Metronome,
+    /// This block's played runs so far, `(block offset, from, to)`.
+    click_runs: [(u32, u64, u64); CLICK_RUNS],
+    /// How many of `click_runs` this block filled.
+    click_n: usize,
     /// A bounce's stem taps (plan 5f-2, pre-flight C1), while set.
     stems: Option<Box<StemTaps>>,
 }
@@ -918,6 +932,39 @@ fn skip_sinks(sinks: &mut SinkTable, frames: u64, except: u64) {
     }
 }
 
+/// Adds a played run to this block's list for the metronome, joined to
+/// the last one when it carries straight on. // RT
+fn note_run(
+    runs: &mut [(u32, u64, u64); CLICK_RUNS],
+    n: &mut usize,
+    offset: u32,
+    from: u64,
+    to: u64,
+) {
+    if let Some(last) = n.checked_sub(1).and_then(|i| runs.get_mut(i)) {
+        let len = u32::try_from(last.2.saturating_sub(last.1)).unwrap_or(u32::MAX);
+        if last.2 == from && last.0.saturating_add(len) == offset {
+            last.2 = to;
+            return;
+        }
+    }
+    if let Some(slot) = runs.get_mut(*n) {
+        *slot = (offset, from, to);
+        *n += 1;
+    }
+}
+
+/// Frames `a..b` of channels 0 and 1 of `out` (empty where missing).
+/// // RT
+fn channels<'a>(out: &'a mut [&mut [f32]], a: usize, b: usize) -> [&'a mut [f32]; 2] {
+    let (l, r) = match out {
+        [l, r, ..] => (l.get_mut(a..b), r.get_mut(a..b)),
+        [l] => (l.get_mut(a..b), None),
+        [] => (None, None),
+    };
+    [l.unwrap_or(&mut []), r.unwrap_or(&mut [])]
+}
+
 /// Hard clamp of frames `offset..offset + frames` of channels 0–1 at ±1.0;
 /// non-finite samples become 0. Raises `CLIPPED` when anything was changed
 /// (engine ruling). // RT
@@ -994,6 +1041,9 @@ impl Renderer {
             seg_mark: 0,
             after_end: 0,
             counting: None,
+            metronome: Metronome::new(cfg.sample_rate),
+            click_runs: [(0, 0, 0); CLICK_RUNS],
+            click_n: 0,
             stems: None,
         };
         r.prepare(cfg.max_frames);
@@ -1274,6 +1324,7 @@ impl Renderer {
                 let step = self.transport.next(length, at, end - at);
                 match step {
                     Step::Play { from, to, offset } => {
+                        note_run(&mut self.click_runs, &mut self.click_n, offset, from, to);
                         if let Some(s) = self.schedule.as_deref() {
                             if std::mem::take(&mut self.chase_pending) {
                                 // A run past frame 0 skips the MPE
@@ -1384,6 +1435,7 @@ impl Renderer {
             // stragglers are done.
             self.pending_skip = self.pending_skip.saturating_add(u64::from(frames - offset));
         }
+        self.click(out, frames);
         if let Some(c) = self.counting.as_mut() {
             c.set_latency(self.latency);
             c.render(out, frames);
@@ -1806,8 +1858,60 @@ impl Renderer {
         self.chase_pending = true;
     }
 
+    /// Adds the metronome's clicks over this block's played runs, then
+    /// clamps the master as the count-in does (Ruling 19). // RT
+    fn click(&mut self, out: &mut [&mut [f32]], frames: u32) {
+        let n = std::mem::take(&mut self.click_n).min(CLICK_RUNS);
+        if !self.metronome.spec().on && !self.metronome.sounding() {
+            return;
+        }
+        let recording = self.tap.is_some();
+        let latency = self.latency;
+        // No schedule has been loaded: nothing has played to click on.
+        let Some(s) = self.schedule.as_deref() else {
+            return;
+        };
+        let m = &mut self.metronome;
+        let mut at = 0u32;
+        for &(off, from, to) in self.click_runs.get(..n).unwrap_or(&[]) {
+            let len = u32::try_from(to.saturating_sub(from)).unwrap_or(0);
+            let off = off.min(frames);
+            let len = len.min(frames - off);
+            if off > at {
+                let mut ch = channels(out, at as usize, off as usize);
+                m.render(
+                    &mut ch,
+                    &s.beats,
+                    &s.tempo,
+                    None,
+                    recording,
+                    latency,
+                    off - at,
+                );
+            }
+            let mut ch = channels(out, off as usize, (off + len) as usize);
+            let run = Some((from, from + u64::from(len)));
+            m.render(&mut ch, &s.beats, &s.tempo, run, recording, latency, len);
+            at = off + len;
+        }
+        if at < frames {
+            let mut ch = channels(out, at as usize, frames as usize);
+            m.render(
+                &mut ch,
+                &s.beats,
+                &s.tempo,
+                None,
+                recording,
+                latency,
+                frames - at,
+            );
+        }
+        clamp_master(out, 0, frames, &self.shared);
+    }
+
     fn apply(&mut self, cmd: EngineCmd) {
         match cmd {
+            EngineCmd::SetClick(spec) => self.metronome.set(spec),
             EngineCmd::SetSchedule(new) => {
                 self.release_now(false);
                 if let Some(old) = self.schedule.take() {

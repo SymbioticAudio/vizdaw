@@ -158,6 +158,16 @@ impl Command {
             Command::ModifyNotes { modify, .. } => modify.name(),
         }
     }
+
+    /// The undo label of this command applied to `before`: its
+    /// [`Command::name`], except where the label names what changed
+    /// ([`SettingsCmd::label`]).
+    pub fn label(&self, before: &Document) -> &'static str {
+        match self {
+            Command::Settings(c) => c.label(before),
+            _ => self.name(),
+        }
+    }
 }
 
 /// Applies a command with an empty selection and no view filter.

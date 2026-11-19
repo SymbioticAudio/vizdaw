@@ -2,9 +2,11 @@
 //! preflight F13): no function marked `// RT` in `graph/controls.rs`
 //! takes a lock or allocates. A function is marked when the last line of
 //! its doc comment, after the `///`, ends exactly in `// RT`; "Not RT"
-//! functions (`build`, `snapshot`, …) are never scanned.
+//! functions (`build`, `snapshot`, …) are never scanned. The metronome's
+//! `metronome.rs` is scanned the same way (groups-vcas Task 10).
 
 const CONTROLS: &str = include_str!("../src/graph/controls.rs");
+const METRONOME: &str = include_str!("../src/metronome.rs");
 
 /// What an `// RT` body must not hold: locks and allocations.
 const FORBIDDEN: &[&str] = &[
@@ -110,6 +112,33 @@ fn controls_take_no_lock() {
             }
         }
     }
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+/// Each forbidden use in the scanned functions' bodies.
+fn forbidden_in(scanned: &[RtFn<'_>]) -> Vec<String> {
+    let mut found = Vec::new();
+    for f in scanned {
+        for line in &f.body {
+            for bad in FORBIDDEN {
+                if line.contains(bad) {
+                    found.push(format!("{}: {bad} in {:?}", f.name, line.trim()));
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn the_metronome_takes_no_lock() {
+    let scanned = rt_functions(METRONOME);
+    let names: Vec<&str> = scanned.iter().map(|f| f.name).collect();
+    for rt in ["beats_in", "set", "render"] {
+        assert!(names.contains(&rt), "{rt} not scanned: {names:?}");
+    }
+    assert!(!names.contains(&"build"), "build scanned: {names:?}");
+    let found = forbidden_in(&scanned);
     assert!(found.is_empty(), "{found:#?}");
 }
 

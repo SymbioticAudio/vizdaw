@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+pub mod click;
 mod co_producer_creative;
 pub mod co_producer_mixer;
 mod fixes;
@@ -2794,6 +2795,7 @@ impl Session {
                     ticks_per_second: crate::clock::ticks_per_second(doc, Some(h.seq), h.tick),
                     rate_mismatch: h.rate_mismatch,
                     counting_in: h.counting_in,
+                    click: Some(doc.settings().click.into()),
                 },
                 None => {
                     let tick = inner.cursor.unwrap_or(Tick::ZERO);
@@ -2819,6 +2821,7 @@ impl Session {
                         ticks_per_second: crate::clock::ticks_per_second(doc, seq, tick),
                         rate_mismatch: false,
                         counting_in: false,
+                        click: Some(doc.settings().click.into()),
                     }
                 }
             })

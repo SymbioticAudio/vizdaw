@@ -497,6 +497,7 @@ pub fn compile(
         preamble: preamble.into_boxed_slice(),
         automation,
         audio,
+        beats: crate::metronome::BeatGrid::build(&s.meter, len),
     };
     report.warnings = warnings(&report);
     report.compile_time = started.elapsed().saturating_sub(resolving);

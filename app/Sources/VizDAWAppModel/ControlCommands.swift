@@ -703,6 +703,8 @@ public enum ControlCommands {
             guard host.focus(fieldKeys[id] ?? .position, docID) else {
                 return unavailable("The window shows no transport fields.")
             }
+        case TransportCommands.clickLevel, TransportCommands.clickMode:
+            if let f = failure(TransportCommands.runClick(id, args: args, m)) { return f }
         case _ where TransportCommands.ids.contains(id):
             if let f = failure(TransportCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where StepCommands.ids.contains(id):

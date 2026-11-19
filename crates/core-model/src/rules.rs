@@ -387,6 +387,7 @@ pub fn validate(doc: &Document) -> Vec<String> {
         "settings",
     );
     push(check_info(&doc.settings().info), "settings");
+    push(doc.settings().click.check(), "settings");
     if let Some(id) = &doc.settings().project_id {
         push(
             need(check_project_id(id), "project_id", id.len()),

@@ -476,8 +476,8 @@ impl History {
             let serial = self.next_serial;
             self.next_serial = self.next_serial.saturating_add(1);
             let next = Version {
+                label: cmd.label(&self.present.doc).to_string(),
                 doc: applied.doc,
-                label: cmd.name().to_string(),
                 at: Timestamp::now(),
                 serial,
             };

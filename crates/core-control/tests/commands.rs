@@ -563,8 +563,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        231,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records; groups-vcas-transport adds seven group commands and seven VCA commands"
+        234,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records; groups-vcas-transport adds seven group commands, seven VCA commands and the three click commands"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -3943,4 +3943,44 @@ fn vca_commands_are_registered() {
         let (code, message) = err("command.run", run(id, params.clone()));
         assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
     }
+}
+
+/// Groups-vcas-transport Ruling 19: the three click commands follow
+/// `transport.punch`; Click has a Transport menu item and a toggle's `on`,
+/// the level and mode are key-only, and Co-Producer is refused all three.
+#[test]
+fn click_commands_are_registered() {
+    let at = |id: &str| COMMANDS.iter().position(|c| c.id == id).unwrap();
+    let punch = at("transport.punch");
+    for (k, id) in [
+        "transport.click",
+        "transport.set_click_level",
+        "transport.set_click_mode",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(at(id), punch + 1 + k, "{id} follows transport.punch");
+        let c = registry::find(id).unwrap();
+        assert_eq!(c.class, registry::Class::Refused, "{id}");
+        assert_eq!(c.menu, "Transport", "{id}");
+        assert!(c.document, "{id}");
+    }
+    let click = registry::find("transport.click").unwrap();
+    assert!(click.menu_item);
+    assert_eq!(click.title, "Click");
+    assert_eq!(click.params.len(), 1);
+    assert_eq!(click.params[0].name, "on");
+    assert!(!click.params[0].required);
+    assert!(
+        !registry::find("transport.set_click_level")
+            .unwrap()
+            .menu_item
+    );
+    assert!(
+        !registry::find("transport.set_click_mode")
+            .unwrap()
+            .menu_item
+    );
+    assert_eq!(registry::CLICK_MODES, &["play_and_record", "record_only"]);
 }

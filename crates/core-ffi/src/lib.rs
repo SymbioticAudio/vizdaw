@@ -163,6 +163,7 @@ pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latenc
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
 pub use selection::{SelectionRow, TickRange};
+pub use session::click::{ClickModeRow, ClickRow};
 pub use session::co_producer_mixer::CoProducerParamsRow;
 pub use session::{CopyRow, NotesRow, OpenOptions, RemovedCopiesRow, Session};
 pub use snapshot::{

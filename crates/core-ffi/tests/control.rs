@@ -804,6 +804,7 @@ fn the_transport_says_when_it_counts_in() {
         ticks_per_second: 960.0,
         rate_mismatch: false,
         counting_in: true,
+        click: None,
     };
     let t = result_json(&ControlResult::Transport {
         doc: "D".into(),
@@ -814,10 +815,21 @@ fn the_transport_says_when_it_counts_in() {
         doc: "D".into(),
         state: vizdaw_ffi::TransportState {
             counting_in: false,
+            click: Some(vizdaw_ffi::ClickRow {
+                on: true,
+                level_db: -12.0,
+                mode: vizdaw_ffi::ClickModeRow::RecordOnly,
+            }),
             ..state
         },
     });
     assert_eq!(t["counting_in"], json!(false), "{t}");
+    // Groups-vcas-transport Task 10: the click's settings.
+    assert_eq!(
+        t["click"],
+        json!({"on": true, "level_db": -12.0, "mode": "record_only"}),
+        "{t}"
+    );
 }
 
 /// Plan 5e-1 Task 10: `state.get automation` spells modes as the
