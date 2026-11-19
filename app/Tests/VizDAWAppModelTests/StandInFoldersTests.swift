@@ -53,4 +53,15 @@ import VizDAWCore
         m.deleteAll()
         #expect(m.problem?.hasPrefix("Could not delete") == true)
     }
+
+    @Test func anIdReadFailureDeletesNothing() {
+        let m = StandInFolders(supportDir: support, openIDs: { throw VizError.Model(message: "busy") })
+        m.list = { [StandIn(id: "a", bytes: 1, modified: 1)] }
+        var asked = 0
+        m.delete = { _ in asked += 1; return 1 }
+        m.deleteAll()
+        #expect(asked == 0)
+        #expect(m.problem == "Couldn't check which songs are open, so nothing was deleted.")
+        #expect(m.line == nil)
+    }
 }

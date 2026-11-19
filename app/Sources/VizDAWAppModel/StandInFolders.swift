@@ -17,7 +17,7 @@ public final class StandInFolders {
         try deleteStandIns(openIds: $0)
     }
     /// The project IDs of the songs open right now.
-    @ObservationIgnored public var openIDs: @MainActor () -> [String]
+    @ObservationIgnored public var openIDs: @MainActor () throws -> [String]
     /// The support folder, for Show in Finder.
     public let supportDir: URL
 
@@ -28,7 +28,7 @@ public final class StandInFolders {
     /// "Could not …", after a failure.
     public private(set) var problem: String?
 
-    public init(supportDir: URL, openIDs: @escaping @MainActor () -> [String]) {
+    public init(supportDir: URL, openIDs: @escaping @MainActor () throws -> [String]) {
         self.supportDir = supportDir
         self.openIDs = openIDs
     }
@@ -40,8 +40,8 @@ public final class StandInFolders {
 
     /// Reads the folders again.
     public func refresh() {
-        let open = Set(openIDs())
         do {
+            let open = Set(try openIDs())
             rows = try list().filter { !open.contains($0.id) }
             problem = nil
         } catch {
@@ -72,7 +72,14 @@ public final class StandInFolders {
         confirming = false
         var failure: String?
         do {
-            _ = try delete(openIDs())
+            // If an open song's ID cannot be read, nothing is deleted.
+            let open: [String]
+            do { open = try openIDs() } catch {
+                refresh()
+                problem = "Couldn't check which songs are open, so nothing was deleted."
+                return
+            }
+            _ = try delete(open)
         } catch {
             failure = "Could not delete the notes and copies: \(error.localizedDescription)"
         }

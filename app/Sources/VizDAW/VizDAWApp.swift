@@ -127,7 +127,7 @@ final class LiveCoProducerSink: CoProducerSink {
 /// songs open right now are never listed or deleted.
 @MainActor let standInFolders = StandInFolders(
     supportDir: AppSetup.coProducerSupportDir,
-    openIDs: { appStore.documents.values.compactMap { (try? $0.session.projectId()) ?? nil } })
+    openIDs: { try appStore.documents.values.compactMap { try $0.session.projectId() } })
 
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
