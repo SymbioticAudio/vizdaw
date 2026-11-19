@@ -98,6 +98,7 @@ fn sample_mixer() -> Mixer {
             synth,
             bus,
         ],
+        groups: vec![],
     })
     .unwrap()
 }
@@ -143,6 +144,7 @@ fn unknown_fields_and_duplicate_strips_are_refused() {
             Strip::new(StripId(0), "Master", StripKind::Master),
             Strip::new(StripId(0), "X", StripKind::Bus),
         ],
+        groups: vec![],
     });
     assert!(r.unwrap_err().contains("duplicate strip id strip0"));
 }

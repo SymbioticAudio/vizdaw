@@ -259,7 +259,7 @@ fn files_write_a_chain_only_when_set_and_read_it_back() {
         ])
     );
     assert_eq!(from_json(&text).unwrap(), d2);
-    assert_eq!(VERSION, 10);
+    assert_eq!(VERSION, 11);
 }
 
 /// Ruling 18: a version-4 project opens with empty chains; the step is the

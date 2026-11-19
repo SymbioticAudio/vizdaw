@@ -4,7 +4,8 @@
 
 use crate::document::{DestKind, Document};
 use crate::error::{ModelError, Result};
-use crate::ids::{AnyId, PluginInstanceId, StripId};
+use crate::groups::{MAX_MEMBERS, check_name};
+use crate::ids::{AnyId, GroupId, PluginInstanceId, StripId};
 use crate::mixer::{GAIN_FLOOR_DB, GAIN_MAX_DB, Mixer, Output, Strip, StripKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -309,7 +310,42 @@ pub fn mixer_problems(doc: &Document) -> Vec<String> {
     if let Err(e) = check_routing(m) {
         push("mixer", e);
     }
+    group_problems(m, c.group, &mut push);
     p
+}
+
+/// The groups' problems (plan groups-vcas Rulings 1–4): every member is a
+/// strip and not the master, no strip is in two groups, and IDs, names
+/// and sizes are in range.
+fn group_problems(m: &Mixer, next: u64, push: &mut impl FnMut(&str, ModelError)) {
+    let mut held: BTreeMap<StripId, GroupId> = BTreeMap::new();
+    for g in m.groups().values() {
+        let ctx = g.id.to_string();
+        if g.id.0 >= next {
+            push(&ctx, ModelError::range("counters.group", g.id));
+        }
+        if let Err(e) = check_name("A group's name", &g.name) {
+            push(&ctx, e);
+        } else if g.name.trim() != g.name {
+            push(&ctx, ModelError::invalid("A group's name is trimmed."));
+        }
+        if g.members.len() > MAX_MEMBERS {
+            push(&ctx, ModelError::range("members", g.members.len()));
+        }
+        let mut own: BTreeSet<StripId> = BTreeSet::new();
+        for s in &g.members {
+            if !m.strips().contains_key(s) {
+                push(&ctx, ModelError::UnknownId(AnyId::Strip(*s)));
+            } else if *s == m.master() {
+                push(&ctx, ModelError::invalid("Master cannot join a group."));
+            }
+            if !own.insert(*s) {
+                push(&ctx, ModelError::invalid(format!("{s} is listed twice")));
+            } else if let Some(other) = held.insert(*s, g.id) {
+                push(&ctx, ModelError::invalid(format!("{s} is also in {other}")));
+            }
+        }
+    }
 }
 
 /// Per strip, the strips audible while it is soloed (Plan Ruling 5):

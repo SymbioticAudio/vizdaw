@@ -6,7 +6,10 @@ use crate::arc_map::ArcMap;
 use crate::automation::AutomationMode;
 use crate::document::{DestKind, Destination, OutputPath};
 use crate::error::{ModelError, Result};
-use crate::ids::{AnyId, Counters, DestId, OutputPathId, PluginInstanceId, StateBlobId, StripId};
+use crate::groups::Group;
+use crate::ids::{
+    AnyId, Counters, DestId, GroupId, OutputPathId, PluginInstanceId, StateBlobId, StripId,
+};
 use im::{OrdMap, Vector};
 use serde::{Deserialize, Serialize};
 
@@ -295,17 +298,18 @@ impl Strip {
     }
 }
 
-/// The mixer: strips by ID, display order and the master. Change it with
-/// commands.
+/// The mixer: strips by ID, display order, the master and the fader
+/// groups. Change it with commands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "MixerRepr", try_from = "MixerRepr")]
 pub struct Mixer {
     strips: ArcMap<StripId, Strip>,
     order: Vector<StripId>,
     master: StripId,
+    groups: OrdMap<GroupId, Group>,
 }
 
-/// The serialized shape of a [`Mixer`]: strips ordered by ID.
+/// The serialized shape of a [`Mixer`]: strips and groups ordered by ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MixerRepr {
@@ -315,6 +319,9 @@ pub struct MixerRepr {
     pub order: Vec<StripId>,
     /// Every strip, master included.
     pub strips: Vec<Strip>,
+    /// Fader groups (plan groups-vcas Ruling 1); not written when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
 }
 
 impl From<Mixer> for MixerRepr {
@@ -323,6 +330,7 @@ impl From<Mixer> for MixerRepr {
             master: m.master,
             order: m.order.iter().copied().collect(),
             strips: m.strips.values().cloned().collect(),
+            groups: m.groups.values().cloned().collect(),
         }
     }
 }
@@ -337,10 +345,18 @@ impl TryFrom<MixerRepr> for Mixer {
                 return Err(format!("duplicate strip id {id}"));
             }
         }
+        let mut groups = OrdMap::new();
+        for g in r.groups {
+            let id = g.id;
+            if groups.insert(id, g).is_some() {
+                return Err(format!("duplicate group id {id}"));
+            }
+        }
         Ok(Mixer {
             strips,
             order: r.order.into_iter().collect(),
             master: r.master,
+            groups,
         })
     }
 }
@@ -352,6 +368,7 @@ impl Mixer {
             strips: ArcMap::unit(master, Strip::new(master, MASTER_NAME, StripKind::Master)),
             order: Vector::new(),
             master,
+            groups: OrdMap::new(),
         }
     }
 
@@ -388,6 +405,34 @@ impl Mixer {
             .ok_or(ModelError::UnknownId(AnyId::Strip(id)))
     }
 
+    /// Fader groups by ID.
+    pub fn groups(&self) -> &OrdMap<GroupId, Group> {
+        &self.groups
+    }
+
+    /// A group by ID.
+    pub fn group(&self, id: GroupId) -> Result<&Group> {
+        self.groups
+            .get(&id)
+            .ok_or(ModelError::UnknownId(AnyId::Group(id)))
+    }
+
+    pub(crate) fn group_mut(&mut self, id: GroupId) -> Result<&mut Group> {
+        self.groups
+            .get_mut(&id)
+            .ok_or(ModelError::UnknownId(AnyId::Group(id)))
+    }
+
+    /// Adds or replaces a group.
+    pub(crate) fn insert_group(&mut self, g: Group) {
+        self.groups.insert(g.id, g);
+    }
+
+    /// Removes a group; its members are left as they are.
+    pub(crate) fn remove_group(&mut self, id: GroupId) -> Option<Group> {
+        self.groups.remove(&id)
+    }
+
     /// Every insert as `(strip, position, slot)`, by strip ID then position.
     pub fn inserts(&self) -> impl Iterator<Item = (StripId, usize, &PluginSlot)> + '_ {
         self.strips
@@ -419,7 +464,8 @@ impl Mixer {
     }
 
     /// Removes a strip (never master): outputs to it go to master, sends to
-    /// it are dropped and sidechains from it are cleared.
+    /// it are dropped, sidechains from it are cleared and it leaves its
+    /// group (an emptied group stays, spec §2a).
     pub(crate) fn remove(&mut self, id: StripId) -> Option<Strip> {
         if id == self.master {
             return None;
@@ -438,6 +484,17 @@ impl Mixer {
                         slot.sidechain = None;
                     }
                 }
+            }
+        }
+        let held: Vec<GroupId> = self
+            .groups
+            .values()
+            .filter(|g| g.members.contains(&id))
+            .map(|g| g.id)
+            .collect();
+        for g in held {
+            if let Some(g) = self.groups.get_mut(&g) {
+                g.members.retain(|x| *x != id);
             }
         }
         Some(s)
