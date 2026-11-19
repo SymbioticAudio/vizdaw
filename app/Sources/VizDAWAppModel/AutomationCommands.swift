@@ -153,7 +153,7 @@ public enum AutomationCommands {
         guard let text = args.text("target"), let target = parseAutomationTarget(text: text) else {
             return invalid(
                 "automation.gesture: `target` is fader:<strip>, pan:<strip>, mute:<strip>, solo:<strip>, "
-                    + "send:<strip>:<n> (n from 1) or param:<slot>:<param>")
+                    + "send:<strip>:<n> (n from 1), param:<slot>:<param> or vca:<vca>")
         }
         let hasValue = given(args, "value")
         let v = value(args.text("value"))

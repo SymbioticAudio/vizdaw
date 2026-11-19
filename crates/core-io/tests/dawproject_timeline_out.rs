@@ -11,8 +11,8 @@ use core_io::dawproject::export::{
     AudioFile, CANCEL_EVERY, CROSSFADES, ClipRule, DpExport, EVENTS_OUTSIDE, ExportEnv,
     ExportOptions, FADE_SHAPES, MIDI_GROUPS, MUTED_NOTES, NESTED_AUDIO, NESTED_MUTED,
     NOTE_ATTRIBUTES, OTHER_PER_NOTE, OVERLAPS, REGION_GAIN, RegionGain, SOLO_AUTOMATION, SYSEX,
-    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VELOCITY_SCALE_AUTOMATION, check, debug_cancel_after,
-    debug_items_after_cancel, export,
+    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VCA_AUTOMATION, VELOCITY_SCALE_AUTOMATION, check,
+    debug_cancel_after, debug_items_after_cancel, export,
 };
 use core_io::dawproject::plugins::{NoPlist, PlistCodec};
 use core_io::dawproject::record::{Snapshot, projection};
@@ -948,6 +948,55 @@ fn what_is_left_out_on_the_timeline() {
             r.items
         );
     }
+}
+
+/// Until Task 8 writes it as the VCA channel's volume, a VCA fader lane
+/// is left out of the file with a line by track (preflight F22); the
+/// file holds no parameter for it and still passes the schema.
+#[test]
+fn vca_fader_automation_is_left_out_by_track() {
+    let f = timeline_fixture();
+    let plain = run(&f.doc, f.seq);
+    let mut b = Builder::from_doc(f.doc.clone());
+    let r = b
+        .run(Command::Groups(core_model::command::GroupCmd::NewVca {
+            name: "Drums VCA".into(),
+            colour: core_model::mixer::Swatch::Blue,
+            members: vec![f.drum_strip],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
+    b.events(
+        f.seq,
+        f.drums,
+        vec![
+            spec(0, automation(AutomationTarget::VcaFader(vca), 0.25)),
+            spec(Q, automation(AutomationTarget::VcaFader(vca), 0.75)),
+        ],
+    )
+    .unwrap();
+    let x = run(&b.finish(), f.seq);
+    assert_eq!(VCA_AUTOMATION, "VCA fader automation");
+    assert_eq!(
+        count(&x.report, ItemKind::LeftOut, VCA_AUTOMATION),
+        1,
+        "{:#?}",
+        x.report.items
+    );
+    assert!(
+        plain.report.items.iter().all(|i| i.what != VCA_AUTOMATION),
+        "{:#?}",
+        plain.report.items
+    );
+    assert_eq!(
+        count(&x.report, ItemKind::LeftOut, UNPLACED_AUTOMATION),
+        0,
+        "not an unplaced target: {:#?}",
+        x.report.items
+    );
+    schema_check(&format!("{DIR}/Project.xsd"), &x.project_xml);
 }
 
 #[test]

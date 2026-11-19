@@ -3,7 +3,9 @@
 //! the engine plays, never a member's fader or switches; the strip's VCA
 //! offset and mark; Review Focus 3 (deleting a member's track is one step
 //! and Undo brings the memberships back, the last member of a VCA too);
-//! hostile input; and the song's cap of `MAX_VCAS`, on create and on load.
+//! hostile input; the song's cap of `MAX_VCAS`, on create and on load
+//! (with the automation of the VCAs a load leaves out); and (Task 6) VCA
+//! fader gestures and automation writes.
 //!
 //! No plug-in loads in the session: the strips are audio tracks' with no
 //! EQ. Offline only; the heard level is measured by an offline render.
@@ -13,20 +15,25 @@ use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::Builder;
 use core_engine::graph::TestInserts;
 use core_engine::offline::{OfflineBackend, OfflineSinks};
+use core_model::automation::{AutomationTarget, fader_db, fader_norm};
 use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::document::Document;
+use core_model::event::EventBody;
 use core_model::groups::MAX_VCAS;
 use core_model::ids::{SeqId, StripId, VcaId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 use vizdaw_ffi::automation::{
-    AutomationModeRow as Mode, reset_automation_settings, set_automation_suspended,
+    AutomationModeRow as Mode, GesturePhaseRow as Phase, parse_automation_target,
+    reset_automation_settings, set_automation_suspended,
 };
 use vizdaw_ffi::control::{ControlArg, ControlValue};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit};
 use vizdaw_ffi::host::{force_offline, reset_host};
 use vizdaw_ffi::{
-    Session, StripKindRow, StripRow, SwatchRow, TrackKindRow, VcaRow, set_new_channel_eq,
+    AutomationTargetRow as Target, EventRow, Session, StripKindRow, StripRow, SwatchRow,
+    TrackKindRow, VcaRow, set_new_channel_eq,
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -674,3 +681,278 @@ fn a_file_with_too_many_vcas_keeps_the_first_64() {
     assert_eq!(notes, vec![line.to_string()]);
     s.close().unwrap();
 }
+
+// ---- VCA automation (groups-vcas-transport Task 6) ----
+
+fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let until = Instant::now() + Duration::from_secs(180);
+    while !ok() {
+        assert!(Instant::now() < until, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn tick(s: &Session) -> i64 {
+    s.transport().unwrap().tick
+}
+
+/// Paces gesture values past the 10 ms sampler (and, while playing, past
+/// a renderer block).
+fn pace(s: &Session) {
+    let t0 = tick(s);
+    std::thread::sleep(Duration::from_millis(12));
+    if s.transport().unwrap().playing {
+        wait_until("the renderer to take a block", || tick(s) > t0);
+    }
+    s.idle().unwrap();
+}
+
+fn gains(s: &Session) -> Vec<(u64, f64)> {
+    strips(s).into_iter().map(|x| (x.id, x.gain_db)).collect()
+}
+
+fn lane_named(s: &Session, seq: u64, name: &str) -> Option<u64> {
+    s.lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == name)
+        .map(|l| l.id)
+}
+
+/// The targets of every automation point in `seq`.
+fn point_targets(s: &Session, seq: u64) -> Vec<Target> {
+    s.lanes(seq)
+        .unwrap()
+        .into_iter()
+        .flat_map(|l| s.lane_events(seq, l.id).unwrap().events)
+        .filter_map(|e: EventRow| e.automation.map(|a| a.target))
+        .collect()
+}
+
+/// Stopped, a touch, values and a release on `vca:<id>` are one undo step
+/// "Set VCA" that sets the VCA's level; no member's fader moves.
+#[test]
+fn a_vca_gesture_is_one_step() {
+    let _g = serial();
+    let t = song();
+    let vca = new_vca(&t.s, &[t.kick, t.snare], "Drums");
+    let (faders, before) = (gains(&t.s), step(&t.s));
+    let target = parse_automation_target(format!("vca:{vca}")).unwrap();
+    assert_eq!(target, Target::VcaFader { vca });
+    t.s.gesture(
+        target,
+        Phase::Touch {
+            value: Some(fader_norm(0.0)),
+        },
+    )
+    .unwrap();
+    for db in [-3.0, -6.0] {
+        pace(&t.s);
+        t.s.gesture(
+            target,
+            Phase::Value {
+                value: fader_norm(db),
+            },
+        )
+        .unwrap();
+    }
+    t.s.gesture(target, Phase::Release).unwrap();
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Set VCA"));
+    let level = vcas(&t.s)[0].gain_db;
+    assert!((level - fader_db(fader_norm(-6.0))).abs() < 1e-9, "{level}");
+    assert_eq!(gains(&t.s), faders, "no member's fader moved");
+    one_step(&t.s, before);
+    t.s.undo().unwrap();
+    assert_eq!(vcas(&t.s)[0].gain_db, 0.0);
+    t.s.close().unwrap();
+}
+
+/// A VCA in Touch writes its own lane, "VCA ‹name› Fader", in a pass that
+/// lands at Stop as one step; no member lane is written and no fader or
+/// VCA level changes.
+#[test]
+fn vca_touch_writes_its_own_lane() {
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    let song = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "Song")
+        .unwrap()
+        .id;
+    let synth = strip_id(&s, "Built-in Synth");
+    let vca = new_vca(&s, &[synth], "Drums");
+    set_vca(&s, vca, vec![text("mode", "touch")]);
+    assert_eq!(vcas(&s)[0].automation, Mode::Touch);
+    let (faders, before) = (gains(&s), point_targets(&s, song));
+    s.play(song).unwrap();
+    wait_until("beat 1", || tick(&s) > 15_360);
+    let t = Target::VcaFader { vca };
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    assert!(s.automation_state().unwrap().touched.contains(&t));
+    for v in [0.55, 0.6, 0.65, 0.7] {
+        pace(&s);
+        s.gesture(t, Phase::Value { value: v }).unwrap();
+    }
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let at = tick(&s);
+    wait_until("the glide to pass", || tick(&s) > at + 15_360);
+    s.stop().unwrap();
+    wait_until("the transport to stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
+    let lane = lane_named(&s, song, "VCA Drums Fader").expect("the VCA's lane");
+    let p: Vec<f64> = s
+        .lane_events(song, lane)
+        .unwrap()
+        .events
+        .iter()
+        .filter_map(|e| e.automation.map(|a| a.value))
+        .collect();
+    assert!(p.len() >= 4, "{p:?}");
+    assert!(p.iter().any(|v| (v - 0.7).abs() < 1e-9), "{p:?}");
+    // Every new point is the VCA's: no member lane was written.
+    let mut after = point_targets(&s, song);
+    after.retain(|x| *x != t);
+    assert_eq!(after, before, "no member lane is written");
+    assert_eq!(lane_named(&s, song, "Built-in Synth Fader"), None);
+    assert_eq!(gains(&s), faders);
+    assert_eq!(vcas(&s)[0].gain_db, 0.0, "writing leaves the static level");
+    s.undo().unwrap();
+    assert_eq!(lane_named(&s, song, "VCA Drums Fader"), None, "one step");
+    s.close().unwrap();
+}
+
+/// A gesture on a VCA the song does not hold is refused and changes
+/// nothing; so is one on a VCA deleted since.
+#[test]
+fn vca_gestures_refuse_odd_targets() {
+    let _g = serial();
+    let t = song();
+    let vca = new_vca(&t.s, &[t.kick], "Drums");
+    let (mixer, at) = (mix(&t.s), step(&t.s));
+    for odd in [vca + 1, 999, u64::MAX] {
+        let target = Target::VcaFader { vca: odd };
+        let e =
+            t.s.gesture(target, Phase::Touch { value: Some(0.5) })
+                .unwrap_err();
+        let want = format!("vca{odd} fader does not exist");
+        assert!(format!("{e:?}").contains(&want), "{e:?}");
+        assert!(
+            t.s.gesture(target, Phase::Value { value: 0.5 }).is_err(),
+            "a value without a touch is refused too"
+        );
+    }
+    assert_eq!((mix(&t.s), step(&t.s)), (mixer, at));
+    t.s.run_mixer("mixer.delete_vca".into(), vec![id("vca", vca)])
+        .unwrap();
+    let e =
+        t.s.gesture(Target::VcaFader { vca }, Phase::Touch { value: None })
+            .unwrap_err();
+    assert!(
+        format!("{e:?}").contains(&format!("vca{vca} fader does not exist")),
+        "{e:?}"
+    );
+    t.s.close().unwrap();
+}
+
+/// A hostile file with 65 VCAs, each with a fader lane, loads with the
+/// first 64 VCAs and their 64 lanes; the 65th's lane goes with it, and
+/// the load says both (controller carry on Task 5's cap).
+#[test]
+fn a_file_with_too_many_vcas_drops_the_lanes_of_those_left_out() {
+    let mut b = Builder::new();
+    let (seq, _) = b.sequence("S", "Notes", None).unwrap();
+    for n in 1..=MAX_VCAS as u64 + 1 {
+        if n <= MAX_VCAS as u64 {
+            b.run(Command::Groups(GroupCmd::NewVca {
+                name: format!("V{n}"),
+                colour: core_model::mixer::Swatch::Blue,
+                members: vec![],
+            }))
+            .unwrap();
+        }
+        let lane = b.lane(seq, &format!("VCA V{n} Fader"), None).unwrap();
+        b.event(
+            seq,
+            lane,
+            0,
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(VcaId(n)),
+                value: 0.5,
+            },
+        )
+        .unwrap();
+    }
+    let doc = b.finish();
+    let lanes_before = doc.sequence(seq).unwrap().lanes.len();
+    let mut json: serde_json::Value =
+        serde_json::from_str(&core_model::file::to_json(&doc).unwrap()).unwrap();
+    let list = json["document"]["mixer"]["vcas"].as_array_mut().unwrap();
+    let mut extra = list.last().unwrap().clone();
+    extra["id"] = (MAX_VCAS as u64 + 1).into();
+    extra["name"] = "V65".into();
+    list.push(extra);
+    json["document"]["counters"]["vca"] = (MAX_VCAS as u64 + 2).into();
+    let text = serde_json::to_string(&json).unwrap();
+
+    let (doc, notes) = core_model::file::from_json_noted(&text).unwrap();
+    assert_eq!(doc.mixer().vcas().len(), MAX_VCAS);
+    let s = doc.sequence(seq).unwrap();
+    let vca_lanes: Vec<VcaId> = s
+        .lanes
+        .iter()
+        .flat_map(|l| l.takes.iter().flat_map(|t| t.events.values()))
+        .filter_map(|e| match e.body {
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(v),
+                ..
+            } => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(vca_lanes.len(), MAX_VCAS, "64 lanes");
+    assert!(vca_lanes.iter().all(|v| doc.mixer().vca(*v).is_ok()));
+    assert_eq!(s.lanes.len(), lanes_before - 1);
+    assert_eq!(
+        notes,
+        vec![
+            "This song has 65 VCAs; a song holds at most 64, so the last 1 (by ID) were left out."
+                .to_string(),
+            "The automation of those VCAs was left out too: 1 track.".to_string(),
+        ]
+    );
+    // A VCA left out with its points on a member's track: only those go.
+    let lane = s.lanes[1].id;
+    let mut b = Builder::from_doc(doc);
+    b.event(
+        seq,
+        lane,
+        Q_TICKS,
+        EventBody::Automation {
+            target: AutomationTarget::VcaFader(VcaId(70)),
+            value: 0.25,
+        },
+    )
+    .unwrap();
+    let doc = b.finish();
+    let mut json: serde_json::Value =
+        serde_json::from_str(&core_model::file::to_json(&doc).unwrap()).unwrap();
+    let list = json["document"]["mixer"]["vcas"].as_array_mut().unwrap();
+    let mut extra = list.last().unwrap().clone();
+    extra["id"] = 70.into();
+    list.push(extra);
+    json["document"]["counters"]["vca"] = 71.into();
+    let (doc, notes) =
+        core_model::file::from_json_noted(&serde_json::to_string(&json).unwrap()).unwrap();
+    assert_eq!(doc.lane(seq, lane).unwrap().takes[0].events.len(), 1);
+    assert_eq!(
+        notes.last().map(String::as_str),
+        Some("The automation of those VCAs was left out too: 1 point on other tracks.")
+    );
+}
+
+const Q_TICKS: i64 = 15_360;

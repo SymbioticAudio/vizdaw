@@ -8796,14 +8796,14 @@ impl Session {
             return None;
         }
         let doc = inner.doc();
-        let strip = core_model::automation::strip_of(doc, t)?;
-        let mode = doc.mixer().strip(strip).ok()?.automation;
+        // A strip's mode, or a VCA's (never Write or Trim, Ruling 6).
+        let mode = core_model::automation::mode_of(doc, t)?;
+        let in_pass =
+            core_model::automation::strip_of(doc, t).is_some_and(|s| w.write_strips.contains(&s));
         match mode {
             // From the first wrap on, the After Write mode (Ruling 9).
-            AutomationMode::Write if w.write_strips.contains(&strip) && w.wrapped => {
-                WriteMode::of(w.after_write)
-            }
-            AutomationMode::Write if w.write_strips.contains(&strip) => Some(WriteMode::Write),
+            AutomationMode::Write if in_pass && w.wrapped => WriteMode::of(w.after_write),
+            AutomationMode::Write if in_pass => Some(WriteMode::Write),
             // Switched to Write while playing: Latch until the next Play.
             AutomationMode::Write => Some(WriteMode::Latch),
             m => WriteMode::of(m),

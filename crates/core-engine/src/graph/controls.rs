@@ -110,7 +110,7 @@ struct CtlStrip {
 }
 
 /// A VCA: `base` is its static (dB, mute, solo); `over_db` its level
-/// automation (set by Task 6's `set_vca`).
+/// automation (set by `set_vca`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CtlVca {
     vca: VcaId,
@@ -222,6 +222,10 @@ impl OverrideSnapshot {
             AutoDest::Strip(s, p) => (s, Some(p)),
             AutoDest::Send(s, _) => (s, None),
             AutoDest::Plugin(..) => return None,
+            AutoDest::Vca(id) => {
+                let v = self.vcas.iter().find(|v| v.vca == id)?;
+                return unslot(&v.over_db).map(fader_norm);
+            }
         };
         let s = self.strips.iter().find(|s| s.strip == strip)?;
         let over = |i: usize| s.over.get(i).and_then(unslot);
@@ -442,12 +446,20 @@ impl Controls {
         self.strips.binary_search_by_key(&strip, |s| s.strip).ok()
     }
 
-    /// The static value (normalised, as automation's) of a strip control
-    /// or a send; `None` for plugins and unknown controls. // RT
+    /// The VCA `vca` (by binary search). // RT
+    fn vca(&self, vca: VcaId) -> Option<&CtlVca> {
+        let i = self.vcas.binary_search_by_key(&vca, |v| v.vca).ok()?;
+        self.vcas.get(i)
+    }
+
+    /// The static value (normalised, as automation's) of a strip control,
+    /// a send or a VCA's fader; `None` for plugins and unknown controls.
+    /// // RT
     pub(crate) fn base_of(&self, dest: AutoDest) -> Option<f64> {
         let strip = match dest {
             AutoDest::Strip(s, _) | AutoDest::Send(s, _) => s,
             AutoDest::Plugin(..) => return None,
+            AutoDest::Vca(v) => return self.vca(v).map(|v| fader_norm(v.base.0)),
         };
         let s = self.find(strip).and_then(|i| self.strips.get(i))?;
         let on = |b: bool| if b { 1.0 } else { 0.0 };
@@ -462,17 +474,23 @@ impl Controls {
                 .iter()
                 .find_map(|f| f.send.filter(|x| x.index == index))
                 .map(|x| fader_norm(x.level_db)),
-            AutoDest::Plugin(..) => None,
+            AutoDest::Plugin(..) | AutoDest::Vca(_) => None,
         }
     }
 
-    /// The value (normalised, as automation's) a strip control or a send
-    /// plays now: its override, else its static value; `None` for plugins
-    /// and unknown controls (Task 5 review I1). // RT
+    /// The value (normalised, as automation's) a strip control, a send or
+    /// a VCA's fader plays now: its override, else its static value;
+    /// `None` for plugins and unknown controls (Task 5 review I1). A
+    /// strip's fader is its own, without its VCAs (preflight F12). // RT
     pub(crate) fn heard_of(&self, dest: AutoDest) -> Option<f64> {
         let strip = match dest {
             AutoDest::Strip(s, _) | AutoDest::Send(s, _) => s,
             AutoDest::Plugin(..) => return None,
+            AutoDest::Vca(v) => {
+                return self
+                    .vca(v)
+                    .map(|v| fader_norm(v.over_db.unwrap_or(v.base.0)));
+            }
         };
         let s = self.find(strip).and_then(|i| self.strips.get(i))?;
         let on = |b: bool| if b { 1.0 } else { 0.0 };
@@ -486,7 +504,7 @@ impl Controls {
                 let send = f.send.filter(|x| x.index == index)?;
                 Some(fader_norm(f.over_db.unwrap_or(send.level_db)))
             }),
-            AutoDest::Plugin(..) => None,
+            AutoDest::Plugin(..) | AutoDest::Vca(_) => None,
         }
     }
 
@@ -524,6 +542,18 @@ impl Controls {
         }
     }
 
+    /// Automation's level (normalised) for VCA `vca`'s fader: an offset
+    /// on its members' faders at the next commit. // RT
+    pub(crate) fn set_vca(&mut self, vca: VcaId, v: f64) {
+        let Ok(i) = self.vcas.binary_search_by_key(&vca, |x| x.vca) else {
+            return;
+        };
+        if let Some(c) = self.vcas.get_mut(i) {
+            c.over_db = Some(fader_db(v));
+            self.any_override = true;
+        }
+    }
+
     /// Drops the overrides of the controls `driven` says no lane drives;
     /// the next commit writes their static values. // RT
     pub(crate) fn release(&mut self, driven: impl Fn(AutoDest) -> bool) {
@@ -547,6 +577,11 @@ impl Controls {
                         f.over_db = None;
                     }
                 }
+            }
+        }
+        for v in self.vcas.iter_mut() {
+            if !driven(AutoDest::Vca(v.vca)) {
+                v.over_db = None;
             }
         }
         self.dirty = true;

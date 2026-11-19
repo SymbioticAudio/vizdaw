@@ -1534,6 +1534,10 @@ impl Renderer {
                                 g.automate_send(id, i, v);
                                 any = true;
                             }
+                            AutoDest::Vca(id) => {
+                                g.automate_vca(id, v);
+                                any = true;
+                            }
                             AutoDest::Plugin(..) => {}
                         }
                     }
@@ -2588,7 +2592,8 @@ fn lane_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64, past: bool)
 /// strip's (they scale the strip's output); its mute and solo at its main
 /// output's edge and a send's level at that send's edge (they are edge
 /// gains, applied after the edge's delay line); an insert's parameter at
-/// the insert's; a plugin instrument's parameter (and every lane without a
+/// the insert's; a VCA's fader at the latest of its members' strips'
+/// (Ruling 7); a plugin instrument's parameter (and every lane without a
 /// graph) at 0. // RT
 fn lane_arrival(graph: Option<&Graph>, lane: &crate::schedule::AutoLane) -> u64 {
     if matches!(lane.dest, AutoDest::Plugin(..)) && lane.instrument.is_some() {
@@ -2608,6 +2613,7 @@ fn dest_arrival(graph: Option<&Graph>, dest: AutoDest) -> u64 {
         AutoDest::Strip(s, StripParam::Mute | StripParam::Solo) => g.feed_arrival(s, None),
         AutoDest::Send(s, i) => g.feed_arrival(s, Some(i)),
         AutoDest::Plugin(id, _) => g.insert_arrival(id),
+        AutoDest::Vca(v) => g.vca_arrival(v),
     }
 }
 
@@ -2684,6 +2690,7 @@ fn apply_live(
         match dest {
             AutoDest::Strip(id, p) => g.automate_strip(id, p, v),
             AutoDest::Send(id, i) => g.automate_send(id, i, v),
+            AutoDest::Vca(id) => g.automate_vca(id, v),
             AutoDest::Plugin(..) => continue,
         }
         if ramp {

@@ -17,13 +17,14 @@ public struct StripMenu: Equatable, Sendable {
 public enum AutomationTargets {
     /// Names and menu groups: per strip its fader, pan (not master), mute,
     /// solo and sends; per plugin slot its automatable, visible parameters;
-    /// one velocity scale per destination. Parts the session cannot read
+    /// one velocity scale per destination; one fader per VCA. Parts the session cannot read
     /// now (Busy) make the load throw, so the caller keeps what it had and
     /// retries; other errors read as empty.
     public static func load(_ session: any SessionProtocol) throws -> (names: StripNames, menus: [StripMenu]) {
         var n = StripNames()
         var menus: [StripMenu] = []
-        let strips = try Self.read { try session.mixer().strips } ?? []
+        let mixer = try Self.read { try session.mixer() }
+        let strips = mixer?.strips ?? []
         for s in strips { n.strips[s.id] = s.name }
         for s in strips {
             n.sends[s.id] = s.sends.map { n.strips[$0.target] ?? "Bus \($0.target)" }
@@ -48,6 +49,11 @@ public enum AutomationTargets {
         for d in dests { n.dests[d.id] = d.name }
         if !dests.isEmpty {
             menus.append(StripMenu(title: "Velocity Scale", lanes: dests.map { .automation(.velocityScale(dest: $0.id)) }))
+        }
+        let vcas = mixer?.vcas ?? []
+        for v in vcas { n.vcas[v.id] = v.name }
+        if !vcas.isEmpty {
+            menus.append(StripMenu(title: "VCAs", lanes: vcas.map { .automation(.vcaFader(vca: $0.id)) }))
         }
         return (n, menus)
     }

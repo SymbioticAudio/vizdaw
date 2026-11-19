@@ -5,7 +5,8 @@
 //! full queue, glides, holds, offsets, released plugin lanes), across loop
 //! wraps, a Locate, a Stop and a graph whose latency changes (so arrivals
 //! change), and (Task 6) while the gesture tap is installed, stamps and is
-//! replaced and removed.
+//! replaced and removed; and (groups-vcas Task 6) a VCA fader lane and
+//! every phase on `AutoDest::Vca`.
 
 use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
@@ -16,10 +17,10 @@ use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::rt_check::{self, CountingAlloc};
 use core_engine::schedule::{AutoDest, StripParam};
 use core_model::automation::{AutomationTarget, SendIndex, fader_norm};
-use core_model::command::MixerCmd;
+use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::event::EventBody;
-use core_model::ids::PluginInstanceId;
-use core_model::mixer::{AuxSend, ParamId, StripKind};
+use core_model::ids::{AnyId, PluginInstanceId};
+use core_model::mixer::{AuxSend, ParamId, StripKind, Swatch};
 use core_model::time::Tick;
 
 #[global_allocator]
@@ -45,8 +46,20 @@ fn gestures_never_allocate() {
     })
     .unwrap();
     let insert = bld.insert(bus, TestInserts::plugin("latency=64")).unwrap();
+    let r = bld
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "Drums".into(),
+            colour: Swatch::Blue,
+            members: vec![synth, bus],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
     let auto = bld.lane(seq, "Auto", None).unwrap();
     for (t, target, v) in [
+        (0, AutomationTarget::VcaFader(vca), fader_norm(-6.0)),
+        (8 * Q, AutomationTarget::VcaFader(vca), fader_norm(0.0)),
         (0, AutomationTarget::StripFader(synth), fader_norm(-12.0)),
         (8 * Q, AutomationTarget::StripFader(synth), fader_norm(0.0)),
         (0, AutomationTarget::SendLevel(synth, SendIndex(0)), 0.5),
@@ -92,6 +105,7 @@ fn gestures_never_allocate() {
         AutoDest::Strip(bus, StripParam::Mute),
         AutoDest::Send(synth, 0),
         AutoDest::Plugin(insert, ParamId(0)),
+        AutoDest::Vca(vca),
     ];
     // Warm up outside the count.
     engine.set_loop_range(Some((0, 4 * 24_000))).unwrap();

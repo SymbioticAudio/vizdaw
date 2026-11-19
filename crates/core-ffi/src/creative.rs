@@ -133,7 +133,12 @@ fn target_of(doc: &Document, text: &str) -> Result<AutomationTarget, VizError> {
     let t = parse_automation_target(text.to_string())
         .map(automation_target_of)
         .ok_or_else(|| no_target(text))?;
-    if !target_exists(doc, t) || matches!(t, AutomationTarget::VelocityScale(_)) {
+    if !target_exists(doc, t)
+        || matches!(
+            t,
+            AutomationTarget::VelocityScale(_) | AutomationTarget::VcaFader(_)
+        )
+    {
         return Err(no_target(text));
     }
     Ok(t)
@@ -185,7 +190,11 @@ fn scale_of(
                 stepped: row.stepped,
             }
         }
-        AutomationTarget::VelocityScale(_) => return Err(no_target(&target_text(t))),
+        // The creative grammar (`registry::automation_target`) has no
+        // VCA spelling; this keeps `to_stored` safe alone.
+        AutomationTarget::VelocityScale(_) | AutomationTarget::VcaFader(_) => {
+            return Err(no_target(&target_text(t)));
+        }
     })
     .and_then(|s| {
         // `t` was checked by the caller; this keeps `to_stored` safe alone.

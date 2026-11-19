@@ -21,7 +21,7 @@ use core_model::event::{
     PerNoteKind, TextKind,
 };
 use core_model::ids::{DestId, LaneId, MediaId, SeqId};
-use core_model::ids::{PluginInstanceId, StripId};
+use core_model::ids::{PluginInstanceId, StripId, VcaId};
 use core_model::mixer::ParamId;
 use core_model::query::length::{reference_span, seq_length};
 use core_model::sequence::SeqKind;
@@ -99,6 +99,11 @@ pub enum AutomationTargetRow {
         /// Destination ID.
         dest: u64,
     },
+    /// A VCA's fader.
+    VcaFader {
+        /// VCA ID.
+        vca: u64,
+    },
 }
 
 /// An automation point's target and normalised value (0–1).
@@ -126,6 +131,7 @@ pub fn automation_target_row(t: AutomationTarget) -> AutomationTargetRow {
             param: id.0,
         },
         AutomationTarget::VelocityScale(d) => AutomationTargetRow::VelocityScale { dest: d.0 },
+        AutomationTarget::VcaFader(v) => AutomationTargetRow::VcaFader { vca: v.0 },
     }
 }
 
@@ -145,6 +151,7 @@ pub fn automation_target_of(t: AutomationTargetRow) -> AutomationTarget {
         AutomationTargetRow::VelocityScale { dest } => {
             AutomationTarget::VelocityScale(DestId(dest))
         }
+        AutomationTargetRow::VcaFader { vca } => AutomationTarget::VcaFader(VcaId(vca)),
     }
 }
 

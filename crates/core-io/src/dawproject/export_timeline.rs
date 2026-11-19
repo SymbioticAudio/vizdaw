@@ -91,6 +91,9 @@ pub const OTHER_PER_NOTE: &str = "Per-note controllers other than pitch, timbre,
 pub const SOLO_AUTOMATION: &str = "Solo automation";
 /// Left out: velocity-scale automation (by track).
 pub const VELOCITY_SCALE_AUTOMATION: &str = "Velocity-scale automation";
+/// Left out: VCA fader automation (by track). Temporary (preflight F22):
+/// Task 8 writes it as the VCA channel's volume and removes this line.
+pub const VCA_AUTOMATION: &str = "VCA fader automation";
 /// Left out: automation of a mixer part the file does not hold (by target).
 pub const UNPLACED_AUTOMATION: &str = "Automation of mixer parts not in the file";
 /// Left out: region gain, with [`RegionGain::LeaveOut`] (by region).
@@ -1245,6 +1248,11 @@ impl Arr<'_, '_, '_, '_, '_> {
                         .add(ItemKind::LeftOut, VELOCITY_SCALE_AUTOMATION, Some(p.name()));
                     continue;
                 }
+                AutomationTarget::VcaFader(_) => {
+                    self.report
+                        .add(ItemKind::LeftOut, VCA_AUTOMATION, Some(p.name()));
+                    continue;
+                }
                 // Listed with the device (Task 4).
                 AutomationTarget::PluginParam(_, q) if u32::try_from(q.0).is_err() => continue,
                 _ => {}
@@ -1292,7 +1300,9 @@ impl Arr<'_, '_, '_, '_, '_> {
                     Some(DpUnit::Normalized),
                     lin(value),
                 ),
-                AutomationTarget::StripSolo(_) | AutomationTarget::VelocityScale(_) => continue,
+                AutomationTarget::StripSolo(_)
+                | AutomationTarget::VelocityScale(_)
+                | AutomationTarget::VcaFader(_) => continue,
             };
             let i = match at.get(&param) {
                 Some(i) => *i,

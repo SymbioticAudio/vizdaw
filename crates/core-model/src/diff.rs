@@ -934,7 +934,8 @@ fn automation_label(
                 .map_or_else(|| format!("parameter {}", id.0), |(n, _)| shown_name(&n));
             format!("{} {name}", shown_name(&slot.plugin.name))
         }
-        AutomationTarget::VelocityScale(_) => return None,
+        // A VCA joins no strip's item; Task 7's VCA items describe it.
+        AutomationTarget::VelocityScale(_) | AutomationTarget::VcaFader(_) => return None,
     })
 }
 

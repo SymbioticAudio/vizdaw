@@ -727,13 +727,14 @@ public final class MixerModel {
         if now != coreTouched { coreTouched = now }
     }
 
-    /// Every strip's fader, pan and send levels (the heard values' targets).
+    /// Every strip's fader, pan and send levels, and every VCA's fader
+    /// (the heard values' targets).
     private var heardTargets: [AutomationTargetRow] {
         snapshot.strips.flatMap { s -> [AutomationTargetRow] in
             var out: [AutomationTargetRow] = [.stripFader(strip: s.id), .stripPan(strip: s.id)]
             out += s.sends.indices.map { .sendLevel(strip: s.id, send: Self.sendIndex($0)) }
             return out
-        }
+        } + snapshot.vcas.map { .vcaFader(vca: $0.id) }
     }
 
     /// `heard` from the core while playing (`Busy` and errors keep the
@@ -857,6 +858,7 @@ public final class MixerModel {
         case .stripSolo: "Solo Failed"
         case .pluginParam: "Parameter Failed"
         case .velocityScale: "Velocity Failed"
+        case .vcaFader: "VCA Failed"
         }
     }
 
@@ -869,6 +871,8 @@ public final class MixerModel {
             return strip(s) != nil
         case .sendLevel(let s, let send):
             return strip(s).map { Int(send) < $0.sends.count } ?? false
+        case .vcaFader(let v):
+            return snap.vcas.contains { $0.id == v }
         case .pluginParam, .velocityScale:
             return true
         }

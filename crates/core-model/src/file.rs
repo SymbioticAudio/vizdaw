@@ -359,12 +359,76 @@ pub fn from_json_noted(text: &str) -> Result<(Document, Vec<String>)> {
     let dropped = file.document.mixer_mut().keep_first_vcas(MAX_VCAS);
     if dropped > 0 {
         notes.push(too_many_vcas(had, dropped));
+        let (tracks, points) = drop_missing_vca_automation(&mut file.document);
+        if let Some(line) = vca_automation_left_out(tracks, points) {
+            notes.push(line);
+        }
     }
     let problems = validate(&file.document);
     if !problems.is_empty() {
         return Err(ModelError::Corrupt { problems });
     }
     Ok((file.document, notes))
+}
+
+/// Takes out the automation of VCAs the document does not hold (those
+/// the load's cap left out): a track whose every event drives one goes
+/// whole; in any other track only those points go. Returns how many
+/// tracks and how many other points went.
+fn drop_missing_vca_automation(doc: &mut Document) -> (usize, usize) {
+    use crate::automation::AutomationTarget;
+    use crate::event::EventBody;
+    let gone = |doc: &Document, body: &EventBody| match body {
+        EventBody::Automation {
+            target: AutomationTarget::VcaFader(v),
+            ..
+        } => doc.mixer().vca(*v).is_err(),
+        _ => false,
+    };
+    let mut whole = Vec::new();
+    let mut points = Vec::new();
+    for (seq_id, seq) in doc.sequences() {
+        for lane in &seq.lanes {
+            let events = || lane.takes.iter().flat_map(|t| t.events.values());
+            if !events().any(|e| gone(doc, &e.body)) {
+                continue;
+            }
+            if events().all(|e| gone(doc, &e.body)) {
+                whole.push((*seq_id, lane.id));
+            } else {
+                points.extend(events().filter(|e| gone(doc, &e.body)).map(|e| e.id));
+            }
+        }
+    }
+    for (seq, lane) in &whole {
+        let _ = doc.remove_lane(*seq, *lane);
+    }
+    for id in &points {
+        let _ = doc.remove_event(*id);
+    }
+    (whole.len(), points.len())
+}
+
+/// The load's line for the automation of the VCAs it left out: `tracks`
+/// whole tracks and `points` points on other tracks; `None` for none.
+fn vca_automation_left_out(tracks: usize, points: usize) -> Option<String> {
+    let count = |n: usize, one: &str| match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {one}s"),
+    };
+    let what = match (tracks, points) {
+        (0, 0) => return None,
+        (t, 0) => count(t, "track"),
+        (0, p) => format!("{} on other tracks", count(p, "point")),
+        (t, p) => format!(
+            "{} and {} on other tracks",
+            count(t, "track"),
+            count(p, "point")
+        ),
+    };
+    Some(format!(
+        "The automation of those VCAs was left out too: {what}."
+    ))
 }
 
 /// The load's line for a song with `had` VCAs, `dropped` of them left out.

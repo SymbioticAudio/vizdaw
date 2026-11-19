@@ -105,7 +105,7 @@ Automation (plan 5e-1): `automation.set_mode {"strips": "all" | "1,2",
 "mode": "touch"}`, `automation.gesture {"target": "fader:3", "phase":
 "touch" | "value" | "release", "value": "0.5"}` (targets `fader:`, `pan:`,
 `mute:`, `solo:` with a strip ID, `send:<strip>:<n>` with n from 1,
-`param:<slot>:<param>`; values are text, 0 to 1) and `automation.suspend`
+`param:<slot>:<param>`, `vca:<vca>`; values are text, 0 to 1) and `automation.suspend`
 (absent `on` toggles; it is app-wide). A `touch` without `value` starts at
 the value heard now. A touch from the channel lasts until its release, a
 Stop's landing keeps it, closing the window ends it; a Locate or a Play

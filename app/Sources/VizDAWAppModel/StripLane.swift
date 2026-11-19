@@ -11,6 +11,7 @@ public enum AutoTarget: Codable, Hashable, Sendable {
     case send(strip: UInt64, index: UInt16)
     case param(slot: UInt64, param: UInt64)
     case velocityScale(dest: UInt64)
+    case vcaFader(vca: UInt64)
 
     public init(_ r: AutomationTargetRow) {
         switch r {
@@ -21,6 +22,7 @@ public enum AutoTarget: Codable, Hashable, Sendable {
         case .sendLevel(let s, let i): self = .send(strip: s, index: i)
         case .pluginParam(let slot, let p): self = .param(slot: slot, param: p)
         case .velocityScale(let d): self = .velocityScale(dest: d)
+        case .vcaFader(let v): self = .vcaFader(vca: v)
         }
     }
 
@@ -33,6 +35,7 @@ public enum AutoTarget: Codable, Hashable, Sendable {
         case .send(let s, let i): .sendLevel(strip: s, send: i)
         case .param(let slot, let p): .pluginParam(slot: slot, param: p)
         case .velocityScale(let d): .velocityScale(dest: d)
+        case .vcaFader(let v): .vcaFader(vca: v)
         }
     }
 
@@ -103,7 +106,7 @@ public enum AutomationLaw {
     /// A value as the Strip Chart shows it.
     public static func text(_ t: AutoTarget, _ v: Double, param: ParamRow? = nil) -> String {
         switch t {
-        case .fader, .send:
+        case .fader, .send, .vcaFader:
             let db = faderDb(v)
             // A level that would read "-144.0" is the floor: "-∞".
             return db < floorDb + 0.05 ? "-∞ dB" : String(format: "%.1f dB", db)
@@ -131,6 +134,7 @@ public struct StripNames: Equatable, Sendable {
     public var slots: [UInt64: String] = [:]
     public var params: [UInt64: [ParamRow]] = [:]
     public var dests: [UInt64: String] = [:]
+    public var vcas: [UInt64: String] = [:]
 
     public init() {}
 
@@ -144,6 +148,7 @@ public struct StripNames: Equatable, Sendable {
         case .fader(let s), .pan(let s), .mute(let s), .solo(let s), .send(let s, _): return strips[s] != nil
         case .param(let slot, _): return slots[slot] != nil
         case .velocityScale(let d): return dests[d] != nil
+        case .vcaFader(let v): return vcas[v] != nil
         }
     }
 
@@ -162,6 +167,9 @@ public struct StripNames: Equatable, Sendable {
             return "\(param(slot, p)?.name ?? "Parameter \(p)") · \(slots[slot] ?? "Plugin \(slot)")"
         case .velocityScale(let d):
             return "Velocity Scale · \(dests[d] ?? "Destination \(d)")"
+        case .vcaFader(let v):
+            // As the core names the VCA's new track ("VCA ‹name› Fader").
+            return "VCA \(vcas[v] ?? "\(v)") Fader"
         }
     }
 }

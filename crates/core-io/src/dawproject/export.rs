@@ -25,7 +25,7 @@ use super::export_timeline::arrange;
 pub use super::export_timeline::{
     CROSSFADES, EVENTS_OUTSIDE, FADE_SHAPES, MIDI_GROUPS, MUTED_NOTES, NESTED_AUDIO, NESTED_MUTED,
     NOTE_ATTRIBUTES, OTHER_PER_NOTE, OVERLAPS, PLAY_QUANTIZED, REGION_GAIN, SOLO_AUTOMATION, SYSEX,
-    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VELOCITY_SCALE_AUTOMATION,
+    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VCA_AUTOMATION, VELOCITY_SCALE_AUTOMATION,
 };
 use super::plugins::{PlistCodec, state_entry};
 use super::record::{self, ObjectRef, Record, Snapshot};
@@ -624,7 +624,9 @@ impl Layout<'_> {
                     .position(|(x, _, _)| x.id == slot)?;
                 Some((c, Some(d)))
             }
-            AutomationTarget::StripSolo(_) | AutomationTarget::VelocityScale(_) => None,
+            AutomationTarget::StripSolo(_)
+            | AutomationTarget::VelocityScale(_)
+            | AutomationTarget::VcaFader(_) => None,
         }
     }
 }

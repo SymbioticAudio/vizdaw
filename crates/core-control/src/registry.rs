@@ -2245,7 +2245,7 @@ const AUTOMATION_GESTURE_PARAMS: &[ParamSpec] = &[
         name: "target",
         kind: ParamKind::Text,
         required: true,
-        help: "`fader:<strip>`, `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or `param:<slot>:<param>`.",
+        help: "`fader:<strip>`, `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1), `param:<slot>:<param>` or `vca:<vca>`.",
     },
     ParamSpec {
         name: "phase",

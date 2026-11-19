@@ -40,4 +40,36 @@ private func automationEvent(_ id: UInt64, _ target: AutomationTargetRow, _ valu
             try ListEdit.commit("150", column: .data2, row: row, context: listContext())
         }
     }
+
+    /// Task 6 (groups-vcas-transport): a VCA's fader is named as the core
+    /// names its track, its values read in dB, it has a Strip Chart menu,
+    /// and the mixer polls its heard value while playing.
+    @MainActor @Test func vcaFaderTargetsAreNamed() throws {
+        let t = AutomationTargetRow.vcaFader(vca: 3)
+        var names = StripNames()
+        names.vcas[3] = "Drums"
+        #expect(StripLane.automation(AutoTarget(t)).title(names) == "VCA Drums Fader")
+        #expect(AutoTarget(t).row == t)
+        #expect(AutomationText.short(t) == "VCA 3 Fader")
+        #expect(AutomationLaw.text(.vcaFader(vca: 3), AutomationLaw.faderNorm(-6)) == "-6.0 dB")
+        names.strips[1] = "Synth"
+        #expect(names.knows(.vcaFader(vca: 3)) && !names.knows(.vcaFader(vca: 4)), "a deleted VCA is missing")
+
+        let f = mixerFake()
+        f.mixerSnap.vcas = [
+            VcaRow(
+                id: 3, name: "Drums", colour: .blue, members: [1], gainDb: 0, mute: false, solo: false,
+                automation: .read)
+        ]
+        let loaded = try AutomationTargets.load(f)
+        #expect(loaded.names.vcas[3] == "Drums")
+        #expect(loaded.menus.last == StripMenu(title: "VCAs", lanes: [.automation(.vcaFader(vca: 3))]))
+
+        let m = try MixerModel(document: DocumentModel(session: f))
+        f.heard = [t: AutomationLaw.faderNorm(-6)]
+        try f.play(seq: 1)
+        m.document.poll()
+        m.pollAutomation()
+        #expect(f.heardCalls.last?.contains(t) == true, "the VCA's fader is polled while playing")
+    }
 }

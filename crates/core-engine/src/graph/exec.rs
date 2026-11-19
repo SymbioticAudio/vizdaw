@@ -33,7 +33,7 @@ use crate::render::{Shared, Sink};
 use crate::schedule::automation::{AutoDest, StripParam};
 use crate::schedule::{AudioSchedule, MAX_TARGETS};
 use core_media::stream::StreamReader;
-use core_model::ids::{OutputPathId, PluginInstanceId, StripId};
+use core_model::ids::{OutputPathId, PluginInstanceId, StripId, VcaId};
 use crossbeam_queue::ArrayQueue;
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
@@ -270,6 +270,9 @@ pub struct Graph {
     /// edge's gain (mute, solo, a send's level) acts after that edge's
     /// delay line, by key. Filled by `set_controls`.
     feed_arrive: Box<[(FeedKey, u64)]>,
+    /// Per VCA, the latest arrival among its members' strips (Ruling 7),
+    /// by VCA. Filled by `set_controls`.
+    vca_arrive: Box<[(VcaId, u64)]>,
     shape: u64,
     max_frames: u32,
     instruments: u64,
@@ -531,6 +534,7 @@ impl Graph {
             input_keys: input_keys.into_boxed_slice(),
             insert_ids: insert_ids.into_boxed_slice(),
             controls: Controls::default(),
+            vca_arrive: Box::default(),
             ramping: false,
             insert_defs: insert_defs.into_boxed_slice(),
             succ: succ.into_iter().map(Vec::into_boxed_slice).collect(),
@@ -683,6 +687,27 @@ impl Graph {
         arrivals.dedup();
         self.arrivals = arrivals.into_boxed_slice();
         self.feed_arrive = feed.into_boxed_slice();
+        let mut vca: BTreeMap<VcaId, u64> = vcas.iter().map(|v| (v.vca, 0)).collect();
+        for c in specs {
+            let at = self.strip_arrival(c.strip);
+            for v in &c.vcas {
+                if let Some(x) = vca.get_mut(v) {
+                    *x = (*x).max(at);
+                }
+            }
+        }
+        self.vca_arrive = vca.into_iter().collect();
+    }
+
+    /// The frame VCA `vca`'s level acts at behind the renderer: the latest
+    /// arrival among its members' strips (Ruling 7); 0 when it has none
+    /// or is unknown. // RT
+    pub fn vca_arrival(&self, vca: VcaId) -> u64 {
+        self.vca_arrive
+            .binary_search_by_key(&vca, |x| x.0)
+            .ok()
+            .and_then(|i| self.vca_arrive.get(i))
+            .map_or(0, |x| x.1)
     }
 
     /// The automation overrides of this graph's controls as of their last
@@ -731,6 +756,15 @@ impl Graph {
     /// missed run may still hold `&Graph` (module protocol).
     pub fn automate_send(&mut self, strip: StripId, index: u16, v: f64) {
         self.controls.set_send(strip, index, v);
+    }
+
+    /// Automation's normalised level for VCA `vca`'s fader. // RT
+    ///
+    /// Only while no run is in flight: after `Exec::try_finish` returned
+    /// true (or `Runner::graph_mut`), never while a straggling worker of a
+    /// missed run may still hold `&Graph` (module protocol).
+    pub fn automate_vca(&mut self, vca: VcaId, v: f64) {
+        self.controls.set_vca(vca, v);
     }
 
     /// Mirrors the overrides for the control thread without writing the
