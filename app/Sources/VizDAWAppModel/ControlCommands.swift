@@ -345,6 +345,7 @@ public enum ControlCommands {
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
             .union(MixerCommands.ids).union(CreativeCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
             .union([TrackCommands.setOutput]).union([RegionCommands.setFadeShape]).union(chores)
+            .union(TransportLayoutCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -388,6 +389,9 @@ public enum ControlCommands {
         case _ where AppearanceCommands.ids.contains(id):
             // App-wide (plan 7b Ruling 11): no document needed.
             return AppearanceCommands.run(args, prefs: host.appearance)
+        case _ where TransportLayoutCommands.ids.contains(id):
+            // App-wide (groups-vcas-transport Ruling 18): no document, no dialog.
+            return TransportLayoutCommands.run(id, args: args, store: store.transportLayout)
         case _ where PluginSettingsCommands.ids.contains(id):
             // App-wide (plan 6g Task 4): no document needed, no dialog.
             return PluginSettingsCommands.run(id, args: args, settings: host.plugins)

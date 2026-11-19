@@ -4,18 +4,14 @@ import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
 
-/// The toolbar's record controls (spec §6.9; plan 5d-2 Task 3): Record
-/// (the R key's `transport.record`, red while recording), the
-/// Replace/Overdub switch (`transport.overdub`; plan 5c-2 takes Ruling 7),
-/// the options popover, and the readouts: count-in, the loop pass and the
-/// time left.
-struct RecordControls: View {
+/// The cluster's Record part (spec §6.9; plan 5d-2 Task 3;
+/// groups-vcas-transport Ruling 13): Record (the R key's
+/// `transport.record`, red while recording) and its readouts: count-in,
+/// the loop pass and the time left. Replace/Overdub and Record Options are
+/// items of their own (`ReplaceOverdubButton`, `RecordOptionsButton`).
+struct RecordClusterPart: View {
     @Environment(\.symbioticTheme) private var theme
-    let model: DocumentModel
     @Bindable var record: RecordModel
-    /// The window this bar is in: the popover shows under this chevron
-    /// only (plan 7a final review I2).
-    let host: RecordPopoverHost
 
     var body: some View {
         HStack(spacing: theme.spacing.s) {
@@ -35,21 +31,6 @@ struct RecordControls: View {
             // bar's punch fields know a press on it (plan 7d Ruling 7's bar
             // Record rule, fix round 1 I1).
             .background(RecordButtonMarker())
-            // The transport's mode, as the popover's picker and the key
-            // set it (plan 5c-2 takes Ruling 7).
-            AppKitButton(
-                record.modeTitle, isOn: !record.replaces, enabled: !record.isRecording, help: RecordModel.modeHelp,
-                label: record.modeLabel
-            ) { record.pressMode() }
-            .fixedSize()
-            AppKitButton(
-                "Record Options", icon: .menuDown,
-                help: "Replace or overdub, punch, loop, count-in, pre-roll and MIDI takes"
-            ) { [host] in record.togglePopover(in: host) }
-            .fixedSize()
-            // An AppKit popover, whose close veto reads the press (I1).
-            .background(
-                RecordPopoverAnchor(model: model, record: record, host: host, shown: record.showsPopover(in: host)))
             if record.countingIn {
                 Text("Count-in")
                     .font(theme.type.label.font)
@@ -65,6 +46,39 @@ struct RecordControls: View {
                     .help("Recording time left on the project's disk for the armed audio tracks")
             }
         }
+    }
+}
+
+/// The Replace/Overdub switch (`transport.overdub`; plan 5c-2 takes Ruling
+/// 7): the transport's mode, as the popover's picker and the key set it.
+struct ReplaceOverdubButton: View {
+    @Bindable var record: RecordModel
+
+    var body: some View {
+        AppKitButton(
+            record.modeTitle, isOn: !record.replaces, enabled: !record.isRecording, help: RecordModel.modeHelp,
+            label: record.modeLabel
+        ) { record.pressMode() }
+        .fixedSize()
+    }
+}
+
+/// The record options' chevron and its popover (spec §6.9). The popover
+/// shows under this chevron only (plan 7a final review I2).
+struct RecordOptionsButton: View {
+    let model: DocumentModel
+    @Bindable var record: RecordModel
+    let host: RecordPopoverHost
+
+    var body: some View {
+        AppKitButton(
+            "Record Options", icon: .menuDown,
+            help: "Replace or overdub, punch, loop, count-in, pre-roll and MIDI takes"
+        ) { [host] in record.togglePopover(in: host) }
+        .fixedSize()
+        // An AppKit popover, whose close veto reads the press (I1).
+        .background(
+            RecordPopoverAnchor(model: model, record: record, host: host, shown: record.showsPopover(in: host)))
     }
 }
 

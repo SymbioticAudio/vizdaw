@@ -49,15 +49,19 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     private var mouseMonitor: Any?
     private var resignObserver: NSObjectProtocol?
 
-    public init(document: DocumentModel) {
+    /// The fields it shows, in bar order (a transport item shows one or two).
+    public let shownFields: [TransportField]
+
+    public init(document: DocumentModel, fields shown: [TransportField] = TransportField.allCases) {
         self.document = document
+        shownFields = TransportField.allCases.filter { shown.contains($0) }
         super.init(frame: .zero)
         clipsToBounds = true
         stack.orientation = .horizontal
         stack.translatesAutoresizingMaskIntoConstraints = false
         // Narrower than its fitting width, the fields give (not the edge).
         stack.setClippingResistancePriority(.defaultLow, for: .horizontal)
-        for f in TransportField.allCases {
+        for f in shownFields {
             let label = NSTextField(labelWithString: f.title)
             label.setContentCompressionResistancePriority(.required, for: .horizontal)
             labels[f] = label
@@ -79,7 +83,7 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         }
         // Tab and Shift-Tab go round the fields in order (Edit Out and
         // Punch Out have no key of their own; Ruling 16, final review I-2).
-        let order = TransportField.allCases.compactMap { fields[$0] }
+        let order = shownFields.compactMap { fields[$0] }
         for (i, field) in order.enumerated() { field.nextKeyView = order[(i + 1) % order.count] }
         addSubview(stack)
         let leading = stack.leadingAnchor.constraint(equalTo: leadingAnchor)
@@ -164,7 +168,10 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     /// Gives `f` the keyboard with its text selected (the P, E and U keys).
     @discardableResult
     public func focus(_ f: TransportField) -> Bool {
-        guard let field = fields[f] as? TransportTextField, let w = window else { return false }
+        // A field folded into the bar's » is hidden: it does not take keys.
+        guard let field = fields[f] as? TransportTextField, let w = window, !isHiddenOrHasHiddenAncestor else {
+            return false
+        }
         field.armed = true
         guard w.makeFirstResponder(field) else { return false }
         field.currentEditor()?.selectAll(nil)
@@ -300,11 +307,11 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         // Tab and Shift-Tab move on: AppKit selects the next key view
         // after this notification, so arm that field now (a field takes the
         // keyboard only when armed); disarm it next turn if it did not.
+        // The next key view may be another fields view's (`link`).
         if movement == .tab || movement == .backtab {
-            let all = TransportField.allCases
-            let i = all.firstIndex(of: f) ?? 0
-            let next = all[(i + (movement == .tab ? 1 : all.count - 1)) % all.count]
-            guard let field = fields[next] as? TransportTextField else { return }
+            let from = fields[f]
+            let next = movement == .tab ? from?.nextKeyView : from?.previousKeyView
+            guard let field = next as? TransportTextField else { return }
             field.armed = true
             DispatchQueue.main.async {
                 if field.currentEditor() == nil { field.armed = false }
@@ -335,14 +342,22 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         return true
     }
 
-    /// The fields view inside `view`, if any (the P, E and U keys find it).
-    public static func find(in view: NSView?) -> TransportFieldsView? {
+    /// The fields view inside `view` that shows `field` (any field when
+    /// nil), if any (the P, E and U keys find it).
+    public static func find(in view: NSView?, showing field: TransportField? = nil) -> TransportFieldsView? {
         guard let view else { return nil }
-        if let v = view as? TransportFieldsView { return v }
+        if let v = view as? TransportFieldsView, field.map({ v.fields[$0] != nil }) ?? true { return v }
         for s in view.subviews {
-            if let v = find(in: s) { return v }
+            if let v = find(in: s, showing: field) { return v }
         }
         return nil
+    }
+
+    /// Tab and Shift-Tab go round the fields of `views` in order, as they
+    /// went round one view's five (the bar shows them as three items).
+    public static func link(_ views: [TransportFieldsView]) {
+        let order = views.flatMap { v in v.shownFields.compactMap { v.fields[$0] } }
+        for (i, field) in order.enumerated() { field.nextKeyView = order[(i + 1) % order.count] }
     }
 
     /// Torn down mid-edit: give the keyboard back to the transport keys.

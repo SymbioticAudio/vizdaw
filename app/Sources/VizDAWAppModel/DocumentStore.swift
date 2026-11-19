@@ -125,6 +125,10 @@ public final class DocumentStore {
         }
     }
 
+    /// The transport bar's items (groups-vcas-transport Ruling 17): in
+    /// memory here; the app gives it the real preferences.
+    public var transportLayout = TransportLayoutStore(defaults: MemoryDefaults())
+
     /// Bumped when `defaultFormat` is set (Settings › Recording redraws).
     public private(set) var formatChanges = 0
 

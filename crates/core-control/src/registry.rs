@@ -1037,6 +1037,14 @@ const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "A built-in theme, or a user theme's `user.` ID (see Settings › Appearance).",
 }];
 
+/// `ui.set_transport_bar`'s parameter (groups-vcas-transport Ruling 18).
+const UI_TRANSPORT_BAR_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "items",
+    kind: ParamKind::Text,
+    required: true,
+    help: "The bar's items in order, split by commas: cluster (exactly once), loop, click, replace_overdub, record_options, count_in, summary, bar, time, tempo, signature, position_field, edit_fields, punch_fields, dsp_load, device, faults, main_view, panes, space, separator; bar, time and tempo take :small or :large. At most 64.",
+}];
+
 /// `ui.pane`'s parameters (plan 7a Task 5).
 const UI_PANE_PARAMS: &[ParamSpec] = &[
     ParamSpec {
@@ -2743,6 +2751,25 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: UI_THEME_PARAMS,
         ..key_only(cmd("ui.theme", "View", "Theme", None, false))
     },
+    // Groups-vcas-transport Ruling 18: the bar's items, app-wide; the app
+    // checks the grammar (exactly one cluster, at most 64 items).
+    CommandSpec {
+        params: UI_TRANSPORT_BAR_PARAMS,
+        ..key_only(cmd(
+            "ui.set_transport_bar",
+            "View",
+            "Set Transport Bar",
+            None,
+            false,
+        ))
+    },
+    key_only(cmd(
+        "ui.reset_transport_bar",
+        "View",
+        "Reset Transport Bar",
+        None,
+        false,
+    )),
     cmd(
         "editors.piano_roll",
         "Editors",

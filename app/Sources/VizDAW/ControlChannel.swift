@@ -847,7 +847,7 @@ final class AppControlHost: ControlHost {
         let target = TransportFieldsTarget.choose(keyKind: tag?.kind, keyDoc: tag?.doc, doc: doc)
         let window = target == .mixerWindow ? key : ControlWindows.window(of: doc)
         guard let w = window,
-            let v = TransportFieldsView.find(in: w.contentView?.superview ?? w.contentView)
+            let v = TransportFieldsView.find(in: w.contentView?.superview ?? w.contentView, showing: field)
         else { return false }
         return v.focus(field)
     }

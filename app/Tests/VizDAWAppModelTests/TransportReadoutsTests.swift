@@ -144,20 +144,6 @@ import VizDAWCore
         #expect(TransportReadouts.label("Bar", .classicLight) == "BAR")
     }
 
-    @Test func theFlowWrapsReadoutsAboveTheFieldsWhenNarrow() {
-        func lines(_ w: [CGFloat], _ width: CGFloat) -> [[Int]] {
-            TransportFlow.lines(widths: w, lastMinimum: 660, width: width, spacing: 12)
-        }
-        let all: [CGFloat] = [80, 330, 700]
-        #expect(lines(all, 1200) == [[0, 1, 2]])
-        #expect(lines(all, 900) == [[0, 1], [2]])
-        #expect(lines(all, 400) == [[0], [1], [2]])
-        #expect(lines(all, 0) == [[0], [1], [2]])
-        #expect(lines(all, .nan) == [[0], [1], [2]])
-        #expect(lines([330, 700], 1100) == [[0, 1]])
-        #expect(lines([330, 700], 700) == [[0], [1]])
-    }
-
     @Test func theReadoutsViewNamesItsBoxes() async throws {
         let f = demoFake()
         let m = try DocumentModel(session: f)

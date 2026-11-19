@@ -145,6 +145,9 @@ struct VizDAWApp: App {
         Icons.register(SymbioticBrand.provider)
         #endif
         appStore.keyBindings = keyBindings
+        // The transport bar's items (groups-vcas-transport Ruling 17): an
+        // app preference, in memory under a throwaway home.
+        appStore.transportLayout = TransportLayoutStore(defaults: MemoryDefaults.appStore())
         // Trims snap to zero crossings by this preference (plan
         // release-fixes Task 7).
         ZeroCrossing.preferences = editingPreferences
