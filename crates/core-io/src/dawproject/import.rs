@@ -62,7 +62,7 @@ use core_model::command::{
 };
 use core_model::document::{DestKind, MAX_INFO_BYTES, SongInfo};
 use core_model::error::ModelError;
-use core_model::groups::MAX_VCAS;
+use core_model::groups::{MAX_VCAS, NAME_MAX};
 use core_model::history::History;
 use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
@@ -227,6 +227,10 @@ pub const VCA: &str = "VCA channels";
 /// Changed: VCA channels came in with no members (by VCA).
 pub const VCA_NO_MEMBERS: &str =
     "VCA channels came in without members (DAWproject does not say which channels a VCA controls)";
+/// Changed: a VCA channel's name was cleaned to what a VCA name holds (control
+/// characters out, at most 64 characters, "VCA n" when none is left).
+pub const VCA_NAME_CHANGED: &str =
+    "VCA names were cleaned (control characters out, at most 64 characters)";
 /// Left out: VCA channels past the limit of [`MAX_VCAS`] (by VCA).
 pub const VCA_LIMIT: &str = "VCA channels past the limit of 64 (a song holds at most 64)";
 /// Left out: send pan (a count).
@@ -1334,7 +1338,20 @@ impl<'a, 'p> Cx<'a, 'p> {
     ) {
         plan.vca_channels = plan.vca_channels.saturating_add(1);
         let number = plan.vca_channels;
+        let raw = name.unwrap_or("").trim().to_owned();
         let name = self.name(name, || format!("VCA {number}"));
+        // What `check_name` accepts: 1 to NAME_MAX characters, no control
+        // characters (`clean_name` took those out).
+        let name: String = name.chars().take(NAME_MAX).collect();
+        let name = name.trim().to_owned();
+        let name = if name.is_empty() {
+            format!("VCA {number}")
+        } else {
+            name
+        };
+        if name != raw {
+            self.add(ItemKind::Changed, VCA_NAME_CHANGED, Some(name.clone()));
+        }
         if plan.vcas.len() >= MAX_VCAS {
             self.add(ItemKind::LeftOut, VCA_LIMIT, Some(name));
             return;

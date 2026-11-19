@@ -9,7 +9,8 @@ use core_io::dawproject::import::{
     BOTH_STRIPS, BUILTIN_EFFECTS, CANCEL_EVERY, COLOURS_AND_COMMENTS, COLOURS_NEAREST, DpImport,
     FOLDERS, FROM_VIZDAW, INFO_CUT, ImportEnv, METER_MOVED, MediaSource, NAMES_CUT, NOT_INSTALLED,
     OUTPUT_TO_TRACK, PLAYS_BUILTIN, PLUGIN_SETTINGS, TOO_LARGE_TO_CARRY, VCA, VCA_LIMIT,
-    VCA_NO_MEMBERS, VST, apply, debug_items_after_pause, debug_pause_at, debug_paused, map,
+    VCA_NAME_CHANGED, VCA_NO_MEMBERS, VST, apply, debug_items_after_pause, debug_pause_at,
+    debug_paused, map,
 };
 use core_io::dawproject::package::{
     AudioSource, DpPackage, ODD_RATE, RECORD_UNREADABLE, SONG_INFO_UNREADABLE,
@@ -2245,4 +2246,40 @@ fn past_64_vca_channels_are_left_out() {
         (1, &["V65".to_owned()][..])
     );
     lacks(&a.report, VCA);
+}
+
+/// Hostile VCA names: over 64 characters, control characters, and empty or
+/// blank. The import succeeds, each name is what a VCA name holds, and the
+/// report says the name changed.
+#[test]
+fn hostile_vca_names_are_cleaned_and_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let long = "x".repeat(200);
+    let structure = format!(
+        concat!(
+            r#"<Channel id="a" name="{}" role="vca"/>"#,
+            r#"<Channel id="b" name="Ki&#1;t&#7;" role="vca"/>"#,
+            r#"<Channel id="c" name="" role="vca"/>"#,
+            r#"<Channel id="d" name="   " role="vca"/>"#,
+            r#"<Channel id="e" name="Fine" role="vca"/>"#,
+        ),
+        long
+    );
+    let pkg = small(dir.path(), &project_xml(&structure, ""), None);
+    let a = imported(&pkg, &yes);
+    let names: Vec<String> =
+        a.h.doc()
+            .mixer()
+            .vcas()
+            .values()
+            .map(|v| v.name.clone())
+            .collect();
+    assert_eq!(names.len(), 5, "{names:?}");
+    assert_eq!(names[0], "x".repeat(64));
+    assert!(names[1] == "Kit" || names[1] == "VCA 2", "{}", names[1]);
+    assert_eq!(names[2], "VCA 3");
+    assert_eq!(names[3], "VCA 4");
+    assert_eq!(names[4], "Fine");
+    let line = item(&a.report, ItemKind::Changed, VCA_NAME_CHANGED).expect("listed");
+    assert!(line.count >= 3, "{line:?}");
 }
