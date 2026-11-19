@@ -6,9 +6,9 @@ use crate::arc_map::ArcMap;
 use crate::automation::AutomationMode;
 use crate::document::{DestKind, Destination, OutputPath};
 use crate::error::{ModelError, Result};
-use crate::groups::Group;
+use crate::groups::{Group, Vca};
 use crate::ids::{
-    AnyId, Counters, DestId, GroupId, OutputPathId, PluginInstanceId, StateBlobId, StripId,
+    AnyId, Counters, DestId, GroupId, OutputPathId, PluginInstanceId, StateBlobId, StripId, VcaId,
 };
 use im::{OrdMap, Vector};
 use serde::{Deserialize, Serialize};
@@ -298,8 +298,8 @@ impl Strip {
     }
 }
 
-/// The mixer: strips by ID, display order, the master and the fader
-/// groups. Change it with commands.
+/// The mixer: strips by ID, display order, the master, the fader groups
+/// and the VCAs. Change it with commands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "MixerRepr", try_from = "MixerRepr")]
 pub struct Mixer {
@@ -307,9 +307,11 @@ pub struct Mixer {
     order: Vector<StripId>,
     master: StripId,
     groups: OrdMap<GroupId, Group>,
+    vcas: OrdMap<VcaId, Vca>,
 }
 
-/// The serialized shape of a [`Mixer`]: strips and groups ordered by ID.
+/// The serialized shape of a [`Mixer`]: strips, groups and VCAs ordered
+/// by ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MixerRepr {
@@ -322,6 +324,9 @@ pub struct MixerRepr {
     /// Fader groups (plan groups-vcas Ruling 1); not written when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<Group>,
+    /// VCAs (plan groups-vcas Ruling 1); not written when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vcas: Vec<Vca>,
 }
 
 impl From<Mixer> for MixerRepr {
@@ -331,6 +336,7 @@ impl From<Mixer> for MixerRepr {
             order: m.order.iter().copied().collect(),
             strips: m.strips.values().cloned().collect(),
             groups: m.groups.values().cloned().collect(),
+            vcas: m.vcas.values().cloned().collect(),
         }
     }
 }
@@ -352,11 +358,19 @@ impl TryFrom<MixerRepr> for Mixer {
                 return Err(format!("duplicate group id {id}"));
             }
         }
+        let mut vcas = OrdMap::new();
+        for v in r.vcas {
+            let id = v.id;
+            if vcas.insert(id, v).is_some() {
+                return Err(format!("duplicate VCA id {id}"));
+            }
+        }
         Ok(Mixer {
             strips,
             order: r.order.into_iter().collect(),
             master: r.master,
             groups,
+            vcas,
         })
     }
 }
@@ -369,6 +383,7 @@ impl Mixer {
             order: Vector::new(),
             master,
             groups: OrdMap::new(),
+            vcas: OrdMap::new(),
         }
     }
 
@@ -433,6 +448,34 @@ impl Mixer {
         self.groups.remove(&id)
     }
 
+    /// VCAs by ID.
+    pub fn vcas(&self) -> &OrdMap<VcaId, Vca> {
+        &self.vcas
+    }
+
+    /// A VCA by ID.
+    pub fn vca(&self, id: VcaId) -> Result<&Vca> {
+        self.vcas
+            .get(&id)
+            .ok_or(ModelError::UnknownId(AnyId::Vca(id)))
+    }
+
+    pub(crate) fn vca_mut(&mut self, id: VcaId) -> Result<&mut Vca> {
+        self.vcas
+            .get_mut(&id)
+            .ok_or(ModelError::UnknownId(AnyId::Vca(id)))
+    }
+
+    /// Adds or replaces a VCA.
+    pub(crate) fn insert_vca(&mut self, v: Vca) {
+        self.vcas.insert(v.id, v);
+    }
+
+    /// Removes a VCA; its members are left as they are.
+    pub(crate) fn remove_vca(&mut self, id: VcaId) -> Option<Vca> {
+        self.vcas.remove(&id)
+    }
+
     /// Every insert as `(strip, position, slot)`, by strip ID then position.
     pub fn inserts(&self) -> impl Iterator<Item = (StripId, usize, &PluginSlot)> + '_ {
         self.strips
@@ -465,7 +508,7 @@ impl Mixer {
 
     /// Removes a strip (never master): outputs to it go to master, sends to
     /// it are dropped, sidechains from it are cleared and it leaves its
-    /// group (an emptied group stays, spec §2a).
+    /// group and its VCAs (an emptied group or VCA stays, spec §2a).
     pub(crate) fn remove(&mut self, id: StripId) -> Option<Strip> {
         if id == self.master {
             return None;
@@ -495,6 +538,17 @@ impl Mixer {
         for g in held {
             if let Some(g) = self.groups.get_mut(&g) {
                 g.members.retain(|x| *x != id);
+            }
+        }
+        let held: Vec<VcaId> = self
+            .vcas
+            .values()
+            .filter(|v| v.members.contains(&id))
+            .map(|v| v.id)
+            .collect();
+        for v in held {
+            if let Some(v) = self.vcas.get_mut(&v) {
+                v.members.retain(|x| *x != id);
             }
         }
         Some(s)

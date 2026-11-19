@@ -1,19 +1,24 @@
-//! Fader-group edits (plan groups-vcas Rulings 1–4). Every command checks
-//! everything before it changes anything; on error the document is
-//! unchanged (commands work on a copy).
+//! Fader-group and VCA edits (plan groups-vcas Rulings 1–6). Every
+//! command checks everything before it changes anything; on error the
+//! document is unchanged (commands work on a copy). No VCA command touches
+//! a strip (spec §2).
 
 use super::Report;
+use crate::automation::AutomationMode;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
-use crate::groups::{Group, MAX_MEMBERS, check_name, group_of};
-use crate::ids::{AnyId, GroupId, StripId};
+use crate::groups::{Group, MAX_MEMBERS, VCA_MODES, Vca, check_name, group_of};
+use crate::ids::{AnyId, GroupId, StripId, VcaId};
 use crate::mixer::Swatch;
+use crate::mixer_rules::level;
 use std::collections::BTreeSet;
 
 /// What a group's name is called in messages.
 const GROUP_NAME: &str = "A group's name";
+/// What a VCA's name is called in messages.
+const VCA_NAME: &str = "A VCA's name";
 
-/// Fader-group edits.
+/// Fader-group and VCA edits.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupCmd {
     /// Make a group of `members`, with both links on.
@@ -67,6 +72,76 @@ pub enum GroupCmd {
         /// Target.
         group: GroupId,
     },
+    /// Make a VCA of `members` at 0 dB, unmuted, unsoloed, in Read.
+    NewVca {
+        /// Name ([`check_name`]).
+        name: String,
+        /// Colour.
+        colour: Swatch,
+        /// Its first members, in order; may be empty.
+        members: Vec<StripId>,
+    },
+    /// Rename a VCA.
+    RenameVca {
+        /// Target.
+        vca: VcaId,
+        /// New name ([`check_name`]).
+        name: String,
+    },
+    /// Recolour a VCA.
+    SetVcaColour {
+        /// Target.
+        vca: VcaId,
+        /// New colour.
+        colour: Swatch,
+    },
+    /// Assign strips to a VCA, at the end, in order.
+    AssignVca {
+        /// Target.
+        vca: VcaId,
+        /// Strips not in it yet.
+        strips: Vec<StripId>,
+    },
+    /// Take strips off a VCA; an emptied VCA stays.
+    UnassignVca {
+        /// Target.
+        vca: VcaId,
+        /// Members of it.
+        strips: Vec<StripId>,
+    },
+    /// Set a VCA's level.
+    SetVcaLevel {
+        /// Target.
+        vca: VcaId,
+        /// Level in dB, `GAIN_FLOOR_DB..=GAIN_MAX_DB`.
+        gain_db: f64,
+    },
+    /// Mute or unmute a VCA.
+    SetVcaMute {
+        /// Target.
+        vca: VcaId,
+        /// Muted.
+        mute: bool,
+    },
+    /// Solo or unsolo a VCA.
+    SetVcaSolo {
+        /// Target.
+        vca: VcaId,
+        /// Soloed.
+        solo: bool,
+    },
+    /// Set a VCA's automation mode, one of [`VCA_MODES`].
+    SetVcaMode {
+        /// Target.
+        vca: VcaId,
+        /// Mode.
+        mode: AutomationMode,
+    },
+    /// Delete a VCA; its members keep their faders and switches.
+    DeleteVca {
+        /// Target.
+        vca: VcaId,
+    },
 }
 
 impl GroupCmd {
@@ -80,17 +155,34 @@ impl GroupCmd {
             GroupCmd::RemoveFromGroup { .. } => "Remove from Group",
             GroupCmd::SetGroupLinks { .. } => "Group Links",
             GroupCmd::DeleteGroup { .. } => "Delete Group",
+            GroupCmd::NewVca { .. } => "New VCA",
+            GroupCmd::RenameVca { .. } => "Rename VCA",
+            GroupCmd::SetVcaColour { .. } => "VCA Colour",
+            GroupCmd::AssignVca { .. } => "Assign to VCA",
+            GroupCmd::UnassignVca { .. } => "Remove from VCA",
+            GroupCmd::SetVcaLevel { .. } => "Set VCA",
+            GroupCmd::SetVcaMute { .. } => "Mute VCA",
+            GroupCmd::SetVcaSolo { .. } => "Solo VCA",
+            GroupCmd::SetVcaMode { .. } => "Set VCA Automation Mode",
+            GroupCmd::DeleteVca { .. } => "Delete VCA",
         }
     }
 }
 
-/// Refuses a list with more than [`MAX_MEMBERS`] strips or a strip twice.
-fn check_list(strips: &[StripId]) -> Result<()> {
-    if strips.len() > MAX_MEMBERS {
+/// Refuses more than [`MAX_MEMBERS`] members in `what` ("A group", "A VCA").
+fn check_size(what: &str, n: usize) -> Result<()> {
+    if n > MAX_MEMBERS {
         return Err(ModelError::invalid(format!(
-            "A group holds at most {MAX_MEMBERS} strips."
+            "{what} holds at most {MAX_MEMBERS} strips."
         )));
     }
+    Ok(())
+}
+
+/// Refuses a list with more than [`MAX_MEMBERS`] strips or a strip twice;
+/// `what` names the holder in the message.
+fn check_list(what: &str, strips: &[StripId]) -> Result<()> {
+    check_size(what, strips.len())?;
     let mut seen = BTreeSet::new();
     for s in strips {
         if !seen.insert(*s) {
@@ -119,6 +211,25 @@ fn check_joiners(d: &Document, strips: &[StripId]) -> Result<()> {
     Ok(())
 }
 
+/// Refuses strips that may not join VCA `vca` (`None` for a new one):
+/// unknown ones, the master and its members already.
+fn check_vca_joiners(d: &Document, vca: Option<&Vca>, strips: &[StripId]) -> Result<()> {
+    let m = d.mixer();
+    for id in strips {
+        let s = m.strip(*id)?;
+        if *id == m.master() {
+            return Err(ModelError::invalid("Master cannot join a VCA."));
+        }
+        if let Some(v) = vca.filter(|v| v.members.contains(id)) {
+            return Err(ModelError::invalid(format!(
+                "Strip {} is already in VCA {}.",
+                s.name, v.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Refuses an empty strip list.
 fn need_strips(strips: &[StripId]) -> Result<()> {
     if strips.is_empty() {
@@ -135,7 +246,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &GroupCmd, r: &mut Report) -> Result<
             members,
         } => {
             let name = check_name(GROUP_NAME, name)?;
-            check_list(members)?;
+            check_list("A group", members)?;
             check_joiners(d, members)?;
             let id = d.counters_mut().alloc_group();
             if d.mixer().groups().contains_key(&id) {
@@ -161,12 +272,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &GroupCmd, r: &mut Report) -> Result<
         GroupCmd::AddToGroup { group, strips } => {
             let held = d.mixer().group(*group)?.members.len();
             need_strips(strips)?;
-            check_list(strips)?;
-            if held.saturating_add(strips.len()) > MAX_MEMBERS {
-                return Err(ModelError::invalid(format!(
-                    "A group holds at most {MAX_MEMBERS} strips."
-                )));
-            }
+            check_list("A group", strips)?;
+            check_size("A group", held.saturating_add(strips.len()))?;
             check_joiners(d, strips)?;
             d.mixer_mut()
                 .group_mut(*group)?
@@ -176,7 +283,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &GroupCmd, r: &mut Report) -> Result<
         GroupCmd::RemoveFromGroup { group, strips } => {
             let g = d.mixer().group(*group)?;
             need_strips(strips)?;
-            check_list(strips)?;
+            check_list("A group", strips)?;
             for id in strips {
                 let s = d.mixer().strip(*id)?;
                 if !g.members.contains(id) {
@@ -211,6 +318,98 @@ pub(crate) fn apply(d: &mut Document, cmd: &GroupCmd, r: &mut Report) -> Result<
             d.mixer_mut().remove_group(*group);
             r.removed.push(AnyId::Group(*group));
         }
+        GroupCmd::NewVca {
+            name,
+            colour,
+            members,
+        } => {
+            let name = check_name(VCA_NAME, name)?;
+            check_list("A VCA", members)?;
+            check_vca_joiners(d, None, members)?;
+            let id = d.counters_mut().alloc_vca();
+            if d.mixer().vcas().contains_key(&id) {
+                return Err(ModelError::invalid("no free VCA ID"));
+            }
+            d.mixer_mut().insert_vca(Vca {
+                id,
+                name,
+                colour: *colour,
+                members: members.iter().copied().collect(),
+                gain_db: 0.0,
+                mute: false,
+                solo: false,
+                automation: AutomationMode::Read,
+            });
+            r.created.push(AnyId::Vca(id));
+        }
+        GroupCmd::RenameVca { vca, name } => {
+            let name = check_name(VCA_NAME, name)?;
+            d.mixer_mut().vca_mut(*vca)?.name = name;
+        }
+        GroupCmd::SetVcaColour { vca, colour } => {
+            d.mixer_mut().vca_mut(*vca)?.colour = *colour;
+        }
+        GroupCmd::AssignVca { vca, strips } => {
+            let v = d.mixer().vca(*vca)?;
+            need_strips(strips)?;
+            check_list("A VCA", strips)?;
+            check_size("A VCA", v.members.len().saturating_add(strips.len()))?;
+            check_vca_joiners(d, Some(v), strips)?;
+            d.mixer_mut()
+                .vca_mut(*vca)?
+                .members
+                .extend(strips.iter().copied());
+        }
+        GroupCmd::UnassignVca { vca, strips } => {
+            let v = d.mixer().vca(*vca)?;
+            need_strips(strips)?;
+            check_list("A VCA", strips)?;
+            for id in strips {
+                let s = d.mixer().strip(*id)?;
+                if !v.members.contains(id) {
+                    return Err(ModelError::invalid(format!(
+                        "Strip {} is not in VCA {}.",
+                        s.name, v.name
+                    )));
+                }
+            }
+            d.mixer_mut()
+                .vca_mut(*vca)?
+                .members
+                .retain(|x| !strips.contains(x));
+        }
+        GroupCmd::SetVcaLevel { vca, gain_db } => {
+            d.mixer().vca(*vca)?;
+            level("gain_db", *gain_db)?;
+            d.mixer_mut().vca_mut(*vca)?.gain_db = *gain_db;
+        }
+        GroupCmd::SetVcaMute { vca, mute } => {
+            d.mixer_mut().vca_mut(*vca)?.mute = *mute;
+        }
+        GroupCmd::SetVcaSolo { vca, solo } => {
+            d.mixer_mut().vca_mut(*vca)?.solo = *solo;
+        }
+        GroupCmd::SetVcaMode { vca, mode } => {
+            d.mixer().vca(*vca)?;
+            check_vca_mode(*mode)?;
+            d.mixer_mut().vca_mut(*vca)?.automation = *mode;
+        }
+        GroupCmd::DeleteVca { vca } => {
+            d.mixer().vca(*vca)?;
+            d.mixer_mut().remove_vca(*vca);
+            r.removed.push(AnyId::Vca(*vca));
+        }
     }
     Ok(())
+}
+
+/// Refuses Write and Trim (Ruling 6).
+fn check_vca_mode(mode: AutomationMode) -> Result<()> {
+    if VCA_MODES.contains(&mode) {
+        Ok(())
+    } else {
+        Err(ModelError::invalid(
+            "A VCA's automation mode is Off, Read, Touch or Latch.",
+        ))
+    }
 }

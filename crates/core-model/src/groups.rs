@@ -1,10 +1,13 @@
 //! Fader groups (plan groups-vcas Rulings 1–4): a named, coloured set of
 //! strips whose faders move together by the same dB, with linked mute and
-//! solo switches. Membership lives in the group, not on the strip. Edits
-//! are in `crate::command::groups`.
+//! solo switches. And VCAs (spec §2): a named, coloured fader whose level
+//! is an offset on each member's heard level, with its own mute and solo.
+//! Membership lives in the group or VCA, not on the strip. Edits are in
+//! `crate::command::groups`.
 
+use crate::automation::AutomationMode;
 use crate::error::{ModelError, Result};
-use crate::ids::{GroupId, StripId};
+use crate::ids::{GroupId, StripId, VcaId};
 use crate::mixer::{GAIN_FLOOR_DB, GAIN_MAX_DB, Mixer, Swatch};
 use im::Vector;
 use serde::{Deserialize, Serialize};
@@ -35,6 +38,92 @@ pub struct Group {
     pub link_mute: bool,
     /// Soloing one member solos them all.
     pub link_solo: bool,
+}
+
+/// A VCA (spec §2): its level, mute and solo act on its members' heard
+/// sound without ever rewriting their strips. A strip may be in any number
+/// of VCAs, and in a group as well.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vca {
+    /// VCA ID.
+    pub id: VcaId,
+    /// Display name ([`check_name`]).
+    pub name: String,
+    /// Its colour.
+    pub colour: Swatch,
+    /// Members in the order they were assigned; never the master, each
+    /// once.
+    pub members: Vector<StripId>,
+    /// Its level in dB, added to each member's own fader
+    /// ([`vca_offset_db`]); at or below [`GAIN_FLOOR_DB`] it silences them.
+    pub gain_db: f64,
+    /// Mutes every member, leaving each strip's own switch as it is.
+    pub mute: bool,
+    /// Solos every member, leaving each strip's own switch as it is.
+    pub solo: bool,
+    /// Its fader's automation mode, one of [`VCA_MODES`] (Ruling 6); Read
+    /// is not written.
+    #[serde(default, skip_serializing_if = "AutomationMode::is_read")]
+    pub automation: AutomationMode,
+}
+
+/// A VCA's automation modes (Ruling 6), in menu order.
+pub const VCA_MODES: [AutomationMode; 4] = [
+    AutomationMode::Off,
+    AutomationMode::Read,
+    AutomationMode::Touch,
+    AutomationMode::Latch,
+];
+
+/// The VCAs `strip` is in, by VCA ID.
+pub fn vcas_of(m: &Mixer, strip: StripId) -> impl Iterator<Item = &Vca> + '_ {
+    m.vcas()
+        .values()
+        .filter(move |v| v.members.contains(&strip))
+}
+
+/// True for a level that sounds: above [`GAIN_FLOOR_DB`] (NaN does not).
+fn sounds(db: f64) -> bool {
+    db > GAIN_FLOOR_DB
+}
+
+/// Σ of `strip`'s VCAs' levels; GAIN_FLOOR_DB when any is at or below it; 0 for none.
+///
+/// Also [`GAIN_FLOOR_DB`] when the sum is at or below it. The top is not
+/// capped here: [`heard_db`] caps the total.
+pub fn vca_offset_db(m: &Mixer, strip: StripId) -> f64 {
+    let mut sum = 0.0;
+    for v in vcas_of(m, strip) {
+        if !sounds(v.gain_db) {
+            return GAIN_FLOOR_DB;
+        }
+        sum += v.gain_db;
+    }
+    if sounds(sum) { sum } else { GAIN_FLOOR_DB }
+}
+
+/// own + offset, clamped to GAIN_MAX_DB; GAIN_FLOOR_DB when either is at or below it or the sum is.
+///
+/// The level a strip is heard at (preflight F12: a group move measures
+/// from the own fader, never from this). NaN anywhere gives the floor.
+pub fn heard_db(own_db: f64, offset_db: f64) -> f64 {
+    let sum = own_db + offset_db;
+    if sounds(own_db) && sounds(offset_db) && sounds(sum) {
+        sum.min(GAIN_MAX_DB)
+    } else {
+        GAIN_FLOOR_DB
+    }
+}
+
+/// True when any of `strip`'s VCAs is muted.
+pub fn vca_muted(m: &Mixer, strip: StripId) -> bool {
+    vcas_of(m, strip).any(|v| v.mute)
+}
+
+/// True when any of `strip`'s VCAs is soloed.
+pub fn vca_soloed(m: &Mixer, strip: StripId) -> bool {
+    vcas_of(m, strip).any(|v| v.solo)
 }
 
 /// A group's link switches.

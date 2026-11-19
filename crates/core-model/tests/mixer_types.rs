@@ -99,6 +99,7 @@ fn sample_mixer() -> Mixer {
             bus,
         ],
         groups: vec![],
+        vcas: vec![],
     })
     .unwrap()
 }
@@ -145,6 +146,7 @@ fn unknown_fields_and_duplicate_strips_are_refused() {
             Strip::new(StripId(0), "X", StripKind::Bus),
         ],
         groups: vec![],
+        vcas: vec![],
     });
     assert!(r.unwrap_err().contains("duplicate strip id strip0"));
 }

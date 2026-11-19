@@ -4,7 +4,7 @@
 
 use crate::document::{DestKind, Document};
 use crate::error::{ModelError, Result};
-use crate::groups::{MAX_MEMBERS, check_name};
+use crate::groups::{MAX_MEMBERS, VCA_MODES, check_name, vca_soloed};
 use crate::ids::{AnyId, GroupId, PluginInstanceId, StripId};
 use crate::mixer::{GAIN_FLOOR_DB, GAIN_MAX_DB, Mixer, Output, Strip, StripKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -162,7 +162,9 @@ pub fn check_routing(m: &Mixer) -> Result<()> {
     Ok(())
 }
 
-fn level(field: &'static str, db: f64) -> Result<()> {
+/// A fader, send or VCA level: finite and in
+/// `GAIN_FLOOR_DB..=GAIN_MAX_DB`.
+pub(crate) fn level(field: &'static str, db: f64) -> Result<()> {
     if db.is_finite() && (GAIN_FLOOR_DB..=GAIN_MAX_DB).contains(&db) {
         Ok(())
     } else {
@@ -311,7 +313,45 @@ pub fn mixer_problems(doc: &Document) -> Vec<String> {
         push("mixer", e);
     }
     group_problems(m, c.group, &mut push);
+    vca_problems(m, c.vca, &mut push);
     p
+}
+
+/// The VCAs' problems (plan groups-vcas Rulings 1, 4 and 6): every member
+/// is a strip, not the master and listed once; IDs, names, sizes, levels
+/// and modes are in range. A strip may be in many VCAs.
+fn vca_problems(m: &Mixer, next: u64, push: &mut impl FnMut(&str, ModelError)) {
+    for v in m.vcas().values() {
+        let ctx = v.id.to_string();
+        if v.id.0 >= next {
+            push(&ctx, ModelError::range("counters.vca", v.id));
+        }
+        if let Err(e) = check_name("A VCA's name", &v.name) {
+            push(&ctx, e);
+        } else if v.name.trim() != v.name {
+            push(&ctx, ModelError::invalid("A VCA's name is trimmed."));
+        }
+        if v.members.len() > MAX_MEMBERS {
+            push(&ctx, ModelError::range("members", v.members.len()));
+        }
+        if let Err(e) = level("gain_db", v.gain_db) {
+            push(&ctx, e);
+        }
+        if !VCA_MODES.contains(&v.automation) {
+            push(&ctx, ModelError::range("automation", v.automation.name()));
+        }
+        let mut own: BTreeSet<StripId> = BTreeSet::new();
+        for s in &v.members {
+            if !m.strips().contains_key(s) {
+                push(&ctx, ModelError::UnknownId(AnyId::Strip(*s)));
+            } else if *s == m.master() {
+                push(&ctx, ModelError::invalid("Master cannot join a VCA."));
+            }
+            if !own.insert(*s) {
+                push(&ctx, ModelError::invalid(format!("{s} is listed twice")));
+            }
+        }
+    }
 }
 
 /// The groups' problems (plan groups-vcas Rulings 1–4): every member is a
@@ -385,14 +425,17 @@ pub fn solo_reach(m: &Mixer) -> BTreeMap<StripId, BTreeSet<StripId>> {
 /// Strips that sound under the current solo state (Plan Ruling 5):
 /// every strip when nothing is soloed; otherwise the soloed strips and
 /// every strip downstream or upstream of one through outputs and sends.
+/// A strip counts as soloed when its own switch or one of its VCAs' is on
+/// (spec §2).
 pub fn audible(m: &Mixer) -> BTreeSet<StripId> {
-    if !m.strips().values().any(|s| s.solo) {
+    let soloed = |s: &&Strip| s.solo || vca_soloed(m, s.id);
+    if !m.strips().values().any(|s| soloed(&s)) {
         return m.strips().keys().copied().collect();
     }
     let reach = solo_reach(m);
     m.strips()
         .values()
-        .filter(|s| s.solo)
+        .filter(soloed)
         .filter_map(|s| reach.get(&s.id))
         .flatten()
         .copied()

@@ -74,10 +74,10 @@ fn fade_frames(tempo: &TempoMap, start: i64, ticks: i64, rate: f64) -> u64 {
     ((e - s) * rate).round().max(0.0) as u64
 }
 
-/// Version 10 → 11 (plan groups-vcas Ruling 1): the mixer gains an
-/// optional `groups` list (fader groups) and the counters optional
-/// `group` and `vca` counters, each 1 when absent. A file without them has
-/// no groups, so the document is unchanged. The bump makes an older build
+/// Version 10 → 11 (plan groups-vcas Ruling 1): the mixer gains optional
+/// `groups` (fader groups) and `vcas` (VCAs) lists and the counters
+/// optional `group` and `vca` counters, each 1 when absent. A file without
+/// them has no groups and no VCAs, so the document is unchanged. The bump makes an older build
 /// refuse a version-11 project with its `NewerFormat` message rather than
 /// an unknown-field error.
 pub fn migrate_v10_to_v11(v: Value) -> Result<Value> {
