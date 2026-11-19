@@ -66,6 +66,7 @@ pub mod revs;
 pub mod selection;
 pub mod session;
 pub mod snapshot;
+pub mod stand_ins;
 pub mod starter;
 pub mod step;
 pub mod strip;

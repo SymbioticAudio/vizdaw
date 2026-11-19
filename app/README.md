@@ -2892,6 +2892,13 @@ Plan 8b, the Co-Producer notes file and the librarian:
      Co-Producer lists it marked "unverified". Revoke it, and the next
      change asks again. Leave a sheet open for 10 minutes: it closes,
      and the change is not made.
+358a. Ask Claude to add a track in a new untitled song, then close the song
+     without saving. Settings › Co-Producer shows "Notes and copies kept
+     for 1 unsaved song (…)" with Show in Finder and Delete…. Show in
+     Finder opens the Untitled folder. Delete… asks "Delete the notes and
+     copies Co-Producer kept for 1 song that was never saved?"; Cancel
+     keeps them, Delete removes them and the line goes. A song that is
+     open right now is not counted and is not deleted.
 
 The approval sheet, by hand on a real Mac (an ad-hoc build, and a signed
 one for step 364). Watch the log with

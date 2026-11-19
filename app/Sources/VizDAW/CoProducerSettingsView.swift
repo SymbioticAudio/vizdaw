@@ -11,6 +11,7 @@ struct CoProducerSettingsView: View {
     @Environment(\.symbioticTheme) private var theme
     @Bindable var settings: CoProducerSettings
     @Bindable var metrics: CoProducerMetrics
+    @Bindable var standIns: StandInFolders
     let store: DocumentStore
 
     /// `vizdaw-mcp`, next to the app's executable in the bundle.
@@ -55,6 +56,7 @@ struct CoProducerSettingsView: View {
                     .foregroundStyle(theme.state.warning.color)
                     .accessibilityLabel(problem)
             }
+            unsavedSongs
             approvals
             time
         }
@@ -62,8 +64,17 @@ struct CoProducerSettingsView: View {
         .frame(width: 500)
         .onAppear {
             settings.readCopies(store)
+            standIns.refresh()
             settings.readApprovals()
             metrics.refreshOverview()
+        }
+        .alert("Delete notes and copies?", isPresented: $standIns.confirming) {
+            Button("Delete", role: .destructive) { standIns.deleteAll() }
+                .accessibilityLabel("Delete the notes and copies of songs never saved")
+            Button("Cancel", role: .cancel) { standIns.confirming = false }
+                .accessibilityLabel("Cancel")
+        } message: {
+            Text(standIns.confirmMessage)
         }
         // Only the composer's own click asks; the control channel's delete
         // opens nothing.
@@ -74,6 +85,29 @@ struct CoProducerSettingsView: View {
                 .accessibilityLabel("Cancel")
         } message: {
             Text("This deletes everything VizDAW has counted about where your time goes, for every song. It cannot be undone.")
+        }
+    }
+
+    /// "Notes and copies kept for N unsaved songs (X MB)", with Show in
+    /// Finder and Delete…; hidden when there are none.
+    @ViewBuilder private var unsavedSongs: some View {
+        if let line = standIns.line {
+            HStack(spacing: theme.spacing.s) {
+                Text(line)
+                    .font(theme.type.caption.font)
+                    .foregroundStyle(theme.text.secondary.color)
+                    .accessibilityLabel(line)
+                Spacer(minLength: theme.spacing.m)
+                Button("Show in Finder") { NSWorkspace.shared.open(standIns.folder) }
+                    .accessibilityLabel("Show the notes and copies of unsaved songs in Finder")
+                Button("Delete…") { standIns.confirming = true }
+                    .accessibilityLabel("Delete the notes and copies of unsaved songs")
+            }
+        }
+        if let problem = standIns.problem {
+            Text(problem)
+                .foregroundStyle(theme.state.warning.color)
+                .accessibilityLabel(problem)
         }
     }
 

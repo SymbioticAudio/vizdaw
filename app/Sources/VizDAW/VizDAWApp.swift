@@ -123,6 +123,12 @@ final class LiveCoProducerSink: CoProducerSink {
     makePrivate: { SupportFolder.makePrivate($0) },
     open: { try MetricsRecorder.open(support: $0.path, blockMs: $1, sampleMs: $2) })
 
+/// Settings › Co-Producer's stand-in folders of songs never saved; the
+/// songs open right now are never listed or deleted.
+@MainActor let standInFolders = StandInFolders(
+    supportDir: AppSetup.coProducerSupportDir,
+    openIDs: { appStore.documents.values.compactMap { (try? $0.session.projectId()) ?? nil } })
+
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
 @MainActor let noteInputHub = NoteInputHub(input: NoteInput())
@@ -273,7 +279,8 @@ struct VizDAWApp: App {
                     .tabItem { AppIcon.settingsSurfaces.label("Surfaces") }
                 PluginSettingsView(settings: pluginSettings)
                     .tabItem { AppIcon.settingsPlugins.label("Plug-ins") }
-                CoProducerSettingsView(settings: coProducerSettings, metrics: coProducerMetrics, store: appStore)
+                CoProducerSettingsView(
+                    settings: coProducerSettings, metrics: coProducerMetrics, standIns: standInFolders, store: appStore)
                     .tabItem { AppIcon.settingsCoProducer.label("Co-Producer") }
             }
             .themedRoot()
