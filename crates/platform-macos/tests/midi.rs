@@ -2,10 +2,60 @@
 
 use core_engine::backend::MidiBackend;
 use platform_macos::midi::{MidiMonitor, MidiSystem, now_ns, ns_to_host};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
+
+/// One test at a time, with the MIDI server up (Task 9).
+///
+/// The source listeners here connect every virtual source this process
+/// owns, so a test running beside them adds and disposes sources (whose
+/// endpoint refs CoreMIDI reuses) while they count and reconnect theirs:
+/// the reconnect test once lost the message of a source it had just
+/// connected (1 failure in 50 runs of this file).
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    static UP: OnceLock<()> = OnceLock::new();
+    UP.get_or_init(wait_for_the_midi_server);
+    g
+}
+
+/// The MIDI server quits a few seconds after its last client goes. A
+/// process whose first client comes while it shuts down gets
+/// `MIDIClientCreate` -304 or -2 for that client and every later one, so
+/// a run of this file started a few seconds after another MIDI run failed
+/// whole (10 of 100 runs back to back). Before this process makes its
+/// first client, a child process (this binary, running
+/// [`midi_server_probe`]) makes one, again until one succeeds: the server
+/// is then up, and stays up past this process's first client.
+fn wait_for_the_midi_server() {
+    let exe = std::env::current_exe().unwrap();
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let up = std::process::Command::new(&exe)
+            .args(["midi_server_probe", "--exact", "--ignored", "--quiet"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if up {
+            return;
+        }
+        assert!(Instant::now() < until, "the MIDI server takes no client");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// [`wait_for_the_midi_server`]'s child: a client the server takes.
+#[test]
+#[ignore = "run as a child process by the tests here"]
+fn midi_server_probe() {
+    MidiSystem::new("VizDAW Server Probe").unwrap();
+}
 
 #[test]
 fn virtual_source_roundtrip() {
+    let _g = serial();
     let mut sys = MidiSystem::new("VizDAW Test").unwrap();
     let mut out = sys.open_virtual_source("VizDAW Test Out").unwrap();
     let monitor = MidiMonitor::watch(&sys, "VizDAW Test Out").unwrap();
@@ -46,6 +96,7 @@ fn virtual_source_roundtrip() {
 
 #[test]
 fn destinations_can_be_listed() {
+    let _g = serial();
     let sys = MidiSystem::new("VizDAW List").unwrap();
     for d in sys.destinations() {
         assert!(!d.name.is_empty());
@@ -56,6 +107,7 @@ fn destinations_can_be_listed() {
 fn a_note_listener_hears_every_source() {
     use platform_macos::midi::NoteListener;
     use std::sync::{Arc, Mutex};
+    let _g = serial();
     let mut sys = MidiSystem::new("VizDAW Keys Test").unwrap();
     let mut out = sys.open_virtual_source("VizDAW Keys Test Out").unwrap();
     std::thread::sleep(Duration::from_millis(50));
@@ -80,6 +132,7 @@ fn a_note_listener_hears_every_source() {
 fn a_note_listener_skips_this_processs_own_virtual_source() {
     use platform_macos::midi::NoteListener;
     use std::sync::{Arc, Mutex};
+    let _g = serial();
     let mut sys = MidiSystem::new("VizDAW Loop Test").unwrap();
     let mut out = sys.open_virtual_source("VizDAW Loop Test Out").unwrap();
     std::thread::sleep(Duration::from_millis(50));
@@ -111,6 +164,7 @@ fn a_source_listener_names_the_source_and_keeps_the_time() {
     use core_engine::input::port_key;
     use platform_macos::midi::SourceListener;
     use std::sync::{Arc, Mutex};
+    let _g = serial();
     let mut sys = MidiSystem::new("VizDAW Record Test").unwrap();
     let mut out = sys.open_virtual_source("VizDAW Record Test Out").unwrap();
     std::thread::sleep(Duration::from_millis(50));
@@ -151,6 +205,7 @@ fn a_source_listener_names_the_source_and_keeps_the_time() {
 fn a_source_listener_reconnects_new_sources_without_doubling_old_ones() {
     use platform_macos::midi::SourceListener;
     use std::sync::{Arc, Mutex};
+    let _g = serial();
     let mut sys = MidiSystem::new("VizDAW Reconnect Test").unwrap();
     let mut first = sys.open_virtual_source("VizDAW Reconnect A").unwrap();
     std::thread::sleep(Duration::from_millis(50));
@@ -198,6 +253,7 @@ fn a_source_listener_reconnects_new_sources_without_doubling_old_ones() {
 /// process's own virtual sources (they carry VizDAW's own output).
 #[test]
 fn sources_are_listed_without_this_processs_own() {
+    let _g = serial();
     let mut sys = MidiSystem::new("VizDAW Sources Test").unwrap();
     let _out = sys.open_virtual_source("VizDAW Sources Test Out").unwrap();
     std::thread::sleep(Duration::from_millis(50));

@@ -682,10 +682,15 @@ fn a_rebuild_during_the_count_in(event: BackendEvent) {
     assert!(!st.playing);
     assert_eq!(st.tick, 4 * Q, "the timeline moved");
     assert!(wait_for(&s, |st| st.playing), "it never rolled");
-    // Three beats left: 1.5 s, give or take a block and the polling.
+    // Three beats left: 1.5 s, give or take a block and the polling. The
+    // margins hold on a loaded runner (Task 9): the new engine can start
+    // counting before `rebuilt` is read, and the polling can see the roll
+    // late. The low bound is halfway to two beats (1.0 s, a resume that
+    // lost a beat); the high one catches a count-in that never ends or
+    // counts its beats again.
     let took = rebuilt.elapsed();
     assert!(
-        took >= Duration::from_millis(1450) && took < Duration::from_millis(2200),
+        took >= Duration::from_millis(1250) && took < Duration::from_millis(3000),
         "rolled after {took:?}"
     );
     // A rebuild still ends the recording pass (backlog, 27.1.0): only the
