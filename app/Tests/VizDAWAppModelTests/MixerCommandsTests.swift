@@ -69,8 +69,9 @@ import VizDAWCore
         #expect(m.alert == nil)
     }
 
-    /// Plan 8d Task 5: the thirteen ids, each with arguments the registry
-    /// takes, and the status each answers (its title; a new track's name).
+    /// Plan 8d Task 5: the thirteen ids and the seven group ids, each with
+    /// arguments the registry takes, and the status each answers (its
+    /// title; a new track's name).
     static let edits: [(String, [ControlArg], String)] = {
         func t(_ n: String, _ v: String) -> ControlArg { ControlArg(name: n, value: .text(value: v)) }
         func i(_ n: String, _ v: Int64) -> ControlArg { ControlArg(name: n, value: .int(value: v)) }
@@ -88,6 +89,13 @@ import VizDAWCore
             ("mixer.set_eq", [i("strip", 1), t("plugin", "none")], "Set EQ"),
             ("mixer.set_param", [i("slot", 10), i("param", 3), t("value", "0.5")], "Set Plug-in Parameter"),
             ("mixer.remove_bus", [i("strip", 2)], "Remove Bus"),
+            ("mixer.new_group", [t("strips", "1,2"), t("name", "Drums")], "Group"),
+            ("mixer.rename_group", [i("group", 1), t("name", "Kit")], "Rename Group"),
+            ("mixer.set_group_colour", [i("group", 1), t("colour", "teal")], "Group Colour"),
+            ("mixer.add_to_group", [i("group", 1), t("strips", "2")], "Add to Group"),
+            ("mixer.remove_from_group", [i("group", 1), t("strips", "2")], "Remove from Group"),
+            ("mixer.set_group_links", [i("group", 1), b("mute", false)], "Group Links"),
+            ("mixer.delete_group", [i("group", 1)], "Ungroup"),
             ("track.new_plugin_instrument", [i("seq", 3), i("after", 30), t("plugin", "built-in-synth")], "Inst 3"),
         ]
     }()

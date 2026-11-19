@@ -149,8 +149,8 @@ pub use metrics::{
     metrics_delete_all, metrics_overview, metrics_summary,
 };
 pub use mixer::{
-    BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, OutputPathRow,
-    SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow,
+    BusRow, DestRow, GroupRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot,
+    OutputPathRow, SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow,
 };
 pub use mixer_chores::{CoProducerPluginRow, CoProducerPluginsRow, co_producer_plugins};
 pub use modify::{

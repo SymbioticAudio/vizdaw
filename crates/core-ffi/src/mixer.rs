@@ -5,6 +5,7 @@ use crate::plugins::slot_row;
 use crate::snapshot::SlotRow;
 use core_host::PluginHost;
 use core_model::document::{DestKind, Document};
+use core_model::groups::group_of;
 use core_model::mixer::{Mixer, Output, Strip, StripKind, Swatch};
 use core_model::mixer_rules::audible;
 use std::collections::BTreeSet;
@@ -190,6 +191,27 @@ pub struct StripRow {
     /// 8b Ruling 1).
     #[uniffi(default)]
     pub co_producer: bool,
+    /// The fader group it is in, if any (groups-vcas-transport Ruling 3:
+    /// at most one).
+    #[uniffi(default)]
+    pub group: Option<u64>,
+}
+
+/// A fader group (groups-vcas-transport Ruling 1).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct GroupRow {
+    /// Group ID.
+    pub id: u64,
+    /// Name.
+    pub name: String,
+    /// Its colour, the tag on each member.
+    pub colour: SwatchRow,
+    /// Member strip IDs, in the order they joined.
+    pub members: Vec<u64>,
+    /// Muting one member mutes them all.
+    pub link_mute: bool,
+    /// Soloing one member solos them all.
+    pub link_solo: bool,
 }
 
 /// One output path of the document, in id order (release-fixes Task 6:
@@ -276,6 +298,9 @@ pub struct MixerSnapshot {
     pub strips: Vec<StripRow>,
     /// The buses, in display order.
     pub buses: Vec<BusRow>,
+    /// The fader groups, by ID.
+    #[uniffi(default)]
+    pub groups: Vec<GroupRow>,
 }
 
 /// One strip's peaks since the last read (linear, 1.0 is full scale).
@@ -423,6 +448,7 @@ fn strip_row(
         kind_colour: strip_colour(doc.mixer(), s),
         colour: s.colour.map(SwatchRow::from),
         co_producer: s.co_producer,
+        group: group_of(doc.mixer(), s.id).map(|g| g.id.0),
     }
 }
 
@@ -450,10 +476,23 @@ pub fn snapshot(doc: &Document, version: u64, mut host: Option<&mut PluginHost>)
             name: s.name.clone(),
         })
         .collect();
+    let groups = m
+        .groups()
+        .values()
+        .map(|g| GroupRow {
+            id: g.id.0,
+            name: g.name.clone(),
+            colour: g.colour.into(),
+            members: g.members.iter().map(|x| x.0).collect(),
+            link_mute: g.link_mute,
+            link_solo: g.link_solo,
+        })
+        .collect();
     MixerSnapshot {
         version,
         strips,
         buses,
+        groups,
     }
 }
 

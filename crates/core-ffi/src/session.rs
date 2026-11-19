@@ -50,6 +50,7 @@ use std::time::Instant;
 mod co_producer_creative;
 pub mod co_producer_mixer;
 mod fixes;
+mod groups;
 
 /// Package extension.
 pub const EXTENSION: &str = "vizdaw";
@@ -156,6 +157,9 @@ pub(crate) struct Inner {
     /// The targets touched now, with their paths (plan 5e-1 Rulings 14,
     /// 20).
     touches: std::collections::BTreeMap<AutomationTarget, Touching>,
+    /// The group drags in progress, by their leader's fader
+    /// (groups-vcas-transport Task 2).
+    group_drags: std::collections::BTreeMap<AutomationTarget, groups::GroupDrag>,
     /// The shared static edit's label and its open static touches
     /// (Ruling 14).
     static_edit: Option<(String, usize)>,
@@ -390,6 +394,7 @@ impl Inner {
             settings_seen: crate::audio::epoch(),
             save_after_pass: false,
             touches: Default::default(),
+            group_drags: Default::default(),
             static_edit: None,
             sampler: Sampler::default(),
             plugin_touches: PluginTouches::default(),
@@ -8497,15 +8502,33 @@ impl Session {
         phase: GesturePhaseRow,
         holder: crate::automation::GestureHolderRow,
     ) -> Result<(), VizError> {
+        self.gesture_as(target, phase, holder, false)
+    }
+
+    /// [`Session::gesture_from`], with the strip's group following unless
+    /// `alone` (groups-vcas-transport Task 2): a fader touch of a grouped
+    /// strip touches the other members' faders, its values move them all
+    /// by the same dB, and its release releases them; a mute or solo
+    /// gesture goes to the linked members. `alone` moves this target
+    /// only. Errors as [`Session::gesture_from`].
+    pub fn gesture_as(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+        holder: crate::automation::GestureHolderRow,
+        alone: bool,
+    ) -> Result<(), VizError> {
         ffi_guard(|| {
             let t = automation_target_of(target);
-            let phase = match phase {
-                GesturePhaseRow::Touch { value } => core_surface::Phase::Touch(value),
-                GesturePhaseRow::Value { value } => core_surface::Phase::Value(value),
-                GesturePhaseRow::Release => core_surface::Phase::Release,
-            };
             let mut inner = self.lock_inner();
-            self.gesture_held(&mut inner, t, phase, TouchHolder::from(holder), None)
+            self.gesture_held(
+                &mut inner,
+                t,
+                phase_of(phase),
+                TouchHolder::from(holder),
+                None,
+                alone,
+            )
         })
     }
 
@@ -8557,6 +8580,7 @@ impl Session {
                     .keys()
                     .map(|t| automation_target_row(*t))
                     .collect(),
+                touched_values: inner.touches.values().map(|x| x.value).collect(),
                 suspended: crate::automation::suspended(),
                 writing: inner.writing.is_some(),
             })
@@ -8628,6 +8652,15 @@ impl Session {
                 })
                 .collect())
         })
+    }
+}
+
+/// The gesture path's phase of the app's `phase`.
+fn phase_of(phase: GesturePhaseRow) -> core_surface::Phase {
+    match phase {
+        GesturePhaseRow::Touch { value } => core_surface::Phase::Touch(value),
+        GesturePhaseRow::Value { value } => core_surface::Phase::Value(value),
+        GesturePhaseRow::Release => core_surface::Phase::Release,
     }
 }
 
@@ -8901,12 +8934,13 @@ impl Session {
         }
     }
 
-    /// A gesture phase on `t` from holder `h` (plan 5f-1 Ruling 2): the
-    /// one path of the mouse, the channel, the surfaces and learn, as
+    /// A gesture phase on `t` alone from holder `h` (plan 5f-1 Ruling 2):
+    /// the one path of the mouse, the channel, the surfaces and learn
+    /// (each through `gesture_held`, which fans it out to a group), as
     /// `Source::Ui`, stamped at `host_ns` (`None`: now). `Model` for a
     /// target that cannot be gestured or a non-finite value; `Busy` for a
     /// static touch's first value while another edit is open.
-    pub(crate) fn gesture_held(
+    fn gesture_one(
         &self,
         inner: &mut Inner,
         t: AutomationTarget,
@@ -8968,7 +9002,8 @@ impl Session {
         // touch-sensing fader holds no transaction open.
         let shared = path == TouchPath::Static && value.is_some();
         if shared {
-            self.open_static_share(inner, t)?;
+            let label = self.static_label_of(inner, t);
+            self.open_static_share(inner, &label)?;
         }
         if let Some(w) = inner.writing.as_mut() {
             w.moved.insert(t);
@@ -9230,6 +9265,8 @@ impl Session {
             self.keep_static_param(inner, t, touching);
             self.end_static_share(inner);
         }
+        // A group drag's leader takes its followers with it.
+        self.end_group_drag(inner, t, host_ns);
         // A Touch or Trim plugin parameter no lane drives plays its static
         // value again (pre-flight M14).
         if let (
@@ -9288,16 +9325,18 @@ impl Session {
         if x.path != TouchPath::Static || x.shared {
             return Ok(());
         }
-        self.open_static_share(inner, t)?;
+        let label = self.static_label_of(inner, t);
+        self.open_static_share(inner, &label)?;
         if let Some(x) = inner.touches.get_mut(&t) {
             x.shared = true;
         }
         Ok(())
     }
 
-    /// Opens the shared static edit, labelled by `t`, or joins it (Ruling
-    /// 14); `Busy` while an edit the gesture path did not open is open.
-    fn open_static_share(&self, inner: &mut Inner, t: AutomationTarget) -> Result<(), VizError> {
+    /// Opens the shared static edit as `label` (the control's, or a group
+    /// drag's "Move Group ‹name›"), or joins it (Ruling 14); `Busy` while
+    /// an edit the gesture path did not open is open.
+    fn open_static_share(&self, inner: &mut Inner, label: &str) -> Result<(), VizError> {
         match inner.static_edit.as_mut() {
             Some((_, n)) => *n += 1,
             None => {
@@ -9306,7 +9345,6 @@ impl Session {
                         message: "Finish the open edit first.".into(),
                     });
                 }
-                let label = crate::automation::static_label(t);
                 inner.history.begin(label)?;
                 inner.static_edit = Some((label.to_string(), 1));
             }
@@ -12974,7 +13012,7 @@ impl Session {
             let ok = match a.action {
                 A::Gesture(t, phase) => {
                     let ok = self
-                        .gesture_held(inner, t, phase, a.holder, a.host_ns)
+                        .gesture_held(inner, t, phase, a.holder, a.host_ns, false)
                         .is_ok();
                     let key = (a.holder, t);
                     match phase {

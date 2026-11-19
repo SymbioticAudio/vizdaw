@@ -1610,6 +1610,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         holders.append(holder)
     }
 
+    /// The `alone` of `gestureAs` calls, in order (groups-vcas-transport).
+    var alones: [Bool] = []
+    func gestureAs(target: AutomationTargetRow, phase: GesturePhaseRow, holder: GestureHolderRow, alone: Bool) throws {
+        try gestureFrom(target: target, phase: phase, holder: holder)
+        alones.append(alone)
+    }
+
     // MARK: Surfaces (plan 5f-1)
 
     var focusCalls = 0

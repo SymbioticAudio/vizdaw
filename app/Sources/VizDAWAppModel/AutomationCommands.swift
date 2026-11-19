@@ -170,8 +170,10 @@ public enum AutomationCommands {
         default: return invalid("automation.gesture: `phase` is touch, value or release")
         }
         do {
-            // The channel is its own holder (plan 5f-1 Ruling 2).
-            try m.session.gestureFrom(target: target, phase: phase, holder: .channel)
+            // The channel is its own holder (plan 5f-1 Ruling 2); `alone`
+            // keeps the strip's group still (groups-vcas-transport).
+            try m.session.gestureAs(
+                target: target, phase: phase, holder: .channel, alone: args.flag("alone") ?? false)
         } catch {
             return .failed(.thrown(error, "Automation Failed"))
         }

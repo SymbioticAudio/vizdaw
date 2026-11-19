@@ -13,9 +13,10 @@ import VizDAWCore
 /// session. The core's own refusals are `failed`, its `Busy` is `busy`.
 /// Nothing here opens a dialog.
 ///
-/// Plan 8d Ruling 1's thirteen Co-Producer commands are each one
-/// `runMixer` call with the arguments as given (the core checks them), its
-/// snapshot applied; each answers `status` with its title, and
+/// Plan 8d Ruling 1's thirteen Co-Producer commands, and the seven group
+/// commands (groups-vcas-transport Task 2), are each one `runMixer` call
+/// with the arguments as given (the core checks them), its snapshot
+/// applied; each answers `status` with its title, and
 /// `track.new_plugin_instrument` with the new track's name. On the
 /// Co-Producer socket the twelve edits run only through
 /// `co_producer.apply`, after its take (`CoProducerCommands`). Nothing
@@ -24,11 +25,15 @@ import VizDAWCore
 public enum MixerCommands {
     public static let newBus = "mixer.new_bus"
     public static let newPluginInstrument = "track.new_plugin_instrument"
-    /// Plan 8d Ruling 1's thirteen commands, in registry order.
+    /// Plan 8d Ruling 1's thirteen commands, then the seven group commands,
+    /// in registry order.
     public static let coProducerEdits: [String] = [
         "mixer.set_strip", "mixer.set_output", "mixer.add_send", "mixer.set_send", "mixer.remove_send",
         "mixer.add_insert", "mixer.remove_insert", "mixer.move_insert", "mixer.set_bypass", "mixer.set_eq",
-        "mixer.set_param", "mixer.remove_bus", "track.new_plugin_instrument",
+        "mixer.set_param", "mixer.remove_bus",
+        "mixer.new_group", "mixer.rename_group", "mixer.set_group_colour", "mixer.add_to_group",
+        "mixer.remove_from_group", "mixer.set_group_links", "mixer.delete_group",
+        "track.new_plugin_instrument",
     ]
     public static let ids: Set<String> = Set([newBus] + coProducerEdits)
     /// The registry's titles of `coProducerEdits`: each edit's status.
@@ -38,6 +43,9 @@ public enum MixerCommands {
         "mixer.remove_insert": "Remove Insert", "mixer.move_insert": "Move Insert",
         "mixer.set_bypass": "Bypass Insert", "mixer.set_eq": "Set EQ", "mixer.set_param": "Set Plug-in Parameter",
         "mixer.remove_bus": "Remove Bus", newPluginInstrument: "New Plug-in Instrument Track",
+        "mixer.new_group": "Group", "mixer.rename_group": "Rename Group", "mixer.set_group_colour": "Group Colour",
+        "mixer.add_to_group": "Add to Group", "mixer.remove_from_group": "Remove from Group",
+        "mixer.set_group_links": "Group Links", "mixer.delete_group": "Ungroup",
     ]
     /// Why master gets no new bus.
     public static let masterHasNoSends = "Master has no sends."

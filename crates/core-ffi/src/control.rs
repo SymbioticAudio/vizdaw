@@ -1678,11 +1678,26 @@ fn slot_json(s: &crate::snapshot::SlotRow) -> Value {
     json!({ "slot": s.id, "name": s.plugin.name, "plugin": plugin, "bypass": s.bypass })
 }
 
+/// A swatch as `state.get mixer` spells it (the registry's colour names).
+fn swatch_text(c: crate::mixer::SwatchRow) -> &'static str {
+    use crate::mixer::SwatchRow as W;
+    match c {
+        W::Red => "red",
+        W::Orange => "orange",
+        W::Yellow => "yellow",
+        W::Green => "green",
+        W::Teal => "teal",
+        W::Blue => "blue",
+        W::Purple => "purple",
+        W::Pink => "pink",
+    }
+}
+
 /// A strip as `state.get mixer` spells it (plan 7b Ruling 11), with its
 /// output's name (plan 8d Ruling 5): "Master", the bus's name, or null
 /// for master itself. `all` is every strip of the snapshot.
 fn strip_json(s: &crate::mixer::StripRow, all: &[crate::mixer::StripRow]) -> Value {
-    use crate::mixer::{StripColourRow as K, StripKindRow, SwatchRow as W};
+    use crate::mixer::{StripColourRow as K, StripKindRow};
     let output_name = match s.output {
         _ if s.kind == StripKindRow::Master => None,
         None => Some("Master".to_string()),
@@ -1703,16 +1718,8 @@ fn strip_json(s: &crate::mixer::StripRow, all: &[crate::mixer::StripRow]) -> Val
             K::Bus => "bus",
             K::Master => "master",
         },
-        "colour": s.colour.map(|c| match c {
-            W::Red => "red",
-            W::Orange => "orange",
-            W::Yellow => "yellow",
-            W::Green => "green",
-            W::Teal => "teal",
-            W::Blue => "blue",
-            W::Purple => "purple",
-            W::Pink => "pink",
-        }),
+        "colour": s.colour.map(swatch_text),
+        "group": s.group,
         "gain_db": s.gain_db, "pan": s.pan, "mute": s.mute, "solo": s.solo,
         "output": s.output,
         "automation": crate::automation::mode_text(s.automation),
@@ -1835,6 +1842,10 @@ pub fn result_json(r: &ControlResult) -> Value {
         ControlResult::Mixer { doc, mixer } => json!({
             "doc": doc,
             "strips": mixer.strips.iter().map(|x| strip_json(x, &mixer.strips)).collect::<Vec<_>>(),
+            "groups": mixer.groups.iter().map(|g| json!({
+                "id": g.id, "name": g.name, "colour": swatch_text(g.colour),
+                "members": g.members, "link_mute": g.link_mute, "link_solo": g.link_solo,
+            })).collect::<Vec<_>>(),
         }),
         ControlResult::AudioEditor { doc, editor } => audio_editor_json(doc, editor),
         ControlResult::Surfaces { doc, state } => json!({

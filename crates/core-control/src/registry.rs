@@ -559,7 +559,17 @@ const MIXER_SET_STRIP_PARAMS: &[ParamSpec] = &[
         required: false,
         help: "Solo (true) or unsolo (false).",
     },
+    ALONE,
 ];
+
+/// `mixer.set_strip`'s and `automation.gesture`'s `alone`
+/// (groups-vcas-transport): the strip moves without its group.
+const ALONE: ParamSpec = ParamSpec {
+    name: "alone",
+    kind: ParamKind::Flag,
+    required: false,
+    help: "true moves this strip only: its group does not follow (default false).",
+};
 
 /// `mixer.set_output` (plan 8d Ruling 1).
 const MIXER_SET_OUTPUT_PARAMS: &[ParamSpec] = &[
@@ -693,6 +703,94 @@ const MIXER_SET_PARAM_PARAMS: &[ParamSpec] = &[
 
 /// `mixer.remove_bus` (plan 8d Ruling 1).
 const MIXER_REMOVE_BUS_PARAMS: &[ParamSpec] = &[mixer_id("strip", "The bus strip to remove.")];
+
+/// The groups-vcas-transport plan's group commands, in its table's order.
+pub const GROUP_IDS: &[&str] = &[
+    "mixer.new_group",
+    "mixer.rename_group",
+    "mixer.set_group_colour",
+    "mixer.add_to_group",
+    "mixer.remove_from_group",
+    "mixer.set_group_links",
+    "mixer.delete_group",
+];
+
+/// The colours a group takes (groups-vcas-transport Ruling 4): the eight
+/// swatches, without `none`.
+pub const GROUP_COLOURS: &[&str] = &[
+    "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+];
+
+const GROUP: ParamSpec = mixer_id("group", "The group (see state.get mixer).");
+
+const GROUP_STRIPS: ParamSpec = ParamSpec {
+    name: "strips",
+    kind: ParamKind::Text,
+    required: true,
+    help: "1 to 64 strip IDs separated by commas, such as \"2,3\" (see state.get mixer).",
+};
+
+const GROUP_NAME: ParamSpec = ParamSpec {
+    name: "name",
+    kind: ParamKind::Text,
+    required: true,
+    help: "The group's name: 1 to 64 characters, no control characters.",
+};
+
+const GROUP_COLOUR: ParamSpec = ParamSpec {
+    name: "colour",
+    kind: ParamKind::Choice(GROUP_COLOURS),
+    required: true,
+    help: "red, orange, yellow, green, teal, blue, purple or pink.",
+};
+
+/// `mixer.new_group` (groups-vcas-transport Rulings 4 and 11).
+const NEW_GROUP_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        required: false,
+        help: "Its first members: 1 to 64 strip IDs separated by commas (default: none, an empty group).",
+        ..GROUP_STRIPS
+    },
+    ParamSpec {
+        required: false,
+        help: "Its name, 1 to 64 characters (default \"Group N\", N one more than the groups).",
+        ..GROUP_NAME
+    },
+    ParamSpec {
+        required: false,
+        help: "Its colour (default: the next swatch, in order, by the number of groups).",
+        ..GROUP_COLOUR
+    },
+];
+
+/// `mixer.rename_group`.
+const RENAME_GROUP_PARAMS: &[ParamSpec] = &[GROUP, GROUP_NAME];
+
+/// `mixer.set_group_colour`.
+const GROUP_COLOUR_PARAMS: &[ParamSpec] = &[GROUP, GROUP_COLOUR];
+
+/// `mixer.add_to_group` and `mixer.remove_from_group`.
+const GROUP_STRIPS_PARAMS: &[ParamSpec] = &[GROUP, GROUP_STRIPS];
+
+/// `mixer.set_group_links`.
+const GROUP_LINKS_PARAMS: &[ParamSpec] = &[
+    GROUP,
+    ParamSpec {
+        name: "mute",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Link the members' mutes (true) or not (false). At least one of mute and solo is required.",
+    },
+    ParamSpec {
+        name: "solo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Link the members' solos (true) or not (false).",
+    },
+];
+
+/// `mixer.delete_group`.
+const GROUP_ONLY_PARAMS: &[ParamSpec] = &[GROUP];
 
 /// `track.new_plugin_instrument` (plan 8d Ruling 1).
 const NEW_PLUGIN_INSTRUMENT_PARAMS: &[ParamSpec] = &[
@@ -2082,6 +2180,7 @@ const AUTOMATION_GESTURE_PARAMS: &[ParamSpec] = &[
         required: false,
         help: "The normalised value 0–1 as text (\"0.5\"); needed for value, optional for touch.",
     },
+    ALONE,
 ];
 
 /// A surface's ID (plan 5f-1 Ruling 4; `state.get surfaces` lists them).
@@ -3645,6 +3744,73 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: MIXER_REMOVE_BUS_PARAMS,
         ..key_only(cmd("mixer.remove_bus", "Mixer", "Remove Bus", None, true))
     },
+    // Groups-vcas-transport: fader groups. Group and Ungroup are menu
+    // items (Ruling 12).
+    CommandSpec {
+        class: Class::Add,
+        params: NEW_GROUP_PARAMS,
+        ..cmd("mixer.new_group", "Mixer", "Group", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: RENAME_GROUP_PARAMS,
+        ..key_only(cmd(
+            "mixer.rename_group",
+            "Mixer",
+            "Rename Group",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: GROUP_COLOUR_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_group_colour",
+            "Mixer",
+            "Group Colour",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: GROUP_STRIPS_PARAMS,
+        ..key_only(cmd(
+            "mixer.add_to_group",
+            "Mixer",
+            "Add to Group",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: GROUP_STRIPS_PARAMS,
+        ..key_only(cmd(
+            "mixer.remove_from_group",
+            "Mixer",
+            "Remove from Group",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: GROUP_LINKS_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_group_links",
+            "Mixer",
+            "Group Links",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: GROUP_ONLY_PARAMS,
+        ..cmd("mixer.delete_group", "Mixer", "Ungroup", None, true)
+    },
     CommandSpec {
         class: Class::Add,
         params: NEW_PLUGIN_INSTRUMENT_PARAMS,
@@ -3793,6 +3959,7 @@ pub fn validate_args(
         return Err(p.error("give at least one of `volume`, `pan` and `mute`"));
     }
     mixer_rules(&p, spec.id, &out)?;
+    group_rules(&p, spec.id, &out)?;
     chore_rules(&p, spec.id, &mut out)?;
     creative_rules(&p, spec.id, &out)?;
     for d in spec.dialogs.iter().filter(|d| d.always) {
@@ -3929,6 +4096,23 @@ fn mixer_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(
     if let Some(t) = text_arg(out, "plugin") {
         plugin_ref(t, id == "track.new_plugin_instrument")
             .map_err(|m| p.error(format!("`plugin` {m}")))?;
+    }
+    Ok(())
+}
+
+/// The group commands' rules across parameters, for both sockets: a
+/// `strips` list as [`crate::co_producer::id_list`] reads it, and at
+/// least one switch for `mixer.set_group_links`.
+fn group_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(), ControlError> {
+    if !GROUP_IDS.contains(&id) {
+        return Ok(());
+    }
+    if let Some(t) = text_arg(out, "strips") {
+        crate::co_producer::id_list(t).map_err(|m| p.error(format!("`strips`: {m}")))?;
+    }
+    let none_of = |keys: &[&str]| !keys.iter().any(|k| out.iter().any(|(n, _)| n == k));
+    if id == "mixer.set_group_links" && none_of(&["mute", "solo"]) {
+        return Err(p.error("give at least one of `mute` and `solo`"));
     }
     Ok(())
 }

@@ -71,6 +71,7 @@ const ADD: &[&str] = &[
     "mixer.new_bus",
     "marker.add",
     "track.new_plugin_instrument",
+    "mixer.new_group",
 ];
 const OUTWARD: &[&str] = &[
     "file.bounce",
@@ -130,6 +131,11 @@ const CHANGE: &[&str] = &[
     "mixer.set_eq",
     "mixer.set_param",
     "automation.write",
+    "mixer.rename_group",
+    "mixer.set_group_colour",
+    "mixer.add_to_group",
+    "mixer.remove_from_group",
+    "mixer.set_group_links",
 ];
 const REMOVE: &[&str] = &[
     "track.delete",
@@ -141,6 +147,7 @@ const REMOVE: &[&str] = &[
     "mixer.remove_send",
     "mixer.remove_insert",
     "mixer.remove_bus",
+    "mixer.delete_group",
 ];
 /// Spec §6.5's refused commands (the layout `ui.*` included).
 const SPEC_REFUSED: &[&str] = &[
@@ -194,8 +201,8 @@ fn listed_class(id: &str) -> Option<Class> {
 fn every_command_has_the_spec_class() {
     assert_eq!(
         COMMANDS.len(),
-        217,
-        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings"
+        224,
+        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings; groups-vcas-transport adds seven group commands"
     );
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
@@ -381,8 +388,9 @@ fn track_duplicate_is_refused() {
 
 /// The adds Co-Producer may run, sorted. None of them creates notes:
 /// the new tracks start empty, `media.import` (without `lane`) puts audio
-/// on new tracks, `mixer.new_bus` (without `strip`) is a free bus and
-/// `marker.add` is a marker. The adds that do create notes,
+/// on new tracks, `mixer.new_bus` (without `strip`) is a free bus,
+/// `mixer.new_group` (without `strips`) an empty group and `marker.add` is
+/// a marker. The adds that do create notes,
 /// `file.import_midi` and `track.duplicate`, are refused (release gate
 /// B2). A new add fails `no_add_command_writes_notes` until a reviewer
 /// classifies it here or refuses it.
@@ -390,6 +398,7 @@ const NOTELESS_ADDS: &[&str] = &[
     "marker.add",
     "media.import",
     "mixer.new_bus",
+    "mixer.new_group",
     "track.new_audio",
     "track.new_instrument",
     "track.new_midi",

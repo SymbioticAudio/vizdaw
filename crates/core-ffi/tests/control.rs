@@ -839,6 +839,7 @@ fn automation_state_answers_in_the_channels_spelling() {
                 },
             ],
             touched: vec![AutomationTargetRow::SendLevel { strip: 1, send: 0 }],
+            touched_values: vec![0.5],
             suspended: true,
             writing: false,
         },
@@ -997,7 +998,9 @@ fn state_get_mixer_answers_json() {
         "eq",
         "inserts",
         "sends",
+        "group",
     ];
+    assert_eq!(j["groups"], json!([]), "groups-vcas-transport Task 2");
     for s in strips {
         let mut have: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
         have.sort_unstable();

@@ -95,13 +95,17 @@ pub struct StripModeRow {
 }
 
 /// What automation is doing in a session (`state.get automation`).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct AutomationStateRow {
     /// Every strip's mode, in the mixer's display order (master last).
     pub modes: Vec<StripModeRow>,
     /// The targets touched now: active touches only, never Write holds
     /// or released Latch holds (pre-flight M8; 5e-2's rings).
     pub touched: Vec<AutomationTargetRow>,
+    /// The normalised value of each of `touched`, in the same order: what
+    /// a group drag moved each follower to, too.
+    #[uniffi(default)]
+    pub touched_values: Vec<f64>,
     /// Automation is suspended (process-wide).
     pub suspended: bool,
     /// This session is playing and its gesture tap is installed.
