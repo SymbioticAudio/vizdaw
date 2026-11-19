@@ -999,8 +999,12 @@ fn state_get_mixer_answers_json() {
         "inserts",
         "sends",
         "group",
+        "vcas",
+        "vca_offset_db",
+        "vca_mark",
     ];
     assert_eq!(j["groups"], json!([]), "groups-vcas-transport Task 2");
+    assert_eq!(j["vcas"], json!([]), "groups-vcas-transport Task 5");
     for s in strips {
         let mut have: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
         have.sort_unstable();
@@ -1334,4 +1338,107 @@ fn document_state_reports_mpe_per_track_and_destination() {
     for k in ["midi_volume", "midi_pan", "midi_mute"] {
         assert!(v["destinations"][0].get(k).is_some(), "{k}");
     }
+}
+
+/// Groups-vcas-transport Task 5: `state.get mixer` lists the groups
+/// (Task 2's fields) and the VCAs (this task's), and each strip answers
+/// its group, its VCAs, its VCA offset and its VCA mark.
+#[test]
+fn state_get_mixer_lists_groups_and_vcas() {
+    use vizdaw_ffi::TrackKindRow;
+    use vizdaw_ffi::control::{ControlArg, ControlValue};
+    let text = |name: &str, value: &str| ControlArg {
+        name: name.into(),
+        value: ControlValue::Text {
+            value: value.into(),
+        },
+    };
+    let s = Session::new_empty().unwrap();
+    let seq = s.snapshot().unwrap().sequences[0].id;
+    for _ in 0..2 {
+        s.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    }
+    let ids: Vec<u64> = s
+        .mixer()
+        .unwrap()
+        .strips
+        .iter()
+        .filter(|x| x.name.starts_with("Audio"))
+        .map(|x| x.id)
+        .collect();
+    let (a, b) = (ids[0], ids[1]);
+    s.run_mixer(
+        "mixer.new_group".into(),
+        vec![text("strips", &format!("{a},{b}")), text("name", "Drums")],
+    )
+    .unwrap();
+    s.run_mixer(
+        "mixer.new_vca".into(),
+        vec![text("strips", &a.to_string()), text("name", "Kit")],
+    )
+    .unwrap();
+    let vca = s.mixer().unwrap().vcas[0].id;
+    s.run_mixer(
+        "mixer.set_vca".into(),
+        vec![
+            ControlArg {
+                name: "vca".into(),
+                value: ControlValue::Int { value: vca as i64 },
+            },
+            text("gain_db", "-3"),
+            ControlArg {
+                name: "mute".into(),
+                value: ControlValue::Flag { value: true },
+            },
+        ],
+    )
+    .unwrap();
+    let j = result_json(&ControlResult::Mixer {
+        doc: "D".into(),
+        mixer: s.mixer().unwrap(),
+    });
+    let group = j["groups"][0]["id"].clone();
+    assert_eq!(
+        j["groups"],
+        json!([{"id": group, "name": "Drums", "colour": "red", "members": [a, b],
+                "link_mute": true, "link_solo": true}])
+    );
+    assert_eq!(
+        j["vcas"],
+        json!([{"id": vca, "name": "Kit", "colour": "red", "members": [a],
+                "gain_db": -3.0, "mute": true, "solo": false, "automation": "read"}])
+    );
+    let strip = |id: u64| {
+        j["strips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let (sa, sb) = (strip(a), strip(b));
+    assert_eq!(
+        (
+            &sa["group"],
+            &sa["vcas"],
+            &sa["vca_offset_db"],
+            &sa["vca_mark"]
+        ),
+        (&group, &json!([vca]), &json!(-3.0), &json!(true))
+    );
+    assert_eq!(
+        (
+            &sb["group"],
+            &sb["vcas"],
+            &sb["vca_offset_db"],
+            &sb["vca_mark"]
+        ),
+        (&group, &json!([]), &json!(0.0), &json!(false))
+    );
+    assert_eq!(
+        (&sa["gain_db"], &sa["mute"]),
+        (&json!(0.0), &json!(false)),
+        "the VCA leaves the strip's own fader and mute"
+    );
 }

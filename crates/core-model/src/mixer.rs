@@ -476,6 +476,16 @@ impl Mixer {
         self.vcas.remove(&id)
     }
 
+    /// Keeps the first `n` VCAs by ID and drops the rest (a loaded file
+    /// past [`crate::groups::MAX_VCAS`]); returns how many it dropped.
+    pub(crate) fn keep_first_vcas(&mut self, n: usize) -> usize {
+        let extra: Vec<VcaId> = self.vcas.keys().skip(n).copied().collect();
+        for id in &extra {
+            self.vcas.remove(id);
+        }
+        extra.len()
+    }
+
     /// Every insert as `(strip, position, slot)`, by strip ID then position.
     pub fn inserts(&self) -> impl Iterator<Item = (StripId, usize, &PluginSlot)> + '_ {
         self.strips

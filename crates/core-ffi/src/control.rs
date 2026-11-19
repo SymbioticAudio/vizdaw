@@ -1720,6 +1720,7 @@ fn strip_json(s: &crate::mixer::StripRow, all: &[crate::mixer::StripRow]) -> Val
         },
         "colour": s.colour.map(swatch_text),
         "group": s.group,
+        "vcas": s.vcas, "vca_offset_db": s.vca_offset_db, "vca_mark": s.vca_mark,
         "gain_db": s.gain_db, "pan": s.pan, "mute": s.mute, "solo": s.solo,
         "output": s.output,
         "automation": crate::automation::mode_text(s.automation),
@@ -1845,6 +1846,11 @@ pub fn result_json(r: &ControlResult) -> Value {
             "groups": mixer.groups.iter().map(|g| json!({
                 "id": g.id, "name": g.name, "colour": swatch_text(g.colour),
                 "members": g.members, "link_mute": g.link_mute, "link_solo": g.link_solo,
+            })).collect::<Vec<_>>(),
+            "vcas": mixer.vcas.iter().map(|v| json!({
+                "id": v.id, "name": v.name, "colour": swatch_text(v.colour),
+                "members": v.members, "gain_db": v.gain_db, "mute": v.mute, "solo": v.solo,
+                "automation": crate::automation::mode_text(v.automation),
             })).collect::<Vec<_>>(),
         }),
         ControlResult::AudioEditor { doc, editor } => audio_editor_json(doc, editor),

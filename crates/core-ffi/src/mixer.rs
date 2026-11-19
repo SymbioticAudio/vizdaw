@@ -5,7 +5,7 @@ use crate::plugins::slot_row;
 use crate::snapshot::SlotRow;
 use core_host::PluginHost;
 use core_model::document::{DestKind, Document};
-use core_model::groups::group_of;
+use core_model::groups::{group_of, vca_muted, vca_offset_db, vca_soloed};
 use core_model::mixer::{Mixer, Output, Strip, StripKind, Swatch};
 use core_model::mixer_rules::audible;
 use std::collections::BTreeSet;
@@ -195,6 +195,38 @@ pub struct StripRow {
     /// at most one).
     #[uniffi(default)]
     pub group: Option<u64>,
+    /// The VCAs it is in, by VCA ID (spec §2: any number).
+    #[uniffi(default)]
+    pub vcas: Vec<u64>,
+    /// The sum of its VCAs' levels in dB, added to its own fader for what
+    /// is heard (`GAIN_FLOOR_DB` when a VCA silences it; 0 in none).
+    #[uniffi(default)]
+    pub vca_offset_db: f64,
+    /// A VCA mutes or solos it (spec §2a: the strip's "VCA" mark). Its
+    /// own `mute` and `solo` are unchanged.
+    #[uniffi(default)]
+    pub vca_mark: bool,
+}
+
+/// A VCA (spec §2): a fader, mute and solo over its members' heard sound.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct VcaRow {
+    /// VCA ID.
+    pub id: u64,
+    /// Name.
+    pub name: String,
+    /// Its colour.
+    pub colour: SwatchRow,
+    /// Member strip IDs, in the order they were assigned.
+    pub members: Vec<u64>,
+    /// Its level in dB (−144 is −∞).
+    pub gain_db: f64,
+    /// Mutes its members.
+    pub mute: bool,
+    /// Solos its members.
+    pub solo: bool,
+    /// Its fader's automation mode: Off, Read, Touch or Latch.
+    pub automation: crate::automation::AutomationModeRow,
 }
 
 /// A fader group (groups-vcas-transport Ruling 1).
@@ -301,6 +333,9 @@ pub struct MixerSnapshot {
     /// The fader groups, by ID.
     #[uniffi(default)]
     pub groups: Vec<GroupRow>,
+    /// The VCAs, by ID.
+    #[uniffi(default)]
+    pub vcas: Vec<VcaRow>,
 }
 
 /// One strip's peaks since the last read (linear, 1.0 is full scale).
@@ -449,6 +484,11 @@ fn strip_row(
         colour: s.colour.map(SwatchRow::from),
         co_producer: s.co_producer,
         group: group_of(doc.mixer(), s.id).map(|g| g.id.0),
+        vcas: core_model::groups::vcas_of(doc.mixer(), s.id)
+            .map(|v| v.id.0)
+            .collect(),
+        vca_offset_db: vca_offset_db(doc.mixer(), s.id),
+        vca_mark: vca_muted(doc.mixer(), s.id) || vca_soloed(doc.mixer(), s.id),
     }
 }
 
@@ -488,11 +528,26 @@ pub fn snapshot(doc: &Document, version: u64, mut host: Option<&mut PluginHost>)
             link_solo: g.link_solo,
         })
         .collect();
+    let vcas = m
+        .vcas()
+        .values()
+        .map(|v| VcaRow {
+            id: v.id.0,
+            name: v.name.clone(),
+            colour: v.colour.into(),
+            members: v.members.iter().map(|x| x.0).collect(),
+            gain_db: v.gain_db,
+            mute: v.mute,
+            solo: v.solo,
+            automation: v.automation.into(),
+        })
+        .collect();
     MixerSnapshot {
         version,
         strips,
         buses,
         groups,
+        vcas,
     }
 }
 

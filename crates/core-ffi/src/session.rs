@@ -2174,15 +2174,17 @@ impl Session {
             if !p.join(file::PROJECT_FILE).is_file() {
                 return Err(VizError::NotFound { path });
             }
-            let (doc, clean) = match &options.autosave {
+            // `left_out`: what the load dropped (VCAs past MAX_VCAS), one
+            // problem line each for the first `idle`.
+            let (doc, clean, left_out) = match &options.autosave {
                 Some(a) => {
-                    let doc = file::load_autosave(&p, Path::new(a))?;
+                    let (doc, left_out) = file::load_autosave_noted(&p, Path::new(a))?;
                     let clean = file::load(&p).unwrap_or_else(|_| doc.clone());
-                    (doc, clean)
+                    (doc, clean, left_out)
                 }
                 None => {
-                    let doc = file::load(&p)?;
-                    (doc.clone(), doc)
+                    let (doc, left_out) = file::load_noted(&p)?;
+                    (doc.clone(), doc, left_out)
                 }
             };
             let s = Session::with(doc, Some(p.clone()), options.plugins_off)?;
@@ -2199,6 +2201,7 @@ impl Session {
                 let recovered = crate::record::offered(&p, inner.doc(), &kept);
                 inner.keep_recordings = kept;
                 inner.recovered = recovered;
+                inner.news.problems.extend(left_out);
                 inner.news.problems.extend(unread);
                 inner.windows = windows;
                 inner.editor_layout = layout;
@@ -2228,7 +2231,8 @@ impl Session {
             // original's project ID its untitled stand-in would be the
             // original's, whose next save would move this window's notes
             // and copies in.
-            let doc = file::load_copy(&copy)?.with_new_project_id(&crate::project_id::fresh());
+            let (doc, left_out) = file::load_copy_noted(&copy)?;
+            let doc = doc.with_new_project_id(&crate::project_id::fresh());
             let mut files: Vec<String> = doc.media().values().map(|m| m.path.clone()).collect();
             files.extend(doc.referenced_states().into_iter().map(|b| {
                 format!(
@@ -2239,7 +2243,7 @@ impl Session {
             }));
             let s = Session::with(doc, None, false)?;
             let root = crate::media::scratch_root(s.id);
-            let mut problems = Vec::new();
+            let mut problems = left_out;
             for rel in files {
                 let to = root.join(&rel);
                 let done = match to.parent() {

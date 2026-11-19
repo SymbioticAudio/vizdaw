@@ -704,7 +704,8 @@ const MIXER_SET_PARAM_PARAMS: &[ParamSpec] = &[
 /// `mixer.remove_bus` (plan 8d Ruling 1).
 const MIXER_REMOVE_BUS_PARAMS: &[ParamSpec] = &[mixer_id("strip", "The bus strip to remove.")];
 
-/// The groups-vcas-transport plan's group commands, in its table's order.
+/// The groups-vcas-transport plan's group and VCA commands, in its
+/// table's order.
 pub const GROUP_IDS: &[&str] = &[
     "mixer.new_group",
     "mixer.rename_group",
@@ -713,7 +714,18 @@ pub const GROUP_IDS: &[&str] = &[
     "mixer.remove_from_group",
     "mixer.set_group_links",
     "mixer.delete_group",
+    "mixer.new_vca",
+    "mixer.rename_vca",
+    "mixer.set_vca_colour",
+    "mixer.assign_vca",
+    "mixer.unassign_vca",
+    "mixer.set_vca",
+    "mixer.delete_vca",
 ];
+
+/// The automation modes a VCA takes (groups-vcas-transport Ruling 6):
+/// Write and Trim are not among them.
+pub const VCA_MODE_NAMES: &[&str] = &["off", "read", "touch", "latch"];
 
 /// The colours a group takes (groups-vcas-transport Ruling 4): the eight
 /// swatches, without `none`.
@@ -791,6 +803,73 @@ const GROUP_LINKS_PARAMS: &[ParamSpec] = &[
 
 /// `mixer.delete_group`.
 const GROUP_ONLY_PARAMS: &[ParamSpec] = &[GROUP];
+
+const VCA: ParamSpec = mixer_id("vca", "The VCA (see state.get mixer).");
+
+const VCA_NAME: ParamSpec = ParamSpec {
+    help: "The VCA's name: 1 to 64 characters, no control characters.",
+    ..GROUP_NAME
+};
+
+/// `mixer.new_vca` (groups-vcas-transport Rulings 4 and 11).
+const NEW_VCA_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        required: false,
+        help: "Its first members: 1 to 64 strip IDs separated by commas (default: none, an empty VCA).",
+        ..GROUP_STRIPS
+    },
+    ParamSpec {
+        required: false,
+        help: "Its name, 1 to 64 characters (default \"VCA N\", N one more than the VCAs).",
+        ..GROUP_NAME
+    },
+    ParamSpec {
+        required: false,
+        help: "Its colour (default: the next swatch, in order, by the number of VCAs).",
+        ..GROUP_COLOUR
+    },
+];
+
+/// `mixer.rename_vca`.
+const RENAME_VCA_PARAMS: &[ParamSpec] = &[VCA, VCA_NAME];
+
+/// `mixer.set_vca_colour`.
+const VCA_COLOUR_PARAMS: &[ParamSpec] = &[VCA, GROUP_COLOUR];
+
+/// `mixer.assign_vca` and `mixer.unassign_vca`.
+const VCA_STRIPS_PARAMS: &[ParamSpec] = &[VCA, GROUP_STRIPS];
+
+/// `mixer.set_vca`: at least one of the four.
+const SET_VCA_PARAMS: &[ParamSpec] = &[
+    VCA,
+    ParamSpec {
+        name: "gain_db",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Its level in dB as text, such as \"-3\" (-144 is -inf, at most 12). At least one of gain_db, mute, solo and mode is required.",
+    },
+    ParamSpec {
+        name: "mute",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Mute its members (true) or not (false).",
+    },
+    ParamSpec {
+        name: "solo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Solo its members (true) or not (false).",
+    },
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(VCA_MODE_NAMES),
+        required: false,
+        help: "Its automation mode: off, read, touch or latch.",
+    },
+];
+
+/// `mixer.delete_vca`.
+const VCA_ONLY_PARAMS: &[ParamSpec] = &[VCA];
 
 /// `track.new_plugin_instrument` (plan 8d Ruling 1).
 const NEW_PLUGIN_INSTRUMENT_PARAMS: &[ParamSpec] = &[
@@ -3811,6 +3890,60 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: GROUP_ONLY_PARAMS,
         ..cmd("mixer.delete_group", "Mixer", "Ungroup", None, true)
     },
+    // Groups-vcas-transport: VCAs. New VCA is a menu item (Ruling 12).
+    CommandSpec {
+        class: Class::Add,
+        params: NEW_VCA_PARAMS,
+        ..cmd("mixer.new_vca", "Mixer", "New VCA", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: RENAME_VCA_PARAMS,
+        ..key_only(cmd("mixer.rename_vca", "Mixer", "Rename VCA", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: VCA_COLOUR_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_vca_colour",
+            "Mixer",
+            "VCA Colour",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: VCA_STRIPS_PARAMS,
+        ..key_only(cmd(
+            "mixer.assign_vca",
+            "Mixer",
+            "Assign to VCA",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: VCA_STRIPS_PARAMS,
+        ..key_only(cmd(
+            "mixer.unassign_vca",
+            "Mixer",
+            "Remove from VCA",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: SET_VCA_PARAMS,
+        ..key_only(cmd("mixer.set_vca", "Mixer", "Set VCA", None, true))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: VCA_ONLY_PARAMS,
+        ..key_only(cmd("mixer.delete_vca", "Mixer", "Delete VCA", None, true))
+    },
     CommandSpec {
         class: Class::Add,
         params: NEW_PLUGIN_INSTRUMENT_PARAMS,
@@ -4100,9 +4233,10 @@ fn mixer_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(
     Ok(())
 }
 
-/// The group commands' rules across parameters, for both sockets: a
-/// `strips` list as [`crate::co_producer::id_list`] reads it, and at
-/// least one switch for `mixer.set_group_links`.
+/// The group and VCA commands' rules across parameters, for both
+/// sockets: a `strips` list as [`crate::co_producer::id_list`] reads it,
+/// at least one switch for `mixer.set_group_links`, at least one setting
+/// for `mixer.set_vca`, and its `gain_db` as [`decimal`] spells it.
 fn group_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(), ControlError> {
     if !GROUP_IDS.contains(&id) {
         return Ok(());
@@ -4113,6 +4247,13 @@ fn group_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(
     let none_of = |keys: &[&str]| !keys.iter().any(|k| out.iter().any(|(n, _)| n == k));
     if id == "mixer.set_group_links" && none_of(&["mute", "solo"]) {
         return Err(p.error("give at least one of `mute` and `solo`"));
+    }
+    if id == "mixer.set_vca" && none_of(&["gain_db", "mute", "solo", "mode"]) {
+        return Err(p.error("give at least one of `gain_db`, `mute`, `solo` and `mode`"));
+    }
+    if let Some(t) = text_arg(out, "gain_db") {
+        let (min, max) = LEVEL_DB;
+        decimal(t, min, max).map_err(|m| p.error(format!("`gain_db` {m}")))?;
     }
     Ok(())
 }

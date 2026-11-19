@@ -9,6 +9,7 @@
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::format::AudioFormat;
+use crate::groups::MAX_VCAS;
 use crate::history::Timestamp;
 use crate::ids::PluginInstanceId;
 use crate::mixer::{PluginRef, PluginSlot};
@@ -342,16 +343,35 @@ struct Header {
 
 /// Parses, migrates and validates `project.json` text.
 pub fn from_json(text: &str) -> Result<Document> {
+    from_json_noted(text).map(|(doc, _)| doc)
+}
+
+/// [`from_json`], with a line for each thing the load left out: past
+/// [`MAX_VCAS`], the first VCAs by ID are kept and the rest dropped.
+pub fn from_json_noted(text: &str) -> Result<(Document, Vec<String>)> {
     // Fast path: a current-version file deserializes in one pass.
-    let file = match serde_json::from_str::<ProjectFile>(text) {
+    let mut file = match serde_json::from_str::<ProjectFile>(text) {
         Ok(f) if f.format == FORMAT && f.version == VERSION => f,
         _ => slow_path(text)?,
     };
+    let mut notes = Vec::new();
+    let had = file.document.mixer().vcas().len();
+    let dropped = file.document.mixer_mut().keep_first_vcas(MAX_VCAS);
+    if dropped > 0 {
+        notes.push(too_many_vcas(had, dropped));
+    }
     let problems = validate(&file.document);
     if !problems.is_empty() {
         return Err(ModelError::Corrupt { problems });
     }
-    Ok(file.document)
+    Ok((file.document, notes))
+}
+
+/// The load's line for a song with `had` VCAs, `dropped` of them left out.
+fn too_many_vcas(had: usize, dropped: usize) -> String {
+    format!(
+        "This song has {had} VCAs; a song holds at most {MAX_VCAS}, so the last {dropped} (by ID) were left out."
+    )
 }
 
 /// Checks the header, refuses newer versions and migrates older ones.
@@ -459,18 +479,28 @@ pub fn save(doc: &Document, package: &Path) -> Result<()> {
 /// Loads the package's `project.json` and its plugin state blobs. A
 /// missing blob is listed by `Document::missing_states`, not an error.
 pub fn load(package: &Path) -> Result<Document> {
-    let mut doc = from_json(&fs::read_to_string(package.join(PROJECT_FILE))?)?;
+    load_noted(package).map(|(doc, _)| doc)
+}
+
+/// [`load`], with [`from_json_noted`]'s lines.
+pub fn load_noted(package: &Path) -> Result<(Document, Vec<String>)> {
+    let (mut doc, notes) = from_json_noted(&fs::read_to_string(package.join(PROJECT_FILE))?)?;
     read_states(&mut doc, package);
-    Ok(doc)
+    Ok((doc, notes))
 }
 
 /// Loads the autosave copy at `autosave` (a file in the package's
 /// `Autosave/` folder) with the package's plugin state blobs ("Restore
 /// autosave", spec §10).
 pub fn load_autosave(package: &Path, autosave: &Path) -> Result<Document> {
-    let mut doc = from_json(&fs::read_to_string(autosave)?)?;
+    load_autosave_noted(package, autosave).map(|(doc, _)| doc)
+}
+
+/// [`load_autosave`], with [`from_json_noted`]'s lines.
+pub fn load_autosave_noted(package: &Path, autosave: &Path) -> Result<(Document, Vec<String>)> {
+    let (mut doc, notes) = from_json_noted(&fs::read_to_string(autosave)?)?;
     read_states(&mut doc, package);
-    Ok(doc)
+    Ok((doc, notes))
 }
 
 /// Autosave copies in the package, newest first.
@@ -786,12 +816,17 @@ fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
 /// Only regular files are read: inside a package, a `project.json` or a
 /// blob that is a link or a FIFO is refused or missing.
 pub fn load_copy(copy: &Path) -> Result<Document> {
+    load_copy_noted(copy).map(|(doc, _)| doc)
+}
+
+/// [`load_copy`], with [`from_json_noted`]'s lines.
+pub fn load_copy_noted(copy: &Path) -> Result<(Document, Vec<String>)> {
     let package =
         copy_parent(copy).ok_or_else(|| ModelError::invalid("that is not a Co-Producer copy"))?;
     refuse_linked_folders(&package, Path::new(COPIES_DIR))?;
     let text = String::from_utf8(read_regular(&copy.join(PROJECT_FILE))?)
         .map_err(|_| ModelError::invalid("the copy's project.json is not UTF-8"))?;
-    let mut doc = from_json(&text)?;
+    let (mut doc, notes) = from_json_noted(&text)?;
     if refuse_linked_folders(&package, Path::new(STATE_DIR)).is_ok() {
         let dir = package.join(STATE_DIR);
         for id in doc.referenced_states() {
@@ -800,7 +835,7 @@ pub fn load_copy(copy: &Path) -> Result<Document> {
             }
         }
     }
-    Ok(doc)
+    Ok((doc, notes))
 }
 
 /// Writes a timestamped copy to `Autosave/` and keeps the newest

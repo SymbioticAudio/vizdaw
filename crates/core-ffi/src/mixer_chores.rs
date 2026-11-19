@@ -19,15 +19,17 @@ use crate::catalog::PluginKindTag;
 use crate::error::VizError;
 use crate::guard::ffi_guard;
 use crate::snapshot::ParamRow;
-use core_control::registry::{self, ArgValue, GROUP_COLOURS, GROUP_IDS, MIXER_IDS, NULL_TEXT};
+use core_control::registry::{
+    self, ArgValue, GROUP_COLOURS, GROUP_IDS, MIXER_IDS, NULL_TEXT, VCA_MODE_NAMES,
+};
 use core_host::PluginKind;
 use core_host::bundled::{MULTIQ_AU_ID, MULTIQ_CLAP_ID};
 use core_host::catalog::{Catalog, CatalogEntry, PluginStatus};
 use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::diff::shown_name;
 use core_model::document::{Document, SlotOwner};
-use core_model::groups::{Link, group_gains, group_of, linked};
-use core_model::ids::{GroupId, PluginInstanceId, StripId};
+use core_model::groups::{Link, VCA_MODES, group_gains, group_of, linked};
+use core_model::ids::{GroupId, PluginInstanceId, StripId, VcaId};
 use core_model::mixer::{
     AuxSend, GAIN_FLOOR_DB, GAIN_MAX_DB, Output, ParamId, PluginFormat, PluginRef, Strip,
     StripKind, Swatch,
@@ -313,10 +315,14 @@ fn default_swatch(count: usize) -> Swatch {
 
 /// The undo step `cmds` (built by [`commands_for`] for `id`, whose
 /// registry title is `title`) run as: a group command's own name (so
-/// `mixer.new_group` is "New Group", not its menu title "Group"), "Move
-/// Group ‹name›" for a `mixer.set_strip` whose fader move the group
-/// follows, else `title`.
+/// `mixer.new_group` is "New Group", not its menu title "Group"), but
+/// always "Set VCA" for `mixer.set_vca` (preflight F11: a mute-only call
+/// too), "Move Group ‹name›" for a `mixer.set_strip` whose fader move the
+/// group follows, else `title`.
 pub fn step_label(doc: &Document, id: &str, title: &str, cmds: &[Command]) -> String {
+    if id == "mixer.set_vca" {
+        return SET_VCA.to_string();
+    }
     if let [Command::Groups(g)] = cmds {
         return g.name().to_string();
     }
@@ -340,6 +346,9 @@ pub fn step_label(doc: &Document, id: &str, title: &str, cmds: &[Command]) -> St
 pub(crate) fn move_group_label(name: &str) -> String {
     format!("Move Group {}", shown_name(name))
 }
+
+/// `mixer.set_vca`'s one undo step, whatever it sets.
+const SET_VCA: &str = "Set VCA";
 
 /// A required group ID.
 fn group_arg(id: &str, args: &[(String, ArgValue)]) -> Result<GroupId, VizError> {
@@ -383,6 +392,91 @@ fn colour_arg(id: &str, args: &[(String, ArgValue)]) -> Result<Option<Swatch>, V
 /// A required `name`, as given (the model trims and checks it).
 fn name_arg(id: &str, args: &[(String, ArgValue)]) -> Result<String, VizError> {
     Ok(need_text(id, args, "name")?.to_string())
+}
+
+/// A required VCA ID.
+fn vca_arg(id: &str, args: &[(String, ArgValue)]) -> Result<VcaId, VizError> {
+    need_id(id, args, "vca").map(VcaId)
+}
+
+/// The [`GroupCmd`]s of group or VCA command `id`, in order: one, but
+/// `mixer.set_vca`'s level, mute, solo and mode, those given.
+fn group_commands(
+    doc: &Document,
+    id: &str,
+    args: &[(String, ArgValue)],
+) -> Result<Vec<GroupCmd>, VizError> {
+    if id != "mixer.set_vca" {
+        let one = match vca_command(doc, id, args)? {
+            Some(c) => c,
+            None => group_command(doc, id, args)?,
+        };
+        return Ok(vec![one]);
+    }
+    let vca = vca_arg(id, args)?;
+    let mode = opt_text(id, args, "mode")?
+        .map(|t| {
+            VCA_MODE_NAMES
+                .iter()
+                .position(|m| *m == t)
+                .and_then(|i| VCA_MODES.get(i).copied())
+                .ok_or_else(|| bad("A VCA's automation mode is Off, Read, Touch or Latch."))
+        })
+        .transpose()?;
+    let mut out = Vec::new();
+    out.extend(level(id, args, "gain_db")?.map(|gain_db| GroupCmd::SetVcaLevel { vca, gain_db }));
+    out.extend(opt_flag(id, args, "mute")?.map(|mute| GroupCmd::SetVcaMute { vca, mute }));
+    out.extend(opt_flag(id, args, "solo")?.map(|solo| GroupCmd::SetVcaSolo { vca, solo }));
+    out.extend(mode.map(|mode| GroupCmd::SetVcaMode { vca, mode }));
+    if out.is_empty() {
+        return Err(bad(format!(
+            "{id}: give at least one of gain_db, mute, solo and mode"
+        )));
+    }
+    Ok(out)
+}
+
+/// The one [`GroupCmd`] of VCA command `id` but `mixer.set_vca` (Ruling
+/// 4's defaults: "VCA N" and the swatch by count, N one more than the
+/// VCAs); `None` for a group command.
+fn vca_command(
+    doc: &Document,
+    id: &str,
+    args: &[(String, ArgValue)],
+) -> Result<Option<GroupCmd>, VizError> {
+    Ok(Some(match id {
+        "mixer.new_vca" => {
+            let count = doc.mixer().vcas().len();
+            GroupCmd::NewVca {
+                members: strips_arg(id, args, false)?,
+                name: match opt_text(id, args, "name")? {
+                    Some(n) => n.to_string(),
+                    None => format!("VCA {}", count + 1),
+                },
+                colour: colour_arg(id, args)?.unwrap_or_else(|| default_swatch(count)),
+            }
+        }
+        "mixer.rename_vca" => GroupCmd::RenameVca {
+            vca: vca_arg(id, args)?,
+            name: name_arg(id, args)?,
+        },
+        "mixer.set_vca_colour" => GroupCmd::SetVcaColour {
+            vca: vca_arg(id, args)?,
+            colour: colour_arg(id, args)?.ok_or_else(|| bad(format!("{id}: give `colour`")))?,
+        },
+        "mixer.assign_vca" => GroupCmd::AssignVca {
+            vca: vca_arg(id, args)?,
+            strips: strips_arg(id, args, true)?,
+        },
+        "mixer.unassign_vca" => GroupCmd::UnassignVca {
+            vca: vca_arg(id, args)?,
+            strips: strips_arg(id, args, true)?,
+        },
+        "mixer.delete_vca" => GroupCmd::DeleteVca {
+            vca: vca_arg(id, args)?,
+        },
+        _ => return Ok(None),
+    }))
 }
 
 /// The one [`GroupCmd`] of group command `id` (Ruling 4's defaults: "Group
@@ -431,9 +525,16 @@ fn group_command(
                 solo,
             }
         }
-        _ => GroupCmd::DeleteGroup {
+        "mixer.delete_group" => GroupCmd::DeleteGroup {
             group: group_arg(id, args)?,
         },
+        _ => {
+            let shown: String = id.chars().take(64).collect();
+            return Err(bad(format!(
+                "{} is not a group command.",
+                shown_name(&shown)
+            )));
+        }
     })
 }
 
@@ -638,8 +739,9 @@ fn param_pair(
 }
 
 /// The core-model commands for one of [`MIXER_IDS`] but
-/// `track.new_plugin_instrument`, one of [`GROUP_IDS`] (its one
-/// [`GroupCmd`]), or for `mixer.new_bus` with `strip`, in order;
+/// `track.new_plugin_instrument`, one of [`GROUP_IDS`] (its
+/// [`GroupCmd`]s: one, or `mixer.set_vca`'s in the order level, mute,
+/// solo, mode), or for `mixer.new_bus` with `strip`, in order;
 /// `mixer.set_strip` moves the strip's group and its linked switches too
 /// unless `alone` (groups-vcas-transport Task 2); Ruling 1's refusals, all found from `doc` (and `host`) before
 /// any command is built. `args` are the registry's, read by name and
@@ -656,7 +758,10 @@ pub fn commands_for(
         return Err(bad(format!("{} is not a mixer edit.", shown_name(&shown))));
     }
     if GROUP_IDS.contains(&id) {
-        return Ok(vec![Command::Groups(group_command(doc, id, args)?)]);
+        return Ok(group_commands(doc, id, args)?
+            .into_iter()
+            .map(Command::Groups)
+            .collect());
     }
     let master = doc.mixer().master();
     let mix = |c: MixerCmd| Command::Mixer(c);

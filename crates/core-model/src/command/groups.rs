@@ -7,7 +7,7 @@ use super::Report;
 use crate::automation::AutomationMode;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
-use crate::groups::{Group, MAX_MEMBERS, VCA_MODES, Vca, check_name, group_of};
+use crate::groups::{Group, MAX_MEMBERS, MAX_VCAS, VCA_MODES, Vca, check_name, group_of};
 use crate::ids::{AnyId, GroupId, StripId, VcaId};
 use crate::mixer::Swatch;
 use crate::mixer_rules::level;
@@ -72,7 +72,8 @@ pub enum GroupCmd {
         /// Target.
         group: GroupId,
     },
-    /// Make a VCA of `members` at 0 dB, unmuted, unsoloed, in Read.
+    /// Make a VCA of `members` at 0 dB, unmuted, unsoloed, in Read; a song
+    /// holds at most [`MAX_VCAS`].
     NewVca {
         /// Name ([`check_name`]).
         name: String,
@@ -323,6 +324,11 @@ pub(crate) fn apply(d: &mut Document, cmd: &GroupCmd, r: &mut Report) -> Result<
             colour,
             members,
         } => {
+            if d.mixer().vcas().len() >= MAX_VCAS {
+                return Err(ModelError::invalid(format!(
+                    "A song holds at most {MAX_VCAS} VCAs; delete one first."
+                )));
+            }
             let name = check_name(VCA_NAME, name)?;
             check_list("A VCA", members)?;
             check_vca_joiners(d, None, members)?;

@@ -13,8 +13,9 @@ import VizDAWCore
 /// session. The core's own refusals are `failed`, its `Busy` is `busy`.
 /// Nothing here opens a dialog.
 ///
-/// Plan 8d Ruling 1's thirteen Co-Producer commands, and the seven group
-/// commands (groups-vcas-transport Task 2), are each one `runMixer` call
+/// Plan 8d Ruling 1's thirteen Co-Producer commands, the seven group
+/// commands (groups-vcas-transport Task 2) and the seven VCA commands
+/// (Task 5), are each one `runMixer` call
 /// with the arguments as given (the core checks them), its snapshot
 /// applied; each answers `status` with its title, and
 /// `track.new_plugin_instrument` with the new track's name. On the
@@ -25,14 +26,16 @@ import VizDAWCore
 public enum MixerCommands {
     public static let newBus = "mixer.new_bus"
     public static let newPluginInstrument = "track.new_plugin_instrument"
-    /// Plan 8d Ruling 1's thirteen commands, then the seven group commands,
-    /// in registry order.
+    /// Plan 8d Ruling 1's thirteen commands, then the seven group commands
+    /// and the seven VCA commands, in registry order.
     public static let coProducerEdits: [String] = [
         "mixer.set_strip", "mixer.set_output", "mixer.add_send", "mixer.set_send", "mixer.remove_send",
         "mixer.add_insert", "mixer.remove_insert", "mixer.move_insert", "mixer.set_bypass", "mixer.set_eq",
         "mixer.set_param", "mixer.remove_bus",
         "mixer.new_group", "mixer.rename_group", "mixer.set_group_colour", "mixer.add_to_group",
         "mixer.remove_from_group", "mixer.set_group_links", "mixer.delete_group",
+        "mixer.new_vca", "mixer.rename_vca", "mixer.set_vca_colour", "mixer.assign_vca",
+        "mixer.unassign_vca", "mixer.set_vca", "mixer.delete_vca",
         "track.new_plugin_instrument",
     ]
     public static let ids: Set<String> = Set([newBus] + coProducerEdits)
@@ -46,6 +49,9 @@ public enum MixerCommands {
         "mixer.new_group": "Group", "mixer.rename_group": "Rename Group", "mixer.set_group_colour": "Group Colour",
         "mixer.add_to_group": "Add to Group", "mixer.remove_from_group": "Remove from Group",
         "mixer.set_group_links": "Group Links", "mixer.delete_group": "Ungroup",
+        "mixer.new_vca": "New VCA", "mixer.rename_vca": "Rename VCA", "mixer.set_vca_colour": "VCA Colour",
+        "mixer.assign_vca": "Assign to VCA", "mixer.unassign_vca": "Remove from VCA",
+        "mixer.set_vca": "Set VCA", "mixer.delete_vca": "Delete VCA",
     ]
     /// Why master gets no new bus.
     public static let masterHasNoSends = "Master has no sends."

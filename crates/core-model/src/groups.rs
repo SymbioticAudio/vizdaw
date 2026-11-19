@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 /// Most members a group (or VCA) holds (Ruling 4): bounds a gesture's
 /// fan-out well inside the engine's live-gesture limit.
 pub const MAX_MEMBERS: usize = 128;
+/// Most VCAs a song holds (the controller's cap, 2026-11-18): each of a
+/// strip's VCA links costs audio-thread time every block. A new VCA past
+/// it is refused; a loaded file keeps the first, by ID, and says so.
+pub const MAX_VCAS: usize = 64;
 /// Longest group or VCA name, in characters, after trimming (Ruling 4).
 pub const NAME_MAX: usize = 64;
 /// The fader's lowest finite step (Ruling 2), as the mixer view draws it:

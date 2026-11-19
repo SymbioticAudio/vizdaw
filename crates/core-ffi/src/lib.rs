@@ -150,7 +150,7 @@ pub use metrics::{
 };
 pub use mixer::{
     BusRow, DestRow, GroupRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot,
-    OutputPathRow, SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow,
+    OutputPathRow, SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow, VcaRow,
 };
 pub use mixer_chores::{CoProducerPluginRow, CoProducerPluginsRow, co_producer_plugins};
 pub use modify::{
