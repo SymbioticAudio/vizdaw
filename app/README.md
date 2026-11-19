@@ -3193,3 +3193,37 @@ Plan 8f, Co-Producer time tracking and coaching:
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;
 - check the About or licence wording against D1.
+
+### Fader groups, VCAs and the transport bar (plan groups-vcas-transport)
+
+439. Group three strips; drag one: all move by the same dB, and ⌘Z undoes
+     "Move Group ‹name›" in one step.
+440. ⌥-drag a grouped fader: it moves alone.
+441. Push a group up until a member hits +12: the whole move stops; drag
+     back: the balance returns.
+442. Mute and solo one member: the others follow while the group's mute and
+     solo switches are on; turn a switch off and they don't.
+443. Make a VCA from two strips and pull it to −6: the faders don't move,
+     each strip shows "VCA −6.0", and the sound drops.
+444. Mute and solo the VCA: the members' own buttons stay off and their
+     "VCA" mark lights.
+445. Automate the VCA in Touch, then play it back in Read: its fader follows
+     the recorded move.
+446. Delete a member's track, then undo: the membership returns.
+447. Export a DAWproject with a VCA and a group and read the report lines;
+     import it back.
+448. Customize the transport bar: drag items in, out and along; add a
+     Command button for Mixer and click it; Reset to Default.
+449. Add a Command button for Bounce…: clicking it opens the Bounce sheet.
+450. Narrow the mixer window to its smallest: the bar stays one row, and »
+     lists the rest.
+451. Quit and reopen: the bar is the same in both windows.
+452. Turn Click on and play: a click on every beat, the downbeat higher and
+     louder, through a tempo change and a meter change.
+453. Set Click to Record Only: silent while playing, clicking while
+     recording; set its level to −24 dB and hear it drop.
+454. Bounce the song with Click on: the file has no clicks. Save, close and
+     reopen: the click settings are kept.
+455. Take Punch fields off the bar (or narrow the window) and press P: »
+     opens with Punch In ready; Return commits; a click outside cancels.
+456. The mixer window at 1600 pt shows no ».
