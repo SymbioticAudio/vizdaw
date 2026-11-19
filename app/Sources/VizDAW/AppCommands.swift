@@ -179,6 +179,13 @@ struct AppCommands: Commands {
                     commandToggle($0, ViewCommands.self)
                 }
                 Divider()
+                // Task 12: the sheet on the key document or mixer window.
+                Button(keyBindings.row(TransportCustomize.command)?.title ?? TransportCustomize.title) {
+                    if let w = store.keyWindowToken { store.transportLayout.beginCustomizing(window: w) }
+                }
+                .keyboardShortcut(KeyMenu.shortcut(TransportCustomize.command))
+                .disabled(store.keyWindowToken == nil)
+                Divider()
             }
         }
         CommandMenu("Editors") {

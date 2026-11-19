@@ -1,6 +1,7 @@
 import AppKit
 import SymbioticTokens
 import VizDAWAppModel
+import VizDAWCore
 
 /// The transport bar as one row of items (groups-vcas-transport Ruling
 /// 14): it lays its items out by `TransportRowFit` on every `layout()`.
@@ -38,6 +39,10 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
     public var dspLoad: @MainActor () -> Float = { 0 }
     /// "Customize Transport Bar…" (Task 12); the item is off while nil.
     public var onCustomize: (@MainActor () -> Void)?
+    /// A command button's registry row (nil: a stale id), and its click,
+    /// for its entry in » (Task 12).
+    public var commandRow: @MainActor (String) -> BindingRow? = { _ in nil }
+    public var runCommand: @MainActor (String) -> Void = { _ in }
 
     /// One item and its view.
     public struct Slot {
@@ -96,11 +101,11 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
         closePopover()
         var old: [String: NSView] = [:]
         for (n, s) in slots.enumerated() {
-            old[key(s.item, n)] = s.view
+            old[Self.key(s.item, n)] = s.view
         }
         var next: [Slot] = []
         for (n, item) in transportLayout.items(documentWindow: documentWindow).enumerated() {
-            let k = key(item, n)
+            let k = Self.key(item, n)
             let v = old.removeValue(forKey: k) ?? make(item)
             next.append(Slot(item: item, view: v))
         }
@@ -113,7 +118,11 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
         needsLayout = true
     }
 
-    private func key(_ item: TransportItem, _ n: Int) -> String {
+    /// A view's identity across layouts (Task 12 pre-flight A34): a
+    /// built-in item by its id and size; a space, separator or command
+    /// button by its token (a command's id and label) and place, so
+    /// buttons for different commands are never one view.
+    static func key(_ item: TransportItem, _ n: Int) -> String {
         item.id.repeats ? "\(item.token)#\(n)" : item.id.rawValue + ":" + item.size.rawValue
     }
 
@@ -226,8 +235,12 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
 
     /// The » menu: the folded items' entries, in bar order.
     public func overflowMenu() -> NSMenu {
+        let row = commandRow
+        let run = runCommand
         let entries = foldedItems.compactMap {
-            TransportItemEntries.overflow($0, document, documentWindow: documentWindow, dspLoad: dspLoad())
+            TransportItemEntries.overflow(
+                $0, document, documentWindow: documentWindow, dspLoad: dspLoad(), commandRow: { row($0) },
+                runCommand: run)
         }
         return TransportMenus.menu(entries) { [weak self] title in self?.showPopover(titled: title) }
     }

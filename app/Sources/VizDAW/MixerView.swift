@@ -38,6 +38,7 @@ struct MixerWindow: View {
             }
             .environment(\.openPluginWindow, { slot in PluginWindows.show(store, doc: id, slot: slot) })
             .environment(\.openBuiltinSynthWindow, { dest in BuiltinSynthWindows.show(store, doc: id, dest: dest) })
+            .environment(\.transportWindowToken, focusToken.wrappedValue)
             .focusedSceneValue(\.documentModel, mixer.document)
             .focusedSceneValue(\.documentID, id)
             .navigationTitle("Mixer — \(mixer.document.snapshot.title)")

@@ -345,7 +345,7 @@ public enum ControlCommands {
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
             .union(MixerCommands.ids).union(CreativeCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
             .union([TrackCommands.setOutput]).union([RegionCommands.setFadeShape]).union(chores)
-            .union(TransportLayoutCommands.ids)
+            .union(TransportLayoutCommands.ids).union([TransportCustomize.command])
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -389,6 +389,9 @@ public enum ControlCommands {
         case _ where AppearanceCommands.ids.contains(id):
             // App-wide (plan 7b Ruling 11): no document needed.
             return AppearanceCommands.run(args, prefs: host.appearance)
+        case TransportCustomize.command:
+            // The sheet is the View menu's (Task 12): the channel opens none.
+            return TransportCustomize.run()
         case _ where TransportLayoutCommands.ids.contains(id):
             // App-wide (groups-vcas-transport Ruling 18): no document, no dialog.
             return TransportLayoutCommands.run(id, args: args, store: store.transportLayout)

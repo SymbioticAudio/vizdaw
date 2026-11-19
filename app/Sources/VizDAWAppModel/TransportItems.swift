@@ -7,7 +7,10 @@ import Observation
 /// spell it in snake_case (`token`).
 public enum TransportItemID: String, Codable, CaseIterable, Sendable {
     case cluster, loop, click, replaceOverdub, recordOptions, countIn, summary, bar, time, tempo, signature,
-        positionField, editFields, punchFields, dspLoad, device, faults, mainView, panes, space, separator
+        positionField, editFields, punchFields, dspLoad, device, faults, mainView, panes, space, separator,
+        /// A command button (Task 12): its command is the item's
+        /// (`TransportItem.command`), never a bare `.builtIn(.command, _)`.
+        command
 
     /// Its name in the palette and in ».
     public var title: String {
@@ -33,6 +36,7 @@ public enum TransportItemID: String, Codable, CaseIterable, Sendable {
         case .panes: "Pane Toggles"
         case .space: "Flexible Space"
         case .separator: "Separator"
+        case .command: "Command Button"
         }
     }
 
@@ -44,7 +48,7 @@ public enum TransportItemID: String, Codable, CaseIterable, Sendable {
     public var documentOnly: Bool { self == .faults || self == .mainView || self == .panes }
 
     /// Items the bar may hold more than once.
-    public var repeats: Bool { self == .space || self == .separator }
+    public var repeats: Bool { self == .space || self == .separator || self == .command }
 
     /// The snake_case name the preference and the channel use.
     public var token: String {
@@ -71,15 +75,21 @@ public enum ReadoutSize: String, Codable, Sendable {
     case small, large
 }
 
-/// One item of the bar. Task 12 adds command buttons (`command:<id>`).
+/// One item of the bar: a built-in item, or a command button
+/// (`command:<id>[:<label>]`, Task 12).
 public enum TransportItem: Codable, Equatable, Sendable {
     /// A built-in item; the size is given only for an item that `sizes`
     /// (nil: large).
     case builtIn(TransportItemID, ReadoutSize?)
+    /// A button that runs registry command `id`; `label` (1–32 characters,
+    /// trimmed) replaces the command's title. An id the registry no
+    /// longer has stays on the bar, greyed (Ruling 16).
+    case command(id: String, label: String?)
 
     public var id: TransportItemID {
         switch self {
         case .builtIn(let id, _): id
+        case .command: .command
         }
     }
 
@@ -87,13 +97,67 @@ public enum TransportItem: Codable, Equatable, Sendable {
     public var size: ReadoutSize {
         switch self {
         case .builtIn(_, let s): s ?? .large
+        case .command: .large
         }
     }
 
-    /// `<id>[:large|:small]`, as the preference and the channel spell it.
+    /// `<id>[:large|:small]` or `command:<id>[:<label>]`, as the
+    /// preference and the channel spell it; a label's "%" and "," are
+    /// `%25` and `%2C`, so the bar's text still splits on ",".
     public var token: String {
         switch self {
         case .builtIn(let id, let s): s.map { "\(id.token):\($0.rawValue)" } ?? id.token
+        case .command(let cmd, let label):
+            label.map { "\(TransportItemID.command.token):\(cmd):\(Self.escaped($0))" }
+                ?? "\(TransportItemID.command.token):\(cmd)"
+        }
+    }
+
+    /// The longest label a command button takes, in characters.
+    public static let maxLabel = 32
+    /// The longest command id a command button takes.
+    public static let maxCommandID = 80
+
+    /// A label as a command button keeps it: trimmed; blank is nil (the
+    /// command's title); longer than `maxLabel` is refused.
+    public static func label(_ raw: String?) -> Result<String?, TransportLayoutError> {
+        guard let raw else { return .success(nil) }
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return .success(nil) }
+        guard t.count <= maxLabel else { return .failure(.init("a label is at most \(maxLabel) characters")) }
+        guard !t.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            return .failure(.init("a label has no control characters"))
+        }
+        return .success(t)
+    }
+
+    /// Whether `id` is spelled as a registry id (lowercase words, digits,
+    /// "." and "_"); whether the registry has it is the button's business.
+    public static func isCommandID(_ id: String) -> Bool {
+        !id.isEmpty && id.utf8.count <= maxCommandID
+            && id.utf8.allSatisfy { ($0 >= 0x61 && $0 <= 0x7A) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x2E || $0 == 0x5F }
+    }
+
+    static func escaped(_ label: String) -> String {
+        label.replacingOccurrences(of: "%", with: "%25").replacingOccurrences(of: ",", with: "%2C")
+    }
+
+    static func unescaped(_ text: String) -> String {
+        text.replacingOccurrences(of: "%2C", with: ",").replacingOccurrences(of: "%2c", with: ",")
+            .replacingOccurrences(of: "%25", with: "%")
+    }
+
+    /// `command:<rest>`'s item, or why not.
+    static func parseCommand(_ rest: String) -> Result<TransportItem, TransportLayoutError> {
+        let parts = rest.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        let cmd = parts[0]
+        guard isCommandID(cmd) else { return .failure(.init("command has no command id \(cmd.prefix(quoted))")) }
+        guard parts.count == 2 else { return .success(.command(id: cmd, label: nil)) }
+        let raw = unescaped(parts[1])
+        switch label(raw) {
+        case .success(let l?) where l == raw: return .success(.command(id: cmd, label: l))
+        case .failure(let e): return .failure(.init("command:\(cmd): \(e.message)"))
+        default: return .failure(.init("command:\(cmd): a label is 1 to \(maxLabel) characters, not blank or padded"))
         }
     }
 
@@ -108,6 +172,10 @@ public enum TransportItem: Codable, Equatable, Sendable {
         guard !name.isEmpty else { return .failure(.init("an empty item")) }
         guard let id = TransportItemID(token: name) else {
             return .failure(.init("unknown item \(name.prefix(quoted))"))
+        }
+        if id == .command {
+            guard parts.count == 2 else { return .failure(.init("command needs a command id: command:<id>")) }
+            return parseCommand(parts[1])
         }
         guard parts.count == 2 else { return .success(.builtIn(id, nil)) }
         guard id.sizes else { return .failure(.init("\(id.token) has no size")) }
@@ -174,9 +242,18 @@ public struct TransportLayout: Codable, Equatable, Sendable {
     }
 
     /// `items` as a layout, or why it is not one: exactly one cluster, at
-    /// most 64 items, and no built-in item twice but spaces and separators.
+    /// most 64 items, no built-in item twice but spaces and separators
+    /// (command buttons repeat too), and every item one its own token
+    /// spells (so one built in code reads back the same: Task 11 review).
     public static func checked(_ items: [TransportItem]) -> Result<TransportLayout, TransportLayoutError> {
         guard items.count <= maxItems else { return .failure(.init("at most \(maxItems) items")) }
+        for item in items {
+            switch TransportItem.parse(token: item.token) {
+            case .success(let back) where back == item: continue
+            case .failure(let e): return .failure(e)
+            default: return .failure(.init("\(item.token.prefix(TransportItem.quoted)) is not an item"))
+            }
+        }
         guard items.filter({ $0.id == .cluster }).count == 1 else {
             return .failure(.init("the bar needs cluster once"))
         }
@@ -237,12 +314,36 @@ public struct TransportLayout: Codable, Equatable, Sendable {
             } ?? .standard
     }
 
-    /// Shows `l` and writes the preference.
-    public func set(_ l: TransportLayout) {
-        layout = l
-        if let data = try? JSONEncoder().encode(l), let s = String(data: data, encoding: .utf8) {
-            defaults.set(s, forKey: Self.key)
+    /// The window token of the window whose Customize Transport Bar sheet
+    /// is open (Task 12), and the sheet's model; nil: no sheet.
+    public private(set) var customizing: UUID?
+    public private(set) var customizer: TransportCustomizeModel?
+
+    /// Opens the sheet on window `window` (its bar or the View menu asked);
+    /// one sheet at a time: a second ask moves it.
+    public func beginCustomizing(window: UUID) {
+        customizer = TransportCustomizeModel(store: self)
+        customizing = window
+    }
+
+    /// Closes the sheet (Done or Cancel; the window went).
+    public func endCustomizing() {
+        customizing = nil
+        customizer = nil
+    }
+
+    /// Shows `l` and writes the preference; a layout that breaks the
+    /// decoder's rules is refused before anything is written (Task 11
+    /// review: else the next launch would fall back to the default).
+    @discardableResult
+    public func set(_ l: TransportLayout) -> TransportLayoutError? {
+        if case .failure(let e) = TransportLayout.checked(l.items) { return e }
+        guard let data = try? JSONEncoder().encode(l), let s = String(data: data, encoding: .utf8) else {
+            return .init("the transport bar could not be written")
         }
+        layout = l
+        defaults.set(s, forKey: Self.key)
+        return nil
     }
 
     /// The default bar, written.

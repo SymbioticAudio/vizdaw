@@ -563,8 +563,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        236,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar"
+        237,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar; Task 12 adds ui.customize_transport"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -4061,5 +4061,58 @@ fn transport_bar_commands_are_registered() {
     ] {
         let (code, message) = err("command.run", run(id, params.clone()));
         assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+}
+
+#[test]
+fn customize_transport_only_ever_needs_its_dialog() {
+    use core_control::registry::Class;
+    let at = |id: &str| COMMANDS.iter().position(|c| c.id == id).unwrap();
+    assert_eq!(
+        at("ui.customize_transport"),
+        at("ui.reset_transport_bar") + 1
+    );
+    let c = registry::find("ui.customize_transport").unwrap();
+    assert_eq!(
+        (
+            c.class,
+            c.menu,
+            c.title,
+            c.menu_item,
+            c.document,
+            c.shortcut
+        ),
+        (
+            Class::Refused,
+            "View",
+            "Customize Transport Bar…",
+            true,
+            false,
+            None
+        )
+    );
+    assert!(c.params.is_empty());
+    assert_eq!(c.dialogs.len(), 1);
+    assert!(c.dialogs[0].always && c.dialogs[0].answered_by.is_empty());
+    let (code, msg) = err("command.run", json!({"id": "ui.customize_transport"}));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(msg.contains("\"Customize Transport Bar\""), "{msg}");
+    assert!(!msg.contains("pass  instead"), "{msg}");
+    // Hostile params: never past the registry, and never a sheet.
+    for params in [
+        json!({"items": "cluster"}),
+        json!({"window": 1}),
+        json!({"x": "y".repeat(70_000)}),
+        json!(null),
+        json!([1]),
+    ] {
+        let (code, _) = err(
+            "command.run",
+            json!({"id": "ui.customize_transport", "params": params}),
+        );
+        assert!(
+            matches!(code, ErrorCode::InvalidParams | ErrorCode::DialogRequired),
+            "{code:?}"
+        );
     }
 }

@@ -136,7 +136,11 @@ impl ControlError {
             .join(", ");
         ControlError {
             code: ErrorCode::DialogRequired,
-            message: format!("this would open the \"{dialog}\" dialog; pass {params} instead"),
+            message: if params.is_empty() {
+                format!("this would open the \"{dialog}\" dialog, which no parameter answers")
+            } else {
+                format!("this would open the \"{dialog}\" dialog; pass {params} instead")
+            },
             dialog: Some(dialog.to_string()),
             details: None,
         }

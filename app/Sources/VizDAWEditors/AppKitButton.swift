@@ -9,7 +9,8 @@ import VizDAWAppModel
 /// `Button` and `Toggle` are not in that tree. With `icon` it shows the
 /// icon only (its SymbioticAudio icon, chosen in AppIcon: plan 7b Task B3
 /// and the final fix wave, as a template image); without,
-/// the title. `label` names it in the tree instead of `title` when given.
+/// the title; with `showsTitle` too, the icon then the title (a command
+/// button). `label` names it in the tree instead of `title` when given.
 /// It never takes the keyboard (Full Keyboard Access stays on the editors;
 /// Task 7 review M4).
 public struct AppKitButton: View {
@@ -17,11 +18,12 @@ public struct AppKitButton: View {
 
     public init(
         _ title: String, icon: AppIcon? = nil, isOn: Bool? = nil, enabled: Bool = true, help: String,
-        tint: NSColor? = nil, label: String? = nil, action: @escaping @MainActor () -> Void
+        tint: NSColor? = nil, label: String? = nil, showsTitle: Bool = false,
+        action: @escaping @MainActor () -> Void
     ) {
         button = BarButton(
             title: title, icon: icon, isOn: isOn, enabled: enabled, help: help, tint: tint, label: label ?? title,
-            action: action)
+            showsTitle: showsTitle, action: action)
     }
 
     // SwiftUI sets a hosted control's `isEnabled` from the environment, so
@@ -39,6 +41,8 @@ struct BarButton: NSViewRepresentable {
     let tint: NSColor?
     /// The accessibility label.
     let label: String
+    /// With an icon, the title shows too.
+    let showsTitle: Bool
     let action: @MainActor () -> Void
 
     @MainActor
@@ -76,8 +80,8 @@ struct BarButton: NSViewRepresentable {
         c.isOn = isOn
         if let icon {
             b.image = icon.nsImage(accessibilityDescription: title, theme: ThemedViews.current)
-            b.imagePosition = .imageOnly
-            b.title = ""
+            b.imagePosition = showsTitle ? .imageLeading : .imageOnly
+            b.title = showsTitle ? title : ""
         } else {
             b.image = nil
             b.imagePosition = .noImage
@@ -86,7 +90,7 @@ struct BarButton: NSViewRepresentable {
         b.setAccessibilityLabel(label)
         // A titled button's own label and title are what its cell says, so
         // a label that differs from the title goes on the cell too.
-        if icon == nil {
+        if icon == nil || showsTitle {
             b.cell?.setAccessibilityLabel(label)
             b.cell?.setAccessibilityTitle(label)
         }

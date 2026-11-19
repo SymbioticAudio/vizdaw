@@ -15,6 +15,9 @@ enum TransportItemViews {
     /// `item`'s view in `docID`'s window; nil for the row's own views.
     static func make(_ item: TransportItem, model: DocumentModel, docID: UUID, documentWindow: Bool) -> NSView? {
         let host: RecordPopoverHost = documentWindow ? .document : .mixerWindow
+        if case .command(let cmd, let label) = item {
+            return hosted(CommandButtonItem(model: model, docID: docID, command: cmd, label: label))
+        }
         switch item.id {
         case .cluster: return hosted(TransportCluster(model: model))
         case .loop: return hosted(LoopItem(model: model))
@@ -28,7 +31,8 @@ enum TransportItemViews {
         case .faults: return hosted(FaultsItem(model: model))
         case .mainView: return hosted(MainViewItem(model: model, editor: model.editor))
         case .panes: return hosted(PanesItem(model: model, editor: model.editor))
-        case .bar, .time, .tempo, .signature, .positionField, .editFields, .punchFields, .space, .separator:
+        case .bar, .time, .tempo, .signature, .positionField, .editFields, .punchFields, .space, .separator,
+            .command:
             return nil
         }
     }
@@ -114,6 +118,55 @@ struct TransportCluster: View {
             onCancel: { m.shuttle.cancel() }
         )
         .fixedSize()
+    }
+}
+
+/// A command button (Task 12, Ruling 16): its label (the command's title
+/// unless given) with its glyph when it has one; its tooltip and
+/// accessibility label the command's title; greyed while its menu item
+/// would be, or when the registry no longer has its id.
+struct CommandButtonItem: View {
+    let model: DocumentModel
+    let docID: UUID
+    let command: String
+    let label: String?
+
+    var body: some View {
+        let face = CommandButtonFace.make(id: command, label: label, row: keyBindings.row(command), doc: model)
+        let m = model
+        let id = docID
+        let cmd = command
+        AppKitButton(
+            face.label, icon: face.icon, enabled: face.enabled, help: face.tooltip, label: face.accessibilityLabel,
+            showsTitle: true
+        ) {
+            CommandButtonAction.run(
+                cmd, doc: (id, m), store: appStore, host: AppControlHost.shared, menu: AppMenuPerformer())
+        }
+    }
+}
+
+/// The app's main menu as a command button falls back to it (Ruling 16):
+/// the top-level menu titled `menu`, the item titled `title` in it (or in
+/// its submenus), performed when it is enabled.
+@MainActor
+struct AppMenuPerformer: MenuPerformer {
+    func perform(menu: String, title: String) -> Bool {
+        guard let top = NSApp.mainMenu?.items.first(where: { $0.title == menu })?.submenu else { return false }
+        return Self.perform(title, in: top)
+    }
+
+    private static func perform(_ title: String, in menu: NSMenu) -> Bool {
+        menu.update()
+        for (n, item) in menu.items.enumerated() {
+            if item.title == title, item.submenu == nil {
+                guard item.isEnabled else { return false }
+                menu.performActionForItem(at: n)
+                return true
+            }
+            if let sub = item.submenu, perform(title, in: sub) { return true }
+        }
+        return false
     }
 }
 

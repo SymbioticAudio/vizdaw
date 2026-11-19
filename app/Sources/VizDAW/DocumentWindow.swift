@@ -25,6 +25,7 @@ struct DocumentWindow: View {
         Group {
             if let id, let model = store.model(id) {
                 DocumentView(model: model, docID: id)
+                    .environment(\.transportWindowToken, focusToken.wrappedValue)
                     .background(WindowTag(kind: .document, doc: id))
                     // The document goes as its window closes: SwiftUI's
                     // onDisappear does not always come for the last window.

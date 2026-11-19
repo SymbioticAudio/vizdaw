@@ -185,6 +185,7 @@ const SPEC_REFUSED: &[&str] = &[
     "transport.set_click_mode",
     "ui.set_transport_bar",
     "ui.reset_transport_bar",
+    "ui.customize_transport",
 ];
 
 /// Ruling 5's class of `id`, by its lists and families.
@@ -213,8 +214,8 @@ fn listed_class(id: &str) -> Option<Class> {
 fn every_command_has_the_spec_class() {
     assert_eq!(
         COMMANDS.len(),
-        236,
-        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar"
+        237,
+        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar; Task 12 adds ui.customize_transport"
     );
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {

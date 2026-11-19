@@ -211,12 +211,52 @@ struct DocumentTransportBar: View {
     let model: DocumentModel
     let docID: UUID
     let showsViews: Bool
+    /// The window's token: Customize Transport Bar opens on the window
+    /// that asked (Task 12).
+    @Environment(\.transportWindowToken) private var window
 
     var body: some View {
         TransportRowHost(
-            model: model, docID: docID, documentWindow: showsViews, layout: appStore.transportLayout.layout
+            model: model, docID: docID, documentWindow: showsViews, layout: appStore.transportLayout.layout,
+            onCustomize: customize
         )
         .background(.bar)
+        .sheet(isPresented: sheetShown) { sheet }
+    }
+
+    /// The row's "Customize Transport Bar…": the sheet on this window.
+    private var customize: (@MainActor () -> Void)? {
+        guard let t = window else { return nil }
+        let layouts = appStore.transportLayout
+        return { layouts.beginCustomizing(window: t) }
+    }
+
+    private var sheetShown: Binding<Bool> {
+        let layouts = appStore.transportLayout
+        let token = window
+        return Binding(
+            get: { token != nil && layouts.customizing == token && layouts.customizer != nil },
+            set: { shown in
+                if !shown, token != nil, layouts.customizing == token { layouts.endCustomizing() }
+            })
+    }
+
+    @ViewBuilder private var sheet: some View {
+        if let c = appStore.transportLayout.customizer {
+            TransportCustomizeSheet(model: c, keys: keyBindings).themedRoot()
+        }
+    }
+}
+
+/// A window's token in its views (Task 12: the sheet's window).
+struct TransportWindowTokenKey: EnvironmentKey {
+    static let defaultValue: UUID? = nil
+}
+
+extension EnvironmentValues {
+    var transportWindowToken: UUID? {
+        get { self[TransportWindowTokenKey.self] }
+        set { self[TransportWindowTokenKey.self] = newValue }
     }
 }
 
@@ -226,6 +266,8 @@ struct TransportRowHost: NSViewRepresentable {
     let docID: UUID
     let documentWindow: Bool
     let layout: TransportLayout
+    /// The row's "Customize Transport Bar…" (nil: off).
+    var onCustomize: (@MainActor () -> Void)?
 
     func makeNSView(context: Context) -> TransportRowView {
         let m = model
@@ -235,10 +277,18 @@ struct TransportRowHost: NSViewRepresentable {
             TransportItemViews.make(item, model: m, docID: id, documentWindow: doc)
         }
         row.dspLoad = { appStore.mixer(id)?.dspLoad ?? 0 }
+        row.commandRow = { keyBindings.row($0) }
+        row.runCommand = { cmd in
+            CommandButtonAction.run(
+                cmd, doc: appStore.model(id).map { (id, $0) }, store: appStore, host: AppControlHost.shared,
+                menu: AppMenuPerformer())
+        }
+        row.onCustomize = onCustomize
         return row
     }
 
     func updateNSView(_ row: TransportRowView, context: Context) {
+        row.onCustomize = onCustomize
         row.theme = context.environment.symbioticTheme
         row.setLayout(layout)
     }

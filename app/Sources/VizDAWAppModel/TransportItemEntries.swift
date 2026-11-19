@@ -91,14 +91,21 @@ public enum TransportItemEntries {
     /// `item`'s entry in » (Ruling 14); nil for what never folds (the
     /// cluster, spaces, separators) and for a document-only item outside
     /// the document window.
+    /// A command button's entry is its face's label, greyed as the button
+    /// is; choosing it runs `runCommand` (the button's own click).
     public static func overflow(
-        _ item: TransportItem, _ m: DocumentModel, documentWindow: Bool, dspLoad: Float = 0
+        _ item: TransportItem, _ m: DocumentModel, documentWindow: Bool, dspLoad: Float = 0,
+        commandRow: (String) -> BindingRow? = { _ in nil }, runCommand: @escaping @MainActor (String) -> Void = { _ in }
     ) -> TransportMenuEntry? {
         let id = item.id
         if id.documentOnly && !documentWindow { return nil }
         let title = id.title
+        if case .command(let cmd, let label) = item {
+            let face = CommandButtonFace.make(id: cmd, label: label, row: commandRow(cmd), doc: m)
+            return .action(title: face.label, isOn: nil, enabled: face.enabled) { runCommand(cmd) }
+        }
         switch id {
-        case .cluster, .space, .separator:
+        case .cluster, .space, .separator, .command:
             return nil
         case .loop:
             return .action(title: title, isOn: m.looping, enabled: true) { m.toggleLoop() }

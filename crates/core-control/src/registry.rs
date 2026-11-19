@@ -1042,7 +1042,7 @@ const UI_TRANSPORT_BAR_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "items",
     kind: ParamKind::Text,
     required: true,
-    help: "The bar's items in order, split by commas: cluster (exactly once), loop, click, replace_overdub, record_options, count_in, summary, bar, time, tempo, signature, position_field, edit_fields, punch_fields, dsp_load, device, faults, main_view, panes, space, separator; bar, time and tempo take :small or :large. At most 64.",
+    help: "The bar's items in order, split by commas: cluster (exactly once), loop, click, replace_overdub, record_options, count_in, summary, bar, time, tempo, signature, position_field, edit_fields, punch_fields, dsp_load, device, faults, main_view, panes, space, separator, command:<command id>[:<label>]; bar, time and tempo take :small or :large; a label is 1 to 32 characters, its commas and percent signs written %2C and %25. At most 64.",
 }];
 
 /// `ui.pane`'s parameters (plan 7a Task 5).
@@ -2770,6 +2770,23 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         false,
     )),
+    // Groups-vcas-transport Task 12: the View menu's sheet; over the
+    // channel it is only ever `dialog_required` (no sheet opens).
+    CommandSpec {
+        dialogs: &[DialogSpec {
+            name: "Customize Transport Bar",
+            when: "always",
+            always: true,
+            answered_by: &[],
+        }],
+        ..cmd(
+            "ui.customize_transport",
+            "View",
+            "Customize Transport Bar…",
+            None,
+            false,
+        )
+    },
     cmd(
         "editors.piano_roll",
         "Editors",
