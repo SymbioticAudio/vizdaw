@@ -2820,6 +2820,13 @@ Plan 8a, Co-Producer safety and the server:
 337. Ask Claude to rename one of your tracks. Claude Code asks you directly,
      with the exact change listed. Say no: nothing changes. Ask again and
      say yes: it is renamed, as one undo step.
+337a. With the current release of Claude Code (2026-11) connected to
+     `vizdaw-mcp`, ask for a change to one of your own tracks. The approval
+     request shows in Claude Code as a form (elicitation) listing the
+     change, not as a list and a token in the chat. Answer Allow in the
+     form: VizDAW then checks again with its own approval sheet, and the
+     change is made only after you allow it there too. Don't Allow in
+     either place changes nothing.
 338. In a host that cannot ask you itself (Claude's desktop app, as of
      2026-11), ask for the same: Claude shows the list in the chat and
      waits for your yes before applying it.

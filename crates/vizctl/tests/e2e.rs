@@ -7325,3 +7325,183 @@ fn co_producer_time_over_mcp() {
     drop(mcp);
     app.quit();
 }
+
+/// Release gate B2 (Task 2): in 26.0.0 Co-Producer writes no MIDI notes,
+/// so `file.import_midi` is refused in every form. Through `vizdaw-mcp` it
+/// is no tool and not on the command list, and the Co-Producer socket
+/// itself refuses it. No track, note or window appears.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn co_producer_import_midi_is_refused() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let sock = home.join("support/co-producer.sock");
+    app.call(
+        "command.run",
+        json!({"id": "settings.co_producer", "params": {"on": true}}),
+    );
+    wait_for_path(&sock, true);
+
+    // A real MIDI file, written by the developer channel from the demo,
+    // so a refusal is the gate's and not the file's.
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let smf = home.join("demo.mid");
+    app.call(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"path": smf}, "window": w}),
+    );
+    assert_eq!(&std::fs::read(&smf).unwrap()[..4], b"MThd");
+    let doc = |app: &mut App| app.call("state.get", json!({"target": "document", "window": w}));
+    let before = doc(&mut app);
+    let tracks = |d: &Value| d["lanes"].as_array().unwrap().len();
+    let events = |d: &Value| -> u64 {
+        d["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["events"].as_u64().unwrap_or(0))
+            .sum()
+    };
+    let windows = window_numbers(&mut app);
+    let path = smf.display().to_string();
+    let forms = [
+        json!({"path": path}),
+        json!({"path": path, "tick": 0}),
+        json!({"path": path, "new_project": true}),
+        json!({"path": path, "new_project": false}),
+    ];
+
+    // Through vizdaw-mcp: not a tool, not on the list, not a change.
+    let mut mcp = McpProc::start(&app, json!({}));
+    let listed = mcp.request("tools/list", json!({}));
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listed}"))
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(!names.contains(&"file_import_midi"), "{names:?}");
+    mcp.ok("begin_request", json!({"name": "import a MIDI file"}));
+    for params in &forms {
+        let r = mcp.request(
+            "tools/call",
+            json!({"name": "file_import_midi", "arguments": params}),
+        );
+        assert!(r.get("error").is_some(), "no such tool: {r}");
+        let r = mcp.tool(
+            "change",
+            json!({"commands": [{"id": "file.import_midi", "params": params}], "window": w}),
+        );
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(
+            mcp_text(&r).contains("Co-Producer has no command file.import_midi"),
+            "{r}"
+        );
+    }
+    mcp.ok("end_request", json!({}));
+    drop(mcp);
+
+    // The Co-Producer socket's own gate, past vizdaw-mcp.
+    let mut raw = Client::connect(&sock).expect("the Co-Producer socket");
+    for params in &forms {
+        for (cmd, q) in [
+            (
+                "command.run",
+                json!({"id": "file.import_midi", "params": params, "window": w}),
+            ),
+            (
+                "co_producer.preview",
+                json!({"commands": [{"id": "file.import_midi", "params": params}], "window": w}),
+            ),
+        ] {
+            match raw.call(cmd, q.clone(), Duration::from_secs(30)) {
+                Err(CallError::Reply(e)) => {
+                    if cmd == "command.run" {
+                        assert_eq!(e.code, ErrorCode::NotAllowed, "{cmd} {q}: {e:?}");
+                    }
+                    assert!(
+                        e.message.contains("cannot run file.import_midi"),
+                        "{cmd} {q}: {e:?}"
+                    );
+                }
+                other => panic!("{cmd} {q}: expected a refusal, got {other:?}"),
+            }
+        }
+    }
+    drop(raw);
+    assert_no_sheet(&mut app);
+
+    // Nothing was written: the same tracks and notes, and no new window.
+    let after = doc(&mut app);
+    assert_eq!(tracks(&after), tracks(&before), "{after}");
+    assert_eq!(events(&after), events(&before), "{after}");
+    assert_eq!(after["undo"], before["undo"], "no undo step");
+    assert_eq!(window_numbers(&mut app), windows, "no new window");
+    app.quit();
+}
+
+/// Release gate Task 3: the save prompts are the user's only. `file.close`
+/// over the control channel closes a song with unsaved changes, untitled
+/// or saved, at once: no prompt holds the call, and the window goes.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn control_close_of_a_dirty_song_does_not_prompt() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let saved = home.join("Dirty.vizdaw");
+    for save in [false, true] {
+        let w = app.call("command.run", json!({"id": "file.new"}))["window"].clone();
+        app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+        if save {
+            app.call(
+                "command.run",
+                json!({"id": "file.save", "params": {"path": saved.display().to_string()}, "window": w}),
+            );
+        }
+        // An edit: the song now has unsaved changes.
+        app.call("command.run", json!({"id": "track.new_midi", "window": w}));
+        let d = app.call("state.get", json!({"target": "document", "window": w}));
+        assert_eq!(d["dirty"], true, "{d}");
+        let before = window_numbers(&mut app);
+        assert!(before.iter().any(|(n, _)| *n == w), "{before:?}");
+
+        // The call returns within the normal timeout: no prompt waits.
+        let started = Instant::now();
+        let r = app.client.call(
+            "command.run",
+            json!({"id": "file.close", "window": w}),
+            Duration::from_millis(WAIT_MS),
+        );
+        assert!(
+            r.is_ok(),
+            "file.close (saved: {save}): {r:?}\nVizDAW log:\n{}",
+            log_tail(&app.launched.log, 40)
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(WAIT_MS),
+            "{:?}",
+            started.elapsed()
+        );
+
+        // The window goes (a condition with a timeout, not a sleep).
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        loop {
+            let now = window_numbers(&mut app);
+            if now.len() < before.len() && now.iter().all(|(n, _)| *n != w) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the window stayed (saved: {save}): {now:?}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let e = app.call_err("state.get", json!({"target": "document", "window": w}));
+        assert_eq!(e.code, ErrorCode::NoWindow, "{e}");
+    }
+    // Quitting meets no prompt either.
+    app.quit();
+}

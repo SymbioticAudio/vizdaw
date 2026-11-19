@@ -79,6 +79,19 @@ A Linux app, with its own Rust interface and PipeWire audio, is planned
 after 1.0. A later 2.0 may bring one interface for every platform, and
 Windows.
 
+## Download and install
+
+1. Download `VizDAW-<version>.zip` (for this beta, `VizDAW-26.0.0.zip`)
+   from the project's GitHub release and unzip it.
+2. Move VizDAW to your Applications folder and open it once.
+3. macOS says it cannot verify the developer, because 26.0.0 is not
+   signed with a Developer ID yet. Open **System Settings › Privacy &
+   Security**, choose **Open Anyway** for VizDAW, and confirm. You only
+   need to do this once.
+
+Co-Producer's MCP server, `vizdaw-mcp`, lives inside the app, at
+`VizDAW.app/Contents/MacOS/vizdaw-mcp`.
+
 ## Building from source
 
 You need macOS 14 or newer, Rust 1.86 or newer, and the Xcode Command Line
