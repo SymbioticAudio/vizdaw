@@ -503,6 +503,74 @@ fn a_member_held_by_another_hand_is_not_moved() {
     s.close().unwrap();
 }
 
+/// Review Focus 2 (review fix round 1): a follower the drag's hand let go
+/// of mid-drag, and that a surface then took, follows only the surface.
+#[test]
+fn a_follower_another_hand_retouches_follows_only_that_hand() {
+    let _g = serial();
+    let d = song();
+    let s = &d.s;
+    let (kick, snare) = (fader(d.kick), fader(d.snare));
+    s.gesture(kick, Phase::Touch { value: None }).unwrap();
+    pace(s);
+    s.gesture(
+        kick,
+        Phase::Value {
+            value: fader_norm(-2.0),
+        },
+    )
+    .unwrap();
+    assert!(close(gain(s, d.snare), -2.0));
+    // The mouse lets go of Snare; a surface takes it.
+    s.gesture_as(snare, Phase::Release, Holder::Mouse, true)
+        .unwrap();
+    s.debug_surface_gesture(
+        0,
+        snare,
+        Phase::Touch {
+            value: Some(fader_norm(-10.0)),
+        },
+        true,
+    )
+    .unwrap();
+    pace(s);
+    s.gesture(
+        kick,
+        Phase::Value {
+            value: fader_norm(-4.0),
+        },
+    )
+    .unwrap();
+    assert!(close(gain(s, d.kick), -4.0) && close(gain(s, d.hat), -4.0));
+    assert!(close(gain(s, d.snare), -10.0), "{}", gain(s, d.snare));
+    pace(s);
+    s.debug_surface_gesture(
+        0,
+        snare,
+        Phase::Value {
+            value: fader_norm(-12.0),
+        },
+        true,
+    )
+    .unwrap();
+    assert!(close(gain(s, d.snare), -12.0), "{}", gain(s, d.snare));
+    assert!(
+        close(gain(s, d.kick), -4.0),
+        "the surface moves Snare alone"
+    );
+    s.gesture(kick, Phase::Release).unwrap();
+    assert!(
+        s.automation_state().unwrap().touched.contains(&snare),
+        "the leader's release leaves the surface's hold"
+    );
+    s.debug_surface_gesture(0, snare, Phase::Release, true)
+        .unwrap();
+    s.idle().unwrap();
+    assert!(close(gain(s, d.snare), -12.0));
+    assert!(s.automation_state().unwrap().touched.is_empty());
+    s.close().unwrap();
+}
+
 #[test]
 fn surface_gestures_move_the_group() {
     let _g = serial();

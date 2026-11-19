@@ -205,8 +205,14 @@ impl Session {
         };
         self.gesture_one(inner, t, leader, h, host_ns)?;
         for (f, base) in &drag.followers {
-            // A follower that went (its strip deleted) is not touched again.
-            if inner.touches.contains_key(f) {
+            // Only while the drag's hand still holds it: a follower that
+            // was let go (or went) and that another hand took since
+            // follows that hand alone (Review Focus 2).
+            if inner
+                .touches
+                .get(f)
+                .is_some_and(|x| x.holders.has(drag.holder))
+            {
                 let _ = self.gesture_one(
                     inner,
                     *f,
