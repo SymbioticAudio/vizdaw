@@ -1088,3 +1088,113 @@ fn every_export_passes_the_schema() {
         check_schema(&x);
     }
 }
+
+/// A VCA with a level, a mute and fader automation survives as a VCA
+/// channel: the file passes the schema; the import has one VCA with the
+/// same name, level, mute and (within the tolerance) points, and no
+/// members, and says so.
+#[test]
+fn vca_channels_round_trip() {
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::command::GroupCmd;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::mixer::Swatch;
+    let mut b = Builder::new();
+    let (seq, keys, _, _) = song(&mut b, "Keys");
+    b.notes(seq, keys, &[(0, 60, 0x8000, Q)]).unwrap();
+    let strip = b.doc().mixer().order().iter().copied().next().unwrap();
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "Kit".into(),
+            colour: Swatch::Teal,
+            members: vec![strip],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA");
+    };
+    for cmd in [
+        GroupCmd::SetVcaLevel { vca, gain_db: -6.0 },
+        GroupCmd::SetVcaMute { vca, mute: true },
+    ] {
+        b.run(Command::Groups(cmd)).unwrap();
+    }
+    let points = [
+        (0, fader_norm(-12.0)),
+        (Q, fader_norm(-3.0)),
+        (2 * Q, fader_norm(0.0)),
+    ];
+    b.events(
+        seq,
+        keys,
+        points
+            .iter()
+            .map(|(t, v)| {
+                EventSpec::new(
+                    Tick(*t),
+                    EventBody::Automation {
+                        target: AutomationTarget::VcaFader(vca),
+                        value: *v,
+                    },
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    let doc = b.finish();
+    let t = trip(&doc, &options(seq, RegionGain::Apply));
+    let vcas: Vec<_> = t.doc.mixer().vcas().values().collect();
+    assert_eq!(vcas.len(), 1, "{:#?}", t.import.items);
+    let v = vcas[0];
+    assert_eq!(v.name, "Kit");
+    assert!((v.gain_db - -6.0).abs() < 1e-6, "{}", v.gain_db);
+    assert!(v.mute && !v.solo);
+    assert!(v.members.is_empty(), "DAWproject names no members");
+    assert_eq!(v.colour, Swatch::Teal);
+    let back: Vec<(i64, f64)> = t
+        .doc
+        .sequence(t.seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .filter_map(|l| l.active())
+        .flat_map(|k| k.events.values())
+        .filter_map(|e| match e.body {
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(x),
+                value,
+            } if x == v.id => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(back.len(), points.len(), "{back:?}");
+    for ((t0, v0), (t1, v1)) in points.iter().zip(&back) {
+        assert_eq!(t0, t1);
+        near(*v0, *v1, "VCA fader point");
+    }
+    // The members keep their own faders: the file has no VCA offset.
+    assert_eq!(
+        count(
+            &t.import,
+            ItemKind::Changed,
+            core_io::dawproject::import::VCA_NO_MEMBERS
+        ),
+        1
+    );
+    assert_eq!(
+        t.import
+            .items
+            .iter()
+            .find(|i| i.what == core_io::dawproject::import::VCA_NO_MEMBERS)
+            .map(|i| i.details.clone()),
+        Some(vec!["Kit".to_owned()])
+    );
+    assert_eq!(
+        count(
+            &t.import,
+            ItemKind::LeftOut,
+            core_io::dawproject::import::VCA
+        ),
+        0
+    );
+}

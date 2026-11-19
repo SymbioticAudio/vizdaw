@@ -16,7 +16,9 @@
 //! clip they are beats from the clip's start, inside a note from the note's
 //! start (Ruling 12); inside an audio clip seconds of the media.
 
-use super::export::{AudioFile, ClipRule, Layout, LeftOutAudio, Part, RegionGain, Ticker};
+use super::export::{
+    AudioFile, ClipRule, Layout, LeftOutAudio, Part, RegionGain, Ticker, vca_channel_id,
+};
 use super::schema::*;
 use super::units::{TagKind, beats, linear_gain, pass_comment, tag};
 use crate::IoError;
@@ -91,9 +93,6 @@ pub const OTHER_PER_NOTE: &str = "Per-note controllers other than pitch, timbre,
 pub const SOLO_AUTOMATION: &str = "Solo automation";
 /// Left out: velocity-scale automation (by track).
 pub const VELOCITY_SCALE_AUTOMATION: &str = "Velocity-scale automation";
-/// Left out: VCA fader automation (by track). Temporary (preflight F22):
-/// Task 8 writes it as the VCA channel's volume and removes this line.
-pub const VCA_AUTOMATION: &str = "VCA fader automation";
 /// Left out: automation of a mixer part the file does not hold (by target).
 pub const UNPLACED_AUTOMATION: &str = "Automation of mixer parts not in the file";
 /// Left out: region gain, with [`RegionGain::LeaveOut`] (by region).
@@ -1248,14 +1247,33 @@ impl Arr<'_, '_, '_, '_, '_> {
                         .add(ItemKind::LeftOut, VELOCITY_SCALE_AUTOMATION, Some(p.name()));
                     continue;
                 }
-                AutomationTarget::VcaFader(_) => {
-                    self.report
-                        .add(ItemKind::LeftOut, VCA_AUTOMATION, Some(p.name()));
+                // The VCA channel's volume (below); a VCA the document lost
+                // is an unplaced target.
+                AutomationTarget::VcaFader(v) if l.doc.mixer().vca(v).is_err() => {
+                    self.report.add(
+                        ItemKind::LeftOut,
+                        UNPLACED_AUTOMATION,
+                        Some(target.describe()),
+                    );
                     continue;
                 }
                 // Listed with the device (Task 4).
                 AutomationTarget::PluginParam(_, q) if u32::try_from(q.0).is_err() => continue,
                 _ => {}
+            }
+            if let AutomationTarget::VcaFader(v) = target {
+                let param = format!("{}v", vca_channel_id(v));
+                let value =
+                    DpPointValue::Real(linear_gain(fader_db(value)), Some(DpInterpolation::Linear));
+                self.point(
+                    &mut out,
+                    &mut at,
+                    param,
+                    Some(DpUnit::Linear),
+                    r.tick,
+                    value,
+                );
+                continue;
             }
             let chan = l.target(pi, target).and_then(|(c, _)| l.chans.get(c));
             let Some(chan) = chan else {
@@ -1304,31 +1322,44 @@ impl Arr<'_, '_, '_, '_, '_> {
                 | AutomationTarget::VelocityScale(_)
                 | AutomationTarget::VcaFader(_) => continue,
             };
-            let i = match at.get(&param) {
-                Some(i) => *i,
-                None => {
-                    out.push(DpPoints {
-                        head: DpHead::default(),
-                        unit,
-                        target: DpTarget {
-                            parameter: Some(param.clone()),
-                            ..DpTarget::default()
-                        },
-                        points: Vec::new(),
-                    });
-                    at.insert(param, out.len() - 1);
-                    out.len() - 1
-                }
-            };
-            if let Some(a) = out.get_mut(i) {
-                a.points.push(DpPoint {
-                    time: self.rel(r.tick.0),
-                    value: v,
-                });
-                self.points = self.points.saturating_add(1);
-            }
+            self.point(&mut out, &mut at, param, unit, r.tick, v);
         }
         Ok(out)
+    }
+
+    /// One point of parameter `param`'s curve in `out`, which `at` indexes.
+    fn point(
+        &mut self,
+        out: &mut Vec<DpPoints>,
+        at: &mut BTreeMap<String, usize>,
+        param: String,
+        unit: Option<DpUnit>,
+        tick: Tick,
+        value: DpPointValue,
+    ) {
+        let i = match at.get(&param) {
+            Some(i) => *i,
+            None => {
+                out.push(DpPoints {
+                    head: DpHead::default(),
+                    unit,
+                    target: DpTarget {
+                        parameter: Some(param.clone()),
+                        ..DpTarget::default()
+                    },
+                    points: Vec::new(),
+                });
+                at.insert(param, out.len() - 1);
+                out.len() - 1
+            }
+        };
+        if let Some(a) = out.get_mut(i) {
+            a.points.push(DpPoint {
+                time: self.rel(tick.0),
+                value,
+            });
+            self.points = self.points.saturating_add(1);
+        }
     }
 }
 

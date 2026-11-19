@@ -6,7 +6,7 @@ use core_model::automation::{AutomationTarget, SendIndex, target_exists};
 use core_model::command::{EventCmd, MediaCmd};
 use core_model::document::{Document, MediaOrigin};
 use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
-use core_model::ids::MediaId;
+use core_model::ids::{MediaId, VcaId};
 use core_model::sequence::SeqLength;
 use std::collections::BTreeSet;
 
@@ -92,6 +92,8 @@ pub(super) struct Applied {
     /// By plan bus.
     pub(super) buses: BTreeMap<usize, (StripId, MixSlots)>,
     pub(super) master: (StripId, MixSlots),
+    /// By plan VCA.
+    pub(super) vcas: Vec<VcaId>,
 }
 
 impl Applied {
@@ -104,6 +106,7 @@ impl Applied {
             instruments: vec![None; n],
             buses: BTreeMap::new(),
             master: (master, MixSlots::default()),
+            vcas: Vec::new(),
         }
     }
 }
@@ -372,6 +375,7 @@ pub fn apply_tagged(
     slot_origins(&plan.master, &made, &mut origins);
     placed.master = (master, made);
     plugins = plugins.saturating_add(slots(&plan.master));
+    placed.vcas = add_vcas(h, &plan.vcas)?;
 
     run(
         h,
@@ -422,6 +426,43 @@ pub fn apply_tagged(
     s.plugins = s.plugins.saturating_add(plugins);
     s.tempo_map = true;
     Ok((states, origins))
+}
+
+/// Makes the plan's VCAs, with no members, and answers each one's ID.
+fn add_vcas(h: &mut History, vcas: &[VcaPlan]) -> Result<Vec<VcaId>, ModelError> {
+    let mut ids = Vec::with_capacity(vcas.len());
+    for v in vcas {
+        let r = run(
+            h,
+            Command::Groups(GroupCmd::NewVca {
+                name: v.name.clone(),
+                colour: v.colour.unwrap_or(Swatch::Blue),
+                members: Vec::new(),
+            }),
+        )?;
+        let vca = created(&r, |id| match id {
+            AnyId::Vca(v) => Some(*v),
+            _ => None,
+        })
+        .ok_or_else(|| ModelError::invalid("no VCA was created"))?;
+        if v.gain_db != 0.0 {
+            run(
+                h,
+                Command::Groups(GroupCmd::SetVcaLevel {
+                    vca,
+                    gain_db: v.gain_db,
+                }),
+            )?;
+        }
+        if v.mute {
+            run(h, Command::Groups(GroupCmd::SetVcaMute { vca, mute: true }))?;
+        }
+        if v.solo {
+            run(h, Command::Groups(GroupCmd::SetVcaSolo { vca, solo: true }))?;
+        }
+        ids.push(vca);
+    }
+    Ok(ids)
 }
 
 /// Adds plan buses `which` (in order) that `buses` does not hold yet, with
@@ -851,6 +892,7 @@ fn target_of(h: &History, plan: &Plan, at: AutoAt, placed: &Applied) -> Option<A
         }
     };
     let target = match at {
+        AutoAt::Vca(i) => AutomationTarget::VcaFader(placed.vcas.get(i).copied()?),
         AutoAt::Fader(s) => AutomationTarget::StripFader(strip(s)?.0),
         AutoAt::Pan(s) => AutomationTarget::StripPan(strip(s)?.0),
         AutoAt::Mute(s) => AutomationTarget::StripMute(strip(s)?.0),
@@ -903,6 +945,7 @@ impl Arrange {
         let strip = match at {
             AutoAt::Fader(s) | AutoAt::Pan(s) | AutoAt::Mute(s) => s,
             AutoAt::Send(s, _) | AutoAt::Param(s, _, _) => s,
+            AutoAt::Vca(_) => return false,
         };
         match (strip, &self.which) {
             (StripAt::Track(i), Some(which)) => !which.contains(&i),

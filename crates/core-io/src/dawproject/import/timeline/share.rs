@@ -219,10 +219,11 @@ impl<'p> Tl<'_, '_, 'p> {
         let mut shared: HashSet<usize> = HashSet::new();
         for a in std::mem::take(&mut self.autos) {
             let strip = match a.at {
-                AutoAt::Fader(s) | AutoAt::Pan(s) | AutoAt::Mute(s) => s,
-                AutoAt::Send(s, _) | AutoAt::Param(s, _, _) => s,
+                AutoAt::Fader(s) | AutoAt::Pan(s) | AutoAt::Mute(s) => Some(s),
+                AutoAt::Send(s, _) | AutoAt::Param(s, _, _) => Some(s),
+                AutoAt::Vca(_) => None,
             };
-            if let StripAt::Track(i) = strip {
+            if let Some(StripAt::Track(i)) = strip {
                 if !owns(i) {
                     if unplaced.insert(a.param) {
                         self.cx

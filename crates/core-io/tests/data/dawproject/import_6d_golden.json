@@ -298,7 +298,7 @@
       "LeftOut VST plug-ins x1 [\"Bass VST\"]",
       "LeftOut Built-in effects on tracks x1 [\"Equalizer on track 'Gtr': Band type=bell: Freq id=dv3f1 unit=hertz value=1000, Gain id=dv3g1 unit=decibel value=3, Q id=dv3q1 unit=linear value=0.71\", \"Equalizer on track 'Gtr': Band type=highPass: Freq id=dv3f2 unit=hertz value=80\"]",
       "Changed Colours changed to the nearest VizDAW colour x1 []",
-      "LeftOut VCA channels x1 []"
+      "Changed VCA channels came in without members (DAWproject does not say which channels a VCA controls) x1 [\"Group\"]"
     ]
   },
   "hostile": {

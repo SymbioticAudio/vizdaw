@@ -10,7 +10,9 @@
 //!
 //! **Structure** (Rulings 5–7): one `Track` per track in sequence order (a
 //! track playing notes and audio is two), then the buses and the submixes
-//! made for shared audio paths in mixer order, then the master. A track's
+//! made for shared audio paths in mixer order, then each VCA as a channel
+//! (name, colour, level, mute, solo and volume automation, no members), then
+//! the master. A track's
 //! channel is its strip: the instrument strip of its destination for notes
 //! (copied to each track when several share it), the audio path strip of
 //! its output for audio (a submix with plain channels into it when several
@@ -25,7 +27,7 @@ use super::export_timeline::arrange;
 pub use super::export_timeline::{
     CROSSFADES, EVENTS_OUTSIDE, FADE_SHAPES, MIDI_GROUPS, MUTED_NOTES, NESTED_AUDIO, NESTED_MUTED,
     NOTE_ATTRIBUTES, OTHER_PER_NOTE, OVERLAPS, PLAY_QUANTIZED, REGION_GAIN, SOLO_AUTOMATION, SYSEX,
-    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VCA_AUTOMATION, VELOCITY_SCALE_AUTOMATION,
+    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VELOCITY_SCALE_AUTOMATION,
 };
 use super::plugins::{PlistCodec, state_entry};
 use super::record::{self, ObjectRef, Record, Snapshot};
@@ -41,7 +43,8 @@ use core_model::automation::{AutomationMode, AutomationTarget, automated_targets
 use core_model::command::{Command, EventCmd, apply};
 use core_model::document::{DestKind, Document, SlotOwner};
 use core_model::event::EventBody;
-use core_model::ids::{DestId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
+use core_model::groups::Vca;
+use core_model::ids::{DestId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, StripId, VcaId};
 use core_model::lane::{Lane, MonitorMode};
 use core_model::mixer::{
     GAIN_MAX_DB, Output, ParamId, PluginFormat, PluginSlot, Strip, StripKind, Swatch,
@@ -315,6 +318,11 @@ pub const SEQUENCE_COMMENTS: &str = "Sequence comments";
 pub const UNPLAYED_STRIPS: &str = "Strips no track of this sequence plays through";
 /// Left out: markers before the pickup's start (by marker).
 pub const EARLY_MARKERS: &str = "Markers before the start of the song";
+/// Left out: which channels a VCA controls (by VCA with members). The
+/// members keep their own faders.
+pub const VCA_MEMBERS: &str = "VCA assignments (DAWproject cannot say which channels a VCA controls; members keep their own faders)";
+/// Left out: fader groups (by group).
+pub const GROUPS: &str = "Fader groups";
 /// Changed: an audio path several tracks share (by strip).
 pub const SHARED_AUDIO_PATHS: &str = "Audio paths shared by several tracks became submix channels";
 /// Changed: tracks holding notes and audio (by track).
@@ -707,6 +715,11 @@ fn output_id(doc: &Document, o: Output) -> String {
         Output::Master => format!("c{}", doc.mixer().master().0),
         Output::Bus(b) => format!("c{}", b.0),
     }
+}
+
+/// The ID of VCA `v`'s channel (and `<id>v` is its volume).
+pub(super) fn vca_channel_id(v: VcaId) -> String {
+    format!("vca{}", v.0)
 }
 
 /// The layout of sequence `seq`, with the report lines of the structure.
@@ -1133,6 +1146,34 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// A VCA's channel: name, colour, volume, mute and solo. The file holds
+    /// no list of members (the report says so), and the ID is not in the
+    /// return record: a merge reads VCAs as left out.
+    fn vca_channel(&mut self, v: &Vca) -> DpChannel {
+        let id = vca_channel_id(v.id);
+        if v.automation != AutomationMode::Read {
+            self.report
+                .add(ItemKind::LeftOut, AUTOMATION_MODES, Some(v.name.clone()));
+        }
+        DpChannel {
+            named: DpNamed {
+                id: Some(id.clone()),
+                name: non_empty(&v.name),
+                color: Some(swatch_hex(v.colour).to_owned()),
+                comment: None,
+            },
+            role: Some(DpMixerRole::Vca),
+            audio_channels: None,
+            destination: None,
+            solo: Some(v.solo),
+            devices: Vec::new(),
+            mute: Some(Box::new(boolean(format!("{id}m"), v.mute))),
+            pan: None,
+            sends: Vec::new(),
+            volume: Some(Box::new(volume(format!("{id}v"), v.gain_db))),
+        }
+    }
+
     fn channel(&mut self, c: &Chan<'_>) -> DpChannel {
         let id = &c.id;
         let mut devices = Vec::new();
@@ -1274,6 +1315,14 @@ fn vizdaw_only(doc: &Document, s: &Sequence, report: &mut Report) {
         }
         if other.keyboard_slot.is_some() {
             report.add(ItemKind::LeftOut, KEYBOARD_SLOTS, Some(other.name.clone()));
+        }
+    }
+    for g in doc.mixer().groups().values() {
+        report.add(ItemKind::LeftOut, GROUPS, Some(g.name.clone()));
+    }
+    for v in doc.mixer().vcas().values() {
+        if !v.members.is_empty() {
+            report.add(ItemKind::LeftOut, VCA_MEMBERS, Some(v.name.clone()));
         }
     }
     let learn = u64::try_from(doc.settings().learn.len()).unwrap_or(u64::MAX);
@@ -1481,7 +1530,15 @@ fn build<'a>(
     stop(cancel)?;
 
     let mut structure = Vec::new();
+    let mut vcas_done = false;
     for c in &layout.chans {
+        // The VCAs come after the buses, before the master.
+        if c.home == Home::Master && !vcas_done {
+            vcas_done = true;
+            for v in doc.mixer().vcas().values() {
+                structure.push(DpStructureItem::Channel(ctx.vca_channel(v)));
+            }
+        }
         let channel = Some(Box::new(ctx.channel(c)));
         let strip = c.strip;
         let colour = |s: Option<&Strip>| s.and_then(|s| s.colour).map(|w| swatch_hex(w).to_owned());
@@ -1545,6 +1602,11 @@ fn build<'a>(
             }
         };
         structure.push(DpStructureItem::Track(track));
+    }
+    if !vcas_done {
+        for v in doc.mixer().vcas().values() {
+            structure.push(DpStructureItem::Channel(ctx.vca_channel(v)));
+        }
     }
     stop(cancel)?;
 

@@ -74,7 +74,8 @@ impl<'p> Tl<'_, '_, 'p> {
                 _ => None,
             },
         };
-        let at = strip.and_then(|s| match role {
+        let vca = self.cx.vca_at.get(chan).copied();
+        let by_strip = strip.and_then(|s| match role {
             Role::Volume(_) => Some(AutoAt::Fader(s)),
             Role::Pan(_) if s != StripAt::Master => Some(AutoAt::Pan(s)),
             Role::Pan(_) => None,
@@ -92,6 +93,16 @@ impl<'p> Tl<'_, '_, 'p> {
                 Some(AutoAt::Param(s, slot, ParamId(u64::from(id as u32))))
             }
         });
+        let at = match (vca, role) {
+            (Some(v), Role::Volume(_)) => {
+                if !self.cx.vca_params.iter().any(|x| x == param) {
+                    self.cx.vca_params.push(param.to_owned());
+                }
+                Some(AutoAt::Vca(v))
+            }
+            (Some(_), _) => None,
+            (None, _) => by_strip,
+        };
         // Whether the track owns a strip, and whether it shares the
         // built-in synth's, is known once every track's notes and audio
         // are (`finish`).

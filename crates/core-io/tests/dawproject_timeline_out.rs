@@ -11,8 +11,8 @@ use core_io::dawproject::export::{
     AudioFile, CANCEL_EVERY, CROSSFADES, ClipRule, DpExport, EVENTS_OUTSIDE, ExportEnv,
     ExportOptions, FADE_SHAPES, MIDI_GROUPS, MUTED_NOTES, NESTED_AUDIO, NESTED_MUTED,
     NOTE_ATTRIBUTES, OTHER_PER_NOTE, OVERLAPS, REGION_GAIN, RegionGain, SOLO_AUTOMATION, SYSEX,
-    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VCA_AUTOMATION, VELOCITY_SCALE_AUTOMATION, check,
-    debug_cancel_after, debug_items_after_cancel, export,
+    TEXTS, TRANSPOSED, UNPLACED_AUTOMATION, VELOCITY_SCALE_AUTOMATION, check, debug_cancel_after,
+    debug_items_after_cancel, export,
 };
 use core_io::dawproject::plugins::{NoPlist, PlistCodec};
 use core_io::dawproject::record::{Snapshot, projection};
@@ -950,11 +950,11 @@ fn what_is_left_out_on_the_timeline() {
     }
 }
 
-/// Until Task 8 writes it as the VCA channel's volume, a VCA fader lane
-/// is left out of the file with a line by track (preflight F22); the
-/// file holds no parameter for it and still passes the schema.
+/// A VCA fader lane is the VCA channel's volume automation (Task 8
+/// replaced preflight F22's temporary left-out line): no line is listed,
+/// the curve targets the channel's volume, and the file passes the schema.
 #[test]
-fn vca_fader_automation_is_left_out_by_track() {
+fn vca_fader_automation_is_the_vca_channels_volume() {
     let f = timeline_fixture();
     let plain = run(&f.doc, f.seq);
     let mut b = Builder::from_doc(f.doc.clone());
@@ -978,17 +978,23 @@ fn vca_fader_automation_is_left_out_by_track() {
     )
     .unwrap();
     let x = run(&b.finish(), f.seq);
-    assert_eq!(VCA_AUTOMATION, "VCA fader automation");
-    assert_eq!(
-        count(&x.report, ItemKind::LeftOut, VCA_AUTOMATION),
-        1,
+    assert!(
+        x.report
+            .items
+            .iter()
+            .all(|i| !i.what.contains("VCA fader automation")),
         "{:#?}",
         x.report.items
     );
     assert!(
-        plain.report.items.iter().all(|i| i.what != VCA_AUTOMATION),
-        "{:#?}",
-        plain.report.items
+        x.project_xml
+            .contains(&format!("parameter=\"vca{}v\"", vca.0)),
+        "{}",
+        x.project_xml
+    );
+    assert_eq!(
+        x.report.summary.automation_points,
+        plain.report.summary.automation_points + 2
     );
     assert_eq!(
         count(&x.report, ItemKind::LeftOut, UNPLACED_AUTOMATION),

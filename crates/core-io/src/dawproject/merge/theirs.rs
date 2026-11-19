@@ -113,6 +113,8 @@ pub fn theirs(
     cancel: &AtomicBool,
 ) -> Result<Theirs, IoError> {
     stop(cancel)?;
+    // A merge makes no VCAs (preflight F17).
+    let imp = imp.for_merge();
     let (mut h, seq) = empty_project(format).map_err(refused)?;
     let mut report = Report::default();
     h.begin(LABEL).map_err(refused)?;

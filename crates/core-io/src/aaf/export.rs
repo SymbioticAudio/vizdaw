@@ -253,6 +253,10 @@ fn write_file(
 
 // ---------------------------------------------------------------- the report
 
+/// Left out: VCAs (by VCA); each track keeps its own fader.
+pub const VCAS: &str = "VCAs (each track keeps its own fader)";
+/// Left out: fader groups (by group).
+pub const GROUPS: &str = "Fader groups";
 /// Left out: muted regions (by track).
 pub const MUTED_REGIONS: &str = "Muted regions";
 /// Left out: track and strip mute and solo (by name).
@@ -1056,6 +1060,12 @@ fn left_out(
         && let Ok(st) = m.strip(m.master())
     {
         strip_lines(st, report);
+    }
+    for g in m.groups().values() {
+        report.add(ItemKind::LeftOut, GROUPS, Some(g.name.clone()));
+    }
+    for v in m.vcas().values() {
+        report.add(ItemKind::LeftOut, VCAS, Some(v.name.clone()));
     }
     add_n(
         report,

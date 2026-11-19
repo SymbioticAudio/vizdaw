@@ -5830,3 +5830,72 @@ fn a_drum_tracks_note_channel_and_program_theirs_changes_land() {
     assert_eq!(h2.undo_depth(), 0);
     assert_eq!(to_json(h2.doc()).unwrap(), once);
 }
+
+/// A merge makes no VCAs (preflight F17): theirs' VCA channel is left out
+/// as 6e always listed it ("VCA channels", a count), its volume curve is a
+/// part VizDAW does not hold, and the merged project has no VCA.
+#[test]
+fn merge_still_leaves_vcas_out() {
+    use core_io::dawproject::import::VCA;
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::command::GroupCmd;
+    use core_model::mixer::Swatch;
+    let (doc, seq) = fixture();
+    let t = trip(&doc, seq);
+    let with_vca = edited(&t, &t.base_doc, |h, i| {
+        let r = h
+            .execute(
+                &Command::Groups(GroupCmd::NewVca {
+                    name: "Kit".into(),
+                    colour: Swatch::Teal,
+                    members: vec![i.bass_strip],
+                }),
+                &ViewFilter::default(),
+            )
+            .expect("makes a VCA");
+        let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+            panic!("no VCA");
+        };
+        run(
+            h,
+            Command::Groups(GroupCmd::SetVcaLevel { vca, gain_db: -6.0 }),
+        );
+        run(
+            h,
+            Command::Event(EventCmd::Insert {
+                seq: i.seq,
+                lane: i.bass,
+                events: vec![EventSpec::new(
+                    Tick(Q),
+                    EventBody::Automation {
+                        target: AutomationTarget::VcaFader(vca),
+                        value: fader_norm(-6.0),
+                    },
+                )],
+            }),
+        );
+    });
+    let theirs = theirs_doc(&t, &with_vca);
+    assert!(theirs.doc.mixer().vcas().is_empty(), "no VCA is made");
+    let line = item(&theirs.report, ItemKind::LeftOut, VCA);
+    assert_eq!((line.count, line.details.len()), (1, 0));
+    assert!(
+        theirs
+            .report
+            .items
+            .iter()
+            .all(|i| !i.what.starts_with("VCA channels came in")),
+        "{:#?}",
+        theirs.report.items
+    );
+    let curve = item(
+        &theirs.report,
+        ItemKind::LeftOut,
+        core_io::dawproject::import::UNPLACED,
+    );
+    assert_eq!(curve.count, 1, "{:#?}", theirs.report.items);
+    // The merge itself changes nothing of ours' VCAs (it has none).
+    let p = plan_doc(&t, &with_vca, &t.base_doc);
+    let (h, _) = apply_on(&t.base_doc, &p);
+    assert!(h.doc().mixer().vcas().is_empty());
+}

@@ -1718,3 +1718,66 @@ fn external_audio_is_located_in_the_export_folder() {
     let abs = format!("file://{}/Audio/001%20keys.wav", folder.display()).replace(' ', "%20");
     assert_eq!(urls, [abs, "Audio/001%20keys.wav".to_string()]);
 }
+
+// ---------------------------------------------------------------- VCAs and groups
+
+/// VCAs and groups are left out, one line each naming it; each track is
+/// written with its own fader, as if there were no VCA or group.
+#[test]
+fn aaf_lists_vcas_and_groups() {
+    use core_io::aaf::export::{GROUPS, VCAS};
+    use core_model::command::GroupCmd;
+    use core_model::mixer::Swatch;
+    assert_eq!(VCAS, "VCAs (each track keeps its own fader)");
+    assert_eq!(GROUPS, "Fader groups");
+    let mut g = song(1);
+    g.region(0, 0, 48_000, 0.0, 0);
+    g.b.mixer(MixerCmd::SetGain {
+        strip: g.strip,
+        gain_db: -4.0,
+    })
+    .unwrap();
+    let plain = g.b.doc().clone();
+    let r =
+        g.b.run(Command::Groups(GroupCmd::NewVca {
+            name: "Kit".into(),
+            colour: Swatch::Red,
+            members: vec![g.strip],
+        }))
+        .unwrap();
+    let Some(core_model::ids::AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA");
+    };
+    g.b.run(Command::Groups(GroupCmd::SetVcaLevel {
+        vca,
+        gain_db: -10.0,
+    }))
+    .unwrap();
+    g.b.run(Command::Groups(GroupCmd::NewGroup {
+        name: "Drums".into(),
+        colour: Swatch::Blue,
+        members: vec![g.strip],
+    }))
+    .unwrap();
+    let doc = g.b.finish();
+    let o = opts(g.seq);
+    let (x, s) = round(&doc, &o);
+    for (what, name) in [(VCAS, "Kit"), (GROUPS, "Drums")] {
+        let i = x
+            .report
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::LeftOut && i.what == what)
+            .unwrap_or_else(|| panic!("no '{what}': {:#?}", x.report.items));
+        assert_eq!((i.count, i.details.as_slice()), (1, &[name.to_owned()][..]));
+    }
+    let (_, base) = round(&plain, &o);
+    let volume = |s: &Store| {
+        let (groups, _) = peel(s, sound_slots(s)[0].1);
+        let vol = list(s, groups[0], pid::OPERATION_GROUP_PARAMETERS)[0];
+        ratio(s, vol, pid::CONSTANT_VALUE_VALUE)
+    };
+    assert_eq!(volume(&s), volume(&base), "the member's own fader");
+    assert_ne!(volume(&s), (1, 1));
+    assert!(!x.report.items.iter().any(|i| i.what == OTHER_AUTOMATION));
+}

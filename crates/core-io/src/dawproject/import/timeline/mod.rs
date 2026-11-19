@@ -215,6 +215,8 @@ pub(super) enum AutoAt {
     Send(StripAt, usize),
     /// A plug-in parameter.
     Param(StripAt, SlotAt, ParamId),
+    /// A VCA's fader, by plan VCA.
+    Vca(usize),
 }
 
 /// An audio region before its media item exists.
