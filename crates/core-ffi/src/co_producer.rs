@@ -613,7 +613,8 @@ fn names_text(names: &[String]) -> (String, bool) {
 }
 
 /// Plan 8e Task 6c: each Co-Producer bus (in `before`) that the step from
-/// `before` to `after` removes, mutes, sets to −∞ or re-routes, or whose automation
+/// `before` to `after` removes, mutes, sets to −∞ or re-routes, as heard
+/// (its own mute and fader with its VCAs' mutes and levels), or whose automation
 /// in `cmds` mutes it (a point of 1) or sets its fader to −∞, while a strip
 /// not Co-Producer's feeds it, directly or through other buses. Each is
 /// its item's thing ("Strip <name>") and the line its item adds. Unmuting,
@@ -625,6 +626,7 @@ fn cut_lines(
 ) -> Vec<(String, String)> {
     use core_model::automation::{AutomationTarget, fader_db, switch_on};
     use core_model::command::Command;
+    use core_model::groups::{heard_db, vca_muted, vca_offset_db};
     use core_model::mixer::{GAIN_FLOOR_DB, Output, StripKind};
     let automated = |bus: core_model::ids::StripId| {
         cmds.iter().any(|c| match c {
@@ -649,12 +651,21 @@ fn cut_lines(
             continue;
         }
         // Fix round 1: a removed bus silences what reaches it, as a mute
-        // does.
+        // does. Groups-vcas-transport Task 7 fix round 1: what is heard
+        // decides, so a VCA's mute, or its level taking the bus to −∞
+        // (by `mixer.set_vca`, or by assigning the bus to such a VCA),
+        // silences it as its own mute or fader would.
+        let muted = |d: &core_model::document::Document, s: &core_model::mixer::Strip| {
+            s.mute || vca_muted(d.mixer(), s.id)
+        };
+        let heard = |d: &core_model::document::Document, s: &core_model::mixer::Strip| {
+            heard_db(s.gain_db, vca_offset_db(d.mixer(), s.id))
+        };
         let cut = match after.mixer().strip(*id) {
             Err(_) => Cut::Silent,
             Ok(a)
-                if (!b.mute && a.mute)
-                    || (b.gain_db > GAIN_FLOOR_DB && a.gain_db <= GAIN_FLOOR_DB)
+                if (!muted(before, b) && muted(after, a))
+                    || (heard(before, b) > GAIN_FLOOR_DB && heard(after, a) <= GAIN_FLOOR_DB)
                     || automated(*id) =>
             {
                 Cut::Silent
