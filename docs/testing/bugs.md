@@ -34,3 +34,24 @@ Claude tidies each entry into the shape below when it triages them.
 
 # Session: (date, build)
 
+
+# Session: 2026-11-19, build dd36914d (26.0.0), README checks 439–456 run by Claude through the control channel
+
+## B-001 A VCA's automation track exports to DAWproject as a synth track
+- Build: dd36914d
+- Where: File › Export DAWproject, a project with a VCA that has automation
+- Steps: 1. Make a VCA from two strips. 2. Set it to Touch, play and move
+  its level (this makes the track "VCA VCA 1 Fader"). 3. Export a
+  DAWproject. 4. Import it as a new project.
+- Expected: the VCA's moves go out as the VCA channel's automation; no
+  extra track.
+- Actual: the export counts the VCA's track as a sixth track and reports
+  "Track … plays the built-in synth"; on import, "VCA VCA 1 Fader" comes
+  back as an instrument track on Built-in Synth with no events. The VCA
+  itself comes back with level, mute and solo (check 447 holds).
+- Status: open
+- Notes: The report said "7 automation points" were written, so the moves
+  may also reach the VCA channel; not yet traced. The track name repeats
+  "VCA" ("VCA VCA 1 Fader", `StripLane.swift:172`) when the VCA keeps its
+  default name; the strip's accessibility labels do the same ("Fader of VCA
+  VCA 1").
