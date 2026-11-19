@@ -3210,11 +3210,15 @@ Plan 8f, Co-Producer time tracking and coaching:
 445. Automate the VCA in Touch, then play it back in Read: its fader follows
      the recorded move.
 446. Delete a member's track, then undo: the membership returns.
-447. Export a DAWproject with a VCA and a group and read the report lines;
-     import it back.
+447. Export a DAWproject with a VCA and a group: the report lists "VCA
+     assignments" and "Fader groups" as left out. Import it back: the VCA comes
+     back with its level, mute and solo but no members, and the report says
+     so.
 448. Customize the transport bar: drag items in, out and along; add a
-     Command button for Mixer and click it; Reset to Default.
-449. Add a Command button for Bounce…: clicking it opens the Bounce sheet.
+     Command button for Mixer and click it: a mixer window opens. Reset to
+     Default: the bar returns to the standard layout.
+449. Add a Command button for Bounce…: clicking it opens the Bounce sheet,
+     and nothing is bounced until you confirm there.
 450. Narrow the mixer window to its smallest: the bar stays one row, and »
      lists the rest.
 451. Quit and reopen: the bar is the same in both windows.
