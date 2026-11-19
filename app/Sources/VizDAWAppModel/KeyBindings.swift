@@ -270,8 +270,15 @@ extension KeyDispatch {
             RegionCommands.runMenu(id, m, editor: host.externalEditor)
             return .handled
         }
-        return after(ControlCommands.run(id, args: [], doc: doc, store: store, host: host), doc: doc?.model)
+        let args = selectionFilled.contains(id) ? DocumentModel.stripsArg(doc?.model.selectedMemberStrips() ?? []) : []
+        return after(ControlCommands.run(id, args: args, doc: doc, store: store, host: host), doc: doc?.model)
     }
+
+    /// The commands a key (or a command button) runs with the selected
+    /// strips as `strips` (groups-vcas-transport Ruling 11): the channel
+    /// and Co-Producer never act on the selection, so only the key path
+    /// fills it.
+    public static let selectionFilled: Set<String> = ["mixer.new_group", "mixer.new_vca"]
 }
 
 /// Where a key press VizDAW did not use goes next (controller rulings F1,

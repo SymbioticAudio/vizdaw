@@ -50,6 +50,9 @@ public enum StripLayout {
     public static let toggleRowHeight: CGFloat = 24
     /// The automation mode menu, at the 24-point hit minimum (review M2).
     public static let modeMenuHeight: CGFloat = 24
+    /// The VCA offset row under the level box ("VCA −3.0" and the "VCA"
+    /// mark; groups-vcas-transport Task 9): only while the mixer has a VCA.
+    public static let vcaOffsetHeight: CGFloat = 16
     /// The gap between the strip's sections.
     public static let gap: CGFloat = 6
     /// The strip's padding above and below.
@@ -139,7 +142,7 @@ public enum StripGrid {
     /// What a grid child is: a strip's panel, the divider, a row above the
     /// fader, or one of the parts below it.
     public enum Part: Equatable, Sendable {
-        case panel, divider, fader, level, buttons, mode
+        case panel, divider, fader, level, vcaOffset, buttons, mode
         case row(StripRowKind)
     }
 
@@ -180,13 +183,15 @@ public enum StripGrid {
         let rows = rowHeights(Array(measured.values))
         let top = tops(rows)
         let up = upper(rows)
-        let throwLength = StripLayout.split(height: height, upper: up).throwLength
-        let total = StripLayout.contentHeight(upper: up, throwLength: throwLength)
+        // The VCA offset row, under the level box, when any strip has it.
+        let offset = cells.contains { $0.part == .vcaOffset } ? StripLayout.vcaOffsetHeight : 0
+        let throwLength = StripLayout.split(height: height, upper: up + offset).throwLength
+        let total = StripLayout.contentHeight(upper: up + offset, throwLength: throwLength)
         let inner = StripLayout.width - 2 * StripLayout.sidePadding
         let fader = faderTop(rows)
         let faderHeight = throwLength + StripLayout.faderCap
         let level = fader + faderHeight + StripLayout.gap
-        let buttons = level + StripLayout.levelBoxHeight + StripLayout.gap
+        let buttons = level + StripLayout.levelBoxHeight + offset + StripLayout.gap
         let mode = buttons + StripLayout.toggleRowHeight + StripLayout.gap
         let frames = cells.map { c -> CGRect in
             let left = x(c.column, dividerBefore: dividerBefore)
@@ -199,6 +204,8 @@ public enum StripGrid {
             case .row(let k): return CGRect(x: cx, y: StripLayout.padding + (top[k] ?? 0), width: inner, height: rows[k] ?? 0)
             case .fader: return CGRect(x: cx, y: fader, width: inner, height: faderHeight)
             case .level: return CGRect(x: cx, y: level, width: inner, height: StripLayout.levelBoxHeight)
+            case .vcaOffset:
+                return CGRect(x: cx, y: level + StripLayout.levelBoxHeight, width: inner, height: offset)
             case .buttons: return CGRect(x: cx, y: buttons, width: inner, height: StripLayout.toggleRowHeight)
             case .mode: return CGRect(x: cx, y: mode, width: inner, height: StripLayout.modeMenuHeight)
             }

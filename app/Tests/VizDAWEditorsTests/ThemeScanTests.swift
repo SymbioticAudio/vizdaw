@@ -425,7 +425,7 @@ enum SourceScan {
         #expect(Theme.console.style.legendFamily.rawValue == "technical")
         for t in Theme.all where t.id != "console" { #expect(t.style.legendFamily.rawValue == "system", "\(t.id)") }
         var legends = 0
-        for file in ["VizDAW/ChannelStrip.swift", "VizDAW/MidiStripCells.swift"] {
+        for file in ["VizDAW/ChannelStrip.swift", "VizDAW/MidiStripCells.swift", "VizDAW/VcaStrip.swift"] {
             let url = SourceScan.sourcesRoot.appendingPathComponent(file)
             let lines = try String(contentsOf: url, encoding: .utf8).components(separatedBy: "\n")
             for (i, line) in lines.enumerated() where line.contains("theme.stripLabel(") {
@@ -435,7 +435,8 @@ enum SourceScan {
                 #expect(font.contains("theme.stripLabelFont("), "\(file):\(i + 1): \(line)")
             }
         }
-        #expect(legends == 5)
+        // Five, then the group tag and the VCA strip's name and kind (Task 9).
+        #expect(legends == 8)
         let strip = try String(
             contentsOf: SourceScan.sourcesRoot.appendingPathComponent("VizDAW/ChannelStrip.swift"), encoding: .utf8)
         #expect(strip.contains("themedLabelFont(self, size: type.size"))

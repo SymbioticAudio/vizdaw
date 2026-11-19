@@ -340,6 +340,9 @@ struct AppCommands: Commands {
             commandItem("transport.arm_previous", TransportCommands.self)
             commandItem("transport.arm_next", TransportCommands.self)
         }
+        // At most 10 items per builder (older SDKs): the last menus go in
+        // one Group.
+        Group {
         CommandMenu("Step") {
             commandToggle(StepCommands.entry, StepCommands.self)
             Divider()
@@ -360,6 +363,41 @@ struct AppCommands: Commands {
             Divider()
             commandToggle(AutomationCommands.suspend, AutomationCommands.self)
         }
+        CommandMenu("Mixer") { mixerMenu }
+        }
+    }
+
+    /// The Mixer menu (groups-vcas-transport Ruling 12): Group, Ungroup,
+    /// New VCA, Assign to VCA ▸ (each VCA, then New VCA) and Remove from
+    /// VCA ▸, on the selected strips; each is off where its command would
+    /// be refused. None has a default key.
+    @ViewBuilder private var mixerMenu: some View {
+        let mixer = doc?.mixer
+        let strips = mixer?.selectedMembers ?? []
+        Button("Group") { mixer?.groupSelection() }
+            .disabled(!(mixer?.canGroupSelection ?? false))
+        Button("Ungroup") { mixer?.ungroupSelection() }
+            .disabled(mixer?.selectionGroup == nil)
+        Divider()
+        Button("New VCA") { mixer?.newVca(fromSelection: true) }
+            .disabled(mixer == nil)
+        Menu("Assign to VCA") {
+            ForEach(mixer?.vcas ?? [], id: \.id) { v in
+                let add = mixer?.assignable(strips, to: v) ?? []
+                Button(v.name) { mixer?.assign(add, toVca: v.id, true) }
+                    .disabled(add.isEmpty)
+            }
+            if !(mixer?.vcas ?? []).isEmpty { Divider() }
+            Button("New VCA") { mixer?.newVca(fromSelection: true) }
+        }
+        .disabled(strips.isEmpty)
+        let holding = mixer?.vcasHolding(strips) ?? []
+        Menu("Remove from VCA") {
+            ForEach(holding, id: \.id) { v in
+                Button(v.name) { mixer?.assign(strips.filter(v.members.contains), toVca: v.id, false) }
+            }
+        }
+        .disabled(holding.isEmpty)
     }
 
     /// A menu item for a command of `kind` (plan 4f): its title and key

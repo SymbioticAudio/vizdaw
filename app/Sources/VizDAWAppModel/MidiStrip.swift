@@ -75,17 +75,20 @@ public enum MidiStripMath {
     }
 }
 
-/// One column of the mixer: an audio strip, or an external destination's
-/// MIDI strip.
+/// One column of the mixer: an audio strip, an external destination's
+/// MIDI strip, or a VCA (groups-vcas-transport Task 9).
 public enum MixerColumn: Identifiable, Equatable {
     case audio(StripRow)
     case midi(DestRow)
+    case vca(VcaRow)
 
-    /// "s" + strip ID or "d" + destination ID, so the two never collide.
+    /// "s" + strip ID, "d" + destination ID or "v" + VCA ID, so they never
+    /// collide.
     public var id: String {
         switch self {
         case .audio(let s): "s\(s.id)"
         case .midi(let d): "d\(d.id)"
+        case .vca(let v): "v\(v.id)"
         }
     }
 }
@@ -98,12 +101,14 @@ extension MixerModel {
     /// in the document's order, with every external destination's MIDI
     /// strip inserted before the first bus (at the end when there is
     /// none), so an interleaved order such as [Audio 1, Bus 1, Audio 2]
-    /// keeps its places. Master is not one, as with `strips`.
+    /// keeps its places. The VCAs follow, after the buses (spec §2): the
+    /// master's divider comes after them. Master is not one, as with
+    /// `strips`.
     public var columns: [MixerColumn] {
         var out = strips.map(MixerColumn.audio)
         let at = strips.firstIndex { $0.kind == .bus } ?? out.count
         out.insert(contentsOf: destinations.filter(\.external).map(MixerColumn.midi), at: at)
-        return out
+        return out + vcas.map(MixerColumn.vca)
     }
 
     /// Whether `dest`'s strip shows as selected in the mixer (Task 6

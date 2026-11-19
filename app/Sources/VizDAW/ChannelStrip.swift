@@ -37,16 +37,18 @@ struct ChannelStrip: View {
 
 /// One column of the strips' grid: an audio strip, the mixer's MIDI strip
 /// of a destination (its name only, Ruling 8), or the left pane's MIDI
-/// strip of a track (a destination menu; `dest` nil for none).
+/// strip of a track (a destination menu; `dest` nil for none), or a VCA.
 enum StripColumn: Identifiable {
     case audio(StripRow)
     case midi(DestRow)
     case track(LaneRow, dest: DestRow?)
+    case vca(VcaRow)
 
     init(_ c: MixerColumn) {
         switch c {
         case .audio(let s): self = .audio(s)
         case .midi(let d): self = .midi(d)
+        case .vca(let v): self = .vca(v)
         }
     }
 
@@ -58,6 +60,7 @@ enum StripColumn: Identifiable {
         // The destination too, so a change of it is a new view and the
         // old one's drag is cancelled (final review m4).
         case .track(let l, let d): "t\(l.id)-\(d.map { "\($0.id)" } ?? "none")"
+        case .vca(let v): "v\(v.id)"
         }
     }
 }
@@ -103,6 +106,8 @@ struct ChannelStrips: View {
                         model: model, dest: d, lane: model.midiLane(for: d.id, in: placement), menu: false, column: i)
                 case .track(let lane, let d):
                     MidiStripCells(model: model, dest: d, lane: lane, menu: true, column: i)
+                case .vca(let v):
+                    VcaStripCells(model: model, vca: v, column: i)
                 }
             }
             ForEach(Array(columns.enumerated()), id: \.element.id) { i, c in
@@ -121,7 +126,7 @@ extension ChannelStrips {
         switch c {
         case .audio(let s): model.isSelected(s.id)
         case .midi(let d): model.isMidiSelected(d.id)
-        case .track: false
+        case .track, .vca: false
         }
     }
 }
@@ -184,6 +189,11 @@ private struct StripCells: View {
         }
         StripFaderSection(model: model, strip: strip).cell(column, .fader)
         StripLevelBox(model: model, strip: strip).cell(column, .level)
+        if !model.vcas.isEmpty {
+            // The VCA offset row (Task 9), in every strip while the mixer
+            // has a VCA, so the rows below line up.
+            StripVcaOffset(model: model, strip: strip).cell(column, .vcaOffset)
+        }
         StripButtons(model: model, strip: strip).cell(column, .buttons)
         StripModeMenu(model: model, strip: strip).cell(column, .mode)
     }
@@ -324,6 +334,9 @@ private struct StripHeader: View {
                 .font(theme.stripLabelFont(theme.type.caption))
                 .foregroundStyle(theme.text.secondary.color)
                 .lineLimit(1)
+            if let g = model.group(strip) {
+                StripGroupTag(model: model, strip: strip, group: g)
+            }
             let held = model.heldSlots(of: strip)
             if !held.isEmpty {
                 Button("Load All") { model.load(held) }
@@ -381,6 +394,10 @@ private struct StripHeader: View {
             Button("Remove Bus") { model.removeBus(strip.id) }
         }
         StripColourMenu(model: model, strip: strip)
+        if strip.kind != .master {
+            Divider()
+            StripGroupItems(model: model, strip: strip)
+        }
         Divider()
         Button("MIDI Learn Maps…") { model.document.learn.showMaps(in: placement) }
         if !strip.freeOutputs.isEmpty {
@@ -390,6 +407,65 @@ private struct StripHeader: View {
                 }
             }
         }
+    }
+}
+
+/// A grouped strip's tag (Task 9, spec §1): the group's colour and name;
+/// its menu holds the group's Mute and Solo links, Remove from Group and
+/// Ungroup.
+private struct StripGroupTag: View {
+    let model: MixerModel
+    let strip: StripRow
+    let group: GroupRow
+    @Environment(\.symbioticTheme) private var theme
+
+    var body: some View {
+        StripMenu(
+            text: theme.stripLabel(group.name), dot: StripPalette.swatch(group.colour, theme).color,
+            font: theme.stripLabelFont(theme.type.caption)
+        ) {
+            Toggle(
+                "Link Mutes",
+                isOn: Binding(get: { group.linkMute }, set: { model.setGroupLinks(group.id, mute: $0) }))
+            Toggle(
+                "Link Solos",
+                isOn: Binding(get: { group.linkSolo }, set: { model.setGroupLinks(group.id, solo: $0) }))
+            Divider()
+            Button("Remove from Group") { model.removeFromGroup(group.id, [strip.id]) }
+            Button("Ungroup") { model.deleteGroup(group.id) }
+        }
+        .help("Group \(group.name)")
+        .accessibilityLabel(VcaStripLabels.group(group.name))
+    }
+}
+
+/// The strip menu's Group, Assign to VCA ▸ (each VCA, then New VCA) and
+/// Remove from VCA ▸ (Task 9): on the selection when it holds the strip,
+/// else on the strip; each item is off where the core would refuse it.
+private struct StripGroupItems: View {
+    let model: MixerModel
+    let strip: StripRow
+
+    var body: some View {
+        let strips = model.menuStrips(strip)
+        Button("Group") { model.newGroup(strips) }
+            .disabled(!model.canGroup(strips))
+        Menu("Assign to VCA") {
+            ForEach(model.vcas, id: \.id) { v in
+                let add = model.assignable(strips, to: v)
+                Button(v.name) { model.assign(add, toVca: v.id, true) }
+                    .disabled(add.isEmpty)
+            }
+            if !model.vcas.isEmpty { Divider() }
+            Button("New VCA") { model.newVca(strips) }
+        }
+        let holding = model.vcasHolding(strips)
+        Menu("Remove from VCA") {
+            ForEach(holding, id: \.id) { v in
+                Button(v.name) { model.assign(strips.filter(v.members.contains), toVca: v.id, false) }
+            }
+        }
+        .disabled(holding.isEmpty)
     }
 }
 
@@ -844,7 +920,8 @@ struct StripFaderSection: View {
                     relief: Relief(theme: theme),
                     marks: StripLayout.faderMarks.map { FaderMark(position: $0.position, label: $0.label) },
                     accessibilityLabel: "Fader of \(strip.name)", accessibilityValue: StripEntry.levelText(db),
-                    onBegin: { model.touch(target) },
+                    // ⌥ at mouse-down moves this fader alone (spec §1).
+                    onBegin: { model.touch(target, alone: NSEvent.modifierFlags.contains(.option)) },
                     onChange: { model.move(target, to: AutomationLaw.faderNorm(MixerMath.faderDb($0))) },
                     onEnd: { model.release(target) },
                     onReset: { model.click(target, AutomationLaw.faderNorm(0)) })
