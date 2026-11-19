@@ -84,10 +84,12 @@ Windows.
 1. Download `VizDAW-<version>.zip` (for this beta, `VizDAW-26.0.0.zip`)
    from the project's GitHub release and unzip it.
 2. Move VizDAW to your Applications folder and open it once.
-3. macOS says it cannot verify the developer, because 26.0.0 is not
-   signed with a Developer ID yet. Open **System Settings › Privacy &
-   Security**, choose **Open Anyway** for VizDAW, and confirm. You only
-   need to do this once.
+3. macOS won't open it the first time, because 26.0.0 is not signed
+   with a Developer ID yet: it says it can't check VizDAW for malicious
+   software. Choose **Done**, then open **System Settings › Privacy &
+   Security**, scroll down, and choose **Open Anyway** for VizDAW. Confirm,
+   and enter your Mac's password if asked. **Open Anyway** shows only after
+   that first try, and you only need to do this once.
 
 Co-Producer's MCP server, `vizdaw-mcp`, lives inside the app, at
 `VizDAW.app/Contents/MacOS/vizdaw-mcp`.
