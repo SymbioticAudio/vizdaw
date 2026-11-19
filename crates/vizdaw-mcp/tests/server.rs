@@ -4085,3 +4085,57 @@ fn modern_unknown_resource_is_invalid_params() {
     );
     m.ping_answers();
 }
+
+/// groups-vcas-transport Task 7 (Ruling 10): `mixer_new_group` and
+/// `mixer_new_vca` make only empty ones, so their tools offer no
+/// `strips`; a call that gives one reaches no app. The `change` tool says
+/// where the rest goes.
+#[test]
+fn new_group_and_vca_tools_have_no_strips() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    for name in ["mixer_new_group", "mixer_new_vca"] {
+        let tool = tool_named(&mut m, name);
+        assert!(!tool.is_null(), "{name} is a tool");
+        let props = &tool["inputSchema"]["properties"];
+        assert!(props.get("strips").is_none(), "{name}: {props}");
+        assert!(props.get("name").is_some(), "{name}: {props}");
+        assert!(props.get("colour").is_some(), "{name}: {props}");
+        assert_eq!(tool["inputSchema"]["required"], json!([]), "{name}");
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name}");
+    }
+    // Every other group and VCA command goes through `change`.
+    let tools = m.result("tools/list", json!({}));
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for id in core_control::registry::GROUP_IDS {
+        let n = id.replace('.', "_");
+        let tool = ["mixer.new_group", "mixer.new_vca"].contains(id);
+        assert_eq!(names.contains(&n.as_str()), tool, "{n}");
+    }
+    let change = tool_named(&mut m, "change")["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        change.contains(
+            "Fader groups and VCAs: make an empty one with mixer_new_group or mixer_new_vca, then add strips, move, mute, solo, rename, recolour, relink or delete it here; a group or VCA that holds any of the composer's strips asks first."
+        ),
+        "{change}"
+    );
+    for (tool, args) in [
+        ("mixer_new_group", json!({"strips": "2,3"})),
+        ("mixer_new_vca", json!({"strips": "2"})),
+        ("mixer_new_vca", json!({"name": "Kit", "strips": "2"})),
+    ] {
+        let r = m.call(tool, args.clone());
+        assert!(is_error(&r), "{tool} {args}: {r}");
+    }
+    m.ping_answers();
+    assert!(app.seen().is_empty(), "no socket call: {:?}", app.seen());
+}

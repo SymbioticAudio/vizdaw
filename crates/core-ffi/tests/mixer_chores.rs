@@ -2015,3 +2015,518 @@ mod task4 {
         t.s.close().unwrap();
     }
 }
+
+// ---- groups-vcas-transport Task 7: groups and VCAs, where the members
+// decide who says yes (Ruling 10). No plug-in loads: the composer's
+// strips are audio tracks' with no EQ, and Co-Producer's is a bus. ----
+
+mod groups_vcas {
+    use super::serial;
+    use core_model::automation::AutomationTarget;
+    use core_model::command::{AutomationWrite, Command};
+    use core_model::document::Document;
+    use core_model::ids::{SeqId, VcaId};
+    use core_model::time::Tick;
+    use std::sync::Arc;
+    use vizdaw_ffi::co_producer::{CoProducerApproval, NEEDS_APPROVAL, PlannedRow, PreviewRow};
+    use vizdaw_ffi::control::{ControlArg, ControlValue};
+    use vizdaw_ffi::{Session, StripKindRow, StripRow, TrackKindRow, VizError};
+
+    const STAMP: &str = "2026-11-18 10-00";
+    const CHANGED: &str = "The song changed since the preview; preview again.";
+    const DRUMS: &str = "Strip Drums (Co-Producer)";
+
+    /// [`serial`], with no EQ on new channels, so nothing loads.
+    fn quiet() -> std::sync::MutexGuard<'static, ()> {
+        let g = serial();
+        vizdaw_ffi::set_new_channel_eq(false);
+        g
+    }
+
+    fn id(name: &str, value: u64) -> ControlArg {
+        ControlArg {
+            name: name.into(),
+            value: ControlValue::Int {
+                value: value as i64,
+            },
+        }
+    }
+
+    fn text(name: &str, value: &str) -> ControlArg {
+        ControlArg {
+            name: name.into(),
+            value: ControlValue::Text {
+                value: value.into(),
+            },
+        }
+    }
+
+    fn flag(name: &str, value: bool) -> ControlArg {
+        ControlArg {
+            name: name.into(),
+            value: ControlValue::Flag { value },
+        }
+    }
+
+    fn planned(id: &str, args: Vec<ControlArg>) -> PlannedRow {
+        PlannedRow {
+            id: id.into(),
+            args,
+        }
+    }
+
+    fn doc(s: &Session) -> Document {
+        core_model::file::from_json(&s.debug_document_json()).unwrap()
+    }
+
+    fn strips(s: &Session) -> Vec<StripRow> {
+        s.mixer().unwrap().strips
+    }
+
+    fn strip_id(s: &Session, name: &str) -> u64 {
+        strips(s)
+            .into_iter()
+            .find(|x| x.name == name)
+            .unwrap_or_else(|| panic!("no strip {name}"))
+            .id
+    }
+
+    fn group_id(s: &Session, name: &str) -> u64 {
+        s.mixer()
+            .unwrap()
+            .groups
+            .into_iter()
+            .find(|g| g.name == name)
+            .unwrap_or_else(|| panic!("no group {name}"))
+            .id
+    }
+
+    fn vca_id(s: &Session, name: &str) -> u64 {
+        s.mixer()
+            .unwrap()
+            .vcas
+            .into_iter()
+            .find(|v| v.name == name)
+            .unwrap_or_else(|| panic!("no VCA {name}"))
+            .id
+    }
+
+    fn items(p: &PreviewRow) -> Vec<(String, String, bool)> {
+        p.items
+            .iter()
+            .map(|i| (i.thing.clone(), i.change.clone(), i.composers_work))
+            .collect()
+    }
+
+    fn it(thing: &str, change: &str, theirs: bool) -> (String, String, bool) {
+        (thing.into(), change.into(), theirs)
+    }
+
+    /// The composer's audio tracks Kick and Snare (each on its own strip,
+    /// to master), then Co-Producer's buses Drums and Verb, made in a
+    /// request of its own; saved.
+    struct Song {
+        s: Arc<Session>,
+        _dir: tempfile::TempDir,
+        seq: u64,
+        kick: u64,
+        snare: u64,
+        drums: u64,
+        verb: u64,
+        master: u64,
+    }
+
+    fn song() -> Song {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Session::new_empty().unwrap();
+        let seq = s.snapshot().unwrap().sequences[0].id;
+        let mut ids = Vec::new();
+        for (i, name) in ["Kick", "Snare"].iter().enumerate() {
+            s.new_track(seq, TrackKindRow::Audio, None).unwrap();
+            let id = strip_id(&s, &format!("Audio {}", i + 1));
+            s.rename_strip(id, (*name).into()).unwrap();
+            ids.push(id);
+        }
+        s.save_as(dir.path().join("G.vizdaw").display().to_string())
+            .unwrap();
+        s.co_producer_begin("add a drum bus".into()).unwrap();
+        s.co_producer_enter(STAMP.into()).unwrap();
+        s.add_bus("Drums".into()).unwrap();
+        s.add_bus("Verb".into()).unwrap();
+        s.co_producer_leave();
+        s.co_producer_end().unwrap();
+        let master = strips(&s)
+            .into_iter()
+            .find(|x| x.kind == StripKindRow::Master)
+            .unwrap()
+            .id;
+        Song {
+            seq,
+            kick: ids[0],
+            snare: ids[1],
+            drums: strip_id(&s, "Drums (Co-Producer)"),
+            verb: strip_id(&s, "Verb (Co-Producer)"),
+            master,
+            s,
+            _dir: dir,
+        }
+    }
+
+    /// The take with `approval`, then each command through `run_mixer`,
+    /// as the app's apply runs them.
+    fn take_with(
+        s: &Session,
+        token: String,
+        plan: &[PlannedRow],
+        approval: CoProducerApproval,
+    ) -> Result<(), VizError> {
+        s.co_producer_enter(STAMP.into()).unwrap();
+        let r = s
+            .co_producer_take(token, plan.to_vec(), approval)
+            .and_then(|()| {
+                for p in plan {
+                    s.run_mixer(p.id.clone(), p.args.clone())?;
+                }
+                Ok(())
+            });
+        s.co_producer_leave();
+        r
+    }
+
+    /// Previews `plan`, takes it with the sheet's Allow and runs it.
+    fn apply(s: &Session, plan: Vec<PlannedRow>) {
+        let p = s.co_producer_preview(plan.clone()).unwrap();
+        take_with(s, p.token, &plan, CoProducerApproval::Sheet).unwrap();
+    }
+
+    fn set_vca(vca: u64, more: Vec<ControlArg>) -> PlannedRow {
+        let mut args = vec![id("vca", vca)];
+        args.extend(more);
+        planned("mixer.set_vca", args)
+    }
+
+    /// The composer's own group or VCA, made by hand outside any request.
+    fn by_hand(s: &Session, which: &str, members: &[u64], name: &str) {
+        let list: Vec<String> = members.iter().map(u64::to_string).collect();
+        s.run_mixer(
+            which.into(),
+            vec![text("strips", &list.join(",")), text("name", name)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_members_decide_who_says_yes() {
+        let _g = quiet();
+        let t = song();
+        let s = &t.s;
+        by_hand(s, "mixer.new_vca", &[t.drums], "Own");
+        by_hand(s, "mixer.new_vca", &[t.kick], "Kit");
+        by_hand(s, "mixer.new_group", &[t.drums, t.kick], "Both");
+        by_hand(s, "mixer.new_group", &[t.verb], "Mine");
+        let (own, kit) = (vca_id(s, "Own"), vca_id(s, "Kit"));
+        let (both, mine) = (group_id(s, "Both"), group_id(s, "Mine"));
+        s.co_producer_begin("mix the drums".into()).unwrap();
+
+        // Free: a VCA of Co-Producer's own bus only.
+        let plan = vec![set_vca(own, vec![text("gain_db", "-3")])];
+        let p = s.co_producer_preview(plan.clone()).unwrap();
+        assert!(!p.needs_yes, "{p:?}");
+        assert_eq!(
+            items(&p),
+            vec![
+                it(DRUMS, "heard 0.0 dB → −3.0 dB", false),
+                it("VCA Own", "level 0.0 dB → −3.0 dB", false),
+            ]
+        );
+        // It applies with no approval at all (8c Ruling 8).
+        take_with(s, p.token, &plan, CoProducerApproval::None).unwrap();
+        assert_eq!(s.mixer().unwrap().vcas[0].gain_db, -3.0);
+
+        // Asks: a VCA holding Kick.
+        let plan = vec![set_vca(kit, vec![text("gain_db", "-3")])];
+        let p = s.co_producer_preview(plan.clone()).unwrap();
+        assert!(p.needs_yes, "{p:?}");
+        assert_eq!(
+            items(&p),
+            vec![
+                it("Strip Kick", "heard 0.0 dB → −3.0 dB", true),
+                it("VCA Kit", "level 0.0 dB → −3.0 dB", true),
+            ]
+        );
+        let e = take_with(s, p.token, &plan, CoProducerApproval::None).unwrap_err();
+        assert_eq!(e.to_string(), NEEDS_APPROVAL);
+
+        // Asks: Co-Producer's bus moved in a group with Kick moves Kick.
+        let p = s
+            .co_producer_preview(vec![planned(
+                "mixer.set_strip",
+                vec![id("strip", t.drums), text("gain_db", "-6")],
+            )])
+            .unwrap();
+        assert!(p.needs_yes, "{p:?}");
+        assert!(
+            items(&p).contains(&it("Strip Kick", "volume 0.0 dB → −6.0 dB", true)),
+            "{p:?}"
+        );
+        assert!(
+            items(&p).contains(&it(DRUMS, "volume 0.0 dB → −6.0 dB", false)),
+            "{p:?}"
+        );
+        // Alone, it moves only Co-Producer's bus: free.
+        let p = s
+            .co_producer_preview(vec![planned(
+                "mixer.set_strip",
+                vec![
+                    id("strip", t.drums),
+                    text("gain_db", "-6"),
+                    flag("alone", true),
+                ],
+            )])
+            .unwrap();
+        assert!(!p.needs_yes, "{p:?}");
+
+        // Asks: links and a rename of a group with Kick; assigning Kick.
+        for (plan, item) in [
+            (
+                planned(
+                    "mixer.set_group_links",
+                    vec![id("group", both), flag("mute", false)],
+                ),
+                it("Group Both", "mute link off", true),
+            ),
+            (
+                planned(
+                    "mixer.rename_group",
+                    vec![id("group", both), text("name", "Kit")],
+                ),
+                it("Group Both", "renamed Both → Kit", true),
+            ),
+            (
+                planned(
+                    "mixer.assign_vca",
+                    vec![id("vca", own), text("strips", &t.kick.to_string())],
+                ),
+                it("VCA Own", "Kick assigned", true),
+            ),
+            (
+                planned(
+                    "mixer.add_to_group",
+                    vec![id("group", mine), text("strips", &t.snare.to_string())],
+                ),
+                it("Group Mine", "Snare added", true),
+            ),
+            (
+                planned(
+                    "mixer.new_group",
+                    vec![text("strips", &t.snare.to_string())],
+                ),
+                it("Group Group 3", "added, Snare added", true),
+            ),
+        ] {
+            let p = s.co_producer_preview(vec![plan.clone()]).unwrap();
+            assert!(p.needs_yes, "{}: {p:?}", plan.id);
+            assert!(items(&p).contains(&item), "{}: {p:?}", plan.id);
+        }
+        // Free: the same on Co-Producer's own group and VCA.
+        for plan in [
+            planned(
+                "mixer.set_group_links",
+                vec![id("group", mine), flag("solo", false)],
+            ),
+            planned(
+                "mixer.rename_group",
+                vec![id("group", mine), text("name", "Ours")],
+            ),
+            planned("mixer.new_vca", vec![text("strips", &t.drums.to_string())]),
+            set_vca(own, vec![flag("mute", true)]),
+        ] {
+            let p = s.co_producer_preview(vec![plan.clone()]).unwrap();
+            assert!(!p.needs_yes, "{}: {p:?}", plan.id);
+        }
+        // A VCA solo asks, as every solo does (8d), even on its own VCA.
+        let p = s
+            .co_producer_preview(vec![set_vca(own, vec![flag("solo", true)])])
+            .unwrap();
+        assert!(p.needs_yes, "{p:?}");
+        assert_eq!(items(&p), vec![it("VCA Own", "soloed", true)]);
+
+        // Asks: deleting Kit, once at −3 dB, gives Kick back its level.
+        apply(s, vec![set_vca(kit, vec![text("gain_db", "-3")])]);
+        let p = s
+            .co_producer_preview(vec![planned("mixer.delete_vca", vec![id("vca", kit)])])
+            .unwrap();
+        assert!(p.needs_yes, "{p:?}");
+        assert_eq!(
+            items(&p),
+            vec![
+                it("Strip Kick", "heard −3.0 dB → 0.0 dB", true),
+                it("VCA Kit", "deleted", true),
+            ]
+        );
+        s.co_producer_end().unwrap();
+        s.close().unwrap();
+    }
+
+    /// Carry (b): deleting a VCA that holds a composer's strip lists its
+    /// automation, which stops playing, and asks.
+    #[test]
+    fn deleting_a_vca_lists_its_automation() {
+        let _g = quiet();
+        let t = song();
+        by_hand(&t.s, "mixer.new_vca", &[t.kick], "Kit");
+        let kit = vca_id(&t.s, "Kit");
+        let path = t._dir.path().join("Written.vizdaw");
+        let mut d = doc(&t.s);
+        let bar = 61_440;
+        d = core_model::command::apply(
+            &d,
+            &Command::WriteAutomation(AutomationWrite {
+                seq: SeqId(t.seq),
+                target: AutomationTarget::VcaFader(VcaId(kit)),
+                start: Tick(0),
+                end: Tick(2 * bar),
+                points: vec![(Tick(0), 0.5), (Tick(bar), 0.25), (Tick(2 * bar), 0.5)],
+                lane_name: "VCA Kit Fader".into(),
+            }),
+        )
+        .unwrap()
+        .doc;
+        core_model::file::save(&d, &path).unwrap();
+        t.s.close().unwrap();
+        let s = Session::open(path.display().to_string()).unwrap();
+        s.co_producer_begin("tidy up".into()).unwrap();
+        let p = s
+            .co_producer_preview(vec![planned("mixer.delete_vca", vec![id("vca", kit)])])
+            .unwrap();
+        assert!(p.needs_yes, "{p:?}");
+        assert_eq!(
+            items(&p),
+            vec![it(
+                "VCA Kit",
+                "deleted, fader automation no longer plays (3 points, bars 1–3)",
+                true
+            )]
+        );
+        s.co_producer_end().unwrap();
+        s.close().unwrap();
+    }
+
+    /// Carry (c): in 26.0.0 Co-Producer neither writes nor reads VCA
+    /// automation, and the app says so plainly, as the gate does.
+    #[test]
+    fn vca_automation_stays_refused() {
+        let _g = quiet();
+        let t = song();
+        let s = &t.s;
+        by_hand(s, "mixer.new_vca", &[t.kick], "Kit");
+        let target = format!("vca:{}", vca_id(s, "Kit"));
+        let sentence = core_control::registry::VCA_AUTOMATION_REFUSED;
+        let e = s
+            .co_producer_automation(t.seq, target.clone(), 0, 61_440)
+            .unwrap_err();
+        assert!(e.to_string().contains(sentence), "{e}");
+        let before = doc(s);
+        s.co_producer_begin("ride the kit".into()).unwrap();
+        s.co_producer_enter(STAMP.into()).unwrap();
+        let e = s
+            .run_creative(
+                "automation.write".into(),
+                vec![
+                    id("seq", t.seq),
+                    text("target", &target),
+                    id("start", 0),
+                    id("end", 61_440),
+                    text("points", "0:0.5"),
+                ],
+            )
+            .unwrap_err();
+        s.co_producer_leave();
+        assert!(e.to_string().contains(sentence), "{e}");
+        let e = s
+            .co_producer_preview(vec![planned(
+                "automation.write",
+                vec![
+                    id("seq", t.seq),
+                    text("target", &target),
+                    id("start", 0),
+                    id("end", 61_440),
+                    text("points", "0:0.5"),
+                ],
+            )])
+            .unwrap_err();
+        assert!(e.to_string().contains(sentence), "{e}");
+        s.co_producer_end().unwrap();
+        assert_eq!(doc(s).mixer(), before.mixer());
+        s.close().unwrap();
+    }
+
+    #[test]
+    fn group_previews_match_what_the_apply_does() {
+        let _g = quiet();
+        let t = song();
+        let s = &t.s;
+        s.co_producer_begin("group the drums".into()).unwrap();
+        let ids: Vec<&str> = core_control::registry::GROUP_IDS.to_vec();
+        assert_eq!(ids.len(), 14);
+        let (kick, snare, drums) = (t.kick.to_string(), t.snare.to_string(), t.drums.to_string());
+        for (n, which) in ids.into_iter().enumerate() {
+            let group = || s.mixer().unwrap().groups.first().map(|g| g.id);
+            let vca = || s.mixer().unwrap().vcas.first().map(|v| v.id);
+            let args = match which {
+                "mixer.new_group" => vec![
+                    text("strips", &format!("{kick},{snare}")),
+                    text("name", "Kit"),
+                ],
+                "mixer.rename_group" => vec![id("group", group().unwrap()), text("name", "Drums")],
+                "mixer.set_group_colour" => {
+                    vec![id("group", group().unwrap()), text("colour", "blue")]
+                }
+                "mixer.add_to_group" => vec![id("group", group().unwrap()), text("strips", &drums)],
+                "mixer.remove_from_group" => {
+                    vec![id("group", group().unwrap()), text("strips", &snare)]
+                }
+                "mixer.set_group_links" => vec![id("group", group().unwrap()), flag("mute", false)],
+                "mixer.delete_group" => vec![id("group", group().unwrap())],
+                "mixer.new_vca" => vec![text("strips", &kick), text("name", "Kit")],
+                "mixer.rename_vca" => vec![id("vca", vca().unwrap()), text("name", "Drums")],
+                "mixer.set_vca_colour" => vec![id("vca", vca().unwrap()), text("colour", "pink")],
+                "mixer.assign_vca" => vec![id("vca", vca().unwrap()), text("strips", &snare)],
+                "mixer.unassign_vca" => vec![id("vca", vca().unwrap()), text("strips", &snare)],
+                "mixer.set_vca" => vec![
+                    id("vca", vca().unwrap()),
+                    text("gain_db", "-3"),
+                    flag("mute", true),
+                    text("mode", "touch"),
+                ],
+                _ => vec![id("vca", vca().unwrap())],
+            };
+            let plan = vec![planned(which, args)];
+            // A hand edit between the preview and the take.
+            let p = s.co_producer_preview(plan.clone()).unwrap();
+            s.set_gain(t.master, -1.0 - n as f64).unwrap();
+            let before = doc(s);
+            let e = take_with(s, p.token, &plan, CoProducerApproval::Sheet).unwrap_err();
+            assert_eq!(e.to_string(), CHANGED, "{which}");
+            assert_eq!(doc(s), before, "{which}");
+            // Previewed again, it does exactly what it said.
+            let p = s.co_producer_preview(plan.clone()).unwrap();
+            assert!(!p.items.is_empty(), "{which}");
+            assert!(p.needs_yes, "{which}: Kick is in it");
+            let start = doc(s);
+            take_with(s, p.token, &plan, CoProducerApproval::Sheet).unwrap();
+            let said: Vec<(String, String)> = core_model::diff::describe(&start, &doc(s))
+                .into_iter()
+                .map(|i| (i.thing, i.change))
+                .collect();
+            let shown: Vec<(String, String)> =
+                p.items.into_iter().map(|i| (i.thing, i.change)).collect();
+            assert_eq!(said, shown, "{which}");
+        }
+        // What they did: the group is gone, and so is the VCA.
+        let m = s.mixer().unwrap();
+        assert!(m.groups.is_empty() && m.vcas.is_empty(), "{m:?}");
+        s.co_producer_end().unwrap();
+        s.close().unwrap();
+    }
+}

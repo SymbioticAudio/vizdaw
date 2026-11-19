@@ -494,7 +494,10 @@ fn fixes_command(
 /// change, or is new (an item "added": an acting step made it). So a send
 /// or insert Co-Producer itself put on a composer's strip still asks. With
 /// `feeds_theirs` (the change alters what feeds a bus of the composer's)
-/// every item but a new strip's is.
+/// every item but a new strip's is. A group or VCA item's members decide
+/// (groups-vcas-transport Ruling 10): `co_producers` only when every
+/// member, before and after, is Co-Producer's; a new one given strips is
+/// "added, <strip> added", so a composer's member asks.
 fn mixer_rows(items: Vec<ChangeItem>, feeds_theirs: bool) -> impl Iterator<Item = ChangeItemRow> {
     items.into_iter().map(move |i| ChangeItemRow {
         composers_work: i.change != "added" && (feeds_theirs || !i.co_producers),
@@ -523,6 +526,27 @@ fn solo_changes(
             (b.solo != a.solo).then(|| (format!("Strip {}", diff::shown_name(&b.name)), a.solo))
         })
         .collect()
+}
+
+/// Whether the step from `before` to `after` changes a VCA's solo, or
+/// which strips a soloed VCA holds (groups-vcas-transport Task 7). A VCA
+/// solo asks as every solo change does (plan 8d): it silences every strip
+/// outside its reach, the composer's tracks included.
+fn vca_solo_changed(
+    before: &core_model::document::Document,
+    after: &core_model::document::Document,
+) -> bool {
+    use core_model::groups::vca_soloed;
+    let (b, a) = (before.mixer(), after.mixer());
+    let soloed = |m: &core_model::mixer::Mixer, v| m.vcas().get(&v).is_some_and(|x| x.solo);
+    b.vcas()
+        .keys()
+        .chain(a.vcas().keys())
+        .any(|v| soloed(b, *v) != soloed(a, *v))
+        || b.strips()
+            .keys()
+            .chain(a.strips().keys())
+            .any(|s| vca_soloed(b, *s) != vca_soloed(a, *s))
 }
 
 /// How a change to a Co-Producer bus cuts off what feeds it (owner,
@@ -765,12 +789,16 @@ pub fn preview_items(
                 let lookup = param_lookup(host);
                 let theirs = crate::mixer_chores::feeds_composers_bus(&before, h.doc());
                 let soloed = solo_changes(&before, h.doc());
+                let vca_solo = vca_solo_changed(&before, h.doc());
                 let step: Vec<ChangeItemRow> =
                     mixer_rows(diff::describe_with(&before, h.doc(), &lookup), theirs)
                         .map(|mut r| {
                             // A solo change's strip item asks, whoever's
-                            // strip it is.
-                            if soloed.iter().any(|(thing, _)| *thing == r.thing) {
+                            // strip it is; so does a VCA's item when a
+                            // VCA solo changes.
+                            if soloed.iter().any(|(thing, _)| *thing == r.thing)
+                                || (vca_solo && r.thing.starts_with("VCA "))
+                            {
                                 r.composers_work = true;
                             }
                             r

@@ -286,7 +286,9 @@ import VizDAWCore
     @Test func mixerEditsRunOnlyAfterATake() throws {
         let (s, id, m, f) = try demo()
         let strip = int("strip", 1)
-        for edit in MixerCommands.coProducerEdits where edit != "track.new_plugin_instrument" {
+        // A new group or VCA is an add without `strips` (its own test).
+        for edit in MixerCommands.coProducerEdits
+        where edit != "track.new_plugin_instrument" && !CoProducerCommands.newGroupOrVca.contains(edit) {
             let o = run(command(edit, [strip]), s, id)
             #expect(failure(o)?.code == .notAllowed, "\(edit): \(o)")
         }
@@ -330,6 +332,32 @@ import VizDAWCore
         #expect(failure(denied)?.message == CoProducerCommands.notAllowed)
         #expect(f.coLog.isEmpty)
         #expect(f.mixerRuns.count == runs)
+    }
+
+    /// groups-vcas-transport Ruling 10, as the Rust gate's
+    /// `effective_class`: a new group or VCA without `strips` adds, so it
+    /// runs between enter and leave; with `strips` it changes the
+    /// composer's strips, so `command.run` of it is refused.
+    @Test func emptyGroupsAndVcasAreAdds() throws {
+        let (s, id, _, f) = try demo()
+        #expect(CoProducerCommands.newGroupOrVca == ["mixer.new_group", "mixer.new_vca"])
+        for new in ["mixer.new_group", "mixer.new_vca"] {
+            #expect(!CoProducerCommands.changesWork(new, []), "\(new)")
+            #expect(!CoProducerCommands.changesWork(new, [text("name", "Kit")]), "\(new)")
+            #expect(CoProducerCommands.changesWork(new, [text("strips", "2")]), "\(new)")
+            f.coLog = []
+            let refused = run(command(new, [text("strips", "2,3")]), s, id)
+            #expect(failure(refused)?.code == .notAllowed, "\(new): \(refused)")
+            #expect(f.coLog.isEmpty, "\(new)")
+            let added = run(command(new, [text("name", "Kit")]), s, id)
+            #expect(failure(added) == nil, "\(new): \(added)")
+            #expect(f.coLog == ["enter \(stamp)", "runMixer \(new)", "leave"], "\(new)")
+        }
+        // Every other group and VCA command changes work, whatever its args.
+        for edit in MixerCommands.coProducerEdits where edit.contains("group") || edit.contains("vca") {
+            if CoProducerCommands.newGroupOrVca.contains(edit) { continue }
+            #expect(CoProducerCommands.changesWork(edit, []), "\(edit)")
+        }
     }
 
     /// Plan 8b Task 5: the notes, a note and an export folder reach the

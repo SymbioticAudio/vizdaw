@@ -1676,3 +1676,399 @@ fn the_synth_sound_is_an_item() {
         vec![item("Built-in Synth", "sound Pad → another sound")]
     );
 }
+
+// ---- groups-vcas-transport Task 7: the group and VCA items. ----
+
+fn group(d: &Document, c: core_model::command::GroupCmd) -> Document {
+    run(d, Command::Groups(c))
+}
+
+fn group_id(d: &Document, name: &str) -> core_model::ids::GroupId {
+    d.mixer()
+        .groups()
+        .values()
+        .find(|g| g.name == name)
+        .unwrap()
+        .id
+}
+
+fn vca_id(d: &Document, name: &str) -> core_model::ids::VcaId {
+    d.mixer()
+        .vcas()
+        .values()
+        .find(|v| v.name == name)
+        .unwrap()
+        .id
+}
+
+#[test]
+fn group_and_vca_items_read_plainly() {
+    use core_model::automation::AutomationMode;
+    use core_model::command::GroupCmd as G;
+    let d = mix();
+    let (kick, snare, bass) = (bus(&d, "Kick"), bus(&d, "Snare"), bus(&d, "Bass"));
+    let drums = bus(&d, "Drums (Co-Producer)");
+
+    // A group: each part, in its order.
+    let g0 = group(
+        &d,
+        G::NewGroup {
+            name: "Drums".into(),
+            colour: Swatch::Red,
+            members: vec![kick, snare],
+        },
+    );
+    assert_eq!(
+        describe(&d, &g0),
+        vec![item("Group Drums", "added, Kick added, Snare added")]
+    );
+    let g = group_id(&g0, "Drums");
+    assert_eq!(
+        describe(&g0, &d),
+        vec![item("Group Drums", "deleted")],
+        "undoing it deletes it"
+    );
+    let g1 = group(
+        &g0,
+        G::RenameGroup {
+            group: g,
+            name: "Kit".into(),
+        },
+    );
+    assert_eq!(
+        describe(&g0, &g1),
+        vec![item("Group Drums", "renamed Drums → Kit")]
+    );
+    let g2 = group(
+        &g1,
+        G::SetGroupColour {
+            group: g,
+            colour: Swatch::Blue,
+        },
+    );
+    assert_eq!(
+        describe(&g1, &g2),
+        vec![item("Group Kit", "colour red → blue")]
+    );
+    let g3 = group(
+        &g2,
+        G::AddToGroup {
+            group: g,
+            strips: vec![bass],
+        },
+    );
+    assert_eq!(describe(&g2, &g3), vec![item("Group Kit", "Bass added")]);
+    let g4 = group(
+        &g3,
+        G::RemoveFromGroup {
+            group: g,
+            strips: vec![snare],
+        },
+    );
+    assert_eq!(describe(&g3, &g4), vec![item("Group Kit", "Snare removed")]);
+    let g5 = group(
+        &g4,
+        G::SetGroupLinks {
+            group: g,
+            mute: Some(false),
+            solo: Some(false),
+        },
+    );
+    assert_eq!(
+        describe(&g4, &g5),
+        vec![item("Group Kit", "mute link off, solo link off")]
+    );
+    assert_eq!(
+        describe(&g5, &g4),
+        vec![item("Group Kit", "mute link on, solo link on")]
+    );
+    let g6 = group(&g5, G::DeleteGroup { group: g });
+    assert_eq!(describe(&g5, &g6), vec![item("Group Kit", "deleted")]);
+
+    // The members decide (Ruling 10): an empty group, and one of
+    // Co-Producer's own strips only, are Co-Producer's.
+    let e = group(
+        &d,
+        G::NewGroup {
+            name: "Empty".into(),
+            colour: Swatch::Green,
+            members: vec![],
+        },
+    );
+    assert_eq!(describe(&d, &e), vec![ours("Group Empty", "added")]);
+    let own = group(
+        &d,
+        G::NewGroup {
+            name: "Own".into(),
+            colour: Swatch::Green,
+            members: vec![drums],
+        },
+    );
+    assert_eq!(
+        describe(&d, &own),
+        vec![ours("Group Own", "added, Drums (Co-Producer) added")]
+    );
+    let o = group_id(&own, "Own");
+    let renamed = group(
+        &own,
+        G::RenameGroup {
+            group: o,
+            name: "Mine".into(),
+        },
+    );
+    assert_eq!(
+        describe(&own, &renamed),
+        vec![ours("Group Own", "renamed Own → Mine")]
+    );
+    // A composer's strip joining, or leaving, is theirs.
+    let joined = group(
+        &own,
+        G::AddToGroup {
+            group: o,
+            strips: vec![kick],
+        },
+    );
+    assert_eq!(
+        describe(&own, &joined),
+        vec![item("Group Own", "Kick added")]
+    );
+    assert_eq!(
+        describe(&joined, &own),
+        vec![item("Group Own", "Kick removed")]
+    );
+
+    // A VCA: each part, and what it does to its members.
+    let v0 = group(
+        &d,
+        G::NewVca {
+            name: "Kit".into(),
+            colour: Swatch::Teal,
+            members: vec![kick],
+        },
+    );
+    assert_eq!(
+        describe(&d, &v0),
+        vec![item("VCA Kit", "added, Kick assigned")]
+    );
+    let v = vca_id(&v0, "Kit");
+    let level = |from: &Document, db: f64| {
+        group(
+            from,
+            G::SetVcaLevel {
+                vca: v,
+                gain_db: db,
+            },
+        )
+    };
+    let v1 = level(&v0, -2.0);
+    assert_eq!(
+        describe(&v0, &v1),
+        vec![
+            item("Strip Kick", "heard 0.0 dB → −2.0 dB"),
+            item("VCA Kit", "level 0.0 dB → −2.0 dB"),
+        ]
+    );
+    let v2 = level(&v1, -5.0);
+    assert_eq!(
+        describe(&v1, &v2),
+        vec![
+            item("Strip Kick", "heard −2.0 dB → −5.0 dB"),
+            item("VCA Kit", "level −2.0 dB → −5.0 dB"),
+        ]
+    );
+    // Its own fader moving says only that.
+    let own_move = exec(
+        &v2,
+        vec![MixerCmd::SetGain {
+            strip: kick,
+            gain_db: -1.0,
+        }],
+    );
+    assert_eq!(
+        describe(&v2, &own_move),
+        vec![item("Strip Kick", "volume 0.0 dB → −1.0 dB")]
+    );
+    let muted = group(&v2, G::SetVcaMute { vca: v, mute: true });
+    assert_eq!(
+        describe(&v2, &muted),
+        vec![
+            item("Strip Kick", "muted by a VCA"),
+            item("VCA Kit", "muted"),
+        ]
+    );
+    assert_eq!(
+        describe(&muted, &v2),
+        vec![
+            item("Strip Kick", "no longer muted by a VCA"),
+            item("VCA Kit", "unmuted"),
+        ]
+    );
+    let soloed = group(&v2, G::SetVcaSolo { vca: v, solo: true });
+    assert_eq!(describe(&v2, &soloed), vec![item("VCA Kit", "soloed")]);
+    assert_eq!(describe(&soloed, &v2), vec![item("VCA Kit", "unsoloed")]);
+    let touch = group(
+        &v2,
+        G::SetVcaMode {
+            vca: v,
+            mode: AutomationMode::Touch,
+        },
+    );
+    assert_eq!(
+        describe(&v2, &touch),
+        vec![item("VCA Kit", "mode Read → Touch")]
+    );
+    let more = group(
+        &v2,
+        G::AssignVca {
+            vca: v,
+            strips: vec![snare],
+        },
+    );
+    assert_eq!(
+        describe(&v2, &more),
+        vec![
+            item("Strip Snare", "heard 0.0 dB → −5.0 dB"),
+            item("VCA Kit", "Snare assigned"),
+        ]
+    );
+    let fewer = group(
+        &more,
+        G::UnassignVca {
+            vca: v,
+            strips: vec![snare],
+        },
+    );
+    assert_eq!(
+        describe(&more, &fewer),
+        vec![
+            item("Strip Snare", "heard −5.0 dB → 0.0 dB"),
+            item("VCA Kit", "Snare unassigned"),
+        ]
+    );
+    let named = group(
+        &v2,
+        G::RenameVca {
+            vca: v,
+            name: "Drums".into(),
+        },
+    );
+    let named = group(
+        &named,
+        G::SetVcaColour {
+            vca: v,
+            colour: Swatch::Pink,
+        },
+    );
+    assert_eq!(
+        describe(&v2, &named),
+        vec![item("VCA Kit", "renamed Kit → Drums, colour teal → pink")]
+    );
+    let gone = group(&v2, G::DeleteVca { vca: v });
+    assert_eq!(
+        describe(&v2, &gone),
+        vec![
+            item("Strip Kick", "heard −5.0 dB → 0.0 dB"),
+            item("VCA Kit", "deleted"),
+        ]
+    );
+    let floor = level(&v2, -144.0);
+    assert_eq!(
+        describe(&v2, &floor),
+        vec![
+            item("Strip Kick", "heard −5.0 dB → −∞ dB"),
+            item("VCA Kit", "level −5.0 dB → −∞ dB"),
+        ]
+    );
+
+    // A VCA of Co-Producer's own strips only is Co-Producer's.
+    let mine = group(
+        &d,
+        G::NewVca {
+            name: "Mine".into(),
+            colour: Swatch::Teal,
+            members: vec![drums],
+        },
+    );
+    let m = vca_id(&mine, "Mine");
+    let down = group(
+        &mine,
+        G::SetVcaLevel {
+            vca: m,
+            gain_db: -3.0,
+        },
+    );
+    assert_eq!(
+        describe(&mine, &down),
+        vec![
+            ours("Strip Drums (Co-Producer)", "heard 0.0 dB → −3.0 dB"),
+            ours("VCA Mine", "level 0.0 dB → −3.0 dB"),
+        ]
+    );
+}
+
+/// Carry (b): a VCA's automation is its item's part, and deleting the VCA
+/// says its automation no longer plays; whose it is follows the members.
+#[test]
+fn vca_automation_is_a_vca_part() {
+    use core_model::command::GroupCmd as G;
+    let d = mix();
+    let (kick, drums) = (bus(&d, "Kick"), bus(&d, "Drums (Co-Producer)"));
+    let with = group(
+        &d,
+        G::NewVca {
+            name: "Kit".into(),
+            colour: Swatch::Teal,
+            members: vec![kick],
+        },
+    );
+    let v = vca_id(&with, "Kit");
+    let written = run(&with, automate(AutomationTarget::VcaFader(v), 12));
+    assert_eq!(
+        describe(&with, &written),
+        vec![
+            item("Track 3, Automation", "added"),
+            item(
+                "VCA Kit",
+                "fader automation 0 points → 12 points, bars 9–12"
+            ),
+        ]
+    );
+    let gone = group(&written, G::DeleteVca { vca: v });
+    assert_eq!(
+        describe(&written, &gone),
+        vec![item(
+            "VCA Kit",
+            "deleted, fader automation no longer plays (12 points, bars 9–12)"
+        )]
+    );
+    // Co-Producer's own VCA with Co-Producer's own automation track is
+    // Co-Producer's; on a composer's track, or with a composer's member,
+    // it is not.
+    let mine = group(
+        &d,
+        G::NewVca {
+            name: "Mine".into(),
+            colour: Swatch::Teal,
+            members: vec![drums],
+        },
+    );
+    let m = vca_id(&mine, "Mine");
+    let ours_written = acting(&mine, automate(AutomationTarget::VcaFader(m), 4));
+    let deleted = group(&ours_written, G::DeleteVca { vca: m });
+    assert_eq!(
+        describe(&ours_written, &deleted),
+        vec![ours(
+            "VCA Mine",
+            "deleted, fader automation no longer plays (4 points, bars 9–12)"
+        )]
+    );
+    let theirs_written = run(&mine, automate(AutomationTarget::VcaFader(m), 4));
+    let deleted = group(&theirs_written, G::DeleteVca { vca: m });
+    assert_eq!(
+        describe(&theirs_written, &deleted),
+        vec![item(
+            "VCA Mine",
+            "deleted, fader automation no longer plays (4 points, bars 9–12)"
+        )]
+    );
+}

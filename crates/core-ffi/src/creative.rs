@@ -133,6 +133,14 @@ fn target_of(doc: &Document, text: &str) -> Result<AutomationTarget, VizError> {
     let t = parse_automation_target(text.to_string())
         .map(automation_target_of)
         .ok_or_else(|| no_target(text))?;
+    // The gate refuses `vca:` first (groups-vcas-transport Task 7); the
+    // app says the same.
+    if matches!(t, AutomationTarget::VcaFader(_)) {
+        return Err(bad(format!(
+            "`target` {}.",
+            registry::VCA_AUTOMATION_REFUSED
+        )));
+    }
     if !target_exists(doc, t)
         || matches!(
             t,

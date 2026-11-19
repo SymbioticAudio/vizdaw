@@ -243,6 +243,9 @@ public enum CoProducerCommands {
         RegionCommands.setFadeShape, SynthCommands.setSound, TrackCommands.setOutput,
     ]
 
+    /// The new group and new VCA: adds when empty, changes with `strips`.
+    static let newGroupOrVca: Set<String> = ["mixer.new_group", "mixer.new_vca"]
+
     /// The adds Co-Producer cannot run in any form in 26.0.0 (release gate
     /// B2), as the Rust gate's `REFUSED_IN_26`: each writes notes.
     static let refusedAdds: Set<String> = ["file.import_midi", "track.duplicate"]
@@ -259,12 +262,16 @@ public enum CoProducerCommands {
     /// Whether `id` with `args` changes or removes the composer's work, so
     /// runs only through `co_producer.apply` after its take: the chores,
     /// plan 8d's twelve mixer edits, a new bus fed from a strip (8d
-    /// Ruling 1), plan 8e's `automation.write` and the release-fixes
-    /// changes. A new plug-in instrument track only adds.
+    /// Ruling 1), the group and VCA commands, plan 8e's `automation.write`
+    /// and the release-fixes changes. A new plug-in instrument track only
+    /// adds, and so does a new group or VCA without `strips`
+    /// (groups-vcas-transport Ruling 10), as the Rust gate's
+    /// `effective_class` has it.
     static func changesWork(_ id: String, _ args: [ControlArg]) -> Bool {
         if changesWork.contains(id) || fixesChanges.contains(id) { return true }
         if CreativeCommands.ids.contains(id) { return true }
         if id == MixerCommands.newBus { return args.contains { $0.name == "strip" } }
+        if newGroupOrVca.contains(id) { return args.contains { $0.name == "strips" } }
         return MixerCommands.coProducerEdits.contains(id) && id != MixerCommands.newPluginInstrument
     }
 

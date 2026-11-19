@@ -26,7 +26,9 @@ use std::path::{Component, Path, PathBuf};
 /// chores and the marker changes; 8d Ruling 1 adds `mixer.new_bus` with a
 /// `strip` and the twelve mixer edits; 8e Ruling 1 adds `automation.write`;
 /// 8e Task 6b adds the release-fixes fade shape, Built-in Synth sound and
-/// track output).
+/// track output; groups-vcas-transport Task 7 adds the fourteen group and
+/// VCA commands, `registry::GROUP_IDS`, whose new group and new VCA preview
+/// only with `strips`).
 pub const PREVIEWABLE: &[&str] = &[
     "track.rename",
     "track.delete",
@@ -56,6 +58,20 @@ pub const PREVIEWABLE: &[&str] = &[
     "region.set_fade_shape",
     "destination.set_sound",
     "lane.set_output",
+    "mixer.new_group",
+    "mixer.rename_group",
+    "mixer.set_group_colour",
+    "mixer.add_to_group",
+    "mixer.remove_from_group",
+    "mixer.set_group_links",
+    "mixer.delete_group",
+    "mixer.new_vca",
+    "mixer.rename_vca",
+    "mixer.set_vca_colour",
+    "mixer.assign_vca",
+    "mixer.unassign_vca",
+    "mixer.set_vca",
+    "mixer.delete_vca",
 ];
 
 /// The adds Co-Producer cannot run in any form in 26.0.0 (release gate
@@ -147,7 +163,9 @@ fn flag(args: &[(String, ArgValue)], name: &str) -> bool {
 }
 
 /// The class of `spec` run with `args` on the Co-Producer socket (Ruling
-/// 5, P3): a new bus with a send from the composer's `strip` is a change.
+/// 5, P3): a new bus with a send from the composer's `strip` is a change,
+/// and so is a new group or VCA given `strips` (groups-vcas-transport
+/// Ruling 10): an empty one is an add.
 /// Release gate B2 refuses [`REFUSED_IN_26`] in every form, and an audio
 /// import with a `lane`, whose region would play over what is on that
 /// track; without one it goes on new tracks.
@@ -155,6 +173,7 @@ pub fn effective_class(spec: &CommandSpec, args: &[(String, ArgValue)]) -> Class
     match spec.id {
         id if REFUSED_IN_26.contains(&id) => Class::Refused,
         "mixer.new_bus" if arg(args, "strip").is_some() => Class::Change,
+        "mixer.new_group" | "mixer.new_vca" if arg(args, "strips").is_some() => Class::Change,
         "media.import" if arg(args, "lane").is_some() => Class::Refused,
         _ => spec.class,
     }
@@ -329,8 +348,9 @@ fn admit_planned(p: &Planned) -> Result<(), ControlError> {
     let spec = spec_of(id)?;
     never_replaces(&p.args)?;
     // A free bus is an add (8d Ruling 1): only its `strip` form previews.
-    let free_bus = id == "mixer.new_bus" && arg(&p.args, "strip").is_none();
-    if !PREVIEWABLE.contains(&id) || free_bus {
+    // So is an empty group or VCA (groups-vcas-transport Ruling 10).
+    let free_add = effective_class(spec, &p.args) == Class::Add;
+    if !PREVIEWABLE.contains(&id) || free_add {
         return Err(match effective_class(spec, &p.args) {
             Class::Change | Class::Remove => {
                 ControlError::not_allowed(format!("Co-Producer cannot preview {id} yet."))

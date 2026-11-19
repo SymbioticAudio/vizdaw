@@ -938,10 +938,17 @@ pub fn point_list(text: &str, start: u64, end: u64) -> Result<Vec<(u64, f64)>, S
     Ok(points)
 }
 
+/// Why [`automation_target`] refuses `vca:<id>`, after "`target` ".
+pub const VCA_AUTOMATION_REFUSED: &str = "names a VCA's fader, and VCA automation cannot be read or written this way in 26.0.0: move the VCA with mixer.set_vca instead";
+
 /// `automation.gesture`'s target grammar, the shape only (the app's
 /// `parse_automation_target`): `fader:<strip>`, `pan:<strip>`,
 /// `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or
 /// `param:<slot>:<param>`, IDs in ASCII digits, at most 64 characters.
+/// A VCA's fader (`vca:<id>`, the gesture's spelling) is refused with
+/// [`VCA_AUTOMATION_REFUSED`]: in 26.0.0 neither `automation.write` nor
+/// `co_producer.automation` reaches VCA automation (groups-vcas-transport
+/// Task 7).
 pub fn automation_target(text: &str) -> Result<(), String> {
     let refuse = || {
         "must be fader:<strip>, pan:<strip>, mute:<strip>, solo:<strip>, send:<strip>:<n> (n from 1) or param:<slot>:<param>".to_string()
@@ -956,6 +963,9 @@ pub fn automation_target(text: &str) -> Result<(), String> {
         return Err(refuse());
     }
     let parts: Vec<&str> = text.split(':').collect();
+    if matches!(parts.as_slice(), ["vca", id] if number(id).is_some()) {
+        return Err(VCA_AUTOMATION_REFUSED.into());
+    }
     let ok = match parts.as_slice() {
         [kind, id] => matches!(*kind, "fader" | "pan" | "mute" | "solo") && number(id).is_some(),
         ["send", strip, n] => {

@@ -1661,6 +1661,20 @@ fn chore_commands_have_their_class() {
             "region.set_fade_shape",
             "destination.set_sound",
             "lane.set_output",
+            "mixer.new_group",
+            "mixer.rename_group",
+            "mixer.set_group_colour",
+            "mixer.add_to_group",
+            "mixer.remove_from_group",
+            "mixer.set_group_links",
+            "mixer.delete_group",
+            "mixer.new_vca",
+            "mixer.rename_vca",
+            "mixer.set_vca_colour",
+            "mixer.assign_vca",
+            "mixer.unassign_vca",
+            "mixer.set_vca",
+            "mixer.delete_vca",
         ]
     );
 }
@@ -2717,8 +2731,8 @@ fn creative_commands_have_their_class() {
     assert!(PREVIEWABLE.contains(&"automation.write"));
     assert_eq!(
         PREVIEWABLE.len(),
-        28,
-        "8e adds automation.write; Task 6b adds the three release-fixes changes"
+        42,
+        "8e adds automation.write; Task 6b adds the three release-fixes changes; groups-vcas-transport Task 7 adds the fourteen group and VCA commands"
     );
     let list = co_producer::list_json();
     let listed = list["commands"]
@@ -3435,5 +3449,188 @@ fn metrics_read_refuses_hostile_input() {
     for params in cases {
         let e = refused("co_producer.metrics", params.clone());
         assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {}", e.message);
+    }
+}
+
+// ---- groups-vcas-transport Task 7: groups and VCAs (Ruling 10). ----
+
+/// The twelve group and VCA changes and removes, with valid params.
+fn group_changes() -> Vec<(&'static str, Value)> {
+    vec![
+        ("mixer.rename_group", json!({"group": 1, "name": "Kit"})),
+        (
+            "mixer.set_group_colour",
+            json!({"group": 1, "colour": "blue"}),
+        ),
+        ("mixer.add_to_group", json!({"group": 1, "strips": "2,3"})),
+        (
+            "mixer.remove_from_group",
+            json!({"group": 1, "strips": "2"}),
+        ),
+        ("mixer.set_group_links", json!({"group": 1, "mute": false})),
+        ("mixer.delete_group", json!({"group": 1})),
+        ("mixer.rename_vca", json!({"vca": 1, "name": "Kit"})),
+        ("mixer.set_vca_colour", json!({"vca": 1, "colour": "teal"})),
+        ("mixer.assign_vca", json!({"vca": 1, "strips": "2"})),
+        ("mixer.unassign_vca", json!({"vca": 1, "strips": "2"})),
+        ("mixer.set_vca", json!({"vca": 1, "gain_db": "-3"})),
+        ("mixer.delete_vca", json!({"vca": 1})),
+    ]
+}
+
+#[test]
+fn empty_groups_and_vcas_are_adds() {
+    let direct = |id: &str| {
+        format!(
+            "{id} changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+        )
+    };
+    let list = co_producer::list_json();
+    let commands = list["commands"].as_array().unwrap();
+    for id in ["mixer.new_group", "mixer.new_vca"] {
+        let spec = registry::find(id).unwrap();
+        assert_eq!(spec.class, Class::Add, "{id}");
+        assert_eq!(effective_class(spec, &[]), Class::Add, "{id}");
+        assert_eq!(
+            effective_class(spec, &[("name".into(), ArgValue::Text("Kit".into()))]),
+            Class::Add,
+            "{id}"
+        );
+        assert_eq!(
+            effective_class(spec, &[("strips".into(), ArgValue::Text("2".into()))]),
+            Class::Change,
+            "{id}"
+        );
+        // Empty, it runs directly.
+        for params in [
+            json!({}),
+            json!({"name": "Kit"}),
+            json!({"name": "Kit", "colour": "red"}),
+        ] {
+            assert_eq!(
+                gate("command.run", run(id, params.clone())),
+                Ok(()),
+                "{id} {params}"
+            );
+            // An add needs no preview.
+            let e = preview(json!([{"id": id, "params": params}])).unwrap_err();
+            assert_eq!(e.code, ErrorCode::NotAllowed, "{id}: {}", e.message);
+            assert_eq!(
+                e.message,
+                format!("{id} needs no preview: run it with command.run.")
+            );
+        }
+        // With `strips` it changes the composer's strips.
+        for params in [
+            json!({"strips": "2"}),
+            json!({"strips": "2,3", "name": "Kit"}),
+        ] {
+            let m = assert_code(
+                "command.run",
+                run(id, params.clone()),
+                ErrorCode::NotAllowed,
+            );
+            assert_eq!(m, direct(id), "{params}");
+            assert_eq!(
+                preview(json!([{"id": id, "params": params}])),
+                Ok(()),
+                "{id} {params}"
+            );
+        }
+        // Listed as an add, previewable for its `strips` form.
+        let c = commands.iter().find(|c| c["id"] == id).unwrap();
+        assert_eq!(c["class"], "add", "{id}");
+        assert_eq!(c["previewable"], json!(true), "{id}");
+    }
+    // A plan holding both, with strips, then a VCA move.
+    let plan = json!([
+        {"id": "mixer.new_group", "params": {"strips": "2,3"}},
+        {"id": "mixer.new_vca", "params": {"strips": "2", "name": "Kit"}},
+        {"id": "mixer.set_vca", "params": {"vca": 1, "gain_db": "-3"}},
+    ]);
+    assert_eq!(preview(plan.clone()), Ok(()));
+    assert_eq!(
+        gate(
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": plan})
+        ),
+        Ok(())
+    );
+    // Hostile `strips` is refused before the gate's class.
+    for bad in [json!(""), json!("0"), json!("2,2"), json!("x"), json!(2)] {
+        let e = refused("command.run", run("mixer.new_vca", json!({"strips": bad})));
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{bad}: {}", e.message);
+    }
+}
+
+#[test]
+fn group_and_vca_changes_only_through_a_preview() {
+    let direct = |id: &str| {
+        format!(
+            "{id} changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+        )
+    };
+    let changes = group_changes();
+    let ids: Vec<&str> = changes.iter().map(|(id, _)| *id).collect();
+    let want: Vec<&str> = registry::GROUP_IDS
+        .iter()
+        .copied()
+        .filter(|id| !["mixer.new_group", "mixer.new_vca"].contains(id))
+        .collect();
+    assert_eq!(ids, want, "the twelve change and remove ids");
+    let list = co_producer::list_json();
+    let commands = list["commands"].as_array().unwrap();
+    for (id, params) in &changes {
+        assert!(PREVIEWABLE.contains(id), "{id}");
+        let c = commands.iter().find(|c| c["id"] == *id).unwrap();
+        assert_eq!(c["previewable"], json!(true), "{id}");
+        let m = assert_code(
+            "command.run",
+            run(id, params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert_eq!(m, direct(id));
+        assert_eq!(
+            preview(json!([{"id": id, "params": params}])),
+            Ok(()),
+            "{id} {params}"
+        );
+    }
+    let plan: Vec<Value> = changes
+        .iter()
+        .map(|(id, params)| json!({"id": id, "params": params}))
+        .collect();
+    assert_eq!(preview(Value::Array(plan.clone())), Ok(()));
+    assert_eq!(
+        gate(
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": plan})
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn vca_automation_is_refused_plainly() {
+    let sentence = format!("`target` {}", registry::VCA_AUTOMATION_REFUSED);
+    let write = json!({"seq": 1, "target": "vca:1", "start": 0, "end": 61440, "points": "0:0"});
+    let e = refused("command.run", run("automation.write", write.clone()));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{}", e.message);
+    assert!(e.message.contains(&sentence), "{}", e.message);
+    let e = preview(json!([{"id": "automation.write", "params": write}])).unwrap_err();
+    assert!(e.message.contains(&sentence), "{}", e.message);
+    let e = refused(
+        "co_producer.automation",
+        json!({"seq": 1, "target": "vca:1", "start": 0, "end": 61440}),
+    );
+    assert!(e.message.contains(&sentence), "{}", e.message);
+    assert_eq!(
+        registry::VCA_AUTOMATION_REFUSED,
+        "names a VCA's fader, and VCA automation cannot be read or written this way in 26.0.0: move the VCA with mixer.set_vca instead"
+    );
+    // A malformed VCA spelling gets the grammar's own sentence.
+    for odd in ["vca:", "vca:x", "vca:1:2", "VCA:1"] {
+        let m = registry::automation_target(odd).unwrap_err();
+        assert!(m.starts_with("must be fader:"), "{odd}: {m}");
     }
 }

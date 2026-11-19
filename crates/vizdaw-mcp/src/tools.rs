@@ -128,13 +128,17 @@ fn string_limit(name: &str) -> usize {
 }
 
 /// A param Co-Producer's tool does not offer: `mixer.new_bus`'s `strip`
-/// form changes the composer's routing, so it goes through `change`, and
-/// `media.import`'s `lane` form is refused (release gate B2: its region
-/// would play over what is on that track).
+/// form changes the composer's routing, and so do `mixer.new_group`'s and
+/// `mixer.new_vca`'s `strips` (groups-vcas-transport Ruling 10), so they go
+/// through `change`; `media.import`'s `lane` form is refused (release gate
+/// B2: its region would play over what is on that track).
 fn barred(spec: &Value, param: &str) -> bool {
     matches!(
         (str_of(spec, "id"), param),
-        ("mixer.new_bus", "strip") | ("media.import", "lane")
+        ("mixer.new_bus", "strip")
+            | ("mixer.new_group", "strips")
+            | ("mixer.new_vca", "strips")
+            | ("media.import", "lane")
     )
 }
 
@@ -354,7 +358,7 @@ fn own_tools() -> Vec<Value> {
         ),
         own_tool(
             CHANGE,
-            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save, quantizing, transposing or changing the velocity of notes, and renaming or removing a marker, and mixer changes: routing a strip to a bus, adding or changing a send or insert, setting an EQ, the volume, pan, mute, solo or a plug-in parameter, and removing a send, insert or bus. Make new buses first with mixer_new_bus and read their IDs with show_mixer; mixer changes on Co-Producer's own buses apply without asking. creative writes: automation points with automation.write. On Co-Producer's own tracks and buses these apply without asking. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
+            "Change or delete something that already exists, such as renaming or deleting a track, Undo, Redo, or Save, quantizing, transposing or changing the velocity of notes, and renaming or removing a marker, and mixer changes: routing a strip to a bus, adding or changing a send or insert, setting an EQ, the volume, pan, mute, solo or a plug-in parameter, and removing a send, insert or bus. Make new buses first with mixer_new_bus and read their IDs with show_mixer; mixer changes on Co-Producer's own buses apply without asking. Fader groups and VCAs: make an empty one with mixer_new_group or mixer_new_vca, then add strips, move, mute, solo, rename, recolour, relink or delete it here; a group or VCA that holds any of the composer's strips asks first. creative writes: automation points with automation.write. On Co-Producer's own tracks and buses these apply without asking. Needs an open request (begin_request). VizDAW first works out exactly what will change. If the composer must agree, VizDAW asks them itself when it can. Otherwise this returns the list and a token: show the composer the whole list, word for word, and call apply_change only after they say yes in this chat. Never call apply_change on your own judgement. VizDAW then asks the composer too, unless they always allow this app.",
             &[("commands", plan_schema())],
             &["commands"],
             json!({"destructiveHint": true}),
