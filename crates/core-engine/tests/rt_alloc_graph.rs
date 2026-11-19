@@ -10,15 +10,25 @@ use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::render::{Faults, RETIRE_CAPACITY};
 use core_engine::rt_check::{self, CountingAlloc};
 use core_engine::schedule::BuiltinRoute;
-use core_model::command::MixerCmd;
+use core_model::automation::{AutomationTarget, fader_norm};
+use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::document::Document;
-use core_model::ids::{SeqId, StripId};
-use core_model::mixer::{AuxSend, ParamId, StripKind};
-use std::sync::Arc;
+use core_model::event::{EventBody, EventSpec};
+use core_model::ids::{AnyId, SeqId, StripId, VcaId};
+use core_model::mixer::{AuxSend, Output, ParamId, StripKind, Swatch};
+use core_model::time::Tick;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
+
+/// The allocation counter is global: one test at a time.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn armed_block(b: &mut OfflineBackend, frames: u32) {
     rt_check::arm();
@@ -156,9 +166,10 @@ fn play_graph(workers: usize, callback_helps: bool, blocks: u32) {
     drop(engine);
 }
 
-/// One test: the allocation counter is global.
+/// The counter is global: the tests take `serial`.
 #[test]
 fn graph_render_path_never_allocates() {
+    let _g = serial();
     rt_check::set_arm_workers(true);
     // The counter works on this thread.
     let before = rt_check::count();
@@ -344,6 +355,148 @@ fn graph_render_path_never_allocates() {
             .any(|r| r.target == old && r.bytes() == [0x80, 60, 0]),
         "{offs:?}"
     );
+    drop(b.stop().unwrap());
+    drop(engine);
+    rt_check::set_arm_workers(false);
+}
+
+/// The demo with 80 buses in a chain from the synth (each feeding the
+/// next, the last to master) and 3 VCAs of 40 members each, overlapping
+/// (VCA k holds buses 20k … 20k + 39), so buses 20 … 59 have two VCAs.
+/// Bus 0's and bus 45's faders are automated, so every block commits the
+/// controls, summing the VCAs.
+/// Returns the document, the song and the VCAs.
+fn vca_song() -> (Document, SeqId, Vec<VcaId>) {
+    let doc = demo_document().unwrap();
+    let song = find_sequence(&doc, "Song").unwrap();
+    let mut b = Builder::from_doc(doc);
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let buses: Vec<StripId> = (0..80)
+        .map(|i| b.bus(&format!("Bus {i}")).unwrap())
+        .collect();
+    let mut from = synth;
+    for bus in &buses {
+        b.mixer(MixerCmd::SetOutput {
+            strip: from,
+            output: Output::Bus(*bus),
+        })
+        .unwrap();
+        from = *bus;
+    }
+    let mut vcas = Vec::new();
+    for k in 0..3 {
+        let members = buses[20 * k..20 * k + 40].to_vec();
+        let r = b
+            .run(Command::Groups(GroupCmd::NewVca {
+                name: format!("V{k}"),
+                colour: Swatch::Teal,
+                members,
+            }))
+            .unwrap();
+        let Some(AnyId::Vca(v)) = r.created.first().copied() else {
+            panic!("no VCA: {:?}", r.created);
+        };
+        vcas.push(v);
+    }
+    let auto: Vec<EventSpec> = (0..64i64)
+        .flat_map(|k| {
+            [buses[0], buses[45]].map(|s| {
+                EventSpec::new(
+                    Tick(k * core_engine::fixtures::Q / 4),
+                    EventBody::Automation {
+                        target: AutomationTarget::StripFader(s),
+                        value: fader_norm(-(k % 12) as f64),
+                    },
+                )
+            })
+        })
+        .collect();
+    let lane = b.lane(song, "Auto", None).unwrap();
+    b.events(song, lane, auto).unwrap();
+    (b.finish(), song, vcas)
+}
+
+/// Tasks 4 and 6: VCA offsets are summed on the audio thread without
+/// allocating, across graph rebuilds (the new graph adopts the old one's
+/// overrides and commits) and every block's commit.
+#[test]
+fn vca_graphs_never_allocate() {
+    let _g = serial();
+    rt_check::set_arm_workers(true);
+    // The counter works on this thread.
+    let before = rt_check::count();
+    rt_check::arm();
+    drop(Vec::<u8>::with_capacity(10));
+    rt_check::disarm();
+    assert_eq!(rt_check::count() - before, 2);
+    let (doc, song, vcas) = vca_song();
+    assert_eq!(doc.mixer().vcas().len(), 3);
+    assert!(doc.mixer().vcas().values().all(|v| v.members.len() == 40));
+    // Value-only variants: VCA levels, a VCA mute, a VCA solo.
+    let variant = |i: usize| {
+        let mut b = Builder::from_doc(doc.clone());
+        let v = vcas[i % 3];
+        let cmd = match i % 4 {
+            0 => GroupCmd::SetVcaLevel {
+                vca: v,
+                gain_db: -(i as f64 % 20.0),
+            },
+            1 => GroupCmd::SetVcaMute { vca: v, mute: true },
+            2 => GroupCmd::SetVcaSolo { vca: v, solo: true },
+            _ => GroupCmd::SetVcaLevel {
+                vca: v,
+                gain_db: 3.0,
+            },
+        };
+        b.run(Command::Groups(cmd)).unwrap();
+        b.finish()
+    };
+    let docs: Vec<Document> = (0..8).map(variant).collect();
+    let mut cfg = EngineConfig::new(48_000.0);
+    cfg.workers = 2;
+    let (mut engine, renderer) =
+        Engine::new(cfg, Box::new(OfflineSinks::new(1 << 20).with_tone())).unwrap();
+    engine.load(&doc, song).unwrap();
+    let mut b = OfflineBackend::new(48_000.0, 512);
+    b.start(renderer).unwrap();
+    b.reserve(4096);
+    engine.set_loop(true).unwrap();
+    engine.play().unwrap();
+    for _ in 0..10 {
+        armed_block(&mut b, 256);
+    }
+    let before = rt_check::count();
+    let applied = engine.graphs_applied();
+    for i in 0..400u32 {
+        if i % 50 == 25 {
+            engine
+                .load(&docs[(i / 50) as usize % docs.len()], song)
+                .unwrap();
+        }
+        armed_block(&mut b, 1 + (i * 53) % 1024);
+    }
+    assert_eq!(
+        rt_check::count() - before,
+        0,
+        "allocations with VCAs across rebuilds and commits"
+    );
+    assert!(
+        engine.graphs_applied() - applied >= 8,
+        "{} graphs applied",
+        engine.graphs_applied() - applied
+    );
+    assert!(engine.faults().is_empty(), "{:?}", engine.faults().names());
+    // The automation commits: the last graph holds the automated faders.
+    let bus = |name: &str| {
+        let m = doc.mixer();
+        *m.strips()
+            .values()
+            .find(|s| s.name == name)
+            .map(|s| &s.id)
+            .unwrap()
+    };
+    let held = engine.overrides().unwrap();
+    assert!(held.fader_db(bus("Bus 0")).is_some() && held.fader_db(bus("Bus 45")).is_some());
     drop(b.stop().unwrap());
     drop(engine);
     rt_check::set_arm_workers(false);

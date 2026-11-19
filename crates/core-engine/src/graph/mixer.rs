@@ -1,10 +1,11 @@
 //! The mixer → graph translation (spec §6; Plan Rulings 1, 4, 5, 25).
 
-use crate::graph::controls::{FeedSpec, SendSpec, StripControlSpec};
+use crate::graph::controls::{FeedSpec, SendSpec, StripControlSpec, VcaControlSpec};
 use crate::graph::dsp::strip_gains;
 use crate::graph::spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};
 use crate::schedule::TargetIdx;
 use core_model::document::Document;
+use core_model::groups::{heard_db, vca_muted, vca_offset_db, vcas_of};
 use core_model::ids::{DestId, OutputPathId, StripId};
 use core_model::mixer::{Output, PluginSlot, Strip, StripKind, db_to_gain};
 use core_model::mixer_rules::{audible, solo_reach};
@@ -21,6 +22,8 @@ pub struct MixerGraph {
     pub warnings: Vec<String>,
     /// Every strip's automatable controls (4d, `Graph::set_controls`).
     pub controls: Vec<StripControlSpec>,
+    /// Every VCA's controls, by VCA ID (`Graph::set_controls`).
+    pub vcas: Vec<VcaControlSpec>,
 }
 
 /// Which strip an instrument node feeds.
@@ -171,7 +174,9 @@ pub fn mixer_spec(
             }
         }
     }
-    let muted = |s: &Strip| s.mute || !on.contains(&s.id);
+    // Heard muted: its own mute, a VCA's, or another strip's solo (spec
+    // §2a; `audible` counts a VCA's solo as its members').
+    let muted = |s: &Strip| s.mute || vca_muted(m, s.id) || !on.contains(&s.id);
     // What each strip feeds, for automation (Plan 4d Ruling 11).
     let mut feeds: BTreeMap<StripId, Vec<FeedSpec>> = BTreeMap::new();
     for s in m.strips().values() {
@@ -233,7 +238,11 @@ pub fn mixer_spec(
         let Some(spec) = strips.get_mut(k) else {
             continue;
         };
-        let (gl, gr) = strip_gains(s.gain_db, s.pan, s.id != m.master());
+        // A VCA acts as part of the fader: on the main output and the
+        // post-fader taps, not the pre-fader ones (spec §2a). `commit`
+        // sums the same way.
+        let heard = heard_db(s.gain_db, vca_offset_db(m, s.id));
+        let (gl, gr) = strip_gains(heard, s.pan, s.id != m.master());
         spec.gain_l = gl;
         spec.gain_r = gr;
         spec.audible = !muted(s);
@@ -250,12 +259,13 @@ pub fn mixer_spec(
                 .remove(&s.id)
                 .map(|x| x.into_iter().collect())
                 .unwrap_or_else(|| vec![s.id]),
+            vcas: vcas_of(m, s.id).map(|v| v.id).collect(),
         });
         // The EQ first, then the inserts (plan 7b Ruling 9).
         for slot in s.chain() {
             let sidechain = slot.sidechain.and_then(|src| {
                 let from = node(src)?;
-                let explicit = m.strip(src).map(|x| x.mute).unwrap_or(false);
+                let explicit = m.strip(src).map(|x| x.mute).unwrap_or(false) || vca_muted(m, src);
                 Some(InputSpec {
                     from,
                     tap: Tap::Post,
@@ -294,10 +304,21 @@ pub fn mixer_spec(
             .into_iter()
             .map(|path| NodeSpec::Regions { path }),
     );
+    let vcas = m
+        .vcas()
+        .values()
+        .map(|v| VcaControlSpec {
+            vca: v.id,
+            gain_db: v.gain_db,
+            mute: v.mute,
+            solo: v.solo,
+        })
+        .collect();
     MixerGraph {
         spec: GraphSpec { nodes, master },
         strips: strip_nodes,
         warnings,
         controls,
+        vcas,
     }
 }

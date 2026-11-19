@@ -21,7 +21,7 @@
 
 use crate::backend::{BlockInfo, StereoBuf};
 use crate::error::EngineError;
-use crate::graph::controls::{Controls, StripControlSpec};
+use crate::graph::controls::{Controls, StripControlSpec, VcaControlSpec};
 use crate::graph::delay::DelayLine;
 use crate::graph::dsp;
 use crate::graph::node::{EffectNode, ProcessStatus};
@@ -653,15 +653,15 @@ impl Graph {
         self.instruments
     }
 
-    /// Installs the mixer's controls (after `build`). Not RT.
-    pub fn set_controls(&mut self, specs: &[StripControlSpec]) {
+    /// Installs the mixer's controls and its VCAs (after `build`). Not RT.
+    pub fn set_controls(&mut self, specs: &[StripControlSpec], vcas: &[VcaControlSpec]) {
         let keys: BTreeMap<(usize, usize), usize> = self
             .input_keys
             .iter()
             .enumerate()
             .map(|(i, k)| (*k, i))
             .collect();
-        self.controls = Controls::build(specs, |node, k| keys.get(&(node, k)).copied());
+        self.controls = Controls::build(specs, vcas, |node, k| keys.get(&(node, k)).copied());
         let mut feed: Vec<(FeedKey, u64)> = specs
             .iter()
             .flat_map(|c| {

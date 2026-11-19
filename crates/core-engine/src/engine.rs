@@ -1026,7 +1026,7 @@ impl Engine {
                 None => InsertInit::Placeholder,
             }
         });
-        graph.set_controls(&mg.controls);
+        graph.set_controls(&mg.controls, &mg.vcas);
         if let Some(seed) = &self.seed {
             graph.seed_overrides(seed);
         }

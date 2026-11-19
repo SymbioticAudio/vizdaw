@@ -93,12 +93,21 @@ fn sounds(db: f64) -> bool {
 /// Also [`GAIN_FLOOR_DB`] when the sum is at or below it. The top is not
 /// capped here: [`heard_db`] caps the total.
 pub fn vca_offset_db(m: &Mixer, strip: StripId) -> f64 {
+    vca_sum(vcas_of(m, strip).map(|v| v.gain_db))
+}
+
+/// The offset of VCA levels `levels`, by [`vca_offset_db`]'s rule: Σ;
+/// GAIN_FLOOR_DB when any level or the sum is at or below it; 0 for none.
+///
+/// The engine sums a strip's VCAs with it (live, bounce and render alike);
+/// it neither allocates nor panics.
+pub fn vca_sum(levels: impl IntoIterator<Item = f64>) -> f64 {
     let mut sum = 0.0;
-    for v in vcas_of(m, strip) {
-        if !sounds(v.gain_db) {
+    for db in levels {
+        if !sounds(db) {
             return GAIN_FLOOR_DB;
         }
-        sum += v.gain_db;
+        sum += db;
     }
     if sounds(sum) { sum } else { GAIN_FLOOR_DB }
 }
