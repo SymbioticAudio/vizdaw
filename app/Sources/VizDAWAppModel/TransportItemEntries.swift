@@ -163,6 +163,34 @@ public enum TransportItemEntries {
         }
     }
 
+    /// The item that shows `f`.
+    public static func item(holding f: TransportField) -> TransportItemID {
+        switch f {
+        case .position: .positionField
+        case .editIn, .editOut: .editFields
+        case .punchIn, .punchOut: .punchFields
+        }
+    }
+
+    /// What a field key (P, E, U) does (Task 12b): focus its field on the
+    /// row; or open » at the folded item that holds it; or, when the bar
+    /// has no such item, open » at a view of that item made for it.
+    public enum FieldKeyTarget: Equatable, Sendable {
+        case onRow
+        case folded(TransportItemID)
+        case absent(TransportItemID)
+    }
+
+    /// Where `f` is on a row of `items` (the row's, in bar order) of which
+    /// `folded` are in ».
+    public static func fieldKey(_ f: TransportField, items: [TransportItem], folded: [TransportItem])
+        -> FieldKeyTarget
+    {
+        let id = item(holding: f)
+        if folded.contains(where: { $0.id == id }) { return .folded(id) }
+        return items.contains { $0.id == id } ? .onRow : .absent(id)
+    }
+
     /// A refusal goes to the status line, as a menu item's does.
     static func report(_ o: KeyOutcome, _ m: DocumentModel) {
         switch o {

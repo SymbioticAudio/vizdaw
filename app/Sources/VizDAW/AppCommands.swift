@@ -440,7 +440,10 @@ struct AppCommands: Commands {
     /// A key that focuses a transport field (plan 4f Ruling 16).
     private func fieldItem(_ id: String) -> some View {
         Button(keyBindings.row(id)?.title ?? id) {
-            if let docID, let f = ControlCommands.fieldKeys[id] { _ = AppControlHost.shared.focus(f, docID) }
+            // Folded or not on the bar, » opens at the field (Task 12b).
+            if let docID, let f = ControlCommands.fieldKeys[id], !AppControlHost.shared.openField(f, docID) {
+                doc?.editor.status = "The window shows no transport fields."
+            }
         }
         .keyboardShortcut(KeyMenu.shortcut(id))
         .disabled(docID == nil || !(doc?.transportKeysEnabled ?? false))

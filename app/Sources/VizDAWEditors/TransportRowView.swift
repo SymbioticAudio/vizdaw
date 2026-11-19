@@ -59,6 +59,9 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
     private var popover: NSPopover?
     /// The view lent to the popover, and the size it had.
     private var lent: NSView?
+    /// The lent view was made for the popover (an absent item's fields),
+    /// not the row's.
+    private var lentIsBorrowed = false
 
     public init(
         document: DocumentModel, layout: TransportLayout, documentWindow: Bool,
@@ -231,6 +234,63 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
         foldedItems = folded.map { slots[items[$0].slot].item }
     }
 
+    // MARK: Field keys
+
+    /// The row inside `view`, if any (the P, E and U keys find it).
+    public static func find(in view: NSView?) -> TransportRowView? {
+        guard let view else { return nil }
+        if let r = view as? TransportRowView { return r }
+        for s in view.subviews {
+            if let r = find(in: s) { return r }
+        }
+        return nil
+    }
+
+    /// Where field `f` is on this row now (Task 12b).
+    public func fieldKey(_ f: TransportField) -> TransportItemEntries.FieldKeyTarget {
+        TransportItemEntries.fieldKey(f, items: slots.map(\.item), folded: foldedItems)
+    }
+
+    /// A view of item `id`'s fields for » when the bar has no such item:
+    /// never on the row; Tab goes round its own fields.
+    func absentFieldsView(_ id: TransportItemID) -> TransportFieldsView {
+        let v = TransportFieldsView(document: document, fields: TransportItemEntries.fields(id))
+        v.theme = theme
+        return v
+    }
+
+    /// The P, E and U keys (Task 12b): `f` on the row takes the keyboard;
+    /// folded or absent, » opens a popover at its item with `f` ready to
+    /// type. An edit there commits only on Return, Tab or Shift-Tab and
+    /// cancels when the popover closes (Ruling 7). False: nothing took it.
+    @discardableResult
+    public func openField(_ f: TransportField) -> Bool {
+        switch fieldKey(f) {
+        case .onRow:
+            return TransportFieldsView.find(in: self, showing: f)?.focus(f) ?? false
+        case .folded(let id):
+            guard let slot = slots.first(where: { $0.item.id == id }), let v = slot.view as? TransportFieldsView
+            else { return false }
+            lend(v, borrowed: false)
+            return focusInPopover(v, f)
+        case .absent(let id):
+            let v = absentFieldsView(id)
+            lend(v, borrowed: true)
+            return focusInPopover(v, f)
+        }
+    }
+
+    /// The popover's window takes key so the field can be typed in.
+    private func focusInPopover(_ v: TransportFieldsView, _ f: TransportField) -> Bool {
+        guard popover?.isShown == true, let w = v.window else {
+            // It did not open (no window on screen): the view goes back.
+            closePopover()
+            return false
+        }
+        w.makeKey()
+        return v.focus(f)
+    }
+
     // MARK: Menus
 
     /// The » menu: the folded items' entries, in bar order.
@@ -274,8 +334,14 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
         guard let slot = slots.first(where: { foldedItems.contains($0.item) && $0.item.id.title == title }) else {
             return
         }
+        lend(slot.view, borrowed: false)
+    }
+
+    /// Shows `v` in a popover under » until it closes: a row item's own
+    /// view goes back to the row then; a `borrowed` one (made for the
+    /// popover) is let go.
+    private func lend(_ v: NSView, borrowed: Bool) {
         closePopover()
-        let v = slot.view
         let size = Self.idealSize(v)
         let pad = theme.spacing.s
         let box = NSView(frame: NSRect(x: 0, y: 0, width: size.width + 2 * pad, height: size.height + 2 * pad))
@@ -291,8 +357,15 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
         p.appearance = NSAppearance(named: theme.appearance.nsAppearanceName)
         p.delegate = self
         lent = v
+        lentIsBorrowed = borrowed
         popover = p
-        p.show(relativeTo: chevron.bounds, of: chevron, preferredEdge: .maxY)
+        // Under »; at »'s place on the row when » is hidden (an absent
+        // item, nothing folded: Task 12b).
+        if chevron.isHidden {
+            p.show(relativeTo: chevron.frame, of: self, preferredEdge: isFlipped ? .maxY : .minY)
+        } else {
+            p.show(relativeTo: chevron.bounds, of: chevron, preferredEdge: .maxY)
+        }
     }
 
     /// The popover's item, back on the row.
@@ -306,6 +379,10 @@ public final class TransportRowView: NSView, ThemedView, NSPopoverDelegate {
         guard let v = lent else { return }
         lent = nil
         v.removeFromSuperview()
+        if lentIsBorrowed {
+            lentIsBorrowed = false
+            return
+        }
         addSubview(v, positioned: .below, relativeTo: chevron)
         needsLayout = true
     }

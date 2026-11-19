@@ -218,11 +218,13 @@ public struct TransportLayout: Codable, Equatable, Sendable {
     public init(items: [TransportItem]) { self.items = items }
 
     /// Ruling 13's default: today's bar, with Loop just after the cluster
-    /// and Click after Loop.
+    /// and Click after Loop; without Punch In and Out and Audio Device
+    /// (Task 12b, owner: so the mixer window's bar fits at 1,600 pt). Both
+    /// stay in the Customize palette.
     public static let standard = TransportLayout(
         items: ([
             .cluster, .loop, .click, .replaceOverdub, .recordOptions, .summary, .bar, .time, .tempo, .signature,
-            .positionField, .editFields, .punchFields, .space, .device, .faults, .mainView, .panes,
+            .positionField, .editFields, .space, .faults, .mainView, .panes,
         ] as [TransportItemID]).map { .builtIn($0, nil) })
 
     /// `ui.set_transport_bar`'s text: tokens split by ",", each
@@ -302,6 +304,9 @@ public struct TransportLayout: Codable, Equatable, Sendable {
 /// value gives the default and is left as it is until `set` or `reset`.
 @Observable @MainActor public final class TransportLayoutStore {
     public static let key = "VizDAW.transportBar"
+    /// The stored value of the default bar (Task 12b): it follows the
+    /// default when a later version changes it.
+    public static let standardValue = "standard"
 
     @ObservationIgnored private let defaults: UserDefaults
     public private(set) var layout: TransportLayout
@@ -310,7 +315,8 @@ public struct TransportLayout: Codable, Equatable, Sendable {
         self.defaults = defaults
         layout =
             defaults.string(forKey: Self.key).flatMap {
-                try? JSONDecoder().decode(TransportLayout.self, from: Data($0.utf8))
+                $0 == Self.standardValue
+                    ? .standard : try? JSONDecoder().decode(TransportLayout.self, from: Data($0.utf8))
             } ?? .standard
     }
 
@@ -332,12 +338,18 @@ public struct TransportLayout: Codable, Equatable, Sendable {
         customizer = nil
     }
 
-    /// Shows `l` and writes the preference; a layout that breaks the
-    /// decoder's rules is refused before anything is written (Task 11
-    /// review: else the next launch would fall back to the default).
+    /// Shows `l` and writes the preference (the default as
+    /// `standardValue`); a layout that breaks the decoder's rules is
+    /// refused before anything is written (Task 11 review: else the next
+    /// launch would fall back to the default).
     @discardableResult
     public func set(_ l: TransportLayout) -> TransportLayoutError? {
         if case .failure(let e) = TransportLayout.checked(l.items) { return e }
+        if l == .standard {
+            layout = l
+            defaults.set(Self.standardValue, forKey: Self.key)
+            return nil
+        }
         guard let data = try? JSONEncoder().encode(l), let s = String(data: data, encoding: .utf8) else {
             return .init("the transport bar could not be written")
         }

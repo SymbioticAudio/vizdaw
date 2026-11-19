@@ -840,15 +840,27 @@ final class AppControlHost: ControlHost {
     }
 
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {
-        // The key mixer window of this document has fields of its own
-        // (plan 7d Ruling 7); else the document window's.
-        let key = NSApp.keyWindow
-        let tag = key.map(ControlWindows.tagOf)
-        let target = TransportFieldsTarget.choose(keyKind: tag?.kind, keyDoc: tag?.doc, doc: doc)
-        let window = target == .mixerWindow ? key : ControlWindows.window(of: doc)
-        guard let w = window,
+        guard let w = fieldsWindow(doc),
             let v = TransportFieldsView.find(in: w.contentView?.superview ?? w.contentView, showing: field)
         else { return false }
         return v.focus(field)
+    }
+
+    /// The key mixer window of this document has fields of its own (plan
+    /// 7d Ruling 7); else the document window's.
+    private func fieldsWindow(_ doc: UUID) -> NSWindow? {
+        let key = NSApp.keyWindow
+        let tag = key.map(ControlWindows.tagOf)
+        let target = TransportFieldsTarget.choose(keyKind: tag?.kind, keyDoc: tag?.doc, doc: doc)
+        return target == .mixerWindow ? key : ControlWindows.window(of: doc)
+    }
+
+    /// The P, E and U keys from the menu (a user's key, never the
+    /// channel's: Task 12b): the field on the row takes the keyboard;
+    /// folded into », or not on the bar, » opens at it.
+    func openField(_ field: TransportField, _ doc: UUID) -> Bool {
+        guard let w = fieldsWindow(doc), let row = TransportRowView.find(in: w.contentView?.superview ?? w.contentView)
+        else { return focus(field, doc) }
+        return row.openField(field)
     }
 }

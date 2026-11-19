@@ -47,7 +47,7 @@ private let appWidths: [TransportItemID: CGFloat] = [
 
     @Test func nothingIsCut() {
         let pieces = standardPieces()
-        #expect(pieces.count == 18)
+        #expect(pieces.count == 16)
         let content = Set(pieces.indices.filter { pieces[$0].kind == .content })
         let cluster = pieces.firstIndex { $0.kind == .fixed }
         let spacing: CGFloat = 12
@@ -111,11 +111,15 @@ private let appWidths: [TransportItemID: CGFloat] = [
     }
 
     @Test func theDefaultLayoutIsTodaysBar() {
+        // Task 12b (owner): no Punch fields and no Audio Device by default;
+        // the palette still offers both.
         #expect(
             TransportLayout.standard.items.map(\.id) == [
                 .cluster, .loop, .click, .replaceOverdub, .recordOptions, .summary, .bar, .time, .tempo, .signature,
-                .positionField, .editFields, .punchFields, .space, .device, .faults, .mainView, .panes,
+                .positionField, .editFields, .space, .faults, .mainView, .panes,
             ])
+        let sheet = TransportCustomizeModel(store: TransportLayoutStore(defaults: MemoryDefaults()))
+        #expect(sheet.palette.contains(.builtIn(.punchFields, nil)) && sheet.palette.contains(.builtIn(.device, nil)))
         // The mixer window's: no document-only item.
         #expect(!TransportLayout.standard.items(documentWindow: false).contains { $0.id.documentOnly })
         #expect(TransportItemID.allCases.filter(\.documentOnly) == [.faults, .mainView, .panes])
@@ -151,6 +155,77 @@ private let appWidths: [TransportItemID: CGFloat] = [
         let empty = MemoryDefaults()
         #expect(TransportLayoutStore(defaults: empty).layout == .standard)
         #expect(empty.string(forKey: key) == nil)
+    }
+
+    /// Task 12b: a stored `standard` follows the default; a stored custom
+    /// bar keeps its Punch fields and Audio Device.
+    @Test func aStoredStandardFollowsTheDefault() throws {
+        let key = TransportLayoutStore.key
+        let d = MemoryDefaults()
+        d.set("standard", forKey: key)
+        let s = TransportLayoutStore(defaults: d)
+        #expect(s.layout == .standard)
+        #expect(!s.layout.items.contains { [.punchFields, .device].contains($0.id) })
+        // Reset and a bar equal to the default write `standard`.
+        let custom = try TransportLayout.parse("cluster,loop").get()
+        s.set(custom)
+        s.reset()
+        #expect(d.string(forKey: key) == "standard")
+        s.set(custom)
+        s.set(.standard)
+        #expect(d.string(forKey: key) == "standard")
+        #expect(TransportLayoutStore(defaults: d).layout == .standard)
+        // A custom bar that names them keeps them.
+        let old = try TransportLayout.parse(
+            "cluster,loop,bar,position_field,edit_fields,punch_fields,space,device,faults").get()
+        let c = MemoryDefaults()
+        TransportLayoutStore(defaults: c).set(old)
+        #expect(c.string(forKey: key) != "standard")
+        let back = TransportLayoutStore(defaults: c).layout
+        #expect(back == old)
+        #expect(back.items.contains(.builtIn(.punchFields, nil)) && back.items.contains(.builtIn(.device, nil)))
+    }
+
+    /// Task 12b: P, E and U focus their field on the row; folded, they open
+    /// » at its item; absent, » at a view of its own.
+    @Test func theFieldKeysOpenTheirField() throws {
+        let keys: [(id: String, field: TransportField, item: TransportItemID)] = [
+            ("transport.go_position", .position, .positionField), ("transport.go_edit_in", .editIn, .editFields),
+            ("transport.go_punch", .punchIn, .punchFields),
+        ]
+        for k in keys {
+            #expect(ControlCommands.fieldKeys[k.id] == k.field, "\(k.id)")
+            #expect(TransportItemEntries.item(holding: k.field) == k.item)
+            let item = TransportItem.builtIn(k.item, nil)
+            let all: [TransportItem] = [.builtIn(.cluster, nil), item, .builtIn(.loop, nil)]
+            #expect(TransportItemEntries.fieldKey(k.field, items: all, folded: []) == .onRow, "\(k.id) on the row")
+            #expect(
+                TransportItemEntries.fieldKey(k.field, items: all, folded: [item, .builtIn(.loop, nil)])
+                    == .folded(k.item), "\(k.id) folded")
+            let without = all.filter { $0 != item }
+            #expect(
+                TransportItemEntries.fieldKey(k.field, items: without, folded: without) == .absent(k.item),
+                "\(k.id) absent")
+        }
+        #expect(TransportItemEntries.item(holding: .editOut) == .editFields)
+        #expect(TransportItemEntries.item(holding: .punchOut) == .punchFields)
+        // The row's own answer: the default has no Punch fields.
+        let m = try DocumentModel(session: demoFake())
+        let row = mixerRow(m)
+        let w = window(row, width: 1600, height: row.fittingHeight)
+        defer { w.close() }
+        row.layoutSubtreeIfNeeded()
+        #expect(row.fieldKey(.position) == .onRow && row.fieldKey(.editIn) == .onRow)
+        #expect(row.fieldKey(.punchIn) == .absent(.punchFields))
+        w.setContentSize(NSSize(width: 300, height: row.fittingHeight))
+        row.layoutSubtreeIfNeeded()
+        #expect(row.fieldKey(.position) == .folded(.positionField))
+        #expect(row.fieldKey(.editIn) == .folded(.editFields))
+        // An absent field's view: made for », its fields only, never on the row.
+        let v = row.absentFieldsView(.punchFields)
+        #expect(v.shownFields == [.punchIn, .punchOut])
+        #expect(v.fields[.punchOut]?.nextKeyView === v.fields[.punchIn], "Tab goes round its own two")
+        #expect(!row.slots.contains { $0.view === v })
     }
 
     @Test func itemsTextParses() throws {
@@ -227,9 +302,8 @@ private let appWidths: [TransportItemID: CGFloat] = [
         let shownOrFolded = Set(row.shownItems.map(\.id)).union(folded.map(\.id))
         // Widening brings them back, in order, none lost on the way.
         let content = Set(row.slots.map(\.item.id).filter { ![.space, .separator, .summary].contains($0) })
-        // The real readouts and fields need about 1,790 pt in the mixer
-        // window (the brief's 1,600 assumed narrower ones): at 1,600 only
-        // the tail is folded; by 2,000 nothing is.
+        // At 1,600 pt nothing folds (Task 12b: the default dropped Punch
+        // and Audio Device).
         let inBar = order.map(\.id).filter { content.contains($0) }
         var lastFolded = Int.max
         for width in stride(from: CGFloat(300), through: 2000, by: 50) {
@@ -241,7 +315,10 @@ private let appWidths: [TransportItemID: CGFloat] = [
             #expect(row.foldedItems.map(\.id) == Array(inBar.suffix(row.foldedItems.count)), "\(width): the tail folds")
             #expect(row.foldedItems.count <= lastFolded, "\(width): widening only brings items back")
             lastFolded = row.foldedItems.count
-            if width == 1600 { #expect(row.foldedItems.count <= 2, "1600: \(row.foldedItems)") }
+            if width == 1600 {
+                #expect(row.foldedItems.isEmpty, "1600: \(row.foldedItems)")
+                #expect(row.chevron.isHidden, "1600: » is hidden")
+            }
         }
         #expect(shownOrFolded == content)
         #expect(row.foldedItems.isEmpty, "at 2000 nothing folds")
@@ -253,7 +330,10 @@ private let appWidths: [TransportItemID: CGFloat] = [
     /// and gives it back.
     @Test func foldedFieldsAreHiddenNotRemade() throws {
         let m = try DocumentModel(session: demoFake())
-        let row = mixerRow(m)
+        let all = try TransportLayout.parse("cluster,position_field,edit_fields,punch_fields").get()
+        let row = TransportRowView(document: m, layout: all, documentWindow: false) { item in
+            appWidths[item.id].map { StandIn($0) }
+        }
         let w = window(row, width: 1600, height: row.fittingHeight)
         defer { w.close() }
         row.layoutSubtreeIfNeeded()

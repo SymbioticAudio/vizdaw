@@ -3145,6 +3145,14 @@ fn transport_jumps_readouts_and_fields_over_the_channel() {
         app.call("state.get", json!({"target": "record", "window": w}))["recording"].clone()
     };
     let punch_in = |e: &Value| e["transport"]["punch_in"].clone();
+    // The default bar has no Punch fields (Task 12b): put them on it, just
+    // after Edit In and Out, so they show before the tail folds.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar", "params": {"items": "cluster,loop,click,replace_overdub,\
+                record_options,summary,bar,time,tempo,signature,position_field,edit_fields,punch_fields,\
+                space,faults,main_view,panes"}}),
+    );
     let before = punch_in(&app.call("state.get", json!({"target": "editor", "window": w})));
     select_field(&mut app, "Punch In");
     app.call("ui.key", json!({"window": w, "text": "3"}));
