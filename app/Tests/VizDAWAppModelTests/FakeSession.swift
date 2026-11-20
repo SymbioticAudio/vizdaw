@@ -1559,12 +1559,35 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return true
     }
 
+    /// The synth calls in the order they came (small-fixes Task 4).
+    var synthCalls: [String] = []
+
+    /// Every `editMidiDestination` call (small-fixes Task 4); the row
+    /// takes the values.
+    var editedDestinations: [(dest: UInt64, name: String, port: String, channel: UInt8)] = []
+
+    func editMidiDestination(dest: UInt64, name: String, port: String, channel: UInt8) throws -> DocSnapshot {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        editedDestinations.append((dest, name, port, channel))
+        synthCalls.append("editMidiDestination")
+        if let i = dests.firstIndex(where: { $0.id == dest }) {
+            dests[i].name = name
+            dests[i].port = port
+            dests[i].channel = channel
+        }
+        return commandResult()
+    }
+
     func setReturnLatency(dest: UInt64, ms: Float) throws -> DocSnapshot {
         if let e = synthError {
             synthError = nil
             throw e
         }
         returnLatencies.append((dest, ms))
+        synthCalls.append("setReturnLatency")
         return commandResult()
     }
 

@@ -103,6 +103,37 @@ import VizDAWCore
         #expect(f.trackSynthCalls.count == before)
     }
 
+    /// Small-fixes Task 4: `destination.edit_midi` takes every key, a
+    /// 1-based channel and an external MIDI destination; the core gets the
+    /// trimmed name and the 0-based channel.
+    @Test func editMidiTakesANamePortAndChannel() throws {
+        let (s, id, m, f) = try demo()
+        let good: [(String, ControlValue)] = [
+            ("dest", .int(value: 7)), ("name", .text(value: " Juno 106 ")), ("port", .text(value: "Juno MIDI")),
+            ("channel", .int(value: 16)),
+        ]
+        #expect(failure(run("destination.edit_midi", good, m, s, id)) == nil)
+        let e = try #require(f.editedDestinations.last)
+        #expect(e.dest == 7 && e.name == "Juno 106" && e.port == "Juno MIDI" && e.channel == 15)
+        func with(_ key: String, _ v: ControlValue?) -> [(String, ControlValue)] {
+            var a = good.filter { $0.0 != key }
+            if let v { a.append((key, v)) }
+            return a
+        }
+        for bad in [
+            with("dest", nil), with("name", nil), with("port", nil), with("channel", nil),
+            with("dest", .int(value: 1)), with("dest", .int(value: 99)), with("dest", .int(value: -7)),
+            with("name", .text(value: "  ")), with("name", .text(value: String(repeating: "x", count: 256))),
+            with("name", .text(value: "a\nb")), with("port", .text(value: "")), with("port", .text(value: "P\u{7}")),
+            with("channel", .int(value: 0)), with("channel", .int(value: 17)), with("channel", .text(value: "1")),
+        ] {
+            #expect(failure(run("destination.edit_midi", bad, m, s, id))?.code == .invalidParams, "\(bad)")
+        }
+        #expect(f.editedDestinations.count == 1)
+        f.synthError = .Model(message: "no MIDI destination named \"Gone\"")
+        #expect(failure(run("destination.edit_midi", good, m, s, id))?.code == .failed)
+    }
+
     @Test func returnLatencyIsTextMillisecondsFrom0To500() throws {
         let (s, id, m, f) = try demo()
         #expect(

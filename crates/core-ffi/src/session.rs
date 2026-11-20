@@ -3501,6 +3501,12 @@ impl Session {
                     },
                     mpe: d.mpe.map(Into::into),
                     builtin_sound: crate::builtin_sound::sound_of(d),
+                    port: match &d.kind {
+                        DestKind::MidiEndpoint { endpoint_ref, .. } if d.kind.is_external() => {
+                            Some(endpoint_ref.clone())
+                        }
+                        _ => None,
+                    },
                 })
                 .collect())
         })
@@ -3521,35 +3527,8 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let name = name.trim().to_string();
-            // The port is matched as given: a CoreMIDI name may have
-            // edge spaces (Task 11 review m5).
-            for (what, v) in [("name", &name), ("port", &port)] {
-                if v.trim().is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control)
-                {
-                    return Err(crate::events::bad(&format!(
-                        "the destination's {what} is 1 to 255 characters"
-                    )));
-                }
-            }
-            if channel > 15 {
-                return Err(crate::events::bad(
-                    "the MIDI channel is 0 to 15 (MIDI channels 1 to 16)",
-                ));
-            }
-            // A device named like a reserved reference would play the
-            // built-in synth or the virtual output (Task 11 review m5).
-            if port == core_model::mixer::BUILTIN_SYNTH_REF
-                || port == core_engine::schedule::targets::VIRTUAL_OUT_REF
-            {
-                return Err(crate::events::bad(&format!(
-                    "{port:?} is reserved; choose a MIDI destination"
-                )));
-            }
-            if !crate::host::midi_destination_ports().contains(&port) {
-                return Err(crate::events::bad(&format!(
-                    "no MIDI destination named {port:?}"
-                )));
-            }
+            check_midi_fields(&name, &port, channel)?;
+            check_new_port(&port)?;
             self.execute(Command::Routing(RoutingCmd::AddDestination {
                 name,
                 kind: DestKind::MidiEndpoint {
@@ -3559,6 +3538,99 @@ impl Session {
                 },
                 default_patch: None,
             }))
+        })
+    }
+
+    /// The destination editor (small-fixes Task 4, R4): external MIDI
+    /// destination `dest` takes the name `name` (trimmed), port `port` and
+    /// channel `channel` (0–15), one undo step "Edit Destination"; nothing
+    /// changed (the trimmed name, port and channel as they are) is no
+    /// step. The checks are [`Session::add_midi_destination`]'s, except
+    /// that the port it plays now may be kept although
+    /// [`crate::host::midi_destination_ports`] no longer lists it (an
+    /// offline synth stays editable). `Model` for an unknown id or a
+    /// destination that is not external MIDI (a plugin instrument, the
+    /// Built-in Synth): the kind is not edited here.
+    pub fn edit_midi_destination(
+        &self,
+        dest: u64,
+        name: String,
+        port: String,
+        channel: u8,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let name = name.trim().to_string();
+            check_midi_fields(&name, &port, channel)?;
+            let id = DestId(dest);
+            let old = self
+                .lock_inner()
+                .doc()
+                .instruments()
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| VizError::Model {
+                    message: format!("unknown id {id}"),
+                })?;
+            let DestKind::MidiEndpoint {
+                endpoint_ref,
+                group,
+                channel: old_channel,
+            } = &old.kind
+            else {
+                return Err(not_external_midi(&old.name));
+            };
+            if !old.kind.is_external() {
+                return Err(not_external_midi(&old.name));
+            }
+            if port != *endpoint_ref {
+                check_new_port(&port)?;
+            }
+            let mut steps = Vec::new();
+            if name != old.name {
+                steps.push(Command::Routing(RoutingCmd::RenameDestination {
+                    dest: id,
+                    name,
+                }));
+            }
+            if port != *endpoint_ref || channel != *old_channel {
+                steps.push(Command::Routing(RoutingCmd::EditDestination {
+                    dest: id,
+                    kind: DestKind::MidiEndpoint {
+                        endpoint_ref: port,
+                        group: *group,
+                        channel,
+                    },
+                    default_patch: old.default_patch,
+                }));
+            }
+            if steps.is_empty() {
+                return self.lock_inner().snapshot();
+            }
+            let mut inner = self.lock_inner();
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(edit_open_busy());
+            }
+            let before = inner.doc().clone();
+            let filter = ViewFilter::default();
+            let h = &mut inner.history;
+            crate::bundled::arm(h);
+            h.begin("Edit Destination")?;
+            let mut notes = Vec::new();
+            for step in &steps {
+                match h.execute(step, &filter) {
+                    Ok(r) => notes.extend(r.warnings),
+                    Err(e) => {
+                        let _ = h.abort();
+                        return Err(e.into());
+                    }
+                }
+            }
+            h.commit()?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            self.send_mix_changes(&mut inner, &before);
+            inner.snapshot_with(notes)
         })
     }
 
@@ -3589,6 +3661,57 @@ impl Session {
             }))
         })
     }
+}
+
+/// The name (already trimmed), port and channel checks New MIDI
+/// Destination and the destination editor share: name and port 1 to 255
+/// characters with no control characters (the port matched as given: a
+/// CoreMIDI name may have edge spaces, Task 11 review m5), channel 0–15.
+fn check_midi_fields(name: &str, port: &str, channel: u8) -> Result<(), VizError> {
+    for (what, v) in [("name", name), ("port", port)] {
+        if v.trim().is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control) {
+            return Err(crate::events::bad(&format!(
+                "the destination's {what} is 1 to 255 characters"
+            )));
+        }
+    }
+    if channel > 15 {
+        return Err(crate::events::bad(
+            "the MIDI channel is 0 to 15 (MIDI channels 1 to 16)",
+        ));
+    }
+    Ok(())
+}
+
+/// A port a destination may newly play: not a reserved reference (a
+/// device named like one would play the built-in synth or the virtual
+/// output, Task 11 review m5), and one
+/// [`crate::host::midi_destination_ports`] lists.
+fn check_new_port(port: &str) -> Result<(), VizError> {
+    if port == core_model::mixer::BUILTIN_SYNTH_REF
+        || port == core_engine::schedule::targets::VIRTUAL_OUT_REF
+    {
+        return Err(crate::events::bad(&format!(
+            "{port:?} is reserved; choose a MIDI destination"
+        )));
+    }
+    if !crate::host::midi_destination_ports()
+        .iter()
+        .any(|p| p == port)
+    {
+        return Err(crate::events::bad(&format!(
+            "no MIDI destination named {port:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// The destination editor's refusal of a destination whose port and
+/// channel it does not edit (R4).
+fn not_external_midi(name: &str) -> VizError {
+    crate::events::bad(&format!(
+        "{name:?} is not an external MIDI destination; only its name can be changed"
+    ))
 }
 
 /// The package file holding which plugin windows were open (not part of

@@ -2265,6 +2265,30 @@ const ADD_MIDI_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `destination.edit_midi` (small-fixes Task 4): the destination
+/// editor's name, port and channel, all required.
+const EDIT_MIDI_PARAMS: &[ParamSpec] = &[
+    id_param("dest", "The external MIDI destination."),
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Its name, 1 to 255 characters (edge spaces are trimmed).",
+    },
+    ParamSpec {
+        name: "port",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI destination it plays (its CoreMIDI name), or the one it plays now even when offline.",
+    },
+    ParamSpec {
+        name: "channel",
+        kind: ParamKind::Int { min: 1, max: 16 },
+        required: true,
+        help: "The MIDI channel, 1 to 16.",
+    },
+];
+
 /// `automation.set_mode` (plan 5e-1 Ruling 17).
 const AUTOMATION_MODE_PARAMS: &[ParamSpec] = &[
     ParamSpec {
@@ -3457,6 +3481,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         class: Class::Change,
+        params: EDIT_MIDI_PARAMS,
+        ..key_only(cmd(
+            "destination.edit_midi",
+            "Destination",
+            "Edit Destination",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
         params: AUTOMATION_MODE_PARAMS,
         ..key_only(cmd(
             "automation.set_mode",
@@ -4193,6 +4228,7 @@ pub fn validate_args(
     {
         return Err(p.error("give at least one of `volume`, `pan` and `mute`"));
     }
+    destination_rules(&p, spec.id, &out)?;
     mixer_rules(&p, spec.id, &out)?;
     group_rules(&p, spec.id, &out)?;
     if spec.id == "transport.set_click_level"
@@ -4337,6 +4373,30 @@ fn mixer_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(
     if let Some(t) = text_arg(out, "plugin") {
         plugin_ref(t, id == "track.new_plugin_instrument")
             .map_err(|m| p.error(format!("`plugin` {m}")))?;
+    }
+    Ok(())
+}
+
+/// `destination.edit_midi`'s name and port, for both sockets: 1 to 255
+/// characters (the name trimmed, the port as given but not blank), no
+/// control characters, as the core checks them.
+fn destination_rules(
+    p: &Params<'_>,
+    id: &str,
+    out: &[(String, ArgValue)],
+) -> Result<(), ControlError> {
+    if id != "destination.edit_midi" {
+        return Ok(());
+    }
+    for (name, trim) in [("name", true), ("port", false)] {
+        if let Some(t) = text_arg(out, name) {
+            let v = if trim { t.trim() } else { t };
+            if v.trim().is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control) {
+                return Err(p.error(format!(
+                    "`{name}` is 1 to 255 characters, with no control characters"
+                )));
+            }
+        }
     }
     Ok(())
 }

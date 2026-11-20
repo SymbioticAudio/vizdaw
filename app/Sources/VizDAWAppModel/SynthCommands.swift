@@ -4,7 +4,8 @@ import VizDAWCore
 /// Tracking a hardware synth from the control channel (plan 5c-2;
 /// sub-project 5 spec §6.7, §12.1): `lane.track_synth` sets up the lane
 /// recording a synth's return, `destination.set_return_latency` types a
-/// synth's return latency and `destination.measure_return` measures it.
+/// synth's return latency, `destination.measure_return` measures it and
+/// `destination.edit_midi` sets its name, port and channel.
 /// The Track Synth sheet and the lane menu (plan 5d-2 Task 8) call the
 /// same session methods; Measure runs off the main thread for both (it
 /// takes about three seconds).
@@ -31,7 +32,9 @@ public enum SynthCommands {
     public static let setMidiMix = "destination.set_midi_mix"
     /// The Built-in Synth's sound (plan release-fixes Task 8).
     public static let setSound = "destination.set_sound"
-    public static let ids: Set<String> = [trackSynth, setReturnLatency, setMidiMix, measureReturn, setSound]
+    /// The destination editor's name, port and channel (small-fixes Task 4).
+    public static let editMidi = "destination.edit_midi"
+    public static let ids: Set<String> = [trackSynth, setReturnLatency, setMidiMix, measureReturn, setSound, editMidi]
 
     /// What the channel sends for a null volume or pan: unset.
     static let unsetText = "none"
@@ -159,6 +162,27 @@ public enum SynthCommands {
                 m.apply(try m.session.setReturnLatency(dest: dest, ms: ms))
             } catch {
                 return .failed(.thrown(error, "Set Return Latency Failed"))
+            }
+        case editMidi:
+            // Every key is required (no partial edits), the channel 1 to 16
+            // as `destination.add_midi` takes it; the port goes as given.
+            let name = args.text("name")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let port = args.text("port") ?? ""
+            guard let dest = Self.id(args, "dest"), let channel = args.int("channel"), (1...16).contains(channel),
+                !name.isEmpty, !port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                AudioCommands.fitsCore(name), AudioCommands.fitsCore(port)
+            else {
+                return .failed(
+                    .of(
+                        .invalidParams,
+                        "destination.edit_midi: `dest` names an external MIDI destination, `name` and `port` are 1 to 255 characters, `channel` 1 to 16"
+                    ))
+            }
+            if isExternal(dest, m) == false { return notExternal(id, dest) }
+            do {
+                m.apply(try m.session.editMidiDestination(dest: dest, name: name, port: port, channel: UInt8(channel - 1)))
+            } catch {
+                return .failed(.thrown(error, "Edit Destination Failed"))
             }
         case setMidiMix:
             let usage = "destination.set_midi_mix: `dest` names an external MIDI destination; `volume` and `pan` are 0 to 127 or null, `mute` is true or false; give at least one"

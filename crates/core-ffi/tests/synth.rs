@@ -1756,3 +1756,170 @@ fn a_measure_refused_for_its_channel_leaves_another_windows_plugin_engine() {
     other.close().unwrap();
     a.close().unwrap();
 }
+
+/// The external destination named `name`.
+fn dest_named(s: &Session, name: &str) -> vizdaw_ffi::DestRow {
+    s.destinations()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.name == name)
+        .unwrap_or_else(|| panic!("no destination {name:?}"))
+}
+
+/// Task 4 (small fixes), Review Focus 3: a name, port and channel edit
+/// is one undo step "Edit Destination"; one undo puts back all three.
+/// Offline the port list holds only the fake synth's, so the edit moves
+/// a destination from a port that is gone onto it.
+#[test]
+fn a_destination_edit_is_one_undo_step() {
+    let g = serial(Some(DELAY_MS), None);
+    let mut b = Builder::new();
+    let id = b.dest("Synth A", "Old Port", 0).unwrap();
+    let s = untitled(&g, b.finish());
+    let a = dest_named(&s, "Synth A");
+    assert_eq!(a.port.as_deref(), Some("Old Port"));
+    assert_eq!(a.channel, Some(0));
+    let snap = s
+        .edit_midi_destination(id.0, " Synth B ".into(), FAKE_SYNTH_PORT.into(), 9)
+        .unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Edit Destination"));
+    let e = dest_named(&s, "Synth B");
+    assert_eq!(e.id, id.0);
+    assert_eq!(e.port.as_deref(), Some(FAKE_SYNTH_PORT));
+    assert_eq!(e.channel, Some(9));
+    assert!(e.external);
+    s.undo().unwrap();
+    let back = dest_named(&s, "Synth A");
+    assert_eq!(back.port.as_deref(), Some("Old Port"));
+    assert_eq!(back.channel, Some(0));
+    assert!(s.snapshot().unwrap().undo_label.is_none(), "one step");
+    // A name-only and a channel-only edit are one step each too.
+    s.redo().unwrap();
+    s.edit_midi_destination(id.0, "Synth C".into(), FAKE_SYNTH_PORT.into(), 9)
+        .unwrap();
+    s.edit_midi_destination(id.0, "Synth C".into(), FAKE_SYNTH_PORT.into(), 3)
+        .unwrap();
+    assert_eq!(dest_named(&s, "Synth C").channel, Some(3));
+    s.undo().unwrap();
+    assert_eq!(dest_named(&s, "Synth C").channel, Some(9));
+    s.undo().unwrap();
+    assert_eq!(dest_named(&s, "Synth B").channel, Some(9));
+    s.close().unwrap();
+}
+
+/// Task 4, Review Focus 2: a destination whose port is not in the port
+/// list keeps working: renaming it (or changing its channel) while it
+/// keeps its port succeeds; moving it to another port that is not listed
+/// is refused and changes nothing.
+#[test]
+fn an_offline_port_can_be_kept_but_not_chosen() {
+    let g = serial(Some(DELAY_MS), None);
+    let mut b = Builder::new();
+    let id = b.dest("Juno", "Juno MIDI", 0).unwrap();
+    let s = untitled(&g, b.finish());
+    assert!(!vizdaw_ffi::host::midi_destination_ports().contains(&"Juno MIDI".to_string()));
+    s.edit_midi_destination(id.0, "Juno 106".into(), "Juno MIDI".into(), 4)
+        .unwrap();
+    let d = dest_named(&s, "Juno 106");
+    assert_eq!(d.port.as_deref(), Some("Juno MIDI"));
+    assert_eq!(d.channel, Some(4));
+    let label = s.snapshot().unwrap().undo_label;
+    for port in [
+        "Other Gone Port",
+        "builtin:synth",
+        "virtual:out",
+        "",
+        " Juno MIDI ",
+    ] {
+        assert!(
+            matches!(
+                s.edit_midi_destination(id.0, "Juno 106".into(), port.into(), 4),
+                Err(VizError::Model { .. })
+            ),
+            "{port:?}"
+        );
+    }
+    let d = dest_named(&s, "Juno 106");
+    assert_eq!(d.port.as_deref(), Some("Juno MIDI"));
+    assert_eq!(s.snapshot().unwrap().undo_label, label, "no step");
+    s.close().unwrap();
+}
+
+/// Task 4 (R4): the kind is not edited here; a plugin instrument, the
+/// Built-in Synth and an unknown id are refused, as are hostile names
+/// and channels, with no step.
+#[test]
+fn editing_a_plugin_destination_is_refused() {
+    let g = serial(Some(DELAY_MS), None);
+    let mut b = Builder::new();
+    let ext = b.dest("Juno", FAKE_SYNTH_PORT, 0).unwrap();
+    let builtin = b
+        .dest("Built-in Synth", core_model::mixer::BUILTIN_SYNTH_REF, 0)
+        .unwrap();
+    let s = untitled(&g, b.finish());
+    s.add_plugin_instrument(
+        "Keys".into(),
+        vizdaw_ffi::PluginRefRow {
+            format: vizdaw_ffi::PluginFormatTag::Clap,
+            id: "com.example.keys".into(),
+            name: "Keys".into(),
+            vendor: "Example".into(),
+            version: "1".into(),
+        },
+    )
+    .unwrap();
+    let plugin = dest_named(&s, "Keys");
+    assert!(plugin.port.is_none());
+    assert!(dest_named(&s, "Built-in Synth").port.is_none());
+    let label = s.snapshot().unwrap().undo_label;
+    let long = "x".repeat(256);
+    for (dest, name, port, channel) in [
+        (plugin.id, "Keys 2", FAKE_SYNTH_PORT, 0u8),
+        (builtin.0, "Synth", FAKE_SYNTH_PORT, 0),
+        (builtin.0, "Synth", core_model::mixer::BUILTIN_SYNTH_REF, 0),
+        (9_999, "Synth", FAKE_SYNTH_PORT, 0),
+        (ext.0, "", FAKE_SYNTH_PORT, 0),
+        (ext.0, "   ", FAKE_SYNTH_PORT, 0),
+        (ext.0, long.as_str(), FAKE_SYNTH_PORT, 0),
+        (ext.0, "a\nb", FAKE_SYNTH_PORT, 0),
+        (ext.0, "Juno", long.as_str(), 0),
+        (ext.0, "Juno", "Port\u{7}", 0),
+        (ext.0, "Juno", FAKE_SYNTH_PORT, 16),
+        (ext.0, "Juno", FAKE_SYNTH_PORT, 255),
+    ] {
+        assert!(
+            matches!(
+                s.edit_midi_destination(dest, name.into(), port.into(), channel),
+                Err(VizError::Model { .. })
+            ),
+            "{dest} {name:?} {port:?} {channel}"
+        );
+    }
+    assert_eq!(s.snapshot().unwrap().undo_label, label, "no step");
+    assert_eq!(dest_named(&s, "Juno").channel, Some(0));
+    assert!(dest_named(&s, "Keys").plugin.is_some());
+    s.close().unwrap();
+}
+
+/// Task 4: the same name (after trimming), port and channel is no
+/// change: no undo step, no error.
+#[test]
+fn an_edit_that_changes_nothing_adds_no_undo_step() {
+    let g = serial(Some(DELAY_MS), None);
+    let s = untitled(&g, Builder::new().finish());
+    s.add_midi_destination("Synth A".into(), FAKE_SYNTH_PORT.into(), 2)
+        .unwrap();
+    let id = dest_named(&s, "Synth A").id;
+    let before = s.snapshot().unwrap();
+    let snap = s
+        .edit_midi_destination(id, "  Synth A ".into(), FAKE_SYNTH_PORT.into(), 2)
+        .unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Add Destination"));
+    assert_eq!(snap.version, before.version, "nothing applied");
+    s.undo().unwrap();
+    assert!(
+        s.destinations().unwrap().is_empty(),
+        "the add was the last step"
+    );
+    s.close().unwrap();
+}
