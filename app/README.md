@@ -3238,7 +3238,8 @@ These apply to a build from `next`, not the beta test build.
 
 457. Give a VCA moves on its own track, export a DAWproject and import it
      back as a new project: there is no extra instrument track, and the VCA
-     plays its moves.
+     plays its moves. (To make the moves: set the VCA to Touch, play, and
+     move its level.)
 458. A VCA named "VCA 1" reads "VCA 1 Fader" in the track list; with
      VoiceOver on, its fader says "Fader of VCA 1". A VCA named "Strings"
      reads "VCA Strings Fader".
