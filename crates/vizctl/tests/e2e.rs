@@ -507,7 +507,14 @@ fn keys_drive_step_entry_locators_and_bindings() {
     wait_for_editor(&mut app, &window, "step entry off", |e| e["step"].is_null());
 
     // P gives the Position field the keyboard, a typed bar and Return
-    // move there; ⌥2 sets locator 2 there.
+    // move there; ⌥2 sets locator 2 there. A short bar keeps Position on
+    // it: the default bar folds it into » in a window under about 1100 pt
+    // (Task 12b), as on CI's smaller screen, and the channel cannot type
+    // into the » popover.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar", "params": {"items": "cluster,position_field"}}),
+    );
     wait_for_label(&mut app, &window, "Position");
     key(&mut app, "p", json!([]));
     app.call("ui.key", json!({"window": window, "text": "3\n"}));
@@ -3051,6 +3058,14 @@ fn transport_jumps_readouts_and_fields_over_the_channel() {
         let doc = app.call("state.get", json!({"target": "document", "window": w}));
         assert!(doc["alert"].is_null(), "no dialog: {doc}");
     };
+
+    // A bar of just what this test reads, so nothing folds into » in a
+    // window under about 1100 pt (Task 12b), as on CI's smaller screen.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar",
+            "params": {"items": "cluster,bar,time,tempo,signature,position_field"}}),
+    );
 
     // 1. The readouts at the start.
     wait_for_tick(&mut app, &w, 0);
