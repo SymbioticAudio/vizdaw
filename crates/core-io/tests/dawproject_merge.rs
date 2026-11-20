@@ -5899,3 +5899,51 @@ fn merge_still_leaves_vcas_out() {
     let (h, _) = apply_on(&t.base_doc, &p);
     assert!(h.doc().mixer().vcas().is_empty());
 }
+
+/// B-001: a merge of a file whose VCA-only track came back as trackless
+/// VCA curves makes no lane for them (it makes no VCAs), so an unchanged
+/// return changes no tracks.
+#[test]
+fn a_vca_only_lane_merges_without_an_extra_track() {
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::command::GroupCmd;
+    use core_model::mixer::Swatch;
+    let (doc, seq) = fixture();
+    let mut b = core_engine::fixtures::Builder::from_doc(doc);
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "VCA 1".into(),
+            colour: Swatch::Teal,
+            members: vec![],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA");
+    };
+    let lane = b.lane(seq, "VCA 1 Fader", None).unwrap();
+    b.events(
+        seq,
+        lane,
+        vec![EventSpec::new(
+            Tick(Q),
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(vca),
+                value: fader_norm(-6.0),
+            },
+        )],
+    )
+    .unwrap();
+    let t = trip(&b.finish(), seq);
+    let p = plan_doc(&t, &t.base_doc, &t.base_doc);
+    let (h, _) = apply_on(&t.base_doc, &p);
+    let names = |d: &Document| -> Vec<String> {
+        d.sequence(seq)
+            .unwrap()
+            .lanes
+            .iter()
+            .map(|l| l.name.clone())
+            .collect()
+    };
+    assert_eq!(names(h.doc()), names(&t.base_doc));
+    assert_eq!(names(h.doc()), ["Bass", "Keys", "VCA 1 Fader"]);
+}

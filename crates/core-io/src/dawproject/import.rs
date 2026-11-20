@@ -184,6 +184,29 @@ impl DpImport {
                 )
             });
         }
+        // The tracks made only for those curves (B-001) now hold nothing:
+        // the merge makes none of them.
+        let arranged = &mut self.plan.arranged;
+        let mut gone: Vec<usize> = std::mem::take(&mut arranged.vca_tracks)
+            .into_iter()
+            .filter(|&i| arranged.items.get(i).is_some_and(Vec::is_empty))
+            .collect();
+        gone.sort_unstable();
+        gone.dedup();
+        for &i in gone.iter().rev() {
+            if i < self.plan.tracks.len() {
+                self.plan.tracks.remove(i);
+            }
+            if i < arranged.items.len() {
+                arranged.items.remove(i);
+            }
+            if i < arranged.main.len() {
+                arranged.main.remove(i);
+            }
+        }
+        for s in &mut arranged.seqs {
+            s.track -= gone.iter().filter(|&&g| g < s.track).count();
+        }
         let at = self
             .report
             .items

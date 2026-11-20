@@ -1,6 +1,7 @@
 //! Automation (Ruling 14, inverted).
 
 use super::*;
+use core_model::groups::vca_label;
 
 impl<'p> Tl<'_, '_, 'p> {
     /// Every channel's volume, pan, mute, send levels and device
@@ -115,12 +116,19 @@ impl<'p> Tl<'_, '_, 'p> {
             Some(StripAt::Track(i)) => Some(i),
             _ => None,
         });
-        if owner.is_none() && self.automation_track.is_none() {
-            let i = self.new_track(AUTOMATION_NAME.to_owned(), false);
-            self.automation_track = Some(i);
-            self.cx.add(ItemKind::Note, AUTOMATION_TRACK, None);
-        }
-        let owner = owner.or(self.automation_track);
+        let owner = match (owner, at) {
+            (Some(i), _) => Some(i),
+            // A VCA's curve with no track: the lane of that VCA (B-001).
+            (None, AutoAt::Vca(v)) => Some(self.vca_track(v)),
+            (None, _) => {
+                if self.automation_track.is_none() {
+                    let i = self.new_track(AUTOMATION_NAME.to_owned(), false);
+                    self.automation_track = Some(i);
+                    self.cx.add(ItemKind::Note, AUTOMATION_TRACK, None);
+                }
+                self.automation_track
+            }
+        };
         let unit = p.unit.unwrap_or(match role {
             Role::Volume(r) | Role::Pan(r) | Role::Send(_, r) | Role::Device(_, r) => r.unit,
             Role::Mute => DpUnit::Normalized,
@@ -169,6 +177,19 @@ impl<'p> Tl<'_, '_, 'p> {
             self.cx.add(ItemKind::Changed, HELD_STEPS, None);
         }
         Ok(())
+    }
+
+    /// The lane that holds VCA `v`'s trackless curves, "‹label› Fader",
+    /// made on first use with no instrument (B-001).
+    fn vca_track(&mut self, v: usize) -> usize {
+        if let Some(&i) = self.vca_tracks.get(&v) {
+            return i;
+        }
+        let label = vca_label(self.vca_names.get(v).map_or("", String::as_str));
+        let name = self.made_name(&format!("{label} Fader"));
+        let i = self.new_track(name, false);
+        self.vca_tracks.insert(v, i);
+        i
     }
 
     /// An automation point's value, 0 to 1.

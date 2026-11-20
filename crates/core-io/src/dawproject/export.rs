@@ -576,6 +576,9 @@ pub(super) struct Layout<'a> {
     pub(super) muted: BTreeSet<EventId>,
     /// The tracks, in order.
     pub(super) parts: Vec<Part<'a>>,
+    /// The tracks that only move VCA faders (B-001): no part of their own;
+    /// their points are the VCA channels' curves, with no track.
+    pub(super) vca_lanes: Vec<&'a Lane>,
     /// The channels, in the structure's order: the tracks', then the
     /// buses' and submixes' in mixer order, then the master's.
     pub(super) chans: Vec<Chan<'a>>,
@@ -767,8 +770,13 @@ pub(super) fn layout<'a>(
     // Each track's halves and how they reach the mixer.
     let mut ticker = Ticker::new(cancel);
     let mut halves: Vec<(&Lane, bool, bool, Feed)> = Vec::new();
+    let mut vca_lanes: Vec<&Lane> = Vec::new();
     for lane in &s.lanes {
         let events = played.get(&lane.id).map_or(&[][..], Vec::as_slice);
+        if moves_vcas_only(events) {
+            vca_lanes.push(lane);
+            continue;
+        }
         let (mut midi, mut audio, mut dest) = (false, false, None);
         for r in events {
             ticker.tick()?;
@@ -958,8 +966,24 @@ pub(super) fn layout<'a>(
         played,
         muted,
         parts,
+        vca_lanes,
         chans,
     })
+}
+
+/// Whether a track plays something and all of it is VCA fader moves
+/// (B-001): such a track is no DAWproject track.
+fn moves_vcas_only(events: &[ResolvedEvent]) -> bool {
+    !events.is_empty()
+        && events.iter().all(|r| {
+            matches!(
+                r.body,
+                EventBody::Automation {
+                    target: AutomationTarget::VcaFader(_),
+                    ..
+                }
+            )
+        })
 }
 
 // ---------------------------------------------------------------- the model

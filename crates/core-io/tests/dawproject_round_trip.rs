@@ -1089,6 +1089,234 @@ fn every_export_passes_the_schema() {
     }
 }
 
+/// The arrangement's `Lanes` (tracks) and trackless `Points` of an export.
+fn read_arrangement(x: &DpExport) -> core_io::dawproject::DpProject {
+    let tree = core_io::xml::Tree::parse(
+        x.project_xml.as_bytes(),
+        &PackageLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .expect("parses");
+    let mut r = Report::default();
+    core_io::dawproject::read_project(&tree, &mut r).expect("reads back")
+}
+
+/// The VCA fader points `(tick, value)` of lane `name` in `t`'s import.
+fn vca_points_on(t: &Trip, name: &str) -> Vec<(i64, f64)> {
+    use core_model::automation::AutomationTarget;
+    use core_model::event::EventBody;
+    let s = t.doc.sequence(t.seq).unwrap();
+    let lane = s
+        .lanes
+        .iter()
+        .find(|l| l.name == name)
+        .unwrap_or_else(|| panic!("no lane {name}"));
+    lane.active()
+        .into_iter()
+        .flat_map(|k| k.events.values())
+        .filter_map(|e| match e.body {
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(_),
+                value,
+            } => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// B-001 (R1): a lane whose only events are a VCA's fader moves is not a
+/// DAWproject track. Its points are the VCA channel's volume at the
+/// arrangement level, with no track; the import puts them on one lane per
+/// VCA, named with the VCA's label, with no instrument.
+#[test]
+fn a_vca_only_lane_is_not_a_track() {
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::command::GroupCmd;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::mixer::Swatch;
+    let mut b = Builder::new();
+    let (seq, lane) = b.sequence("Song", "VCA 1 Fader", None).unwrap();
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "VCA 1".into(),
+            colour: Swatch::Teal,
+            members: vec![],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA");
+    };
+    let points = [
+        (0, fader_norm(-12.0)),
+        (Q, fader_norm(-3.0)),
+        (2 * Q, fader_norm(0.0)),
+    ];
+    b.events(
+        seq,
+        lane,
+        points
+            .iter()
+            .map(|(t, v)| {
+                EventSpec::new(
+                    Tick(*t),
+                    EventBody::Automation {
+                        target: AutomationTarget::VcaFader(vca),
+                        value: *v,
+                    },
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    let doc = b.finish();
+    let t = trip(&doc, &options(seq, RegionGain::Apply));
+
+    // The export: no track for the lane; one trackless curve of 3 points
+    // on the VCA channel's volume.
+    assert!(
+        !t.x.project_xml.contains("name=\"VCA 1 Fader\""),
+        "{}",
+        t.x.project_xml
+    );
+    assert_eq!(t.x.report.summary.tracks, 0, "{:#?}", t.x.report);
+    assert_eq!(t.x.report.summary.automation_points, 3);
+    let p = read_arrangement(&t.x);
+    let root = p
+        .arrangement
+        .as_ref()
+        .and_then(|a| a.lanes.as_ref())
+        .unwrap();
+    let param = format!("vca{}v", vca.0);
+    let curves: Vec<_> = root
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            core_io::dawproject::DpTimeline::Points(x) => Some(x),
+            core_io::dawproject::DpTimeline::Lanes(l) => panic!("a track's lanes: {l:?}"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(curves.len(), 1, "{curves:?}");
+    assert_eq!(curves[0].head.track, None);
+    assert_eq!(curves[0].target.parameter.as_deref(), Some(param.as_str()));
+    assert_eq!(curves[0].points.len(), 3);
+
+    // The import: one lane, the VCA's, with no instrument and the points.
+    let s = t.doc.sequence(t.seq).unwrap();
+    let names: Vec<&str> = s.lanes.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["VCA 1 Fader"], "{:#?}", t.import.items);
+    assert_eq!(s.lanes.front().unwrap().midi_dest, None);
+    let v = t.doc.mixer().vcas().values().next().expect("a VCA").id;
+    let on_v = s
+        .lanes
+        .front()
+        .unwrap()
+        .active()
+        .into_iter()
+        .flat_map(|k| k.events.values())
+        .all(|e| {
+            matches!(
+                e.body,
+                EventBody::Automation {
+                    target: AutomationTarget::VcaFader(x),
+                    ..
+                } if x == v
+            )
+        });
+    assert!(on_v, "every event drives the imported VCA");
+    let back = vca_points_on(&t, "VCA 1 Fader");
+    assert_eq!(back.len(), points.len(), "{back:?}");
+    for ((t0, v0), (t1, v1)) in points.iter().zip(&back) {
+        assert_eq!(t0, t1);
+        near(*v0, *v1, "VCA fader point");
+    }
+    assert_eq!(
+        count(
+            &t.import,
+            ItemKind::Note,
+            core_io::dawproject::import::AUTOMATION_TRACK
+        ),
+        0,
+        "{:#?}",
+        t.import.items
+    );
+}
+
+/// Review Focus 1: a lane holding a VCA's moves and another target's
+/// automation stays a track, and both curves come back on it.
+#[test]
+fn a_lane_with_vca_and_strip_moves_stays_a_track() {
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::command::GroupCmd;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::mixer::{StripKind, Swatch};
+    let mut b = Builder::new();
+    let (seq, keys, dest, _) = song(&mut b, "Keys");
+    let strip = b.strip_of(StripKind::Instrument(dest)).unwrap();
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "Kit".into(),
+            colour: Swatch::Teal,
+            members: vec![strip],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA");
+    };
+    let moves = [(0, fader_norm(-12.0)), (Q, fader_norm(-3.0))];
+    let mut specs = Vec::new();
+    for (t, v) in moves {
+        specs.push(EventSpec::new(
+            Tick(t),
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(vca),
+                value: v,
+            },
+        ));
+        specs.push(EventSpec::new(
+            Tick(t),
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(strip),
+                value: v,
+            },
+        ));
+    }
+    // Automation only, no notes: the strip's curve alone keeps the track.
+    b.events(seq, keys, specs).unwrap();
+    let doc = b.finish();
+    let t = trip(&doc, &options(seq, RegionGain::Apply));
+    assert!(
+        t.x.project_xml.contains("name=\"Keys\""),
+        "{}",
+        t.x.project_xml
+    );
+    assert_eq!(t.x.report.summary.tracks, 1);
+    assert_eq!(t.x.report.summary.automation_points, 4);
+    let s = t.doc.sequence(t.seq).unwrap();
+    let names: Vec<&str> = s.lanes.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Keys"], "{:#?}", t.import.items);
+    let back = vca_points_on(&t, "Keys");
+    assert_eq!(back.len(), moves.len(), "{back:?}");
+    let faders = s
+        .lanes
+        .front()
+        .unwrap()
+        .active()
+        .into_iter()
+        .flat_map(|k| k.events.values())
+        .filter(|e| {
+            matches!(
+                e.body,
+                EventBody::Automation {
+                    target: AutomationTarget::StripFader(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(faders, moves.len());
+}
+
 /// A VCA with a level, a mute and fader automation survives as a VCA
 /// channel: the file passes the schema; the import has one VCA with the
 /// same name, level, mute and (within the tolerance) points, and no

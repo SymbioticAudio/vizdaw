@@ -327,6 +327,9 @@ pub(super) struct Arranged {
     pub(super) media: Vec<MediaPlan>,
     /// Each plan track's main channel ([`MAIN_CHANNEL`]).
     pub(super) main: Vec<u8>,
+    /// The tracks made for VCA curves with no track (B-001), which a
+    /// merge leaves out with the curves.
+    pub(super) vca_tracks: Vec<usize>,
 }
 
 /// A clip's fades, in `unit`.
@@ -551,6 +554,10 @@ struct Tl<'c, 'a, 'p> {
     extra: Vec<(String, bool)>,
     extra_at: HashMap<(usize, usize), usize>,
     automation_track: Option<usize>,
+    /// The plan's VCAs' names, and the lane made for each VCA's trackless
+    /// curves (B-001), by VCA.
+    vca_names: Vec<String>,
+    vca_tracks: HashMap<usize, usize>,
     /// Per track: its straight MIDI events and top-level clip count.
     evs: Vec<Vec<Ev>>,
     clips: Vec<usize>,
@@ -604,6 +611,8 @@ impl<'a, 'p> Cx<'a, 'p> {
             extra: Vec::new(),
             extra_at: HashMap::new(),
             automation_track: None,
+            vca_names: plan.vcas.iter().map(|v| v.name.clone()).collect(),
+            vca_tracks: HashMap::new(),
             evs: vec![Vec::new(); n],
             clips: vec![0; n],
             regs: Vec::new(),

@@ -1005,6 +1005,71 @@ fn vca_fader_automation_is_the_vca_channels_volume() {
     schema_check(&format!("{DIR}/Project.xsd"), &x.project_xml);
 }
 
+/// B-001 (R1): a lane whose every event is a VCA fader move is no track;
+/// its points sit in the arrangement's `Lanes` with no `track`, on the VCA
+/// channel's volume, and the point count is unchanged.
+#[test]
+fn a_vca_only_lanes_points_have_no_track() {
+    let f = timeline_fixture();
+    let plain = run(&f.doc, f.seq);
+    let mut b = Builder::from_doc(f.doc.clone());
+    let r = b
+        .run(Command::Groups(core_model::command::GroupCmd::NewVca {
+            name: "Drums VCA".into(),
+            colour: core_model::mixer::Swatch::Blue,
+            members: vec![f.drum_strip],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
+    let lane = b.lane(f.seq, "Drums VCA Fader", None).unwrap();
+    b.events(
+        f.seq,
+        lane,
+        vec![
+            spec(0, automation(AutomationTarget::VcaFader(vca), 0.25)),
+            spec(Q, automation(AutomationTarget::VcaFader(vca), 0.75)),
+        ],
+    )
+    .unwrap();
+    let x = run(&b.finish(), f.seq);
+    validates(&x);
+    assert_eq!(x.report.summary.tracks, plain.report.summary.tracks);
+    assert_eq!(
+        x.report.summary.automation_points,
+        plain.report.summary.automation_points + 2
+    );
+    let p = read_back(&x);
+    let root = p
+        .arrangement
+        .as_ref()
+        .and_then(|a| a.lanes.as_ref())
+        .expect("arrangement lanes");
+    let own = format!("t{}", lane.0);
+    assert!(
+        root.items.iter().all(|t| !matches!(
+            t,
+            DpTimeline::Lanes(l) if l.head.track.as_deref() == Some(own.as_str())
+        )),
+        "the lane is no track"
+    );
+    let param = format!("vca{}v", vca.0);
+    let curves: Vec<&DpPoints> = root
+        .items
+        .iter()
+        .filter_map(|t| match t {
+            DpTimeline::Points(x) => Some(x),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(curves.len(), 1, "{curves:?}");
+    assert_eq!(curves[0].head.track, None);
+    assert_eq!(curves[0].target.parameter.as_deref(), Some(param.as_str()));
+    assert_eq!(curves[0].unit, Some(DpUnit::Linear));
+    assert_eq!(curves[0].points.len(), 2);
+}
+
 #[test]
 fn region_gain_entries() {
     let f = timeline_fixture();
