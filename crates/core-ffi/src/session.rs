@@ -110,6 +110,15 @@ pub(crate) struct Inner {
     editor_layout: Option<serde_json::Value>,
     /// Offline media and why (Ruling 22; runtime only, never saved).
     offline: std::collections::BTreeMap<core_model::ids::MediaId, crate::media::OfflineReasonRow>,
+    /// The reader the last zero-crossing snap opened: the media, the file it
+    /// was opened from, and the reader (shared so the read runs without the
+    /// session lock). Used only while both the media and its resolved path
+    /// still match, so a relink or replaced file is never read through it.
+    crossing_reader: Option<(
+        u64,
+        std::path::PathBuf,
+        std::sync::Arc<core_media::caf::CafReader>,
+    )>,
     /// The document whose media and format `offline` was computed for, and
     /// the root it was checked under.
     media_seen: Option<(Document, std::path::PathBuf)>,
@@ -379,6 +388,7 @@ impl Inner {
             plugin_dirty: false,
             closed: false,
             offline: Default::default(),
+            crossing_reader: None,
             media_seen: None,
             jobs: Default::default(),
             overviews: Default::default(),

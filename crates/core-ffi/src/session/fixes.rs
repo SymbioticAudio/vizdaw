@@ -155,9 +155,31 @@ impl Session {
             if offline {
                 return Ok(frame);
             }
-            // A file gone since it was checked keeps the frame, as offline.
-            let Ok(r) = core_media::caf::CafReader::open(&file) else {
-                return Ok(frame);
+            // The reader the last snap opened, while the media and its path
+            // still match; else open and replace it. A file gone since it
+            // was checked keeps the frame, as offline.
+            let cached = {
+                let mut inner = self.lock_inner();
+                match &inner.crossing_reader {
+                    Some((m, p, r)) if *m == media && *p == file => Some(r.clone()),
+                    _ => {
+                        inner.crossing_reader = None;
+                        None
+                    }
+                }
+            };
+            let r = match cached {
+                Some(r) => r,
+                None => {
+                    #[cfg(test)]
+                    tests::OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Ok(r) = core_media::caf::CafReader::open(&file) else {
+                        return Ok(frame);
+                    };
+                    let r = std::sync::Arc::new(r);
+                    self.lock_inner().crossing_reader = Some((media, file, r.clone()));
+                    r
+                }
             };
             Ok(nearest_crossing(&r, frame, radius).unwrap_or(frame))
         })
@@ -247,5 +269,61 @@ impl Session {
             self.mark(&mut inner);
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{ImportTargetRow, JobStateRow, Session};
+    use core_media::caf::{CafWriter, WriteMode};
+    use core_model::format::BitDepth;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// How many times a snap opened a file (test-only).
+    pub(super) static OPENS: AtomicUsize = AtomicUsize::new(0);
+
+    /// A mono CAF of 4800 frames: +1 before `flip`, -1 from it.
+    fn step(path: &std::path::Path, flip: u64) {
+        let mut w =
+            CafWriter::create(path, 48_000, 1, BitDepth::Float32, WriteMode::Normal).unwrap();
+        let data: Vec<f32> = (0..4800u64)
+            .map(|k| if k < flip { 1.0 } else { -1.0 })
+            .collect();
+        w.write(&data).unwrap();
+        w.finish().unwrap();
+    }
+
+    /// A trim drag snaps again and again on one file: it opens once.
+    #[test]
+    fn repeated_snaps_open_the_file_once() {
+        crate::host::force_offline();
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.caf");
+        step(&src, 100);
+        let s = Session::new_demo().unwrap();
+        let seq = s.snapshot().unwrap().sequences[0].id;
+        let job = s
+            .import_audio(
+                vec![src.display().to_string()],
+                Some(ImportTargetRow {
+                    seq,
+                    lane: None,
+                    tick: 0,
+                }),
+            )
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(60);
+        while s.job(job).unwrap().state == JobStateRow::Running {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let media = s.media().unwrap().last().unwrap().id;
+        let before = OPENS.load(Ordering::SeqCst);
+        for _ in 0..50 {
+            assert_eq!(s.zero_crossing(media, 250, 1000).unwrap(), 100);
+        }
+        assert_eq!(OPENS.load(Ordering::SeqCst) - before, 1);
+        s.close().unwrap();
     }
 }

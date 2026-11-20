@@ -139,3 +139,36 @@ fn offline_media_keeps_the_frame() {
     assert_eq!(s.zero_crossing(m, 10_000_000, 144).unwrap(), FRAMES);
     s.close().unwrap();
 }
+
+/// Review Focus 5: a relink drops the cached reader; the next snap reads
+/// the new file.
+#[test]
+fn the_cached_reader_follows_a_relink() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let step = |name: &str, flip: u64| {
+        let path = dir.path().join(name);
+        let mut w =
+            CafWriter::create(&path, 48_000, 1, BitDepth::Float32, WriteMode::Normal).unwrap();
+        let data: Vec<f32> = (0..FRAMES)
+            .map(|k| if k < flip { 1.0 } else { -1.0 })
+            .collect();
+        w.write(&data).unwrap();
+        w.finish().unwrap();
+        path
+    };
+    let (s, m) = demo_with(&step("a.caf", 100));
+    // The sign changes at 100: from 250 that is the nearest.
+    assert_eq!(s.zero_crossing(m, 250, 1000).unwrap(), 100);
+    assert_eq!(s.zero_crossing(m, 250, 1000).unwrap(), 100);
+    let b = step("b.caf", 300);
+    let job = s.relink_media(m, b.display().to_string()).unwrap();
+    let until = Instant::now() + common::wait_limit();
+    while s.job(job).unwrap().state == JobStateRow::Running {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(s.job(job).unwrap().state, JobStateRow::Done);
+    assert_eq!(s.zero_crossing(m, 250, 1000).unwrap(), 300);
+    s.close().unwrap();
+}
