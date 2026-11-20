@@ -55,3 +55,21 @@ keyboard (`NSEvent.modifierFlags`) and synthetic clicks can't hold them.
 | Customize sheet: drag, Escape cancels, each window keeps its own sheet | open |
 | Press U then E quickly: » opens at Edit In, nothing typed is lost | open |
 | Your own mixer opens at 1600 × 700, not 459 pt (the test copy's narrow size may have been saved) | open |
+
+## `next` branch (after the beta)
+
+These apply to a build from `next`, not the beta test build (dd36914d).
+
+### Small fixes (README 457–464)
+
+| Step | What | Status |
+|---|---|---|
+| 457 | DAWproject round trip: a VCA's moves add no instrument track | open |
+| 458 | VCA labels: "VCA 1 Fader", "Fader of VCA 1", "VCA Strings Fader" | open |
+| 459 | A read-only AU parameter's slider is greyed out | open |
+| 460 | Destination edit (name, port, channel), one ⌘Z undoes all | open |
+| 461 | A quick trim drag snaps without stutter | open |
+| 462 | Record, ⌘W asks; Don't Save leaves the file as it was | open |
+| 463 | A clean song shows the edited dot while it records | open |
+| 464 | Quit with two songs, Discard Changes: the waiting save still happens | open |
+| B-001 | Verify the DAWproject VCA fix in the next build from `next` | open |
