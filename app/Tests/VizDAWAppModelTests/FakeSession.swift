@@ -11,6 +11,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         ticksPerSecond: 30_720)
     var playError: VizError?
     var transportError: VizError?
+    /// Every `runClick` call, in order; `clickError` throws after the log.
+    var clickRuns: [(id: String, args: [ControlArg])] = []
+    var clickError: VizError?
     /// Thrown by `undo()` and `redo()`.
     var stepError: VizError?
     var savedPath: String?
@@ -183,6 +186,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var savesAfterPassRow = false
 
     func savesAfterPass() throws -> Bool { savesAfterPassRow }
+
+    /// Release gate B1: the close prompts read the snapshot's flag.
+    func hasUnsavedChanges() throws -> Bool { snap.dirty }
 
     /// What `addMidiDestination` was asked (plan 5d-1 Ruling 25).
     var addedDestinations: [(name: String, port: String, channel: UInt8)] = []
@@ -1607,6 +1613,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         holders.append(holder)
     }
 
+    /// The `alone` of `gestureAs` calls, in order (groups-vcas-transport).
+    var alones: [Bool] = []
+    func gestureAs(target: AutomationTargetRow, phase: GesturePhaseRow, holder: GestureHolderRow, alone: Bool) throws {
+        try gestureFrom(target: target, phase: phase, holder: holder)
+        alones.append(alone)
+    }
+
     // MARK: Surfaces (plan 5f-1)
 
     var focusCalls = 0
@@ -1841,6 +1854,40 @@ func regionRow(
     r.fadeIn = FadeRow(length: fadeIn, shape: .linear)
     r.fadeOut = FadeRow(length: fadeOut, shape: .linear)
     return r
+}
+
+/// The metronome (groups-vcas-transport Task 10): `setClick` and
+/// `runClick` keep the settings in `state.click`, so the transport read
+/// shows them; every `runClick` is logged in `clickRuns` first, and
+/// `clickError` throws after the log.
+extension FakeSession {
+    static let defaultClick = ClickRow(on: false, levelDb: -6, mode: .playAndRecord)
+
+    func click() throws -> ClickRow { state.click ?? Self.defaultClick }
+
+    func setClick(click: ClickRow) throws -> DocSnapshot {
+        if let e = clickError { throw e }
+        state.click = click
+        return commandResult()
+    }
+
+    func runClick(id: String, args: [ControlArg]) throws -> DocSnapshot {
+        clickRuns.append((id, args))
+        if let e = clickError { throw e }
+        var c = try click()
+        let arg = args.first?.value
+        switch (id, arg) {
+        case ("transport.click", .flag(let on)?): c.on = on
+        case ("transport.click", nil): c.on.toggle()
+        case ("transport.set_click_level", .text(let t)?):
+            guard let v = Double(t) else { throw VizError.Model(message: "`level_db` is a plain decimal") }
+            c.levelDb = v
+        case ("transport.set_click_mode", .text("record_only")?): c.mode = .recordOnly
+        case ("transport.set_click_mode", .text("play_and_record")?): c.mode = .playAndRecord
+        default: throw VizError.Model(message: "\(id): bad arguments")
+        }
+        return try setClick(click: c)
+    }
 }
 
 /// A media-pool row.

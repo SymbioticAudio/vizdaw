@@ -125,6 +125,10 @@ public final class DocumentStore {
         }
     }
 
+    /// The transport bar's items (groups-vcas-transport Ruling 17): in
+    /// memory here; the app gives it the real preferences.
+    public var transportLayout = TransportLayoutStore(defaults: MemoryDefaults())
+
     /// Bumped when `defaultFormat` is set (Settings › Recording redraws).
     public private(set) var formatChanges = 0
 
@@ -213,6 +217,9 @@ public final class DocumentStore {
 
     /// The document whose own window is key.
     public var keyDocument: UUID? { keyWindow?.doc }
+    /// The key document or mixer window's token (Customize Transport Bar
+    /// opens on it: Task 12).
+    public var keyWindowToken: UUID? { keyWindow?.window }
 
     public func focusDocument(_ doc: UUID, window: UUID) {
         // A closing window can take key after its document went.

@@ -264,4 +264,46 @@ import VizDAWCore
         }
         #expect(f.stepBars.isEmpty && m.alert == nil)
     }
+
+    /// Groups-vcas-transport Task 10: Click's check follows the transport
+    /// read; `run` without `on` flips it, with `on` sets it, each one
+    /// session call. It waits for no text field (it has no key).
+    @Test func clickTogglesAndShowsItsCheck() throws {
+        let (s, id, m, f) = try demo()
+        #expect(!TransportCommands.isOn("transport.click", m))
+        #expect(TransportCommands.enabled("transport.click", m))
+        f.state.click = ClickRow(on: true, levelDb: -6, mode: .playAndRecord)
+        m.poll()
+        #expect(TransportCommands.isOn("transport.click", m), "the check follows the snapshot")
+        #expect(TransportCommands.run("transport.click", m) == .done)
+        #expect(!TransportCommands.isOn("transport.click", m), "flipped off")
+        #expect(f.clickRuns.last?.id == "transport.click" && f.clickRuns.last?.args.isEmpty == true)
+        #expect(TransportCommands.run("transport.click", m) == .done)
+        #expect(TransportCommands.isOn("transport.click", m), "flipped on")
+        #expect(failure(run("transport.click", on, s, id)) == nil)
+        #expect(f.clickRuns.last?.args == on, "the channel's on is passed on")
+        #expect(f.state.click?.on == true)
+        f.clickError = .Model(message: "no")
+        #expect(failure(run("transport.click", s, id)) == .of(.failed, "no"))
+        #expect(m.alert == nil, "a refusal raises no alert")
+    }
+
+    /// Groups-vcas-transport Task 10: the level and mode go to the session
+    /// with the channel's arguments; a key (no arguments) is unavailable.
+    @Test func clickLevelAndModeReachTheSession() throws {
+        let (s, id, m, f) = try demo()
+        let level = [ControlArg(name: "level_db", value: .text(value: "-12"))]
+        #expect(failure(run("transport.set_click_level", level, s, id)) == nil)
+        #expect(f.clickRuns.last?.id == "transport.set_click_level" && f.clickRuns.last?.args == level)
+        #expect(m.transport.click?.levelDb == -12)
+        let mode = [ControlArg(name: "mode", value: .text(value: "record_only"))]
+        #expect(failure(run("transport.set_click_mode", mode, s, id)) == nil)
+        #expect(m.transport.click?.mode == .recordOnly)
+        let runs = f.clickRuns.count
+        #expect(failure(run("transport.set_click_level", s, id))?.code == .failed, "the session refuses no level")
+        if case .unavailable = TransportCommands.run("transport.set_click_mode", m) {} else {
+            Issue.record("a key sends no mode")
+        }
+        #expect(f.clickRuns.count == runs + 1, "a key reaches no session")
+    }
 }

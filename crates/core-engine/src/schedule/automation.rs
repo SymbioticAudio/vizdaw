@@ -6,7 +6,7 @@ use super::TargetIdx;
 use crate::schedule::TargetKind;
 use core_model::automation::{AutomationTarget, SendIndex, unit};
 use core_model::document::{Document, SlotOwner};
-use core_model::ids::{PluginInstanceId, StripId};
+use core_model::ids::{PluginInstanceId, StripId, VcaId};
 use core_model::mixer::ParamId;
 
 /// Most lanes (targets) one schedule plays; more are dropped and reported.
@@ -37,6 +37,8 @@ pub enum AutoDest {
     Send(StripId, u16),
     /// A plugin parameter.
     Plugin(PluginInstanceId, ParamId),
+    /// A VCA's fader (it ramps, as a strip fader does).
+    Vca(VcaId),
 }
 
 impl AutoDest {
@@ -50,6 +52,7 @@ impl AutoDest {
             AutomationTarget::StripSolo(s) => AutoDest::Strip(s, StripParam::Solo),
             AutomationTarget::SendLevel(s, i) => AutoDest::Send(s, i.0),
             AutomationTarget::PluginParam(p, id) => AutoDest::Plugin(p, id),
+            AutomationTarget::VcaFader(v) => AutoDest::Vca(v),
             AutomationTarget::VelocityScale(_) => return None,
         })
     }
@@ -64,6 +67,7 @@ impl AutoDest {
             AutoDest::Strip(s, StripParam::Solo) => AutomationTarget::StripSolo(s),
             AutoDest::Send(s, i) => AutomationTarget::SendLevel(s, SendIndex(i)),
             AutoDest::Plugin(p, id) => AutomationTarget::PluginParam(p, id),
+            AutoDest::Vca(v) => AutomationTarget::VcaFader(v),
         }
     }
 
@@ -72,7 +76,7 @@ impl AutoDest {
     pub fn is_db(self) -> bool {
         matches!(
             self,
-            AutoDest::Strip(_, StripParam::Fader) | AutoDest::Send(..)
+            AutoDest::Strip(_, StripParam::Fader) | AutoDest::Send(..) | AutoDest::Vca(_)
         )
     }
 }

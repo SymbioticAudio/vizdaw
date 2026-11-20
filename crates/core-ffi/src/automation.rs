@@ -12,7 +12,7 @@ use core_model::automation::{
     AutomationMode, AutomationTarget, fader_db, fader_norm, pan_norm, pan_of, strip_of, switch_on,
     unit,
 };
-use core_model::command::{Command, MixerCmd};
+use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::document::Document;
 use core_model::event::EventBody;
 use core_model::ids::{PluginInstanceId, SeqId, StripId};
@@ -95,13 +95,17 @@ pub struct StripModeRow {
 }
 
 /// What automation is doing in a session (`state.get automation`).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct AutomationStateRow {
     /// Every strip's mode, in the mixer's display order (master last).
     pub modes: Vec<StripModeRow>,
     /// The targets touched now: active touches only, never Write holds
     /// or released Latch holds (pre-flight M8; 5e-2's rings).
     pub touched: Vec<AutomationTargetRow>,
+    /// The normalised value of each of `touched`, in the same order: what
+    /// a group drag moved each follower to, too.
+    #[uniffi(default)]
+    pub touched_values: Vec<f64>,
     /// Automation is suspended (process-wide).
     pub suspended: bool,
     /// This session is playing and its gesture tap is installed.
@@ -267,8 +271,8 @@ const MAX_TARGET_TEXT: usize = 64;
 
 /// `target` as the channel spells it (Ruling 17): `fader:<strip>`,
 /// `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n
-/// from 1), `param:<slot>:<param>`; empty for velocity scale, which has
-/// no spelling (it cannot be gestured).
+/// from 1), `param:<slot>:<param>`, `vca:<vca>`; empty for velocity
+/// scale, which has no spelling (it cannot be gestured).
 #[uniffi::export]
 pub fn automation_target_text(target: AutomationTargetRow) -> String {
     std::panic::catch_unwind(|| match target {
@@ -281,6 +285,7 @@ pub fn automation_target_text(target: AutomationTargetRow) -> String {
         }
         AutomationTargetRow::PluginParam { slot, param } => format!("param:{slot}:{param}"),
         AutomationTargetRow::VelocityScale { .. } => String::new(),
+        AutomationTargetRow::VcaFader { vca } => format!("vca:{vca}"),
     })
     .unwrap_or_default()
 }
@@ -316,6 +321,7 @@ pub fn parse_automation_target(text: String) -> Option<AutomationTargetRow> {
             ("pan", None) => Some(AutomationTargetRow::StripPan { strip: a }),
             ("mute", None) => Some(AutomationTargetRow::StripMute { strip: a }),
             ("solo", None) => Some(AutomationTargetRow::StripSolo { strip: a }),
+            ("vca", None) => Some(AutomationTargetRow::VcaFader { vca: a }),
             ("send", Some(n)) => {
                 let send = u16::try_from(digits(n)?.checked_sub(1)?).ok()?;
                 Some(AutomationTargetRow::SendLevel { strip: a, send })
@@ -1032,8 +1038,15 @@ pub(crate) fn param_info(owner: u64, t: AutomationTarget) -> Option<ParamInfo> {
 
 /// The lane a new write goes into (Ruling 4): "<strip> Fader", "<strip>
 /// Pan", "<strip> Mute", "<strip> Solo", "<strip> Send <n>" (n from 1),
-/// "<strip> <parameter name>", "<strip> Parameter <id>".
+/// "<strip> <parameter name>", "<strip> Parameter <id>"; a VCA's "VCA
+/// <name> Fader".
 pub(crate) fn lane_name(doc: &Document, t: AutomationTarget, param_name: Option<&str>) -> String {
+    if let AutomationTarget::VcaFader(v) = t {
+        return match doc.mixer().vca(v) {
+            Ok(x) => format!("VCA {} Fader", x.name),
+            Err(_) => "VCA Fader".to_string(),
+        };
+    }
     let strip = strip_of(doc, t)
         .and_then(|s| doc.mixer().strip(s).ok())
         .map(|s| s.name.clone());
@@ -1047,7 +1060,9 @@ pub(crate) fn lane_name(doc: &Document, t: AutomationTarget, param_name: Option<
             Some(n) if !n.trim().is_empty() => n.to_string(),
             _ => format!("Parameter {}", id.0),
         },
-        AutomationTarget::VelocityScale(_) => return t.describe(),
+        AutomationTarget::VelocityScale(_) | AutomationTarget::VcaFader(_) => {
+            return t.describe();
+        }
     };
     match strip {
         Some(s) => format!("{s} {what}"),
@@ -1175,8 +1190,8 @@ pub(crate) fn value_at(points: &[(Tick, f64)], tick: Tick, stepped: bool) -> Opt
     }
 }
 
-/// The static value of `t`, normalised: a strip's or send's from the
-/// document; a plugin parameter's from the slot's overlay, else its
+/// The static value of `t`, normalised: a strip's, send's or VCA's from
+/// the document; a plugin parameter's from the slot's overlay, else its
 /// default, normalised by the range `param` gives; else 0.5.
 pub(crate) fn fixed_value(doc: &Document, t: AutomationTarget, param: Option<&ParamInfo>) -> f64 {
     let m = doc.mixer();
@@ -1202,14 +1217,21 @@ pub(crate) fn fixed_value(doc: &Document, t: AutomationTarget, param: Option<&Pa
             None => 0.5,
         },
         AutomationTarget::VelocityScale(_) => 0.5,
+        AutomationTarget::VcaFader(v) => m.vca(v).map_or(0.5, |x| fader_norm(x.gain_db)),
     }
 }
 
 /// The command that sets `t`'s static value to `v` (normalised):
-/// SetGain, SetPan, SetMute, SetSolo, EditSend; `None` for plugin
-/// parameters (they commit `SetPluginParams` at the release) and the
-/// rest.
+/// SetGain, SetPan, SetMute, SetSolo, EditSend, SetVcaLevel; `None` for
+/// plugin parameters (they commit `SetPluginParams` at the release) and
+/// the rest.
 pub(crate) fn static_command(doc: &Document, t: AutomationTarget, v: f64) -> Option<Command> {
+    if let AutomationTarget::VcaFader(vca) = t {
+        return Some(Command::Groups(GroupCmd::SetVcaLevel {
+            vca,
+            gain_db: fader_db(v),
+        }));
+    }
     Some(Command::Mixer(match t {
         AutomationTarget::StripFader(strip) => MixerCmd::SetGain {
             strip,
@@ -1238,7 +1260,9 @@ pub(crate) fn static_command(doc: &Document, t: AutomationTarget, v: f64) -> Opt
                 },
             }
         }
-        AutomationTarget::PluginParam(..) | AutomationTarget::VelocityScale(_) => return None,
+        AutomationTarget::PluginParam(..)
+        | AutomationTarget::VelocityScale(_)
+        | AutomationTarget::VcaFader(_) => return None,
     }))
 }
 
@@ -1422,6 +1446,7 @@ pub(crate) fn static_label(t: AutomationTarget) -> &'static str {
         AutomationTarget::StripMute(_) => "Mute",
         AutomationTarget::StripSolo(_) => "Solo",
         AutomationTarget::SendLevel(..) => "Set Send Level",
+        AutomationTarget::VcaFader(_) => "Set VCA",
         AutomationTarget::PluginParam(..) | AutomationTarget::VelocityScale(_) => {
             "Change Plugin Parameter"
         }
@@ -1634,5 +1659,33 @@ mod tests {
         assert_eq!(tried, vec![GesturePhase::Hold]);
         assert_eq!(q.len(), 0);
         q.resend(|_| panic!("nothing is left"));
+    }
+
+    /// `vca:<id>` parses to a VCA's fader and prints back; anything else
+    /// shaped like it is refused, as the other spellings are.
+    #[test]
+    fn vca_target_text_round_trips() {
+        let t = parse_automation_target("vca:7".into());
+        assert_eq!(t, Some(AutomationTargetRow::VcaFader { vca: 7 }));
+        assert_eq!(automation_target_text(t.unwrap()), "vca:7");
+        let long = format!("vca:{}", "1".repeat(61));
+        assert_eq!(long.len(), 65);
+        for odd in [
+            "vca:",
+            "vca:-1",
+            "vca:0x1",
+            "vca:1:2",
+            long.as_str(),
+            "vca:+1",
+            "vca: 1",
+            "VCA:1",
+            "vca",
+        ] {
+            assert_eq!(parse_automation_target(odd.into()), None, "{odd:?}");
+        }
+        assert_eq!(
+            static_label(AutomationTarget::VcaFader(core_model::ids::VcaId(7))),
+            "Set VCA"
+        );
     }
 }

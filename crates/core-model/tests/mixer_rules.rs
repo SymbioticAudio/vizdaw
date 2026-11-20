@@ -36,6 +36,8 @@ fn buses(spec: &[(Option<u64>, Vec<u64>, Vec<u64>)]) -> Mixer {
         master: StripId(0),
         order: (1..=spec.len() as u64).map(StripId).collect(),
         strips,
+        groups: vec![],
+        vcas: vec![],
     })
     .unwrap()
 }

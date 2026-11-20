@@ -559,7 +559,17 @@ const MIXER_SET_STRIP_PARAMS: &[ParamSpec] = &[
         required: false,
         help: "Solo (true) or unsolo (false).",
     },
+    ALONE,
 ];
+
+/// `mixer.set_strip`'s and `automation.gesture`'s `alone`
+/// (groups-vcas-transport): the strip moves without its group.
+const ALONE: ParamSpec = ParamSpec {
+    name: "alone",
+    kind: ParamKind::Flag,
+    required: false,
+    help: "true moves this strip only: its group does not follow (default false).",
+};
 
 /// `mixer.set_output` (plan 8d Ruling 1).
 const MIXER_SET_OUTPUT_PARAMS: &[ParamSpec] = &[
@@ -694,6 +704,197 @@ const MIXER_SET_PARAM_PARAMS: &[ParamSpec] = &[
 /// `mixer.remove_bus` (plan 8d Ruling 1).
 const MIXER_REMOVE_BUS_PARAMS: &[ParamSpec] = &[mixer_id("strip", "The bus strip to remove.")];
 
+/// The groups-vcas-transport plan's group and VCA commands, in its
+/// table's order.
+pub const GROUP_IDS: &[&str] = &[
+    "mixer.new_group",
+    "mixer.rename_group",
+    "mixer.set_group_colour",
+    "mixer.add_to_group",
+    "mixer.remove_from_group",
+    "mixer.set_group_links",
+    "mixer.delete_group",
+    "mixer.new_vca",
+    "mixer.rename_vca",
+    "mixer.set_vca_colour",
+    "mixer.assign_vca",
+    "mixer.unassign_vca",
+    "mixer.set_vca",
+    "mixer.delete_vca",
+];
+
+/// The automation modes a VCA takes (groups-vcas-transport Ruling 6):
+/// Write and Trim are not among them.
+pub const VCA_MODE_NAMES: &[&str] = &["off", "read", "touch", "latch"];
+
+/// The metronome's modes (groups-vcas-transport Ruling 19), as
+/// `transport.set_click_mode` spells them.
+pub const CLICK_MODES: &[&str] = &["play_and_record", "record_only"];
+
+/// The metronome's level range in dB (`core_model`'s
+/// `CLICK_LEVEL_MIN_DB` and `CLICK_LEVEL_MAX_DB`).
+pub const CLICK_LEVEL_DB: (f64, f64) = (-60.0, 0.0);
+
+/// `transport.set_click_level`.
+const CLICK_LEVEL_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "level_db",
+    kind: ParamKind::Text,
+    required: true,
+    help: "The click level in dB as text, such as \"-12\" (-60 to 0).",
+}];
+
+/// `transport.set_click_mode`.
+const CLICK_MODE_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "mode",
+    kind: ParamKind::Choice(CLICK_MODES),
+    required: true,
+    help: "When it clicks: play_and_record (every beat while playing) or record_only (only while recording, pre-roll included).",
+}];
+
+/// The colours a group takes (groups-vcas-transport Ruling 4): the eight
+/// swatches, without `none`.
+pub const GROUP_COLOURS: &[&str] = &[
+    "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+];
+
+const GROUP: ParamSpec = mixer_id("group", "The group (see state.get mixer).");
+
+const GROUP_STRIPS: ParamSpec = ParamSpec {
+    name: "strips",
+    kind: ParamKind::Text,
+    required: true,
+    help: "1 to 64 strip IDs separated by commas, such as \"2,3\" (see state.get mixer).",
+};
+
+const GROUP_NAME: ParamSpec = ParamSpec {
+    name: "name",
+    kind: ParamKind::Text,
+    required: true,
+    help: "The group's name: 1 to 64 characters, no control characters.",
+};
+
+const GROUP_COLOUR: ParamSpec = ParamSpec {
+    name: "colour",
+    kind: ParamKind::Choice(GROUP_COLOURS),
+    required: true,
+    help: "red, orange, yellow, green, teal, blue, purple or pink.",
+};
+
+/// `mixer.new_group` (groups-vcas-transport Rulings 4 and 11).
+const NEW_GROUP_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        required: false,
+        help: "Its first members: 1 to 64 strip IDs separated by commas (default: none, an empty group).",
+        ..GROUP_STRIPS
+    },
+    ParamSpec {
+        required: false,
+        help: "Its name, 1 to 64 characters (default \"Group N\", N one more than the groups).",
+        ..GROUP_NAME
+    },
+    ParamSpec {
+        required: false,
+        help: "Its colour (default: the next swatch, in order, by the number of groups).",
+        ..GROUP_COLOUR
+    },
+];
+
+/// `mixer.rename_group`.
+const RENAME_GROUP_PARAMS: &[ParamSpec] = &[GROUP, GROUP_NAME];
+
+/// `mixer.set_group_colour`.
+const GROUP_COLOUR_PARAMS: &[ParamSpec] = &[GROUP, GROUP_COLOUR];
+
+/// `mixer.add_to_group` and `mixer.remove_from_group`.
+const GROUP_STRIPS_PARAMS: &[ParamSpec] = &[GROUP, GROUP_STRIPS];
+
+/// `mixer.set_group_links`.
+const GROUP_LINKS_PARAMS: &[ParamSpec] = &[
+    GROUP,
+    ParamSpec {
+        name: "mute",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Link the members' mutes (true) or not (false). At least one of mute and solo is required.",
+    },
+    ParamSpec {
+        name: "solo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Link the members' solos (true) or not (false).",
+    },
+];
+
+/// `mixer.delete_group`.
+const GROUP_ONLY_PARAMS: &[ParamSpec] = &[GROUP];
+
+const VCA: ParamSpec = mixer_id("vca", "The VCA (see state.get mixer).");
+
+const VCA_NAME: ParamSpec = ParamSpec {
+    help: "The VCA's name: 1 to 64 characters, no control characters.",
+    ..GROUP_NAME
+};
+
+/// `mixer.new_vca` (groups-vcas-transport Rulings 4 and 11).
+const NEW_VCA_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        required: false,
+        help: "Its first members: 1 to 64 strip IDs separated by commas (default: none, an empty VCA).",
+        ..GROUP_STRIPS
+    },
+    ParamSpec {
+        required: false,
+        help: "Its name, 1 to 64 characters (default \"VCA N\", N one more than the VCAs).",
+        ..GROUP_NAME
+    },
+    ParamSpec {
+        required: false,
+        help: "Its colour (default: the next swatch, in order, by the number of VCAs).",
+        ..GROUP_COLOUR
+    },
+];
+
+/// `mixer.rename_vca`.
+const RENAME_VCA_PARAMS: &[ParamSpec] = &[VCA, VCA_NAME];
+
+/// `mixer.set_vca_colour`.
+const VCA_COLOUR_PARAMS: &[ParamSpec] = &[VCA, GROUP_COLOUR];
+
+/// `mixer.assign_vca` and `mixer.unassign_vca`.
+const VCA_STRIPS_PARAMS: &[ParamSpec] = &[VCA, GROUP_STRIPS];
+
+/// `mixer.set_vca`: at least one of the four.
+const SET_VCA_PARAMS: &[ParamSpec] = &[
+    VCA,
+    ParamSpec {
+        name: "gain_db",
+        kind: ParamKind::Text,
+        required: false,
+        help: "Its level in dB as text, such as \"-3\" (-144 is -inf, at most 12). At least one of gain_db, mute, solo and mode is required.",
+    },
+    ParamSpec {
+        name: "mute",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Mute its members (true) or not (false).",
+    },
+    ParamSpec {
+        name: "solo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Solo its members (true) or not (false).",
+    },
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(VCA_MODE_NAMES),
+        required: false,
+        help: "Its automation mode: off, read, touch or latch.",
+    },
+];
+
+/// `mixer.delete_vca`.
+const VCA_ONLY_PARAMS: &[ParamSpec] = &[VCA];
+
 /// `track.new_plugin_instrument` (plan 8d Ruling 1).
 const NEW_PLUGIN_INSTRUMENT_PARAMS: &[ParamSpec] = &[
     opt_id_param("seq", "The sequence (default: the selected one)."),
@@ -761,10 +962,17 @@ pub fn point_list(text: &str, start: u64, end: u64) -> Result<Vec<(u64, f64)>, S
     Ok(points)
 }
 
+/// Why [`automation_target`] refuses `vca:<id>`, after "`target` ".
+pub const VCA_AUTOMATION_REFUSED: &str = "names a VCA's fader, and VCA automation cannot be read or written this way in 26.0.0: move the VCA with mixer.set_vca instead";
+
 /// `automation.gesture`'s target grammar, the shape only (the app's
 /// `parse_automation_target`): `fader:<strip>`, `pan:<strip>`,
 /// `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or
 /// `param:<slot>:<param>`, IDs in ASCII digits, at most 64 characters.
+/// A VCA's fader (`vca:<id>`, the gesture's spelling) is refused with
+/// [`VCA_AUTOMATION_REFUSED`]: in 26.0.0 neither `automation.write` nor
+/// `co_producer.automation` reaches VCA automation (groups-vcas-transport
+/// Task 7).
 pub fn automation_target(text: &str) -> Result<(), String> {
     let refuse = || {
         "must be fader:<strip>, pan:<strip>, mute:<strip>, solo:<strip>, send:<strip>:<n> (n from 1) or param:<slot>:<param>".to_string()
@@ -779,6 +987,9 @@ pub fn automation_target(text: &str) -> Result<(), String> {
         return Err(refuse());
     }
     let parts: Vec<&str> = text.split(':').collect();
+    if matches!(parts.as_slice(), ["vca", id] if number(id).is_some()) {
+        return Err(VCA_AUTOMATION_REFUSED.into());
+    }
     let ok = match parts.as_slice() {
         [kind, id] => matches!(*kind, "fader" | "pan" | "mute" | "solo") && number(id).is_some(),
         ["send", strip, n] => {
@@ -824,6 +1035,14 @@ const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
     },
     required: true,
     help: "A built-in theme, or a user theme's `user.` ID (see Settings › Appearance).",
+}];
+
+/// `ui.set_transport_bar`'s parameter (groups-vcas-transport Ruling 18).
+const UI_TRANSPORT_BAR_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "items",
+    kind: ParamKind::Text,
+    required: true,
+    help: "The bar's items in order, split by commas: cluster (exactly once), loop, click, replace_overdub, record_options, count_in, summary, bar, time, tempo, signature, position_field, edit_fields, punch_fields, dsp_load, device, faults, main_view, panes, space, separator, command:<command id>[:<label>]; bar, time and tempo take :small or :large; a label is 1 to 32 characters, its commas and percent signs written %2C and %25. At most 64.",
 }];
 
 /// `ui.pane`'s parameters (plan 7a Task 5).
@@ -2068,7 +2287,7 @@ const AUTOMATION_GESTURE_PARAMS: &[ParamSpec] = &[
         name: "target",
         kind: ParamKind::Text,
         required: true,
-        help: "`fader:<strip>`, `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or `param:<slot>:<param>`.",
+        help: "`fader:<strip>`, `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1), `param:<slot>:<param>` or `vca:<vca>`.",
     },
     ParamSpec {
         name: "phase",
@@ -2082,6 +2301,7 @@ const AUTOMATION_GESTURE_PARAMS: &[ParamSpec] = &[
         required: false,
         help: "The normalised value 0–1 as text (\"0.5\"); needed for value, optional for touch.",
     },
+    ALONE,
 ];
 
 /// A surface's ID (plan 5f-1 Ruling 4; `state.get surfaces` lists them).
@@ -2531,6 +2751,42 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: UI_THEME_PARAMS,
         ..key_only(cmd("ui.theme", "View", "Theme", None, false))
     },
+    // Groups-vcas-transport Ruling 18: the bar's items, app-wide; the app
+    // checks the grammar (exactly one cluster, at most 64 items).
+    CommandSpec {
+        params: UI_TRANSPORT_BAR_PARAMS,
+        ..key_only(cmd(
+            "ui.set_transport_bar",
+            "View",
+            "Set Transport Bar",
+            None,
+            false,
+        ))
+    },
+    key_only(cmd(
+        "ui.reset_transport_bar",
+        "View",
+        "Reset Transport Bar",
+        None,
+        false,
+    )),
+    // Groups-vcas-transport Task 12: the View menu's sheet; over the
+    // channel it is only ever `dialog_required` (no sheet opens).
+    CommandSpec {
+        dialogs: &[DialogSpec {
+            name: "Customize Transport Bar",
+            when: "always",
+            always: true,
+            answered_by: &[],
+        }],
+        ..cmd(
+            "ui.customize_transport",
+            "View",
+            "Customize Transport Bar…",
+            None,
+            false,
+        )
+    },
     cmd(
         "editors.piano_roll",
         "Editors",
@@ -2950,6 +3206,30 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         params: ON,
         ..cmd("transport.punch", "Transport", "Punch", Some("I"), true)
+    },
+    CommandSpec {
+        params: ON,
+        ..cmd("transport.click", "Transport", "Click", None, true)
+    },
+    CommandSpec {
+        params: CLICK_LEVEL_PARAMS,
+        ..key_only(cmd(
+            "transport.set_click_level",
+            "Transport",
+            "Click Level",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: CLICK_MODE_PARAMS,
+        ..key_only(cmd(
+            "transport.set_click_mode",
+            "Transport",
+            "Click Mode",
+            None,
+            true,
+        ))
     },
     CommandSpec {
         class: Class::Read,
@@ -3645,6 +3925,127 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: MIXER_REMOVE_BUS_PARAMS,
         ..key_only(cmd("mixer.remove_bus", "Mixer", "Remove Bus", None, true))
     },
+    // Groups-vcas-transport: fader groups. Group and Ungroup are menu
+    // items (Ruling 12).
+    CommandSpec {
+        class: Class::Add,
+        params: NEW_GROUP_PARAMS,
+        ..cmd("mixer.new_group", "Mixer", "Group", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: RENAME_GROUP_PARAMS,
+        ..key_only(cmd(
+            "mixer.rename_group",
+            "Mixer",
+            "Rename Group",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: GROUP_COLOUR_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_group_colour",
+            "Mixer",
+            "Group Colour",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: GROUP_STRIPS_PARAMS,
+        ..key_only(cmd(
+            "mixer.add_to_group",
+            "Mixer",
+            "Add to Group",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: GROUP_STRIPS_PARAMS,
+        ..key_only(cmd(
+            "mixer.remove_from_group",
+            "Mixer",
+            "Remove from Group",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: GROUP_LINKS_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_group_links",
+            "Mixer",
+            "Group Links",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: GROUP_ONLY_PARAMS,
+        ..cmd("mixer.delete_group", "Mixer", "Ungroup", None, true)
+    },
+    // Groups-vcas-transport: VCAs. New VCA is a menu item (Ruling 12).
+    CommandSpec {
+        class: Class::Add,
+        params: NEW_VCA_PARAMS,
+        ..cmd("mixer.new_vca", "Mixer", "New VCA", None, true)
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: RENAME_VCA_PARAMS,
+        ..key_only(cmd("mixer.rename_vca", "Mixer", "Rename VCA", None, true))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: VCA_COLOUR_PARAMS,
+        ..key_only(cmd(
+            "mixer.set_vca_colour",
+            "Mixer",
+            "VCA Colour",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: VCA_STRIPS_PARAMS,
+        ..key_only(cmd(
+            "mixer.assign_vca",
+            "Mixer",
+            "Assign to VCA",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: VCA_STRIPS_PARAMS,
+        ..key_only(cmd(
+            "mixer.unassign_vca",
+            "Mixer",
+            "Remove from VCA",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        class: Class::Change,
+        params: SET_VCA_PARAMS,
+        ..key_only(cmd("mixer.set_vca", "Mixer", "Set VCA", None, true))
+    },
+    CommandSpec {
+        class: Class::Remove,
+        params: VCA_ONLY_PARAMS,
+        ..key_only(cmd("mixer.delete_vca", "Mixer", "Delete VCA", None, true))
+    },
     CommandSpec {
         class: Class::Add,
         params: NEW_PLUGIN_INSTRUMENT_PARAMS,
@@ -3793,6 +4194,13 @@ pub fn validate_args(
         return Err(p.error("give at least one of `volume`, `pan` and `mute`"));
     }
     mixer_rules(&p, spec.id, &out)?;
+    group_rules(&p, spec.id, &out)?;
+    if spec.id == "transport.set_click_level"
+        && let Some(t) = text_arg(&out, "level_db")
+    {
+        let (min, max) = CLICK_LEVEL_DB;
+        decimal(t, min, max).map_err(|m| p.error(format!("`level_db` {m}")))?;
+    }
     chore_rules(&p, spec.id, &mut out)?;
     creative_rules(&p, spec.id, &out)?;
     for d in spec.dialogs.iter().filter(|d| d.always) {
@@ -3929,6 +4337,31 @@ fn mixer_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(
     if let Some(t) = text_arg(out, "plugin") {
         plugin_ref(t, id == "track.new_plugin_instrument")
             .map_err(|m| p.error(format!("`plugin` {m}")))?;
+    }
+    Ok(())
+}
+
+/// The group and VCA commands' rules across parameters, for both
+/// sockets: a `strips` list as [`crate::co_producer::id_list`] reads it,
+/// at least one switch for `mixer.set_group_links`, at least one setting
+/// for `mixer.set_vca`, and its `gain_db` as [`decimal`] spells it.
+fn group_rules(p: &Params<'_>, id: &str, out: &[(String, ArgValue)]) -> Result<(), ControlError> {
+    if !GROUP_IDS.contains(&id) {
+        return Ok(());
+    }
+    if let Some(t) = text_arg(out, "strips") {
+        crate::co_producer::id_list(t).map_err(|m| p.error(format!("`strips`: {m}")))?;
+    }
+    let none_of = |keys: &[&str]| !keys.iter().any(|k| out.iter().any(|(n, _)| n == k));
+    if id == "mixer.set_group_links" && none_of(&["mute", "solo"]) {
+        return Err(p.error("give at least one of `mute` and `solo`"));
+    }
+    if id == "mixer.set_vca" && none_of(&["gain_db", "mute", "solo", "mode"]) {
+        return Err(p.error("give at least one of `gain_db`, `mute`, `solo` and `mode`"));
+    }
+    if let Some(t) = text_arg(out, "gain_db") {
+        let (min, max) = LEVEL_DB;
+        decimal(t, min, max).map_err(|m| p.error(format!("`gain_db` {m}")))?;
     }
     Ok(())
 }

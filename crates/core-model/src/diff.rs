@@ -5,10 +5,11 @@
 //! Claude gave a track, sequence or bus can never add or hide lines in
 //! that list.
 
-use crate::automation::{AutomationTarget, strip_of};
+use crate::automation::{AutomationMode, AutomationTarget, strip_of};
 use crate::document::{DestKind, Document};
 use crate::event::{Event, EventBody, FadeShape};
-use crate::ids::{DestId, EventId, LaneId, OutputPathId, PluginInstanceId, SeqId, StripId};
+use crate::groups::{heard_db, vca_muted, vca_offset_db};
+use crate::ids::{DestId, EventId, LaneId, OutputPathId, PluginInstanceId, SeqId, StripId, VcaId};
 use crate::lane::Lane;
 use crate::mixer::{AuxSend, GAIN_FLOOR_DB, Output, ParamId, PluginSlot, Strip, StripKind, Swatch};
 use crate::sequence::{Marker, Sequence};
@@ -430,8 +431,13 @@ fn colour(c: Option<Swatch>) -> &'static str {
     }
 }
 
-fn strips(before: &Document, after: &Document, params: ParamLookup, out: &mut Vec<ChangeItem>) {
-    let mut automation = automation_parts(before, after, params);
+fn strips(
+    before: &Document,
+    after: &Document,
+    automation: &mut BTreeMap<Owner, (Vec<String>, bool)>,
+    params: ParamLookup,
+    out: &mut Vec<ChangeItem>,
+) {
     let (b, a) = (before.mixer().strips(), after.mixer().strips());
     for id in strip_order(before) {
         if let (Some(s), None) = (b.get(&id), a.get(&id)) {
@@ -455,13 +461,263 @@ fn strips(before: &Document, after: &Document, params: ParamLookup, out: &mut Ve
             ));
         }
         let mut parts = mixer_parts(before, after, old, s, params);
-        let (auto, theirs) = automation.remove(&id).unwrap_or_default();
+        parts.extend(vca_parts(before, after, old, s));
+        let (auto, theirs) = automation.remove(&Owner::Strip(id)).unwrap_or_default();
         parts.extend(auto);
         let parts = capped(parts);
         if !parts.is_empty() {
             let ours = old.co_producer && !theirs;
             out.push(item_of(strip(&old.name), parts.join(", "), ours));
         }
+    }
+}
+
+/// What the VCAs do to a strip present before (`old`) and after (`new`)
+/// (groups-vcas-transport Task 7): `heard <a> → <b>` when the level it is
+/// heard at changed while its own fader did not, and `muted by a VCA` or
+/// `no longer muted by a VCA`.
+fn vca_parts(before: &Document, after: &Document, old: &Strip, new: &Strip) -> Vec<String> {
+    let mut parts = Vec::new();
+    let heard = |d: &Document, s: &Strip| heard_db(s.gain_db, vca_offset_db(d.mixer(), s.id));
+    let (was, now) = (heard(before, old), heard(after, new));
+    if old.gain_db == new.gain_db && was != now {
+        parts.push(format!("heard {} → {}", db(was), db(now)));
+    }
+    let (m0, m1) = (
+        vca_muted(before.mixer(), old.id),
+        vca_muted(after.mixer(), new.id),
+    );
+    if m0 != m1 {
+        parts.push(
+            if m1 {
+                "muted by a VCA"
+            } else {
+                "no longer muted by a VCA"
+            }
+            .into(),
+        );
+    }
+    parts
+}
+
+/// Whether every one of `members` is a strip of `doc` marked Co-Producer's.
+fn all_ours(doc: &Document, members: &im::Vector<StripId>) -> bool {
+    members
+        .iter()
+        .all(|id| doc.mixer().strip(*id).is_ok_and(|s| s.co_producer))
+}
+
+/// `<strip> <added>` for each of `new` not in `old`, then `<strip>
+/// <removed>` for each of `old` not in `new`, each in its list's order;
+/// strips named as the strip items name them, by the name before.
+fn member_parts(
+    before: &Document,
+    after: &Document,
+    (old, new): (&im::Vector<StripId>, &im::Vector<StripId>),
+    (added, removed): (&str, &str),
+    parts: &mut Vec<String>,
+) {
+    for id in new.iter().filter(|id| !old.contains(id)) {
+        parts.push(format!("{} {added}", either_name(before, after, *id)));
+    }
+    for id in old.iter().filter(|id| !new.contains(id)) {
+        parts.push(format!("{} {removed}", either_name(before, after, *id)));
+    }
+}
+
+/// "renamed <old> → <new>" and "colour <old> → <new>" of a group or VCA.
+fn name_parts((n0, n1): (&str, &str), (c0, c1): (Swatch, Swatch), parts: &mut Vec<String>) {
+    if n0 != n1 {
+        parts.push(format!("renamed {} → {}", shown_name(n0), shown_name(n1)));
+    }
+    if c0 != c1 {
+        parts.push(format!(
+            "colour {} → {}",
+            colour(Some(c0)),
+            colour(Some(c1))
+        ));
+    }
+}
+
+/// An automation mode as the strip's menu titles it.
+fn mode(m: AutomationMode) -> &'static str {
+    match m {
+        AutomationMode::Off => "Off",
+        AutomationMode::Read => "Read",
+        AutomationMode::Touch => "Touch",
+        AutomationMode::Latch => "Latch",
+        AutomationMode::Write => "Write",
+        AutomationMode::Trim => "Trim",
+    }
+}
+
+/// The "Group <name>" items, by group ID (groups-vcas-transport Task 7):
+/// `added`, `deleted`, `renamed`, `colour`, `<strip> added`, `<strip>
+/// removed`, `mute link on`/`off` and `solo link on`/`off`. A group is
+/// Co-Producer's only when, before and after, it carries Co-Producer's
+/// mark and every member is a strip marked Co-Producer's (Ruling 10;
+/// owner, 2026-11-19): the composer's group asks, even an empty one.
+fn groups(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
+    let (b, a) = (before.mixer().groups(), after.mixer().groups());
+    let ids: BTreeSet<_> = b.keys().chain(a.keys()).copied().collect();
+    let none = im::Vector::new();
+    for id in ids {
+        let (old, new) = (b.get(&id), a.get(&id));
+        let (Some(named), true) = (old.or(new), old != new) else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        match (old, new) {
+            (None, Some(g)) => {
+                parts.push("added".to_string());
+                member_parts(
+                    before,
+                    after,
+                    (&none, &g.members),
+                    ("added", "removed"),
+                    &mut parts,
+                );
+            }
+            (Some(_), None) => parts.push("deleted".to_string()),
+            (Some(o), Some(g)) => {
+                name_parts((&o.name, &g.name), (o.colour, g.colour), &mut parts);
+                member_parts(
+                    before,
+                    after,
+                    (&o.members, &g.members),
+                    ("added", "removed"),
+                    &mut parts,
+                );
+                for (link, was, now) in [
+                    ("mute", o.link_mute, g.link_mute),
+                    ("solo", o.link_solo, g.link_solo),
+                ] {
+                    if was != now {
+                        parts.push(format!("{link} link {}", if now { "on" } else { "off" }));
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+        let parts = capped(parts);
+        if parts.is_empty() {
+            continue;
+        }
+        let ours = old.is_none_or(|g| g.co_producer && all_ours(before, &g.members))
+            && new.is_none_or(|g| g.co_producer && all_ours(after, &g.members));
+        out.push(item_of(
+            format!("Group {}", shown_name(&named.name)),
+            parts.join(", "),
+            ours,
+        ));
+    }
+}
+
+/// The points of `doc` that play on VCA `vca`'s fader: their count, the
+/// first and last tick, and whether any is on a track not Co-Producer's.
+fn vca_points(doc: &Document, vca: VcaId) -> Option<(usize, SeqId, Tick, Tick, bool)> {
+    let points = automation_points(doc);
+    let mut found: Option<(usize, SeqId, Tick, Tick, bool)> = None;
+    for ((target, seq), ps) in &points {
+        if *target != AutomationTarget::VcaFader(vca) {
+            continue;
+        }
+        for (t, _, ours) in ps.values() {
+            let f = found.get_or_insert((0, *seq, *t, *t, false));
+            f.0 += 1;
+            f.2 = f.2.min(*t);
+            f.3 = f.3.max(*t);
+            f.4 |= !ours;
+        }
+    }
+    found
+}
+
+/// The "VCA <name>" items, by VCA ID (groups-vcas-transport Task 7):
+/// `added`, `deleted`, `renamed`, `colour`, `level <a> → <b>`,
+/// `muted`/`unmuted`, `soloed`/`unsoloed`, `mode <a> → <b>`, `<strip>
+/// assigned`, `<strip> unassigned`, then its fader automation's parts. A
+/// deleted VCA's automation stops playing, so its item says so. A VCA is
+/// Co-Producer's as a group is ([`groups`]), and not when the change takes
+/// away or changes points on a track not Co-Producer's.
+fn vcas(
+    before: &Document,
+    after: &Document,
+    automation: &mut BTreeMap<Owner, (Vec<String>, bool)>,
+    out: &mut Vec<ChangeItem>,
+) {
+    let (b, a) = (before.mixer().vcas(), after.mixer().vcas());
+    let ids: BTreeSet<_> = b.keys().chain(a.keys()).copied().collect();
+    let none = im::Vector::new();
+    for id in ids {
+        let (old, new) = (b.get(&id), a.get(&id));
+        let Some(named) = old.or(new) else { continue };
+        let (auto, mut theirs) = automation.remove(&Owner::Vca(id)).unwrap_or_default();
+        let mut parts = Vec::new();
+        match (old, new) {
+            (None, Some(v)) => {
+                parts.push("added".to_string());
+                member_parts(
+                    before,
+                    after,
+                    (&none, &v.members),
+                    ("assigned", "unassigned"),
+                    &mut parts,
+                );
+            }
+            (Some(_), None) => {
+                parts.push("deleted".to_string());
+                if let Some((n, seq, lo, hi, any_theirs)) = vca_points(before, id) {
+                    parts.push(format!(
+                        "fader automation no longer plays ({}, bars {}–{})",
+                        count(n, "point", "points"),
+                        bar_of(before, seq, lo),
+                        bar_of(before, seq, hi)
+                    ));
+                    theirs |= any_theirs;
+                }
+            }
+            (Some(o), Some(v)) => {
+                name_parts((&o.name, &v.name), (o.colour, v.colour), &mut parts);
+                if o.gain_db != v.gain_db {
+                    parts.push(format!("level {} → {}", db(o.gain_db), db(v.gain_db)));
+                }
+                if o.mute != v.mute {
+                    parts.push(if v.mute { "muted" } else { "unmuted" }.into());
+                }
+                if o.solo != v.solo {
+                    parts.push(if v.solo { "soloed" } else { "unsoloed" }.into());
+                }
+                if o.automation != v.automation {
+                    parts.push(format!(
+                        "mode {} → {}",
+                        mode(o.automation),
+                        mode(v.automation)
+                    ));
+                }
+                member_parts(
+                    before,
+                    after,
+                    (&o.members, &v.members),
+                    ("assigned", "unassigned"),
+                    &mut parts,
+                );
+            }
+            (None, None) => {}
+        }
+        parts.extend(auto);
+        let parts = capped(parts);
+        if parts.is_empty() {
+            continue;
+        }
+        let ours = !theirs
+            && old.is_none_or(|v| v.co_producer && all_ours(before, &v.members))
+            && new.is_none_or(|v| v.co_producer && all_ours(after, &v.members));
+        out.push(item_of(
+            format!("VCA {}", shown_name(&named.name)),
+            parts.join(", "),
+            ours,
+        ));
     }
 }
 
@@ -874,6 +1130,14 @@ pub fn bar_of(doc: &Document, seq: SeqId, tick: Tick) -> u32 {
         .max(1)
 }
 
+/// What an automation part joins: a strip's item, or a VCA's
+/// (groups-vcas-transport Task 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Owner {
+    Strip(StripId),
+    Vca(VcaId),
+}
+
 /// Every automation point of `doc`, by target and sequence, then by ID:
 /// its tick and value, and whether its lane is Co-Producer's. Points of
 /// every take of every lane count.
@@ -934,11 +1198,13 @@ fn automation_label(
                 .map_or_else(|| format!("parameter {}", id.0), |(n, _)| shown_name(&n));
             format!("{} {name}", shown_name(&slot.plugin.name))
         }
+        // A VCA's fader joins its VCA's item.
+        AutomationTarget::VcaFader(_) => "fader".into(),
         AutomationTarget::VelocityScale(_) => return None,
     })
 }
 
-/// Ruling 4's automation parts, by the strip whose item they join: for
+/// Ruling 4's automation parts, by the strip (or VCA) whose item they join: for
 /// each target and sequence whose points differ, `<label> automation <n>
 /// points → <m> points, bars <a>–<b>` (or `<label> automation cleared,
 /// bars <a>–<b>` when none are left), over the ticks from the first to
@@ -949,11 +1215,11 @@ fn automation_parts(
     before: &Document,
     after: &Document,
     params: ParamLookup,
-) -> BTreeMap<StripId, (Vec<String>, bool)> {
+) -> BTreeMap<Owner, (Vec<String>, bool)> {
     let (b, a) = (automation_points(before), automation_points(after));
     let keys: BTreeSet<(AutomationTarget, SeqId)> = b.keys().chain(a.keys()).copied().collect();
     let none = BTreeMap::new();
-    let mut out: BTreeMap<StripId, (Vec<String>, bool)> = BTreeMap::new();
+    let mut out: BTreeMap<Owner, (Vec<String>, bool)> = BTreeMap::new();
     for key in keys {
         let (target, seq) = key;
         let (old, new) = (b.get(&key).unwrap_or(&none), a.get(&key).unwrap_or(&none));
@@ -973,8 +1239,12 @@ fn automation_parts(
         else {
             continue;
         };
-        let Some(strip) = strip_of(after, target).or_else(|| strip_of(before, target)) else {
-            continue;
+        let owner = match target {
+            AutomationTarget::VcaFader(v) => Owner::Vca(v),
+            _ => match strip_of(after, target).or_else(|| strip_of(before, target)) {
+                Some(strip) => Owner::Strip(strip),
+                None => continue,
+            },
         };
         let Some(label) = automation_label(before, after, target, params) else {
             continue;
@@ -998,7 +1268,7 @@ fn automation_parts(
                 count(m, "point", "points")
             )
         };
-        let entry = out.entry(strip).or_default();
+        let entry = out.entry(owner).or_default();
         entry.0.push(part);
         entry.1 |= theirs;
     }
@@ -1013,7 +1283,9 @@ fn automation_parts(
 ///
 /// A strip present before and after gets one item for its mixer changes
 /// (plan 8d Ruling 4), after its rename and colour items; its automation
-/// changes (plan 8e Ruling 4) follow the parameters in that item.
+/// changes (plan 8e Ruling 4) follow the parameters in that item, after
+/// what its VCAs do to it (`heard …`, `muted by a VCA`). The "Group" and
+/// "VCA" items follow the strips (groups-vcas-transport Task 7).
 ///
 /// A track's item also lists its regions' fade shapes ("fade in linear →
 /// s-curve") and its output ("output Audio 1 → none"); a Built-in Synth
@@ -1031,7 +1303,10 @@ pub fn describe_with(before: &Document, after: &Document, params: ParamLookup) -
     }
     let mut out = Vec::new();
     sequences(before, after, &mut out);
-    strips(before, after, params, &mut out);
+    let mut automation = automation_parts(before, after, params);
+    strips(before, after, &mut automation, params, &mut out);
+    groups(before, after, &mut out);
+    vcas(before, after, &mut automation, &mut out);
     synth_sounds(before, after, &mut out);
     if out.is_empty() {
         out.push(item("The song".into(), "other changes".into()));

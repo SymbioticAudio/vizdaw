@@ -242,8 +242,7 @@ final class FakeControlHost: ControlHost {
         #expect(m.editor.layout.detail?.kind == .list)
         _ = run("editors.strip_chart_window", s, id)
         _ = run("window.mixer", s, id)
-        _ = run("file.close", s, id)
-        #expect(host.calls == ["tear stripChart", "mixer", "close"])
+        #expect(host.calls == ["tear stripChart", "mixer"])
         _ = run("modify.exact_mode", [ControlArg(name: "on", value: .flag(value: true))], s, id)
         #expect(m.editor.exactMode)
         _ = run("modify.exact_mode", s, id)
@@ -257,6 +256,10 @@ final class FakeControlHost: ControlHost {
         #expect(ControlStates.facts(m).detailKind == "list")
         _ = run("editors.close_detail", s, id)
         #expect(ControlStates.facts(m).detailKind == "none")
+        // Last: the document goes with its window (release gate B1).
+        _ = run("file.close", s, id)
+        #expect(host.calls == ["tear stripChart", "mixer", "close"])
+        #expect(s.model(id) == nil)
     }
 
     @Test func theEditorStateSpellsTheDivisionSnakeCase() throws {

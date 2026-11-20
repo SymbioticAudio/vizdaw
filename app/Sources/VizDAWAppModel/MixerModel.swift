@@ -157,6 +157,17 @@ public final class MixerModel {
     private var editing: Set<AutomationTargetRow> = []
     /// Targets the core lists as touched (`automation_state`, Ruling 3).
     private var coreTouched: Set<AutomationTargetRow> = []
+    /// The core's values (normalised) of the targets it holds and this
+    /// view does not: a group drag's followers (groups-vcas-transport
+    /// Task 9), so they move during the drag.
+    public private(set) var coreValues: [AutomationTargetRow: Double] = [:]
+    /// Targets touched here alone (⌥-drag): their phases go to the core
+    /// with `alone`, so the group does not follow (spec §1).
+    private var aloneTouches: Set<AutomationTargetRow> = []
+    /// The VCA whose name is being edited (its popover's field).
+    public internal(set) var renamingVca: UInt64?
+    /// Where the VCA's rename field shows.
+    public internal(set) var vcaRenamePlacement: MixerPlacement = .window
     /// A refetch hit Busy and is still owed.
     private var refetchOwed = false
     @ObservationIgnored private var browserModels: [String: PluginBrowserModel] = [:]
@@ -404,6 +415,7 @@ public final class MixerModel {
             coreTouched.remove(t)
             send(t, .release)
         }
+        aloneTouches = []
         gestureLanded()
     }
 
@@ -615,9 +627,18 @@ public final class MixerModel {
     /// value or release follows it. A resting touch opens no edit (plan
     /// 5f-1 Ruling 2), so the core refuses its first value instead while
     /// another edit is open: `move` then ends the drag.
-    public func touch(_ t: AutomationTargetRow) {
+    public func touch(_ t: AutomationTargetRow) { touch(t, alone: false) }
+
+    /// `touch(_:)`; `alone` (⌥ held at mouse-down) moves this target only,
+    /// without its group, until its release (spec §1).
+    public func touch(_ t: AutomationTargetRow, alone: Bool) {
         editing.insert(t)
-        guard !touches.contains(t), send(t, .touch(value: nil)) else { return }
+        guard !touches.contains(t) else { return }
+        if alone { aloneTouches.insert(t) }
+        guard send(t, .touch(value: nil)) else {
+            aloneTouches.remove(t)
+            return
+        }
         touches.insert(t)
     }
 
@@ -641,6 +662,7 @@ public final class MixerModel {
             live[t] = nil
             coreTouched.remove(t)
             send(t, .release)
+            aloneTouches.remove(t)
             return
         }
     }
@@ -653,6 +675,7 @@ public final class MixerModel {
         live[t] = nil
         coreTouched.remove(t)
         send(t, .release)
+        aloneTouches.remove(t)
         gestureLanded()
     }
 
@@ -693,10 +716,22 @@ public final class MixerModel {
         touches.contains(t) || coreTouched.contains(t)
     }
 
-    /// The fader dB as shown (live while touched, else heard while playing).
+    /// The fader dB as shown: live while touched here, else the core's
+    /// value while it holds the fader (a group drag's follower), else heard
+    /// while playing, else the snapshot's.
     public func gainDb(_ s: StripRow) -> Double {
-        let t = AutomationTargetRow.stripFader(strip: s.id)
-        return live[t].map(AutomationLaw.faderDb) ?? heard[t] ?? s.gainDb
+        shownDb(.stripFader(strip: s.id), s.gainDb)
+    }
+
+    /// A VCA's fader dB as shown, by the same rule as `gainDb`.
+    public func vcaGainDb(_ v: VcaRow) -> Double {
+        shownDb(.vcaFader(vca: v.id), v.gainDb)
+    }
+
+    private func shownDb(_ t: AutomationTargetRow, _ rest: Double) -> Double {
+        if let v = live[t] { return AutomationLaw.faderDb(v) }
+        if let v = coreValues[t] { return AutomationLaw.faderDb(v) }
+        return heard[t] ?? rest
     }
 
     /// The pan as shown (live while touched, else heard while playing).
@@ -725,15 +760,21 @@ public final class MixerModel {
         guard let a = try? session.automationState() else { return }
         let now = Set(a.touched)
         if now != coreTouched { coreTouched = now }
+        var values: [AutomationTargetRow: Double] = [:]
+        for (t, v) in zip(a.touched, a.touchedValues) where !touches.contains(t) && v.isFinite {
+            values[t] = v
+        }
+        if values != coreValues { coreValues = values }
     }
 
-    /// Every strip's fader, pan and send levels (the heard values' targets).
+    /// Every strip's fader, pan and send levels, and every VCA's fader
+    /// (the heard values' targets).
     private var heardTargets: [AutomationTargetRow] {
         snapshot.strips.flatMap { s -> [AutomationTargetRow] in
             var out: [AutomationTargetRow] = [.stripFader(strip: s.id), .stripPan(strip: s.id)]
             out += s.sends.indices.map { .sendLevel(strip: s.id, send: Self.sendIndex($0)) }
             return out
-        }
+        } + snapshot.vcas.map { .vcaFader(vca: $0.id) }
     }
 
     /// `heard` from the core while playing (`Busy` and errors keep the
@@ -832,7 +873,11 @@ public final class MixerModel {
     @discardableResult
     private func send(_ t: AutomationTargetRow, _ phase: GesturePhaseRow) -> Bool {
         do {
-            try session.gesture(target: t, phase: phase)
+            if aloneTouches.contains(t) {
+                try session.gestureAs(target: t, phase: phase, holder: .mouse, alone: true)
+            } else {
+                try session.gesture(target: t, phase: phase)
+            }
             return true
         } catch {
             raise(AlertItem(error, title: Self.failureTitle(t)))
@@ -857,6 +902,7 @@ public final class MixerModel {
         case .stripSolo: "Solo Failed"
         case .pluginParam: "Parameter Failed"
         case .velocityScale: "Velocity Failed"
+        case .vcaFader: "VCA Failed"
         }
     }
 
@@ -869,6 +915,8 @@ public final class MixerModel {
             return strip(s) != nil
         case .sendLevel(let s, let send):
             return strip(s).map { Int(send) < $0.sends.count } ?? false
+        case .vcaFader(let v):
+            return snap.vcas.contains { $0.id == v }
         case .pluginParam, .velocityScale:
             return true
         }
@@ -882,8 +930,13 @@ public final class MixerModel {
         for t in touches where !Self.exists(t, in: snap) {
             touches.remove(t)
             live[t] = nil
-            try? session.gesture(target: t, phase: .release)
+            if aloneTouches.remove(t) != nil {
+                try? session.gestureAs(target: t, phase: .release, holder: .mouse, alone: true)
+            } else {
+                try? session.gesture(target: t, phase: .release)
+            }
         }
+        if let v = renamingVca, !snap.vcas.contains(where: { $0.id == v }) { renamingVca = nil }
         let ids = Set(snap.strips.map(\.id))
         let kept = document.selectedStrips.intersection(ids)
         if kept != document.selectedStrips { document.selectedStrips = kept }

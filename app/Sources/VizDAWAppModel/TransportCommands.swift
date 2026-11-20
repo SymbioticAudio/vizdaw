@@ -34,12 +34,21 @@ public enum TransportCommands {
             "transport.play_from_edit_in", "transport.record", "transport.scrub",
             "transport.previous_marker", "transport.next_marker", "transport.rewind", "transport.fast_forward",
             "transport.overdub", "transport.punch",
+            "transport.click", "transport.set_click_level", "transport.set_click_mode",
             "transport.arm_previous", "transport.arm_next", "record.keep_pass", "record.discard_pass",
             "editors.snap",
         ]
             + (0..<TransportMarks.locatorCount).flatMap { n in
                 ["go", "set", "clear"].map { "locator.\($0)_\(n)" }
             })
+
+    /// The metronome's three commands (groups-vcas-transport Ruling 19):
+    /// Click toggles it; the level and mode take their argument from the
+    /// channel (`runClick`). Project settings, so each is one undo step.
+    public static let click = "transport.click"
+    public static let clickLevel = "transport.set_click_level"
+    public static let clickMode = "transport.set_click_mode"
+    static let clickIDs: Set<String> = [click, clickLevel, clickMode]
 
     /// A locator command's operation and number.
     static func locator(_ id: String) -> (op: String, n: Int)? {
@@ -60,6 +69,7 @@ public enum TransportCommands {
         case "transport.stop": m.isPlaying
         case "transport.play": m.canPlay
         case "transport.overdub", "transport.punch", "editors.snap": true
+        case _ where clickIDs.contains(id): true
         case "transport.play_from_edit_in": m.selectedSeq != nil && m.editor.selection.timeRange != nil
         // Locators need no sequence, as in `run`.
         case _ where locator(id) != nil: true
@@ -74,6 +84,7 @@ public enum TransportCommands {
     /// arrows do not.
     static func typesText(_ id: String) -> Bool {
         !["record.keep_pass", "record.discard_pass", "transport.arm_previous", "transport.arm_next"].contains(id)
+            && !clickIDs.contains(id)
     }
 
     /// A toggle's state (its menu item's check mark).
@@ -81,6 +92,7 @@ public enum TransportCommands {
         switch id {
         case "transport.overdub": m.editor.layout.transport.overdub
         case "transport.punch": m.editor.layout.transport.punch
+        case "transport.click": m.transport.click?.on ?? false
         case "editors.snap": m.editor.layout.snap.enabled
         default: false
         }
@@ -112,6 +124,12 @@ public enum TransportCommands {
         case "editors.snap":
             m.editor.updateLayout { $0.snap.enabled = on ?? !$0.snap.enabled }
             return .done
+        case click:
+            return runClick(id, args: on.map { [ControlArg(name: "on", value: .flag(value: $0))] } ?? [], m)
+        case clickLevel:
+            return .unavailable("Click Level needs a level, such as -12 dB.")
+        case clickMode:
+            return .unavailable("Click Mode needs a mode: play_and_record or record_only.")
         case "transport.play":
             // Play only starts (plan 5f-1 Ruling 5): while playing it does
             // nothing; a stopped transport plays from where it stands.
@@ -183,6 +201,20 @@ public enum TransportCommands {
         default:
             return .unavailable("VizDAW has no handler for \(id).")
         }
+    }
+
+    /// One of the click commands with `args` as given: the session checks
+    /// them (as the registry does) and makes one undo step; the transport
+    /// is read again, so Click's check follows. Opens nothing.
+    public static func runClick(_ id: String, args: [ControlArg], _ m: DocumentModel) -> KeyOutcome {
+        guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
+        do {
+            m.apply(try m.session.runClick(id: id, args: args))
+        } catch {
+            return refused(error)
+        }
+        m.poll()
+        return .done
     }
 
     private static func runLocator(_ op: String, _ n: Int, _ m: DocumentModel) -> KeyOutcome {

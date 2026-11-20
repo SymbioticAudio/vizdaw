@@ -3158,13 +3158,17 @@ fn glides_the_wrap_cuts_land_as_far_as_they_went() {
         s.set_automation_mode(vec![bus], mode).unwrap();
         let t = Target::StripFader { strip: bus };
         s.play(seq).unwrap();
-        wait_tick_in(&s, 3 * Q, 3 * Q + Q / 4);
+        // The touch comes at 2.5 beats, 0.75 s before the wrap. Task 9: from
+        // 3 beats (0.375 s before it), three slow paces on a loaded runner
+        // could leave the glide too little time to move 0.5 dB, or reach
+        // the wrap before the release.
+        wait_tick_in(&s, 5 * Q / 2, 5 * Q / 2 + Q / 4);
         s.gesture(t, Phase::Touch { value: None }).unwrap();
         pace(&s);
         s.gesture(t, Phase::Value { value: ride }).unwrap();
         pace(&s);
         pace(&s);
-        // A 2 s glide back from about 3.3 beats: the wrap at 4 beats cuts it.
+        // A 2 s glide back from about 2.6 beats: the wrap at 4 beats cuts it.
         s.gesture(t, Phase::Release).unwrap();
         wait_wrap(&s);
         wait_until("the cycle to land", || {
@@ -3180,7 +3184,7 @@ fn glides_the_wrap_cuts_land_as_far_as_they_went() {
             "{mode:?}: the glide ends part way back ({lo} < {at} < {hi} dB): {p:?}"
         );
         assert!(
-            p.iter().filter(|x| x.0 < 3 * Q).all(|x| *x == (0, 0.2)),
+            p.iter().filter(|x| x.0 < 2 * Q).all(|x| *x == (0, 0.2)),
             "{mode:?}: nothing written at the next cycle's start: {p:?}"
         );
         stop_and_land(&s);

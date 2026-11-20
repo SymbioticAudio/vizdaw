@@ -2,11 +2,12 @@
 //! P7). A call connects when it has no live connection. It connects and
 //! sends again once, and only when connecting failed or the peer had
 //! already closed before any byte of the request was written: once any of
-//! it was written, VizDAW may run it (the socket runs an unterminated last
-//! line at the end of input), so a failed write, a dropped connection or a
-//! timeout is that call's answer and the call is never sent again. The
-//! next call reconnects. Before connecting, the socket's folder must be a
-//! folder (not a link) of this user's, writable by no one else.
+//! it was written, VizDAW may run it, so a failed write, a dropped connection or a
+//! timeout is that call's answer and the call is never sent again (the
+//! socket refuses a line cut off before its newline, but one whose
+//! newline went out may have run). The next call reconnects. Before
+//! connecting, the socket's folder must be a folder (not a link) of this
+//! user's, writable by no one else.
 
 use core_control::ControlError;
 use core_control::client::{CallError, Client, SendError};
@@ -115,28 +116,7 @@ impl App {
     /// Why the socket's folder is not safe to connect in; Ok(false) when
     /// it does not exist (VizDAW never ran with Co-Producer on).
     fn folder_is_safe(&self) -> Result<bool, AppError> {
-        let m = match std::fs::symlink_metadata(&self.support) {
-            Ok(m) => m,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(AppError::Unsafe(format!("its folder cannot be read ({e})"))),
-        };
-        let shown = self.support.display();
-        if m.file_type().is_symlink() || !m.is_dir() {
-            return Err(AppError::Unsafe(format!("{shown} is not a folder")));
-        }
-        if m.mode() & 0o022 != 0 {
-            return Err(AppError::Unsafe(format!(
-                "{shown} can be written by other users (mode {:o})",
-                m.mode() & 0o777
-            )));
-        }
-        match my_uid() {
-            Ok(uid) if uid == m.uid() => Ok(true),
-            Ok(_) => Err(AppError::Unsafe(format!("{shown} belongs to another user"))),
-            Err(e) => Err(AppError::Unsafe(format!(
-                "this user cannot be told from others ({e})"
-            ))),
-        }
+        support_is_safe(&self.support)
     }
 
     fn connect(&self) -> Result<Client, AppError> {
@@ -192,6 +172,49 @@ impl App {
     }
 }
 
+/// Why `support` is not safe to connect in or read a screenshot from:
+/// it must be a folder (not a link) of this user's, writable by no one
+/// else, whoever made it. Ok(false) when it does not exist.
+pub(crate) fn support_is_safe(support: &Path) -> Result<bool, AppError> {
+    match my_uid() {
+        Ok(uid) => folder_check(support, uid),
+        Err(e) => Err(AppError::Unsafe(format!(
+            "this user cannot be told from others ({e})"
+        ))),
+    }
+}
+
+/// [`support_is_safe`] for the user `uid`.
+pub(crate) fn folder_check(support: &Path, uid: u32) -> Result<bool, AppError> {
+    // A final `/` or `/.` makes the system follow a final link, which
+    // `symlink_metadata` would not see.
+    if !core_control::co_producer::is_normal(support) {
+        return Err(AppError::Unsafe(format!(
+            "{} is not in normal form (no `.` part, no doubled `/`, no `/` at the end)",
+            support.display()
+        )));
+    }
+    let m = match std::fs::symlink_metadata(support) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(AppError::Unsafe(format!("its folder cannot be read ({e})"))),
+    };
+    let shown = support.display();
+    if m.file_type().is_symlink() || !m.is_dir() {
+        return Err(AppError::Unsafe(format!("{shown} is not a folder")));
+    }
+    if m.uid() != uid {
+        return Err(AppError::Unsafe(format!("{shown} belongs to another user")));
+    }
+    if m.mode() & 0o022 != 0 {
+        return Err(AppError::Unsafe(format!(
+            "{shown} can be written by other users (mode {:o})",
+            m.mode() & 0o777
+        )));
+    }
+    Ok(true)
+}
+
 /// Whether a failed send may go again on a new connection: only when the
 /// peer had already closed and not one byte of this request was written.
 pub fn may_resend(e: &SendError) -> bool {
@@ -206,7 +229,7 @@ pub fn may_resend(e: &SendError) -> bool {
 
 /// This process's user, from a file it makes (std has no `getuid`, and
 /// unsafe code is forbidden). Read once.
-fn my_uid() -> io::Result<u32> {
+pub(crate) fn my_uid() -> io::Result<u32> {
     static UID: std::sync::OnceLock<Result<u32, String>> = std::sync::OnceLock::new();
     UID.get_or_init(|| {
         let nanos = std::time::SystemTime::now()
@@ -302,6 +325,28 @@ mod tests {
             1,
             "sent on one connection only"
         );
+    }
+
+    /// A support folder of another user's is never connected in, nor read
+    /// a screenshot from, though vizdaw-mcp did not make it (release gate
+    /// Task 5). Tests cannot give a folder away, so the check is asked
+    /// about a uid that is not its owner's.
+    #[test]
+    fn foreign_owned_support_folder_is_refused() {
+        let d = private_tmp();
+        let owner = std::fs::symlink_metadata(d.path()).unwrap().uid();
+        assert!(matches!(folder_check(d.path(), owner), Ok(true)));
+        match folder_check(d.path(), owner.wrapping_add(1)) {
+            Err(AppError::Unsafe(why)) => assert!(why.contains("another user"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        // `/` belongs to the system's own user, never to a test's.
+        if my_uid().unwrap() != 0 {
+            match folder_check(Path::new("/"), my_uid().unwrap()) {
+                Err(AppError::Unsafe(_)) => {}
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -507,7 +507,14 @@ fn keys_drive_step_entry_locators_and_bindings() {
     wait_for_editor(&mut app, &window, "step entry off", |e| e["step"].is_null());
 
     // P gives the Position field the keyboard, a typed bar and Return
-    // move there; ⌥2 sets locator 2 there.
+    // move there; ⌥2 sets locator 2 there. A short bar keeps Position on
+    // it: the default bar folds it into » in a window under about 1100 pt
+    // (Task 12b), as on CI's smaller screen, and the channel cannot type
+    // into the » popover.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar", "params": {"items": "cluster,position_field"}}),
+    );
     wait_for_label(&mut app, &window, "Position");
     key(&mut app, "p", json!([]));
     app.call("ui.key", json!({"window": window, "text": "3\n"}));
@@ -2225,7 +2232,14 @@ fn window_views_and_panes_over_the_channel() {
         );
     }
     // The transport bar's controls are in the tree (final review I1): an
-    // agent finds Loop, Record and the pane buttons, not only Play.
+    // agent finds Loop, Record and the pane buttons, not only Play. The
+    // window is narrower than the default bar (Task 12b folds the tail
+    // into »), so a short bar goes first.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar", "params": {"items": "cluster,loop,record_options,panes"},
+            "window": window}),
+    );
     for label in [
         "Loop",
         "Record",
@@ -3045,6 +3059,14 @@ fn transport_jumps_readouts_and_fields_over_the_channel() {
         assert!(doc["alert"].is_null(), "no dialog: {doc}");
     };
 
+    // A bar of just what this test reads, so nothing folds into » in a
+    // window under about 1100 pt (Task 12b), as on CI's smaller screen.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar",
+            "params": {"items": "cluster,bar,time,tempo,signature,position_field"}}),
+    );
+
     // 1. The readouts at the start.
     wait_for_tick(&mut app, &w, 0);
     let t0 = app.call("state.get", json!({"target": "transport", "window": w}));
@@ -3145,6 +3167,13 @@ fn transport_jumps_readouts_and_fields_over_the_channel() {
         app.call("state.get", json!({"target": "record", "window": w}))["recording"].clone()
     };
     let punch_in = |e: &Value| e["transport"]["punch_in"].clone();
+    // The default bar has no Punch fields (Task 12b): a short bar with
+    // them, so they show in this window before anything folds.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar",
+            "params": {"items": "cluster,edit_fields,punch_fields"}}),
+    );
     let before = punch_in(&app.call("state.get", json!({"target": "editor", "window": w})));
     select_field(&mut app, "Punch In");
     app.call("ui.key", json!({"window": w, "text": "3"}));
@@ -7323,5 +7352,319 @@ fn co_producer_time_over_mcp() {
     play_for(&mut app, 3);
     assert!(!metrics.exists(), "no Metrics folder after switching off");
     drop(mcp);
+    app.quit();
+}
+
+/// Release gate B2 (Task 2): in 26.0.0 Co-Producer writes no MIDI notes,
+/// so `file.import_midi` is refused in every form. Through `vizdaw-mcp` it
+/// is no tool and not on the command list, and the Co-Producer socket
+/// itself refuses it. No track, note or window appears.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn co_producer_import_midi_is_refused() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let sock = home.join("support/co-producer.sock");
+    app.call(
+        "command.run",
+        json!({"id": "settings.co_producer", "params": {"on": true}}),
+    );
+    wait_for_path(&sock, true);
+
+    // A real MIDI file, written by the developer channel from the demo,
+    // so a refusal is the gate's and not the file's.
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let smf = home.join("demo.mid");
+    app.call(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"path": smf}, "window": w}),
+    );
+    assert_eq!(&std::fs::read(&smf).unwrap()[..4], b"MThd");
+    let doc = |app: &mut App| app.call("state.get", json!({"target": "document", "window": w}));
+    let before = doc(&mut app);
+    let tracks = |d: &Value| d["lanes"].as_array().unwrap().len();
+    let events = |d: &Value| -> u64 {
+        d["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["events"].as_u64().unwrap_or(0))
+            .sum()
+    };
+    let windows = window_numbers(&mut app);
+    let path = smf.display().to_string();
+    let forms = [
+        json!({"path": path}),
+        json!({"path": path, "tick": 0}),
+        json!({"path": path, "new_project": true}),
+        json!({"path": path, "new_project": false}),
+    ];
+
+    // Through vizdaw-mcp: not a tool, not on the list, not a change.
+    let mut mcp = McpProc::start(&app, json!({}));
+    let listed = mcp.request("tools/list", json!({}));
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listed}"))
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(!names.contains(&"file_import_midi"), "{names:?}");
+    mcp.ok("begin_request", json!({"name": "import a MIDI file"}));
+    for params in &forms {
+        let r = mcp.request(
+            "tools/call",
+            json!({"name": "file_import_midi", "arguments": params}),
+        );
+        assert!(r.get("error").is_some(), "no such tool: {r}");
+        let r = mcp.tool(
+            "change",
+            json!({"commands": [{"id": "file.import_midi", "params": params}], "window": w}),
+        );
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(
+            mcp_text(&r).contains("Co-Producer has no command file.import_midi"),
+            "{r}"
+        );
+    }
+    mcp.ok("end_request", json!({}));
+    drop(mcp);
+
+    // The Co-Producer socket's own gate, past vizdaw-mcp.
+    let mut raw = Client::connect(&sock).expect("the Co-Producer socket");
+    for params in &forms {
+        for (cmd, q) in [
+            (
+                "command.run",
+                json!({"id": "file.import_midi", "params": params, "window": w}),
+            ),
+            (
+                "co_producer.preview",
+                json!({"commands": [{"id": "file.import_midi", "params": params}], "window": w}),
+            ),
+        ] {
+            match raw.call(cmd, q.clone(), Duration::from_secs(30)) {
+                Err(CallError::Reply(e)) => {
+                    if cmd == "command.run" {
+                        assert_eq!(e.code, ErrorCode::NotAllowed, "{cmd} {q}: {e:?}");
+                    }
+                    assert!(
+                        e.message.contains("cannot run file.import_midi"),
+                        "{cmd} {q}: {e:?}"
+                    );
+                }
+                other => panic!("{cmd} {q}: expected a refusal, got {other:?}"),
+            }
+        }
+    }
+    drop(raw);
+    assert_no_sheet(&mut app);
+
+    // Nothing was written: the same tracks and notes, and no new window.
+    let after = doc(&mut app);
+    assert_eq!(tracks(&after), tracks(&before), "{after}");
+    assert_eq!(events(&after), events(&before), "{after}");
+    assert_eq!(after["undo"], before["undo"], "no undo step");
+    assert_eq!(window_numbers(&mut app), windows, "no new window");
+    app.quit();
+}
+
+/// Release gate Task 3: the save prompts are the user's only. `file.close`
+/// over the control channel closes a song with unsaved changes, untitled
+/// or saved, at once: no prompt holds the call, and the window goes.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn control_close_of_a_dirty_song_does_not_prompt() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let saved = home.join("Dirty.vizdaw");
+    for save in [false, true] {
+        let w = app.call("command.run", json!({"id": "file.new"}))["window"].clone();
+        app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+        if save {
+            app.call(
+                "command.run",
+                json!({"id": "file.save", "params": {"path": saved.display().to_string()}, "window": w}),
+            );
+        }
+        // An edit: the song now has unsaved changes.
+        app.call("command.run", json!({"id": "track.new_midi", "window": w}));
+        let d = app.call("state.get", json!({"target": "document", "window": w}));
+        assert_eq!(d["dirty"], true, "{d}");
+        let before = window_numbers(&mut app);
+        assert!(before.iter().any(|(n, _)| *n == w), "{before:?}");
+
+        // The call returns within the normal timeout: no prompt waits.
+        let started = Instant::now();
+        let r = app.client.call(
+            "command.run",
+            json!({"id": "file.close", "window": w}),
+            Duration::from_millis(WAIT_MS),
+        );
+        assert!(
+            r.is_ok(),
+            "file.close (saved: {save}): {r:?}\nVizDAW log:\n{}",
+            log_tail(&app.launched.log, 40)
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(WAIT_MS),
+            "{:?}",
+            started.elapsed()
+        );
+
+        // The window goes (a condition with a timeout, not a sleep).
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        loop {
+            let now = window_numbers(&mut app);
+            if now.len() < before.len() && now.iter().all(|(n, _)| *n != w) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the window stayed (saved: {save}): {now:?}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let e = app.call_err("state.get", json!({"target": "document", "window": w}));
+        assert_eq!(e.code, ErrorCode::NoWindow, "{e}");
+    }
+    // Quitting meets no prompt either.
+    app.quit();
+}
+
+/// README 439–456 through the channel (plan groups-vcas-transport Task 13):
+/// a group moves its members by one dB and undoes as one step, a VCA's
+/// offset leaves the faders alone, the transport bar takes a Command
+/// button that opens a mixer window, resets, and the click settings show
+/// in the transport state (a level above 0 dB is refused).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn groups_vcas_and_transport_bar_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    // The demo has one strip besides Master; a second track gives two.
+    app.call("command.run", json!({"id": "track.new_audio", "window": w}));
+    let m = wait_for_state(&mut app, &w, "mixer", |m| {
+        m["strips"].as_array().unwrap().len() >= 3
+    });
+    let two: Vec<(u64, f64)> = m["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["kind_colour"] != "master")
+        .take(2)
+        .map(|s| (s["id"].as_u64().unwrap(), s["gain_db"].as_f64().unwrap()))
+        .collect();
+    assert_eq!(two.len(), 2, "{m}");
+    let ids = format!("{},{}", two[0].0, two[1].0);
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    let gain = |m: &Value, id: u64| -> f64 {
+        m["strips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"].as_u64() == Some(id))
+            .unwrap_or_else(|| panic!("no strip {id} in {m}"))["gain_db"]
+            .as_f64()
+            .unwrap()
+    };
+
+    // A group of both strips; one move moves both by the same dB.
+    run(&mut app, "mixer.new_group", json!({"strips": ids}));
+    run(
+        &mut app,
+        "mixer.set_strip",
+        json!({"strip": two[0].0, "gain_db": "-3"}),
+    );
+    let m = app.call("state.get", json!({"target": "mixer", "window": w}));
+    let d0 = gain(&m, two[0].0) - two[0].1;
+    let d1 = gain(&m, two[1].0) - two[1].1;
+    assert!((gain(&m, two[0].0) + 3.0).abs() < 1e-3, "{m}");
+    assert!((d0 - d1).abs() < 1e-3, "both moved by {d0} / {d1}: {m}");
+    assert_eq!(m["groups"].as_array().unwrap().len(), 1, "{m}");
+    wait_for_undo(&mut app, &w, "Move Group Group 1");
+
+    // A VCA: the offset shows, the faders stay.
+    run(&mut app, "mixer.new_vca", json!({"strips": ids}));
+    run(
+        &mut app,
+        "mixer.set_vca",
+        json!({"vca": 1, "gain_db": "-6"}),
+    );
+    let after = app.call("state.get", json!({"target": "mixer", "window": w}));
+    for (id, _) in &two {
+        let s = after["strips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"].as_u64() == Some(*id))
+            .unwrap();
+        assert!(
+            (s["vca_offset_db"].as_f64().unwrap() + 6.0).abs() < 1e-3,
+            "{s}"
+        );
+        assert!((gain(&after, *id) - gain(&m, *id)).abs() < 1e-6, "{after}");
+    }
+
+    // The bar: the cluster and one Command button for Mixer; a click on
+    // the button opens a mixer window; Reset puts the default back.
+    let mixers = |app: &mut App| {
+        window_numbers(app)
+            .iter()
+            .filter(|(_, k)| k == "mixer")
+            .count()
+    };
+    let before = mixers(&mut app);
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar",
+            "params": {"items": "cluster,command:window.mixer"}, "window": w}),
+    );
+    let button = wait_for_label(&mut app, &w, "Mixer");
+    app.call("ui.click", json!({"window": w, "element": button}));
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    while mixers(&mut app) <= before {
+        assert!(Instant::now() < deadline, "no mixer window opened");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    app.call(
+        "command.run",
+        json!({"id": "ui.reset_transport_bar", "window": w}),
+    );
+
+    // The click: its settings show in the transport state.
+    run(&mut app, "transport.click", json!({"on": true}));
+    run(
+        &mut app,
+        "transport.set_click_level",
+        json!({"level_db": "-12"}),
+    );
+    run(
+        &mut app,
+        "transport.set_click_mode",
+        json!({"mode": "record_only"}),
+    );
+    let t = app.call("state.get", json!({"target": "transport", "window": w}));
+    assert_eq!(t["click"]["on"], true, "{t}");
+    assert!(
+        (t["click"]["level_db"].as_f64().unwrap() + 12.0).abs() < 1e-3,
+        "{t}"
+    );
+    assert_eq!(t["click"]["mode"], "record_only", "{t}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "transport.set_click_level", "params": {"level_db": "6"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
     app.quit();
 }

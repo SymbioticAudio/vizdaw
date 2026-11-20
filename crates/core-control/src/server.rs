@@ -478,10 +478,14 @@ fn accept(s: &Arc<Shared>, listener: &UnixListener) {
 enum Line {
     Full(Vec<u8>),
     TooLong,
+    /// Bytes at the end of input with no newline after them: the client
+    /// may have been cut off partway, so they are never run.
+    Unterminated,
 }
 
 /// Reads up to a newline; a line over `max` bytes is consumed and
-/// reported as [`Line::TooLong`]. None at end of input.
+/// reported as [`Line::TooLong`], and bytes at the end of input without a
+/// newline as [`Line::Unterminated`]. None at end of input.
 fn read_line_capped(r: &mut impl BufRead, max: usize) -> io::Result<Option<Line>> {
     let mut buf = Vec::new();
     let mut too_long = false;
@@ -520,6 +524,9 @@ fn read_line_capped(r: &mut impl BufRead, max: usize) -> io::Result<Option<Line>
             if eof && buf.is_empty() && !too_long {
                 return Ok(None);
             }
+            if eof {
+                return Ok(Some(Line::Unterminated));
+            }
             return Ok(Some(if too_long {
                 Line::TooLong
             } else {
@@ -538,8 +545,19 @@ fn serve(s: &Arc<Shared>, stream: UnixStream, peer: Peer) {
     let mut reader = BufReader::with_capacity(64 * 1024, read_half);
     let mut writer = stream;
     loop {
+        let mut last = false;
         let (id, outcome) = match read_line_capped(&mut reader, MAX_LINE) {
             Ok(None) | Err(_) => return,
+            Ok(Some(Line::Unterminated)) => {
+                last = true;
+                (
+                    None,
+                    Err(ControlError::new(
+                        ErrorCode::ParseError,
+                        "the request line ended without a newline, so it was not run",
+                    )),
+                )
+            }
             Ok(Some(Line::TooLong)) => (
                 None,
                 Err(ControlError::new(
@@ -568,7 +586,7 @@ fn serve(s: &Arc<Shared>, stream: UnixStream, peer: Peer) {
         {
             return;
         }
-        if s.stopping.load(Ordering::SeqCst) {
+        if last || s.stopping.load(Ordering::SeqCst) {
             return;
         }
     }
@@ -597,9 +615,10 @@ fn handle(
         Ok(c) => c,
         Err(e) => return (id, Err(e)),
     };
-    if let Err(e) = gate(s, &raw.cmd, &command) {
-        return (id, Err(e));
-    }
+    let shot = match gate(s, &raw.cmd, &command) {
+        Ok(shot) => shot,
+        Err(e) => return (id, Err(e)),
+    };
     match command {
         Command::CommandsList => {
             let list = match s.config.role {
@@ -660,17 +679,38 @@ fn handle(
     };
     lock(&s.waiting).remove(&token);
     lock(&s.extended).remove(&token);
+    if let (Some(slot), Err(_)) = (shot, &outcome) {
+        refund_shot(s, slot);
+    }
     (id, outcome)
+}
+
+/// A screenshot that failed gives its slot back: the slot it took goes
+/// back to the one before, unless a later screenshot took it since.
+fn refund_shot(s: &Shared, slot: Slot) {
+    let mut last = lock(&s.last_shot);
+    if *last == Some(slot.taken) {
+        *last = slot.before;
+    }
+}
+
+/// The screenshot slot a call took: when, and the one before it.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    taken: Instant,
+    before: Option<Instant>,
 }
 
 /// The role's rules for a validated call: the Co-Producer gate and its
 /// screenshot rate, or the developer socket's refusal of `co_producer.*`.
-fn gate(s: &Shared, cmd: &str, command: &Command) -> Result<(), ControlError> {
+/// A Co-Producer screenshot answers the slot it took, given back when the
+/// screenshot fails.
+fn gate(s: &Shared, cmd: &str, command: &Command) -> Result<Option<Slot>, ControlError> {
     match s.config.role {
         Role::Developer if command.is_co_producer() => Err(ControlError::not_allowed(format!(
             "{cmd} is answered only on the Co-Producer socket"
         ))),
-        Role::Developer => Ok(()),
+        Role::Developer => Ok(None),
         Role::CoProducer => {
             co_producer::admit(command)?;
             if matches!(command, Command::UiScreenshot { .. }) {
@@ -682,9 +722,10 @@ fn gate(s: &Shared, cmd: &str, command: &Command) -> Result<(), ControlError> {
                         "one screenshot a second: try again shortly",
                     ));
                 }
-                *last = Some(now);
+                let before = last.replace(now);
+                return Ok(Some(Slot { taken: now, before }));
             }
-            Ok(())
+            Ok(None)
         }
     }
 }

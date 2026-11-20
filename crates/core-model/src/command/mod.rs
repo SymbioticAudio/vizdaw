@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod drum;
 pub mod event;
+pub mod groups;
 pub mod lane;
 pub mod media;
 pub mod mixer;
@@ -17,6 +18,7 @@ pub(crate) mod strips;
 pub use audio::{AudioCmd, CrossfadeLength, FadeEdge};
 pub use drum::DrumCmd;
 pub use event::EventCmd;
+pub use groups::GroupCmd;
 pub use lane::LaneCmd;
 pub use media::{MediaCmd, MediaSwap};
 pub use mixer::MixerCmd;
@@ -96,6 +98,8 @@ pub enum Command {
     Media(MediaCmd),
     /// Mixer edits.
     Mixer(MixerCmd),
+    /// Fader-group edits.
+    Groups(GroupCmd),
     /// Document-settings edits.
     Settings(SettingsCmd),
     /// A finished recording pass, applied whole (sub-project 5 spec §4.7).
@@ -144,6 +148,7 @@ impl Command {
             Command::Routing(c) => c.name(),
             Command::Media(c) => c.name(),
             Command::Mixer(c) => c.name(),
+            Command::Groups(c) => c.name(),
             Command::Settings(c) => c.name(),
             Command::Record(p) => p.name(),
             Command::WriteAutomation(_) => "Write Automation",
@@ -151,6 +156,16 @@ impl Command {
                 modify.as_ref().map_or("Select", Modify::name)
             }
             Command::ModifyNotes { modify, .. } => modify.name(),
+        }
+    }
+
+    /// The undo label of this command applied to `before`: its
+    /// [`Command::name`], except where the label names what changed
+    /// ([`SettingsCmd::label`]).
+    pub fn label(&self, before: &Document) -> &'static str {
+        match self {
+            Command::Settings(c) => c.label(before),
+            _ => self.name(),
         }
     }
 }
@@ -209,6 +224,10 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
         }
         Command::Mixer(c) => {
             mixer::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::Groups(c) => {
+            groups::apply(&mut d, c, &mut report)?;
             None
         }
         Command::Settings(c) => {

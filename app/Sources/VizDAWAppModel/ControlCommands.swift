@@ -217,6 +217,8 @@ public protocol ControlHost: AnyObject {
     func showMixer(_ doc: UUID)
     func showPluginManager()
     func tearOff(_ doc: UUID, kind: DetailEditorKind)
+    /// Closes document `doc`'s window without its save prompt (release
+    /// gate B1: programmatic closes never ask).
     func closeDocument(_ doc: UUID)
     /// Opens document `doc`'s media pool window (plan 5b).
     func showMediaPool(_ doc: UUID)
@@ -343,6 +345,7 @@ public enum ControlCommands {
             .union(MpeCommands.ids).union(InterchangeCommands.ids).union(PluginSettingsCommands.ids)
             .union(MixerCommands.ids).union(CreativeCommands.ids).union(coProducer).union(strips).union([SongNotes.command])
             .union([TrackCommands.setOutput]).union([RegionCommands.setFadeShape]).union(chores)
+            .union(TransportLayoutCommands.ids).union([TransportCustomize.command])
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -386,6 +389,12 @@ public enum ControlCommands {
         case _ where AppearanceCommands.ids.contains(id):
             // App-wide (plan 7b Ruling 11): no document needed.
             return AppearanceCommands.run(args, prefs: host.appearance)
+        case TransportCustomize.command:
+            // The sheet is the View menu's (Task 12): the channel opens none.
+            return TransportCustomize.run()
+        case _ where TransportLayoutCommands.ids.contains(id):
+            // App-wide (groups-vcas-transport Ruling 18): no document, no dialog.
+            return TransportLayoutCommands.run(id, args: args, store: store.transportLayout)
         case _ where PluginSettingsCommands.ids.contains(id):
             // App-wide (plan 6g Task 4): no document needed, no dialog.
             return PluginSettingsCommands.run(id, args: args, settings: host.plugins)
@@ -406,7 +415,10 @@ public enum ControlCommands {
         let before = m.alert?.id
         switch id {
         case "file.close":
+            // Never asks (release gate B1): the window closes without its
+            // save prompt and the document goes, saved or not.
             host.closeDocument(docID)
+            store.close(docID)
             return .done(ran(id, docID))
         case "file.save":
             if m.needsSaveAs {
@@ -698,6 +710,8 @@ public enum ControlCommands {
             guard host.focus(fieldKeys[id] ?? .position, docID) else {
                 return unavailable("The window shows no transport fields.")
             }
+        case TransportCommands.clickLevel, TransportCommands.clickMode:
+            if let f = failure(TransportCommands.runClick(id, args: args, m)) { return f }
         case _ where TransportCommands.ids.contains(id):
             if let f = failure(TransportCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where StepCommands.ids.contains(id):

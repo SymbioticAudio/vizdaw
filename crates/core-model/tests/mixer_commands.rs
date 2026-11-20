@@ -746,6 +746,48 @@ fn every_target_names_the_strip_whose_mode_governs_it() {
     assert!(!target_exists(&d, T::SendLevel(StripId(1), SendIndex(3))));
 }
 
+/// `mode_of` (groups-vcas Task 6): a strip target takes its strip's mode,
+/// a VCA's fader its VCA's; velocity scale and unknown targets have none.
+#[test]
+fn every_target_names_the_mode_that_governs_it() {
+    use core_model::automation::{
+        AutomationMode as M, AutomationTarget as T, mode_of, target_exists,
+    };
+    use core_model::command::GroupCmd;
+    use core_model::ids::VcaId;
+    let mut d = base();
+    let a = apply(
+        &d,
+        &Command::Groups(GroupCmd::NewVca {
+            name: "Drums".into(),
+            colour: core_model::mixer::Swatch::Blue,
+            members: vec![StripId(3)],
+        }),
+    )
+    .unwrap();
+    let Some(AnyId::Vca(vca)) = a.report.created.first().copied() else {
+        panic!("no VCA: {:?}", a.report.created);
+    };
+    d = apply(
+        &a.doc,
+        &Command::Groups(GroupCmd::SetVcaMode {
+            vca,
+            mode: M::Touch,
+        }),
+    )
+    .unwrap()
+    .doc;
+    assert_eq!(mode_of(&d, T::StripFader(StripId(3))), Some(M::Read));
+    assert_eq!(mode_of(&d, T::VcaFader(vca)), Some(M::Touch));
+    assert_eq!(mode_of(&d, T::VcaFader(VcaId(99))), None);
+    assert_eq!(mode_of(&d, T::VelocityScale(DestId(0))), None);
+    assert_eq!(mode_of(&d, T::StripFader(StripId(50))), None);
+    assert!(target_exists(&d, T::VcaFader(vca)));
+    assert!(!target_exists(&d, T::VcaFader(VcaId(99))));
+    assert_eq!(T::VcaFader(VcaId(7)).describe(), "vca7 fader");
+    assert!(!T::VcaFader(vca).is_stepped(), "it ramps");
+}
+
 /// The chain ids of `strip` in `d`: the EQ, then the inserts.
 fn chain_ids(d: &Document, strip: StripId) -> Vec<PluginInstanceId> {
     d.mixer()

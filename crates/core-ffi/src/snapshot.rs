@@ -198,6 +198,10 @@ pub struct TransportState {
     /// (plan 5d-1 Ruling 7).
     #[uniffi(default = false)]
     pub counting_in: bool,
+    /// The project's metronome settings (groups-vcas-transport Ruling 19;
+    /// the Click item's check). Always given by a session.
+    #[uniffi(default)]
+    pub click: Option<crate::session::click::ClickRow>,
 }
 
 fn count(n: usize) -> u32 {

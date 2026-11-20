@@ -472,7 +472,7 @@ fn edge_gains_arrive_at_the_fed_node() {
         0,
         "no controls: the strip's own"
     );
-    g.set_controls(&mg.controls);
+    g.set_controls(&mg.controls, &mg.vcas);
     assert_eq!(g.strip_arrival(synth), 0, "its fader acts at its output");
     assert_eq!(
         g.feed_arrival(synth, None),
@@ -650,7 +650,7 @@ fn a_send_level_arrives_at_its_send_edge() {
     );
     let p = plan(&mg.spec, 96_000).unwrap();
     let mut g = Graph::build(&mg.spec, &p, 512, |_, _| InsertInit::Placeholder);
-    g.set_controls(&mg.controls);
+    g.set_controls(&mg.controls, &mg.vcas);
     assert_eq!(g.strip_arrival(synth), 0, "its fader");
     assert_eq!(g.feed_arrival(synth, None), 250, "its main edge");
     assert_eq!(g.feed_arrival(synth, Some(0)), 150, "its send to Fx");

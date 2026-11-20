@@ -105,7 +105,7 @@ Automation (plan 5e-1): `automation.set_mode {"strips": "all" | "1,2",
 "mode": "touch"}`, `automation.gesture {"target": "fader:3", "phase":
 "touch" | "value" | "release", "value": "0.5"}` (targets `fader:`, `pan:`,
 `mute:`, `solo:` with a strip ID, `send:<strip>:<n>` with n from 1,
-`param:<slot>:<param>`; values are text, 0 to 1) and `automation.suspend`
+`param:<slot>:<param>`, `vca:<vca>`; values are text, 0 to 1) and `automation.suspend`
 (absent `on` toggles; it is app-wide). A `touch` without `value` starts at
 the value heard now. A touch from the channel lasts until its release, a
 Stop's landing keeps it, closing the window ends it; a Locate or a Play
@@ -1411,10 +1411,10 @@ a copy, not one you care about.
 153. Save while recording (plan 5d-1 Ruling 19): in a saved project,
      press ⌘S while recording: the status line says "Saved. The take is
      saved when recording stops."; Stop: close the window, no unsaved
-     changes are asked about, and reopening shows the take. VizDAW never
-     asks when a window closes: after ⌘S during a pass, closing the
-     window keeps the take that was announced (it is saved), even with no
-     Save after Stop. ⇧⌘S (Save As) while recording says "Stop recording
+     changes are asked about, and reopening shows the take. Closing asks
+     only about unsaved changes (checks 433–438): after ⌘S during a pass,
+     closing the window keeps the take that was announced (it is saved),
+     even with no Save after Stop. ⇧⌘S (Save As) while recording says "Stop recording
      to use Save As: the take is being written into this project." and
      opens no panel; so does ⌘S in an untitled project.
 154. The growing take: while recording, a red region grows on every
@@ -2820,6 +2820,13 @@ Plan 8a, Co-Producer safety and the server:
 337. Ask Claude to rename one of your tracks. Claude Code asks you directly,
      with the exact change listed. Say no: nothing changes. Ask again and
      say yes: it is renamed, as one undo step.
+337a. With the current release of Claude Code (2026-11) connected to
+     `vizdaw-mcp`, ask for a change to one of your own tracks. The approval
+     request shows in Claude Code as a form (elicitation) listing the
+     change, not as a list and a token in the chat. Answer Allow in the
+     form: VizDAW then checks again with its own approval sheet, and the
+     change is made only after you allow it there too. Don't Allow in
+     either place changes nothing.
 338. In a host that cannot ask you itself (Claude's desktop app, as of
      2026-11), ask for the same: Claude shows the list in the chat and
      waits for your yes before applying it.
@@ -2892,6 +2899,13 @@ Plan 8b, the Co-Producer notes file and the librarian:
      Co-Producer lists it marked "unverified". Revoke it, and the next
      change asks again. Leave a sheet open for 10 minutes: it closes,
      and the change is not made.
+358a. Ask Claude to add a track in a new untitled song, then close the song
+     without saving. Settings › Co-Producer shows "Notes and copies kept
+     for 1 unsaved song (…)" with Show in Finder and Delete…. Show in
+     Finder opens the Untitled folder. Delete… asks "Delete the notes and
+     copies Co-Producer kept for 1 song that was never saved?"; Cancel
+     keeps them, Delete removes them and the line goes. A song that is
+     open right now is not counted and is not deleted.
 
 The approval sheet, by hand on a real Mac (an ad-hoc build, and a signed
 one for step 364). Watch the log with
@@ -3141,7 +3155,79 @@ Plan 8f, Co-Producer time tracking and coaching:
 432. In a host that offers prompts, the coaching prompt is in the list
      beside the other recipes.
 
+26.0.0 release gate, unsaved changes:
+
+433. Make a new untitled song and add a track. The close button shows the
+     edited dot within a second. Press ⌘W: a sheet asks "Do you want to
+     save the changes you made to “Untitled”?" with "Your changes will be
+     lost if you don't save them.", and Save (Return), Don't Save (⌘D) and
+     Cancel (Escape). Click Save: the Save panel opens. Cancel it: the
+     window stays open with the track. Undo back to the start: the dot goes
+     and ⌘W closes without asking.
+434. Open a saved song, move a region, and click the red close button.
+     Click Don't Save: the window closes, and reopening the song shows the
+     region where it was. Repeat with Save: it closes, and reopening shows
+     the move. File › Close and Window › Close ask the same way; Cancel
+     keeps the window open.
+435. Edit two songs and press ⌘Q. An alert reads "You have 2 VizDAW
+     documents with unsaved changes. Do you want to review these changes
+     before quitting?" with Review Changes…, Discard Changes and Cancel.
+     Click Review Changes…: the first song comes to the front with its
+     sheet. Click Don't Save (it closes), then Cancel at the second: VizDAW
+     keeps running with the second song open and still edited. ⌘Q again
+     with one edited song shows only that song's sheet; Save or Don't Save
+     quits.
+436. With an edited song, close it with `vizctl run file.close`, then
+     edit another and `vizctl quit`: neither asks.
+437. Edit a song, press ⌘W, and while its sheet shows press ⌘Q: VizDAW
+     brings that window to the front and does not quit. Click Don't Save:
+     the window closes and VizDAW keeps running normally (menus work; ⌘Q
+     then quits). It is never stuck. In a saved song, press ⌘S while
+     recording, move a fader, then press ⌘W: the sheet reads "Recording is
+     still going. The take and your changes will be saved when it stops."
+     and offers only Save and Cancel.
+438. Edit song A, click song B's window, then click A's red close button
+     without clicking into A first: it still asks.
+
 **Owner check (manual, only the owner can do):**
 - after step 315, open a DAWproject exported from VizDAW in another DAW on
   this Mac: the track's Multi-Q loads there with the same curve;
 - check the About or licence wording against D1.
+
+### Fader groups, VCAs and the transport bar (plan groups-vcas-transport)
+
+439. Group three strips; drag one: all move by the same dB, and ⌘Z undoes
+     "Move Group ‹name›" in one step.
+440. ⌥-drag a grouped fader: it moves alone.
+441. Push a group up until a member hits +12: the whole move stops; drag
+     back: the balance returns.
+442. Mute and solo one member: the others follow while the group's mute and
+     solo switches are on; turn a switch off and they don't.
+443. Make a VCA from two strips and pull it to −6: the faders don't move,
+     each strip shows "VCA −6.0", and the sound drops.
+444. Mute and solo the VCA: the members' own buttons stay off and their
+     "VCA" mark lights.
+445. Automate the VCA in Touch, then play it back in Read: its fader follows
+     the recorded move.
+446. Delete a member's track, then undo: the membership returns.
+447. Export a DAWproject with a VCA and a group: the report lists "VCA
+     assignments" and "Fader groups" as left out. Import it back: the VCA comes
+     back with its level, mute and solo but no members, and the report says
+     so.
+448. Customize the transport bar: drag items in, out and along; add a
+     Command button for Mixer and click it: a mixer window opens. Reset to
+     Default: the bar returns to the standard layout.
+449. Add a Command button for Bounce…: clicking it opens the Bounce sheet,
+     and nothing is bounced until you confirm there.
+450. Narrow the mixer window to its smallest: the bar stays one row, and »
+     lists the rest.
+451. Quit and reopen: the bar is the same in both windows.
+452. Turn Click on and play: a click on every beat, the downbeat higher and
+     louder, through a tempo change and a meter change.
+453. Set Click to Record Only: silent while playing, clicking while
+     recording; set its level to −24 dB and hear it drop.
+454. Bounce the song with Click on: the file has no clicks. Save, close and
+     reopen: the click settings are kept.
+455. Take Punch fields off the bar (or narrow the window) and press P: »
+     opens with Punch In ready; Return commits; a click outside cancels.
+456. The mixer window at 1600 pt shows no ».

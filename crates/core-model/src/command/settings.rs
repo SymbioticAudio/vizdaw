@@ -3,7 +3,7 @@
 use super::Report;
 use super::media::{MediaSwap, swap_media};
 use crate::automation::AutomationTarget;
-use crate::document::{Document, SongInfo};
+use crate::document::{ClickSettings, Document, SongInfo};
 use crate::error::{ModelError, Result};
 use crate::format::AudioFormat;
 use crate::learn::{self, LearnMap, LearnSource};
@@ -64,6 +64,15 @@ pub enum SettingsCmd {
         /// The new song info.
         info: SongInfo,
     },
+    /// Replace the metronome settings (groups-vcas-transport Ruling 19).
+    /// The level must be finite and within
+    /// [`CLICK_LEVEL_MIN_DB`](crate::document::CLICK_LEVEL_MIN_DB)..=
+    /// [`CLICK_LEVEL_MAX_DB`](crate::document::CLICK_LEVEL_MAX_DB). Its undo
+    /// label names what changed ([`SettingsCmd::label`]).
+    SetClick {
+        /// The new settings.
+        click: ClickSettings,
+    },
 }
 
 impl SettingsCmd {
@@ -77,6 +86,27 @@ impl SettingsCmd {
             SettingsCmd::SetLearn { .. } => "MIDI Learn",
             SettingsCmd::RemoveLearn { .. } => "Remove MIDI Learn",
             SettingsCmd::SetInfo { .. } => "Set Song Info",
+            SettingsCmd::SetClick { .. } => "Click",
+        }
+    }
+
+    /// The undo label of this command applied to `before`: its
+    /// [`SettingsCmd::name`], but for `SetClick` what it changes: "Click
+    /// On" or "Click Off" when it switches the click, else "Click Level"
+    /// or "Click Mode" (Ruling 19).
+    pub fn label(&self, before: &Document) -> &'static str {
+        let SettingsCmd::SetClick { click } = self else {
+            return self.name();
+        };
+        let was = before.settings().click;
+        if click.on != was.on {
+            if click.on { "Click On" } else { "Click Off" }
+        } else if click.level_db != was.level_db {
+            "Click Level"
+        } else if click.mode != was.mode {
+            "Click Mode"
+        } else {
+            self.name()
         }
     }
 }
@@ -124,6 +154,11 @@ pub(crate) fn apply(d: &mut Document, cmd: &SettingsCmd, _r: &mut Report) -> Res
         d.settings_mut().info = info;
         return Ok(());
     }
+    if let SettingsCmd::SetClick { click } = cmd {
+        click.check()?;
+        d.settings_mut().click = *click;
+        return Ok(());
+    }
     let s = d.settings_mut();
     match cmd {
         SettingsCmd::SetTemplate { name, template } => match template {
@@ -150,7 +185,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &SettingsCmd, _r: &mut Report) -> Res
         SettingsCmd::SetFormat { .. }
         | SettingsCmd::SetLearn { .. }
         | SettingsCmd::RemoveLearn { .. }
-        | SettingsCmd::SetInfo { .. } => {}
+        | SettingsCmd::SetInfo { .. }
+        | SettingsCmd::SetClick { .. } => {}
     }
     Ok(())
 }

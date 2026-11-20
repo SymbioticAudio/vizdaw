@@ -208,3 +208,23 @@ fn a_failed_save_stamps_no_project_id() {
     assert!(!s.snapshot().unwrap().dirty);
     s.close().unwrap();
 }
+
+/// Release gate B1: the close and quit prompts read this flag.
+#[test]
+fn unsaved_changes_follow_edits_and_saves() {
+    vizdaw_ffi::host::force_offline();
+    let dir = tempfile::tempdir().unwrap();
+    let s = Session::new_empty().unwrap();
+    assert!(!s.has_unsaved_changes().unwrap(), "fresh untitled song");
+    s.add_bus("Bus".into()).unwrap();
+    assert!(s.has_unsaved_changes().unwrap(), "after an edit");
+    let p = dir.path().join("u.vizdaw");
+    s.save_as(p.to_string_lossy().into_owned()).unwrap();
+    assert!(!s.has_unsaved_changes().unwrap(), "after a save");
+    s.undo().unwrap();
+    assert!(
+        s.has_unsaved_changes().unwrap(),
+        "after an undo past the save"
+    );
+    s.close().unwrap();
+}

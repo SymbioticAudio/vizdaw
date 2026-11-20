@@ -1594,3 +1594,40 @@ fn make_mine_through_the_session() {
     assert_eq!(s.debug_document_json(), before);
     assert_eq!(s.snapshot().unwrap().version, version);
 }
+
+/// A preview's token is bound to the song's path: a Save As (to a new
+/// package, or by an untitled song's first save) ends it, so a yes given
+/// for one song never applies under another's name (release gate Task 5).
+#[test]
+fn token_dies_with_save_as() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _) = saved(dir.path());
+    let plan = || vec![rename(first_seq(&s), lanes(&s)[0].0, "Vox")];
+    s.co_producer_begin("tidy up".into()).unwrap();
+    let p = s.co_producer_preview(plan()).unwrap();
+    s.save_as(dir.path().join("Other.vizdaw").display().to_string())
+        .unwrap();
+    let doc = s.debug_document_json();
+    assert_eq!(
+        message(s.co_producer_pending(p.token.clone(), plan()).unwrap_err()),
+        USED
+    );
+    assert_eq!(message(take(&s, p.token, plan()).unwrap_err()), USED);
+    assert_eq!(s.debug_document_json(), doc);
+    // A preview after the Save As works.
+    let p = s.co_producer_preview(plan()).unwrap();
+    take(&s, p.token, plan()).unwrap();
+    s.close().unwrap();
+
+    // An untitled song's first save is a Save As too.
+    let u = Session::new_empty().unwrap();
+    add_track(&u, TrackKindRow::Audio);
+    let plan = || vec![rename(first_seq(&u), lanes(&u)[0].0, "Vox")];
+    u.co_producer_begin("tidy up".into()).unwrap();
+    let p = u.co_producer_preview(plan()).unwrap();
+    u.save_as(dir.path().join("U.vizdaw").display().to_string())
+        .unwrap();
+    assert_eq!(message(take(&u, p.token, plan()).unwrap_err()), USED);
+    u.close().unwrap();
+}

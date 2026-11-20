@@ -71,6 +71,8 @@ const ADD: &[&str] = &[
     "mixer.new_bus",
     "marker.add",
     "track.new_plugin_instrument",
+    "mixer.new_group",
+    "mixer.new_vca",
 ];
 const OUTWARD: &[&str] = &[
     "file.bounce",
@@ -130,6 +132,16 @@ const CHANGE: &[&str] = &[
     "mixer.set_eq",
     "mixer.set_param",
     "automation.write",
+    "mixer.rename_group",
+    "mixer.set_group_colour",
+    "mixer.add_to_group",
+    "mixer.remove_from_group",
+    "mixer.set_group_links",
+    "mixer.rename_vca",
+    "mixer.set_vca_colour",
+    "mixer.assign_vca",
+    "mixer.unassign_vca",
+    "mixer.set_vca",
 ];
 const REMOVE: &[&str] = &[
     "track.delete",
@@ -141,6 +153,8 @@ const REMOVE: &[&str] = &[
     "mixer.remove_send",
     "mixer.remove_insert",
     "mixer.remove_bus",
+    "mixer.delete_group",
+    "mixer.delete_vca",
 ];
 /// Spec §6.5's refused commands (the layout `ui.*` included).
 const SPEC_REFUSED: &[&str] = &[
@@ -166,6 +180,12 @@ const SPEC_REFUSED: &[&str] = &[
     "ui.toggle_bottom",
     "ui.toggle_right",
     "ui.pane",
+    "transport.click",
+    "transport.set_click_level",
+    "transport.set_click_mode",
+    "ui.set_transport_bar",
+    "ui.reset_transport_bar",
+    "ui.customize_transport",
 ];
 
 /// Ruling 5's class of `id`, by its lists and families.
@@ -194,8 +214,8 @@ fn listed_class(id: &str) -> Option<Class> {
 fn every_command_has_the_spec_class() {
     assert_eq!(
         COMMANDS.len(),
-        217,
-        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings"
+        237,
+        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar; Task 12 adds ui.customize_transport"
     );
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {
@@ -247,25 +267,182 @@ fn mixer_new_bus_with_a_strip_is_a_change() {
     );
 }
 
+/// A temp folder holding `a.mid` and `a.wav`, both real files.
+fn import_files() -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let mid = dir.path().join("a.mid");
+    std::fs::write(&mid, b"MThd").unwrap();
+    let wav = dir.path().join("a.wav");
+    std::fs::write(&wav, b"RIFF").unwrap();
+    let (mid, wav) = (mid.to_str().unwrap().into(), wav.to_str().unwrap().into());
+    (dir, mid, wav)
+}
+
 #[test]
-fn import_midi_into_a_new_project_is_refused() {
+fn import_midi_is_refused_in_every_form() {
+    // Release gate B2: Co-Producer writes no notes in 26.0.0, and an
+    // import lands notes on the composer's track.
     let spec = registry::find("file.import_midi").unwrap();
     let path = ("path".to_string(), ArgValue::Text("/tmp/a.mid".into()));
     assert_eq!(
         effective_class(spec, std::slice::from_ref(&path)),
-        Class::Add
+        Class::Refused
     );
-    assert_eq!(
-        effective_class(
-            spec,
-            &[path.clone(), ("new_project".into(), ArgValue::Flag(false))]
-        ),
-        Class::Add
-    );
+    assert_eq!(effective_class(spec, &[]), Class::Refused);
     assert_eq!(
         effective_class(spec, &[path, ("new_project".into(), ArgValue::Flag(true))]),
         Class::Refused
     );
+    let (_dir, mid, _) = import_files();
+    for params in [
+        json!({"path": mid}),
+        json!({"path": mid, "seq": 1, "lane": 2, "tick": 0}),
+        json!({"path": mid, "new_project": true}),
+        json!({"path": mid, "new_project": false}),
+    ] {
+        let m = assert_code(
+            "command.run",
+            run("file.import_midi", params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert!(m.contains("cannot run file.import_midi"), "{params}: {m}");
+        let e = preview(json!([{"id": "file.import_midi", "params": params}])).unwrap_err();
+        assert!(
+            e.message.contains("cannot run file.import_midi"),
+            "{}",
+            e.message
+        );
+    }
+    // The developer channel's class is unchanged.
+    assert_eq!(spec.class, Class::Add);
+}
+
+#[test]
+fn media_import_onto_an_existing_track_is_refused() {
+    let spec = registry::find("media.import").unwrap();
+    assert_eq!(effective_class(spec, &[]), Class::Add);
+    assert_eq!(
+        effective_class(spec, &[("lane".into(), ArgValue::Int(0))]),
+        Class::Refused
+    );
+    let (_dir, _, wav) = import_files();
+    for params in [
+        json!({"path": wav, "seq": 1, "lane": 2, "tick": 0}),
+        json!({"path": wav, "lane": 0}),
+        json!({"path": wav, "seq": 1, "lane": 1}),
+    ] {
+        let m = assert_code(
+            "command.run",
+            run("media.import", params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert!(m.contains("cannot run media.import"), "{params}: {m}");
+    }
+    // Without a `lane` the import goes on new tracks: still an add.
+    for params in [
+        json!({"path": wav}),
+        json!({"path": wav, "seq": 1, "tick": 0}),
+        json!({"path": wav, "lane": null}),
+    ] {
+        assert_eq!(
+            gate("command.run", run("media.import", params.clone())),
+            Ok(()),
+            "{params}"
+        );
+    }
+    // Hostile `lane`s: each is refused, none panics.
+    for lane in [
+        json!("2"),
+        json!(1.5),
+        json!(-1),
+        json!(i64::MIN),
+        json!(i64::MAX),
+        json!(u64::MAX),
+        json!(1e300),
+        json!(true),
+        json!([2]),
+        json!({"lane": 2}),
+    ] {
+        let params = json!({"path": wav, "seq": 1, "lane": lane, "tick": 0});
+        assert!(
+            gate("command.run", run("media.import", params.clone())).is_err(),
+            "{params}"
+        );
+    }
+    assert_eq!(spec.class, Class::Add);
+}
+
+#[test]
+fn track_duplicate_is_refused() {
+    // A duplicate copies the composer's notes onto a new track.
+    let spec = registry::find("track.duplicate").unwrap();
+    assert_eq!(effective_class(spec, &[]), Class::Refused);
+    for params in [json!({}), json!({"seq": 1, "lane": 2})] {
+        let m = assert_code(
+            "command.run",
+            run("track.duplicate", params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert!(m.contains("cannot run track.duplicate"), "{params}: {m}");
+    }
+    let list = co_producer::list_json();
+    for id in co_producer::REFUSED_IN_26 {
+        assert!(
+            list["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["id"] != *id),
+            "{id} is listed"
+        );
+    }
+    assert_eq!(spec.class, Class::Add);
+}
+
+/// The adds Co-Producer may run, sorted. None of them creates notes:
+/// the new tracks start empty, `media.import` (without `lane`) puts audio
+/// on new tracks, `mixer.new_bus` (without `strip`) is a free bus,
+/// `mixer.new_group` and `mixer.new_vca` (without `strips`) an empty group
+/// or VCA, and `marker.add` is a marker. The adds that do create notes,
+/// `file.import_midi` and `track.duplicate`, are refused (release gate
+/// B2). A new add fails `no_add_command_writes_notes` until a reviewer
+/// classifies it here or refuses it.
+const NOTELESS_ADDS: &[&str] = &[
+    "marker.add",
+    "media.import",
+    "mixer.new_bus",
+    "mixer.new_group",
+    "mixer.new_vca",
+    "track.new_audio",
+    "track.new_instrument",
+    "track.new_midi",
+    "track.new_plugin_instrument",
+];
+
+#[test]
+fn no_add_command_writes_notes() {
+    let mut adds: Vec<&str> = COMMANDS
+        .iter()
+        .filter(|c| effective_class(c, &[]) == Class::Add)
+        .map(|c| c.id)
+        .collect();
+    adds.sort_unstable();
+    assert_eq!(adds, NOTELESS_ADDS, "classify every new add here");
+    let mut sorted = NOTELESS_ADDS.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(sorted, NOTELESS_ADDS, "keep the list sorted");
+    // Every add of the registry is either one of these or refused.
+    for c in COMMANDS.iter().filter(|c| c.class == Class::Add) {
+        assert!(
+            NOTELESS_ADDS.contains(&c.id) || co_producer::REFUSED_IN_26.contains(&c.id),
+            "{}",
+            c.id
+        );
+    }
+    for id in ["file.import_midi", "track.duplicate"] {
+        let spec = registry::find(id).unwrap();
+        assert_eq!(effective_class(spec, &[]), Class::Refused, "{id}");
+    }
 }
 
 #[test]
@@ -295,10 +472,6 @@ fn the_gate_admits_only_the_allow_list() {
         (
             "command.run",
             run("mixer.new_bus", json!({"name": "Drums"})),
-        ),
-        (
-            "command.run",
-            run("file.import_midi", json!({"path": existing})),
         ),
     ] {
         assert_eq!(gate(cmd, params.clone()), Ok(()), "{cmd} {params}");
@@ -862,7 +1035,7 @@ fn the_filtered_list_has_classes() {
     let commands = list["commands"].as_array().unwrap();
     let want = COMMANDS
         .iter()
-        .filter(|c| c.class != Class::Refused)
+        .filter(|c| c.class != Class::Refused && !co_producer::REFUSED_IN_26.contains(&c.id))
         .count();
     assert_eq!(commands.len(), want);
     let mut previewable = Vec::new();
@@ -1494,6 +1667,20 @@ fn chore_commands_have_their_class() {
             "region.set_fade_shape",
             "destination.set_sound",
             "lane.set_output",
+            "mixer.new_group",
+            "mixer.rename_group",
+            "mixer.set_group_colour",
+            "mixer.add_to_group",
+            "mixer.remove_from_group",
+            "mixer.set_group_links",
+            "mixer.delete_group",
+            "mixer.new_vca",
+            "mixer.rename_vca",
+            "mixer.set_vca_colour",
+            "mixer.assign_vca",
+            "mixer.unassign_vca",
+            "mixer.set_vca",
+            "mixer.delete_vca",
         ]
     );
 }
@@ -2550,8 +2737,8 @@ fn creative_commands_have_their_class() {
     assert!(PREVIEWABLE.contains(&"automation.write"));
     assert_eq!(
         PREVIEWABLE.len(),
-        28,
-        "8e adds automation.write; Task 6b adds the three release-fixes changes"
+        42,
+        "8e adds automation.write; Task 6b adds the three release-fixes changes; groups-vcas-transport Task 7 adds the fourteen group and VCA commands"
     );
     let list = co_producer::list_json();
     let listed = list["commands"]
@@ -3268,5 +3455,188 @@ fn metrics_read_refuses_hostile_input() {
     for params in cases {
         let e = refused("co_producer.metrics", params.clone());
         assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {}", e.message);
+    }
+}
+
+// ---- groups-vcas-transport Task 7: groups and VCAs (Ruling 10). ----
+
+/// The twelve group and VCA changes and removes, with valid params.
+fn group_changes() -> Vec<(&'static str, Value)> {
+    vec![
+        ("mixer.rename_group", json!({"group": 1, "name": "Kit"})),
+        (
+            "mixer.set_group_colour",
+            json!({"group": 1, "colour": "blue"}),
+        ),
+        ("mixer.add_to_group", json!({"group": 1, "strips": "2,3"})),
+        (
+            "mixer.remove_from_group",
+            json!({"group": 1, "strips": "2"}),
+        ),
+        ("mixer.set_group_links", json!({"group": 1, "mute": false})),
+        ("mixer.delete_group", json!({"group": 1})),
+        ("mixer.rename_vca", json!({"vca": 1, "name": "Kit"})),
+        ("mixer.set_vca_colour", json!({"vca": 1, "colour": "teal"})),
+        ("mixer.assign_vca", json!({"vca": 1, "strips": "2"})),
+        ("mixer.unassign_vca", json!({"vca": 1, "strips": "2"})),
+        ("mixer.set_vca", json!({"vca": 1, "gain_db": "-3"})),
+        ("mixer.delete_vca", json!({"vca": 1})),
+    ]
+}
+
+#[test]
+fn empty_groups_and_vcas_are_adds() {
+    let direct = |id: &str| {
+        format!(
+            "{id} changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+        )
+    };
+    let list = co_producer::list_json();
+    let commands = list["commands"].as_array().unwrap();
+    for id in ["mixer.new_group", "mixer.new_vca"] {
+        let spec = registry::find(id).unwrap();
+        assert_eq!(spec.class, Class::Add, "{id}");
+        assert_eq!(effective_class(spec, &[]), Class::Add, "{id}");
+        assert_eq!(
+            effective_class(spec, &[("name".into(), ArgValue::Text("Kit".into()))]),
+            Class::Add,
+            "{id}"
+        );
+        assert_eq!(
+            effective_class(spec, &[("strips".into(), ArgValue::Text("2".into()))]),
+            Class::Change,
+            "{id}"
+        );
+        // Empty, it runs directly.
+        for params in [
+            json!({}),
+            json!({"name": "Kit"}),
+            json!({"name": "Kit", "colour": "red"}),
+        ] {
+            assert_eq!(
+                gate("command.run", run(id, params.clone())),
+                Ok(()),
+                "{id} {params}"
+            );
+            // An add needs no preview.
+            let e = preview(json!([{"id": id, "params": params}])).unwrap_err();
+            assert_eq!(e.code, ErrorCode::NotAllowed, "{id}: {}", e.message);
+            assert_eq!(
+                e.message,
+                format!("{id} needs no preview: run it with command.run.")
+            );
+        }
+        // With `strips` it changes the composer's strips.
+        for params in [
+            json!({"strips": "2"}),
+            json!({"strips": "2,3", "name": "Kit"}),
+        ] {
+            let m = assert_code(
+                "command.run",
+                run(id, params.clone()),
+                ErrorCode::NotAllowed,
+            );
+            assert_eq!(m, direct(id), "{params}");
+            assert_eq!(
+                preview(json!([{"id": id, "params": params}])),
+                Ok(()),
+                "{id} {params}"
+            );
+        }
+        // Listed as an add, previewable for its `strips` form.
+        let c = commands.iter().find(|c| c["id"] == id).unwrap();
+        assert_eq!(c["class"], "add", "{id}");
+        assert_eq!(c["previewable"], json!(true), "{id}");
+    }
+    // A plan holding both, with strips, then a VCA move.
+    let plan = json!([
+        {"id": "mixer.new_group", "params": {"strips": "2,3"}},
+        {"id": "mixer.new_vca", "params": {"strips": "2", "name": "Kit"}},
+        {"id": "mixer.set_vca", "params": {"vca": 1, "gain_db": "-3"}},
+    ]);
+    assert_eq!(preview(plan.clone()), Ok(()));
+    assert_eq!(
+        gate(
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": plan})
+        ),
+        Ok(())
+    );
+    // Hostile `strips` is refused before the gate's class.
+    for bad in [json!(""), json!("0"), json!("2,2"), json!("x"), json!(2)] {
+        let e = refused("command.run", run("mixer.new_vca", json!({"strips": bad})));
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{bad}: {}", e.message);
+    }
+}
+
+#[test]
+fn group_and_vca_changes_only_through_a_preview() {
+    let direct = |id: &str| {
+        format!(
+            "{id} changes your work: preview it with co_producer.preview and apply it with the composer's yes."
+        )
+    };
+    let changes = group_changes();
+    let ids: Vec<&str> = changes.iter().map(|(id, _)| *id).collect();
+    let want: Vec<&str> = registry::GROUP_IDS
+        .iter()
+        .copied()
+        .filter(|id| !["mixer.new_group", "mixer.new_vca"].contains(id))
+        .collect();
+    assert_eq!(ids, want, "the twelve change and remove ids");
+    let list = co_producer::list_json();
+    let commands = list["commands"].as_array().unwrap();
+    for (id, params) in &changes {
+        assert!(PREVIEWABLE.contains(id), "{id}");
+        let c = commands.iter().find(|c| c["id"] == *id).unwrap();
+        assert_eq!(c["previewable"], json!(true), "{id}");
+        let m = assert_code(
+            "command.run",
+            run(id, params.clone()),
+            ErrorCode::NotAllowed,
+        );
+        assert_eq!(m, direct(id));
+        assert_eq!(
+            preview(json!([{"id": id, "params": params}])),
+            Ok(()),
+            "{id} {params}"
+        );
+    }
+    let plan: Vec<Value> = changes
+        .iter()
+        .map(|(id, params)| json!({"id": id, "params": params}))
+        .collect();
+    assert_eq!(preview(Value::Array(plan.clone())), Ok(()));
+    assert_eq!(
+        gate(
+            "co_producer.apply",
+            json!({"token": "0123456789abcdef0123456789abcdef", "commands": plan})
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn vca_automation_is_refused_plainly() {
+    let sentence = format!("`target` {}", registry::VCA_AUTOMATION_REFUSED);
+    let write = json!({"seq": 1, "target": "vca:1", "start": 0, "end": 61440, "points": "0:0"});
+    let e = refused("command.run", run("automation.write", write.clone()));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{}", e.message);
+    assert!(e.message.contains(&sentence), "{}", e.message);
+    let e = preview(json!([{"id": "automation.write", "params": write}])).unwrap_err();
+    assert!(e.message.contains(&sentence), "{}", e.message);
+    let e = refused(
+        "co_producer.automation",
+        json!({"seq": 1, "target": "vca:1", "start": 0, "end": 61440}),
+    );
+    assert!(e.message.contains(&sentence), "{}", e.message);
+    assert_eq!(
+        registry::VCA_AUTOMATION_REFUSED,
+        "names a VCA's fader, and VCA automation cannot be read or written this way in 26.0.0: move the VCA with mixer.set_vca instead"
+    );
+    // A malformed VCA spelling gets the grammar's own sentence.
+    for odd in ["vca:", "vca:x", "vca:1:2", "VCA:1"] {
+        let m = registry::automation_target(odd).unwrap_err();
+        assert!(m.starts_with("must be fader:"), "{odd}: {m}");
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::document::{Document, SlotOwner};
 use crate::event::EventBody;
-use crate::ids::{DestId, PluginInstanceId, StripId};
+use crate::ids::{DestId, PluginInstanceId, StripId, VcaId};
 use crate::mixer::{GAIN_FLOOR_DB, GAIN_MAX_DB, ParamId, StripKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -32,6 +32,8 @@ pub enum AutomationTarget {
     /// A destination's velocity scale (Plan 4d Ruling 2), applied to note
     /// velocities when the sequence is compiled.
     VelocityScale(DestId),
+    /// A VCA's fader (Ruling 6): its level, as a strip fader's.
+    VcaFader(VcaId),
 }
 
 impl AutomationTarget {
@@ -57,6 +59,7 @@ impl AutomationTarget {
             }
             AutomationTarget::PluginParam(p, id) => format!("{p} parameter {}", id.0),
             AutomationTarget::VelocityScale(d) => format!("{d} velocity scale"),
+            AutomationTarget::VcaFader(v) => format!("{v} fader"),
         }
     }
 }
@@ -124,8 +127,8 @@ impl AutomationMode {
 
 /// The strip whose automation mode governs `t` (plan 5e-1 Ruling 3): a
 /// strip's own controls and sends, an insert's or EQ's strip, a plugin
-/// instrument's Instrument strip; `None` for velocity scale or a target
-/// whose strip or slot does not exist.
+/// instrument's Instrument strip; `None` for velocity scale, a VCA's
+/// fader (see [`mode_of`]) or a target whose strip or slot does not exist.
 pub fn strip_of(doc: &Document, t: AutomationTarget) -> Option<StripId> {
     match t {
         AutomationTarget::StripFader(s)
@@ -137,7 +140,20 @@ pub fn strip_of(doc: &Document, t: AutomationTarget) -> Option<StripId> {
             SlotOwner::Insert(s, _) | SlotOwner::Eq(s) => Some(s),
             SlotOwner::Instrument(dest) => doc.mixer().find_kind(StripKind::Instrument(dest)),
         },
-        AutomationTarget::VelocityScale(_) => None,
+        AutomationTarget::VelocityScale(_) | AutomationTarget::VcaFader(_) => None,
+    }
+}
+
+/// The automation mode governing `t`: its strip's (as [`strip_of`]), or
+/// its VCA's; `None` for velocity scale or a target whose strip, slot or
+/// VCA does not exist.
+pub fn mode_of(doc: &Document, t: AutomationTarget) -> Option<AutomationMode> {
+    match t {
+        AutomationTarget::VcaFader(v) => doc.mixer().vca(v).ok().map(|x| x.automation),
+        _ => {
+            let s = strip_of(doc, t)?;
+            doc.mixer().strip(s).ok().map(|x| x.automation)
+        }
     }
 }
 
@@ -196,6 +212,7 @@ pub fn target_exists(doc: &Document, t: AutomationTarget) -> bool {
         }
         AutomationTarget::PluginParam(p, _) => doc.plugin_slot(p).is_some(),
         AutomationTarget::VelocityScale(d) => doc.instruments().contains_key(&d),
+        AutomationTarget::VcaFader(v) => m.vca(v).is_ok(),
     }
 }
 

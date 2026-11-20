@@ -47,9 +47,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+pub mod click;
 mod co_producer_creative;
 pub mod co_producer_mixer;
 mod fixes;
+mod groups;
 
 /// Package extension.
 pub const EXTENSION: &str = "vizdaw";
@@ -156,6 +158,9 @@ pub(crate) struct Inner {
     /// The targets touched now, with their paths (plan 5e-1 Rulings 14,
     /// 20).
     touches: std::collections::BTreeMap<AutomationTarget, Touching>,
+    /// The group drags in progress, by their leader's fader
+    /// (groups-vcas-transport Task 2).
+    group_drags: std::collections::BTreeMap<AutomationTarget, groups::GroupDrag>,
     /// The shared static edit's label and its open static touches
     /// (Ruling 14).
     static_edit: Option<(String, usize)>,
@@ -390,6 +395,7 @@ impl Inner {
             settings_seen: crate::audio::epoch(),
             save_after_pass: false,
             touches: Default::default(),
+            group_drags: Default::default(),
             static_edit: None,
             sampler: Sampler::default(),
             plugin_touches: PluginTouches::default(),
@@ -658,6 +664,10 @@ impl Inner {
         if !core_model::document::check_project_id(&id) {
             return Err(crate::events::bad("the project ID is malformed"));
         }
+        // Never written through a linked `Co-Producer` folder of the
+        // support folder (release gate Task 5).
+        let rel = Path::new("Co-Producer").join("Untitled").join(&id);
+        file::refuse_linked_folders(&recovery::support_dir(), &rel)?;
         Ok(Some(stand_in(&id)))
     }
 
@@ -935,6 +945,24 @@ fn title(path: Option<&Path>, copy: Option<&str>) -> String {
 /// Why `open` refuses a Co-Producer copy (plan 8a Ruling 9).
 pub const COPY_NOT_A_PROJECT: &str =
     "That is a Co-Producer copy: open it with File › Open Co-Producer Copy….";
+
+/// Copies the package file `rel` to `to` only when it is a regular file
+/// in real folders of `package`: no link is followed, a FIFO is never
+/// waited on (release gate Task 5). The open file is the one checked.
+fn copy_regular(package: &Path, rel: &str, to: &Path) -> std::io::Result<u64> {
+    let rel = Path::new(rel);
+    if let Some(folders) = rel.parent() {
+        file::refuse_linked_folders(package, folders)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+    let from = file::open_regular(&package.join(rel))?;
+    // Through the checked descriptor (`/dev/fd/N` opens that same file),
+    // so the copy still clones on APFS as `std::fs::copy` does.
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&from);
+    let copied = std::fs::copy(format!("/dev/fd/{fd}"), to);
+    drop(from);
+    copied
+}
 
 /// True when `p`, as given or as its real place, is a Co-Producer copy.
 fn is_copy(p: &Path) -> bool {
@@ -2147,15 +2175,17 @@ impl Session {
             if !p.join(file::PROJECT_FILE).is_file() {
                 return Err(VizError::NotFound { path });
             }
-            let (doc, clean) = match &options.autosave {
+            // `left_out`: what the load dropped (VCAs past MAX_VCAS), one
+            // problem line each for the first `idle`.
+            let (doc, clean, left_out) = match &options.autosave {
                 Some(a) => {
-                    let doc = file::load_autosave(&p, Path::new(a))?;
+                    let (doc, left_out) = file::load_autosave_noted(&p, Path::new(a))?;
                     let clean = file::load(&p).unwrap_or_else(|_| doc.clone());
-                    (doc, clean)
+                    (doc, clean, left_out)
                 }
                 None => {
-                    let doc = file::load(&p)?;
-                    (doc.clone(), doc)
+                    let (doc, left_out) = file::load_noted(&p)?;
+                    (doc.clone(), doc, left_out)
                 }
             };
             let s = Session::with(doc, Some(p.clone()), options.plugins_off)?;
@@ -2172,6 +2202,7 @@ impl Session {
                 let recovered = crate::record::offered(&p, inner.doc(), &kept);
                 inner.keep_recordings = kept;
                 inner.recovered = recovered;
+                inner.news.problems.extend(left_out);
                 inner.news.problems.extend(unread);
                 inner.windows = windows;
                 inner.editor_layout = layout;
@@ -2201,7 +2232,8 @@ impl Session {
             // original's project ID its untitled stand-in would be the
             // original's, whose next save would move this window's notes
             // and copies in.
-            let doc = file::load_copy(&copy)?.with_new_project_id(&crate::project_id::fresh());
+            let (doc, left_out) = file::load_copy_noted(&copy)?;
+            let doc = doc.with_new_project_id(&crate::project_id::fresh());
             let mut files: Vec<String> = doc.media().values().map(|m| m.path.clone()).collect();
             files.extend(doc.referenced_states().into_iter().map(|b| {
                 format!(
@@ -2212,14 +2244,14 @@ impl Session {
             }));
             let s = Session::with(doc, None, false)?;
             let root = crate::media::scratch_root(s.id);
-            let mut problems = Vec::new();
+            let mut problems = left_out;
             for rel in files {
                 let to = root.join(&rel);
                 let done = match to.parent() {
                     Some(d) => std::fs::create_dir_all(d),
                     None => Ok(()),
                 }
-                .and_then(|()| std::fs::copy(package.join(&rel), &to));
+                .and_then(|()| copy_regular(&package, &rel, &to));
                 if let Err(e) = done {
                     problems.push(format!("{rel} was not copied ({e})."));
                 }
@@ -2276,6 +2308,13 @@ impl Session {
     /// lands (plan 5d-1 Ruling 19; the app says so).
     pub fn saves_after_pass(&self) -> Result<bool, VizError> {
         ffi_guard(|| Ok(self.lock_inner().save_after_pass))
+    }
+
+    /// Whether the song has changes a close would lose: the document
+    /// differs from the one last opened or saved, or a plugin changed its
+    /// own state (release gate B1; the close and quit prompts ask on it).
+    pub fn has_unsaved_changes(&self) -> Result<bool, VizError> {
+        ffi_guard(|| Ok(self.lock_inner().unsaved()))
     }
 
     /// Why Save As would be refused before its panel opens: the sentence
@@ -2356,6 +2395,9 @@ impl Session {
                 }
             }
             self.save_to(&mut inner, &p)?;
+            // A Save As ends the pending preview (release gate Task 5): its
+            // yes was for the song under its old name.
+            inner.co_producer_preview = None;
             if inner.path.as_deref() != Some(p.as_path()) {
                 // The marker follows the project to its new place (not
                 // after `close`).
@@ -2753,6 +2795,7 @@ impl Session {
                     ticks_per_second: crate::clock::ticks_per_second(doc, Some(h.seq), h.tick),
                     rate_mismatch: h.rate_mismatch,
                     counting_in: h.counting_in,
+                    click: Some(doc.settings().click.into()),
                 },
                 None => {
                     let tick = inner.cursor.unwrap_or(Tick::ZERO);
@@ -2778,6 +2821,7 @@ impl Session {
                         ticks_per_second: crate::clock::ticks_per_second(doc, seq, tick),
                         rate_mismatch: false,
                         counting_in: false,
+                        click: Some(doc.settings().click.into()),
                     }
                 }
             })
@@ -4928,6 +4972,7 @@ impl Session {
                 token,
                 version: inner.version,
                 serial: inner.history.present_serial(),
+                path: inner.path.clone(),
                 canonical: cp::canonical(&plan),
                 needs_yes,
                 items,
@@ -4977,8 +5022,12 @@ impl Session {
                             .into(),
                 });
             }
-            let (version, serial) = (inner.version, inner.history.present_serial());
-            crate::co_producer::check_take(pending, &token, &plan, version, serial)?;
+            let now = crate::co_producer::Now {
+                version: inner.version,
+                serial: inner.history.present_serial(),
+                path: inner.path.as_deref(),
+            };
+            crate::co_producer::check_take(pending, &token, &plan, now)?;
             if yes && approval == CoProducerApproval::None {
                 return Err(VizError::Model {
                     message: NEEDS_APPROVAL.into(),
@@ -5009,9 +5058,13 @@ impl Session {
                     message: OPEN_A_REQUEST.into(),
                 });
             }
-            let (version, serial) = (inner.version, inner.history.present_serial());
+            let now = cp::Now {
+                version: inner.version,
+                serial: inner.history.present_serial(),
+                path: inner.path.as_deref(),
+            };
             let pending = inner.co_producer_preview.as_ref();
-            cp::check_pending(pending, &token, &plan, version, serial)?;
+            cp::check_pending(pending, &token, &plan, now)?;
             pending.map(cp::PendingPreview::row).ok_or(VizError::Model {
                 message: cp::USED.into(),
             })
@@ -8456,15 +8509,33 @@ impl Session {
         phase: GesturePhaseRow,
         holder: crate::automation::GestureHolderRow,
     ) -> Result<(), VizError> {
+        self.gesture_as(target, phase, holder, false)
+    }
+
+    /// [`Session::gesture_from`], with the strip's group following unless
+    /// `alone` (groups-vcas-transport Task 2): a fader touch of a grouped
+    /// strip touches the other members' faders, its values move them all
+    /// by the same dB, and its release releases them; a mute or solo
+    /// gesture goes to the linked members. `alone` moves this target
+    /// only. Errors as [`Session::gesture_from`].
+    pub fn gesture_as(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+        holder: crate::automation::GestureHolderRow,
+        alone: bool,
+    ) -> Result<(), VizError> {
         ffi_guard(|| {
             let t = automation_target_of(target);
-            let phase = match phase {
-                GesturePhaseRow::Touch { value } => core_surface::Phase::Touch(value),
-                GesturePhaseRow::Value { value } => core_surface::Phase::Value(value),
-                GesturePhaseRow::Release => core_surface::Phase::Release,
-            };
             let mut inner = self.lock_inner();
-            self.gesture_held(&mut inner, t, phase, TouchHolder::from(holder), None)
+            self.gesture_held(
+                &mut inner,
+                t,
+                phase_of(phase),
+                TouchHolder::from(holder),
+                None,
+                alone,
+            )
         })
     }
 
@@ -8516,6 +8587,7 @@ impl Session {
                     .keys()
                     .map(|t| automation_target_row(*t))
                     .collect(),
+                touched_values: inner.touches.values().map(|x| x.value).collect(),
                 suspended: crate::automation::suspended(),
                 writing: inner.writing.is_some(),
             })
@@ -8587,6 +8659,15 @@ impl Session {
                 })
                 .collect())
         })
+    }
+}
+
+/// The gesture path's phase of the app's `phase`.
+fn phase_of(phase: GesturePhaseRow) -> core_surface::Phase {
+    match phase {
+        GesturePhaseRow::Touch { value } => core_surface::Phase::Touch(value),
+        GesturePhaseRow::Value { value } => core_surface::Phase::Value(value),
+        GesturePhaseRow::Release => core_surface::Phase::Release,
     }
 }
 
@@ -8718,14 +8799,14 @@ impl Session {
             return None;
         }
         let doc = inner.doc();
-        let strip = core_model::automation::strip_of(doc, t)?;
-        let mode = doc.mixer().strip(strip).ok()?.automation;
+        // A strip's mode, or a VCA's (never Write or Trim, Ruling 6).
+        let mode = core_model::automation::mode_of(doc, t)?;
+        let in_pass =
+            core_model::automation::strip_of(doc, t).is_some_and(|s| w.write_strips.contains(&s));
         match mode {
             // From the first wrap on, the After Write mode (Ruling 9).
-            AutomationMode::Write if w.write_strips.contains(&strip) && w.wrapped => {
-                WriteMode::of(w.after_write)
-            }
-            AutomationMode::Write if w.write_strips.contains(&strip) => Some(WriteMode::Write),
+            AutomationMode::Write if in_pass && w.wrapped => WriteMode::of(w.after_write),
+            AutomationMode::Write if in_pass => Some(WriteMode::Write),
             // Switched to Write while playing: Latch until the next Play.
             AutomationMode::Write => Some(WriteMode::Latch),
             m => WriteMode::of(m),
@@ -8860,12 +8941,13 @@ impl Session {
         }
     }
 
-    /// A gesture phase on `t` from holder `h` (plan 5f-1 Ruling 2): the
-    /// one path of the mouse, the channel, the surfaces and learn, as
+    /// A gesture phase on `t` alone from holder `h` (plan 5f-1 Ruling 2):
+    /// the one path of the mouse, the channel, the surfaces and learn
+    /// (each through `gesture_held`, which fans it out to a group), as
     /// `Source::Ui`, stamped at `host_ns` (`None`: now). `Model` for a
     /// target that cannot be gestured or a non-finite value; `Busy` for a
     /// static touch's first value while another edit is open.
-    pub(crate) fn gesture_held(
+    fn gesture_one(
         &self,
         inner: &mut Inner,
         t: AutomationTarget,
@@ -8927,7 +9009,8 @@ impl Session {
         // touch-sensing fader holds no transaction open.
         let shared = path == TouchPath::Static && value.is_some();
         if shared {
-            self.open_static_share(inner, t)?;
+            let label = self.static_label_of(inner, t);
+            self.open_static_share(inner, &label)?;
         }
         if let Some(w) = inner.writing.as_mut() {
             w.moved.insert(t);
@@ -9189,6 +9272,8 @@ impl Session {
             self.keep_static_param(inner, t, touching);
             self.end_static_share(inner);
         }
+        // A group drag's leader takes its followers with it.
+        self.end_group_drag(inner, t, host_ns);
         // A Touch or Trim plugin parameter no lane drives plays its static
         // value again (pre-flight M14).
         if let (
@@ -9247,16 +9332,18 @@ impl Session {
         if x.path != TouchPath::Static || x.shared {
             return Ok(());
         }
-        self.open_static_share(inner, t)?;
+        let label = self.static_label_of(inner, t);
+        self.open_static_share(inner, &label)?;
         if let Some(x) = inner.touches.get_mut(&t) {
             x.shared = true;
         }
         Ok(())
     }
 
-    /// Opens the shared static edit, labelled by `t`, or joins it (Ruling
-    /// 14); `Busy` while an edit the gesture path did not open is open.
-    fn open_static_share(&self, inner: &mut Inner, t: AutomationTarget) -> Result<(), VizError> {
+    /// Opens the shared static edit as `label` (the control's, or a group
+    /// drag's "Move Group ‹name›"), or joins it (Ruling 14); `Busy` while
+    /// an edit the gesture path did not open is open.
+    fn open_static_share(&self, inner: &mut Inner, label: &str) -> Result<(), VizError> {
         match inner.static_edit.as_mut() {
             Some((_, n)) => *n += 1,
             None => {
@@ -9265,7 +9352,6 @@ impl Session {
                         message: "Finish the open edit first.".into(),
                     });
                 }
-                let label = crate::automation::static_label(t);
                 inner.history.begin(label)?;
                 inner.static_edit = Some((label.to_string(), 1));
             }
@@ -12933,7 +13019,7 @@ impl Session {
             let ok = match a.action {
                 A::Gesture(t, phase) => {
                     let ok = self
-                        .gesture_held(inner, t, phase, a.holder, a.host_ns)
+                        .gesture_held(inner, t, phase, a.holder, a.host_ns, false)
                         .is_ok();
                     let key = (a.holder, t);
                     match phase {

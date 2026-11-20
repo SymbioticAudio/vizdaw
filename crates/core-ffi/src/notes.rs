@@ -437,18 +437,27 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Moves the copy folder `src` to `<dir>/<name>` (Ruling 7, step 2):
+/// Moves the copy folder `src` to `<package>/<COPIES_DIR>/<name>` (Ruling 7, step 2):
 /// by `rename` when `try_rename`; else, or across volumes, by a copy into
 /// `.<name>.moving` beside it, a rename into place, then removing `src`.
 /// A name already taken leaves `src` where it is. Nothing half-moved is
 /// left on failure.
-fn move_copy(src: &Path, dir: &Path, name: &str, try_rename: bool) -> Result<(), String> {
+fn move_copy(src: &Path, package: &Path, name: &str, try_rename: bool) -> Result<(), String> {
     const TAKEN: &str = "the song already has a copy of that name";
+    let dir = package.join(COPIES_DIR);
     let dst = dir.join(name);
     if std::fs::symlink_metadata(&dst).is_ok() {
         return Err(TAKEN.into());
     }
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // Never through a linked `Co-Producer` or `Copies` folder (release
+    // gate Task 5): checked before and after the folders are made.
+    let linked = || {
+        core_model::file::refuse_linked_folders(package, Path::new(COPIES_DIR))
+            .map_err(|e| e.to_string())
+    };
+    linked()?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    linked()?;
     if try_rename {
         match std::fs::rename(src, &dst) {
             Ok(()) => return Ok(()),
@@ -576,9 +585,7 @@ fn move_in_with(stand_in: &Path, package: &Path, try_rename: bool) -> Vec<String
                         let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
                             continue;
                         };
-                        if let Err(why) =
-                            move_copy(src, &package.join(COPIES_DIR), name, try_rename)
-                        {
+                        if let Err(why) = move_copy(src, package, name, try_rename) {
                             let what = format!("copy \"{}\"", diff::shown_name(name));
                             lines.push(left(&what, &why));
                         }

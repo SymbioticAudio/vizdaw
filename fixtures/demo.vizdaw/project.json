@@ -1,6 +1,6 @@
 {
   "format": "vizdaw-project",
-  "version": 10,
+  "version": 11,
   "document": {
     "settings": {
       "history_depth": 200,
@@ -1490,7 +1490,9 @@
       "take": 5,
       "drum_row": 3,
       "strip": 2,
-      "plugin": 0
+      "plugin": 0,
+      "group": 1,
+      "vca": 1
     }
   }
 }

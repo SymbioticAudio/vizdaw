@@ -11,7 +11,7 @@ use crate::error::EngineError;
 use crate::midi1::{Class, Midi1Msg, When, translate};
 use crate::mpe::configuration;
 use core_model::automation::{
-    AutomationMode, AutomationTarget, strip_of, target_exists, velocity_scale_percent,
+    AutomationMode, AutomationTarget, mode_of, target_exists, velocity_scale_percent,
 };
 use core_model::document::{DestKind, Document, SlotOwner};
 use core_model::event::EventBody;
@@ -175,11 +175,9 @@ pub fn compile(
             report.automation_missing += 1;
             continue;
         }
-        // An Off strip plays its static values (spec §4.6), unless
+        // An Off strip or VCA plays its static values (spec §4.6), unless
         // automation is suspended (every strip then behaves as Read).
-        let off = strip_of(doc, target)
-            .and_then(|s| doc.mixer().strip(s).ok())
-            .is_some_and(|s| s.automation == AutomationMode::Off);
+        let off = mode_of(doc, target) == Some(AutomationMode::Off);
         if off && !opts.suspend_automation {
             continue;
         }
@@ -499,6 +497,7 @@ pub fn compile(
         preamble: preamble.into_boxed_slice(),
         automation,
         audio,
+        beats: crate::metronome::BeatGrid::build(&s.meter, len),
     };
     report.warnings = warnings(&report);
     report.compile_time = started.elapsed().saturating_sub(resolving);

@@ -143,4 +143,25 @@ import Testing
             [.header: 44, .input: 22, .eq: 20, .inserts: 58, .sends: 80, .output: 24, .pan: 38]
         ])), throwLength: fader.height - StripLayout.faderCap))
     }
+
+    /// Groups-vcas-transport Task 9: with a VCA in the mixer, the VCA
+    /// offset row sits right under the level box and pushes the buttons and
+    /// the mode menu down; the strip stays as tall (the throw gives way).
+    @Test func theVcaOffsetRowSitsUnderTheLevelBox() {
+        let base = cells()
+        var with = base
+        for col in 0..<4 { with.append(StripGrid.Cell(column: col, part: .vcaOffset)) }
+        let a = StripGrid.place(base, height: 700, dividerBefore: 3)
+        let b = StripGrid.place(with, height: 700, dividerBefore: 3)
+        func frame(_ c: [StripGrid.Cell], _ f: [CGRect], _ part: StripGrid.Part) -> CGRect {
+            zip(c, f).first { $0.0.part == part }!.1
+        }
+        let level = frame(with, b.frames, .level)
+        let offset = frame(with, b.frames, .vcaOffset)
+        #expect(offset.minY == level.maxY)
+        #expect(offset.height == StripLayout.vcaOffsetHeight)
+        #expect(frame(with, b.frames, .buttons).minY == offset.maxY + StripLayout.gap)
+        #expect(a.size.height == b.size.height, "the throw gives way")
+        #expect(frame(with, b.frames, .fader).height == frame(base, a.frames, .fader).height - StripLayout.vcaOffsetHeight)
+    }
 }

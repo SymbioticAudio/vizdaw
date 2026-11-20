@@ -132,6 +132,13 @@ import VizDAWCore
         #expect(code(o) == nil)
         #expect(f.holders == [.channel])
         #expect(f.gestures.last?.1 == .touch(value: nil), "recorded as `gesture` records it")
+        #expect(f.alones == [false], "the group follows by default")
+        let alone = AutomationCommands.run(
+            AutomationCommands.gesture,
+            args: [arg("target", "fader:1"), arg("phase", "release"), ControlArg(name: "alone", value: .flag(value: true))],
+            doc: id, m)
+        #expect(code(alone) == nil)
+        #expect(f.alones == [false, true])
     }
 
     /// 5e-1 Task 10 review M3: a mode change while an editor drag is open

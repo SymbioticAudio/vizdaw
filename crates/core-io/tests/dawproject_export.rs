@@ -1404,3 +1404,118 @@ fn file_names_come_from_the_title_or_the_sequence() {
         Err(IoError::Refused(_))
     ));
 }
+
+/// A VCA with members and a group are listed as left out (one line each,
+/// naming them); the members' channels carry their own faders, and the VCA
+/// is a channel of the file's structure, after the buses and before the
+/// master. The file passes the schema.
+#[test]
+fn vca_members_and_groups_are_listed() {
+    use common::generators::{note_track, song};
+    use core_io::dawproject::export::{GROUPS, VCA_MEMBERS};
+    use core_model::command::GroupCmd;
+    let mut b = Builder::new();
+    let (seq, _, dest_a, _) = song(&mut b, "A");
+    let (_, dest_b, _) = note_track(&mut b, seq, "B");
+    let strip_of = |b: &Builder, d| b.doc().mixer().find_kind(StripKind::Instrument(d)).unwrap();
+    let (a, c) = (strip_of(&b, dest_a), strip_of(&b, dest_b));
+    for (strip, gain_db) in [(a, -3.0), (c, -9.0)] {
+        b.mixer(MixerCmd::SetGain { strip, gain_db }).unwrap();
+    }
+    b.run(Command::Groups(GroupCmd::NewVca {
+        name: "Kit".into(),
+        colour: Swatch::Red,
+        members: vec![a, c],
+    }))
+    .unwrap();
+    b.run(Command::Groups(GroupCmd::NewVca {
+        name: "Empty".into(),
+        colour: Swatch::Red,
+        members: Vec::new(),
+    }))
+    .unwrap();
+    b.run(Command::Groups(GroupCmd::NewGroup {
+        name: "Drums".into(),
+        colour: Swatch::Blue,
+        members: vec![a, c],
+    }))
+    .unwrap();
+    let doc = b.finish();
+    let x = run(&doc, seq);
+    schema_check(&format!("{DIR}/Project.xsd"), &x.project_xml);
+    let r = &x.report;
+    assert_eq!(
+        VCA_MEMBERS,
+        "VCA assignments (DAWproject cannot say which channels a VCA controls; members keep their own faders)"
+    );
+    assert_eq!(GROUPS, "Fader groups");
+    let members = item(r, ItemKind::LeftOut, VCA_MEMBERS);
+    assert_eq!(
+        (members.count, members.details.as_slice()),
+        (1, &["Kit".to_owned()][..]),
+        "only a VCA with members: {:#?}",
+        r.items
+    );
+    let groups = item(r, ItemKind::LeftOut, GROUPS);
+    assert_eq!(
+        (groups.count, groups.details.as_slice()),
+        (1, &["Drums".to_owned()][..])
+    );
+    let p = read_back(&x);
+    for (id, gain_db) in [(a, -3.0), (c, -9.0)] {
+        let ch = channel(track(&p, &format!("t{}", lane_of(&doc, id))));
+        let v = ch.volume.as_ref().unwrap().value.unwrap();
+        assert!((db_of_linear(v) - gain_db).abs() < 1e-6, "{v}");
+    }
+    let roles: Vec<(Option<DpMixerRole>, Option<String>)> = p
+        .structure
+        .iter()
+        .map(|i| match i {
+            DpStructureItem::Track(t) => (t.channel.as_ref().and_then(|c| c.role), None),
+            DpStructureItem::Channel(c) => (c.role, c.named.name.clone()),
+        })
+        .collect();
+    let vca: Vec<usize> = roles
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.0 == Some(DpMixerRole::Vca))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(vca.len(), 2, "{roles:?}");
+    let master = roles
+        .iter()
+        .position(|r| r.0 == Some(DpMixerRole::Master))
+        .unwrap();
+    assert!(vca.iter().all(|i| *i < master), "VCAs before the master");
+    assert_eq!(roles[vca[0]].1.as_deref(), Some("Kit"));
+}
+
+/// A VCA at its default (nothing assigned, nothing automated, no group)
+/// adds no VCA_MEMBERS or GROUPS line.
+#[test]
+fn a_song_without_groups_has_no_group_lines() {
+    use core_io::dawproject::export::{GROUPS, VCA_MEMBERS};
+    let mut b = Builder::new();
+    let (seq, _) = b.sequence("S", "T", None).unwrap();
+    let x = run(&b.finish(), seq);
+    assert!(
+        x.report
+            .items
+            .iter()
+            .all(|i| i.what != GROUPS && i.what != VCA_MEMBERS)
+    );
+}
+
+/// The lane (track ID number) the strip `strip` is played by.
+fn lane_of(doc: &Document, strip: StripId) -> u64 {
+    let s = doc.mixer().strip(strip).unwrap();
+    let StripKind::Instrument(d) = s.kind else {
+        panic!("not an instrument strip");
+    };
+    doc.sequences()
+        .values()
+        .flat_map(|q| q.lanes.iter())
+        .find(|l| l.midi_dest == Some(d))
+        .map(|l| l.id.0)
+        .expect("a lane plays it")
+}

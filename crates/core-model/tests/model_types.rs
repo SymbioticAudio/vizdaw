@@ -139,6 +139,7 @@ fn sample() -> Document {
             media: 1,
             take: 2,
             drum_row: 0,
+            ..Counters::default()
         },
     })
     .unwrap()

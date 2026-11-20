@@ -1,12 +1,16 @@
 //! Automatable mixer controls of a render graph (Plan 4d Rulings 11, 13):
 //! every strip's fader, pan, mute and solo and every send's level, the
 //! static value the mixer gave each, and the override automation set.
+//! Each strip also links to its VCAs, whose offsets, mutes and solos a
+//! commit hears (groups-vcas Task 4, spec §2a). A strip's `base`/`over`
+//! stay its own fader: only `commit` adds the VCAs (preflight F12).
 //! Built off the audio thread; set, committed and adopted on it. // RT
 
 use crate::graph::dsp::strip_gains;
 use crate::schedule::automation::{AutoDest, StripParam};
 use core_model::automation::{fader_db, fader_norm, pan_norm, pan_of, switch_on};
-use core_model::ids::StripId;
+use core_model::groups::{heard_db, vca_sum};
+use core_model::ids::{StripId, VcaId};
 use core_model::mixer::db_to_gain;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -58,6 +62,22 @@ pub struct StripControlSpec {
     /// Strips audible while it is soloed: itself, everything it reaches and
     /// everything reaching it (sidechains excluded).
     pub solo_keeps: Vec<StripId>,
+    /// The VCAs it belongs to, by VCA ID.
+    pub vcas: Vec<VcaId>,
+}
+
+/// A VCA's static controls, from the mixer: its level is an offset on its
+/// members' faders; its mute and solo count as theirs (spec §2a).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VcaControlSpec {
+    /// The VCA.
+    pub vca: VcaId,
+    /// Level in dB.
+    pub gain_db: f64,
+    /// Muted.
+    pub mute: bool,
+    /// Soloed.
+    pub solo: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +105,17 @@ struct CtlStrip {
     over: Over,
     feeds: Range<usize>,
     keeps: Range<usize>,
+    /// Its VCAs: a range of [`Controls::links`].
+    vca_links: Range<usize>,
+}
+
+/// A VCA: `base` is its static (dB, mute, solo); `over_db` its level
+/// automation (set by `set_vca`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CtlVca {
+    vca: VcaId,
+    base: (f64, bool, bool),
+    over_db: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -103,6 +134,10 @@ pub struct Controls {
     feeds: Box<[CtlFeed]>,
     /// Per strip, bit words of the strips its solo keeps.
     keeps: Box<[u64]>,
+    /// Sorted by VCA.
+    vcas: Box<[CtlVca]>,
+    /// Indexes into `vcas`, a range per strip (`CtlStrip::vca_links`).
+    links: Box<[u32]>,
     /// Scratch: the audible strips.
     audible: Box<[u64]>,
     any_override: bool,
@@ -115,10 +150,12 @@ pub struct Controls {
 /// No override, in an [`OverrideSnapshot`] slot.
 const NONE: u64 = u64::MAX;
 
+/// `v` as an [`OverrideSnapshot`] slot. // RT
 fn slot(v: Option<f64>) -> u64 {
     v.map_or(NONE, f64::to_bits)
 }
 
+/// The override an [`OverrideSnapshot`] slot holds. // RT
 fn unslot(a: &AtomicU64) -> Option<f64> {
     match a.load(Ordering::Relaxed) {
         NONE => None,
@@ -141,6 +178,13 @@ struct SnapFeed {
     over_db: AtomicU64,
 }
 
+#[derive(Debug)]
+struct SnapVca {
+    vca: VcaId,
+    base: (f64, bool, bool),
+    over_db: AtomicU64,
+}
+
 /// The automation overrides a graph's controls held at their last commit,
 /// readable off the audio thread: a rebuilt engine starts from them, so a
 /// device change while stopped keeps automated values until the user moves
@@ -150,6 +194,7 @@ struct SnapFeed {
 pub struct OverrideSnapshot {
     strips: Box<[SnapStrip]>,
     feeds: Box<[SnapFeed]>,
+    vcas: Box<[SnapVca]>,
 }
 
 impl OverrideSnapshot {
@@ -159,6 +204,7 @@ impl OverrideSnapshot {
             .iter()
             .all(|s| s.over.iter().all(|a| unslot(a).is_none()))
             && self.feeds.iter().all(|f| unslot(&f.over_db).is_none())
+            && self.vcas.iter().all(|v| unslot(&v.over_db).is_none())
     }
 
     /// The fader override (dB) of `strip`, if any.
@@ -176,6 +222,10 @@ impl OverrideSnapshot {
             AutoDest::Strip(s, p) => (s, Some(p)),
             AutoDest::Send(s, _) => (s, None),
             AutoDest::Plugin(..) => return None,
+            AutoDest::Vca(id) => {
+                let v = self.vcas.iter().find(|v| v.vca == id)?;
+                return unslot(&v.over_db).map(fader_norm);
+            }
         };
         let s = self.strips.iter().find(|s| s.strip == strip)?;
         let over = |i: usize| s.over.get(i).and_then(unslot);
@@ -213,6 +263,7 @@ impl OverrideSnapshot {
                 },
                 feeds: s.feeds.clone(),
                 keeps: 0..0,
+                vca_links: 0..0,
             })
             .collect();
         let feeds = self
@@ -224,22 +275,45 @@ impl OverrideSnapshot {
                 over_db: unslot(&f.over_db),
             })
             .collect();
+        let vcas = self
+            .vcas
+            .iter()
+            .map(|v| CtlVca {
+                vca: v.vca,
+                base: v.base,
+                over_db: unslot(&v.over_db),
+            })
+            .collect();
         Controls {
             strips,
             feeds,
+            vcas,
             ..Controls::default()
         }
     }
 }
 
 impl Controls {
-    /// The controls of `specs`; `input(node, k)` is the graph's index of
-    /// input `k` of node `node` (`None`: the graph dropped that edge). Not
-    /// RT.
+    /// The controls of `specs` and their VCAs `vcas`; `input(node, k)` is
+    /// the graph's index of input `k` of node `node` (`None`: the graph
+    /// dropped that edge). A strip's link to a VCA not in `vcas` is
+    /// dropped. Not RT.
     pub(crate) fn build(
         specs: &[StripControlSpec],
+        vcas: &[VcaControlSpec],
         input: impl Fn(usize, usize) -> Option<usize>,
     ) -> Controls {
+        let mut vcas: Vec<CtlVca> = vcas
+            .iter()
+            .map(|v| CtlVca {
+                vca: v.vca,
+                base: (v.gain_db, v.mute, v.solo),
+                over_db: None,
+            })
+            .collect();
+        vcas.sort_by_key(|v| v.vca);
+        vcas.dedup_by_key(|v| v.vca);
+        let mut links: Vec<u32> = Vec::new();
         let mut sorted: Vec<&StripControlSpec> = specs.iter().collect();
         sorted.sort_by_key(|s| s.strip);
         sorted.dedup_by_key(|s| s.strip);
@@ -271,6 +345,18 @@ impl Controls {
                     }
                 }
             }
+            let first_link = links.len();
+            for v in &s.vcas {
+                let Ok(k) = vcas.binary_search_by_key(v, |x| x.vca) else {
+                    continue;
+                };
+                let Ok(k) = u32::try_from(k) else {
+                    continue;
+                };
+                if !links.get(first_link..).is_some_and(|l| l.contains(&k)) {
+                    links.push(k);
+                }
+            }
             strips.push(CtlStrip {
                 strip: s.strip,
                 node: s.node,
@@ -284,6 +370,7 @@ impl Controls {
                 over: Over::default(),
                 feeds: first..feeds.len(),
                 keeps: i * words..(i + 1) * words,
+                vca_links: first_link..links.len(),
             });
         }
         let mirror = Arc::new(OverrideSnapshot {
@@ -303,11 +390,21 @@ impl Controls {
                     over_db: AtomicU64::new(NONE),
                 })
                 .collect(),
+            vcas: vcas
+                .iter()
+                .map(|v| SnapVca {
+                    vca: v.vca,
+                    base: v.base,
+                    over_db: AtomicU64::new(NONE),
+                })
+                .collect(),
         });
         Controls {
             strips: strips.into_boxed_slice(),
             feeds: feeds.into_boxed_slice(),
             keeps: keeps.into_boxed_slice(),
+            vcas: vcas.into_boxed_slice(),
+            links: links.into_boxed_slice(),
             audible: vec![0u64; words].into_boxed_slice(),
             any_override: false,
             dirty: false,
@@ -339,18 +436,30 @@ impl Controls {
         for (f, m) in self.feeds.iter().zip(self.mirror.feeds.iter()) {
             m.over_db.store(slot(f.over_db), Ordering::Relaxed);
         }
+        for (v, m) in self.vcas.iter().zip(self.mirror.vcas.iter()) {
+            m.over_db.store(slot(v.over_db), Ordering::Relaxed);
+        }
     }
 
+    /// The position of `strip` in `strips`. // RT
     fn find(&self, strip: StripId) -> Option<usize> {
         self.strips.binary_search_by_key(&strip, |s| s.strip).ok()
     }
 
-    /// The static value (normalised, as automation's) of a strip control
-    /// or a send; `None` for plugins and unknown controls. // RT
+    /// The VCA `vca` (by binary search). // RT
+    fn vca(&self, vca: VcaId) -> Option<&CtlVca> {
+        let i = self.vcas.binary_search_by_key(&vca, |v| v.vca).ok()?;
+        self.vcas.get(i)
+    }
+
+    /// The static value (normalised, as automation's) of a strip control,
+    /// a send or a VCA's fader; `None` for plugins and unknown controls.
+    /// // RT
     pub(crate) fn base_of(&self, dest: AutoDest) -> Option<f64> {
         let strip = match dest {
             AutoDest::Strip(s, _) | AutoDest::Send(s, _) => s,
             AutoDest::Plugin(..) => return None,
+            AutoDest::Vca(v) => return self.vca(v).map(|v| fader_norm(v.base.0)),
         };
         let s = self.find(strip).and_then(|i| self.strips.get(i))?;
         let on = |b: bool| if b { 1.0 } else { 0.0 };
@@ -365,17 +474,23 @@ impl Controls {
                 .iter()
                 .find_map(|f| f.send.filter(|x| x.index == index))
                 .map(|x| fader_norm(x.level_db)),
-            AutoDest::Plugin(..) => None,
+            AutoDest::Plugin(..) | AutoDest::Vca(_) => None,
         }
     }
 
-    /// The value (normalised, as automation's) a strip control or a send
-    /// plays now: its override, else its static value; `None` for plugins
-    /// and unknown controls (Task 5 review I1). // RT
+    /// The value (normalised, as automation's) a strip control, a send or
+    /// a VCA's fader plays now: its override, else its static value;
+    /// `None` for plugins and unknown controls (Task 5 review I1). A
+    /// strip's fader is its own, without its VCAs (preflight F12). // RT
     pub(crate) fn heard_of(&self, dest: AutoDest) -> Option<f64> {
         let strip = match dest {
             AutoDest::Strip(s, _) | AutoDest::Send(s, _) => s,
             AutoDest::Plugin(..) => return None,
+            AutoDest::Vca(v) => {
+                return self
+                    .vca(v)
+                    .map(|v| fader_norm(v.over_db.unwrap_or(v.base.0)));
+            }
         };
         let s = self.find(strip).and_then(|i| self.strips.get(i))?;
         let on = |b: bool| if b { 1.0 } else { 0.0 };
@@ -389,7 +504,7 @@ impl Controls {
                 let send = f.send.filter(|x| x.index == index)?;
                 Some(fader_norm(f.over_db.unwrap_or(send.level_db)))
             }),
-            AutoDest::Plugin(..) => None,
+            AutoDest::Plugin(..) | AutoDest::Vca(_) => None,
         }
     }
 
@@ -427,6 +542,18 @@ impl Controls {
         }
     }
 
+    /// Automation's level (normalised) for VCA `vca`'s fader: an offset
+    /// on its members' faders at the next commit. // RT
+    pub(crate) fn set_vca(&mut self, vca: VcaId, v: f64) {
+        let Ok(i) = self.vcas.binary_search_by_key(&vca, |x| x.vca) else {
+            return;
+        };
+        if let Some(c) = self.vcas.get_mut(i) {
+            c.over_db = Some(fader_db(v));
+            self.any_override = true;
+        }
+    }
+
     /// Drops the overrides of the controls `driven` says no lane drives;
     /// the next commit writes their static values. // RT
     pub(crate) fn release(&mut self, driven: impl Fn(AutoDest) -> bool) {
@@ -452,13 +579,38 @@ impl Controls {
                 }
             }
         }
+        for v in self.vcas.iter_mut() {
+            if !driven(AutoDest::Vca(v.vca)) {
+                v.over_db = None;
+            }
+        }
         self.dirty = true;
         self.any_override = self.has_overrides();
     }
 
+    /// Whether any override is held. // RT
     fn has_overrides(&self) -> bool {
         self.strips.iter().any(|s| s.over != Over::default())
             || self.feeds.iter().any(|f| f.over_db.is_some())
+            || self.vcas.iter().any(|v| v.over_db.is_some())
+    }
+
+    /// What `s`'s VCAs add to it: their summed offset in dB (by the
+    /// model's `vca_sum`), whether one mutes it and whether one solos it.
+    /// // RT
+    fn vca_state(&self, s: &CtlStrip) -> (f64, bool, bool) {
+        let links = self.links.get(s.vca_links.clone()).unwrap_or(&[]);
+        let linked = || {
+            links
+                .iter()
+                .filter_map(|k| self.vcas.get(usize::try_from(*k).ok()?))
+        };
+        let offset = vca_sum(linked().map(|v| v.over_db.unwrap_or(v.base.0)));
+        (
+            offset,
+            linked().any(|v| v.base.1),
+            linked().any(|v| v.base.2),
+        )
     }
 
     /// Takes `old`'s overrides for the controls whose static value did not
@@ -497,6 +649,18 @@ impl Controls {
                 }
             }
         }
+        for v in self.vcas.iter_mut() {
+            let old_v = old
+                .vcas
+                .binary_search_by_key(&v.vca, |x| x.vca)
+                .ok()
+                .and_then(|j| old.vcas.get(j));
+            if let Some(o) = old_v {
+                if o.base.0 == v.base.0 {
+                    v.over_db = o.over_db;
+                }
+            }
+        }
         self.any_override = self.has_overrides();
         self.any_override
     }
@@ -505,7 +669,9 @@ impl Controls {
     /// per strip, which returns whether the strip's audibility changed,
     /// and `edge(input, gain, switched)` per fed edge, `switched` passing
     /// that change on (mute and solo switch hard, Plan 4d Ruling 11). The
-    /// gains are those the mixer translation computes (`graph::mixer`).
+    /// gains are those the mixer translation computes (`graph::mixer`):
+    /// a strip plays at `heard_db(own fader, Σ its VCAs)`, is muted by its
+    /// own mute or any VCA's, and is soloed by its own solo or any VCA's.
     /// Writes nothing (false) when no override exists and none was
     /// dropped. // RT
     pub(crate) fn commit(
@@ -517,14 +683,13 @@ impl Controls {
             return false;
         }
         self.dirty = false;
-        let any_solo = self
-            .strips
-            .iter()
-            .any(|s| s.over.solo.unwrap_or(s.base.solo));
+        let soloed =
+            |c: &Controls, s: &CtlStrip| s.over.solo.unwrap_or(s.base.solo) || c.vca_state(s).2;
+        let any_solo = self.strips.iter().any(|s| soloed(self, s));
         if any_solo {
             self.audible.fill(0);
             for s in self.strips.iter() {
-                if s.over.solo.unwrap_or(s.base.solo) {
+                if soloed(self, s) {
                     let keeps = self.keeps.get(s.keeps.clone()).unwrap_or(&[]);
                     for (a, k) in self.audible.iter_mut().zip(keeps) {
                         *a |= *k;
@@ -539,9 +704,10 @@ impl Controls {
                 .audible
                 .get(i / 64)
                 .is_some_and(|w| w & (1u64 << (i % 64)) != 0);
-            let on = kept && !s.over.mute.unwrap_or(s.base.mute);
+            let (offset, vca_mute, _) = self.vca_state(s);
+            let on = kept && !s.over.mute.unwrap_or(s.base.mute) && !vca_mute;
             let (gl, gr) = strip_gains(
-                s.over.db.unwrap_or(s.base.db),
+                heard_db(s.over.db.unwrap_or(s.base.db), offset),
                 s.over.pan.unwrap_or(s.base.pan),
                 s.apply_pan,
             );

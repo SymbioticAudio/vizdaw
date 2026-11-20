@@ -29,6 +29,7 @@ pub mod graph;
 pub mod input;
 pub mod input_fx;
 pub mod measure;
+pub mod metronome;
 pub mod midi1;
 pub mod mpe;
 pub mod notes;

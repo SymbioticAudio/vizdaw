@@ -24,14 +24,25 @@ static INTERVAL_MS: AtomicU64 = AtomicU64::new(120_000);
 /// Where VizDAW keeps its own files: set by the app, else
 /// `~/Library/Application Support/VizDAW`. Test builds (`test-hooks`)
 /// default to a per-process temporary folder, so tests never touch the
-/// user's.
+/// user's; it starts empty.
 pub fn support_dir() -> PathBuf {
     if let Some(p) = lock(&SUPPORT).clone() {
         return p;
     }
     #[cfg(feature = "test-hooks")]
     {
-        std::env::temp_dir().join(format!("vizdaw-test-support-{}", std::process::id()))
+        static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        TEST_DIR
+            .get_or_init(|| {
+                let p = std::env::temp_dir()
+                    .join(format!("vizdaw-test-support-{}", std::process::id()));
+                // A folder of this name is an earlier process's: process
+                // IDs are reused and test runs leave theirs behind. Task 9:
+                // a stale `surfaces.json.bad` in one failed a Kontrol test.
+                let _ = std::fs::remove_dir_all(&p);
+                p
+            })
+            .clone()
     }
     #[cfg(not(feature = "test-hooks"))]
     {

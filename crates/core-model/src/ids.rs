@@ -77,6 +77,16 @@ id_type!(
     StateBlobId,
     "state"
 );
+id_type!(
+    /// Identifies a fader group (plan groups-vcas Ruling 1).
+    GroupId,
+    "group"
+);
+id_type!(
+    /// Identifies a VCA (plan groups-vcas Ruling 1).
+    VcaId,
+    "vca"
+);
 
 /// Any ID, used in errors and reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -101,6 +111,10 @@ pub enum AnyId {
     Strip(StripId),
     /// A plugin instance.
     Plugin(PluginInstanceId),
+    /// A fader group.
+    Group(GroupId),
+    /// A VCA.
+    Vca(VcaId),
 }
 
 impl fmt::Display for AnyId {
@@ -116,6 +130,8 @@ impl fmt::Display for AnyId {
             AnyId::DrumRow(i) => i.fmt(f),
             AnyId::Strip(i) => i.fmt(f),
             AnyId::Plugin(i) => i.fmt(f),
+            AnyId::Group(i) => i.fmt(f),
+            AnyId::Vca(i) => i.fmt(f),
         }
     }
 }
@@ -139,10 +155,13 @@ any_from!(TakeId, Take);
 any_from!(DrumRowId, DrumRow);
 any_from!(StripId, Strip);
 any_from!(PluginInstanceId, Plugin);
+any_from!(GroupId, Group);
+any_from!(VcaId, Vca);
 
 /// Per-document ID counters. Each holds the next value to hand out; IDs are
-/// never reused within a document.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// never reused within a document. Group and VCA IDs start at 1, as the
+/// registry's do (plan groups-vcas Ruling 1); the others start at 0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Counters {
     /// Next sequence ID.
@@ -165,6 +184,36 @@ pub struct Counters {
     pub strip: u64,
     /// Next plugin instance ID.
     pub plugin: u64,
+    /// Next group ID; 1 in a file without one (a version-10 file).
+    #[serde(default = "first_id")]
+    pub group: u64,
+    /// Next VCA ID; 1 in a file without one (a version-10 file).
+    #[serde(default = "first_id")]
+    pub vca: u64,
+}
+
+/// The first group or VCA ID.
+fn first_id() -> u64 {
+    1
+}
+
+impl Default for Counters {
+    fn default() -> Self {
+        Counters {
+            seq: 0,
+            lane: 0,
+            event: 0,
+            dest: 0,
+            output: 0,
+            media: 0,
+            take: 0,
+            drum_row: 0,
+            strip: 0,
+            plugin: 0,
+            group: first_id(),
+            vca: first_id(),
+        }
+    }
 }
 
 fn bump(c: &mut u64) -> u64 {
@@ -213,5 +262,15 @@ impl Counters {
     /// Allocates a plugin instance ID.
     pub fn alloc_plugin(&mut self) -> PluginInstanceId {
         PluginInstanceId(bump(&mut self.plugin))
+    }
+    /// Allocates a group ID; never 0, even from a counter a file set to 0.
+    pub fn alloc_group(&mut self) -> GroupId {
+        self.group = self.group.max(first_id());
+        GroupId(bump(&mut self.group))
+    }
+    /// Allocates a VCA ID; never 0, even from a counter a file set to 0.
+    pub fn alloc_vca(&mut self) -> VcaId {
+        self.vca = self.vca.max(first_id());
+        VcaId(bump(&mut self.vca))
     }
 }

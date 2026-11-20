@@ -161,7 +161,10 @@ fn initialize_era_handshake() {
 fn modern_era_discover_and_versions() {
     let d = support_dir();
     let mut m = Mcp::spawn(d.path());
-    let meta = |v: &str| json!({"_meta": {"io.modelcontextprotocol/protocolVersion": v}});
+    let meta = |v: &str| {
+        json!({"_meta": {"io.modelcontextprotocol/protocolVersion": v,
+            "io.modelcontextprotocol/clientCapabilities": {}}})
+    };
     let r = m.result("server/discover", meta("2026-07-28"));
     assert_eq!(
         r["supportedVersions"],
@@ -776,12 +779,16 @@ fn legacy_elicitation_meanwhile() {
     let r = m.reply_to("list");
     assert!(r["tools"].is_array(), "{r}");
     assert_eq!(app.applies().len(), 1);
-    // A cancel ends the wait with no apply and no reply.
+    // A cancel ends the wait with no apply and no reply; the form is
+    // withdrawn (release gate Task 6).
     let e = m.ask("c2", &two_changes());
     m.send(
         &json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
         "params": {"requestId": "c2", "reason": "the user stopped it"}}),
     );
+    let n = m.recv();
+    assert_eq!(n["method"], "notifications/cancelled", "{n}");
+    assert_eq!(n["params"]["requestId"], e["id"], "{n}");
     m.silent_for(Duration::from_millis(300));
     // A late answer to the cancelled question is ignored.
     m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
@@ -906,14 +913,15 @@ fn modern_elicitation_round_trip() {
     );
     assert!(!is_error(&r), "{r}");
     assert_eq!(text(&r), SAID_NO);
-    // The capability may also sit beside `_meta`.
-    let r = m.result(
+    // The capability beside `_meta` is not read (the final 2026-07-28
+    // text puts it only in `_meta`; release gate Task 6).
+    let r = m.request(
         "tools/call",
         json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
             "clientCapabilities": {"elicitation": {}},
             "name": "change", "arguments": {"commands": two_changes()}}),
     );
-    assert_eq!(r["resultType"], "input_required", "{r}");
+    assert_eq!(r["error"]["code"], -32602, "{r}");
     assert_eq!(app.applies().len(), 1);
 }
 
@@ -3703,4 +3711,431 @@ fn mcp_never_opens_the_records() {
         }
     }
     assert!(seen >= 5);
+}
+
+// --- Release gate Task 6: the elicitation recheck (MCP 2026-07-28 final
+// text, 2026-11-18) ---
+
+const FOR_OTHER_COMMANDS: &str = "This token was for other commands, and is now used up. Call change again with the commands you want.";
+
+/// The token in a fallback `change` answer.
+fn token_in(listed: &str) -> String {
+    listed
+        .split_whitespace()
+        .skip_while(|t| *t != "token")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no token in {listed}"))
+        .to_string()
+}
+
+/// The fallback token goes only with the commands it was handed out
+/// for: other commands use it up and nothing reaches the app.
+#[test]
+fn fallback_token_is_bound_to_its_commands() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+    );
+    let token = token_in(&text(&m.call("change", json!({"commands": two_changes()}))));
+    assert_eq!(token, preview_token(1));
+    let before = app.seen().len();
+    let other = json!([{"id": "track.delete", "params": {"seq": 1, "lane": 9}}]);
+    let r = m.call("apply_change", json!({"token": token, "commands": other}));
+    assert!(is_error(&r), "{r}");
+    assert_eq!(text(&r), FOR_OTHER_COMMANDS);
+    assert_eq!(app.seen().len(), before, "refused before reaching the app");
+    // Used up: the right commands are refused now too.
+    let r = m.call(
+        "apply_change",
+        json!({"token": token, "commands": two_changes()}),
+    );
+    assert!(is_error(&r), "{r}");
+    assert_eq!(
+        text(&r),
+        "Use the token change returned in this conversation."
+    );
+    assert!(app.applies().is_empty(), "{:?}", app.applies());
+    // A fresh token with its own commands applies.
+    let token = token_in(&text(&m.call("change", json!({"commands": two_changes()}))));
+    let r = m.call(
+        "apply_change",
+        json!({"token": token, "commands": two_changes()}),
+    );
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(app.applies().len(), 1);
+    m.ping_answers();
+}
+
+/// The client cancels the call a form is open for: the form is withdrawn
+/// with `notifications/cancelled` naming the elicitation, and the call
+/// gets no reply.
+#[test]
+fn lingering_form_is_cancelled() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let e = m.ask("c1", &two_changes());
+    m.send(
+        &json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+        "params": {"requestId": "c1", "reason": "the user stopped it"}}),
+    );
+    let n = m.recv();
+    assert_eq!(n["method"], "notifications/cancelled", "{n}");
+    assert!(n.get("id").is_none(), "{n}");
+    assert_eq!(n["params"]["requestId"], e["id"], "{n}");
+    assert!(n["params"]["reason"].is_string(), "{n}");
+    m.silent_for(Duration::from_millis(300));
+    // A late yes to the withdrawn form is ignored.
+    m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
+    m.silent_for(Duration::from_millis(300));
+    m.ping_answers();
+    assert!(app.applies().is_empty(), "{:?}", app.applies());
+}
+
+/// A call kept while the composer is asked, then cancelled, never runs;
+/// the other kept calls still do, in order.
+#[test]
+fn cancelled_queued_call_never_runs() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let e = m.ask("c1", &two_changes());
+    m.send(&json!({"jsonrpc": "2.0", "id": "q", "method": "tools/call",
+        "params": {"name": "track_new_audio", "arguments": {"seq": 1}}}));
+    m.send(&json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": {"name": "track_new_audio", "arguments": {"seq": 2}}}));
+    m.send(&json!({"jsonrpc": "2.0", "id": "list", "method": "tools/list"}));
+    // The string "7" is not the number 7: that call is kept.
+    for id in [json!("q"), json!("7"), json!(["q"]), json!(null)] {
+        m.send(
+            &json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": id}}),
+        );
+    }
+    m.send_raw(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":"q"}"#);
+    m.silent_for(Duration::from_millis(300));
+    m.answer(&e, json!({"action": "accept", "content": {"allow": true}}));
+    assert!(!is_error(&m.reply_to("c1")));
+    let r = m.recv();
+    assert_eq!(r["id"], 7, "{r}");
+    assert!(!is_error(&r["result"]), "{r}");
+    assert!(m.reply_to("list")["tools"].is_array());
+    m.silent_for(Duration::from_millis(300));
+    m.ping_answers();
+    let runs = app.runs();
+    assert_eq!(
+        runs,
+        vec![run_of("track.new_audio", vec![("seq", ArgValue::Int(2))])]
+    );
+    assert_eq!(app.applies().len(), 1);
+}
+
+/// The question keeps its blank line before "Allow these changes?",
+/// however many items it lists and whatever they hold.
+#[test]
+fn allow_question_has_its_blank_line() {
+    use vizdaw_mcp::tools::question;
+    let item = |t: &str| json!({"thing": t, "change": "deleted"});
+    let many: Vec<Value> = (1..=45).map(|i| item(&format!("Track {i}"))).collect();
+    for items in [
+        vec![],
+        vec![item("Track 2, Vox")],
+        vec![item("Track 2\n"), item("Track 3\r\n\n")],
+        vec![json!({"thing": 5}), json!("x")],
+        many,
+    ] {
+        let q = question(&items);
+        let msg = q["message"].as_str().unwrap();
+        assert!(msg.ends_with("\n\nAllow these changes?"), "{msg:?}");
+        assert!(!msg.ends_with("\n\n\nAllow these changes?"), "{msg:?}");
+        assert_eq!(msg.matches("\n\n").count(), 1, "{msg:?}");
+        assert!(msg.starts_with("Co-Producer wants to change your work:\n"));
+    }
+    assert_eq!(
+        question(&[item("Track 2, Vox"), item("Track 3, Bass")])["message"],
+        "Co-Producer wants to change your work:\n- Track 2, Vox: deleted\n- Track 3, Bass: deleted\n\nAllow these changes?"
+    );
+}
+
+/// The fallback list, not a form: what a client that cannot show one gets.
+fn assert_fallback(r: &Value) {
+    assert!(!is_error(r), "{r}");
+    assert!(text(r).contains("Then call apply_change with token"), "{r}");
+}
+
+/// An `initialize` names its capabilities in `capabilities`; the same
+/// object in `_meta` is not read.
+#[test]
+fn initialize_with_capabilities_only_in_meta() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25",
+            "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {}}}}),
+    );
+    assert_fallback(&m.call("change", json!({"commands": two_changes()})));
+    assert!(app.applies().is_empty());
+    m.ping_answers();
+}
+
+/// Hostile `capabilities` at `initialize`: never a panic, never a form;
+/// the server answers and goes on.
+#[test]
+fn initialize_with_malformed_capabilities() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    for caps in [
+        json!(null),
+        json!("elicitation"),
+        json!([{"elicitation": {}}]),
+        json!(7),
+        json!({"elicitation": null}),
+        json!({"elicitation": true}),
+        json!({"elicitation": []}),
+        json!({"elicitation": "form"}),
+        json!({"elicitation": {"form": true}}),
+        json!({"elicitation": {"form": []}}),
+        json!({"elicitation": {"form": null, "url": {}}}),
+        json!({"elicitation": {"url": {}}}),
+        json!({"extensions": "x", "elicitation": {"url": 1}}),
+    ] {
+        let r = m.result(
+            "initialize",
+            json!({"protocolVersion": "2025-11-25", "capabilities": caps}),
+        );
+        assert_eq!(r["protocolVersion"], "2025-11-25", "{caps}");
+        assert_fallback(&m.call("change", json!({"commands": two_changes()})));
+    }
+    // `params` itself not an object.
+    let r = m.request("initialize", json!([1]));
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+    m.send_raw(r#"{"jsonrpc":"2.0","id":"s","method":"initialize","params":"x"}"#);
+    assert_eq!(m.recv()["error"]["code"], -32602);
+    assert!(app.applies().is_empty());
+    m.ping_answers();
+}
+
+/// An `initialize` that names 2026-07-28 in `_meta` mixes the eras: it
+/// is refused and changes nothing that was declared before.
+#[test]
+fn initialize_with_modern_version_in_meta() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    m.result(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+    );
+    let r = m.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}},
+            "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {"elicitation": {}}}}),
+    );
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("2026-07-28"),
+        "{r}"
+    );
+    // Still the first initialize's client: no form.
+    assert_fallback(&m.call("change", json!({"commands": two_changes()})));
+    assert!(app.applies().is_empty());
+    m.ping_answers();
+}
+
+/// After an `initialize` that declared forms, a 2026-07-28 call is read
+/// on its own: without forms in its `_meta` it gets the list and a token,
+/// and with them a `requestState`; no server-sent request either way.
+#[test]
+fn initialize_with_elicitation_then_a_modern_call() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::with_elicitation(d.path());
+    let r = m.result(
+        "tools/call",
+        modern_with(
+            json!({}),
+            json!({"name": "change", "arguments": {"commands": two_changes()}}),
+        ),
+    );
+    assert_eq!(r["resultType"], "complete", "{r}");
+    assert_fallback(&r);
+    let r = m.result(
+        "tools/call",
+        modern_with(
+            json!({"elicitation": {"form": {}, "url": {}}}),
+            json!({"name": "change", "arguments": {"commands": two_changes()}}),
+        ),
+    );
+    assert_eq!(r["resultType"], "input_required", "{r}");
+    m.silent_for(Duration::from_millis(300));
+    // The legacy era still asks with a form of its own.
+    let e = m.ask("c1", &two_changes());
+    m.answer(&e, json!({"action": "decline"}));
+    assert_eq!(text(&m.reply_to("c1")), SAID_NO);
+    assert!(app.applies().is_empty());
+}
+
+/// 2026-07-28 puts a request's client capabilities only in `_meta`: a
+/// `clientCapabilities` beside it is not read.
+#[test]
+fn modern_capabilities_beside_meta_are_not_read() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let r = m.request(
+        "tools/call",
+        json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+            "clientCapabilities": {"elicitation": {}},
+            "name": "change", "arguments": {"commands": two_changes()}}),
+    );
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+    let r = m.result(
+        "tools/call",
+        json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}},
+            "clientCapabilities": {"elicitation": {}, "extensions": {EXTENSION: {"mimeTypes": [MIME]}}},
+            "name": "change", "arguments": {"commands": two_changes()}}),
+    );
+    assert_eq!(r["resultType"], "complete", "{r}");
+    assert_fallback(&r);
+    assert!(r.get("structuredContent").is_none(), "no views: {r}");
+    assert!(app.applies().is_empty());
+    m.ping_answers();
+}
+
+/// A 2026-07-28 request must carry its client capabilities in `_meta`,
+/// as an object: else `-32602`, and nothing reaches the app. Malformed
+/// shapes inside the object mean no form, never a panic.
+#[test]
+fn modern_request_without_client_capabilities_is_refused() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    let version = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28"});
+    let mut metas = vec![version.clone()];
+    for caps in [json!(null), json!("x"), json!([]), json!(5), json!(true)] {
+        let mut meta = version.clone();
+        meta["io.modelcontextprotocol/clientCapabilities"] = caps;
+        metas.push(meta);
+    }
+    for meta in metas {
+        for (method, extra) in [
+            ("server/discover", json!({})),
+            ("tools/list", json!({})),
+            (
+                "tools/call",
+                json!({"name": "change", "arguments": {"commands": two_changes()}}),
+            ),
+        ] {
+            let mut p = extra.clone();
+            p["_meta"] = meta.clone();
+            let r = m.request(method, p);
+            assert_eq!(r["error"]["code"], -32602, "{method} {meta}: {r}");
+        }
+    }
+    assert!(app.seen().is_empty(), "{:?}", app.seen());
+    for caps in [
+        json!({"elicitation": null}),
+        json!({"elicitation": true}),
+        json!({"elicitation": []}),
+        json!({"elicitation": {"form": 1}}),
+        json!({"elicitation": {"url": {}}}),
+        json!({"elicitation": {"form": "yes"}, "extensions": []}),
+    ] {
+        let r = m.result(
+            "tools/call",
+            modern_with(
+                caps.clone(),
+                json!({"name": "change", "arguments": {"commands": two_changes()}}),
+            ),
+        );
+        assert_eq!(r["resultType"], "complete", "{caps}: {r}");
+        assert_fallback(&r);
+    }
+    assert!(app.applies().is_empty());
+    m.ping_answers();
+}
+
+/// 2026-07-28 answers a resource that does not exist with `-32602`
+/// (it must not send `-32002`); the `initialize` era keeps `-32002`.
+#[test]
+fn modern_unknown_resource_is_invalid_params() {
+    let d = support_dir();
+    let mut m = Mcp::spawn(d.path());
+    for uri in ["ui://vizdaw/nope", "vizdaw://nope"] {
+        let r = m.request(
+            "resources/read",
+            modern_with(json!({}), json!({"uri": uri})),
+        );
+        assert_eq!(r["error"]["code"], -32602, "{uri}: {r}");
+    }
+    assert_eq!(
+        m.error_code("resources/read", json!({"uri": "ui://vizdaw/nope"})),
+        -32002
+    );
+    m.ping_answers();
+}
+
+/// groups-vcas-transport Task 7 (Ruling 10): `mixer_new_group` and
+/// `mixer_new_vca` make only empty ones, so their tools offer no
+/// `strips`; a call that gives one reaches no app. The `change` tool says
+/// where the rest goes.
+#[test]
+fn new_group_and_vca_tools_have_no_strips() {
+    let d = support_dir();
+    let app = FakeApp::start(d.path());
+    let mut m = Mcp::spawn(d.path());
+    for name in ["mixer_new_group", "mixer_new_vca"] {
+        let tool = tool_named(&mut m, name);
+        assert!(!tool.is_null(), "{name} is a tool");
+        let props = &tool["inputSchema"]["properties"];
+        assert!(props.get("strips").is_none(), "{name}: {props}");
+        assert!(props.get("name").is_some(), "{name}: {props}");
+        assert!(props.get("colour").is_some(), "{name}: {props}");
+        assert_eq!(tool["inputSchema"]["required"], json!([]), "{name}");
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name}");
+    }
+    // Every other group and VCA command goes through `change`.
+    let tools = m.result("tools/list", json!({}));
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for id in core_control::registry::GROUP_IDS {
+        let n = id.replace('.', "_");
+        let tool = ["mixer.new_group", "mixer.new_vca"].contains(id);
+        assert_eq!(names.contains(&n.as_str()), tool, "{n}");
+    }
+    let change = tool_named(&mut m, "change")["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        change.contains(
+            "Fader groups and VCAs: make an empty one with mixer_new_group or mixer_new_vca, then add strips, move, mute, solo, rename, recolour, relink or delete it here; a group or VCA that holds any of the composer's strips asks first."
+        ),
+        "{change}"
+    );
+    for (tool, args) in [
+        ("mixer_new_group", json!({"strips": "2,3"})),
+        ("mixer_new_vca", json!({"strips": "2"})),
+        ("mixer_new_vca", json!({"name": "Kit", "strips": "2"})),
+    ] {
+        let r = m.call(tool, args.clone());
+        assert!(is_error(&r), "{tool} {args}: {r}");
+    }
+    m.ping_answers();
+    assert!(app.seen().is_empty(), "no socket call: {:?}", app.seen());
 }

@@ -10,10 +10,11 @@ use core_engine::graph::{
 };
 use core_engine::schedule::{AutoDest, StripParam, TargetIdx};
 use core_model::automation::{fader_db, fader_norm, pan_norm};
-use core_model::command::MixerCmd;
+use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::document::Document;
-use core_model::ids::{PluginInstanceId, StripId};
-use core_model::mixer::{AuxSend, PluginRef, PluginSlot, StripKind, db_to_gain};
+use core_model::groups::group_gains;
+use core_model::ids::{AnyId, PluginInstanceId, StripId, VcaId};
+use core_model::mixer::{AuxSend, PluginRef, PluginSlot, StripKind, Swatch, db_to_gain};
 use core_model::mixer_rules::audible;
 
 fn zero(_: &PluginSlot) -> u32 {
@@ -25,7 +26,7 @@ fn built(doc: &Document) -> (Graph, Vec<(usize, StripId)>) {
     let mg = mixer_spec(doc, &[InstrumentFeed::builtin(TargetIdx(0), 0)], &mut zero);
     let p = plan(&mg.spec, 96_000).unwrap();
     let mut g = Graph::build(&mg.spec, &p, 512, |_, _| InsertInit::Placeholder);
-    g.set_controls(&mg.controls);
+    g.set_controls(&mg.controls, &mg.vcas);
     (g, mg.strips)
 }
 
@@ -215,19 +216,23 @@ fn noise_runner(reference: bool) -> Runner {
             solo: false,
             feeds,
             solo_keeps: vec![S, M],
+            vcas: Vec::new(),
         };
-        g.set_controls(&[
-            ctl(
-                S,
-                0,
-                vec![FeedSpec {
-                    to: 1,
-                    input: 0,
-                    send: None,
-                }],
-            ),
-            ctl(M, 1, Vec::new()),
-        ]);
+        g.set_controls(
+            &[
+                ctl(
+                    S,
+                    0,
+                    vec![FeedSpec {
+                        to: 1,
+                        input: 0,
+                        send: None,
+                    }],
+                ),
+                ctl(M, 1, Vec::new()),
+            ],
+            &[],
+        );
     }
     Runner::serial(g)
 }
@@ -344,4 +349,116 @@ fn an_automated_mute_leaves_the_sidechain_feed() {
         vec![1.0],
         "an automated mute still feeds the sidechain"
     );
+}
+
+/// A new VCA of `members` at `gain_db`.
+fn vca(b: &mut Builder, members: Vec<StripId>, gain_db: f64) -> VcaId {
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "V".into(),
+            colour: Swatch::Purple,
+            members,
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(v)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
+    b.run(Command::Groups(GroupCmd::SetVcaLevel { vca: v, gain_db }))
+        .unwrap();
+    v
+}
+
+/// Spec §2a: an automated fader still hears its VCAs; the override is the
+/// member's own fader (preflight F12).
+#[test]
+fn commit_keeps_the_vca_offset() {
+    let fader = |s| AutoDest::Strip(s, StripParam::Fader);
+    let own = fader_db(fader_norm(-3.0));
+    for with_vca in [true, false] {
+        let (mut b, synth, _, _, _) = routed();
+        if with_vca {
+            vca(&mut b, vec![synth], -6.0);
+        }
+        let offset = if with_vca { -6.0 } else { 0.0 };
+        let (mut g, strips) = built(b.doc());
+        let sn = node(&strips, synth);
+        let (l, r) = strip_gains(offset, 0.0, true);
+        assert_eq!(g.gains(sn), Some((l, r, true)), "static, VCA {with_vca}");
+        g.automate_strip(synth, StripParam::Fader, fader_norm(-3.0));
+        g.commit_controls(false);
+        let (l, r) = strip_gains(own + offset, 0.0, true);
+        assert_eq!(g.gains(sn), Some((l, r, true)), "committed, VCA {with_vca}");
+        // What automation and a drag read is the own fader.
+        assert_eq!(g.heard_value(fader(synth)), Some(fader_norm(own)));
+        assert_eq!(g.static_value(fader(synth)), Some(fader_norm(0.0)));
+        // Released, the static gains come back.
+        g.release_overrides(|_| false);
+        g.commit_controls(false);
+        let (l, r) = strip_gains(offset, 0.0, true);
+        assert_eq!(g.gains(sn), Some((l, r, true)), "released, VCA {with_vca}");
+    }
+}
+
+/// A commit hears a VCA's mute and solo as the static path does.
+#[test]
+fn commit_hears_vca_mute_and_solo() {
+    // Muted: the synth and its send are off after a commit.
+    let (mut b, synth, a, _, _) = routed();
+    let v = vca(&mut b, vec![synth], 0.0);
+    b.run(Command::Groups(GroupCmd::SetVcaMute { vca: v, mute: true }))
+        .unwrap();
+    let (mut g, strips) = built(b.doc());
+    let (sn, an) = (node(&strips, synth), node(&strips, a));
+    g.automate_strip(synth, StripParam::Pan, pan_norm(0.0));
+    g.commit_controls(false);
+    assert_eq!(g.gains(sn).map(|x| x.2), Some(false));
+    assert_eq!(g.edge_gains(an), vec![0.0]);
+    // Soloed (B): the synth and A are silenced, B plays.
+    let (mut b, synth, a, bus_b2, _) = routed();
+    let v = vca(&mut b, vec![bus_b2], 0.0);
+    b.run(Command::Groups(GroupCmd::SetVcaSolo { vca: v, solo: true }))
+        .unwrap();
+    let (mut g, strips) = built(b.doc());
+    let before: Vec<_> = strips.iter().map(|(n, _)| g.gains(*n)).collect();
+    g.automate_strip(synth, StripParam::Pan, pan_norm(0.0));
+    g.commit_controls(false);
+    let after: Vec<_> = strips.iter().map(|(n, _)| g.gains(*n)).collect();
+    assert_eq!(before, after, "the commit and the static path agree");
+    assert_eq!(g.gains(node(&strips, synth)).map(|x| x.2), Some(false));
+    assert_eq!(g.gains(node(&strips, a)).map(|x| x.2), Some(false));
+    assert_eq!(g.gains(node(&strips, bus_b2)).map(|x| x.2), Some(true));
+    let heard = audible(b.doc().mixer());
+    assert!(heard.contains(&bus_b2) && !heard.contains(&synth));
+}
+
+/// Preflight F12: a group move changes only the members' own faders. A
+/// member of a −6 dB VCA moved by −3 has its fader at −3 (not −9), and is
+/// heard at −9.
+#[test]
+fn a_group_move_leaves_the_vca_out_of_the_members_faders() {
+    let fader = |s| AutoDest::Strip(s, StripParam::Fader);
+    let (mut b, _, a, bus_b, _) = routed();
+    b.run(Command::Groups(GroupCmd::NewGroup {
+        name: "G".into(),
+        colour: Swatch::Red,
+        members: vec![a, bus_b],
+    }))
+    .unwrap();
+    vca(&mut b, vec![bus_b], -6.0);
+    let (g, strips) = built(b.doc());
+    // A drag's follower base is what the engine plays as the own fader.
+    assert_eq!(g.heard_value(fader(bus_b)), Some(fader_norm(0.0)));
+    let moves = group_gains(b.doc().mixer(), a, -3.0);
+    assert_eq!(moves, vec![(a, -3.0), (bus_b, -3.0)]);
+    for (strip, gain_db) in moves {
+        b.mixer(MixerCmd::SetGain { strip, gain_db }).unwrap();
+    }
+    assert_eq!(b.doc().mixer().strip(bus_b).unwrap().gain_db, -3.0);
+    let (g2, strips2) = built(b.doc());
+    assert_eq!(strips, strips2);
+    let (l, r) = strip_gains(-9.0, 0.0, true);
+    assert_eq!(g2.gains(node(&strips2, bus_b)), Some((l, r, true)));
+    let (l, r) = strip_gains(-3.0, 0.0, true);
+    assert_eq!(g2.gains(node(&strips2, a)), Some((l, r, true)));
+    assert_eq!(g2.heard_value(fader(bus_b)), Some(fader_norm(-3.0)));
 }

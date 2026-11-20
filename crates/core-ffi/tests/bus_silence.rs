@@ -464,3 +464,172 @@ fn removing_a_bus_the_composer_reaches_through_a_send_asks() {
     s.co_producer_end().unwrap();
     s.close().unwrap();
 }
+
+// ---- groups-vcas-transport Task 7 fix round 1: what is heard decides.
+// A VCA's mute, or its level at −∞, silences a Co-Producer bus as the
+// bus's own mute or fader would. ----
+
+fn vca_named(s: &Session, name: &str) -> u64 {
+    s.mixer()
+        .unwrap()
+        .vcas
+        .into_iter()
+        .find(|v| v.name == name)
+        .unwrap_or_else(|| panic!("no VCA {name}"))
+        .id
+}
+
+fn set_vca(vca: u64, more: Vec<ControlArg>) -> PlannedRow {
+    let mut args = vec![id("vca", vca)];
+    args.extend(more);
+    planned("mixer.set_vca", args)
+}
+
+fn assign(vca: u64, strip: u64) -> PlannedRow {
+    planned(
+        "mixer.assign_vca",
+        vec![id("vca", vca), text("strips", &strip.to_string())],
+    )
+}
+
+/// Co-Producer's empty VCA "Ride" (an add, run directly in the open
+/// request), then `bus` assigned to it through a preview (free: Ride
+/// holds only Co-Producer's bus at 0 dB, which changes nothing heard).
+fn ride_with(s: &Session, bus: u64) -> u64 {
+    s.co_producer_enter(STAMP.into()).unwrap();
+    s.run_mixer("mixer.new_vca".into(), vec![text("name", "Ride")])
+        .unwrap();
+    s.co_producer_leave();
+    let ride = vca_named(s, "Ride");
+    let plan = vec![assign(ride, bus)];
+    let p = s.co_producer_preview(plan.clone()).unwrap();
+    assert!(!p.needs_yes, "{p:?}");
+    take_with(s, p.token, &plan, CoProducerApproval::None).unwrap();
+    ride
+}
+
+#[test]
+fn muting_a_vca_that_holds_a_bus_the_composer_feeds_asks() {
+    let _g = serial();
+    let t = song();
+    let s = &t.s;
+    s.add_send(t.kick, t.drums).unwrap();
+    s.co_producer_begin("ride the drums".into()).unwrap();
+    let ride = ride_with(s, t.drums);
+    let p = s
+        .co_producer_preview(vec![set_vca(ride, vec![flag("mute", true)])])
+        .unwrap();
+    assert!(p.needs_yes, "{p:?}");
+    assert_eq!(
+        item_of(&p, DRUMS),
+        ("muted by a VCA; Kick goes silent through it".into(), true)
+    );
+    let e = take_with(
+        s,
+        p.token,
+        &[set_vca(ride, vec![flag("mute", true)])],
+        CoProducerApproval::None,
+    )
+    .unwrap_err();
+    assert_eq!(e.to_string(), NEEDS_APPROVAL);
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+#[test]
+fn a_vca_taking_a_bus_the_composer_feeds_to_minus_infinity_asks() {
+    let _g = serial();
+    let t = song();
+    let s = &t.s;
+    s.add_send(t.kick, t.drums).unwrap();
+    s.co_producer_begin("ride the drums".into()).unwrap();
+    let ride = ride_with(s, t.drums);
+    let p = s
+        .co_producer_preview(vec![set_vca(ride, vec![text("gain_db", "-144")])])
+        .unwrap();
+    assert!(p.needs_yes, "{p:?}");
+    assert_eq!(
+        item_of(&p, DRUMS),
+        (
+            "heard 0.0 dB → −∞ dB; Kick goes silent through it".into(),
+            true
+        )
+    );
+    // Lower, but still heard: free.
+    let p = s
+        .co_producer_preview(vec![set_vca(ride, vec![text("gain_db", "-20")])])
+        .unwrap();
+    assert!(!p.needs_yes, "{p:?}");
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+#[test]
+fn assigning_a_bus_the_composer_feeds_to_a_silent_vca_asks() {
+    let _g = serial();
+    let t = song();
+    let s = &t.s;
+    s.add_send(t.kick, t.drums).unwrap();
+    s.co_producer_begin("ride the drums".into()).unwrap();
+    // A VCA of Co-Producer's other bus only, muted, then one at −∞.
+    let ride = ride_with(s, t.verb);
+    let plan = vec![set_vca(ride, vec![flag("mute", true)])];
+    let p = s.co_producer_preview(plan.clone()).unwrap();
+    assert!(
+        !p.needs_yes,
+        "nothing of the composer's reaches Verb: {p:?}"
+    );
+    take_with(s, p.token, &plan, CoProducerApproval::None).unwrap();
+    let p = s.co_producer_preview(vec![assign(ride, t.drums)]).unwrap();
+    assert!(p.needs_yes, "{p:?}");
+    assert_eq!(
+        item_of(&p, DRUMS),
+        ("muted by a VCA; Kick goes silent through it".into(), true)
+    );
+    let plan = vec![set_vca(
+        ride,
+        vec![flag("mute", false), text("gain_db", "-144")],
+    )];
+    let p = s.co_producer_preview(plan.clone()).unwrap();
+    assert!(!p.needs_yes, "{p:?}");
+    take_with(s, p.token, &plan, CoProducerApproval::None).unwrap();
+    let p = s.co_producer_preview(vec![assign(ride, t.drums)]).unwrap();
+    assert!(p.needs_yes, "{p:?}");
+    assert_eq!(
+        item_of(&p, DRUMS),
+        (
+            "heard 0.0 dB → −∞ dB; Kick goes silent through it".into(),
+            true
+        )
+    );
+    // Unassigning Verb, which only Co-Producer feeds, stays free.
+    let p = s
+        .co_producer_preview(vec![planned(
+            "mixer.unassign_vca",
+            vec![id("vca", ride), text("strips", &t.verb.to_string())],
+        )])
+        .unwrap();
+    assert!(!p.needs_yes, "{p:?}");
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}
+
+#[test]
+fn a_vca_silencing_a_bus_only_co_producer_feeds_stays_free() {
+    let _g = serial();
+    let t = song();
+    let s = &t.s;
+    // Co-Producer's own track Loop feeds Drums; no composer's sound does.
+    s.set_output(t.lp, Some(t.drums)).unwrap();
+    s.co_producer_begin("ride the drums".into()).unwrap();
+    let ride = ride_with(s, t.drums);
+    for plan in [
+        set_vca(ride, vec![flag("mute", true)]),
+        set_vca(ride, vec![text("gain_db", "-144")]),
+    ] {
+        let p = s.co_producer_preview(vec![plan]).unwrap();
+        assert!(!p.needs_yes, "{p:?}");
+    }
+    s.co_producer_end().unwrap();
+    s.close().unwrap();
+}

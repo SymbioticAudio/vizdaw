@@ -2350,6 +2350,10 @@ impl Host {
         self.engine
             .set_automation_suspended(crate::automation::suspended());
         let report = self.engine.load(doc, seq)?;
+        // The live engine alone clicks (Ruling 19): a bounce or an export
+        // builds its own engine and never sends this.
+        self.engine
+            .set_click(crate::session::click::click_spec(&doc.settings().click));
         self.report = report_lines(&report);
         self.engine.set_loop(looped)?;
         self.looped = looped;
@@ -3183,6 +3187,9 @@ pub fn reload(
                     h.engine.restart_instance(id);
                 }
             }
+            // A click change is heard at once, even while plug-ins load.
+            h.engine
+                .set_click(crate::session::click::click_spec(&doc.settings().click));
             if !ready {
                 return Ok(());
             }

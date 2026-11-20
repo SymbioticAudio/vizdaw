@@ -286,7 +286,9 @@ import VizDAWCore
     @Test func mixerEditsRunOnlyAfterATake() throws {
         let (s, id, m, f) = try demo()
         let strip = int("strip", 1)
-        for edit in MixerCommands.coProducerEdits where edit != "track.new_plugin_instrument" {
+        // A new group or VCA is an add without `strips` (its own test).
+        for edit in MixerCommands.coProducerEdits
+        where edit != "track.new_plugin_instrument" && !CoProducerCommands.newGroupOrVca.contains(edit) {
             let o = run(command(edit, [strip]), s, id)
             #expect(failure(o)?.code == .notAllowed, "\(edit): \(o)")
         }
@@ -330,6 +332,32 @@ import VizDAWCore
         #expect(failure(denied)?.message == CoProducerCommands.notAllowed)
         #expect(f.coLog.isEmpty)
         #expect(f.mixerRuns.count == runs)
+    }
+
+    /// groups-vcas-transport Ruling 10, as the Rust gate's
+    /// `effective_class`: a new group or VCA without `strips` adds, so it
+    /// runs between enter and leave; with `strips` it changes the
+    /// composer's strips, so `command.run` of it is refused.
+    @Test func emptyGroupsAndVcasAreAdds() throws {
+        let (s, id, _, f) = try demo()
+        #expect(CoProducerCommands.newGroupOrVca == ["mixer.new_group", "mixer.new_vca"])
+        for new in ["mixer.new_group", "mixer.new_vca"] {
+            #expect(!CoProducerCommands.changesWork(new, []), "\(new)")
+            #expect(!CoProducerCommands.changesWork(new, [text("name", "Kit")]), "\(new)")
+            #expect(CoProducerCommands.changesWork(new, [text("strips", "2")]), "\(new)")
+            f.coLog = []
+            let refused = run(command(new, [text("strips", "2,3")]), s, id)
+            #expect(failure(refused)?.code == .notAllowed, "\(new): \(refused)")
+            #expect(f.coLog.isEmpty, "\(new)")
+            let added = run(command(new, [text("name", "Kit")]), s, id)
+            #expect(failure(added) == nil, "\(new): \(added)")
+            #expect(f.coLog == ["enter \(stamp)", "runMixer \(new)", "leave"], "\(new)")
+        }
+        // Every other group and VCA command changes work, whatever its args.
+        for edit in MixerCommands.coProducerEdits where edit.contains("group") || edit.contains("vca") {
+            if CoProducerCommands.newGroupOrVca.contains(edit) { continue }
+            #expect(CoProducerCommands.changesWork(edit, []), "\(edit)")
+        }
     }
 
     /// Plan 8b Task 5: the notes, a note and an export folder reach the
@@ -1112,6 +1140,31 @@ import VizDAWCore
                 r, doc: nil, store: s, host: host, stamp: stamp, peer: nil, approver: FakeApprover(.allow))
             #expect(failure(none)?.code == .noDocument)
         }
+    }
+
+    /// Release gate B2: Co-Producer writes no notes in 26.0.0, so a MIDI
+    /// import (any form), an audio import onto a track and a track
+    /// duplicate are refused here as the gate refuses them, with no enter.
+    /// An audio import with no `lane` goes on new tracks and still runs.
+    @Test func coProducerImportOntoATrackIsRefused() throws {
+        let (s, id, _, f) = try demo()
+        for (cmd, args) in [
+            ("file.import_midi", [text("path", "/tmp/a.mid")]),
+            ("file.import_midi", [text("path", "/tmp/a.mid"), int("seq", 1), int("lane", 2), int("tick", 0)]),
+            ("file.import_midi", [text("path", "/tmp/a.mid"), ControlArg(name: "new_project", value: .flag(value: true))]),
+            ("media.import", [text("path", "/tmp/a.wav"), int("seq", 1), int("lane", 2), int("tick", 0)]),
+            ("media.import", [text("path", "/tmp/a.wav"), int("lane", 0)]),
+            ("track.duplicate", []),
+            ("track.duplicate", [int("seq", 1), int("lane", 2)]),
+        ] {
+            f.coLog = []
+            let o = run(command(cmd, args), s, id)
+            #expect(failure(o)?.code == .notAllowed, "\(cmd) \(args)")
+            #expect(failure(o)?.message == "Co-Producer cannot run \(cmd).", "\(cmd) \(args)")
+            #expect(f.coLog == [], "\(cmd) \(args)")
+        }
+        #expect(!CoProducerCommands.refusedIn26("media.import", [text("path", "/tmp/a.wav"), int("seq", 1)]))
+        #expect(!CoProducerCommands.refusedIn26("track.new_midi", []))
     }
 
     /// Plan 8e Task 6b: a fade shape, the Built-in Synth's sound and a

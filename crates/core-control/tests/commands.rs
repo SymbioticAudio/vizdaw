@@ -563,8 +563,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        217,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records"
+        237,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar; Task 12 adds ui.customize_transport"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -3527,4 +3527,592 @@ fn time_settings_check_their_params() {
         run(registry::DELETE_TIME_RECORDS, json!({"all": true})),
     );
     assert_eq!(code, ErrorCode::InvalidParams, "{msg}");
+}
+
+/// Groups-vcas-transport Task 2: the seven group commands, with the plan
+/// table's parameters, class, menu and title; `mixer.new_group` and
+/// `mixer.delete_group` have menu items; `strips` goes through the ID
+/// list and `mixer.set_group_links` needs a switch.
+#[test]
+fn group_commands_are_registered() {
+    use core_control::registry::{Class, GROUP_COLOURS, GROUP_IDS, ParamKind};
+    let spec = |id: &str| registry::find(id).unwrap_or_else(|| panic!("{id}"));
+    // (id, params as (name, required), class, title, menu item)
+    type Row = (
+        &'static str,
+        &'static [(&'static str, bool)],
+        Class,
+        &'static str,
+        bool,
+    );
+    let table: [Row; 7] = [
+        (
+            "mixer.new_group",
+            &[("strips", false), ("name", false), ("colour", false)],
+            Class::Add,
+            "Group",
+            true,
+        ),
+        (
+            "mixer.rename_group",
+            &[("group", true), ("name", true)],
+            Class::Change,
+            "Rename Group",
+            false,
+        ),
+        (
+            "mixer.set_group_colour",
+            &[("group", true), ("colour", true)],
+            Class::Change,
+            "Group Colour",
+            false,
+        ),
+        (
+            "mixer.add_to_group",
+            &[("group", true), ("strips", true)],
+            Class::Change,
+            "Add to Group",
+            false,
+        ),
+        (
+            "mixer.remove_from_group",
+            &[("group", true), ("strips", true)],
+            Class::Change,
+            "Remove from Group",
+            false,
+        ),
+        (
+            "mixer.set_group_links",
+            &[("group", true), ("mute", false), ("solo", false)],
+            Class::Change,
+            "Group Links",
+            false,
+        ),
+        (
+            "mixer.delete_group",
+            &[("group", true)],
+            Class::Remove,
+            "Ungroup",
+            true,
+        ),
+    ];
+    assert_eq!(&GROUP_IDS[..7], table.map(|t| t.0));
+    assert_eq!(
+        GROUP_COLOURS,
+        [
+            "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"
+        ]
+    );
+    for (id, params, class, title, menu_item) in table {
+        let s = spec(id);
+        let got: Vec<(&str, bool)> = s.params.iter().map(|p| (p.name, p.required)).collect();
+        assert_eq!(got, params, "{id}");
+        assert_eq!(
+            (
+                s.class,
+                s.menu,
+                s.title,
+                s.menu_item,
+                s.document,
+                s.shortcut
+            ),
+            (class, "Mixer", title, menu_item, true, None),
+            "{id}"
+        );
+        assert!(s.dialogs.is_empty(), "{id}");
+        for p in s.params {
+            let want = match p.name {
+                "group" => ParamKind::Int {
+                    min: 1,
+                    max: registry::MAX_EXACT_ID,
+                },
+                "strips" | "name" => ParamKind::Text,
+                "colour" => ParamKind::Choice(GROUP_COLOURS),
+                "mute" | "solo" => ParamKind::Flag,
+                other => panic!("{id}: {other}"),
+            };
+            assert_eq!(p.kind, want, "{id} {}", p.name);
+        }
+    }
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    assert_eq!(
+        ok(
+            "command.run",
+            run(
+                "mixer.new_group",
+                json!({"strips": "3,1", "name": "Drums", "colour": "teal"})
+            )
+        ),
+        Command::CommandRun {
+            id: "mixer.new_group".into(),
+            args: vec![
+                ("strips".into(), ArgValue::Text("3,1".into())),
+                ("name".into(), ArgValue::Text("Drums".into())),
+                ("colour".into(), ArgValue::Text("teal".into())),
+            ],
+            window: None,
+        }
+    );
+    assert_eq!(
+        ok("command.run", run("mixer.new_group", json!({}))),
+        Command::CommandRun {
+            id: "mixer.new_group".into(),
+            args: vec![],
+            window: None,
+        }
+    );
+    for params in [
+        json!({"group": 1, "mute": false}),
+        json!({"group": 1, "solo": true}),
+    ] {
+        ok("command.run", run("mixer.set_group_links", params));
+    }
+    let huge = "x".repeat(70_000);
+    let many = (1..=65)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for (id, params) in [
+        ("mixer.new_group", json!({"strips": "1,1"})),
+        ("mixer.new_group", json!({"strips": "0"})),
+        ("mixer.new_group", json!({"strips": many})),
+        ("mixer.new_group", json!({"strips": ""})),
+        ("mixer.new_group", json!({"strips": "1;2"})),
+        ("mixer.new_group", json!({"strips": 1})),
+        ("mixer.new_group", json!({"name": huge})),
+        ("mixer.new_group", json!({"colour": "none"})),
+        ("mixer.new_group", json!({"colour": "Red"})),
+        ("mixer.new_group", json!({"extra": 1})),
+        ("mixer.rename_group", json!({"group": 1})),
+        ("mixer.rename_group", json!({"name": "x"})),
+        ("mixer.rename_group", json!({"group": 0, "name": "x"})),
+        ("mixer.rename_group", json!({"group": -1, "name": "x"})),
+        (
+            "mixer.set_group_colour",
+            json!({"group": 1, "colour": "none"}),
+        ),
+        ("mixer.add_to_group", json!({"group": 1})),
+        ("mixer.add_to_group", json!({"group": 1, "strips": "x"})),
+        (
+            "mixer.remove_from_group",
+            json!({"group": 1, "strips": "2,2"}),
+        ),
+        ("mixer.set_group_links", json!({"group": 1})),
+        ("mixer.set_group_links", json!({"group": 1, "mute": "yes"})),
+        ("mixer.delete_group", json!({})),
+        ("mixer.delete_group", json!({"group": u64::MAX})),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+}
+
+/// Groups-vcas-transport Task 2: `alone` is an optional Flag on
+/// `mixer.set_strip` and `automation.gesture`; alone, it is no setting.
+#[test]
+fn alone_moves_one_strip() {
+    use core_control::registry::ParamKind;
+    for id in ["mixer.set_strip", "automation.gesture"] {
+        let p = registry::find(id)
+            .unwrap()
+            .params
+            .iter()
+            .find(|p| p.name == "alone")
+            .unwrap_or_else(|| panic!("{id} has no alone"));
+        assert_eq!((p.kind, p.required), (ParamKind::Flag, false), "{id}");
+    }
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    assert_eq!(
+        ok(
+            "command.run",
+            run(
+                "mixer.set_strip",
+                json!({"strip": 2, "gain_db": "-3", "alone": true})
+            )
+        ),
+        Command::CommandRun {
+            id: "mixer.set_strip".into(),
+            args: vec![
+                ("strip".into(), ArgValue::Int(2)),
+                ("gain_db".into(), ArgValue::Text("-3".into())),
+                ("alone".into(), ArgValue::Flag(true)),
+            ],
+            window: None,
+        }
+    );
+    ok(
+        "command.run",
+        run(
+            "automation.gesture",
+            json!({"target": "fader:2", "phase": "touch", "alone": true}),
+        ),
+    );
+    for (id, params) in [
+        ("mixer.set_strip", json!({"strip": 2, "alone": true})),
+        (
+            "mixer.set_strip",
+            json!({"strip": 2, "mute": true, "alone": 1}),
+        ),
+        (
+            "automation.gesture",
+            json!({"target": "fader:2", "phase": "touch", "alone": "yes"}),
+        ),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+}
+
+/// Groups-vcas-transport Task 5: the seven VCA commands, as Task 2's
+/// test is for groups: the plan table's parameters, class, menu and
+/// title; `mixer.new_vca` has a menu item; `strips` goes through the ID
+/// list, `gain_db` through `decimal`, `mode` is off, read, touch or latch
+/// and `mixer.set_vca` needs a setting.
+#[test]
+fn vca_commands_are_registered() {
+    use core_control::registry::{Class, GROUP_COLOURS, GROUP_IDS, ParamKind, VCA_MODE_NAMES};
+    let spec = |id: &str| registry::find(id).unwrap_or_else(|| panic!("{id}"));
+    type Row = (
+        &'static str,
+        &'static [(&'static str, bool)],
+        Class,
+        &'static str,
+        bool,
+    );
+    let table: [Row; 7] = [
+        (
+            "mixer.new_vca",
+            &[("strips", false), ("name", false), ("colour", false)],
+            Class::Add,
+            "New VCA",
+            true,
+        ),
+        (
+            "mixer.rename_vca",
+            &[("vca", true), ("name", true)],
+            Class::Change,
+            "Rename VCA",
+            false,
+        ),
+        (
+            "mixer.set_vca_colour",
+            &[("vca", true), ("colour", true)],
+            Class::Change,
+            "VCA Colour",
+            false,
+        ),
+        (
+            "mixer.assign_vca",
+            &[("vca", true), ("strips", true)],
+            Class::Change,
+            "Assign to VCA",
+            false,
+        ),
+        (
+            "mixer.unassign_vca",
+            &[("vca", true), ("strips", true)],
+            Class::Change,
+            "Remove from VCA",
+            false,
+        ),
+        (
+            "mixer.set_vca",
+            &[
+                ("vca", true),
+                ("gain_db", false),
+                ("mute", false),
+                ("solo", false),
+                ("mode", false),
+            ],
+            Class::Change,
+            "Set VCA",
+            false,
+        ),
+        (
+            "mixer.delete_vca",
+            &[("vca", true)],
+            Class::Remove,
+            "Delete VCA",
+            false,
+        ),
+    ];
+    assert_eq!(GROUP_IDS.len(), 14);
+    assert_eq!(&GROUP_IDS[7..], table.map(|t| t.0));
+    assert_eq!(VCA_MODE_NAMES, ["off", "read", "touch", "latch"]);
+    for (id, params, class, title, menu_item) in table {
+        let s = spec(id);
+        let got: Vec<(&str, bool)> = s.params.iter().map(|p| (p.name, p.required)).collect();
+        assert_eq!(got, params, "{id}");
+        assert_eq!(
+            (
+                s.class,
+                s.menu,
+                s.title,
+                s.menu_item,
+                s.document,
+                s.shortcut
+            ),
+            (class, "Mixer", title, menu_item, true, None),
+            "{id}"
+        );
+        assert!(s.dialogs.is_empty(), "{id}");
+        for p in s.params {
+            let want = match p.name {
+                "vca" => ParamKind::Int {
+                    min: 1,
+                    max: registry::MAX_EXACT_ID,
+                },
+                "strips" | "name" | "gain_db" => ParamKind::Text,
+                "colour" => ParamKind::Choice(GROUP_COLOURS),
+                "mode" => ParamKind::Choice(VCA_MODE_NAMES),
+                "mute" | "solo" => ParamKind::Flag,
+                other => panic!("{id}: {other}"),
+            };
+            assert_eq!(p.kind, want, "{id} {}", p.name);
+        }
+    }
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    assert_eq!(
+        ok(
+            "command.run",
+            run(
+                "mixer.set_vca",
+                json!({"vca": 1, "gain_db": "-3", "mute": true, "solo": false, "mode": "touch"})
+            )
+        ),
+        Command::CommandRun {
+            id: "mixer.set_vca".into(),
+            args: vec![
+                ("vca".into(), ArgValue::Int(1)),
+                ("gain_db".into(), ArgValue::Text("-3".into())),
+                ("mute".into(), ArgValue::Flag(true)),
+                ("solo".into(), ArgValue::Flag(false)),
+                ("mode".into(), ArgValue::Text("touch".into())),
+            ],
+            window: None,
+        }
+    );
+    for params in [
+        json!({"vca": 1, "gain_db": "-144"}),
+        json!({"vca": 1, "gain_db": "12"}),
+        json!({"vca": 1, "mute": true}),
+        json!({"vca": 1, "solo": true}),
+        json!({"vca": 1, "mode": "off"}),
+    ] {
+        ok("command.run", run("mixer.set_vca", params));
+    }
+    ok("command.run", run("mixer.new_vca", json!({})));
+    ok(
+        "command.run",
+        run(
+            "mixer.new_vca",
+            json!({"strips": "2,3", "name": "Kit", "colour": "blue"}),
+        ),
+    );
+    let huge = "x".repeat(70_000);
+    let many = (1..=65)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for (id, params) in [
+        ("mixer.new_vca", json!({"strips": "1,1"})),
+        ("mixer.new_vca", json!({"strips": "0"})),
+        ("mixer.new_vca", json!({"strips": many})),
+        ("mixer.new_vca", json!({"strips": ""})),
+        ("mixer.new_vca", json!({"name": huge})),
+        ("mixer.new_vca", json!({"colour": "none"})),
+        ("mixer.new_vca", json!({"extra": 1})),
+        ("mixer.rename_vca", json!({"vca": 1})),
+        ("mixer.rename_vca", json!({"vca": 0, "name": "x"})),
+        ("mixer.set_vca_colour", json!({"vca": 1, "colour": "Red"})),
+        ("mixer.assign_vca", json!({"vca": 1})),
+        ("mixer.unassign_vca", json!({"vca": 1, "strips": "2,2"})),
+        ("mixer.set_vca", json!({"vca": 1})),
+        ("mixer.set_vca", json!({"vca": u64::MAX, "mute": true})),
+        ("mixer.set_vca", json!({"vca": 1, "gain_db": "1e3"})),
+        ("mixer.set_vca", json!({"vca": 1, "gain_db": "NaN"})),
+        ("mixer.set_vca", json!({"vca": 1, "gain_db": "12.5"})),
+        ("mixer.set_vca", json!({"vca": 1, "gain_db": ""})),
+        ("mixer.set_vca", json!({"vca": 1, "gain_db": -3})),
+        ("mixer.set_vca", json!({"vca": 1, "mode": "write"})),
+        ("mixer.set_vca", json!({"vca": 1, "mode": "trim"})),
+        ("mixer.set_vca", json!({"vca": 1, "mute": "yes"})),
+        ("mixer.delete_vca", json!({})),
+        ("mixer.delete_vca", json!({"vca": -1})),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+}
+
+/// Groups-vcas-transport Ruling 19: the three click commands follow
+/// `transport.punch`; Click has a Transport menu item and a toggle's `on`,
+/// the level and mode are key-only, and Co-Producer is refused all three.
+#[test]
+fn click_commands_are_registered() {
+    let at = |id: &str| COMMANDS.iter().position(|c| c.id == id).unwrap();
+    let punch = at("transport.punch");
+    for (k, id) in [
+        "transport.click",
+        "transport.set_click_level",
+        "transport.set_click_mode",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(at(id), punch + 1 + k, "{id} follows transport.punch");
+        let c = registry::find(id).unwrap();
+        assert_eq!(c.class, registry::Class::Refused, "{id}");
+        assert_eq!(c.menu, "Transport", "{id}");
+        assert!(c.document, "{id}");
+    }
+    let click = registry::find("transport.click").unwrap();
+    assert!(click.menu_item);
+    assert_eq!(click.title, "Click");
+    assert_eq!(click.params.len(), 1);
+    assert_eq!(click.params[0].name, "on");
+    assert!(!click.params[0].required);
+    assert!(
+        !registry::find("transport.set_click_level")
+            .unwrap()
+            .menu_item
+    );
+    assert!(
+        !registry::find("transport.set_click_mode")
+            .unwrap()
+            .menu_item
+    );
+    assert_eq!(registry::CLICK_MODES, &["play_and_record", "record_only"]);
+}
+
+/// Groups-vcas-transport Ruling 18: `ui.set_transport_bar {items}` and
+/// `ui.reset_transport_bar` follow `ui.theme`, app-wide, key-only and
+/// refused to Co-Producer. The app checks the item grammar; the registry
+/// takes only text within the string limit.
+#[test]
+fn transport_bar_commands_are_registered() {
+    use core_control::registry::{Class, ParamKind};
+    let at = |id: &str| COMMANDS.iter().position(|c| c.id == id).unwrap();
+    let theme = at("ui.theme");
+    for (k, (id, title)) in [
+        ("ui.set_transport_bar", "Set Transport Bar"),
+        ("ui.reset_transport_bar", "Reset Transport Bar"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(at(id), theme + 1 + k, "{id} follows ui.theme");
+        let c = registry::find(id).unwrap();
+        assert_eq!(
+            (
+                c.class,
+                c.menu,
+                c.title,
+                c.menu_item,
+                c.document,
+                c.shortcut
+            ),
+            (Class::Refused, "View", *title, false, false, None),
+            "{id}"
+        );
+        assert!(c.dialogs.is_empty(), "{id}");
+    }
+    let set = registry::find("ui.set_transport_bar").unwrap();
+    assert_eq!(set.params.len(), 1);
+    assert_eq!(
+        (
+            set.params[0].name,
+            set.params[0].kind,
+            set.params[0].required
+        ),
+        ("items", ParamKind::Text, true)
+    );
+    assert!(
+        registry::find("ui.reset_transport_bar")
+            .unwrap()
+            .params
+            .is_empty()
+    );
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    assert_eq!(
+        ok(
+            "command.run",
+            run("ui.set_transport_bar", json!({"items": "cluster,loop"}))
+        ),
+        Command::CommandRun {
+            id: "ui.set_transport_bar".into(),
+            args: vec![("items".into(), ArgValue::Text("cluster,loop".into()))],
+            window: None,
+        }
+    );
+    ok("command.run", run("ui.reset_transport_bar", json!({})));
+    let huge = "x".repeat(70_000);
+    for (id, params) in [
+        ("ui.set_transport_bar", json!({})),
+        ("ui.set_transport_bar", json!({"items": 7})),
+        ("ui.set_transport_bar", json!({"items": ["cluster"]})),
+        ("ui.set_transport_bar", json!({"items": null})),
+        ("ui.set_transport_bar", json!({"items": huge})),
+        (
+            "ui.set_transport_bar",
+            json!({"items": "cluster", "extra": 1}),
+        ),
+        ("ui.reset_transport_bar", json!({"items": "cluster"})),
+    ] {
+        let (code, message) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}: {message}");
+    }
+}
+
+#[test]
+fn customize_transport_only_ever_needs_its_dialog() {
+    use core_control::registry::Class;
+    let at = |id: &str| COMMANDS.iter().position(|c| c.id == id).unwrap();
+    assert_eq!(
+        at("ui.customize_transport"),
+        at("ui.reset_transport_bar") + 1
+    );
+    let c = registry::find("ui.customize_transport").unwrap();
+    assert_eq!(
+        (
+            c.class,
+            c.menu,
+            c.title,
+            c.menu_item,
+            c.document,
+            c.shortcut
+        ),
+        (
+            Class::Refused,
+            "View",
+            "Customize Transport Bar…",
+            true,
+            false,
+            None
+        )
+    );
+    assert!(c.params.is_empty());
+    assert_eq!(c.dialogs.len(), 1);
+    assert!(c.dialogs[0].always && c.dialogs[0].answered_by.is_empty());
+    let (code, msg) = err("command.run", json!({"id": "ui.customize_transport"}));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(msg.contains("\"Customize Transport Bar\""), "{msg}");
+    assert!(!msg.contains("pass  instead"), "{msg}");
+    // Hostile params: never past the registry, and never a sheet.
+    for params in [
+        json!({"items": "cluster"}),
+        json!({"window": 1}),
+        json!({"x": "y".repeat(70_000)}),
+        json!(null),
+        json!([1]),
+    ] {
+        let (code, _) = err(
+            "command.run",
+            json!({"id": "ui.customize_transport", "params": params}),
+        );
+        assert!(
+            matches!(code, ErrorCode::InvalidParams | ErrorCode::DialogRequired),
+            "{code:?}"
+        );
+    }
 }

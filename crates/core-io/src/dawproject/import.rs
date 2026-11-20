@@ -12,8 +12,10 @@
 //!   with both gets both;
 //! - a folder, and every effect or submix channel, becomes a bus; the
 //!   folder's tracks output to it unless their channel names another
-//!   destination. The master channel sets the master strip; VCAs are left
-//!   out.
+//!   destination. The master channel sets the master strip; each VCA
+//!   channel becomes a VCA with no members (the first 64; the file cannot
+//!   say which channels a VCA controls), with its level, mute, solo and
+//!   volume automation. A merge leaves VCAs out ([`DpImport::for_merge`]).
 //! - a track's channel sets the strips it owns (its instrument's and its
 //!   audio path's): fader, pan, mute, solo, colour, output, sends and
 //!   effects. A track on the shared built-in synth keeps its mute and solo
@@ -56,10 +58,11 @@ use super::units::{
 use crate::IoError;
 use crate::report::{ItemKind, Report};
 use core_model::command::{
-    Command, LaneCmd, MixerCmd, Report as CmdReport, RoutingCmd, SequenceCmd, SettingsCmd,
+    Command, GroupCmd, LaneCmd, MixerCmd, Report as CmdReport, RoutingCmd, SequenceCmd, SettingsCmd,
 };
 use core_model::document::{DestKind, MAX_INFO_BYTES, SongInfo};
 use core_model::error::ModelError;
+use core_model::groups::{MAX_VCAS, NAME_MAX};
 use core_model::history::History;
 use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
@@ -162,6 +165,52 @@ impl DpImport {
     }
 }
 
+impl DpImport {
+    /// The same import for a merge, which makes no VCAs (preflight F17): its
+    /// VCA channels are left out as the 6e merge always listed them, and the
+    /// volume curves of VCA channels are parts VizDAW does not hold.
+    #[must_use]
+    pub fn for_merge(mut self) -> DpImport {
+        let channels = u64::try_from(self.plan.vca_channels).unwrap_or(u64::MAX);
+        self.plan.vcas.clear();
+        for track in &mut self.plan.arranged.items {
+            track.retain(|i| {
+                !matches!(
+                    i.body,
+                    Body::Auto {
+                        at: AutoAt::Vca(_),
+                        ..
+                    }
+                )
+            });
+        }
+        let at = self
+            .report
+            .items
+            .iter()
+            .position(|i| i.what == VCA_NO_MEMBERS || i.what == VCA_LIMIT);
+        self.report
+            .items
+            .retain(|i| i.what != VCA_NO_MEMBERS && i.what != VCA_LIMIT);
+        if channels > 0 {
+            let item = crate::report::Item {
+                kind: ItemKind::LeftOut,
+                what: VCA.to_owned(),
+                count: channels,
+                details: Vec::new(),
+            };
+            let at = at
+                .unwrap_or(self.report.items.len())
+                .min(self.report.items.len());
+            self.report.items.insert(at, item);
+        }
+        for param in std::mem::take(&mut self.plan.vca_params) {
+            self.report.add(ItemKind::LeftOut, UNPLACED, Some(param));
+        }
+        self
+    }
+}
+
 /// The new plug-in slots with the state each is to capture, as [`apply`]
 /// returns them.
 pub type SlotStates = Vec<(PluginInstanceId, Arc<[u8]>)>;
@@ -173,8 +222,17 @@ pub const CANCEL_EVERY: usize = 65_536;
 
 /// Changed: folder tracks (a count).
 pub const FOLDERS: &str = "Folder tracks became buses";
-/// Left out: VCA channels (a count).
+/// Left out: VCA channels of a merge's file (a count; an import makes them).
 pub const VCA: &str = "VCA channels";
+/// Changed: VCA channels came in with no members (by VCA).
+pub const VCA_NO_MEMBERS: &str =
+    "VCA channels came in without members (DAWproject does not say which channels a VCA controls)";
+/// Changed: a VCA channel's name was cleaned to what a VCA name holds (control
+/// characters out, at most 64 characters, "VCA n" when none is left).
+pub const VCA_NAME_CHANGED: &str =
+    "VCA names were cleaned (control characters out, at most 64 characters)";
+/// Left out: VCA channels past the limit of [`MAX_VCAS`] (by VCA).
+pub const VCA_LIMIT: &str = "VCA channels past the limit of 64 (a song holds at most 64)";
 /// Left out: send pan (a count).
 pub const SEND_PAN: &str = "Send pan";
 /// Changed: a channel that outputs to a track's channel (a count).
@@ -396,6 +454,16 @@ struct BusPlan {
     tag: Option<u64>,
 }
 
+/// A VCA channel that becomes a VCA with no members.
+#[derive(Debug, Clone, PartialEq)]
+struct VcaPlan {
+    name: String,
+    colour: Option<Swatch>,
+    gain_db: f64,
+    mute: bool,
+    solo: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Plan {
     name: String,
@@ -409,6 +477,13 @@ struct Plan {
     master: Mix,
     builtin: Option<Mix>,
     tracks: Vec<TrackPlan>,
+    /// The VCAs to make, the first [`MAX_VCAS`] VCA channels.
+    vcas: Vec<VcaPlan>,
+    /// Every VCA channel the file has (a merge counts them all).
+    vca_channels: usize,
+    /// The distinct IDs of the volume curves of VCA channels (a merge
+    /// lists them as parts VizDAW does not hold).
+    vca_params: Vec<String>,
     /// The tracks' clips, the new sequences and the media (Task 7).
     arranged: timeline::Arranged,
 }
@@ -498,7 +573,7 @@ pub fn debug_items_seen() -> usize {
 enum Target {
     Master,
     Bus(usize),
-    /// A note or audio track's channel, or a VCA.
+    /// A note or audio track's channel.
     Other,
 }
 
@@ -524,6 +599,10 @@ enum Node<'p> {
 type StateRead = Result<Arc<[u8]>, String>;
 
 struct Cx<'a, 'p> {
+    /// Each VCA made, by its channel's ID (the plan's index).
+    vca_at: HashMap<&'p str, usize>,
+    /// The volume curves of VCA channels seen, by parameter ID.
+    vca_params: Vec<String>,
     pkg: &'p DpPackage,
     env: &'a ImportEnv<'a>,
     cancel: &'a AtomicBool,
@@ -682,6 +761,8 @@ pub fn map(
         send_at: HashMap::new(),
         claims: Claims::default(),
         copy: None,
+        vca_at: HashMap::new(),
+        vca_params: Vec::new(),
     };
     let p = &pkg.project;
     if p.dropped_text > 0 {
@@ -706,12 +787,16 @@ pub fn map(
         master: Mix::default(),
         builtin: None,
         tracks: Vec::new(),
+        vcas: Vec::new(),
+        vca_channels: 0,
+        vca_params: Vec::new(),
         arranged: timeline::Arranged::default(),
     };
     cx.structure(&nodes, &mut plan)?;
     let cut = cut_loops(&mut plan, &mut cx.report);
     cx.sends_cut(&cut);
     plan.arranged = cx.arrangement(&mut plan, media)?;
+    plan.vca_params = std::mem::take(&mut cx.vca_params);
     let (name, info) = cx.song_info();
     plan.name = name;
     plan.info = info;
@@ -1146,10 +1231,21 @@ impl<'a, 'p> Cx<'a, 'p> {
                     let default_out = parent.map_or(Out::Master, Out::Bus);
                     match role {
                         TrackRole::Vca => {
-                            self.add(ItemKind::LeftOut, VCA, None);
                             self.comment(t.named.comment.as_deref(), || {
                                 format!("track '{}'", t.named.name.as_deref().unwrap_or(""))
                             });
+                            let c = t.channel.as_deref();
+                            let name = t
+                                .named
+                                .name
+                                .as_deref()
+                                .or(c.and_then(|c| c.named.name.as_deref()));
+                            let colour = t
+                                .named
+                                .color
+                                .as_deref()
+                                .or(c.and_then(|c| c.named.color.as_deref()));
+                            self.vca(c, name, colour, plan);
                         }
                         TrackRole::Master if master => {
                             let name = t.named.name.as_deref().unwrap_or("Master").to_owned();
@@ -1218,12 +1314,69 @@ impl<'a, 'p> Cx<'a, 'p> {
                             *slot = BusPlan { name, mix, tag };
                         }
                     } else {
-                        self.add(ItemKind::LeftOut, VCA, None);
+                        self.vca(
+                            Some(c),
+                            c.named.name.as_deref(),
+                            c.named.color.as_deref(),
+                            plan,
+                        );
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// A VCA channel `c`: a VCA with no members (the first [`MAX_VCAS`]; the
+    /// rest are listed). Its level, mute and solo come with it.
+    fn vca(
+        &mut self,
+        c: Option<&'p DpChannel>,
+        name: Option<&str>,
+        colour: Option<&str>,
+        plan: &mut Plan,
+    ) {
+        plan.vca_channels = plan.vca_channels.saturating_add(1);
+        let number = plan.vca_channels;
+        let raw = name.unwrap_or("").trim().to_owned();
+        let name = self.name(name, || format!("VCA {number}"));
+        // What `check_name` accepts: 1 to NAME_MAX characters, no control
+        // characters (`clean_name` took those out).
+        let name: String = name.chars().take(NAME_MAX).collect();
+        let name = name.trim().to_owned();
+        let name = if name.is_empty() {
+            format!("VCA {number}")
+        } else {
+            name
+        };
+        if name != raw {
+            self.add(ItemKind::Changed, VCA_NAME_CHANGED, Some(name.clone()));
+        }
+        if plan.vcas.len() >= MAX_VCAS {
+            self.add(ItemKind::LeftOut, VCA_LIMIT, Some(name));
+            return;
+        }
+        let colour = self.colour(colour);
+        let gain_db = c
+            .and_then(|c| c.volume.as_deref())
+            .and_then(|v| self.level(v, &format!("volume of '{name}'")))
+            .unwrap_or(0.0);
+        let mute = c
+            .and_then(|c| c.mute.as_ref())
+            .and_then(|m| m.value)
+            .unwrap_or(false);
+        let solo = c.and_then(|c| c.solo).unwrap_or(false);
+        if let Some(id) = c.and_then(|c| c.named.id.as_deref()) {
+            self.vca_at.insert(id, plan.vcas.len());
+        }
+        self.add(ItemKind::Changed, VCA_NO_MEMBERS, Some(name.clone()));
+        plan.vcas.push(VcaPlan {
+            name,
+            colour,
+            gain_db,
+            mute,
+            solo,
+        });
     }
 
     /// A note or audio track: its destination, audio path and settings.

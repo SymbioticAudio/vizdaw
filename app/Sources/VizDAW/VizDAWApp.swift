@@ -17,6 +17,8 @@ import SymbioticBrand
 
 /// The Plugin Manager window's model.
 @MainActor let pluginManager = PluginManagerModel(plugins: appPlugins)
+/// VizDAW › Licences… (release gate Task 4): the bundle's Licences folder.
+@MainActor let licencesModel = LicencesModel(folder: LicencesModel.bundled)
 
 /// Editing preferences: the nudge steps (Plan 4b Ruling 16).
 @MainActor let editingPreferences = EditingPreferences(defaults: MemoryDefaults.appStore())
@@ -121,6 +123,12 @@ final class LiveCoProducerSink: CoProducerSink {
     makePrivate: { SupportFolder.makePrivate($0) },
     open: { try MetricsRecorder.open(support: $0.path, blockMs: $1, sampleMs: $2) })
 
+/// Settings › Co-Producer's stand-in folders of songs never saved; the
+/// songs open right now are never listed or deleted.
+@MainActor let standInFolders = StandInFolders(
+    supportDir: AppSetup.coProducerSupportDir,
+    openIDs: { try appStore.documents.values.compactMap { try $0.session.projectId() } })
+
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
 @MainActor let noteInputHub = NoteInputHub(input: NoteInput())
@@ -137,6 +145,9 @@ struct VizDAWApp: App {
         Icons.register(SymbioticBrand.provider)
         #endif
         appStore.keyBindings = keyBindings
+        // The transport bar's items (groups-vcas-transport Ruling 17): an
+        // app preference, in memory under a throwaway home.
+        appStore.transportLayout = TransportLayoutStore(defaults: MemoryDefaults.appStore())
         // Trims snap to zero crossings by this preference (plan
         // release-fixes Task 7).
         ZeroCrossing.preferences = editingPreferences
@@ -248,6 +259,11 @@ struct VizDAWApp: App {
             PluginManagerView(model: pluginManager)
                 .themedRoot()
         }
+        Window("Licences", id: "licences") {
+            LicencesView(model: licencesModel)
+                .themedRoot()
+        }
+        .defaultSize(width: 900, height: 600)
         Settings {
             TabView {
                 AppearanceSettingsView(prefs: appearancePreferences)
@@ -266,7 +282,8 @@ struct VizDAWApp: App {
                     .tabItem { AppIcon.settingsSurfaces.label("Surfaces") }
                 PluginSettingsView(settings: pluginSettings)
                     .tabItem { AppIcon.settingsPlugins.label("Plug-ins") }
-                CoProducerSettingsView(settings: coProducerSettings, metrics: coProducerMetrics, store: appStore)
+                CoProducerSettingsView(
+                    settings: coProducerSettings, metrics: coProducerMetrics, standIns: standInFolders, store: appStore)
                     .tabItem { AppIcon.settingsCoProducer.label("Co-Producer") }
             }
             .themedRoot()
@@ -300,6 +317,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Quit asks about songs with unsaved changes first (release gate B1);
+    /// never under `VIZDAW_TEST_HOOKS=1` or for the control channel's
+    /// `app.quit`.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated { QuitPrompts.shouldTerminate() }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // A clean quit leaves no crash markers.
         MainActor.assumeIsolated {
@@ -319,6 +343,119 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
             appStore.enqueue(appStore.open(path: url.path))
+        }
+    }
+}
+
+/// Quitting with unsaved changes (release gate B1): one dirty song asks
+/// its sheet; two or more ask whether to review them, then walk them one
+/// at a time. A Cancel anywhere stops the quit; choices made stand.
+@MainActor
+enum QuitPrompts {
+    /// Set by the control channel's `app.quit`: a programmatic quit never
+    /// asks.
+    static var quiet = false
+
+    static var testHooks: Bool { ProcessInfo.processInfo.environment["VIZDAW_TEST_HOOKS"] == "1" }
+
+    static func shouldTerminate() -> NSApplication.TerminateReply {
+        let dirty = dirtyDocuments()
+        let step = ClosePrompts.quitStep(dirty: dirty, testHooks: testHooks || quiet)
+        // A song's close sheet is already up: it is answered first, and the
+        // quit stops rather than queue a sheet behind it (fix round 1, I-1).
+        if step != .quitNow, let w = sheetWindow() {
+            w.makeKeyAndOrderFront(nil)
+            return .terminateCancel
+        }
+        switch step {
+        case .quitNow:
+            return .terminateNow
+        case .cancel:
+            return .terminateCancel
+        case .askOne(let id):
+            walk([id])
+            return .terminateLater
+        case .askMany(let count):
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = ClosePrompts.quitAlertText(count: count)
+            alert.addButton(withTitle: ClosePrompts.reviewChanges)
+            alert.addButton(withTitle: ClosePrompts.discardChanges)
+            let cancel = alert.addButton(withTitle: ClosePrompts.cancel)
+            cancel.keyEquivalent = "\u{1b}"
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                walk(dirty)
+                return .terminateLater
+            case .alertSecondButtonReturn:
+                return .terminateNow
+            default:
+                return .terminateCancel
+            }
+        }
+    }
+
+    /// A document window with a sheet up, if any.
+    static func sheetWindow() -> NSWindow? {
+        ControlWindows.windows().first { ControlWindows.tagOf($0).kind == .document && $0.attachedSheet != nil }
+    }
+
+    /// The songs with unsaved changes, front window first; songs with no
+    /// window come last.
+    static func dirtyDocuments() -> [UUID] {
+        var order: [UUID] = []
+        for w in ControlWindows.windows() {
+            let t = ControlWindows.tagOf(w)
+            if t.kind == .document, let d = t.doc, !order.contains(d) { order.append(d) }
+        }
+        for d in appStore.documents.keys where !order.contains(d) { order.append(d) }
+        return order.filter { appStore.model($0)?.hasUnsavedChanges == true }
+    }
+
+    /// Asks each song in turn (on the next turn: the quit is answered
+    /// `.terminateLater` first), then answers the quit.
+    private static func walk(_ dirty: [UUID]) {
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { step(QuitWalk(dirty)) }
+        }
+    }
+
+    private static func step(_ walk: QuitWalk) {
+        guard let id = walk.current else {
+            NSApp.reply(toApplicationShouldTerminate: walk.result == .quitNow)
+            return
+        }
+        // Closed mid-walk, or its window already shows a sheet: the quit
+        // stops, so the reply always comes (fix round 1, I-1).
+        guard let model = appStore.model(id), CloseHooks.hook(for: id)?.window?.attachedSheet == nil else {
+            var next = walk
+            next.windowGone()
+            step(next)
+            return
+        }
+        let answered: @MainActor @Sendable (CloseChoice, Bool) -> Void = { choice, closed in
+            var next = walk
+            next.answer(choice, saved: closed)
+            step(next)
+        }
+        if let hook = CloseHooks.hook(for: id), let w = hook.window {
+            w.makeKeyAndOrderFront(nil)
+            hook.ask(answered)
+        } else {
+            // No window: an app-modal alert, and the song goes quietly.
+            CloseSheet.ask(model: model, window: nil) { choice in
+                switch choice {
+                case .cancel:
+                    answered(.cancel, false)
+                case .dontSave:
+                    appStore.close(id)
+                    answered(.dontSave, true)
+                case .save:
+                    let saved = SaveFlow.save(model, forceAs: false)
+                    if saved { appStore.close(id) }
+                    answered(.save, saved)
+                }
+            }
         }
     }
 }

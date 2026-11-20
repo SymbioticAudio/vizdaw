@@ -8,8 +8,9 @@ use core_io::IoError;
 use core_io::dawproject::import::{
     BOTH_STRIPS, BUILTIN_EFFECTS, CANCEL_EVERY, COLOURS_AND_COMMENTS, COLOURS_NEAREST, DpImport,
     FOLDERS, FROM_VIZDAW, INFO_CUT, ImportEnv, METER_MOVED, MediaSource, NAMES_CUT, NOT_INSTALLED,
-    OUTPUT_TO_TRACK, PLAYS_BUILTIN, PLUGIN_SETTINGS, TOO_LARGE_TO_CARRY, VCA, VST, apply,
-    debug_items_after_pause, debug_pause_at, debug_paused, map,
+    OUTPUT_TO_TRACK, PLAYS_BUILTIN, PLUGIN_SETTINGS, TOO_LARGE_TO_CARRY, VCA, VCA_LIMIT,
+    VCA_NAME_CHANGED, VCA_NO_MEMBERS, VST, apply, debug_items_after_pause, debug_pause_at,
+    debug_paused, map,
 };
 use core_io::dawproject::package::{
     AudioSource, DpPackage, ODD_RATE, RECORD_UNREADABLE, SONG_INFO_UNREADABLE,
@@ -379,7 +380,9 @@ fn reads_the_hand_other_file() {
         eq.details
     );
     assert!(eq.details[1].contains("highPass"), "{:?}", eq.details);
-    has(r, ItemKind::LeftOut, VCA);
+    // The VCA channel imports as a VCA with no members (Task 8).
+    lacks(r, VCA);
+    has_detail(r, ItemKind::Changed, VCA_NO_MEMBERS, "Group");
 
     // The AU delay is the insert, with its state through the codec.
     assert_eq!(gtr_strip.inserts.len(), 1);
@@ -2169,4 +2172,114 @@ mod origins {
         // so 6d's plain import does not show it.
         lacks(&imported(&pkg, &yes).report, TAGS_IGNORED);
     }
+}
+
+// ---------------------------------------------------------------- VCAs
+
+/// `hand_other`'s VCA channel ("Group", `ch6`) now imports (the golden file
+/// holds its report): a VCA with no members, at unity, and no "VCA
+/// channels" line.
+#[test]
+fn hand_other_imports_its_vca() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = imported(&hand_other(dir.path()), &yes);
+    let vcas: Vec<_> = a.h.doc().mixer().vcas().values().cloned().collect();
+    assert_eq!(vcas.len(), 1);
+    assert_eq!(vcas[0].name, "Group");
+    assert!(vcas[0].members.is_empty());
+    assert_eq!(
+        (vcas[0].gain_db, vcas[0].mute, vcas[0].solo),
+        (0.0, false, false)
+    );
+    lacks(&a.report, VCA);
+    let line = item(&a.report, ItemKind::Changed, VCA_NO_MEMBERS).expect("the line");
+    assert_eq!(
+        (line.count, line.details.as_slice()),
+        (1, &["Group".to_owned()][..])
+    );
+}
+
+/// A VCA channel's level, mute, solo and colour come with it, and a missing
+/// or blank name gets "VCA n".
+#[test]
+fn a_vca_keeps_its_level_mute_solo_and_colour() {
+    let dir = tempfile::tempdir().unwrap();
+    let structure = concat!(
+        r##"<Channel id="a" name="Kit" role="vca" solo="true" color="#ff0000"><Mute id="am" value="true"/><Volume id="av" unit="linear" value="0.5" min="0" max="2"/></Channel>"##,
+        r#"<Channel id="b" name="  " role="vca"><Volume id="bv" unit="linear" value="0" min="0" max="2"/></Channel>"#,
+        // A VCA inside a track, as other DAWs write it.
+        r#"<Track id="t" name="Strings" contentType="audio"><Channel id="tc" role="vca"/></Track>"#,
+    );
+    let pkg = small(dir.path(), &project_xml(structure, ""), None);
+    let a = imported(&pkg, &yes);
+    let vcas: Vec<_> = a.h.doc().mixer().vcas().values().cloned().collect();
+    assert_eq!(vcas.len(), 3);
+    assert_eq!(vcas[2].name, "Strings");
+    assert_eq!(vcas[0].name, "Kit");
+    assert!(
+        (vcas[0].gain_db - -6.0206).abs() < 1e-3,
+        "{}",
+        vcas[0].gain_db
+    );
+    assert!(vcas[0].mute && vcas[0].solo);
+    assert_eq!(vcas[0].colour, core_model::mixer::Swatch::Red);
+    assert_eq!(vcas[1].name, "VCA 2");
+    assert!(vcas[1].gain_db <= core_model::mixer::GAIN_FLOOR_DB);
+}
+
+/// Hostile: 65 VCA channels. The first 64 come in; the rest is one line
+/// (naming it), never a dialog or an error.
+#[test]
+fn past_64_vca_channels_are_left_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let structure: String = (1..=65)
+        .map(|i| format!(r#"<Channel id="v{i}" name="V{i}" role="vca"/>"#))
+        .collect();
+    let pkg = small(dir.path(), &project_xml(&structure, ""), None);
+    let a = imported(&pkg, &yes);
+    assert_eq!(a.h.doc().mixer().vcas().len(), 64);
+    let made = item(&a.report, ItemKind::Changed, VCA_NO_MEMBERS).expect("line");
+    assert_eq!(made.count, 64);
+    let left = item(&a.report, ItemKind::LeftOut, VCA_LIMIT).expect("line");
+    assert_eq!(
+        (left.count, left.details.as_slice()),
+        (1, &["V65".to_owned()][..])
+    );
+    lacks(&a.report, VCA);
+}
+
+/// Hostile VCA names: over 64 characters, control characters, and empty or
+/// blank. The import succeeds, each name is what a VCA name holds, and the
+/// report says the name changed.
+#[test]
+fn hostile_vca_names_are_cleaned_and_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let long = "x".repeat(200);
+    let structure = format!(
+        concat!(
+            r#"<Channel id="a" name="{}" role="vca"/>"#,
+            r#"<Channel id="b" name="Ki&#1;t&#7;" role="vca"/>"#,
+            r#"<Channel id="c" name="" role="vca"/>"#,
+            r#"<Channel id="d" name="   " role="vca"/>"#,
+            r#"<Channel id="e" name="Fine" role="vca"/>"#,
+        ),
+        long
+    );
+    let pkg = small(dir.path(), &project_xml(&structure, ""), None);
+    let a = imported(&pkg, &yes);
+    let names: Vec<String> =
+        a.h.doc()
+            .mixer()
+            .vcas()
+            .values()
+            .map(|v| v.name.clone())
+            .collect();
+    assert_eq!(names.len(), 5, "{names:?}");
+    assert_eq!(names[0], "x".repeat(64));
+    assert!(names[1] == "Kit" || names[1] == "VCA 2", "{}", names[1]);
+    assert_eq!(names[2], "VCA 3");
+    assert_eq!(names[3], "VCA 4");
+    assert_eq!(names[4], "Fine");
+    let line = item(&a.report, ItemKind::Changed, VCA_NAME_CHANGED).expect("listed");
+    assert!(line.count >= 3, "{line:?}");
 }

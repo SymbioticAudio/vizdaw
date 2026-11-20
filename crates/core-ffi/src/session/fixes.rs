@@ -26,12 +26,14 @@ impl Session {
 }
 
 /// `v` (normalised) in the units the mixer shows `t` in: dB for a fader
-/// or a send, −1 to 1 for a pan, else as it is (0 or 1 for mute and solo,
+/// (a VCA's too) or a send, −1 to 1 for a pan, else as it is (0 or 1 for mute and solo,
 /// 0–1 for a plug-in parameter).
 fn shown(t: AutomationTarget, v: f64) -> f64 {
     use core_model::automation::{fader_db, pan_of};
     match t {
-        AutomationTarget::StripFader(_) | AutomationTarget::SendLevel(..) => fader_db(v),
+        AutomationTarget::StripFader(_)
+        | AutomationTarget::SendLevel(..)
+        | AutomationTarget::VcaFader(_) => fader_db(v),
         AutomationTarget::StripPan(_) => pan_of(v),
         _ => v,
     }

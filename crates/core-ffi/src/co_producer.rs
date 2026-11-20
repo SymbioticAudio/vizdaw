@@ -175,6 +175,9 @@ pub struct PendingPreview {
     pub version: u64,
     /// The present step's serial when it was made.
     pub serial: u64,
+    /// The song's path when it was made (None: untitled). A Save As ends
+    /// the preview; a take or a check under another path is [`USED`].
+    pub path: Option<std::path::PathBuf>,
     /// The plan's canonical text.
     pub canonical: String,
     /// Some item is the composer's work (plan 8b Ruling 11: a take then
@@ -223,24 +226,36 @@ pub fn check_take(
     pending: Option<PendingPreview>,
     token: &str,
     plan: &[PlannedRow],
-    version: u64,
-    serial: u64,
+    now: Now<'_>,
 ) -> Result<(), VizError> {
-    check_pending(pending.as_ref(), token, plan, version, serial)
+    check_pending(pending.as_ref(), token, plan, now)
+}
+
+/// The session as a take finds it: its version, the present step's
+/// serial and the song's path.
+#[derive(Debug, Clone, Copy)]
+pub struct Now<'a> {
+    /// The session's version.
+    pub version: u64,
+    /// The present step's serial.
+    pub serial: u64,
+    /// The song's path (None: untitled).
+    pub path: Option<&'a Path>,
 }
 
 /// [`check_take`]'s checks on a preview still in the session (plan 8b
-/// Ruling 11): nothing is taken.
+/// Ruling 11): nothing is taken. A preview made under another path (the
+/// song was saved as another since) is [`USED`] (release gate Task 5).
 pub fn check_pending(
     pending: Option<&PendingPreview>,
     token: &str,
     plan: &[PlannedRow],
-    version: u64,
-    serial: u64,
+    now: Now<'_>,
 ) -> Result<(), VizError> {
-    let Some(p) = pending.filter(|p| p.token == token) else {
+    let Some(p) = pending.filter(|p| p.token == token && p.path.as_deref() == now.path) else {
         return Err(model(USED));
     };
+    let (version, serial) = (now.version, now.serial);
     if p.version != version || p.serial != serial {
         return Err(model(CHANGED));
     }
@@ -479,7 +494,11 @@ fn fixes_command(
 /// change, or is new (an item "added": an acting step made it). So a send
 /// or insert Co-Producer itself put on a composer's strip still asks. With
 /// `feeds_theirs` (the change alters what feeds a bus of the composer's)
-/// every item but a new strip's is.
+/// every item but a new strip's is. A group or VCA item's mark and members
+/// decide (groups-vcas-transport Ruling 10; owner, 2026-11-19):
+/// `co_producers` only when Co-Producer made it and every member, before
+/// and after, is Co-Producer's; a new one given strips is "added, <strip>
+/// added", so a composer's member asks.
 fn mixer_rows(items: Vec<ChangeItem>, feeds_theirs: bool) -> impl Iterator<Item = ChangeItemRow> {
     items.into_iter().map(move |i| ChangeItemRow {
         composers_work: i.change != "added" && (feeds_theirs || !i.co_producers),
@@ -508,6 +527,27 @@ fn solo_changes(
             (b.solo != a.solo).then(|| (format!("Strip {}", diff::shown_name(&b.name)), a.solo))
         })
         .collect()
+}
+
+/// Whether the step from `before` to `after` changes a VCA's solo, or
+/// which strips a soloed VCA holds (groups-vcas-transport Task 7). A VCA
+/// solo asks as every solo change does (plan 8d): it silences every strip
+/// outside its reach, the composer's tracks included.
+fn vca_solo_changed(
+    before: &core_model::document::Document,
+    after: &core_model::document::Document,
+) -> bool {
+    use core_model::groups::vca_soloed;
+    let (b, a) = (before.mixer(), after.mixer());
+    let soloed = |m: &core_model::mixer::Mixer, v| m.vcas().get(&v).is_some_and(|x| x.solo);
+    b.vcas()
+        .keys()
+        .chain(a.vcas().keys())
+        .any(|v| soloed(b, *v) != soloed(a, *v))
+        || b.strips()
+            .keys()
+            .chain(a.strips().keys())
+            .any(|s| vca_soloed(b, *s) != vca_soloed(a, *s))
 }
 
 /// How a change to a Co-Producer bus cuts off what feeds it (owner,
@@ -574,7 +614,8 @@ fn names_text(names: &[String]) -> (String, bool) {
 }
 
 /// Plan 8e Task 6c: each Co-Producer bus (in `before`) that the step from
-/// `before` to `after` removes, mutes, sets to −∞ or re-routes, or whose automation
+/// `before` to `after` removes, mutes, sets to −∞ or re-routes, as heard
+/// (its own mute and fader with its VCAs' mutes and levels), or whose automation
 /// in `cmds` mutes it (a point of 1) or sets its fader to −∞, while a strip
 /// not Co-Producer's feeds it, directly or through other buses. Each is
 /// its item's thing ("Strip <name>") and the line its item adds. Unmuting,
@@ -586,6 +627,7 @@ fn cut_lines(
 ) -> Vec<(String, String)> {
     use core_model::automation::{AutomationTarget, fader_db, switch_on};
     use core_model::command::Command;
+    use core_model::groups::{heard_db, vca_muted, vca_offset_db};
     use core_model::mixer::{GAIN_FLOOR_DB, Output, StripKind};
     let automated = |bus: core_model::ids::StripId| {
         cmds.iter().any(|c| match c {
@@ -610,12 +652,21 @@ fn cut_lines(
             continue;
         }
         // Fix round 1: a removed bus silences what reaches it, as a mute
-        // does.
+        // does. Groups-vcas-transport Task 7 fix round 1: what is heard
+        // decides, so a VCA's mute, or its level taking the bus to −∞
+        // (by `mixer.set_vca`, or by assigning the bus to such a VCA),
+        // silences it as its own mute or fader would.
+        let muted = |d: &core_model::document::Document, s: &core_model::mixer::Strip| {
+            s.mute || vca_muted(d.mixer(), s.id)
+        };
+        let heard = |d: &core_model::document::Document, s: &core_model::mixer::Strip| {
+            heard_db(s.gain_db, vca_offset_db(d.mixer(), s.id))
+        };
         let cut = match after.mixer().strip(*id) {
             Err(_) => Cut::Silent,
             Ok(a)
-                if (!b.mute && a.mute)
-                    || (b.gain_db > GAIN_FLOOR_DB && a.gain_db <= GAIN_FLOOR_DB)
+                if (!muted(before, b) && muted(after, a))
+                    || (heard(before, b) > GAIN_FLOOR_DB && heard(after, a) <= GAIN_FLOOR_DB)
                     || automated(*id) =>
             {
                 Cut::Silent
@@ -750,12 +801,16 @@ pub fn preview_items(
                 let lookup = param_lookup(host);
                 let theirs = crate::mixer_chores::feeds_composers_bus(&before, h.doc());
                 let soloed = solo_changes(&before, h.doc());
+                let vca_solo = vca_solo_changed(&before, h.doc());
                 let step: Vec<ChangeItemRow> =
                     mixer_rows(diff::describe_with(&before, h.doc(), &lookup), theirs)
                         .map(|mut r| {
                             // A solo change's strip item asks, whoever's
-                            // strip it is.
-                            if soloed.iter().any(|(thing, _)| *thing == r.thing) {
+                            // strip it is; so does a VCA's item when a
+                            // VCA solo changes.
+                            if soloed.iter().any(|(thing, _)| *thing == r.thing)
+                                || (vca_solo && r.thing.starts_with("VCA "))
+                            {
                                 r.composers_work = true;
                             }
                             r

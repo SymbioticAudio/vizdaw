@@ -1,11 +1,14 @@
 use core_engine::fixtures::{Builder, demo_document};
-use core_engine::graph::mixer::mixer_spec;
-use core_engine::graph::{InputSpec, InstrumentFeed, NodeSpec, StripSpec, Tap};
+use core_engine::graph::dsp::strip_gains;
+use core_engine::graph::mixer::{MixerGraph, mixer_spec};
+use core_engine::graph::{InputSpec, InstrumentFeed, NodeSpec, StripSpec, Tap, VcaControlSpec};
 use core_engine::schedule::TargetIdx;
-use core_model::command::MixerCmd;
+use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::document::{DestKind, Document, DocumentRepr, Settings};
-use core_model::ids::{Counters, StripId};
-use core_model::mixer::{AuxSend, Mixer, PluginRef, PluginSlot, StripKind};
+use core_model::ids::{AnyId, Counters, StripId, VcaId};
+use core_model::mixer::{
+    AuxSend, GAIN_FLOOR_DB, GAIN_MAX_DB, Mixer, PluginRef, PluginSlot, StripKind, Swatch,
+};
 use std::f32::consts::FRAC_1_SQRT_2;
 
 fn strip(spec: &core_engine::graph::GraphSpec, i: usize) -> &StripSpec {
@@ -391,4 +394,165 @@ fn the_eq_slot_runs_before_the_inserts() {
         &mut lat,
     );
     assert_eq!(plan(&g.spec, 96_000).unwrap().latency, 0);
+}
+
+/// A new VCA of `members` at `gain_db`.
+fn vca(b: &mut Builder, members: Vec<StripId>, gain_db: f64) -> VcaId {
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "V".into(),
+            colour: Swatch::Purple,
+            members,
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(v)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
+    b.run(Command::Groups(GroupCmd::SetVcaLevel { vca: v, gain_db }))
+        .unwrap();
+    v
+}
+
+fn graph(b: &Builder) -> MixerGraph {
+    mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut zero,
+    )
+}
+
+/// Spec §2a: a VCA is part of its member's fader. Nodes as `routed`, plus
+/// a post-fader send from the synth (2) to B (4).
+#[test]
+fn vca_offset_scales_main_output_and_post_sends_not_pre() {
+    let mut b = routed();
+    b.mixer(MixerCmd::AddSend {
+        strip: StripId(1),
+        send: AuxSend::new(StripId(3)),
+    })
+    .unwrap();
+    let plain = graph(&b);
+    let v = vca(&mut b, vec![StripId(1)], -6.0);
+    let g = graph(&b);
+    let synth = strip(&g.spec, 2);
+    let (l, r) = strip_gains(-6.0, 0.0, true);
+    assert_eq!((synth.gain_l, synth.gain_r), (l, r));
+    assert_eq!(strip(&plain.spec, 2).gain_l, strip_gains(0.0, 0.0, true).0);
+    // The main output and the post send read after the strip's gain: their
+    // own gains don't change. The pre send reads before it.
+    let main = strip(&g.spec, 1).inputs[0];
+    assert_eq!((main.from, main.tap, main.gain), (2, Tap::Post, 1.0));
+    let post_send = *strip(&g.spec, 4)
+        .inputs
+        .iter()
+        .find(|x| x.from == 2)
+        .unwrap();
+    assert_eq!(post_send.tap, Tap::Post);
+    let pre_send = strip(&g.spec, 3).inputs[0];
+    assert_eq!((pre_send.from, pre_send.tap), (2, Tap::Pre));
+    for n in [1, 3, 4] {
+        assert_eq!(
+            strip(&g.spec, n).inputs,
+            strip(&plain.spec, n).inputs,
+            "node {n}"
+        );
+        assert_eq!(
+            strip(&g.spec, n).gain_l,
+            strip(&plain.spec, n).gain_l,
+            "node {n}"
+        );
+    }
+    // The sidechain tap is unchanged too.
+    assert_eq!(strip(&g.spec, 4).inserts[0].sidechain, Some(post(2, 1.0)));
+    // The controls keep the own fader and name the VCA.
+    let c = g.controls.iter().find(|c| c.strip == StripId(1)).unwrap();
+    assert_eq!((c.gain_db, c.vcas.clone()), (0.0, vec![v]));
+    assert!(
+        g.controls
+            .iter()
+            .filter(|c| c.strip != StripId(1))
+            .all(|c| c.vcas.is_empty())
+    );
+    assert_eq!(
+        g.vcas,
+        vec![VcaControlSpec {
+            vca: v,
+            gain_db: -6.0,
+            mute: false,
+            solo: false,
+        }]
+    );
+    // Two VCAs add up; the total stops at GAIN_MAX_DB; −∞ silences.
+    let w = vca(&mut b, vec![StripId(1)], -3.0);
+    assert_eq!(
+        strip(&graph(&b).spec, 2).gain_l,
+        strip_gains(-9.0, 0.0, true).0
+    );
+    b.run(Command::Groups(GroupCmd::SetVcaLevel {
+        vca: v,
+        gain_db: 10.0,
+    }))
+    .unwrap();
+    b.run(Command::Groups(GroupCmd::SetVcaLevel {
+        vca: w,
+        gain_db: 10.0,
+    }))
+    .unwrap();
+    assert_eq!(
+        strip(&graph(&b).spec, 2).gain_l,
+        strip_gains(GAIN_MAX_DB, 0.0, true).0
+    );
+    b.run(Command::Groups(GroupCmd::SetVcaLevel {
+        vca: w,
+        gain_db: GAIN_FLOOR_DB,
+    }))
+    .unwrap();
+    assert_eq!(strip(&graph(&b).spec, 2).gain_l, 0.0);
+}
+
+/// Spec §2a: a VCA's mute mutes its members and its solo solos them, as
+/// their own switches would; the members' own switches stay off.
+#[test]
+fn vca_mute_and_solo_in_the_graph() {
+    // Muted: the synth's edges and sidechain feed are 0, as for its own mute.
+    let mut b = routed();
+    let v = vca(&mut b, vec![StripId(1)], 0.0);
+    b.run(Command::Groups(GroupCmd::SetVcaMute { vca: v, mute: true }))
+        .unwrap();
+    let g = graph(&b);
+    assert!(!strip(&g.spec, 2).audible);
+    assert_eq!(strip(&g.spec, 1).inputs[0], post(2, 0.0));
+    assert_eq!(strip(&g.spec, 3).inputs[0].gain, 0.0);
+    assert_eq!(strip(&g.spec, 4).inserts[0].sidechain, Some(post(2, 0.0)));
+    let c = g.controls.iter().find(|c| c.strip == StripId(1)).unwrap();
+    assert!(!c.mute, "the member's own mute stays off");
+    assert!(g.vcas[0].mute);
+    let mut own = routed();
+    own.mixer(MixerCmd::SetMute {
+        strip: StripId(1),
+        mute: true,
+    })
+    .unwrap();
+    assert_eq!(g.spec, graph(&own).spec);
+
+    // Soloed: the synth and what it reaches play; B is silenced.
+    let mut b = routed();
+    let v = vca(&mut b, vec![StripId(1)], 0.0);
+    b.run(Command::Groups(GroupCmd::SetVcaSolo { vca: v, solo: true }))
+        .unwrap();
+    let g = graph(&b);
+    assert!(strip(&g.spec, 2).audible && strip(&g.spec, 3).audible);
+    assert!(!strip(&g.spec, 4).audible);
+    assert_eq!(
+        strip(&g.spec, 1).inputs,
+        vec![post(2, 1.0), post(3, 1.0), post(4, 0.0)]
+    );
+    assert!(g.vcas[0].solo);
+    let mut own = routed();
+    own.mixer(MixerCmd::SetSolo {
+        strip: StripId(1),
+        solo: true,
+    })
+    .unwrap();
+    assert_eq!(g.spec, graph(&own).spec);
 }

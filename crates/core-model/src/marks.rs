@@ -1,17 +1,18 @@
 //! Co-Producer's marks (plan 8b Ruling 1; spec §7.2): tracks, strips,
 //! sends and plug-in slots Co-Producer made carry `co_producer` until the
-//! composer takes them over.
+//! composer takes them over. So do fader groups and VCAs (owner,
+//! 2026-11-19), though their names stay as given.
 //!
 //! [`settle`] runs after every step of [`crate::history::History`]: an
 //! acting step marks what it made and names its marked tracks and strips
 //! "… (Co-Producer)"; a hand step never makes a marked thing, and a hand
-//! rename of a marked track or strip takes it over. Make Mine
+//! rename of a marked track, strip, group or VCA takes it over. Make Mine
 //! ([`crate::command::LaneCmd::MakeMine`],
 //! [`crate::command::MixerCmd::MakeMine`]) takes things over by hand.
 
 use crate::document::{DestKind, Document};
 use crate::error::Result;
-use crate::ids::{DestId, LaneId, PluginInstanceId, SeqId, StripId};
+use crate::ids::{DestId, GroupId, LaneId, PluginInstanceId, SeqId, StripId, VcaId};
 use crate::lane::Lane;
 use crate::mixer::{PluginSlot, Strip, StripKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -207,6 +208,45 @@ fn settle_instruments(
     }
 }
 
+/// Settles each group's and VCA's mark against `before` as [`settled`]
+/// does a track's: a new one is marked exactly when Co-Producer made it,
+/// and a hand rename of a marked one takes it over. A group or VCA keeps
+/// its name: no " (Co-Producer)" is added.
+fn settle_groups(before: &Document, after: &mut Document, acting: bool) {
+    let (b, a) = (before.mixer(), after.mixer());
+    // Only the mark: the name `settled` would give is not used.
+    let mark =
+        |old: Option<(&str, bool)>, name: &str, marked: bool| settled(old, name, marked, acting).0;
+    let groups: Vec<(GroupId, bool)> = a
+        .groups()
+        .iter()
+        .filter_map(|(id, g)| {
+            let old = b.groups().get(id).map(|o| (o.name.as_str(), o.co_producer));
+            let m = mark(old, &g.name, g.co_producer);
+            (m != g.co_producer).then_some((*id, m))
+        })
+        .collect();
+    let vcas: Vec<(VcaId, bool)> = a
+        .vcas()
+        .iter()
+        .filter_map(|(id, v)| {
+            let old = b.vcas().get(id).map(|o| (o.name.as_str(), o.co_producer));
+            let m = mark(old, &v.name, v.co_producer);
+            (m != v.co_producer).then_some((*id, m))
+        })
+        .collect();
+    for (id, m) in groups {
+        if let Ok(g) = after.mixer_mut().group_mut(id) {
+            g.co_producer = m;
+        }
+    }
+    for (id, m) in vcas {
+        if let Ok(v) = after.mixer_mut().vca_mut(id) {
+            v.co_producer = m;
+        }
+    }
+}
+
 /// Whether [`settle`] has work for a step from `before`: always while
 /// Co-Producer acts, else only when `before` may hold marks. A hand step
 /// on a song with no marks makes none (whatever it adds is unmarked, and
@@ -224,6 +264,7 @@ pub fn settle(before: &Document, after: &mut Document, acting: bool) {
         after.set_may_have_marks();
     }
     settle_lanes(before, after, acting);
+    settle_groups(before, after, acting);
     let mixer = !after.mixer().strips().ptr_eq(before.mixer().strips());
     let insts = !after.instruments().ptr_eq(before.instruments());
     if !(mixer || insts) {

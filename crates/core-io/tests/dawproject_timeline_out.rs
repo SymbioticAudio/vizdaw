@@ -950,6 +950,61 @@ fn what_is_left_out_on_the_timeline() {
     }
 }
 
+/// A VCA fader lane is the VCA channel's volume automation (Task 8
+/// replaced preflight F22's temporary left-out line): no line is listed,
+/// the curve targets the channel's volume, and the file passes the schema.
+#[test]
+fn vca_fader_automation_is_the_vca_channels_volume() {
+    let f = timeline_fixture();
+    let plain = run(&f.doc, f.seq);
+    let mut b = Builder::from_doc(f.doc.clone());
+    let r = b
+        .run(Command::Groups(core_model::command::GroupCmd::NewVca {
+            name: "Drums VCA".into(),
+            colour: core_model::mixer::Swatch::Blue,
+            members: vec![f.drum_strip],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
+    b.events(
+        f.seq,
+        f.drums,
+        vec![
+            spec(0, automation(AutomationTarget::VcaFader(vca), 0.25)),
+            spec(Q, automation(AutomationTarget::VcaFader(vca), 0.75)),
+        ],
+    )
+    .unwrap();
+    let x = run(&b.finish(), f.seq);
+    assert!(
+        x.report
+            .items
+            .iter()
+            .all(|i| !i.what.contains("VCA fader automation")),
+        "{:#?}",
+        x.report.items
+    );
+    assert!(
+        x.project_xml
+            .contains(&format!("parameter=\"vca{}v\"", vca.0)),
+        "{}",
+        x.project_xml
+    );
+    assert_eq!(
+        x.report.summary.automation_points,
+        plain.report.summary.automation_points + 2
+    );
+    assert_eq!(
+        count(&x.report, ItemKind::LeftOut, UNPLACED_AUTOMATION),
+        0,
+        "not an unplaced target: {:#?}",
+        x.report.items
+    );
+    schema_check(&format!("{DIR}/Project.xsd"), &x.project_xml);
+}
+
 #[test]
 fn region_gain_entries() {
     let f = timeline_fixture();

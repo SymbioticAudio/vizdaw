@@ -66,6 +66,7 @@ pub mod revs;
 pub mod selection;
 pub mod session;
 pub mod snapshot;
+pub mod stand_ins;
 pub mod starter;
 pub mod step;
 pub mod strip;
@@ -148,8 +149,8 @@ pub use metrics::{
     metrics_delete_all, metrics_overview, metrics_summary,
 };
 pub use mixer::{
-    BusRow, DestRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot, OutputPathRow,
-    SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow,
+    BusRow, DestRow, GroupRow, MeterRow, MidiLevelRow, MidiMixRow, MixerLevels, MixerSnapshot,
+    OutputPathRow, SendRow, StripColourRow, StripKindRow, StripRow, SwatchRow, VcaRow,
 };
 pub use mixer_chores::{CoProducerPluginRow, CoProducerPluginsRow, co_producer_plugins};
 pub use modify::{
@@ -162,6 +163,7 @@ pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latenc
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
 pub use selection::{SelectionRow, TickRange};
+pub use session::click::{ClickModeRow, ClickRow};
 pub use session::co_producer_mixer::CoProducerParamsRow;
 pub use session::{CopyRow, NotesRow, OpenOptions, RemovedCopiesRow, Session};
 pub use snapshot::{

@@ -30,6 +30,29 @@ pub const BEAT_HZ: f64 = 800.0;
 /// The other beats' peak.
 pub const BEAT_LEVEL: f32 = 0.35;
 
+/// Sample `offset` (frames since the click started) of a click at `rate`
+/// Hz: the first beat of a bar (`k_in_bar` 0) is the accent, any other
+/// beat the plain click; `gain` scales the peak. Zero from
+/// [`CLICK_SECONDS`] on. The count-in and the metronome both sound
+/// through it, so their clicks are one sound (groups-vcas-transport
+/// Ruling 19). // RT
+pub fn click_sample(k_in_bar: u32, offset: u64, rate: f64, gain: f32) -> f32 {
+    let rate = rate.max(1.0);
+    let t = offset as f64 / rate;
+    if t >= CLICK_SECONDS {
+        return 0.0;
+    }
+    let (hz, level) = if k_in_bar == 0 {
+        (ACCENT_HZ, ACCENT_LEVEL)
+    } else {
+        (BEAT_HZ, BEAT_LEVEL)
+    };
+    (f64::from(level)
+        * f64::from(gain)
+        * (std::f64::consts::TAU * hz * t).sin()
+        * (-t / DECAY_SECONDS).exp()) as f32
+}
+
 /// A count-in in progress on the real-time side. `Copy`, so starting one
 /// never allocates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -172,18 +195,10 @@ impl Counting {
     /// Adds the part of click `k` (starting at `at`) inside `[from, to)`.
     /// // RT
     fn click(&self, out: &mut [&mut [f32]], k: u32, at: u64, from: u64, to: u64) {
-        let (hz, level) = if k % self.c.per_bar == 0 {
-            (ACCENT_HZ, ACCENT_LEVEL)
-        } else {
-            (BEAT_HZ, BEAT_LEVEL)
-        };
         let a = at.max(from);
         let b = at.saturating_add(self.click_len()).min(to);
         for f in a..b {
-            let t = (f - at) as f64 / self.rate;
-            let v = (f64::from(level)
-                * (std::f64::consts::TAU * hz * t).sin()
-                * (-t / DECAY_SECONDS).exp()) as f32;
+            let v = click_sample(k % self.c.per_bar, f - at, self.rate, 1.0);
             let i = (f - from) as usize;
             for ch in out.iter_mut().take(2) {
                 if let Some(x) = ch.get_mut(i) {

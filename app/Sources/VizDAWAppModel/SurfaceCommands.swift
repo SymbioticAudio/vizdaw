@@ -170,7 +170,7 @@ public enum SurfaceCommands {
             guard let text = target, let t = parseAutomationTarget(text: text) else {
                 return bad(
                     "\(id): `target` is fader:<strip>, pan:<strip>, mute:<strip>, solo:<strip>, "
-                        + "send:<strip>:<n> (n from 1) or param:<slot>:<param>")
+                        + "send:<strip>:<n> (n from 1), param:<slot>:<param> or vca:<vca>")
             }
             return .ok(id == learn ? .learnTarget(t) : .unlearnTarget(t))
         }

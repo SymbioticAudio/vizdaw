@@ -296,7 +296,7 @@ enum ControlChannel {
                 if coProducer { _ = CoProducerCommands.takeNewAlert(m, before: alertBefore) }
                 CoProducerCommands.jobEnded(doc: doc, job: job, m)
                 InterchangeCommands.jobEnded(doc, failed: true, store: appStore) { id in
-                    if let w = ControlWindows.window(of: id) { w.performClose(nil) } else { appStore.close(id) }
+                    ControlWindows.closeQuietly(id)
                 }
                 _ = try? server.fail(token: token, failure: .of(.failed, message))
                 return true
@@ -501,6 +501,8 @@ enum ControlChannel {
             answer(server, token, ControlOpen.open(path: path, answers: answers, store: appStore))
         case .quit:
             _ = try? server.reply(token: token, result: .quitting)
+            // A programmatic quit never asks to save (release gate B1).
+            QuitPrompts.quiet = true
             // Next turn: the reply is on its way before the app tears down.
             DispatchQueue.main.async { NSApp.terminate(nil) }
         case .wait(let condition, let window, let timeoutMs):
@@ -726,6 +728,19 @@ enum ControlWindows {
         }
     }
 
+    /// Closes document `doc`'s window, or the document when it has none,
+    /// without the save prompt (release gate B1): `close()` skips
+    /// `windowShouldClose`, and the window's will-close closes the document.
+    static func closeQuietly(_ doc: UUID) {
+        if let w = window(of: doc) {
+            // A sheet still up gets its Cancel first, so a quit waiting on
+            // it is answered (fix round 1, I-1).
+            if let sheet = w.attachedSheet { w.endSheet(sheet, returnCode: .cancel) }
+            w.close()
+        }
+        appStore.close(doc)
+    }
+
     static func openDocument(_ doc: UUID) {
         guard window(of: doc) == nil else { return }
         if let openWindow {
@@ -800,13 +815,7 @@ final class AppControlHost: ControlHost {
     func documentWindow(_ doc: UUID) -> Int64? { ControlWindows.window(of: doc).map { Int64($0.windowNumber) } }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { EditorWindows.tearOff(appStore, doc: doc, kind: kind) }
 
-    func closeDocument(_ doc: UUID) {
-        if let w = ControlWindows.window(of: doc) {
-            w.performClose(nil)
-        } else {
-            appStore.close(doc)
-        }
-    }
+    func closeDocument(_ doc: UUID) { ControlWindows.closeQuietly(doc) }
 
     var nudge: NudgeSettings { editingPreferences.nudge }
     var crossfadeMs: Double { editingPreferences.crossfadeMs }
@@ -831,15 +840,27 @@ final class AppControlHost: ControlHost {
     }
 
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {
-        // The key mixer window of this document has fields of its own
-        // (plan 7d Ruling 7); else the document window's.
+        guard let w = fieldsWindow(doc),
+            let v = TransportFieldsView.find(in: w.contentView?.superview ?? w.contentView, showing: field)
+        else { return false }
+        return v.focus(field)
+    }
+
+    /// The key mixer window of this document has fields of its own (plan
+    /// 7d Ruling 7); else the document window's.
+    private func fieldsWindow(_ doc: UUID) -> NSWindow? {
         let key = NSApp.keyWindow
         let tag = key.map(ControlWindows.tagOf)
         let target = TransportFieldsTarget.choose(keyKind: tag?.kind, keyDoc: tag?.doc, doc: doc)
-        let window = target == .mixerWindow ? key : ControlWindows.window(of: doc)
-        guard let w = window,
-            let v = TransportFieldsView.find(in: w.contentView?.superview ?? w.contentView)
-        else { return false }
-        return v.focus(field)
+        return target == .mixerWindow ? key : ControlWindows.window(of: doc)
+    }
+
+    /// The P, E and U keys from the menu (a user's key, never the
+    /// channel's: Task 12b): the field on the row takes the keyboard;
+    /// folded into », or not on the bar, » opens at it.
+    func openField(_ field: TransportField, _ doc: UUID) -> Bool {
+        guard let w = fieldsWindow(doc), let row = TransportRowView.find(in: w.contentView?.superview ?? w.contentView)
+        else { return focus(field, doc) }
+        return row.openField(field)
     }
 }

@@ -47,6 +47,10 @@ struct AppCommands: Commands {
         // Older SDKs (CI's macos-15 Xcode) take at most 10 items per
         // builder, so the standard groups go in one Group.
         Group {
+            // VizDAW › Licences…, after About (release gate Task 4).
+            CommandGroup(after: .appInfo) {
+                Button("Licences…") { openWindow(id: "licences") }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New") {
                     if let f = FormatPanel.run(
@@ -95,6 +99,8 @@ struct AppCommands: Commands {
                 Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
             }
             CommandGroup(replacing: .saveItem) {
+                // `performClose` asks the window's close hook, which asks
+                // to save a song with unsaved changes (release gate B1).
                 Button("Close") { NSApp.keyWindow?.performClose(nil) }
                     .keyboardShortcut(KeyMenu.shortcut("file.close"))
                 Button("Save") { save(as: false) }
@@ -172,6 +178,13 @@ struct AppCommands: Commands {
                 ForEach(["ui.toggle_left", "ui.toggle_bottom", "ui.toggle_right"], id: \.self) {
                     commandToggle($0, ViewCommands.self)
                 }
+                Divider()
+                // Task 12: the sheet on the key document or mixer window.
+                Button(keyBindings.row(TransportCustomize.command)?.title ?? TransportCustomize.title) {
+                    if let w = store.keyWindowToken { store.transportLayout.beginCustomizing(window: w) }
+                }
+                .keyboardShortcut(KeyMenu.shortcut(TransportCustomize.command))
+                .disabled(store.keyWindowToken == nil)
                 Divider()
             }
         }
@@ -326,6 +339,7 @@ struct AppCommands: Commands {
                 .disabled(doc == nil)
             commandToggle("transport.overdub", TransportCommands.self)
             commandToggle("transport.punch", TransportCommands.self)
+            commandToggle(TransportCommands.click, TransportCommands.self)
             Divider()
             fieldItem("transport.go_position")
             fieldItem("transport.go_edit_in")
@@ -334,6 +348,9 @@ struct AppCommands: Commands {
             commandItem("transport.arm_previous", TransportCommands.self)
             commandItem("transport.arm_next", TransportCommands.self)
         }
+        // At most 10 items per builder (older SDKs): the last menus go in
+        // one Group.
+        Group {
         CommandMenu("Step") {
             commandToggle(StepCommands.entry, StepCommands.self)
             Divider()
@@ -354,6 +371,41 @@ struct AppCommands: Commands {
             Divider()
             commandToggle(AutomationCommands.suspend, AutomationCommands.self)
         }
+        CommandMenu("Mixer") { mixerMenu }
+        }
+    }
+
+    /// The Mixer menu (groups-vcas-transport Ruling 12): Group, Ungroup,
+    /// New VCA, Assign to VCA ▸ (each VCA, then New VCA) and Remove from
+    /// VCA ▸, on the selected strips; each is off where its command would
+    /// be refused. None has a default key.
+    @ViewBuilder private var mixerMenu: some View {
+        let mixer = doc?.mixer
+        let strips = mixer?.selectedMembers ?? []
+        Button("Group") { mixer?.groupSelection() }
+            .disabled(!(mixer?.canGroupSelection ?? false))
+        Button("Ungroup") { mixer?.ungroupSelection() }
+            .disabled(mixer?.selectionGroup == nil)
+        Divider()
+        Button("New VCA") { mixer?.newVca(fromSelection: true) }
+            .disabled(mixer == nil)
+        Menu("Assign to VCA") {
+            ForEach(mixer?.vcas ?? [], id: \.id) { v in
+                let add = mixer?.assignable(strips, to: v) ?? []
+                Button(v.name) { mixer?.assign(add, toVca: v.id, true) }
+                    .disabled(add.isEmpty)
+            }
+            if !(mixer?.vcas ?? []).isEmpty { Divider() }
+            Button("New VCA") { mixer?.newVca(fromSelection: true) }
+        }
+        .disabled(strips.isEmpty)
+        let holding = mixer?.vcasHolding(strips) ?? []
+        Menu("Remove from VCA") {
+            ForEach(holding, id: \.id) { v in
+                Button(v.name) { mixer?.assign(strips.filter(v.members.contains), toVca: v.id, false) }
+            }
+        }
+        .disabled(holding.isEmpty)
     }
 
     /// A menu item for a command of `kind` (plan 4f): its title and key
@@ -388,7 +440,10 @@ struct AppCommands: Commands {
     /// A key that focuses a transport field (plan 4f Ruling 16).
     private func fieldItem(_ id: String) -> some View {
         Button(keyBindings.row(id)?.title ?? id) {
-            if let docID, let f = ControlCommands.fieldKeys[id] { _ = AppControlHost.shared.focus(f, docID) }
+            // Folded or not on the bar, » opens at the field (Task 12b).
+            if let docID, let f = ControlCommands.fieldKeys[id], !AppControlHost.shared.openField(f, docID) {
+                doc?.editor.status = "The window shows no transport fields."
+            }
         }
         .keyboardShortcut(KeyMenu.shortcut(id))
         .disabled(docID == nil || !(doc?.transportKeysEnabled ?? false))
@@ -479,16 +534,30 @@ struct AppCommands: Commands {
 
     private func save(as forceAs: Bool) {
         guard let doc else { return }
+        _ = SaveFlow.save(doc, forceAs: forceAs)
+    }
+}
+
+/// File › Save and Save As, and the close prompt's Save (release gate B1).
+@MainActor
+enum SaveFlow {
+    /// Saves `doc`, through the Save As panel when it is untitled (or
+    /// `forceAs`). True when it saved: false when the panel was cancelled,
+    /// the save was refused (its status shows) or failed (its alert shows).
+    @discardableResult
+    static func save(_ doc: DocumentModel, forceAs: Bool) -> Bool {
+        let alertBefore = doc.alert?.id
         switch doc.saveAction(forceAs: forceAs) {
         case .panel:
-            if let path = Panels.chooseSaveLocation(title: doc.snapshot.title) {
-                doc.saveAs(path: path)
-            }
+            guard let path = Panels.chooseSaveLocation(title: doc.snapshot.title) else { return false }
+            doc.saveAs(path: path)
         case .save:
             doc.save()
         case .refused(let why):
             doc.editor.status = why
+            return false
         }
+        return doc.alert?.id == alertBefore && !doc.hasUnsavedChanges
     }
 }
 

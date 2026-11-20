@@ -15,7 +15,7 @@ pub mod spec;
 
 use core_model::ids::PluginInstanceId;
 
-pub use controls::{FeedSpec, OverrideSnapshot, SendSpec, StripControlSpec};
+pub use controls::{FeedSpec, OverrideSnapshot, SendSpec, StripControlSpec, VcaControlSpec};
 pub use exec::{Graph, InsertInit, Runner, SinkTable};
 pub use mixer::mixer_spec;
 pub use mixer::{FeedSource, InstrumentFeed};

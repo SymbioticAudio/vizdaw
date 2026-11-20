@@ -67,6 +67,12 @@ pub fn support_dir_from_env() -> Result<PathBuf, String> {
         if !d.is_absolute() {
             return Err("vizdaw-mcp: VIZDAW_SUPPORT_DIR must be an absolute path.".into());
         }
+        if !core_control::co_producer::is_normal(&d) {
+            return Err(
+                "vizdaw-mcp: VIZDAW_SUPPORT_DIR must be in normal form, with no `.` part, no doubled `/` and no `/` at the end."
+                    .into(),
+            );
+        }
         return Ok(d);
     }
     match std::env::var_os("HOME").map(PathBuf::from) {
@@ -121,15 +127,17 @@ pub struct Server {
     /// The client asked for MCP Apps views at `initialize` (Ruling 7).
     views: bool,
     ask_timeout: Duration,
-    /// The question in flight, if any; lines meanwhile wait in `queue`.
+    /// The question in flight, if any; lines meanwhile wait in `queue`,
+    /// each with its request id (None for a notification).
     wait: Option<Wait>,
-    queue: VecDeque<String>,
+    queue: VecDeque<(Option<Value>, String)>,
     queued_bytes: usize,
     next_elicit: u64,
     /// 2026-07-28 questions awaiting their retry, oldest first.
     held: Vec<Held>,
-    /// Tokens handed to the model (the fallback), oldest first.
-    tokens: VecDeque<String>,
+    /// Tokens handed to the model (the fallback), oldest first, each with
+    /// the commands and window it was handed out for.
+    tokens: VecDeque<Pending>,
     /// The documents whose notes the first answer already gave, oldest
     /// first, at most [`MAX_NOTED`].
     noted: VecDeque<String>,
@@ -253,19 +261,19 @@ impl Server {
                 }
             }
             Ok(Message::Request { method, .. }) if method == "ping" => self.dispatch(line),
-            Ok(Message::Notification { method, params })
-                if method == "notifications/cancelled"
-                    && params.get("requestId") == Some(&call) =>
-            {
-                self.wait = None;
-                Vec::new()
+            Ok(Message::Notification { method, params }) if method == "notifications/cancelled" => {
+                self.cancelled(params.get("requestId"), &call, &elicit)
             }
             Ok(m) => {
                 if self.queue.len() < MAX_QUEUED
                     && self.queued_bytes.saturating_add(line.len()) <= MAX_QUEUED_BYTES
                 {
+                    let id = match &m {
+                        Message::Request { id, .. } => Some(id.clone()),
+                        _ => None,
+                    };
                     self.queued_bytes = self.queued_bytes.saturating_add(line.len());
-                    self.queue.push_back(line.to_string());
+                    self.queue.push_back((id, line.to_string()));
                     return Vec::new();
                 }
                 match m {
@@ -282,12 +290,36 @@ impl Server {
         }
     }
 
+    /// A client's cancel while the composer is asked. For the waiting call:
+    /// the wait ends with no reply, and the form still open on the host is
+    /// withdrawn with `notifications/cancelled` naming the elicitation
+    /// (2025-11-25 lets either side cancel its own request). For a kept
+    /// call: it is dropped and never runs. Anything else is ignored.
+    fn cancelled(&mut self, id: Option<&Value>, call: &Value, elicit: &str) -> Vec<String> {
+        let Some(id) = id.filter(|v| v.is_string() || v.is_number()) else {
+            return Vec::new();
+        };
+        if id == call {
+            self.wait = None;
+            return vec![rpc::notification_line(
+                "notifications/cancelled",
+                json!({ "requestId": elicit, "reason": "The call this question was for was cancelled." }),
+            )];
+        }
+        let before = self.queue.len();
+        self.queue.retain(|(q, _)| q.as_ref() != Some(id));
+        if self.queue.len() != before {
+            self.queued_bytes = self.queue.iter().map(|(_, l)| l.len()).sum();
+        }
+        Vec::new()
+    }
+
     /// Lines kept during a question, handled once it ends, until another
     /// question starts.
     fn drain(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         while self.wait.is_none() {
-            let Some(line) = self.queue.pop_front() else {
+            let Some((_, line)) = self.queue.pop_front() else {
                 break;
             };
             self.queued_bytes = self.queued_bytes.saturating_sub(line.len());
@@ -371,6 +403,20 @@ impl Server {
         params: &Map<String, Value>,
     ) -> Result<Done, RpcError> {
         let era = rpc::era(params)?;
+        if era == Era::Modern {
+            rpc::check_modern(params)?;
+            if method == "initialize" {
+                // The eras do not mix in one request: 2026-07-28 has no
+                // `initialize`, and what was declared before stays.
+                return Err(RpcError::new(
+                    rpc::INVALID_PARAMS,
+                    format!(
+                        "`initialize` is not part of {}: send it without that version in `_meta`, or send requests without `initialize`.",
+                        rpc::MODERN
+                    ),
+                ));
+            }
+        }
         if method == "tools/call" {
             return self.call_tool(id, era, params);
         }
@@ -403,7 +449,7 @@ impl Server {
             "resources/templates/list" => (Kind::Cacheable, json!({ "resourceTemplates": [] })),
             "prompts/list" => (Kind::Cacheable, recipes::prompts_list()),
             "prompts/get" => (Kind::Cacheable, recipes::prompt_get(params)?),
-            "resources/read" => (Kind::Cacheable, self.read_resource(params)?),
+            "resources/read" => (Kind::Cacheable, self.read_resource(era, params)?),
             _ => {
                 return Err(RpcError::new(
                     rpc::METHOD_NOT_FOUND,
@@ -585,12 +631,13 @@ impl Server {
                 while self.tokens.len() >= MAX_HELD {
                     self.tokens.pop_front();
                 }
-                self.tokens.push_back(pending.token.clone());
                 // The token is only in the text, never in the view.
-                Done::Result(with_view(
+                let answer = with_view(
                     tool_text(tools::list_for_the_model(items, &pending.token), false),
                     views.then(|| tools::change_view("ask_in_chat", items, None)),
-                ))
+                );
+                self.tokens.push_back(pending);
+                Done::Result(answer)
             }
         }
     }
@@ -620,7 +667,9 @@ impl Server {
     }
 
     /// The fallback's second half: a token `change` gave the model in this
-    /// conversation, used once.
+    /// conversation, used once, and only for the commands and window it
+    /// was handed out for (VizDAW binds it to the song as well). A token
+    /// sent with other commands is used up and nothing is applied.
     fn apply_change(&mut self, args: &Map<String, Value>) -> Value {
         let mut a = match tools::change_args(args, true)
             .and_then(|a| tools::listed(&self.commands, &a.commands).map(|()| a))
@@ -633,19 +682,16 @@ impl Server {
             Err(e) => return e,
         };
         let token = a.token.clone().unwrap_or_default();
-        let Some(at) = self.tokens.iter().position(|t| *t == token) else {
+        let Some(at) = self.tokens.iter().position(|p| p.token == token) else {
             return tool_error(tools::NOT_OUR_TOKEN);
         };
-        self.tokens.remove(at);
-        self.apply(
-            &Pending {
-                token,
-                commands: a.commands,
-                window: a.window,
-                items: Vec::new(),
-            },
-            None,
-        )
+        let Some(pending) = self.tokens.remove(at) else {
+            return tool_error(tools::NOT_OUR_TOKEN);
+        };
+        if pending.commands != a.commands || pending.window != a.window {
+            return tool_error(tools::FOR_OTHER_COMMANDS);
+        }
+        self.apply(&pending, None)
     }
 
     /// Sends `co_producer.apply` and answers its results; with the change
@@ -1100,7 +1146,7 @@ impl Server {
         }
     }
 
-    fn read_resource(&mut self, params: &Map<String, Value>) -> Result<Value, RpcError> {
+    fn read_resource(&mut self, era: Era, params: &Map<String, Value>) -> Result<Value, RpcError> {
         let Some(uri) = params.get("uri").and_then(Value::as_str) else {
             return Err(RpcError::new(
                 rpc::INVALID_PARAMS,
@@ -1112,7 +1158,10 @@ impl Server {
             return match views::read(uri) {
                 Some(c) => Ok(json!({ "contents": [c] })),
                 None => Err(RpcError::new(
-                    rpc::RESOURCE_NOT_FOUND,
+                    match era {
+                        Era::Legacy => rpc::RESOURCE_NOT_FOUND,
+                        Era::Modern => rpc::INVALID_PARAMS,
+                    },
                     format!("No resource {:?}.", rpc::truncate(uri, 128)),
                 )),
             };
@@ -1209,9 +1258,34 @@ fn is_screenshot_name(name: &str) -> bool {
         .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Opens `path` for reading without following a final link and without
+/// blocking on a FIFO (`O_NOFOLLOW | O_NONBLOCK`), then requires, on the
+/// open file, a regular file of this user's: nothing can be swapped in
+/// between the check and the read.
+fn open_screenshot(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| format!("it cannot be opened as a file ({e})"))?;
+    let m = f
+        .metadata()
+        .map_err(|e| format!("it cannot be checked ({e})"))?;
+    if !m.file_type().is_file() {
+        return Err("it is not a regular file".into());
+    }
+    match app::my_uid() {
+        Ok(uid) if uid == m.uid() => Ok(f),
+        Ok(_) => Err("it belongs to another user".into()),
+        Err(e) => Err(format!("this user cannot be told from others ({e})")),
+    }
+}
+
 /// Reads and deletes the screenshot VizDAW answered (Ruling 12). Only a
-/// regular file `<support>/screenshot-<digits>.png`, not a link, is read
-/// and deleted; any other path is refused and left alone.
+/// regular file `<support>/screenshot-<digits>.png` of this user's, in a
+/// support folder that passes the connect check, is read and deleted; a
+/// link, a FIFO or any other path is refused and left alone.
 fn take_screenshot(support: &Path, path: &Path) -> Result<Vec<u8>, String> {
     let refuse = || {
         format!(
@@ -1223,22 +1297,34 @@ fn take_screenshot(support: &Path, path: &Path) -> Result<Vec<u8>, String> {
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(is_screenshot_name);
-    if !named || path.parent() != Some(support) {
+    // `file_name` and `parent` read past a final `/` or a `.` part, which
+    // the system would not (it follows a final link then).
+    let normal = core_control::co_producer::is_normal(path);
+    if !normal || !named || path.parent() != Some(support) {
         return Err(refuse());
     }
-    match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_file() => {}
-        _ => return Err(refuse()),
+    match app::support_is_safe(support) {
+        Ok(true) => {}
+        Ok(false) => return Err(refuse()),
+        Err(e) => {
+            return Err(format!(
+                "The screenshot was not read: {}.",
+                match e {
+                    app::AppError::Unsafe(why) => why,
+                    _ => "its folder is not safe".into(),
+                }
+            ));
+        }
     }
-    let read = std::fs::File::open(path).and_then(|f| {
-        let mut bytes = Vec::new();
-        f.take(MAX_SCREENSHOT + 1).read_to_end(&mut bytes)?;
-        Ok(bytes)
-    });
+    let Ok(f) = open_screenshot(path) else {
+        return Err(refuse());
+    };
+    let mut bytes = Vec::new();
+    let read = f.take(MAX_SCREENSHOT + 1).read_to_end(&mut bytes);
     let _ = std::fs::remove_file(path);
     match read {
-        Ok(b) if b.len() as u64 > MAX_SCREENSHOT => Err("The screenshot is too large.".into()),
-        Ok(b) => Ok(b),
+        Ok(_) if bytes.len() as u64 > MAX_SCREENSHOT => Err("The screenshot is too large.".into()),
+        Ok(_) => Ok(bytes),
         Err(e) => Err(format!("The screenshot could not be read ({e}).")),
     }
 }
@@ -1260,6 +1346,7 @@ fn other_song() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn screenshot_names() {
@@ -1271,6 +1358,100 @@ mod tests {
             "x-1.png",
         ] {
             assert!(!is_screenshot_name(bad), "{bad}");
+        }
+    }
+
+    fn private_tmp() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::Builder::new()
+            .prefix("vzs")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        d
+    }
+
+    /// A link, a FIFO or a folder with a screenshot's name is refused and
+    /// left alone; opening never follows the link and never blocks on the
+    /// FIFO (release gate Task 5).
+    #[test]
+    fn screenshot_symlink_is_refused() {
+        let d = private_tmp();
+        let elsewhere = private_tmp();
+        let target = elsewhere.path().join("secret.png");
+        std::fs::write(&target, b"keep").unwrap();
+        let link = d.path().join("screenshot-1.png");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let e = take_screenshot(d.path(), &link).unwrap_err();
+        assert!(e.contains("not its own screenshot file"), "{e}");
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "the link is left");
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+
+        let fifo = d.path().join("screenshot-2.png");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (sup, at) = (d.path().to_path_buf(), fifo.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(take_screenshot(&sup, &at));
+        });
+        let r = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opening the FIFO blocked");
+        assert!(r.unwrap_err().contains("not its own screenshot file"));
+        assert!(std::fs::symlink_metadata(&fifo).is_ok(), "the FIFO is left");
+        // The open itself refuses both, so a swap after any check is
+        // refused too.
+        assert!(open_screenshot(&link).is_err());
+        assert!(open_screenshot(&fifo).is_err());
+
+        let folder = d.path().join("screenshot-3.png");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(take_screenshot(d.path(), &folder).is_err());
+        assert!(folder.is_dir());
+
+        let real = d.path().join("screenshot-4.png");
+        std::fs::write(&real, b"png").unwrap();
+        assert_eq!(take_screenshot(d.path(), &real).unwrap(), b"png");
+        assert!(
+            std::fs::symlink_metadata(&real).is_err(),
+            "read and deleted"
+        );
+    }
+
+    /// A final `/` or a `.` part makes the system follow a final link that
+    /// `symlink_metadata` and `parent` would not see: the support folder
+    /// and the screenshot path must be in normal form (release gate
+    /// Task 5, as the developer socket's export paths are).
+    #[test]
+    fn trailing_slash_path_is_refused() {
+        let d = private_tmp();
+        let link_dir = private_tmp();
+        let link = link_dir.path().join("support");
+        std::os::unix::fs::symlink(d.path(), &link).unwrap();
+        let uid = std::fs::symlink_metadata(d.path()).unwrap().uid();
+        for p in [
+            format!("{}/", link.display()),
+            format!("{}/.", link.display()),
+        ] {
+            match app::folder_check(Path::new(&p), uid) {
+                Err(app::AppError::Unsafe(why)) => assert!(why.contains("normal form"), "{why}"),
+                other => panic!("{p}: {other:?}"),
+            }
+        }
+        let real = d.path().join("screenshot-5.png");
+        std::fs::write(&real, b"keep").unwrap();
+        for p in [
+            format!("{}/./screenshot-5.png", d.path().display()),
+            format!("{}//screenshot-5.png", d.path().display()),
+            format!("{}/screenshot-5.png/", d.path().display()),
+        ] {
+            let e = take_screenshot(d.path(), Path::new(&p)).unwrap_err();
+            assert!(e.contains("not its own screenshot file"), "{p}: {e}");
+            assert_eq!(std::fs::read(&real).unwrap(), b"keep", "{p}");
         }
     }
 

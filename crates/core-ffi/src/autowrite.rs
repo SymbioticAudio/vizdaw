@@ -104,12 +104,14 @@ impl Thinning {
     }
 }
 
-/// A level in dB (a fader or a send): thinned in dB, Trim offsets it in
+/// A level in dB (a fader, a VCA's included, or a send): thinned in dB, Trim offsets it in
 /// dB (Rulings 11, 12).
 fn is_db(target: AutomationTarget) -> bool {
     matches!(
         target,
-        AutomationTarget::StripFader(_) | AutomationTarget::SendLevel(..)
+        AutomationTarget::StripFader(_)
+            | AutomationTarget::SendLevel(..)
+            | AutomationTarget::VcaFader(_)
     )
 }
 

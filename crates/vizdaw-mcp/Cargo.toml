@@ -1,6 +1,6 @@
 [package]
 name = "vizdaw-mcp"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 core-control = { path = "../core-control" }
 serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

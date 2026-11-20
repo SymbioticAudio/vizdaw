@@ -201,196 +201,101 @@ private struct DocumentAlerts: ViewModifier {
     }
 }
 
-/// The transport bar along the top of the window (plan 7a Ruling 9): an
-/// ordinary view, not a toolbar. Return to Start, Rewind, Fast Forward,
-/// Play, Loop and Record, the readouts, the transport fields, the device
-/// and (document window only) the faults button, the main-view tabs and
-/// the pane toggles. The mixer window
-/// shows it with `showsViews` false.
+/// The transport bar along the top of the window (plan 7a Ruling 9;
+/// groups-vcas-transport Rulings 13 and 14): an ordinary view, not a
+/// toolbar. One row of the app's transport items (`TransportRowView`),
+/// from the transport bar preference; what does not fit folds into ».
+/// The mixer window shows it with `showsViews` false, without the
+/// document-only items.
 struct DocumentTransportBar: View {
-    @Environment(\.symbioticTheme) private var theme
-    @Bindable var model: DocumentModel
+    let model: DocumentModel
     let docID: UUID
     let showsViews: Bool
+    /// The window's token: Customize Transport Bar opens on the window
+    /// that asked (Task 12).
+    @Environment(\.transportWindowToken) private var window
 
     var body: some View {
-        // One row when it fits, else the fields on a second row (Task 7
-        // review I1): never cut at the default window or the minimum.
-        TransportBarLayout(spacing: theme.spacing.m, rowSpacing: theme.spacing.xs) {
-            HStack(spacing: theme.spacing.m) {
-                // AppKit controls and text: the channel's tree walks AppKit's
-                // elements and sees no SwiftUI button or text (final review I1).
-                HStack(spacing: theme.spacing.s) {
-                    AppKitButton(
-                        "Return to Start", icon: .returnToStart, enabled: model.selectedSeq != nil,
-                        help: "Return to Start"
-                    ) {
-                        do { try model.moveTo(0) } catch { model.editor.status = TransportCommands.statusText(error) }
-                    }
-                    .fixedSize()
-                    holdButton("Rewind", icon: .rewind, forward: false,
-                        help: "Rewind one bar; hold to wind; ⇧-click: previous marker")
-                    holdButton("Fast Forward", icon: .fastForward, forward: true,
-                        help: "Fast Forward one bar; hold to wind; ⇧-click: next marker")
-                    AppKitButton(
-                        model.isPlaying ? "Stop" : "Play", icon: model.isPlaying ? .stop : .play,
-                        enabled: model.canPlay, help: model.isPlaying ? "Stop (Space)" : "Play (Space)"
-                    ) { model.playStop() }
-                    .fixedSize()
-                    AppKitButton("Loop", icon: .loop, isOn: model.looping, help: "Loop") { model.toggleLoop() }
-                        .fixedSize()
-                    RecordControls(model: model, record: model.record, host: showsViews ? .document : .mixerWindow)
-                }
-                .fixedSize()
-            }
-            // In a row narrower than they like, the fields narrow (to 72 pt).
-            TransportBar(model: model)
-                .clipped()
-            HStack(spacing: theme.spacing.m) {
-                AppKitLabel(
-                    Formatting.device(model.transport), font: theme.type.caption.nsFont, secondary: true,
-                    truncatesMiddle: true)
-                if showsViews {
-                    faults
-                    views
-                        .fixedSize()
-                }
-            }
-        }
-        .padding(.horizontal, TransportBarRows.padding)
-        .padding(.vertical, theme.spacing.xs)
-        .background(.bar)
-    }
-
-    private func holdButton(_ title: String, icon: AppIcon, forward: Bool, help: String) -> some View {
-        let m = model
-        return AppKitHoldButton(
-            title, icon: icon, enabled: m.selectedSeq != nil, help: help,
-            onPress: { shift in
-                m.shuttle.press(forward: forward, shift: shift, at: ProcessInfo.processInfo.systemUptime)
-            },
-            onTick: { m.shuttle.tick(at: ProcessInfo.processInfo.systemUptime) },
-            onRelease: { inside in
-                m.shuttle.release(at: ProcessInfo.processInfo.systemUptime, inside: inside)
-            },
-            onCancel: { m.shuttle.cancel() }
+        TransportRowHost(
+            model: model, docID: docID, documentWindow: showsViews, layout: appStore.transportLayout.layout,
+            onCustomize: customize
         )
-        .fixedSize()
+        .background(.bar)
+        .sheet(isPresented: sheetShown) { sheet }
     }
 
-    /// Attached only in the document window, so `showsFaults` opens one
-    /// popover (Ruling 8).
-    @ViewBuilder private var faults: some View {
-        if model.hasFaults || model.hasReport {
-            AppKitButton(
-                "Faults", icon: .faultIndicator, help: "Faults and compile messages",
-                tint: model.hasFaults ? theme.state.error.nsColor : theme.state.warning.nsColor
-            ) { model.showsFaults.toggle() }
-            .fixedSize()
-            .popover(isPresented: $model.showsFaults) {
-                VStack(alignment: .leading, spacing: theme.spacing.xs) {
-                    ForEach(Array(model.messages.enumerated()), id: \.offset) {
-                        Text($0.element)
-                    }
-                }
-                .padding(theme.spacing.l)
-                .frame(minWidth: 240)
-            }
-        }
+    /// The row's "Customize Transport Bar…": the sheet on this window.
+    private var customize: (@MainActor () -> Void)? {
+        guard let t = window else { return nil }
+        let layouts = appStore.transportLayout
+        return { layouts.beginCustomizing(window: t) }
     }
 
-    /// The main-view tabs and the pane toggles, through the View menu's
-    /// commands (`ui.*`).
-    private var views: some View {
-        HStack(spacing: theme.spacing.s) {
-            Picker(
-                "Main View",
-                selection: Binding(
-                    get: { model.editor.layout.views.main },
-                    set: { ViewCommands.run($0 == .arrange ? "ui.view_arrange" : "ui.view_mix", on: nil, model) })
-            ) {
-                ForEach(MainView.allCases, id: \.self) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            paneToggle("ui.toggle_left", .left, icon: .leftPane, key: "⌃⌘←")
-            paneToggle("ui.toggle_bottom", .bottom, icon: .bottomPane, key: "⌃⌘↓")
-            paneToggle("ui.toggle_right", .right, icon: .rightPane, key: "⌃⌘→")
-        }
+    private var sheetShown: Binding<Bool> {
+        let layouts = appStore.transportLayout
+        let token = window
+        return Binding(
+            get: { token != nil && layouts.customizing == token && layouts.customizer != nil },
+            set: { shown in
+                if !shown, token != nil, layouts.customizing == token { layouts.endCustomizing() }
+            })
     }
 
-    private func paneToggle(_ id: String, _ side: PaneSide, icon: AppIcon, key: String) -> some View {
-        AppKitButton(side.title, icon: icon, isOn: ViewCommands.isOn(id, model), help: "\(side.title) (\(key))") {
-            ViewCommands.run(id, on: nil, model)
+    @ViewBuilder private var sheet: some View {
+        if let c = appStore.transportLayout.customizer {
+            TransportCustomizeSheet(model: c, keys: keyBindings).themedRoot()
         }
-        .fixedSize()
     }
 }
 
-/// The transport bar's three parts (leading controls, the fields, trailing
-/// controls) on one row, or, when `TransportBarRows` says it does not fit,
-/// the leading and trailing on the first row and the fields on the second.
-/// One layout, so the fields view is never remade when the window resizes.
-struct TransportBarLayout: Layout {
-    var spacing: CGFloat
-    var rowSpacing: CGFloat
+/// A window's token in its views (Task 12: the sheet's window).
+struct TransportWindowTokenKey: EnvironmentKey {
+    static let defaultValue: UUID? = nil
+}
 
-    private func ideal(_ subviews: Subviews) -> [CGSize] {
-        subviews.map { $0.sizeThatFits(.unspecified) }
+extension EnvironmentValues {
+    var transportWindowToken: UUID? {
+        get { self[TransportWindowTokenKey.self] }
+        set { self[TransportWindowTokenKey.self] = newValue }
     }
+}
 
-    private func rows(_ width: CGFloat, _ s: [CGSize]) -> Int {
-        guard s.count == 3 else { return 1 }
-        // The width here is inside the bar's padding: add it back for the rule.
-        return TransportBarRows.count(
-            width: width + 2 * TransportBarRows.padding, leading: s[0].width, fields: s[1].width,
-            trailing: s[2].width, spacing: spacing)
-    }
+/// Hosts the row; a new layout (Settings, the channel) updates it in place.
+struct TransportRowHost: NSViewRepresentable {
+    let model: DocumentModel
+    let docID: UUID
+    let documentWindow: Bool
+    let layout: TransportLayout
+    /// The row's "Customize Transport Bar…" (nil: off).
+    var onCustomize: (@MainActor () -> Void)?
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let s = ideal(subviews)
-        guard s.count == 3 else { return .zero }
-        let one = s[0].width + spacing + s[1].width + spacing + s[2].width
-        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? one
-        let top = max(s[0].height, s[2].height)
-        guard rows(width, s) == 2 else { return CGSize(width: width, height: max(top, s[1].height)) }
-        // On a row of its own the fields part may wrap (the summary above).
-        let fields = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil))
-        return CGSize(width: width, height: top + rowSpacing + fields.height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let s = ideal(subviews)
-        guard s.count == 3 else { return }
-        let w = bounds.width
-        if rows(w, s) == 1 {
-            let top = max(s[0].height, s[1].height, s[2].height)
-            subviews[0].place(
-                at: CGPoint(x: bounds.minX, y: bounds.minY + top / 2), anchor: .leading,
-                proposal: ProposedViewSize(s[0]))
-            let fieldsW = max(w - s[0].width - s[2].width - 2 * spacing, 0)
-            subviews[1].place(
-                at: CGPoint(x: bounds.minX + s[0].width + spacing, y: bounds.minY + top / 2), anchor: .leading,
-                proposal: ProposedViewSize(width: fieldsW, height: s[1].height))
-            subviews[2].place(
-                at: CGPoint(x: bounds.maxX, y: bounds.minY + top / 2), anchor: .trailing,
-                proposal: ProposedViewSize(s[2]))
-        } else {
-            let top = max(s[0].height, s[2].height)
-            subviews[0].place(
-                at: CGPoint(x: bounds.minX, y: bounds.minY + top / 2), anchor: .leading,
-                proposal: ProposedViewSize(s[0]))
-            // The trailing part gives way (the device text truncates) before
-            // it covers the leading part.
-            let trailingW = max(min(s[2].width, w - s[0].width - spacing), 0)
-            subviews[2].place(
-                at: CGPoint(x: bounds.maxX, y: bounds.minY + top / 2), anchor: .trailing,
-                proposal: ProposedViewSize(width: trailingW, height: s[2].height))
-            let fields = subviews[1].sizeThatFits(ProposedViewSize(width: w, height: nil))
-            subviews[1].place(
-                at: CGPoint(x: bounds.minX, y: bounds.minY + top + rowSpacing), anchor: .topLeading,
-                proposal: ProposedViewSize(width: w, height: fields.height))
+    func makeNSView(context: Context) -> TransportRowView {
+        let m = model
+        let id = docID
+        let doc = documentWindow
+        let row = TransportRowView(document: m, layout: layout, documentWindow: doc) { item in
+            TransportItemViews.make(item, model: m, docID: id, documentWindow: doc)
         }
+        row.dspLoad = { appStore.mixer(id)?.dspLoad ?? 0 }
+        row.commandRow = { keyBindings.row($0) }
+        row.runCommand = { cmd in
+            CommandButtonAction.run(
+                cmd, doc: appStore.model(id).map { (id, $0) }, store: appStore, host: AppControlHost.shared,
+                menu: AppMenuPerformer())
+        }
+        row.onCustomize = onCustomize
+        return row
+    }
+
+    func updateNSView(_ row: TransportRowView, context: Context) {
+        row.onCustomize = onCustomize
+        row.theme = context.environment.symbioticTheme
+        row.setLayout(layout)
+    }
+
+    /// The width it is offered; its own height.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView row: TransportRowView, context: Context) -> CGSize? {
+        let w = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? 700
+        return CGSize(width: w, height: row.fittingHeight)
     }
 }

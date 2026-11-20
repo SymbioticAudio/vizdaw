@@ -79,6 +79,21 @@ A Linux app, with its own Rust interface and PipeWire audio, is planned
 after 1.0. A later 2.0 may bring one interface for every platform, and
 Windows.
 
+## Download and install
+
+1. Download `VizDAW-<version>.zip` (for this beta, `VizDAW-26.0.0.zip`)
+   from the project's GitHub release and unzip it.
+2. Move VizDAW to your Applications folder and open it once.
+3. macOS won't open it the first time, because 26.0.0 is not signed
+   with a Developer ID yet: it says it can't check VizDAW for malicious
+   software. Choose **Done**, then open **System Settings › Privacy &
+   Security**, scroll down, and choose **Open Anyway** for VizDAW. Confirm,
+   and enter your Mac's password if asked. **Open Anyway** shows only after
+   that first try, and you only need to do this once.
+
+Co-Producer's MCP server, `vizdaw-mcp`, lives inside the app, at
+`VizDAW.app/Contents/MacOS/vizdaw-mcp`.
+
 ## Building from source
 
 You need macOS 14 or newer, Rust 1.86 or newer, and the Xcode Command Line
@@ -100,11 +115,11 @@ See [app/README.md](app/README.md) for more.
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+GPL-3.0-only — see [LICENSE](LICENSE). VizDAW bundles Dusk Audio Multi-Q, which includes parts under the GNU AGPLv3 (JUCE).
 
 VizDAW's own build links SymbioticAudio's branded icons under a GPL section 7 additional permission (see LICENSE). The artwork stays all rights reserved and is not covered by the GPL; forks build without it with `VIZDAW_NO_BRAND=1`.
 
-The VizDAW.app bundle also carries Dusk Audio Multi-Q (GPL-3.0-only), built with JUCE (AGPLv3) and clap-juce-extensions (MIT); their licence texts and the source offer are in Contents/Resources/Licences/Multi-Q/.
+The VizDAW.app bundle also carries Dusk Audio Multi-Q (GPL-3.0-only), built with JUCE (AGPLv3) and clap-juce-extensions (MIT); their licence texts and the source offer are in Contents/Resources/Licences/Multi-Q/. The notices of the other third-party code it carries (Rust crates, data files, Swift packages) are in Contents/Resources/Licences/THIRD-PARTY.txt, written by `scripts/third-party-notices.sh`; VizDAW › Licences… shows them all.
 
 ## Disclaimer
 

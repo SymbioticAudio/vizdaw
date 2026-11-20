@@ -153,7 +153,7 @@ public enum AutomationCommands {
         guard let text = args.text("target"), let target = parseAutomationTarget(text: text) else {
             return invalid(
                 "automation.gesture: `target` is fader:<strip>, pan:<strip>, mute:<strip>, solo:<strip>, "
-                    + "send:<strip>:<n> (n from 1) or param:<slot>:<param>")
+                    + "send:<strip>:<n> (n from 1), param:<slot>:<param> or vca:<vca>")
         }
         let hasValue = given(args, "value")
         let v = value(args.text("value"))
@@ -170,8 +170,10 @@ public enum AutomationCommands {
         default: return invalid("automation.gesture: `phase` is touch, value or release")
         }
         do {
-            // The channel is its own holder (plan 5f-1 Ruling 2).
-            try m.session.gestureFrom(target: target, phase: phase, holder: .channel)
+            // The channel is its own holder (plan 5f-1 Ruling 2); `alone`
+            // keeps the strip's group still (groups-vcas-transport).
+            try m.session.gestureAs(
+                target: target, phase: phase, holder: .channel, alone: args.flag("alone") ?? false)
         } catch {
             return .failed(.thrown(error, "Automation Failed"))
         }

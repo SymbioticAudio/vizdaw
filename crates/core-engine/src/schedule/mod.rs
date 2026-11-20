@@ -71,6 +71,9 @@ pub struct Schedule {
     pub automation: Automation,
     /// Audio regions per output path (5a).
     pub audio: AudioSchedule,
+    /// The metronome's beats, from the sequence's meter map
+    /// (groups-vcas-transport Ruling 19).
+    pub beats: crate::metronome::BeatGrid,
 }
 
 /// One chased controller value: `msg` takes effect at `frame`.

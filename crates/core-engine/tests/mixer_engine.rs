@@ -5,10 +5,10 @@ use core_engine::graph::TestInserts;
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::render::Faults;
 use core_engine::schedule::BuiltinRoute;
-use core_model::command::MixerCmd;
+use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::document::Document;
-use core_model::ids::{PluginInstanceId, SeqId, StripId};
-use core_model::mixer::{AuxSend, PluginRef, StripKind};
+use core_model::ids::{AnyId, PluginInstanceId, SeqId, StripId};
+use core_model::mixer::{AuxSend, PluginRef, StripKind, Swatch};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -486,4 +486,71 @@ fn a_graph_queued_before_a_larger_prepare_is_not_run_past_its_buffers() {
     assert!(faults.is_empty(), "{:?}", faults.names());
     assert_eq!(engine.counters().xruns, 1);
     assert!(out.iter().any(|x| *x != 0.0));
+}
+
+/// Spec §2: the engine applies a VCA's offset with the same ramping as a
+/// fader move. Noise (an insert, whose state a reload keeps) plays on the
+/// synth strip A, the only member of a VCA at 0 dB; one engine then gets
+/// `SetGain { A, −6 }`, the other `SetVcaLevel { vca, −6 }`, and the next
+/// 2 blocks are equal sample for sample (and differ from an unchanged
+/// render).
+#[test]
+fn a_vca_level_change_ramps_as_a_fader_change_does() {
+    let mut b = Builder::new();
+    let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (song, _) = b.sequence("S", "L", Some(d)).unwrap();
+    let a = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    b.insert(a, TestInserts::plugin("noise=9")).unwrap();
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "V".into(),
+            colour: Swatch::Blue,
+            members: vec![a],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
+    let before = b.finish();
+    let after = |cmd: Command| {
+        let mut b = Builder::from_doc(before.clone());
+        b.run(cmd).unwrap();
+        b.finish()
+    };
+    let by_fader = after(Command::Mixer(MixerCmd::SetGain {
+        strip: a,
+        gain_db: -6.0,
+    }));
+    let by_vca = after(Command::Groups(GroupCmd::SetVcaLevel {
+        vca,
+        gain_db: -6.0,
+    }));
+    let play = |next: Option<&Document>| {
+        let (mut engine, r) =
+            Engine::new(EngineConfig::new(SR), Box::new(OfflineSinks::new(10))).unwrap();
+        engine.set_insert_factory(Box::new(TestInserts::new()));
+        engine.load(&before, song).unwrap();
+        let mut b = OfflineBackend::new(SR, 512);
+        b.start(r).unwrap();
+        engine.play().unwrap();
+        let _ = render(&mut b, 20 * 512, &[512]);
+        if let Some(d) = next {
+            engine.load(d, song).unwrap();
+        }
+        let out = render(&mut b, 2 * 512, &[512]);
+        assert!(engine.faults().is_empty());
+        drop(b.stop().unwrap());
+        out
+    };
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let fader = play(Some(&by_fader));
+    let vca_moved = play(Some(&by_vca));
+    let unchanged = play(None);
+    assert!(fader.iter().any(|x| *x != 0.0), "the noise plays");
+    assert_eq!(bits(&vca_moved), bits(&fader));
+    assert_ne!(
+        bits(&vca_moved),
+        bits(&unchanged),
+        "the VCA change is heard"
+    );
 }

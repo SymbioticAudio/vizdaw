@@ -3,7 +3,7 @@
 use crate::error::ControlError;
 use crate::protocol::{RequestId, read_reply, request_line};
 use serde_json::Value;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -83,8 +83,8 @@ impl Client {
 
     /// Sends `line` and its newline as one buffer, and on failure says how
     /// many of its bytes were written first. A caller that resends must
-    /// know none were: the server runs an unterminated last line at the
-    /// end of input.
+    /// know none were: a line cut off before its newline is not run, but
+    /// one whose newline went out may have been.
     pub fn send_counted(&mut self, line: &str) -> Result<(), SendError> {
         let mut buf = Vec::with_capacity(line.len() + 1);
         buf.extend_from_slice(line.as_bytes());
@@ -136,16 +136,60 @@ impl Client {
         }
     }
 
-    /// The next raw line.
+    /// The next raw line, at most [`MAX_REPLY`] bytes before its newline.
+    /// A longer one is refused once the cap is read, without reading the
+    /// rest: the connection is then of no further use.
     pub fn read_line(&mut self) -> Result<String, CallError> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(0) => Err(CallError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "VizDAW closed the connection",
-            ))),
-            Ok(_) => Ok(line),
-            Err(e) => Err(CallError::Io(e)),
+        read_line_capped(&mut self.reader, MAX_REPLY)
+    }
+}
+
+/// The longest reply line read (256 MiB), newline excluded. Larger than
+/// the server's request cap [`MAX_LINE`](crate::protocol::MAX_LINE) on
+/// purpose: requests are small, but a reply such as `state.get document`
+/// for a big song can be far over 1 MiB, and the server does not cap its
+/// replies. The cap only stops a hostile peer from making the client
+/// read without end.
+pub const MAX_REPLY: usize = 256 << 20;
+
+/// One line of at most `max` bytes before its newline from `r`; a longer
+/// one is `Protocol`, refused once `max + 1` bytes are read.
+fn read_line_capped(r: &mut impl BufRead, max: usize) -> Result<String, CallError> {
+    let mut line = Vec::new();
+    let cap = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
+    match r.take(cap).read_until(b'\n', &mut line) {
+        Ok(0) => Err(CallError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "VizDAW closed the connection",
+        ))),
+        Ok(_) if line.len() > max && line.last() != Some(&b'\n') => Err(CallError::Protocol(
+            format!("the reply is longer than {max} bytes"),
+        )),
+        Ok(_) => String::from_utf8(line)
+            .map_err(|_| CallError::Protocol("the reply is not UTF-8".into())),
+        Err(e) => Err(CallError::Io(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peer that answers with an endless line is refused at the cap,
+    /// not read into memory without end (release gate Task 5). The source
+    /// is streamed and the cap small, so nothing large is allocated.
+    #[test]
+    fn client_refuses_an_overlong_reply() {
+        let mut endless = BufReader::new(io::repeat(b'x'));
+        match read_line_capped(&mut endless, 4096) {
+            Err(CallError::Protocol(m)) => assert!(m.contains("longer than 4096"), "{m}"),
+            other => panic!("{other:?}"),
         }
+        // Exactly the cap, then a newline, is read.
+        let mut exact =
+            BufReader::new(io::Cursor::new([vec![b'y'; 4096], b"\n".to_vec()].concat()));
+        assert_eq!(read_line_capped(&mut exact, 4096).unwrap().len(), 4097);
+        // The client's own cap is the reply cap, above the request cap.
+        const { assert!(MAX_REPLY > crate::protocol::MAX_LINE) };
     }
 }

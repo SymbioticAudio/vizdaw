@@ -420,10 +420,18 @@ fn arming_while_an_engine_retires_does_not_wait_for_the_drain() {
     let t = Instant::now();
     arm(&b, seq, lp, true);
     let took = t.elapsed();
+    let parked = vizdaw_ffi::host::retiring_count();
+    // An arm that waits out the drain takes at least `DRAIN` (300 ms), so
+    // the bound is `DRAIN` itself: it still fails every arm that waits,
+    // and leaves a loaded runner the whole drain for the edit's own work
+    // (Task 9: 150 ms could flake there). The order is checked too: the
+    // old engine is still parked when the arm returns, so the arm did not
+    // drop it.
     assert!(
-        took < Duration::from_millis(150),
+        took < Duration::from_millis(300),
         "the arm waited {took:?} for the old engine's drain"
     );
+    assert_eq!(parked, 1, "the old engine is parked for its drain");
     wait_until("b's claim to be heard", || {
         b.debug_input_open() == Some(true)
     });

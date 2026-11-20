@@ -87,6 +87,12 @@ jobs:
         run: scripts/build-ffi.sh
       - name: Swift build
         run: scripts/swift.sh build
+      - name: Third-party notices build offline
+        run: |
+          cargo fetch --locked
+          CARGO_NET_OFFLINE=true scripts/third-party-notices.sh target/third-party/THIRD-PARTY.txt
+          grep -q '^quick-xml ' target/third-party/THIRD-PARTY.txt
+          grep -q '^cfb ' target/third-party/THIRD-PARTY.txt
       - name: App builds without the branded glyphs
         run: |
           VIZDAW_NO_BRAND=1 scripts/swift.sh build --scratch-path "$RUNNER_TEMP/nobrand"

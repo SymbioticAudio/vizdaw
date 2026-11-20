@@ -1,0 +1,958 @@
+//! VCAs through a session (groups-vcas-transport Task 5): the seven VCA
+//! commands through `run_mixer`, each one undo step; a VCA changes what
+//! the engine plays, never a member's fader or switches; the strip's VCA
+//! offset and mark; Review Focus 3 (deleting a member's track is one step
+//! and Undo brings the memberships back, the last member of a VCA too);
+//! hostile input; the song's cap of `MAX_VCAS`, on create and on load
+//! (with the automation of the VCAs a load leaves out); and (Task 6) VCA
+//! fader gestures and automation writes.
+//!
+//! No plug-in loads in the session: the strips are audio tracks' with no
+//! EQ. Offline only; the heard level is measured by an offline render.
+
+use core_engine::backend::AudioBackend;
+use core_engine::engine::{Engine, EngineConfig};
+use core_engine::fixtures::Builder;
+use core_engine::graph::TestInserts;
+use core_engine::offline::{OfflineBackend, OfflineSinks};
+use core_model::automation::{AutomationTarget, fader_db, fader_norm};
+use core_model::command::{Command, GroupCmd, MixerCmd};
+use core_model::document::Document;
+use core_model::event::EventBody;
+use core_model::groups::MAX_VCAS;
+use core_model::ids::{SeqId, StripId, VcaId};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+use vizdaw_ffi::automation::{
+    AutomationModeRow as Mode, GesturePhaseRow as Phase, parse_automation_target,
+    reset_automation_settings, set_automation_suspended,
+};
+use vizdaw_ffi::control::{ControlArg, ControlValue};
+use vizdaw_ffi::edit::{EditCommand, LaneEdit};
+use vizdaw_ffi::host::{force_offline, reset_host};
+use vizdaw_ffi::{
+    AutomationTargetRow as Target, EventRow, Session, StripKindRow, StripRow, SwatchRow,
+    TrackKindRow, VcaRow, set_new_channel_eq,
+};
+
+static SERIAL: Mutex<()> = Mutex::new(());
+
+const SR: f64 = 48_000.0;
+
+/// One test at a time; offline; no EQ on new channels, so nothing loads.
+fn serial() -> MutexGuard<'static, ()> {
+    let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    force_offline();
+    vizdaw_ffi::host::set_offline_rate(SR);
+    reset_host();
+    reset_automation_settings();
+    set_automation_suspended(false);
+    set_new_channel_eq(false);
+    g
+}
+
+fn int(name: &str, value: i64) -> ControlArg {
+    ControlArg {
+        name: name.into(),
+        value: ControlValue::Int { value },
+    }
+}
+
+fn id(name: &str, value: u64) -> ControlArg {
+    int(name, value as i64)
+}
+
+fn text(name: &str, value: &str) -> ControlArg {
+    ControlArg {
+        name: name.into(),
+        value: ControlValue::Text {
+            value: value.into(),
+        },
+    }
+}
+
+fn flag(name: &str, value: bool) -> ControlArg {
+    ControlArg {
+        name: name.into(),
+        value: ControlValue::Flag { value },
+    }
+}
+
+fn strips(s: &Session) -> Vec<StripRow> {
+    s.mixer().unwrap().strips
+}
+
+fn strip_row(s: &Session, id: u64) -> StripRow {
+    strips(s).into_iter().find(|x| x.id == id).unwrap()
+}
+
+fn strip_id(s: &Session, name: &str) -> u64 {
+    strips(s)
+        .into_iter()
+        .find(|x| x.name == name)
+        .unwrap_or_else(|| panic!("no strip {name}"))
+        .id
+}
+
+fn vcas(s: &Session) -> Vec<VcaRow> {
+    s.mixer().unwrap().vcas
+}
+
+fn undo_label(s: &Session) -> Option<String> {
+    s.snapshot().unwrap().undo_label
+}
+
+fn step(s: &Session) -> u64 {
+    s.snapshot().unwrap().step
+}
+
+/// The last edit made one undo step, the first after the step `before`:
+/// one undo goes back to `before`, and redo brings the edit back.
+fn one_step(s: &Session, before: u64) {
+    let after = step(s);
+    assert_ne!(after, before, "a step was made");
+    s.undo().unwrap();
+    assert_eq!(step(s), before, "one undo goes back");
+    s.redo().unwrap();
+    assert_eq!(step(s), after);
+}
+
+/// The mixer's strips, groups and VCAs (not its version).
+fn mix(s: &Session) -> (Vec<StripRow>, Vec<vizdaw_ffi::GroupRow>, Vec<VcaRow>) {
+    let m = s.mixer().unwrap();
+    (m.strips, m.groups, m.vcas)
+}
+
+/// A saved song with audio tracks Kick and Snare (each on its own strip
+/// at 0 dB, to master) and a bus, in the sequence `seq`.
+struct Song {
+    s: Arc<Session>,
+    seq: u64,
+    kick: u64,
+    snare: u64,
+    bus: u64,
+    master: u64,
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+fn song() -> Song {
+    let s = Session::new_empty().unwrap();
+    let seq = s.snapshot().unwrap().sequences[0].id;
+    let mut ids = Vec::new();
+    for (i, name) in ["Kick", "Snare"].iter().enumerate() {
+        s.new_track(seq, TrackKindRow::Audio, None).unwrap();
+        let id = strip_id(&s, &format!("Audio {}", i + 1));
+        s.rename_strip(id, (*name).into()).unwrap();
+        ids.push(id);
+    }
+    s.add_bus("Bus".into()).unwrap();
+    let bus = strip_id(&s, "Bus");
+    let master = strips(&s)
+        .into_iter()
+        .find(|x| x.kind == StripKindRow::Master)
+        .unwrap()
+        .id;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("VCAs.vizdaw");
+    s.save_as(path.to_string_lossy().into_owned()).unwrap();
+    Song {
+        seq,
+        kick: ids[0],
+        snare: ids[1],
+        bus,
+        master,
+        path,
+        s,
+        _dir: dir,
+    }
+}
+
+/// `mixer.new_vca` of `members`, named `name`; its ID.
+fn new_vca(s: &Session, members: &[u64], name: &str) -> u64 {
+    let list: Vec<String> = members.iter().map(u64::to_string).collect();
+    s.run_mixer(
+        "mixer.new_vca".into(),
+        vec![text("strips", &list.join(",")), text("name", name)],
+    )
+    .unwrap();
+    vcas(s).into_iter().find(|v| v.name == name).unwrap().id
+}
+
+fn set_vca(s: &Session, vca: u64, mut more: Vec<ControlArg>) {
+    let mut args = vec![id("vca", vca)];
+    args.append(&mut more);
+    s.run_mixer("mixer.set_vca".into(), args).unwrap();
+}
+
+#[test]
+fn new_vca_from_strips() {
+    let _g = serial();
+    let t = song();
+    let before = step(&t.s);
+    t.s.run_mixer(
+        "mixer.new_vca".into(),
+        vec![text("strips", &format!("{},{}", t.kick, t.snare))],
+    )
+    .unwrap();
+    one_step(&t.s, before);
+    assert_eq!(undo_label(&t.s).as_deref(), Some("New VCA"));
+    let v = &vcas(&t.s)[0];
+    assert_eq!(
+        (
+            v.name.as_str(),
+            v.colour,
+            v.members.clone(),
+            v.gain_db,
+            v.mute,
+            v.solo,
+            v.automation
+        ),
+        (
+            "VCA 1",
+            SwatchRow::Red,
+            vec![t.kick, t.snare],
+            0.0,
+            false,
+            false,
+            Mode::Read
+        )
+    );
+    for k in [t.kick, t.snare] {
+        let r = strip_row(&t.s, k);
+        assert_eq!(
+            (r.vcas, r.vca_offset_db, r.vca_mark),
+            (vec![v.id], 0.0, false)
+        );
+    }
+    assert!(strip_row(&t.s, t.bus).vcas.is_empty());
+    // An empty one (Ruling 11), named and coloured by the count; a bus may
+    // join, as may a strip already in a VCA.
+    t.s.run_mixer("mixer.new_vca".into(), vec![]).unwrap();
+    let w = &vcas(&t.s)[1];
+    assert_eq!(
+        (w.name.as_str(), w.colour, w.members.len()),
+        ("VCA 2", SwatchRow::Orange, 0)
+    );
+    t.s.run_mixer(
+        "mixer.assign_vca".into(),
+        vec![
+            id("vca", w.id),
+            text("strips", &format!("{},{}", t.bus, t.kick)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Assign to VCA"));
+    assert_eq!(strip_row(&t.s, t.kick).vcas, vec![v.id, w.id]);
+    t.s.run_mixer(
+        "mixer.unassign_vca".into(),
+        vec![id("vca", w.id), text("strips", &t.bus.to_string())],
+    )
+    .unwrap();
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Remove from VCA"));
+    assert_eq!(vcas(&t.s)[1].members, vec![t.kick]);
+    t.s.run_mixer(
+        "mixer.rename_vca".into(),
+        vec![id("vca", w.id), text("name", "  Kit  ")],
+    )
+    .unwrap();
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Rename VCA"));
+    t.s.run_mixer(
+        "mixer.set_vca_colour".into(),
+        vec![id("vca", w.id), text("colour", "teal")],
+    )
+    .unwrap();
+    assert_eq!(undo_label(&t.s).as_deref(), Some("VCA Colour"));
+    let w = &vcas(&t.s)[1];
+    assert_eq!((w.name.as_str(), w.colour), ("Kit", SwatchRow::Teal));
+}
+
+/// The left channel of `doc`'s sequence `seq` played offline for 20
+/// blocks, with the test inserts.
+fn played(doc: &Document, seq: SeqId) -> Vec<f32> {
+    let (mut engine, r) =
+        Engine::new(EngineConfig::new(SR), Box::new(OfflineSinks::new(10))).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.load(doc, seq).unwrap();
+    let mut b = OfflineBackend::new(SR, 512);
+    b.start(r).unwrap();
+    engine.play().unwrap();
+    let mut out = Vec::new();
+    for _ in 0..20 {
+        b.reserve(512);
+        b.block(512);
+        out.extend_from_slice(b.output(512).0);
+    }
+    assert!(engine.faults().is_empty());
+    drop(b.stop().unwrap());
+    out
+}
+
+/// The saved song at `path` with a noise insert on `strip`, then `edits`.
+fn noisy(path: &Path, strip: u64, edits: &[Command]) -> Document {
+    let mut b = Builder::from_doc(core_model::file::load(path).unwrap());
+    b.insert(StripId(strip), TestInserts::plugin("noise=9"))
+        .unwrap();
+    for c in edits {
+        b.run(c.clone()).unwrap();
+    }
+    b.finish()
+}
+
+fn bits(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// Spec §2: a VCA's level is heard on its members, and no member's fader
+/// moves. Kick's fader stays at its −1.5 while its offset is −3; the
+/// engine plays the saved song (noise on Kick) sample for sample as the
+/// same song with no VCA level and Kick's own fader at −4.5.
+#[test]
+fn set_vca_changes_heard_not_faders() {
+    let _g = serial();
+    let t = song();
+    t.s.run_mixer(
+        "mixer.set_strip".into(),
+        vec![id("strip", t.kick), text("gain_db", "-1.5")],
+    )
+    .unwrap();
+    let vca = new_vca(&t.s, &[t.kick], "Kit");
+    let before = step(&t.s);
+    set_vca(&t.s, vca, vec![text("gain_db", "-3")]);
+    one_step(&t.s, before);
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Set VCA"));
+    let k = strip_row(&t.s, t.kick);
+    assert_eq!((k.gain_db, k.vca_offset_db), (-1.5, -3.0));
+    assert_eq!(strip_row(&t.s, t.snare).vca_offset_db, 0.0);
+    assert_eq!(vcas(&t.s)[0].gain_db, -3.0);
+    t.s.save().unwrap();
+
+    let seq = SeqId(t.seq);
+    let heard = played(&noisy(&t.path, t.kick, &[]), seq);
+    let by_fader = played(
+        &noisy(
+            &t.path,
+            t.kick,
+            &[
+                Command::Groups(GroupCmd::SetVcaLevel {
+                    vca: VcaId(vca),
+                    gain_db: 0.0,
+                }),
+                Command::Mixer(MixerCmd::SetGain {
+                    strip: StripId(t.kick),
+                    gain_db: -4.5,
+                }),
+            ],
+        ),
+        seq,
+    );
+    let at_own = played(
+        &noisy(
+            &t.path,
+            t.kick,
+            &[Command::Groups(GroupCmd::SetVcaLevel {
+                vca: VcaId(vca),
+                gain_db: 0.0,
+            })],
+        ),
+        seq,
+    );
+    assert!(heard.iter().any(|x| *x != 0.0), "the noise plays");
+    assert_eq!(bits(&heard), bits(&by_fader), "heard at fader −3");
+    assert_ne!(bits(&heard), bits(&at_own), "the VCA is heard");
+}
+
+/// Spec §2a: the mark lights while a VCA mutes or solos the strip; the
+/// strip's own switches stay off. `mixer.set_vca` is "Set VCA" whatever
+/// it sets (preflight F11), and all four settings are one step.
+#[test]
+fn vca_mark_lights_when_muting_or_soloing() {
+    let _g = serial();
+    let t = song();
+    let vca = new_vca(&t.s, &[t.kick, t.snare], "Kit");
+    let mark = |s: &Session| strip_row(s, t.kick).vca_mark;
+    let own = |s: &Session| {
+        [t.kick, t.snare]
+            .map(|k| strip_row(s, k))
+            .iter()
+            .all(|r| !r.mute && !r.solo)
+    };
+    assert!(!mark(&t.s));
+    set_vca(&t.s, vca, vec![flag("mute", true)]);
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Set VCA"));
+    assert!(mark(&t.s) && strip_row(&t.s, t.snare).vca_mark && own(&t.s));
+    assert!(vcas(&t.s)[0].mute);
+    set_vca(&t.s, vca, vec![flag("mute", false)]);
+    assert!(!mark(&t.s) && own(&t.s));
+    set_vca(&t.s, vca, vec![flag("solo", true)]);
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Set VCA"));
+    assert!(mark(&t.s) && own(&t.s));
+    // A VCA solo counts as the members' solo: the bus is solo-muted, they
+    // are not.
+    assert!(strip_row(&t.s, t.bus).solo_muted);
+    assert!(!strip_row(&t.s, t.kick).solo_muted);
+    assert!(!strip_row(&t.s, t.bus).vca_mark);
+
+    let before = step(&t.s);
+    set_vca(
+        &t.s,
+        vca,
+        vec![
+            text("gain_db", "-6"),
+            flag("mute", true),
+            flag("solo", false),
+            text("mode", "latch"),
+        ],
+    );
+    one_step(&t.s, before);
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Set VCA"));
+    let v = &vcas(&t.s)[0];
+    assert_eq!(
+        (v.gain_db, v.mute, v.solo, v.automation),
+        (-6.0, true, false, Mode::Latch)
+    );
+    set_vca(&t.s, vca, vec![text("mode", "off")]);
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Set VCA"));
+    t.s.undo().unwrap();
+    t.s.undo().unwrap();
+    let v = &vcas(&t.s)[0];
+    assert_eq!(
+        (v.gain_db, v.mute, v.solo, v.automation),
+        (0.0, false, true, Mode::Read),
+        "one undo takes back all four"
+    );
+}
+
+#[test]
+fn deleting_a_vca_is_one_step() {
+    let _g = serial();
+    let t = song();
+    let vca = new_vca(&t.s, &[t.kick, t.snare], "Kit");
+    set_vca(&t.s, vca, vec![text("gain_db", "-3")]);
+    let kept = vcas(&t.s);
+    let before = step(&t.s);
+    t.s.run_mixer("mixer.delete_vca".into(), vec![id("vca", vca)])
+        .unwrap();
+    one_step(&t.s, before);
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Delete VCA"));
+    assert!(vcas(&t.s).is_empty());
+    for k in [t.kick, t.snare] {
+        let r = strip_row(&t.s, k);
+        assert_eq!(
+            (r.gain_db, r.vcas.len(), r.vca_offset_db),
+            (0.0, 0, 0.0),
+            "members as their faders say"
+        );
+    }
+    t.s.undo().unwrap();
+    assert_eq!(vcas(&t.s), kept, "the VCA and its members come back");
+    assert_eq!(strip_row(&t.s, t.kick).vca_offset_db, -3.0);
+}
+
+/// Review Focus 3: Kick is in group "Drums" and is the only member of VCA
+/// "Kit". Deleting its track is one undo step; "Kit" stays, empty, and
+/// "Drums" no longer holds Kick. One undo brings back the track, the
+/// strip, and both memberships.
+#[test]
+fn deleting_a_member_strip_is_one_step_and_undo_restores_membership() {
+    let _g = serial();
+    let t = song();
+    t.s.run_mixer(
+        "mixer.new_group".into(),
+        vec![
+            text("strips", &format!("{},{}", t.kick, t.snare)),
+            text("name", "Drums"),
+        ],
+    )
+    .unwrap();
+    let vca = new_vca(&t.s, &[t.kick], "Kit");
+    let mixer_before = mix(&t.s);
+    let lanes_before = t.s.lanes(t.seq).unwrap();
+    let lane = lanes_before
+        .iter()
+        .find(|l| l.name == "Audio 1")
+        .unwrap_or(&lanes_before[0])
+        .id;
+    let before = step(&t.s);
+    t.s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::Remove { seq: t.seq, lane },
+        },
+        None,
+    )
+    .unwrap();
+    assert_ne!(step(&t.s), before);
+    let m = t.s.mixer().unwrap();
+    assert!(m.strips.iter().all(|s| s.id != t.kick), "the strip went");
+    assert_eq!(m.vcas.len(), 1);
+    assert_eq!((m.vcas[0].id, m.vcas[0].name.as_str()), (vca, "Kit"));
+    assert!(m.vcas[0].members.is_empty(), "the VCA stays, empty");
+    assert_eq!(m.groups[0].members, vec![t.snare], "Drums lacks Kick");
+    assert_eq!(t.s.lanes(t.seq).unwrap().len(), lanes_before.len() - 1);
+
+    t.s.undo().unwrap();
+    assert_eq!(step(&t.s), before);
+    assert_eq!(t.s.lanes(t.seq).unwrap(), lanes_before, "the track is back");
+    let m = t.s.mixer().unwrap();
+    assert_eq!(m.groups, mixer_before.1, "Drums holds Kick again");
+    assert_eq!(m.vcas, mixer_before.2, "Kit holds Kick again");
+    let k = strip_row(&t.s, t.kick);
+    assert_eq!((k.group, k.vcas), (Some(m.groups[0].id), vec![vca]));
+    assert_eq!(mix(&t.s), mixer_before, "the strip as it was");
+}
+
+/// Each refused call changes nothing: the same step, the same mixer.
+#[test]
+fn run_vca_commands_refuse_hostile_input() {
+    let _g = serial();
+    let t = song();
+    let vca = new_vca(&t.s, &[t.kick], "Kit");
+    let mixer = mix(&t.s);
+    let at = step(&t.s);
+    let huge = "x".repeat(70_000);
+    let cases: Vec<(&str, Vec<ControlArg>)> = vec![
+        (
+            "mixer.set_vca",
+            vec![id("vca", u64::MAX), flag("mute", true)],
+        ),
+        ("mixer.set_vca", vec![int("vca", -1), flag("mute", true)]),
+        (
+            "mixer.set_vca",
+            vec![id("vca", vca + 1), flag("mute", true)],
+        ),
+        ("mixer.delete_vca", vec![id("vca", u64::MAX)]),
+        (
+            "mixer.rename_vca",
+            vec![id("vca", u64::MAX), text("name", "x")],
+        ),
+        (
+            "mixer.set_vca",
+            vec![id("vca", vca), text("gain_db", "1e3")],
+        ),
+        (
+            "mixer.set_vca",
+            vec![id("vca", vca), text("gain_db", "NaN")],
+        ),
+        (
+            "mixer.set_vca",
+            vec![id("vca", vca), text("gain_db", "12.5")],
+        ),
+        ("mixer.set_vca", vec![id("vca", vca), text("gain_db", "")]),
+        (
+            "mixer.set_vca",
+            vec![id("vca", vca), text("gain_db", "inf")],
+        ),
+        ("mixer.set_vca", vec![id("vca", vca), int("gain_db", -3)]),
+        ("mixer.set_vca", vec![id("vca", vca), text("mode", "write")]),
+        ("mixer.set_vca", vec![id("vca", vca), text("mode", "trim")]),
+        ("mixer.set_vca", vec![id("vca", vca), text("mode", "Read")]),
+        (
+            "mixer.set_vca",
+            vec![id("vca", vca), text("gain_db", "-3"), text("mode", "trim")],
+        ),
+        ("mixer.set_vca", vec![id("vca", vca)]),
+        (
+            "mixer.new_vca",
+            vec![text("strips", &format!("{},{}", t.snare, t.master))],
+        ),
+        (
+            "mixer.assign_vca",
+            vec![id("vca", vca), text("strips", &t.master.to_string())],
+        ),
+        (
+            "mixer.assign_vca",
+            vec![id("vca", vca), text("strips", &t.kick.to_string())],
+        ),
+        (
+            "mixer.assign_vca",
+            vec![id("vca", vca), text("strips", "999999")],
+        ),
+        ("mixer.assign_vca", vec![id("vca", vca)]),
+        (
+            "mixer.unassign_vca",
+            vec![id("vca", vca), text("strips", &t.snare.to_string())],
+        ),
+        ("mixer.new_vca", vec![text("strips", "1,1")]),
+        ("mixer.new_vca", vec![text("name", &huge)]),
+        ("mixer.new_vca", vec![text("name", "   ")]),
+        ("mixer.new_vca", vec![text("name", "a\u{7}b")]),
+        (
+            "mixer.rename_vca",
+            vec![id("vca", vca), text("name", &huge)],
+        ),
+        ("mixer.new_vca", vec![text("colour", "none")]),
+        (
+            "mixer.set_vca_colour",
+            vec![id("vca", vca), text("colour", "mauve")],
+        ),
+    ];
+    for (cmd, args) in cases {
+        let shown = format!("{cmd} {args:?}");
+        let shown: String = shown.chars().take(200).collect();
+        assert!(t.s.run_mixer(cmd.into(), args).is_err(), "{shown}");
+        assert_eq!(step(&t.s), at, "{shown}");
+        assert_eq!(mix(&t.s), mixer, "{shown}");
+    }
+    // Write and Trim name Ruling 6's modes.
+    let e =
+        t.s.run_mixer(
+            "mixer.set_vca".into(),
+            vec![id("vca", vca), text("mode", "trim")],
+        )
+        .unwrap_err();
+    assert!(format!("{e:?}").contains("mode"), "{e:?}");
+}
+
+/// The cap: a song holds at most `MAX_VCAS` VCAs, so the next is refused
+/// with a sentence and changes nothing; deleting one makes room.
+#[test]
+fn a_vca_past_the_cap_is_refused() {
+    let _g = serial();
+    let t = song();
+    for _ in 0..MAX_VCAS {
+        t.s.run_mixer("mixer.new_vca".into(), vec![]).unwrap();
+    }
+    assert_eq!(vcas(&t.s).len(), MAX_VCAS);
+    let (mixer, at) = (mix(&t.s), step(&t.s));
+    let e =
+        t.s.run_mixer(
+            "mixer.new_vca".into(),
+            vec![text("strips", &t.kick.to_string())],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{e:?}").contains("A song holds at most 64 VCAs; delete one first."),
+        "{e:?}"
+    );
+    assert_eq!((mix(&t.s), step(&t.s)), (mixer, at));
+    let first = vcas(&t.s)[0].id;
+    t.s.run_mixer("mixer.delete_vca".into(), vec![id("vca", first)])
+        .unwrap();
+    t.s.run_mixer("mixer.new_vca".into(), vec![]).unwrap();
+    assert_eq!(vcas(&t.s).len(), MAX_VCAS);
+}
+
+/// A hostile file with more than `MAX_VCAS` VCAs opens with the first 64
+/// by ID, the rest dropped, and says so on the first `idle`. A strip that
+/// was only in a dropped VCA hears no offset.
+#[test]
+fn a_file_with_too_many_vcas_keeps_the_first_64() {
+    let _g = serial();
+    let t = song();
+    let first = new_vca(&t.s, &[t.kick], "First");
+    t.s.save().unwrap();
+    let file = t.path.join(core_model::file::PROJECT_FILE);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let list = json["document"]["mixer"]["vcas"].as_array_mut().unwrap();
+    let template = list[0].clone();
+    for n in 2..=70u64 {
+        let mut v = template.clone();
+        v["id"] = n.into();
+        v["name"] = format!("Extra {n}").into();
+        v["members"] = if n == 70 {
+            serde_json::json!([t.snare])
+        } else {
+            serde_json::json!([])
+        };
+        v["gain_db"] = (-6.0).into();
+        list.push(v);
+    }
+    json["document"]["counters"]["vca"] = 71.into();
+    std::fs::write(&file, serde_json::to_string(&json).unwrap()).unwrap();
+    t.s.close().unwrap();
+
+    let s = Session::open(t.path.to_string_lossy().into_owned()).unwrap();
+    let kept = vcas(&s);
+    assert_eq!(kept.len(), MAX_VCAS);
+    assert_eq!(kept[0].id, first);
+    assert_eq!(kept.last().unwrap().id, MAX_VCAS as u64);
+    assert_eq!(strip_row(&s, t.snare).vca_offset_db, 0.0);
+    assert!(strip_row(&s, t.snare).vcas.is_empty());
+    let problems = s.idle().unwrap().problems;
+    let line =
+        "This song has 70 VCAs; a song holds at most 64, so the last 6 (by ID) were left out.";
+    assert!(problems.iter().any(|p| p == line), "{problems:?}");
+    // The same file read by the model directly is capped too.
+    let doc = core_model::file::load(&t.path).unwrap();
+    assert_eq!(doc.mixer().vcas().len(), MAX_VCAS);
+    let (_, notes) = core_model::file::load_noted(&t.path).unwrap();
+    assert_eq!(notes, vec![line.to_string()]);
+    s.close().unwrap();
+}
+
+// ---- VCA automation (groups-vcas-transport Task 6) ----
+
+fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let until = Instant::now() + Duration::from_secs(180);
+    while !ok() {
+        assert!(Instant::now() < until, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn tick(s: &Session) -> i64 {
+    s.transport().unwrap().tick
+}
+
+/// Paces gesture values past the 10 ms sampler (and, while playing, past
+/// a renderer block).
+fn pace(s: &Session) {
+    let t0 = tick(s);
+    std::thread::sleep(Duration::from_millis(12));
+    if s.transport().unwrap().playing {
+        wait_until("the renderer to take a block", || tick(s) > t0);
+    }
+    s.idle().unwrap();
+}
+
+fn gains(s: &Session) -> Vec<(u64, f64)> {
+    strips(s).into_iter().map(|x| (x.id, x.gain_db)).collect()
+}
+
+fn lane_named(s: &Session, seq: u64, name: &str) -> Option<u64> {
+    s.lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == name)
+        .map(|l| l.id)
+}
+
+/// The targets of every automation point in `seq`.
+fn point_targets(s: &Session, seq: u64) -> Vec<Target> {
+    s.lanes(seq)
+        .unwrap()
+        .into_iter()
+        .flat_map(|l| s.lane_events(seq, l.id).unwrap().events)
+        .filter_map(|e: EventRow| e.automation.map(|a| a.target))
+        .collect()
+}
+
+/// Stopped, a touch, values and a release on `vca:<id>` are one undo step
+/// "Set VCA" that sets the VCA's level; no member's fader moves.
+#[test]
+fn a_vca_gesture_is_one_step() {
+    let _g = serial();
+    let t = song();
+    let vca = new_vca(&t.s, &[t.kick, t.snare], "Drums");
+    let (faders, before) = (gains(&t.s), step(&t.s));
+    let target = parse_automation_target(format!("vca:{vca}")).unwrap();
+    assert_eq!(target, Target::VcaFader { vca });
+    t.s.gesture(
+        target,
+        Phase::Touch {
+            value: Some(fader_norm(0.0)),
+        },
+    )
+    .unwrap();
+    for db in [-3.0, -6.0] {
+        pace(&t.s);
+        t.s.gesture(
+            target,
+            Phase::Value {
+                value: fader_norm(db),
+            },
+        )
+        .unwrap();
+    }
+    t.s.gesture(target, Phase::Release).unwrap();
+    assert_eq!(undo_label(&t.s).as_deref(), Some("Set VCA"));
+    let level = vcas(&t.s)[0].gain_db;
+    assert!((level - fader_db(fader_norm(-6.0))).abs() < 1e-9, "{level}");
+    assert_eq!(gains(&t.s), faders, "no member's fader moved");
+    one_step(&t.s, before);
+    t.s.undo().unwrap();
+    assert_eq!(vcas(&t.s)[0].gain_db, 0.0);
+    t.s.close().unwrap();
+}
+
+/// A VCA in Touch writes its own lane, "VCA ‹name› Fader", in a pass that
+/// lands at Stop as one step; no member lane is written and no fader or
+/// VCA level changes.
+#[test]
+fn vca_touch_writes_its_own_lane() {
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    let song = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "Song")
+        .unwrap()
+        .id;
+    let synth = strip_id(&s, "Built-in Synth");
+    let vca = new_vca(&s, &[synth], "Drums");
+    set_vca(&s, vca, vec![text("mode", "touch")]);
+    assert_eq!(vcas(&s)[0].automation, Mode::Touch);
+    let (faders, before) = (gains(&s), point_targets(&s, song));
+    s.play(song).unwrap();
+    wait_until("beat 1", || tick(&s) > 15_360);
+    let t = Target::VcaFader { vca };
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    assert!(s.automation_state().unwrap().touched.contains(&t));
+    for v in [0.55, 0.6, 0.65, 0.7] {
+        pace(&s);
+        s.gesture(t, Phase::Value { value: v }).unwrap();
+    }
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let at = tick(&s);
+    wait_until("the glide to pass", || tick(&s) > at + 15_360);
+    s.stop().unwrap();
+    wait_until("the transport to stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
+    let lane = lane_named(&s, song, "VCA Drums Fader").expect("the VCA's lane");
+    let p: Vec<f64> = s
+        .lane_events(song, lane)
+        .unwrap()
+        .events
+        .iter()
+        .filter_map(|e| e.automation.map(|a| a.value))
+        .collect();
+    assert!(p.len() >= 4, "{p:?}");
+    assert!(p.iter().any(|v| (v - 0.7).abs() < 1e-9), "{p:?}");
+    // Every new point is the VCA's: no member lane was written.
+    let mut after = point_targets(&s, song);
+    after.retain(|x| *x != t);
+    assert_eq!(after, before, "no member lane is written");
+    assert_eq!(lane_named(&s, song, "Built-in Synth Fader"), None);
+    assert_eq!(gains(&s), faders);
+    assert_eq!(vcas(&s)[0].gain_db, 0.0, "writing leaves the static level");
+    s.undo().unwrap();
+    assert_eq!(lane_named(&s, song, "VCA Drums Fader"), None, "one step");
+    s.close().unwrap();
+}
+
+/// A gesture on a VCA the song does not hold is refused and changes
+/// nothing; so is one on a VCA deleted since.
+#[test]
+fn vca_gestures_refuse_odd_targets() {
+    let _g = serial();
+    let t = song();
+    let vca = new_vca(&t.s, &[t.kick], "Drums");
+    let (mixer, at) = (mix(&t.s), step(&t.s));
+    for odd in [vca + 1, 999, u64::MAX] {
+        let target = Target::VcaFader { vca: odd };
+        let e =
+            t.s.gesture(target, Phase::Touch { value: Some(0.5) })
+                .unwrap_err();
+        let want = format!("vca{odd} fader does not exist");
+        assert!(format!("{e:?}").contains(&want), "{e:?}");
+        assert!(
+            t.s.gesture(target, Phase::Value { value: 0.5 }).is_err(),
+            "a value without a touch is refused too"
+        );
+    }
+    assert_eq!((mix(&t.s), step(&t.s)), (mixer, at));
+    t.s.run_mixer("mixer.delete_vca".into(), vec![id("vca", vca)])
+        .unwrap();
+    let e =
+        t.s.gesture(Target::VcaFader { vca }, Phase::Touch { value: None })
+            .unwrap_err();
+    assert!(
+        format!("{e:?}").contains(&format!("vca{vca} fader does not exist")),
+        "{e:?}"
+    );
+    t.s.close().unwrap();
+}
+
+/// A hostile file with 65 VCAs, each with a fader lane, loads with the
+/// first 64 VCAs and their 64 lanes; the 65th's lane goes with it, and
+/// the load says both (controller carry on Task 5's cap).
+#[test]
+fn a_file_with_too_many_vcas_drops_the_lanes_of_those_left_out() {
+    let mut b = Builder::new();
+    let (seq, _) = b.sequence("S", "Notes", None).unwrap();
+    for n in 1..=MAX_VCAS as u64 + 1 {
+        if n <= MAX_VCAS as u64 {
+            b.run(Command::Groups(GroupCmd::NewVca {
+                name: format!("V{n}"),
+                colour: core_model::mixer::Swatch::Blue,
+                members: vec![],
+            }))
+            .unwrap();
+        }
+        let lane = b.lane(seq, &format!("VCA V{n} Fader"), None).unwrap();
+        b.event(
+            seq,
+            lane,
+            0,
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(VcaId(n)),
+                value: 0.5,
+            },
+        )
+        .unwrap();
+    }
+    let doc = b.finish();
+    let lanes_before = doc.sequence(seq).unwrap().lanes.len();
+    let mut json: serde_json::Value =
+        serde_json::from_str(&core_model::file::to_json(&doc).unwrap()).unwrap();
+    let list = json["document"]["mixer"]["vcas"].as_array_mut().unwrap();
+    let mut extra = list.last().unwrap().clone();
+    extra["id"] = (MAX_VCAS as u64 + 1).into();
+    extra["name"] = "V65".into();
+    list.push(extra);
+    json["document"]["counters"]["vca"] = (MAX_VCAS as u64 + 2).into();
+    let text = serde_json::to_string(&json).unwrap();
+
+    let (doc, notes) = core_model::file::from_json_noted(&text).unwrap();
+    assert_eq!(doc.mixer().vcas().len(), MAX_VCAS);
+    let s = doc.sequence(seq).unwrap();
+    let vca_lanes: Vec<VcaId> = s
+        .lanes
+        .iter()
+        .flat_map(|l| l.takes.iter().flat_map(|t| t.events.values()))
+        .filter_map(|e| match e.body {
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(v),
+                ..
+            } => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(vca_lanes.len(), MAX_VCAS, "64 lanes");
+    assert!(vca_lanes.iter().all(|v| doc.mixer().vca(*v).is_ok()));
+    assert_eq!(s.lanes.len(), lanes_before - 1);
+    assert_eq!(
+        notes,
+        vec![
+            "This song has 65 VCAs; a song holds at most 64, so the last 1 (by ID) were left out."
+                .to_string(),
+            "The automation of those VCAs was left out too: 1 track.".to_string(),
+        ]
+    );
+    // A VCA left out with its points on a member's track: only those go.
+    let lane = s.lanes[1].id;
+    let mut b = Builder::from_doc(doc);
+    b.event(
+        seq,
+        lane,
+        Q_TICKS,
+        EventBody::Automation {
+            target: AutomationTarget::VcaFader(VcaId(70)),
+            value: 0.25,
+        },
+    )
+    .unwrap();
+    let doc = b.finish();
+    let mut json: serde_json::Value =
+        serde_json::from_str(&core_model::file::to_json(&doc).unwrap()).unwrap();
+    let list = json["document"]["mixer"]["vcas"].as_array_mut().unwrap();
+    let mut extra = list.last().unwrap().clone();
+    extra["id"] = 70.into();
+    list.push(extra);
+    json["document"]["counters"]["vca"] = 71.into();
+    let (doc, notes) =
+        core_model::file::from_json_noted(&serde_json::to_string(&json).unwrap()).unwrap();
+    assert_eq!(doc.lane(seq, lane).unwrap().takes[0].events.len(), 1);
+    assert_eq!(
+        notes.last().map(String::as_str),
+        Some("The automation of those VCAs was left out too: 1 point on other tracks.")
+    );
+}
+
+const Q_TICKS: i64 = 15_360;

@@ -1,6 +1,6 @@
 //! The `.vizdaw` package: `project.json`, `Media/` and `Autosave/`.
 //!
-//! `project.json` is `{ "format": "vizdaw-project", "version": 10,
+//! `project.json` is `{ "format": "vizdaw-project", "version": 11,
 //! "document": { … } }`. Loading migrates older versions step by step,
 //! refuses newer ones, rejects unknown fields and runs every integrity
 //! check. Saving writes a temporary file, syncs it, renames it over the old
@@ -9,6 +9,7 @@
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::format::AudioFormat;
+use crate::groups::MAX_VCAS;
 use crate::history::Timestamp;
 use crate::ids::PluginInstanceId;
 use crate::mixer::{PluginRef, PluginSlot};
@@ -27,7 +28,7 @@ use std::sync::Arc;
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
 /// The version this build writes.
-pub const VERSION: u64 = 10;
+pub const VERSION: u64 = 11;
 /// The oldest version this build can migrate from.
 pub const FIRST_VERSION: u64 = 1;
 /// The project file name inside a package.
@@ -47,6 +48,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migrate_v7_to_v8,
     migrate_v8_to_v9,
     migrate_v9_to_v10,
+    migrate_v10_to_v11,
 ];
 
 /// The project rate a migrated project gets (5a Ruling 2): the most
@@ -71,6 +73,20 @@ fn fade_frames(tempo: &TempoMap, start: i64, ticks: i64, rate: f64) -> u64 {
     let e = tempo.tick_to_seconds(Tick(start.saturating_add(ticks.max(0))));
     // Float-to-int `as` saturates (and maps NaN to 0).
     ((e - s) * rate).round().max(0.0) as u64
+}
+
+/// Version 10 → 11 (plan groups-vcas Ruling 1): the mixer gains optional
+/// `groups` (fader groups) and `vcas` (VCAs) lists and the counters
+/// optional `group` and `vca` counters, each 1 when absent. A group or
+/// VCA has an optional `co_producer` mark (owner, 2026-11-19); without it,
+/// it is the composer's. A file without the lists has no groups and no
+/// VCAs, so the document is unchanged. The
+/// settings gain an optional `settings.click` (the metronome, Ruling 19):
+/// absent, it is off at −6 dB in `play_and_record`. The bump makes an older build
+/// refuse a version-11 project with its `NewerFormat` message rather than
+/// an unknown-field error.
+pub fn migrate_v10_to_v11(v: Value) -> Result<Value> {
+    Ok(v)
 }
 
 /// Version 9 → 10 (plan 8b): tracks, strips, sends and plug-in slots gain
@@ -331,16 +347,99 @@ struct Header {
 
 /// Parses, migrates and validates `project.json` text.
 pub fn from_json(text: &str) -> Result<Document> {
+    from_json_noted(text).map(|(doc, _)| doc)
+}
+
+/// [`from_json`], with a line for each thing the load left out: past
+/// [`MAX_VCAS`], the first VCAs by ID are kept and the rest dropped.
+pub fn from_json_noted(text: &str) -> Result<(Document, Vec<String>)> {
     // Fast path: a current-version file deserializes in one pass.
-    let file = match serde_json::from_str::<ProjectFile>(text) {
+    let mut file = match serde_json::from_str::<ProjectFile>(text) {
         Ok(f) if f.format == FORMAT && f.version == VERSION => f,
         _ => slow_path(text)?,
     };
+    let mut notes = Vec::new();
+    let had = file.document.mixer().vcas().len();
+    let dropped = file.document.mixer_mut().keep_first_vcas(MAX_VCAS);
+    if dropped > 0 {
+        notes.push(too_many_vcas(had, dropped));
+        let (tracks, points) = drop_missing_vca_automation(&mut file.document);
+        if let Some(line) = vca_automation_left_out(tracks, points) {
+            notes.push(line);
+        }
+    }
     let problems = validate(&file.document);
     if !problems.is_empty() {
         return Err(ModelError::Corrupt { problems });
     }
-    Ok(file.document)
+    Ok((file.document, notes))
+}
+
+/// Takes out the automation of VCAs the document does not hold (those
+/// the load's cap left out): a track whose every event drives one goes
+/// whole; in any other track only those points go. Returns how many
+/// tracks and how many other points went.
+fn drop_missing_vca_automation(doc: &mut Document) -> (usize, usize) {
+    use crate::automation::AutomationTarget;
+    use crate::event::EventBody;
+    let gone = |doc: &Document, body: &EventBody| match body {
+        EventBody::Automation {
+            target: AutomationTarget::VcaFader(v),
+            ..
+        } => doc.mixer().vca(*v).is_err(),
+        _ => false,
+    };
+    let mut whole = Vec::new();
+    let mut points = Vec::new();
+    for (seq_id, seq) in doc.sequences() {
+        for lane in &seq.lanes {
+            let events = || lane.takes.iter().flat_map(|t| t.events.values());
+            if !events().any(|e| gone(doc, &e.body)) {
+                continue;
+            }
+            if events().all(|e| gone(doc, &e.body)) {
+                whole.push((*seq_id, lane.id));
+            } else {
+                points.extend(events().filter(|e| gone(doc, &e.body)).map(|e| e.id));
+            }
+        }
+    }
+    for (seq, lane) in &whole {
+        let _ = doc.remove_lane(*seq, *lane);
+    }
+    for id in &points {
+        let _ = doc.remove_event(*id);
+    }
+    (whole.len(), points.len())
+}
+
+/// The load's line for the automation of the VCAs it left out: `tracks`
+/// whole tracks and `points` points on other tracks; `None` for none.
+fn vca_automation_left_out(tracks: usize, points: usize) -> Option<String> {
+    let count = |n: usize, one: &str| match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {one}s"),
+    };
+    let what = match (tracks, points) {
+        (0, 0) => return None,
+        (t, 0) => count(t, "track"),
+        (0, p) => format!("{} on other tracks", count(p, "point")),
+        (t, p) => format!(
+            "{} and {} on other tracks",
+            count(t, "track"),
+            count(p, "point")
+        ),
+    };
+    Some(format!(
+        "The automation of those VCAs was left out too: {what}."
+    ))
+}
+
+/// The load's line for a song with `had` VCAs, `dropped` of them left out.
+fn too_many_vcas(had: usize, dropped: usize) -> String {
+    format!(
+        "This song has {had} VCAs; a song holds at most {MAX_VCAS}, so the last {dropped} (by ID) were left out."
+    )
 }
 
 /// Checks the header, refuses newer versions and migrates older ones.
@@ -448,18 +547,28 @@ pub fn save(doc: &Document, package: &Path) -> Result<()> {
 /// Loads the package's `project.json` and its plugin state blobs. A
 /// missing blob is listed by `Document::missing_states`, not an error.
 pub fn load(package: &Path) -> Result<Document> {
-    let mut doc = from_json(&fs::read_to_string(package.join(PROJECT_FILE))?)?;
+    load_noted(package).map(|(doc, _)| doc)
+}
+
+/// [`load`], with [`from_json_noted`]'s lines.
+pub fn load_noted(package: &Path) -> Result<(Document, Vec<String>)> {
+    let (mut doc, notes) = from_json_noted(&fs::read_to_string(package.join(PROJECT_FILE))?)?;
     read_states(&mut doc, package);
-    Ok(doc)
+    Ok((doc, notes))
 }
 
 /// Loads the autosave copy at `autosave` (a file in the package's
 /// `Autosave/` folder) with the package's plugin state blobs ("Restore
 /// autosave", spec §10).
 pub fn load_autosave(package: &Path, autosave: &Path) -> Result<Document> {
-    let mut doc = from_json(&fs::read_to_string(autosave)?)?;
+    load_autosave_noted(package, autosave).map(|(doc, _)| doc)
+}
+
+/// [`load_autosave`], with [`from_json_noted`]'s lines.
+pub fn load_autosave_noted(package: &Path, autosave: &Path) -> Result<(Document, Vec<String>)> {
+    let (mut doc, notes) = from_json_noted(&fs::read_to_string(autosave)?)?;
     read_states(&mut doc, package);
-    Ok(doc)
+    Ok((doc, notes))
 }
 
 /// Autosave copies in the package, newest first.
@@ -586,6 +695,35 @@ pub fn copy_media_files(doc: &Document, root: &Path) -> Result<Vec<(String, u64)
     Ok(out)
 }
 
+/// Refuses when a folder of `rel` under `base` (each of its parts in
+/// turn, `base` itself not included) is a link or not a folder, so a
+/// write there never goes through a link (release gate Task 5). Parts
+/// not made yet are fine; checked again once they are made.
+pub fn refuse_linked_folders(base: &Path, rel: &Path) -> Result<()> {
+    let mut at = base.to_path_buf();
+    for part in rel.components() {
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(ModelError::invalid(format!(
+                    "{} is a link; Co-Producer does not write through it",
+                    at.display()
+                )));
+            }
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => {
+                return Err(ModelError::invalid(format!(
+                    "{} is not a folder",
+                    at.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 fn write_copy_from(
     doc: &Document,
     package: &Path,
@@ -595,8 +733,11 @@ fn write_copy_from(
 ) -> Result<PathBuf> {
     let dir = package.join(COPIES_DIR);
     // Checked before anything is written.
+    refuse_linked_folders(package, Path::new(COPIES_DIR))?;
     copy_name(&dir, stamp, title)?;
     fs::create_dir_all(&dir)?;
+    // A link swapped in while the folders were made.
+    refuse_linked_folders(package, Path::new(COPIES_DIR))?;
     write_states(doc, package)?;
     // Another writer may take the free name first: try the next one.
     let mut tries = 0;
@@ -715,13 +856,54 @@ pub fn copy_parent(path: &Path) -> Option<PathBuf> {
     Some(parts.iter().collect())
 }
 
+/// Opens `path` for reading only when it is a regular file: a final link
+/// is not followed and a FIFO is not waited on (`O_NOFOLLOW |
+/// `O_NONBLOCK`), and the open file itself is checked, so nothing can be
+/// swapped in between the check and the read (release gate Task 5).
+pub fn open_regular(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !f.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::other("it is not a regular file"));
+    }
+    Ok(f)
+}
+
+/// The bytes of the regular file `path` ([`open_regular`]).
+fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    open_regular(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// The copy's document with the parent's blobs (like `load_autosave`).
+/// Only regular files are read: inside a package, a `project.json` or a
+/// blob that is a link or a FIFO is refused or missing.
 pub fn load_copy(copy: &Path) -> Result<Document> {
+    load_copy_noted(copy).map(|(doc, _)| doc)
+}
+
+/// [`load_copy`], with [`from_json_noted`]'s lines.
+pub fn load_copy_noted(copy: &Path) -> Result<(Document, Vec<String>)> {
     let package =
         copy_parent(copy).ok_or_else(|| ModelError::invalid("that is not a Co-Producer copy"))?;
-    let mut doc = from_json(&fs::read_to_string(copy.join(PROJECT_FILE))?)?;
-    read_states(&mut doc, &package);
-    Ok(doc)
+    refuse_linked_folders(&package, Path::new(COPIES_DIR))?;
+    let text = String::from_utf8(read_regular(&copy.join(PROJECT_FILE))?)
+        .map_err(|_| ModelError::invalid("the copy's project.json is not UTF-8"))?;
+    let (mut doc, notes) = from_json_noted(&text)?;
+    if refuse_linked_folders(&package, Path::new(STATE_DIR)).is_ok() {
+        let dir = package.join(STATE_DIR);
+        for id in doc.referenced_states() {
+            if let Ok(bytes) = read_regular(&dir.join(blob_file_name(id))) {
+                doc.states_mut().insert(id, Arc::from(bytes));
+            }
+        }
+    }
+    Ok((doc, notes))
 }
 
 /// Writes a timestamped copy to `Autosave/` and keeps the newest

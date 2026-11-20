@@ -12,12 +12,12 @@ use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_media::caf::{CafWriter, WriteMode};
 use core_media::stream::{DiskMode, MediaFile};
 use core_model::automation::AutomationTarget;
-use core_model::command::MixerCmd;
+use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::document::Document;
 use core_model::event::{EventBody, EventSpec, Fade};
 use core_model::format::BitDepth;
-use core_model::ids::{MediaId, SeqId, StripId};
-use core_model::mixer::{AuxSend, Output, StripKind};
+use core_model::ids::{AnyId, MediaId, SeqId, StripId};
+use core_model::mixer::{AuxSend, Output, StripKind, Swatch, db_to_gain};
 use core_model::time::Tick;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -748,4 +748,138 @@ fn a_range_shorter_than_a_block_bounces() {
     let (second, again) = run_lr(&mut r, &short);
     assert_eq!(again, stats);
     assert_eq!(second, first, "the same engine bounces it again alike");
+}
+
+/// `d` with its region's path the only member of a VCA at `gain_db`.
+fn with_vca(d: &Document, gain_db: f64) -> Document {
+    let path = path_and_bus(d).0;
+    let mut b = Builder::from_doc(d.clone());
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "V".into(),
+            colour: Swatch::Green,
+            members: vec![path],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(v)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
+    b.run(Command::Groups(GroupCmd::SetVcaLevel { vca: v, gain_db }))
+        .unwrap();
+    b.finish()
+}
+
+/// The mix of `d` bounced, then rendered by plain live blocks (after the
+/// graph's latency), over the same range.
+fn bounced_and_live(d: &Document, seq: SeqId) -> (Vec<f32>, Vec<f32>) {
+    let end = Tick(15 * Q / 2);
+    let mut a = rig(d, seq);
+    let (got, stats) = run(&mut a, &BounceSpec { end, ..spec(0) });
+    let mut b = rig(d, seq);
+    b.engine.play().unwrap();
+    let l = b.engine.latency_frames();
+    let mut live = Vec::new();
+    while (live.len() as u64) < l + stats.range {
+        b.engine.streamer().service();
+        b.out.block(BLOCK);
+        live.extend_from_slice(b.out.output(BLOCK).0);
+    }
+    let live = live[l as usize..(l + stats.range) as usize].to_vec();
+    let mix = got.into_iter().next().unwrap();
+    (mix[..live.len()].to_vec(), live)
+}
+
+/// Asserts `a` and `b` hold the same samples, naming the first that differs.
+fn same(a: &[f32], b: &[f32], what: &str) {
+    assert_eq!(a.len(), b.len(), "{what}: lengths");
+    if let Some(f) = a
+        .iter()
+        .zip(b)
+        .position(|(x, y)| x.to_bits() != y.to_bits())
+    {
+        panic!("{what}: frame {f}: {} vs {}", a[f], b[f]);
+    }
+}
+
+/// Spec §2a: the live engine, the offline bounce and the render use the
+/// same sum. A −6 dB VCA on the region's path gives the same samples in a
+/// bounce and in live blocks, and the same as the path's own fader at −6;
+/// under fader automation (each commit sums the VCA) bounce and live
+/// agree, at −6 dB from the same song without the VCA.
+#[test]
+fn live_bounce_and_render_agree_with_a_vca() {
+    let (plain, seq) = doc(0, None);
+    let (mix, live) = bounced_and_live(&with_vca(&plain, -6.0), seq);
+    assert!(mix.iter().any(|x| *x != 0.0));
+    same(&mix, &live, "bounce and live blocks");
+    let mut b = Builder::from_doc(plain.clone());
+    let path = path_and_bus(b.doc()).0;
+    b.mixer(MixerCmd::SetGain {
+        strip: path,
+        gain_db: -6.0,
+    })
+    .unwrap();
+    let (by_fader, _) = bounced_and_live(&b.finish(), seq);
+    same(&mix, &by_fader, "the same as the own fader at −6");
+
+    let (ramped, seq) = doc_with(Opts {
+        master: Some("gain=0.5"),
+        ramp: true,
+        ..Opts::default()
+    });
+    let (mix, live) = bounced_and_live(&with_vca(&ramped, -6.0), seq);
+    same(&mix, &live, "bounce and live blocks, automated");
+    let (unscaled, _) = bounced_and_live(&ramped, seq);
+    let g = db_to_gain(-6.0) as f32;
+    assert!(unscaled.iter().any(|x| *x != 0.0));
+    for (f, (x, y)) in mix.iter().zip(&unscaled).enumerate() {
+        assert!(
+            (x - y * g).abs() <= 1e-5 * (1.0 + y.abs()),
+            "frame {f}: {x} vs {}",
+            y * g
+        );
+    }
+}
+
+/// Ruling 19: the metronome never reaches a bounce. With the live
+/// engine's click on, a bounce of the same song is the same, sample for
+/// sample, as one with it off; live blocks over the same span click.
+#[test]
+fn clicks_never_reach_a_bounce() {
+    use core_engine::metronome::ClickSpec;
+    let (d, seq) = doc(0, None);
+    let end = Tick(15 * Q / 2);
+    let bounced = |click: bool| {
+        let mut r = rig(&d, seq);
+        r.engine.set_click(ClickSpec {
+            on: click,
+            gain: 1.0,
+            record_only: false,
+        });
+        let (got, stats) = run(&mut r, &BounceSpec { end, ..spec(0) });
+        (got.into_iter().next().unwrap(), stats)
+    };
+    let (with, stats) = bounced(true);
+    let (without, _) = bounced(false);
+    assert!(without.iter().any(|x| *x != 0.0));
+    same(&with, &without, "a bounce with the click on and off");
+    let mut b = rig(&d, seq);
+    b.engine.set_click(ClickSpec {
+        on: true,
+        gain: 1.0,
+        record_only: false,
+    });
+    b.engine.play().unwrap();
+    let mut live = Vec::new();
+    while (live.len() as u64) < stats.range {
+        b.engine.streamer().service();
+        b.out.block(BLOCK);
+        live.extend_from_slice(b.out.output(BLOCK).0);
+    }
+    live.truncate(stats.range as usize);
+    let n = live.len();
+    assert!(
+        live.iter().zip(&with[..n]).any(|(x, y)| x != y),
+        "live blocks click"
+    );
 }

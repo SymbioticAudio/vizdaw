@@ -9,10 +9,11 @@ use crate::guard::ffi_guard;
 use crate::host;
 use crate::mixer_chores::{
     BUILT_IN_SYNTH, MAX_PARAMS, PluginLookup, commands_for, plugin_ref_text, resolve_plugin,
+    step_label,
 };
 use crate::plugins;
 use crate::snapshot::{DocSnapshot, ParamRow};
-use core_control::registry::{self, ArgValue, MIXER_IDS};
+use core_control::registry::{self, ArgValue, GROUP_IDS, MIXER_IDS};
 use core_host::PluginKind;
 use core_model::command::{Command, MixerCmd};
 use core_model::diff::shown_name;
@@ -116,8 +117,10 @@ impl Session {
 /// Co-Producer's mixer edits (plan 8d Task 4).
 #[uniffi::export]
 impl Session {
-    /// Runs one of [`MIXER_IDS`] as one step named its title (Ruling 1),
-    /// as the preview built it ([`commands_for`]): `args` are validated by
+    /// Runs one of [`MIXER_IDS`] or [`GROUP_IDS`] as one step named by
+    /// [`step_label`] (its title, Ruling 1; a group command's own name; a
+    /// group's fader move "Move Group ‹name›"), as the preview built it
+    /// ([`commands_for`]): `args` are validated by
     /// the registry and checked again; a refusal changes nothing. Inside a
     /// Co-Producer call the step is Co-Producer's, and joins the request's.
     /// `mixer.set_param` sends the value to the running plug-in first, as
@@ -127,7 +130,7 @@ impl Session {
     /// is open (and, for a new track, while recording).
     pub fn run_mixer(&self, id: String, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            if !MIXER_IDS.contains(&id.as_str()) {
+            if !MIXER_IDS.contains(&id.as_str()) && !GROUP_IDS.contains(&id.as_str()) {
                 let shown: String = id.chars().take(64).collect();
                 return Err(bad(format!(
                     "{} is not a mixer command.",
@@ -211,10 +214,11 @@ impl Session {
             }
         };
         let before = inner.doc().clone();
+        let label = step_label(&before, id, title, &cmds);
         let filter = ViewFilter::default();
         let h = &mut inner.history;
         crate::bundled::arm(h);
-        h.begin(title)?;
+        h.begin(label)?;
         let mut notes = Vec::new();
         for c in &cmds {
             match h.execute(c, &filter) {

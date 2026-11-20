@@ -5,12 +5,14 @@ use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
-use core_model::automation::{AutomationTarget, fader_db, fader_norm, pan_norm};
-use core_model::command::MixerCmd;
+use core_engine::schedule::AutoDest;
+use core_model::automation::{AutomationMode, AutomationTarget, fader_db, fader_norm, pan_norm};
+use core_model::command::{Command, GroupCmd, MixerCmd};
 use core_model::document::Document;
 use core_model::event::{EventBody, EventSpec};
-use core_model::ids::{DestId, SeqId, StripId};
-use core_model::mixer::{StripKind, db_to_gain};
+use core_model::groups::heard_db;
+use core_model::ids::{AnyId, DestId, SeqId, StripId, VcaId};
+use core_model::mixer::{StripKind, Swatch, db_to_gain};
 use core_model::time::Tick;
 
 const SR: f64 = 48_000.0;
@@ -807,4 +809,92 @@ fn a_new_engine_seeded_with_the_old_overrides_keeps_the_automated_fader() {
     })
     .unwrap();
     scaled(&rebuilt(&b.finish()), &base, db_to_gain(-3.0) as f32);
+}
+
+/// The song of [`song`] with no strip points, the synth's strip in VCA
+/// "Drums" (at 0 dB, in `mode`), and the lane "Auto" holding `points` on
+/// that VCA's fader.
+fn vca_song(mode: AutomationMode, points: &[(i64, f64)]) -> (Song, VcaId) {
+    let s = song(|_| vec![]);
+    let mut b = Builder::from_doc(s.doc);
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "Drums".into(),
+            colour: Swatch::Blue,
+            members: vec![s.synth],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA: {:?}", r.created);
+    };
+    if mode != AutomationMode::Read {
+        b.run(Command::Groups(GroupCmd::SetVcaMode { vca, mode }))
+            .unwrap();
+    }
+    let auto = b.doc().sequence(s.seq).unwrap().lanes[1].id;
+    let specs: Vec<EventSpec> = points
+        .iter()
+        .map(|&(t, value)| {
+            EventSpec::new(
+                Tick(t),
+                EventBody::Automation {
+                    target: AutomationTarget::VcaFader(vca),
+                    value,
+                },
+            )
+        })
+        .collect();
+    b.events(s.seq, auto, specs).unwrap();
+    (
+        Song {
+            doc: b.finish(),
+            seq: s.seq,
+            synth: s.synth,
+            dest: s.dest,
+        },
+        vca,
+    )
+}
+
+/// A VCA fader lane from −∞ to 0 dB takes its member from silence to its
+/// own fader's level, by the fader law, as a strip fader lane would; the
+/// member's own fader is never overridden (the lane is the VCA's).
+#[test]
+fn vca_lanes_play() {
+    let (silent, unity) = (fader_norm(-144.0), fader_norm(0.0));
+    assert_eq!(silent, 0.0);
+    let dry = played(&song(|_| vec![]), 120_000);
+    let (s, vca) = vca_song(AutomationMode::Read, &[(0, silent), (BAR, unity)]);
+    let mut r = rig(&s.doc, s.seq, 256);
+    r.engine.play().unwrap();
+    let wet = r.render(120_000);
+    assert!(wet[..256].iter().all(|x| *x == 0.0), "silent at the start");
+    // Past the bar (96 000 frames) the member plays at its own 0 dB fader.
+    scaled(&wet[100_000..], &dry[100_000..], 1.0);
+    // In between, the fader law on the member's heard level.
+    let gain = |p: u64| unity * (p as f64 / 96_000.0).min(1.0);
+    for (i, (w, d)) in wet.iter().zip(&dry).enumerate() {
+        let g = db_to_gain(heard_db(0.0, fader_db(gain(i as u64)))) as f32;
+        assert!((w - d * g).abs() <= 1e-6, "frame {i}: {w} vs {}", d * g);
+    }
+    let model = ramp_model(wet.len(), 256, &[], |i| i as u64, gain);
+    frame_exact(&wet, &dry, &model);
+    let o = r
+        .engine
+        .overrides()
+        .expect("the engine published overrides");
+    assert_eq!(o.fader_db(s.synth), None, "the member's fader is its own");
+    let held = o.value(AutoDest::Vca(vca)).expect("the VCA's override");
+    assert!((held - unity).abs() < 1e-9, "{held} vs {unity}");
+}
+
+/// A VCA in Off plays its static level and ignores its lane.
+#[test]
+fn vca_off_mode_plays_static() {
+    let dry = played(&song(|_| vec![]), 20_000);
+    let (s, _) = vca_song(AutomationMode::Off, &[(0, 0.0), (BAR, 0.0)]);
+    scaled(&played(&s, 20_000), &dry, 1.0);
+    // The same lane in Read silences it.
+    let (s, _) = vca_song(AutomationMode::Read, &[(0, 0.0), (BAR, 0.0)]);
+    assert!(played(&s, 20_000).iter().all(|x| *x == 0.0));
 }

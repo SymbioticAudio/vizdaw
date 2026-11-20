@@ -52,6 +52,10 @@ public final class TransportReadoutsView: NSView, ThemedView {
     }
 
     public let document: DocumentModel
+    /// The boxes it shows, in order (a transport item shows one).
+    public let shownBoxes: [TransportReadouts.Box]
+    /// Large: the theme's title digits; small: its body digits.
+    public let size: ReadoutSize
     private(set) var boxes: [TransportReadouts.Box: BoxView] = [:]
     /// Each box's width, for the theme's fonts.
     private var widths: [TransportReadouts.Box: CGFloat] = [:]
@@ -62,11 +66,19 @@ public final class TransportReadoutsView: NSView, ThemedView {
     /// How many times a theme has been applied (a test reads it).
     private(set) var themeApplications = 0
 
-    public init(document: DocumentModel) {
+    public init(
+        document: DocumentModel, boxes shown: [TransportReadouts.Box] = TransportReadouts.Box.allCases,
+        size: ReadoutSize = .large
+    ) {
         self.document = document
+        // Each box once, in the order given.
+        var seen: [TransportReadouts.Box] = []
+        for b in shown where !seen.contains(b) { seen.append(b) }
+        shownBoxes = seen
+        self.size = size
         super.init(frame: .zero)
         clipsToBounds = true
-        for b in TransportReadouts.Box.allCases {
+        for b in shownBoxes {
             let v = BoxView(b)
             boxes[b] = v
             addSubview(v)
@@ -104,7 +116,7 @@ public final class TransportReadoutsView: NSView, ThemedView {
         let t = theme
         let look = TransportReadouts.look(t)
         appearance = NSAppearance(named: t.appearance.nsAppearanceName)
-        let digits = t.digitsFont(t.type.title, weight: t.type.title.weight.appKit)
+        let digits = Self.valueFont(t, size)
         let caption = t.font(t.type.caption, weight: t.type.caption.weight.appKit)
         var tallest: CGFloat = 0
         for (b, v) in boxes {
@@ -124,6 +136,13 @@ public final class TransportReadoutsView: NSView, ThemedView {
         invalidateIntrinsicContentSize()
         needsLayout = true
         needsDisplay = true
+    }
+
+    /// The value font for `size` (Task 11): large readouts use the theme's
+    /// title digits, small ones its body digits.
+    public static func valueFont(_ t: Theme, _ size: ReadoutSize) -> NSFont {
+        let type = size == .large ? t.type.title : t.type.body
+        return t.digitsFont(type, weight: type.weight.appKit)
     }
 
     private func observe() {
@@ -157,7 +176,7 @@ public final class TransportReadoutsView: NSView, ThemedView {
         super.layout()
         let look = TransportReadouts.look(theme)
         var x = inset
-        for b in TransportReadouts.Box.allCases {
+        for b in shownBoxes {
             guard let v = boxes[b], let w = widths[b] else { continue }
             v.frame = NSRect(x: x, y: inset, width: w, height: max(bounds.height - 2 * inset, 0))
             let th = v.title.intrinsicContentSize.height
@@ -179,7 +198,7 @@ public final class TransportReadoutsView: NSView, ThemedView {
 
     public override func draw(_ dirtyRect: NSRect) {
         let look = TransportReadouts.look(theme)
-        let frames = TransportReadouts.Box.allCases.compactMap { boxes[$0]?.frame }
+        let frames = shownBoxes.compactMap { boxes[$0]?.frame }
         if let edge = look.edge {
             let group = NSBezierPath(roundedRect: bounds, xRadius: look.radius, yRadius: look.radius)
             edge.nsColor.setFill()
