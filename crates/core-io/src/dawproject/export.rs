@@ -773,7 +773,7 @@ pub(super) fn layout<'a>(
     let mut vca_lanes: Vec<&Lane> = Vec::new();
     for lane in &s.lanes {
         let events = played.get(&lane.id).map_or(&[][..], Vec::as_slice);
-        if moves_vcas_only(events) {
+        if !lane.mute && moves_vcas_only(events) {
             vca_lanes.push(lane);
             continue;
         }
@@ -972,7 +972,8 @@ pub(super) fn layout<'a>(
 }
 
 /// Whether a track plays something and all of it is VCA fader moves
-/// (B-001): such a track is no DAWproject track.
+/// (B-001): such a track is no DAWproject track. A muted lane is kept by
+/// the caller, so its moves do not start playing after a round trip.
 fn moves_vcas_only(events: &[ResolvedEvent]) -> bool {
     !events.is_empty()
         && events.iter().all(|r| {

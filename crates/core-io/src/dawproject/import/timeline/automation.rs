@@ -3,6 +3,15 @@
 use super::*;
 use core_model::groups::vca_label;
 
+/// VCA `v`'s label for its lane; a missing or empty name falls back to the
+/// import's own default, "VCA N".
+fn vca_lane_label(names: &[String], v: usize) -> String {
+    match names.get(v).map(|n| n.trim()) {
+        Some(n) if !n.is_empty() => vca_label(n),
+        _ => format!("VCA {}", v + 1),
+    }
+}
+
 impl<'p> Tl<'_, '_, 'p> {
     /// Every channel's volume, pan, mute, send levels and device
     /// parameters.
@@ -185,7 +194,7 @@ impl<'p> Tl<'_, '_, 'p> {
         if let Some(&i) = self.vca_tracks.get(&v) {
             return i;
         }
-        let label = vca_label(self.vca_names.get(v).map_or("", String::as_str));
+        let label = vca_lane_label(&self.vca_names, v);
         let name = self.made_name(&format!("{label} Fader"));
         let i = self.new_track(name, false);
         self.vca_tracks.insert(v, i);
@@ -233,5 +242,18 @@ impl<'p> Tl<'_, '_, 'p> {
             self.count(ItemKind::Changed, VALUES_CLAMPED);
         }
         Some(raw.clamp(0.0, 1.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vca_lane_label;
+
+    #[test]
+    fn an_unnamed_vca_lane_reads_vca_n_fader() {
+        let names = vec![String::new(), "Strings".to_owned()];
+        assert_eq!(vca_lane_label(&names, 0), "VCA 1");
+        assert_eq!(vca_lane_label(&names, 1), "VCA Strings");
+        assert_eq!(vca_lane_label(&names, 5), "VCA 6");
     }
 }

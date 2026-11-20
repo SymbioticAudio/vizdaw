@@ -1317,6 +1317,56 @@ fn a_lane_with_vca_and_strip_moves_stays_a_track() {
     assert_eq!(faders, moves.len());
 }
 
+/// A muted lane stays a track even when it holds only VCA moves: folding
+/// it away would make the moves play after the round trip.
+#[test]
+fn a_muted_vca_only_lane_stays_a_track() {
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::command::GroupCmd;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::mixer::Swatch;
+    let mut b = Builder::new();
+    let (seq, lane) = b.sequence("Song", "VCA 1 Fader", None).unwrap();
+    let r = b
+        .run(Command::Groups(GroupCmd::NewVca {
+            name: "VCA 1".into(),
+            colour: Swatch::Teal,
+            members: vec![],
+        }))
+        .unwrap();
+    let Some(AnyId::Vca(vca)) = r.created.first().copied() else {
+        panic!("no VCA");
+    };
+    b.events(
+        seq,
+        lane,
+        vec![EventSpec::new(
+            Tick(0),
+            EventBody::Automation {
+                target: AutomationTarget::VcaFader(vca),
+                value: fader_norm(-6.0),
+            },
+        )],
+    )
+    .unwrap();
+    b.run(Command::Lane(LaneCmd::SetFlags {
+        seq,
+        lane,
+        mute: Some(true),
+        solo: None,
+        arm: None,
+    }))
+    .unwrap();
+    let doc = b.finish();
+    let t = trip(&doc, &options(seq, RegionGain::Apply));
+    assert!(
+        t.x.project_xml.contains("name=\"VCA 1 Fader\""),
+        "{}",
+        t.x.project_xml
+    );
+    assert_eq!(t.x.report.summary.tracks, 1, "{:#?}", t.x.report);
+}
+
 /// A VCA with a level, a mute and fader automation survives as a VCA
 /// channel: the file passes the schema; the import has one VCA with the
 /// same name, level, mute and (within the tolerance) points, and no
