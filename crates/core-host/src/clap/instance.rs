@@ -171,6 +171,7 @@ impl ClapInstance {
                         stepped: p.flags.contains(ParamInfoFlags::IS_STEPPED),
                         automatable: p.flags.contains(ParamInfoFlags::IS_AUTOMATABLE),
                         hidden: p.flags.contains(ParamInfoFlags::IS_HIDDEN),
+                        read_only: p.flags.contains(ParamInfoFlags::IS_READONLY),
                     });
                 }
             }

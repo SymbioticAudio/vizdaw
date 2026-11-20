@@ -3003,6 +3003,7 @@ impl Session {
                         stepped: i.stepped,
                         automatable: i.automatable,
                         hidden: i.hidden,
+                        read_only: i.read_only,
                     })
                     .collect()
             })

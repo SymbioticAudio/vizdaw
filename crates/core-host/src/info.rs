@@ -60,6 +60,10 @@ pub struct ParamInfo {
     pub automatable: bool,
     /// Hidden from the user.
     pub hidden: bool,
+    /// The plugin only reports this value; the user cannot set it. Not the
+    /// same as `!automatable`, which can still be set by hand.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 /// How long a plugin keeps sounding after its input stops.

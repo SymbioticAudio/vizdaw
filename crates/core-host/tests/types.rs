@@ -40,6 +40,7 @@ fn ducker() -> PluginInfo {
             stepped: false,
             automatable: true,
             hidden: false,
+            read_only: false,
         }],
         latency: 0,
         tail: Tail::Frames(480),
@@ -116,4 +117,17 @@ fn queues_carry_values_in_and_gestures_out() {
             ParamEvent::End(ParamId(1)),
         ]
     );
+}
+
+#[test]
+fn read_only_is_optional_in_json_and_omitted_when_false() {
+    let p = ducker().params[0].clone();
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(!json.contains("read_only"), "{json}");
+    let back: ParamInfo = serde_json::from_str(&json).unwrap();
+    assert!(!back.read_only);
+    let ro = ParamInfo { read_only: true, ..p };
+    let json = serde_json::to_string(&ro).unwrap();
+    assert!(json.contains("\"read_only\":true"), "{json}");
+    assert_eq!(serde_json::from_str::<ParamInfo>(&json).unwrap(), ro);
 }

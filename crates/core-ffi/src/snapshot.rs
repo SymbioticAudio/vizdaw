@@ -474,6 +474,9 @@ pub struct ParamRow {
     pub automatable: bool,
     /// Hidden from the user.
     pub hidden: bool,
+    /// The plugin only reports it; the user cannot set it.
+    #[uniffi(default = false)]
+    pub read_only: bool,
 }
 
 /// A parameter value to record.

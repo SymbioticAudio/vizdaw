@@ -381,6 +381,7 @@ fn fake_info() -> PluginInfo {
         stepped: false,
         automatable: true,
         hidden: false,
+        read_only: false,
     };
     PluginInfo {
         plugin: fake_ref(),

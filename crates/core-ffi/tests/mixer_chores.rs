@@ -595,6 +595,7 @@ fn plugin_results_json() {
                 stepped: false,
                 automatable: true,
                 hidden: false,
+                read_only: false,
             }],
         },
     });
@@ -948,6 +949,7 @@ mod task4 {
             stepped,
             automatable: true,
             hidden,
+            read_only: false,
         }
     }
 

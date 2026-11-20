@@ -36,6 +36,19 @@ const TYPES: [u32; 3] = [
 /// `kAudioUnitParameterUnit_Indexed` and `_Boolean`.
 const STEPPED_UNITS: [u32; 2] = [1, 2];
 
+/// What an AU parameter's flags mean for the host, as
+/// `(automatable, read_only, hidden)`. Read-only is the absence of
+/// `IsWritable`; a non-real-time parameter cannot be written from the
+/// audio thread, so it is not automatable.
+fn au_param_facts(flags: AudioUnitParameterOptions) -> (bool, bool, bool) {
+    let writable = flags.contains(AudioUnitParameterOptions::Flag_IsWritable);
+    (
+        writable && !flags.contains(AudioUnitParameterOptions::Flag_NonRealTime),
+        !writable,
+        !flags.contains(AudioUnitParameterOptions::Flag_IsReadable),
+    )
+}
+
 fn fourcc(v: u32) -> String {
     v.to_be_bytes().iter().map(|b| char::from(*b)).collect()
 }
@@ -615,6 +628,7 @@ impl AuInstance {
             .into_iter()
             .filter_map(|id| {
                 let (name, min, max, def, flags, unit) = u.parameter_info(id)?;
+                let (automatable, read_only, hidden) = au_param_facts(flags);
                 Some(ParamInfo {
                     id: ParamId(u64::from(id)),
                     name,
@@ -623,8 +637,9 @@ impl AuInstance {
                     max: f64::from(max),
                     default: f64::from(def),
                     stepped: STEPPED_UNITS.contains(&unit),
-                    automatable: flags.contains(AudioUnitParameterOptions::Flag_IsWritable),
-                    hidden: !flags.contains(AudioUnitParameterOptions::Flag_IsReadable),
+                    automatable,
+                    hidden,
+                    read_only,
                 })
             })
             .collect();
@@ -1087,6 +1102,16 @@ pub fn scan_timeout(v3: bool) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn au_flags_give_automatable_read_only_and_hidden() {
+        use AudioUnitParameterOptions as F;
+        let rw = F::Flag_IsWritable | F::Flag_IsReadable;
+        assert_eq!(au_param_facts(rw), (true, false, false));
+        assert_eq!(au_param_facts(F::Flag_IsReadable), (false, true, false));
+        assert_eq!(au_param_facts(rw | F::Flag_NonRealTime), (false, false, false));
+        assert_eq!(au_param_facts(F::Flag_IsWritable), (true, false, true));
+    }
 
     #[test]
     fn the_first_activation_does_not_initialize_on_the_main_thread() {
