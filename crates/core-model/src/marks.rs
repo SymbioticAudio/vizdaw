@@ -6,7 +6,7 @@
 //! [`settle`] runs after every step of [`crate::history::History`]: an
 //! acting step marks what it made and names its marked tracks and strips
 //! "… (Co-Producer)"; a hand step never makes a marked thing, and a hand
-//! rename of a marked track or strip takes it over. Make Mine
+//! rename of a marked track, strip, group or VCA takes it over. Make Mine
 //! ([`crate::command::LaneCmd::MakeMine`],
 //! [`crate::command::MixerCmd::MakeMine`]) takes things over by hand.
 
@@ -208,30 +208,41 @@ fn settle_instruments(
     }
 }
 
-/// Marks each group and VCA new since `before` as `acting` says. A group
-/// or VCA keeps its name: no " (Co-Producer)" is added.
+/// Settles each group's and VCA's mark against `before` as [`settled`]
+/// does a track's: a new one is marked exactly when Co-Producer made it,
+/// and a hand rename of a marked one takes it over. A group or VCA keeps
+/// its name: no " (Co-Producer)" is added.
 fn settle_groups(before: &Document, after: &mut Document, acting: bool) {
     let (b, a) = (before.mixer(), after.mixer());
-    let groups: Vec<GroupId> = a
+    // Only the mark: the name `settled` would give is not used.
+    let mark =
+        |old: Option<(&str, bool)>, name: &str, marked: bool| settled(old, name, marked, acting).0;
+    let groups: Vec<(GroupId, bool)> = a
         .groups()
         .iter()
-        .filter(|(id, g)| !b.groups().contains_key(id) && g.co_producer != acting)
-        .map(|(id, _)| *id)
+        .filter_map(|(id, g)| {
+            let old = b.groups().get(id).map(|o| (o.name.as_str(), o.co_producer));
+            let m = mark(old, &g.name, g.co_producer);
+            (m != g.co_producer).then_some((*id, m))
+        })
         .collect();
-    let vcas: Vec<VcaId> = a
+    let vcas: Vec<(VcaId, bool)> = a
         .vcas()
         .iter()
-        .filter(|(id, v)| !b.vcas().contains_key(id) && v.co_producer != acting)
-        .map(|(id, _)| *id)
+        .filter_map(|(id, v)| {
+            let old = b.vcas().get(id).map(|o| (o.name.as_str(), o.co_producer));
+            let m = mark(old, &v.name, v.co_producer);
+            (m != v.co_producer).then_some((*id, m))
+        })
         .collect();
-    for id in groups {
+    for (id, m) in groups {
         if let Ok(g) = after.mixer_mut().group_mut(id) {
-            g.co_producer = acting;
+            g.co_producer = m;
         }
     }
-    for id in vcas {
+    for (id, m) in vcas {
         if let Ok(v) = after.mixer_mut().vca_mut(id) {
-            v.co_producer = acting;
+            v.co_producer = m;
         }
     }
 }

@@ -2261,3 +2261,91 @@ fn the_composers_empty_group_or_vca_asks() {
         vec![item("Group Own", "Kick added")]
     );
 }
+
+/// Plan 8b Ruling 1, for groups and VCAs too: a hand rename of
+/// Co-Producer's group or VCA takes it over, so Co-Producer then asks.
+/// Its other group, not renamed, stays its own.
+#[test]
+fn a_hand_rename_takes_a_group_or_vca_over() {
+    use core_model::command::GroupCmd as G;
+    let d = mix();
+    let drums = bus(&d, "Drums (Co-Producer)");
+    let mut h = History::new(d.clone());
+    h.begin_request("help").unwrap();
+    h.set_acting(true).unwrap();
+    for c in [
+        G::NewGroup {
+            name: "Drums".into(),
+            colour: Swatch::Green,
+            members: vec![drums],
+        },
+        G::NewGroup {
+            name: "Other".into(),
+            colour: Swatch::Green,
+            members: vec![],
+        },
+        G::NewVca {
+            name: "Ride".into(),
+            colour: Swatch::Teal,
+            members: vec![drums],
+        },
+    ] {
+        h.execute(&Command::Groups(c), &ViewFilter::default())
+            .unwrap();
+    }
+    let (g, other) = (group_id(h.doc(), "Drums"), group_id(h.doc(), "Other"));
+    let v = vca_id(h.doc(), "Ride");
+    h.set_acting(false).unwrap();
+    for c in [
+        G::RenameGroup {
+            group: g,
+            name: "Kit".into(),
+        },
+        G::RenameVca {
+            vca: v,
+            name: "Fader".into(),
+        },
+    ] {
+        h.execute(&Command::Groups(c), &ViewFilter::default())
+            .unwrap();
+    }
+    let taken = h.doc().clone();
+    let m = taken.mixer();
+    assert!(!m.groups()[&g].co_producer);
+    assert!(!m.vcas()[&v].co_producer);
+    assert!(m.groups()[&other].co_producer);
+
+    let renamed = acting(
+        &taken,
+        Command::Groups(G::RenameGroup {
+            group: g,
+            name: "Drums".into(),
+        }),
+    );
+    assert_eq!(
+        describe(&taken, &renamed),
+        vec![item("Group Kit", "renamed Kit → Drums")]
+    );
+    let renamed = acting(
+        &taken,
+        Command::Groups(G::RenameVca {
+            vca: v,
+            name: "Ride".into(),
+        }),
+    );
+    assert_eq!(
+        describe(&taken, &renamed),
+        vec![item("VCA Fader", "renamed Fader → Ride")]
+    );
+    let renamed = acting(
+        &taken,
+        Command::Groups(G::RenameGroup {
+            group: other,
+            name: "Mine".into(),
+        }),
+    );
+    assert_eq!(
+        describe(&taken, &renamed),
+        vec![ours("Group Other", "renamed Other → Mine")]
+    );
+}
