@@ -714,7 +714,7 @@ fn vcas(
             && old.is_none_or(|v| v.co_producer && all_ours(before, &v.members))
             && new.is_none_or(|v| v.co_producer && all_ours(after, &v.members));
         out.push(item_of(
-            format!("VCA {}", shown_name(&named.name)),
+            crate::groups::vca_label(&shown_name(&named.name)),
             parts.join(", "),
             ours,
         ));

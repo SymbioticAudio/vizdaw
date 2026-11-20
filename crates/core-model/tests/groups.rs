@@ -6,6 +6,7 @@ use core_model::document::{DestKind, Document};
 use core_model::file::{VERSION, from_json, migrate_v10_to_v11, to_json};
 use core_model::groups::{
     FADER_FLOOR_DB, Link, MAX_MEMBERS, check_name, group_delta, group_gains, group_of, linked,
+    vca_label,
 };
 use core_model::history::History;
 use core_model::ids::{AnyId, GroupId, StripId};
@@ -732,4 +733,12 @@ fn the_co_producer_mark_saves_and_loads() {
     let plain = from_json(&v.to_string()).unwrap();
     assert!(!plain.mixer().groups().values().next().unwrap().co_producer);
     assert!(!plain.mixer().vcas().values().next().unwrap().co_producer);
+}
+
+#[test]
+fn a_vca_label_never_says_vca_twice() {
+    assert_eq!(vca_label("VCA 1"), "VCA 1");
+    assert_eq!(vca_label("VCA"), "VCA");
+    assert_eq!(vca_label("Strings"), "VCA Strings");
+    assert_eq!(vca_label("VCAs and more"), "VCA VCAs and more");
 }

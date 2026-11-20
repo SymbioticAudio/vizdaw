@@ -1043,7 +1043,7 @@ pub(crate) fn param_info(owner: u64, t: AutomationTarget) -> Option<ParamInfo> {
 pub(crate) fn lane_name(doc: &Document, t: AutomationTarget, param_name: Option<&str>) -> String {
     if let AutomationTarget::VcaFader(v) = t {
         return match doc.mixer().vca(v) {
-            Ok(x) => format!("VCA {} Fader", x.name),
+            Ok(x) => format!("{} Fader", core_model::groups::vca_label(&x.name)),
             Err(_) => "VCA Fader".to_string(),
         };
     }
@@ -1460,6 +1460,26 @@ mod tests {
     use core_model::ids::StripId;
     use core_model::mixer::ParamId;
     use std::time::Duration;
+
+    #[test]
+    fn a_vcas_lane_never_says_vca_twice() {
+        use core_model::command::{Command, GroupCmd, apply};
+        let mut d = core_model::document::Document::new();
+        for (name, want) in [("VCA 1", "VCA 1 Fader"), ("Strings", "VCA Strings Fader")] {
+            d = apply(
+                &d,
+                &Command::Groups(GroupCmd::NewVca {
+                    name: name.into(),
+                    colour: core_model::mixer::Swatch::Teal,
+                    members: vec![],
+                }),
+            )
+            .unwrap()
+            .doc;
+            let v = d.mixer().vcas().values().find(|v| v.name == name).unwrap().id;
+            assert_eq!(lane_name(&d, AutomationTarget::VcaFader(v), None), want);
+        }
+    }
 
     /// Ruling 8: at most one value per 10 ms; the last kept value is sent
     /// once 10 ms passed, or first at the release, with the host time it
