@@ -872,6 +872,13 @@ impl Inner {
         self.plugin_dirty || *self.doc() != self.clean
     }
 
+    /// What the close and quit prompts ask on: [`Inner::unsaved`], or a
+    /// recording pass running or still to land (its take is in no file
+    /// yet). Not autosave's test: autosave never writes mid-recording.
+    fn asks_before_close(&self) -> bool {
+        self.unsaved() || self.recording.is_some() || self.finishing || self.pending_pass.is_some()
+    }
+
     fn snapshot(&mut self) -> Result<DocSnapshot, VizError> {
         self.snapshot_with(Vec::new())
     }
@@ -2321,10 +2328,22 @@ impl Session {
     }
 
     /// Whether the song has changes a close would lose: the document
-    /// differs from the one last opened or saved, or a plugin changed its
-    /// own state (release gate B1; the close and quit prompts ask on it).
+    /// differs from the one last opened or saved, a plugin changed its
+    /// own state, or a recording pass is running or still to land (release
+    /// gate B1; next small fixes Task 6). The close and quit prompts ask on
+    /// it; autosave and the snapshot's `dirty` read the document only.
     pub fn has_unsaved_changes(&self) -> Result<bool, VizError> {
-        ffi_guard(|| Ok(self.lock_inner().unsaved()))
+        ffi_guard(|| Ok(self.lock_inner().asks_before_close()))
+    }
+
+    /// Don't Save on a song that is recording (next small fixes Task 6):
+    /// a Save made during the pass is no longer owed, so the close that
+    /// ends the recording saves nothing. Nothing else changes.
+    pub fn cancel_save_after_pass(&self) -> Result<(), VizError> {
+        ffi_guard(|| {
+            self.lock_inner().save_after_pass = false;
+            Ok(())
+        })
     }
 
     /// Why Save As would be refused before its panel opens: the sentence

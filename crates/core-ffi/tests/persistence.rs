@@ -228,3 +228,20 @@ fn unsaved_changes_follow_edits_and_saves() {
     );
     s.close().unwrap();
 }
+
+/// Next small fixes Task 6: Don't Save on a song that is not recording
+/// changes nothing: the edits stay unsaved and no save is owed.
+#[test]
+fn cancel_save_after_pass_on_a_song_not_recording_changes_nothing() {
+    vizdaw_ffi::host::force_offline();
+    let s = Session::new_empty().unwrap();
+    s.add_bus("Bus".into()).unwrap();
+    s.cancel_save_after_pass().unwrap();
+    assert!(!s.saves_after_pass().unwrap());
+    assert!(
+        s.has_unsaved_changes().unwrap(),
+        "the edit is still unsaved"
+    );
+    assert!(s.snapshot().unwrap().dirty);
+    s.close().unwrap();
+}

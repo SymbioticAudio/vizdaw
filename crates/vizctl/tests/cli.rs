@@ -297,6 +297,50 @@ fn bad_timeouts_are_usage_errors_not_panics() {
     assert!(t <= Duration::from_secs(3700));
 }
 
+/// Next small fixes Task 6 (R7): `vizctl quit` asks VizDAW to keep
+/// unsaved songs; `--discard` says to lose them.
+#[test]
+fn quit_discards_only_when_asked() {
+    let (cmd, p, _) = request("quit");
+    assert_eq!((cmd.as_str(), p), ("app.quit", json!({})));
+    let (cmd, p, _) = request("quit --discard --window 2");
+    assert_eq!(
+        (cmd.as_str(), p),
+        ("app.quit", json!({"discard": true})),
+        "no window for app.*"
+    );
+}
+
+/// Next small fixes Task 6: a throwaway launch's cleanup quits with
+/// `discard` (its home is thrown away, so nothing in it is worth a prompt
+/// that would keep VizDAW running).
+#[test]
+fn dropping_launched_quits_with_discard() {
+    let dir = tempfile::Builder::new()
+        .prefix("vzq")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = dir.path().join("s.sock");
+    let mut server = Server::start(&socket, Config::default()).unwrap();
+    let child = Process::new("/bin/sleep").arg("60").spawn().unwrap();
+    let launched =
+        vizctl::launch::Launched::new(child, socket.clone(), "/tmp".into(), "/tmp/n.log".into());
+    let dropper = thread::spawn(move || drop(launched));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let call = loop {
+        if let Some(c) = server.next_call() {
+            break c;
+        }
+        assert!(std::time::Instant::now() < deadline, "no quit arrived");
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(call.command, Command::AppQuit { discard: true });
+    server.reply(call.token, Ok(json!({"quitting": true})));
+    dropper.join().unwrap();
+    server.stop();
+}
+
 #[test]
 fn dropping_launched_stops_the_child_unless_detached() {
     let spawn = || Process::new("/bin/sleep").arg("60").spawn().unwrap();

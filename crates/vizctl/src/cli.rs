@@ -33,7 +33,8 @@ The socket defaults to $VIZDAW_CONTROL. Results print as JSON on stdout.
                                window_titled | window_gone | detail_kind
   new-demo [--audio]           the demo project in a new window
   open PATH [--plugins normal|off|disable] [--restore-autosave true|false]
-  quit                         quit VizDAW
+  quit [--discard]             quit VizDAW; refused while a song is unsaved
+                               unless --discard (its changes are lost)
   call CMD [PARAMS-JSON]       send any request
 
 Every command except launch takes --window N (a number from `state windows`).
@@ -384,7 +385,16 @@ pub fn parse(args: &[String], env_socket: Option<String>) -> Result<Plan, String
             }
             ("app.open".to_string(), p)
         }
-        "quit" => ("app.quit".to_string(), json!({})),
+        // Without --discard VizDAW refuses while a song is unsaved
+        // (`unsaved_changes`, next small fixes Task 6 R7).
+        "quit" => (
+            "app.quit".to_string(),
+            if a.flag("--discard") {
+                json!({"discard": true})
+            } else {
+                json!({})
+            },
+        ),
         other => return Err(format!("unknown command {other:?} (see vizctl help)")),
     };
     if let (Some(w), Some(o)) = (window, params.as_object_mut()) {

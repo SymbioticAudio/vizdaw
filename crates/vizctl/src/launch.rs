@@ -80,7 +80,9 @@ impl Drop for Launched {
             return;
         }
         if let Ok(mut c) = Client::connect(&self.socket) {
-            let _ = c.call("app.quit", json!({}), Duration::from_secs(5));
+            // The home is throwaway: unsaved songs in it are let go
+            // (next small fixes Task 6 R7).
+            let _ = c.call("app.quit", json!({"discard": true}), Duration::from_secs(5));
         }
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {

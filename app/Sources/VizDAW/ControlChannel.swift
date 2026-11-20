@@ -499,7 +499,14 @@ enum ControlChannel {
                 ?? .failed(appStore.takeAlert().map(ControlFailure.alert) ?? .of(.failed, "no demo was made")))
         case .open(let path, let answers):
             answer(server, token, ControlOpen.open(path: path, answers: answers, store: appStore))
-        case .quit:
+        case .quit(let discard):
+            // Never loses an unsaved song unasked, test hooks or not (next
+            // small fixes Task 6, R7): `discard: true` lets them go (a Save
+            // made while recording is still made by the song's close).
+            let unsaved = QuitPrompts.dirtyDocuments().compactMap { appStore.model($0)?.snapshot.title }
+            if !discard, !unsaved.isEmpty {
+                return answer(server, token, .failed(.of(.unsavedChanges, ClosePrompts.quitRefusal(titles: unsaved))))
+            }
             _ = try? server.reply(token: token, result: .quitting)
             // A programmatic quit never asks to save (release gate B1).
             QuitPrompts.quiet = true

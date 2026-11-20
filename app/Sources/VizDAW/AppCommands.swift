@@ -557,7 +557,10 @@ enum SaveFlow {
             doc.editor.status = why
             return false
         }
-        return doc.alert?.id == alertBefore && !doc.hasUnsavedChanges
+        // A Save made while recording saved the song and is owed again at
+        // Stop: it saved, though the take is still to land (next small
+        // fixes Task 6; the close that follows saves the pass).
+        return doc.alert?.id == alertBefore && (!doc.hasUnsavedChanges || doc.saveAfterPassPending)
     }
 }
 

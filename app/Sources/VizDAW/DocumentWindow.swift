@@ -307,6 +307,9 @@ final class CloseHook: NSObject, NSWindowDelegate {
             case .cancel:
                 done(.cancel, false)
             case .dontSave:
+                // A close never saves a pass nobody asked to save (next
+                // small fixes Task 6).
+                hook.model.cancelSaveAfterPass()
                 hook.closeQuietly()
                 done(.dontSave, true)
             case .save:

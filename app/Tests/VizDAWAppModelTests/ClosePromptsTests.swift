@@ -24,6 +24,35 @@ struct ClosePromptsTests {
                 == "You have 3 VizDAW documents with unsaved changes. Do you want to review these changes before quitting?")
     }
 
+    /// Next small fixes Task 6 (R6): Discard Changes still saves a song
+    /// whose Save waits for its recording pass, and the quit alert says so.
+    @Test func quit_alert_names_a_song_still_saved_after_its_pass() {
+        let t = ClosePrompts.quitAlertText(discardable: ["A"], savingAfterPass: ["B"])
+        #expect(t.message == ClosePrompts.quitAlertText(count: 2))
+        #expect(t.info.contains("\u{201C}B\u{201D}"))
+        #expect(t.info.contains("will still be saved when its recording ends"))
+        #expect(!t.info.contains("\u{201C}A\u{201D}"))
+        let two = ClosePrompts.quitAlertText(discardable: [], savingAfterPass: ["B", "C"])
+        #expect(two.message == ClosePrompts.quitAlertText(count: 2))
+        #expect(two.info.contains("\u{201C}B\u{201D}") && two.info.contains("\u{201C}C\u{201D}"))
+        #expect(two.info.contains("will still be saved when their recordings end"))
+    }
+
+    @Test func quit_alert_with_no_song_waiting_is_todays() {
+        let t = ClosePrompts.quitAlertText(discardable: ["A", "B", "C"], savingAfterPass: [])
+        #expect(t.message == ClosePrompts.quitAlertText(count: 3))
+        #expect(t.info == "")
+    }
+
+    /// R7: `app.quit`'s refusal names the unsaved songs.
+    @Test func quit_refusal_names_the_songs() {
+        let one = ClosePrompts.quitRefusal(titles: ["Song"])
+        #expect(one.hasPrefix("1 song has unsaved changes: \u{201C}Song\u{201D}."))
+        #expect(one.contains("discard: true"))
+        let two = ClosePrompts.quitRefusal(titles: ["A", "B"])
+        #expect(two.hasPrefix("2 songs have unsaved changes: \u{201C}A\u{201D}, \u{201C}B\u{201D}."))
+    }
+
     @Test func test_hooks_quit_now_even_when_dirty() {
         #expect(ClosePrompts.quitStep(dirty: [a], testHooks: true) == .quitNow)
         #expect(ClosePrompts.quitStep(dirty: [a, b], testHooks: true) == .quitNow)

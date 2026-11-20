@@ -46,6 +46,36 @@ public enum ClosePrompts {
         "You have \(count) VizDAW documents with unsaved changes. Do you want to review these changes before quitting?"
     }
 
+    /// The quit alert's message and informative text (next small fixes
+    /// Task 6, R6): `discardable` are the songs Discard Changes loses,
+    /// `savingAfterPass` those whose Save waits for their recording pass,
+    /// which Discard Changes still saves. With none waiting the
+    /// informative text is empty, as before.
+    public static func quitAlertText(discardable: [String], savingAfterPass: [String])
+        -> (message: String, info: String)
+    {
+        let message = quitAlertText(count: discardable.count + savingAfterPass.count)
+        let quoted = savingAfterPass.map { "\u{201C}\($0)\u{201D}" }
+        switch quoted.count {
+        case 0:
+            return (message, "")
+        case 1:
+            return (message, "If you discard changes, \(quoted[0]) will still be saved when its recording ends.")
+        default:
+            let names = quoted.dropLast().joined(separator: ", ") + " and " + quoted[quoted.count - 1]
+            return (message, "If you discard changes, \(names) will still be saved when their recordings end.")
+        }
+    }
+
+    /// `app.quit`'s refusal while songs have unsaved changes (next small
+    /// fixes Task 6, R7): names them by their window titles.
+    public static func quitRefusal(titles: [String]) -> String {
+        let names = titles.map { "\u{201C}\($0)\u{201D}" }.joined(separator: ", ")
+        let what = titles.count == 1 ? "1 song has" : "\(titles.count) songs have"
+        return "\(what) unsaved changes: \(names). Save or close them first, or pass discard: true "
+            + "(their changes are lost; a Save made while recording is still made)."
+    }
+
     public static let save = "Save"
     public static let dontSave = "Don't Save"
     public static let cancel = "Cancel"

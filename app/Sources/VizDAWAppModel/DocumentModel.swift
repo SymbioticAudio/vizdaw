@@ -890,6 +890,11 @@ public final class DocumentModel {
     /// saves the song whatever the sheet says (fix round 1, I-2).
     public var saveAfterPassPending: Bool { (try? session.savesAfterPass()) == true }
 
+    /// Don't Save (next small fixes Task 6): a Save made while recording
+    /// is no longer owed, so the close that ends the recording saves
+    /// nothing. A no-op when none is owed.
+    public func cancelSaveAfterPass() { try? session.cancelSaveAfterPass() }
+
     public func save() {
         editor.storeLayout()
         perform("Save Failed") { try $0.save() }

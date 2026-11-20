@@ -190,6 +190,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     /// Release gate B1: the close prompts read the snapshot's flag.
     func hasUnsavedChanges() throws -> Bool { snap.dirty }
 
+    /// Next small fixes Task 6: Don't Save drops a save owed at Stop.
+    var cancelledSaveAfterPass = 0
+    func cancelSaveAfterPass() throws {
+        cancelledSaveAfterPass += 1
+        savesAfterPassRow = false
+    }
+
     /// What `addMidiDestination` was asked (plan 5d-1 Ruling 25).
     var addedDestinations: [(name: String, port: String, channel: UInt8)] = []
 

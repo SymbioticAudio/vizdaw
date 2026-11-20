@@ -464,6 +464,16 @@ import VizDAWCore
         #expect(m.saveAction(forceAs: false) == .save)
     }
 
+    /// Next small fixes Task 6: Don't Save drops the save owed at Stop.
+    @Test func cancelSaveAfterPassDropsTheOwedSave() throws {
+        let (m, f) = try armed()
+        f.savesAfterPassRow = true
+        #expect(m.saveAfterPassPending)
+        m.cancelSaveAfterPass()
+        #expect(f.cancelledSaveAfterPass == 1)
+        #expect(!m.saveAfterPassPending)
+    }
+
     /// 5d-2 T2 M2: a pass that ended by itself since the last poll does
     /// not refuse a Save As.
     @Test func saveActionReadsTheRecordingNow() throws {

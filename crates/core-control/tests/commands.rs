@@ -105,6 +105,40 @@ fn unknown_commands_and_parameters_are_refused() {
     assert!(msg.starts_with("state.get: "), "{msg}");
 }
 
+/// Next small fixes Task 6 (R7): `app.quit` takes an optional Bool
+/// `discard`; anything else is a bad param.
+#[test]
+fn app_quit_takes_only_a_bool_discard() {
+    assert_eq!(
+        ok("app.quit", json!({})),
+        Command::AppQuit { discard: false }
+    );
+    assert_eq!(
+        ok("app.quit", json!({"discard": true})),
+        Command::AppQuit { discard: true }
+    );
+    assert_eq!(
+        ok("app.quit", json!({"discard": false})),
+        Command::AppQuit { discard: false }
+    );
+    assert_eq!(
+        ok("app.quit", json!({"discard": null})),
+        Command::AppQuit { discard: false },
+        "null is absent, as for every parameter"
+    );
+    for bad in [
+        json!("yes"),
+        json!(1),
+        json!("true"),
+        json!({}),
+        json!([true]),
+    ] {
+        let (code, msg) = err("app.quit", json!({ "discard": bad }));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(msg.contains("discard"), "{msg}");
+    }
+}
+
 #[test]
 fn state_and_tree_read_their_window() {
     assert_eq!(
