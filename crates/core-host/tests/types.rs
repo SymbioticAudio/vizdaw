@@ -126,7 +126,10 @@ fn read_only_is_optional_in_json_and_omitted_when_false() {
     assert!(!json.contains("read_only"), "{json}");
     let back: ParamInfo = serde_json::from_str(&json).unwrap();
     assert!(!back.read_only);
-    let ro = ParamInfo { read_only: true, ..p };
+    let ro = ParamInfo {
+        read_only: true,
+        ..p
+    };
     let json = serde_json::to_string(&ro).unwrap();
     assert!(json.contains("\"read_only\":true"), "{json}");
     assert_eq!(serde_json::from_str::<ParamInfo>(&json).unwrap(), ro);

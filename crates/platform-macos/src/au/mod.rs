@@ -1109,7 +1109,10 @@ mod tests {
         let rw = F::Flag_IsWritable | F::Flag_IsReadable;
         assert_eq!(au_param_facts(rw), (true, false, false));
         assert_eq!(au_param_facts(F::Flag_IsReadable), (false, true, false));
-        assert_eq!(au_param_facts(rw | F::Flag_NonRealTime), (false, false, false));
+        assert_eq!(
+            au_param_facts(rw | F::Flag_NonRealTime),
+            (false, false, false)
+        );
         assert_eq!(au_param_facts(F::Flag_IsWritable), (true, false, true));
     }
 

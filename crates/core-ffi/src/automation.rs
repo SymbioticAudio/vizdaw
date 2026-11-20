@@ -1476,7 +1476,13 @@ mod tests {
             )
             .unwrap()
             .doc;
-            let v = d.mixer().vcas().values().find(|v| v.name == name).unwrap().id;
+            let v = d
+                .mixer()
+                .vcas()
+                .values()
+                .find(|v| v.name == name)
+                .unwrap()
+                .id;
             assert_eq!(lane_name(&d, AutomationTarget::VcaFader(v), None), want);
         }
     }
