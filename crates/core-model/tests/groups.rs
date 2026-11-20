@@ -660,3 +660,76 @@ fn validate_finds_broken_groups() {
         &g.to_string(),
     );
 }
+
+/// Owner, 2026-11-19: what Co-Producer makes carries its mark, saved and
+/// loaded; a file without the mark is the composer's.
+#[test]
+fn the_co_producer_mark_saves_and_loads() {
+    let d = base();
+    let mut h = History::new(d.clone());
+    h.begin_request("group them").unwrap();
+    h.set_acting(true).unwrap();
+    for c in [
+        GroupCmd::NewGroup {
+            name: "Ours".into(),
+            colour: Swatch::Red,
+            members: vec![],
+        },
+        GroupCmd::NewVca {
+            name: "Ride".into(),
+            colour: Swatch::Teal,
+            members: vec![],
+        },
+    ] {
+        h.execute(&Command::Groups(c), &ViewFilter::default())
+            .unwrap();
+    }
+    let ours = h.doc().clone();
+    let g = ours.mixer().groups().values().next().unwrap();
+    let v = ours.mixer().vcas().values().next().unwrap();
+    assert!(g.co_producer && v.co_producer);
+    // Not renamed: a group or VCA name has no " (Co-Producer)".
+    assert_eq!((g.name.as_str(), v.name.as_str()), ("Ours", "Ride"));
+    let text = to_json(&ours).unwrap();
+    let back = from_json(&text).unwrap();
+    assert_eq!(back, ours);
+    assert!(back.mixer().groups().values().all(|g| g.co_producer));
+    assert!(back.mixer().vcas().values().all(|v| v.co_producer));
+    assert!(back.may_have_marks());
+
+    // By hand: no mark, and none written.
+    let hand = grp(
+        &d,
+        GroupCmd::NewGroup {
+            name: "Mine".into(),
+            colour: Swatch::Red,
+            members: vec![],
+        },
+    )
+    .unwrap();
+    let hand = run(
+        &hand,
+        Command::Groups(GroupCmd::NewVca {
+            name: "Kit".into(),
+            colour: Swatch::Teal,
+            members: vec![],
+        }),
+    )
+    .unwrap();
+    assert!(!hand.mixer().groups().values().next().unwrap().co_producer);
+    assert!(!hand.mixer().vcas().values().next().unwrap().co_producer);
+    let v: Value = serde_json::from_str(&to_json(&hand).unwrap()).unwrap();
+    assert_eq!(v["document"]["mixer"]["groups"][0].get("co_producer"), None);
+    assert_eq!(v["document"]["mixer"]["vcas"][0].get("co_producer"), None);
+
+    // A file without the field loads as the composer's.
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    for list in ["groups", "vcas"] {
+        for x in v["document"]["mixer"][list].as_array_mut().unwrap() {
+            x.as_object_mut().unwrap().remove("co_producer");
+        }
+    }
+    let plain = from_json(&v.to_string()).unwrap();
+    assert!(!plain.mixer().groups().values().next().unwrap().co_producer);
+    assert!(!plain.mixer().vcas().values().next().unwrap().co_producer);
+}

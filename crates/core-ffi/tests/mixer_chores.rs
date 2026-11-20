@@ -2215,15 +2215,30 @@ mod groups_vcas {
         .unwrap();
     }
 
+    /// Co-Producer's own group or VCA, made in a request of its own, as
+    /// `command.run` runs an add: given strips, `members`, else empty.
+    fn by_co_producer(s: &Session, which: &str, members: &[u64], name: &str) {
+        let list: Vec<String> = members.iter().map(u64::to_string).collect();
+        let mut args = vec![text("name", name)];
+        if !list.is_empty() {
+            args.push(text("strips", &list.join(",")));
+        }
+        s.co_producer_begin("make a group".into()).unwrap();
+        s.co_producer_enter(STAMP.into()).unwrap();
+        s.run_mixer(which.into(), args).unwrap();
+        s.co_producer_leave();
+        s.co_producer_end().unwrap();
+    }
+
     #[test]
     fn the_members_decide_who_says_yes() {
         let _g = quiet();
         let t = song();
         let s = &t.s;
-        by_hand(s, "mixer.new_vca", &[t.drums], "Own");
+        by_co_producer(s, "mixer.new_vca", &[t.drums], "Own");
         by_hand(s, "mixer.new_vca", &[t.kick], "Kit");
         by_hand(s, "mixer.new_group", &[t.drums, t.kick], "Both");
-        by_hand(s, "mixer.new_group", &[t.verb], "Mine");
+        by_co_producer(s, "mixer.new_group", &[t.verb], "Mine");
         let (own, kit) = (vca_id(s, "Own"), vca_id(s, "Kit"));
         let (both, mine) = (group_id(s, "Both"), group_id(s, "Mine"));
         s.co_producer_begin("mix the drums".into()).unwrap();
@@ -2365,6 +2380,113 @@ mod groups_vcas {
             ]
         );
         s.co_producer_end().unwrap();
+        s.close().unwrap();
+    }
+
+    /// Owner, 2026-11-19: the composer's group or VCA asks, even empty,
+    /// and even to take in Co-Producer's own strip; Co-Producer's own
+    /// empty one is free.
+    #[test]
+    fn the_composers_empty_group_or_vca_asks() {
+        let _g = quiet();
+        let t = song();
+        let s = &t.s;
+        s.run_mixer("mixer.new_group".into(), vec![text("name", "Empty")])
+            .unwrap();
+        s.run_mixer("mixer.new_vca".into(), vec![text("name", "Ride")])
+            .unwrap();
+        let (g, v) = (group_id(s, "Empty"), vca_id(s, "Ride"));
+        let drums = t.drums.to_string();
+        s.co_producer_begin("tidy the mix".into()).unwrap();
+        for plan in [
+            planned(
+                "mixer.rename_group",
+                vec![id("group", g), text("name", "Kit")],
+            ),
+            planned(
+                "mixer.set_group_colour",
+                vec![id("group", g), text("colour", "blue")],
+            ),
+            planned(
+                "mixer.set_group_links",
+                vec![id("group", g), flag("mute", false)],
+            ),
+            planned("mixer.delete_group", vec![id("group", g)]),
+            planned(
+                "mixer.add_to_group",
+                vec![id("group", g), text("strips", &drums)],
+            ),
+            planned("mixer.rename_vca", vec![id("vca", v), text("name", "Kit")]),
+            planned(
+                "mixer.set_vca_colour",
+                vec![id("vca", v), text("colour", "pink")],
+            ),
+            set_vca(v, vec![text("gain_db", "-3")]),
+            set_vca(v, vec![flag("mute", true)]),
+            planned("mixer.delete_vca", vec![id("vca", v)]),
+            planned(
+                "mixer.assign_vca",
+                vec![id("vca", v), text("strips", &drums)],
+            ),
+        ] {
+            let p = s.co_producer_preview(vec![plan.clone()]).unwrap();
+            assert!(p.needs_yes, "{}: {p:?}", plan.id);
+            let e = take_with(
+                s,
+                p.token,
+                std::slice::from_ref(&plan),
+                CoProducerApproval::None,
+            )
+            .unwrap_err();
+            assert_eq!(e.to_string(), NEEDS_APPROVAL, "{}", plan.id);
+        }
+        s.co_producer_end().unwrap();
+        assert_eq!(group_id(s, "Empty"), g);
+        assert_eq!(vca_id(s, "Ride"), v);
+
+        // Co-Producer's own empty ones: free, and they apply unasked.
+        by_co_producer(s, "mixer.new_group", &[], "Ours");
+        by_co_producer(s, "mixer.new_vca", &[], "Bus Ride");
+        let (og, ov) = (group_id(s, "Ours"), vca_id(s, "Bus Ride"));
+        s.co_producer_begin("tidy the mix".into()).unwrap();
+        for plan in [
+            planned(
+                "mixer.rename_group",
+                vec![id("group", og), text("name", "Kit")],
+            ),
+            planned(
+                "mixer.add_to_group",
+                vec![id("group", og), text("strips", &drums)],
+            ),
+            set_vca(ov, vec![text("gain_db", "-3")]),
+            planned(
+                "mixer.assign_vca",
+                vec![id("vca", ov), text("strips", &drums)],
+            ),
+        ] {
+            let p = s.co_producer_preview(vec![plan.clone()]).unwrap();
+            assert!(!p.needs_yes, "{}: {p:?}", plan.id);
+            take_with(
+                s,
+                p.token,
+                std::slice::from_ref(&plan),
+                CoProducerApproval::None,
+            )
+            .unwrap();
+        }
+        // Then a composer's strip joining asks.
+        let p = s
+            .co_producer_preview(vec![planned(
+                "mixer.add_to_group",
+                vec![id("group", og), text("strips", &t.kick.to_string())],
+            )])
+            .unwrap();
+        assert!(p.needs_yes, "{p:?}");
+        s.co_producer_end().unwrap();
+        let m = s.mixer().unwrap();
+        let ours = m.groups.iter().find(|x| x.id == og).unwrap();
+        assert_eq!(ours.name, "Kit");
+        assert_eq!(m.vcas.iter().find(|x| x.id == ov).unwrap().gain_db, -3.0);
         s.close().unwrap();
     }
 

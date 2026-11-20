@@ -1,6 +1,7 @@
 //! Co-Producer's marks (plan 8b Ruling 1; spec §7.2): tracks, strips,
 //! sends and plug-in slots Co-Producer made carry `co_producer` until the
-//! composer takes them over.
+//! composer takes them over. So do fader groups and VCAs (owner,
+//! 2026-11-19), though their names stay as given.
 //!
 //! [`settle`] runs after every step of [`crate::history::History`]: an
 //! acting step marks what it made and names its marked tracks and strips
@@ -11,7 +12,7 @@
 
 use crate::document::{DestKind, Document};
 use crate::error::Result;
-use crate::ids::{DestId, LaneId, PluginInstanceId, SeqId, StripId};
+use crate::ids::{DestId, GroupId, LaneId, PluginInstanceId, SeqId, StripId, VcaId};
 use crate::lane::Lane;
 use crate::mixer::{PluginSlot, Strip, StripKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -207,6 +208,34 @@ fn settle_instruments(
     }
 }
 
+/// Marks each group and VCA new since `before` as `acting` says. A group
+/// or VCA keeps its name: no " (Co-Producer)" is added.
+fn settle_groups(before: &Document, after: &mut Document, acting: bool) {
+    let (b, a) = (before.mixer(), after.mixer());
+    let groups: Vec<GroupId> = a
+        .groups()
+        .iter()
+        .filter(|(id, g)| !b.groups().contains_key(id) && g.co_producer != acting)
+        .map(|(id, _)| *id)
+        .collect();
+    let vcas: Vec<VcaId> = a
+        .vcas()
+        .iter()
+        .filter(|(id, v)| !b.vcas().contains_key(id) && v.co_producer != acting)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in groups {
+        if let Ok(g) = after.mixer_mut().group_mut(id) {
+            g.co_producer = acting;
+        }
+    }
+    for id in vcas {
+        if let Ok(v) = after.mixer_mut().vca_mut(id) {
+            v.co_producer = acting;
+        }
+    }
+}
+
 /// Whether [`settle`] has work for a step from `before`: always while
 /// Co-Producer acts, else only when `before` may hold marks. A hand step
 /// on a song with no marks makes none (whatever it adds is unmarked, and
@@ -224,6 +253,7 @@ pub fn settle(before: &Document, after: &mut Document, acting: bool) {
         after.set_may_have_marks();
     }
     settle_lanes(before, after, acting);
+    settle_groups(before, after, acting);
     let mixer = !after.mixer().strips().ptr_eq(before.mixer().strips());
     let insts = !after.instruments().ptr_eq(before.instruments());
     if !(mixer || insts) {

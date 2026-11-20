@@ -484,7 +484,8 @@ impl PartialEq for MayHaveMarks {
     }
 }
 
-/// Whether any track, strip, send or plug-in slot of these is marked.
+/// Whether any track, strip, send, plug-in slot, group or VCA of these is
+/// marked.
 fn holds_marks<'a>(
     instruments: impl Iterator<Item = &'a Destination>,
     sequences: impl Iterator<Item = &'a Sequence>,
@@ -500,6 +501,8 @@ fn holds_marks<'a>(
                 || s.sends.iter().any(|x| x.co_producer)
                 || s.chain().any(|p| p.co_producer)
         })
+        || mixer.groups().values().any(|g| g.co_producer)
+        || mixer.vcas().values().any(|v| v.co_producer)
 }
 
 impl Default for Document {

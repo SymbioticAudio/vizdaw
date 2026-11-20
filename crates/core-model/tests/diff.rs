@@ -1785,24 +1785,25 @@ fn group_and_vca_items_read_plainly() {
     let g6 = group(&g5, G::DeleteGroup { group: g });
     assert_eq!(describe(&g5, &g6), vec![item("Group Kit", "deleted")]);
 
-    // The members decide (Ruling 10): an empty group, and one of
-    // Co-Producer's own strips only, are Co-Producer's.
-    let e = group(
+    // The mark and the members decide (Ruling 10; owner, 2026-11-19): a
+    // group Co-Producer made, empty or of its own strips only, is
+    // Co-Producer's.
+    let e = acting(
         &d,
-        G::NewGroup {
+        Command::Groups(G::NewGroup {
             name: "Empty".into(),
             colour: Swatch::Green,
             members: vec![],
-        },
+        }),
     );
     assert_eq!(describe(&d, &e), vec![ours("Group Empty", "added")]);
-    let own = group(
+    let own = acting(
         &d,
-        G::NewGroup {
+        Command::Groups(G::NewGroup {
             name: "Own".into(),
             colour: Swatch::Green,
             members: vec![drums],
-        },
+        }),
     );
     assert_eq!(
         describe(&d, &own),
@@ -1980,14 +1981,14 @@ fn group_and_vca_items_read_plainly() {
         ]
     );
 
-    // A VCA of Co-Producer's own strips only is Co-Producer's.
-    let mine = group(
+    // A VCA Co-Producer made, of its own strips only, is Co-Producer's.
+    let mine = acting(
         &d,
-        G::NewVca {
+        Command::Groups(G::NewVca {
             name: "Mine".into(),
             colour: Swatch::Teal,
             members: vec![drums],
-        },
+        }),
     );
     let m = vca_id(&mine, "Mine");
     let down = group(
@@ -2044,13 +2045,13 @@ fn vca_automation_is_a_vca_part() {
     // Co-Producer's own VCA with Co-Producer's own automation track is
     // Co-Producer's; on a composer's track, or with a composer's member,
     // it is not.
-    let mine = group(
+    let mine = acting(
         &d,
-        G::NewVca {
+        Command::Groups(G::NewVca {
             name: "Mine".into(),
             colour: Swatch::Teal,
             members: vec![drums],
-        },
+        }),
     );
     let m = vca_id(&mine, "Mine");
     let ours_written = acting(&mine, automate(AutomationTarget::VcaFader(m), 4));
@@ -2070,5 +2071,193 @@ fn vca_automation_is_a_vca_part() {
             "VCA Mine",
             "deleted, fader automation no longer plays (4 points, bars 9–12)"
         )]
+    );
+}
+
+/// Owner, 2026-11-19: a group or VCA is Co-Producer's only when it made
+/// it (its mark) and every member, before and after, is its own. So the
+/// composer's group or VCA asks, even empty.
+#[test]
+fn the_composers_empty_group_or_vca_asks() {
+    use core_model::automation::AutomationMode;
+    use core_model::command::GroupCmd as G;
+    let d = mix();
+    let drums = bus(&d, "Drums (Co-Producer)");
+    let new_group = || G::NewGroup {
+        name: "Empty".into(),
+        colour: Swatch::Green,
+        members: vec![],
+    };
+    let new_vca = || G::NewVca {
+        name: "Ride".into(),
+        colour: Swatch::Teal,
+        members: vec![],
+    };
+
+    // The composer's empty group: every change is theirs.
+    let e = group(&d, new_group());
+    assert_eq!(describe(&d, &e), vec![item("Group Empty", "added")]);
+    let g = group_id(&e, "Empty");
+    for (c, change) in [
+        (
+            G::RenameGroup {
+                group: g,
+                name: "Kit".into(),
+            },
+            "renamed Empty → Kit",
+        ),
+        (
+            G::SetGroupColour {
+                group: g,
+                colour: Swatch::Blue,
+            },
+            "colour green → blue",
+        ),
+        (
+            G::SetGroupLinks {
+                group: g,
+                mute: Some(false),
+                solo: None,
+            },
+            "mute link off",
+        ),
+        (G::DeleteGroup { group: g }, "deleted"),
+        (
+            G::AddToGroup {
+                group: g,
+                strips: vec![drums],
+            },
+            "Drums (Co-Producer) added",
+        ),
+    ] {
+        let after = acting(&e, Command::Groups(c));
+        assert_eq!(
+            describe(&e, &after),
+            vec![item("Group Empty", change)],
+            "{change}"
+        );
+    }
+
+    // The composer's empty VCA: the same.
+    let e = group(&d, new_vca());
+    assert_eq!(describe(&d, &e), vec![item("VCA Ride", "added")]);
+    let v = vca_id(&e, "Ride");
+    for (c, change) in [
+        (
+            G::RenameVca {
+                vca: v,
+                name: "Kit".into(),
+            },
+            "renamed Ride → Kit",
+        ),
+        (
+            G::SetVcaColour {
+                vca: v,
+                colour: Swatch::Pink,
+            },
+            "colour teal → pink",
+        ),
+        (
+            G::SetVcaLevel {
+                vca: v,
+                gain_db: -3.0,
+            },
+            "level 0.0 dB → −3.0 dB",
+        ),
+        (G::SetVcaMute { vca: v, mute: true }, "muted"),
+        (
+            G::SetVcaMode {
+                vca: v,
+                mode: AutomationMode::Touch,
+            },
+            "mode Read → Touch",
+        ),
+        (G::DeleteVca { vca: v }, "deleted"),
+    ] {
+        let after = acting(&e, Command::Groups(c));
+        assert_eq!(
+            describe(&e, &after),
+            vec![item("VCA Ride", change)],
+            "{change}"
+        );
+    }
+    let filled = acting(
+        &e,
+        Command::Groups(G::AssignVca {
+            vca: v,
+            strips: vec![drums],
+        }),
+    );
+    assert!(
+        describe(&e, &filled).contains(&item("VCA Ride", "Drums (Co-Producer) assigned")),
+        "{:?}",
+        describe(&e, &filled)
+    );
+
+    // Co-Producer's own: made by it, with only its own strips, it is free.
+    let own = acting(
+        &d,
+        Command::Groups(G::NewGroup {
+            name: "Own".into(),
+            colour: Swatch::Green,
+            members: vec![drums],
+        }),
+    );
+    assert_eq!(
+        describe(&d, &own),
+        vec![ours("Group Own", "added, Drums (Co-Producer) added")]
+    );
+    let o = group_id(&own, "Own");
+    let renamed = acting(
+        &own,
+        Command::Groups(G::RenameGroup {
+            group: o,
+            name: "Mine".into(),
+        }),
+    );
+    assert_eq!(
+        describe(&own, &renamed),
+        vec![ours("Group Own", "renamed Own → Mine")]
+    );
+    let gone = acting(&own, Command::Groups(G::DeleteGroup { group: o }));
+    assert_eq!(describe(&own, &gone), vec![ours("Group Own", "deleted")]);
+    let empty = acting(&d, Command::Groups(new_group()));
+    assert_eq!(describe(&d, &empty), vec![ours("Group Empty", "added")]);
+    let mine = acting(
+        &d,
+        Command::Groups(G::NewVca {
+            name: "Mine".into(),
+            colour: Swatch::Teal,
+            members: vec![drums],
+        }),
+    );
+    let m = vca_id(&mine, "Mine");
+    let down = acting(
+        &mine,
+        Command::Groups(G::SetVcaLevel {
+            vca: m,
+            gain_db: -3.0,
+        }),
+    );
+    assert_eq!(
+        describe(&mine, &down),
+        vec![
+            ours("Strip Drums (Co-Producer)", "heard 0.0 dB → −3.0 dB"),
+            ours("VCA Mine", "level 0.0 dB → −3.0 dB"),
+        ]
+    );
+
+    // A composer's strip joining Co-Producer's group still asks.
+    let kick = bus(&d, "Kick");
+    let joined = acting(
+        &own,
+        Command::Groups(G::AddToGroup {
+            group: o,
+            strips: vec![kick],
+        }),
+    );
+    assert_eq!(
+        describe(&own, &joined),
+        vec![item("Group Own", "Kick added")]
     );
 }

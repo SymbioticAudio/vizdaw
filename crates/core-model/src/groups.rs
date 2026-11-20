@@ -42,6 +42,11 @@ pub struct Group {
     pub link_mute: bool,
     /// Soloing one member solos them all.
     pub link_solo: bool,
+    /// Co-Producer made it (owner, 2026-11-19): only then, and with only
+    /// its own strips, may it change it without asking; absent in files
+    /// when not, so a file without it is the composer's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub co_producer: bool,
 }
 
 /// A VCA (spec §2): its level, mute and solo act on its members' heard
@@ -70,6 +75,11 @@ pub struct Vca {
     /// is not written.
     #[serde(default, skip_serializing_if = "AutomationMode::is_read")]
     pub automation: AutomationMode,
+    /// Co-Producer made it (owner, 2026-11-19): only then, and with only
+    /// its own strips, may it change it without asking; absent in files
+    /// when not, so a file without it is the composer's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub co_producer: bool,
 }
 
 /// A VCA's automation modes (Ruling 6), in menu order.

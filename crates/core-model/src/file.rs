@@ -77,8 +77,10 @@ fn fade_frames(tempo: &TempoMap, start: i64, ticks: i64, rate: f64) -> u64 {
 
 /// Version 10 → 11 (plan groups-vcas Ruling 1): the mixer gains optional
 /// `groups` (fader groups) and `vcas` (VCAs) lists and the counters
-/// optional `group` and `vca` counters, each 1 when absent. A file without
-/// them has no groups and no VCAs, so the document is unchanged. The
+/// optional `group` and `vca` counters, each 1 when absent. A group or
+/// VCA has an optional `co_producer` mark (owner, 2026-11-19); without it,
+/// it is the composer's. A file without the lists has no groups and no
+/// VCAs, so the document is unchanged. The
 /// settings gain an optional `settings.click` (the metronome, Ruling 19):
 /// absent, it is off at −6 dB in `play_and_record`. The bump makes an older build
 /// refuse a version-11 project with its `NewerFormat` message rather than

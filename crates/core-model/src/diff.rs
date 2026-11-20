@@ -553,9 +553,10 @@ fn mode(m: AutomationMode) -> &'static str {
 
 /// The "Group <name>" items, by group ID (groups-vcas-transport Task 7):
 /// `added`, `deleted`, `renamed`, `colour`, `<strip> added`, `<strip>
-/// removed`, `mute link on`/`off` and `solo link on`/`off`. A group carries
-/// no mark: it is Co-Producer's only when every member, before and after,
-/// is a strip marked Co-Producer's (Ruling 10), so an empty one is.
+/// removed`, `mute link on`/`off` and `solo link on`/`off`. A group is
+/// Co-Producer's only when, before and after, it carries Co-Producer's
+/// mark and every member is a strip marked Co-Producer's (Ruling 10;
+/// owner, 2026-11-19): the composer's group asks, even an empty one.
 fn groups(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
     let (b, a) = (before.mixer().groups(), after.mixer().groups());
     let ids: BTreeSet<_> = b.keys().chain(a.keys()).copied().collect();
@@ -602,8 +603,8 @@ fn groups(before: &Document, after: &Document, out: &mut Vec<ChangeItem>) {
         if parts.is_empty() {
             continue;
         }
-        let ours = old.is_none_or(|g| all_ours(before, &g.members))
-            && new.is_none_or(|g| all_ours(after, &g.members));
+        let ours = old.is_none_or(|g| g.co_producer && all_ours(before, &g.members))
+            && new.is_none_or(|g| g.co_producer && all_ours(after, &g.members));
         out.push(item_of(
             format!("Group {}", shown_name(&named.name)),
             parts.join(", "),
@@ -710,8 +711,8 @@ fn vcas(
             continue;
         }
         let ours = !theirs
-            && old.is_none_or(|v| all_ours(before, &v.members))
-            && new.is_none_or(|v| all_ours(after, &v.members));
+            && old.is_none_or(|v| v.co_producer && all_ours(before, &v.members))
+            && new.is_none_or(|v| v.co_producer && all_ours(after, &v.members));
         out.push(item_of(
             format!("VCA {}", shown_name(&named.name)),
             parts.join(", "),

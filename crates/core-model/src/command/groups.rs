@@ -260,6 +260,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &GroupCmd, r: &mut Report) -> Result<
                 members: members.iter().copied().collect(),
                 link_mute: true,
                 link_solo: true,
+                co_producer: false,
             });
             r.created.push(AnyId::Group(id));
         }
@@ -345,6 +346,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &GroupCmd, r: &mut Report) -> Result<
                 mute: false,
                 solo: false,
                 automation: AutomationMode::Read,
+                co_producer: false,
             });
             r.created.push(AnyId::Vca(id));
         }

@@ -494,10 +494,11 @@ fn fixes_command(
 /// change, or is new (an item "added": an acting step made it). So a send
 /// or insert Co-Producer itself put on a composer's strip still asks. With
 /// `feeds_theirs` (the change alters what feeds a bus of the composer's)
-/// every item but a new strip's is. A group or VCA item's members decide
-/// (groups-vcas-transport Ruling 10): `co_producers` only when every
-/// member, before and after, is Co-Producer's; a new one given strips is
-/// "added, <strip> added", so a composer's member asks.
+/// every item but a new strip's is. A group or VCA item's mark and members
+/// decide (groups-vcas-transport Ruling 10; owner, 2026-11-19):
+/// `co_producers` only when Co-Producer made it and every member, before
+/// and after, is Co-Producer's; a new one given strips is "added, <strip>
+/// added", so a composer's member asks.
 fn mixer_rows(items: Vec<ChangeItem>, feeds_theirs: bool) -> impl Iterator<Item = ChangeItemRow> {
     items.into_iter().map(move |i| ChangeItemRow {
         composers_work: i.change != "added" && (feeds_theirs || !i.co_producers),
