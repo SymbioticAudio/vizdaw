@@ -36,7 +36,7 @@ keyboard (`NSEvent.modifierFlags`) and synthetic clicks can't hold them.
 | 444 | VCA mute/solo marks | pass | — |
 | 445 | VCA Touch, then Read playback | owner | All of it; Touch did record (export counted 7 points) |
 | 446 | Delete a member, undo | pass | — |
-| 447 | DAWproject export/import with a VCA and group | pass | Note B-001 (VCA automation track exports as a synth track) |
+| 447 | DAWproject export/import with a VCA and group | pass | — (B-001, the VCA automation track, is in the backlog) |
 | 448 | Customize sheet: drag in/out/along, Command button, Reset | owner | The sheet itself (drag, Escape, per-window). Mixer button and Reset passed |
 | 449 | Bounce… Command button opens the sheet | owner | All of it; with the screen locked it said "can't run from a button right now" |
 | 450 | Narrowest mixer: one row, » lists the rest | owner | Open » and check its list. One row at 459 pt passed |
