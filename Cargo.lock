@@ -6377,6 +6377,10 @@ dependencies = [
 [[package]]
 name = "vizdaw-app"
 version = "26.0.0"
+dependencies = [
+ "core-ffi",
+ "tempfile",
+]
 
 [[package]]
 name = "vizdaw-gpui"
