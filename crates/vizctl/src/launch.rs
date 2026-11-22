@@ -96,13 +96,29 @@ impl Drop for Launched {
     }
 }
 
-/// The executable inside `app` when it is a bundle, else `app`.
+/// The executable inside `app` when it is a bundle (named by the
+/// plist's `CFBundleExecutable`, `VizDAW` when that cannot be read),
+/// else `app`.
 pub fn executable(app: &Path) -> PathBuf {
     if app.extension().is_some_and(|e| e == "app") {
-        app.join("Contents/MacOS/VizDAW")
+        let name = fs::read_to_string(app.join("Contents/Info.plist"))
+            .ok()
+            .and_then(|t| bundle_executable(&t))
+            .unwrap_or_else(|| "VizDAW".to_string());
+        app.join("Contents/MacOS").join(name)
     } else {
         app.to_path_buf()
     }
+}
+
+/// The `<string>` after `<key>CFBundleExecutable</key>` in an XML
+/// plist (a plain scan: vizctl stays free of a plist parser). Names
+/// with a path separator are refused.
+fn bundle_executable(xml: &str) -> Option<String> {
+    let after = xml.split_once("<key>CFBundleExecutable</key>")?.1;
+    let value = after.split_once("<string>")?.1.split_once("</string>")?.0;
+    let value = value.trim();
+    (!value.is_empty() && !value.contains('/') && value != "..").then(|| value.to_string())
 }
 
 /// A fresh home in `/tmp`, made 0700 by this process: `mkdir` fails when
@@ -372,5 +388,33 @@ mod tests {
         assert!(m.is_dir() && !m.file_type().is_symlink());
         assert_eq!(m.permissions().mode() & 0o777, 0o700);
         fs::remove_dir(&home).unwrap();
+    }
+
+    #[test]
+    fn executable_reads_cfbundleexecutable() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("X.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        // No plist: the Swift app's name.
+        assert_eq!(executable(&app), app.join("Contents/MacOS/VizDAW"));
+        fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>Other</string>
+  <key>CFBundleExecutable</key>
+  <string>vizdaw-gpui</string>
+</dict></plist>"#,
+        )
+        .unwrap();
+        assert_eq!(executable(&app), app.join("Contents/MacOS/vizdaw-gpui"));
+        // A plist without the key falls back too.
+        fs::write(app.join("Contents/Info.plist"), "<plist><dict/></plist>").unwrap();
+        assert_eq!(executable(&app), app.join("Contents/MacOS/VizDAW"));
+        // A bare binary is used as given.
+        assert_eq!(
+            executable(Path::new("/x/vizdaw-gpui")),
+            Path::new("/x/vizdaw-gpui")
+        );
     }
 }

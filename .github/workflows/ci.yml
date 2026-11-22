@@ -24,7 +24,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev libfontconfig-dev libfreetype-dev
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev libfontconfig-dev libfreetype-dev xvfb
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
@@ -48,6 +48,15 @@ jobs:
         run: scripts/build-multiq.sh
       - name: Test
         run: cargo test --workspace
+      - name: GPUI end to end (Linux, virtual X server)
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: |
+          cargo build -p vizdaw-gpui
+          unset WAYLAND_DISPLAY
+          xvfb-run -a cargo test -p vizctl --test e2e_gpui -- --ignored --nocapture --test-threads 1
+        env:
+          VIZDAW_E2E_APP: target/debug/vizdaw-gpui
       - name: Bundled Multi-Q tests
         if: runner.os == 'macOS'
         run: |
