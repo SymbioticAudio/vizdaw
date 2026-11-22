@@ -247,7 +247,11 @@ fn golden(name: &str) {
     assert!(now.contains(&format!("\"version\": {VERSION}")), "{name}");
     // Canonical: a current-version file re-serializes byte for byte.
     assert_eq!(to_json(&from_json(&now).unwrap()).unwrap(), now, "{name}");
-    insta::assert_json_snapshot!(name, summary(&d));
+    // Workspace builds with GPUI unify serde_json's `preserve_order` on, so sort
+    // keys to keep the snapshot independent of that feature.
+    insta::with_settings!({ sort_maps => true }, {
+        insta::assert_json_snapshot!(name, summary(&d));
+    });
 }
 
 #[test]
