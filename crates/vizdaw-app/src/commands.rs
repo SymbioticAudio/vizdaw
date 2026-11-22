@@ -65,21 +65,50 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
 /// busy core; Rename asks the UI to start the header's rename field. What
 /// cannot run shows in the status line (and is returned).
 pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
-    let result = if id == "track.rename" {
-        Err(ControlError::dialog("Rename Track", &["name"]))
-    } else {
-        run(id, &[], doc)
-    };
-    match result {
-        Err(e) if e.code == ErrorCode::Busy && matches!(id, "edit.undo" | "edit.redo") => {
-            Ok(ran(doc))
-        }
-        Err(e) if e.code == ErrorCode::Unavailable => {
-            doc.set_status(Some(e.message.clone()));
-            Err(e)
-        }
-        other => other,
+    if !DOCUMENT_COMMANDS.contains(&id) {
+        return Err(unavailable(&format!("There is no command {id}.")));
     }
+    if matches!(id, "edit.undo" | "edit.redo") {
+        let undo = id == "edit.undo";
+        if !(if undo { doc.can_undo() } else { doc.can_redo() }) {
+            return Err(refused(
+                doc,
+                unavailable(if undo {
+                    "Nothing to undo."
+                } else {
+                    "Nothing to redo."
+                }),
+            ));
+        }
+        // The model's own step: Busy is silent, any other failure an alert.
+        if undo {
+            doc.undo();
+        } else {
+            doc.redo();
+        }
+        return Ok(ran(doc));
+    }
+    if doc.selected_seq().is_none() && kind_of(id).is_some() {
+        return Err(refused(doc, unavailable(NO_SEQUENCE)));
+    }
+    if kind_of(id).is_none() {
+        if doc.selected_seq().is_none() {
+            return Err(refused(doc, unavailable(NO_SEQUENCE)));
+        }
+        if doc.selected_lane().is_none() {
+            return Err(refused(doc, unavailable(NO_TRACK)));
+        }
+    }
+    if id == "track.rename" {
+        return Err(ControlError::dialog("Rename Track", &["name"]));
+    }
+    run(id, &[], doc).map_err(|e| refused(doc, e))
+}
+
+/// A refusal shows in the status line, and is returned.
+fn refused(doc: &mut DocumentModel, e: ControlError) -> ControlError {
+    doc.set_status(Some(e.message.clone()));
+    e
 }
 
 fn ran(doc: &DocumentModel) -> Ran {
@@ -255,6 +284,13 @@ fn run_step(undo: bool, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
     } else {
         doc.session().redo()
     };
-    doc.apply_result(result).map_err(|e| from_viz(&e))?;
+    let verb = if undo { "Undo" } else { "Redo" };
+    doc.apply_result(result).map_err(|e| {
+        let mut e = from_viz(&e);
+        if e.code != ErrorCode::Busy {
+            e.message = format!("{verb} Failed: {}", e.message);
+        }
+        e
+    })?;
     Ok(ran(doc))
 }

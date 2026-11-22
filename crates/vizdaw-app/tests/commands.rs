@@ -336,3 +336,50 @@ fn every_document_command_is_in_the_registry() {
         assert!(spec.document, "{id}");
     }
 }
+
+#[test]
+fn a_refused_menu_command_shows_in_the_status_line() {
+    let f = Arc::new(demo_fake());
+    let mut m = model(&f);
+    m.select_track(30, false);
+    f.set_edit_error(Some(VizError::Model {
+        message: "The core refused.".into(),
+    }));
+    let e = perform_from_menu("track.delete", &mut m).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Failed);
+    assert_eq!(m.status(), Some("The core refused."));
+}
+
+#[test]
+fn a_failed_menu_undo_raises_the_alert() {
+    let f = Arc::new(demo_fake());
+    let mut m = undoable(&f);
+    f.set_step_error(Some(VizError::Model {
+        message: "Cannot undo.".into(),
+    }));
+    perform_from_menu("edit.undo", &mut m).unwrap();
+    let alert = m.alert.as_ref().expect("an alert");
+    assert_eq!(alert.title, "Undo Failed");
+    assert_eq!(alert.message, "Cannot undo.");
+}
+
+#[test]
+fn a_failed_channel_undo_is_prefixed() {
+    let f = Arc::new(demo_fake());
+    let mut m = undoable(&f);
+    f.set_step_error(Some(VizError::Model {
+        message: "Cannot undo.".into(),
+    }));
+    let e = run("edit.undo", &[], &mut m).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Failed);
+    assert_eq!(e.message, "Undo Failed: Cannot undo.");
+}
+
+#[test]
+fn menu_rename_without_a_track_is_unavailable_first() {
+    let f = Arc::new(demo_fake());
+    let mut m = model(&f);
+    let e = perform_from_menu("track.rename", &mut m).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert_eq!(m.status(), Some("Select a track in the arrangement first."));
+}
