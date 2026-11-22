@@ -3,6 +3,7 @@
 //! column beside the (for now empty) arrangement, and the status line.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -24,6 +25,9 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::track_headers::{HeadersState, Rename, TrackHeaders};
 use crate::transport_bar::{self, BarState, colors};
 
+/// How long a status text shows (Swift `StatusLine`).
+pub const STATUS_TIMEOUT: Duration = Duration::from_secs(6);
+
 pub struct DocumentWindow {
     app: Entity<AppState>,
     doc: DocId,
@@ -40,6 +44,9 @@ pub struct DocumentWindow {
     menu_bar: Option<MenuBar>,
     /// The track header column (its rename field, its Add Track menu).
     track_headers: TrackHeaders,
+    /// The status text last drawn, and the timer that clears it.
+    status_shown: Option<String>,
+    _status_timer: Option<Task<()>>,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -141,6 +148,8 @@ impl DocumentWindow {
             menu_bar: cfg!(not(target_os = "macos"))
                 .then(|| MenuBar::new(menus::menu_model(None, &Default::default()))),
             track_headers: TrackHeaders::default(),
+            status_shown: None,
+            _status_timer: None,
             _subscriptions: subscriptions,
         }
     }
@@ -305,6 +314,62 @@ impl DocumentWindow {
 
     pub(crate) fn set_status(&mut self, text: &str, cx: &mut Context<Self>) {
         self.with_model(cx, |d| d.set_status(Some(text.to_owned())));
+    }
+
+    /// A status text newly drawn clears itself `STATUS_TIMEOUT` later
+    /// unless another has replaced it (Swift `StatusLine`: the timer is
+    /// keyed on the text, so a new message starts it again).
+    fn follow_status(&mut self, status: &Option<String>, window: &Window, cx: &mut Context<Self>) {
+        if *status == self.status_shown {
+            return;
+        }
+        self.status_shown = status.clone();
+        self._status_timer = status.clone().map(|text| {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(STATUS_TIMEOUT).await;
+                this.update(cx, |this, cx| {
+                    this.with_model(cx, |d| {
+                        if d.status() == Some(text.as_str()) {
+                            d.set_status(None);
+                        }
+                    })
+                })
+                .ok();
+            })
+        });
+    }
+
+    fn status_line(
+        status: String,
+        scope: &mut RegistryScope,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_1()
+            .bg(rgb(colors::BAR))
+            .text_xs()
+            .text_color(rgb(colors::DIM))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(status),
+            )
+            .child(
+                transport_bar::button("dismiss-status", "Dismiss", true, colors::BAR, scope)
+                    .h(px(20.))
+                    .min_w(px(0.))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.with_model(cx, |d| d.set_status(None));
+                    })),
+            )
     }
 
     /// Starts the inline rename of track `lane` in its header: a field
@@ -623,6 +688,7 @@ impl Render for DocumentWindow {
                 d.and_then(|d| d.status().map(String::from)),
             )
         };
+        self.follow_status(&status, window, cx);
         if title != self.title {
             window.set_window_title(&title);
             self.title = title;
@@ -690,15 +756,7 @@ impl Render for DocumentWindow {
                     ),
             )
             .when_some(status, |d, status| {
-                d.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .bg(rgb(colors::BAR))
-                        .text_xs()
-                        .text_color(rgb(colors::DIM))
-                        .child(status),
-                )
+                d.child(Self::status_line(status, &mut root.container(), cx))
             })
     }
 }

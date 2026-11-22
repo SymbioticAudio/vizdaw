@@ -430,3 +430,49 @@ fn the_rename_command_opens_the_field_on_the_selected_track(cx: &mut TestAppCont
     s.cx.run_until_parked();
     assert_eq!(s.renames(), vec!["s".to_string()]);
 }
+
+impl Setup {
+    /// Sets the document's status as an editor action would.
+    fn set_status(&mut self, text: &str) {
+        let doc = self.doc();
+        let text = text.to_owned();
+        self.app.update(&mut self.cx, |a, cx| {
+            a.store.with_document(doc, |d, _| d.set_status(Some(text)));
+            cx.notify();
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn wait(&mut self, seconds: f32) {
+        self.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_secs_f32(seconds));
+        self.cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn the_status_line_clears_six_seconds_after_its_text_appears(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.set_status("First");
+    s.wait(5.);
+    assert_eq!(s.status().as_deref(), Some("First"));
+    // A new message restarts the six seconds.
+    s.set_status("Second");
+    s.wait(5.);
+    assert_eq!(s.status().as_deref(), Some("Second"));
+    s.wait(1.5);
+    assert_eq!(s.status(), None);
+    assert!(s.find("button", "Dismiss").is_none());
+}
+
+#[gpui::test]
+fn the_status_line_dismiss_button_clears_it(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    assert!(s.find("button", "Dismiss").is_none());
+    s.channel_click("button", "Add Track");
+    assert!(s.status().is_some());
+    s.click("button", "Dismiss");
+    assert_eq!(s.status(), None);
+    assert!(s.find("button", "Dismiss").is_none());
+}
