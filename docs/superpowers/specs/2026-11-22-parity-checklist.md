@@ -47,8 +47,8 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| edit.undo | Edit | Undo | ⌘Z | true | | |
-| edit.redo | Edit | Redo | ⇧⌘Z | true | | |
+| edit.undo | Edit | Undo | ⌘Z | true | S2 | S2 |
+| edit.redo | Edit | Redo | ⇧⌘Z | true | S2 | S2 |
 
 ### View
 
@@ -214,12 +214,12 @@ item (false: keys, the Keys settings and the control channel only).
 | lane.set_input_fx | Track | Set Input Effects |  | false | | |
 | lane.set_mpe | Track | Set Track MPE |  | false | | |
 | lane.track_synth | Track | Track Synth |  | false | | |
-| track.new_audio | Track | New Audio Track | ⌥⌘A | true | | |
-| track.new_instrument | Track | New Instrument Track | ⌥⌘S | true | | |
-| track.new_midi | Track | New MIDI Track | ⌥⌘X | true | | |
-| track.duplicate | Track | Duplicate Track |  | true | | |
-| track.delete | Track | Delete Track |  | true | | |
-| track.rename | Track | Rename Track |  | true | | |
+| track.new_audio | Track | New Audio Track | ⌥⌘A | true | S2 | S2 |
+| track.new_instrument | Track | New Instrument Track | ⌥⌘S | true | S2 | S2 |
+| track.new_midi | Track | New MIDI Track | ⌥⌘X | true | S2 | S2 |
+| track.duplicate | Track | Duplicate Track |  | true | S2 | S2 |
+| track.delete | Track | Delete Track |  | true | S2 | S2 |
+| track.rename | Track | Rename Track |  | true | S2 | S2 |
 | track.make_mine | Track | Make Mine |  | true | | |
 | track.choose_take | Track | Choose Take |  | true | | |
 | track.rename_take | Track | Rename Take |  | true | | |
@@ -557,7 +557,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | themes_and_the_strip_over_the_channel | | |
 | edits_a_region_in_the_audio_editor | | |
 | transport_jumps_readouts_and_fields_over_the_channel | | |
-| new_project_tracks_over_the_channel | | |
+| new_project_tracks_over_the_channel | S2 (fails with the screen locked: no redraw, stale ui.tree; re-run unlocked) | S2 |
 | loop_wraps_at_the_end | | |
 | arpeggiates_an_injected_chord_while_recording | | |
 | midi_mix_reaches_state_get | | |
@@ -580,8 +580,8 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | release_fixes_over_the_channel | | |
 | co_producer_time_over_mcp | | |
 | co_producer_import_midi_is_refused | | |
-| control_close_of_a_dirty_song_does_not_prompt | | |
-| app_quit_refuses_while_a_song_is_unsaved | | |
+| control_close_of_a_dirty_song_does_not_prompt | S2 | S2 |
+| app_quit_refuses_while_a_song_is_unsaved | S2 | S2 |
 | groups_vcas_and_transport_bar_over_the_channel | | |
 
 ## Linux gaps
