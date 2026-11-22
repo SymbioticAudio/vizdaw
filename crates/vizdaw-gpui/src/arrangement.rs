@@ -13,6 +13,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -24,12 +25,13 @@ use gpui::{
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::arrangement::{
-    AutoScroll, Geometry, GridKind, PageFollow, RULER_HEIGHT, Rect, RulerSelection, TimeAxis,
-    WheelScroll, ZOOM_STEP, a11y_label, bar_length, grid_lines_between, label_every, sketch,
+    AutoScroll, Geometry, GridKind, MeterBars, PageFollow, RULER_HEIGHT, Rect, RulerSelection,
+    TimeAxis, WheelScroll, ZOOM_STEP, a11y_label_in, bar_length, grid_lines_in, label_every,
+    sketch,
 };
 use vizdaw_app::transport::TransportModel;
 use vizdaw_ffi::blocks::{BlockKind, BlockRow};
-use vizdaw_ffi::events::{EventRow, MeterEntryRow};
+use vizdaw_ffi::events::EventRow;
 use vizdaw_ffi::selection::TickRange;
 
 use crate::registry::{ChildRecorder, RegistryScope};
@@ -84,6 +86,7 @@ pub struct Arrangement {
     layout: Rc<Cell<Bounds<Pixels>>>,
     /// The playhead's x in the canvas at the last draw, when shown.
     playhead: Rc<Cell<Option<f32>>>,
+    rows_built: Cell<usize>,
     _auto_scroll: Option<Task<()>>,
 }
 
@@ -108,8 +111,30 @@ impl Arrangement {
             drag: None,
             layout: Rc::default(),
             playhead: Rc::default(),
+            rows_built: Cell::new(0),
             _auto_scroll: None,
         }
+    }
+
+    /// How many rows the last frame built state for (only the visible
+    /// ones): a test seam.
+    #[doc(hidden)]
+    pub fn rows_built(&self) -> usize {
+        self.rows_built.get()
+    }
+
+    /// The rows of `count` tracks the body shows, partly or wholly; before
+    /// the first layout the body is taken as `fallback` high.
+    pub(crate) fn visible_rows(&self, count: usize, fallback: f32) -> std::ops::Range<usize> {
+        let body = if self.layout.get().size.height > px(0.) {
+            self.body_height()
+        } else {
+            fallback
+        };
+        let lane = Geometry::default().lane_height;
+        let first = (self.vertical_offset / lane).floor().max(0.) as usize;
+        let last = ((self.vertical_offset + body) / lane).ceil().max(0.) as usize;
+        first.min(count)..last.min(count)
     }
 
     pub fn axis(&self) -> &TimeAxis {
@@ -179,6 +204,7 @@ impl Arrangement {
         scope: &mut RegistryScope,
         cx: &mut Context<DocumentWindow>,
     ) -> AnyElement {
+        self.rows_built.set(state.rows.len());
         let mut group = scope.container();
         let mut recorder = group.children();
         let view = Scene {
@@ -272,10 +298,12 @@ pub(crate) fn toolbar(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow
         .into_any_element()
 }
 
-/// What the canvas draws of the document.
+/// What the canvas draws of the document: only the rows in view, their
+/// blocks and events shared with the document, not copied.
 pub struct ArrangementState {
     pub rows: Vec<RowState>,
-    pub meter: Vec<MeterEntryRow>,
+    /// The shown sequence's meter, its bar table built once a frame.
+    pub bars: MeterBars,
     pub selection: Option<TickRange>,
     pub selected_events: Vec<u64>,
     /// The playhead's tick, when the transport is on the shown sequence.
@@ -286,37 +314,60 @@ pub struct ArrangementState {
 
 /// One track's row.
 pub struct RowState {
+    /// Its place among the shown sequence's tracks.
+    pub index: usize,
     pub name: String,
-    pub blocks: Vec<BlockRow>,
-    pub events: Vec<EventRow>,
+    pub blocks: Arc<[BlockRow]>,
+    pub events: Arc<[EventRow]>,
 }
 
 impl ArrangementState {
-    /// The shown sequence of `doc`, with `transport`'s playhead at `now`
-    /// (extrapolated from the last poll while playing).
-    pub fn of(doc: &DocumentModel, transport: Option<&TransportModel>, now: Instant) -> Self {
+    /// Nothing to draw (no document).
+    pub fn empty() -> Self {
+        ArrangementState {
+            rows: vec![],
+            bars: MeterBars::new(&[]),
+            selection: None,
+            selected_events: vec![],
+            playhead: None,
+            playing: false,
+        }
+    }
+
+    /// The `visible` tracks of `doc`'s shown sequence, with `transport`'s
+    /// playhead at `now` (extrapolated from the last poll while playing).
+    pub fn of(
+        doc: &DocumentModel,
+        transport: Option<&TransportModel>,
+        now: Instant,
+        visible: std::ops::Range<usize>,
+    ) -> Self {
         let seq = doc.selected_seq();
-        let rows = doc
-            .lanes()
+        let lanes = doc.lanes();
+        let rows = lanes
+            .get(visible.clone())
+            .unwrap_or_default()
             .iter()
-            .map(|l| {
-                let blocks = doc.blocks(l.id).to_vec();
+            .zip(visible)
+            .map(|(l, index)| {
+                let blocks = doc.blocks(l.id);
                 let sketched = blocks.iter().any(|b| b.kind == BlockKind::Events);
                 RowState {
+                    index,
                     name: l.name.clone(),
                     events: if sketched {
-                        doc.lane_events(l.id).to_vec()
+                        doc.lane_events(l.id)
                     } else {
-                        vec![]
+                        Arc::from([])
                     },
                     blocks,
                 }
             })
             .collect();
-        let meter = seq
-            .and_then(|s| doc.sequence_info(s))
-            .map(|i| i.meter.clone())
-            .unwrap_or_default();
+        let bars = MeterBars::new(
+            seq.and_then(|s| doc.sequence_info(s))
+                .map_or(&[][..], |i| i.meter.as_slice()),
+        );
         let (playhead, playing) = match transport {
             Some(t) if seq.is_some() && t.state().seq == seq => {
                 let tick = if t.clock().last().is_some() {
@@ -330,7 +381,7 @@ impl ArrangementState {
         };
         ArrangementState {
             rows,
-            meter,
+            bars,
             selection: doc.selection().time_range,
             selected_events: doc.selection().events.clone(),
             playhead,
@@ -387,19 +438,12 @@ impl Scene {
             width: w,
             height: (h - RULER_HEIGHT).max(0.),
         };
-        let grid = grid_lines_between(&state.meter, axis.tick_at(-1.), axis.tick_at(w + 1.), tpp)
+        let grid = grid_lines_in(&state.bars, axis.tick_at(-1.), axis.tick_at(w + 1.), tpp)
             .into_iter()
             .map(|l| (snap(l.tick), l.kind))
             .collect();
-        let first = state.meter.first().copied().unwrap_or(MeterEntryRow {
-            tick: 0,
-            num: 4,
-            den: 4,
-            sharps: 0,
-            minor: false,
-        });
-        let every = label_every(bar_length(&first), tpp);
-        let lines = grid_lines_between(&state.meter, axis.tick_at(-60.), axis.tick_at(w), tpp);
+        let every = label_every(bar_length(&state.bars.first()), tpp);
+        let lines = grid_lines_in(&state.bars, axis.tick_at(-60.), axis.tick_at(w), tpp);
         let labels = lines
             .iter()
             .filter_map(|l| match l.kind {
@@ -414,13 +458,14 @@ impl Scene {
         let g = &self.geometry;
         let mut separators = vec![];
         let mut blocks = vec![];
-        for (i, row) in state.rows.iter().enumerate() {
+        for row in &state.rows {
+            let i = row.index;
             let top = RULER_HEIGHT + g.row_top(i);
             if top + g.lane_height < RULER_HEIGHT || top > h {
                 continue;
             }
             separators.push(top + g.lane_height - 1.);
-            for b in &row.blocks {
+            for b in row.blocks.iter() {
                 let mut rect = g.block_rect(b, i, axis);
                 rect.y += RULER_HEIGHT;
                 if !rect.intersects(&body) {
@@ -428,7 +473,7 @@ impl Scene {
                 }
                 recorder.record(
                     "button",
-                    &a11y_label(b, &row.name, &state.meter),
+                    &a11y_label_in(b, &row.name, &state.bars),
                     Bounds::new(
                         point(bounds.origin.x + px(rect.x), bounds.origin.y + px(rect.y)),
                         size(px(rect.width), px(rect.height)),
@@ -650,7 +695,7 @@ impl DocumentWindow {
         &self.arrangement
     }
 
-    fn shown_rows(&self, cx: &App) -> usize {
+    pub(crate) fn shown_rows(&self, cx: &App) -> usize {
         let s = self.app().read(cx);
         s.store.document(self.doc()).map_or(0, |d| d.lanes().len())
     }

@@ -369,7 +369,10 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
                 continue;
             }
             let Some(k) = keystroke(&chord) else { continue };
-            let context = if chord.mods == 0 {
+            // A chord without ⌘ or ⌃ (bare, ⇧ or ⌥) waits while a text
+            // field has the keyboard, which types it (Swift's bare-key
+            // rule, as the control channel's `bound_command`).
+            let context = if chord.mods & (COMMAND | CONTROL) == 0 {
                 UNMODIFIED_KEYS
             } else {
                 WINDOW_CONTEXT

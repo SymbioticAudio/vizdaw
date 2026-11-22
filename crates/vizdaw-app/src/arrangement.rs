@@ -54,42 +54,58 @@ pub fn bar_length(m: &MeterEntryRow) -> i64 {
     beat_ticks(m) * i64::from(m.num.max(1))
 }
 
-/// Each entry with the number of the bar it starts; an empty map is 4/4.
-fn with_bars(meter: &[MeterEntryRow]) -> Vec<(MeterEntryRow, i64)> {
-    let entries: &[MeterEntryRow] = if meter.is_empty() {
-        std::slice::from_ref(&FOUR_FOUR)
-    } else {
-        meter
-    };
-    let mut out: Vec<(MeterEntryRow, i64)> = Vec::with_capacity(entries.len());
-    for e in entries {
-        let bar = match out.last() {
-            Some((prev, n)) => n + (e.tick - prev.tick) / bar_length(prev),
-            None => 1,
+/// A meter map with the number of the bar each entry starts (an empty
+/// map is 4/4), built once and asked for any number of bars.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeterBars(Vec<(MeterEntryRow, i64)>);
+
+impl MeterBars {
+    pub fn new(meter: &[MeterEntryRow]) -> Self {
+        let entries: &[MeterEntryRow] = if meter.is_empty() {
+            std::slice::from_ref(&FOUR_FOUR)
+        } else {
+            meter
         };
-        out.push((*e, bar));
+        let mut out: Vec<(MeterEntryRow, i64)> = Vec::with_capacity(entries.len());
+        for e in entries {
+            let bar = match out.last() {
+                Some((prev, n)) => n + (e.tick - prev.tick) / bar_length(prev),
+                None => 1,
+            };
+            out.push((*e, bar));
+        }
+        MeterBars(out)
     }
-    out
+
+    /// The first entry (4/4 for an empty map).
+    pub fn first(&self) -> MeterEntryRow {
+        self.0[0].0
+    }
+
+    /// The bar containing `tick` (bar 1 starts at tick 0; pickup bars
+    /// before it count down from 0).
+    pub fn bar_at(&self, tick: i64) -> Bar {
+        let (e, first) = self
+            .0
+            .iter()
+            .rev()
+            .find(|(e, _)| e.tick <= tick)
+            .copied()
+            .unwrap_or(self.0[0]);
+        let length = bar_length(&e);
+        let k = (tick - e.tick).div_euclid(length);
+        Bar {
+            number: first + k,
+            start: e.tick + k * length,
+            length,
+            meter: e,
+        }
+    }
 }
 
-/// The bar containing `tick` (bar 1 starts at tick 0; pickup bars before
-/// it count down from 0).
+/// The bar containing `tick` (builds the table each call: for one-offs).
 pub fn bar_at(tick: i64, meter: &[MeterEntryRow]) -> Bar {
-    let bars = with_bars(meter);
-    let (e, first) = bars
-        .iter()
-        .rev()
-        .find(|(e, _)| e.tick <= tick)
-        .copied()
-        .unwrap_or(bars[0]);
-    let length = bar_length(&e);
-    let k = (tick - e.tick).div_euclid(length);
-    Bar {
-        number: first + k,
-        start: e.tick + k * length,
-        length,
-        meter: e,
-    }
+    MeterBars::new(meter).bar_at(tick)
 }
 
 // MARK: TimeAxis
@@ -386,18 +402,10 @@ pub fn grid_lines(axis: &TimeAxis, width: f32, meter: &[MeterEntryRow]) -> Vec<G
     grid_lines_between(meter, *r.start(), *r.end(), axis.ticks_per_point())
 }
 
-/// Lines from the bar containing `from` up to `to` (Swift `Grid.lines`).
-/// Beat lines only when beats are at least 6 points apart; bar lines
-/// thinned to every 2^n-th bar (counted from bar 1) when bars are closer;
-/// at most 4000 lines.
-pub fn grid_lines_between(
-    meter: &[MeterEntryRow],
-    from: i64,
-    to: i64,
-    ticks_per_point: f64,
-) -> Vec<GridLine> {
+/// As [`grid_lines_between`], over a table already built.
+pub fn grid_lines_in(bars: &MeterBars, from: i64, to: i64, ticks_per_point: f64) -> Vec<GridLine> {
     let mut out = Vec::new();
-    let mut bar = bar_at(from, meter);
+    let mut bar = bars.bar_at(from);
     let mut visits = 0;
     while bar.start <= to && out.len() < MAX_LINES && visits < 200_000 {
         visits += 1;
@@ -425,9 +433,22 @@ pub fn grid_lines_between(
                 t += beat;
             }
         }
-        bar = bar_at(bar.start + bar.length, meter);
+        bar = bars.bar_at(bar.start + bar.length);
     }
     out
+}
+
+/// Lines from the bar containing `from` up to `to` (Swift `Grid.lines`).
+/// Beat lines only when beats are at least 6 points apart; bar lines
+/// thinned to every 2^n-th bar (counted from bar 1) when bars are closer;
+/// at most 4000 lines.
+pub fn grid_lines_between(
+    meter: &[MeterEntryRow],
+    from: i64,
+    to: i64,
+    ticks_per_point: f64,
+) -> Vec<GridLine> {
+    grid_lines_in(&MeterBars::new(meter), from, to, ticks_per_point)
 }
 
 /// Label every n-th bar so labels are at least 28 points apart (n a power
@@ -529,8 +550,13 @@ impl WheelScroll {
 
 /// A block's label (Swift `ArrangementA11y.label`).
 pub fn a11y_label(b: &BlockRow, lane_name: &str, meter: &[MeterEntryRow]) -> String {
-    let first = bar_at(b.start, meter).number;
-    let last = bar_at((b.end - 1).max(b.start), meter).number;
+    a11y_label_in(b, lane_name, &MeterBars::new(meter))
+}
+
+/// As [`a11y_label`], over a table already built (one per frame).
+pub fn a11y_label_in(b: &BlockRow, lane_name: &str, bars: &MeterBars) -> String {
+    let first = bars.bar_at(b.start).number;
+    let last = bars.bar_at((b.end - 1).max(b.start)).number;
     let bars = if first == last {
         format!("bar {first}")
     } else {

@@ -855,6 +855,9 @@ impl Focusable for DocumentWindow {
 impl Render for DocumentWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.doc;
+        // First, so the rows built below are the ones in view.
+        let rows = self.shown_rows(cx);
+        self.clamp_arrangement(rows);
         let (title, dirty, alert, bar, model, front, lanes, selected, status, layout, arranged) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
@@ -878,7 +881,12 @@ impl Render for DocumentWindow {
                 d.map(DocumentModel::selected_lanes).unwrap_or_default(),
                 d.and_then(|d| d.status().map(String::from)),
                 s.transport_layout(),
-                d.map(|d| ArrangementState::of(d, s.transport(doc), Instant::now())),
+                d.map(|d| {
+                    let visible = self
+                        .arrangement
+                        .visible_rows(d.lanes().len(), f32::from(window.viewport_size().height));
+                    ArrangementState::of(d, s.transport(doc), Instant::now(), visible)
+                }),
             )
         };
         let plan = Plan::new(&layout, f32::from(window.viewport_size().width));
@@ -910,15 +918,7 @@ impl Render for DocumentWindow {
             bar.set_model(model);
         }
 
-        let arranged = arranged.unwrap_or(ArrangementState {
-            rows: vec![],
-            meter: vec![],
-            selection: None,
-            selected_events: vec![],
-            playhead: None,
-            playing: false,
-        });
-        self.clamp_arrangement(lanes.len());
+        let arranged = arranged.unwrap_or_else(ArrangementState::empty);
         self.arrangement.follow(&arranged);
         // The playhead moves every frame while the shown sequence plays;
         // stopped, it moves when a poll reads a locate.

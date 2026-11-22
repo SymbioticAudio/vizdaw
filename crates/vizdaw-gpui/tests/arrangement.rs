@@ -533,3 +533,37 @@ fn the_headers_and_add_row_show_beside_the_canvas(cx: &mut TestAppContext) {
     assert!(headers.origin.y >= play.bottom());
     assert!(s.element("button", "Zoom In").bounds.bottom() <= canvas.origin.y);
 }
+
+#[gpui::test]
+fn a_long_song_builds_only_the_rows_in_view(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    let tracks: Vec<_> = (0..200)
+        .map(|i| lane_row(100 + i, &format!("Track {i}"), false))
+        .collect();
+    fake.set_lanes(3, tracks);
+    fake.set_blocks(3, 299, vec![events_block(0, BAR, &[7])]);
+    let mut s = setup(cx, fake);
+    let body = f32::from(s.canvas().bounds.size.height) - RULER;
+    let most = (body / 48.).ceil() as usize + 1;
+    let built = |s: &mut Setup| {
+        s.window
+            .read_with(&s.cx, |v, _| v.arrangement().rows_built())
+            .unwrap()
+    };
+    let n = built(&mut s);
+    assert!(n > 0 && n <= most, "{n} rows built, {most} at most in view");
+    // Scrolled to the end, the last track's block shows; still only a
+    // screenful is built.
+    let at = s.at(300., 100.);
+    s.scroll(
+        at,
+        ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
+        Modifiers::none(),
+    );
+    assert!(
+        s.find("button", "Block on Track 199, bar 1, 1 event")
+            .is_some()
+    );
+    let n = built(&mut s);
+    assert!(n > 0 && n <= most, "{n} rows built after the scroll");
+}

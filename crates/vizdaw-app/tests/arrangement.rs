@@ -8,8 +8,9 @@ use std::sync::Arc;
 use support::demo_fake;
 use vizdaw_app::DocumentModel;
 use vizdaw_app::arrangement::{
-    AutoScroll, BLOCK_RULE, Geometry, GridKind, GridLine, PageFollow, Rect, RulerSelection,
-    TimeAxis, WheelScroll, a11y_label, grid_lines, grid_lines_between, label_every, sketch,
+    AutoScroll, BLOCK_RULE, Geometry, GridKind, GridLine, MeterBars, PageFollow, Rect,
+    RulerSelection, TimeAxis, WheelScroll, a11y_label, a11y_label_in, grid_lines,
+    grid_lines_between, label_every, sketch,
 };
 use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
 use vizdaw_ffi::events::{EventKindRow, EventRow, MeterEntryRow};
@@ -373,4 +374,28 @@ fn the_model_reads_blocks_and_selects_ruler_ranges() {
     let lanes: Vec<u64> = s.lanes.iter().map(|l| l.lane).collect();
     assert_eq!(lanes, vec![30, 31], "every track of the shown sequence");
     assert!(s.events.is_empty());
+}
+
+#[test]
+fn reads_of_one_snapshot_share_their_rows() {
+    let f = Arc::new(demo_fake());
+    f.set_blocks(3, 31, vec![block(0, BAR, &[1], false, false)]);
+    f.set_events(3, 31, vec![EventRow::blank(1, 0, EventKindRow::Note)]);
+    let m = DocumentModel::new(f.clone()).unwrap();
+    assert!(Arc::ptr_eq(&m.blocks(31), &m.blocks(31)));
+    assert!(Arc::ptr_eq(&m.lane_events(31), &m.lane_events(31)));
+    assert_eq!(m.lane_events(31).len(), 1);
+}
+
+#[test]
+fn one_meter_table_answers_every_bar() {
+    let m = vec![meter(0, 4, 4), meter(BAR, 3, 4)];
+    let bars = MeterBars::new(&m);
+    assert_eq!(bars.bar_at(BAR + 3 * Q).number, 3);
+    assert_eq!(bars.bar_at(-1).number, 0);
+    let b = block(0, 2 * BAR, &[1, 2], false, false);
+    assert_eq!(
+        a11y_label_in(&b, "Chords", &bars),
+        a11y_label(&b, "Chords", &m)
+    );
 }

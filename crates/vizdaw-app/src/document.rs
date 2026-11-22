@@ -53,8 +53,8 @@ pub struct DocumentModel {
 /// What the arrangement reads of one track, read when first asked for.
 #[derive(Default)]
 struct LaneReads {
-    blocks: OnceLock<Vec<BlockRow>>,
-    events: OnceLock<Vec<EventRow>>,
+    blocks: OnceLock<Arc<[BlockRow]>>,
+    events: OnceLock<Arc<[EventRow]>>,
 }
 
 impl DocumentModel {
@@ -255,9 +255,9 @@ impl DocumentModel {
     /// Track `lane`'s arrangement blocks (under
     /// [`crate::arrangement::BLOCK_RULE`]), read once per snapshot; none
     /// while the core cannot answer (a refusal is read again next time).
-    pub fn blocks(&self, lane: u64) -> &[BlockRow] {
+    pub fn blocks(&self, lane: u64) -> Arc<[BlockRow]> {
         let Some((seq, reads)) = self.reads(lane) else {
-            return &[];
+            return Arc::from([]);
         };
         read_once(&reads.blocks, || {
             self.session
@@ -267,9 +267,9 @@ impl DocumentModel {
 
     /// Track `lane`'s events in time order, read once per snapshot; none
     /// while the core cannot answer.
-    pub fn lane_events(&self, lane: u64) -> &[EventRow] {
+    pub fn lane_events(&self, lane: u64) -> Arc<[EventRow]> {
         let Some((seq, reads)) = self.reads(lane) else {
-            return &[];
+            return Arc::from([]);
         };
         read_once(&reads.events, || {
             self.session.lane_events(seq, lane).map(|e| e.events)
@@ -653,14 +653,18 @@ impl DocumentModel {
     }
 }
 
-/// `cell`'s rows, read by `read` the first time it answers.
-fn read_once<T>(cell: &OnceLock<Vec<T>>, read: impl FnOnce() -> Result<Vec<T>, VizError>) -> &[T] {
+/// `cell`'s rows (shared, not copied), read by `read` the first time it
+/// answers.
+fn read_once<T>(
+    cell: &OnceLock<Arc<[T]>>,
+    read: impl FnOnce() -> Result<Vec<T>, VizError>,
+) -> Arc<[T]> {
     if let Some(rows) = cell.get() {
-        return rows;
+        return rows.clone();
     }
     match read() {
-        Ok(rows) => cell.get_or_init(|| rows),
-        Err(_) => &[],
+        Ok(rows) => cell.get_or_init(|| rows.into()).clone(),
+        Err(_) => Arc::from([]),
     }
 }
 

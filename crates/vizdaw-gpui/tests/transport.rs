@@ -442,6 +442,44 @@ fn bare_keys_wait_while_a_field_has_the_keyboard(cx: &mut TestAppContext) {
     );
 }
 
+/// ⇧Space (Play from Selection) and ⌥Space (Play Selection) have no ⌘ or
+/// ⌃: a field that has the keyboard types their space (Swift's bare-key
+/// rule), in the transport fields and the track rename alike.
+#[gpui::test]
+fn shifted_and_option_space_type_into_a_field(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.click("textfield", "Position");
+    s.keys("x shift-space");
+    // ⌥Space types a no-break space on a Mac keyboard: the test platform
+    // has no character for ⌥ keys unless told.
+    let option_space = gpui::Keystroke {
+        modifiers: Modifiers::alt(),
+        key: "space".into(),
+        key_char: Some("\u{a0}".into()),
+    };
+    s.cx.dispatch_keystroke(s.window.into(), option_space);
+    s.cx.run_until_parked();
+    s.keys("y");
+    assert_eq!(s.value("textfield", "Position"), "x \u{a0}y");
+    assert_eq!(s.status(), None);
+    assert!(s.fake.plays_from().is_empty());
+    assert_eq!(s.fake.count("play(3)"), 0);
+    s.keys("escape");
+
+    s.window
+        .update(&mut s.cx, |v, window, cx| v.begin_rename(30, window, cx))
+        .unwrap();
+    s.cx.run_until_parked();
+    s.cx.simulate_input("LEAD");
+    s.keys("shift-space");
+    s.cx.simulate_input("VOX");
+    s.keys("enter");
+    assert_eq!(s.status(), None);
+    assert!(s.fake.plays_from().is_empty());
+    let renamed = s.with_doc(|d| d.lanes().iter().any(|l| l.name == "LEAD VOX"));
+    assert!(renamed, "the space was typed into the name");
+}
+
 #[gpui::test]
 fn a_narrow_window_folds_the_last_items_into_more(cx: &mut TestAppContext) {
     let mut s = setup(cx, demo_fake());
