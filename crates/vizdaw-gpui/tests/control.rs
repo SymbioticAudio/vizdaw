@@ -13,7 +13,7 @@ use core_control::{ControlError, ErrorCode};
 use gpui::TestAppContext;
 use serde_json::{Map, Value, json};
 use vizdaw_app::DocumentStore;
-use vizdaw_app::testing::{FakeSession, demo_fake};
+use vizdaw_app::testing::{FakeSession, demo_fake, lane_row};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::snapshot::DocSnapshot;
 use vizdaw_gpui::AppState;
@@ -1354,4 +1354,43 @@ fn a_refused_key_command_is_not_run_again_by_the_window(cx: &mut TestAppContext)
     // S while stopped: refused, and the window does not run it again.
     ok(call(&s, cx, "ui.key", json!({"key": "s"})));
     assert_eq!(doc_state(&s, cx), (json!([]), Value::Null, Value::Null));
+}
+
+#[gpui::test]
+fn the_tree_is_read_from_a_fresh_frame(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    // One tick, no frame drawn between the step and the reads (a locked
+    // screen sends no frame callbacks).
+    let step = s.calls.push("command.run", json!({"id": "transport.loop"}));
+    let tree = s.calls.push("ui.tree", json!({}));
+    cx.update(|cx| control::pump(&s.calls, cx));
+    ok(s.calls.reply_to(step).unwrap());
+    let tree = ok(s.calls.reply_to(tree).unwrap());
+    assert_eq!(node(&tree, "button", "Loop")["value"], "on");
+    // A new track's header shows in the same tick's tree.
+    s.fake.bump(edited(&s.fake, "New Audio Track"));
+    s.fake.set_lanes(
+        3,
+        vec![
+            lane_row(30, "Groove", false),
+            lane_row(31, "Chords", false),
+            lane_row(32, "Vox", false),
+        ],
+    );
+    let made = s
+        .calls
+        .push("command.run", json!({"id": "track.new_audio"}));
+    let tree = s.calls.push("ui.tree", json!({}));
+    cx.update(|cx| control::pump(&s.calls, cx));
+    ok(s.calls.reply_to(made).unwrap());
+    let tree = ok(s.calls.reply_to(tree).unwrap());
+    assert!(
+        tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["label"].as_str().is_some_and(|l| l.contains("Vox"))),
+        "{tree}"
+    );
 }

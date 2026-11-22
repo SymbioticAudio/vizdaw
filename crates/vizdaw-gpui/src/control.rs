@@ -388,6 +388,7 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
         ))),
         Command::UiTree { window, .. } => {
             let entry = target(window.as_ref(), cx)?;
+            fresh_frame(&entry, cx)?;
             let mut tree = entry
                 .handle
                 .read(cx)
@@ -785,6 +786,7 @@ fn click(
     modifiers: keys::Modifiers,
     cx: &mut App,
 ) -> Result<Value, ControlError> {
+    fresh_frame(entry, cx)?;
     let at = {
         let view = entry.handle.read(cx).map_err(|_| gone())?;
         let registry = view.registry().borrow();
@@ -835,6 +837,25 @@ fn click(
         "x": f32::from(at.x),
         "y": f32::from(at.y),
     }))
+}
+
+/// Draws `entry`'s window now, so its element registry and scene are this
+/// moment's. The registry is filled while drawing, and a window draws only
+/// on the platform's frame callbacks, which stop while the screen is
+/// locked or the window is hidden. The draw marks the frame for the next
+/// real frame to present. The pump calls this from its own top-level
+/// update (a timer), never from inside a draw. Always drawn: the calls
+/// that need it (`ui.tree`, `ui.click`, `ui.key` with `element`,
+/// `ui.screenshot`) are rare next to frames.
+fn fresh_frame(entry: &WindowEntry, cx: &mut App) -> Result<(), ControlError> {
+    let any: AnyWindowHandle = entry.handle.into();
+    any.update(cx, |_, window, cx| {
+        // Whole, reusing no cached view: what this tick changed may not
+        // have reached the window's dirty views yet.
+        window.refresh();
+        window.draw(cx).clear(cx);
+    })
+    .map_err(|_| gone())
 }
 
 /// The channel's modifiers as GPUI's: ⌘ is `platform` on macOS and
@@ -1002,6 +1023,7 @@ fn screenshot(
     }
     let entry = target(window, cx)?;
     let path = path.unwrap_or_else(temp_screenshot_path);
+    fresh_frame(&entry, cx)?;
     let capture = crate::screenshot::capture_fn(cx);
     let any: AnyWindowHandle = entry.handle.into();
     let shot = any
