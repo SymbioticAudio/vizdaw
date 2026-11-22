@@ -1,6 +1,8 @@
 //! The document window: one window per open document, with the alert
 //! banner, the transport bar and (for now) an empty body.
 
+use std::path::{Path, PathBuf};
+
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
@@ -253,23 +255,75 @@ impl DocumentWindow {
         cx.spawn_in(window, async move |this, cx| {
             let answer = chosen.await;
             this.update_in(cx, |this, window, cx| {
-                let saved = this.app.update(cx, |s, cx| {
-                    cx.notify();
-                    match answer {
-                        Ok(Ok(Some(path))) => s.save_as(doc, &path).is_ok(),
-                        Ok(Err(e)) => {
+                let path = match answer {
+                    Ok(Ok(Some(path))) => Some(path),
+                    Ok(Err(e)) => {
+                        this.app.update(cx, |s, cx| {
+                            cx.notify();
                             s.store
                                 .post_alert(AlertItem::new("Save Failed", e.to_string()));
-                            false
-                        }
-                        _ => false,
+                        });
+                        None
                     }
-                });
-                if saved && close {
-                    window.remove_window();
+                    _ => None,
+                };
+                let Some(path) = path else { return };
+                match crate::app_state::silent_replacement(&path) {
+                    Some(existing) => this.confirm_replace(doc, path, existing, close, window, cx),
+                    None => this.finish_save_as(doc, &path, close, window, cx),
                 }
             })
             .ok();
+        })
+        .detach();
+    }
+
+    fn finish_save_as(
+        &mut self,
+        doc: DocId,
+        path: &Path,
+        close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.save_as(doc, path).is_ok()
+        });
+        if saved && close {
+            window.remove_window();
+        }
+    }
+
+    /// The panel did not ask (the name had no extension), so ask before
+    /// saving over the existing project.
+    fn confirm_replace(
+        &mut self,
+        doc: DocId,
+        path: PathBuf,
+        existing: PathBuf,
+        close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = existing
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("\u{201c}{name}\u{201d} already exists. Do you want to replace it?"),
+            Some("Replacing it overwrites the project that is there."),
+            &["Replace", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(0) = answer.await {
+                this.update_in(cx, |this, window, cx| {
+                    this.finish_save_as(doc, &path, close, window, cx)
+                })
+                .ok();
+            }
         })
         .detach();
     }

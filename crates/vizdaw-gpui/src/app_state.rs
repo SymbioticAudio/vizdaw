@@ -230,6 +230,14 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// The existing project `path` would silently replace: `Some` when adding
+/// the `.vizdaw` extension changed the path (so the save panel never asked
+/// about replacing it) and the result exists.
+pub fn silent_replacement(path: &Path) -> Option<PathBuf> {
+    let full = with_extension(path);
+    (full != path && full.exists()).then_some(full)
+}
+
 /// `path`, ending in `.vizdaw`.
 pub fn with_extension(path: &Path) -> PathBuf {
     if path.extension().and_then(|e| e.to_str()) == Some("vizdaw") {

@@ -361,3 +361,63 @@ fn quit_with_unsaved_changes_asks_first(cx: &mut TestAppContext) {
         .read_with(&s.cx, |a, _| (a.transport(doc).is_none(), a.store.count()));
     assert_eq!(left, (true, 0));
 }
+
+fn save_as_calls(s: &Setup) -> Vec<String> {
+    s.fake
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("save_as("))
+        .collect()
+}
+
+#[gpui::test]
+fn save_as_asks_before_replacing_an_existing_project(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("Song.vizdaw")).unwrap();
+    let typed = dir.path().join("Song");
+    let target = dir.path().join("Song.vizdaw");
+    let pick = typed.clone();
+    s.cx.dispatch_action(vizdaw_gpui::SaveAs);
+    s.cx.run_until_parked();
+    assert!(s.cx.did_prompt_for_new_path());
+    s.cx.simulate_new_path_selection(move |_| Some(pick.clone()));
+    s.cx.run_until_parked();
+    assert!(s.cx.has_pending_prompt());
+    assert!(save_as_calls(&s).is_empty());
+    s.cx.simulate_prompt_answer("Cancel");
+    s.cx.run_until_parked();
+    assert!(save_as_calls(&s).is_empty());
+
+    let pick = typed.clone();
+    s.cx.dispatch_action(vizdaw_gpui::SaveAs);
+    s.cx.run_until_parked();
+    s.cx.simulate_new_path_selection(move |_| Some(pick.clone()));
+    s.cx.run_until_parked();
+    assert!(s.cx.has_pending_prompt());
+    s.cx.simulate_prompt_answer("Replace");
+    s.cx.run_until_parked();
+    assert_eq!(
+        save_as_calls(&s),
+        vec![format!("save_as({})", target.display())]
+    );
+}
+
+#[gpui::test]
+fn save_as_to_a_new_name_does_not_ask(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    let dir = tempfile::tempdir().unwrap();
+    let pick = dir.path().join("New");
+    s.cx.dispatch_action(vizdaw_gpui::SaveAs);
+    s.cx.run_until_parked();
+    s.cx.simulate_new_path_selection(move |_| Some(pick.clone()));
+    s.cx.run_until_parked();
+    assert!(!s.cx.has_pending_prompt());
+    assert_eq!(
+        save_as_calls(&s),
+        vec![format!(
+            "save_as({})",
+            dir.path().join("New.vizdaw").display()
+        )]
+    );
+}
