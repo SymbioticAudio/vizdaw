@@ -10,7 +10,8 @@ use core_control::bindings::Keymap;
 use gpui::{App, AppContext, Entity, Global, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::transport::{PollResult, TransportModel, TransportReadout};
-use vizdaw_app::{DocId, DocumentStore, SaveAction, WindowToken};
+use vizdaw_app::transport_bar::TransportLayout;
+use vizdaw_app::{DocId, DocumentStore, Prefs, SaveAction, WindowToken};
 
 use crate::shell::DocumentWindow;
 
@@ -26,6 +27,10 @@ pub struct AppState {
     pub store: DocumentStore,
     /// The keys of every command (the registry's defaults for now).
     pub keymap: Keymap,
+    /// The app's preferences: every document window draws its transport
+    /// bar from them, so a change redraws them all. In memory until
+    /// [`crate::run`] opens the launch home's.
+    pub prefs: Prefs,
     /// Each document's transport, built from that document and only ever
     /// called with it.
     transports: HashMap<DocId, TransportModel>,
@@ -47,6 +52,7 @@ impl AppState {
         AppState {
             store,
             keymap: Keymap::default(),
+            prefs: Prefs::in_memory(),
             transports: HashMap::new(),
             windows: Vec::new(),
             next_token: 1,
@@ -61,6 +67,11 @@ impl AppState {
 
     pub(crate) fn set_global(state: Entity<AppState>, cx: &mut App) {
         cx.set_global(GlobalAppState(state));
+    }
+
+    /// The transport bar every document window draws.
+    pub fn transport_layout(&self) -> TransportLayout {
+        self.prefs.transport_bar()
     }
 
     pub fn windows(&self) -> &[WindowEntry] {

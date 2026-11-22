@@ -9,6 +9,7 @@ pub mod shell;
 pub mod text_input;
 pub mod track_headers;
 pub mod transport_bar;
+pub mod transport_fields;
 
 use std::path::Path;
 
@@ -210,7 +211,10 @@ pub fn quit_now(cx: &mut App) {
 pub fn run() {
     let options = control::LaunchOptions::from_env();
     gpui_platform::application().run(move |cx: &mut App| {
-        install(DocumentStore::live(), cx);
+        let state = install(DocumentStore::live(), cx);
+        // The preferences under the launch home (a throwaway e2e home
+        // keeps its own).
+        state.update(cx, |s, _| s.prefs = vizdaw_app::Prefs::open());
         // Before any document opens.
         if let Some(path) = &options.control
             && let Err(e) = control::start(path, cx)

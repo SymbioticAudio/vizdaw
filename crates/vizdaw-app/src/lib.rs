@@ -4,6 +4,7 @@
 pub mod alerts;
 pub mod commands;
 pub mod document;
+pub mod position;
 pub mod prefs;
 pub mod session;
 pub mod store;
@@ -11,6 +12,7 @@ pub mod store;
 pub mod testing;
 pub mod transport;
 pub mod transport_bar;
+pub mod transport_fields;
 
 pub use alerts::AlertItem;
 pub use document::{DocumentModel, SaveAction};

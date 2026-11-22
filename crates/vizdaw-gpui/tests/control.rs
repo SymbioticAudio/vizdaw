@@ -720,3 +720,44 @@ fn launch_arguments_take_the_socket_and_ignore_the_rest() {
     );
     assert!(!o.demo);
 }
+
+#[gpui::test]
+fn a_channel_click_on_more_names_the_bar_command(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let window = cx.update(|cx| AppState::global(cx).read(cx).windows()[0].handle);
+    cx.simulate_window_resize(window.into(), gpui::size(gpui::px(600.), gpui::px(640.)));
+    cx.run_until_parked();
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    let node = |label: &str| {
+        tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["label"] == label)
+            .cloned()
+    };
+    let more = node("More Transport Items").unwrap_or_else(|| panic!("no » in {tree}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ok(call(&s, cx, "ui.click", json!({"element": more})));
+    let status = cx.update(|cx| {
+        let s = AppState::global(cx).read(cx);
+        let doc = s.windows()[0].doc;
+        s.store.document(doc).unwrap().status().map(String::from)
+    });
+    assert_eq!(
+        status.as_deref(),
+        Some("The \u{bb} menu does not open for the control channel; use ui.set_transport_bar.")
+    );
+    // The menu stays shut.
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    assert!(
+        !tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["role"] == "menuitem" && n["label"] == "Position Field")
+    );
+}

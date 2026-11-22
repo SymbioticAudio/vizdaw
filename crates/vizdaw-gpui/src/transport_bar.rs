@@ -1,31 +1,210 @@
-//! The transport bar: Play/Stop, Stop and Return, and the bar and time
-//! readouts (tempo and signature come with sequence info in slice 2).
+//! The transport bar, drawn from the app's [`TransportLayout`] (Swift:
+//! `TransportRowView`, `TransportItemViews`, `TransportReadoutsView`,
+//! `TransportFieldsView`): the cluster (Return to Start, Rewind, Fast
+//! Forward, Play/Stop), Loop, the four readouts, the Position and Edit
+//! In/Out fields and flexible space; what does not fit folds, last first,
+//! into the » menu. Recording, the click, step entry, faults and the view
+//! items come with their slices and are not drawn yet.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement, Rgba, Stateful,
-    StatefulInteractiveElement, Styled, div, px, rgb,
+    AnyElement, Context, Div, ElementId, Focusable, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, Rgba, Stateful, StatefulInteractiveElement, Styled, Window,
+    anchored, deferred, div, point, px, rgb,
 };
 use vizdaw_app::transport::{ReadoutBox, TransportReadout};
+use vizdaw_app::transport_bar::{Fit, ItemKind, TransportItem, TransportLayout, fit};
+use vizdaw_app::transport_fields::TransportField;
 
-use crate::menus::{PlayStop, StopAndReturn};
+use crate::control;
+use crate::menus::PlayStop;
 use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
+use crate::transport_fields::TransportFields;
 
 /// What the bar draws.
 pub struct BarState {
     pub readout: TransportReadout,
     pub can_play: bool,
+    /// A sequence is shown (Return to Start, Rewind and Fast Forward need
+    /// one).
+    pub has_sequence: bool,
+    pub looping: bool,
+    /// What each field shows when it is not being typed in.
+    pub field_texts: Vec<(TransportField, String)>,
+}
+
+impl BarState {
+    fn field_text(&self, f: TransportField) -> &str {
+        self.field_texts
+            .iter()
+            .find(|(g, _)| *g == f)
+            .map_or("", |(_, t)| t.as_str())
+    }
 }
 
 pub(crate) mod colors {
     pub const BAR: u32 = 0x26262e;
     pub const BUTTON: u32 = 0x3a3f4f;
     pub const PLAYING: u32 = 0x2f6f4f;
+    pub const ON: u32 = 0x3f5f8f;
     pub const READOUT: u32 = 0x15151a;
+    pub const FIELD: u32 = 0xf4f4f6;
     pub const TEXT: u32 = 0xe8e8ec;
     pub const DISABLED: u32 = 0x77777f;
     pub const DIM: u32 = 0x9a9aa6;
+    pub const LIST: u32 = 0x2e2e38;
+    pub const BORDER: u32 = 0x4a4a56;
+}
+
+/// The row's padding and the gap between its pieces (Swift: 8 and the
+/// theme's medium spacing).
+pub const PADDING: f32 = 8.;
+pub const GAP: f32 = 8.;
+/// The » button's width.
+pub const CHEVRON: f32 = 28.;
+const CLUSTER_BUTTON: f32 = 32.;
+const CLUSTER_GAP: f32 = 4.;
+const LOOP: f32 = 48.;
+/// A field's width (Swift `fieldWidth`).
+const FIELD: f32 = 86.;
+const LABEL_GAP: f32 = 4.;
+const HEIGHT: f32 = 36.;
+
+/// The » button's label, and what a channel click on it says (Swift
+/// `TransportRowView.channelNote`).
+pub const MORE: &str = "More Transport Items";
+pub const MORE_ON_CHANNEL: &str =
+    "The \u{bb} menu does not open for the control channel; use ui.set_transport_bar.";
+
+/// One drawn piece of the bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Piece {
+    Cluster,
+    Loop,
+    Readout(ReadoutBox),
+    Position,
+    EditFields,
+    Space,
+}
+
+impl Piece {
+    fn of(item: &TransportItem) -> Option<Piece> {
+        Some(match item {
+            TransportItem::Cluster => Piece::Cluster,
+            TransportItem::Loop => Piece::Loop,
+            TransportItem::Bar(_) => Piece::Readout(ReadoutBox::Bar),
+            TransportItem::Time(_) => Piece::Readout(ReadoutBox::Time),
+            TransportItem::Tempo(_) => Piece::Readout(ReadoutBox::Tempo),
+            TransportItem::Signature => Piece::Readout(ReadoutBox::Signature),
+            TransportItem::PositionField => Piece::Position,
+            TransportItem::EditFields => Piece::EditFields,
+            TransportItem::Space => Piece::Space,
+            _ => return None,
+        })
+    }
+
+    /// The width it takes. Fixed, so the readouts fit their widest texts
+    /// ("9999.4.960", "999:59.999", "999.99", "255/128") and the bar
+    /// folds the same way whatever is playing.
+    pub fn width(self) -> f32 {
+        match self {
+            Piece::Cluster => 4. * CLUSTER_BUTTON + 3. * CLUSTER_GAP,
+            Piece::Loop => LOOP,
+            Piece::Readout(b) => readout_width(b),
+            Piece::Position => label_width(TransportField::Position) + LABEL_GAP + FIELD,
+            Piece::EditFields => {
+                label_width(TransportField::EditIn)
+                    + label_width(TransportField::EditOut)
+                    + 2. * (LABEL_GAP + FIELD)
+                    + GAP
+            }
+            Piece::Space => 0.,
+        }
+    }
+
+    /// Its title in the » menu (Swift `TransportItemID.title`).
+    pub fn title(self) -> &'static str {
+        match self {
+            Piece::Cluster => "Transport Controls",
+            Piece::Loop => "Loop",
+            Piece::Readout(ReadoutBox::Bar) => "Position in Bars",
+            Piece::Readout(ReadoutBox::Time) => "Position in Time",
+            Piece::Readout(ReadoutBox::Tempo) => "Tempo",
+            Piece::Readout(ReadoutBox::Signature) => "Time Signature",
+            Piece::Position => "Position Field",
+            Piece::EditFields => "Edit In and Out",
+            Piece::Space => "Flexible Space",
+        }
+    }
+
+    fn fields(self) -> &'static [TransportField] {
+        match self {
+            Piece::Position => &[TransportField::Position],
+            Piece::EditFields => &[TransportField::EditIn, TransportField::EditOut],
+            _ => &[],
+        }
+    }
+}
+
+fn readout_width(b: ReadoutBox) -> f32 {
+    match b {
+        ReadoutBox::Bar | ReadoutBox::Time => 84.,
+        ReadoutBox::Tempo => 56.,
+        ReadoutBox::Signature => 60.,
+    }
+}
+
+fn label_width(f: TransportField) -> f32 {
+    match f {
+        TransportField::Position | TransportField::EditOut => 52.,
+        TransportField::EditIn => 44.,
+    }
+}
+
+/// Which pieces a bar of `width` shows and which fold into ».
+pub struct Plan {
+    pieces: Vec<Piece>,
+    fit: Fit,
+}
+
+impl Plan {
+    pub fn new(layout: &TransportLayout, width: f32) -> Plan {
+        let pieces: Vec<Piece> = layout
+            .items_for(true)
+            .into_iter()
+            .filter_map(Piece::of)
+            .collect();
+        let widths: Vec<(f32, bool, ItemKind)> = pieces
+            .iter()
+            .map(|p| {
+                let kind = if *p == Piece::Space {
+                    ItemKind::Space
+                } else {
+                    ItemKind::Content
+                };
+                (p.width(), *p == Piece::Cluster, kind)
+            })
+            .collect();
+        let fit = fit(&widths, width - 2. * PADDING, GAP, CHEVRON);
+        Plan { pieces, fit }
+    }
+
+    pub fn shown(&self) -> Vec<Piece> {
+        self.fit.shown.iter().map(|&i| self.pieces[i]).collect()
+    }
+
+    pub fn folded(&self) -> Vec<Piece> {
+        self.fit.folded.iter().map(|&i| self.pieces[i]).collect()
+    }
+
+    /// The fields drawn, in bar order (Tab goes through them).
+    pub fn shown_fields(&self) -> Vec<TransportField> {
+        self.shown()
+            .into_iter()
+            .flat_map(|p| p.fields().iter().copied())
+            .collect()
+    }
 }
 
 fn color(enabled: bool) -> Rgba {
@@ -45,56 +224,101 @@ pub(crate) fn button(
     background: u32,
     scope: &mut RegistryScope,
 ) -> Stateful<Div> {
+    face(id, label, enabled, background)
+        .min_w(px(96.))
+        .px_3()
+        .child(scope.control("button", label, enabled))
+}
+
+/// A button's look, showing `text`, unrecorded.
+fn face(id: impl Into<ElementId>, text: &str, enabled: bool, background: u32) -> Stateful<Div> {
     div()
         .id(id)
         .relative()
         .h(px(28.))
-        .min_w(px(96.))
-        .px_3()
         .flex()
+        .flex_none()
         .items_center()
         .justify_center()
         .rounded_md()
         .bg(rgb(background))
         .text_color(color(enabled))
         .when(enabled, |b| b.cursor_pointer())
-        .child(label.to_owned())
+        .child(text.to_owned())
+}
+
+/// A cluster button: a glyph, with the Swift label in the tree.
+fn cluster_button(
+    id: &'static str,
+    glyph: &str,
+    label: &str,
+    enabled: bool,
+    background: u32,
+    scope: &mut RegistryScope,
+) -> Stateful<Div> {
+    face(id, glyph, enabled, background)
+        .w(px(CLUSTER_BUTTON))
         .child(scope.control("button", label, enabled))
 }
 
-fn readout(which: ReadoutBox, text: &str, scope: &mut RegistryScope) -> Div {
-    div()
-        .relative()
-        .w(px(132.))
-        .h(px(36.))
-        .px_2()
-        .flex()
-        .flex_col()
-        .justify_center()
-        .rounded_md()
-        .bg(rgb(colors::READOUT))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(colors::DIM))
-                .child(which.title()),
+/// Rewind or Fast Forward: pressed on mouse-down (⇧: a marker step on
+/// release), held it winds, the release lands. A release elsewhere is the
+/// window root's (`shuttle_release(false)`).
+fn hold_button(
+    forward: bool,
+    enabled: bool,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> Stateful<Div> {
+    let (id, glyph, label) = if forward {
+        ("fast-forward", "\u{25b6}\u{25b6}", "Fast Forward")
+    } else {
+        ("rewind", "\u{25c0}\u{25c0}", "Rewind")
+    };
+    cluster_button(id, glyph, label, enabled, colors::BUTTON, scope).when(enabled, |b| {
+        b.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                this.shuttle_press(forward, e.modifiers.shift, window, cx)
+            }),
         )
-        .child(div().text_color(rgb(colors::TEXT)).child(text.to_owned()))
-        .child(scope.control("text", which.accessibility_label(), true))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.shuttle_release(true, cx)),
+        )
+    })
 }
 
-pub fn render(
+fn cluster(
     state: &BarState,
     scope: &mut RegistryScope,
     cx: &mut Context<DocumentWindow>,
-) -> impl IntoElement {
+) -> AnyElement {
     let playing = state.readout.playing;
-    let play_label = if playing { "Stop" } else { "Play" };
-    let play_enabled = state.can_play;
-    let play = button(
+    let seq = state.has_sequence;
+    let ret = cluster_button(
+        "return-to-start",
+        "|\u{25c0}",
+        "Return to Start",
+        seq,
+        colors::BUTTON,
+        scope,
+    )
+    .when(seq, |b| {
+        b.on_click(cx.listener(|this, _, _, cx| this.return_to_start(cx)))
+    });
+    let rewind = hold_button(false, seq, scope, cx);
+    let forward = hold_button(true, seq, scope, cx);
+    let (glyph, label) = if playing {
+        ("\u{25a0}", "Stop")
+    } else {
+        ("\u{25b6}", "Play")
+    };
+    let play = cluster_button(
         "play-stop",
-        play_label,
-        play_enabled,
+        glyph,
+        label,
+        state.can_play,
         if playing {
             colors::PLAYING
         } else {
@@ -102,32 +326,287 @@ pub fn render(
         },
         scope,
     )
-    .when(play_enabled, |b| {
+    .when(state.can_play, |b| {
         b.on_click(cx.listener(|this, _, window, cx| this.play_stop(&PlayStop, window, cx)))
     });
-    let stop = button(
-        "stop-and-return",
-        "Stop and Return",
-        playing,
-        colors::BUTTON,
-        scope,
-    )
-    .when(playing, |b| {
-        b.on_click(
-            cx.listener(|this, _, window, cx| this.stop_and_return(&StopAndReturn, window, cx)),
-        )
-    });
-    let texts = &state.readout.texts;
     div()
         .flex()
         .flex_row()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .bg(rgb(colors::BAR))
+        .flex_none()
+        .gap(px(CLUSTER_GAP))
+        .child(ret)
+        .child(rewind)
+        .child(forward)
         .child(play)
-        .child(stop)
-        .child(readout(ReadoutBox::Bar, &texts.bar, scope))
-        .child(readout(ReadoutBox::Time, &texts.time, scope))
+        .into_any_element()
+}
+
+fn loop_button(
+    on: bool,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let value = if on { "on" } else { "off" };
+    face(
+        "loop",
+        "Loop",
+        true,
+        if on { colors::ON } else { colors::BUTTON },
+    )
+    .w(px(LOOP))
+    .child(scope.control_with("button", "Loop", true, Some(value), false))
+    .on_click(cx.listener(|this, _, _, cx| this.toggle_loop(cx)))
+    .into_any_element()
+}
+
+fn readout(which: ReadoutBox, text: &str, scope: &mut RegistryScope) -> AnyElement {
+    div()
+        .relative()
+        .flex_none()
+        .w(px(readout_width(which)))
+        .h(px(HEIGHT))
+        .px_2()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .rounded_md()
+        .bg(rgb(colors::READOUT))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(colors::DIM))
+                .child(which.title()),
+        )
+        .child(div().text_color(rgb(colors::TEXT)).child(text.to_owned()))
+        .child(scope.control_with("text", which.accessibility_label(), true, Some(text), false))
+        .into_any_element()
+}
+
+/// A field with its label: the model's text until a click (or its key)
+/// starts an edit, then the text input.
+fn field(
+    f: TransportField,
+    state: &BarState,
+    fields: &TransportFields,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let input = fields.input(f).clone();
+    let editing = fields.editing() == Some(f);
+    let focused = editing && input.focus_handle(cx).is_focused(window);
+    let value = if editing {
+        input.read(cx).text().to_owned()
+    } else {
+        state.field_text(f).to_owned()
+    };
+    let boxed = div()
+        .id(("transport-field", f as usize))
+        .relative()
+        .flex_none()
+        .w(px(FIELD))
+        .h(px(24.))
+        .rounded_sm()
+        .overflow_hidden()
+        .text_color(rgb(0x000000));
+    let boxed = if editing {
+        boxed
+            .child(input)
+            .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
+                // A press elsewhere ends the edit, then goes on to what it
+                // hit.
+                this.end_field(f, false, window, cx)
+            }))
+    } else {
+        boxed
+            .bg(rgb(colors::FIELD))
+            .px(px(4.))
+            .flex()
+            .items_center()
+            .text_size(px(13.))
+            .whitespace_nowrap()
+            .cursor_text()
+            .child(state.field_text(f).to_owned())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    // The first click selects all the text; the window's
+                    // root must not take the focus back.
+                    window.prevent_default();
+                    this.begin_field(f, window, cx)
+                }),
+            )
+    };
+    let boxed =
+        boxed.child(scope.control_with("textfield", f.title(), true, Some(&value), focused));
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(px(LABEL_GAP))
+        .child(
+            div()
+                .w(px(label_width(f)))
+                .flex_none()
+                .text_xs()
+                .text_color(rgb(colors::DIM))
+                .whitespace_nowrap()
+                .child(f.title()),
+        )
+        .child(boxed)
+        .into_any_element()
+}
+
+fn more_button(
+    open: bool,
+    folded: &[Piece],
+    state: &BarState,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let mut chevron = face("more", "\u{bb}", true, colors::BUTTON)
+        .w(px(CHEVRON))
+        .child(scope.control("button", MORE, true))
+        .on_click(cx.listener(|this, _, _, cx| {
+            if control::is_channel_click() {
+                // The menu would track modally: name the command instead.
+                this.set_status(MORE_ON_CHANNEL, cx);
+                return;
+            }
+            this.toggle_more(cx);
+        }));
+    if open {
+        let size = window.viewport_size();
+        chevron = chevron
+            .child(
+                deferred(
+                    anchored().position(point(px(0.), px(0.))).child(
+                        div()
+                            .id("more-backdrop")
+                            .w(size.width)
+                            .h(size.height)
+                            .occlude()
+                            .on_any_mouse_down(cx.listener(|this, _, _, cx| this.close_more(cx))),
+                    ),
+                )
+                .with_priority(1),
+            )
+            .child(
+                div().absolute().top_full().right_0().child(
+                    deferred(anchored().snap_to_window().child(more_menu(
+                        folded,
+                        state,
+                        &mut scope.container(),
+                        cx,
+                    )))
+                    .with_priority(2),
+                ),
+            );
+    }
+    chevron.into_any_element()
+}
+
+/// The folded items: Loop toggles; a readout or field shows its text.
+fn more_menu(
+    folded: &[Piece],
+    state: &BarState,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let mut list = div()
+        .id("more-menu")
+        .occlude()
+        .flex()
+        .flex_col()
+        .min_w(px(220.))
+        .py_1()
+        .bg(rgb(colors::LIST))
+        .border_1()
+        .border_color(rgb(colors::BORDER))
+        .rounded_md()
+        .shadow_md()
+        .text_color(rgb(colors::TEXT));
+    for (row, piece) in folded.iter().copied().enumerate() {
+        let detail = match piece {
+            Piece::Loop => if state.looping { "On" } else { "Off" }.to_owned(),
+            Piece::Readout(b) => state.readout.texts.text(b).to_owned(),
+            Piece::Position | Piece::EditFields => piece
+                .fields()
+                .iter()
+                .map(|f| state.field_text(*f))
+                .collect::<Vec<_>>()
+                .join(" \u{2013} "),
+            Piece::Cluster | Piece::Space => String::new(),
+        };
+        let acts = piece == Piece::Loop;
+        let mut entry = div()
+            .id(("more-item", row))
+            .relative()
+            .flex()
+            .flex_row()
+            .gap_3()
+            .px_3()
+            .py_1()
+            .child(div().flex_1().child(piece.title()))
+            .child(div().text_color(rgb(colors::DIM)).child(detail))
+            .child(scope.control("menuitem", piece.title(), acts));
+        if acts {
+            entry = entry
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_more(cx);
+                    this.toggle_loop(cx);
+                }));
+        }
+        list = list.child(entry);
+    }
+    list.into_any_element()
+}
+
+/// The bar: `plan`'s shown pieces, then » when anything folds.
+pub fn render(
+    state: &BarState,
+    plan: &Plan,
+    fields: &TransportFields,
+    more_open: bool,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> impl IntoElement {
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(GAP))
+        .p(px(PADDING))
+        .bg(rgb(colors::BAR))
+        .overflow_hidden();
+    for piece in plan.shown() {
+        let child = match piece {
+            Piece::Cluster => cluster(state, scope, cx),
+            Piece::Loop => loop_button(state.looping, scope, cx),
+            Piece::Readout(b) => readout(b, state.readout.texts.text(b), scope),
+            Piece::Position | Piece::EditFields => {
+                let mut group = div().flex().flex_row().flex_none().gap(px(GAP));
+                for f in piece.fields() {
+                    group = group.child(field(*f, state, fields, scope, window, cx));
+                }
+                group.into_any_element()
+            }
+            Piece::Space => div().flex_1().into_any_element(),
+        };
+        row = row.child(child);
+    }
+    let folded = plan.folded();
+    if !folded.is_empty() {
+        row = row
+            .child(div().flex_1())
+            .child(more_button(more_open, &folded, state, scope, window, cx));
+    }
+    row
 }

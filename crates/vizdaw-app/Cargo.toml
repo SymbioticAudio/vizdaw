@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 core-control = { path = "../core-control" }
 core-ffi = { path = "../core-ffi" }
+core-model = { path = "../core-model" }
 serde_json = "1"
 
 [features]

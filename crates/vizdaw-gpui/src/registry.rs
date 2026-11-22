@@ -22,6 +22,10 @@ pub struct Element {
     pub label: String,
     pub bounds: Bounds<Pixels>,
     pub enabled: bool,
+    /// The text a readout or field shows (a toggle: "on" or "off").
+    pub value: Option<String>,
+    /// A field that has the keyboard.
+    pub focused: bool,
 }
 
 /// What one window drew last frame.
@@ -46,6 +50,21 @@ impl Registry {
         bounds: Bounds<Pixels>,
         enabled: bool,
     ) {
+        self.record_with(path, role, label, bounds, enabled, None, false);
+    }
+
+    /// As [`record`](Self::record), with the node's `value` and `focused`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with(
+        &mut self,
+        path: &[u32],
+        role: &str,
+        label: &str,
+        bounds: Bounds<Pixels>,
+        enabled: bool,
+        value: Option<&str>,
+        focused: bool,
+    ) {
         self.elements.push(Element {
             id: core_control::element::element_id(path, role, label),
             path: path.to_vec(),
@@ -53,6 +72,8 @@ impl Registry {
             label: label.to_owned(),
             bounds,
             enabled,
+            value: value.map(str::to_owned),
+            focused,
         });
     }
 
@@ -80,6 +101,12 @@ impl Registry {
                 });
                 if e.role == "button" {
                     n["actions"] = json!(["press"]);
+                }
+                if let Some(v) = &e.value {
+                    n["value"] = json!(v);
+                }
+                if e.focused {
+                    n["focused"] = json!(true);
                 }
                 n
             })
@@ -150,9 +177,7 @@ impl RegistryScope {
         overlay(
             self.registry.clone(),
             self.path.clone(),
-            role,
-            label,
-            enabled,
+            Node::new(role, label, enabled),
         )
     }
 
@@ -163,24 +188,60 @@ impl RegistryScope {
     /// text in a block container).
     pub fn control(&mut self, role: &str, label: &str, enabled: bool) -> impl IntoElement {
         let path = self.take_index();
-        overlay(self.registry.clone(), path, role, label, enabled)
+        overlay(self.registry.clone(), path, Node::new(role, label, enabled))
+    }
+
+    /// As [`control`](Self::control), with the text the control shows as
+    /// the node's `value` (when `Some`) and `focused` (when true).
+    pub fn control_with(
+        &mut self,
+        role: &str,
+        label: &str,
+        enabled: bool,
+        value: Option<&str>,
+        focused: bool,
+    ) -> impl IntoElement {
+        let path = self.take_index();
+        let mut node = Node::new(role, label, enabled);
+        node.value = value.map(str::to_owned);
+        node.focused = focused;
+        overlay(self.registry.clone(), path, node)
     }
 }
 
-fn overlay(
-    registry: SharedRegistry,
-    path: Vec<u32>,
-    role: &str,
-    label: &str,
+/// What an overlay records.
+struct Node {
+    role: String,
+    label: String,
     enabled: bool,
-) -> impl IntoElement + use<> {
-    let role = role.to_owned();
-    let label = label.to_owned();
+    value: Option<String>,
+    focused: bool,
+}
+
+impl Node {
+    fn new(role: &str, label: &str, enabled: bool) -> Self {
+        Node {
+            role: role.to_owned(),
+            label: label.to_owned(),
+            enabled,
+            value: None,
+            focused: false,
+        }
+    }
+}
+
+fn overlay(registry: SharedRegistry, path: Vec<u32>, n: Node) -> impl IntoElement + use<> {
     canvas(
         move |bounds, _, _| {
-            registry
-                .borrow_mut()
-                .record(&path, &role, &label, bounds, enabled)
+            registry.borrow_mut().record_with(
+                &path,
+                &n.role,
+                &n.label,
+                bounds,
+                n.enabled,
+                n.value.as_deref(),
+                n.focused,
+            )
         },
         |_, _, _, _| {},
     )

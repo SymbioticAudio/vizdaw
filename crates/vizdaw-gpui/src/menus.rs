@@ -12,7 +12,7 @@ use core_control::bindings::{self, COMMAND, CONTROL, Chord, Keymap, OPTION, SHIF
 use core_control::registry;
 use gpui::{Action, App, Global, KeyBinding, Menu, MenuItem, SharedString, actions};
 use vizdaw_app::DocumentModel;
-use vizdaw_app::commands::{self, DOCUMENT_COMMANDS};
+use vizdaw_app::commands::{self, DOCUMENT_COMMANDS, TRANSPORT_COMMANDS};
 
 use crate::text_input;
 
@@ -237,17 +237,32 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     cmd("track.rename"),
                 ],
             ),
-            menu(
-                "Transport",
-                vec![
-                    slice1(PLAY_STOP, "Play / Stop", None, keymap),
-                    slice1(STOP_AND_RETURN, "Stop and Return", None, keymap),
-                ],
-            ),
+            menu("Transport", transport_items(front, keymap)),
             // macOS adds the window list.
             menu("Window", vec![]),
         ],
     }
+}
+
+/// The Transport menu: every transport command with a menu item, in
+/// registry order, with Swift's dividers (after the markers, after Click,
+/// after the field keys). Recording, Overdub, Punch, Click, the punch
+/// fields and arming are not handled yet, so they show disabled.
+fn transport_items(front: Option<&DocumentModel>, keymap: &Keymap) -> Vec<ItemSpec> {
+    let mut items = Vec::new();
+    for c in registry::COMMANDS
+        .iter()
+        .filter(|c| c.id.starts_with("transport.") && c.menu_item)
+    {
+        items.push(command(c.id, front, keymap));
+        if matches!(
+            c.id,
+            "transport.next_marker" | "transport.click" | "transport.go_punch"
+        ) {
+            items.push(ItemSpec::Separator);
+        }
+    }
+    items
 }
 
 /// The GPUI key name of a registry key, if GPUI has one.
@@ -318,8 +333,9 @@ fn interned(s: String) -> &'static str {
     k
 }
 
-/// Slice 1's bindings, then one per chord of each document command (a
-/// chord without a modifier only where [`UNMODIFIED_KEYS`] holds).
+/// Slice 1's bindings, then one per chord of each document and transport
+/// command (a chord without a modifier only where [`UNMODIFIED_KEYS`]
+/// holds).
 pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
     let mut keys = vec![
         KeyBinding::new(secondary!("n"), NewDocument, None),
@@ -334,8 +350,24 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
         KeyBinding::new("s", StopAndReturn, Some(UNMODIFIED_KEYS)),
     ];
     keys.extend(text_input::bindings());
-    for &id in DOCUMENT_COMMANDS {
+    // Rewind and Fast Forward are held keys: the window's key handler
+    // steps them per key-down and lands on key-up. Their keypad twins
+    // (Keypad- and Keypad+) are not bound: GPUI does not tell the keypad
+    // from the main keys, and the main - and + are not theirs.
+    let transport = TRANSPORT_COMMANDS.iter().filter(|id| {
+        !matches!(
+            **id,
+            "transport.play_stop"
+                | "transport.stop"
+                | "transport.rewind"
+                | "transport.fast_forward"
+        )
+    });
+    for &id in DOCUMENT_COMMANDS.iter().chain(transport) {
         for chord in keymap.chords(id) {
+            if bindings::key_name(chord.code).is_some_and(|n| n.starts_with("Keypad")) {
+                continue;
+            }
             let Some(k) = keystroke(&chord) else { continue };
             let context = if chord.mods == 0 {
                 UNMODIFIED_KEYS

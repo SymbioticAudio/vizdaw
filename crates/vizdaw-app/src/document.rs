@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef};
 use vizdaw_ffi::events::SequenceInfo;
-use vizdaw_ffi::selection::SelectionRow;
+use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
 
 use crate::alerts::{AlertItem, error_message};
@@ -203,6 +203,20 @@ impl DocumentModel {
             self.alert = Some(AlertItem::from_error(&e, "Selection Failed"));
         }
         // Hold exactly what the session holds (it drops unknown lanes).
+        self.refresh_selection();
+    }
+
+    /// Sets the selection's time range (the Edit In and Out fields); the
+    /// tracks and events stay. A failure is the alert "Selection Failed".
+    pub fn set_time_range(&mut self, range: TickRange) {
+        let want = SelectionRow {
+            time_range: Some(range),
+            ..self.selection.clone()
+        };
+        self.selection = want.clone();
+        if let Err(e) = self.session.set_selection(want) {
+            self.alert = Some(AlertItem::from_error(&e, "Selection Failed"));
+        }
         self.refresh_selection();
     }
 

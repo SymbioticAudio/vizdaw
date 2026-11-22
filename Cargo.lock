@@ -6380,6 +6380,7 @@ version = "26.0.0"
 dependencies = [
  "core-control",
  "core-ffi",
+ "core-model",
  "serde_json",
  "tempfile",
  "vizdaw-app",

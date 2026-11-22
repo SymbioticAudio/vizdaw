@@ -239,3 +239,84 @@ fn keystroke_spells_modifiers_for_gpui() {
         Some("f5")
     );
 }
+
+#[test]
+fn the_transport_menu_lists_every_transport_command() {
+    let keymap = Keymap::default();
+    let doc = demo_doc();
+    let m = menu_model(Some(&doc), &keymap);
+    let transport = m.menus.iter().find(|s| s.title == "Transport").unwrap();
+    let ids: Vec<&str> = transport
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ItemSpec::Command { id, .. } => Some(*id),
+            ItemSpec::Separator => None,
+        })
+        .collect();
+    // Every transport command with a menu item, in registry order.
+    let want: Vec<&str> = registry::COMMANDS
+        .iter()
+        .filter(|c| c.id.starts_with("transport.") && c.menu_item)
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(ids, want);
+    for c in registry::COMMANDS
+        .iter()
+        .filter(|c| c.id.starts_with("transport.") && c.menu_item)
+    {
+        let (id, _, keys, enabled) = item(&m, "Transport", c.title);
+        assert_eq!(id, c.id);
+        let want = c.shortcut.map(|s| Chord::parse(s).unwrap().text());
+        assert_eq!(keys.map(String::from), want, "{id}");
+        // Recording, the click, overdub, punch and arming come later.
+        let later = matches!(
+            id,
+            "transport.record"
+                | "transport.overdub"
+                | "transport.punch"
+                | "transport.click"
+                | "transport.go_punch"
+                | "transport.arm_previous"
+                | "transport.arm_next"
+        );
+        if later {
+            assert!(!enabled, "{id} is disabled");
+        }
+    }
+    // Stopped, with a sequence: these run.
+    for t in [
+        "Play / Stop",
+        "Rewind",
+        "Fast Forward",
+        "Return to Start",
+        "Loop",
+        "Go to Position Field",
+        "Go to Edit-In Field",
+    ] {
+        assert!(item(&m, "Transport", t).3, "{t}");
+    }
+    // Nothing is playing: Stop does not run; scrubbing is not here yet.
+    assert!(!item(&m, "Transport", "Stop").3);
+    assert!(!item(&m, "Transport", "Scrub").3);
+    // Every transport command's keys are bound, but the held keys (the
+    // bar's shuttle handles them) and the keypad twins (GPUI cannot tell
+    // the keypad from the main keys).
+    let all = menus::bindings(&keymap);
+    for &id in commands::TRANSPORT_COMMANDS {
+        if matches!(
+            id,
+            "transport.rewind"
+                | "transport.fast_forward"
+                | "transport.play_stop"
+                | "transport.stop"
+        ) {
+            continue;
+        }
+        let n = all
+            .iter()
+            .filter(|b| b.action().partial_eq(&menus::RunCommand::new(id)))
+            .count();
+        assert_eq!(n, keymap.chords(id).len(), "{id}");
+    }
+}

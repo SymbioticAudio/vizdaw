@@ -1,6 +1,8 @@
 //! The document window: one window per open document, with the menu bar
 //! (off macOS), the alert banner, the transport bar, the track header
 //! column beside the (for now empty) arrangement, and the status line.
+//! The window holds the bar's shuttle (Rewind and Fast Forward held, and
+//! their held keys) and its fields' edit.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -8,12 +10,14 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, PromptLevel, Render, StatefulInteractiveElement,
-    Styled, Subscription, Task, Window, WindowBounds, WindowHandle, WindowOptions, div, px, rgb,
-    size,
+    IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton, ParentElement, PromptLevel,
+    Render, StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowBounds,
+    WindowHandle, WindowOptions, div, px, rgb, size,
 };
-use vizdaw_app::alerts::AlertItem;
-use vizdaw_app::commands;
+use vizdaw_app::alerts::{AlertItem, error_message};
+use vizdaw_app::commands::{self, FieldFocus};
+use vizdaw_app::transport::Shuttle;
+use vizdaw_app::transport_fields::{self as fields_model, TransportField};
 use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
 use vizdaw_ffi::snapshot::LaneRow;
 
@@ -23,7 +27,8 @@ use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAn
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::track_headers::{HeadersState, Rename, TrackHeaders};
-use crate::transport_bar::{self, BarState, colors};
+use crate::transport_bar::{self, BarState, Plan, colors};
+use crate::transport_fields::TransportFields;
 
 /// How long a status text shows (Swift `StatusLine`).
 pub const STATUS_TIMEOUT: Duration = Duration::from_secs(6);
@@ -47,6 +52,14 @@ pub struct DocumentWindow {
     /// The status text last drawn, and the timer that clears it.
     status_shown: Option<String>,
     _status_timer: Option<Task<()>>,
+    /// The transport bar's Position and Edit In/Out fields.
+    pub(crate) transport_fields: TransportFields,
+    /// Rewind and Fast Forward held, and their held keys.
+    shuttle: Shuttle,
+    /// Winds a held button every `Shuttle::TICK_EVERY` until it ends.
+    _hold: Option<Task<()>>,
+    /// The transport bar's » menu is open.
+    more_open: bool,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -123,12 +136,23 @@ impl DocumentWindow {
                     let (doc, token) = (this.doc, this.token);
                     this.app
                         .update(cx, |s, _| s.store.focus_document(doc, token));
+                } else {
+                    // The window lost the keyboard: a field edit cancels, a
+                    // hold ends where it got to, a held key lands.
+                    this.cancel_field(window, cx);
+                    this.end_shuttle(cx);
                 }
             }),
         ];
         let state = app.clone();
-        subscriptions.push(cx.on_release(move |_, cx| {
+        subscriptions.push(cx.on_release(move |this: &mut Self, cx| {
+            this._hold = None;
+            let shuttle = &mut this.shuttle;
             state.update(cx, |s, cx| {
+                s.store.with_document(doc, |d, _| {
+                    shuttle.cancel(d);
+                    shuttle.key_up(d);
+                });
                 s.close_document(doc);
                 cx.notify();
             });
@@ -153,6 +177,10 @@ impl DocumentWindow {
             track_headers: TrackHeaders::default(),
             status_shown: None,
             _status_timer: None,
+            transport_fields: TransportFields::new(cx),
+            shuttle: Shuttle::new(),
+            _hold: None,
+            more_open: false,
             _subscriptions: subscriptions,
         }
     }
@@ -254,12 +282,136 @@ impl DocumentWindow {
                 })
                 .unzip()
         });
-        if let (Some(Err(e)), Some(Some(lane))) = (result, lane)
-            && e.dialog.as_deref() == Some("Rename Track")
-        {
-            self.begin_rename(lane, window, cx);
+        if action.id.starts_with("transport.") {
+            self.after_transport(window, cx);
+        }
+        match (result, lane) {
+            (Some(Err(e)), Some(Some(lane))) if e.dialog.as_deref() == Some("Rename Track") => {
+                self.begin_rename(lane, window, cx);
+            }
+            (Some(Ok(ran)), _) => match ran.focus {
+                Some(FieldFocus::Position) => {
+                    self.focus_field(TransportField::Position, window, cx)
+                }
+                Some(FieldFocus::EditIn) => self.focus_field(TransportField::EditIn, window, cx),
+                None => {}
+            },
+            _ => {}
         }
         cx.notify();
+    }
+
+    /// A transport command ran: the readouts read it now, and the poll
+    /// takes the interval playing or stopping set.
+    fn after_transport(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let doc = self.doc;
+        self.app.update(cx, |s, cx| {
+            s.poll(doc);
+            cx.notify();
+        });
+        self.restart_polling(window, cx);
+    }
+
+    /// Return to Start, the bar's button: a refusal shows in the status
+    /// line.
+    pub(crate) fn return_to_start(&mut self, cx: &mut Context<Self>) {
+        let doc = self.doc;
+        self.with_model(cx, |d| {
+            if let Err(e) = d.move_to(0) {
+                d.set_status(Some(error_message(&e)));
+            }
+        });
+        self.app.update(cx, |s, _| s.poll(doc));
+    }
+
+    /// The bar's Loop button; a refusal is the alert "Loop Failed".
+    pub(crate) fn toggle_loop(&mut self, cx: &mut Context<Self>) {
+        self.with_model(cx, DocumentModel::toggle_loop);
+    }
+
+    pub(crate) fn toggle_more(&mut self, cx: &mut Context<Self>) {
+        self.more_open = !self.more_open;
+        cx.notify();
+    }
+
+    pub(crate) fn close_more(&mut self, cx: &mut Context<Self>) {
+        self.more_open = false;
+        cx.notify();
+    }
+
+    /// Runs `f` on the shuttle and the window's document.
+    fn with_shuttle<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Shuttle, &mut DocumentModel) -> R,
+    ) -> Option<R> {
+        let doc = self.doc;
+        let shuttle = &mut self.shuttle;
+        self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.store.with_document(doc, |d, _| f(shuttle, d))
+        })
+    }
+
+    /// Rewind (`forward` false) or Fast Forward pressed: held, it winds
+    /// every `Shuttle::TICK_EVERY` until the release or a cancel.
+    pub(crate) fn shuttle_press(
+        &mut self,
+        forward: bool,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let now = cx.background_executor().now();
+        let holding = self
+            .with_shuttle(cx, |sh, d| {
+                sh.press(forward, shift, now, d);
+                sh.holding()
+            })
+            .unwrap_or(false);
+        self._hold = holding.then(|| {
+            cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Shuttle::TICK_EVERY).await;
+                    let going = this.update(cx, |this, cx| {
+                        let now = cx.background_executor().now();
+                        let going = this
+                            .with_shuttle(cx, |sh, d| {
+                                sh.tick(now, d);
+                                sh.holding()
+                            })
+                            .unwrap_or(false);
+                        let doc = this.doc;
+                        this.app.update(cx, |s, _| s.poll(doc));
+                        going
+                    });
+                    if !matches!(going, Ok(true)) {
+                        break;
+                    }
+                }
+            })
+        });
+    }
+
+    /// The held button is released, over it (`inside`) or not.
+    pub(crate) fn shuttle_release(&mut self, inside: bool, cx: &mut Context<Self>) {
+        if !self.shuttle.holding() {
+            return;
+        }
+        self._hold = None;
+        let now = cx.background_executor().now();
+        self.with_shuttle(cx, |sh, d| sh.release(inside, now, d));
+        let doc = self.doc;
+        self.app.update(cx, |s, _| s.poll(doc));
+    }
+
+    /// Ends a hold where it got to and lands a held key.
+    fn end_shuttle(&mut self, cx: &mut Context<Self>) {
+        self._hold = None;
+        self.with_shuttle(cx, |sh, d| {
+            sh.cancel(d);
+            sh.key_up(d);
+        });
     }
 
     /// The track header column's state.
@@ -276,7 +428,7 @@ impl DocumentWindow {
         self.track_headers.renaming()
     }
 
-    fn with_model<R>(
+    pub(crate) fn with_model<R>(
         &mut self,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut DocumentModel) -> R,
@@ -389,8 +541,10 @@ impl DocumentWindow {
         let field = cx.new(|cx| TextInput::new("Name", cx).with_text(&row.name));
         let focus = field.focus_handle(cx);
         let subscriptions = vec![
-            cx.subscribe_in(&field, window, |this, _, event, window, cx| {
-                this.end_rename(*event == TextInputEvent::Confirm, window, cx)
+            cx.subscribe_in(&field, window, |this, _, event, window, cx| match event {
+                TextInputEvent::Confirm => this.end_rename(true, window, cx),
+                TextInputEvent::Cancel => this.end_rename(false, window, cx),
+                TextInputEvent::Tab | TextInputEvent::BackTab => {}
             }),
             cx.on_blur(&focus, window, |this, window, cx| {
                 this.end_rename(true, window, cx)
@@ -444,15 +598,37 @@ impl DocumentWindow {
         }
     }
 
-    /// Escape closes an open menu list (the key goes no further).
-    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// Escape closes an open menu list (the key goes no further). ⇧, and
+    /// ⇧. (Rewind and Fast Forward) step a bar per key-down and
+    /// auto-repeat while the window has the keyboard.
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(forward) = held_key(&event.keystroke)
+            && window.focused(cx).is_none_or(|f| f == self.focus)
+        {
+            cx.stop_propagation();
+            self.with_shuttle(cx, |sh, d| {
+                let _ = sh.key_down(forward, d);
+            });
+            let doc = self.doc;
+            self.app.update(cx, |s, _| s.poll(doc));
+            return;
+        }
         if event.keystroke.key != "escape" {
             return;
         }
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
-        if self.menu_bar.as_mut().is_some_and(MenuBar::close) || headers {
+        let more = std::mem::take(&mut self.more_open);
+        if self.menu_bar.as_mut().is_some_and(MenuBar::close) || headers || more {
             cx.stop_propagation();
             cx.notify();
+        }
+    }
+
+    /// The held key is up: one landing if it stepped.
+    fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let k = event.keystroke.key.as_str();
+        if matches!(k, "," | "." | "<" | ">") {
+            self.with_shuttle(cx, |sh, d| sh.key_up(d));
         }
     }
 
@@ -465,18 +641,15 @@ impl DocumentWindow {
         self.restart_polling(window, cx);
     }
 
+    /// `transport.stop` (S): stops and returns to where playing started;
+    /// while stopped the status line says "Nothing is playing.".
     pub fn stop_and_return(
         &mut self,
         _: &StopAndReturn,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let doc = self.doc;
-        self.app.update(cx, |s, cx| {
-            s.stop_and_return(doc);
-            cx.notify();
-        });
-        self.restart_polling(window, cx);
+        self.run_command(&RunCommand::new("transport.stop"), window, cx);
     }
 
     /// Starting or stopping changes the interval: wait the new one, not
@@ -688,24 +861,44 @@ impl Focusable for DocumentWindow {
 impl Render for DocumentWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.doc;
-        let (title, dirty, alert, bar, model, front, lanes, selected, status) = {
+        let (title, dirty, alert, bar, model, front, lanes, selected, status, layout) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
             (
                 s.title(doc).unwrap_or_default(),
                 s.is_dirty(doc),
                 s.store.alert().cloned(),
-                s.readout(doc).map(|readout| BarState {
+                s.readout(doc).zip(d).map(|(readout, d)| BarState {
                     readout,
                     can_play: s.can_play(doc),
+                    has_sequence: d.selected_seq().is_some(),
+                    looping: d.looping(),
+                    field_texts: TransportField::ALL
+                        .into_iter()
+                        .map(|f| (f, fields_model::field_text(d, f)))
+                        .collect(),
                 }),
                 menus::menu_model(s.store.document(doc), &s.keymap),
                 s.store.front().is_none_or(|f| f == doc),
                 d.map(|d| d.lanes().to_vec()).unwrap_or_default(),
                 d.map(DocumentModel::selected_lanes).unwrap_or_default(),
                 d.and_then(|d| d.status().map(String::from)),
+                s.transport_layout(),
             )
         };
+        let plan = Plan::new(&layout, f32::from(window.viewport_size().width));
+        self.set_shown_fields(
+            if bar.is_some() {
+                plan.shown_fields()
+            } else {
+                vec![]
+            },
+            window,
+            cx,
+        );
+        if plan.folded().is_empty() {
+            self.more_open = false;
+        }
         self.follow_status(&status, window, cx);
         if title != self.title {
             window.set_window_title(&title);
@@ -731,6 +924,13 @@ impl Render for DocumentWindow {
             .key_context(menus::WINDOW_CONTEXT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
+            // A held Rewind or Fast Forward released anywhere else (the
+            // button's own release comes first and ends the hold).
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.shuttle_release(false, cx)),
+            )
             .on_action(cx.listener(Self::run_command))
             .on_action(cx.listener(Self::play_stop))
             .on_action(cx.listener(Self::stop_and_return))
@@ -748,7 +948,15 @@ impl Render for DocumentWindow {
                 d.child(Self::alert_banner(&alert, &mut root.container(), cx))
             })
             .when_some(bar, |d, bar| {
-                d.child(transport_bar::render(&bar, &mut root.container(), cx))
+                d.child(transport_bar::render(
+                    &bar,
+                    &plan,
+                    &self.transport_fields,
+                    self.more_open,
+                    &mut root.container(),
+                    window,
+                    cx,
+                ))
             })
             .child(
                 div()
@@ -776,5 +984,19 @@ impl Render for DocumentWindow {
             .when_some(status, |d, status| {
                 d.child(Self::status_line(status, &mut root.container(), cx))
             })
+    }
+}
+
+/// Rewind (false) or Fast Forward (true) for a held-key keystroke: ⇧, and
+/// ⇧. with no other modifier (a layout may report the shifted character).
+fn held_key(k: &Keystroke) -> Option<bool> {
+    let m = &k.modifiers;
+    if !m.shift || m.control || m.alt || m.platform || m.function {
+        return None;
+    }
+    match k.key.as_str() {
+        "," | "<" => Some(false),
+        "." | ">" => Some(true),
+        _ => None,
     }
 }

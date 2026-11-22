@@ -2,9 +2,9 @@
 //! pinned revision (see Cargo.toml).
 //! Copyright Zed Industries, Inc.; licensed under the Apache License,
 //! Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
-//! Changes: public `new`, `text`, `with_text` and `bindings`; the bindings
-//! are scoped to the `TextInput` key context; Enter and Escape emit
-//! [`TextInputEvent`]s. Slice 2 replaces it with a full field (IME
+//! Changes: public `new`, `text`, `with_text`, `set_text`, `compact` and
+//! `bindings`; the bindings are scoped to the `TextInput` key context;
+//! Enter, Escape, Tab and Shift-Tab emit [`TextInputEvent`]s. Slice 2 replaces it with a full field (IME
 //! edge cases, undo, number fields).
 
 use std::ops::Range;
@@ -36,6 +36,8 @@ actions!(
         Copy,
         Confirm,
         Cancel,
+        Tab,
+        BackTab,
     ]
 );
 
@@ -46,6 +48,10 @@ pub enum TextInputEvent {
     Confirm,
     /// Escape.
     Cancel,
+    /// Tab.
+    Tab,
+    /// Shift-Tab.
+    BackTab,
 }
 
 impl gpui::EventEmitter<TextInputEvent> for TextInput {}
@@ -60,6 +66,8 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// The transport bar's small field rather than the full-size one.
+    compact: bool,
 }
 
 impl TextInput {
@@ -98,6 +106,14 @@ impl TextInput {
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Cancel);
+    }
+
+    fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Tab);
+    }
+
+    fn back_tab(&mut self, _: &BackTab, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::BackTab);
     }
 
     fn home(&mut self, _: &Home, window: &mut Window, cx: &mut Context<Self>) {
@@ -680,21 +696,27 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::tab))
+            .on_action(cx.listener(Self::back_tab))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .bg(rgb(0xeeeeee))
-            .line_height(px(30.))
-            .text_size(px(24.))
-            .child(
-                div()
-                    .h(px(30. + 4. * 2.))
-                    .w_full()
-                    .p(px(4.))
-                    .bg(white())
-                    .child(TextElement { input: cx.entity() }),
-            )
+            .map(|d| {
+                let (line, pad) = if self.compact { (18., 2.) } else { (30., 4.) };
+                d.line_height(px(line))
+                    .text_size(px(if self.compact { 13. } else { 24. }))
+                    .child(
+                        div()
+                            .h(px(line + pad * 2.))
+                            .w_full()
+                            .p(px(pad))
+                            .bg(white())
+                            .text_color(rgb(0x000000))
+                            .child(TextElement { input: cx.entity() }),
+                    )
+            })
     }
 }
 
@@ -716,6 +738,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            compact: false,
         }
     }
 
@@ -728,6 +751,22 @@ impl TextInput {
         self.content = text.to_owned().into();
         self.selected_range = 0..self.content.len();
         self
+    }
+
+    /// The transport bar's small field.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    /// Holds `text` now, all of it selected.
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.content = text.to_owned().into();
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.is_selecting = false;
+        cx.notify();
     }
 }
 
@@ -749,6 +788,8 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("end", End, c),
         KeyBinding::new("enter", Confirm, c),
         KeyBinding::new("escape", Cancel, c),
+        KeyBinding::new("tab", Tab, c),
+        KeyBinding::new("shift-tab", BackTab, c),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, c),
     ]
 }
