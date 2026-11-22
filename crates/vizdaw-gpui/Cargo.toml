@@ -18,6 +18,8 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["runtime_shaders", "x11", "wayland"] }
 
 [dev-dependencies]
+tempfile = "3"
+core-ffi = { path = "../core-ffi" }
 vizdaw-app = { path = "../vizdaw-app", features = ["test-support"] }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["test-support"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["test-support"] }

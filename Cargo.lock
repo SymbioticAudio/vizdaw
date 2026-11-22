@@ -6388,9 +6388,11 @@ name = "vizdaw-gpui"
 version = "26.0.0"
 dependencies = [
  "core-control",
+ "core-ffi",
  "gpui",
  "gpui_platform",
  "serde_json",
+ "tempfile",
  "unicode-segmentation",
  "vizdaw-app",
 ]

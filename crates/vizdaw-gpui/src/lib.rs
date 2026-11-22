@@ -1,6 +1,7 @@
 //! The VizDAW GPUI application.
 
 pub mod app_state;
+pub mod control;
 pub mod menus;
 pub mod registry;
 pub mod shell;
@@ -180,11 +181,26 @@ pub fn quit_now(cx: &mut App) {
     cx.quit();
 }
 
-/// Starts the app with one new document window.
+/// Starts the app with one new document window (the demo with
+/// `--demo`), and the control channel with `--control PATH` (or
+/// `VIZDAW_CONTROL`). A control socket that cannot be made exits with
+/// status 2, so a launching agent learns at once.
 pub fn run() {
-    gpui_platform::application().run(|cx: &mut App| {
+    let options = control::LaunchOptions::from_env();
+    gpui_platform::application().run(move |cx: &mut App| {
         install(DocumentStore::live(), cx);
+        // Before any document opens.
+        if let Some(path) = &options.control
+            && let Err(e) = control::start(path, cx)
+        {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
         cx.activate(true);
-        new_document(cx);
+        if options.demo {
+            new_demo(cx);
+        } else {
+            new_document(cx);
+        }
     });
 }
