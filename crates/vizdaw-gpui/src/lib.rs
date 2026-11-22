@@ -6,6 +6,7 @@ pub mod control;
 pub mod menu_bar;
 pub mod menus;
 pub mod registry;
+pub mod screenshot;
 pub mod shell;
 pub mod text_input;
 pub mod track_headers;

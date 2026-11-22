@@ -6,7 +6,8 @@
 //! ```text
 //! scripts/make-gpui-app.sh   # macOS: target/VizDAW-GPUI.app
 //! VIZDAW_E2E_APP=target/VizDAW-GPUI.app cargo test -p vizctl --test e2e_gpui -- --ignored --nocapture
-//! # Linux: VIZDAW_E2E_APP=target/debug/vizdaw-gpui (under xvfb-run -a, WAYLAND_DISPLAY unset)
+//! # Linux: cargo build -p vizdaw-gpui --features screenshot, then
+//! # VIZDAW_E2E_APP=target/debug/vizdaw-gpui (under xvfb-run -a, WAYLAND_DISPLAY unset)
 //! ```
 //!
 //! The launch helper is copied from `e2e.rs` (only what is needed), not

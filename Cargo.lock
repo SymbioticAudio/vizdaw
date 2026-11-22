@@ -6394,10 +6394,13 @@ dependencies = [
  "core-ffi",
  "gpui",
  "gpui_platform",
+ "image",
+ "raw-window-handle",
  "serde_json",
  "tempfile",
  "unicode-segmentation",
  "vizdaw-app",
+ "x11rb",
 ]
 
 [[package]]

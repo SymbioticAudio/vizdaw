@@ -200,7 +200,8 @@ impl TrackHeaders {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(rows),
+                    .child(rows)
+                    .child(scope.clip()),
             );
         // The rows are the full 200 px; the line to the arrangement is
         // outside them.

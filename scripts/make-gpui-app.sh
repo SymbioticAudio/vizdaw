@@ -8,9 +8,11 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 profile="${1:-debug}"
+# `screenshot`: ui.screenshot draws the window offscreen (GPUI's
+# render_to_image, behind its test-support feature at this pin).
 case "$profile" in
-    debug) cargo build -p vizdaw-gpui ;;
-    release) cargo build -p vizdaw-gpui --release ;;
+    debug) cargo build -p vizdaw-gpui --features screenshot ;;
+    release) cargo build -p vizdaw-gpui --release --features screenshot ;;
     *) echo "usage: make-gpui-app.sh [debug|release]" >&2; exit 2 ;;
 esac
 

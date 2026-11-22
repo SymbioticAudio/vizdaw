@@ -52,7 +52,7 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 20
         run: |
-          cargo build -p vizdaw-gpui
+          cargo build -p vizdaw-gpui --features screenshot
           unset WAYLAND_DISPLAY
           xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p vizctl --test e2e_gpui -- --ignored --nocapture --test-threads 1
         env:

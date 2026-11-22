@@ -295,7 +295,7 @@ impl DocumentWindow {
 
     /// A transport command ran: the readouts read it now, and the poll
     /// takes the interval playing or stopping set.
-    fn after_transport(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn after_transport(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let doc = self.doc;
         self.app.update(cx, |s, cx| {
             s.poll(doc);

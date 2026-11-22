@@ -4,19 +4,25 @@
 //! blocking, at most [`MAX_CALLS_PER_TICK`] calls a tick so a burst cannot
 //! stall drawing.
 //!
-//! Slices 1 and 2 answer `app.new_demo`, `app.open`, `app.quit`,
+//! Slices 1 to 3 answer `app.new_demo`, `app.open`, `app.quit`,
 //! `command.run` for `file.new`, `file.close` (never asks), `file.save`,
-//! `file.save_as`, `transport.play_stop`, `transport.stop` (stop and
-//! return) and the document commands (`edit.undo`, `edit.redo`, the Track
-//! menu), `state.get` `transport`, `windows`, `document` and `editor` (its
-//! `doc` and `status` only, `gesture: null`: the other fields come with the
-//! editor slices), `ui.tree` and `ui.click {element}`. Everything else
-//! answers `unavailable`.
+//! `file.save_as`, the transport commands, `ui.set_transport_bar`,
+//! `ui.reset_transport_bar` and the document commands (`edit.undo`,
+//! `edit.redo`, the Track menu), `state.get` `transport`, `windows`,
+//! `document` and `editor` (its `doc` and `status` only, `gesture: null`:
+//! the other fields come with the editor slices), `ui.tree`, `ui.click
+//! {element}` (with modifiers and a count), `ui.key`, `ui.screenshot` and
+//! `wait`. Everything else answers `unavailable`.
+//!
+//! A `wait` is not answered in the tick it is taken unless it already
+//! holds: it joins a list the pump checks every tick against fresh facts,
+//! answering it once it holds or its time is up. Pending waits take no
+//! share of a tick's [`MAX_CALLS_PER_TICK`] calls.
 //!
 //! Calls are handled in the pump's own top-level update, never inside
 //! `AppState::update` or a window's update, so a call may open windows and
 //! update window handles directly (GPUI panics on, or refuses, a nested
-//! one). Every call is answered in the tick it is taken; `app.quit` is
+//! one). Every other call is answered in the tick it is taken; `app.quit` is
 //! answered first and the app quits once that update has ended
 //! (`cx.defer`); the server is stopped while quitting so the reply is
 //! written before the process goes.
@@ -25,25 +31,34 @@ use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
+use core_control::bindings::{self, Chord};
+use core_control::keys::{self, KeyStroke};
 use core_control::params::WindowRef;
 use core_control::registry::ArgValue;
-use core_control::request::{Command, Pointer, StateTarget};
+use core_control::request::{Button, Command, Pointer, StateTarget};
 use core_control::server::Call;
+use core_control::wait::{self, DocFacts, Facts, WaitCondition};
 use core_control::{Config, ControlError, ErrorCode, Server, StartError};
 use gpui::{
-    AnyWindowHandle, App, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput,
-    WindowHandle,
+    AnyWindowHandle, App, Global, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, PlatformInput, WindowHandle,
 };
 use serde_json::{Value, json};
-use vizdaw_app::commands::{self, DOCUMENT_COMMANDS};
+use vizdaw_app::commands::{self, APP_COMMANDS, DOCUMENT_COMMANDS, FieldFocus, TRANSPORT_COMMANDS};
+use vizdaw_app::transport_fields::TransportField;
 use vizdaw_app::{DocId, SaveAction};
 use vizdaw_ffi::control::{AlertRow, ControlResult, result_json};
 
 use crate::app_state::{AppState, WindowEntry};
-use crate::menus::{PlayStop, StopAndReturn};
 use crate::shell::DocumentWindow;
+use crate::transport_fields::NO_FIELDS;
+
+/// The theme `state.get windows` names: the one fixed look the GPUI app
+/// draws until themes are ported (its dark palette).
+pub const THEME: &str = "studio-dark";
 
 thread_local! {
     static CHANNEL_CLICK: Cell<bool> = const { Cell::new(false) };
@@ -85,6 +100,16 @@ pub trait CallSource {
     fn next_call(&self) -> Option<Call>;
     /// Answers call `token`; false when nobody waits for it any more.
     fn reply(&self, token: u64, outcome: Result<Value, ControlError>) -> bool;
+    /// Where a `ui.screenshot` without `path` goes; `None`: a new file in
+    /// the system's temporary folder.
+    fn screenshot_path(&self) -> Option<PathBuf> {
+        None
+    }
+    /// Whether a client still waits for call `token` (a pending `wait`
+    /// whose client left is dropped).
+    fn is_waiting(&self, _token: u64) -> bool {
+        true
+    }
 }
 
 impl CallSource for Server {
@@ -94,6 +119,14 @@ impl CallSource for Server {
 
     fn reply(&self, token: u64, outcome: Result<Value, ControlError>) -> bool {
         Server::reply(self, token, outcome)
+    }
+
+    fn screenshot_path(&self) -> Option<PathBuf> {
+        Some(Server::screenshot_path(self))
+    }
+
+    fn is_waiting(&self, token: u64) -> bool {
+        Server::is_waiting(self, token)
     }
 }
 
@@ -113,29 +146,181 @@ pub struct Tick {
     pub handled: usize,
     /// An `app.quit` was answered; the app quits once this update ends.
     pub quit: bool,
+    /// `wait` calls still waiting after this tick.
+    pub waiting: usize,
 }
 
-/// Takes and answers up to [`MAX_CALLS_PER_TICK`] calls. Call it from a
-/// top-level update (the pump timer's), not from inside an entity's or a
-/// window's update.
+/// Takes and answers up to [`MAX_CALLS_PER_TICK`] calls, then checks the
+/// pending waits. Call it from a top-level update (the pump timer's), not
+/// from inside an entity's or a window's update.
 pub fn pump(calls: &impl CallSource, cx: &mut App) -> Tick {
     let mut tick = Tick::default();
     while tick.handled < MAX_CALLS_PER_TICK && !tick.quit {
         let Some(call) = calls.next_call() else { break };
         tick.handled += 1;
-        match handle(&call.command, cx) {
-            Handled::Reply(r) => {
+        match &call.command {
+            Command::Wait {
+                condition,
+                window,
+                timeout_ms,
+            } => start_wait(calls, call.token, condition, *window, *timeout_ms, cx),
+            Command::UiScreenshot {
+                window,
+                path,
+                scale,
+                live,
+            } => {
+                let path = path.clone().or_else(|| calls.screenshot_path());
+                let r = screenshot(window.as_ref(), path, *scale, *live, cx);
                 calls.reply(call.token, r);
             }
-            Handled::Quit => {
-                calls.reply(call.token, Ok(json!({ "quitting": true })));
-                tick.quit = true;
-                // After this update: the reply is on its way first.
-                cx.defer(crate::quit_now);
-            }
+            command => match handle(command, cx) {
+                Handled::Reply(r) => {
+                    calls.reply(call.token, r);
+                }
+                Handled::Quit => {
+                    calls.reply(call.token, Ok(json!({ "quitting": true })));
+                    tick.quit = true;
+                    // After this update: the reply is on its way first.
+                    cx.defer(crate::quit_now);
+                }
+            },
         }
     }
+    if !tick.quit {
+        check_waits(calls, cx);
+    }
+    tick.waiting = cx.try_global::<Waits>().map_or(0, |w| w.0.len());
     tick
+}
+
+/// A `wait` not answered yet.
+struct PendingWait {
+    token: u64,
+    condition: WaitCondition,
+    window: Option<WindowRef>,
+    started: Instant,
+    timeout_ms: u64,
+}
+
+/// The waits the pump checks every tick.
+#[derive(Default)]
+struct Waits(Vec<PendingWait>);
+
+impl Global for Waits {}
+
+/// Takes a `wait`: a stale window number is `no_window` at once (for a
+/// condition that reads a document); a condition that holds is answered
+/// at once; else it waits in the list.
+fn start_wait(
+    calls: &impl CallSource,
+    token: u64,
+    condition: &WaitCondition,
+    window: Option<WindowRef>,
+    timeout_ms: u64,
+    cx: &mut App,
+) {
+    if condition.needs_document()
+        && let Some(WindowRef::Number(n)) = window
+        && target(window.as_ref(), cx).is_err()
+    {
+        calls.reply(
+            token,
+            Err(ControlError::new(
+                ErrorCode::NoWindow,
+                format!("no VizDAW window {n}"),
+            )),
+        );
+        return;
+    }
+    let pending = PendingWait {
+        token,
+        condition: condition.clone(),
+        window,
+        started: cx.background_executor().now(),
+        timeout_ms,
+    };
+    let facts = facts(window.as_ref(), cx);
+    if wait::met(condition, &facts) {
+        calls.reply(token, Ok(waited(&pending, pending.started)));
+        return;
+    }
+    cx.default_global::<Waits>().0.push(pending);
+}
+
+/// Answers every pending wait that holds now or whose time is up. The
+/// facts are read once per window the waits name.
+fn check_waits(calls: &impl CallSource, cx: &mut App) {
+    let Some(waits) = cx.try_global::<Waits>() else {
+        return;
+    };
+    if waits.0.is_empty() {
+        return;
+    }
+    let pending = std::mem::take(&mut cx.global_mut::<Waits>().0);
+    let now = cx.background_executor().now();
+    let mut seen: Vec<(Option<WindowRef>, Facts)> = Vec::new();
+    let mut kept = Vec::new();
+    for w in pending.into_iter().filter(|w| calls.is_waiting(w.token)) {
+        let f = match seen.iter().find(|(r, _)| *r == w.window) {
+            Some((_, f)) => f.clone(),
+            None => {
+                let f = facts(w.window.as_ref(), cx);
+                seen.push((w.window, f.clone()));
+                f
+            }
+        };
+        if wait::met(&w.condition, &f) {
+            calls.reply(w.token, Ok(waited(&w, now)));
+        } else if now.saturating_duration_since(w.started) >= Duration::from_millis(w.timeout_ms) {
+            let e = ControlError::new(
+                ErrorCode::Timeout,
+                format!(
+                    "{} did not happen within {} ms",
+                    w.condition.describe(),
+                    w.timeout_ms
+                ),
+            )
+            .with_details(wait::timeout_details(&w.condition, w.timeout_ms, &f));
+            calls.reply(w.token, Err(e));
+        } else {
+            kept.push(w);
+        }
+    }
+    cx.global_mut::<Waits>().0.extend(kept);
+}
+
+/// A met wait's answer: `{condition, elapsed_ms}`.
+fn waited(w: &PendingWait, now: Instant) -> Value {
+    let ms = now.saturating_duration_since(w.started).as_millis();
+    json!({ "condition": w.condition.name(), "elapsed_ms": u64::try_from(ms).unwrap_or(u64::MAX) })
+}
+
+/// What a wait reads now: the target document's transport (polled fresh),
+/// the open documents and the windows' titles. The detail pane is empty
+/// until the editors come.
+fn facts(window: Option<&WindowRef>, cx: &mut App) -> Facts {
+    let app = AppState::global(cx);
+    let doc = target(window, cx).ok().map(|e| e.doc);
+    let document = doc.and_then(|doc| {
+        app.update(cx, |s, cx| {
+            if s.poll(doc) {
+                cx.notify();
+            }
+        });
+        let t = app.read(cx).transport(doc)?.state();
+        Some(DocFacts {
+            playing: t.playing,
+            tick: t.tick,
+            detail_kind: "none".into(),
+        })
+    });
+    let s = app.read(cx);
+    Facts {
+        document,
+        documents: u32::try_from(s.store.count()).unwrap_or(u32::MAX),
+        window_titles: s.windows().iter().filter_map(|w| s.title(w.doc)).collect(),
+    }
 }
 
 /// Answers one call.
@@ -148,7 +333,7 @@ pub fn handle(command: &Command, cx: &mut App) -> Handled {
 
 fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
     match command {
-        Command::AppNewDemo { audio: true } => Err(unavailable(
+        Command::AppNewDemo { audio: true } => Err(not_yet(
             "app.new_demo with `audio`: the audio demo is not in slice 1",
         )),
         Command::AppNewDemo { audio: false } => {
@@ -165,8 +350,10 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
                 None => Err(failure(before, "the project did not open", cx)),
             }
         }
-        Command::CommandRun { id, args, .. } if id == "file.new" => new_document(args, cx),
         Command::CommandRun { id, args, window } => {
+            if let Some(r) = app_wide(id, args, cx) {
+                return r;
+            }
             let entry = target(window.as_ref(), cx)?;
             run_command(id, args, &entry, cx)
         }
@@ -195,7 +382,7 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             let entry = target(window.as_ref(), cx)?;
             editor_state(entry.doc, cx)
         }
-        Command::StateGet { target, .. } => Err(unavailable(&format!(
+        Command::StateGet { target, .. } => Err(not_yet(&format!(
             "state.get {}",
             format!("{target:?}").to_lowercase()
         ))),
@@ -214,14 +401,29 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
         Command::UiClick {
             window,
             at: Pointer::Element(r),
+            button,
             count,
-            ..
+            modifiers,
         } => {
             let entry = target(window.as_ref(), cx)?;
-            click(&entry, &r.id, *count, cx)
+            click(&entry, &r.id, *button, *count, *modifiers, cx)
         }
-        Command::UiClick { .. } => Err(unavailable("ui.click at a point")),
-        _ => Err(unavailable("this command")),
+        Command::UiClick { .. } => Err(not_yet("ui.click at a point")),
+        Command::UiKey {
+            window,
+            focus,
+            strokes,
+        } => {
+            let entry = target(window.as_ref(), cx)?;
+            key_strokes(&entry, focus.as_ref().map(|f| f.id.as_str()), strokes, cx)
+        }
+        Command::UiScreenshot {
+            window,
+            path,
+            scale,
+            live,
+        } => screenshot(window.as_ref(), path.clone(), *scale, *live, cx),
+        _ => Err(not_yet("this command")),
     }
 }
 
@@ -297,6 +499,7 @@ fn run_command(
             }
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
         }
+        _ if TRANSPORT_COMMANDS.contains(&id) => return run_transport(id, args, entry, cx),
         "file.close" => {
             // Never asks (Swift `control_close_never_prompts`): the window
             // closes without its save prompt and the document goes, saved
@@ -331,29 +534,7 @@ fn run_command(
                 return Err(failure(before, &m, cx));
             }
         }
-        "transport.play_stop" => {
-            let can = app.read(cx).can_play(doc)
-                || app.read(cx).transport(doc).is_some_and(|t| t.is_playing());
-            if !can {
-                return Err(ControlError::new(
-                    ErrorCode::Unavailable,
-                    "Play / Stop is disabled: the song has nothing to play",
-                ));
-            }
-            entry
-                .handle
-                .update(cx, |v, window, cx| v.play_stop(&PlayStop, window, cx))
-                .map_err(|_| gone())?;
-        }
-        "transport.stop" => {
-            entry
-                .handle
-                .update(cx, |v, window, cx| {
-                    v.stop_and_return(&StopAndReturn, window, cx)
-                })
-                .map_err(|_| gone())?;
-        }
-        _ => return Err(unavailable(&format!("command.run {id}"))),
+        _ => return Err(not_yet(&format!("command.run {id}"))),
     }
     if alert_id(cx) != before {
         return Err(failure(before, "the command failed", cx));
@@ -383,11 +564,92 @@ fn ran_json(
     })
 }
 
+/// A transport command on `entry`'s document, as `commands::run` runs it
+/// for the channel: an alert it raised is the call's failure (and is not
+/// left showing); the window reads the transport again; a field key's
+/// field takes the keyboard.
+fn run_transport(
+    id: &str,
+    args: &[(String, ArgValue)],
+    entry: &WindowEntry,
+    cx: &mut App,
+) -> Result<Value, ControlError> {
+    let app = AppState::global(cx);
+    let doc = entry.doc;
+    let before = alert_id(cx);
+    let ran = app
+        .update(cx, |s, cx| {
+            cx.notify();
+            s.store.with_document(doc, |d, _| {
+                d.set_status(None);
+                commands::run(id, args, d)
+            })
+        })
+        .ok_or_else(closed)?;
+    if alert_id(cx) != before {
+        return Err(failure(before, "the command failed", cx));
+    }
+    let ran = ran?;
+    entry
+        .handle
+        .update(cx, |v, window, cx| v.after_transport(window, cx))
+        .map_err(|_| gone())?;
+    if let Some(focus) = ran.focus {
+        let field = match focus {
+            FieldFocus::Position => TransportField::Position,
+            FieldFocus::EditIn => TransportField::EditIn,
+        };
+        let shown = entry
+            .handle
+            .update(cx, |v, window, cx| {
+                let shown = v.transport_fields.shown().contains(&field);
+                if shown {
+                    v.begin_field(field, window, cx);
+                }
+                shown
+            })
+            .map_err(|_| gone())?;
+        if !shown {
+            return Err(ControlError::new(ErrorCode::Unavailable, NO_FIELDS));
+        }
+    }
+    Ok(ran_json(id, doc, entry, ran.undo, ran.status))
+}
+
+/// A command that needs no document window: `file.new` and the app-wide
+/// ones (`ui.set_transport_bar`, `ui.reset_transport_bar`, answered with
+/// no `doc` or `window`, as Swift's). `None` for any other.
+fn app_wide(
+    id: &str,
+    args: &[(String, ArgValue)],
+    cx: &mut App,
+) -> Option<Result<Value, ControlError>> {
+    if id == "file.new" {
+        return Some(new_document(args, cx));
+    }
+    if !APP_COMMANDS.contains(&id) {
+        return None;
+    }
+    let app = AppState::global(cx);
+    let ran = app.update(cx, |s, cx| {
+        let ran = commands::run_app(id, args, &mut s.prefs);
+        // Every window draws its bar from the preferences.
+        cx.notify();
+        ran
+    });
+    Some(ran.map(|ran| {
+        json!({
+            "command": id, "doc": Value::Null, "window": Value::Null,
+            "undo": ran.undo, "status": ran.status,
+        })
+    }))
+}
+
 /// `command.run file.new`: an empty document in a new window; no document
 /// need be open. Project formats (`rate`, `depth`) are not in this slice.
 fn new_document(args: &[(String, ArgValue)], cx: &mut App) -> Result<Value, ControlError> {
     if let Some((name, _)) = args.first() {
-        return Err(unavailable(&format!("file.new with `{name}`")));
+        return Err(not_yet(&format!("file.new with `{name}`")));
     }
     let before = alert_id(cx);
     let Some(h) = crate::new_document(cx) else {
@@ -458,6 +720,8 @@ fn transport_state(entry: &WindowEntry, cx: &mut App) -> Result<Value, ControlEr
         "position": t.position_bbu, "seconds": t.seconds, "sample_rate": t.sample_rate,
         "device": t.device, "faults": t.faults, "report": t.report,
         "rate_mismatch": t.rate_mismatch, "counting_in": t.counting_in,
+        // The metronome click comes with the recording slice.
+        "click": Value::Null,
     }))
 }
 
@@ -504,34 +768,51 @@ fn windows_state(cx: &mut App) -> Value {
         .map(|a| json!({ "title": a.title, "message": a.message }))
         .into_iter()
         .collect();
-    json!({ "windows": rows, "alerts": alerts })
+    json!({ "windows": rows, "alerts": alerts, "theme": THEME })
 }
 
 /// `ui.click {element}`: a mouse down and up at the element's centre,
-/// dispatched through the window's hit-testing as a user's click is
-/// (left button, no modifiers this slice). Handlers see
-/// [`is_channel_click`] while it is delivered.
-fn click(entry: &WindowEntry, id: &str, count: u32, cx: &mut App) -> Result<Value, ControlError> {
-    let at = entry
-        .handle
-        .read(cx)
-        .map_err(|_| gone())?
-        .registry()
-        .borrow()
-        .resolve(id)?
-        .bounds
-        .center();
+/// dispatched through the window's hit-testing as a user's click is, with
+/// the button, click count and modifiers asked for. Handlers see
+/// [`is_channel_click`] while it is delivered. An element whose centre a
+/// scrolling container has scrolled out of view is refused (the click
+/// would land on whatever is drawn there).
+fn click(
+    entry: &WindowEntry,
+    id: &str,
+    button: Button,
+    count: u32,
+    modifiers: keys::Modifiers,
+    cx: &mut App,
+) -> Result<Value, ControlError> {
+    let at = {
+        let view = entry.handle.read(cx).map_err(|_| gone())?;
+        let registry = view.registry().borrow();
+        let e = registry.resolve(id)?;
+        if registry.scrolled_out(e) {
+            return Err(ControlError::new(
+                ErrorCode::Failed,
+                format!("{} is scrolled out of view.", e.label),
+            ));
+        }
+        e.bounds.center()
+    };
     let any: AnyWindowHandle = entry.handle.into();
     let count = count.max(1) as usize;
+    let button = match button {
+        Button::Left => MouseButton::Left,
+        Button::Right => MouseButton::Right,
+    };
+    let modifiers = gpui_modifiers(modifiers);
     // Through the window, not its view: the click's handlers update the
     // view, which a view update would hold.
     let _channel = ChannelClick::begin();
     any.update(cx, |_, window, cx| {
         window.dispatch_event(
             PlatformInput::MouseDown(MouseDownEvent {
-                button: MouseButton::Left,
+                button,
                 position: at,
-                modifiers: Modifiers::none(),
+                modifiers,
                 click_count: count,
                 first_mouse: false,
             }),
@@ -539,9 +820,9 @@ fn click(entry: &WindowEntry, id: &str, count: u32, cx: &mut App) -> Result<Valu
         );
         window.dispatch_event(
             PlatformInput::MouseUp(MouseUpEvent {
-                button: MouseButton::Left,
+                button,
                 position: at,
-                modifiers: Modifiers::none(),
+                modifiers,
                 click_count: count,
             }),
             cx,
@@ -554,6 +835,175 @@ fn click(entry: &WindowEntry, id: &str, count: u32, cx: &mut App) -> Result<Valu
         "x": f32::from(at.x),
         "y": f32::from(at.y),
     }))
+}
+
+/// The channel's modifiers as GPUI's: ⌘ is `platform` on macOS and
+/// Control elsewhere, as the key bindings read it (`menus::keystroke`).
+fn gpui_modifiers(m: keys::Modifiers) -> Modifiers {
+    let mac = cfg!(target_os = "macos");
+    Modifiers {
+        shift: m.shift,
+        alt: m.option,
+        control: m.control || (m.command && !mac),
+        platform: m.command && mac,
+        function: false,
+    }
+}
+
+/// `ui.key`: `focus` is clicked first (a plain left click), then each
+/// stroke is routed as the keyboard's: a plain key while a text field has
+/// the keyboard types into it; else a key the keymap binds runs its
+/// command as `command.run` would (one event). A command that answers
+/// `unavailable`, `no_document` or `unknown_id` lets the key through
+/// (Swift `channelDelivers`); another failure ends the call. A key that
+/// runs nothing goes to the window as a key down and up (two events),
+/// through GPUI's own dispatch: its key bindings, the focused element and
+/// the focused text input.
+fn key_strokes(
+    entry: &WindowEntry,
+    focus: Option<&str>,
+    strokes: &[KeyStroke],
+    cx: &mut App,
+) -> Result<Value, ControlError> {
+    if let Some(id) = focus {
+        click(entry, id, Button::Left, 1, keys::Modifiers::default(), cx)?;
+    }
+    let mut sent: u32 = 0;
+    for k in strokes {
+        if let Some(id) = bound_command(entry, k, cx) {
+            let ran = match app_wide(id, &[], cx) {
+                Some(r) => r,
+                None => run_command(id, &[], entry, cx),
+            };
+            match ran {
+                Ok(_) => {
+                    sent += 1;
+                    continue;
+                }
+                Err(e) if delivers(e.code) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        deliver(entry, k, cx)?;
+        sent += 2;
+    }
+    Ok(json!({ "window": number(entry.handle), "events": sent, "x": 0.0, "y": 0.0 }))
+}
+
+/// A command refusal after which the key still goes to the window, as
+/// the keyboard passes it (Swift `KeyDispatch.channelDelivers`).
+fn delivers(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Unavailable | ErrorCode::NoDocument | ErrorCode::UnknownId
+    )
+}
+
+/// The command stroke `k` runs in `entry`'s window, by the app's keymap
+/// (the one the key bindings are made from). A plain key (no ⌘ or ⌃)
+/// while a text field has the keyboard runs none: it is typed.
+fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'static str> {
+    let s = AppState::global(cx).read(cx);
+    let typing = s
+        .store
+        .document(entry.doc)
+        .is_some_and(|d| !d.transport_keys_enabled());
+    let m = k.modifiers;
+    if typing && !m.command && !m.control {
+        return None;
+    }
+    let mut mods = 0;
+    for (on, bit) in [
+        (m.shift, bindings::SHIFT),
+        (m.control, bindings::CONTROL),
+        (m.option, bindings::OPTION),
+        (m.command, bindings::COMMAND),
+    ] {
+        if on {
+            mods |= bit;
+        }
+    }
+    let chord = Chord::new(k.key_code, mods)?;
+    s.keymap.lookup(chord, false, false)
+}
+
+/// Sends `k` into the window: a key down through GPUI's keystroke
+/// dispatch (bindings, then the focused text input), then its key up.
+/// One update per stroke, so what a stroke changed (a field taking the
+/// keyboard) is drawn before the next.
+fn deliver(entry: &WindowEntry, k: &KeyStroke, cx: &mut App) -> Result<(), ControlError> {
+    let keystroke = gpui_keystroke(k);
+    let any: AnyWindowHandle = entry.handle.into();
+    any.update(cx, |_, window, cx| {
+        window.dispatch_keystroke(keystroke.clone(), cx);
+        window.dispatch_event(PlatformInput::KeyUp(KeyUpEvent { keystroke }), cx);
+    })
+    .map_err(|_| gone())
+}
+
+/// `k` as a GPUI keystroke: the key named as GPUI names it (from the key
+/// code: the keypad's keys are the main keys', as GPUI does not tell
+/// them apart), and the character it types when no ⌘ or ⌃ is held.
+fn gpui_keystroke(k: &KeyStroke) -> Keystroke {
+    let modifiers = gpui_modifiers(k.modifiers);
+    let key = bindings::key_name(k.key_code)
+        .and_then(crate::menus::gpui_key)
+        .unwrap_or_else(|| k.unmodified.to_lowercase());
+    let typed = !k.modifiers.command
+        && !k.modifiers.control
+        && k.characters
+            .chars()
+            .all(|c| !c.is_control() && !is_private_use(c))
+        && !k.characters.is_empty();
+    Keystroke {
+        modifiers,
+        key,
+        key_char: typed.then(|| k.characters.clone()),
+    }
+}
+
+/// AppKit's function-key characters (U+F700 and on) type nothing.
+fn is_private_use(c: char) -> bool {
+    ('\u{e000}'..='\u{f8ff}').contains(&c)
+}
+
+/// `ui.screenshot`: the window's PNG at `path` (or the channel's next
+/// screenshot path), written atomically. `live` (a capture of what the
+/// window server shows) is the Swift app's.
+fn screenshot(
+    window: Option<&WindowRef>,
+    path: Option<PathBuf>,
+    scale: Option<f64>,
+    live: bool,
+    cx: &mut App,
+) -> Result<Value, ControlError> {
+    if live {
+        return Err(ControlError::new(
+            ErrorCode::Unavailable,
+            "ui.screenshot with `live`: the GPUI app draws the window itself; leave `live` out",
+        ));
+    }
+    let entry = target(window, cx)?;
+    let path = path.unwrap_or_else(temp_screenshot_path);
+    let capture = crate::screenshot::capture_fn(cx);
+    let any: AnyWindowHandle = entry.handle.into();
+    let shot = any
+        .update(cx, |_, window, _| capture(window, scale))
+        .map_err(|_| gone())??;
+    crate::screenshot::write_png(&shot, &path)?;
+    Ok(json!({
+        "window": number(entry.handle),
+        "path": path.to_string_lossy(),
+        "width": shot.width,
+        "height": shot.height,
+    }))
+}
+
+/// A new screenshot path in the temporary folder (no server to name one).
+fn temp_screenshot_path() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("vizdaw-screenshot-{}-{n}.png", std::process::id()))
 }
 
 /// The document window `window` names; absent: the front document's.
@@ -630,15 +1080,16 @@ fn gone() -> ControlError {
     ControlError::new(ErrorCode::NoWindow, "the window closed")
 }
 
-fn unavailable(what: &str) -> ControlError {
+fn not_yet(what: &str) -> ControlError {
     ControlError::new(
         ErrorCode::Unavailable,
         format!(
-            "{what} is not available in the GPUI app yet (slice 2 answers app.new_demo, \
+            "{what} is not available in the GPUI app yet (slice 3 answers app.new_demo, \
              app.open, app.quit, command.run file.new / file.close / file.save / file.save_as / \
-             transport.play_stop / transport.stop / edit.undo / edit.redo / track.*, \
-             state.get transport / windows / document / editor, ui.tree and \
-             ui.click {{element}})"
+             transport.* (not recording or the click) / ui.set_transport_bar / \
+             ui.reset_transport_bar / edit.undo / edit.redo / track.*, state.get transport / \
+             windows / document / editor, ui.tree, ui.click {{element}}, ui.key, ui.screenshot \
+             and wait)"
         ),
     )
 }

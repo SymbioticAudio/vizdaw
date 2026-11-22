@@ -266,7 +266,7 @@ fn transport_items(front: Option<&DocumentModel>, keymap: &Keymap) -> Vec<ItemSp
 }
 
 /// The GPUI key name of a registry key, if GPUI has one.
-fn gpui_key(name: &str) -> Option<String> {
+pub(crate) fn gpui_key(name: &str) -> Option<String> {
     let key = match name {
         "Return" | "Enter" => "enter",
         "Tab" => "tab",

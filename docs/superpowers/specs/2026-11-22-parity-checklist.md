@@ -594,3 +594,4 @@ unknown.
 | The bundled default EQ is AU-only | A CLAP build of it, or a built-in EQ default on Linux | |
 | Co-Producer approvals are stored in the Mac Keychain | The Secret Service password store on Linux | |
 | AU inserts in Mac projects | Shown as placeholders that keep their settings (design section 10); no automatic swap | |
+| `ui.screenshot` of a native Wayland window (the GPUI pin has no offscreen render off macOS) | X11 `GetImage` of the window (XWayland, Xvfb); a native Wayland window answers `unavailable` "Screenshots need an X11 window on Linux." until GPUI or the compositor gives a capture | |

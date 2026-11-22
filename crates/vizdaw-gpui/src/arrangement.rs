@@ -238,6 +238,7 @@ impl Arrangement {
             }))
             .child(painter)
             .child(group.this("group", GROUP, true))
+            .child(group.clip())
             .into_any_element()
     }
 }

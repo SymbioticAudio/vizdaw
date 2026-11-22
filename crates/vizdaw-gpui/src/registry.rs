@@ -32,6 +32,9 @@ pub struct Element {
 #[derive(Debug, Default, Clone)]
 pub struct Registry {
     elements: Vec<Element>,
+    /// Scrolling containers: a container's path and the bounds it clips
+    /// its children to.
+    clips: Vec<(Vec<u32>, Bounds<Pixels>)>,
 }
 
 /// A window's registry, shared with the draw callbacks that fill it.
@@ -40,6 +43,27 @@ pub type SharedRegistry = Rc<RefCell<Registry>>;
 impl Registry {
     pub fn clear(&mut self) {
         self.elements.clear();
+        self.clips.clear();
+    }
+
+    /// Records that the container at `path` shows its children only
+    /// inside `bounds` (it scrolls them).
+    pub fn record_clip(&mut self, path: &[u32], bounds: Bounds<Pixels>) {
+        self.clips.push((path.to_vec(), bounds));
+    }
+
+    /// Whether `e`'s centre lies outside a scrolling container it is in:
+    /// a click there would land on whatever is drawn at that point.
+    /// Menu items are drawn deferred, above every container, and are
+    /// never clipped.
+    pub fn scrolled_out(&self, e: &Element) -> bool {
+        if e.role == "menuitem" {
+            return false;
+        }
+        let at = e.bounds.center();
+        self.clips.iter().any(|(path, clip)| {
+            e.path.len() > path.len() && e.path.starts_with(path) && !clip.contains(&at)
+        })
     }
 
     pub fn record(
@@ -179,6 +203,23 @@ impl RegistryScope {
             self.path.clone(),
             Node::new(role, label, enabled),
         )
+    }
+
+    /// An invisible overlay that records this container as a scrolling
+    /// one: its children show only inside its bounds. Add it as a child of
+    /// the clipping (`overflow_hidden`, `.relative()`) element. It takes no
+    /// index.
+    pub fn clip(&self) -> impl IntoElement {
+        let registry = self.registry.clone();
+        let path = self.path.clone();
+        canvas(
+            move |bounds, _, _| registry.borrow_mut().record_clip(&path, bounds),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
     }
 
     /// An invisible overlay that records the next child control with its

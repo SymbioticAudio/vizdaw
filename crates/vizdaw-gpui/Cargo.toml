@@ -12,11 +12,24 @@ core-control = { path = "../core-control" }
 core-ffi = { path = "../core-ffi" }
 serde_json = "1"
 unicode-segmentation = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Pinned 2026-11-21 to zed main at this rev rather than crates.io gpui 0.2.2:
 # 0.2.2 panics in X11 window_handle (unimplemented) and fails to build on Linux
 # via xattr. See docs/superpowers/specs/2026-11-21-gpui-spike-report.md.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["runtime_shaders", "x11", "wayland"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# ui.screenshot reads the window's pixels from the X server.
+raw-window-handle = "0.6"
+x11rb = "0.13"
+
+[features]
+# ui.screenshot on macOS: GPUI's `Window::render_to_image` exists at this
+# pin only with its `test-support` feature, which adds test helpers and no
+# behaviour to a real-platform build. scripts/make-gpui-app.sh and the
+# Linux CI build turn it on.
+screenshot = ["gpui/test-support", "gpui_platform/test-support"]
 
 [dev-dependencies]
 tempfile = "3"
