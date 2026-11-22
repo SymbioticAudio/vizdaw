@@ -257,7 +257,7 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
     let exe = executable(&o.app);
     if !exe.is_file() {
         return Err(format!(
-            "no VizDAW executable at {} (build it with scripts/make-app.sh, or pass --app)",
+            "no VizDAW executable at {} (build it with scripts/make-app.sh or scripts/make-gpui-app.sh, or pass --app)",
             exe.display()
         ));
     }
