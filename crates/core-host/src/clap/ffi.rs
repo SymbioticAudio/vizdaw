@@ -18,7 +18,7 @@ pub(crate) fn load_entry(path: &Path) -> Result<PluginEntry, HostError> {
 }
 
 /// Embeds the plugin's GUI in the `NSView` at `parent`.
-pub(crate) fn set_cocoa_parent(
+pub(crate) fn set_native_parent(
     gui: &PluginGui,
     plugin: &PluginMainThreadHandle,
     parent: *mut c_void,
@@ -26,11 +26,15 @@ pub(crate) fn set_cocoa_parent(
     if parent.is_null() {
         return Err(HostError::EditorUnavailable("no parent view".into()));
     }
-    // SAFETY: `parent` comes from `ParentView::new`, whose contract is that
-    // the `NSView *` stays valid until the editor is closed, i.e. until
-    // `gui.destroy`, which `ClapInstance` calls before releasing it; the
-    // plugin only adds a subview to it.
+    // macOS: SAFETY: `parent` comes from `ParentView::new`, whose contract
+    // is that the `NSView *` stays valid until the editor is closed, i.e.
+    // until `gui.destroy`, which `ClapInstance` calls before releasing it;
+    // the plugin only adds a subview to it.
+    #[cfg(target_os = "macos")]
     let window = unsafe { Window::from_cocoa_nsview(parent) };
+    // Linux: the pointer carries an X11 window ID (`ParentView::new`).
+    #[cfg(not(target_os = "macos"))]
+    let window = Window::from_x11_handle(parent as usize as std::ffi::c_ulong);
     // SAFETY: as above; the view (and so the window handle) is valid until
     // `gui.destroy`.
     unsafe { gui.set_parent(plugin, window) }

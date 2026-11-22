@@ -362,15 +362,27 @@ impl PluginInstance for ClapInstance {
     }
 }
 
+/// The window API CLAP editors embed with here: Cocoa on macOS, X11 on
+/// Linux (under Wayland through XWayland; CLAP has no embedded Wayland
+/// API). `None` elsewhere.
+pub fn editor_api() -> Option<GuiApiType<'static>> {
+    if cfg!(target_os = "macos") {
+        Some(GuiApiType::COCOA)
+    } else if cfg!(target_os = "linux") {
+        Some(GuiApiType::X11)
+    } else {
+        None
+    }
+}
+
 impl PluginEditor for ClapInstance {
     fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError> {
         let gui = self
             .exts()
             .gui
             .ok_or_else(|| HostError::EditorUnavailable("no GUI".into()))?;
-        let api = GuiApiType::default_for_current_platform()
-            .filter(|a| *a == GuiApiType::COCOA)
-            .ok_or_else(|| HostError::EditorUnavailable("embedding needs Cocoa".into()))?;
+        let api = editor_api()
+            .ok_or_else(|| HostError::EditorUnavailable("no embedding API here".into()))?;
         let h = self.inst.plugin_handle();
         if self.gui_open {
             gui.hide(&h).ok();
@@ -386,7 +398,7 @@ impl PluginEditor for ClapInstance {
         )
         .map_err(|e| HostError::EditorUnavailable(format!("{e:?}")))?;
         self.gui_open = true;
-        if let Err(e) = ffi::set_cocoa_parent(&gui, &h, parent.0) {
+        if let Err(e) = ffi::set_native_parent(&gui, &h, parent.0) {
             gui.destroy(&h);
             self.gui_open = false;
             return Err(e);

@@ -67,7 +67,8 @@ pub enum OfflineRender {
     Refused,
 }
 
-/// The native view an editor attaches to (an `NSView *` on macOS).
+/// The native view an editor attaches to: an `NSView *` on macOS, an X11
+/// window ID (cast to a pointer) on Linux.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentView(pub(crate) *mut c_void);
 
@@ -75,8 +76,8 @@ impl ParentView {
     /// Wraps the native parent view.
     ///
     /// # Safety
-    /// `view` must be a valid `NSView *` (or the platform's parent view)
-    /// that stays alive until the editor it is passed to is closed.
+    /// `view` must be a valid `NSView *` on macOS, or an X11 window ID on
+    /// Linux, that stays alive until the editor it is passed to is closed.
     pub unsafe fn new(view: *mut c_void) -> ParentView {
         ParentView(view)
     }
