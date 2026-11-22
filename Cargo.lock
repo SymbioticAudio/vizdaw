@@ -6370,6 +6370,7 @@ dependencies = [
  "core-host",
  "core-media",
  "core-model",
+ "image",
  "serde_json",
  "tempfile",
 ]

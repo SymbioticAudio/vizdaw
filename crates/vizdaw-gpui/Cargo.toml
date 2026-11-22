@@ -19,7 +19,9 @@ raw-window-handle = "0.6"
 # 0.2.2 panics in X11 window_handle (unimplemented) and fails to build on Linux
 # via xattr. See docs/superpowers/specs/2026-11-21-gpui-spike-report.md.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["runtime_shaders", "x11", "wayland"] }
+# `font-kit`: without it the macOS platform uses a no-op text system and
+# draws no text at all (it only logs a warning).
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["runtime_shaders", "font-kit", "x11", "wayland"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # ui.screenshot reads the window's pixels from the X server.

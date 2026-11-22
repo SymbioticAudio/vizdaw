@@ -583,6 +583,40 @@ fn gpui_demo_play_screenshot_stop() {
     let png = std::fs::read(&shot).unwrap();
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "a PNG");
     assert!(r["width"].as_u64().unwrap() >= 400, "{r}");
+    // The screenshot shows text: the Bar readout's box holds bright glyph
+    // pixels. Without GPUI's `font-kit` feature the macOS build drew no
+    // text at all while every tree-based check still passed.
+    let ws = app.call("state.get", json!({"target": "windows"}));
+    let frame_w = ws["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["number"] == window)
+        .unwrap_or_else(|| panic!("no window {window} in {ws}"))["frame"]["width"]
+        .as_f64()
+        .unwrap();
+    let img = image::open(&shot).unwrap().to_rgb8();
+    let scale = f64::from(img.width()) / frame_w;
+    let bar = wait_for_node(&mut app, &window, "Bar Readout");
+    let f = &bar["frame"];
+    let (x0, y0) = (f["x"].as_f64().unwrap(), f["y"].as_f64().unwrap());
+    let (w, h) = (f["width"].as_f64().unwrap(), f["height"].as_f64().unwrap());
+    let mut bright = 0;
+    for y in (y0 * scale) as u32..((y0 + h) * scale) as u32 {
+        for x in (x0 * scale) as u32..((x0 + w) * scale) as u32 {
+            if x < img.width()
+                && y < img.height()
+                && img.get_pixel(x, y).0.iter().all(|&c| c > 0xb0)
+            {
+                bright += 1;
+            }
+        }
+    }
+    assert!(
+        bright >= 20,
+        "no text drawn in the Bar readout ({bright} bright pixels) in {}",
+        shot.display()
+    );
 
     app.call(
         "command.run",
