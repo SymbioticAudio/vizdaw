@@ -156,22 +156,27 @@ impl TrackHeaders {
         window: &Window,
         cx: &mut Context<DocumentWindow>,
     ) -> AnyElement {
-        let mut column = div()
+        // The rows scroll inside the column; the group records the
+        // column itself (it stays put), the rows where they are drawn.
+        let mut rows = div()
             .id("track-headers")
-            .relative()
             .flex()
             .flex_col()
+            .size_full()
+            .overflow_y_scroll();
+        for lane in state.lanes {
+            let selected = state.selected.contains(&lane.id);
+            rows = rows.child(self.row(lane, selected, scope, cx));
+        }
+        rows = rows.child(self.add_row(scope, window, cx));
+        let column = div()
+            .relative()
             .w(px(WIDTH))
             .h_full()
             .flex_none()
-            .overflow_hidden()
             .bg(rgb(COLUMN))
-            .child(scope.this("group", "Track Headers", true));
-        for lane in state.lanes {
-            let selected = state.selected.contains(&lane.id);
-            column = column.child(self.row(lane, selected, scope, cx));
-        }
-        column = column.child(self.add_row(scope, window, cx));
+            .child(scope.this("group", "Track Headers", true))
+            .child(rows);
         // The rows are the full 200 px; the line to the arrangement is
         // outside them.
         div()

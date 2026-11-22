@@ -476,3 +476,34 @@ fn the_status_line_dismiss_button_clears_it(cx: &mut TestAppContext) {
     assert_eq!(s.status(), None);
     assert!(s.find("button", "Dismiss").is_none());
 }
+
+#[gpui::test]
+fn the_header_column_scrolls_to_reach_every_track(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let many: Vec<_> = (0..20)
+        .map(|i| lane_row(100 + i, &format!("Track {i}"), false))
+        .collect();
+    fake.set_lanes(3, many);
+    let mut s = setup(cx, fake);
+    let viewport = s.cx.update(|window, _| window.viewport_size());
+    let group = s.element("group", "Track Headers");
+    let add = s.element("button", "Add Track");
+    // More tracks than fit: "+ Add Track" is drawn below the window.
+    assert!(add.bounds.origin.y >= viewport.height, "{add:?}");
+    s.cx.simulate_event(gpui::ScrollEvent {
+        position: group.bounds.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+        ..Default::default()
+    });
+    s.cx.run_until_parked();
+    // The column stays put; its rows move up with the scroll.
+    assert_eq!(s.element("group", "Track Headers").bounds, group.bounds);
+    let add = s.element("button", "Add Track");
+    assert!(add.bounds.bottom() <= viewport.height, "{add:?}");
+    assert!(add.bounds.origin.y >= group.bounds.origin.y, "{add:?}");
+    let first = s.element("button", "MIDI track, Track 0, no destination");
+    assert!(first.bounds.bottom() <= group.bounds.origin.y, "{first:?}");
+    // And it works where it now is.
+    s.click("button", "Add Track");
+    assert!(s.find("menuitem", "New Audio Track").is_some());
+}
