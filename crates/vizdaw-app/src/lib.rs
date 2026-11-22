@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 pub mod alerts;
+pub mod commands;
 pub mod document;
 pub mod session;
 pub mod store;

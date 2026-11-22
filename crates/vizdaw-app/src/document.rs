@@ -169,6 +169,19 @@ impl DocumentModel {
         }
     }
 
+    /// Applies the result of an edit call: the snapshot is taken and the
+    /// selection re-read; an error is handed back untouched (the command
+    /// runner turns it into a control error).
+    pub(crate) fn apply_result(
+        &mut self,
+        result: Result<DocSnapshot, VizError>,
+    ) -> Result<(), VizError> {
+        let snapshot = result?;
+        self.apply(snapshot);
+        self.refresh_selection();
+        Ok(())
+    }
+
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref()
     }

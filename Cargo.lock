@@ -6378,6 +6378,7 @@ dependencies = [
 name = "vizdaw-app"
 version = "26.0.0"
 dependencies = [
+ "core-control",
  "core-ffi",
  "tempfile",
  "vizdaw-app",

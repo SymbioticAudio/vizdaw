@@ -304,11 +304,28 @@ impl DocSession for FakeSession {
     ) -> Result<DocSnapshot, VizError> {
         let mut s = self.st();
         s.calls.push(format!("new_track({seq},{kind:?},{after:?})"));
+        let id = s.lanes.values().flatten().map(|l| l.id).max().unwrap_or(0) + 1;
+        let mut row = lane_row(id, &format!("Track {id}"), false);
+        row.kind = kind;
+        let rows = s.lanes.entry(seq).or_default();
+        let at = after
+            .and_then(|a| rows.iter().position(|l| l.id == a))
+            .map_or(rows.len(), |i| i + 1);
+        rows.insert(at, row);
         Ok(Self::command_result(&mut s))
     }
     fn duplicate_track(&self, seq: u64, lane: u64) -> Result<DocSnapshot, VizError> {
         let mut s = self.st();
         s.calls.push(format!("duplicate_track({seq},{lane})"));
+        let id = s.lanes.values().flatten().map(|l| l.id).max().unwrap_or(0) + 1;
+        if let Some(rows) = s.lanes.get_mut(&seq)
+            && let Some(i) = rows.iter().position(|l| l.id == lane)
+        {
+            let mut copy = rows[i].clone();
+            copy.id = id;
+            copy.name = format!("{} copy", copy.name);
+            rows.insert(i + 1, copy);
+        }
         Ok(Self::command_result(&mut s))
     }
     fn edit(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError> {
@@ -336,6 +353,15 @@ impl DocSession for FakeSession {
                         l.solo = solo.unwrap_or(l.solo);
                         l.arm = arm.unwrap_or(l.arm);
                     }
+                }
+                LaneEdit::Remove { seq, lane } => {
+                    if let Some(rows) = s.lanes.get_mut(seq) {
+                        rows.retain(|l| l.id != *lane);
+                    }
+                    // Like the core: a removed lane leaves the selection.
+                    s.selection
+                        .lanes
+                        .retain(|r| !(r.seq == *seq && r.lane == *lane));
                 }
                 _ => {}
             }
