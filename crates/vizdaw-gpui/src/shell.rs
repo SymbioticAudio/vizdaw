@@ -375,13 +375,14 @@ impl DocumentWindow {
     /// Starts the inline rename of track `lane` in its header: a field
     /// holding the name, focused, the name selected. Enter commits (the
     /// name trimmed; blank or unchanged sends nothing), Escape cancels,
-    /// focus loss commits. A track not shown does nothing; a rename
-    /// already open is cancelled first.
+    /// focus loss commits. A rename already open is committed first (as
+    /// its field losing the focus would); then a track not shown does
+    /// nothing.
     pub fn begin_rename(&mut self, lane: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_rename(true, window, cx);
         let Some(row) = self.lane(lane, cx) else {
             return;
         };
-        self.end_rename(false, window, cx);
         let field = cx.new(|cx| TextInput::new("Name", cx).with_text(&row.name));
         let focus = field.focus_handle(cx);
         let subscriptions = vec![
@@ -418,6 +419,13 @@ impl DocumentWindow {
             window.focus(&self.focus, cx);
         }
         cx.notify();
+    }
+
+    /// Commits an open rename, as its field losing the focus would: Close,
+    /// Save, Save As and Quit do this first, so the typed name is in the
+    /// song they check or save.
+    pub fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_rename(true, window, cx);
     }
 
     /// A rename whose track is no longer shown (Undo removed it, the
@@ -473,10 +481,12 @@ impl DocumentWindow {
     }
 
     fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_rename(window, cx);
         self.save_then_close(false, window, cx);
     }
 
     fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_rename(window, cx);
         self.prompt_save_as(false, window, cx);
     }
 
@@ -586,8 +596,10 @@ impl DocumentWindow {
     }
 
     /// True when the window may close now; with unsaved changes it asks
-    /// first (Save, Don't Save, Cancel) and answers false.
+    /// first (Save, Don't Save, Cancel) and answers false. An open rename
+    /// is committed first.
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.commit_rename(window, cx);
         let doc = self.doc;
         let (dirty, title) = {
             let s = self.app.read(cx);

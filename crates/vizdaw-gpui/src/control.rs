@@ -229,6 +229,8 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
 /// unsaved changes answer `unsaved_changes` naming the songs, and nothing
 /// is shown or closed. With it, or with nothing unsaved, quits at once.
 fn quit(discard: bool, cx: &mut App) -> Handled {
+    // A typed name is in the songs checked (and lost only with them).
+    crate::commit_renames(cx);
     let unsaved: Vec<String> = {
         let s = AppState::global(cx);
         let s = s.read(cx);

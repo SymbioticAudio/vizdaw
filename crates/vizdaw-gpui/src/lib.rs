@@ -131,6 +131,7 @@ pub fn quit(cx: &mut App) {
 }
 
 fn quit_or_ask(cx: &mut App) {
+    commit_renames(cx);
     let app = AppState::global(cx);
     let (dirty, front) = {
         let s = app.read(cx);
@@ -172,6 +173,23 @@ fn quit_or_ask(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Commits the open track rename of every window, before Quit checks for
+/// unsaved changes. Call it outside any window's update (a window being
+/// updated is skipped).
+pub fn commit_renames(cx: &mut App) {
+    let handles: Vec<_> = AppState::global(cx)
+        .read(cx)
+        .windows()
+        .iter()
+        .map(|w| w.handle)
+        .collect();
+    for handle in handles {
+        handle
+            .update(cx, |v, window, cx| v.commit_rename(window, cx))
+            .ok();
+    }
 }
 
 /// Closes every document (stopping its transport, dropping it so no poll

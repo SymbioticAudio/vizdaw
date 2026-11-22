@@ -507,3 +507,192 @@ fn the_header_column_scrolls_to_reach_every_track(cx: &mut TestAppContext) {
     s.click("button", "Add Track");
     assert!(s.find("menuitem", "New Audio Track").is_some());
 }
+
+impl Setup {
+    fn renaming(&self) -> Option<u64> {
+        self.window
+            .read_with(&self.cx, |v, _| v.renaming())
+            .unwrap()
+    }
+
+    fn begin_rename(&mut self, lane: u64) {
+        self.window
+            .update(&mut self.cx, |v, window, cx| {
+                v.begin_rename(lane, window, cx)
+            })
+            .unwrap();
+        self.cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn starting_a_second_rename_commits_the_first(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.click("button", CHORDS);
+    s.begin_rename(30);
+    s.cx.simulate_input("Drums");
+    // The Rename command (its menu item) on the selected track, while the
+    // field has the keyboard.
+    s.cx.dispatch_action(RunCommand::new("track.rename"));
+    s.cx.run_until_parked();
+    assert_eq!(s.renames(), vec!["Drums".to_string()]);
+    assert_eq!(s.renaming(), Some(31));
+    // A double-click on another track's name.
+    s.cx.simulate_input("Keys");
+    s.double_click("button", "MIDI track, Drums, no destination");
+    assert_eq!(s.renames(), vec!["Drums".to_string(), "Keys".to_string()]);
+    assert_eq!(s.renaming(), Some(30));
+}
+
+#[gpui::test]
+fn a_click_elsewhere_in_the_window_commits_the_rename(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    // Under "+ Add Track", in the header column.
+    let add = s.element("button", "Add Track").bounds;
+    let below = point(add.center().x, add.bottom() + px(100.));
+    // The transport bar, left of its first button.
+    let play = s.element("button", "Play").bounds;
+    let bar = point(play.origin.x - px(4.), play.center().y);
+    // The status line's text.
+    s.set_status("Something");
+    let dismiss = s.element("button", "Dismiss").bounds;
+    let status = point(px(20.), dismiss.center().y);
+    for (i, at) in [below, bar, status].into_iter().enumerate() {
+        s.begin_rename(30);
+        let name = format!("Name {i}");
+        s.cx.simulate_input(&name);
+        s.click_at(at, Modifiers::none());
+        assert_eq!(s.renames().last(), Some(&name), "click {i} at {at:?}");
+        assert_eq!(s.renaming(), None, "click {i}");
+    }
+}
+
+impl Setup {
+    /// The next edit leaves the song edited (the fake's edits keep the
+    /// snapshot as it is otherwise).
+    fn next_edit_dirties(&self) {
+        let mut n = self.fake.snap();
+        n.version += 1;
+        n.dirty = true;
+        n.undo_label = Some("Rename Track".into());
+        self.fake.bump(n);
+    }
+
+    /// A rename of Groove open with "Drums" typed, on a clean song.
+    fn typed_rename(&mut self) {
+        self.begin_rename(30);
+        self.cx.simulate_input("Drums");
+        self.next_edit_dirties();
+        assert!(self.renames().is_empty());
+    }
+
+    /// The fake's calls from the rename edit on: the edit, then the rest.
+    fn calls_from_edit(&self) -> Vec<String> {
+        let calls = self.fake.calls();
+        let at = calls
+            .iter()
+            .position(|c| c == "edit")
+            .unwrap_or_else(|| panic!("no edit in {calls:?}"));
+        calls[at..].to_vec()
+    }
+
+    fn control_call(&mut self, cmd: &str, params: Value) -> control::Handled {
+        let raw = RawRequest {
+            id: RequestId::Num(1),
+            cmd: cmd.into(),
+            params: params.as_object().cloned().unwrap_or_default(),
+        };
+        let command = core_control::validate(&raw).expect("a valid request");
+        let handled = self.cx.cx.update(|cx| control::handle(&command, cx));
+        self.cx.run_until_parked();
+        handled
+    }
+}
+
+#[gpui::test]
+fn close_commits_an_open_rename_before_asking(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.typed_rename();
+    s.cx.dispatch_action(vizdaw_gpui::CloseWindow);
+    s.cx.run_until_parked();
+    assert_eq!(s.renames(), vec!["Drums".to_string()]);
+    // The song is now unsaved: the close asks.
+    assert!(s.cx.has_pending_prompt());
+    s.cx.simulate_prompt_answer("Cancel");
+    s.cx.run_until_parked();
+    assert_eq!(s.app.read_with(&s.cx, |a, _| a.windows().len()), 1);
+}
+
+#[gpui::test]
+fn the_close_button_commits_an_open_rename_before_asking(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.typed_rename();
+    let closed = s.cx.simulate_close();
+    s.cx.run_until_parked();
+    assert!(!closed);
+    assert_eq!(s.renames(), vec!["Drums".to_string()]);
+    assert!(s.cx.has_pending_prompt());
+    s.cx.simulate_prompt_answer("Cancel");
+    s.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn save_commits_an_open_rename_first(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Song.vizdaw");
+    fake.set_path(Some(path.to_str().unwrap()));
+    let mut s = setup(cx, fake);
+    s.typed_rename();
+    s.cx.dispatch_action(vizdaw_gpui::Save);
+    s.cx.run_until_parked();
+    assert_eq!(s.renames(), vec!["Drums".to_string()]);
+    assert_eq!(s.calls_from_edit(), vec!["edit", "save"]);
+    assert_eq!(s.renaming(), None);
+}
+
+#[gpui::test]
+fn save_as_commits_an_open_rename_first(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    let dir = tempfile::tempdir().unwrap();
+    let pick = dir.path().join("New");
+    s.typed_rename();
+    s.cx.dispatch_action(vizdaw_gpui::SaveAs);
+    s.cx.run_until_parked();
+    s.cx.simulate_new_path_selection(move |_| Some(pick.clone()));
+    s.cx.run_until_parked();
+    assert_eq!(s.renames(), vec!["Drums".to_string()]);
+    let saved = format!("save_as({})", dir.path().join("New.vizdaw").display());
+    let calls = s.calls_from_edit();
+    assert_eq!(calls.first().map(String::as_str), Some("edit"));
+    assert!(calls.contains(&saved), "{calls:?}");
+}
+
+#[gpui::test]
+fn quit_commits_an_open_rename_before_asking(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.typed_rename();
+    s.cx.dispatch_action(vizdaw_gpui::Quit);
+    s.cx.run_until_parked();
+    assert_eq!(s.renames(), vec!["Drums".to_string()]);
+    // The song is now unsaved: Quit asks.
+    assert!(s.cx.has_pending_prompt());
+    assert_eq!(s.fake.count("close"), 0);
+    s.cx.simulate_prompt_answer("Cancel");
+    s.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn control_quit_commits_an_open_rename_before_refusing(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.typed_rename();
+    let handled = s.control_call("app.quit", json!({}));
+    assert_eq!(s.renames(), vec!["Drums".to_string()]);
+    match handled {
+        control::Handled::Reply(Err(e)) => {
+            assert_eq!(e.code, core_control::error::ErrorCode::UnsavedChanges)
+        }
+        other => panic!("app.quit should refuse: {other:?}"),
+    }
+    assert_eq!(s.fake.count("close"), 0);
+}
