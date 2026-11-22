@@ -118,8 +118,14 @@ pub fn prompt_open(cx: &mut App) {
     .detach();
 }
 
-/// Quit: with unsaved changes, asks first in the front window.
+/// Quit: with unsaved changes, asks first in the front window. Deferred:
+/// Quit arrives from a key or menu while the front window is being
+/// updated, and a window cannot be updated from inside its own update.
 pub fn quit(cx: &mut App) {
+    cx.defer(quit_or_ask);
+}
+
+fn quit_or_ask(cx: &mut App) {
     let app = AppState::global(cx);
     let (dirty, front) = {
         let s = app.read(cx);
@@ -132,8 +138,14 @@ pub fn quit(cx: &mut App) {
             .map(|w| w.handle);
         (dirty, front)
     };
-    let Some(front) = front.filter(|_| dirty) else {
+    if !dirty {
         quit_now(cx);
+        return;
+    }
+    // Unsaved changes are never discarded without an answer: with no
+    // window to ask in, Quit does nothing.
+    let Some(front) = front else {
+        eprintln!("Quit: unsaved changes and no window to ask in");
         return;
     };
     let asked = front.update(cx, |_, window, cx| {
@@ -146,7 +158,7 @@ pub fn quit(cx: &mut App) {
         )
     });
     let Ok(answer) = asked else {
-        quit_now(cx);
+        eprintln!("Quit: the front window could not ask about unsaved changes");
         return;
     };
     cx.spawn(async move |cx| {
@@ -157,10 +169,14 @@ pub fn quit(cx: &mut App) {
     .detach();
 }
 
-/// Closes every document (stopping its transport) and quits.
+/// Closes every document (stopping its transport, dropping it so no poll
+/// reads a closed session) and quits.
 pub fn quit_now(cx: &mut App) {
     let app = AppState::global(cx);
-    app.update(cx, |s, _| s.store.close_all());
+    app.update(cx, |s, cx| {
+        s.close_all();
+        cx.notify();
+    });
     cx.quit();
 }
 

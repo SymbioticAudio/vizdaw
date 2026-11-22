@@ -107,6 +107,16 @@ impl AppState {
         self.store.close(doc);
     }
 
+    /// Every document closes, with its transport and window entry.
+    pub fn close_all(&mut self) {
+        let docs: Vec<DocId> = self.windows.iter().map(|w| w.doc).collect();
+        for doc in docs {
+            self.close_document(doc);
+        }
+        self.transports.clear();
+        self.store.close_all();
+    }
+
     /// Plays or stops `doc`'s transport.
     pub fn play_stop(&mut self, doc: DocId) {
         let Some(t) = self.transports.get_mut(&doc) else {

@@ -326,3 +326,38 @@ fn closing_an_edited_window_asks_first(cx: &mut TestAppContext) {
         .read_with(&s.cx, |a, _| (a.windows().len(), a.store.count()));
     assert_eq!(left, (0, 0));
 }
+
+#[gpui::test]
+fn quit_with_unsaved_changes_asks_first(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    fake.set_dirty(true);
+    let mut s = setup(cx, fake);
+    let doc = s.window_doc();
+    // The shortcut, dispatched from the front window.
+    let quit_key = if cfg!(target_os = "macos") {
+        "cmd-q"
+    } else {
+        "ctrl-q"
+    };
+    s.cx.simulate_keystrokes(quit_key);
+    s.cx.run_until_parked();
+    assert!(s.cx.has_pending_prompt());
+    assert_eq!(s.fake.count("close"), 0);
+    s.cx.simulate_prompt_answer("Cancel");
+    s.cx.run_until_parked();
+    assert_eq!(s.fake.count("close"), 0);
+
+    // The menu item, dispatched on the window.
+    s.cx.dispatch_action(vizdaw_gpui::Quit);
+    s.cx.run_until_parked();
+    assert!(s.cx.has_pending_prompt());
+    assert_eq!(s.fake.count("close"), 0);
+    s.cx.simulate_prompt_answer("Discard Changes and Quit");
+    s.cx.run_until_parked();
+    assert_eq!(s.fake.count("close"), 1);
+    // Nothing is left to poll a closed session.
+    let left = s
+        .app
+        .read_with(&s.cx, |a, _| (a.transport(doc).is_none(), a.store.count()));
+    assert_eq!(left, (true, 0));
+}
