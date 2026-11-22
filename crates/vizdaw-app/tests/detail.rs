@@ -235,7 +235,11 @@ fn the_detail_reads_and_writes_the_swift_shapes() {
         r#"{"detail":{"kind":"list","target":{"lane":{"seq":3,"lane":31}},"listFilter":{"hiddenKinds":["cc"],"shownDests":[2]}}}"#,
     ));
     let filter = l.detail.unwrap().list_filter.unwrap();
-    assert!(filter.hidden_kinds.contains("cc"));
+    assert!(
+        filter
+            .hidden_kinds
+            .contains(&vizdaw_app::list::ListKind::Cc)
+    );
     assert_eq!(
         filter
             .shown_dests

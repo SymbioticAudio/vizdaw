@@ -2,10 +2,10 @@
 //! on what. Encoded as Swift's `Codable` writes them, so `ui.json` reads
 //! in both apps.
 
-use std::collections::BTreeSet;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+pub use crate::list::ListFilter;
 
 /// The detail editors. `ui.json` spells them camel-case (`pianoRoll`), the
 /// control channel snake-case ([`DetailEditorKind::name`]).
@@ -93,17 +93,6 @@ impl EditorTarget {
             EditorTarget::Sequence { .. } => None,
         }
     }
-}
-
-/// What a list hides (Swift `ListFilter`). The kinds are the Swift raw
-/// names (`note`, `cc`, `pitchBend`, …); the List editor types them.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListFilter {
-    pub hidden_kinds: BTreeSet<String>,
-    /// Destinations shown (`None`: all).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shown_dests: Option<BTreeSet<u64>>,
 }
 
 /// A detail editor and its target. Fields this app does not model (the

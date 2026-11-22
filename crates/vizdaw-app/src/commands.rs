@@ -35,10 +35,12 @@ pub const EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
     "editors.list",
     "editors.close_detail",
+    "editors.insert_event",
     "ui.toggle_bottom",
 ];
 
 const NO_DETAIL: &str = "No detail editor is open.";
+const NO_LIST: &str = "Insert Event needs a list editor that has the keyboard.";
 
 /// The registry IDs of the transport commands `run` handles. Recording,
 /// the click, locators and the punch and edit-out fields come later.
@@ -152,7 +154,11 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
         return transport_enabled(id, doc);
     }
     if EDITOR_COMMANDS.contains(&id) {
-        return id != "editors.close_detail" || doc.layout().detail.is_some();
+        return match id {
+            "editors.close_detail" => doc.layout().detail.is_some(),
+            "editors.insert_event" => insert_event_ready(doc),
+            _ => true,
+        };
     }
     if !DOCUMENT_COMMANDS.contains(&id) {
         return false;
@@ -443,6 +449,12 @@ fn run_editor(
             doc.update_layout(|l| l.snap.enabled = on.unwrap_or(!l.snap.enabled));
         }
         "editors.list" => doc.show_detail(DetailEditorKind::List),
+        "editors.insert_event" => {
+            if !insert_event_ready(doc) {
+                return Err(unavailable(NO_LIST));
+            }
+            doc.list_insert(None);
+        }
         "ui.toggle_bottom" => {
             let on = on_flag(id, args)?;
             doc.update_layout(|l| {
@@ -458,6 +470,11 @@ fn run_editor(
         }
     }
     Ok(ran(doc))
+}
+
+/// Insert Event works with a list open and no text being typed in.
+fn insert_event_ready(doc: &DocumentModel) -> bool {
+    doc.list_open() && doc.transport_keys_enabled()
 }
 
 /// Whether a transport command can run now (its menu item is enabled).

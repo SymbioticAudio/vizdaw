@@ -10,7 +10,7 @@ use vizdaw_ffi::VizError;
 use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef, MonitorModeRow};
 use vizdaw_ffi::events::{
-    EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo,
+    EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
 };
 use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::revs::LaneRev;
@@ -62,6 +62,7 @@ struct State {
     call_errors: HashMap<String, VizError>,
     /// Errors a call answers with once each, first, by call name.
     next_errors: HashMap<String, VecDeque<VizError>>,
+    dests: Vec<DestRow>,
 }
 
 /// What the session keeps of a selection it is given (after dropping
@@ -150,6 +151,7 @@ impl FakeSession {
             edit_alls: vec![],
             call_errors: HashMap::new(),
             next_errors: HashMap::new(),
+            dests: vec![],
         }))
     }
 
@@ -374,7 +376,7 @@ impl FakeSession {
 
     /// Makes `call` (`begin_edit`, `edit_gesture`, `end_edit`,
     /// `abort_edit`, `edit_all`, `seconds_at`, `ticks_at`, `ui_layout`,
-    /// `set_ui_layout`) answer `e` every time (`None`: normally again).
+    /// `set_ui_layout`, `destinations`) answer `e` every time (`None`: normally again).
     pub fn set_call_error(&self, call: &str, e: Option<VizError>) {
         let mut s = self.st();
         match e {
@@ -420,6 +422,11 @@ impl FakeSession {
     /// Every `edit_gesture` command, in order.
     pub fn gesture_edits(&self) -> Vec<EditCommand> {
         self.st().gesture_edits.clone()
+    }
+
+    /// The instrument list `destinations` answers with.
+    pub fn set_destinations(&self, rows: Vec<DestRow>) {
+        self.st().dests = rows;
     }
 
     /// Every `edit_all(label, cmds)`, in order.
@@ -766,7 +773,9 @@ impl DocSession for FakeSession {
         Ok(vec![])
     }
     fn destinations(&self) -> Result<Vec<DestRow>, VizError> {
-        Ok(vec![])
+        let mut s = self.st();
+        Self::scripted(&mut s, "destinations")?;
+        Ok(s.dests.clone())
     }
     fn begin_edit(&self, label: &str) -> Result<(), VizError> {
         let mut s = self.st();
@@ -902,6 +911,78 @@ pub fn editor_fake() -> FakeSession {
         }],
     );
     f.set_blocks(3, 31, vec![block_row(0, BAR, &[1])]);
+    f
+}
+
+/// A 4/4, 120 BPM sequence info, 4 bars long (Swift `fourFour`).
+pub fn four_four(seq: u64) -> SequenceInfo {
+    SequenceInfo {
+        id: seq,
+        name: "S".into(),
+        comment: String::new(),
+        keyboard_slot: None,
+        start_offset: 0,
+        length_ticks: 4 * BAR,
+        tempo: vec![TempoPointRow {
+            tick: 0,
+            bpm: 120.,
+            ramp: false,
+        }],
+        meter: vec![MeterEntryRow {
+            tick: 0,
+            num: 4,
+            den: 4,
+            sharps: 0,
+            minor: false,
+        }],
+        markers: vec![],
+        generated: false,
+    }
+}
+
+/// A note row: velocity 0x8000, a quarter long (Swift `noteRow`).
+pub fn note_row(id: u64, tick: i64, pitch: u8) -> EventRow {
+    EventRow {
+        pitch,
+        velocity: 0x8000,
+        duration: 15_360,
+        ..EventRow::blank(id, tick, EventKindRow::Note)
+    }
+}
+
+/// A destination row with everything else defaulted.
+pub fn dest_row(id: u64, name: &str) -> DestRow {
+    DestRow {
+        id,
+        name: name.into(),
+        plugin: None,
+        external: false,
+        return_latency_ms: 0.,
+        midi_mix: Default::default(),
+        channel: None,
+        mpe: None,
+        builtin_sound: None,
+        port: None,
+    }
+}
+
+/// [`editor_fake`] for the detail editors (Swift `rollFake`): Song (3)
+/// has Groove (30), Chords (31, destination 5: notes 1 at 0 and 2 at a
+/// quarter) and Bass (32, destination 6: note 3 at 0); a 4/4, 120 BPM
+/// map; destinations Piano (5) and Bass Synth (6).
+pub fn roll_fake() -> FakeSession {
+    let f = editor_fake();
+    let mut chords = lane_row(31, "Chords", false);
+    chords.midi_dest = Some(5);
+    chords.midi_event_count = 2;
+    let mut bass = lane_row(32, "Bass", false);
+    bass.midi_dest = Some(6);
+    bass.midi_event_count = 1;
+    f.set_lanes(3, vec![lane_row(30, "Groove", false), chords, bass]);
+    f.set_events(3, 31, vec![note_row(1, 0, 60), note_row(2, 15_360, 64)]);
+    f.set_events(3, 32, vec![note_row(3, 0, 40)]);
+    f.set_info(3, four_four(3));
+    f.set_destinations(vec![dest_row(5, "Piano"), dest_row(6, "Bass Synth")]);
     f
 }
 

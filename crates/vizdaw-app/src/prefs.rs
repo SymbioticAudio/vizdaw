@@ -1,15 +1,18 @@
 //! The app's preferences: one JSON file under the launch home (so a
 //! throwaway e2e home keeps its own), or only in memory for tests. Only
-//! what the app has needed so far: the `transportBar` key.
+//! what the app has needed so far: the `transportBar` and `list` keys.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use crate::list::{ListColumns, ListFilter, ListPrefs};
 use crate::transport_bar::{TransportItem, TransportLayout};
 
 /// The preference's key.
 pub const TRANSPORT_BAR_KEY: &str = "transportBar";
+/// The list editors' default filter and columns (Swift "VizDAW.list").
+pub const LIST_KEY: &str = "list";
 /// The stored value of the default bar: it follows the default when a
 /// later version changes it.
 const STANDARD: &str = "standard";
@@ -106,6 +109,44 @@ impl Prefs {
     /// The default bar, written.
     pub fn reset_transport_bar(&mut self) -> Result<(), String> {
         self.set_transport_bar(&TransportLayout::standard())
+    }
+
+    /// The list preferences; a missing or damaged value is the defaults
+    /// (and is kept as it is until one is set).
+    pub fn list(&self) -> ListPrefs {
+        self.map
+            .get(LIST_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Writes the list preferences; on a failure nothing changes.
+    pub fn set_list(&mut self, prefs: &ListPrefs) -> Result<(), String> {
+        let value = serde_json::to_value(prefs).map_err(|e| e.to_string())?;
+        let old = self.map.insert(LIST_KEY.into(), value);
+        if let Err(e) = self.save() {
+            match old {
+                Some(o) => self.map.insert(LIST_KEY.into(), o),
+                None => self.map.remove(LIST_KEY),
+            };
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The optional list columns and the SMPTE rate.
+    pub fn set_list_columns(&mut self, columns: ListColumns) -> Result<(), String> {
+        let mut p = self.list();
+        p.columns = columns;
+        self.set_list(&p)
+    }
+
+    /// "Save as Default": only the hidden kinds are kept (destinations
+    /// belong to one project).
+    pub fn set_list_default_filter(&mut self, filter: &ListFilter) -> Result<(), String> {
+        let mut p = self.list();
+        p.default_filter = filter.kinds_only();
+        self.set_list(&p)
     }
 
     fn save(&self) -> Result<(), String> {

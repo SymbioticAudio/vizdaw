@@ -62,6 +62,8 @@ pub struct EditorModel {
     /// The `ui.json` last read or stored: what a save merges into when the
     /// session cannot answer.
     pub(crate) ui_json: Option<String>,
+    /// The detail pane's list (cursor, last inserted kind, cached rows).
+    pub(crate) list: crate::list::ListModel,
 }
 
 impl EditorModel {
@@ -72,6 +74,7 @@ impl EditorModel {
             layout: EditorLayout::decode(json),
             gesture: None,
             ui_json: json.map(String::from),
+            list: crate::list::ListModel::default(),
         }
     }
 
@@ -104,6 +107,9 @@ impl EditorModel {
         let kind = kind.unwrap_or(l.last_kind);
         l.last_kind = kind;
         let mut next = DetailState::new(kind, target);
+        if l.detail.as_ref().is_none_or(|old| old.target != target) {
+            self.list.retarget();
+        }
         if let Some(old) = l.detail.take() {
             next.list_filter = old.list_filter;
             next.extra = old.extra;

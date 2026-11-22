@@ -588,7 +588,7 @@ fn saving_keeps_nested_keys_this_app_does_not_know() {
         l.views.arrange.left.size = 300.;
         l.snap.enabled = false;
         let filter = l.detail.as_mut().unwrap().list_filter.as_mut().unwrap();
-        filter.hidden_kinds.insert("note".into());
+        filter.hidden_kinds.insert(vizdaw_app::list::ListKind::Note);
         filter.shown_dests = None;
         l.block_rule = vizdaw_app::editor::BlockRuleSetting::FixedBars { bars: 2 };
     });

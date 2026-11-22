@@ -56,6 +56,10 @@ pub struct DocumentModel {
     transport: Arc<Mutex<TransportState>>,
     /// Each shown track's blocks and events, read once per lanes fetch.
     lane_reads: Vec<(u64, LaneReads)>,
+    /// The app's list preferences (default filter, columns), as last given.
+    pub(crate) list_prefs: crate::list::ListPrefs,
+    /// The list table has the keyboard (Swift `EditorModel.listFocused`).
+    pub(crate) list_focused: bool,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -93,6 +97,8 @@ impl DocumentModel {
             infos: vec![],
             transport: Arc::new(Mutex::new(transport)),
             lane_reads: vec![],
+            list_prefs: crate::list::ListPrefs::default(),
+            list_focused: false,
         };
         model.reset_infos();
         model.refresh_lanes();
@@ -360,10 +366,10 @@ impl DocumentModel {
         self.text_editors.is_empty()
     }
 
-    /// Return (Return to Start) also waits for a list that has the
-    /// keyboard, once the editors have lists.
+    /// Return (Return to Start) also waits while the list table has the
+    /// keyboard; Space still plays.
     pub fn return_key_enabled(&self) -> bool {
-        self.transport_keys_enabled()
+        self.transport_keys_enabled() && !self.list_focused
     }
 
     /// Where the last Play started; Stop returns there.

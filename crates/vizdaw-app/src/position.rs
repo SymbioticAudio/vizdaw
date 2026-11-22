@@ -105,12 +105,7 @@ pub fn parse_position(text: &str, current: Bbu) -> Option<Bbu> {
             }
             continue;
         }
-        // Swift's `Int64(_:)`: an optional sign and digits only.
-        let digits = p.strip_prefix(['+', '-']).unwrap_or(p);
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let v: i64 = p.parse().ok()?;
+        let v = swift_int(p)?;
         match i {
             0 => out.bar = v,
             1 => out.beat = v,
@@ -119,6 +114,24 @@ pub fn parse_position(text: &str, current: Bbu) -> Option<Bbu> {
     }
     (BARS.contains(&out.bar) && BEATS.contains(&out.beat) && UNITS.contains(&out.unit))
         .then_some(out)
+}
+
+/// Swift's `Int64(_:)`: an optional sign and ASCII digits only, in range.
+pub(crate) fn swift_int(text: &str) -> Option<i64> {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.strip_prefix('+').unwrap_or(text).parse().ok()
+}
+
+/// Swift's `UInt32(_:)`-style parse: an optional `+` and ASCII digits.
+pub(crate) fn swift_uint(text: &str) -> Option<u64> {
+    let digits = text.strip_prefix('+').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 #[cfg(test)]
