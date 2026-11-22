@@ -76,6 +76,13 @@ impl App {
         }
     }
 
+    fn wait(&mut self, window: &Value, condition: Value) -> Value {
+        let mut p = condition;
+        p["timeout_ms"] = json!(WAIT_MS);
+        p["window"] = window.clone();
+        self.call("wait", p)
+    }
+
     fn command(&mut self, id: &str, params: Value) -> Value {
         self.call("command.run", json!({"id": id, "params": params}))
     }
@@ -445,5 +452,329 @@ fn gpui_app_quit_refuses_while_a_song_is_unsaved() {
     let d = app.call("state.get", json!({"target": "document", "window": w}));
     assert_eq!(d["dirty"], true, "{d}");
     // `discard: true` quits (App::quit sends it).
+    app.quit();
+}
+
+/// Opens the demo the way the Swift tests do and waits for its document.
+fn start_demo(home: &std::path::Path) -> (App, Value) {
+    let mut app = App::start(home, false);
+    let opened = app.call("app.new_demo", json!({}));
+    let window = opened["window"].clone();
+    assert!(window.as_i64().is_some_and(|w| w > 0), "{opened}");
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    (app, window)
+}
+
+/// Polls the tree until the node labelled exactly `label` exists; returns
+/// it (its `id`, `value` and `focused`).
+fn wait_for_node(app: &mut App, window: &Value, label: &str) -> Value {
+    wait_in_tree(app, window, label, |nodes| find_node(nodes, label))
+}
+
+/// Polls the tree until the node labelled `label` has the value `value`.
+fn wait_for_value(app: &mut App, window: &Value, label: &str, value: &str) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let n = wait_for_node(app, window, label);
+        if n["value"].as_str() == Some(value) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label} is not {value:?} within {WAIT_MS} ms: {n}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Polls `state.get editor` until `ok` holds; returns it.
+fn wait_for_editor(
+    app: &mut App,
+    window: &Value,
+    what: &str,
+    ok: impl Fn(&Value) -> bool,
+) -> Value {
+    // `wait_for_state` names the target in its failure; `what` adds context.
+    let _ = what;
+    wait_for_state(app, window, "editor", ok)
+}
+
+/// The transport's tick, read until it is `tick`.
+fn wait_for_tick(app: &mut App, window: &Value, tick: i64) {
+    wait_for_state(app, window, "transport", |t| {
+        t["tick"].as_i64() == Some(tick)
+    });
+}
+
+/// The ID of the tree's button labelled (or titled) exactly "Play". GPUI's
+/// role is `button` where the Swift app's was `AXButton`.
+fn play_button(nodes: &Value) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        let exact = |k: &str| n[k].as_str() == Some("Play");
+        if n["role"] == "button" && (exact("label") || exact("title")) {
+            Some(n["id"].clone())
+        } else {
+            play_button(&n["children"])
+        }
+    })
+}
+
+/// Ported from `demo_play_screenshot_stop`, without its last step
+/// (`editors.list` then `wait detail_kind list`): the List editor is a
+/// later slice.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_demo_play_screenshot_stop() {
+    let home = temp_home();
+    let (mut app, window) = start_demo(home.path());
+
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    let song = doc["sequences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Song")
+        .unwrap_or_else(|| panic!("no Song in {doc}"))["id"]
+        .clone();
+    assert_eq!(doc["selected_seq"], song, "Song is selected");
+
+    // A window number that names no window is `no_window` for every
+    // command (spec 5.3).
+    for (cmd, p) in [
+        (
+            "state.get",
+            json!({"target": "document", "window": 999_999_999}),
+        ),
+        (
+            "command.run",
+            json!({"id": "transport.play_stop", "window": 999_999_999}),
+        ),
+        ("ui.tree", json!({"window": 999_999_999})),
+    ] {
+        let e = app.call_err(cmd, p);
+        assert_eq!(e.code, core_control::ErrorCode::NoWindow, "{cmd}: {e}");
+    }
+
+    // A command that would open a dialog fails instead, naming it.
+    let e = app.call_err("command.run", json!({"id": "file.save", "window": window}));
+    assert_eq!(e.dialog.as_deref(), Some("Save"), "{e}");
+
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": window}),
+    );
+    app.wait(&window, json!({"condition": "playing"}));
+    let t0 = app.call(
+        "state.get",
+        json!({"target": "transport", "window": window}),
+    )["tick"]
+        .as_i64()
+        .unwrap();
+    app.wait(
+        &window,
+        json!({"condition": "tick_at_least", "tick": t0 + 1}),
+    );
+
+    let shot = app.launched.home.join("playing.png");
+    let r = app.call("ui.screenshot", json!({"window": window, "path": shot}));
+    let png = std::fs::read(&shot).unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "a PNG");
+    assert!(r["width"].as_u64().unwrap() >= 400, "{r}");
+
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": window}),
+    );
+    app.wait(&window, json!({"condition": "stopped"}));
+
+    let tree = app.call("ui.tree", json!({"window": window}));
+    let found = vizctl::cli::find_in_tree(&tree, "Arrangement");
+    assert!(
+        !found["matches"].as_array().unwrap().is_empty(),
+        "no Arrangement in the tree"
+    );
+    app.quit();
+}
+
+/// Events into the app's own window: a click on the toolbar's Play button
+/// plays, Space (the Transport menu's key) stops.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_click_play_and_press_space() {
+    let home = temp_home();
+    let (mut app, window) = start_demo(home.path());
+    // The toolbar may come up after the window (slow runners): poll the
+    // tree for the button labelled exactly "Play".
+    let id = wait_in_tree(&mut app, &window, "Play button", play_button);
+    app.call("ui.click", json!({"window": window, "element": id}));
+    app.wait(&window, json!({"condition": "playing"}));
+    app.call("ui.key", json!({"window": window, "key": "space"}));
+    app.wait(&window, json!({"condition": "stopped"}));
+    app.quit();
+}
+
+/// With Loop on, playing past the end of the sequence wraps to bar 1
+/// instead of stopping.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_loop_wraps_at_the_end() {
+    let home = temp_home();
+    let (mut app, window) = start_demo(home.path());
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "window": window, "params": params}),
+        )
+    };
+    let button = wait_for_node(&mut app, &window, "Loop")["id"].clone();
+    app.call("ui.click", json!({"window": window, "element": button}));
+    for _ in 0..11 {
+        run(&mut app, "transport.fast_forward", json!({}));
+    }
+    run(&mut app, "transport.play", json!({}));
+    app.wait(&window, json!({"condition": "playing"}));
+    std::thread::sleep(Duration::from_millis(5000));
+    let t = app.call(
+        "state.get",
+        json!({"target": "transport", "window": window}),
+    );
+    assert_eq!(t["playing"], true, "the loop ended at the end: {t}");
+    app.quit();
+}
+
+/// Ported from `transport_jumps_readouts_and_fields_over_the_channel`,
+/// steps 0-6. Step 7 (a typed Punch In refuses Record) is left out: Punch
+/// and Record are a later slice.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_transport_jumps_readouts_and_fields_over_the_channel() {
+    use core_control::ErrorCode;
+    const BAR: i64 = 61_440;
+    let home = temp_home();
+    // The demo's shown sequence: 4/4 at 120 BPM over its first ten bars.
+    let (mut app, w) = start_demo(home.path());
+    let tick = |app: &mut App| {
+        app.call("state.get", json!({"target": "transport", "window": w}))["tick"]
+            .as_i64()
+            .unwrap()
+    };
+    let click = |app: &mut App, label: &str, mods: Value| {
+        let n = wait_for_node(app, &w, label);
+        app.call(
+            "ui.click",
+            json!({"window": w, "element": n["id"], "modifiers": mods}),
+        );
+    };
+    // One click in a field selects all its text, so what is typed
+    // replaces it.
+    let select_field = |app: &mut App, label: &str| click(app, label, json!([]));
+    let no_alert = |app: &mut App| {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        assert_eq!(ws["alerts"].as_array().unwrap().len(), 0, "{ws}");
+        let doc = app.call("state.get", json!({"target": "document", "window": w}));
+        assert!(doc["alert"].is_null(), "no dialog: {doc}");
+    };
+
+    // A bar of just what this test reads, so nothing folds into the
+    // overflow button in a small window.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar",
+            "params": {"items": "cluster,bar,time,tempo,signature,position_field"}}),
+    );
+
+    // 1. The readouts at the start.
+    wait_for_tick(&mut app, &w, 0);
+    let t0 = app.call("state.get", json!({"target": "transport", "window": w}));
+    let bbu0 = t0["position"].as_str().unwrap().to_string();
+    assert_eq!(bbu0, "1.1.0", "{t0}");
+    wait_for_value(&mut app, &w, "Bar Readout", &bbu0);
+    wait_for_value(&mut app, &w, "Time Readout", "0:00.000");
+    wait_for_value(&mut app, &w, "Tempo Readout", "120.00");
+    wait_for_value(&mut app, &w, "Signature Readout", "4/4");
+
+    // 2. A click on Fast Forward goes one bar; the command another;
+    // Rewind one back; Return to Start to 0; Rewind at 0 stays there.
+    click(&mut app, "Fast Forward", json!([]));
+    wait_for_tick(&mut app, &w, BAR);
+    wait_for_value(&mut app, &w, "Time Readout", "0:02.000");
+    app.call(
+        "command.run",
+        json!({"id": "transport.fast_forward", "window": w}),
+    );
+    wait_for_tick(&mut app, &w, 2 * BAR);
+    click(&mut app, "Rewind", json!([]));
+    wait_for_tick(&mut app, &w, BAR);
+    click(&mut app, "Return to Start", json!([]));
+    wait_for_tick(&mut app, &w, 0);
+    wait_for_value(&mut app, &w, "Bar Readout", &bbu0);
+    click(&mut app, "Rewind", json!([]));
+    assert_eq!(tick(&mut app), 0, "Rewind stops at bar 1");
+    no_alert(&mut app);
+
+    // 3. A shift-click with no marker: the status line says so, nothing moves.
+    click(&mut app, "Fast Forward", json!(["shift"]));
+    let e = wait_for_editor(&mut app, &w, "no marker", |e| {
+        e["status"] == "No marker after the position."
+    });
+    assert_eq!(tick(&mut app), 0, "{e}");
+    no_alert(&mut app);
+
+    // 4. Shift-. one bar on, the keypad's minus one bar back.
+    app.call(
+        "ui.key",
+        json!({"window": w, "key": ".", "modifiers": ["shift"]}),
+    );
+    wait_for_tick(&mut app, &w, BAR);
+    app.call("ui.key", json!({"window": w, "key": "keypad_minus"}));
+    wait_for_tick(&mut app, &w, 0);
+
+    // 5. Hostile parameters are refused and move nothing.
+    for (id, params) in [
+        ("transport.rewind", json!({"bars": 2})),
+        ("transport.fast_forward", json!("x")),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{id} {params}: {e}");
+        assert_eq!(tick(&mut app), 0, "{id} {params}");
+    }
+    no_alert(&mut app);
+
+    // 6. A typed position is cancelled by a click on a view that never
+    // takes the keyboard, and by one on the arrangement (which does);
+    // Return commits (the click selects all, so no stale digit is left).
+    let old = wait_for_node(&mut app, &w, "Position")["value"].clone();
+    for away in ["Bar Readout", "Arrangement"] {
+        click(&mut app, "Position", json!([]));
+        app.call("ui.key", json!({"window": w, "text": "5"}));
+        // The typed text replaced the old one before the click away, so
+        // the wait below sees the cancel and not a click that never began
+        // an edit.
+        wait_for_value(&mut app, &w, "Position", "5");
+        click(&mut app, away, json!([]));
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        loop {
+            let n = wait_for_node(&mut app, &w, "Position");
+            if n["value"] == old {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a click on {away} leaves Position showing {old}: {n}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(tick(&mut app), 0, "a click on {away} commits nothing");
+    }
+    select_field(&mut app, "Position");
+    app.call("ui.key", json!({"window": w, "text": "5\n"}));
+    wait_for_tick(&mut app, &w, 4 * BAR);
+    no_alert(&mut app);
     app.quit();
 }
