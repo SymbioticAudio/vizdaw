@@ -7,10 +7,11 @@ use std::sync::Mutex;
 
 use crate::DocSession;
 use vizdaw_ffi::VizError;
+use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef, MonitorModeRow};
-use vizdaw_ffi::events::MarkerRow;
+use vizdaw_ffi::events::{MarkerRow, MeterEntryRow, SequenceInfo};
 use vizdaw_ffi::mixer::DestRow;
-use vizdaw_ffi::selection::SelectionRow;
+use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, SeqRow, TransportState};
 use vizdaw_ffi::tracks::TrackKindRow;
 
@@ -30,7 +31,24 @@ struct State {
     unsaved: Option<Result<bool, VizError>>,
     idle_snapshot: Option<DocSnapshot>,
     selection: SelectionRow,
+    span: Option<TickRange>,
+    marker_ticks: Vec<i64>,
+    infos: HashMap<u64, SequenceInfo>,
+    blocks: HashMap<(u64, u64), Vec<BlockRow>>,
+    plays_from: Vec<(u64, i64, Option<i64>)>,
+    step_bars: Vec<bool>,
+    key_steps: Vec<bool>,
+    winds: Vec<f64>,
+    wind_attempts: usize,
+    hold_ends: usize,
+    jump_error: Option<VizError>,
+    loop_error: Option<VizError>,
+    looped: bool,
+    info_reads: usize,
 }
+
+/// One bar of 4/4, in ticks.
+const BAR: i64 = 61_440;
 
 pub struct FakeSession(Mutex<State>);
 
@@ -86,6 +104,20 @@ impl FakeSession {
                 lanes: vec![],
                 events: vec![],
             },
+            span: None,
+            marker_ticks: vec![],
+            infos: HashMap::new(),
+            blocks: HashMap::new(),
+            plays_from: vec![],
+            step_bars: vec![],
+            key_steps: vec![],
+            winds: vec![],
+            wind_attempts: 0,
+            hold_ends: 0,
+            jump_error: None,
+            loop_error: None,
+            looped: false,
+            info_reads: 0,
         }))
     }
 
@@ -158,6 +190,83 @@ impl FakeSession {
 
     pub fn set_edit_error(&self, e: Option<VizError>) {
         self.st().edit_error = e;
+    }
+
+    /// The selection's span `selection_span` answers.
+    pub fn set_span(&self, span: Option<TickRange>) {
+        self.st().span = span;
+    }
+
+    /// Where the markers are (any order).
+    pub fn set_marker_ticks(&self, ticks: Vec<i64>) {
+        self.st().marker_ticks = ticks;
+    }
+
+    /// Gives sequence `seq` a playing length (before the model reads it).
+    pub fn set_length(&self, seq: u64, ticks: i64) {
+        let mut s = self.st();
+        if let Some(q) = s.snap.sequences.iter_mut().find(|q| q.id == seq) {
+            q.length_ticks = ticks;
+        }
+    }
+
+    /// Scripts what `sequence_info(seq)` answers.
+    pub fn set_info(&self, seq: u64, info: SequenceInfo) {
+        self.st().infos.insert(seq, info);
+    }
+
+    /// Scripts what `blocks(seq, lane, _)` answers.
+    pub fn set_blocks(&self, seq: u64, lane: u64, rows: Vec<BlockRow>) {
+        self.st().blocks.insert((seq, lane), rows);
+    }
+
+    /// The error every bar step, key step and wind answers with.
+    pub fn set_jump_error(&self, e: Option<VizError>) {
+        self.st().jump_error = e;
+    }
+
+    pub fn set_loop_error(&self, e: Option<VizError>) {
+        self.st().loop_error = e;
+    }
+
+    /// Whether `set_loop` last turned looping on.
+    pub fn looped(&self) -> bool {
+        self.st().looped
+    }
+
+    /// How often `sequence_info` was read (reads stay out of the call log).
+    pub fn info_reads(&self) -> usize {
+        self.st().info_reads
+    }
+
+    /// Every `play_from(seq, from, to)`, in order.
+    pub fn plays_from(&self) -> Vec<(u64, i64, Option<i64>)> {
+        self.st().plays_from.clone()
+    }
+
+    /// The direction of every `transport_step_bar`.
+    pub fn step_bars(&self) -> Vec<bool> {
+        self.st().step_bars.clone()
+    }
+
+    /// The direction of every `transport_key_step`.
+    pub fn key_steps(&self) -> Vec<bool> {
+        self.st().key_steps.clone()
+    }
+
+    /// The quarters of every wind that went through.
+    pub fn winds(&self) -> Vec<f64> {
+        self.st().winds.clone()
+    }
+
+    /// Winds tried, refused ones included.
+    pub fn wind_attempts(&self) -> usize {
+        self.st().wind_attempts
+    }
+
+    /// `transport_hold_end` calls.
+    pub fn hold_ends(&self) -> usize {
+        self.st().hold_ends
     }
 
     /// Every `edit` command received, in order.
@@ -258,6 +367,7 @@ impl DocSession for FakeSession {
         if let Some(e) = s.play_error.clone() {
             return Err(e);
         }
+        s.plays_from.push((seq, from, to));
         s.calls.push(format!("play_from({seq},{from},{to:?})"));
         s.transport.playing = true;
         s.transport.seq = Some(seq);
@@ -397,6 +507,105 @@ impl DocSession for FakeSession {
         sel.lanes.retain(|r| known(&s, r));
         s.selection = sel;
         Ok(())
+    }
+    fn set_loop(&self, on: bool) -> Result<(), VizError> {
+        let mut s = self.st();
+        if let Some(e) = s.loop_error.clone() {
+            return Err(e);
+        }
+        s.calls.push(format!("set_loop({on})"));
+        s.looped = on;
+        Ok(())
+    }
+    fn marker_step(&self, seq: u64, tick: i64, forward: bool) -> Result<Option<i64>, VizError> {
+        let mut s = self.st();
+        s.calls.push(format!("marker_step({seq},{tick},{forward})"));
+        let ticks = s.marker_ticks.iter().copied();
+        Ok(if forward {
+            ticks.filter(|t| *t > tick).min()
+        } else {
+            ticks.filter(|t| *t < tick).max()
+        })
+    }
+    fn transport_step_bar(&self, forward: bool) -> Result<i64, VizError> {
+        let mut s = self.st();
+        if let Some(e) = s.jump_error.clone() {
+            return Err(e);
+        }
+        s.calls.push(format!("transport_step_bar({forward})"));
+        s.step_bars.push(forward);
+        let to = (s.transport.tick + if forward { BAR } else { -BAR }).max(0);
+        s.transport.tick = to;
+        Ok(to)
+    }
+    fn transport_key_step(&self, forward: bool) -> Result<i64, VizError> {
+        let mut s = self.st();
+        if let Some(e) = s.jump_error.clone() {
+            return Err(e);
+        }
+        s.calls.push(format!("transport_key_step({forward})"));
+        s.key_steps.push(forward);
+        let to = (s.transport.tick + if forward { BAR } else { -BAR }).max(0);
+        s.transport.tick = to;
+        Ok(to)
+    }
+    fn transport_wind(&self, quarters: f64) -> Result<i64, VizError> {
+        let mut s = self.st();
+        s.wind_attempts += 1;
+        if let Some(e) = s.jump_error.clone() {
+            return Err(e);
+        }
+        s.calls.push(format!("transport_wind({quarters})"));
+        s.winds.push(quarters);
+        let to = (s.transport.tick + (quarters * 15_360.0).round() as i64).max(0);
+        s.transport.tick = to;
+        Ok(to)
+    }
+    fn transport_hold_end(&self) -> Result<i64, VizError> {
+        let mut s = self.st();
+        s.calls.push("transport_hold_end".into());
+        s.hold_ends += 1;
+        Ok(s.transport.tick)
+    }
+    fn selection_span(&self, seq: u64) -> Result<Option<TickRange>, VizError> {
+        let mut s = self.st();
+        s.calls.push(format!("selection_span({seq})"));
+        Ok(s.span)
+    }
+    fn sequence_info(&self, seq: u64) -> Result<SequenceInfo, VizError> {
+        let mut s = self.st();
+        s.info_reads += 1;
+        if let Some(i) = s.infos.get(&seq) {
+            return Ok(i.clone());
+        }
+        let row = s.snap.sequences.iter().find(|q| q.id == seq).cloned();
+        let Some(row) = row else {
+            return Err(VizError::Model {
+                message: format!("There is no sequence {seq}."),
+            });
+        };
+        Ok(SequenceInfo {
+            id: seq,
+            name: row.name,
+            comment: String::new(),
+            keyboard_slot: None,
+            start_offset: 0,
+            length_ticks: row.length_ticks,
+            tempo: vec![],
+            meter: vec![MeterEntryRow {
+                tick: 0,
+                num: 4,
+                den: 4,
+                sharps: 0,
+                minor: false,
+            }],
+            markers: vec![],
+            generated: false,
+        })
+    }
+    fn blocks(&self, seq: u64, lane: u64, _rule: BlockRule) -> Result<Vec<BlockRow>, VizError> {
+        let s = self.st();
+        Ok(s.blocks.get(&(seq, lane)).cloned().unwrap_or_default())
     }
     fn markers(&self, _seq: u64) -> Result<Vec<MarkerRow>, VizError> {
         Ok(vec![])

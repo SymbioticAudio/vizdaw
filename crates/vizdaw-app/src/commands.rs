@@ -1,7 +1,8 @@
 //! The document commands the menus, keys and control channel share: Undo,
-//! Redo and the Track menu (Swift: `TrackCommands`, and the undo/redo arm
-//! of `ControlCommands`). Recording and open-drag refusals come with those
-//! features.
+//! Redo, the Track menu and the transport (Swift: `TrackCommands`,
+//! `TransportCommands`, and the arms of `ControlCommands`). Recording and
+//! open-drag refusals come with those features. A transport command reads
+//! the transport fresh from the session, as Swift polls first.
 
 use core_control::registry::{self, ArgValue};
 use core_control::{ControlError, ErrorCode};
@@ -24,6 +25,33 @@ pub const DOCUMENT_COMMANDS: &[&str] = &[
     "track.rename",
 ];
 
+/// The registry IDs of the transport commands `run` handles. Recording,
+/// the click, locators and the punch and edit-out fields come later.
+pub const TRANSPORT_COMMANDS: &[&str] = &[
+    "transport.play_stop",
+    "transport.stop",
+    "transport.play",
+    "transport.play_selection",
+    "transport.play_from_selection",
+    "transport.play_from_edit_in",
+    "transport.scrub",
+    "transport.return_to_start",
+    "transport.rewind",
+    "transport.fast_forward",
+    "transport.previous_marker",
+    "transport.next_marker",
+    "transport.loop",
+    "transport.go_position",
+    "transport.go_edit_in",
+];
+
+/// Why a bare transport key does nothing while a field is typed in.
+pub const TEXT_FIELD_HAS_KEYBOARD: &str = "A text field has the keyboard.";
+const NO_PLAY_SEQUENCE: &str = "Select a sequence to play.";
+const NOT_YET: &str = "Scrubbing is not available yet.";
+const NO_SELECTION: &str = "Select something in the shown sequence first.";
+const NO_EDIT_IN: &str = "Set an edit-in point (select a time range) first.";
+
 const NO_SEQUENCE: &str = "Select a sequence first.";
 const NO_TRACK: &str = "Select a track in the arrangement first.";
 /// What the status line says after a MIDI track is made with no destination.
@@ -37,6 +65,17 @@ pub struct Ran {
     pub undo: Option<String>,
     /// The status line afterwards.
     pub status: Option<String>,
+    /// A transport field the UI is to focus (Go to Position, Go to Edit In).
+    pub focus: Option<FieldFocus>,
+}
+
+/// A transport bar field a command asks the UI to focus. The UI answers
+/// `unavailable` "The window shows no transport fields." when the bar is
+/// folded or absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldFocus {
+    Position,
+    EditIn,
 }
 
 fn kind_of(id: &str) -> Option<TrackKindRow> {
@@ -50,6 +89,9 @@ fn kind_of(id: &str) -> Option<TrackKindRow> {
 
 /// Whether `id` can run on `doc` now (its menu item is enabled).
 pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
+    if TRANSPORT_COMMANDS.contains(&id) {
+        return transport_enabled(id, doc);
+    }
     if !DOCUMENT_COMMANDS.contains(&id) {
         return false;
     }
@@ -65,6 +107,9 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
 /// busy core; Rename asks the UI to start the header's rename field. What
 /// cannot run shows in the status line (and is returned).
 pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
+    if TRANSPORT_COMMANDS.contains(&id) {
+        return transport_from_menu(id, doc);
+    }
     if !DOCUMENT_COMMANDS.contains(&id) {
         return Err(unavailable(&format!("There is no command {id}.")));
     }
@@ -115,6 +160,7 @@ fn ran(doc: &DocumentModel) -> Ran {
     Ran {
         undo: doc.snapshot().undo_label.clone(),
         status: doc.status().map(String::from),
+        focus: None,
     }
 }
 
@@ -131,7 +177,7 @@ fn no_track(lane: u64) -> ControlError {
 }
 
 /// A core error as a control error: a busy core is `busy`.
-fn from_viz(e: &VizError) -> ControlError {
+pub(crate) fn from_viz(e: &VizError) -> ControlError {
     let code = if matches!(e, VizError::Busy { .. }) {
         ErrorCode::Busy
     } else {
@@ -160,6 +206,9 @@ pub fn run(
     args: &[(String, ArgValue)],
     doc: &mut DocumentModel,
 ) -> Result<Ran, ControlError> {
+    if TRANSPORT_COMMANDS.contains(&id) {
+        return run_transport(id, args, doc);
+    }
     if !DOCUMENT_COMMANDS.contains(&id) {
         return Err(ControlError::new(
             ErrorCode::UnknownId,
@@ -293,4 +342,196 @@ fn run_step(undo: bool, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
         e
     })?;
     Ok(ran(doc))
+}
+
+/// Whether a transport command can run now (its menu item is enabled).
+fn transport_enabled(id: &str, doc: &DocumentModel) -> bool {
+    if !doc.transport_keys_enabled() {
+        return false;
+    }
+    let seq = doc.selected_seq().is_some();
+    match id {
+        "transport.scrub" => false,
+        "transport.stop" => doc.is_playing(),
+        "transport.play_stop" | "transport.play" => seq || doc.is_playing(),
+        "transport.play_from_edit_in" => seq && doc.selection().time_range.is_some(),
+        "transport.return_to_start" => seq && doc.return_key_enabled(),
+        "transport.go_position" | "transport.go_edit_in" => true,
+        _ => seq,
+    }
+}
+
+/// A transport command from a menu item or key: what cannot run shows in
+/// the status line, and Play, Stop, Return and Loop raise their alerts as
+/// the model's own intents do.
+fn transport_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
+    match id {
+        "transport.play_stop" | "transport.return_to_start" | "transport.loop" => {
+            let gate = match id {
+                "transport.play_stop" => text_gate(doc).or_else(|| {
+                    (doc.selected_seq().is_none() && !doc.is_playing())
+                        .then(|| unavailable(NO_PLAY_SEQUENCE))
+                }),
+                "transport.return_to_start" => {
+                    (!doc.return_key_enabled()).then(|| unavailable(RETURN_KEY_BUSY))
+                }
+                _ => text_gate(doc),
+            };
+            if let Some(e) = gate {
+                return Err(refused(doc, e));
+            }
+            match id {
+                "transport.play_stop" => doc.play_stop(),
+                "transport.return_to_start" => doc.return_to_start(),
+                _ => doc.toggle_loop(),
+            }
+            Ok(ran(doc))
+        }
+        _ => run_transport(id, &[], doc).map_err(|e| refused(doc, e)),
+    }
+}
+
+const RETURN_KEY_BUSY: &str = "A text field or list has the keyboard.";
+
+fn text_gate(doc: &DocumentModel) -> Option<ControlError> {
+    (!doc.transport_keys_enabled()).then(|| unavailable(TEXT_FIELD_HAS_KEYBOARD))
+}
+
+/// A transport command over the channel (and the keys that share it).
+fn run_transport(
+    id: &str,
+    args: &[(String, ArgValue)],
+    doc: &mut DocumentModel,
+) -> Result<Ran, ControlError> {
+    check_names(id, args)?;
+    let on = match args.iter().find(|(n, _)| n == "on") {
+        None => None,
+        Some((_, ArgValue::Flag(f))) => Some(*f),
+        Some(_) => return Err(ControlError::params(id, "`on` is true or false")),
+    };
+    match id {
+        "transport.play_stop" => {
+            if doc.selected_seq().is_none() && !doc.is_playing() {
+                return Err(unavailable(NO_PLAY_SEQUENCE));
+            }
+            if let Some(e) = text_gate(doc) {
+                return Err(e);
+            }
+            let playing = doc.is_playing();
+            let result = if playing {
+                doc.session().stop()
+            } else {
+                doc.start_playing(None, None)
+            };
+            result.map_err(|e| {
+                let mut e = from_viz(&e);
+                if e.code != ErrorCode::Busy {
+                    let verb = if playing { "Stop" } else { "Play" };
+                    e.message = format!("{verb} Failed: {}", e.message);
+                }
+                e
+            })?;
+        }
+        "transport.loop" => {
+            if on.unwrap_or(!doc.looping()) != doc.looping() {
+                doc.toggle_loop();
+            }
+        }
+        "transport.return_to_start" => {
+            if !doc.return_key_enabled() {
+                return Err(unavailable(RETURN_KEY_BUSY));
+            }
+            doc.return_to_start();
+        }
+        "transport.go_position" | "transport.go_edit_in" => {
+            if let Some(e) = text_gate(doc) {
+                return Err(e);
+            }
+            let mut ran = ran(doc);
+            ran.focus = Some(if id == "transport.go_position" {
+                FieldFocus::Position
+            } else {
+                FieldFocus::EditIn
+            });
+            return Ok(ran);
+        }
+        _ => run_key_command(id, doc)?,
+    }
+    Ok(ran(doc))
+}
+
+/// The commands that wait for the text fields and then act on the session.
+fn run_key_command(id: &str, doc: &mut DocumentModel) -> Result<(), ControlError> {
+    if let Some(e) = text_gate(doc) {
+        return Err(e);
+    }
+    let playing = || doc.is_playing();
+    match id {
+        "transport.scrub" => return Err(unavailable(NOT_YET)),
+        "transport.stop" => {
+            if !playing() {
+                return Err(unavailable("Nothing is playing."));
+            }
+            return doc.stop_and_return().map_err(|e| from_viz(&e));
+        }
+        "transport.play" => {
+            // Play only starts: while playing it does nothing; a stopped
+            // transport plays from where it stands.
+            if playing() {
+                return Ok(());
+            }
+            if doc.selected_seq().is_none() {
+                return Err(unavailable(NO_PLAY_SEQUENCE));
+            }
+            return doc.start_playing(None, None).map_err(|e| from_viz(&e));
+        }
+        _ => {}
+    }
+    let Some(seq) = doc.selected_seq() else {
+        return Err(unavailable(NO_SEQUENCE));
+    };
+    match id {
+        "transport.play_selection" | "transport.play_from_selection" => {
+            let span = doc
+                .session()
+                .selection_span(seq)
+                .map_err(|e| from_viz(&e))?;
+            let Some(span) = span else {
+                return Err(unavailable(NO_SELECTION));
+            };
+            let to = (id == "transport.play_selection").then_some(span.end);
+            doc.start_playing(Some(span.start), to)
+                .map_err(|e| from_viz(&e))
+        }
+        "transport.play_from_edit_in" => {
+            let Some(range) = doc.selection().time_range else {
+                return Err(unavailable(NO_EDIT_IN));
+            };
+            doc.start_playing(Some(range.start), None)
+                .map_err(|e| from_viz(&e))
+        }
+        "transport.previous_marker" | "transport.next_marker" => {
+            let forward = id == "transport.next_marker";
+            let tick = doc.live_transport().map_or(0, |t| t.tick);
+            let target = doc
+                .session()
+                .marker_step(seq, tick, forward)
+                .map_err(|e| from_viz(&e))?;
+            let Some(target) = target else {
+                return Err(unavailable(if forward {
+                    "No marker after the position."
+                } else {
+                    "No marker before the position."
+                }));
+            };
+            doc.move_to(target).map_err(|e| from_viz(&e))
+        }
+        // One bar, as a click on the bar's button. A held key goes to
+        // `Shuttle::key_down` instead.
+        _ => doc
+            .session()
+            .transport_step_bar(id == "transport.fast_forward")
+            .map(|_| ())
+            .map_err(|e| from_viz(&e)),
+    }
 }

@@ -1,10 +1,11 @@
 //! The slice of the core session the document model uses.
 
 use vizdaw_ffi::VizError;
+use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::edit::EditCommand;
-use vizdaw_ffi::events::MarkerRow;
+use vizdaw_ffi::events::{MarkerRow, SequenceInfo};
 use vizdaw_ffi::mixer::DestRow;
-use vizdaw_ffi::selection::SelectionRow;
+use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::Session;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
 use vizdaw_ffi::tracks::TrackKindRow;
@@ -41,6 +42,24 @@ pub trait DocSession: Send + Sync {
     fn set_lane_mute(&self, seq: u64, lane: u64, mute: bool) -> Result<DocSnapshot, VizError>;
     fn selection(&self) -> Result<SelectionRow, VizError>;
     fn set_selection(&self, s: SelectionRow) -> Result<(), VizError>;
+    /// Turns the loop (the whole sequence) on or off.
+    fn set_loop(&self, on: bool) -> Result<(), VizError>;
+    /// The marker nearest `tick` in the given direction.
+    fn marker_step(&self, seq: u64, tick: i64, forward: bool) -> Result<Option<i64>, VizError>;
+    /// One bar on or back; the new tick.
+    fn transport_step_bar(&self, forward: bool) -> Result<i64, VizError>;
+    /// A held key's bar step (landed by `transport_hold_end`).
+    fn transport_key_step(&self, forward: bool) -> Result<i64, VizError>;
+    /// A held button's wind by `quarters` (negative: back).
+    fn transport_wind(&self, quarters: f64) -> Result<i64, VizError>;
+    /// The end of a hold: lands an open pass once.
+    fn transport_hold_end(&self) -> Result<i64, VizError>;
+    /// The time span the selection covers in `seq`, if any.
+    fn selection_span(&self, seq: u64) -> Result<Option<TickRange>, VizError>;
+    /// What rulers and readouts need about `seq` (meter map, markers).
+    fn sequence_info(&self, seq: u64) -> Result<SequenceInfo, VizError>;
+    /// The arrangement blocks of one track.
+    fn blocks(&self, seq: u64, lane: u64, rule: BlockRule) -> Result<Vec<BlockRow>, VizError>;
     /// Sequence `seq`'s markers, in order.
     fn markers(&self, seq: u64) -> Result<Vec<MarkerRow>, VizError>;
     /// The destinations, with their return latency and MIDI mix.
@@ -115,6 +134,33 @@ impl DocSession for Session {
     }
     fn set_selection(&self, s: SelectionRow) -> Result<(), VizError> {
         Session::set_selection(self, s)
+    }
+    fn set_loop(&self, on: bool) -> Result<(), VizError> {
+        Session::set_loop(self, on)
+    }
+    fn marker_step(&self, seq: u64, tick: i64, forward: bool) -> Result<Option<i64>, VizError> {
+        Session::marker_step(self, seq, tick, forward)
+    }
+    fn transport_step_bar(&self, forward: bool) -> Result<i64, VizError> {
+        Session::transport_step_bar(self, forward)
+    }
+    fn transport_key_step(&self, forward: bool) -> Result<i64, VizError> {
+        Session::transport_key_step(self, forward)
+    }
+    fn transport_wind(&self, quarters: f64) -> Result<i64, VizError> {
+        Session::transport_wind(self, quarters)
+    }
+    fn transport_hold_end(&self) -> Result<i64, VizError> {
+        Session::transport_hold_end(self)
+    }
+    fn selection_span(&self, seq: u64) -> Result<Option<TickRange>, VizError> {
+        Session::selection_span(self, seq)
+    }
+    fn sequence_info(&self, seq: u64) -> Result<SequenceInfo, VizError> {
+        Session::sequence_info(self, seq)
+    }
+    fn blocks(&self, seq: u64, lane: u64, rule: BlockRule) -> Result<Vec<BlockRow>, VizError> {
+        Session::blocks(self, seq, lane, rule)
     }
     fn markers(&self, seq: u64) -> Result<Vec<MarkerRow>, VizError> {
         Session::sequence_info(self, seq).map(|i| i.markers)

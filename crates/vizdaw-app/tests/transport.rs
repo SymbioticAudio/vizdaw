@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use support::{FakeSession, demo_fake};
-use vizdaw_app::transport::{PollResult, ReadoutTexts, TransportModel, TransportReadouts};
+use vizdaw_app::transport::{Clock, PollResult, ReadoutTexts, TransportModel, TransportReadouts};
 use vizdaw_app::{DocumentModel, DocumentStore};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::events::MeterEntryRow;
@@ -246,4 +246,116 @@ fn time_formats_pickups_and_huge_values() {
     assert_eq!(format_time(-0.0001), "0:00.000");
     assert_eq!(format_time(75.0), "1:15.000");
     assert!(format_time(f64::MAX).starts_with(char::is_numeric));
+}
+
+// The playhead clock (Swift: TransportClockTests).
+
+use std::time::Instant;
+
+const TPS: f64 = 30_720.0;
+
+fn ms(t0: Instant, ms: u64) -> Instant {
+    t0 + Duration::from_millis(ms)
+}
+
+fn ticks(base: i64, seconds: f64) -> i64 {
+    (base as f64 + seconds * TPS).round() as i64
+}
+
+#[test]
+fn no_sample_is_tick_zero() {
+    assert_eq!(Clock::new().tick_at(Instant::now()), 0);
+}
+
+#[test]
+fn the_clock_extrapolates_between_polls() {
+    let t0 = Instant::now();
+    let mut c = Clock::new();
+    c.sample(1_000, true, Some(1), TPS, t0);
+    assert_eq!(c.tick_at(ms(t0, 10)), ticks(1_000, 0.01));
+}
+
+#[test]
+fn the_clock_never_runs_more_than_one_poll_past_the_sample() {
+    let t0 = Instant::now();
+    let mut c = Clock::new();
+    c.sample(1_000, true, Some(1), TPS, t0);
+    assert_eq!(c.tick_at(ms(t0, 1_000)), ticks(1_000, 0.033));
+}
+
+#[test]
+fn the_clock_holds_instead_of_twitching_back() {
+    let t0 = Instant::now();
+    let mut c = Clock::new();
+    c.sample(1_000, true, Some(1), TPS, t0);
+    let ahead = c.tick_at(ms(t0, 30));
+    // The next poll reads slightly less than was drawn: hold.
+    c.sample(1_900, true, Some(1), TPS, ms(t0, 30));
+    assert_eq!(c.tick_at(ms(t0, 30)), ahead);
+    assert_eq!(c.tick_at(ms(t0, 40)), ticks(1_900, 0.01));
+}
+
+#[test]
+fn the_clock_snaps_back_on_a_locate_or_a_loop_wrap() {
+    let t0 = Instant::now();
+    let mut c = Clock::new();
+    c.sample(100_000, true, Some(1), TPS, t0);
+    let _ = c.tick_at(ms(t0, 20));
+    c.sample(0, true, Some(1), TPS, ms(t0, 33));
+    assert_eq!(c.tick_at(ms(t0, 33)), 0);
+}
+
+#[test]
+fn stop_and_sequence_changes_snap() {
+    let t0 = Instant::now();
+    let mut c = Clock::new();
+    c.sample(9_000, true, Some(1), TPS, t0);
+    let _ = c.tick_at(ms(t0, 30));
+    c.sample(8_000, false, Some(1), TPS, ms(t0, 33));
+    assert_eq!(c.tick_at(ms(t0, 900)), 8_000);
+    c.sample(9_000, true, Some(1), TPS, t0);
+    let _ = c.tick_at(ms(t0, 30));
+    c.sample(8_990, true, Some(2), TPS, ms(t0, 33));
+    assert_eq!(c.tick_at(ms(t0, 33)), 8_990);
+}
+
+#[test]
+fn every_poll_feeds_the_clock() {
+    let f = Arc::new(demo_fake());
+    let (_doc, mut t) = setup(&f);
+    let mut s = store();
+    assert!(t.clock().last().is_none());
+    f.set_transport(|t| {
+        t.playing = true;
+        t.tick = 5_000;
+    });
+    t.poll(&mut s);
+    let last = t.clock().last().unwrap();
+    assert_eq!((last.tick, last.playing, last.seq), (5_000, true, None));
+}
+
+#[test]
+fn the_readout_reads_tempo_and_meter_from_the_sequence_info() {
+    use vizdaw_app::DocSession;
+    let f = Arc::new(demo_fake());
+    let m = meter(&[(0, 4, 4), (122_880, 7, 8)]);
+    let mut info = f.sequence_info(3).unwrap();
+    info.meter = m;
+    f.set_info(3, info);
+    f.set_transport(|t| {
+        t.tick = 122_880;
+        t.ticks_per_second = 23_040.0;
+    });
+    let before = f.info_reads();
+    let (doc, t) = setup(&f);
+    let r = t.readout_of(&doc);
+    assert_eq!(r.texts.tempo, "90.00");
+    assert_eq!(r.texts.signature, "7/8");
+    // The info is read once per snapshot version.
+    t.readout_of(&doc);
+    assert_eq!(f.info_reads(), before + 1);
+    // No sequence, no info: a dash.
+    let empty = Arc::new(FakeSession::new(vec![]));
+    let (doc, t) = setup(&empty);
+    assert_eq!(t.readout_of(&doc).texts.signature, "\u{2013}");
 }

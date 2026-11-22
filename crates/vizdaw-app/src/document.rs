@@ -1,13 +1,15 @@
 //! One open document (Swift: `DocumentModel`, the title, save and undo
 //! parts; transport comes with Task 3).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef};
+use vizdaw_ffi::events::SequenceInfo;
 use vizdaw_ffi::selection::SelectionRow;
-use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow};
+use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
 
 use crate::alerts::{AlertItem, error_message};
 use crate::session::DocSession;
@@ -33,6 +35,14 @@ pub struct DocumentModel {
     lanes_fetches: u64,
     selection: SelectionRow,
     status: Option<String>,
+    looping: bool,
+    /// The fields being typed in (Swift: `EditorModel.textEditors`); the
+    /// bare transport keys wait while any is open.
+    text_editors: BTreeSet<String>,
+    /// Where playing started; the transport model shares it.
+    play_start: Arc<Mutex<Option<i64>>>,
+    /// Sequence info, read once per snapshot version.
+    infos: Vec<(u64, OnceLock<Option<SequenceInfo>>)>,
 }
 
 impl DocumentModel {
@@ -49,7 +59,12 @@ impl DocumentModel {
             lanes_fetches: 0,
             selection,
             status: None,
+            looping: false,
+            text_editors: BTreeSet::new(),
+            play_start: Arc::new(Mutex::new(None)),
+            infos: vec![],
         };
+        model.reset_infos();
         model.refresh_lanes();
         Ok(model)
     }
@@ -67,7 +82,25 @@ impl DocumentModel {
             self.selected_seq = first_sequence(&s);
         }
         self.snapshot = s;
+        self.reset_infos();
         self.refresh_lanes();
+    }
+
+    fn reset_infos(&mut self) {
+        self.infos = self
+            .snapshot
+            .sequences
+            .iter()
+            .map(|q| (q.id, OnceLock::new()))
+            .collect();
+    }
+
+    /// What rulers and readouts need about `seq` (tempo, meter, markers),
+    /// read once per snapshot version; `None` when the core refuses.
+    pub fn sequence_info(&self, seq: u64) -> Option<&SequenceInfo> {
+        let (_, cell) = self.infos.iter().find(|(id, _)| *id == seq)?;
+        cell.get_or_init(|| self.session.sequence_info(seq).ok())
+            .as_ref()
     }
 
     /// One plugin-timer tick. True when a new snapshot arrived.
@@ -98,6 +131,11 @@ impl DocumentModel {
         }
         self.selected_seq = seq;
         self.refresh_lanes();
+    }
+
+    /// The selection as the model holds it.
+    pub fn selection(&self) -> &SelectionRow {
+        &self.selection
     }
 
     pub fn lanes(&self) -> &[LaneRow] {
@@ -180,6 +218,143 @@ impl DocumentModel {
         self.apply(snapshot);
         self.refresh_selection();
         Ok(())
+    }
+
+    pub fn looping(&self) -> bool {
+        self.looping
+    }
+
+    /// Turns the loop on or off; a failure is the alert "Loop Failed" and
+    /// the loop stays as it was.
+    pub fn toggle_loop(&mut self) {
+        match self.session.set_loop(!self.looping) {
+            Ok(()) => self.looping = !self.looping,
+            Err(e) => self.alert = Some(AlertItem::from_error(&e, "Loop Failed")),
+        }
+    }
+
+    /// Moves the transport to `tick` (a click in a ruler); a failure is the
+    /// alert "Locate Failed".
+    pub fn locate(&mut self, tick: i64) {
+        if let Err(e) = self.session.locate(tick) {
+            self.alert = Some(AlertItem::from_error(&e, "Locate Failed"));
+        }
+    }
+
+    /// Moves the transport to `tick`; the error is the caller's to show
+    /// (the bar's buttons report it in the status line).
+    pub fn move_to(&mut self, tick: i64) -> Result<(), VizError> {
+        self.session.locate(tick)
+    }
+
+    pub fn return_to_start(&mut self) {
+        self.locate(0);
+    }
+
+    /// A field is being typed in; the bare transport keys wait.
+    pub fn begin_text_editing(&mut self, owner: &str) {
+        self.text_editors.insert(owner.to_owned());
+    }
+
+    pub fn end_text_editing(&mut self, owner: &str) {
+        self.text_editors.remove(owner);
+    }
+
+    /// Space and the other bare transport keys work: no field is typed in.
+    pub fn transport_keys_enabled(&self) -> bool {
+        self.text_editors.is_empty()
+    }
+
+    /// Return (Return to Start) also waits for a list that has the
+    /// keyboard, once the editors have lists.
+    pub fn return_key_enabled(&self) -> bool {
+        self.transport_keys_enabled()
+    }
+
+    /// Where the last Play started; Stop returns there.
+    pub fn play_start(&self) -> Option<i64> {
+        *self.play_start.lock().unwrap()
+    }
+
+    pub(crate) fn shared_play_start(&self) -> Arc<Mutex<Option<i64>>> {
+        self.play_start.clone()
+    }
+
+    /// The transport read now; `None` while the core is busy or refuses.
+    pub fn live_transport(&self) -> Option<TransportState> {
+        self.session.transport().ok()
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.live_transport().is_some_and(|t| t.playing)
+    }
+
+    /// Plays the shown sequence from `from` (`None`: where the transport
+    /// stands, or bar 1 at the end), up to `to` where it stops.
+    pub fn start_playing(&self, from: Option<i64>, to: Option<i64>) -> Result<(), VizError> {
+        let state = self
+            .live_transport()
+            .unwrap_or_else(crate::transport::stopped);
+        self.start_playing_at(&state, from, to)
+    }
+
+    /// `start_playing` against a transport already read.
+    pub(crate) fn start_playing_at(
+        &self,
+        state: &TransportState,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Result<(), VizError> {
+        let seq = self.selected_seq.ok_or_else(|| VizError::Model {
+            message: "Select a sequence to play.".into(),
+        })?;
+        // The engine restarts at bar 1 from the end, or from another
+        // sequence's position.
+        let length = self
+            .snapshot
+            .sequences
+            .iter()
+            .find(|s| s.id == seq)
+            .map_or(0, |s| s.length_ticks);
+        let there = state.seq.is_none() || state.seq == Some(seq);
+        let start = from.unwrap_or(if there && state.tick < length {
+            state.tick
+        } else {
+            0
+        });
+        match from {
+            Some(f) => self.session.play_from(seq, f, to)?,
+            None => self.session.play(seq)?,
+        }
+        *self.play_start.lock().unwrap() = Some(start);
+        Ok(())
+    }
+
+    /// Stops when playing, else plays the shown sequence. A failure is an
+    /// alert, "Stop Failed" or "Play Failed".
+    pub fn play_stop(&mut self) {
+        let playing = self.is_playing();
+        let result = if playing {
+            self.session.stop()
+        } else if self.selected_seq.is_some() {
+            self.start_playing(None, None)
+        } else {
+            Ok(())
+        };
+        if let Err(e) = result {
+            let title = if playing {
+                "Stop Failed"
+            } else {
+                "Play Failed"
+            };
+            self.alert = Some(AlertItem::from_error(&e, title));
+        }
+    }
+
+    /// Stops and goes back to where playing started.
+    pub fn stop_and_return(&self) -> Result<(), VizError> {
+        self.session.stop()?;
+        self.session.locate(self.play_start().unwrap_or(0))
     }
 
     pub fn status(&self) -> Option<&str> {

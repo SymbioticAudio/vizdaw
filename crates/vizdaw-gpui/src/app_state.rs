@@ -186,11 +186,14 @@ impl AppState {
         self.transports.get(&doc).map(|t| t.poll_interval())
     }
 
-    /// What `doc`'s transport bar shows. Sequence info (the meter map) is
-    /// not read this slice, so the signature is a dash; the bar shows the
-    /// bar and time readouts only.
+    /// What `doc`'s transport bar shows; tempo and signature come from the
+    /// sequence info.
     pub fn readout(&self, doc: DocId) -> Option<TransportReadout> {
-        self.transports.get(&doc).map(|t| t.readout(None))
+        let t = self.transports.get(&doc)?;
+        Some(match self.store.document(doc) {
+            Some(d) => t.readout_of(d),
+            None => t.readout(None),
+        })
     }
 
     /// Whether Play does anything for `doc`.

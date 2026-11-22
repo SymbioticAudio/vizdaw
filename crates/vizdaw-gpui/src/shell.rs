@@ -51,6 +51,9 @@ pub struct DocumentWindow {
     _subscriptions: Vec<Subscription>,
 }
 
+/// The text-editing owner of the track header's rename field.
+const RENAME_OWNER: &str = "track-rename";
+
 impl DocumentWindow {
     /// Opens a window for `doc`, an open document of the store, and builds
     /// its transport. A failure is an alert and the document closes. Call
@@ -394,6 +397,8 @@ impl DocumentWindow {
             }),
         ];
         window.focus(&focus, cx);
+        // The bare transport keys wait while the name is typed.
+        self.with_model(cx, |d| d.begin_text_editing(RENAME_OWNER));
         self.track_headers.rename = Some(Rename {
             lane,
             field,
@@ -411,6 +416,7 @@ impl DocumentWindow {
         };
         let focus = rename.field.focus_handle(cx);
         let name = rename.field.read(cx).text().to_owned();
+        self.with_model(cx, |d| d.end_text_editing(RENAME_OWNER));
         if commit && self.lane(rename.lane, cx).is_some() {
             let lane = rename.lane;
             self.with_model(cx, |d| d.rename_track(lane, &name));

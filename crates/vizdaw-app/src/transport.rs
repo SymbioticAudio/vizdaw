@@ -2,14 +2,19 @@
 //! `TransportReadouts`). No GPUI and no timers: the caller calls `poll()`
 //! every `poll_interval()`.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::cell::Cell;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::events::MeterEntryRow;
 use vizdaw_ffi::snapshot::TransportState;
 
+use core_control::{ControlError, ErrorCode};
+use vizdaw_ffi::surfaces::shuttle_quarters;
+
 use crate::alerts::AlertItem;
+use crate::commands::{self, TEXT_FIELD_HAS_KEYBOARD, from_viz};
 use crate::document::DocumentModel;
 use crate::session::DocSession;
 use crate::store::DocumentStore;
@@ -26,7 +31,7 @@ pub enum PollResult {
 }
 
 /// The transport shown until the first successful read.
-fn stopped() -> TransportState {
+pub(crate) fn stopped() -> TransportState {
     TransportState {
         playing: false,
         seq: None,
@@ -51,7 +56,9 @@ pub struct TransportModel {
     session: Arc<dyn DocSession>,
     state: TransportState,
     selected: Option<u64>,
-    play_start: Option<i64>,
+    /// Shared with the document, whose commands start playing too.
+    play_start: Arc<Mutex<Option<i64>>>,
+    clock: Clock,
 }
 
 impl TransportModel {
@@ -68,7 +75,8 @@ impl TransportModel {
             session: doc.session().clone(),
             state,
             selected: None,
-            play_start: None,
+            play_start: doc.shared_play_start(),
+            clock: Clock::new(),
         })
     }
 
@@ -82,7 +90,12 @@ impl TransportModel {
 
     /// Where the last Play started; Stop returns there.
     pub fn play_start(&self) -> Option<i64> {
-        self.play_start
+        *self.play_start.lock().unwrap()
+    }
+
+    /// The playhead clock, fed by every poll.
+    pub fn clock(&self) -> &Clock {
+        &self.clock
     }
 
     /// Chooses the sequence Play plays.
@@ -169,7 +182,7 @@ impl TransportModel {
             Some(f) => self.session.play_from(seq, f, to)?,
             None => self.session.play(seq)?,
         }
-        self.play_start = Some(start);
+        *self.play_start.lock().unwrap() = Some(start);
         self.poll(store);
         Ok(())
     }
@@ -178,7 +191,7 @@ impl TransportModel {
     /// caller's to show (keys report a refusal in the status line).
     pub fn stop_and_return(&mut self, store: &mut DocumentStore) -> Result<(), VizError> {
         self.session.stop()?;
-        self.session.locate(self.play_start.unwrap_or(0))?;
+        self.session.locate(self.play_start().unwrap_or(0))?;
         self.poll(store);
         Ok(())
     }
@@ -188,6 +201,8 @@ impl TransportModel {
     pub fn poll(&mut self, store: &mut DocumentStore) -> PollResult {
         match self.session.transport() {
             Ok(t) => {
+                self.clock
+                    .sample(t.tick, t.playing, t.seq, t.ticks_per_second, Instant::now());
                 self.state = t;
                 PollResult::Updated
             }
@@ -199,6 +214,14 @@ impl TransportModel {
                 PollResult::Failed
             }
         }
+    }
+
+    /// The readouts of `doc`'s transport: tempo and meter come from the
+    /// sequence it plays, else the shown one.
+    pub fn readout_of(&self, doc: &DocumentModel) -> TransportReadout {
+        let seq = self.state.seq.or(doc.selected_seq());
+        let info = seq.and_then(|s| doc.sequence_info(s));
+        self.readout(info.map(|i| i.meter.as_slice()))
     }
 
     /// The four readout texts; `meter` is the sequence info's meter map
@@ -362,5 +385,276 @@ pub fn format_bbu(position: &str) -> String {
         "-.-.-".into()
     } else {
         position.into()
+    }
+}
+
+/// Extrapolates the playhead between transport polls (Swift:
+/// `TransportClock`): `tick + min(elapsed, poll) x ticks_per_second`.
+/// While playing it never steps back by less than 0.1 s of ticks (poll
+/// jitter); it snaps on bigger backward jumps (a locate, a loop wrap), on
+/// start, stop and a change of sequence. Time is passed in.
+pub struct Clock {
+    sample: Option<Sample>,
+    /// The tick drawn last.
+    shown: Cell<f64>,
+}
+
+/// One transport reading, as the clock keeps it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sample {
+    pub tick: i64,
+    pub playing: bool,
+    pub seq: Option<u64>,
+    pub ticks_per_second: f64,
+    pub at: Instant,
+}
+
+impl Clock {
+    /// How far the extrapolation may run past the last sample: the poll
+    /// interval while playing.
+    pub const POLL: Duration = Duration::from_millis(33);
+    /// How far back the playhead may be read without snapping.
+    pub const HOLD: Duration = Duration::from_millis(100);
+
+    pub fn new() -> Self {
+        Clock {
+            sample: None,
+            shown: Cell::new(0.0),
+        }
+    }
+
+    /// The last reading, if any.
+    pub fn last(&self) -> Option<&Sample> {
+        self.sample.as_ref()
+    }
+
+    /// A new transport reading taken at `at`.
+    pub fn sample(&mut self, tick: i64, playing: bool, seq: Option<u64>, tps: f64, at: Instant) {
+        let new = Sample {
+            tick,
+            playing,
+            seq,
+            ticks_per_second: if tps.is_finite() { tps.max(0.0) } else { 0.0 },
+            at,
+        };
+        let continuing = self
+            .sample
+            .is_some_and(|old| old.playing && new.playing && old.seq == new.seq);
+        let jumped_back =
+            (tick as f64) < self.shown.get() - Self::HOLD.as_secs_f64() * new.ticks_per_second;
+        self.sample = Some(new);
+        if !continuing || jumped_back {
+            self.shown.set(tick as f64);
+        }
+    }
+
+    /// The tick to draw at `at`.
+    pub fn tick_at(&self, at: Instant) -> i64 {
+        let Some(s) = self.sample else { return 0 };
+        if !s.playing {
+            self.shown.set(s.tick as f64);
+            return s.tick;
+        }
+        let elapsed = at.saturating_duration_since(s.at).min(Self::POLL);
+        let t = s.tick as f64 + elapsed.as_secs_f64() * s.ticks_per_second;
+        self.shown.set(self.shown.get().max(t));
+        self.shown.get().round() as i64
+    }
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The bar's rewind and fast forward buttons held to wind, and the held
+/// keys (Swift: `TransportShuttle`).
+///
+/// - A click (a release with no wind yet) steps one bar; with shift it
+///   goes to the previous or next marker. A release outside the button
+///   with no wind yet moves nothing.
+/// - Holding winds on the surfaces' shuttle curve: nothing below 0.4 s,
+///   then faster the longer it is held. The caller calls `tick` every
+///   [`Shuttle::TICK_EVERY`]. The hold's end lands an open automation
+///   pass once (`transport_hold_end`).
+/// - A held key steps one bar per key-down and auto-repeat
+///   (`transport_key_step`, no landing); its key-up lands once.
+/// - Everything waits while a text field has the keyboard, and a refusal
+///   goes to the status line, never an alert. Time is passed in.
+#[derive(Default)]
+pub struct Shuttle {
+    hold: Option<Hold>,
+    /// A key step went through since the last key-up.
+    key_stepped: bool,
+}
+
+struct Hold {
+    forward: bool,
+    /// Shift goes to a marker on release and never winds.
+    shift: bool,
+    start: Instant,
+    /// Milliseconds since the press up to which it has wound.
+    last_ms: u64,
+    /// A wind went through: the release ends the hold, steps no bar.
+    wound: bool,
+}
+
+impl Shuttle {
+    /// How often a held button winds.
+    pub const TICK_EVERY: Duration = Duration::from_millis(100);
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A button is held (pressed and not yet released or cancelled).
+    pub fn holding(&self) -> bool {
+        self.hold.is_some()
+    }
+
+    /// Rewind (`forward` false) or fast forward pressed at `at`.
+    pub fn press(&mut self, forward: bool, shift: bool, at: Instant, doc: &mut DocumentModel) {
+        if self.hold.is_some() {
+            self.cancel(doc);
+        }
+        if !doc.transport_keys_enabled() {
+            doc.set_status(Some(TEXT_FIELD_HAS_KEYBOARD.into()));
+            return;
+        }
+        self.hold = Some(Hold {
+            forward,
+            shift,
+            start: at,
+            last_ms: 0,
+            wound: false,
+        });
+    }
+
+    /// The button is still held at `at`: winds by the curve since the last
+    /// tick, signed, when that is above 0.
+    pub fn tick(&mut self, at: Instant, doc: &mut DocumentModel) {
+        let Some(h) = self.hold.as_mut() else { return };
+        if h.shift {
+            return;
+        }
+        if !doc.transport_keys_enabled() {
+            // A text field took the keyboard mid-hold: the hold stops
+            // where it got to.
+            self.cancel(doc);
+            doc.set_status(Some(TEXT_FIELD_HAS_KEYBOARD.into()));
+            return;
+        }
+        let now = ms_since(h.start, at);
+        let quarters = shuttle_quarters(h.last_ms, now);
+        h.last_ms = h.last_ms.max(now);
+        if !(quarters > 0.0 && quarters.is_finite()) {
+            return;
+        }
+        let signed = if h.forward { quarters } else { -quarters };
+        let wound = h.wound;
+        match doc.session().transport_wind(signed) {
+            Ok(_) => h.wound = true,
+            Err(e) => {
+                // The refusal says why once and the hold stops; a pass the
+                // earlier winds moved still lands (its own error is
+                // ignored).
+                self.hold = None;
+                doc.set_status(Some(from_viz(&e).message));
+                if wound {
+                    land(doc, false);
+                }
+            }
+        }
+    }
+
+    /// The button is released at `at`. With no wind yet it is a click
+    /// (`inside`) or nothing (outside); after winding it winds the
+    /// remainder and ends the hold, wherever the release is.
+    pub fn release(&mut self, inside: bool, at: Instant, doc: &mut DocumentModel) {
+        let Some(h) = self.hold.as_ref() else { return };
+        if !h.wound {
+            let (forward, shift) = (h.forward, h.shift);
+            self.hold = None;
+            if !inside {
+                return;
+            }
+            let id = match (shift, forward) {
+                (true, true) => "transport.next_marker",
+                (true, false) => "transport.previous_marker",
+                (false, true) => "transport.fast_forward",
+                (false, false) => "transport.rewind",
+            };
+            if let Err(e) = commands::run(id, &[], doc) {
+                doc.set_status(Some(e.message));
+            }
+            return;
+        }
+        self.tick(at, doc);
+        // A refused remainder already ended the hold and landed.
+        if self.hold.take().is_some() {
+            land(doc, true);
+        }
+    }
+
+    /// Ends the hold with no further wind; after winding, the open pass
+    /// lands where the wind got to.
+    pub fn cancel(&mut self, doc: &mut DocumentModel) {
+        if let Some(h) = self.hold.take()
+            && h.wound
+        {
+            land(doc, true);
+        }
+    }
+
+    /// A key-down or auto-repeat of rewind or fast forward: one bar, moved
+    /// as a wind moves (no landing), gated as the command is; a refusal
+    /// shows in the status line and is returned.
+    pub fn key_down(&mut self, forward: bool, doc: &mut DocumentModel) -> Result<(), ControlError> {
+        let result = if !doc.transport_keys_enabled() {
+            Err(ControlError::new(
+                ErrorCode::Unavailable,
+                TEXT_FIELD_HAS_KEYBOARD,
+            ))
+        } else if doc.selected_seq().is_none() {
+            Err(ControlError::new(
+                ErrorCode::Unavailable,
+                "Select a sequence first.",
+            ))
+        } else {
+            doc.session()
+                .transport_key_step(forward)
+                .map(|_| self.key_stepped = true)
+                .map_err(|e| from_viz(&e))
+        };
+        if let Err(e) = &result {
+            doc.set_status(Some(e.message.clone()));
+        }
+        result
+    }
+
+    /// The held key is up (or the window or app lost the keyboard): one
+    /// landing if a key step happened since the last key-up.
+    pub fn key_up(&mut self, doc: &mut DocumentModel) {
+        if std::mem::take(&mut self.key_stepped) {
+            land(doc, true);
+        }
+    }
+}
+
+/// Milliseconds from `start` to `at`; a time before `start` is 0.
+fn ms_since(start: Instant, at: Instant) -> u64 {
+    // Far beyond any hold; keeps the conversion in range.
+    at.saturating_duration_since(start)
+        .as_millis()
+        .min(1_000_000_000_000_000) as u64
+}
+
+/// One landing (`transport_hold_end`); a refusal shows if `report`.
+fn land(doc: &mut DocumentModel, report: bool) {
+    if let Err(e) = doc.session().transport_hold_end()
+        && report
+    {
+        doc.set_status(Some(from_viz(&e).message));
     }
 }
