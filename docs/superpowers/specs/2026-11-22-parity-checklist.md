@@ -61,8 +61,8 @@ item (false: keys, the Keys settings and the control channel only).
 | ui.toggle_right | View | Right Pane | ⌃⌘→ | true | | |
 | ui.pane | View | Set Pane |  | false | | |
 | ui.theme | View | Theme |  | false | | |
-| ui.set_transport_bar | View | Set Transport Bar |  | false | | |
-| ui.reset_transport_bar | View | Reset Transport Bar |  | false | | |
+| ui.set_transport_bar | View | Set Transport Bar |  | false | S3 | S3 |
+| ui.reset_transport_bar | View | Reset Transport Bar |  | false | S3 | S3 |
 | ui.customize_transport | View | Customize Transport Bar… |  | true | | |
 
 ### Editors
@@ -137,27 +137,27 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| transport.play_stop | Transport | Play / Stop | Space | true | S1 | S1 |
-| transport.stop | Transport | Stop | S | true | S1 | S1 |
-| transport.play | Transport | Play |  | false | | |
-| transport.play_selection | Transport | Play Selection | ⌥Space | true | | |
-| transport.play_from_selection | Transport | Play from Selection | ⇧Space | true | | |
-| transport.play_from_edit_in | Transport | Play from Edit-In | Y | true | | |
+| transport.play_stop | Transport | Play / Stop | Space | true | S1, S3 | S1, S3 |
+| transport.stop | Transport | Stop | S | true | S1, S3 | S1, S3 |
+| transport.play | Transport | Play |  | false | S3 | S3 |
+| transport.play_selection | Transport | Play Selection | ⌥Space | true | S3 | S3 |
+| transport.play_from_selection | Transport | Play from Selection | ⇧Space | true | S3 | S3 |
+| transport.play_from_edit_in | Transport | Play from Edit-In | Y | true | S3 | S3 |
 | transport.record | Transport | Record | R | true | | |
-| transport.scrub | Transport | Scrub | K | true | | |
-| transport.return_to_start | Transport | Return to Start | Return | true | | |
-| transport.rewind | Transport | Rewind | ⇧, | true | | |
-| transport.fast_forward | Transport | Fast Forward | ⇧. | true | | |
-| transport.previous_marker | Transport | Previous Marker | , | true | | |
-| transport.next_marker | Transport | Next Marker | . | true | | |
-| transport.loop | Transport | Loop | L | true | | |
+| transport.scrub | Transport | Scrub | K | true | S3 | S3 |
+| transport.return_to_start | Transport | Return to Start | Return | true | S3 | S3 |
+| transport.rewind | Transport | Rewind | ⇧, | true | S3 (keypad key: gap, see below) | S3 (keypad key: gap) |
+| transport.fast_forward | Transport | Fast Forward | ⇧. | true | S3 (keypad key: gap, see below) | S3 (keypad key: gap) |
+| transport.previous_marker | Transport | Previous Marker | , | true | S3 | S3 |
+| transport.next_marker | Transport | Next Marker | . | true | S3 | S3 |
+| transport.loop | Transport | Loop | L | true | S3 | S3 |
 | transport.overdub | Transport | Overdub | O | true | | |
 | transport.punch | Transport | Punch | I | true | | |
 | transport.click | Transport | Click |  | true | | |
 | transport.set_click_level | Transport | Click Level |  | false | | |
 | transport.set_click_mode | Transport | Click Mode |  | false | | |
-| transport.go_position | Transport | Go to Position Field | P | true | | |
-| transport.go_edit_in | Transport | Go to Edit-In Field | E | true | | |
+| transport.go_position | Transport | Go to Position Field | P | true | S3 | S3 |
+| transport.go_edit_in | Transport | Go to Edit-In Field | E | true | S3 | S3 |
 | transport.go_punch | Transport | Go to Punch Fields | U | true | | |
 | transport.arm_previous | Transport | Arm Previous Track | ⌥⇧↑ | true | | |
 | transport.arm_next | Transport | Arm Next Track | ⌥⇧↓ | true | | |
@@ -539,8 +539,8 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 
 | Test | Mac | Linux |
 |---|---|---|
-| demo_play_screenshot_stop | | |
-| click_play_and_press_space | | |
+| demo_play_screenshot_stop | S3 (without the final List-editor step: later slice) | S3 (without the final List-editor step: later slice) |
+| click_play_and_press_space | S3 | S3 |
 | drum_grid_paints_and_erases_by_element | | |
 | keys_drive_step_entry_locators_and_bindings | | |
 | audio_import_plays_and_reports_media | | |
@@ -556,9 +556,9 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | window_views_and_panes_over_the_channel | | |
 | themes_and_the_strip_over_the_channel | | |
 | edits_a_region_in_the_audio_editor | | |
-| transport_jumps_readouts_and_fields_over_the_channel | | |
-| new_project_tracks_over_the_channel | pending: failed with the screen locked (no redraw, stale ui.tree); re-run unlocked | S2 |
-| loop_wraps_at_the_end | | |
+| transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6; step 7 Punch/Record: later slice) | S3 (steps 0–6; step 7 Punch/Record: later slice) |
+| new_project_tracks_over_the_channel | S3 (passed with the screen locked once the channel draws a fresh frame) | S2 |
+| loop_wraps_at_the_end | S3 | S3 |
 | arpeggiates_an_injected_chord_while_recording | | |
 | midi_mix_reaches_state_get | | |
 | records_mpe_as_per_note_expression | | |
@@ -595,3 +595,4 @@ unknown.
 | Co-Producer approvals are stored in the Mac Keychain | The Secret Service password store on Linux | |
 | AU inserts in Mac projects | Shown as placeholders that keep their settings (design section 10); no automatic swap | |
 | `ui.screenshot` of a native Wayland window (the GPUI pin has no offscreen render off macOS) | X11 `GetImage` of the window (XWayland, Xvfb); a native Wayland window answers `unavailable` "Screenshots need an X11 window on Linux." until GPUI or the compositor gives a capture | |
+| Keypad − and + as Rewind and Fast Forward keys (GPUI at the pin does not tell keypad keys from main keys; Mac too) | The ⇧, and ⇧. keys and the buttons; the control channel's `keypad_minus`/`keypad_plus` work. Closes when GPUI reports the keypad | |
