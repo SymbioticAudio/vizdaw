@@ -1337,3 +1337,21 @@ fn a_scrolled_out_element_is_not_clicked(cx: &mut TestAppContext) {
         .unwrap();
     ok(call(&s, cx, "ui.click", json!({"element": groove["id"]})));
 }
+
+#[gpui::test]
+fn a_refused_key_command_is_not_run_again_by_the_window(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    // An empty song: Space has nothing to play.
+    ok(call(&s, cx, "command.run", json!({"id": "file.new"})));
+    let doc_state = |s: &Setup, cx: &mut TestAppContext| {
+        let w = ok(call(s, cx, "state.get", json!({"target": "windows"})));
+        let d = ok(call(s, cx, "state.get", json!({"target": "document"})));
+        let e = ok(call(s, cx, "state.get", json!({"target": "editor"})));
+        (w["alerts"].clone(), d["alert"].clone(), e["status"].clone())
+    };
+    ok(call(&s, cx, "ui.key", json!({"key": "space"})));
+    assert_eq!(doc_state(&s, cx), (json!([]), Value::Null, Value::Null));
+    // S while stopped: refused, and the window does not run it again.
+    ok(call(&s, cx, "ui.key", json!({"key": "s"})));
+    assert_eq!(doc_state(&s, cx), (json!([]), Value::Null, Value::Null));
+}

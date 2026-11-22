@@ -38,6 +38,17 @@ impl Global for CaptureHook {}
 /// Why a Linux window that is not an X11 one cannot be captured.
 pub const NEEDS_X11: &str = "Screenshots need an X11 window on Linux.";
 
+/// Why a window with no native handle (GPUI's test window) cannot be
+/// captured.
+pub const NO_HANDLE: &str = "The window has no native handle to capture.";
+
+/// A window handle that cannot be had: nothing to capture, `unavailable`
+/// (not a failed capture; those are the X server's errors).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn handle_error(_: raw_window_handle::HandleError) -> ControlError {
+    ControlError::new(ErrorCode::Unavailable, NO_HANDLE)
+}
+
 /// Replaces the platform capture (tests).
 pub fn set_capture(
     cx: &mut App,
@@ -96,8 +107,9 @@ fn native_capture(_: &mut Window) -> Result<Shot, ControlError> {
 
 #[cfg(target_os = "linux")]
 fn native_capture(window: &mut Window) -> Result<Shot, ControlError> {
-    use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
-    let handle = window.window_handle().map_err(|_| not_rendered())?;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    // The trait's, not `Window::window_handle` (GPUI's window handle).
+    let handle = HasWindowHandle::window_handle(&*window).map_err(handle_error)?;
     let id = match handle.as_raw() {
         RawWindowHandle::Xcb(h) => h.window.get(),
         RawWindowHandle::Xlib(h) => u32::try_from(h.window).map_err(|_| not_rendered())?,
@@ -271,6 +283,16 @@ mod tests {
         // Too little data, or 16-bit pixels: not read.
         assert_eq!(zpixmap_to_rgba(&data[..4], 2, 1, 32, 32, true), None);
         assert_eq!(zpixmap_to_rgba(&data, 2, 1, 16, 32, true), None);
+    }
+
+    #[test]
+    fn a_window_without_a_native_handle_is_unavailable() {
+        use raw_window_handle::HandleError;
+        for e in [HandleError::NotSupported, HandleError::Unavailable] {
+            let c = handle_error(e);
+            assert_eq!(c.code, ErrorCode::Unavailable);
+            assert_eq!(c.message, NO_HANDLE);
+        }
     }
 
     #[test]

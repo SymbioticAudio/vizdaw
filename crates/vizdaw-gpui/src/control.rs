@@ -880,6 +880,16 @@ fn key_strokes(
                     sent += 1;
                     continue;
                 }
+                // The window's own key bindings and key handler run the
+                // document and transport commands: delivering the key there
+                // would run the refused command again (a second refusal in
+                // the status line or an alert). Swift delivers it to the
+                // first responder only, which does nothing with it; so it is
+                // counted as delivered and not sent.
+                Err(e) if delivers(e.code) && window_runs(id) => {
+                    sent += 2;
+                    continue;
+                }
                 Err(e) if delivers(e.code) => {}
                 Err(e) => return Err(e),
             }
@@ -888,6 +898,13 @@ fn key_strokes(
         sent += 2;
     }
     Ok(json!({ "window": number(entry.handle), "events": sent, "x": 0.0, "y": 0.0 }))
+}
+
+/// Whether a document window's key bindings or key handler run command
+/// `id` (`menus::bindings` binds the document and transport commands; the
+/// window's key handler steps Rewind and Fast Forward).
+fn window_runs(id: &str) -> bool {
+    DOCUMENT_COMMANDS.contains(&id) || TRANSPORT_COMMANDS.contains(&id)
 }
 
 /// A command refusal after which the key still goes to the window, as
