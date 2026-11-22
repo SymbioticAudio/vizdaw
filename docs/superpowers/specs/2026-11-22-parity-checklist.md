@@ -371,8 +371,11 @@ item (false: keys, the Keys settings and the control channel only).
 
 ## Windows
 
-Confirmed from the scenes in `app/Sources/VizDAW/VizDAWApp.swift` and the
-Window menu in `AppCommands.swift`.
+Confirmed from the scenes in `app/Sources/VizDAW/VizDAWApp.swift`, the
+Window menu in `AppCommands.swift`, and a grep of `showWindow(`, `NSWindow(`
+and `NSPanel` in `app/Sources/VizDAW` and `app/Sources/VizDAWEditors`
+(AppKit windows: plug-in editors, Built-in Synth, Modify panel, torn-off
+editors). The record popover is a popover, not a window.
 
 | Window | Kind | Mac | Linux |
 |---|---|---|---|
@@ -381,6 +384,9 @@ Window menu in `AppCommands.swift`.
 | Torn-off editor: List | `DetailEditorKind.list` (⌥⌘2) | | |
 | Torn-off editor: Strip Chart | `DetailEditorKind.stripChart` (⌥⌘3) | | |
 | Torn-off editor: Drum Grid | `DetailEditorKind.drumGrid` (⌥⌘4) | | |
+| Plug-in editor window (one per insert or instrument slot) | `PluginWindows.show`, AppKit `NSWindow` (`PluginWindows.swift`) | | |
+| Built-in Synth window | `BuiltinSynthWindow.swift`, AppKit `NSWindow` | | |
+| Modify panel (floating, one per document) | `ModifyPanels.show`, AppKit `NSPanel` (`ModifyPanel.swift`) | | |
 | Mixer | `mixer` | | |
 | Media Pool | `media-pool` | | |
 | Plugin Manager | `plugins` | | |
@@ -400,7 +406,8 @@ Window menu in `AppCommands.swift`.
 
 From `.sheet(`, `.alert(`, `.confirmationDialog(`, `NSSavePanel` and
 `NSOpenPanel` in `app/Sources/VizDAW`. A sheet without a title of its own is
-listed by its Swift type.
+listed by its Swift type. 23 `.sheet(` sites make 22 rows because MIDI Learn
+Maps is opened from two places.
 
 ### Sheets
 
@@ -423,7 +430,7 @@ listed by its Swift type.
 | Project Settings | document | | |
 | Merge DAWproject | document | | |
 | Customize Transport Bar | document and mixer windows | | |
-| MIDI Learn Maps | mixer, panes | | |
+| MIDI Learn Maps | mixer and panes (two `.sheet(` sites, one sheet) | | |
 | Comment (`CommentSheet`) | sequence sidebar | | |
 | Key slot (`KeySlotSheet`) | sequence sidebar | | |
 | Remove Old Co-Producer Copies? | Media Pool | | |
@@ -445,23 +452,28 @@ listed by its Swift type.
 
 ### File panels
 
+20 `NSOpenPanel()`/`NSSavePanel()` sites make 20 rows; the folder panel
+is one site used by four callers.
+
 | Panel | Prompt | Mac | Linux |
 |---|---|---|---|
-| Open (project, MIDI, DAWproject or AAF) | Open | | |
-| Open Co-Producer copy | Open Copy | | |
-| Import MIDI file | Import | | |
-| Save (new project) | Save | | |
-| Relink audio file | Relink | | |
-| Search folder for missing audio | Search | | |
-| Choose folder for missing audio | Choose | | |
-| Import audio files | Import | | |
-| Bounce destination | Bounce | | |
-| Export destination (for another DAW) | Export | | |
-| Import DAWproject | Import | | |
-| Merge DAWproject (choose the original project) | Merge | | |
-| Export DAWproject destination | Export | | |
-| Import AAF | Import | | |
-| Choose the MIDI file for the AAF file | Choose | | |
+| Open (project, MIDI, DAWproject or AAF): `chooseProject` | Open | | |
+| Open Co-Producer copy: `chooseCoProducerCopy` | Open Copy | | |
+| Import MIDI file: `chooseMidi` | Import | | |
+| Save location: `chooseSaveLocation` | Save | | |
+| Relink audio file: `chooseRelink` | Relink | | |
+| Search folder for missing audio: `chooseFolder` | Search | | |
+| Import audio files: `chooseAudio` | Import | | |
+| Bounce file: `chooseBounceFile` | Bounce | | |
+| Folder panel (shared site `chooseFolder(prompt:message:)`): bounce stems folder, MIDI export folder, export folder for another DAW, AAF export folder | Bounce, Export, Export Here | | |
+| MIDI export file: `chooseMidiExportFile` | Export | | |
+| Import DAWproject: `chooseDawprojectToOpen` | Import | | |
+| Merge DAWproject (choose the original project): `chooseProjectToMerge` | Merge | | |
+| Export DAWproject file: `chooseDawprojectFile` | Export | | |
+| Import AAF: `chooseAafToOpen` | Import | | |
+| Choose the MIDI file for the AAF file: `chooseMidiBesideAaf` | Choose | | |
+| Choose folder for the AAF's missing audio: `chooseAafMediaFolder` | Choose | | |
+| Report sheet Save as Text: `chooseReportText` | Save | | |
 | Choose External Sample Editor | Choose | | |
 | Keys settings: save keys file | (save panel) | | |
 | Keys settings: open keys file | (open panel) | | |
