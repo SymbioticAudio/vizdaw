@@ -567,3 +567,46 @@ fn the_fake_records_the_gesture_calls() {
     assert!(f.calls().contains(&"begin_edit(Move Block)".to_string()));
     assert_eq!(f.count("abort_edit"), 1);
 }
+
+#[test]
+fn saving_keeps_nested_keys_this_app_does_not_know() {
+    let original = serde_json::json!({
+        "views": {"main": "arrange", "future": {"a": 1},
+                  "arrange": {"future": 2,
+                              "left": {"shown": true, "view": "strip", "size": 220, "future": 3}}},
+        "snap": {"division": "quarter", "triplet": false, "dotted": false, "enabled": true,
+                 "future": 4},
+        "detail": {"kind": "list", "target": {"lane": {"seq": 3, "lane": 31}},
+                   "listFilter": {"hiddenKinds": ["cc"], "shownDests": [2], "future": 5}},
+        "blockRule": {"silenceGap": {"beats": 4}}
+    });
+    let f = Arc::new(editor_fake());
+    f.set_layout(Some(&original.to_string()));
+    let mut m = model(&f);
+    m.update_layout(|l| {
+        l.views.main = vizdaw_app::editor::MainView::Mix;
+        l.views.arrange.left.size = 300.;
+        l.snap.enabled = false;
+        let filter = l.detail.as_mut().unwrap().list_filter.as_mut().unwrap();
+        filter.hidden_kinds.insert("note".into());
+        filter.shown_dests = None;
+        l.block_rule = vizdaw_app::editor::BlockRuleSetting::FixedBars { bars: 2 };
+    });
+    m.save_as(std::path::Path::new("/tmp/x/a.vizdaw")).unwrap();
+    let w: serde_json::Value = serde_json::from_str(&f.layout().unwrap()).unwrap();
+    assert_eq!(w["views"]["future"], serde_json::json!({"a": 1}));
+    assert_eq!(w["views"]["main"], "mix");
+    assert_eq!(w["views"]["arrange"]["future"], 2);
+    assert_eq!(w["views"]["arrange"]["left"]["future"], 3);
+    assert_eq!(w["views"]["arrange"]["left"]["size"], 300.);
+    assert_eq!(w["snap"]["future"], 4);
+    assert_eq!(w["snap"]["enabled"], false);
+    let lf = &w["detail"]["listFilter"];
+    assert_eq!(lf["future"], 5);
+    assert_eq!(lf["hiddenKinds"], serde_json::json!(["cc", "note"]));
+    assert!(
+        lf.get("shownDests").is_none(),
+        "a modelled optional that went is gone"
+    );
+    assert_eq!(w["blockRule"], serde_json::json!({"fixedBars": {"_0": 2}}));
+}

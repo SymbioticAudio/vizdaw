@@ -420,7 +420,8 @@ impl EditorLayout {
         for (key, value) in self.entries() {
             match value {
                 Some(v) => {
-                    obj.insert(key.to_owned(), v);
+                    let merged = merge_key(key, obj.get(key), v);
+                    obj.insert(key.to_owned(), merged);
                 }
                 None => {
                     obj.remove(key);
@@ -429,4 +430,60 @@ impl EditorLayout {
         }
         sorted(Value::Object(obj)).to_string()
     }
+}
+
+/// Struct-shaped objects are merged into what is there, so keys this app
+/// does not model inside them survive; enum-shaped values (`blockRule`,
+/// `lastKind`, `lightMode`, `detail.target`) and the detail itself (its
+/// unmodelled fields ride in `DetailState::extra`) are replaced whole.
+fn merge_key(key: &str, old: Option<&Value>, new: Value) -> Value {
+    match key {
+        "snap" => merge_struct(old, new, &[]),
+        "views" => {
+            let mut views = merge_struct(old, new, &["frame"]);
+            for main in ["arrange", "mix"] {
+                let old_setup = old.and_then(|o| o.get(main));
+                let Some(setup) = views.get_mut(main) else {
+                    continue;
+                };
+                let mut merged = merge_struct(old_setup, setup.take(), &[]);
+                for side in ["left", "bottom", "right"] {
+                    let old_pane = old_setup.and_then(|o| o.get(side));
+                    if let Some(pane) = merged.get_mut(side) {
+                        *pane = merge_struct(old_pane, pane.take(), &[]);
+                    }
+                }
+                *setup = merged;
+            }
+            views
+        }
+        "detail" => {
+            let mut detail = new;
+            let old_filter = old.and_then(|o| o.get("listFilter"));
+            if let Some(filter) = detail.get_mut("listFilter") {
+                *filter = merge_struct(old_filter, filter.take(), &["shownDests"]);
+            }
+            detail
+        }
+        _ => new,
+    }
+}
+
+/// `new`'s keys written over the object `old`: keys `new` lacks stay,
+/// except the modelled optionals in `optional` (absent in `new` means
+/// none). Anything that is not two objects is `new`.
+fn merge_struct(old: Option<&Value>, new: Value, optional: &[&str]) -> Value {
+    let (Some(Value::Object(old)), Value::Object(new)) = (old, &new) else {
+        return new;
+    };
+    let mut out = old.clone();
+    for key in optional {
+        if !new.contains_key(*key) {
+            out.remove(*key);
+        }
+    }
+    for (k, v) in new {
+        out.insert(k.clone(), v.clone());
+    }
+    Value::Object(out)
 }
