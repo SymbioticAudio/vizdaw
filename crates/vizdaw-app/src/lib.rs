@@ -5,6 +5,7 @@ pub mod alerts;
 pub mod document;
 pub mod session;
 pub mod store;
+pub mod transport;
 
 pub use alerts::AlertItem;
 pub use document::{DocumentModel, SaveAction};

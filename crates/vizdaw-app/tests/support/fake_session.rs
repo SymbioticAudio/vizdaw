@@ -103,6 +103,11 @@ impl FakeSession {
         self.st().transport.playing = playing;
     }
 
+    /// Edits the scripted transport (what the next `transport()` reads).
+    pub fn set_transport(&self, f: impl FnOnce(&mut TransportState)) {
+        f(&mut self.st().transport);
+    }
+
     /// Every call, in order, as `name` or `name(arg)`.
     pub fn calls(&self) -> Vec<String> {
         self.st().calls.clone()
@@ -202,6 +207,12 @@ impl DocSession for FakeSession {
         let mut s = self.st();
         s.calls.push("stop".into());
         s.transport.playing = false;
+        Ok(())
+    }
+    fn locate(&self, tick: i64) -> Result<(), VizError> {
+        let mut s = self.st();
+        s.calls.push(format!("locate({tick})"));
+        s.transport.tick = tick;
         Ok(())
     }
     fn close(&self) -> Result<(), VizError> {

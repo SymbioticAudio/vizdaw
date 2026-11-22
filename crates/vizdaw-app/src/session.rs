@@ -18,6 +18,7 @@ pub trait DocSession: Send + Sync {
     fn play(&self, seq: u64) -> Result<(), VizError>;
     fn play_from(&self, seq: u64, from: i64, to: Option<i64>) -> Result<(), VizError>;
     fn stop(&self) -> Result<(), VizError>;
+    fn locate(&self, tick: i64) -> Result<(), VizError>;
     fn close(&self) -> Result<(), VizError>;
 }
 
@@ -51,6 +52,9 @@ impl DocSession for Session {
     }
     fn stop(&self) -> Result<(), VizError> {
         Session::stop(self)
+    }
+    fn locate(&self, tick: i64) -> Result<(), VizError> {
+        Session::locate(self, tick)
     }
     fn close(&self) -> Result<(), VizError> {
         Session::close(self)
