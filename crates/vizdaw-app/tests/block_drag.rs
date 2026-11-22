@@ -230,12 +230,7 @@ impl Canvas {
 
     /// Escape: also aborts a drag whose final edit waits on Busy.
     fn cancel(&mut self, m: &mut DocumentModel) {
-        let fx = self.machine.cancel();
-        self.handle(m, fx);
-        self.drag = None;
-        if m.gesture_open() {
-            m.cancel_gesture();
-        }
+        m.cancel_block_drag(&mut self.machine, &mut self.drag, &self.frame);
     }
 }
 

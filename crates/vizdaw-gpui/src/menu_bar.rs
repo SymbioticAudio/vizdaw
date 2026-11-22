@@ -169,8 +169,14 @@ impl MenuBar {
                     title,
                     keys,
                     enabled,
+                    checked,
                 } => {
-                    let (id, enabled) = (*id, *enabled);
+                    let (id, enabled, checked) = (*id, *enabled, *checked);
+                    let mark = match checked {
+                        Some(true) => "\u{2713} ",
+                        Some(false) => "    ",
+                        None => "",
+                    };
                     div()
                         .id(("menuitem", row))
                         .relative()
@@ -185,7 +191,7 @@ impl MenuBar {
                         } else {
                             colors::DISABLED
                         }))
-                        .child(title.clone())
+                        .child(format!("{mark}{title}"))
                         .child(
                             div()
                                 .text_color(rgb(if enabled {
@@ -195,7 +201,13 @@ impl MenuBar {
                                 }))
                                 .child(keys.clone().unwrap_or_default()),
                         )
-                        .child(scope.control("menuitem", title, enabled))
+                        .child(scope.control_with(
+                            "menuitem",
+                            title,
+                            enabled,
+                            checked.map(|on| if on { "on" } else { "off" }),
+                            false,
+                        ))
                         .when(enabled, |d| {
                             d.cursor_pointer()
                                 .hover(|s| s.bg(rgb(colors::BUTTON)))

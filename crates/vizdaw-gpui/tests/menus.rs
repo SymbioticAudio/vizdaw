@@ -33,6 +33,7 @@ fn item<'a>(
                 title: t,
                 keys,
                 enabled,
+                ..
             } if t == title => Some((*id, t.as_str(), keys.as_deref(), *enabled)),
             _ => None,
         })
@@ -51,7 +52,15 @@ fn the_menu_model_follows_the_swift_order() {
         let m = menu_model(front, &keymap);
         assert_eq!(
             titles(&m),
-            ["VizDAW", "File", "Edit", "Track", "Transport", "Window"]
+            [
+                "VizDAW",
+                "File",
+                "Edit",
+                "Editors",
+                "Track",
+                "Transport",
+                "Window"
+            ]
         );
     }
     let m = menu_model(Some(&doc), &keymap);
@@ -75,7 +84,7 @@ fn the_menu_model_follows_the_swift_order() {
             Some("Select All"),
         ]
     );
-    let track: Vec<Option<&str>> = m.menus[3]
+    let track: Vec<Option<&str>> = m.menus[4]
         .items
         .iter()
         .map(|i| match i {
@@ -95,7 +104,7 @@ fn the_menu_model_follows_the_swift_order() {
             Some("track.rename"),
         ]
     );
-    assert!(m.menus[5].items.is_empty());
+    assert!(m.menus[6].items.is_empty());
 }
 
 #[test]

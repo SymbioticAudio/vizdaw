@@ -302,9 +302,13 @@ fn ui_tree_and_click_press_play(cx: &mut TestAppContext) {
     // The button now reads Stop: the old ID names nothing.
     let gone = call(&s, cx, "ui.click", json!({"element": play})).unwrap_err();
     assert_eq!(gone.code, ErrorCode::NoElement);
-    // Points are not answered this slice.
-    let point = call(&s, cx, "ui.click", json!({"point": {"x": 1, "y": 1}})).unwrap_err();
-    assert_eq!(point.code, ErrorCode::Unavailable);
+    // A point is clicked as the mouse would there.
+    let point = ok(call(&s, cx, "ui.click", json!({"point": {"x": 1, "y": 1}})));
+    assert_eq!(point["events"], 2);
+    assert_eq!(
+        (point["x"].as_f64(), point["y"].as_f64()),
+        (Some(1.), Some(1.))
+    );
 }
 
 #[gpui::test]
@@ -321,7 +325,7 @@ fn commands_outside_the_slice_are_unavailable(cx: &mut TestAppContext) {
     ] {
         let e = call(&s, cx, cmd, params).unwrap_err();
         assert_eq!(e.code, ErrorCode::Unavailable, "{cmd}");
-        assert!(e.message.contains("slice 3"), "{cmd}: {}", e.message);
+        assert!(e.message.contains("slice 4"), "{cmd}: {}", e.message);
     }
 }
 
@@ -389,11 +393,15 @@ fn state_get_document_matches_the_swift_fields(cx: &mut TestAppContext) {
     ));
     assert_eq!(by_window, d);
 
-    // `state.get editor`: this slice's subset.
+    // `state.get editor`: the Swift fields this slice has.
     let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
     assert_eq!(
         e,
-        json!({"doc": opened["doc"], "status": null, "gesture": null})
+        json!({
+            "doc": opened["doc"], "detail": null, "windows": [], "tool": "arrow",
+            "snap": {"enabled": true, "division": "quarter"}, "exact_mode": false,
+            "gesture": false, "status": null,
+        })
     );
 }
 
@@ -1393,4 +1401,90 @@ fn the_tree_is_read_from_a_fresh_frame(cx: &mut TestAppContext) {
             .any(|n| n["label"].as_str().is_some_and(|l| l.contains("Vox"))),
         "{tree}"
     );
+}
+
+/// The demo with a two-event block on Chords at bar 1.
+fn with_chords_block() -> FakeSession {
+    let f = demo_fake();
+    f.set_blocks(
+        3,
+        31,
+        vec![vizdaw_ffi::blocks::BlockRow {
+            start: 0,
+            end: BAR,
+            kind: vizdaw_ffi::blocks::BlockKind::Events,
+            events: vec![1, 2],
+            label: None,
+            ref_seq: None,
+            muted: false,
+        }],
+    );
+    f
+}
+
+const CHORDS_BLOCK: &str = "Block on Chords, bar 1, 2 events";
+
+#[gpui::test]
+fn state_get_selection_follows_a_block_click(cx: &mut TestAppContext) {
+    let s = setup(cx, with_chords_block());
+    let opened = ok(call(&s, cx, "app.new_demo", json!({})));
+    let sel = ok(call(&s, cx, "state.get", json!({"target": "selection"})));
+    assert_eq!(
+        sel,
+        json!({"doc": opened["doc"], "time_range": null, "lanes": [], "events": []})
+    );
+    let block = node_id(&s, cx, "button", CHORDS_BLOCK);
+    ok(call(&s, cx, "ui.click", json!({"element": block})));
+    let sel = ok(call(&s, cx, "state.get", json!({"target": "selection"})));
+    assert_eq!(
+        sel,
+        json!({
+            "doc": opened["doc"], "time_range": {"start": 0, "end": BAR},
+            "lanes": [{"seq": 3, "lane": 31}], "events": [1, 2],
+        })
+    );
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    assert_eq!(node(&tree, "button", CHORDS_BLOCK)["selected"], true);
+    // A double click (count 2) opens the detail on the block.
+    ok(call(
+        &s,
+        cx,
+        "ui.click",
+        json!({"element": block, "count": 2}),
+    ));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(
+        e["detail"],
+        json!({"kind": "list", "seq": 3, "lane": 31, "start": 0, "end": BAR})
+    );
+}
+
+#[gpui::test]
+fn a_point_click_on_empty_space_clears_the_selection(cx: &mut TestAppContext) {
+    let s = setup(cx, with_chords_block());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    let canvas = node(&tree, "group", "Arrangement")["frame"].clone();
+    let (x, y) = (canvas["x"].as_f64().unwrap(), canvas["y"].as_f64().unwrap());
+    // A point on the block selects it, as the mouse does.
+    let r = ok(call(
+        &s,
+        cx,
+        "ui.click",
+        json!({"point": {"x": x + 50., "y": y + 22. + 48. + 24.}}),
+    ));
+    assert_eq!(r["events"], 2);
+    let sel = ok(call(&s, cx, "state.get", json!({"target": "selection"})));
+    assert_eq!(sel["events"], json!([1, 2]));
+    // A point on empty space clears it.
+    ok(call(
+        &s,
+        cx,
+        "ui.click",
+        json!({"point": {"x": x + 400., "y": y + 200.}}),
+    ));
+    let sel = ok(call(&s, cx, "state.get", json!({"target": "selection"})));
+    assert_eq!(sel["events"], json!([]));
+    assert_eq!(sel["lanes"], json!([]));
+    assert_eq!(sel["time_range"], Value::Null);
 }

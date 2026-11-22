@@ -8,15 +8,19 @@ use std::time::Duration;
 
 use core_control::protocol::{RawRequest, RequestId};
 use gpui::{
-    Entity, Modifiers, MouseButton, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext,
-    VisualTestContext, WindowHandle, point, px,
+    Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
+    ScrollEvent, TestAppContext, VisualTestContext, WindowHandle, point, px,
 };
 use serde_json::{Map, json};
 use vizdaw_app::DocumentStore;
+use vizdaw_app::editor::{DetailEditorKind, EditorTarget, Tool};
 use vizdaw_app::testing::{FakeSession, demo_fake, lane_row};
 use vizdaw_ffi::blocks::{BlockKind, BlockRow};
-use vizdaw_ffi::selection::TickRange;
+use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneRef};
+use vizdaw_ffi::events::{EventKindRow, EventRow};
+use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_gpui::control;
+use vizdaw_gpui::menus::{self, ItemSpec};
 use vizdaw_gpui::registry::Element;
 use vizdaw_gpui::{AppState, DocumentWindow};
 
@@ -592,4 +596,605 @@ fn rows_exposed_by_a_taller_canvas_are_built(cx: &mut TestAppContext) {
     let last = (body / 48.).ceil() as usize - 1;
     let label = format!("Block on Track {last}, bar 1, 1 event");
     assert!(s.find("button", &label).is_some(), "no {label:?}");
+}
+
+// MARK: Block editing (slice 4)
+
+/// The Chords block (bar 1 of row 1) and the Groove reference (bar 2 of
+/// row 0), in canvas points; empty space on the Chords row; and below
+/// every row.
+const ON_CHORDS: (f32, f32) = (50., RULER + 48. + 24.);
+const ON_GROOVE: (f32, f32) = (200., RULER + 24.);
+const EMPTY_CHORDS: (f32, f32) = (400., RULER + 48. + 24.);
+const BELOW_ROWS: (f32, f32) = (400., 200.);
+const CHORDS_BLOCK: &str = "Block on Chords, bar 1, 2 events";
+const GROOVE_BLOCK: &str = "Reference to Beat on Groove, bar 2";
+
+fn alt() -> Modifiers {
+    Modifiers {
+        alt: true,
+        ..Modifiers::none()
+    }
+}
+
+fn note(id: u64, tick: i64) -> EventRow {
+    EventRow {
+        pitch: 60,
+        velocity: 0x8000,
+        duration: BAR / 4,
+        ..EventRow::blank(id, tick, EventKindRow::Note)
+    }
+}
+
+impl Setup {
+    fn pt(&mut self, (x, y): (f32, f32)) -> Point<Pixels> {
+        self.at(x, y)
+    }
+
+    fn click_with(&mut self, at: (f32, f32), modifiers: Modifiers) {
+        let at = self.pt(at);
+        self.cx.simulate_click(at, modifiers);
+        self.cx.run_until_parked();
+    }
+
+    fn double_click(&mut self, at: (f32, f32)) {
+        let position = self.pt(at);
+        for (count, _) in [(1, ()), (2, ())] {
+            self.cx.simulate_event(MouseDownEvent {
+                position,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count: count,
+                first_mouse: false,
+            });
+            self.cx.simulate_event(MouseUpEvent {
+                position,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count: count,
+            });
+        }
+        self.cx.run_until_parked();
+    }
+
+    fn right_click(&mut self, at: (f32, f32)) {
+        let position = self.pt(at);
+        self.cx
+            .simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        self.cx
+            .simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    /// Presses at `from` and moves to `to`, the button held.
+    fn press_and_move(&mut self, from: (f32, f32), to: (f32, f32), modifiers: Modifiers) {
+        let (from, to) = (self.pt(from), self.pt(to));
+        self.cx
+            .simulate_mouse_down(from, MouseButton::Left, modifiers);
+        self.cx.run_until_parked();
+        self.cx
+            .simulate_mouse_move(to, Some(MouseButton::Left), modifiers);
+        self.cx.run_until_parked();
+    }
+
+    fn release_with(&mut self, at: (f32, f32), modifiers: Modifiers) {
+        let at = self.pt(at);
+        self.cx.simulate_mouse_up(at, MouseButton::Left, modifiers);
+        self.cx.run_until_parked();
+    }
+
+    fn model<R>(&mut self, f: impl FnOnce(&vizdaw_app::DocumentModel) -> R) -> R {
+        let doc = self.doc();
+        self.app
+            .read_with(&self.cx, |a, _| f(a.store.document(doc).unwrap()))
+    }
+
+    fn selection(&mut self) -> SelectionRow {
+        self.model(|d| d.selection().clone())
+    }
+
+    fn selected_lanes(&mut self) -> Vec<u64> {
+        self.selection().lanes.iter().map(|l| l.lane).collect()
+    }
+
+    /// The fake's calls of a drag: begins, gesture edits, ends and aborts.
+    fn drag_calls(&self) -> Vec<String> {
+        self.fake
+            .calls()
+            .into_iter()
+            .filter(|c| {
+                c.starts_with("begin_edit") || c.starts_with("edit_gesture") || c.ends_with("_edit")
+            })
+            .collect()
+    }
+
+    fn undo_label(&mut self) -> Option<String> {
+        self.model(|d| d.snapshot().undo_label.clone())
+    }
+
+    fn status(&mut self) -> Option<String> {
+        self.model(|d| d.status().map(String::from))
+    }
+
+    fn channel(&mut self, cmd: &str, params: serde_json::Value) -> control::Handled {
+        let serde_json::Value::Object(params) = params else {
+            panic!("params are an object")
+        };
+        let raw = RawRequest {
+            id: RequestId::Num(1),
+            cmd: cmd.into(),
+            params,
+        };
+        let command = core_control::validate(&raw).expect("a valid request");
+        let handled = self.cx.cx.update(|cx| control::handle(&command, cx));
+        self.cx.run_until_parked();
+        handled
+    }
+
+    fn channel_ok(&mut self, cmd: &str, params: serde_json::Value) -> serde_json::Value {
+        match self.channel(cmd, params) {
+            control::Handled::Reply(Ok(v)) => v,
+            other => panic!("{cmd} failed: {other:?}"),
+        }
+    }
+}
+
+fn mv(events: &[u64], delta: i64, to_lane: Option<LaneRef>) -> EditCommand {
+    EditCommand::Event {
+        edit: EventEdit::Move {
+            events: events.to_vec(),
+            delta,
+            to_lane,
+        },
+    }
+}
+
+const GROOVE_LANE: LaneRef = LaneRef { seq: 3, lane: 30 };
+
+#[gpui::test]
+fn a_click_selects_a_block_and_shift_adds(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.click_with(ON_CHORDS, Modifiers::none());
+    let sel = s.selection();
+    assert_eq!(sel.events, vec![1, 2]);
+    assert_eq!(s.selected_lanes(), vec![31]);
+    assert_eq!(sel.time_range, Some(TickRange { start: 0, end: BAR }));
+    // ⇧ adds the Groove reference: its event, its track, the range united.
+    s.click_with(ON_GROOVE, Modifiers::shift());
+    let sel = s.selection();
+    assert_eq!(sel.events, vec![1, 2, 9]);
+    assert_eq!(s.selected_lanes(), vec![31, 30]);
+    assert_eq!(
+        sel.time_range,
+        Some(TickRange {
+            start: 0,
+            end: 2 * BAR
+        })
+    );
+    // A plain click selects only the clicked block.
+    s.click_with(ON_GROOVE, Modifiers::none());
+    assert_eq!(s.selection().events, vec![9]);
+    assert_eq!(s.selected_lanes(), vec![30]);
+    assert!(s.drag_calls().is_empty(), "a click is not a drag");
+}
+
+#[gpui::test]
+fn a_click_on_empty_space_clears_unless_shift(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.click_with(ON_CHORDS, Modifiers::none());
+    s.click_with(EMPTY_CHORDS, Modifiers::shift());
+    assert_eq!(s.selection().events, vec![1, 2], "⇧ keeps the selection");
+    s.click_with(EMPTY_CHORDS, Modifiers::none());
+    let sel = s.selection();
+    assert!(sel.events.is_empty() && sel.lanes.is_empty() && sel.time_range.is_none());
+    // Below every row too.
+    s.click_with(ON_CHORDS, Modifiers::none());
+    s.click_with(BELOW_ROWS, Modifiers::none());
+    assert!(s.selection().events.is_empty());
+}
+
+#[gpui::test]
+fn a_drag_moves_a_block_as_one_undo_step(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.fake.clear_calls();
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    // The live preview: the gesture is open and its target applied.
+    assert!(s.model(|d| d.gesture_open()));
+    assert_eq!(s.drag_calls(), ["begin_edit(Move Block)", "edit_gesture"]);
+    let to = s.pt((310., ON_CHORDS.1));
+    s.cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    s.cx.run_until_parked();
+    s.release_with((310., ON_CHORDS.1), Modifiers::none());
+    let calls = s.drag_calls();
+    assert_eq!(calls.first().unwrap(), "begin_edit(Move Block)");
+    assert_eq!(calls.last().unwrap(), "end_edit");
+    assert_eq!(calls.iter().filter(|c| c.starts_with("begin")).count(), 1);
+    assert!(!s.model(|d| d.gesture_open()));
+    assert_eq!(s.undo_label().as_deref(), Some("Move Block"));
+    let Some(EditCommand::Event {
+        edit:
+            EventEdit::Move {
+                events,
+                delta,
+                to_lane,
+            },
+    }) = s.fake.gesture_edits().last().cloned()
+    else {
+        panic!("expected a move: {:?}", s.fake.gesture_edits());
+    };
+    assert_eq!(events, vec![1, 2]);
+    assert!(delta > 0);
+    assert_eq!(to_lane, None);
+    // The selection is not changed by a drag.
+    assert!(s.selection().events.is_empty());
+}
+
+#[gpui::test]
+fn an_option_drag_copies(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    fake.set_events(3, 31, vec![note(1, 0), note(2, BAR / 4)]);
+    let mut s = setup(cx, fake);
+    s.fake.clear_calls();
+    s.press_and_move(ON_CHORDS, (300., ON_GROOVE.1), alt());
+    s.release_with((300., ON_GROOVE.1), alt());
+    assert_eq!(
+        s.drag_calls(),
+        ["begin_edit(Copy Block)", "edit_gesture", "end_edit"]
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Copy Block"));
+    let Some(EditCommand::Event {
+        edit: EventEdit::Insert { seq, lane, events },
+    }) = s.fake.gesture_edits().last().cloned()
+    else {
+        panic!("expected an insert: {:?}", s.fake.gesture_edits());
+    };
+    assert_eq!((seq, lane), (3, 30));
+    assert_eq!(events.len(), 2);
+    assert!(events[0].tick > 0 && events[1].tick - events[0].tick == BAR / 4);
+}
+
+#[gpui::test]
+fn a_drag_onto_another_track_merges(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.fake.clear_calls();
+    s.press_and_move(ON_CHORDS, (ON_CHORDS.0, ON_GROOVE.1), Modifiers::none());
+    s.release_with((ON_CHORDS.0, ON_GROOVE.1), Modifiers::none());
+    assert_eq!(
+        s.drag_calls(),
+        ["begin_edit(Move Block)", "edit_gesture", "end_edit"]
+    );
+    assert_eq!(s.fake.gesture_edits(), [mv(&[1, 2], 0, Some(GROOVE_LANE))]);
+}
+
+#[gpui::test]
+fn escape_mid_drag_leaves_the_song_unchanged(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.fake.clear_calls();
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.keys("escape");
+    assert!(!s.model(|d| d.gesture_open()));
+    // The matching mouse-up (and moves before it) are swallowed.
+    let to = s.pt((350., ON_CHORDS.1));
+    s.cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    s.release_with((350., ON_CHORDS.1), Modifiers::none());
+    assert_eq!(
+        s.drag_calls(),
+        ["begin_edit(Move Block)", "edit_gesture", "abort_edit"]
+    );
+    assert_eq!(s.undo_label(), None);
+    assert!(s.selection().events.is_empty(), "nor is it a click");
+}
+
+#[gpui::test]
+fn the_eraser_deletes_the_clicked_block(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.click("button", "Eraser");
+    assert_eq!(s.model(|d| d.tool()), Tool::Eraser);
+    let mut next = s.fake.snap();
+    next.version += 1;
+    next.undo_label = Some("Delete Events".into());
+    s.fake.bump(next);
+    s.click_with(ON_CHORDS, Modifiers::none());
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Delete { events: vec![1, 2] }
+        })
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Delete Events"));
+    // The eraser does not drag.
+    s.fake.clear_calls();
+    s.press_and_move(ON_GROOVE, (400., ON_GROOVE.1), Modifiers::none());
+    s.release_with((400., ON_GROOVE.1), Modifiers::none());
+    assert!(s.drag_calls().is_empty());
+    // A refusal is the model's status.
+    s.fake.set_edit_error(Some(vizdaw_ffi::VizError::Model {
+        message: "the events are locked".into(),
+    }));
+    s.click_with(ON_CHORDS, Modifiers::none());
+    assert_eq!(s.status().as_deref(), Some("the events are locked"));
+}
+
+#[gpui::test]
+fn the_pencil_is_chosen_but_does_nothing_yet(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.click("button", "Pencil");
+    assert_eq!(s.model(|d| d.tool()), Tool::Pencil);
+    assert!(s.element("button", "Pencil").selected);
+    s.fake.clear_calls();
+    s.click_with(ON_CHORDS, Modifiers::none());
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.release_with((300., ON_CHORDS.1), Modifiers::none());
+    assert!(s.fake.calls().is_empty(), "{:?}", s.fake.calls());
+    s.click("button", "Arrow");
+    assert_eq!(s.model(|d| d.tool()), Tool::Arrow);
+}
+
+#[gpui::test]
+fn a_double_click_opens_the_detail_on_the_block(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.double_click(ON_CHORDS);
+    let detail = s.model(|d| d.layout().detail.clone()).expect("a detail");
+    assert_eq!(detail.kind, DetailEditorKind::List);
+    assert_eq!(
+        detail.target,
+        EditorTarget::Block {
+            seq: 3,
+            lane: 31,
+            start: 0,
+            end: BAR
+        }
+    );
+    let e = s.channel_ok("state.get", json!({"target": "editor"}));
+    assert_eq!(
+        e["detail"],
+        json!({"kind": "list", "seq": 3, "lane": 31, "start": 0, "end": BAR})
+    );
+}
+
+#[gpui::test]
+fn the_block_menu_opens_the_list_and_deletes(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    assert!(s.find("menuitem", "Open in List").is_none());
+    s.right_click(ON_CHORDS);
+    // An unselected block is selected first.
+    assert_eq!(s.selection().events, vec![1, 2]);
+    let items: Vec<String> = s
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "menuitem")
+        .map(|e| e.label)
+        .collect();
+    assert_eq!(items, ["Open in List", "Delete"]);
+    s.click("menuitem", "Open in List");
+    assert!(s.find("menuitem", "Open in List").is_none(), "it closes");
+    let detail = s.model(|d| d.layout().detail.clone()).expect("a detail");
+    assert_eq!(detail.kind, DetailEditorKind::List);
+    assert_eq!(
+        detail.target,
+        EditorTarget::Block {
+            seq: 3,
+            lane: 31,
+            start: 0,
+            end: BAR
+        }
+    );
+    // A selected block keeps the selection it is part of.
+    s.click_with(ON_GROOVE, Modifiers::shift());
+    s.right_click(ON_CHORDS);
+    assert_eq!(s.selection().events, vec![1, 2, 9]);
+    // Escape closes the menu without acting.
+    s.keys("escape");
+    assert!(s.find("menuitem", "Delete").is_none());
+    s.right_click(ON_CHORDS);
+    s.click("menuitem", "Delete");
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Delete { events: vec![1, 2] }
+        })
+    );
+    // On empty space there is no menu.
+    s.right_click(EMPTY_CHORDS);
+    assert!(s.find("menuitem", "Delete").is_none());
+}
+
+#[gpui::test]
+fn g_toggles_snap_and_the_menu_shows_it(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    let snap_item = |s: &mut Setup| {
+        let doc = s.doc();
+        let m = s.app.read_with(&s.cx, |a, _| {
+            menus::menu_model(a.store.document(doc), &a.keymap)
+        });
+        let editors = m
+            .menus
+            .iter()
+            .find(|m| m.title == "Editors")
+            .expect("an Editors menu")
+            .clone();
+        editors
+            .items
+            .into_iter()
+            .find_map(|i| match i {
+                ItemSpec::Command {
+                    id: "editors.snap",
+                    title,
+                    keys,
+                    enabled,
+                    checked,
+                } => Some((title, keys, enabled, checked)),
+                _ => None,
+            })
+            .expect("Snap to Grid")
+    };
+    assert_eq!(
+        snap_item(&mut s),
+        ("Snap to Grid".into(), Some("G".into()), true, Some(true))
+    );
+    assert_eq!(s.value("button", "Snap").as_deref(), Some("on"));
+    s.keys("g");
+    assert!(!s.model(|d| d.layout().snap.enabled));
+    assert_eq!(snap_item(&mut s).3, Some(false));
+    assert_eq!(s.value("button", "Snap").as_deref(), Some("off"));
+    // The menu item runs it too.
+    s.window
+        .update(&mut s.cx, |_, window, cx| {
+            window.dispatch_action(menus::action_for("editors.snap"), cx)
+        })
+        .unwrap();
+    s.cx.run_until_parked();
+    assert!(s.model(|d| d.layout().snap.enabled));
+    // And the channel, with `on`.
+    s.channel_ok(
+        "command.run",
+        json!({"id": "editors.snap", "params": {"on": false}}),
+    );
+    assert!(!s.model(|d| d.layout().snap.enabled));
+    let e = s.channel_ok("state.get", json!({"target": "editor"}));
+    assert_eq!(e["snap"], json!({"enabled": false, "division": "quarter"}));
+    // The tool bar's toggle and division menu.
+    s.click("button", "Snap");
+    assert!(s.model(|d| d.layout().snap.enabled));
+    s.click("button", "1/4");
+    let items: Vec<String> = s
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "menuitem")
+        .map(|e| e.label)
+        .collect();
+    assert_eq!(
+        items,
+        [
+            "Bar", "1/2", "1/4", "1/8", "1/16", "1/32", "Triplet", "Dotted"
+        ]
+    );
+    s.click("menuitem", "1/8");
+    assert_eq!(
+        s.model(|d| d.layout().snap.division),
+        vizdaw_app::editor::Division::Eighth
+    );
+    s.click("button", "1/8");
+    assert_eq!(s.value("menuitem", "Triplet").as_deref(), Some("off"));
+    s.click("menuitem", "Triplet");
+    assert!(s.model(|d| d.layout().snap.triplet));
+}
+
+#[gpui::test]
+fn a_snapped_drag_lands_on_the_grid(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    // 250 points at 384 ticks a point: 96 000 ticks, which snaps (1/4) to
+    // 92 160 (bar 2, beat 3).
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.release_with((300., ON_CHORDS.1), Modifiers::none());
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&mv(&[1, 2], 92_160, None))
+    );
+    // Snap off: the raw distance.
+    s.keys("g");
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.release_with((300., ON_CHORDS.1), Modifiers::none());
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&mv(&[1, 2], 96_000, None))
+    );
+}
+
+#[gpui::test]
+fn selected_blocks_are_selected_in_the_tree(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    assert!(!s.element("button", CHORDS_BLOCK).selected);
+    s.click_with(ON_CHORDS, Modifiers::none());
+    assert!(s.element("button", CHORDS_BLOCK).selected);
+    assert!(!s.element("button", GROOVE_BLOCK).selected);
+    assert!(s.element("button", "Arrow").selected);
+    assert!(!s.element("button", "Eraser").selected);
+    let tree = s
+        .window
+        .read_with(&s.cx, |v, _| v.registry().borrow().tree())
+        .unwrap();
+    let node = |label: &str| {
+        tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["label"] == label)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(node(CHORDS_BLOCK)["selected"], json!(true));
+    assert_eq!(node(GROOVE_BLOCK).get("selected"), None);
+}
+
+#[gpui::test]
+fn undo_is_refused_while_a_drag_is_open(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    let mut done = fake.snap();
+    done.version += 1;
+    done.undo_label = Some("New MIDI Track".into());
+    fake.bump(done);
+    let mut s = setup(cx, fake);
+    s.channel_ok("command.run", json!({"id": "track.new_midi"}));
+    assert!(s.model(|d| d.can_undo()));
+    s.fake.clear_calls();
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.keys(if cfg!(target_os = "macos") {
+        "cmd-z"
+    } else {
+        "ctrl-z"
+    });
+    assert_eq!(s.status().as_deref(), Some("Finish the drag first."));
+    match s.channel("command.run", json!({"id": "edit.undo"})) {
+        control::Handled::Reply(Err(e)) => {
+            assert_eq!(e.code, core_control::ErrorCode::Unavailable);
+            assert_eq!(e.message, "Finish the drag first.");
+        }
+        other => panic!("undo ran: {other:?}"),
+    }
+    assert_eq!(s.fake.count("undo"), 0);
+    s.release_with((300., ON_CHORDS.1), Modifiers::none());
+    assert_eq!(s.undo_label().as_deref(), Some("Move Block"));
+}
+
+#[gpui::test]
+fn a_block_drag_near_the_edge_scrolls_and_the_block_follows(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    let width = f32::from(s.canvas().bounds.size.width);
+    let edge = (width - 4., ON_CHORDS.1);
+    s.press_and_move(ON_CHORDS, edge, Modifiers::none());
+    let first = match s.fake.gesture_edits().last().cloned() {
+        Some(EditCommand::Event {
+            edit: EventEdit::Move { delta, .. },
+        }) => delta,
+        other => panic!("expected a move, got {other:?}"),
+    };
+    s.cx.executor().advance_clock(Duration::from_millis(200));
+    s.cx.run_until_parked();
+    let origin = s
+        .window
+        .read_with(&s.cx, |v, _| v.arrangement().axis().origin())
+        .unwrap();
+    assert!(origin > 0, "the view scrolled");
+    let later = match s.fake.gesture_edits().last().cloned() {
+        Some(EditCommand::Event {
+            edit: EventEdit::Move { delta, .. },
+        }) => delta,
+        other => panic!("expected a move, got {other:?}"),
+    };
+    assert!(later > first, "the block follows: {first} then {later}");
+    s.release_with(edge, Modifiers::none());
+    assert!(!s.model(|d| d.gesture_open()));
+    // The release ended the scrolling.
+    let after = s
+        .window
+        .read_with(&s.cx, |v, _| v.arrangement().axis().origin())
+        .unwrap();
+    s.cx.executor().advance_clock(Duration::from_millis(200));
+    s.cx.run_until_parked();
+    let again = s
+        .window
+        .read_with(&s.cx, |v, _| v.arrangement().axis().origin())
+        .unwrap();
+    assert_eq!(after, again);
 }

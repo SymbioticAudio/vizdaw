@@ -9,10 +9,11 @@
 //! `file.save_as`, the transport commands, `ui.set_transport_bar`,
 //! `ui.reset_transport_bar` and the document commands (`edit.undo`,
 //! `edit.redo`, the Track menu), `state.get` `transport`, `windows`,
-//! `document` and `editor` (its `doc` and `status` only, `gesture: null`:
-//! the other fields come with the editor slices), `ui.tree`, `ui.click
-//! {element}` (with modifiers and a count), `ui.key`, `ui.screenshot` and
-//! `wait`. Everything else answers `unavailable`.
+//! `document` and `editor` (`step` and the transport marks come with
+//! their slices); slice 4 adds `editors.snap`, `state.get selection` and
+//! `ui.click` at a point. `ui.tree`, `ui.click` (an element or a point,
+//! with modifiers and a count), `ui.key`, `ui.screenshot` and `wait`.
+//! Everything else answers `unavailable`.
 //!
 //! A `wait` is not answered in the tick it is taken unless it already
 //! holds: it joins a list the pump checks every tick against fresh facts,
@@ -53,6 +54,7 @@ use vizdaw_app::{DocId, SaveAction};
 use vizdaw_ffi::control::{AlertRow, ControlResult, result_json};
 
 use crate::app_state::{AppState, WindowEntry};
+use crate::menus::ROUTED_EDITOR_COMMANDS;
 use crate::shell::DocumentWindow;
 use crate::transport_fields::NO_FIELDS;
 
@@ -382,6 +384,13 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             let entry = target(window.as_ref(), cx)?;
             editor_state(entry.doc, cx)
         }
+        Command::StateGet {
+            target: StateTarget::Selection,
+            window,
+        } => {
+            let entry = target(window.as_ref(), cx)?;
+            selection_state(entry.doc, cx)
+        }
         Command::StateGet { target, .. } => Err(not_yet(&format!(
             "state.get {}",
             format!("{target:?}").to_lowercase()
@@ -409,7 +418,18 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             let entry = target(window.as_ref(), cx)?;
             click(&entry, &r.id, *button, *count, *modifiers, cx)
         }
-        Command::UiClick { .. } => Err(not_yet("ui.click at a point")),
+        Command::UiClick {
+            window,
+            at: Pointer::Point { x, y },
+            button,
+            count,
+            modifiers,
+        } => {
+            let entry = target(window.as_ref(), cx)?;
+            fresh_frame(&entry, cx)?;
+            let at = gpui::point(gpui::px(*x as f32), gpui::px(*y as f32));
+            click_at(&entry, at, *button, *count, *modifiers, cx)
+        }
         Command::UiKey {
             window,
             focus,
@@ -484,7 +504,7 @@ fn run_command(
         _ => None,
     });
     match id {
-        _ if DOCUMENT_COMMANDS.contains(&id) => {
+        _ if DOCUMENT_COMMANDS.contains(&id) || ROUTED_EDITOR_COMMANDS.contains(&id) => {
             let ran = app.update(cx, |s, cx| {
                 cx.notify();
                 s.store.with_document(doc, |d, _| {
@@ -693,13 +713,47 @@ fn document_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
     }))
 }
 
-/// `state.get editor`: this slice's subset (`doc`, `status`); `gesture` is
-/// null until the editors come.
+/// `state.get editor`, in the Swift fields this slice has: the detail
+/// (`DetailRow`-shaped), no torn-off windows, the tool, the grid, no exact
+/// mode, whether a drag is open, and the status. `step` and the transport
+/// marks come with their slices.
 fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
     let s = AppState::global(cx);
     let s = s.read(cx);
     let d = s.store.document(doc).ok_or_else(closed)?;
-    Ok(json!({ "doc": doc_id(doc), "status": d.status(), "gesture": Value::Null }))
+    let detail = d.layout().detail.as_ref().map(|detail| {
+        let t = detail.target;
+        let (start, end) = match t {
+            vizdaw_app::editor::EditorTarget::Block { start, end, .. } => (Some(start), Some(end)),
+            _ => (None, None),
+        };
+        json!({
+            "kind": detail.kind.name(), "seq": t.seq(), "lane": t.lane(),
+            "start": start, "end": end,
+        })
+    });
+    let snap = d.layout().snap;
+    Ok(json!({
+        "doc": doc_id(doc),
+        "detail": detail,
+        "windows": [],
+        "tool": d.tool().name(),
+        "snap": { "enabled": snap.enabled, "division": snap.division.name() },
+        "exact_mode": false,
+        "gesture": d.gesture_open(),
+        "status": d.status(),
+    }))
+}
+
+/// `state.get selection`: the time range, tracks and events selected.
+fn selection_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
+    let s = AppState::global(cx);
+    let s = s.read(cx);
+    let d = s.store.document(doc).ok_or_else(closed)?;
+    Ok(result_json(&ControlResult::Selection {
+        doc: doc_id(doc),
+        selection: d.selection().clone(),
+    }))
 }
 
 /// `state.get transport`, read fresh.
@@ -799,6 +853,21 @@ fn click(
         }
         e.bounds.center()
     };
+    click_at(entry, at, button, count, modifiers, cx)
+}
+
+/// A mouse down and up at window point `at` (top-left origin, in points),
+/// through the window's hit-testing as a user's click: the element under
+/// it handles it, as a real press there would. `ui.click {point}` and
+/// `ui.click {element}` both end here.
+fn click_at(
+    entry: &WindowEntry,
+    at: gpui::Point<gpui::Pixels>,
+    button: Button,
+    count: u32,
+    modifiers: keys::Modifiers,
+    cx: &mut App,
+) -> Result<Value, ControlError> {
     let any: AnyWindowHandle = entry.handle.into();
     let count = count.max(1) as usize;
     let button = match button {
@@ -925,7 +994,9 @@ fn key_strokes(
 /// `id` (`menus::bindings` binds the document and transport commands; the
 /// window's key handler steps Rewind and Fast Forward).
 fn window_runs(id: &str) -> bool {
-    DOCUMENT_COMMANDS.contains(&id) || TRANSPORT_COMMANDS.contains(&id)
+    DOCUMENT_COMMANDS.contains(&id)
+        || TRANSPORT_COMMANDS.contains(&id)
+        || ROUTED_EDITOR_COMMANDS.contains(&id)
 }
 
 /// A command refusal after which the key still goes to the window, as
@@ -1123,12 +1194,12 @@ fn not_yet(what: &str) -> ControlError {
     ControlError::new(
         ErrorCode::Unavailable,
         format!(
-            "{what} is not available in the GPUI app yet (slice 3 answers app.new_demo, \
+            "{what} is not available in the GPUI app yet (slice 4 answers app.new_demo, \
              app.open, app.quit, command.run file.new / file.close / file.save / file.save_as / \
              transport.* (not recording or the click) / ui.set_transport_bar / \
-             ui.reset_transport_bar / edit.undo / edit.redo / track.*, state.get transport / \
-             windows / document / editor, ui.tree, ui.click {{element}}, ui.key, ui.screenshot \
-             and wait)"
+             ui.reset_transport_bar / edit.undo / edit.redo / track.* / editors.snap, state.get \
+             transport / windows / document / editor / selection, ui.tree, ui.click, ui.key, \
+             ui.screenshot and wait)"
         ),
     )
 }

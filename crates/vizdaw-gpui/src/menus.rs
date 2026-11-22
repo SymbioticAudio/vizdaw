@@ -73,6 +73,11 @@ pub struct UnavailableCommand {
 
 /// The key context of a document window's root.
 pub const WINDOW_CONTEXT: &str = "DocumentWindow";
+/// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
+/// to its menus, keys and control channel so far: the others need the
+/// detail pane.
+pub const ROUTED_EDITOR_COMMANDS: &[&str] = &["editors.snap"];
+
 /// Where unmodified keys act: in a document window, but never while a text
 /// field has focus (typing a space must not start the transport).
 pub const UNMODIFIED_KEYS: &str = "DocumentWindow && !TextInput";
@@ -93,12 +98,13 @@ pub struct MenuSpec {
 pub enum ItemSpec {
     /// A command: a registry ID for document commands, else one of the
     /// slice 1 items' IDs below. `keys` is the first chord as menus show
-    /// it.
+    /// it. `checked` is a toggle's state (`None`: not a toggle).
     Command {
         id: &'static str,
         title: String,
         keys: Option<String>,
         enabled: bool,
+        checked: Option<bool>,
     },
     Separator,
 }
@@ -160,6 +166,7 @@ fn slice1(id: &'static str, title: &str, key: Option<&str>, keymap: &Keymap) -> 
         title: title.to_owned(),
         keys,
         enabled: true,
+        checked: None,
     }
 }
 
@@ -171,11 +178,16 @@ fn command(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> 
         ("edit.redo", Some(d)) => d.redo_title(),
         _ => registry::find(id).map_or(id, |c| c.title).to_owned(),
     };
+    let checked = match id {
+        "editors.snap" => Some(front.is_some_and(|d| d.layout().snap.enabled)),
+        _ => None,
+    };
     ItemSpec::Command {
         id,
         title,
         keys: keys_of(id, keymap),
         enabled: front.is_some_and(|d| commands::enabled(id, d)),
+        checked,
     }
 }
 
@@ -225,6 +237,9 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     slice1(EDIT_SELECT_ALL, "Select All", Some("a"), keymap),
                 ],
             ),
+            // The detail editors, their windows, Insert Event and the
+            // nudges come with their views.
+            menu("Editors", vec![cmd("editors.snap")]),
             menu(
                 "Track",
                 vec![
@@ -363,7 +378,11 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
                 | "transport.fast_forward"
         )
     });
-    for &id in DOCUMENT_COMMANDS.iter().chain(transport) {
+    for &id in DOCUMENT_COMMANDS
+        .iter()
+        .chain(ROUTED_EDITOR_COMMANDS)
+        .chain(transport)
+    {
         for chord in keymap.chords(id) {
             if bindings::key_name(chord.code).is_some_and(|n| n.starts_with("Keypad")) {
                 continue;
@@ -406,11 +425,13 @@ pub fn menus(model: &MenuModel) -> Vec<Menu> {
                         },
                     )
                     .disabled(true),
-                    ItemSpec::Command { id, title, .. } => MenuItem::Action {
+                    ItemSpec::Command {
+                        id, title, checked, ..
+                    } => MenuItem::Action {
                         name: title.clone().into(),
                         action: action_for(id),
                         os_action: None,
-                        checked: false,
+                        checked: checked.unwrap_or(false),
                         disabled: false,
                     },
                 }

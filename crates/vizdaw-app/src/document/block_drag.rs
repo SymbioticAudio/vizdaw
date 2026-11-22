@@ -4,7 +4,7 @@
 
 use super::DocumentModel;
 use crate::arrangement::{
-    ArrangementFrame, ArrangementHit, BlockDrag, BlockDragState, MachineEvent, Point,
+    ArrangementFrame, ArrangementHit, BlockDrag, BlockDragState, MachineEvent, Point, ToolMachine,
 };
 use crate::editor::Tool;
 use vizdaw_ffi::edit::{EditCommand, LaneRef};
@@ -54,6 +54,25 @@ impl DocumentModel {
                 }
                 MachineEvent::Begin { .. } | MachineEvent::Click { .. } => {}
             }
+        }
+    }
+
+    /// Escape on the canvas (Swift `ArrangementView.contentCancel`): the
+    /// machine's cancel runs, the drag is dropped, and a gesture still
+    /// open is cancelled too, which also aborts a final edit still
+    /// pending on Busy after the mouse-up. The machine then swallows the
+    /// matching mouse-up.
+    pub fn cancel_block_drag(
+        &mut self,
+        machine: &mut ToolMachine<ArrangementHit>,
+        drag: &mut Option<BlockDragState>,
+        frame: &ArrangementFrame,
+    ) {
+        let events = machine.cancel();
+        self.block_drag_events(drag, &events, frame);
+        *drag = None;
+        if self.gesture_open() {
+            self.cancel_gesture();
         }
     }
 

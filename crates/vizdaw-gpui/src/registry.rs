@@ -26,6 +26,8 @@ pub struct Element {
     pub value: Option<String>,
     /// A field that has the keyboard.
     pub focused: bool,
+    /// Selected (a block, a segment of a picker): `ui.tree` says so.
+    pub selected: bool,
 }
 
 /// What one window drew last frame.
@@ -74,10 +76,11 @@ impl Registry {
         bounds: Bounds<Pixels>,
         enabled: bool,
     ) {
-        self.record_with(path, role, label, bounds, enabled, None, false);
+        self.record_with(path, role, label, bounds, enabled, None, false, false);
     }
 
-    /// As [`record`](Self::record), with the node's `value` and `focused`.
+    /// As [`record`](Self::record), with the node's `value`, `focused` and
+    /// `selected`.
     #[allow(clippy::too_many_arguments)]
     pub fn record_with(
         &mut self,
@@ -88,6 +91,7 @@ impl Registry {
         enabled: bool,
         value: Option<&str>,
         focused: bool,
+        selected: bool,
     ) {
         self.elements.push(Element {
             id: core_control::element::element_id(path, role, label),
@@ -98,6 +102,7 @@ impl Registry {
             enabled,
             value: value.map(str::to_owned),
             focused,
+            selected,
         });
     }
 
@@ -131,6 +136,9 @@ impl Registry {
                 }
                 if e.focused {
                     n["focused"] = json!(true);
+                }
+                if e.selected {
+                    n["selected"] = json!(true);
                 }
                 n
             })
@@ -248,6 +256,23 @@ impl RegistryScope {
         node.focused = focused;
         overlay(self.registry.clone(), path, node)
     }
+
+    /// As [`control`](Self::control), with the node's `value` (when
+    /// `Some`) and `selected` (a picker's segment, a menu's current item).
+    pub fn control_selected(
+        &mut self,
+        role: &str,
+        label: &str,
+        enabled: bool,
+        value: Option<&str>,
+        selected: bool,
+    ) -> impl IntoElement {
+        let path = self.take_index();
+        let mut node = Node::new(role, label, enabled);
+        node.value = value.map(str::to_owned);
+        node.selected = selected;
+        overlay(self.registry.clone(), path, node)
+    }
 }
 
 /// Records a container's children with bounds known only while drawing
@@ -260,14 +285,22 @@ pub struct ChildRecorder {
 }
 
 impl ChildRecorder {
-    /// Records the next child, a control with `bounds` in window space.
-    pub fn record(&mut self, role: &str, label: &str, bounds: Bounds<Pixels>, enabled: bool) {
+    /// Records the next child, a control with `bounds` in window space,
+    /// `selected` or not.
+    pub fn record(
+        &mut self,
+        role: &str,
+        label: &str,
+        bounds: Bounds<Pixels>,
+        enabled: bool,
+        selected: bool,
+    ) {
         let mut path = self.path.clone();
         path.push(self.next);
         self.next += 1;
         self.registry
             .borrow_mut()
-            .record(&path, role, label, bounds, enabled);
+            .record_with(&path, role, label, bounds, enabled, None, false, selected);
     }
 }
 
@@ -289,6 +322,7 @@ struct Node {
     enabled: bool,
     value: Option<String>,
     focused: bool,
+    selected: bool,
 }
 
 impl Node {
@@ -299,6 +333,7 @@ impl Node {
             enabled,
             value: None,
             focused: false,
+            selected: false,
         }
     }
 }
@@ -314,6 +349,7 @@ fn overlay(registry: SharedRegistry, path: Vec<u32>, n: Node) -> impl IntoElemen
                 n.enabled,
                 n.value.as_deref(),
                 n.focused,
+                n.selected,
             )
         },
         |_, _, _, _| {},

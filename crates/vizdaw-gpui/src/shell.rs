@@ -22,7 +22,7 @@ use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
 use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::AppState;
-use crate::arrangement::{self, Arrangement, ArrangementState};
+use crate::arrangement::{self, Arrangement, ArrangementState, ToolbarState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
 use crate::registry::{RegistryScope, SharedRegistry};
@@ -143,6 +143,7 @@ impl DocumentWindow {
                     this.cancel_field(window, cx);
                     this.end_shuttle(cx);
                     this.cancel_ruler_drag(cx);
+                    this.cancel_block_drag(cx);
                 }
             }),
         ];
@@ -612,7 +613,8 @@ impl DocumentWindow {
         }
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
         let more = std::mem::take(&mut self.more_open);
-        if self.menu_bar.as_mut().is_some_and(MenuBar::close) || headers || more {
+        let arrangement = self.arrangement.close_menus();
+        if self.menu_bar.as_mut().is_some_and(MenuBar::close) || headers || more || arrangement {
             cx.stop_propagation();
             cx.notify();
         }
@@ -858,7 +860,20 @@ impl Render for DocumentWindow {
         // First, so the rows built below are the ones in view.
         let rows = self.shown_rows(cx);
         self.clamp_arrangement(rows);
-        let (title, dirty, alert, bar, model, front, lanes, selected, status, layout, arranged) = {
+        let (
+            title,
+            dirty,
+            alert,
+            bar,
+            model,
+            front,
+            lanes,
+            selected,
+            status,
+            layout,
+            arranged,
+            tools,
+        ) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
             (
@@ -887,6 +902,7 @@ impl Render for DocumentWindow {
                         .visible_rows(d.lanes().len(), f32::from(window.viewport_size().height));
                     ArrangementState::of(d, s.transport(doc), Instant::now(), visible)
                 }),
+                d.map(ToolbarState::of).unwrap_or_default(),
             )
         };
         let plan = Plan::new(&layout, f32::from(window.viewport_size().width));
@@ -969,7 +985,13 @@ impl Render for DocumentWindow {
                     cx,
                 ))
             })
-            .child(arrangement::toolbar(&mut root.container(), cx))
+            .child(arrangement::toolbar(
+                tools,
+                self.arrangement.division_open(),
+                &mut root.container(),
+                window,
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -987,7 +1009,10 @@ impl Render for DocumentWindow {
                         window,
                         cx,
                     ))
-                    .child(self.arrangement.render(arranged, &mut root.container(), cx)),
+                    .child(
+                        self.arrangement
+                            .render(arranged, &mut root.container(), window, cx),
+                    ),
             )
             .when_some(status, |d, status| {
                 d.child(Self::status_line(status, &mut root.container(), cx))

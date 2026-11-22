@@ -7,30 +7,43 @@
 //! A click takes the keyboard (so a field edit ends); a ruler click
 //! locates, a ruler drag sets the time selection (scrolling near the
 //! edges; Escape cancels it). The wheel scrolls (vertically together with
-//! the headers) and, with the secondary modifier, zooms about the pointer;
-//! the Zoom Out and In buttons above step by 1.5. Blocks are drawn and
-//! listed, not yet editable. The maths are `vizdaw_app::arrangement`'s.
+//! the headers) and, with the secondary modifier, zooms about the pointer.
+//!
+//! Below the ruler a press goes through the tool machine (Swift
+//! `ArrangementView.handle`): a click selects a block (⇧ adds), on empty
+//! space clears the selection (⇧ keeps it), a double click opens the
+//! detail editor on the block, the Eraser deletes the clicked block's
+//! events; an Arrow drag moves the block (⌥ copies, onto another row it
+//! merges into that track) as one gesture, previewed live and scrolling
+//! near the edges; Escape cancels it. A right click opens the block's
+//! menu. The tool bar above holds the tool picker, Snap and its division
+//! menu, and the zoom buttons. The maths and the drag are
+//! `vizdaw_app`'s; this canvas only feeds them pointer events.
 
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ContentMask, Context, DispatchPhase, FocusHandle, Hsla,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, ScrollDelta, ScrollEvent, SharedString,
-    StatefulInteractiveElement, Styled, Task, TextAlign, TextRun, Window, canvas, div, fill, point,
-    px, quad, rgb, size,
+    InteractiveElement, IntoElement, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, ScrollDelta, ScrollEvent,
+    SharedString, StatefulInteractiveElement, Styled, Task, TextAlign, TextRun, Window, anchored,
+    canvas, deferred, div, fill, point, px, quad, rgb, size,
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::arrangement::{
-    AutoScroll, Geometry, GridKind, MeterBars, PageFollow, RULER_HEIGHT, Rect, RulerSelection,
-    TimeAxis, WheelScroll, ZOOM_STEP, a11y_label_in, bar_length, grid_lines_in, label_every,
-    sketch,
+    self as model, ArrangementFrame, ArrangementHit, AutoScroll, BlockDragState, Geometry,
+    GridKind, MachineEvent, MeterBars, PageFollow, Phase, RULER_HEIGHT, Rect, RulerSelection,
+    TimeAxis, ToolMachine, WheelScroll, ZOOM_STEP, a11y_label_in, bar_length, grid_lines_in,
+    hit_test, label_every, sketch,
 };
+use vizdaw_app::editor::{DetailEditorKind, Division, EditorTarget, Snap, Tool};
 use vizdaw_app::transport::TransportModel;
 use vizdaw_ffi::blocks::{BlockKind, BlockRow};
+use vizdaw_ffi::edit::{EditCommand, EventEdit};
 use vizdaw_ffi::events::EventRow;
 use vizdaw_ffi::selection::TickRange;
 
@@ -42,6 +55,16 @@ use crate::transport_bar::{self, colors as bar_colors};
 pub const GROUP: &str = "Arrangement";
 pub const ZOOM_OUT: &str = "Zoom Out";
 pub const ZOOM_IN: &str = "Zoom In";
+/// The Snap toggle (Swift `Toggle("Snap")`) and the division menu's
+/// toggles.
+pub const SNAP: &str = "Snap";
+pub const TRIPLET: &str = "Triplet";
+pub const DOTTED: &str = "Dotted";
+/// The block menu's items (Swift `ArrangementView.blockMenu`; the other
+/// detail editors, Make Reference, Takes and the reference commands come
+/// later).
+pub const OPEN_IN_LIST: &str = "Open in List";
+pub const DELETE: &str = "Delete";
 /// The zoom buttons' row above the headers and the canvas.
 pub const TOOLBAR_HEIGHT: f32 = 32.;
 
@@ -88,6 +111,24 @@ pub struct Arrangement {
     playhead: Rc<Cell<Option<f32>>>,
     rows_built: Cell<usize>,
     _auto_scroll: Option<Task<()>>,
+    /// Presses below the ruler (Swift `ToolMachine`).
+    machine: ToolMachine<ArrangementHit>,
+    /// The block drag in progress.
+    block_drag: Option<BlockDragState>,
+    /// The pointer of a press below the ruler (body points) and its
+    /// modifiers: auto-scroll moves a drag under a still pointer.
+    pointer: Option<(model::Point, model::Modifiers)>,
+    /// The block menu, while open.
+    block_menu: Option<BlockMenu>,
+    /// The tool bar's division menu is open.
+    division_open: bool,
+}
+
+/// A right-clicked block's menu: the block, and where it opened.
+struct BlockMenu {
+    lane: u64,
+    block: BlockRow,
+    at: Point<Pixels>,
 }
 
 /// A press in the ruler: a click until it moves past the dead zone, then
@@ -113,7 +154,47 @@ impl Arrangement {
             playhead: Rc::default(),
             rows_built: Cell::new(0),
             _auto_scroll: None,
+            machine: ToolMachine::new(),
+            block_drag: None,
+            pointer: None,
+            block_menu: None,
+            division_open: false,
         }
+    }
+
+    /// How the rows are drawn now, for hit testing and drags.
+    fn frame(&self) -> ArrangementFrame {
+        ArrangementFrame {
+            geometry: self.geometry(),
+            axis: self.axis,
+        }
+    }
+
+    /// Window point `p` in body points (the rows' space, below the ruler).
+    fn body_point(&self, p: Point<Pixels>) -> model::Point {
+        let o = self.layout.get().origin;
+        model::Point {
+            x: f32::from(p.x - o.x),
+            y: f32::from(p.y - o.y) - RULER_HEIGHT,
+        }
+    }
+
+    /// The tool bar's division menu is open.
+    pub fn division_open(&self) -> bool {
+        self.division_open
+    }
+
+    fn pressing(&self) -> bool {
+        !matches!(self.machine.phase(), Phase::Idle)
+    }
+
+    /// Closes the block menu and the division menu; false when none was
+    /// open.
+    pub(crate) fn close_menus(&mut self) -> bool {
+        let open = self.block_menu.is_some() || self.division_open;
+        self.block_menu = None;
+        self.division_open = false;
+        open
     }
 
     /// How many rows the last frame built state for (only the visible
@@ -201,6 +282,7 @@ impl Arrangement {
         &self,
         state: ArrangementState,
         scope: &mut RegistryScope,
+        window: &Window,
         cx: &mut Context<DocumentWindow>,
     ) -> AnyElement {
         self.rows_built.set(state.rows.len());
@@ -237,14 +319,22 @@ impl Arrangement {
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                     if phase == DispatchPhase::Bubble {
                         moved
-                            .update(cx, |this, cx| this.ruler_drag_to(e.position.x, cx))
+                            .update(cx, |this, cx| {
+                                this.ruler_drag_to(e.position.x, cx);
+                                this.block_drag_to(e.position, e.modifiers, cx);
+                            })
                             .ok();
                     }
                 });
                 let released = weak.clone();
                 window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
                     if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
-                        released.update(cx, |this, cx| this.ruler_release(cx)).ok();
+                        released
+                            .update(cx, |this, cx| {
+                                this.ruler_release(cx);
+                                this.block_release(e.position, e.modifiers, cx);
+                            })
+                            .ok();
                     }
                 });
             },
@@ -264,21 +354,217 @@ impl Arrangement {
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, _, cx| this.arrangement_mouse_down(e, cx)),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| this.block_menu_press(e, cx)),
+            )
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                if e.keystroke.key == "escape" && this.arrangement.drag.is_some() {
+                if e.keystroke.key != "escape" {
+                    return;
+                }
+                if this.arrangement.drag.is_some() {
                     cx.stop_propagation();
                     this.cancel_ruler_drag(cx);
+                } else if this.cancel_block_drag(cx) {
+                    cx.stop_propagation();
                 }
             }))
             .child(painter)
             .child(group.this("group", GROUP, true))
             .child(group.clip())
+            .when_some(self.block_menu.as_ref(), |d, menu| {
+                d.children(block_menu(menu, &mut scope.container(), window, cx))
+            })
             .into_any_element()
     }
 }
 
-/// The zoom buttons' row (Swift's arrangement tool bar, its zoom part).
-pub(crate) fn toolbar(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow>) -> AnyElement {
+/// What the tool bar shows of the document.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolbarState {
+    pub tool: Tool,
+    pub snap: Snap,
+}
+
+impl ToolbarState {
+    pub fn of(doc: &DocumentModel) -> Self {
+        ToolbarState {
+            tool: doc.tool(),
+            snap: doc.layout().snap,
+        }
+    }
+}
+
+/// The open block menu: a backdrop that closes it, and its items at the
+/// press.
+fn block_menu(
+    menu: &BlockMenu,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> Vec<AnyElement> {
+    let size = window.viewport_size();
+    let backdrop = deferred(
+        anchored().position(point(px(0.), px(0.))).child(
+            div()
+                .id("block-menu-backdrop")
+                .w(size.width)
+                .h(size.height)
+                .occlude()
+                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                    this.arrangement.block_menu = None;
+                    cx.notify();
+                })),
+        ),
+    )
+    .with_priority(1)
+    .into_any_element();
+    let mut items: Vec<Option<&'static str>> = vec![];
+    if menu.block.kind == BlockKind::Events {
+        items.extend([Some(OPEN_IN_LIST), None]);
+    }
+    items.push(Some(DELETE));
+    let mut list = menu_list("block-menu");
+    for (row, item) in items.into_iter().enumerate() {
+        list = list.child(match item {
+            None => menu_separator(),
+            Some(title) => menu_item(("block-menu-item", row), title, scope)
+                .on_click(cx.listener(move |this, _, _, cx| this.block_menu_choose(title, cx)))
+                .into_any_element(),
+        });
+    }
+    let list = deferred(anchored().position(menu.at).snap_to_window().child(list))
+        .with_priority(2)
+        .into_any_element();
+    vec![backdrop, list]
+}
+
+fn menu_list(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .occlude()
+        .flex()
+        .flex_col()
+        .min_w(px(160.))
+        .py_1()
+        .bg(rgb(bar_colors::LIST))
+        .border_1()
+        .border_color(rgb(bar_colors::BORDER))
+        .rounded_md()
+        .shadow_md()
+        .text_color(rgb(bar_colors::TEXT))
+}
+
+fn menu_separator() -> AnyElement {
+    div()
+        .h(px(1.))
+        .my_1()
+        .bg(rgb(bar_colors::BORDER))
+        .into_any_element()
+}
+
+fn menu_item(
+    id: impl Into<gpui::ElementId>,
+    title: &str,
+    scope: &mut RegistryScope,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .relative()
+        .px_3()
+        .py_1()
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(bar_colors::BUTTON)))
+        .child(title.to_owned())
+        .child(scope.control("menuitem", title, true))
+}
+
+/// A tool bar button showing `text`, recorded as a `button` labelled
+/// `label` with `value` and `selected`.
+fn bar_button(
+    id: impl Into<gpui::ElementId>,
+    text: &str,
+    label: &str,
+    width: f32,
+    on: bool,
+    value: Option<&str>,
+    scope: &mut RegistryScope,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .relative()
+        .h(px(24.))
+        .w(px(width))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_xs()
+        .bg(rgb(if on {
+            bar_colors::ON
+        } else {
+            bar_colors::BUTTON
+        }))
+        .text_color(rgb(bar_colors::TEXT))
+        .child(text.to_owned())
+        .child(scope.control_selected("button", label, true, value, on && value.is_none()))
+}
+
+/// The arrangement tool bar (Swift `ArrangementBar`, its tool, snap and
+/// zoom parts): the tool picker, the Snap toggle and its division menu,
+/// then the zoom buttons.
+pub(crate) fn toolbar(
+    state: ToolbarState,
+    division_open: bool,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    // Swift's segmented picker is 210 points wide.
+    let mut picker = div().flex().flex_row().flex_none().gap(px(1.));
+    for tool in Tool::ALL {
+        picker = picker.child(
+            bar_button(
+                ("tool", tool as usize),
+                tool.title(),
+                tool.title(),
+                70.,
+                state.tool == tool,
+                None,
+                scope,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.with_model(cx, |d| d.set_tool(tool));
+            })),
+        );
+    }
+    let snap = state.snap;
+    let toggle = bar_button(
+        "snap",
+        SNAP,
+        SNAP,
+        52.,
+        snap.enabled,
+        Some(if snap.enabled { "on" } else { "off" }),
+        scope,
+    )
+    .on_click(cx.listener(|this, _, _, cx| {
+        this.with_model(cx, |d| {
+            d.update_layout(|l| l.snap.enabled = !l.snap.enabled)
+        });
+    }));
+    let title = snap.division.title();
+    let mut division = bar_button("division", title, title, 70., false, None, scope).on_click(
+        cx.listener(|this, _, _, cx| {
+            this.arrangement.division_open = !this.arrangement.division_open;
+            cx.notify();
+        }),
+    );
+    if division_open {
+        division = division.children(division_menu(snap, &mut scope.container(), window, cx));
+    }
     let zoom_out = transport_bar::cluster_button(
         "zoom-out",
         "\u{2212}",
@@ -301,9 +587,104 @@ pub(crate) fn toolbar(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow
         .px(px(8.))
         .h(px(TOOLBAR_HEIGHT))
         .bg(rgb(bar_colors::BAR))
+        .child(picker)
+        .child(toggle)
+        .child(division)
+        .child(div().flex_1())
         .child(zoom_out)
         .child(zoom_in)
         .into_any_element()
+}
+
+/// The division menu (Swift's `Menu(snap.division.title)`): the note
+/// values, then the Triplet and Dotted toggles.
+fn division_menu(
+    snap: Snap,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> Vec<AnyElement> {
+    let size = window.viewport_size();
+    let backdrop = deferred(
+        anchored().position(point(px(0.), px(0.))).child(
+            div()
+                .id("division-backdrop")
+                .w(size.width)
+                .h(size.height)
+                .occlude()
+                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                    this.arrangement.division_open = false;
+                    cx.notify();
+                })),
+        ),
+    )
+    .with_priority(1)
+    .into_any_element();
+    let mut list = menu_list("division-menu");
+    for d in Division::ALL {
+        let current = snap.division == d;
+        list = list.child(
+            div()
+                .id(("division-item", d as usize))
+                .relative()
+                .px_3()
+                .py_1()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(bar_colors::BUTTON)))
+                .child(format!(
+                    "{}{}",
+                    if current { "\u{2713} " } else { "" },
+                    d.title()
+                ))
+                .child(scope.control_selected("menuitem", d.title(), true, None, current))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.arrangement.division_open = false;
+                    this.with_model(cx, |m| m.update_layout(|l| l.snap.division = d));
+                })),
+        );
+    }
+    list = list.child(menu_separator());
+    for (row, (title, on)) in [(TRIPLET, snap.triplet), (DOTTED, snap.dotted)]
+        .into_iter()
+        .enumerate()
+    {
+        list = list.child(
+            div()
+                .id(("division-toggle", row))
+                .relative()
+                .px_3()
+                .py_1()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(bar_colors::BUTTON)))
+                .child(format!("{}{title}", if on { "\u{2713} " } else { "    " }))
+                .child(scope.control_with(
+                    "menuitem",
+                    title,
+                    true,
+                    Some(if on { "on" } else { "off" }),
+                    false,
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.arrangement.division_open = false;
+                    this.with_model(cx, |m| {
+                        m.update_layout(|l| {
+                            if title == TRIPLET {
+                                l.snap.triplet = !l.snap.triplet;
+                            } else {
+                                l.snap.dotted = !l.snap.dotted;
+                            }
+                        })
+                    });
+                })),
+        );
+    }
+    let list = div()
+        .absolute()
+        .top_full()
+        .left_0()
+        .child(deferred(anchored().snap_to_window().child(list)).with_priority(2))
+        .into_any_element();
+    vec![backdrop, list]
 }
 
 /// What the canvas draws of the document: only the rows in view, their
@@ -479,6 +860,7 @@ impl Scene {
                 if !rect.intersects(&body) {
                     continue;
                 }
+                let drawn = self.block(b, rect, row, state);
                 recorder.record(
                     "button",
                     &a11y_label_in(b, &row.name, &state.bars),
@@ -487,8 +869,9 @@ impl Scene {
                         size(px(rect.width), px(rect.height)),
                     ),
                     true,
+                    drawn.selected,
                 );
-                blocks.push(self.block(b, rect, row, state));
+                blocks.push(drawn);
             }
         }
         let shade = self.range.map(|r| {
@@ -709,7 +1092,7 @@ impl DocumentWindow {
     }
 
     /// A press in the canvas: in the ruler it starts a click or a range
-    /// drag. (Block editing comes in a later slice.)
+    /// drag; below it, a press of the tool machine on what it hits.
     fn arrangement_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let b = self.arrangement.layout.get();
         let x = f32::from(e.position.x - b.origin.x);
@@ -723,7 +1106,212 @@ impl DocumentWindow {
                 preview: None,
             });
             cx.notify();
+            return;
         }
+        let at = self.arrangement.body_point(e.position);
+        let modifiers = machine_modifiers(e.modifiers);
+        let Some(hit) = self.hit(at, cx) else { return };
+        let clicks = u32::try_from(e.click_count).unwrap_or(u32::MAX).max(1);
+        let events = self.arrangement.machine.down(hit, at, clicks, modifiers);
+        self.arrangement.pointer = Some((at, modifiers));
+        self.machine_events(events, cx);
+        cx.notify();
+    }
+
+    /// What body point `at` lands on, with the blocks as the document
+    /// holds them now.
+    fn hit(&self, at: model::Point, cx: &App) -> Option<ArrangementHit> {
+        let s = self.app().read(cx);
+        let d = s.store.document(self.doc())?;
+        let rows: Vec<(u64, Arc<[BlockRow]>)> =
+            d.lanes().iter().map(|l| (l.id, d.blocks(l.id))).collect();
+        let frame = self.arrangement.frame();
+        Some(hit_test(&frame.geometry, &frame.axis, &rows, at))
+    }
+
+    /// The machine's events: the drag part goes to the document's block
+    /// drag, clicks to [`Self::arrangement_click`].
+    fn machine_events(
+        &mut self,
+        events: Vec<MachineEvent<ArrangementHit>>,
+        cx: &mut Context<Self>,
+    ) {
+        if events.is_empty() {
+            return;
+        }
+        let frame = self.arrangement.frame();
+        let mut drag = self.arrangement.block_drag.take();
+        self.with_model(cx, |d| d.block_drag_events(&mut drag, &events, &frame));
+        self.arrangement.block_drag = drag;
+        for e in events {
+            if let MachineEvent::Click {
+                hit,
+                clicks,
+                modifiers,
+                ..
+            } = e
+            {
+                self.arrangement_click(hit, clicks, modifiers, cx);
+            }
+        }
+    }
+
+    /// A click below the ruler (Swift `ArrangementView.click`). The
+    /// Pencil does nothing yet (it opens the piano roll in a later slice).
+    fn arrangement_click(
+        &mut self,
+        hit: ArrangementHit,
+        clicks: u32,
+        modifiers: model::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_model(cx, |d| {
+            let tool = d.tool();
+            if tool == Tool::Pencil {
+                return;
+            }
+            match hit {
+                ArrangementHit::Block { lane, index } => {
+                    let Some(block) = d.blocks(lane).get(index).cloned() else {
+                        return;
+                    };
+                    if tool == Tool::Eraser {
+                        d.edit(delete(&block));
+                    } else if clicks >= 2 {
+                        // A reference opens its sequence in a later slice.
+                        if block.kind == BlockKind::Events {
+                            open_block_detail(d, lane, &block, None);
+                        }
+                    } else {
+                        d.select_block(lane, &block, modifiers.shift);
+                    }
+                }
+                ArrangementHit::Empty { .. } => {
+                    if !modifiers.shift {
+                        d.clear_selection();
+                    }
+                }
+            }
+        });
+    }
+
+    /// The pointer moved to window point `at` during a press below the
+    /// ruler: the machine drags (past the dead zone a drag begins), and
+    /// near an edge the view scrolls.
+    fn block_drag_to(&mut self, at: Point<Pixels>, m: Modifiers, cx: &mut Context<Self>) {
+        if !self.arrangement.pressing() {
+            return;
+        }
+        let at = self.arrangement.body_point(at);
+        let modifiers = machine_modifiers(m);
+        self.arrangement.pointer = Some((at, modifiers));
+        let events = self.arrangement.machine.drag(at, modifiers);
+        self.machine_events(events, cx);
+        let a = &self.arrangement;
+        if matches!(a.machine.phase(), Phase::Dragging { .. })
+            && AutoScroll::speed(at.x, a.width()) != 0.
+        {
+            self.start_auto_scroll(cx);
+        }
+        cx.notify();
+    }
+
+    /// The button is up at window point `at`: a click, or the drag's end.
+    fn block_release(&mut self, at: Point<Pixels>, m: Modifiers, cx: &mut Context<Self>) {
+        if !self.arrangement.pressing() {
+            return;
+        }
+        let at = self.arrangement.body_point(at);
+        self.arrangement.pointer = None;
+        self.arrangement._auto_scroll = None;
+        let events = self.arrangement.machine.up(at, machine_modifiers(m));
+        self.machine_events(events, cx);
+        cx.notify();
+    }
+
+    /// Escape below the ruler: the drag is cancelled, and so is a drag
+    /// whose final edit still waits on Busy; the mouse-up is then
+    /// swallowed. Whether there was anything to cancel.
+    pub(crate) fn cancel_block_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = {
+            let s = self.app().read(cx);
+            s.store
+                .document(self.doc())
+                .is_some_and(DocumentModel::gesture_open)
+        };
+        if !self.arrangement.pressing() && !open {
+            return false;
+        }
+        let frame = self.arrangement.frame();
+        let mut machine = std::mem::take(&mut self.arrangement.machine);
+        let mut drag = self.arrangement.block_drag.take();
+        self.with_model(cx, |d| d.cancel_block_drag(&mut machine, &mut drag, &frame));
+        self.arrangement.machine = machine;
+        self.arrangement.block_drag = drag;
+        self.arrangement.pointer = None;
+        self.arrangement._auto_scroll = None;
+        cx.notify();
+        true
+    }
+
+    /// A right press below the ruler: on a block, the block is selected
+    /// (unless it already is) and its menu opens there.
+    fn block_menu_press(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        let at = self.arrangement.body_point(e.position);
+        self.arrangement.block_menu = None;
+        if at.y < 0. {
+            return;
+        }
+        let Some(ArrangementHit::Block { lane, index }) = self.hit(at, cx) else {
+            cx.notify();
+            return;
+        };
+        let block = self.with_model(cx, |d| {
+            let block = d.blocks(lane).get(index).cloned()?;
+            if !d.is_selected(&block) {
+                d.select_block(lane, &block, false);
+            }
+            Some(block)
+        });
+        if let Some(Some(block)) = block {
+            self.arrangement.block_menu = Some(BlockMenu {
+                lane,
+                block,
+                at: e.position,
+            });
+        }
+        cx.notify();
+    }
+
+    /// A block menu item.
+    fn block_menu_choose(&mut self, title: &str, cx: &mut Context<Self>) {
+        let Some(menu) = self.arrangement.block_menu.take() else {
+            return;
+        };
+        self.with_model(cx, |d| match title {
+            OPEN_IN_LIST => {
+                open_block_detail(d, menu.lane, &menu.block, Some(DetailEditorKind::List))
+            }
+            _ => {
+                d.edit(delete(&menu.block));
+            }
+        });
+        cx.notify();
+    }
+
+    fn start_auto_scroll(&mut self, cx: &mut Context<Self>) {
+        if self.arrangement._auto_scroll.is_some() {
+            return;
+        }
+        self.arrangement._auto_scroll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTO_SCROLL_EVERY).await;
+                let going = this.update(cx, |this, cx| this.auto_scroll_step(cx));
+                if !matches!(going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
     }
 
     /// The pointer moved to window x `at` during a ruler press.
@@ -739,25 +1327,33 @@ impl DocumentWindow {
             d.moved = true;
         }
         d.preview = RulerSelection::range(d.anchor, d.x, &a.axis);
-        if a._auto_scroll.is_none() && AutoScroll::speed(d.x, a.width()) != 0. {
-            a._auto_scroll = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(AUTO_SCROLL_EVERY).await;
-                    let going = this.update(cx, |this, cx| this.auto_scroll_step(cx));
-                    if !matches!(going, Ok(true)) {
-                        break;
-                    }
-                }
-            }));
+        if AutoScroll::speed(d.x, a.width()) != 0. {
+            self.start_auto_scroll(cx);
         }
         cx.notify();
     }
 
     /// One auto-scroll step; false once the drag has ended or the pointer
-    /// left the edges.
+    /// left the edges. A block drag runs again with the pointer where it
+    /// is, so the block follows the scrolled view.
     fn auto_scroll_step(&mut self, cx: &mut Context<Self>) -> bool {
         let a = &mut self.arrangement;
         let width = a.width();
+        if a.drag.is_none()
+            && matches!(a.machine.phase(), Phase::Dragging { .. })
+            && let Some((at, modifiers)) = a.pointer
+        {
+            let v = AutoScroll::speed(at.x, width);
+            if v == 0. {
+                a._auto_scroll = None;
+                return false;
+            }
+            a.axis = a.axis.scrolled_by(v / 60.);
+            let events = a.machine.drag(at, modifiers);
+            self.machine_events(events, cx);
+            cx.notify();
+            return true;
+        }
         let Some(d) = a.drag.as_mut() else {
             a._auto_scroll = None;
             return false;
@@ -839,4 +1435,47 @@ impl DocumentWindow {
             self.arrangement.clamp_vertical(rows);
         }
     }
+}
+
+/// GPUI's modifiers as the tool machine's: ⌥ is `alt`, ⌘ `platform`.
+fn machine_modifiers(m: Modifiers) -> model::Modifiers {
+    model::Modifiers {
+        shift: m.shift,
+        control: m.control,
+        option: m.alt,
+        command: m.platform,
+    }
+}
+
+/// Deleting `block`'s events (the Eraser, the block menu's Delete).
+fn delete(block: &BlockRow) -> EditCommand {
+    EditCommand::Event {
+        edit: EventEdit::Delete {
+            events: block.events.clone(),
+        },
+    }
+}
+
+/// Opens the detail editor on `block` of track `lane`: in `kind`, else
+/// the last-used editor. The List is the only one this slice has, so a
+/// last-used editor that is not here yet opens the List.
+fn open_block_detail(
+    d: &mut DocumentModel,
+    lane: u64,
+    block: &BlockRow,
+    kind: Option<DetailEditorKind>,
+) {
+    let Some(seq) = d.selected_seq() else { return };
+    let kind = kind.or_else(|| {
+        (d.layout().last_kind != DetailEditorKind::List).then_some(DetailEditorKind::List)
+    });
+    d.open_detail(
+        EditorTarget::Block {
+            seq,
+            lane,
+            start: block.start,
+            end: block.end,
+        },
+        kind,
+    );
 }
