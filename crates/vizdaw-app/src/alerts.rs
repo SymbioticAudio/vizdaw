@@ -7,7 +7,7 @@ use vizdaw_ffi::VizError;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// An error shown to the user.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertItem {
     /// Unique per alert, so a repeat of the same text is still one alert.
     pub id: u64,
@@ -27,12 +27,6 @@ impl AlertItem {
     /// An alert for a core error; its message is the human-readable text.
     pub fn from_error(error: &VizError, title: impl Into<String>) -> Self {
         AlertItem::new(title, error_message(error))
-    }
-}
-
-impl PartialEq for AlertItem {
-    fn eq(&self, other: &Self) -> bool {
-        self.title == other.title && self.message == other.message
     }
 }
 

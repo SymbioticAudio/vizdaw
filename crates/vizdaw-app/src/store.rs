@@ -74,11 +74,11 @@ impl DocumentStore {
     }
 
     pub fn new_empty(&mut self) -> Option<DocId> {
-        self.add("New Document Failed", None, |s| (s.make_empty)())
+        self.add("New Document Failed", |s| (s.make_empty)())
     }
 
     pub fn new_demo(&mut self) -> Option<DocId> {
-        self.add("Demo Project Failed", None, |s| (s.make_demo)())
+        self.add("Demo Project Failed", |s| (s.make_demo)())
     }
 
     /// Opens a `.vizdaw` package. A refusal or failure is also posted as an
@@ -93,12 +93,15 @@ impl DocumentStore {
             self.post_alert(AlertItem::new("Open Failed", message.clone()));
             return Err(message);
         }
-        if let Some((id, _)) = self.documents.iter().find(|(_, d)| d.path() == Some(path)) {
+        if let Some((id, _)) = self
+            .documents
+            .iter()
+            .find(|(_, d)| d.path().map(|p| canonical(&p)) == Some(canonical(path)))
+        {
             return Ok(*id);
         }
         let text = path.to_string_lossy().into_owned();
-        let owned: PathBuf = path.to_path_buf();
-        match self.add("Open Failed", Some(owned), |s| (s.open_path)(&text)) {
+        match self.add("Open Failed", |s| (s.open_path)(&text)) {
             Some(id) => Ok(id),
             None => Err(self
                 .last_failure
@@ -110,10 +113,9 @@ impl DocumentStore {
     fn add(
         &mut self,
         title: &str,
-        path: Option<PathBuf>,
         make: impl FnOnce(&Self) -> Result<Arc<dyn DocSession>, VizError>,
     ) -> Option<DocId> {
-        let made = make(self).and_then(|s| DocumentModel::new(s, path));
+        let made = make(self).and_then(DocumentModel::new);
         match made {
             Ok(model) => {
                 let id = DocId(self.next_id);
@@ -196,4 +198,10 @@ impl DocumentStore {
         self.alert = self.queued_alerts.pop_front();
         current
     }
+}
+
+/// A path as the file system names it (symlinks, `..` and trailing
+/// slashes resolved); a path that does not exist is compared as given.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

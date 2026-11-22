@@ -1,6 +1,6 @@
 mod support;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use support::demo_fake;
@@ -8,7 +8,7 @@ use vizdaw_app::{DocumentModel, SaveAction};
 use vizdaw_ffi::VizError;
 
 fn model(f: &Arc<support::FakeSession>) -> DocumentModel {
-    DocumentModel::new(f.clone(), None).unwrap()
+    DocumentModel::new(f.clone()).unwrap()
 }
 
 #[test]
@@ -63,17 +63,32 @@ fn save_while_untitled_surfaces_use_save_as() {
     let f = Arc::new(demo_fake());
     let mut m = model(&f);
     assert!(m.needs_save_as());
-    // Untitled routes to Save As without raising an alert.
+    // Untitled routes to Save As: no write, no alert.
     assert_eq!(m.save(), SaveAction::NeedsSaveAs);
+    assert_eq!(f.count("save"), 0);
     assert!(m.alert.is_none());
-    // If the core still refuses (the model thought it had a path), its
-    // sentence is shown.
-    let mut stale =
-        DocumentModel::new(f.clone(), Some(PathBuf::from("/tmp/stale.vizdaw"))).unwrap();
-    assert_eq!(stale.save(), SaveAction::Failed("use Save As".into()));
-    let a = stale.alert.as_ref().unwrap();
+    assert!(m.needs_save_as());
+    // A titled document whose core refuses shows the core's sentence.
+    let g = Arc::new(demo_fake());
+    g.set_path(Some("/tmp/x/demo.vizdaw"));
+    g.set_save_error(Some(VizError::Io {
+        message: "use Save As".into(),
+    }));
+    let mut t = model(&g);
+    assert!(!t.needs_save_as());
+    assert_eq!(t.save(), SaveAction::Failed("use Save As".into()));
+    let a = t.alert.as_ref().unwrap();
     assert_eq!(a.title, "Save Failed");
     assert_eq!(a.message, "use Save As");
+}
+
+#[test]
+fn needs_save_as_follows_the_session_path() {
+    let f = Arc::new(demo_fake());
+    let m = model(&f);
+    assert!(m.needs_save_as());
+    f.set_path(Some("/tmp/x/demo.vizdaw"));
+    assert!(!m.needs_save_as());
 }
 
 #[test]

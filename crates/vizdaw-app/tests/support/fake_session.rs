@@ -15,6 +15,7 @@ struct State {
     play_error: Option<VizError>,
     transport_error: Option<VizError>,
     step_error: Option<VizError>,
+    save_error: Option<VizError>,
     calls: Vec<String>,
 }
 
@@ -60,6 +61,7 @@ impl FakeSession {
             play_error: None,
             transport_error: None,
             step_error: None,
+            save_error: None,
             calls: vec![],
         }))
     }
@@ -79,6 +81,14 @@ impl FakeSession {
 
     pub fn set_step_error(&self, e: Option<VizError>) {
         self.st().step_error = e;
+    }
+
+    pub fn set_path(&self, p: Option<&str>) {
+        self.st().saved_path = p.map(String::from);
+    }
+
+    pub fn set_save_error(&self, e: Option<VizError>) {
+        self.st().save_error = e;
     }
 
     pub fn set_play_error(&self, e: Option<VizError>) {
@@ -118,6 +128,9 @@ impl DocSession for FakeSession {
     fn save(&self) -> Result<(), VizError> {
         let mut s = self.st();
         s.calls.push("save".into());
+        if let Some(e) = s.save_error.clone() {
+            return Err(e);
+        }
         if s.saved_path.is_none() {
             return Err(VizError::Io {
                 message: "use Save As".into(),

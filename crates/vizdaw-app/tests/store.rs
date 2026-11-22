@@ -126,11 +126,47 @@ fn saved_project_reopens_with_the_same_snapshot() {
         .save_as(path.to_string_lossy().into_owned())
         .unwrap();
     let saved = session.snapshot().unwrap();
+    let lanes_before: std::collections::HashMap<u64, _> = saved
+        .sequences
+        .iter()
+        .map(|q| (q.id, session.lanes(q.id).unwrap()))
+        .collect();
+    assert!(lanes_before.values().any(|l| !l.is_empty()));
     session.close().unwrap();
     let reopened = Session::open(path.to_string_lossy().into_owned()).unwrap();
     let again = reopened.snapshot().unwrap();
     assert_eq!(again.sequences, saved.sequences);
     assert!(!again.sequences.is_empty());
     assert_eq!(again.title, "roundtrip");
+    for seq in &saved.sequences {
+        assert_eq!(
+            reopened.lanes(seq.id).unwrap(),
+            lanes_before[&seq.id],
+            "lanes of sequence {}",
+            seq.id
+        );
+    }
     reopened.close().unwrap();
+}
+
+#[test]
+fn opening_an_open_project_again_answers_the_same_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let pkg = dir.path().join("a.vizdaw");
+    std::fs::create_dir(&pkg).unwrap();
+    let real = std::fs::canonicalize(&pkg).unwrap();
+    let mut s = DocumentStore::new(
+        Box::new(|| Ok(Arc::new(FakeSession::new(vec![])))),
+        Box::new(|| Ok(Arc::new(demo_fake()))),
+        Box::new(|path| {
+            let f = demo_fake();
+            f.set_path(Some(path));
+            Ok(Arc::new(f))
+        }),
+    );
+    let a = s.open(&real).unwrap();
+    // `.` and a trailing slash name the same package.
+    let indirect = dir.path().join(".").join("a.vizdaw").join("");
+    assert_eq!(s.open(&indirect).unwrap(), a);
+    assert_eq!(s.count(), 1);
 }

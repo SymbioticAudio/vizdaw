@@ -22,18 +22,16 @@ pub enum SaveAction {
 pub struct DocumentModel {
     session: Arc<dyn DocSession>,
     snapshot: DocSnapshot,
-    path: Option<PathBuf>,
     /// The error showing, if any.
     pub alert: Option<AlertItem>,
 }
 
 impl DocumentModel {
-    pub fn new(session: Arc<dyn DocSession>, path: Option<PathBuf>) -> Result<Self, VizError> {
+    pub fn new(session: Arc<dyn DocSession>) -> Result<Self, VizError> {
         let snapshot = session.snapshot()?;
         Ok(DocumentModel {
             session,
             snapshot,
-            path,
             alert: None,
         })
     }
@@ -46,13 +44,14 @@ impl DocumentModel {
         &self.snapshot
     }
 
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
+    /// The session's package path, read each time; `None` when untitled.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.session.path().ok().flatten().map(PathBuf::from)
     }
 
     /// True when Save needs a path first (untitled).
     pub fn needs_save_as(&self) -> bool {
-        self.path.is_none()
+        self.path().is_none()
     }
 
     /// The window title: the name, marked when edited.
@@ -104,7 +103,7 @@ impl DocumentModel {
     /// Saves in place. An untitled document is never written: the caller
     /// asks for a location and calls `save_as`.
     pub fn save(&mut self) -> SaveAction {
-        if self.path.is_none() {
+        if self.path().is_none() {
             return SaveAction::NeedsSaveAs;
         }
         match self.session.save().and_then(|()| self.session.snapshot()) {
@@ -127,7 +126,6 @@ impl DocumentModel {
         match result {
             Ok(snapshot) => {
                 self.snapshot = snapshot;
-                self.path = Some(path.to_path_buf());
                 Ok(())
             }
             Err(e) => {
