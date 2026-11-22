@@ -5,6 +5,7 @@ pub mod alerts;
 pub mod arrangement;
 pub mod commands;
 pub mod document;
+pub mod editor;
 pub mod position;
 pub mod prefs;
 pub mod session;

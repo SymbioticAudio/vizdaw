@@ -66,6 +66,25 @@ pub trait DocSession: Send + Sync {
     fn markers(&self, seq: u64) -> Result<Vec<MarkerRow>, VizError>;
     /// The destinations, with their return latency and MIDI mix.
     fn destinations(&self) -> Result<Vec<DestRow>, VizError>;
+    /// Opens an edit (a drag) that becomes one undo step named `label`.
+    fn begin_edit(&self, label: &str) -> Result<(), VizError>;
+    /// Inside an open edit: rewinds it and runs `cmd` (a drag's whole
+    /// target so far).
+    fn edit_gesture(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError>;
+    /// Closes the open edit as one undo step.
+    fn end_edit(&self) -> Result<DocSnapshot, VizError>;
+    /// Drops the open edit; the document is as it was before it.
+    fn abort_edit(&self) -> Result<DocSnapshot, VizError>;
+    /// Runs `cmds` as one undo step named `label`: all or none.
+    fn edit_all(&self, label: &str, cmds: Vec<EditCommand>) -> Result<DocSnapshot, VizError>;
+    /// Each tick's time in seconds under `seq`'s tempo map.
+    fn seconds_at(&self, seq: u64, ticks: Vec<i64>) -> Result<Vec<f64>, VizError>;
+    /// Each time's tick under `seq`'s tempo map.
+    fn ticks_at(&self, seq: u64, seconds: Vec<f64>) -> Result<Vec<i64>, VizError>;
+    /// The package's `ui.json` as the session holds it (`None`: none yet).
+    fn ui_layout(&self) -> Result<Option<String>, VizError>;
+    /// Hands `ui.json` to the session; the next save writes it.
+    fn set_ui_layout(&self, json: String) -> Result<(), VizError>;
 }
 
 impl DocSession for Session {
@@ -172,5 +191,32 @@ impl DocSession for Session {
     }
     fn destinations(&self) -> Result<Vec<DestRow>, VizError> {
         Session::destinations(self)
+    }
+    fn begin_edit(&self, label: &str) -> Result<(), VizError> {
+        Session::begin_edit(self, label.to_owned())
+    }
+    fn edit_gesture(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError> {
+        Session::edit_gesture(self, cmd, None)
+    }
+    fn end_edit(&self) -> Result<DocSnapshot, VizError> {
+        Session::end_edit(self)
+    }
+    fn abort_edit(&self) -> Result<DocSnapshot, VizError> {
+        Session::abort_edit(self)
+    }
+    fn edit_all(&self, label: &str, cmds: Vec<EditCommand>) -> Result<DocSnapshot, VizError> {
+        Session::edit_all(self, label.to_owned(), cmds, None)
+    }
+    fn seconds_at(&self, seq: u64, ticks: Vec<i64>) -> Result<Vec<f64>, VizError> {
+        Session::seconds_at(self, seq, ticks)
+    }
+    fn ticks_at(&self, seq: u64, seconds: Vec<f64>) -> Result<Vec<i64>, VizError> {
+        Session::ticks_at(self, seq, seconds)
+    }
+    fn ui_layout(&self) -> Result<Option<String>, VizError> {
+        Session::ui_layout(self)
+    }
+    fn set_ui_layout(&self, json: String) -> Result<(), VizError> {
+        Session::set_ui_layout(self, json)
     }
 }

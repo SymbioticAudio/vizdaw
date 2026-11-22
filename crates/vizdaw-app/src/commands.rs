@@ -12,6 +12,7 @@ use vizdaw_ffi::tracks::TrackKindRow;
 
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
+use crate::editor::{DetailEditorKind, GESTURE_OPEN};
 use crate::prefs::Prefs;
 use crate::transport_bar::TransportLayout;
 
@@ -26,6 +27,13 @@ pub const DOCUMENT_COMMANDS: &[&str] = &[
     "track.delete",
     "track.rename",
 ];
+
+/// The registry IDs of the editor commands `run` handles (the detail pane
+/// and the grid). The menus, keys and channel route them once their views
+/// exist.
+pub const EDITOR_COMMANDS: &[&str] = &["editors.snap", "editors.list", "editors.close_detail"];
+
+const NO_DETAIL: &str = "No detail editor is open.";
 
 /// The registry IDs of the transport commands `run` handles. Recording,
 /// the click, locators and the punch and edit-out fields come later.
@@ -138,12 +146,15 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     if TRANSPORT_COMMANDS.contains(&id) {
         return transport_enabled(id, doc);
     }
+    if EDITOR_COMMANDS.contains(&id) {
+        return id != "editors.close_detail" || doc.layout().detail.is_some();
+    }
     if !DOCUMENT_COMMANDS.contains(&id) {
         return false;
     }
     match id {
-        "edit.undo" => doc.can_undo(),
-        "edit.redo" => doc.can_redo(),
+        "edit.undo" => doc.can_undo() && !doc.gesture_open(),
+        "edit.redo" => doc.can_redo() && !doc.gesture_open(),
         _ if kind_of(id).is_some() => doc.selected_seq().is_some(),
         _ => doc.selected_seq().is_some() && doc.selected_lane().is_some(),
     }
@@ -155,6 +166,9 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
 pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
     if TRANSPORT_COMMANDS.contains(&id) {
         return transport_from_menu(id, doc);
+    }
+    if EDITOR_COMMANDS.contains(&id) {
+        return run_editor(id, &[], doc).map_err(|e| refused(doc, e));
     }
     if !DOCUMENT_COMMANDS.contains(&id) {
         return Err(unavailable(&format!("There is no command {id}.")));
@@ -170,6 +184,9 @@ pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Contr
                     "Nothing to redo."
                 }),
             ));
+        }
+        if doc.gesture_open() {
+            return Err(refused(doc, unavailable(GESTURE_OPEN)));
         }
         // The model's own step: Busy is silent, any other failure an alert.
         if undo {
@@ -254,6 +271,9 @@ pub fn run(
 ) -> Result<Ran, ControlError> {
     if TRANSPORT_COMMANDS.contains(&id) {
         return run_transport(id, args, doc);
+    }
+    if EDITOR_COMMANDS.contains(&id) {
+        return run_editor(id, args, doc);
     }
     if !DOCUMENT_COMMANDS.contains(&id) {
         return Err(ControlError::new(
@@ -374,6 +394,9 @@ fn run_step(undo: bool, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
             "Nothing to redo."
         }));
     }
+    if doc.gesture_open() {
+        return Err(unavailable(GESTURE_OPEN));
+    }
     let result = if undo {
         doc.session().undo()
     } else {
@@ -387,6 +410,40 @@ fn run_step(undo: bool, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
         }
         e
     })?;
+    Ok(ran(doc))
+}
+
+/// The `on` flag: absent, or true or false.
+fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bool>, ControlError> {
+    match args.iter().find(|(n, _)| n == "on") {
+        None => Ok(None),
+        Some((_, ArgValue::Flag(f))) => Ok(Some(*f)),
+        Some(_) => Err(ControlError::params(id, "`on` is true or false")),
+    }
+}
+
+/// An editor command: Snap to Grid (`on`, absent toggles), List (opens on
+/// the open detail's target or the selection; nothing to show opens
+/// nothing) and Close Detail Editor.
+fn run_editor(
+    id: &str,
+    args: &[(String, ArgValue)],
+    doc: &mut DocumentModel,
+) -> Result<Ran, ControlError> {
+    check_names(id, args)?;
+    match id {
+        "editors.snap" => {
+            let on = on_flag(id, args)?;
+            doc.update_layout(|l| l.snap.enabled = on.unwrap_or(!l.snap.enabled));
+        }
+        "editors.list" => doc.show_detail(DetailEditorKind::List),
+        _ => {
+            if doc.layout().detail.is_none() {
+                return Err(unavailable(NO_DETAIL));
+            }
+            doc.close_detail();
+        }
+    }
     Ok(ran(doc))
 }
 
@@ -450,11 +507,7 @@ fn run_transport(
     doc: &mut DocumentModel,
 ) -> Result<Ran, ControlError> {
     check_names(id, args)?;
-    let on = match args.iter().find(|(n, _)| n == "on") {
-        None => None,
-        Some((_, ArgValue::Flag(f))) => Some(*f),
-        Some(_) => return Err(ControlError::params(id, "`on` is true or false")),
-    };
+    let on = on_flag(id, args)?;
     match id {
         "transport.play_stop" => {
             let _ = doc.poll_transport();

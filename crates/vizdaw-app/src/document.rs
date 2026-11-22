@@ -1,7 +1,9 @@
 //! One open document (Swift: `DocumentModel`, the title, save and undo
 //! parts; transport comes with Task 3).
 
-use std::collections::BTreeSet;
+mod editing;
+
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -13,6 +15,7 @@ use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
 
 use crate::alerts::{AlertItem, error_message};
+use crate::editor::{EditorModel, GESTURE_OPEN};
 use crate::session::DocSession;
 
 /// What File > Save does.
@@ -35,7 +38,11 @@ pub struct DocumentModel {
     lanes_key: Option<(u64, Option<u64>)>,
     lanes_fetches: u64,
     selection: SelectionRow,
+    /// The selection's events, for `is_selected` per block per frame.
+    selected_events: HashSet<u64>,
     status: Option<String>,
+    /// Tool, saved layout, open drag.
+    editor: EditorModel,
     looping: bool,
     /// The fields being typed in (Swift: `EditorModel.textEditors`); the
     /// bare transport keys wait while any is open.
@@ -64,6 +71,9 @@ impl DocumentModel {
             .transport()
             .unwrap_or_else(|_| crate::transport::stopped());
         let selection = session.selection().unwrap_or_else(|_| empty_selection());
+        // Read once; a missing or damaged `ui.json` is the default layout
+        // (and stays on disk until the next save).
+        let editor = EditorModel::new(session.ui_layout().ok().flatten().as_deref());
         let mut model = DocumentModel {
             session,
             selected_seq: first_sequence(&snapshot),
@@ -72,8 +82,10 @@ impl DocumentModel {
             lanes: vec![],
             lanes_key: None,
             lanes_fetches: 0,
+            selected_events: selection.events.iter().copied().collect(),
             selection,
             status: None,
+            editor,
             looping: false,
             text_editors: BTreeSet::new(),
             play_start: Arc::new(Mutex::new(None)),
@@ -98,6 +110,7 @@ impl DocumentModel {
         if gone {
             self.selected_seq = first_sequence(&s);
         }
+        self.editor.prune(&s);
         self.snapshot = s;
         self.reset_infos();
         self.refresh_lanes();
@@ -204,39 +217,28 @@ impl DocumentModel {
                 None => lanes.push(r),
             }
         }
-        let want = SelectionRow {
+        self.set_selection(SelectionRow {
             time_range: self.selection.time_range,
             lanes,
             events: vec![],
-        };
-        self.selection = want.clone();
-        if let Err(e) = self.session.set_selection(want) {
-            self.alert = Some(AlertItem::from_error(&e, "Selection Failed"));
-        }
-        // Hold exactly what the session holds (it drops unknown lanes).
-        self.refresh_selection();
+        });
     }
 
     /// Sets the selection's time range (the Edit In and Out fields); the
-    /// tracks and events stay. A failure is the alert "Selection Failed".
+    /// tracks and events stay. A failure is the status, as for
+    /// [`DocumentModel::set_selection`].
     pub fn set_time_range(&mut self, range: TickRange) {
-        let want = SelectionRow {
+        self.set_selection(SelectionRow {
             time_range: Some(range),
             ..self.selection.clone()
-        };
-        self.selection = want.clone();
-        if let Err(e) = self.session.set_selection(want) {
-            self.alert = Some(AlertItem::from_error(&e, "Selection Failed"));
-        }
-        self.refresh_selection();
+        });
     }
 
     /// A ruler drag: the time range over every track of the shown
-    /// sequence, no events (Swift `EditorModel.selectRange`). A failure is
-    /// the alert "Selection Failed".
+    /// sequence, no events (Swift `EditorModel.selectRange`).
     pub fn select_range(&mut self, range: TickRange) {
         let Some(seq) = self.selected_seq else { return };
-        let want = SelectionRow {
+        self.set_selection(SelectionRow {
             time_range: Some(range),
             lanes: self
                 .lanes
@@ -244,12 +246,7 @@ impl DocumentModel {
                 .map(|l| LaneRef { seq, lane: l.id })
                 .collect(),
             events: vec![],
-        };
-        self.selection = want.clone();
-        if let Err(e) = self.session.set_selection(want) {
-            self.alert = Some(AlertItem::from_error(&e, "Selection Failed"));
-        }
-        self.refresh_selection();
+        });
     }
 
     /// Track `lane`'s arrangement blocks (under
@@ -285,8 +282,17 @@ impl DocumentModel {
     /// Reads the selection back (after edits, undo and redo).
     fn refresh_selection(&mut self) {
         if let Ok(s) = self.session.selection() {
-            self.selection = s;
+            self.hold(s);
         }
+    }
+
+    /// Holds `s` as the selection.
+    fn hold(&mut self, s: SelectionRow) {
+        if s == self.selection {
+            return;
+        }
+        self.selected_events = s.events.iter().copied().collect();
+        self.selection = s;
     }
 
     /// Applies the result of an edit call: the snapshot is taken and the
@@ -593,7 +599,8 @@ impl DocumentModel {
         self.snapshot.redo_label.is_some()
     }
 
-    /// Undo and Redo do nothing, silently, while the plugin host is busy.
+    /// Undo and Redo do nothing, silently, while the plugin host is busy;
+    /// while a drag is open they are refused in the status line.
     pub fn undo(&mut self) {
         self.step("Undo Failed", |s| s.undo());
     }
@@ -607,6 +614,10 @@ impl DocumentModel {
         title: &str,
         body: impl FnOnce(&dyn DocSession) -> Result<DocSnapshot, VizError>,
     ) {
+        if self.editor.gesture_open() {
+            self.status = Some(GESTURE_OPEN.into());
+            return;
+        }
         match body(self.session.as_ref()) {
             Ok(snapshot) => {
                 self.apply(snapshot);
@@ -623,6 +634,7 @@ impl DocumentModel {
         if self.path().is_none() {
             return SaveAction::NeedsSaveAs;
         }
+        self.store_layout();
         match self.session.save().and_then(|()| self.session.snapshot()) {
             Ok(snapshot) => {
                 self.apply(snapshot);
@@ -636,6 +648,7 @@ impl DocumentModel {
     }
 
     pub fn save_as(&mut self, path: &Path) -> Result<(), String> {
+        self.store_layout();
         let result = self
             .session
             .save_as(path.to_string_lossy().into_owned())

@@ -647,7 +647,8 @@ fn save_commits_an_open_rename_first(cx: &mut TestAppContext) {
     s.cx.dispatch_action(vizdaw_gpui::Save);
     s.cx.run_until_parked();
     assert_eq!(s.renames(), vec!["Drums".to_string()]);
-    assert_eq!(s.calls_from_edit(), vec!["edit", "save"]);
+    // Save hands the editor layout (`ui.json`) to the session first.
+    assert_eq!(s.calls_from_edit(), vec!["edit", "set_ui_layout", "save"]);
     assert_eq!(s.renaming(), None);
 }
 

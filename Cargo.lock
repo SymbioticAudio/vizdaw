@@ -6382,6 +6382,7 @@ dependencies = [
  "core-control",
  "core-ffi",
  "core-model",
+ "serde",
  "serde_json",
  "tempfile",
  "vizdaw-app",

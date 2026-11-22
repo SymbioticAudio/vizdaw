@@ -1,0 +1,137 @@
+//! The editor state of one document that is not document state (Swift
+//! `EditorModel`'s tool, layout and detail parts): the tool, the saved
+//! layout and whether a drag is open. `DocumentModel` holds one and
+//! exposes it; the selection and edits that need the session are
+//! `DocumentModel`'s (`document/editing.rs`).
+
+mod detail;
+mod layout;
+mod snap;
+
+pub use detail::{DetailEditorKind, DetailState, EditorTarget, ListFilter};
+pub use layout::{
+    BlockRuleSetting, EditorLayout, LightMode, MainView, PaneSetup, PaneSide, PaneState, PaneView,
+    ViewLayouts,
+};
+pub use snap::{Division, Snap};
+
+use vizdaw_ffi::snapshot::DocSnapshot;
+
+/// Shown when an edit, undo or redo arrives while a drag is open (it
+/// would join the drag's undo step, or be lost when it is cancelled).
+pub const GESTURE_OPEN: &str = "Finish the drag first.";
+
+/// The editing tool. Not saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Tool {
+    #[default]
+    Arrow,
+    Pencil,
+    Eraser,
+}
+
+impl Tool {
+    pub const ALL: [Tool; 3] = [Tool::Arrow, Tool::Pencil, Tool::Eraser];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Tool::Arrow => "Arrow",
+            Tool::Pencil => "Pencil",
+            Tool::Eraser => "Eraser",
+        }
+    }
+
+    /// The control channel's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Arrow => "arrow",
+            Tool::Pencil => "pencil",
+            Tool::Eraser => "eraser",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EditorModel {
+    pub tool: Tool,
+    layout: EditorLayout,
+    /// A drag holds an open edit (the gesture machine sets it).
+    pub(crate) gesture_open: bool,
+    /// The `ui.json` last read or stored: what a save merges into when the
+    /// session cannot answer.
+    pub(crate) ui_json: Option<String>,
+}
+
+impl EditorModel {
+    /// The editor state of a document whose `ui.json` is `json`.
+    pub fn new(json: Option<&str>) -> Self {
+        EditorModel {
+            tool: Tool::Arrow,
+            layout: EditorLayout::decode(json),
+            gesture_open: false,
+            ui_json: json.map(String::from),
+        }
+    }
+
+    pub fn layout(&self) -> &EditorLayout {
+        &self.layout
+    }
+
+    pub fn update_layout(&mut self, change: impl FnOnce(&mut EditorLayout)) {
+        change(&mut self.layout);
+    }
+
+    pub fn gesture_open(&self) -> bool {
+        self.gesture_open
+    }
+
+    /// Shows `target` in the detail pane in `kind`, else the last-used
+    /// editor; the current view's bottom pane shows the editor. The piano
+    /// roll's extra lanes stay only while the target is the same; the
+    /// list filter and the other saved fields stay.
+    pub fn open_detail(&mut self, target: EditorTarget, kind: Option<DetailEditorKind>) {
+        let l = &mut self.layout;
+        let bottom = &mut l.views.current_mut().bottom;
+        bottom.shown = true;
+        bottom.view = PaneView::Editor;
+        let kind = kind.unwrap_or(l.last_kind);
+        l.last_kind = kind;
+        let mut next = DetailState::new(kind, target);
+        if let Some(old) = l.detail.take() {
+            next.list_filter = old.list_filter;
+            next.extra = old.extra;
+            if old.target != target {
+                next.extra.remove("lanes");
+            }
+        }
+        l.detail = Some(next);
+    }
+
+    pub fn close_detail(&mut self) {
+        self.layout.detail = None;
+    }
+
+    /// The control channel's detail kind: "none" when nothing is open
+    /// (whether or not the pane shows).
+    pub fn detail_kind_name(&self) -> &'static str {
+        self.layout
+            .detail
+            .as_ref()
+            .map_or("none", |d| d.kind.name())
+    }
+
+    /// Drops the detail when its sequence or track is gone from `s`.
+    pub fn prune(&mut self, s: &DocSnapshot) {
+        let Some(d) = &self.layout.detail else { return };
+        let t = d.target;
+        let seq_gone = !s.sequences.iter().any(|q| q.id == t.seq());
+        let lane_gone = t.lane().is_some_and(|lane| {
+            !s.lane_revs
+                .iter()
+                .any(|r| r.seq == t.seq() && r.lane == lane)
+        });
+        if seq_gone || lane_gone {
+            self.layout.detail = None;
+        }
+    }
+}

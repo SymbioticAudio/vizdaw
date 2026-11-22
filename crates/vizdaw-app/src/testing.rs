@@ -2,15 +2,18 @@
 //! flag and a call log. Behind the `test-support` feature so the GPUI
 //! crate's tests drive the same fake as this crate's.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crate::DocSession;
 use vizdaw_ffi::VizError;
-use vizdaw_ffi::blocks::{BlockRow, BlockRule};
+use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef, MonitorModeRow};
-use vizdaw_ffi::events::{EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo};
+use vizdaw_ffi::events::{
+    EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo,
+};
 use vizdaw_ffi::mixer::DestRow;
+use vizdaw_ffi::revs::LaneRev;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, SeqRow, TransportState};
 use vizdaw_ffi::tracks::TrackKindRow;
@@ -47,7 +50,23 @@ struct State {
     looped: bool,
     info_reads: usize,
     locate_error: Option<VizError>,
+    selection_error: Option<VizError>,
+    keep_selection: Option<KeepSelection>,
+    layout: Option<String>,
+    /// The label of the edit `begin_edit` opened, while open.
+    open_edit: Option<String>,
+    gesture_applied: bool,
+    gesture_edits: Vec<EditCommand>,
+    edit_alls: Vec<(String, Vec<EditCommand>)>,
+    /// Errors a call answers with every time, by call name.
+    call_errors: HashMap<String, VizError>,
+    /// Errors a call answers with once each, first, by call name.
+    next_errors: HashMap<String, VecDeque<VizError>>,
 }
+
+/// What the session keeps of a selection it is given (after dropping
+/// unknown lanes), as the core drops events that do not exist.
+pub type KeepSelection = Box<dyn Fn(SelectionRow) -> SelectionRow + Send + Sync>;
 
 /// One bar of 4/4, in ticks.
 const BAR: i64 = 61_440;
@@ -122,6 +141,15 @@ impl FakeSession {
             looped: false,
             info_reads: 0,
             locate_error: None,
+            selection_error: None,
+            keep_selection: None,
+            layout: None,
+            open_edit: None,
+            gesture_applied: false,
+            gesture_edits: vec![],
+            edit_alls: vec![],
+            call_errors: HashMap::new(),
+            next_errors: HashMap::new(),
         }))
     }
 
@@ -130,7 +158,9 @@ impl FakeSession {
     }
 
     pub fn snap(&self) -> DocSnapshot {
-        self.st().snap.clone()
+        let mut s = self.st();
+        Self::sync_revs(&mut s);
+        s.snap.clone()
     }
 
     /// Makes the next command return `s`.
@@ -305,7 +335,91 @@ impl FakeSession {
             Some(n) => s.snap = n,
             None => s.snap.version += 1,
         }
+        Self::sync_revs(s);
         s.snap.clone()
+    }
+
+    /// Like the core: the snapshot lists a revision for every lane.
+    fn sync_revs(s: &mut State) {
+        let mut seqs: Vec<&u64> = s.lanes.keys().collect();
+        seqs.sort();
+        let rev = s.snap.version;
+        s.snap.lane_revs = seqs
+            .into_iter()
+            .flat_map(|seq| {
+                s.lanes[seq].iter().map(move |l| LaneRev {
+                    seq: *seq,
+                    lane: l.id,
+                    rev,
+                })
+            })
+            .collect();
+    }
+
+    /// The scripted error of `call`, if any (a one-shot one first).
+    fn scripted(s: &mut State, call: &str) -> Result<(), VizError> {
+        if let Some(e) = s.next_errors.get_mut(call).and_then(VecDeque::pop_front) {
+            return Err(e);
+        }
+        match s.call_errors.get(call) {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+
+    /// Makes `call` (`begin_edit`, `edit_gesture`, `end_edit`,
+    /// `abort_edit`, `edit_all`, `seconds_at`, `ticks_at`, `ui_layout`,
+    /// `set_ui_layout`) answer `e` every time (`None`: normally again).
+    pub fn set_call_error(&self, call: &str, e: Option<VizError>) {
+        let mut s = self.st();
+        match e {
+            Some(e) => s.call_errors.insert(call.to_owned(), e),
+            None => s.call_errors.remove(call),
+        };
+    }
+
+    /// Makes the next `call` answer `e` (queued: several answer in turn).
+    pub fn fail_next(&self, call: &str, e: VizError) {
+        self.st()
+            .next_errors
+            .entry(call.to_owned())
+            .or_default()
+            .push_back(e);
+    }
+
+    /// The error `set_selection` answers with (the selection stays).
+    pub fn set_selection_error(&self, e: Option<VizError>) {
+        self.st().selection_error = e;
+    }
+
+    /// What the session keeps of each selection it is given.
+    pub fn set_keep_selection(&self, keep: Option<KeepSelection>) {
+        self.st().keep_selection = keep;
+    }
+
+    /// The `ui.json` the session holds (as read at open).
+    pub fn set_layout(&self, json: Option<&str>) {
+        self.st().layout = json.map(String::from);
+    }
+
+    /// The `ui.json` the session holds now.
+    pub fn layout(&self) -> Option<String> {
+        self.st().layout.clone()
+    }
+
+    /// Whether an edit is open (`begin_edit` without `end_edit`/`abort_edit`).
+    pub fn edit_is_open(&self) -> bool {
+        self.st().open_edit.is_some()
+    }
+
+    /// Every `edit_gesture` command, in order.
+    pub fn gesture_edits(&self) -> Vec<EditCommand> {
+        self.st().gesture_edits.clone()
+    }
+
+    /// Every `edit_all(label, cmds)`, in order.
+    pub fn edit_alls(&self) -> Vec<(String, Vec<EditCommand>)> {
+        self.st().edit_alls.clone()
     }
 }
 
@@ -340,7 +454,7 @@ impl DocSession for FakeSession {
         Ok(())
     }
     fn snapshot(&self) -> Result<DocSnapshot, VizError> {
-        Ok(self.st().snap.clone())
+        Ok(self.snap())
     }
     fn undo(&self) -> Result<DocSnapshot, VizError> {
         let mut s = self.st();
@@ -458,6 +572,11 @@ impl DocSession for FakeSession {
     }
     fn edit(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError> {
         let mut s = self.st();
+        if s.open_edit.is_some() {
+            return Err(VizError::Busy {
+                message: "Finish the open edit first.".into(),
+            });
+        }
         if let Some(e) = s.edit_error.clone() {
             return Err(e);
         }
@@ -513,6 +632,9 @@ impl DocSession for FakeSession {
     }
     fn set_selection(&self, mut sel: SelectionRow) -> Result<(), VizError> {
         let mut s = self.st();
+        if let Some(e) = s.selection_error.clone() {
+            return Err(e);
+        }
         s.calls.push("set_selection".into());
         // Like the core: lanes that do not exist are dropped.
         let known = |s: &State, r: &LaneRef| {
@@ -521,6 +643,9 @@ impl DocSession for FakeSession {
                 .is_some_and(|rows| rows.iter().any(|l| l.id == r.lane))
         };
         sel.lanes.retain(|r| known(&s, r));
+        if let Some(keep) = &s.keep_selection {
+            sel = keep(sel);
+        }
         s.selection = sel;
         Ok(())
     }
@@ -638,6 +763,137 @@ impl DocSession for FakeSession {
     fn destinations(&self) -> Result<Vec<DestRow>, VizError> {
         Ok(vec![])
     }
+    fn begin_edit(&self, label: &str) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "begin_edit")?;
+        if s.open_edit.is_some() {
+            return Err(VizError::Model {
+                message: "an edit is already open".into(),
+            });
+        }
+        s.calls.push(format!("begin_edit({label})"));
+        s.open_edit = Some(label.to_owned());
+        s.gesture_applied = false;
+        Ok(())
+    }
+    fn edit_gesture(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "edit_gesture")?;
+        if s.open_edit.is_none() {
+            return Err(VizError::Model {
+                message: "no edit is open".into(),
+            });
+        }
+        s.calls.push("edit_gesture".into());
+        s.gesture_edits.push(cmd);
+        s.gesture_applied = true;
+        Ok(Self::command_result(&mut s))
+    }
+    fn end_edit(&self) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "end_edit")?;
+        s.calls.push("end_edit".into());
+        let label = s.open_edit.take();
+        if s.gesture_applied {
+            s.gesture_applied = false;
+            let mut snap = Self::command_result(&mut s);
+            snap.undo_label = label;
+            snap.redo_label = None;
+            s.snap = snap.clone();
+            return Ok(snap);
+        }
+        Self::sync_revs(&mut s);
+        Ok(s.snap.clone())
+    }
+    fn abort_edit(&self) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "abort_edit")?;
+        s.calls.push("abort_edit".into());
+        s.open_edit = None;
+        s.gesture_applied = false;
+        Ok(Self::command_result(&mut s))
+    }
+    fn edit_all(&self, label: &str, cmds: Vec<EditCommand>) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "edit_all")?;
+        if s.open_edit.is_some() {
+            return Err(VizError::Busy {
+                message: "Finish the open edit first.".into(),
+            });
+        }
+        s.calls.push(format!("edit_all({label})"));
+        s.edit_alls.push((label.to_owned(), cmds));
+        Ok(Self::command_result(&mut s))
+    }
+    fn seconds_at(&self, seq: u64, ticks: Vec<i64>) -> Result<Vec<f64>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "seconds_at")?;
+        s.calls.push(format!("seconds_at({seq})"));
+        let per_second = s.transport.ticks_per_second;
+        Ok(ticks.into_iter().map(|t| t as f64 / per_second).collect())
+    }
+    fn ticks_at(&self, seq: u64, seconds: Vec<f64>) -> Result<Vec<i64>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "ticks_at")?;
+        s.calls.push(format!("ticks_at({seq})"));
+        let per_second = s.transport.ticks_per_second;
+        Ok(seconds
+            .into_iter()
+            .map(|x| (x * per_second).round() as i64)
+            .collect())
+    }
+    fn ui_layout(&self) -> Result<Option<String>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "ui_layout")?;
+        Ok(s.layout.clone())
+    }
+    fn set_ui_layout(&self, json: String) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "set_ui_layout")?;
+        // Like the core: only JSON is held.
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(&json) {
+            return Err(VizError::Model {
+                message: format!("the layout is not JSON: {e}"),
+            });
+        }
+        s.calls.push("set_ui_layout".into());
+        s.layout = Some(json);
+        Ok(())
+    }
+}
+
+/// An events block with everything else defaulted.
+pub fn block_row(start: i64, end: i64, events: &[u64]) -> BlockRow {
+    BlockRow {
+        start,
+        end,
+        kind: BlockKind::Events,
+        events: events.to_vec(),
+        label: None,
+        ref_seq: None,
+        muted: false,
+    }
+}
+
+/// [`demo_fake`] with Song's tracks filled (Swift `editorFake`): Chords
+/// (31) holds note 1 at bar 1 in one block; Groove (30) holds a
+/// reference block to Groove.
+pub fn editor_fake() -> FakeSession {
+    let f = demo_fake();
+    f.set_events(3, 31, vec![EventRow::blank(1, 0, EventKindRow::Note)]);
+    f.set_events(3, 30, vec![]);
+    f.set_blocks(
+        3,
+        30,
+        vec![BlockRow {
+            kind: BlockKind::Reference,
+            label: Some("Groove".into()),
+            ref_seq: Some(2),
+            ..block_row(0, 4 * BAR, &[7])
+        }],
+    );
+    f.set_blocks(3, 31, vec![block_row(0, BAR, &[1])]);
+    f
 }
 
 fn seq(id: u64, name: &str, top_level: bool, uses: u32) -> SeqRow {
