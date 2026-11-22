@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Entity, Global, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
@@ -27,7 +28,12 @@ pub struct AppState {
     transports: HashMap<DocId, TransportModel>,
     windows: Vec<WindowEntry>,
     next_token: u64,
+    /// When each document's session last had its idle tick.
+    last_idle: HashMap<DocId, Instant>,
 }
+
+/// The least time between two idle ticks of one document.
+const IDLE_EVERY: Duration = Duration::from_millis(50);
 
 struct GlobalAppState(Entity<AppState>);
 
@@ -40,6 +46,7 @@ impl AppState {
             transports: HashMap::new(),
             windows: Vec::new(),
             next_token: 1,
+            last_idle: HashMap::new(),
         }
     }
 
@@ -143,13 +150,31 @@ impl AppState {
 
     /// Polls `doc`'s transport; true when what the window shows changed.
     pub fn poll(&mut self, doc: DocId) -> bool {
+        let idled = self.idle(doc);
         let Some(t) = self.transports.get_mut(&doc) else {
-            return false;
+            return idled;
         };
         let before = (t.readout(None), self.store.alert().map(|a| a.id));
         let result = t.poll(&mut self.store);
         let after = (t.readout(None), self.store.alert().map(|a| a.id));
-        result == PollResult::Failed || before != after
+        idled || result == PollResult::Failed || before != after
+    }
+
+    /// The session's idle tick, at most every 50 ms; true when a new
+    /// snapshot arrived (the title may have changed).
+    fn idle(&mut self, doc: DocId) -> bool {
+        let now = Instant::now();
+        if self
+            .last_idle
+            .get(&doc)
+            .is_some_and(|t| now.duration_since(*t) < IDLE_EVERY)
+        {
+            return false;
+        }
+        self.last_idle.insert(doc, now);
+        self.store
+            .with_document(doc, |d, _| d.idle())
+            .unwrap_or(false)
     }
 
     /// How long until `doc`'s next poll; `None` once it is closed.
@@ -176,6 +201,15 @@ impl AppState {
         self.store.document(doc).map(|d| d.title())
     }
 
+    /// Whether closing or quitting must ask first: the session's live
+    /// answer, not the snapshot's flag.
+    pub fn has_unsaved_changes(&self, doc: DocId) -> bool {
+        self.store
+            .document(doc)
+            .is_some_and(|d| d.has_unsaved_changes())
+    }
+
+    /// The snapshot's edited flag (the window title mark).
     pub fn is_dirty(&self, doc: DocId) -> bool {
         self.store.document(doc).is_some_and(|d| d.snapshot().dirty)
     }

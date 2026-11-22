@@ -130,7 +130,7 @@ fn quit_or_ask(cx: &mut App) {
     let app = AppState::global(cx);
     let (dirty, front) = {
         let s = app.read(cx);
-        let dirty = s.windows().iter().any(|w| s.is_dirty(w.doc));
+        let dirty = s.windows().iter().any(|w| s.has_unsaved_changes(w.doc));
         let front = s
             .store
             .front()

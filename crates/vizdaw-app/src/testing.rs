@@ -2,11 +2,15 @@
 //! flag and a call log. Behind the `test-support` feature so the GPUI
 //! crate's tests drive the same fake as this crate's.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::DocSession;
 use vizdaw_ffi::VizError;
-use vizdaw_ffi::snapshot::{DocSnapshot, SeqRow, TransportState};
+use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef, MonitorModeRow};
+use vizdaw_ffi::selection::SelectionRow;
+use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, SeqRow, TransportState};
+use vizdaw_ffi::tracks::TrackKindRow;
 
 struct State {
     snap: DocSnapshot,
@@ -18,6 +22,12 @@ struct State {
     step_error: Option<VizError>,
     save_error: Option<VizError>,
     calls: Vec<String>,
+    lanes: HashMap<u64, Vec<LaneRow>>,
+    edits: Vec<EditCommand>,
+    edit_error: Option<VizError>,
+    unsaved: Option<Result<bool, VizError>>,
+    idle_snapshot: Option<DocSnapshot>,
+    selection: SelectionRow,
 }
 
 pub struct FakeSession(Mutex<State>);
@@ -64,6 +74,16 @@ impl FakeSession {
             step_error: None,
             save_error: None,
             calls: vec![],
+            lanes: HashMap::new(),
+            edits: vec![],
+            edit_error: None,
+            unsaved: None,
+            idle_snapshot: None,
+            selection: SelectionRow {
+                time_range: None,
+                lanes: vec![],
+                events: vec![],
+            },
         }))
     }
 
@@ -114,6 +134,35 @@ impl FakeSession {
         f(&mut self.st().transport);
     }
 
+    /// Scripts the lanes `lanes(seq)` returns.
+    pub fn set_lanes(&self, seq: u64, rows: Vec<LaneRow>) {
+        self.st().lanes.insert(seq, rows);
+    }
+
+    /// What `has_unsaved_changes` answers; `None` follows the snapshot.
+    pub fn set_unsaved(&self, v: Option<Result<bool, VizError>>) {
+        self.st().unsaved = v;
+    }
+
+    /// The snapshot the next `idle()` returns (once).
+    pub fn set_idle(&self, s: Option<DocSnapshot>) {
+        self.st().idle_snapshot = s;
+    }
+
+    /// Makes the session hold exactly `s` as its selection.
+    pub fn force_selection(&self, s: SelectionRow) {
+        self.st().selection = s;
+    }
+
+    pub fn set_edit_error(&self, e: Option<VizError>) {
+        self.st().edit_error = e;
+    }
+
+    /// Every `edit` command received, in order.
+    pub fn edits(&self) -> Vec<EditCommand> {
+        self.st().edits.clone()
+    }
+
     /// Every call, in order, as `name` or `name(arg)`.
     pub fn calls(&self) -> Vec<String> {
         self.st().calls.clone()
@@ -121,6 +170,10 @@ impl FakeSession {
 
     pub fn count(&self, name: &str) -> usize {
         self.calls().iter().filter(|c| c.as_str() == name).count()
+    }
+
+    fn lane_mut(s: &mut State, seq: u64, lane: u64) -> Option<&mut LaneRow> {
+        s.lanes.get_mut(&seq)?.iter_mut().find(|l| l.id == lane)
     }
 
     fn command_result(s: &mut State) -> DocSnapshot {
@@ -225,6 +278,98 @@ impl DocSession for FakeSession {
         self.st().calls.push("close".into());
         Ok(())
     }
+    fn has_unsaved_changes(&self) -> Result<bool, VizError> {
+        let s = self.st();
+        match s.unsaved.clone() {
+            Some(r) => r,
+            None => Ok(s.snap.dirty),
+        }
+    }
+    fn idle(&self) -> Result<Option<DocSnapshot>, VizError> {
+        let mut s = self.st();
+        let n = s.idle_snapshot.take();
+        if let Some(n) = &n {
+            s.snap = n.clone();
+        }
+        Ok(n)
+    }
+    fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
+        Ok(self.st().lanes.get(&seq).cloned().unwrap_or_default())
+    }
+    fn new_track(
+        &self,
+        seq: u64,
+        kind: TrackKindRow,
+        after: Option<u64>,
+    ) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        s.calls.push(format!("new_track({seq},{kind:?},{after:?})"));
+        Ok(Self::command_result(&mut s))
+    }
+    fn duplicate_track(&self, seq: u64, lane: u64) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        s.calls.push(format!("duplicate_track({seq},{lane})"));
+        Ok(Self::command_result(&mut s))
+    }
+    fn edit(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        if let Some(e) = s.edit_error.clone() {
+            return Err(e);
+        }
+        s.calls.push("edit".into());
+        if let EditCommand::Lane { edit } = &cmd {
+            match edit {
+                LaneEdit::Rename { seq, lane, name } => {
+                    if let Some(l) = Self::lane_mut(&mut s, *seq, *lane) {
+                        l.name = name.clone();
+                    }
+                }
+                LaneEdit::SetFlags {
+                    seq,
+                    lane,
+                    mute,
+                    solo,
+                    arm,
+                } => {
+                    if let Some(l) = Self::lane_mut(&mut s, *seq, *lane) {
+                        l.mute = mute.unwrap_or(l.mute);
+                        l.solo = solo.unwrap_or(l.solo);
+                        l.arm = arm.unwrap_or(l.arm);
+                    }
+                }
+                _ => {}
+            }
+        }
+        s.edits.push(cmd);
+        Ok(Self::command_result(&mut s))
+    }
+    fn set_lane_mute(&self, seq: u64, lane: u64, mute: bool) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        if let Some(e) = s.edit_error.clone() {
+            return Err(e);
+        }
+        s.calls.push(format!("set_lane_mute({seq},{lane},{mute})"));
+        if let Some(l) = Self::lane_mut(&mut s, seq, lane) {
+            l.mute = mute;
+        }
+        Ok(Self::command_result(&mut s))
+    }
+    fn selection(&self) -> Result<SelectionRow, VizError> {
+        Ok(self.st().selection.clone())
+    }
+    fn set_selection(&self, mut sel: SelectionRow) -> Result<(), VizError> {
+        let mut s = self.st();
+        s.calls.push("set_selection".into());
+        // Like the core: lanes that do not exist are dropped.
+        let known = |s: &State, r: &LaneRef| {
+            s.lanes
+                .get(&r.seq)
+                .is_some_and(|rows| rows.iter().any(|l| l.id == r.lane))
+        };
+        sel.lanes.retain(|r| known(&s, r));
+        s.selection = sel;
+        Ok(())
+    }
 }
 
 fn seq(id: u64, name: &str, top_level: bool, uses: u32) -> SeqRow {
@@ -240,11 +385,48 @@ fn seq(id: u64, name: &str, top_level: bool, uses: u32) -> SeqRow {
     }
 }
 
+/// A lane row with everything else defaulted.
+pub fn lane_row(id: u64, name: &str, mute: bool) -> LaneRow {
+    LaneRow {
+        id,
+        name: name.into(),
+        destination: None,
+        midi_event_count: 0,
+        region_count: 0,
+        reference_count: 0,
+        mute,
+        solo: false,
+        looped: false,
+        take_count: 1,
+        active_take: "Take 1".into(),
+        is_drum: false,
+        arm: false,
+        midi_dest: None,
+        audio_out: None,
+        input: None,
+        monitor: MonitorModeRow::Auto,
+        kind: TrackKindRow::Midi,
+        audio_out_name: None,
+        input_fx: vec![],
+        mpe: None,
+        takes: vec![],
+        active_take_id: 0,
+        co_producer: false,
+    }
+}
+
 /// Three sequences: Beat and Groove (referenced), Song (top level).
 pub fn demo_fake() -> FakeSession {
-    FakeSession::new(vec![
+    let f = FakeSession::new(vec![
         seq(1, "Beat", false, 1),
         seq(2, "Groove", false, 2),
         seq(3, "Song", true, 0),
-    ])
+    ]);
+    f.set_lanes(1, vec![lane_row(10, "Kick", false)]);
+    f.set_lanes(2, vec![lane_row(20, "Bass", false)]);
+    f.set_lanes(
+        3,
+        vec![lane_row(30, "Groove", false), lane_row(31, "Chords", false)],
+    );
+    f
 }

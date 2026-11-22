@@ -328,6 +328,26 @@ fn closing_an_edited_window_asks_first(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn quit_asks_when_only_the_session_knows_it_is_unsaved(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    // The snapshot says clean; the session says unsaved.
+    fake.set_unsaved(Some(Ok(true)));
+    let mut s = setup(cx, fake);
+    let quit_key = if cfg!(target_os = "macos") {
+        "cmd-q"
+    } else {
+        "ctrl-q"
+    };
+    s.cx.simulate_keystrokes(quit_key);
+    s.cx.run_until_parked();
+    assert!(s.cx.has_pending_prompt());
+    assert_eq!(s.fake.count("close"), 0);
+    s.cx.simulate_prompt_answer("Cancel");
+    s.cx.run_until_parked();
+    assert_eq!(s.fake.count("close"), 0);
+}
+
+#[gpui::test]
 fn quit_with_unsaved_changes_asks_first(cx: &mut TestAppContext) {
     let fake = demo_fake();
     fake.set_dirty(true);

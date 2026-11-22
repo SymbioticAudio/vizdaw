@@ -335,7 +335,7 @@ impl DocumentWindow {
         let (dirty, title) = {
             let s = self.app.read(cx);
             (
-                s.is_dirty(doc),
+                s.has_unsaved_changes(doc),
                 s.store.document(doc).map(|d| d.snapshot().title.clone()),
             )
         };

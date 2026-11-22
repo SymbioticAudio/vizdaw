@@ -1,3 +1,4 @@
 #![allow(dead_code)]
 
-pub use vizdaw_app::testing::{FakeSession, demo_fake};
+#[allow(unused_imports)]
+pub use vizdaw_app::testing::{FakeSession, demo_fake, lane_row};

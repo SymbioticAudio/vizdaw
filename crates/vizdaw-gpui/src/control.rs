@@ -186,7 +186,7 @@ fn quit(discard: bool, cx: &mut App) -> Handled {
         let s = s.read(cx);
         s.windows()
             .iter()
-            .filter(|w| s.is_dirty(w.doc))
+            .filter(|w| s.has_unsaved_changes(w.doc))
             .filter_map(|w| s.store.document(w.doc).map(|d| d.snapshot().title.clone()))
             .collect()
     };
