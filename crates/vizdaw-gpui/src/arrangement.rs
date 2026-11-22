@@ -123,14 +123,13 @@ impl Arrangement {
         self.rows_built.get()
     }
 
-    /// The rows of `count` tracks the body shows, partly or wholly; before
-    /// the first layout the body is taken as `fallback` high.
+    /// The rows of `count` tracks the body shows, partly or wholly, for a
+    /// body at least `fallback` high (the window's height).
     pub(crate) fn visible_rows(&self, count: usize, fallback: f32) -> std::ops::Range<usize> {
-        let body = if self.layout.get().size.height > px(0.) {
-            self.body_height()
-        } else {
-            fallback
-        };
+        // Never fewer than the window could show: the canvas records its
+        // height only while drawing, after the rows are built, so a canvas
+        // that just grew would leave its new rows out.
+        let body = self.body_height().max(fallback);
         let lane = Geometry::default().lane_height;
         let first = (self.vertical_offset / lane).floor().max(0.) as usize;
         let last = ((self.vertical_offset + body) / lane).ceil().max(0.) as usize;
@@ -215,8 +214,17 @@ impl Arrangement {
         let layout = self.layout.clone();
         let playhead = self.playhead.clone();
         let weak = cx.entity().downgrade();
+        let grown = weak.clone();
         let painter = canvas(
-            move |bounds, _, _| {
+            move |bounds, _, cx| {
+                // A new height shows other rows than were built for this
+                // frame: draw again with them.
+                if layout.get().size.height != bounds.size.height {
+                    let grown = grown.clone();
+                    cx.defer(move |cx| {
+                        grown.update(cx, |_, cx| cx.notify()).ok();
+                    });
+                }
                 layout.set(bounds);
                 let prepared = view.prepare(&state, bounds, &mut recorder);
                 playhead.set(prepared.playhead);

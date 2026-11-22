@@ -543,8 +543,11 @@ fn a_long_song_builds_only_the_rows_in_view(cx: &mut TestAppContext) {
     fake.set_lanes(3, tracks);
     fake.set_blocks(3, 299, vec![events_block(0, BAR, &[7])]);
     let mut s = setup(cx, fake);
-    let body = f32::from(s.canvas().bounds.size.height) - RULER;
-    let most = (body / 48.).ceil() as usize + 1;
+    // At most a window's height of rows (the build never under-counts a
+    // canvas that just grew), far fewer than 200.
+    let window =
+        s.cx.update(|window, _| f32::from(window.viewport_size().height));
+    let most = (window / 48.).ceil() as usize + 1;
     let built = |s: &mut Setup| {
         s.window
             .read_with(&s.cx, |v, _| v.arrangement().rows_built())
@@ -566,4 +569,27 @@ fn a_long_song_builds_only_the_rows_in_view(cx: &mut TestAppContext) {
     );
     let n = built(&mut s);
     assert!(n > 0 && n <= most, "{n} rows built after the scroll");
+}
+
+/// Rows a taller canvas exposes are built in the same frame: a window
+/// enlarged after a smaller draw shows the blocks of its new last rows.
+#[gpui::test]
+fn rows_exposed_by_a_taller_canvas_are_built(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    let tracks: Vec<_> = (0..60)
+        .map(|i| lane_row(100 + i, &format!("Track {i}"), false))
+        .collect();
+    fake.set_lanes(3, tracks);
+    for i in 0..60 {
+        fake.set_blocks(3, 100 + i, vec![events_block(0, BAR, &[i])]);
+    }
+    let mut s = setup(cx, fake);
+    s.cx.simulate_resize(gpui::size(px(1000.), px(300.)));
+    s.cx.run_until_parked();
+    s.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+    s.cx.run_until_parked();
+    let body = f32::from(s.canvas().bounds.size.height) - RULER;
+    let last = (body / 48.).ceil() as usize - 1;
+    let label = format!("Block on Track {last}, bar 1, 1 event");
+    assert!(s.find("button", &label).is_some(), "no {label:?}");
 }
