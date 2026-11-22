@@ -156,3 +156,83 @@ Port from `crates/vizctl/tests/e2e.rs`, using `wait` now that the GPUI app answe
 - [ ] **Step 3: Run on Linux (controller, over SSH)** with the slice 2 environment → 8 passed.
 - [ ] **Step 4: Tick the parity checklist**: the 15 transport command rows, `ui.set_transport_bar`/`ui.reset_transport_bar`, the four e2e rows (noting the dropped List-editor step and step 7), and any Linux-gap rows from Tasks 3 and 5.
 - [ ] **Step 5: Commit**: `git commit -m "e2e: transport tests against the GPUI app"`.
+
+## Outcome (2026-11-22)
+
+All six tasks done (commits e2095bfa..ae0438df). Evidence: workspace tests 4143 passed on macOS, 4012 on Linux; clippy `-D warnings` and fmt clean on both (with and without `--features screenshot`); GPUI e2e 8/8 on Linux (XWayland) and 8/8 on macOS with the screen locked (the control channel now draws a fresh frame before reading the tree, which also closes slice 2's "ui.tree is draw-time only" minor).
+
+Final review fixes: ⇧Space/⌥Space typed into fields (539a810c); the arrangement shares its rows and builds only the rows in view (539a810c); rows exposed by a taller canvas are built (ae0438df).
+
+### Rulings
+
+- Task 1: Ruling: Shuttle::press takes doc (text-field refusal sets status at press) — matches Swift — none
+- Task 1: Ruling: commands do not poll after running; UI poll timer refreshes — bar may lag one poll (≤250 ms) — e2e uses waits, fine
+- Task 1: Ruling: control.rs routing of TRANSPORT_COMMANDS stays for Task 5 as planned — none
+- Task 2: Ruling: implementer wrote tests and code in one pass (no RED seen) — reviewer to weigh test strength — weak tests could hide bugs
+- Task 3: Ruling: PositionInput/Bbu were Swift-only; ported into vizdaw-app (position.rs, transport_fields.rs) with a direct core-model dependency — plan assumed a Rust one existed — extra ported code to keep in sync with nothing (Swift retired)
+- Task 3: Ruling: Transport menu lists menu items only (key-only ids omitted, as Swift) — matches Swift — none
+- Task 3: Ruling: S / transport.stop follow Swift (stopped → "Nothing is playing." status) — parity — none
+- Task 4: Ruling: headers and canvas share one vertical offset (headers' own scroll removed; 22 px top band added as Swift) — parity — none
+- Task 4: Ruling: add_field test hook dropped; window test types into Position instead — slice 1 deferred minor closed — none
+- Task 4: Ruling: zoom buttons in a 32 px row above headers+canvas; Arrangement children are blocks only — none
+- Task 5: Ruling: macOS screenshot = gpui render_to_image behind crate feature `screenshot` (enables gpui test-support; implementer audited: test helpers + deps only); Linux = x11rb GetImage, Wayland → unavailable — only route at this pin — test-support in shipped builds could change behaviour on a GPUI upgrade; re-audit on upgrade
+- Task 5: Ruling: ui.key decides command vs plain key from the app keymap (as Swift), else GPUI dispatch_keystroke — keeps command failures and keypad keys — a binding GPUI handles differently from the table could diverge
+- Task 6: Ruling: subagent writes and compiles the e2e tests; controller runs them (subagents have no GUI) — as slice 2 — none
+- Task 6: Ruling: fix now rather than defer — control calls draw a fresh frame (public Window::draw) before reading the registry — e2e and Co-Producer must not depend on the window being presented — a draw per tree call costs a frame
+- Final: Ruling: declined item — slice 2 ⌘-chords in WINDOW_CONTEXT while a field has focus (⌘Z undoes the song, as Swift) — stands, set in slice 2 — a field-level undo expectation would be unmet
+- Final: Ruling: declined item — plugin idle every 250 ms while stopped — stands (slice 2) — slower plugin-state dirty mark while stopped
+- Final: Ruling: declined item — ui.screenshot writes where the local client names — stands, Swift same, socket owner-only — none
+- Final: Ruling: declined item — GPUI Window::draw outside a platform frame — stands on 8/8 e2e evidence both platforms — a GPUI upgrade could change it; e2e would catch
+- Final: Ruling: residual regression introduced by the fix wave is fixed (not parked) — a blank lane after a status line clears is a frequent visible defect — one extra fixer round beyond the single wave
+
+### Deferred minors
+
+- Task 1: minor (deferred): refused sequence_info (Busy) cached as None until next snapshot
+- Task 1: minor (deferred): Clock poll cap fixed at 33 ms instead of current poll interval
+- Task 1: minor (deferred): no poll after shuttle actions (bar lags ≤ one poll)
+- Task 1: minor (deferred): fake transport_hold_end cannot be scripted to fail
+- Task 1: minor (deferred): ms_since truncates (Swift rounds)
+- Task 1: minor (deferred): stale module doc in document.rs ("transport comes with Task 3")
+- Task 1: minor (deferred): play_stop reads transport up to 5 times
+- Task 1: minor (deferred): TransportModel.state lags shared state one poll after channel commands
+- Task 1: minor (deferred): DocumentModel::poll_transport reads do not feed the playhead Clock
+- Task 2: minor (deferred): "other keys survive a write" comment untested; non-JSON prefs file untested; write-failure rollback untested
+- Task 2: minor (deferred): run_app unknown id says "There is no command X." (Swift "VizDAW has no handler for X.")
+- Task 2: minor (deferred): standard tokens spell bar:large where Swift writes bare bar; bar == bar:large here
+- Task 3: minor (deferred): Transport menu says "Play / Stop" (Swift flips Play/Stop) and Loop has no checkmark
+- Task 3: minor (deferred): set_time_range duplicates set_selection's set/alert/refresh
+- Task 3: minor (deferred): AppState::stop_and_return now unused
+- Task 3: minor (deferred): held ⇧, ⇧. act only while the window root has focus
+- Task 3: minor (deferred): no GPUI test for caret placement in an editing field or a field taking the keyboard mid-hold
+- Task 3: minor (deferred): vizdaw-app position/field tests not written test-first
+- Task 3: minor (deferred): Loop tree value "on"/"off" is not a Swift-parity value
+- Task 3: minor (deferred): Linux/Mac keyboard gap — keypad −/+ not bound (GPUI cannot tell keypad)
+- Task 4: minor (deferred): blocks/events Vecs cloned every render while playing (use Arc)
+- Task 4: minor (deferred): selected-block check O(events×selected) per frame
+- Task 4: minor (deferred): a refused blocks read returns empty and retries every frame (Swift keeps last)
+- Task 4: minor (deferred): events read twice per snapshot (blocks + sketch)
+- Task 4: minor (deferred): grid bar_at rebuilds with_bars per bar
+- Task 4: minor (deferred): vertical offset clamps one frame late after a resize
+- Task 4: minor (deferred): ⌘-wheel over headers zooms about a point outside the canvas
+- Task 4: minor (deferred): channel click on Arrangement locates if the canvas is under 44 px tall
+- Task 4: minor (deferred): fallback ArrangementState literal duplicated (derive Default)
+- Task 4: minor (deferred): block nodes precede their group in the flat ui.tree list
+- Task 5: minor (deferred): duplicate UiScreenshot arm in answer() without default path
+- Task 5: minor (deferred): wait facts read twice in the first tick
+- Task 5: minor (deferred): X11 GetImage BadMatch on a partly off-screen window reads as "could not be rendered"
+- Task 5: minor (deferred): test repeats NEEDS_X11 literal
+- Task 5: minor (deferred): ⌘Q via ui.key quits through GPUI Quit (same delivery path)
+- Final: minor (deferred): channel failure reported as success while an alert is already showing (queued alert; also slice 2 paths)
+- Final: minor (deferred, fix before plugin windows): Busy sequence_info cached as None → 4/4 used for fields/ruler until next snapshot
+- Final: minor (deferred): folded field's key answers "The window shows no transport fields." (Swift opens » popover) — parity gap to log
+- Final: minor (deferred): keypad −/+ not bound — feature loss for keypad users, logged as gap
+- Final: minor (deferred): unverified: mouse-up outside the window during a hold; 978 px default bar on Linux
+- Final: minor (deferred): non-JSON preferences.json treated as empty and rewritten
+- Final: minor (deferred): stale module doc document.rs:1-2
+
+### Owner's manual checks
+
+- Look at the arrangement and transport bar on a real display (drawn only on the test platform and in e2e so far).
+- Hold Rewind/Fast Forward and release the mouse outside the window.
+- Default 1000 px window on Linux with the in-window menu bar: does the standard bar fit, or do Edit In/Out fold into »?
+- Typing a position into a 3/4 song lands on the right bar.
