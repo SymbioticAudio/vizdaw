@@ -90,8 +90,9 @@ impl ParentView {
 
 /// A plugin's own editor. Main thread only.
 pub trait PluginEditor {
-    /// Attaches the editor to `parent` and shows it; returns its size in
-    /// points.
+    /// Attaches the editor to `parent` and shows it; returns its size: in
+    /// points on macOS, in physical pixels for CLAP editors on Linux (X11;
+    /// the host does not call CLAP `set_scale` yet).
     fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError>;
     /// Asks for a new size; returns the size the plugin accepted.
     fn resize(&mut self, width: u32, height: u32) -> Result<(u32, u32), HostError>;

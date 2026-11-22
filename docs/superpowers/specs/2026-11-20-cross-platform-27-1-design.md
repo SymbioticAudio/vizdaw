@@ -68,7 +68,7 @@ A throwaway build, about a week, with fixed pass/fail checks on macOS and Linux:
 4. **Performance:** 64 track meters plus a moving playhead at 60 fps without frame drops on the owner's Mac; the engine's meter feed is read without locks on the interface thread.
 5. **Text input and menus:** a text field, a native-feeling menu bar on Mac (app menu, shortcuts) and keyboard shortcuts routed to the focused pane.
 
-Result goes in a short spike report. Any hard fail (1, 3 or 4) → stop and bring the Tauri fallback to the owner before going further.
+Result goes in a short spike report: `2026-11-21-gpui-spike-report.md` (GO; Linux editor windows need `WM_TRANSIENT_FOR` in phase 2). Any hard fail (1, 3 or 4) → stop and bring the Tauri fallback to the owner before going further.
 
 ## 8. Architecture (after the spike passes)
 
