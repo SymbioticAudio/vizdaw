@@ -1,0 +1,584 @@
+# Parity checklist for 27.1.0
+
+Every later slice ticks rows in this list. Per the cross-platform design
+(`2026-11-20-cross-platform-27-1-design.md`, section 10), a feature is done
+when its row passes on the GPUI app. The baseline is the Swift app at the git
+tag `swift-parity-baseline`; each row names something that app does.
+
+How to read it: the **Mac** and **Linux** columns are blank until the row
+passes on that platform in the GPUI app; "S1" means slice 1 did it. A row that
+cannot pass on Linux at 27.1.0 is listed under "Linux gaps" with its answer.
+Row IDs are registry command IDs, window kinds, and sheet or dialog titles.
+
+Command rows are generated: `cargo run -p core-control --example dump_commands`
+(238 commands). The "Menu item" column says whether the command has a menu
+item (false: keys, the Keys settings and the control channel only).
+
+## Commands
+
+### File
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| file.new | File | New | ⌘N | true | S1 | S1 |
+| file.open | File | Open… | ⌘O | true | S1 | S1 |
+| file.create_demo | File | Create Demo Project |  | true | S1 | S1 |
+| file.create_demo_audio | File | Create Demo Project with Audio |  | true | | |
+| media.import | File | Import Audio… | ⇧⌘I | true | | |
+| file.close | File | Close | ⌘W | true | S1 | S1 |
+| file.save | File | Save | ⌘S | true | S1 | S1 |
+| file.save_as | File | Save As… | ⇧⌘S | true | S1 | S1 |
+| file.project_settings | File | Project Settings… |  | true | | |
+| file.bounce | File | Bounce… |  | true | | |
+| file.import_midi | File | Import MIDI File… |  | true | | |
+| file.export_midi | File | MIDI File… |  | true | | |
+| file.export_midi_clip | File | MIDI Clip File… |  | true | | |
+| file.export_for_daw | File | For Another DAW… |  | true | | |
+| file.import_dawproject | File | DAWproject… |  | true | | |
+| file.export_dawproject | File | DAWproject… |  | true | | |
+| file.import_aaf | File | AAF… |  | true | | |
+| file.export_aaf | File | AAF… |  | true | | |
+| file.interchange_report | File | Last Import or Export Report… |  | true | | |
+| media.convert | File | Convert Media to Project Format |  | false | | |
+| media.relink | File | Relink Media… |  | true | | |
+| file.open_copy | File | Open Co-Producer Copy… |  | true | | |
+
+### Edit
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| edit.undo | Edit | Undo | ⌘Z | true | | |
+| edit.redo | Edit | Redo | ⇧⌘Z | true | | |
+
+### View
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| ui.view_arrange | View | Arrange View | ⌃1 | true | | |
+| ui.view_mix | View | Mix View | ⌃2 | true | | |
+| ui.toggle_left | View | Left Pane | ⌃⌘← | true | | |
+| ui.toggle_bottom | View | Bottom Pane | ⌃⌘↓ | true | | |
+| ui.toggle_right | View | Right Pane | ⌃⌘→ | true | | |
+| ui.pane | View | Set Pane |  | false | | |
+| ui.theme | View | Theme |  | false | | |
+| ui.set_transport_bar | View | Set Transport Bar |  | false | | |
+| ui.reset_transport_bar | View | Reset Transport Bar |  | false | | |
+| ui.customize_transport | View | Customize Transport Bar… |  | true | | |
+
+### Editors
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| editors.piano_roll | Editors | Piano Roll | ⌘1 | true | | |
+| editors.list | Editors | List | ⌘2 | true | | |
+| editors.strip_chart | Editors | Strip Chart | ⌘3 | true | | |
+| editors.drum_grid | Editors | Drum Grid | ⌘4 | true | | |
+| editors.audio_editor | Editors | Audio Editor | ⌘5 | true | | |
+| editors.piano_roll_window | Editors | Open Piano Roll in Window | ⌥⌘1 | true | | |
+| editors.list_window | Editors | Open List in Window | ⌥⌘2 | true | | |
+| editors.strip_chart_window | Editors | Open Strip Chart in Window | ⌥⌘3 | true | | |
+| editors.drum_grid_window | Editors | Open Drum Grid in Window | ⌥⌘4 | true | | |
+| editors.close_detail | Editors | Close Detail Editor |  | true | | |
+| editors.insert_event | Editors | Insert Event | ⌘I | true | | |
+| editors.nudge_earlier | Editors | Nudge Earlier | ⌥← | true | | |
+| editors.nudge_later | Editors | Nudge Later | ⌥→ | true | | |
+| editors.nudge_up | Editors | Nudge Up | ⌥↑ | true | | |
+| editors.nudge_down | Editors | Nudge Down | ⌥↓ | true | | |
+| editors.snap | Editors | Snap to Grid | G | true | | |
+
+### Modify
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| modify.select_by_rule | Modify | Select by Rule… | ⌃⌘S | true | | |
+| modify.transpose | Modify | Transpose… | ⌃⌘T | true | | |
+| modify.quantize | Modify | Quantize… | ⌃⌘U | true | | |
+| modify.change | Modify | Change Values… | ⌃⌘M | true | | |
+| modify.move | Modify | Move… | ⌃⌘V | true | | |
+| modify.again | Modify | Modify Again | ⌃⌘R | true | | |
+| modify.template | Modify | Templates |  | true | | |
+| modify.exact_mode | Modify | Exact Mode | ⌃⌘E | true | | |
+| modify.quantize_notes | Modify | Quantize Notes |  | false | | |
+| modify.transpose_notes | Modify | Transpose Notes |  | false | | |
+| modify.velocity_notes | Modify | Change Velocity |  | false | | |
+
+### Sequence
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| sequence.make_reference | Sequence | Make Reference from Selection | ⌥⌘R | true | | |
+| sequence.back | Sequence | Back to Parent Sequence | ⌘[ | true | | |
+
+### Region
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| region.normalize | Region | Normalize… |  | true | | |
+| region.fade_in_to_cursor | Region | Fade In to Cursor |  | true | | |
+| region.fade_out_from_cursor | Region | Fade Out from Cursor |  | true | | |
+| region.remove_fades | Region | Remove Fades |  | true | | |
+| region.crossfade | Region | Crossfade |  | true | | |
+| region.set_fade_shape | Region | Set Fade Shape |  | false | | |
+| region.remove_crossfade | Region | Remove Crossfade |  | true | | |
+| region.open_external | Region | Open in External Editor |  | true | | |
+| region.reload_external | Region | Reload External Edit |  | true | | |
+
+### Drum
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| drum.add_row | Drum | Add Drum Row |  | true | | |
+| drum.show_velocity | Drum | Show Velocity |  | true | | |
+| drum.split_row | Drum | Split Row to Own Track |  | true | | |
+| drum.remove_row | Drum | Remove Drum Row |  | true | | |
+| drum.timeline | Drum | Timeline View |  | true | | |
+
+### Transport
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| transport.play_stop | Transport | Play / Stop | Space | true | S1 | S1 |
+| transport.stop | Transport | Stop | S | true | S1 | S1 |
+| transport.play | Transport | Play |  | false | | |
+| transport.play_selection | Transport | Play Selection | ⌥Space | true | | |
+| transport.play_from_selection | Transport | Play from Selection | ⇧Space | true | | |
+| transport.play_from_edit_in | Transport | Play from Edit-In | Y | true | | |
+| transport.record | Transport | Record | R | true | | |
+| transport.scrub | Transport | Scrub | K | true | | |
+| transport.return_to_start | Transport | Return to Start | Return | true | | |
+| transport.rewind | Transport | Rewind | ⇧, | true | | |
+| transport.fast_forward | Transport | Fast Forward | ⇧. | true | | |
+| transport.previous_marker | Transport | Previous Marker | , | true | | |
+| transport.next_marker | Transport | Next Marker | . | true | | |
+| transport.loop | Transport | Loop | L | true | | |
+| transport.overdub | Transport | Overdub | O | true | | |
+| transport.punch | Transport | Punch | I | true | | |
+| transport.click | Transport | Click |  | true | | |
+| transport.set_click_level | Transport | Click Level |  | false | | |
+| transport.set_click_mode | Transport | Click Mode |  | false | | |
+| transport.go_position | Transport | Go to Position Field | P | true | | |
+| transport.go_edit_in | Transport | Go to Edit-In Field | E | true | | |
+| transport.go_punch | Transport | Go to Punch Fields | U | true | | |
+| transport.arm_previous | Transport | Arm Previous Track | ⌥⇧↑ | true | | |
+| transport.arm_next | Transport | Arm Next Track | ⌥⇧↓ | true | | |
+| marker.add | Transport | Add Marker |  | false | | |
+| marker.rename | Transport | Rename Marker |  | false | | |
+| marker.remove | Transport | Remove Marker |  | false | | |
+
+### Step
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| step.entry | Step | Step Entry | T | true | | |
+| step.whole | Step | Whole Note | 1 | true | | |
+| step.half | Step | Half Note | 2 | true | | |
+| step.quarter | Step | Quarter Note | 3 | true | | |
+| step.eighth | Step | Eighth Note | 4 | true | | |
+| step.sixteenth | Step | Sixteenth Note | 5 | true | | |
+| step.thirty_second | Step | Thirty-Second Note | 6 | true | | |
+| step.dot | Step | Dotted | . | true | | |
+| step.triplet | Step | Triplet | / | true | | |
+| step.tie | Step | Tie | = | true | | |
+| step.rest | Step | Rest | 0 | true | | |
+| step.delete_last | Step | Delete Last Step | Delete | true | | |
+| step.notes | Step | Enter Notes |  | false | | |
+
+### Automation
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| automation.mode.off | Automation | Off |  | true | | |
+| automation.mode.read | Automation | Read |  | true | | |
+| automation.mode.touch | Automation | Touch |  | true | | |
+| automation.mode.latch | Automation | Latch |  | true | | |
+| automation.mode.write | Automation | Write |  | true | | |
+| automation.mode.trim | Automation | Trim |  | true | | |
+| automation.suspend | Automation | Suspend Automation |  | true | | |
+
+### Window
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| window.mixer | Window | Mixer | ⌥⌘M | true | | |
+| window.plugin_manager | Window | Plugin Manager | ⌥⌘P | true | | |
+| window.media_pool | Window | Media Pool |  | true | | |
+| window.song_notes | Window | Song Notes |  | true | | |
+
+### Track
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| lane.set_input | Track | Set Track Input |  | false | | |
+| lane.set_monitor | Track | Set Track Monitor |  | false | | |
+| lane.set_output | Track | Set Track Output |  | false | | |
+| lane.set_input_fx | Track | Set Input Effects |  | false | | |
+| lane.set_mpe | Track | Set Track MPE |  | false | | |
+| lane.track_synth | Track | Track Synth |  | false | | |
+| track.new_audio | Track | New Audio Track | ⌥⌘A | true | | |
+| track.new_instrument | Track | New Instrument Track | ⌥⌘S | true | | |
+| track.new_midi | Track | New MIDI Track | ⌥⌘X | true | | |
+| track.duplicate | Track | Duplicate Track |  | true | | |
+| track.delete | Track | Delete Track |  | true | | |
+| track.rename | Track | Rename Track |  | true | | |
+| track.make_mine | Track | Make Mine |  | true | | |
+| track.choose_take | Track | Choose Take |  | true | | |
+| track.rename_take | Track | Rename Take |  | true | | |
+| track.delete_take | Track | Delete Take |  | true | | |
+| track.new_plugin_instrument | Track | New Plug-in Instrument Track |  | false | | |
+
+### Mixer
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| automation.set_mode | Mixer | Set Automation Mode |  | false | | |
+| automation.gesture | Mixer | Automation Gesture |  | false | | |
+| automation.release_all | Mixer | Release Channel Touches |  | false | | |
+| automation.write | Mixer | Write Automation |  | false | | |
+| mixer.new_bus | Mixer | New Bus |  | false | | |
+| mixer.make_mine | Mixer | Make Mine |  | false | | |
+| mixer.set_colour | Mixer | Colour |  | false | | |
+| mixer.set_strip | Mixer | Set Strip |  | false | | |
+| mixer.set_output | Mixer | Set Strip Output |  | false | | |
+| mixer.add_send | Mixer | Add Send |  | false | | |
+| mixer.set_send | Mixer | Set Send |  | false | | |
+| mixer.remove_send | Mixer | Remove Send |  | false | | |
+| mixer.add_insert | Mixer | Add Insert |  | false | | |
+| mixer.remove_insert | Mixer | Remove Insert |  | false | | |
+| mixer.move_insert | Mixer | Move Insert |  | false | | |
+| mixer.set_bypass | Mixer | Bypass Insert |  | false | | |
+| mixer.set_eq | Mixer | Set EQ |  | false | | |
+| mixer.set_param | Mixer | Set Plug-in Parameter |  | false | | |
+| mixer.remove_bus | Mixer | Remove Bus |  | false | | |
+| mixer.new_group | Mixer | Group |  | true | | |
+| mixer.rename_group | Mixer | Rename Group |  | false | | |
+| mixer.set_group_colour | Mixer | Group Colour |  | false | | |
+| mixer.add_to_group | Mixer | Add to Group |  | false | | |
+| mixer.remove_from_group | Mixer | Remove from Group |  | false | | |
+| mixer.set_group_links | Mixer | Group Links |  | false | | |
+| mixer.delete_group | Mixer | Ungroup |  | true | | |
+| mixer.new_vca | Mixer | New VCA |  | true | | |
+| mixer.rename_vca | Mixer | Rename VCA |  | false | | |
+| mixer.set_vca_colour | Mixer | VCA Colour |  | false | | |
+| mixer.assign_vca | Mixer | Assign to VCA |  | false | | |
+| mixer.unassign_vca | Mixer | Remove from VCA |  | false | | |
+| mixer.set_vca | Mixer | Set VCA |  | false | | |
+| mixer.delete_vca | Mixer | Delete VCA |  | false | | |
+
+### Locators
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| locator.go_0 | Locators | Go to Locator 0 | 0 | false | | |
+| locator.go_1 | Locators | Go to Locator 1 | 1 | false | | |
+| locator.go_2 | Locators | Go to Locator 2 | 2 | false | | |
+| locator.go_3 | Locators | Go to Locator 3 | 3 | false | | |
+| locator.go_4 | Locators | Go to Locator 4 | 4 | false | | |
+| locator.go_5 | Locators | Go to Locator 5 | 5 | false | | |
+| locator.go_6 | Locators | Go to Locator 6 | 6 | false | | |
+| locator.go_7 | Locators | Go to Locator 7 | 7 | false | | |
+| locator.go_8 | Locators | Go to Locator 8 | 8 | false | | |
+| locator.go_9 | Locators | Go to Locator 9 | 9 | false | | |
+| locator.set_0 | Locators | Set Locator 0 | ⌥0 | false | | |
+| locator.set_1 | Locators | Set Locator 1 | ⌥1 | false | | |
+| locator.set_2 | Locators | Set Locator 2 | ⌥2 | false | | |
+| locator.set_3 | Locators | Set Locator 3 | ⌥3 | false | | |
+| locator.set_4 | Locators | Set Locator 4 | ⌥4 | false | | |
+| locator.set_5 | Locators | Set Locator 5 | ⌥5 | false | | |
+| locator.set_6 | Locators | Set Locator 6 | ⌥6 | false | | |
+| locator.set_7 | Locators | Set Locator 7 | ⌥7 | false | | |
+| locator.set_8 | Locators | Set Locator 8 | ⌥8 | false | | |
+| locator.set_9 | Locators | Set Locator 9 | ⌥9 | false | | |
+| locator.clear_0 | Locators | Clear Locator 0 | ⌥⇧0 | false | | |
+| locator.clear_1 | Locators | Clear Locator 1 | ⌥⇧1 | false | | |
+| locator.clear_2 | Locators | Clear Locator 2 | ⌥⇧2 | false | | |
+| locator.clear_3 | Locators | Clear Locator 3 | ⌥⇧3 | false | | |
+| locator.clear_4 | Locators | Clear Locator 4 | ⌥⇧4 | false | | |
+| locator.clear_5 | Locators | Clear Locator 5 | ⌥⇧5 | false | | |
+| locator.clear_6 | Locators | Clear Locator 6 | ⌥⇧6 | false | | |
+| locator.clear_7 | Locators | Clear Locator 7 | ⌥⇧7 | false | | |
+| locator.clear_8 | Locators | Clear Locator 8 | ⌥⇧8 | false | | |
+| locator.clear_9 | Locators | Clear Locator 9 | ⌥⇧9 | false | | |
+
+### Record
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| record.keep_pass | Record | Keep Loop Pass |  | false | | |
+| record.discard_pass | Record | Discard Since Last Keep |  | false | | |
+| record.set | Record | Record Options |  | false | | |
+| record.recover | Record | Recover Recordings |  | false | | |
+
+### Media
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| media.compact | Media | Compact Media |  | false | | |
+| media.rename | Media | Rename Media… |  | false | | |
+
+### MIDI
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| midi.inject | MIDI | Inject MIDI |  | false | | |
+
+### Audio
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| audio.set | Audio | Audio Settings |  | false | | |
+
+### Destination
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| destination.set_return_latency | Destination | Set Return Latency |  | false | | |
+| destination.set_sound | Destination | Set Built-in Synth Sound |  | false | | |
+| destination.set_midi_mix | Destination | Set MIDI Mix |  | false | | |
+| destination.set_mpe | Destination | Set Destination MPE |  | false | | |
+| destination.measure_return | Destination | Measure Return Latency |  | false | | |
+| destination.add_midi | Destination | New MIDI Destination |  | false | | |
+| destination.edit_midi | Destination | Edit Destination |  | false | | |
+
+### Surfaces
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| surface.add | Surfaces | Add Surface |  | false | | |
+| surface.remove | Surfaces | Remove Surface |  | false | | |
+| surface.inject | Surfaces | Inject Surface Bytes |  | false | | |
+| surface.learn | Surfaces | MIDI Learn |  | false | | |
+| surface.unlearn | Surfaces | Remove MIDI Learn |  | false | | |
+
+### Settings
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| plugins.new_channel_eq | Settings | Put an EQ on New Channels |  | false | | |
+| plugins.install_multiq | Settings | Install Multi-Q for Other Apps |  | false | | |
+| plugins.default_eq | Settings | EQ for New Channels |  | false | | |
+| settings.co_producer | Settings | Co-Producer |  | false | | |
+| settings.co_producer_answer | Settings | Answer Co-Producer Approval |  | false | | |
+| settings.co_producer_metrics | Settings | Count Where My Time Goes |  | false | | |
+| settings.delete_time_records | Settings | Delete All Time Records |  | false | | |
+
+### Key Bindings
+
+| ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
+|---|---|---|---|---|---|---|
+| keys.save | Key Bindings | Save Key Bindings… |  | false | | |
+| keys.load | Key Bindings | Load Key Bindings… |  | false | | |
+| keys.reset | Key Bindings | Reset Key Bindings |  | false | | |
+
+## Windows
+
+Confirmed from the scenes in `app/Sources/VizDAW/VizDAWApp.swift` and the
+Window menu in `AppCommands.swift`.
+
+| Window | Kind | Mac | Linux |
+|---|---|---|---|
+| Document window (one per project) | `WindowGroup(for: UUID)` | S1 | S1 |
+| Torn-off editor: Piano Roll | `DetailEditorKind.pianoRoll` (⌥⌘1) | | |
+| Torn-off editor: List | `DetailEditorKind.list` (⌥⌘2) | | |
+| Torn-off editor: Strip Chart | `DetailEditorKind.stripChart` (⌥⌘3) | | |
+| Torn-off editor: Drum Grid | `DetailEditorKind.drumGrid` (⌥⌘4) | | |
+| Mixer | `mixer` | | |
+| Media Pool | `media-pool` | | |
+| Plugin Manager | `plugins` | | |
+| Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
+| Licences | `licences` | | |
+| Settings: Appearance | Settings tab | | |
+| Settings: Editing | Settings tab | | |
+| Settings: Keys | Settings tab | | |
+| Settings: Audio | Settings tab | | |
+| Settings: Recording | Settings tab | | |
+| Settings: Automation | Settings tab | | |
+| Settings: Surfaces | Settings tab | | |
+| Settings: Plug-ins | Settings tab | | |
+| Settings: Co-Producer | Settings tab | | |
+
+## Sheets and dialogs
+
+From `.sheet(`, `.alert(`, `.confirmationDialog(`, `NSSavePanel` and
+`NSOpenPanel` in `app/Sources/VizDAW`. A sheet without a title of its own is
+listed by its Swift type.
+
+### Sheets
+
+| Sheet | Where | Mac | Linux |
+|---|---|---|---|
+| Reference (`ReferenceSheet`) | document | | |
+| Some audio files of this project are missing or changed (`RelinkSheet`) | document | | |
+| Bounce | document | | |
+| Export for Another DAW | document | | |
+| Export DAWproject | document | | |
+| Export AAF | document | | |
+| Import AAF | document | | |
+| Track synth (`TrackSynthSheet`, titled "Track" and the synth name) | document | | |
+| New MIDI Destination | document | | |
+| Destination editor (`DestinationEditorSheet`) | document | | |
+| Co-Producer approval (`CoProducerApprovalSheet`) | document | | |
+| Import MIDI File | document | | |
+| Export MIDI (`MidiExportSheet`) | document | | |
+| Report: Export Report, Merge Report, Import Report (`ReportSheet`) | document | | |
+| Project Settings | document | | |
+| Merge DAWproject | document | | |
+| Customize Transport Bar | document and mixer windows | | |
+| MIDI Learn Maps | mixer, panes | | |
+| Comment (`CommentSheet`) | sequence sidebar | | |
+| Key slot (`KeySlotSheet`) | sequence sidebar | | |
+| Remove Old Co-Producer Copies? | Media Pool | | |
+| Add Surface | Settings > Surfaces | | |
+
+### Alerts and confirmations
+
+| Alert | Where | Mac | Linux |
+|---|---|---|---|
+| Recovered Recordings | document | | |
+| Document alert (its title is set per error) | document | | |
+| Replace question (MIDI import and export) | MidiSheets | | |
+| MIDI Learn alert (title set per error) | MIDI Learn Maps | | |
+| Surfaces alert (title set per error) | Settings > Surfaces | | |
+| Delete notes and copies? | Settings > Co-Producer | | |
+| Delete all time records? | Settings > Co-Producer | | |
+| Delete this sequence and every reference to it? | sequence sidebar | | |
+| Replace the (EQ name) in your Components folder? | Settings > Plug-ins | | |
+
+### File panels
+
+| Panel | Prompt | Mac | Linux |
+|---|---|---|---|
+| Open (project, MIDI, DAWproject or AAF) | Open | | |
+| Open Co-Producer copy | Open Copy | | |
+| Import MIDI file | Import | | |
+| Save (new project) | Save | | |
+| Relink audio file | Relink | | |
+| Search folder for missing audio | Search | | |
+| Choose folder for missing audio | Choose | | |
+| Import audio files | Import | | |
+| Bounce destination | Bounce | | |
+| Export destination (for another DAW) | Export | | |
+| Import DAWproject | Import | | |
+| Merge DAWproject (choose the original project) | Merge | | |
+| Export DAWproject destination | Export | | |
+| Import AAF | Import | | |
+| Choose the MIDI file for the AAF file | Choose | | |
+| Choose External Sample Editor | Choose | | |
+| Keys settings: save keys file | (save panel) | | |
+| Keys settings: open keys file | (open panel) | | |
+
+## Manual checks
+
+Sources: `docs/testing/manual-checks.md` (the open list) and the README
+(`app/README.md`, "Manual smoke test", numbered steps). Each heading below is
+a group of by-eye steps the GPUI app must pass.
+
+### `docs/testing/manual-checks.md`
+
+| Heading | Mac | Linux |
+|---|---|---|
+| Co-Producer, time coaching and close prompts (README 395-438) | | |
+| Fader groups, VCAs and the transport bar (README 439-456) | | |
+| Hand checks from the plan's reviews | | |
+| Small fixes (README 457-464) | | |
+
+### `app/README.md` headings
+
+| Heading | Mac | Linux |
+|---|---|---|
+| Plugins (plan 3c) | | |
+| Editors (plan 4a) | | |
+| Piano roll (plan 4b) | | |
+| List editor and Select and Modify (plan 4c) | | |
+| Strip Chart and automation (plan 4d) | | |
+| Control channel (plan CC) | | |
+| Drum grid (plan 4e) | | |
+| Keys and step entry (plan 4f) | | |
+| Audio playback (plan 5a) | | |
+| Regions in the editors (plan 5b) | | |
+| Recording (plan 5c) | | |
+| Synth tracking (plan 5c-2) | | |
+| Record UI and monitoring (plans 5d-1 and 5d-2) | | |
+| Automation recording, the engine (plan 5e-1) | | |
+| Automation recording, the UI (plan 5e-2) | | |
+| Control surfaces and MIDI learn (plan 5f-1) | | |
+| Bounce and export (plan 5f-2) | | |
+| External sample editor (plan 5f-3) | | |
+| Host-integration keyboards (plan 5f-4) | | |
+| Window, main views and panes (plan 7a) | | |
+| Themes and the channel strip (plan 7b) | | |
+| Audio editor (plan 7c) | | |
+| Clean-up (plan 7d) | | |
+| Tracks (plan tracks) | | |
+| MIDI input effects (plan 5g-1) | | |
+| MIDI strips (plan 5g-1b) | | |
+| MPE input and output (plan 5g-2) | | |
+| MIDI files (plan 6a) | | |
+| Export for another DAW (plan 6b) | | |
+| Crossfades (plan 6c) | | |
+| DAWproject (plan 6d) | | |
+| DAWproject merge (plan 6e) | | |
+| Fader groups, VCAs and the transport bar (plan groups-vcas-transport) | | |
+| Small fixes on `next` (after the beta) | | |
+
+## e2e
+
+The 44 tests in `crates/vizctl/tests/e2e.rs`; each must pass against the GPUI
+app (they need a window server and `VIZDAW_E2E_APP`).
+
+| Test | Mac | Linux |
+|---|---|---|
+| demo_play_screenshot_stop | | |
+| click_play_and_press_space | | |
+| drum_grid_paints_and_erases_by_element | | |
+| keys_drive_step_entry_locators_and_bindings | | |
+| audio_import_plays_and_reports_media | | |
+| regions_normalize_relink_and_trash | | |
+| records_audio_loop_takes_and_midi | | |
+| tracks_the_fake_synth | | |
+| arms_meters_counts_in_and_draws_the_take | | |
+| touch_writes_a_fader_over_the_channel | | |
+| drives_a_fader_and_a_button_from_an_mcu | | |
+| drives_the_mixer_from_a_kontrol_mk3 | | |
+| bounces_the_demo_and_checks_the_file | | |
+| edits_a_region_through_the_stub_editor | | |
+| window_views_and_panes_over_the_channel | | |
+| themes_and_the_strip_over_the_channel | | |
+| edits_a_region_in_the_audio_editor | | |
+| transport_jumps_readouts_and_fields_over_the_channel | | |
+| new_project_tracks_over_the_channel | | |
+| loop_wraps_at_the_end | | |
+| arpeggiates_an_injected_chord_while_recording | | |
+| midi_mix_reaches_state_get | | |
+| records_mpe_as_per_note_expression | | |
+| midi_files_round_trip_over_the_channel | | |
+| exports_for_another_daw_over_the_channel | | |
+| crossfades_over_the_channel | | |
+| dawproject_round_trip_over_the_channel | | |
+| aaf_round_trip_over_the_channel | | |
+| dawproject_merge_over_the_channel | | |
+| multiq_install_and_switch_over_the_channel | | |
+| default_eq_and_new_bus_over_the_channel | | |
+| takes_and_layered_midi_loop_over_the_channel | | |
+| co_producer_over_mcp | | |
+| co_producer_librarian_over_mcp | | |
+| co_producer_approval_over_mcp | | |
+| co_producer_chores_over_mcp | | |
+| co_producer_mixer_over_mcp | | |
+| co_producer_creative_over_mcp | | |
+| release_fixes_over_the_channel | | |
+| co_producer_time_over_mcp | | |
+| co_producer_import_midi_is_refused | | |
+| control_close_of_a_dirty_song_does_not_prompt | | |
+| app_quit_refuses_while_a_song_is_unsaved | | |
+| groups_vcas_and_transport_bar_over_the_channel | | |
+
+## Linux gaps
+
+Known gaps from the design's section 2a. Each has an answer; no gap is left
+unknown.
+
+| Gap | Answer | Status |
+|---|---|---|
+| The bundled default EQ is AU-only | A CLAP build of it, or a built-in EQ default on Linux | |
+| Co-Producer approvals are stored in the Mac Keychain | The Secret Service password store on Linux | |
+| AU inserts in Mac projects | Shown as placeholders that keep their settings (design section 10); no automatic swap | |
