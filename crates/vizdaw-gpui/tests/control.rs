@@ -1511,3 +1511,145 @@ fn a_point_click_on_empty_space_clears_the_selection(cx: &mut TestAppContext) {
     assert_eq!(sel["lanes"], json!([]));
     assert_eq!(sel["time_range"], Value::Null);
 }
+
+#[gpui::test]
+fn close_detail_with_nothing_open_is_unavailable(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let e = call(&s, cx, "command.run", json!({"id": "editors.close_detail"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert_eq!(e.message, "No detail editor is open.");
+    // Open, it closes.
+    ok(call(&s, cx, "command.run", json!({"id": "editors.list"})));
+    let r = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "editors.close_detail"}),
+    ));
+    assert_eq!(r["status"], Value::Null);
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["detail"], Value::Null);
+}
+
+#[gpui::test]
+fn the_wait_reads_the_detail_kind(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    let opened = ok(call(&s, cx, "app.new_demo", json!({})));
+    let window = opened["window"].clone();
+    let none = ok(call(
+        &s,
+        cx,
+        "wait",
+        json!({"condition": "detail_kind", "kind": "none", "window": window}),
+    ));
+    assert_eq!(none["condition"], "detail_kind");
+    let token = s.calls.push(
+        "wait",
+        json!({"condition": "detail_kind", "kind": "list", "window": window}),
+    );
+    tick(&s, cx);
+    assert!(s.calls.reply_to(token).is_none(), "still waiting");
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "editors.list", "window": window}),
+    ));
+    tick(&s, cx);
+    ok(s.calls
+        .reply_to(token)
+        .expect("answered once the list opens"));
+    // The pane hidden, the detail is still the list.
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.toggle_bottom", "params": {"on": false}}),
+    ));
+    ok(call(
+        &s,
+        cx,
+        "wait",
+        json!({"condition": "detail_kind", "kind": "list", "timeout_ms": 100}),
+    ));
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "editors.close_detail"}),
+    ));
+    ok(call(
+        &s,
+        cx,
+        "wait",
+        json!({"condition": "detail_kind", "kind": "none", "timeout_ms": 100}),
+    ));
+}
+
+#[gpui::test]
+fn state_get_editor_reports_the_detail(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    let opened = ok(call(&s, cx, "app.new_demo", json!({})));
+    let r = ok(call(&s, cx, "command.run", json!({"id": "editors.list"})));
+    assert_eq!(r["status"], Value::Null);
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["doc"], opened["doc"]);
+    assert_eq!(
+        e["detail"],
+        json!({"kind": "list", "seq": 3, "lane": null, "start": null, "end": null})
+    );
+    // ui.toggle_bottom: `on` sets, absent flips; a bad `on` is refused.
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.toggle_bottom", "params": {"on": false}}),
+    ));
+    let shown = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let a = AppState::global(cx).read(cx);
+            let doc = a.windows()[0].doc;
+            a.store
+                .document(doc)
+                .unwrap()
+                .layout()
+                .views
+                .arrange
+                .bottom
+                .shown
+        })
+    };
+    assert!(!shown(cx));
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.toggle_bottom"}),
+    ));
+    assert!(shown(cx));
+    let e = call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.toggle_bottom", "params": {"on": "yes"}}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    assert!(shown(cx));
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.toggle_bottom", "params": {"on": true}}),
+    ));
+    assert!(shown(cx));
+    // A key goes the same way.
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"key": "down", "modifiers": ["control", "command"]}),
+    ));
+    assert!(!shown(cx));
+}

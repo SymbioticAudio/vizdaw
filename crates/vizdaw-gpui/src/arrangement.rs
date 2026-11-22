@@ -440,7 +440,7 @@ fn block_menu(
     vec![backdrop, list]
 }
 
-fn menu_list(id: &'static str) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn menu_list(id: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .occlude()

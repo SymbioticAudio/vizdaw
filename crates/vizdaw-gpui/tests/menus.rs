@@ -56,6 +56,7 @@ fn the_menu_model_follows_the_swift_order() {
                 "VizDAW",
                 "File",
                 "Edit",
+                "View",
                 "Editors",
                 "Track",
                 "Transport",
@@ -84,7 +85,7 @@ fn the_menu_model_follows_the_swift_order() {
             Some("Select All"),
         ]
     );
-    let track: Vec<Option<&str>> = m.menus[4]
+    let track: Vec<Option<&str>> = m.menus[5]
         .items
         .iter()
         .map(|i| match i {
@@ -104,7 +105,28 @@ fn the_menu_model_follows_the_swift_order() {
             Some("track.rename"),
         ]
     );
-    assert!(m.menus[6].items.is_empty());
+    assert!(m.menus[7].items.is_empty());
+    let ids = |i: usize| -> Vec<Option<&str>> {
+        m.menus[i]
+            .items
+            .iter()
+            .map(|i| match i {
+                ItemSpec::Command { id, .. } => Some(*id),
+                ItemSpec::Separator => None,
+            })
+            .collect()
+    };
+    assert_eq!(ids(3), [Some("ui.toggle_bottom")]);
+    assert_eq!(
+        ids(4),
+        [
+            Some("editors.list"),
+            None,
+            Some("editors.close_detail"),
+            None,
+            Some("editors.snap"),
+        ]
+    );
 }
 
 #[test]

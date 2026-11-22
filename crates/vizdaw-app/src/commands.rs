@@ -28,10 +28,15 @@ pub const DOCUMENT_COMMANDS: &[&str] = &[
     "track.rename",
 ];
 
-/// The registry IDs of the editor commands `run` handles (the detail pane
-/// and the grid). The menus, keys and channel route them once their views
-/// exist.
-pub const EDITOR_COMMANDS: &[&str] = &["editors.snap", "editors.list", "editors.close_detail"];
+/// The registry IDs of the editor commands `run` handles (the detail pane,
+/// the bottom pane that holds it, and the grid). The menus, keys and
+/// channel route them once their views exist.
+pub const EDITOR_COMMANDS: &[&str] = &[
+    "editors.snap",
+    "editors.list",
+    "editors.close_detail",
+    "ui.toggle_bottom",
+];
 
 const NO_DETAIL: &str = "No detail editor is open.";
 
@@ -424,7 +429,8 @@ fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bool>, Contro
 
 /// An editor command: Snap to Grid (`on`, absent toggles), List (opens on
 /// the open detail's target or the selection; nothing to show opens
-/// nothing) and Close Detail Editor.
+/// nothing), Close Detail Editor and the current view's Bottom Pane
+/// (`on`, absent toggles; Swift `ViewCommands`).
 fn run_editor(
     id: &str,
     args: &[(String, ArgValue)],
@@ -437,6 +443,13 @@ fn run_editor(
             doc.update_layout(|l| l.snap.enabled = on.unwrap_or(!l.snap.enabled));
         }
         "editors.list" => doc.show_detail(DetailEditorKind::List),
+        "ui.toggle_bottom" => {
+            let on = on_flag(id, args)?;
+            doc.update_layout(|l| {
+                let bottom = &mut l.views.current_mut().bottom;
+                bottom.shown = on.unwrap_or(!bottom.shown);
+            });
+        }
         _ => {
             if doc.layout().detail.is_none() {
                 return Err(unavailable(NO_DETAIL));

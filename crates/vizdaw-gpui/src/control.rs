@@ -10,8 +10,9 @@
 //! `ui.reset_transport_bar` and the document commands (`edit.undo`,
 //! `edit.redo`, the Track menu), `state.get` `transport`, `windows`,
 //! `document` and `editor` (`step` and the transport marks come with
-//! their slices); slice 4 adds `editors.snap`, `state.get selection` and
-//! `ui.click` at a point. `ui.tree`, `ui.click` (an element or a point,
+//! their slices); slice 4 adds `editors.snap`, `editors.list`,
+//! `editors.close_detail`, `ui.toggle_bottom`, `state.get selection`, the
+//! detail kind's `wait` and `ui.click` at a point. `ui.tree`, `ui.click` (an element or a point,
 //! with modifiers and a count), `ui.key`, `ui.screenshot` and `wait`.
 //! Everything else answers `unavailable`.
 //!
@@ -300,9 +301,8 @@ fn waited(w: &PendingWait, now: Instant) -> Value {
     json!({ "condition": w.condition.name(), "elapsed_ms": u64::try_from(ms).unwrap_or(u64::MAX) })
 }
 
-/// What a wait reads now: the target document's transport (polled fresh),
-/// the open documents and the windows' titles. The detail pane is empty
-/// until the editors come.
+/// What a wait reads now: the target document's transport (polled fresh)
+/// and detail kind, the open documents and the windows' titles.
 fn facts(window: Option<&WindowRef>, cx: &mut App) -> Facts {
     let app = AppState::global(cx);
     let doc = target(window, cx).ok().map(|e| e.doc);
@@ -312,11 +312,14 @@ fn facts(window: Option<&WindowRef>, cx: &mut App) -> Facts {
                 cx.notify();
             }
         });
-        let t = app.read(cx).transport(doc)?.state();
+        let s = app.read(cx);
+        let t = s.transport(doc)?.state();
+        // The detail's kind, whether or not the bottom pane shows.
+        let detail_kind = s.store.document(doc)?.detail_kind_name().into();
         Some(DocFacts {
             playing: t.playing,
             tick: t.tick,
-            detail_kind: "none".into(),
+            detail_kind,
         })
     });
     let s = app.read(cx);
@@ -1214,7 +1217,8 @@ fn not_yet(what: &str) -> ControlError {
             "{what} is not available in the GPUI app yet (slice 4 answers app.new_demo, \
              app.open, app.quit, command.run file.new / file.close / file.save / file.save_as / \
              transport.* (not recording or the click) / ui.set_transport_bar / \
-             ui.reset_transport_bar / edit.undo / edit.redo / track.* / editors.snap, state.get \
+             ui.reset_transport_bar / edit.undo / edit.redo / track.* / editors.snap / \
+             editors.list / editors.close_detail / ui.toggle_bottom, state.get \
              transport / windows / document / editor / selection, ui.tree, ui.click, ui.key, \
              ui.screenshot and wait)"
         ),

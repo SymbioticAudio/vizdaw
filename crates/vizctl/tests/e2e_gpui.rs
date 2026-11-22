@@ -522,9 +522,9 @@ fn play_button(nodes: &Value) -> Option<Value> {
     })
 }
 
-/// Ported from `demo_play_screenshot_stop`, without its last step
-/// (`editors.list` then `wait detail_kind list`): the List editor is a
-/// later slice.
+/// Ported from `demo_play_screenshot_stop`, with its last step: List
+/// (`editors.list`) opens the detail pane on the shown sequence, and
+/// `wait detail_kind list` sees it.
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_demo_play_screenshot_stop() {
@@ -630,6 +630,12 @@ fn gpui_demo_play_screenshot_stop() {
         !found["matches"].as_array().unwrap().is_empty(),
         "no Arrangement in the tree"
     );
+
+    app.call(
+        "command.run",
+        json!({"id": "editors.list", "window": window}),
+    );
+    app.wait(&window, json!({"condition": "detail_kind", "kind": "list"}));
     app.quit();
 }
 

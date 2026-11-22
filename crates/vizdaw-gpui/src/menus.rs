@@ -74,9 +74,14 @@ pub struct UnavailableCommand {
 /// The key context of a document window's root.
 pub const WINDOW_CONTEXT: &str = "DocumentWindow";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
-/// to its menus, keys and control channel so far: the others need the
-/// detail pane.
-pub const ROUTED_EDITOR_COMMANDS: &[&str] = &["editors.snap"];
+/// to its menus, keys and control channel: the grid, the List, closing the
+/// detail and the bottom pane's toggle.
+pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
+    "editors.snap",
+    "editors.list",
+    "editors.close_detail",
+    "ui.toggle_bottom",
+];
 
 /// Where unmodified keys act: in a document window, but never while a text
 /// field has focus (typing a space must not start the transport).
@@ -180,6 +185,7 @@ fn command(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> 
     };
     let checked = match id {
         "editors.snap" => Some(front.is_some_and(|d| d.layout().snap.enabled)),
+        "ui.toggle_bottom" => Some(front.is_some_and(|d| d.layout().views.current().bottom.shown)),
         _ => None,
     };
     ItemSpec::Command {
@@ -237,9 +243,21 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     slice1(EDIT_SELECT_ALL, "Select All", Some("a"), keymap),
                 ],
             ),
-            // The detail editors, their windows, Insert Event and the
-            // nudges come with their views.
-            menu("Editors", vec![cmd("editors.snap")]),
+            // The main views, the left and right panes and the bar's
+            // customizing come with their views.
+            menu("View", vec![cmd("ui.toggle_bottom")]),
+            // The other detail editors, their windows, Insert Event and
+            // the nudges come with their views.
+            menu(
+                "Editors",
+                vec![
+                    cmd("editors.list"),
+                    ItemSpec::Separator,
+                    cmd("editors.close_detail"),
+                    ItemSpec::Separator,
+                    cmd("editors.snap"),
+                ],
+            ),
             menu(
                 "Track",
                 vec![

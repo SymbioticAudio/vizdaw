@@ -1,10 +1,13 @@
 //! The document window: one window per open document, with the menu bar
-//! (off macOS), the alert banner, the transport bar, the zoom buttons, the
-//! track header column beside the arrangement canvas, and the status line.
+//! (off macOS), the alert banner, the transport bar, the arrangement's tool
+//! bar, the track header column beside the arrangement canvas, the bottom
+//! detail pane under them, and the status line.
 //! The window holds the bar's shuttle (Rewind and Fast Forward held, and
 //! their held keys) and its fields' edit.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder;
@@ -12,7 +15,7 @@ use gpui::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton, ParentElement, PromptLevel,
     Render, StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowBounds,
-    WindowHandle, WindowOptions, div, px, rgb, size,
+    WindowHandle, WindowOptions, canvas, div, px, rgb, size,
 };
 use vizdaw_app::alerts::{AlertItem, error_message};
 use vizdaw_app::commands::{self, FieldFocus};
@@ -23,6 +26,7 @@ use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::AppState;
 use crate::arrangement::{self, Arrangement, ArrangementState, ToolbarState};
+use crate::detail_pane::{self, DetailPaneState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
 use crate::registry::{RegistryScope, SharedRegistry};
@@ -61,6 +65,11 @@ pub struct DocumentWindow {
     _hold: Option<Task<()>>,
     /// The transport bar's » menu is open.
     more_open: bool,
+    /// The bottom pane's picker menu is open.
+    pub(crate) detail_menu_open: bool,
+    /// The size of the area the arrangement and the bottom pane share, at
+    /// the last draw (zero before the first).
+    regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -189,6 +198,8 @@ impl DocumentWindow {
             shuttle: Shuttle::new(),
             _hold: None,
             more_open: false,
+            detail_menu_open: false,
+            regions: Rc::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -596,6 +607,30 @@ impl DocumentWindow {
         }
     }
 
+    /// An invisible overlay that records the size of the area the
+    /// arrangement and the bottom pane share; a new size draws again, so
+    /// the pane fits the area it is in.
+    fn measure_regions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let regions = self.regions.clone();
+        let weak = cx.entity().downgrade();
+        canvas(
+            move |bounds, _, cx| {
+                if regions.get() != bounds.size {
+                    regions.set(bounds.size);
+                    let weak = weak.clone();
+                    cx.defer(move |cx| {
+                        weak.update(cx, |_, cx| cx.notify()).ok();
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
     /// Escape closes an open menu list (the key goes no further). ⇧, and
     /// ⇧. (Rewind and Fast Forward) step a bar per key-down and
     /// auto-repeat while the window has the keyboard.
@@ -619,7 +654,13 @@ impl DocumentWindow {
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
         let more = std::mem::take(&mut self.more_open);
         let arrangement = self.arrangement.close_menus();
-        if self.menu_bar.as_mut().is_some_and(MenuBar::close) || headers || more || arrangement {
+        let detail = std::mem::take(&mut self.detail_menu_open);
+        if self.menu_bar.as_mut().is_some_and(MenuBar::close)
+            || headers
+            || more
+            || arrangement
+            || detail
+        {
             cx.stop_propagation();
             cx.notify();
         }
@@ -878,6 +919,8 @@ impl Render for DocumentWindow {
             layout,
             arranged,
             tools,
+            pane,
+            bottom,
         ) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
@@ -908,8 +951,14 @@ impl Render for DocumentWindow {
                     ArrangementState::of(d, s.transport(doc), Instant::now(), visible)
                 }),
                 d.map(ToolbarState::of).unwrap_or_default(),
+                d.map(DetailPaneState::of).unwrap_or_default(),
+                d.map(|d| d.layout().views.current().bottom),
             )
         };
+        let bottom_height = bottom.and_then(|b| detail_pane::bottom_height(self.regions.get(), &b));
+        if bottom_height.is_none() {
+            self.detail_menu_open = false;
+        }
         let plan = Plan::new(&layout, f32::from(window.viewport_size().width));
         self.set_shown_fields(
             if bar.is_some() {
@@ -990,34 +1039,64 @@ impl Render for DocumentWindow {
                     cx,
                 ))
             })
-            .child(arrangement::toolbar(
-                tools,
-                self.arrangement.division_open(),
-                &mut root.container(),
-                window,
-                cx,
-            ))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .flex()
-                    .flex_row()
-                    .on_scroll(cx.listener(|this, e, _, cx| this.arrangement_wheel(e, cx)))
-                    .child(self.track_headers.render(
-                        &HeadersState {
-                            lanes: &lanes,
-                            selected: &selected,
-                            vertical_offset: self.arrangement.vertical_offset(),
-                        },
+                    .flex_col()
+                    .child(self.measure_regions(cx))
+                    .child(arrangement::toolbar(
+                        tools,
+                        self.arrangement.division_open(),
                         &mut root.container(),
                         window,
                         cx,
                     ))
                     .child(
-                        self.arrangement
-                            .render(arranged, &mut root.container(), window, cx),
-                    ),
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_row()
+                            .on_scroll(cx.listener(|this, e, _, cx| this.arrangement_wheel(e, cx)))
+                            .child(self.track_headers.render(
+                                &HeadersState {
+                                    lanes: &lanes,
+                                    selected: &selected,
+                                    vertical_offset: self.arrangement.vertical_offset(),
+                                },
+                                &mut root.container(),
+                                window,
+                                cx,
+                            ))
+                            .child(self.arrangement.render(
+                                arranged,
+                                &mut root.container(),
+                                window,
+                                cx,
+                            )),
+                    )
+                    .when(bottom_height.is_some(), |d| d.child(detail_pane::divider()))
+                    .child({
+                        // A hidden pane stays mounted, recorded nowhere.
+                        let scratch = SharedRegistry::default();
+                        let mut hidden = RegistryScope::root(&scratch);
+                        let scope = &mut if bottom_height.is_some() {
+                            root.container()
+                        } else {
+                            hidden.container()
+                        };
+                        detail_pane::render(
+                            &pane,
+                            bottom_height,
+                            self.detail_menu_open,
+                            scope,
+                            window,
+                            cx,
+                        )
+                    }),
             )
             .when_some(status, |d, status| {
                 d.child(Self::status_line(status, &mut root.container(), cx))
