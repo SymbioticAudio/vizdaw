@@ -9,5 +9,10 @@ publish = false
 [dependencies]
 core-ffi = { path = "../core-ffi" }
 
+[features]
+# The scripted FakeSession (`testing`), for this crate's and the GPUI crate's tests.
+test-support = []
+
 [dev-dependencies]
+vizdaw-app = { path = ".", features = ["test-support"] }
 tempfile = "3"

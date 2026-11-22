@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 vizdaw-app = { path = "../vizdaw-app" }
+core-control = { path = "../core-control" }
+serde_json = "1"
+unicode-segmentation = "1"
 # Pinned 2026-11-21 to zed main at this rev rather than crates.io gpui 0.2.2:
 # 0.2.2 panics in X11 window_handle (unimplemented) and fails to build on Linux
 # via xattr. See docs/superpowers/specs/2026-11-21-gpui-spike-report.md.
@@ -15,5 +18,6 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["runtime_shaders", "x11", "wayland"] }
 
 [dev-dependencies]
+vizdaw-app = { path = "../vizdaw-app", features = ["test-support"] }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["test-support"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1f8c7974db07e01c5cd05bee0cf4eb8d9", features = ["test-support"] }

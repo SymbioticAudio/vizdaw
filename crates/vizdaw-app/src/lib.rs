@@ -5,6 +5,8 @@ pub mod alerts;
 pub mod document;
 pub mod session;
 pub mod store;
+#[cfg(feature = "test-support")]
+pub mod testing;
 pub mod transport;
 
 pub use alerts::AlertItem;

@@ -170,3 +170,25 @@ fn opening_an_open_project_again_answers_the_same_document() {
     assert_eq!(s.open(&indirect).unwrap(), a);
     assert_eq!(s.count(), 1);
 }
+
+#[test]
+fn with_document_lends_the_document_and_moves_its_alert_to_the_store() {
+    let fake = Arc::new(demo_fake());
+    fake.set_path(Some("/tmp/song.vizdaw"));
+    fake.set_save_error(Some(VizError::Io {
+        message: "disk full".into(),
+    }));
+    let shared = fake.clone();
+    let mut s = DocumentStore::new(
+        Box::new(|| Ok(Arc::new(FakeSession::new(vec![])))),
+        Box::new(move || Ok(shared.clone())),
+        Box::new(|_| Ok(Arc::new(demo_fake()))),
+    );
+    let id = s.new_demo().unwrap();
+    let action = s.with_document(id, |doc, _| doc.save()).unwrap();
+    assert_eq!(action, vizdaw_app::SaveAction::Failed("disk full".into()));
+    assert_eq!(s.alert().unwrap().title, "Save Failed");
+    assert!(s.document(id).unwrap().alert.is_none());
+    assert_eq!(s.count(), 1);
+    assert!(s.with_document(vizdaw_app::DocId(99), |_, _| ()).is_none());
+}

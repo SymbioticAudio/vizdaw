@@ -1,5 +1,3 @@
 #![allow(dead_code)]
 
-mod fake_session;
-
-pub use fake_session::{FakeSession, demo_fake};
+pub use vizdaw_app::testing::{FakeSession, demo_fake};

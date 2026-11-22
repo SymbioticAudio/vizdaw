@@ -1,9 +1,10 @@
 //! A scripted `DocSession` (Swift: `FakeSession`): scripted errors, a busy
-//! flag and a call log.
+//! flag and a call log. Behind the `test-support` feature so the GPUI
+//! crate's tests drive the same fake as this crate's.
 
 use std::sync::Mutex;
 
-use vizdaw_app::DocSession;
+use crate::DocSession;
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::snapshot::{DocSnapshot, SeqRow, TransportState};
 
@@ -77,6 +78,11 @@ impl FakeSession {
     /// Makes the next command return `s`.
     pub fn bump(&self, s: DocSnapshot) {
         self.st().next_snapshot = Some(s);
+    }
+
+    /// Marks the current snapshot edited (or clean).
+    pub fn set_dirty(&self, dirty: bool) {
+        self.st().snap.dirty = dirty;
     }
 
     pub fn set_step_error(&self, e: Option<VizError>) {

@@ -6380,14 +6380,18 @@ version = "26.0.0"
 dependencies = [
  "core-ffi",
  "tempfile",
+ "vizdaw-app",
 ]
 
 [[package]]
 name = "vizdaw-gpui"
 version = "26.0.0"
 dependencies = [
+ "core-control",
  "gpui",
  "gpui_platform",
+ "serde_json",
+ "unicode-segmentation",
  "vizdaw-app",
 ]
 

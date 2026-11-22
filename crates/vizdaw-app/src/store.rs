@@ -69,6 +69,26 @@ impl DocumentStore {
         self.documents.get_mut(&id)
     }
 
+    /// Runs `f` with document `id` and the rest of the store (for calls that
+    /// need both, such as `TransportModel::play_stop`, whose alerts go to
+    /// the store). The document is out of the store while `f` runs, so `f`
+    /// must not open, close or look up documents; it is put back after.
+    /// An alert the document raised (save, undo) moves to the store, the
+    /// single alert channel. `None` when `id` is not open.
+    pub fn with_document<R>(
+        &mut self,
+        id: DocId,
+        f: impl FnOnce(&mut DocumentModel, &mut DocumentStore) -> R,
+    ) -> Option<R> {
+        let mut doc = self.documents.remove(&id)?;
+        let result = f(&mut doc, self);
+        if let Some(alert) = doc.alert.take() {
+            self.post_alert(alert);
+        }
+        self.documents.insert(id, doc);
+        Some(result)
+    }
+
     pub fn count(&self) -> usize {
         self.documents.len()
     }
