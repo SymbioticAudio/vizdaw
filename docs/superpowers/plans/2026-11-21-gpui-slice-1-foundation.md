@@ -135,3 +135,44 @@ fn opens_an_empty_document_window(cx: &mut gpui::TestAppContext) {
 
 - [ ] **Step 1: Failing tests:** unit test `executable_reads_cfbundleexecutable` (temp `.app` with `CFBundleExecutable = vizdaw-gpui`); e2e `gpui_demo_plays_saves_and_reopens` (launch with `VIZDAW_E2E_APP` pointing at the GPUI app/binary; `app.new_demo`; `transport.play_stop`; wait `playing`; stop; `file.save_as` temp; `app.quit`; relaunch; `app.open`; `state.get windows` names it). The e2e test is `#[ignore]` unless `VIZDAW_E2E_APP` is set, like the existing e2e tests' gating (read `crates/vizctl/tests/e2e.rs` and follow its pattern).
 - [ ] **Step 2: Run** the unit test → FAIL. **Step 3: Implement.** **Step 4: Run** the unit test → PASS; then the controller runs the e2e on the Mac and on the Linux box (XWayland) → PASS. **Step 5: Commit** `vizctl: launch the GPUI app; first GPUI e2e test`.
+
+## Outcome (2026-11-21)
+
+All six tasks done with task reviews; final whole-branch review clean after one fix wave (Save As overwrite guard, 18d4a9e3). GPUI e2e passes on macOS and Linux (XWayland). Not yet verified: the Mac visible check of the window (screen was locked), and the CI xvfb + Vulkan e2e step (needs a GitHub run).
+
+### Rulings
+
+- Ruling P1: GPUI git deps need network; controller pre-fetches the pinned rev into ~/.cargo before T1 so the sandboxed implementer builds offline — cost: none.
+- Ruling P2: Linux-box steps (ssh) are run by the controller, not subagents (sandbox network) — implementer reports "Linux pending"; controller verifies before marking complete.
+- Task 1: Ruling: fixed review minor #1 (boot test asserted nothing; plan-mandated wording) in controller commit — one-line, covered by running the test
+- Task 2: Ruling: round-trip tracks + AlertItem id equality enter round 1 despite Minor grade — tracks is a brief requirement, id identity is load-bearing for Task 3 failingPollsRaiseOneAlert
+- Task 4: Ruling: GPUI third-party notices deferred to the packaging task (slice that ships a build) — must be done before any release build — cost: a release without notices would violate Apache-2.0
+- Task 4: Ruling: Minor 'quit_now polls closed session' enters round 1 — same function as the Critical fix
+- Task 6: Ruling: Minor launch.rs error text enters round 2 with the CI fix (same tiny diff)
+- Final: Ruling: I2 is release-gating, not slice-gating — patch GPUI (applicationShouldTerminate hook) before any release build; tracked for the packaging/release slice — cost: a release build could lose unsaved edits on Dock quit/logout (crash markers remain, recovery not yet in GPUI app)
+- Final: Ruling: carry to slice 2 — unsaved-state guard reads a cached snapshot; refresh on edits/plugin news or close/quit guards will discard edits
+
+### Deferred minors (backlog)
+
+- Task 1: minor (deferred): clippy.toml large-error-threshold 256 is global; revisit if preserve_order goes away
+- Task 1: minor (deferred): lib.rs expect() on open_window — later slices add error reporting
+- Task 2: minor (deferred): open() on already-open path returns id without front/activate signal — document for GUI layer
+- Task 2: minor (deferred): path() maps a session.path() error (Busy) to untitled → save() says NeedsSaveAs transiently
+- Task 3: minor (deferred): no-device test lost 'stays usable' tail (could re-play after clearing error)
+- Task 3: minor (deferred): label-case rule TransportReadouts.label("Bar", .flat)=="bar" belongs to theme work
+- Task 3: minor (deferred): vacuous s.alert().is_none() in busy-open test
+- Task 4: minor (deferred): meter map unused (readout(None)); signature not shown this slice
+- Task 4: minor (deferred): no GPUI test for cancelled Save As / failed Save banner
+- Task 4: minor (deferred): DocumentWindow::add_field public test hook — doc(hidden) or remove in slice 2
+- Task 4: minor (deferred): no app-level alert when no window is open (eprintln only)
+- Task 4: minor (deferred): second Quit while quit prompt up opens a second prompt (add quit_prompting flag)
+- Task 4: minor (deferred): close-window Save in progress + quit Discard can close the store mid-save (user chose Discard)
+- Task 5: minor (deferred): ui.click ignores button/modifiers (right-click acts as left) — answer unavailable
+- Task 5: minor (deferred): handler panics not caught as internal; socket left behind on panic
+- Task 5: minor (deferred): default target = front document not key window; windows order front-first only
+- Task 5: minor (deferred): frame top-left origin, visible always true (disclosed)
+- Task 5: minor (deferred): failed-alert detection compares ids only (unrelated alert cleared → false 'failed')
+- Task 5: minor (deferred): no test for calls queued behind app.quit in the same tick
+- Task 5: minor (deferred): on_app_quit borrow-busy fallback leaks server/socket
+- Task 6: minor (deferred): Info.plist scan not comment-aware (theoretical); e2e.rs has the same umask-002 temp-home bug
+- Final: fix wave I1 ADDRESSED (re-review Approved); minor (deferred): Save As from the close prompt with Replace untested (shares finish_save_as)
