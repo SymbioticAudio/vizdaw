@@ -190,3 +190,62 @@ Port from `crates/vizctl/tests/e2e.rs`, keeping every assertion that does not ne
 - [ ] **Step 3: Run on Linux (controller, over SSH)** with the slice 1 environment (XWayland `DISPLAY=:0`, the `XAUTHORITY` file, a 0700 temp home) → 4 passed. CI already runs `e2e_gpui` under xvfb.
 - [ ] **Step 4: Tick the parity checklist** rows for `edit.undo`, `edit.redo` and the six `track.*` IDs on both platforms ("S2"), and the three e2e rows.
 - [ ] **Step 5: Commit**: `git commit -m "e2e: tracks, dirty close and quit refusal against the GPUI app"`.
+
+---
+
+## Outcome (2026-11-22)
+
+All 7 tasks complete; final whole-branch review "with fixes", one fix wave (status line clear, scrolling header column, open renames committed before a second rename, close, save and quit), re-review Approved. Evidence: workspace tests 4004 passed (macOS); app+GPUI tests 127 passed (macOS, Linux); GPUI e2e 4/4 on Linux XWayland, 3/4 on macOS with the screen locked (the tracks e2e needs an unlocked run: GPUI draws no frames while locked and the element registry is filled at draw time).
+
+### Rulings
+
+- Pre-flight: Ruling: T4 adds `DocumentWindow::begin_rename(lane)` as a no-op stub (doc comment "Task 5 fills this") that the RunCommand handler calls on dialog_required "Rename Track"; T5 fills it — plan order T4 before T5 — cost if wrong: none, one stub.
+- Pre-flight: Ruling: M/S/R are not separate registry elements (Swift parity: the e2e suite counts header children; spec §10 says same tree) and override the global "every clickable control" line for those three — cost if wrong: a later e2e that wants to click M directly needs them added.
+- Task 2: Ruling: added DocSession::set_lane_mute (brief omitted it; Swift toggleMute uses it) — cost if wrong: one extra trait method
+- Task 2: Ruling: accept DocumentModel::select(Option<u64>) (tests need a way to choose the shown sequence; Swift has selectedSeq setter) and error titles "Flags Failed"/"Selection Failed" (Swift has none for these paths) — cost if wrong: string changes
+- Task 3: Ruling: recording and open-drag refusals skipped (no recording/gesture surface in the GPUI app yet) — cost if wrong: track edits during recording reach the core, which refuses some itself
+- Task 4: Ruling: accepted out-of-list edits registry.rs overlay inset fix and AppState.keymap (needed; nothing depends on old bounds) — cost if wrong: none
+- Task 5: Ruling: accepted thread-local channel-click flag, core-ffi as a normal dep of vizdaw-gpui, and the added status line — cost if wrong: refactor later
+- Task 6: Ruling: state.get editor answers the {doc,status,gesture:null} subset (editor slices add the rest); file.new with rate/depth answers unavailable (format panel comes later) — cost if wrong: e2e using them fail with a clear unavailable
+- Task 7: Ruling: subagent writes and compiles the e2e tests; controller runs them on Mac and Linux (subagents have no GUI) — cost if wrong: none
+- Task 7: Ruling: Mac run of gpui_new_project_tracks_over_the_channel failed only because the Mac screen is locked (CGSSessionScreenIsLocked=Yes): GPUI draws no frames, so the draw-time element registry (ui.tree) goes stale; the other 3 pass on Mac; all 4 pass on Linux XWayland (24 s). Ticked Mac with that note — cost if wrong: a real Mac-only header bug hides until an unlocked run
+- Final: Ruling: re-graded Minor 3 (second rename discards the first) and Minor 4 (Close/Save drop an open rename) to Important — a typed name is lost without a prompt (review-pace: data loss) — cost if wrong: a small extra fix
+- Final: Ruling: declined-to-judge items (Linux close-button delivery, macOS double dispatch of RunCommand keys, second Quit prompt over a sheet) go to the owner's manual checks; ⌘Z in rename = document undo stands (Swift parity) — cost if wrong: a double-run key or missed close prompt found only by hand
+
+### Deferred minors
+
+- Task 2: minor (deferred): last_idle entries not removed on close (app_state.rs close_document/close_all)
+- Task 2: minor (deferred): idle runs at the transport poll rate (250 ms stopped) vs Swift ~60 Hz — plugin gestures lag up to 250 ms
+- Task 2: minor (deferred): no test for a selection naming a lane gone from lanes()
+- Task 2: minor (deferred): FakeSession edit/set_lane_mute return scripted errors before recording the call
+- Task 2: minor (deferred): undo/redo re-read selection only on success (Swift always)
+- Task 3: minor (deferred): disable test asserts only Delete, not Duplicate/Rename
+- Task 3: minor (deferred): hostile test lacks "There is no sequence 99." text and seq 99 on delete/rename; blank rename doesn't assert names unchanged
+- Task 3: minor (deferred): perform_from_menu repeats run()'s sequence/lane preconditions (drift risk)
+- Task 4: minor (deferred): Linux in-window bar shows ⌘ glyphs (Chord::text); bindings are Ctrl — needs a per-platform key label
+- Task 4: minor (deferred): macOS disabled items show no key equivalent; their key sets status instead of beeping
+- Task 4: minor (deferred): Window menu empty; Linux bar draws a title with an empty list
+- Task 4: minor (deferred): menu_model rebuilt every front-window render (cheap today)
+- Task 4: minor (deferred): Linux bar has no keyboard navigation
+- Task 5: minor (deferred): header column doesn't scroll — rows past the window and Add Track are clipped (must land with the arrangement canvas slice)
+- Task 5: minor (deferred): click inside open rename field re-selects the row (collapses multi-selection); shift-double-click toggles twice
+- Task 5: minor (deferred): channel click on Add Track with mouse menu open leaves the menu open
+- Task 5: minor (deferred): tests miss secondary-modifier extend, unchanged-name GPUI test; M click position hard-coded
+- Task 5: minor (deferred): app_state.rs doc comments still say there is no status line
+- Task 5: minor (deferred): label omits Swift's ", input opening" and Co-Producer badge (input slice / Co-Producer slice)
+- Task 6: minor (deferred): file_close_never_prompts doesn't assert later state.get document → no_window
+- Task 6: minor (deferred): state.get document alert falls back to app-wide alert (can show another document's background alert)
+- Task 6: minor (deferred): file.new with a stale window number succeeds (Swift: no_window)
+- Task 6: minor (deferred): status cleared before a command that then fails validation
+- Task 7: minor (deferred): no in-code comments on dropped documents_at_least waits / draw-time ui.tree
+- Final: minor (deferred): Linux bar ⌘ glyphs; ui.tree draw-time only (backlog before Co-Producer/e2e rely on hidden windows); Window menu empty; run refetches lanes for unshown seq and swallows error
+- Final: minor (deferred): ui.click on a row scrolled out of the header hit-tests its centre, which can land on the transport bar (e.g. Play)
+- Final: minor (deferred): control file.save/save_as don't commit an open rename (typed text stays in the field)
+- Final: minor (deferred): status Dismiss and alert Dismiss share role+label (ids differ)
+
+### Manual checks for the owner
+
+- Linux: does the title-bar close button ask about unsaved changes (X11 and Wayland)?
+- macOS: does a Track menu shortcut (e.g. the New Audio Track key) run once, not twice?
+- macOS: Quit while a save-changes sheet is already showing.
+- macOS: re-run `gpui_new_project_tracks_over_the_channel` with the screen unlocked, then tick its parity row.
