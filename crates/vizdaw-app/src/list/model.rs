@@ -4,7 +4,7 @@
 //! they read and edit the document. Rows are built from the document's
 //! cached reads, once per snapshot version, target, filter and columns.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -480,10 +480,11 @@ impl DocumentModel {
     /// changes stay, and the status says so.
     pub fn list_delete(&mut self, ids: &[String]) {
         let Some(t) = self.list_target() else { return };
+        let set: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let chosen: Vec<ListRow> = self
             .list_rows()
             .iter()
-            .filter(|r| ids.iter().any(|id| id == r.id()))
+            .filter(|r| set.contains(r.id()))
             .cloned()
             .collect();
         let first = chosen.iter().find_map(|r| match r.source {
@@ -506,10 +507,8 @@ impl DocumentModel {
     /// tracks); the time range goes.
     pub fn list_select(&mut self, ids: &[String]) {
         let rows = self.list_rows();
-        let chosen: Vec<&ListRow> = rows
-            .iter()
-            .filter(|r| ids.iter().any(|id| id == r.id()))
-            .collect();
+        let set: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let chosen: Vec<&ListRow> = rows.iter().filter(|r| set.contains(r.id())).collect();
         let mut lanes: Vec<LaneRef> = vec![];
         for r in &chosen {
             if let Some(l) = r.lane()

@@ -457,12 +457,89 @@ fn a_focused_list_keeps_space_but_not_return() {
 #[test]
 fn hostile_commits_leave_at_most_one_edit() {
     let (f, mut m) = list_model(lane_target());
-    for text in ["5..", "99999999999", "H9", "", "-", "1.1.99999"] {
+    for text in [
+        "5..",
+        "99999999999",
+        "H9",
+        "",
+        "-",
+        "1.1.99999",
+        "\u{d7}",
+        "::",
+    ] {
         for col in ListColumn::ALL {
+            let before = f.edits().len();
             m.list_commit(text, "e1", col);
+            assert!(f.edits().len() <= before + 1, "{text:?} in {col:?}");
             m.list_set_cursor(None);
         }
     }
-    // Each commit is at most one plain edit; nothing went as a batch.
-    assert!(f.edit_alls().is_empty());
+    assert!(f.edit_alls().is_empty(), "a commit is never a batch");
+    let refused = [
+        (
+            "H9",
+            ListColumn::Data1,
+            "\"H9\" is not a pitch: type a name such as C4 or a number 0 to 127.",
+        ),
+        (
+            "99999999999",
+            ListColumn::Position,
+            "\"99999999999\" is not a position: type a bar, bar.beat or bar.beat.unit.",
+        ),
+        (
+            "1.1.99999",
+            ListColumn::Position,
+            "\"1.1.99999\" is not a position: type a bar, bar.beat or bar.beat.unit.",
+        ),
+    ];
+    for (text, col, status) in refused {
+        m.set_status(None);
+        let before = f.edits().len();
+        assert!(!m.list_commit(text, "e1", col), "{text}");
+        assert_eq!(f.edits().len(), before, "{text}: nothing sent");
+        assert_eq!(m.status(), Some(status));
+    }
+    // "5.." names the bar only: e2 at 1.2.0 goes to 5.2.0.
+    let before = f.edits().len();
+    assert!(m.list_commit("5..", "e2", ListColumn::Position));
+    assert_eq!(f.edits().len(), before + 1);
+    assert_eq!(
+        f.edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Move {
+                events: vec![2],
+                delta: 4 * 61_440,
+                to_lane: None
+            }
+        })
+    );
+}
+
+#[test]
+fn selecting_and_deleting_many_rows_of_a_long_list_is_quick() {
+    let f = Arc::new(roll_fake());
+    let events: Vec<EventRow> = (0..100_000)
+        .map(|i| support::note_row(i + 1, i as i64 * 240, 60))
+        .collect();
+    f.set_events(3, 31, events);
+    let mut m = DocumentModel::new(f.clone()).unwrap();
+    m.open_detail(lane_target(), Some(DetailEditorKind::List));
+    assert_eq!(m.list_rows().len(), 100_000);
+    let chosen: Vec<String> = (0..10_000).map(|i| format!("e{}", i * 10 + 1)).collect();
+    let start = std::time::Instant::now();
+    m.list_select(&chosen);
+    assert_eq!(m.selection().events.len(), 10_000);
+    m.list_delete(&chosen);
+    let elapsed = start.elapsed();
+    let Some(EditCommand::Event {
+        edit: EventEdit::Delete { events },
+    }) = f.edits().last().cloned()
+    else {
+        panic!("no delete");
+    };
+    assert_eq!(events.len(), 10_000);
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "debug build bound: {elapsed:?}"
+    );
 }
