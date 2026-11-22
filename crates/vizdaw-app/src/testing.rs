@@ -322,6 +322,11 @@ impl FakeSession {
         self.st().calls.clone()
     }
 
+    /// Forgets the calls so far.
+    pub fn clear_calls(&self) {
+        self.st().calls.clear();
+    }
+
     pub fn count(&self, name: &str) -> usize {
         self.calls().iter().filter(|c| c.as_str() == name).count()
     }
@@ -778,7 +783,11 @@ impl DocSession for FakeSession {
     }
     fn edit_gesture(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError> {
         let mut s = self.st();
-        Self::scripted(&mut s, "edit_gesture")?;
+        if let Err(e) = Self::scripted(&mut s, "edit_gesture") {
+            // Logged: a drag's refused or busy move is part of its story.
+            s.calls.push("edit_gesture refused".into());
+            return Err(e);
+        }
         if s.open_edit.is_none() {
             return Err(VizError::Model {
                 message: "no edit is open".into(),

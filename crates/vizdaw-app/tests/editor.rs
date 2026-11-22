@@ -215,7 +215,7 @@ fn edits_and_steps_wait_for_an_open_drag() {
     let f = Arc::new(editor_fake());
     let mut m = model(&f);
     assert!(!m.gesture_open());
-    m.force_gesture_open(true);
+    assert!(m.begin_gesture("Move Block", vec![(3, 31)]));
     assert!(!m.edit(delete(&[1])));
     assert_eq!(m.status(), Some("Finish the drag first."));
     m.set_status(None);
@@ -229,9 +229,9 @@ fn edits_and_steps_wait_for_an_open_drag() {
         s.undo_label = Some("Delete Events".into());
         s.redo_label = Some("Delete Events".into());
     });
-    m.force_gesture_open(false);
+    m.end_gesture(None);
     assert!(m.edit(delete(&[1])));
-    m.force_gesture_open(true);
+    assert!(m.begin_gesture("Move Block", vec![(3, 31)]));
     for id in ["edit.undo", "edit.redo"] {
         assert!(!commands::enabled(id, &m), "{id}");
         let e = commands::run(id, &[], &mut m).unwrap_err();
@@ -245,7 +245,7 @@ fn edits_and_steps_wait_for_an_open_drag() {
     m.undo();
     m.redo();
     assert_eq!(f.count("undo") + f.count("redo"), 0);
-    m.force_gesture_open(false);
+    m.end_gesture(None);
     assert!(commands::enabled("edit.undo", &m));
     commands::run("edit.undo", &[], &mut m).unwrap();
     assert_eq!(f.count("undo"), 1);
@@ -255,7 +255,7 @@ fn edits_and_steps_wait_for_an_open_drag() {
 fn nothing_to_undo_is_said_before_the_drag() {
     let f = Arc::new(editor_fake());
     let mut m = model(&f);
-    m.force_gesture_open(true);
+    assert!(m.begin_gesture("Move Block", vec![(3, 31)]));
     let e = commands::run("edit.undo", &[], &mut m).unwrap_err();
     assert_eq!(e.message, "Nothing to undo.");
 }

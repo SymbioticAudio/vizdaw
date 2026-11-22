@@ -1,6 +1,7 @@
 //! One open document (Swift: `DocumentModel`, the title, save and undo
 //! parts; transport comes with Task 3).
 
+mod block_drag;
 mod editing;
 
 use std::collections::{BTreeSet, HashSet};
@@ -28,7 +29,7 @@ pub enum SaveAction {
 }
 
 pub struct DocumentModel {
-    session: Arc<dyn DocSession>,
+    pub(crate) session: Arc<dyn DocSession>,
     snapshot: DocSnapshot,
     /// The error showing, if any.
     pub alert: Option<AlertItem>,
@@ -40,9 +41,9 @@ pub struct DocumentModel {
     selection: SelectionRow,
     /// The selection's events, for `is_selected` per block per frame.
     selected_events: HashSet<u64>,
-    status: Option<String>,
+    pub(crate) status: Option<String>,
     /// Tool, saved layout, open drag.
-    editor: EditorModel,
+    pub(crate) editor: EditorModel,
     looping: bool,
     /// The fields being typed in (Swift: `EditorModel.textEditors`); the
     /// bare transport keys wait while any is open.
@@ -114,6 +115,7 @@ impl DocumentModel {
         self.snapshot = s;
         self.reset_infos();
         self.refresh_lanes();
+        self.after_sync();
     }
 
     fn reset_infos(&mut self) {
@@ -133,15 +135,20 @@ impl DocumentModel {
             .as_ref()
     }
 
-    /// One plugin-timer tick. True when a new snapshot arrived.
+    /// One plugin-timer tick: a drag's mouse-up or Escape that met Busy is
+    /// retried first. True when a new snapshot arrived or a drag was
+    /// pending.
     pub fn idle(&mut self) -> bool {
-        match self.session.idle() {
+        let pending = self.gesture_pending();
+        self.tick();
+        let arrived = match self.session.idle() {
             Ok(Some(s)) => {
                 self.apply(s);
                 true
             }
             _ => false,
-        }
+        };
+        pending || arrived
     }
 
     /// The session's live answer; the snapshot's flag can lag. A session
@@ -280,7 +287,7 @@ impl DocumentModel {
     }
 
     /// Reads the selection back (after edits, undo and redo).
-    fn refresh_selection(&mut self) {
+    pub(crate) fn refresh_selection(&mut self) {
         if let Ok(s) = self.session.selection() {
             self.hold(s);
         }

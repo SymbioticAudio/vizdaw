@@ -5,10 +5,12 @@
 //! `DocumentModel`'s (`document/editing.rs`).
 
 mod detail;
+mod gesture;
 mod layout;
 mod snap;
 
 pub use detail::{DetailEditorKind, DetailState, EditorTarget, ListFilter};
+pub use gesture::{Gesture, LANE_REMOVED};
 pub use layout::{
     BlockRuleSetting, EditorLayout, LightMode, MainView, PaneSetup, PaneSide, PaneState, PaneView,
     ViewLayouts,
@@ -55,8 +57,8 @@ impl Tool {
 pub struct EditorModel {
     pub tool: Tool,
     layout: EditorLayout,
-    /// A drag holds an open edit (the gesture machine sets it).
-    pub(crate) gesture_open: bool,
+    /// The drag holding an open edit, if any.
+    pub(crate) gesture: Option<Gesture>,
     /// The `ui.json` last read or stored: what a save merges into when the
     /// session cannot answer.
     pub(crate) ui_json: Option<String>,
@@ -68,7 +70,7 @@ impl EditorModel {
         EditorModel {
             tool: Tool::Arrow,
             layout: EditorLayout::decode(json),
-            gesture_open: false,
+            gesture: None,
             ui_json: json.map(String::from),
         }
     }
@@ -81,8 +83,13 @@ impl EditorModel {
         change(&mut self.layout);
     }
 
+    /// A drag holds an open edit (until its end or abort went through).
     pub fn gesture_open(&self) -> bool {
-        self.gesture_open
+        self.gesture.is_some()
+    }
+
+    pub fn gesture(&self) -> Option<&Gesture> {
+        self.gesture.as_ref()
     }
 
     /// Shows `target` in the detail pane in `kind`, else the last-used

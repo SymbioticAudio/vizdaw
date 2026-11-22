@@ -10,6 +10,12 @@ use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
 use vizdaw_ffi::events::{EventKindRow, EventRow, MeterEntryRow};
 use vizdaw_ffi::selection::TickRange;
 
+mod block_drag;
+mod tool_machine;
+
+pub use block_drag::{ArrangementFrame, ArrangementHit, BlockDrag, BlockDragState, hit_test};
+pub use tool_machine::{MachineEvent, Modifiers, Phase, ToolMachine};
+
 /// Ticks per quarter note.
 pub const PPQ: i64 = 15_360;
 
@@ -246,6 +252,13 @@ impl TimeAxis {
 
 // MARK: Geometry
 
+/// A point in canvas points (y = 0 is the top of the first row).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// A rectangle in canvas points (y = 0 is the top of the first row).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
@@ -262,6 +275,12 @@ impl Rect {
 
     pub fn max_y(&self) -> f32 {
         self.y + self.height
+    }
+
+    /// `p` is inside: the left and top edges count, the right and bottom
+    /// do not (as `CGRect.contains`).
+    pub fn contains(&self, p: Point) -> bool {
+        p.x >= self.x && p.x < self.max_x() && p.y >= self.y && p.y < self.max_y()
     }
 
     pub fn intersects(&self, o: &Rect) -> bool {

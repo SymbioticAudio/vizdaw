@@ -42,14 +42,8 @@ impl DocumentModel {
         self.editor.gesture_open()
     }
 
-    /// Tests: marks a drag open or closed (the gesture machine's flag).
-    #[doc(hidden)]
-    pub fn force_gesture_open(&mut self, open: bool) {
-        self.editor.gesture_open = open;
-    }
-
     /// A failure of a user action, in the status line.
-    fn report(&mut self, e: &VizError) {
+    pub(crate) fn report(&mut self, e: &VizError) {
         self.status = Some(error_message(e));
     }
 
