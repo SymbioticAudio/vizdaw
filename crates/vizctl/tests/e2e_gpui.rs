@@ -14,6 +14,7 @@
 
 use core_control::client::Client;
 use serde_json::{Value, json};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use vizctl::launch::{LaunchOptions, Launched, launch, log_tail};
@@ -98,6 +99,9 @@ fn gpui_demo_plays_saves_and_reopens() {
         .prefix("vzg")
         .tempdir_in("/tmp")
         .unwrap();
+    // The temp dir takes the process umask (0775 under Ubuntu's 002);
+    // launch wants a home nobody else can write to.
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let saved = home.path().join("t.vizdaw");
 
     let mut app = App::start(home.path(), true);
