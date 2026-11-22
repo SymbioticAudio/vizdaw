@@ -184,7 +184,8 @@ impl Arrangement {
         self.division_open
     }
 
-    fn pressing(&self) -> bool {
+    /// A press below the ruler is down (its release not seen yet).
+    pub(crate) fn pressing(&self) -> bool {
         !matches!(self.machine.phase(), Phase::Idle)
     }
 
@@ -1456,9 +1457,10 @@ fn delete(block: &BlockRow) -> EditCommand {
     }
 }
 
-/// Opens the detail editor on `block` of track `lane`: in `kind`, else
-/// the last-used editor. The List is the only one this slice has, so a
-/// last-used editor that is not here yet opens the List.
+/// Opens the detail editor on `block` of track `lane`: in `kind` (which
+/// becomes the last-used editor), else in the last-used editor. The List
+/// is the only one this slice has, so a last-used editor that is not here
+/// yet opens the List and stays the saved last-used one.
 fn open_block_detail(
     d: &mut DocumentModel,
     lane: u64,
@@ -1466,16 +1468,18 @@ fn open_block_detail(
     kind: Option<DetailEditorKind>,
 ) {
     let Some(seq) = d.selected_seq() else { return };
-    let kind = kind.or_else(|| {
-        (d.layout().last_kind != DetailEditorKind::List).then_some(DetailEditorKind::List)
-    });
-    d.open_detail(
-        EditorTarget::Block {
-            seq,
-            lane,
-            start: block.start,
-            end: block.end,
-        },
-        kind,
-    );
+    let last = d.layout().last_kind;
+    let target = EditorTarget::Block {
+        seq,
+        lane,
+        start: block.start,
+        end: block.end,
+    };
+    match kind {
+        Some(k) => d.open_detail(target, Some(k)),
+        None => {
+            d.open_detail(target, Some(DetailEditorKind::List));
+            d.update_layout(|l| l.last_kind = last);
+        }
+    }
 }

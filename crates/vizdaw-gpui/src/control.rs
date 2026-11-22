@@ -51,7 +51,9 @@ use serde_json::{Value, json};
 use vizdaw_app::commands::{self, APP_COMMANDS, DOCUMENT_COMMANDS, FieldFocus, TRANSPORT_COMMANDS};
 use vizdaw_app::transport_fields::TransportField;
 use vizdaw_app::{DocId, SaveAction};
-use vizdaw_ffi::control::{AlertRow, ControlResult, result_json};
+use vizdaw_ffi::control::{
+    AlertRow, ControlResult, DetailRow, EditorStateRow, TransportMarksRow, result_json,
+};
 
 use crate::app_state::{AppState, WindowEntry};
 use crate::menus::ROUTED_EDITOR_COMMANDS;
@@ -713,10 +715,11 @@ fn document_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
     }))
 }
 
-/// `state.get editor`, in the Swift fields this slice has: the detail
-/// (`DetailRow`-shaped), no torn-off windows, the tool, the grid, no exact
-/// mode, whether a drag is open, and the status. `step` and the transport
-/// marks come with their slices.
+/// `state.get editor`, in the Swift shape (`ControlResult::Editor`): the
+/// detail, no torn-off windows, the tool, the grid, no exact mode, whether
+/// a drag is open and the status. Step entry (`step: null`) and the
+/// transport marks (no locators, punch points 0, punch and overdub off)
+/// are neutral until their slices.
 fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
     let s = AppState::global(cx);
     let s = s.read(cx);
@@ -727,21 +730,35 @@ fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
             vizdaw_app::editor::EditorTarget::Block { start, end, .. } => (Some(start), Some(end)),
             _ => (None, None),
         };
-        json!({
-            "kind": detail.kind.name(), "seq": t.seq(), "lane": t.lane(),
-            "start": start, "end": end,
-        })
+        DetailRow {
+            kind: detail.kind.name().to_owned(),
+            seq: t.seq(),
+            lane: t.lane(),
+            start,
+            end,
+        }
     });
     let snap = d.layout().snap;
-    Ok(json!({
-        "doc": doc_id(doc),
-        "detail": detail,
-        "windows": [],
-        "tool": d.tool().name(),
-        "snap": { "enabled": snap.enabled, "division": snap.division.name() },
-        "exact_mode": false,
-        "gesture": d.gesture_open(),
-        "status": d.status(),
+    Ok(result_json(&ControlResult::Editor {
+        doc: doc_id(doc),
+        editor: EditorStateRow {
+            detail,
+            windows: vec![],
+            tool: d.tool().name().to_owned(),
+            snap_enabled: snap.enabled,
+            snap_division: snap.division.name().to_owned(),
+            exact_mode: false,
+            gesture: d.gesture_open(),
+            status: d.status().map(String::from),
+            step: None,
+            marks: TransportMarksRow {
+                locators: vec![],
+                punch_in: 0,
+                punch_out: 0,
+                punch: false,
+                overdub: false,
+            },
+        },
     }))
 }
 

@@ -400,8 +400,31 @@ fn state_get_document_matches_the_swift_fields(cx: &mut TestAppContext) {
         json!({
             "doc": opened["doc"], "detail": null, "windows": [], "tool": "arrow",
             "snap": {"enabled": true, "division": "quarter"}, "exact_mode": false,
-            "gesture": false, "status": null,
+            "gesture": false, "status": null, "step": null,
+            "transport": {
+                "locators": [], "punch_in": 0, "punch_out": 0, "punch": false,
+                "overdub": false,
+            },
         })
+    );
+    // Swift's keys, no more and no fewer.
+    let keys: Vec<&str> = e.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut keys = keys;
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "detail",
+            "doc",
+            "exact_mode",
+            "gesture",
+            "snap",
+            "status",
+            "step",
+            "tool",
+            "transport",
+            "windows"
+        ]
     );
 }
 

@@ -1198,3 +1198,86 @@ fn a_block_drag_near_the_edge_scrolls_and_the_block_follows(cx: &mut TestAppCont
         .unwrap();
     assert_eq!(after, again);
 }
+
+// MARK: Review round 1
+
+fn busy() -> vizdaw_ffi::VizError {
+    vizdaw_ffi::VizError::Busy {
+        message: "busy".into(),
+    }
+}
+
+/// Drags the Chords block and releases it with the final `end_edit`
+/// meeting Busy: the drag waits for the timer's tick.
+fn release_on_busy(s: &mut Setup) {
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.fake.fail_next("end_edit", busy());
+    s.release_with((300., ON_CHORDS.1), Modifiers::none());
+    assert!(s.model(|d| d.gesture().is_some_and(|g| g.finishing)));
+}
+
+#[gpui::test]
+fn a_released_drag_pending_on_busy_survives_deactivation(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    release_on_busy(&mut s);
+    s.cx.deactivate_window();
+    s.cx.run_until_parked();
+    assert!(
+        !s.fake.calls().iter().any(|c| c == "abort_edit"),
+        "{:?}",
+        s.fake.calls()
+    );
+    let doc = s.doc();
+    s.app.update(&mut s.cx, |a, _| {
+        a.store.document_mut(doc).unwrap().tick();
+    });
+    assert!(!s.model(|d| d.gesture_open()));
+    assert_eq!(s.undo_label().as_deref(), Some("Move Block"));
+}
+
+#[gpui::test]
+fn deactivation_mid_drag_cancels_it(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.fake.clear_calls();
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.cx.deactivate_window();
+    s.cx.run_until_parked();
+    assert!(!s.model(|d| d.gesture_open()));
+    assert_eq!(s.drag_calls().last().unwrap(), "abort_edit");
+}
+
+#[gpui::test]
+fn escape_aborts_a_released_drag_pending_on_busy(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_blocks());
+    s.fake.clear_calls();
+    release_on_busy(&mut s);
+    s.keys("escape");
+    assert!(!s.model(|d| d.gesture_open()));
+    assert_eq!(s.drag_calls().last().unwrap(), "abort_edit");
+    assert!(!s.drag_calls().iter().any(|c| c == "end_edit"));
+    assert_eq!(s.undo_label(), None);
+}
+
+#[gpui::test]
+fn a_double_click_keeps_the_saved_last_editor(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    fake.set_layout(Some(r#"{"lastKind":"pianoRoll"}"#));
+    let mut s = setup(cx, fake);
+    s.double_click(ON_CHORDS);
+    assert_eq!(
+        s.model(|d| d.layout().detail.as_ref().map(|d| d.kind)),
+        Some(DetailEditorKind::List)
+    );
+    assert_eq!(
+        s.model(|d| d.layout().last_kind),
+        DetailEditorKind::PianoRoll
+    );
+    let path = std::env::temp_dir().join("vizdaw-last-kind.vizdaw");
+    s.channel_ok(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": path.to_string_lossy()}}),
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&s.fake.layout().expect("a stored layout")).unwrap();
+    assert_eq!(saved["lastKind"], "pianoRoll");
+}

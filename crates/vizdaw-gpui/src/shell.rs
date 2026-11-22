@@ -143,7 +143,12 @@ impl DocumentWindow {
                     this.cancel_field(window, cx);
                     this.end_shuttle(cx);
                     this.cancel_ruler_drag(cx);
-                    this.cancel_block_drag(cx);
+                    // A press whose release may never come is dropped; a
+                    // released drag whose final edit waits on Busy is left
+                    // to the timer's tick (Swift never cancels here).
+                    if this.arrangement.pressing() {
+                        this.cancel_block_drag(cx);
+                    }
                 }
             }),
         ];
