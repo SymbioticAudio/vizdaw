@@ -7,6 +7,7 @@ pub mod menus;
 pub mod registry;
 pub mod shell;
 pub mod text_input;
+pub mod track_headers;
 pub mod transport_bar;
 
 use std::path::Path;

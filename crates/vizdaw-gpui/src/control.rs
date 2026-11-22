@@ -18,7 +18,7 @@
 //! (`cx.defer`); the server is stopped while quitting so the reply is
 //! written before the process goes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -39,6 +39,34 @@ use vizdaw_app::{DocId, SaveAction};
 use crate::app_state::{AppState, WindowEntry};
 use crate::menus::{PlayStop, StopAndReturn};
 use crate::shell::DocumentWindow;
+
+thread_local! {
+    static CHANNEL_CLICK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True while a `ui.click` from the control channel is being delivered.
+/// A control whose mouse click opens a menu (which would track modally in
+/// the app the channel drives) does something else for this one: the
+/// Add Track row sets the status, a track header's row toggles mute.
+pub fn is_channel_click() -> bool {
+    CHANNEL_CLICK.with(Cell::get)
+}
+
+/// Marks a channel click for its life; cleared even if a handler panics.
+struct ChannelClick;
+
+impl ChannelClick {
+    fn begin() -> Self {
+        CHANNEL_CLICK.with(|c| c.set(true));
+        ChannelClick
+    }
+}
+
+impl Drop for ChannelClick {
+    fn drop(&mut self) {
+        CHANNEL_CLICK.with(|c| c.set(false));
+    }
+}
 
 /// The most calls one pump tick handles.
 pub const MAX_CALLS_PER_TICK: usize = 16;
@@ -362,7 +390,8 @@ fn windows_state(cx: &mut App) -> Value {
 
 /// `ui.click {element}`: a mouse down and up at the element's centre,
 /// dispatched through the window's hit-testing as a user's click is
-/// (left button, no modifiers this slice).
+/// (left button, no modifiers this slice). Handlers see
+/// [`is_channel_click`] while it is delivered.
 fn click(entry: &WindowEntry, id: &str, count: u32, cx: &mut App) -> Result<Value, ControlError> {
     let at = entry
         .handle
@@ -377,6 +406,7 @@ fn click(entry: &WindowEntry, id: &str, count: u32, cx: &mut App) -> Result<Valu
     let count = count.max(1) as usize;
     // Through the window, not its view: the click's handlers update the
     // view, which a view update would hold.
+    let _channel = ChannelClick::begin();
     any.update(cx, |_, window, cx| {
         window.dispatch_event(
             PlatformInput::MouseDown(MouseDownEvent {

@@ -142,6 +142,20 @@ impl RegistryScope {
         }
     }
 
+    /// An invisible overlay that records this container itself (a
+    /// `group`, say) with its bounds; its controls are its children in
+    /// `ui.tree` paths. Add it as a child of the container, which must be
+    /// `.relative()`. It takes no index.
+    pub fn this(&self, role: &str, label: &str, enabled: bool) -> impl IntoElement {
+        overlay(
+            self.registry.clone(),
+            self.path.clone(),
+            role,
+            label,
+            enabled,
+        )
+    }
+
     /// An invisible overlay that records the next child control with its
     /// parent's bounds when drawn. Add it as a child of the control, which
     /// must be `.relative()`. It is pinned to the parent's corner: an
@@ -149,20 +163,29 @@ impl RegistryScope {
     /// text in a block container).
     pub fn control(&mut self, role: &str, label: &str, enabled: bool) -> impl IntoElement {
         let path = self.take_index();
-        let registry = self.registry.clone();
-        let role = role.to_owned();
-        let label = label.to_owned();
-        canvas(
-            move |bounds, _, _| {
-                registry
-                    .borrow_mut()
-                    .record(&path, &role, &label, bounds, enabled)
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
+        overlay(self.registry.clone(), path, role, label, enabled)
     }
+}
+
+fn overlay(
+    registry: SharedRegistry,
+    path: Vec<u32>,
+    role: &str,
+    label: &str,
+    enabled: bool,
+) -> impl IntoElement + use<> {
+    let role = role.to_owned();
+    let label = label.to_owned();
+    canvas(
+        move |bounds, _, _| {
+            registry
+                .borrow_mut()
+                .record(&path, &role, &label, bounds, enabled)
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }

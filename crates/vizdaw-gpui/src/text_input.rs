@@ -2,8 +2,9 @@
 //! pinned revision (see Cargo.toml).
 //! Copyright Zed Industries, Inc.; licensed under the Apache License,
 //! Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
-//! Changes: public `new`, `text` and `bindings`; the bindings are scoped to
-//! the `TextInput` key context. Slice 2 replaces it with a full field (IME
+//! Changes: public `new`, `text`, `with_text` and `bindings`; the bindings
+//! are scoped to the `TextInput` key context; Enter and Escape emit
+//! [`TextInputEvent`]s. Slice 2 replaces it with a full field (IME
 //! edge cases, undo, number fields).
 
 use std::ops::Range;
@@ -33,8 +34,21 @@ actions!(
         Paste,
         Cut,
         Copy,
+        Confirm,
+        Cancel,
     ]
 );
+
+/// What a field tells its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextInputEvent {
+    /// Enter.
+    Confirm,
+    /// Escape.
+    Cancel,
+}
+
+impl gpui::EventEmitter<TextInputEvent> for TextInput {}
 
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -76,6 +90,14 @@ impl TextInput {
     fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, window, cx);
         self.select_to(self.content.len(), window, cx)
+    }
+
+    fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Confirm);
+    }
+
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Cancel);
     }
 
     fn home(&mut self, _: &Home, window: &mut Window, cx: &mut Context<Self>) {
@@ -656,6 +678,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::cancel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -698,6 +722,13 @@ impl TextInput {
     pub fn text(&self) -> &str {
         &self.content
     }
+
+    /// The field holding `text`, all of it selected (typing replaces it).
+    pub fn with_text(mut self, text: &str) -> Self {
+        self.content = text.to_owned().into();
+        self.selected_range = 0..self.content.len();
+        self
+    }
 }
 
 /// The field's key bindings, active only while a field has focus.
@@ -716,6 +747,8 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(crate::menus::secondary!("x"), Cut, c),
         KeyBinding::new("home", Home, c),
         KeyBinding::new("end", End, c),
+        KeyBinding::new("enter", Confirm, c),
+        KeyBinding::new("escape", Cancel, c),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, c),
     ]
 }

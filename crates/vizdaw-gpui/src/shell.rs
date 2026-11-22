@@ -1,6 +1,6 @@
 //! The document window: one window per open document, with the menu bar
-//! (off macOS), the alert banner, the transport bar and (for now) an empty
-//! body.
+//! (off macOS), the alert banner, the transport bar, the track header
+//! column beside the (for now empty) arrangement, and the status line.
 
 use std::path::{Path, PathBuf};
 
@@ -13,13 +13,15 @@ use gpui::{
 };
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::commands;
-use vizdaw_app::{DocId, SaveAction, WindowToken};
+use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
+use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::AppState;
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
 use crate::registry::{RegistryScope, SharedRegistry};
-use crate::text_input::TextInput;
+use crate::text_input::{TextInput, TextInputEvent};
+use crate::track_headers::{HeadersState, Rename, TrackHeaders};
 use crate::transport_bar::{self, BarState, colors};
 
 pub struct DocumentWindow {
@@ -36,6 +38,8 @@ pub struct DocumentWindow {
     prompting: bool,
     /// The in-window menu bar, when this window draws one (off macOS).
     menu_bar: Option<MenuBar>,
+    /// The track header column (its rename field, its Add Track menu).
+    track_headers: TrackHeaders,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -100,7 +104,10 @@ impl DocumentWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut subscriptions = vec![
-            cx.observe(&app, |_, _, cx| cx.notify()),
+            cx.observe_in(&app, window, |this, _, window, cx| {
+                this.end_stale_rename(window, cx);
+                cx.notify();
+            }),
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     let (doc, token) = (this.doc, this.token);
@@ -133,6 +140,7 @@ impl DocumentWindow {
             prompting: false,
             menu_bar: cfg!(not(target_os = "macos"))
                 .then(|| MenuBar::new(menus::menu_model(None, &Default::default()))),
+            track_headers: TrackHeaders::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -184,8 +192,9 @@ impl DocumentWindow {
         &self.registry
     }
 
-    /// Adds a text field to the window body. Slice 1 has no panes with
-    /// fields of their own; the shortcut tests use this one.
+    /// Adds a text field to the window body: a test hook for the shortcut
+    /// tests, not part of the window's interface.
+    #[doc(hidden)]
     pub fn add_field(&mut self, placeholder: &str, cx: &mut Context<Self>) -> Entity<TextInput> {
         let field = cx.new(|cx| TextInput::new(placeholder, cx));
         self.fields.push(field.clone());
@@ -241,15 +250,128 @@ impl DocumentWindow {
         cx.notify();
     }
 
-    /// Starts the inline rename of track `lane` in its header. Task 5
-    /// (track headers) fills this in; until then Rename does nothing.
-    pub fn begin_rename(&mut self, lane: u64, _window: &mut Window, _cx: &mut Context<Self>) {
-        let _ = lane;
+    /// The track header column's state.
+    pub fn track_headers(&self) -> &TrackHeaders {
+        &self.track_headers
+    }
+
+    pub(crate) fn track_headers_mut(&mut self) -> &mut TrackHeaders {
+        &mut self.track_headers
+    }
+
+    /// The track whose name is being edited in its header.
+    pub fn renaming(&self) -> Option<u64> {
+        self.track_headers.renaming()
+    }
+
+    fn with_model<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut DocumentModel) -> R,
+    ) -> Option<R> {
+        let doc = self.doc;
+        self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.store.with_document(doc, |d, _| f(d))
+        })
+    }
+
+    /// Track `lane` of the shown sequence, as last fetched.
+    pub(crate) fn lane(&self, lane: u64, cx: &App) -> Option<LaneRow> {
+        let s = self.app.read(cx);
+        let d = s.store.document(self.doc)?;
+        d.lanes().iter().find(|l| l.id == lane).cloned()
+    }
+
+    pub(crate) fn select_track(&mut self, lane: u64, extend: bool, cx: &mut Context<Self>) {
+        self.with_model(cx, |d| d.select_track(lane, extend));
+    }
+
+    /// Sets a header's flags; a track gone since it was drawn (`None`
+    /// everywhere) sends nothing.
+    pub(crate) fn set_flags(
+        &mut self,
+        lane: u64,
+        mute: Option<bool>,
+        solo: Option<bool>,
+        arm: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        if mute.is_none() && solo.is_none() && arm.is_none() {
+            return;
+        }
+        self.with_model(cx, |d| d.set_flags(lane, mute, solo, arm));
+    }
+
+    pub(crate) fn set_status(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.with_model(cx, |d| d.set_status(Some(text.to_owned())));
+    }
+
+    /// Starts the inline rename of track `lane` in its header: a field
+    /// holding the name, focused, the name selected. Enter commits (the
+    /// name trimmed; blank or unchanged sends nothing), Escape cancels,
+    /// focus loss commits. A track not shown does nothing; a rename
+    /// already open is cancelled first.
+    pub fn begin_rename(&mut self, lane: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.lane(lane, cx) else {
+            return;
+        };
+        self.end_rename(false, window, cx);
+        let field = cx.new(|cx| TextInput::new("Name", cx).with_text(&row.name));
+        let focus = field.focus_handle(cx);
+        let subscriptions = vec![
+            cx.subscribe_in(&field, window, |this, _, event, window, cx| {
+                this.end_rename(*event == TextInputEvent::Confirm, window, cx)
+            }),
+            cx.on_blur(&focus, window, |this, window, cx| {
+                this.end_rename(true, window, cx)
+            }),
+        ];
+        window.focus(&focus, cx);
+        self.track_headers.rename = Some(Rename {
+            lane,
+            field,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    /// Ends the open rename, renaming the track if `commit` and it is still
+    /// there. The field goes, and the keyboard returns to the window (so
+    /// the single-key shortcuts work again) unless focus moved elsewhere.
+    fn end_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.track_headers.rename.take() else {
+            return;
+        };
+        let focus = rename.field.focus_handle(cx);
+        let name = rename.field.read(cx).text().to_owned();
+        if commit && self.lane(rename.lane, cx).is_some() {
+            let lane = rename.lane;
+            self.with_model(cx, |d| d.rename_track(lane, &name));
+        }
+        if window.focused(cx).is_none_or(|f| f == focus) {
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// A rename whose track is no longer shown (Undo removed it, the
+    /// lanes were fetched again without it) ends without a command.
+    fn end_stale_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(lane) = self.renaming()
+            && self.lane(lane, cx).is_none()
+        {
+            self.end_rename(false, window, cx);
+        }
     }
 
     /// Escape closes an open menu list (the key goes no further).
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key == "escape" && self.menu_bar.as_mut().is_some_and(MenuBar::close) {
+        if event.keystroke.key != "escape" {
+            return;
+        }
+        let headers = std::mem::take(&mut self.track_headers.add_menu_open);
+        if self.menu_bar.as_mut().is_some_and(MenuBar::close) || headers {
             cx.stop_propagation();
             cx.notify();
         }
@@ -483,8 +605,9 @@ impl Focusable for DocumentWindow {
 impl Render for DocumentWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.doc;
-        let (title, dirty, alert, bar, model, front) = {
+        let (title, dirty, alert, bar, model, front, lanes, selected, status) = {
             let s = self.app.read(cx);
+            let d = s.store.document(doc);
             (
                 s.title(doc).unwrap_or_default(),
                 s.is_dirty(doc),
@@ -495,6 +618,9 @@ impl Render for DocumentWindow {
                 }),
                 menus::menu_model(s.store.document(doc), &s.keymap),
                 s.store.front().is_none_or(|f| f == doc),
+                d.map(|d| d.lanes().to_vec()).unwrap_or_default(),
+                d.map(DocumentModel::selected_lanes).unwrap_or_default(),
+                d.and_then(|d| d.status().map(String::from)),
             )
         };
         if title != self.title {
@@ -541,11 +667,38 @@ impl Render for DocumentWindow {
                 d.child(transport_bar::render(&bar, &mut root.container(), cx))
             })
             .child(
-                div().flex_1().p_3().flex().flex_col().gap_2().children(
-                    self.fields
-                        .iter()
-                        .map(|f| div().w(px(240.)).text_color(rgb(0x000000)).child(f.clone())),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(self.track_headers.render(
+                        &HeadersState {
+                            lanes: &lanes,
+                            selected: &selected,
+                        },
+                        &mut root.container(),
+                        window,
+                        cx,
+                    ))
+                    .child(
+                        div().flex_1().p_3().flex().flex_col().gap_2().children(
+                            self.fields.iter().map(|f| {
+                                div().w(px(240.)).text_color(rgb(0x000000)).child(f.clone())
+                            }),
+                        ),
+                    ),
             )
+            .when_some(status, |d, status| {
+                d.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .bg(rgb(colors::BAR))
+                        .text_xs()
+                        .text_color(rgb(colors::DIM))
+                        .child(status),
+                )
+            })
     }
 }
