@@ -543,3 +543,28 @@ fn selecting_and_deleting_many_rows_of_a_long_list_is_quick() {
         "debug build bound: {elapsed:?}"
     );
 }
+
+/// The table looks rows up by ID every frame: a map, not a scan.
+#[test]
+fn rows_are_found_by_id_without_a_scan() {
+    let f = Arc::new(roll_fake());
+    let events: Vec<EventRow> = (0..100_000)
+        .map(|i| support::note_row(i + 1, i as i64 * 240, 60))
+        .collect();
+    f.set_events(3, 31, events);
+    let mut m = DocumentModel::new(f.clone()).unwrap();
+    m.open_detail(lane_target(), Some(DetailEditorKind::List));
+    assert_eq!(m.list_index("e1"), Some(0));
+    assert_eq!(m.list_index("e100000"), Some(99_999));
+    assert_eq!(m.list_index("e0"), None);
+    assert_eq!(m.list_row("e50000").map(|r| r.tick()), Some(49_999 * 240));
+    let start = std::time::Instant::now();
+    for i in 0..20_000u64 {
+        assert!(m.list_index(&format!("e{}", 100_000 - i)).is_some());
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "debug build bound: {elapsed:?}"
+    );
+}

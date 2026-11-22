@@ -818,3 +818,139 @@ fn gpui_transport_jumps_readouts_and_fields_over_the_channel() {
     no_alert(&mut app);
     app.quit();
 }
+
+/// `state.get selection` of window `w`.
+fn selection(app: &mut App, w: &Value) -> Value {
+    app.call("state.get", json!({"target": "selection", "window": w}))
+}
+
+/// Polls `state.get document` until its undo label is `label`.
+fn wait_for_undo(app: &mut App, w: &Value, label: &str) {
+    wait_for_state(app, w, "document", |d| d["undo"].as_str() == Some(label));
+}
+
+/// Blocks select by element (⇧ adds a second track), a click on empty
+/// canvas by point clears the selection, and a double-click opens the
+/// block in the List.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_blocks_select_and_open_in_the_list() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let (chords, _) = wait_in_tree(&mut app, &w, "the Chords block", |n| {
+        labelled_like(n, "Block on Chords")
+    });
+    let (groove, _) = wait_in_tree(&mut app, &w, "the Groove block", |n| {
+        labelled_like(n, "Block on Groove")
+    });
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].clone();
+    let chords_lane = doc["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == "Chords")
+        .map(|l| l["id"].clone())
+        .expect("a Chords track");
+
+    app.call("ui.click", json!({"window": w, "element": chords}));
+    let s = selection(&mut app, &w);
+    assert!(!s["events"].as_array().unwrap().is_empty(), "{s}");
+    assert_eq!(
+        s["lanes"],
+        json!([{"seq": seq, "lane": chords_lane}]),
+        "{s}"
+    );
+    assert!(s["time_range"].is_object(), "{s}");
+
+    app.call(
+        "ui.click",
+        json!({"window": w, "element": groove, "modifiers": ["shift"]}),
+    );
+    let s = selection(&mut app, &w);
+    assert_eq!(s["lanes"].as_array().unwrap().len(), 2, "{s}");
+
+    // Below the two tracks the canvas is empty.
+    let canvas = wait_for_node(&mut app, &w, "Arrangement");
+    let f = &canvas["frame"];
+    let x = f["x"].as_f64().unwrap() + 30.;
+    let y = f["y"].as_f64().unwrap() + f["height"].as_f64().unwrap() - 10.;
+    app.call("ui.click", json!({"window": w, "point": {"x": x, "y": y}}));
+    let s = selection(&mut app, &w);
+    assert!(s["lanes"].as_array().unwrap().is_empty(), "{s}");
+    assert!(s["events"].as_array().unwrap().is_empty(), "{s}");
+    assert!(s["time_range"].is_null(), "{s}");
+
+    app.call(
+        "ui.click",
+        json!({"window": w, "element": chords, "count": 2}),
+    );
+    app.wait(&w, json!({"condition": "detail_kind", "kind": "list"}));
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    let d = &e["detail"];
+    assert_eq!(d["kind"], "list", "{e}");
+    assert_eq!(d["seq"], seq, "{e}");
+    assert_eq!(d["lane"], chords_lane, "{e}");
+    assert!(
+        d["start"].is_i64() && d["end"].is_i64(),
+        "a block target: {e}"
+    );
+    app.quit();
+}
+
+/// The List over the channel: a note row's Position typed (Return edits
+/// it, Return commits), Insert Event, Delete from the table, Undo, and
+/// Close Detail Editor.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_the_list_edits_inserts_and_deletes() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    app.call("command.run", json!({"id": "editors.list", "window": w}));
+    app.wait(&w, json!({"condition": "detail_kind", "kind": "list"}));
+    wait_for_node(&mut app, &w, "Event List");
+    let (row, label) = wait_in_tree(&mut app, &w, "a note row", |n| labelled_like(n, "Note "));
+    app.call("ui.click", json!({"window": w, "element": row}));
+    let s = selection(&mut app, &w);
+    assert_eq!(s["events"].as_array().unwrap().len(), 1, "{label}: {s}");
+
+    // Return edits the row's Position; Return commits it.
+    app.call("ui.key", json!({"window": w, "key": "return"}));
+    app.call("ui.key", json!({"window": w, "text": "5"}));
+    app.call("ui.key", json!({"window": w, "key": "return"}));
+    wait_for_undo(&mut app, &w, "Move Events");
+
+    app.call(
+        "command.run",
+        json!({"id": "editors.insert_event", "window": w}),
+    );
+    wait_for_undo(&mut app, &w, "Insert Events");
+
+    // The table keeps the keyboard: Delete deletes the inserted row.
+    app.call("ui.key", json!({"window": w, "key": "delete"}));
+    wait_for_undo(&mut app, &w, "Delete Events");
+
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_undo(&mut app, &w, "Insert Events");
+
+    app.call(
+        "command.run",
+        json!({"id": "editors.close_detail", "window": w}),
+    );
+    app.wait(&w, json!({"condition": "detail_kind", "kind": "none"}));
+    app.quit();
+}
+
+/// Ported from the G-snap step of `keys_drive_step_entry_locators_and_bindings`:
+/// the grid starts on quarters, and G turns it off.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_g_toggles_snap() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let e = wait_for_editor(&mut app, &w, "snap on", |e| e["snap"]["enabled"] == true);
+    assert_eq!(e["snap"]["division"], "quarter");
+    app.call("ui.key", json!({"window": w, "key": "g"}));
+    wait_for_editor(&mut app, &w, "snap off", |e| e["snap"]["enabled"] == false);
+    app.quit();
+}

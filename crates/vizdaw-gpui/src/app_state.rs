@@ -96,6 +96,10 @@ impl AppState {
         match built {
             Ok(t) => {
                 self.transports.insert(doc, t);
+                // The app's list columns and default filter.
+                let prefs = self.prefs.list();
+                self.store
+                    .with_document(doc, |d, _| d.set_list_prefs(prefs));
                 true
             }
             Err(e) => {
@@ -120,6 +124,16 @@ impl AppState {
         handle: WindowHandle<DocumentWindow>,
     ) {
         self.windows.push(WindowEntry { doc, token, handle });
+    }
+
+    /// The list preferences changed: every open document takes them.
+    pub fn push_list_prefs(&mut self) {
+        let prefs = self.prefs.list();
+        let docs: Vec<DocId> = self.windows.iter().map(|w| w.doc).collect();
+        for doc in docs {
+            self.store
+                .with_document(doc, |d, _| d.set_list_prefs(prefs.clone()));
+        }
     }
 
     /// `doc`'s window went: the document and its transport go too.

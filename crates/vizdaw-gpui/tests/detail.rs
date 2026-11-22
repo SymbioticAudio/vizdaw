@@ -216,7 +216,7 @@ fn editors_list_opens_the_list_on_the_shown_sequence(cx: &mut TestAppContext) {
     assert_eq!(detail.target, EditorTarget::Sequence { seq: 3 });
     assert_eq!(s.model(|d| d.detail_title()), "Song");
     assert!(s.find("text", "Song").is_some(), "the title shows");
-    assert!(s.find("group", LIST_SLOT).is_some(), "the List slot");
+    assert!(s.find("table", LIST_SLOT).is_some(), "the List slot");
     assert!(s.find("button", CLOSE).is_some());
     assert!(s.find("text", EMPTY).is_none());
     assert_eq!(s.element("button", PANE).value.as_deref(), Some("List"));
@@ -246,7 +246,7 @@ fn a_double_clicked_block_opens_its_range(cx: &mut TestAppContext) {
     s.double_click_canvas(50., RULER + 48. + 24.);
     assert_eq!(s.model(|d| d.detail_title()), "Song \u{203a} Chords, bar 1");
     assert!(s.find("text", "Song \u{203a} Chords, bar 1").is_some());
-    assert!(s.find("group", LIST_SLOT).is_some());
+    assert!(s.find("table", LIST_SLOT).is_some());
     // ⌘2 then keeps the block's target.
     s.keys(&secondary("2"));
     assert_eq!(
@@ -264,12 +264,12 @@ fn a_double_clicked_block_opens_its_range(cx: &mut TestAppContext) {
 fn closing_the_detail_shows_the_empty_state(cx: &mut TestAppContext) {
     let mut s = setup(cx, demo_fake());
     s.run_menu("editors.list");
-    assert!(s.find("group", LIST_SLOT).is_some());
+    assert!(s.find("table", LIST_SLOT).is_some());
     s.click("button", CLOSE);
     assert!(s.model(|d| d.layout().detail.is_none()));
     assert!(s.find("text", EMPTY).is_some());
     assert!(s.find("text", EMPTY_HELP).is_some());
-    assert!(s.find("group", LIST_SLOT).is_none());
+    assert!(s.find("table", LIST_SLOT).is_none());
     assert!(s.find("button", CLOSE).is_none());
     assert!(!s.menu_item("Editors", CLOSE).0);
     // The pane stays shown.
@@ -298,7 +298,7 @@ fn toggle_bottom_hides_and_shows_the_pane(cx: &mut TestAppContext) {
     });
     assert!(!s.model(|d| d.layout().views.arrange.bottom.shown));
     assert!(s.pane().is_none(), "hidden: out of the tree");
-    assert!(s.find("group", LIST_SLOT).is_none());
+    assert!(s.find("table", LIST_SLOT).is_none());
     assert_eq!(s.menu_item("View", PANE), (true, Some(false)));
     // The arrangement takes the room.
     assert_eq!(s.canvas().size.height, canvas.size.height + px(261.));
@@ -308,7 +308,7 @@ fn toggle_bottom_hides_and_shows_the_pane(cx: &mut TestAppContext) {
     s.run_menu("ui.toggle_bottom");
     assert!(s.model(|d| d.layout().views.arrange.bottom.shown));
     assert_eq!(s.pane().map(|p| p.size.height), Some(px(260.)));
-    assert!(s.find("group", LIST_SLOT).is_some());
+    assert!(s.find("table", LIST_SLOT).is_some());
 }
 
 #[gpui::test]

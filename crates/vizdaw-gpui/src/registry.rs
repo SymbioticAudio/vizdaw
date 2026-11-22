@@ -213,6 +213,19 @@ impl RegistryScope {
         )
     }
 
+    /// As [`this`](Self::this), `selected` or not (a table's row).
+    pub fn this_selected(
+        &self,
+        role: &str,
+        label: &str,
+        enabled: bool,
+        selected: bool,
+    ) -> impl IntoElement {
+        let mut node = Node::new(role, label, enabled);
+        node.selected = selected;
+        overlay(self.registry.clone(), self.path.clone(), node)
+    }
+
     /// An invisible overlay that records this container as a scrolling
     /// one: its children show only inside its bounds. Add it as a child of
     /// the clipping (`overflow_hidden`, `.relative()`) element. It takes no

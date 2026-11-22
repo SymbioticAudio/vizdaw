@@ -123,6 +123,7 @@ fn the_menu_model_follows_the_swift_order() {
             Some("editors.list"),
             None,
             Some("editors.close_detail"),
+            Some("editors.insert_event"),
             None,
             Some("editors.snap"),
         ]
@@ -216,8 +217,15 @@ fn single_keys_are_off_in_text_fields() {
     let all = menus::bindings(&Keymap::default());
     let mut checked = 0;
     for b in &all {
-        // A text field's own editing keys act only inside it.
+        // A text field's own editing keys act only inside it, the List
+        // table's only inside the table.
         if b.action().name().starts_with("text_input::") {
+            continue;
+        }
+        if b.action().name().starts_with("list_editor::") {
+            let table =
+                KeyBindingContextPredicate::parse(vizdaw_gpui::list_editor::CONTEXT).unwrap();
+            assert_eq!(b.predicate().as_deref(), Some(&table));
             continue;
         }
         if b.keystrokes().iter().any(|k| k.modifiers().modified()) {

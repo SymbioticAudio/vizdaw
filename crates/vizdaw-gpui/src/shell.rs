@@ -27,6 +27,7 @@ use vizdaw_ffi::snapshot::LaneRow;
 use crate::app_state::AppState;
 use crate::arrangement::{self, Arrangement, ArrangementState, ToolbarState};
 use crate::detail_pane::{self, DetailPaneState};
+use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
 use crate::registry::{RegistryScope, SharedRegistry};
@@ -67,6 +68,8 @@ pub struct DocumentWindow {
     more_open: bool,
     /// The bottom pane's picker menu is open.
     pub(crate) detail_menu_open: bool,
+    /// The List editor's table (its selection, scroll and cell edit).
+    pub(crate) list_editor: ListEditor,
     /// The size of the area the arrangement and the bottom pane share, at
     /// the last draw (zero before the first).
     regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
@@ -174,6 +177,12 @@ impl DocumentWindow {
                 cx.notify();
             });
         }));
+        let list_editor = ListEditor::new(cx);
+        subscriptions.extend(Self::watch_list_focus(
+            list_editor.focus_handle(),
+            window,
+            cx,
+        ));
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |this, cx| this.should_close(window, cx))
@@ -199,6 +208,7 @@ impl DocumentWindow {
             _hold: None,
             more_open: false,
             detail_menu_open: false,
+            list_editor,
             regions: Rc::default(),
             _subscriptions: subscriptions,
         }
@@ -655,11 +665,13 @@ impl DocumentWindow {
         let more = std::mem::take(&mut self.more_open);
         let arrangement = self.arrangement.close_menus();
         let detail = std::mem::take(&mut self.detail_menu_open);
+        let list = self.list_editor.close_menu();
         if self.menu_bar.as_mut().is_some_and(MenuBar::close)
             || headers
             || more
             || arrangement
             || detail
+            || list
         {
             cx.stop_propagation();
             cx.notify();
@@ -906,6 +918,7 @@ impl Render for DocumentWindow {
         // First, so the rows built below are the ones in view.
         let rows = self.shown_rows(cx);
         self.clamp_arrangement(rows);
+        let fallback = f32::from(window.viewport_size().height);
         let (
             title,
             dirty,
@@ -921,6 +934,8 @@ impl Render for DocumentWindow {
             tools,
             pane,
             bottom,
+            list_closed,
+            listed,
         ) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
@@ -953,8 +968,15 @@ impl Render for DocumentWindow {
                 d.map(ToolbarState::of).unwrap_or_default(),
                 d.map(DetailPaneState::of).unwrap_or_default(),
                 d.map(|d| d.layout().views.current().bottom),
+                // The selection and scroll first: the rows drawn follow them.
+                d.map(|d| self.list_editor.prepare(d, fallback)),
+                d.filter(|d| d.list_open())
+                    .map(|d| ListState::of(d, &self.list_editor, fallback)),
             )
         };
+        if let Some((editing, focused)) = list_closed {
+            self.list_closed(editing, focused, window, cx);
+        }
         let bottom_height = bottom.and_then(|b| detail_pane::bottom_height(self.regions.get(), &b));
         if bottom_height.is_none() {
             self.detail_menu_open = false;
@@ -1092,6 +1114,7 @@ impl Render for DocumentWindow {
                             &pane,
                             bottom_height,
                             self.detail_menu_open,
+                            listed.as_ref().map(|l| (&self.list_editor, l)),
                             scope,
                             window,
                             cx,

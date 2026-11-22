@@ -55,6 +55,8 @@ struct RowsKey {
 struct Built {
     key: RowsKey,
     rows: Arc<[ListRow]>,
+    /// Each row's index in `rows`, by ID.
+    index: HashMap<String, usize>,
     context: Arc<ListContext>,
     lanes: usize,
 }
@@ -178,11 +180,14 @@ impl DocumentModel {
     }
 
     pub fn list_row(&self, id: &str) -> Option<ListRow> {
-        self.list_rows().iter().find(|r| r.id() == id).cloned()
+        let b = self.list_built()?;
+        b.index.get(id).map(|&i| b.rows[i].clone())
     }
 
+    /// The row's index in [`list_rows`](Self::list_rows), by its ID (a
+    /// map built with the rows: no scan).
     pub fn list_index(&self, id: &str) -> Option<usize> {
-        self.list_rows().iter().position(|r| r.id() == id)
+        self.list_built()?.index.get(id).copied()
     }
 
     pub fn list_cursor_row(&self) -> Option<ListRow> {
@@ -331,8 +336,14 @@ impl DocumentModel {
                     .and_then(|t| t.first().copied())
             }),
         };
+        let index = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.id().to_owned(), i))
+            .collect();
         Built {
             key,
+            index,
             rows: rows.into(),
             context: Arc::new(context),
             lanes: keys.len(),

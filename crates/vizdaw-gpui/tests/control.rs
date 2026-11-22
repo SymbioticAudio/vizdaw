@@ -1653,3 +1653,60 @@ fn state_get_editor_reports_the_detail(cx: &mut TestAppContext) {
     ));
     assert!(!shown(cx));
 }
+
+/// The List over the channel (Swift `ListEditorView.key`): a clicked row
+/// gives the table the keyboard; `ui.key` Return then edits its Position
+/// (no Return to Start), typed text and Return commit, and Delete deletes
+/// the selected row.
+#[gpui::test]
+fn ui_key_return_and_delete_go_to_the_list_table(cx: &mut TestAppContext) {
+    use vizdaw_ffi::edit::{EditCommand, EventEdit};
+    let s = setup(cx, vizdaw_app::testing::roll_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    ok(call(&s, cx, "command.run", json!({"id": "editors.list"})));
+    let row = node_id(&s, cx, "row", "Note E4, bar 1 beat 2, velocity 64");
+    ok(call(&s, cx, "ui.click", json!({"element": row})));
+    s.fake.clear_calls();
+    ok(call(&s, cx, "ui.key", json!({"key": "return"})));
+    assert!(s.fake.calls().iter().all(|c| !c.starts_with("locate(")));
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    let field = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["role"] == "textfield" && n["focused"] == true)
+        .cloned()
+        .unwrap_or_else(|| panic!("no field edits in {tree}"));
+    assert_eq!(field["label"], "Position");
+    assert_eq!(field["value"], "1.2.0");
+    ok(call(&s, cx, "ui.key", json!({"text": "5"})));
+    ok(call(&s, cx, "ui.key", json!({"key": "return"})));
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Move {
+                events: vec![2],
+                // "5" is bar 5's downbeat; the note was on beat 2.
+                delta: 4 * BAR - BAR / 4,
+                to_lane: None,
+            }
+        })
+    );
+    // The table has the keyboard again: Delete deletes the row.
+    ok(call(&s, cx, "ui.key", json!({"key": "delete"})));
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Delete { events: vec![2] }
+        })
+    );
+    // ⌘I (Insert Event) runs from the keyboard too.
+    let before = s.fake.edits().len();
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"key": "i", "modifiers": ["command"]}),
+    ));
+    assert_eq!(s.fake.edits().len(), before + 1);
+}

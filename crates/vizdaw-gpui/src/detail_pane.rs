@@ -13,6 +13,7 @@ use gpui::{
 use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::{DetailEditorKind, PaneSide, PaneState};
 
+use crate::list_editor::{self, ListEditor, ListState};
 use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
 use crate::transport_bar::{self, colors};
@@ -25,8 +26,6 @@ pub const CLOSE: &str = "Close Detail Editor";
 /// The empty state (Swift `DetailArea`).
 pub const EMPTY_TITLE: &str = "No Editor Open";
 pub const EMPTY_HELP: &str = "Double-click a block, or press \u{2318}1 to \u{2318}4.";
-/// The List editor's slot (Task 6 fills it).
-pub const LIST_SLOT: &str = "Event List";
 
 /// The line between the arrangement and the pane.
 pub const DIVIDER: f32 = 1.;
@@ -85,11 +84,13 @@ impl DetailPaneState {
 
 /// The pane: `height` when shown; `None` keeps it mounted at zero height,
 /// out of the tree and the pointer's way (Swift keeps the hidden pane's
-/// editor mounted). `scope` is the pane's own container.
+/// editor mounted). `list` is the List editor's, when one is open.
+/// `scope` is the pane's own container.
 pub(crate) fn render(
     state: &DetailPaneState,
     height: Option<Pixels>,
     menu_open: bool,
+    list: Option<(&ListEditor, &ListState)>,
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
@@ -97,7 +98,7 @@ pub(crate) fn render(
     let shown = height.is_some();
     let picker = picker(state, menu_open && shown, scope, window, cx);
     let content = match &state.detail {
-        Some((kind, title)) => detail(*kind, title, scope, cx),
+        Some((kind, title)) => detail(*kind, title, list, scope, window, cx),
         None => empty_state(scope),
     };
     div()
@@ -230,7 +231,9 @@ fn kind_menu(
 fn detail(
     kind: DetailEditorKind,
     title: &str,
+    list: Option<(&ListEditor, &ListState)>,
     scope: &mut RegistryScope,
+    window: &Window,
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
     let header = div()
@@ -266,16 +269,19 @@ fn detail(
                 this.with_model(cx, DocumentModel::close_detail);
             })),
         );
-    let editor = match kind {
-        // Task 6 puts the List editor here.
-        DetailEditorKind::List => {
-            let slot = scope.container();
-            div()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .child(slot.this("group", LIST_SLOT, true))
-        }
+    let editor = match (kind, list) {
+        (DetailEditorKind::List, Some((editor, state))) => div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(list_editor::render(
+                editor,
+                state,
+                &mut scope.container(),
+                window,
+                cx,
+            )),
         // No other kind opens this slice.
         _ => div().flex_1().min_h_0(),
     };

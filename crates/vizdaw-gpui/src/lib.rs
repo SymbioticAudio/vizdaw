@@ -4,6 +4,7 @@ pub mod app_state;
 pub mod arrangement;
 pub mod control;
 pub mod detail_pane;
+pub mod list_editor;
 pub mod menu_bar;
 pub mod menus;
 pub mod registry;

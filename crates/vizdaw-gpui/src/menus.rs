@@ -75,11 +75,12 @@ pub struct UnavailableCommand {
 pub const WINDOW_CONTEXT: &str = "DocumentWindow";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the List, closing the
-/// detail and the bottom pane's toggle.
+/// detail, Insert Event (the List's) and the bottom pane's toggle.
 pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
     "editors.list",
     "editors.close_detail",
+    "editors.insert_event",
     "ui.toggle_bottom",
 ];
 
@@ -246,14 +247,15 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
             // The main views, the left and right panes and the bar's
             // customizing come with their views.
             menu("View", vec![cmd("ui.toggle_bottom")]),
-            // The other detail editors, their windows, Insert Event and
-            // the nudges come with their views.
+            // The other detail editors, their windows and the nudges come
+            // with their views.
             menu(
                 "Editors",
                 vec![
                     cmd("editors.list"),
                     ItemSpec::Separator,
                     cmd("editors.close_detail"),
+                    cmd("editors.insert_event"),
                     ItemSpec::Separator,
                     cmd("editors.snap"),
                 ],
@@ -383,6 +385,7 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
         KeyBinding::new("s", StopAndReturn, Some(UNMODIFIED_KEYS)),
     ];
     keys.extend(text_input::bindings());
+    keys.extend(crate::list_editor::bindings());
     // Rewind and Fast Forward are held keys: the window's key handler
     // steps them per key-down and lands on key-up. Their keypad twins
     // (Keypad- and Keypad+) are not bound: GPUI does not tell the keypad

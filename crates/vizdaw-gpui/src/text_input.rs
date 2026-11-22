@@ -2,8 +2,8 @@
 //! pinned revision (see Cargo.toml).
 //! Copyright Zed Industries, Inc.; licensed under the Apache License,
 //! Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
-//! Changes: public `new`, `text`, `with_text`, `set_text`, `compact` and
-//! `bindings`; the bindings are scoped to the `TextInput` key context;
+//! Changes: public `new`, `text`, `with_text`, `set_text`, `compact`, `cell`
+//! and `bindings`; the bindings are scoped to the `TextInput` key context;
 //! Enter, Escape, Tab and Shift-Tab emit [`TextInputEvent`]s. Slice 2 replaces it with a full field (IME
 //! edge cases, undo, number fields).
 
@@ -68,6 +68,8 @@ pub struct TextInput {
     is_selecting: bool,
     /// The transport bar's small field rather than the full-size one.
     compact: bool,
+    /// A list cell's field: a table row high.
+    cell: bool,
 }
 
 impl TextInput {
@@ -704,18 +706,22 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .bg(rgb(0xeeeeee))
             .map(|d| {
-                let (line, pad) = if self.compact { (18., 2.) } else { (30., 4.) };
-                d.line_height(px(line))
-                    .text_size(px(if self.compact { 13. } else { 24. }))
-                    .child(
-                        div()
-                            .h(px(line + pad * 2.))
-                            .w_full()
-                            .p(px(pad))
-                            .bg(white())
-                            .text_color(rgb(0x000000))
-                            .child(TextElement { input: cx.entity() }),
-                    )
+                let (line, pad, size) = if self.cell {
+                    (16., 1., 12.)
+                } else if self.compact {
+                    (18., 2., 13.)
+                } else {
+                    (30., 4., 24.)
+                };
+                d.line_height(px(line)).text_size(px(size)).child(
+                    div()
+                        .h(px(line + pad * 2.))
+                        .w_full()
+                        .p(px(pad))
+                        .bg(white())
+                        .text_color(rgb(0x000000))
+                        .child(TextElement { input: cx.entity() }),
+                )
             })
     }
 }
@@ -739,6 +745,7 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             compact: false,
+            cell: false,
         }
     }
 
@@ -756,6 +763,12 @@ impl TextInput {
     /// The transport bar's small field.
     pub fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    /// A list cell's field, a table row (18 points) high.
+    pub fn cell(mut self) -> Self {
+        self.cell = true;
         self
     }
 

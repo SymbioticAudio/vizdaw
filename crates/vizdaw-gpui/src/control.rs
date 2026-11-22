@@ -1041,6 +1041,16 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
     if typing && !m.command && !m.control {
         return None;
     }
+    // The List's table, with the keyboard, takes Return (it edits the
+    // row's Position) and Delete and Forward Delete (they delete the
+    // selected rows): Swift `ListEditorView.key`.
+    let table = s
+        .store
+        .document(entry.doc)
+        .is_some_and(|d| d.list_focused());
+    if table && !m.command && !m.control && !m.option && matches!(k.key_code, 36 | 76 | 51 | 117) {
+        return None;
+    }
     let mut mods = 0;
     for (on, bit) in [
         (m.shift, bindings::SHIFT),
@@ -1218,7 +1228,7 @@ fn not_yet(what: &str) -> ControlError {
              app.open, app.quit, command.run file.new / file.close / file.save / file.save_as / \
              transport.* (not recording or the click) / ui.set_transport_bar / \
              ui.reset_transport_bar / edit.undo / edit.redo / track.* / editors.snap / \
-             editors.list / editors.close_detail / ui.toggle_bottom, state.get \
+             editors.list / editors.close_detail / editors.insert_event / ui.toggle_bottom, state.get \
              transport / windows / document / editor / selection, ui.tree, ui.click, ui.key, \
              ui.screenshot and wait)"
         ),
