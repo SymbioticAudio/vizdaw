@@ -4,13 +4,16 @@
 pub mod alerts;
 pub mod commands;
 pub mod document;
+pub mod prefs;
 pub mod session;
 pub mod store;
 #[cfg(feature = "test-support")]
 pub mod testing;
 pub mod transport;
+pub mod transport_bar;
 
 pub use alerts::AlertItem;
 pub use document::{DocumentModel, SaveAction};
+pub use prefs::Prefs;
 pub use session::DocSession;
 pub use store::{DocId, DocumentStore, WindowToken};

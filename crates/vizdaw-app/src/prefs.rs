@@ -1,0 +1,143 @@
+//! The app's preferences: one JSON file under the launch home (so a
+//! throwaway e2e home keeps its own), or only in memory for tests. Only
+//! what the app has needed so far: the `transportBar` key.
+
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value, json};
+
+use crate::transport_bar::{TransportItem, TransportLayout};
+
+/// The preference's key.
+pub const TRANSPORT_BAR_KEY: &str = "transportBar";
+/// The stored value of the default bar: it follows the default when a
+/// later version changes it.
+const STANDARD: &str = "standard";
+const VERSION: i64 = 1;
+
+/// A preferences store: a JSON object, written through to `path`.
+#[derive(Debug, Default)]
+pub struct Prefs {
+    path: Option<PathBuf>,
+    map: Map<String, Value>,
+}
+
+impl Prefs {
+    /// A store that never touches the disk.
+    pub fn in_memory() -> Self {
+        Self::default()
+    }
+
+    /// The store in `path`; a missing or unreadable file is an empty store
+    /// (and is left as it is until something is set).
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let map = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| match v {
+                Value::Object(m) => Some(m),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Self {
+            path: Some(path),
+            map,
+        }
+    }
+
+    /// The file under `home`: `Library/Preferences/VizDAW/preferences.json`
+    /// on macOS, `.config/vizdaw/preferences.json` elsewhere.
+    pub fn file_in(home: &Path) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            home.join("Library/Preferences/VizDAW/preferences.json")
+        } else {
+            home.join(".config/vizdaw/preferences.json")
+        }
+    }
+
+    /// The store under the launch home (`$HOME`); in memory when there is
+    /// none.
+    pub fn open() -> Self {
+        match std::env::var_os("HOME") {
+            Some(h) => Self::at(Self::file_in(Path::new(&h))),
+            None => Self::in_memory(),
+        }
+    }
+
+    /// The raw stored value of `key`.
+    pub fn raw(&self, key: &str) -> Option<&Value> {
+        self.map.get(key)
+    }
+
+    /// The stored bar; a damaged or newer value gives the standard layout
+    /// and is kept as it is until `set_transport_bar`.
+    pub fn transport_bar(&self) -> TransportLayout {
+        self.map
+            .get(TRANSPORT_BAR_KEY)
+            .and_then(decode)
+            .unwrap_or_else(TransportLayout::standard)
+    }
+
+    /// Shows `layout` and writes the preference (the default as
+    /// `"standard"`); a layout that breaks the rules is refused before
+    /// anything is written.
+    pub fn set_transport_bar(&mut self, layout: &TransportLayout) -> Result<(), String> {
+        TransportLayout::checked(layout.items.clone())?;
+        let value = if *layout == TransportLayout::standard() {
+            Value::String(STANDARD.into())
+        } else {
+            json!({
+                "version": VERSION,
+                "items": layout.items.iter().map(TransportItem::token).collect::<Vec<_>>(),
+            })
+        };
+        let old = self.map.insert(TRANSPORT_BAR_KEY.into(), value);
+        if let Err(e) = self.save() {
+            match old {
+                Some(o) => self.map.insert(TRANSPORT_BAR_KEY.into(), o),
+                None => self.map.remove(TRANSPORT_BAR_KEY),
+            };
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The default bar, written.
+    pub fn reset_transport_bar(&mut self) -> Result<(), String> {
+        self.set_transport_bar(&TransportLayout::standard())
+    }
+
+    fn save(&self) -> Result<(), String> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let fail = |e: std::io::Error| format!("the preferences could not be written: {e}");
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(fail)?;
+        }
+        let text = serde_json::to_vec_pretty(&self.map).map_err(|e| e.to_string())?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text).map_err(fail)?;
+        std::fs::rename(&tmp, path).map_err(fail)
+    }
+}
+
+fn decode(v: &Value) -> Option<TransportLayout> {
+    match v {
+        Value::String(s) if s == STANDARD => Some(TransportLayout::standard()),
+        Value::Object(o) => {
+            if o.get("version")?.as_i64()? != VERSION {
+                return None;
+            }
+            let items = o
+                .get("items")?
+                .as_array()?
+                .iter()
+                .map(|t| TransportItem::parse(t.as_str()?).ok())
+                .collect::<Option<Vec<_>>>()?;
+            TransportLayout::checked(items).ok()
+        }
+        _ => None,
+    }
+}

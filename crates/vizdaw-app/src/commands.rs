@@ -12,6 +12,8 @@ use vizdaw_ffi::tracks::TrackKindRow;
 
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
+use crate::prefs::Prefs;
+use crate::transport_bar::TransportLayout;
 
 /// The registry IDs `run` handles.
 pub const DOCUMENT_COMMANDS: &[&str] = &[
@@ -45,6 +47,9 @@ pub const TRANSPORT_COMMANDS: &[&str] = &[
     "transport.go_edit_in",
 ];
 
+/// The registry IDs `run_app` handles: app-wide, so they need no document.
+pub const APP_COMMANDS: &[&str] = &["ui.set_transport_bar", "ui.reset_transport_bar"];
+
 /// Why a bare transport key does nothing while a field is typed in.
 pub const TEXT_FIELD_HAS_KEYBOARD: &str = "A text field has the keyboard.";
 const NO_PLAY_SEQUENCE: &str = "Select a sequence to play.";
@@ -76,6 +81,47 @@ pub struct Ran {
 pub enum FieldFocus {
     Position,
     EditIn,
+}
+
+/// Runs an app-wide command (`APP_COMMANDS`) with the channel's `args`
+/// against the preferences; no document is needed.
+pub fn run_app(
+    id: &str,
+    args: &[(String, ArgValue)],
+    prefs: &mut Prefs,
+) -> Result<Ran, ControlError> {
+    let status = |s: &str| Ran {
+        undo: None,
+        status: Some(s.into()),
+        focus: None,
+    };
+    let write = |r: Result<(), String>| r.map_err(failed);
+    match id {
+        "ui.set_transport_bar" => {
+            check_names(id, args)?;
+            let Some((_, ArgValue::Text(items))) = args.iter().find(|(n, _)| n == "items") else {
+                return Err(ControlError::params(
+                    id,
+                    "`items` lists the bar's items, such as \"cluster,loop\"",
+                ));
+            };
+            let layout = TransportLayout::parse(items).map_err(|m| ControlError::params(id, m))?;
+            write(prefs.set_transport_bar(&layout))?;
+            Ok(status(&format!(
+                "transport bar: {} items",
+                layout.items.len()
+            )))
+        }
+        "ui.reset_transport_bar" => {
+            check_names(id, args)?;
+            write(prefs.reset_transport_bar())?;
+            Ok(status("transport bar: the default"))
+        }
+        _ => Err(ControlError::new(
+            ErrorCode::UnknownId,
+            format!("There is no command {id}."),
+        )),
+    }
 }
 
 fn kind_of(id: &str) -> Option<TrackKindRow> {
