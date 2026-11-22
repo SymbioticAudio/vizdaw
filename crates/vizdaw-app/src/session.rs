@@ -2,6 +2,8 @@
 
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::edit::EditCommand;
+use vizdaw_ffi::events::MarkerRow;
+use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::selection::SelectionRow;
 use vizdaw_ffi::session::Session;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
@@ -39,6 +41,10 @@ pub trait DocSession: Send + Sync {
     fn set_lane_mute(&self, seq: u64, lane: u64, mute: bool) -> Result<DocSnapshot, VizError>;
     fn selection(&self) -> Result<SelectionRow, VizError>;
     fn set_selection(&self, s: SelectionRow) -> Result<(), VizError>;
+    /// Sequence `seq`'s markers, in order.
+    fn markers(&self, seq: u64) -> Result<Vec<MarkerRow>, VizError>;
+    /// The destinations, with their return latency and MIDI mix.
+    fn destinations(&self) -> Result<Vec<DestRow>, VizError>;
 }
 
 impl DocSession for Session {
@@ -109,5 +115,11 @@ impl DocSession for Session {
     }
     fn set_selection(&self, s: SelectionRow) -> Result<(), VizError> {
         Session::set_selection(self, s)
+    }
+    fn markers(&self, seq: u64) -> Result<Vec<MarkerRow>, VizError> {
+        Session::sequence_info(self, seq).map(|i| i.markers)
+    }
+    fn destinations(&self) -> Result<Vec<DestRow>, VizError> {
+        Session::destinations(self)
     }
 }

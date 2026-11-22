@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use crate::DocSession;
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef, MonitorModeRow};
+use vizdaw_ffi::events::MarkerRow;
+use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::selection::SelectionRow;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, SeqRow, TransportState};
 use vizdaw_ffi::tracks::TrackKindRow;
@@ -395,6 +397,12 @@ impl DocSession for FakeSession {
         sel.lanes.retain(|r| known(&s, r));
         s.selection = sel;
         Ok(())
+    }
+    fn markers(&self, _seq: u64) -> Result<Vec<MarkerRow>, VizError> {
+        Ok(vec![])
+    }
+    fn destinations(&self) -> Result<Vec<DestRow>, VizError> {
+        Ok(vec![])
     }
 }
 

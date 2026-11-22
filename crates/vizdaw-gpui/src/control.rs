@@ -4,11 +4,14 @@
 //! blocking, at most [`MAX_CALLS_PER_TICK`] calls a tick so a burst cannot
 //! stall drawing.
 //!
-//! Slice 1 answers `app.new_demo`, `app.open`, `app.quit`, `command.run`
-//! for `file.save`, `file.save_as`, `transport.play_stop` and
-//! `transport.stop` (stop and return), `state.get` `transport` and
-//! `windows`, `ui.tree` and `ui.click {element}`. Everything else answers
-//! `unavailable`.
+//! Slices 1 and 2 answer `app.new_demo`, `app.open`, `app.quit`,
+//! `command.run` for `file.new`, `file.close` (never asks), `file.save`,
+//! `file.save_as`, `transport.play_stop`, `transport.stop` (stop and
+//! return) and the document commands (`edit.undo`, `edit.redo`, the Track
+//! menu), `state.get` `transport`, `windows`, `document` and `editor` (its
+//! `doc` and `status` only, `gesture: null`: the other fields come with the
+//! editor slices), `ui.tree` and `ui.click {element}`. Everything else
+//! answers `unavailable`.
 //!
 //! Calls are handled in the pump's own top-level update, never inside
 //! `AppState::update` or a window's update, so a call may open windows and
@@ -34,7 +37,9 @@ use gpui::{
     WindowHandle,
 };
 use serde_json::{Value, json};
+use vizdaw_app::commands::{self, DOCUMENT_COMMANDS};
 use vizdaw_app::{DocId, SaveAction};
+use vizdaw_ffi::control::{AlertRow, ControlResult, result_json};
 
 use crate::app_state::{AppState, WindowEntry};
 use crate::menus::{PlayStop, StopAndReturn};
@@ -160,6 +165,7 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
                 None => Err(failure(before, "the project did not open", cx)),
             }
         }
+        Command::CommandRun { id, args, .. } if id == "file.new" => new_document(args, cx),
         Command::CommandRun { id, args, window } => {
             let entry = target(window.as_ref(), cx)?;
             run_command(id, args, &entry, cx)
@@ -175,6 +181,20 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             target: StateTarget::Windows,
             ..
         } => Ok(windows_state(cx)),
+        Command::StateGet {
+            target: StateTarget::Document,
+            window,
+        } => {
+            let entry = target(window.as_ref(), cx)?;
+            document_state(entry.doc, cx)
+        }
+        Command::StateGet {
+            target: StateTarget::Editor,
+            window,
+        } => {
+            let entry = target(window.as_ref(), cx)?;
+            editor_state(entry.doc, cx)
+        }
         Command::StateGet { target, .. } => Err(unavailable(&format!(
             "state.get {}",
             format!("{target:?}").to_lowercase()
@@ -259,6 +279,36 @@ fn run_command(
         _ => None,
     });
     match id {
+        _ if DOCUMENT_COMMANDS.contains(&id) => {
+            let ran = app.update(cx, |s, cx| {
+                cx.notify();
+                s.store.with_document(doc, |d, _| {
+                    // A result's `status` is this command's own: what an
+                    // earlier action left is cleared first.
+                    d.set_status(None);
+                    commands::run(id, args, d)
+                })
+            });
+            let ran = ran.ok_or_else(closed)??;
+            if alert_id(cx) != before {
+                return Err(failure(before, "the command failed", cx));
+            }
+            return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
+        }
+        "file.close" => {
+            // Never asks (Swift `control_close_never_prompts`): the window
+            // closes without its save prompt and the document goes, saved
+            // or not.
+            entry
+                .handle
+                .update(cx, |_, window, _| window.remove_window())
+                .map_err(|_| gone())?;
+            app.update(cx, |s, cx| {
+                s.close_document(doc);
+                cx.notify();
+            });
+            return Ok(ran_json(id, doc, entry, None, None));
+        }
         "file.save" | "file.save_as" => {
             let saved = match (id, path) {
                 (_, Some(path)) => app.update(cx, |s, cx| {
@@ -311,13 +361,80 @@ fn run_command(
         .store
         .document(doc)
         .and_then(|d| d.snapshot().undo_label.clone());
-    Ok(json!({
+    Ok(ran_json(id, doc, entry, undo, None))
+}
+
+/// A `command.run` reply: `{command, doc, window, undo, status}`.
+fn ran_json(
+    id: &str,
+    doc: DocId,
+    entry: &WindowEntry,
+    undo: Option<String>,
+    status: Option<String>,
+) -> Value {
+    json!({
         "command": id,
         "doc": doc_id(doc),
         "window": number(entry.handle),
         "undo": undo,
-        "status": Value::Null,
+        "status": status,
+    })
+}
+
+/// `command.run file.new`: an empty document in a new window; no document
+/// need be open. Project formats (`rate`, `depth`) are not in this slice.
+fn new_document(args: &[(String, ArgValue)], cx: &mut App) -> Result<Value, ControlError> {
+    if let Some((name, _)) = args.first() {
+        return Err(unavailable(&format!("file.new with `{name}`")));
+    }
+    let before = alert_id(cx);
+    let Some(h) = crate::new_document(cx) else {
+        return Err(failure(before, "file.new made no document", cx));
+    };
+    let entry = AppState::global(cx)
+        .read(cx)
+        .windows()
+        .iter()
+        .find(|w| w.handle == h)
+        .cloned()
+        .ok_or_else(gone)?;
+    Ok(ran_json("file.new", entry.doc, &entry, None, None))
+}
+
+/// `state.get document`, in the Swift app's fields: the latest snapshot,
+/// the shown sequence and its lanes and markers, the destinations, and the
+/// alert the window shows.
+fn document_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
+    let s = AppState::global(cx);
+    let s = s.read(cx);
+    let d = s.store.document(doc).ok_or_else(closed)?;
+    let session = d.session();
+    let selected_seq = d.selected_seq();
+    let alert = d.alert.as_ref().or(s.store.alert()).map(|a| AlertRow {
+        title: a.title.clone(),
+        message: a.message.clone(),
+    });
+    Ok(result_json(&ControlResult::Document {
+        doc: doc_id(doc),
+        path: d.path().map(|p| p.to_string_lossy().into_owned()),
+        snapshot: d.snapshot().clone(),
+        selected_seq,
+        lanes: d.lanes().to_vec(),
+        markers: selected_seq
+            .and_then(|q| session.markers(q).ok())
+            .unwrap_or_default(),
+        destinations: session.destinations().unwrap_or_default(),
+        alert,
     }))
+}
+
+/// `state.get editor`: this slice's subset (`doc`, `status`); `gesture` is
+/// null until the editors come.
+fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
+    let s = AppState::global(cx);
+    let s = s.read(cx);
+    let d = s.store.document(doc).ok_or_else(closed)?;
+    Ok(json!({ "doc": doc_id(doc), "status": d.status(), "gesture": Value::Null }))
 }
 
 /// `state.get transport`, read fresh.
@@ -503,6 +620,10 @@ fn failure(before: Option<u64>, fallback: &str, cx: &mut App) -> ControlError {
     ControlError::new(ErrorCode::Failed, message)
 }
 
+fn closed() -> ControlError {
+    ControlError::new(ErrorCode::NoDocument, "the document is closed")
+}
+
 fn gone() -> ControlError {
     ControlError::new(ErrorCode::NoWindow, "the window closed")
 }
@@ -511,9 +632,11 @@ fn unavailable(what: &str) -> ControlError {
     ControlError::new(
         ErrorCode::Unavailable,
         format!(
-            "{what} is not available in the GPUI app yet (slice 1 answers app.new_demo, \
-             app.open, app.quit, command.run file.save / file.save_as / transport.play_stop / \
-             transport.stop, state.get transport / windows, ui.tree and ui.click {{element}})"
+            "{what} is not available in the GPUI app yet (slice 2 answers app.new_demo, \
+             app.open, app.quit, command.run file.new / file.close / file.save / file.save_as / \
+             transport.play_stop / transport.stop / edit.undo / edit.redo / track.*, \
+             state.get transport / windows / document / editor, ui.tree and \
+             ui.click {{element}})"
         ),
     )
 }
