@@ -557,7 +557,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | themes_and_the_strip_over_the_channel | | |
 | edits_a_region_in_the_audio_editor | | |
 | transport_jumps_readouts_and_fields_over_the_channel | | |
-| new_project_tracks_over_the_channel | S2 (fails with the screen locked: no redraw, stale ui.tree; re-run unlocked) | S2 |
+| new_project_tracks_over_the_channel | pending: failed with the screen locked (no redraw, stale ui.tree); re-run unlocked | S2 |
 | loop_wraps_at_the_end | | |
 | arpeggiates_an_injected_chord_while_recording | | |
 | midi_mix_reaches_state_get | | |
