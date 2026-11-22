@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use vizdaw_ffi::VizError;
+use vizdaw_ffi::blocks::BlockRow;
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef};
-use vizdaw_ffi::events::SequenceInfo;
+use vizdaw_ffi::events::{EventRow, SequenceInfo};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
 
@@ -45,6 +46,15 @@ pub struct DocumentModel {
     infos: Vec<(u64, OnceLock<Option<SequenceInfo>>)>,
     /// The last good transport read; the transport model feeds it too.
     transport: Arc<Mutex<TransportState>>,
+    /// Each shown track's blocks and events, read once per lanes fetch.
+    lane_reads: Vec<(u64, LaneReads)>,
+}
+
+/// What the arrangement reads of one track, read when first asked for.
+#[derive(Default)]
+struct LaneReads {
+    blocks: OnceLock<Vec<BlockRow>>,
+    events: OnceLock<Vec<EventRow>>,
 }
 
 impl DocumentModel {
@@ -69,6 +79,7 @@ impl DocumentModel {
             play_start: Arc::new(Mutex::new(None)),
             infos: vec![],
             transport: Arc::new(Mutex::new(transport)),
+            lane_reads: vec![],
         };
         model.reset_infos();
         model.refresh_lanes();
@@ -218,6 +229,57 @@ impl DocumentModel {
             self.alert = Some(AlertItem::from_error(&e, "Selection Failed"));
         }
         self.refresh_selection();
+    }
+
+    /// A ruler drag: the time range over every track of the shown
+    /// sequence, no events (Swift `EditorModel.selectRange`). A failure is
+    /// the alert "Selection Failed".
+    pub fn select_range(&mut self, range: TickRange) {
+        let Some(seq) = self.selected_seq else { return };
+        let want = SelectionRow {
+            time_range: Some(range),
+            lanes: self
+                .lanes
+                .iter()
+                .map(|l| LaneRef { seq, lane: l.id })
+                .collect(),
+            events: vec![],
+        };
+        self.selection = want.clone();
+        if let Err(e) = self.session.set_selection(want) {
+            self.alert = Some(AlertItem::from_error(&e, "Selection Failed"));
+        }
+        self.refresh_selection();
+    }
+
+    /// Track `lane`'s arrangement blocks (under
+    /// [`crate::arrangement::BLOCK_RULE`]), read once per snapshot; none
+    /// while the core cannot answer (a refusal is read again next time).
+    pub fn blocks(&self, lane: u64) -> &[BlockRow] {
+        let Some((seq, reads)) = self.reads(lane) else {
+            return &[];
+        };
+        read_once(&reads.blocks, || {
+            self.session
+                .blocks(seq, lane, crate::arrangement::BLOCK_RULE)
+        })
+    }
+
+    /// Track `lane`'s events in time order, read once per snapshot; none
+    /// while the core cannot answer.
+    pub fn lane_events(&self, lane: u64) -> &[EventRow] {
+        let Some((seq, reads)) = self.reads(lane) else {
+            return &[];
+        };
+        read_once(&reads.events, || {
+            self.session.lane_events(seq, lane).map(|e| e.events)
+        })
+    }
+
+    fn reads(&self, lane: u64) -> Option<(u64, &LaneReads)> {
+        let seq = self.selected_seq?;
+        let (_, reads) = self.lane_reads.iter().find(|(id, _)| *id == lane)?;
+        Some((seq, reads))
     }
 
     /// Reads the selection back (after edits, undo and redo).
@@ -468,6 +530,7 @@ impl DocumentModel {
             return;
         }
         self.lanes_key = Some(key);
+        self.lane_reads.clear();
         let Some(seq) = self.selected_seq else {
             self.lanes = vec![];
             return;
@@ -480,6 +543,11 @@ impl DocumentModel {
                 self.alert = Some(AlertItem::from_error(&e, "Tracks Unavailable"));
             }
         }
+        self.lane_reads = self
+            .lanes
+            .iter()
+            .map(|l| (l.id, LaneReads::default()))
+            .collect();
     }
 
     pub fn session(&self) -> &Arc<dyn DocSession> {
@@ -582,6 +650,17 @@ impl DocumentModel {
                 Err(error_message(&e))
             }
         }
+    }
+}
+
+/// `cell`'s rows, read by `read` the first time it answers.
+fn read_once<T>(cell: &OnceLock<Vec<T>>, read: impl FnOnce() -> Result<Vec<T>, VizError>) -> &[T] {
+    if let Some(rows) = cell.get() {
+        return rows;
+    }
+    match read() {
+        Ok(rows) => cell.get_or_init(|| rows),
+        Err(_) => &[],
     }
 }
 

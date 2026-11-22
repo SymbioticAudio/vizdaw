@@ -248,7 +248,7 @@ fn face(id: impl Into<ElementId>, text: &str, enabled: bool, background: u32) ->
 }
 
 /// A cluster button: a glyph, with the Swift label in the tree.
-fn cluster_button(
+pub(crate) fn cluster_button(
     id: &'static str,
     glyph: &str,
     label: &str,

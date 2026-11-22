@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Context, Entity, Focusable, IntoElement, Modifiers, ParentElement, Pixels, Point, Render,
-    Styled, TestAppContext, VisualTestContext, Window, WindowHandle, div, px,
+    Context, Entity, IntoElement, Modifiers, ParentElement, Pixels, Point, Render, Styled,
+    TestAppContext, VisualTestContext, Window, WindowHandle, div, px,
 };
 use vizdaw_app::testing::{FakeSession, demo_fake};
 use vizdaw_app::{AlertItem, DocumentStore};
@@ -107,18 +107,29 @@ fn space_plays_when_no_text_field_is_focused(cx: &mut TestAppContext) {
 #[gpui::test]
 fn space_types_into_a_focused_text_field(cx: &mut TestAppContext) {
     let mut s = setup(cx, demo_fake());
-    let field = s
+    // The Position field, its text all selected by the click.
+    let at = s
         .window
-        .update(&mut s.cx, |v, window, cx| {
-            let field = v.add_field("Name", cx);
-            window.focus(&field.focus_handle(cx), cx);
-            field
+        .read_with(&s.cx, |v, _| {
+            let r = v.registry().borrow();
+            let e = r.elements().iter().find(|e| e.label == "Position").cloned();
+            e.map(|e| e.bounds.center())
         })
-        .unwrap();
+        .unwrap()
+        .expect("the Position field");
+    s.cx.simulate_click(at, Modifiers::none());
     s.cx.run_until_parked();
     s.cx.simulate_keystrokes("s space");
-    let text = field.read_with(&s.cx, |f, _| f.text().to_owned());
-    assert_eq!(text, "s ");
+    s.cx.run_until_parked();
+    let text = s
+        .window
+        .read_with(&s.cx, |v, _| {
+            let r = v.registry().borrow();
+            let e = r.elements().iter().find(|e| e.label == "Position").cloned();
+            e.and_then(|e| e.value)
+        })
+        .unwrap();
+    assert_eq!(text.as_deref(), Some("s "));
     assert_eq!(s.fake.count("play(3)"), 0);
     assert_eq!(s.fake.count("stop"), 0);
 }

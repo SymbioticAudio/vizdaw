@@ -9,7 +9,7 @@ use crate::DocSession;
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef, MonitorModeRow};
-use vizdaw_ffi::events::{MarkerRow, MeterEntryRow, SequenceInfo};
+use vizdaw_ffi::events::{EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo};
 use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, SeqRow, TransportState};
@@ -35,6 +35,7 @@ struct State {
     marker_ticks: Vec<i64>,
     infos: HashMap<u64, SequenceInfo>,
     blocks: HashMap<(u64, u64), Vec<BlockRow>>,
+    events: HashMap<(u64, u64), Vec<EventRow>>,
     plays_from: Vec<(u64, i64, Option<i64>)>,
     step_bars: Vec<bool>,
     key_steps: Vec<bool>,
@@ -109,6 +110,7 @@ impl FakeSession {
             marker_ticks: vec![],
             infos: HashMap::new(),
             blocks: HashMap::new(),
+            events: HashMap::new(),
             plays_from: vec![],
             step_bars: vec![],
             key_steps: vec![],
@@ -220,6 +222,11 @@ impl FakeSession {
     /// Scripts what `blocks(seq, lane, _)` answers.
     pub fn set_blocks(&self, seq: u64, lane: u64, rows: Vec<BlockRow>) {
         self.st().blocks.insert((seq, lane), rows);
+    }
+
+    /// Scripts what `lane_events(seq, lane)` answers.
+    pub fn set_events(&self, seq: u64, lane: u64, rows: Vec<EventRow>) {
+        self.st().events.insert((seq, lane), rows);
     }
 
     /// The error every bar step, key step and wind answers with.
@@ -615,6 +622,15 @@ impl DocSession for FakeSession {
     fn blocks(&self, seq: u64, lane: u64, _rule: BlockRule) -> Result<Vec<BlockRow>, VizError> {
         let s = self.st();
         Ok(s.blocks.get(&(seq, lane)).cloned().unwrap_or_default())
+    }
+    fn lane_events(&self, seq: u64, lane: u64) -> Result<LaneEvents, VizError> {
+        let s = self.st();
+        Ok(LaneEvents {
+            seq,
+            lane,
+            rev: s.snap.version,
+            events: s.events.get(&(seq, lane)).cloned().unwrap_or_default(),
+        })
     }
     fn markers(&self, _seq: u64) -> Result<Vec<MarkerRow>, VizError> {
         Ok(vec![])

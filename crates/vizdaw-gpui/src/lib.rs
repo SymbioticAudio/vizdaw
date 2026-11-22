@@ -1,6 +1,7 @@
 //! The VizDAW GPUI application.
 
 pub mod app_state;
+pub mod arrangement;
 pub mod control;
 pub mod menu_bar;
 pub mod menus;

@@ -169,9 +169,14 @@ impl AppState {
         let Some(t) = self.transports.get_mut(&doc) else {
             return idled;
         };
-        let before = (t.readout(None), self.store.alert().map(|a| a.id));
+        // The playhead draws the tick and sequence too.
+        let seen = |t: &TransportModel, store: &DocumentStore| {
+            let s = t.state();
+            (t.readout(None), s.tick, s.seq, store.alert().map(|a| a.id))
+        };
+        let before = seen(t, &self.store);
         let result = t.poll(&mut self.store);
-        let after = (t.readout(None), self.store.alert().map(|a| a.id));
+        let after = seen(t, &self.store);
         idled || result == PollResult::Failed || before != after
     }
 

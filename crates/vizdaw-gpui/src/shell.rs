@@ -1,11 +1,11 @@
 //! The document window: one window per open document, with the menu bar
-//! (off macOS), the alert banner, the transport bar, the track header
-//! column beside the (for now empty) arrangement, and the status line.
+//! (off macOS), the alert banner, the transport bar, the zoom buttons, the
+//! track header column beside the arrangement canvas, and the status line.
 //! The window holds the bar's shuttle (Rewind and Fast Forward held, and
 //! their held keys) and its fields' edit.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -22,6 +22,7 @@ use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
 use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::AppState;
+use crate::arrangement::{self, Arrangement, ArrangementState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
 use crate::registry::{RegistryScope, SharedRegistry};
@@ -41,14 +42,14 @@ pub struct DocumentWindow {
     registry: SharedRegistry,
     /// The title last given to the platform window.
     title: String,
-    /// Text fields in the body (none yet; slice 2 panes add theirs).
-    fields: Vec<Entity<TextInput>>,
     /// A save-changes prompt is showing.
     prompting: bool,
     /// The in-window menu bar, when this window draws one (off macOS).
     menu_bar: Option<MenuBar>,
     /// The track header column (its rename field, its Add Track menu).
     track_headers: TrackHeaders,
+    /// The arrangement canvas (its axis, scroll and ruler press).
+    pub(crate) arrangement: Arrangement,
     /// The status text last drawn, and the timer that clears it.
     status_shown: Option<String>,
     _status_timer: Option<Task<()>>,
@@ -141,6 +142,7 @@ impl DocumentWindow {
                     // hold ends where it got to, a held key lands.
                     this.cancel_field(window, cx);
                     this.end_shuttle(cx);
+                    this.cancel_ruler_drag(cx);
                 }
             }),
         ];
@@ -170,11 +172,11 @@ impl DocumentWindow {
             focus: cx.focus_handle(),
             registry: SharedRegistry::default(),
             title: String::new(),
-            fields: Vec::new(),
             prompting: false,
             menu_bar: cfg!(not(target_os = "macos"))
                 .then(|| MenuBar::new(menus::menu_model(None, &Default::default()))),
             track_headers: TrackHeaders::default(),
+            arrangement: Arrangement::new(cx),
             status_shown: None,
             _status_timer: None,
             transport_fields: TransportFields::new(cx),
@@ -230,16 +232,6 @@ impl DocumentWindow {
     /// The elements drawn last frame, for `ui.tree` and `ui.click`.
     pub fn registry(&self) -> &SharedRegistry {
         &self.registry
-    }
-
-    /// Adds a text field to the window body: a test hook for the shortcut
-    /// tests, not part of the window's interface.
-    #[doc(hidden)]
-    pub fn add_field(&mut self, placeholder: &str, cx: &mut Context<Self>) -> Entity<TextInput> {
-        let field = cx.new(|cx| TextInput::new(placeholder, cx));
-        self.fields.push(field.clone());
-        cx.notify();
-        field
     }
 
     /// The in-window menu bar, if this window draws one.
@@ -603,7 +595,9 @@ impl DocumentWindow {
     /// auto-repeat while the window has the keyboard.
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(forward) = held_key(&event.keystroke)
-            && window.focused(cx).is_none_or(|f| f == self.focus)
+            && window
+                .focused(cx)
+                .is_none_or(|f| f == self.focus || &f == self.arrangement.focus_handle())
         {
             cx.stop_propagation();
             self.with_shuttle(cx, |sh, d| {
@@ -861,7 +855,7 @@ impl Focusable for DocumentWindow {
 impl Render for DocumentWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.doc;
-        let (title, dirty, alert, bar, model, front, lanes, selected, status, layout) = {
+        let (title, dirty, alert, bar, model, front, lanes, selected, status, layout, arranged) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
             (
@@ -884,6 +878,7 @@ impl Render for DocumentWindow {
                 d.map(DocumentModel::selected_lanes).unwrap_or_default(),
                 d.and_then(|d| d.status().map(String::from)),
                 s.transport_layout(),
+                d.map(|d| ArrangementState::of(d, s.transport(doc), Instant::now())),
             )
         };
         let plan = Plan::new(&layout, f32::from(window.viewport_size().width));
@@ -913,6 +908,22 @@ impl Render for DocumentWindow {
         }
         if let Some(bar) = &mut self.menu_bar {
             bar.set_model(model);
+        }
+
+        let arranged = arranged.unwrap_or(ArrangementState {
+            rows: vec![],
+            meter: vec![],
+            selection: None,
+            selected_events: vec![],
+            playhead: None,
+            playing: false,
+        });
+        self.clamp_arrangement(lanes.len());
+        self.arrangement.follow(&arranged);
+        // The playhead moves every frame while the shown sequence plays;
+        // stopped, it moves when a poll reads a locate.
+        if arranged.playing {
+            window.request_animation_frame();
         }
 
         let mut root = RegistryScope::root(&self.registry);
@@ -958,28 +969,25 @@ impl Render for DocumentWindow {
                     cx,
                 ))
             })
+            .child(arrangement::toolbar(&mut root.container(), cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .flex_row()
+                    .on_scroll(cx.listener(|this, e, _, cx| this.arrangement_wheel(e, cx)))
                     .child(self.track_headers.render(
                         &HeadersState {
                             lanes: &lanes,
                             selected: &selected,
+                            vertical_offset: self.arrangement.vertical_offset(),
                         },
                         &mut root.container(),
                         window,
                         cx,
                     ))
-                    .child(
-                        div().flex_1().p_3().flex().flex_col().gap_2().children(
-                            self.fields.iter().map(|f| {
-                                div().w(px(240.)).text_color(rgb(0x000000)).child(f.clone())
-                            }),
-                        ),
-                    ),
+                    .child(self.arrangement.render(arranged, &mut root.container(), cx)),
             )
             .when_some(status, |d, status| {
                 d.child(Self::status_line(status, &mut root.container(), cx))

@@ -209,6 +209,38 @@ impl RegistryScope {
     }
 }
 
+/// Records a container's children with bounds known only while drawing
+/// (an editor canvas's items), from the container's next index on. Take
+/// it when the container has no other recorded children.
+pub struct ChildRecorder {
+    registry: SharedRegistry,
+    path: Vec<u32>,
+    next: u32,
+}
+
+impl ChildRecorder {
+    /// Records the next child, a control with `bounds` in window space.
+    pub fn record(&mut self, role: &str, label: &str, bounds: Bounds<Pixels>, enabled: bool) {
+        let mut path = self.path.clone();
+        path.push(self.next);
+        self.next += 1;
+        self.registry
+            .borrow_mut()
+            .record(&path, role, label, bounds, enabled);
+    }
+}
+
+impl RegistryScope {
+    /// A recorder of this container's children, for a draw callback.
+    pub fn children(&mut self) -> ChildRecorder {
+        ChildRecorder {
+            registry: self.registry.clone(),
+            path: self.path.clone(),
+            next: self.next,
+        }
+    }
+}
+
 /// What an overlay records.
 struct Node {
     role: String,

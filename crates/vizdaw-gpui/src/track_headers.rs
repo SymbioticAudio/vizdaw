@@ -1,9 +1,11 @@
 //! The track header column beside the arrangement: one row per track of
 //! the shown sequence (kind icon, name, M, S, R) and the "+ Add Track" row
-//! under the last. The column records as a `group` "Track Headers"; each
-//! row is one `button` whose label names its kind, name and routing (the
-//! M/S/R toggles are not separate elements, as in the Swift app), and
-//! "Add Track" is the last child.
+//! under the last, below a band as tall as the arrangement's ruler. The
+//! rows scroll with the canvas (one shared vertical offset). The column
+//! records as a `group` "Track Headers"; each row is one `button` whose
+//! label names its kind, name and routing (the M/S/R toggles are not
+//! separate elements, as in the Swift app), and "Add Track" is the last
+//! child.
 //!
 //! A click on a row's icon or name (or its empty space) selects the track
 //! (Shift or the secondary modifier adds or removes it); M, S and R set
@@ -26,6 +28,7 @@ use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
 use crate::text_input::TextInput;
 use crate::transport_bar::colors;
+use vizdaw_app::arrangement::RULER_HEIGHT;
 
 /// The column's width.
 pub const WIDTH: f32 = 200.;
@@ -144,6 +147,8 @@ fn kind_glyph(kind: TrackKindRow) -> &'static str {
 pub struct HeadersState<'a> {
     pub lanes: &'a [LaneRow],
     pub selected: &'a [u64],
+    /// The rows' scroll, shared with the arrangement canvas.
+    pub vertical_offset: f32,
 }
 
 impl TrackHeaders {
@@ -156,14 +161,18 @@ impl TrackHeaders {
         window: &Window,
         cx: &mut Context<DocumentWindow>,
     ) -> AnyElement {
-        // The rows scroll inside the column; the group records the
-        // column itself (it stays put), the rows where they are drawn.
+        // The column stays put: a band as tall as the arrangement's ruler,
+        // then the rows, moved by the vertical offset the canvas shares
+        // (the wheel is the arrangement's). The group records the column
+        // itself, the rows where they are drawn.
         let mut rows = div()
             .id("track-headers")
+            .absolute()
+            .left_0()
+            .top(px(-state.vertical_offset))
+            .w_full()
             .flex()
-            .flex_col()
-            .size_full()
-            .overflow_y_scroll();
+            .flex_col();
         for lane in state.lanes {
             let selected = state.selected.contains(&lane.id);
             rows = rows.child(self.row(lane, selected, scope, cx));
@@ -174,9 +183,25 @@ impl TrackHeaders {
             .w(px(WIDTH))
             .h_full()
             .flex_none()
+            .flex()
+            .flex_col()
             .bg(rgb(COLUMN))
             .child(scope.this("group", "Track Headers", true))
-            .child(rows);
+            .child(
+                div()
+                    .h(px(RULER_HEIGHT))
+                    .flex_none()
+                    .border_b_1()
+                    .border_color(rgb(SEPARATOR)),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(rows),
+            );
         // The rows are the full 200 px; the line to the arrangement is
         // outside them.
         div()

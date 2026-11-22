@@ -3,7 +3,7 @@
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::edit::EditCommand;
-use vizdaw_ffi::events::{MarkerRow, SequenceInfo};
+use vizdaw_ffi::events::{LaneEvents, MarkerRow, SequenceInfo};
 use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::Session;
@@ -60,6 +60,8 @@ pub trait DocSession: Send + Sync {
     fn sequence_info(&self, seq: u64) -> Result<SequenceInfo, VizError>;
     /// The arrangement blocks of one track.
     fn blocks(&self, seq: u64, lane: u64, rule: BlockRule) -> Result<Vec<BlockRow>, VizError>;
+    /// One track's events, in time order (the arrangement's note sketch).
+    fn lane_events(&self, seq: u64, lane: u64) -> Result<LaneEvents, VizError>;
     /// Sequence `seq`'s markers, in order.
     fn markers(&self, seq: u64) -> Result<Vec<MarkerRow>, VizError>;
     /// The destinations, with their return latency and MIDI mix.
@@ -161,6 +163,9 @@ impl DocSession for Session {
     }
     fn blocks(&self, seq: u64, lane: u64, rule: BlockRule) -> Result<Vec<BlockRow>, VizError> {
         Session::blocks(self, seq, lane, rule)
+    }
+    fn lane_events(&self, seq: u64, lane: u64) -> Result<LaneEvents, VizError> {
+        Session::lane_events(self, seq, lane)
     }
     fn markers(&self, seq: u64) -> Result<Vec<MarkerRow>, VizError> {
         Session::sequence_info(self, seq).map(|i| i.markers)
