@@ -549,3 +549,52 @@ fn closing_the_list_ends_an_edit_unsaved_and_gives_the_keys_back(cx: &mut TestAp
     assert!(s.model(|d| !d.list_focused() && d.return_key_enabled()));
     assert!(s.find("table", TABLE).is_none());
 }
+
+/// A row click gives the table the keyboard even in a window that is not
+/// the active one (as a channel click on a background app on macOS): the
+/// document's list is focused at once, and Return edits the Position.
+#[gpui::test]
+fn a_row_click_focuses_the_table_in_an_inactive_window(cx: &mut TestAppContext) {
+    let mut s = list_view(cx);
+    s.cx.deactivate_window();
+    s.click_row(FIRST);
+    assert!(s.model(|d| d.list_focused()), "the table has the keyboard");
+    assert!(s.model(|d| !d.return_key_enabled()));
+    s.keys("enter");
+    assert_eq!(s.editing(), Some(("e1".into(), ListColumn::Position)));
+    assert!(s.model(|d| !d.list_focused()), "the cell has it now");
+    s.keys("escape");
+    assert!(s.model(|d| d.list_focused()), "back to the table");
+    // The keyboard going elsewhere gives Return back.
+    let canvas = s.element("group", "Arrangement");
+    s.click_with(&canvas, Modifiers::none(), 1);
+    assert!(s.model(|d| !d.list_focused() && d.return_key_enabled()));
+}
+
+/// A cell edit open when the list changes target ends unsaved: its row ID
+/// (a map row's `t0`) names another sequence's row there.
+#[gpui::test]
+fn a_retarget_cancels_an_open_cell_edit(cx: &mut TestAppContext) {
+    let f = roll_fake();
+    f.set_info(2, vizdaw_app::testing::four_four(2));
+    let mut s = setup(cx, f);
+    s.update_model(|d| {
+        d.open_detail(
+            EditorTarget::Sequence { seq: 3 },
+            Some(DetailEditorKind::List),
+        )
+    });
+    s.begin("t0", ListColumn::Data1);
+    assert_eq!(s.editing(), Some(("t0".into(), ListColumn::Data1)));
+    s.type_text("90");
+    s.update_model(|d| {
+        d.open_detail(
+            EditorTarget::Sequence { seq: 2 },
+            Some(DetailEditorKind::List),
+        )
+    });
+    assert_eq!(s.editing(), None, "the edit ends with the target");
+    assert!(s.transport_keys());
+    s.keys("enter");
+    assert!(s.fake.edits().is_empty(), "{:?}", s.fake.edits());
+}

@@ -178,11 +178,6 @@ impl DocumentWindow {
             });
         }));
         let list_editor = ListEditor::new(cx);
-        subscriptions.extend(Self::watch_list_focus(
-            list_editor.focus_handle(),
-            window,
-            cx,
-        ));
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |this, cx| this.should_close(window, cx))
@@ -934,7 +929,7 @@ impl Render for DocumentWindow {
             tools,
             pane,
             bottom,
-            list_closed,
+            list_after,
             listed,
         ) = {
             let s = self.app.read(cx);
@@ -974,9 +969,10 @@ impl Render for DocumentWindow {
                     .map(|d| ListState::of(d, &self.list_editor, fallback)),
             )
         };
-        if let Some((editing, focused)) = list_closed {
-            self.list_closed(editing, focused, window, cx);
+        if let Some(after) = list_after {
+            self.list_after(after, window, cx);
         }
+        self.sync_list_focus(listed.is_some(), window, cx);
         let bottom_height = bottom.and_then(|b| detail_pane::bottom_height(self.regions.get(), &b));
         if bottom_height.is_none() {
             self.detail_menu_open = false;

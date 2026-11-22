@@ -26,6 +26,7 @@ use gpui::{
     canvas, deferred, div, hsla, point, px, rgb,
 };
 use vizdaw_app::DocumentModel;
+use vizdaw_app::editor::EditorTarget;
 use vizdaw_app::list::{ListColumn, ListColumns, ListKind, ListText, Smpte};
 
 use crate::detail_pane;
@@ -156,6 +157,8 @@ enum Movement {
 
 /// The cell being edited and its one field.
 struct CellEdit {
+    /// The list's target when the edit began: row IDs are the target's.
+    target: EditorTarget,
     row: String,
     column: ListColumn,
     original: String,
@@ -280,16 +283,30 @@ impl ListEditor {
 
     /// Before drawing: follows the cursor, brings a row into view and
     /// keeps the scroll inside the rows. Answers what the window must do
-    /// next turn: (end the cell edit, give up the list's focus), when the
-    /// list is no longer open.
-    pub(crate) fn prepare(&mut self, d: &DocumentModel, fallback: f32) -> (bool, bool) {
+    /// next turn.
+    pub(crate) fn prepare(&mut self, d: &DocumentModel, fallback: f32) -> ListAfter {
         if !d.list_open() {
             self.menu = None;
             self.scroll = 0.;
             self.set_selected(vec![]);
             self.anchor = None;
             self.seen_cursor = None;
-            return (self.editing.is_some(), d.list_focused());
+            return ListAfter {
+                cancel_edit: self.editing.is_some(),
+                closed: true,
+            };
+        }
+        // A new target's rows are other rows: an edit begun on the old
+        // one ends unsaved (a map row's ID names another row now).
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|e| d.list_target() != Some(e.target))
+        {
+            return ListAfter {
+                cancel_edit: true,
+                closed: false,
+            };
         }
         self.follow(d);
         let h = self.body_height(fallback);
@@ -305,8 +322,17 @@ impl ListEditor {
         }
         let max = (d.list_rows().len() as f32 * ROW_HEIGHT - h).max(0.);
         self.scroll = self.scroll.clamp(0., max);
-        (false, false)
+        ListAfter::default()
     }
+}
+
+/// What a draw found the window must do about the list next turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ListAfter {
+    /// End the open cell edit unsaved.
+    pub cancel_edit: bool,
+    /// The list is no longer open.
+    pub closed: bool,
 }
 
 /// One drawn row.
@@ -852,42 +878,55 @@ impl DocumentWindow {
         &self.list_editor
     }
 
-    /// The table's focus: the document's list is focused while it has
-    /// the keyboard. Call once, when the window is made.
-    pub(crate) fn watch_list_focus(
-        focus: &FocusHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<Subscription> {
-        vec![
-            cx.on_focus(focus, window, |this, _, cx| {
-                this.with_model(cx, |d| d.set_list_focused(true));
-            }),
-            cx.on_blur(focus, window, |this, _, cx| {
-                this.with_model(cx, |d| d.set_list_focused(false));
-            }),
-        ]
+    /// Gives the table the keyboard, and the document's list is focused
+    /// at once: not on the next drawn frame's focus events, which an
+    /// inactive window (or one not drawing, as a background app on macOS)
+    /// never sends.
+    fn focus_list_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.list_editor.focus, cx);
+        self.set_list_focused(true, cx);
     }
 
-    /// After a draw found the list closed: an edit still open ends
-    /// unsaved, and the list gives up the keyboard.
-    pub(crate) fn list_closed(
+    fn set_list_focused(&mut self, on: bool, cx: &mut Context<Self>) {
+        let app = self.app().clone();
+        let now = app
+            .read(cx)
+            .store
+            .document(self.doc())
+            .map(DocumentModel::list_focused);
+        if now.is_some_and(|f| f != on) {
+            self.with_model(cx, |d| d.set_list_focused(on));
+        }
+    }
+
+    /// While drawing: the document's list is focused exactly while the
+    /// open list's table has the window's keyboard (the keyboard moved
+    /// elsewhere, or the list closed, gives Return back).
+    pub(crate) fn sync_list_focus(&mut self, open: bool, window: &Window, cx: &mut Context<Self>) {
+        let on = open && self.list_editor.focus.is_focused(window);
+        self.set_list_focused(on, cx);
+    }
+
+    /// After a draw: an edit begun on another target, or on a list now
+    /// closed, ends unsaved; a closed list's table gives the window the
+    /// keyboard.
+    pub(crate) fn list_after(
         &mut self,
-        editing: bool,
-        focused: bool,
+        after: ListAfter,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !editing && !focused {
+        if after == ListAfter::default() {
             return;
         }
-        cx.defer_in(window, |this, window, cx| {
-            this.end_list_cell(false, Movement::Other, window, cx);
-            // The table is gone: the window takes the keyboard.
-            if this.list_editor.focus.is_focused(window) {
-                window.focus(&this.focus_handle(cx), cx);
+        cx.defer_in(window, move |this, window, cx| {
+            if after.cancel_edit {
+                this.end_list_cell(false, Movement::Other, window, cx);
             }
-            this.with_model(cx, |d| d.set_list_focused(false));
+            if after.closed && this.list_editor.focus.is_focused(window) {
+                window.focus(&this.focus_handle(cx), cx);
+                this.set_list_focused(false, cx);
+            }
         });
     }
 
@@ -930,7 +969,7 @@ impl DocumentWindow {
             self.begin_list_cell(id, column, window, cx);
             return;
         }
-        window.focus(&self.list_editor.focus, cx);
+        self.focus_list_table(window, cx);
         self.list_follow(cx);
         let m = e.modifiers;
         let toggle = if cfg!(target_os = "macos") {
@@ -1058,13 +1097,14 @@ impl DocumentWindow {
             let s = app.read(cx);
             s.store.document(self.doc()).and_then(|d| {
                 let r = d.list_row(id)?;
+                let target = d.list_target()?;
                 (d.list_open()
                     && d.list_columns().contains(&column)
                     && ListText::editable(&r, column))
-                .then(|| ListText::cell(&r, column, &d.list_context()))
+                .then(|| (ListText::cell(&r, column, &d.list_context()), target))
             })
         };
-        let Some(text) = text else { return };
+        let Some((text, target)) = text else { return };
         self.end_list_cell(true, Movement::Other, window, cx);
         self.list_editor.menu = None;
         let input = cx.new(|cx| TextInput::new("", cx).cell().with_text(&text));
@@ -1085,9 +1125,14 @@ impl DocumentWindow {
             }),
         ];
         window.focus(&focus, cx);
-        self.with_model(cx, |d| d.begin_text_editing(&owner(column)));
+        // The cell has the keyboard, not the table.
+        self.with_model(cx, |d| {
+            d.begin_text_editing(&owner(column));
+            d.set_list_focused(false);
+        });
         self.list_editor.scroll_to = Some(id.to_owned());
         self.list_editor.editing = Some(CellEdit {
+            target,
             row: id.to_owned(),
             column,
             original: text,
@@ -1141,14 +1186,14 @@ impl DocumentWindow {
                 };
                 match next {
                     Some(c) => self.begin_list_cell(&row, c, window, cx),
-                    None => window.focus(&table, cx),
+                    None => self.focus_list_table(window, cx),
                 }
             }
-            Movement::Return | Movement::Cancel => window.focus(&table, cx),
+            Movement::Return | Movement::Cancel => self.focus_list_table(window, cx),
             Movement::Other => {
                 let field = e.input.focus_handle(cx);
-                if window.focused(cx).is_none_or(|f| f == field) {
-                    window.focus(&table, cx);
+                if window.focused(cx).is_none_or(|f| f == field || f == table) {
+                    self.focus_list_table(window, cx);
                 }
             }
         }

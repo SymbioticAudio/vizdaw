@@ -819,6 +819,20 @@ fn gpui_transport_jumps_readouts_and_fields_over_the_channel() {
     app.quit();
 }
 
+/// The ID of the first block node on track `track`: an events block
+/// ("Block on <track>, …") or a reference ("Reference to … on <track>, …").
+fn block_on(nodes: &Value, track: &str) -> Option<Value> {
+    let on = format!(" on {track}, ");
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        let l = n["label"].as_str().unwrap_or("");
+        if (l.starts_with("Block on ") || l.starts_with("Reference to ")) && l.contains(&on) {
+            Some(n["id"].clone())
+        } else {
+            block_on(&n["children"], track)
+        }
+    })
+}
+
 /// `state.get selection` of window `w`.
 fn selection(app: &mut App, w: &Value) -> Value {
     app.call("state.get", json!({"target": "selection", "window": w}))
@@ -840,9 +854,8 @@ fn gpui_blocks_select_and_open_in_the_list() {
     let (chords, _) = wait_in_tree(&mut app, &w, "the Chords block", |n| {
         labelled_like(n, "Block on Chords")
     });
-    let (groove, _) = wait_in_tree(&mut app, &w, "the Groove block", |n| {
-        labelled_like(n, "Block on Groove")
-    });
+    // Groove's block is a reference ("Reference to … on Groove, …").
+    let groove = wait_in_tree(&mut app, &w, "the Groove block", |n| block_on(n, "Groove"));
     let doc = app.call("state.get", json!({"target": "document", "window": w}));
     let seq = doc["selected_seq"].clone();
     let chords_lane = doc["lanes"]

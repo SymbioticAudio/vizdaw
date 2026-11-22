@@ -980,6 +980,11 @@ fn key_strokes(
     }
     let mut sent: u32 = 0;
     for k in strokes {
+        // Drawn first, so what the keyboard's focus is now (the List's
+        // table, a field) is the document's before the stroke is routed:
+        // a window that is not drawing frames (a background app on macOS)
+        // would otherwise route it on a stale focus.
+        fresh_frame(entry, cx)?;
         if let Some(id) = bound_command(entry, k, cx) {
             let ran = match app_wide(id, &[], cx) {
                 Some(r) => r,
