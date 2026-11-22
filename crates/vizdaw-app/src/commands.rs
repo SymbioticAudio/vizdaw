@@ -411,19 +411,14 @@ fn run_transport(
     };
     match id {
         "transport.play_stop" => {
+            let _ = doc.poll_transport();
             if doc.selected_seq().is_none() && !doc.is_playing() {
                 return Err(unavailable(NO_PLAY_SEQUENCE));
             }
             if let Some(e) = text_gate(doc) {
                 return Err(e);
             }
-            let playing = doc.is_playing();
-            let result = if playing {
-                doc.session().stop()
-            } else {
-                doc.start_playing(None, None)
-            };
-            result.map_err(|e| {
+            doc.try_play_stop().map_err(|(playing, e)| {
                 let mut e = from_viz(&e);
                 if e.code != ErrorCode::Busy {
                     let verb = if playing { "Stop" } else { "Play" };
@@ -465,6 +460,8 @@ fn run_key_command(id: &str, doc: &mut DocumentModel) -> Result<(), ControlError
     if let Some(e) = text_gate(doc) {
         return Err(e);
     }
+    // Read first, as Swift polls: a busy read keeps the last good one.
+    let _ = doc.poll_transport();
     let playing = || doc.is_playing();
     match id {
         "transport.scrub" => return Err(unavailable(NOT_YET)),
@@ -512,7 +509,7 @@ fn run_key_command(id: &str, doc: &mut DocumentModel) -> Result<(), ControlError
         }
         "transport.previous_marker" | "transport.next_marker" => {
             let forward = id == "transport.next_marker";
-            let tick = doc.live_transport().map_or(0, |t| t.tick);
+            let tick = doc.last_transport().tick;
             let target = doc
                 .session()
                 .marker_step(seq, tick, forward)

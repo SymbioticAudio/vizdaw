@@ -399,12 +399,54 @@ fn a_failing_loop_is_an_alert_and_stays_as_it_was() {
 
 #[test]
 fn locating_failures_are_alerts() {
-    let (_f, mut m) = demo();
+    let (f, mut m) = demo();
     m.locate(1_000);
     assert!(m.alert.is_none());
+    f.set_locate_error(Some(VizError::Model {
+        message: "cannot locate".into(),
+    }));
+    m.locate(1_000);
+    let a = m.alert.take().unwrap();
+    assert_eq!(
+        (a.title.as_str(), a.message.as_str()),
+        ("Locate Failed", "cannot locate")
+    );
     m.return_to_start();
-    assert!(m.alert.is_none());
+    let a = m.alert.take().unwrap();
+    assert_eq!(
+        (a.title.as_str(), a.message.as_str()),
+        ("Locate Failed", "cannot locate")
+    );
+    assert!(m.move_to(2_000).is_err());
+    assert!(m.alert.is_none(), "move_to leaves the error to its caller");
+    f.set_locate_error(None);
     assert!(m.move_to(2_000).is_ok());
+}
+
+#[test]
+fn a_busy_transport_read_keeps_the_last_good_state() {
+    let (f, mut m) = demo();
+    go("transport.play_stop", &mut m).unwrap();
+    assert!(playing(&f));
+    f.set_transport_error(Some(VizError::Busy {
+        message: "plugin host is busy".into(),
+    }));
+    // Playing, as last read: Stop tries the stop; it is not "Nothing is playing."
+    go("transport.stop", &mut m).unwrap();
+    assert_eq!(f.count("stop"), 1);
+    f.set_transport_error(None);
+    assert!(!playing(&f));
+    go("transport.play_stop", &mut m).unwrap();
+    f.set_transport_error(Some(VizError::Busy {
+        message: "plugin host is busy".into(),
+    }));
+    go("transport.play_stop", &mut m).unwrap();
+    assert_eq!(
+        f.count("stop"),
+        2,
+        "play_stop stops, it does not start again"
+    );
+    assert_eq!(f.count("play(3)"), 2);
 }
 
 #[test]

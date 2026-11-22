@@ -55,7 +55,8 @@ pub(crate) fn stopped() -> TransportState {
 pub struct TransportModel {
     session: Arc<dyn DocSession>,
     state: TransportState,
-    selected: Option<u64>,
+    /// The document's last good read, which every poll feeds.
+    shared: Arc<Mutex<TransportState>>,
     /// Shared with the document, whose commands start playing too.
     play_start: Arc<Mutex<Option<i64>>>,
     clock: Clock,
@@ -74,7 +75,7 @@ impl TransportModel {
         Ok(TransportModel {
             session: doc.session().clone(),
             state,
-            selected: None,
+            shared: doc.shared_transport(),
             play_start: doc.shared_play_start(),
             clock: Clock::new(),
         })
@@ -98,23 +99,9 @@ impl TransportModel {
         &self.clock
     }
 
-    /// Chooses the sequence Play plays.
-    pub fn select(&mut self, seq: u64) {
-        self.selected = Some(seq);
-    }
-
-    /// The sequence Play plays: the chosen one while it exists, else the
-    /// first top-level sequence, else the first.
+    /// The sequence Play plays: the document's shown one.
     pub fn selected_seq(&self, doc: &DocumentModel) -> Option<u64> {
-        let seqs = &doc.snapshot().sequences;
-        match self.selected {
-            Some(id) if seqs.iter().any(|s| s.id == id) => Some(id),
-            _ => seqs
-                .iter()
-                .find(|s| s.top_level)
-                .or_else(|| seqs.first())
-                .map(|s| s.id),
-        }
+        doc.selected_seq()
     }
 
     /// Whether Play does anything: a sequence is shown, or it is playing.
@@ -134,15 +121,8 @@ impl TransportModel {
     /// Stops when playing, else plays the shown sequence. A failure is an
     /// alert; the transport is polled either way.
     pub fn play_stop(&mut self, doc: &DocumentModel, store: &mut DocumentStore) {
-        let result = if self.is_playing() {
-            self.session.stop()
-        } else if self.selected_seq(doc).is_some() {
-            self.start_playing(doc, store, None, None)
-        } else {
-            Ok(())
-        };
-        if let Err(e) = result {
-            let title = if self.is_playing() {
+        if let Err((playing, e)) = doc.try_play_stop() {
+            let title = if playing {
                 "Stop Failed"
             } else {
                 "Play Failed"
@@ -161,28 +141,7 @@ impl TransportModel {
         from: Option<i64>,
         to: Option<i64>,
     ) -> Result<(), VizError> {
-        let seq = self.selected_seq(doc).ok_or_else(|| VizError::Model {
-            message: "Select a sequence to play.".into(),
-        })?;
-        // The engine restarts at bar 1 from the end, or from another
-        // sequence's position.
-        let length = doc
-            .snapshot()
-            .sequences
-            .iter()
-            .find(|s| s.id == seq)
-            .map_or(0, |s| s.length_ticks);
-        let there = self.state.seq.is_none() || self.state.seq == Some(seq);
-        let start = from.unwrap_or(if there && self.state.tick < length {
-            self.state.tick
-        } else {
-            0
-        });
-        match from {
-            Some(f) => self.session.play_from(seq, f, to)?,
-            None => self.session.play(seq)?,
-        }
-        *self.play_start.lock().unwrap() = Some(start);
+        doc.start_playing(from, to)?;
         self.poll(store);
         Ok(())
     }
@@ -190,8 +149,7 @@ impl TransportModel {
     /// Stops and goes back to where playing started. The error is the
     /// caller's to show (keys report a refusal in the status line).
     pub fn stop_and_return(&mut self, store: &mut DocumentStore) -> Result<(), VizError> {
-        self.session.stop()?;
-        self.session.locate(self.play_start().unwrap_or(0))?;
+        crate::document::stop_and_return(self.session.as_ref(), &self.play_start)?;
         self.poll(store);
         Ok(())
     }
@@ -203,6 +161,7 @@ impl TransportModel {
             Ok(t) => {
                 self.clock
                     .sample(t.tick, t.playing, t.seq, t.ticks_per_second, Instant::now());
+                *self.shared.lock().unwrap() = t.clone();
                 self.state = t;
                 PollResult::Updated
             }

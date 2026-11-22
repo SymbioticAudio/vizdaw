@@ -359,3 +359,28 @@ fn the_readout_reads_tempo_and_meter_from_the_sequence_info() {
     let (doc, t) = setup(&empty);
     assert_eq!(t.readout_of(&doc).texts.signature, "\u{2013}");
 }
+
+#[test]
+fn the_key_and_channel_paths_play_the_same_sequence() {
+    let f = Arc::new(demo_fake());
+    let (mut doc, mut t) = setup(&f);
+    doc.select(Some(1));
+    let mut s = store();
+    t.play_stop(&doc, &mut s);
+    assert_eq!(
+        t.state().seq,
+        Some(1),
+        "the shown sequence, not the first top-level"
+    );
+    let start = t.play_start();
+    t.play_stop(&doc, &mut s);
+    vizdaw_app::commands::run("transport.play_stop", &[], &mut doc).unwrap();
+    assert_eq!(doc.play_start(), start);
+    assert_eq!(t.play_start(), start);
+    let plays: Vec<String> = f
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("play("))
+        .collect();
+    assert_eq!(plays, vec!["play(1)", "play(1)"]);
+}

@@ -45,6 +45,7 @@ struct State {
     loop_error: Option<VizError>,
     looped: bool,
     info_reads: usize,
+    locate_error: Option<VizError>,
 }
 
 /// One bar of 4/4, in ticks.
@@ -118,6 +119,7 @@ impl FakeSession {
             loop_error: None,
             looped: false,
             info_reads: 0,
+            locate_error: None,
         }))
     }
 
@@ -223,6 +225,10 @@ impl FakeSession {
     /// The error every bar step, key step and wind answers with.
     pub fn set_jump_error(&self, e: Option<VizError>) {
         self.st().jump_error = e;
+    }
+
+    pub fn set_locate_error(&self, e: Option<VizError>) {
+        self.st().locate_error = e;
     }
 
     pub fn set_loop_error(&self, e: Option<VizError>) {
@@ -382,6 +388,9 @@ impl DocSession for FakeSession {
     }
     fn locate(&self, tick: i64) -> Result<(), VizError> {
         let mut s = self.st();
+        if let Some(e) = s.locate_error.clone() {
+            return Err(e);
+        }
         s.calls.push(format!("locate({tick})"));
         s.transport.tick = tick;
         Ok(())

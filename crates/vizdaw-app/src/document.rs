@@ -43,11 +43,16 @@ pub struct DocumentModel {
     play_start: Arc<Mutex<Option<i64>>>,
     /// Sequence info, read once per snapshot version.
     infos: Vec<(u64, OnceLock<Option<SequenceInfo>>)>,
+    /// The last good transport read; the transport model feeds it too.
+    transport: Arc<Mutex<TransportState>>,
 }
 
 impl DocumentModel {
     pub fn new(session: Arc<dyn DocSession>) -> Result<Self, VizError> {
         let snapshot = session.snapshot()?;
+        let transport = session
+            .transport()
+            .unwrap_or_else(|_| crate::transport::stopped());
         let selection = session.selection().unwrap_or_else(|_| empty_selection());
         let mut model = DocumentModel {
             session,
@@ -63,6 +68,7 @@ impl DocumentModel {
             text_editors: BTreeSet::new(),
             play_start: Arc::new(Mutex::new(None)),
             infos: vec![],
+            transport: Arc::new(Mutex::new(transport)),
         };
         model.reset_infos();
         model.refresh_lanes();
@@ -280,31 +286,35 @@ impl DocumentModel {
         self.play_start.clone()
     }
 
-    /// The transport read now; `None` while the core is busy or refuses.
-    pub fn live_transport(&self) -> Option<TransportState> {
-        self.session.transport().ok()
+    /// The last transport read that worked (kept while the core is busy,
+    /// as Swift's `poll()` keeps it).
+    pub fn last_transport(&self) -> TransportState {
+        self.transport.lock().unwrap().clone()
     }
 
+    pub(crate) fn shared_transport(&self) -> Arc<Mutex<TransportState>> {
+        self.transport.clone()
+    }
+
+    /// Reads the transport. A read that fails (Busy included) leaves the
+    /// last good one in place, and is returned for the caller to judge.
+    pub fn poll_transport(&self) -> Result<TransportState, VizError> {
+        let t = self.session.transport()?;
+        *self.transport.lock().unwrap() = t.clone();
+        Ok(t)
+    }
+
+    /// Playing, as last read.
     pub fn is_playing(&self) -> bool {
-        self.live_transport().is_some_and(|t| t.playing)
+        self.transport.lock().unwrap().playing
     }
 
     /// Plays the shown sequence from `from` (`None`: where the transport
-    /// stands, or bar 1 at the end), up to `to` where it stops.
+    /// stands, or bar 1 at the end), up to `to` where it stops, and
+    /// remembers where it started. The one start-playing path.
     pub fn start_playing(&self, from: Option<i64>, to: Option<i64>) -> Result<(), VizError> {
-        let state = self
-            .live_transport()
-            .unwrap_or_else(crate::transport::stopped);
-        self.start_playing_at(&state, from, to)
-    }
-
-    /// `start_playing` against a transport already read.
-    pub(crate) fn start_playing_at(
-        &self,
-        state: &TransportState,
-        from: Option<i64>,
-        to: Option<i64>,
-    ) -> Result<(), VizError> {
+        let _ = self.poll_transport();
+        let state = self.last_transport();
         let seq = self.selected_seq.ok_or_else(|| VizError::Model {
             message: "Select a sequence to play.".into(),
         })?;
@@ -327,12 +337,14 @@ impl DocumentModel {
             None => self.session.play(seq)?,
         }
         *self.play_start.lock().unwrap() = Some(start);
+        let _ = self.poll_transport();
         Ok(())
     }
 
-    /// Stops when playing, else plays the shown sequence. A failure is an
-    /// alert, "Stop Failed" or "Play Failed".
-    pub fn play_stop(&mut self) {
+    /// Stops when playing, else plays the shown sequence (nothing with no
+    /// sequence). On a failure: whether it was playing, and the error.
+    pub(crate) fn try_play_stop(&self) -> Result<(), (bool, VizError)> {
+        let _ = self.poll_transport();
         let playing = self.is_playing();
         let result = if playing {
             self.session.stop()
@@ -341,7 +353,14 @@ impl DocumentModel {
         } else {
             Ok(())
         };
-        if let Err(e) = result {
+        let _ = self.poll_transport();
+        result.map_err(|e| (playing, e))
+    }
+
+    /// Stops or plays. A failure is an alert, "Stop Failed" or "Play
+    /// Failed".
+    pub fn play_stop(&mut self) {
+        if let Err((playing, e)) = self.try_play_stop() {
             let title = if playing {
                 "Stop Failed"
             } else {
@@ -353,8 +372,9 @@ impl DocumentModel {
 
     /// Stops and goes back to where playing started.
     pub fn stop_and_return(&self) -> Result<(), VizError> {
-        self.session.stop()?;
-        self.session.locate(self.play_start().unwrap_or(0))
+        stop_and_return(self.session.as_ref(), &self.play_start)?;
+        let _ = self.poll_transport();
+        Ok(())
     }
 
     pub fn status(&self) -> Option<&str> {
@@ -549,6 +569,16 @@ impl DocumentModel {
             }
         }
     }
+}
+
+/// Stops and locates back to where playing started (the one copy).
+pub(crate) fn stop_and_return(
+    session: &dyn DocSession,
+    play_start: &Mutex<Option<i64>>,
+) -> Result<(), VizError> {
+    session.stop()?;
+    let at = *play_start.lock().unwrap();
+    session.locate(at.unwrap_or(0))
 }
 
 fn label_title(verb: &str, label: &Option<String>) -> String {
