@@ -2,6 +2,7 @@
 
 pub mod app_state;
 pub mod control;
+pub mod menu_bar;
 pub mod menus;
 pub mod registry;
 pub mod shell;
@@ -16,7 +17,8 @@ use vizdaw_app::{DocId, DocumentStore};
 
 pub use app_state::AppState;
 pub use menus::{
-    CloseWindow, NewDemo, NewDocument, OpenDocument, PlayStop, Quit, Save, SaveAs, StopAndReturn,
+    CloseWindow, NewDemo, NewDocument, OpenDocument, PlayStop, Quit, RunCommand, Save, SaveAs,
+    StopAndReturn,
 };
 pub use shell::DocumentWindow;
 
@@ -24,7 +26,8 @@ pub use shell::DocumentWindow;
 /// handles the app-level actions (New, New Demo, Open, Quit).
 pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     let state = app_state::create(store, cx);
-    menus::install(cx);
+    let keymap = state.read(cx).keymap.clone();
+    menus::install(&keymap, cx);
     cx.on_action(|_: &NewDocument, cx| {
         new_document(cx);
     });

@@ -144,7 +144,9 @@ impl RegistryScope {
 
     /// An invisible overlay that records the next child control with its
     /// parent's bounds when drawn. Add it as a child of the control, which
-    /// must be `.relative()`.
+    /// must be `.relative()`. It is pinned to the parent's corner: an
+    /// absolute child without insets sits where it would flow (after the
+    /// text in a block container).
     pub fn control(&mut self, role: &str, label: &str, enabled: bool) -> impl IntoElement {
         let path = self.take_index();
         let registry = self.registry.clone();
@@ -159,6 +161,8 @@ impl RegistryScope {
             |_, _, _, _| {},
         )
         .absolute()
+        .top_0()
+        .left_0()
         .size_full()
     }
 }

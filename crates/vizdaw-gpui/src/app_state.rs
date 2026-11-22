@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use core_control::bindings::Keymap;
 use gpui::{App, AppContext, Entity, Global, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::transport::{PollResult, TransportModel, TransportReadout};
@@ -23,6 +24,8 @@ pub struct WindowEntry {
 
 pub struct AppState {
     pub store: DocumentStore,
+    /// The keys of every command (the registry's defaults for now).
+    pub keymap: Keymap,
     /// Each document's transport, built from that document and only ever
     /// called with it.
     transports: HashMap<DocId, TransportModel>,
@@ -43,6 +46,7 @@ impl AppState {
     pub fn new(store: DocumentStore) -> Self {
         AppState {
             store,
+            keymap: Keymap::default(),
             transports: HashMap::new(),
             windows: Vec::new(),
             next_token: 1,

@@ -1,19 +1,23 @@
-//! The document window: one window per open document, with the alert
-//! banner, the transport bar and (for now) an empty body.
+//! The document window: one window per open document, with the menu bar
+//! (off macOS), the alert banner, the transport bar and (for now) an empty
+//! body.
 
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, PromptLevel, Render, StatefulInteractiveElement, Styled,
-    Subscription, Task, Window, WindowBounds, WindowHandle, WindowOptions, div, px, rgb, size,
+    IntoElement, KeyDownEvent, ParentElement, PromptLevel, Render, StatefulInteractiveElement,
+    Styled, Subscription, Task, Window, WindowBounds, WindowHandle, WindowOptions, div, px, rgb,
+    size,
 };
 use vizdaw_app::alerts::AlertItem;
+use vizdaw_app::commands;
 use vizdaw_app::{DocId, SaveAction, WindowToken};
 
 use crate::app_state::AppState;
-use crate::menus::{self, CloseWindow, PlayStop, Save, SaveAs, StopAndReturn};
+use crate::menu_bar::MenuBar;
+use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::TextInput;
 use crate::transport_bar::{self, BarState, colors};
@@ -30,6 +34,8 @@ pub struct DocumentWindow {
     fields: Vec<Entity<TextInput>>,
     /// A save-changes prompt is showing.
     prompting: bool,
+    /// The in-window menu bar, when this window draws one (off macOS).
+    menu_bar: Option<MenuBar>,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -125,6 +131,8 @@ impl DocumentWindow {
             title: String::new(),
             fields: Vec::new(),
             prompting: false,
+            menu_bar: cfg!(not(target_os = "macos"))
+                .then(|| MenuBar::new(menus::menu_model(None, &Default::default()))),
             _subscriptions: subscriptions,
         }
     }
@@ -183,6 +191,68 @@ impl DocumentWindow {
         self.fields.push(field.clone());
         cx.notify();
         field
+    }
+
+    /// The in-window menu bar, if this window draws one.
+    pub fn menu_bar(&self) -> Option<&MenuBar> {
+        self.menu_bar.as_ref()
+    }
+
+    pub fn menu_bar_mut(&mut self) -> Option<&mut MenuBar> {
+        self.menu_bar.as_mut()
+    }
+
+    /// Shows or hides the in-window menu bar. Off macOS it is shown from
+    /// the start; tests turn it on to drive it on macOS.
+    pub fn set_menu_bar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if shown != self.menu_bar.is_some() {
+            self.menu_bar =
+                shown.then(|| MenuBar::new(menus::menu_model(None, &Default::default())));
+            cx.notify();
+        }
+    }
+
+    /// A document command from its menu item or key, on this window's
+    /// document. A refusal shows in the status line; Rename starts the
+    /// track header's rename field.
+    pub fn run_command(
+        &mut self,
+        action: &RunCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = self.doc;
+        let (result, lane) = self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.store
+                .with_document(doc, |d, _| {
+                    (
+                        commands::perform_from_menu(&action.id, d),
+                        d.selected_lane(),
+                    )
+                })
+                .unzip()
+        });
+        if let (Some(Err(e)), Some(Some(lane))) = (result, lane)
+            && e.dialog.as_deref() == Some("Rename Track")
+        {
+            self.begin_rename(lane, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Starts the inline rename of track `lane` in its header. Task 5
+    /// (track headers) fills this in; until then Rename does nothing.
+    pub fn begin_rename(&mut self, lane: u64, _window: &mut Window, _cx: &mut Context<Self>) {
+        let _ = lane;
+    }
+
+    /// Escape closes an open menu list (the key goes no further).
+    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "escape" && self.menu_bar.as_mut().is_some_and(MenuBar::close) {
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     pub fn play_stop(&mut self, _: &PlayStop, window: &mut Window, cx: &mut Context<Self>) {
@@ -413,7 +483,7 @@ impl Focusable for DocumentWindow {
 impl Render for DocumentWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.doc;
-        let (title, dirty, alert, bar) = {
+        let (title, dirty, alert, bar, model, front) = {
             let s = self.app.read(cx);
             (
                 s.title(doc).unwrap_or_default(),
@@ -423,6 +493,8 @@ impl Render for DocumentWindow {
                     readout,
                     can_play: s.can_play(doc),
                 }),
+                menus::menu_model(s.store.document(doc), &s.keymap),
+                s.store.front().is_none_or(|f| f == doc),
             )
         };
         if title != self.title {
@@ -430,11 +502,26 @@ impl Render for DocumentWindow {
             self.title = title;
         }
         window.set_window_edited(dirty);
+        // The app's menus follow the front document (set again only when
+        // they change). Deferred: not from inside a draw.
+        if front {
+            let shown = model.clone();
+            cx.defer(move |cx| menus::show(shown, cx));
+        }
+        if let Some(bar) = &mut self.menu_bar {
+            bar.set_model(model);
+        }
 
         let mut root = RegistryScope::root(&self.registry);
+        let menu_bar = self
+            .menu_bar
+            .as_ref()
+            .map(|b| b.render(&mut root.container(), window, cx));
         div()
             .key_context(menus::WINDOW_CONTEXT)
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(Self::run_command))
             .on_action(cx.listener(Self::play_stop))
             .on_action(cx.listener(Self::stop_and_return))
             .on_action(cx.listener(Self::save))
@@ -446,6 +533,7 @@ impl Render for DocumentWindow {
             .bg(rgb(0x1c1c22))
             .text_color(rgb(colors::TEXT))
             .text_sm()
+            .children(menu_bar)
             .when_some(alert, |d, alert| {
                 d.child(Self::alert_banner(&alert, &mut root.container(), cx))
             })

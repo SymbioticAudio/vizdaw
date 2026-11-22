@@ -441,3 +441,133 @@ fn save_as_to_a_new_name_does_not_ask(cx: &mut TestAppContext) {
         )]
     );
 }
+
+/// The demo window with the in-window menu bar shown (it is off on macOS).
+fn setup_with_menu_bar(cx: &mut TestAppContext) -> Setup {
+    let mut s = setup(cx, demo_fake());
+    s.window
+        .update(&mut s.cx, |v, _, cx| v.set_menu_bar_shown(true, cx))
+        .unwrap();
+    s.cx.run_until_parked();
+    s
+}
+
+fn has_element(s: &mut Setup, role: &str, label: &str) -> bool {
+    s.window
+        .read_with(&s.cx, |v, _| {
+            v.registry()
+                .borrow()
+                .elements()
+                .iter()
+                .any(|e| e.role == role && e.label == label)
+        })
+        .unwrap()
+}
+
+#[gpui::test]
+fn the_in_window_menu_bar_runs_an_item(cx: &mut TestAppContext) {
+    let mut s = setup_with_menu_bar(cx);
+    assert!(!has_element(&mut s, "menuitem", "New Audio Track"));
+    click(&mut s, "menu", "Track");
+    assert!(has_element(&mut s, "menuitem", "New Audio Track"));
+    click(&mut s, "menuitem", "New Audio Track");
+    let made: Vec<String> = s
+        .fake
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("new_track("))
+        .collect();
+    assert_eq!(made, vec!["new_track(3,Audio,None)".to_string()]);
+    // The list closes; the Edit menu now offers Undo.
+    assert!(!has_element(&mut s, "menuitem", "New Audio Track"));
+    assert!(has_element(&mut s, "menu", "Edit"));
+}
+
+#[gpui::test]
+fn escape_closes_the_open_menu(cx: &mut TestAppContext) {
+    let mut s = setup_with_menu_bar(cx);
+    click(&mut s, "menu", "Track");
+    assert!(has_element(&mut s, "menuitem", "New Audio Track"));
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    assert!(!has_element(&mut s, "menuitem", "New Audio Track"));
+    // A click outside closes it too.
+    click(&mut s, "menu", "Track");
+    assert!(has_element(&mut s, "menuitem", "New Audio Track"));
+    s.cx.simulate_click(gpui::point(px(900.), px(600.)), Modifiers::none());
+    s.cx.run_until_parked();
+    assert!(!has_element(&mut s, "menuitem", "New Audio Track"));
+    assert_eq!(s.fake.count("play(3)"), 0);
+}
+
+#[gpui::test]
+fn a_disabled_item_does_nothing(cx: &mut TestAppContext) {
+    let mut s = setup_with_menu_bar(cx);
+    click(&mut s, "menu", "Track");
+    let disabled = s
+        .window
+        .read_with(&s.cx, |v, _| {
+            v.registry()
+                .borrow()
+                .elements()
+                .iter()
+                .find(|e| e.role == "menuitem" && e.label == "Delete Track")
+                .map(|e| e.enabled)
+        })
+        .unwrap();
+    assert_eq!(disabled, Some(false));
+    click(&mut s, "menuitem", "Delete Track");
+    assert!(s.fake.edits().is_empty());
+    // The list stays open, and no refusal was raised.
+    assert!(has_element(&mut s, "menuitem", "Delete Track"));
+    let doc = s.window_doc();
+    let status = s.app.read_with(&s.cx, |a, _| {
+        a.store.document(doc).unwrap().status().map(String::from)
+    });
+    assert_eq!(status, None);
+}
+
+#[gpui::test]
+fn the_track_keys_run_their_commands(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    let key = if cfg!(target_os = "macos") {
+        "cmd-alt-a"
+    } else {
+        "ctrl-alt-a"
+    };
+    s.cx.simulate_keystrokes(key);
+    s.cx.run_until_parked();
+    assert_eq!(
+        s.fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("new_track("))
+            .count(),
+        1
+    );
+}
+
+#[gpui::test]
+fn the_app_menus_follow_the_front_document(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    let undo_title = |s: &mut Setup| {
+        let menus = s.cx.update(|_, cx| cx.get_menus()).expect("menus");
+        let edit = menus.iter().find(|m| m.name == "Edit").unwrap();
+        edit.items
+            .iter()
+            .find_map(|i| match i {
+                gpui::OwnedMenuItem::Action { name, disabled, .. } if name.starts_with("Undo") => {
+                    Some((name.clone(), *disabled))
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(undo_title(&mut s), ("Undo".to_string(), true));
+    let mut next = s.fake.snap();
+    next.undo_label = Some("New Track".into());
+    s.fake.bump(next);
+    s.cx.dispatch_action(vizdaw_gpui::menus::RunCommand::new("track.new_audio"));
+    s.cx.run_until_parked();
+    assert_eq!(undo_title(&mut s), ("Undo New Track".to_string(), false));
+}
