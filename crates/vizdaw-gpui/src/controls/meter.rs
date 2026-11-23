@@ -22,7 +22,7 @@ pub const OVERHANG: f64 = 2.;
 /// points high. While it shows a signal (above the −60 dBFS bottom) it
 /// asks for the next frame, so it falls between two reads.
 pub fn meter(level: MeterLevel, height: f64, window: &mut Window) -> AnyElement {
-    if level.left >= SILENCE || level.right >= SILENCE {
+    if wants_frame(level) {
         window.request_animation_frame();
     }
     canvas(
@@ -33,6 +33,12 @@ pub fn meter(level: MeterLevel, height: f64, window: &mut Window) -> AnyElement 
     .w(px(WIDTH as f32))
     .h(px(height.max(0.) as f32))
     .into_any_element()
+}
+
+/// Whether a meter showing `level` asks for the next frame: while either
+/// bar is above the −60 dBFS bottom (it is still falling).
+pub fn wants_frame(level: MeterLevel) -> bool {
+    level.left >= SILENCE || level.right >= SILENCE
 }
 
 /// Each bar's fill height for `level` in a meter `height` high.

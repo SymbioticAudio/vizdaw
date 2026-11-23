@@ -982,6 +982,9 @@ impl Setup {
     }
 }
 
+/// What the bar shows for `levels(..)`'s load (no sample rate: no PDC).
+const LOAD: &str = "DSP 12% \u{00B7} peak 30%";
+
 #[gpui::test]
 fn meters_decay_and_fall_silent(cx: &mut TestAppContext) {
     let mut s = setup(cx, fake());
@@ -995,12 +998,13 @@ fn meters_decay_and_fall_silent(cx: &mut TestAppContext) {
         "{m:?}"
     );
     assert_eq!(s.meter(6), MeterLevel::SILENT);
-    assert!(
-        s.find("text", "DSP 12% \u{00B7} peak 30% \u{00B7} PDC 0.0 ms")
-            .is_some()
-            || s.elements().iter().any(|e| e.label.starts_with("DSP 12%")),
-        "the load follows the read"
-    );
+    let load: Vec<String> = s
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "text" && e.label.starts_with("DSP "))
+        .map(|e| e.label)
+        .collect();
+    assert_eq!(load, [LOAD], "the load follows the read");
     // The strip leaves the take: it falls 0.85 a period…
     s.fake.set_levels(levels(&[]));
     s.period();
@@ -1014,6 +1018,19 @@ fn meters_decay_and_fall_silent(cx: &mut TestAppContext) {
         s.period();
     }
     assert_eq!(s.meter(5), MeterLevel::SILENT);
+    let drawn: Vec<MeterLevel> = s
+        .view(MixerPlacement::View)
+        .unwrap()
+        .read_with(&s.cx, |v, _| v.drawn().iter().map(|l| l.meter).collect());
+    assert!(
+        drawn.iter().all(|m| !controls::meter::wants_frame(*m)),
+        "no meter asks for a frame once silent: {drawn:?}"
+    );
+    // Nothing more to show: further polls redraw nothing.
+    let version = s.model(|d| d.mixer().unwrap().shown_version());
+    s.period();
+    s.period();
+    assert_eq!(s.model(|d| d.mixer().unwrap().shown_version()), version);
     // A placement that goes stops polling.
     s.run_menu("ui.view_arrange");
     let n = s.fake.levels_reads();

@@ -446,3 +446,38 @@ fn the_monitor_cycles_auto_input_off() {
     mx(&mut d, |m, d| m.cycle_monitor(d, 0));
     assert_eq!(f.edits().len(), n, "master has no input track");
 }
+
+/// A tick moves `shown_version` only when what is shown changes: a load
+/// that jitters inside one shown percentage redraws nothing.
+#[test]
+fn a_load_jitter_inside_one_percent_is_not_a_change() {
+    let (f, mut d) = make();
+    let read = |load: f32, peak: f32| vizdaw_ffi::mixer::MixerLevels {
+        meters: vec![],
+        dsp_load: load,
+        dsp_peak: peak,
+        latency_frames: 0,
+        faulted: vec![],
+        midi: vec![],
+    };
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+    f.set_levels(read(0.1201, 0.3001));
+    mx(&mut d, |m, d| m.tick(d, at(0)));
+    let v = mx(&mut d, |m, _| m.shown_version());
+    for (i, (load, peak)) in [(0.1203, 0.3004), (0.1198, 0.2996), (0.1249, 0.3049)]
+        .into_iter()
+        .enumerate()
+    {
+        f.set_levels(read(load, peak));
+        mx(&mut d, |m, d| m.tick(d, at(40 * (i as u64 + 1))));
+    }
+    assert_eq!(
+        mx(&mut d, |m, _| m.shown_version()),
+        v,
+        "12% · 30% throughout"
+    );
+    f.set_levels(read(0.131, 0.3001));
+    mx(&mut d, |m, d| m.tick(d, at(400)));
+    assert_ne!(mx(&mut d, |m, _| m.shown_version()), v, "13% is a change");
+}

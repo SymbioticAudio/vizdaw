@@ -555,10 +555,14 @@ fn run_command(
         "file.close" => {
             // Never asks (Swift `control_close_never_prompts`): the window
             // closes without its save prompt and the document goes, saved
-            // or not.
-            entry
-                .handle
-                .update(cx, |_, window, _| window.remove_window())
+            // or not. Aimed at the Mixer window, it is the document's own
+            // window that closes; the Mixer window closes itself when it
+            // sees its document gone.
+            let own = app
+                .read(cx)
+                .window_of(doc)
+                .map_or(entry.handle, |w| w.handle);
+            own.update(cx, |_, window, _| window.remove_window())
                 .map_err(|_| gone())?;
             app.update(cx, |s, cx| {
                 s.close_document(doc);

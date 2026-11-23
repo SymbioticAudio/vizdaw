@@ -69,12 +69,19 @@ pub struct Meters {
     midi: HashMap<u64, f64>,
 }
 
-/// Two reads show the same when everything but their time is the same.
+/// A load as the load text shows it ("12").
+fn percent(x: f32) -> String {
+    format!("{:.0}", f64::from(x) * 100.0)
+}
+
+/// Two reads show the same when everything but their time is the same,
+/// the loads compared as the load text shows them (a jitter inside one
+/// percent is no change).
 impl PartialEq for Meters {
     fn eq(&self, o: &Self) -> bool {
         self.levels == o.levels
-            && self.dsp_load == o.dsp_load
-            && self.dsp_peak == o.dsp_peak
+            && percent(self.dsp_load) == percent(o.dsp_load)
+            && percent(self.dsp_peak) == percent(o.dsp_peak)
             && self.latency_frames == o.latency_frames
             && self.faulted == o.faulted
             && self.midi == o.midi
@@ -164,9 +171,9 @@ impl Meters {
             String::new()
         };
         format!(
-            "DSP {:.0}% \u{00B7} peak {:.0}%{pdc}",
-            f64::from(self.dsp_load) * 100.0,
-            f64::from(self.dsp_peak) * 100.0
+            "DSP {}% \u{00B7} peak {}%{pdc}",
+            percent(self.dsp_load),
+            percent(self.dsp_peak)
         )
     }
 }

@@ -1346,11 +1346,27 @@ fn gpui_window_views_and_panes_over_the_channel() {
     let doc = app.call("state.get", json!({"target": "document", "window": window}));
     assert!(doc["alert"].is_null(), "no dialog: {doc}");
 
-    // 3. ⌃2 and ⌃1.
-    app.call(
-        "ui.key",
-        json!({"window": window, "key": "2", "modifiers": ["control"]}),
-    );
+    // 3. ⌃2 and ⌃1 on macOS. Off macOS ⌃2 is ⌘2's (the List, as the
+    // keyboard has it: `menus::owner`), so the views are switched with
+    // their commands there.
+    let mac = cfg!(target_os = "macos");
+    if mac {
+        app.call(
+            "ui.key",
+            json!({"window": window, "key": "2", "modifiers": ["control"]}),
+        );
+    } else {
+        app.call(
+            "ui.key",
+            json!({"window": window, "key": "2", "modifiers": ["control"]}),
+        );
+        app.wait(&window, json!({"condition": "detail_kind", "kind": "list"}));
+        assert_eq!(layout(&mut app)["main"], "arrange", "⌃2 opened the List");
+        app.call(
+            "command.run",
+            json!({"id": "ui.view_mix", "window": window}),
+        );
+    }
     wait_for_state(&mut app, &window, "layout", |l| l["main"] == "mix");
     // Only the mixer has Add Bus: once it is in the tree the view has
     // switched, so the absent Arrangement means something.
@@ -1360,10 +1376,17 @@ fn gpui_window_views_and_panes_over_the_channel() {
         find_node(&tree["nodes"], "Arrangement").is_none(),
         "the Mix view has no arrangement"
     );
-    app.call(
-        "ui.key",
-        json!({"window": window, "key": "1", "modifiers": ["control"]}),
-    );
+    if mac {
+        app.call(
+            "ui.key",
+            json!({"window": window, "key": "1", "modifiers": ["control"]}),
+        );
+    } else {
+        app.call(
+            "command.run",
+            json!({"id": "ui.view_arrange", "window": window}),
+        );
+    }
     wait_for_state(&mut app, &window, "layout", |l| l["main"] == "arrange");
     wait_for_node(&mut app, &window, "Arrangement");
     app.call(

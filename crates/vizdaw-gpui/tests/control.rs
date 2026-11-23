@@ -2036,6 +2036,36 @@ fn window_mixer_opens_one_mixer_window(cx: &mut TestAppContext) {
     assert_eq!(t["playing"], true, "{t}");
 }
 
+/// `file.close` aimed at the Mixer window (by its number, or `key` while
+/// it is key) closes the document's own window, and the Mixer window
+/// with it: no window is left over a closed document.
+#[gpui::test]
+fn file_close_through_the_mixer_window_closes_the_document_window(cx: &mut TestAppContext) {
+    for target in ["number", "key"] {
+        let s = mixer_setup(cx);
+        ok(call(&s, cx, "command.run", json!({"id": "window.mixer"})));
+        let rows = window_rows(&s, cx);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let window = if target == "number" {
+            json!(rows[1].0)
+        } else {
+            assert!(rows[1].3, "the Mixer window is key: {rows:?}");
+            json!("key")
+        };
+        ok(call(
+            &s,
+            cx,
+            "command.run",
+            json!({"id": "file.close", "window": window}),
+        ));
+        cx.update(|_| {});
+        cx.run_until_parked();
+        assert_eq!(documents(cx), 0, "{target}");
+        assert!(window_rows(&s, cx).is_empty(), "{target}");
+        assert!(cx.windows().is_empty(), "{target}: a window is left open");
+    }
+}
+
 /// e2e `touch_writes_a_fader_over_the_channel`, the command part.
 #[gpui::test]
 fn automation_over_the_channel(cx: &mut TestAppContext) {
