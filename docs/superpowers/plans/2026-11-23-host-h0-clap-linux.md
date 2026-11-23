@@ -47,3 +47,36 @@
 **Files:** `crates/test-plugins` (a `gui` kind: X11 editor that registers a timer and an fd and requests a resize), `crates/core-ffi/src/editor.rs` (`on_main_thread` real on Linux; expose run-loop fds/tick and editor resize events), tests `crates/core-host/tests/clap_gui_linux.rs` (`#[cfg(target_os = "linux")]`, `#[ignore]` unless `DISPLAY` is set, run under Xvfb in CI).
 - [ ] Tests first; implement; add the Xvfb run of these tests to the Linux CI job; commit `test-plugins: a CLAP GUI test plug-in; core-ffi run loop on Linux`.
 - [ ] Controller: run the ignored Linux tests over SSH on the Linux box (XWayland `DISPLAY=:0`) and in CI; merge `host` into `next` after review.
+
+## Outcome (2026-11-23)
+
+All three tasks done (commits 97e26be4..56737b0d on branch `host`). Evidence: macOS and Linux core-host/core-ffi/test-plugins/vizdaw-scan green (Linux 1356 passed), the X11 editor tests pass under XWayland on the owner's Linux box, clippy clean on both; whole-branch review: ready to merge.
+
+### Rulings
+
+- Task 1: Ruling: offer CLAP timer/posix-fd only off macOS until H2 drives the run loop (Swift build and macOS GPUI also use core-host) — avoids starving mac plug-ins — mac plug-ins keep their own timers until H2
+- Task 1: Ruling: unix fd type gated behind cfg(unix) so non-unix still builds — none
+- Task 1: Ruling: run loop is thread-local (instances are created on the main thread); H2 must tick from the instance-creating thread — correct for the app — an offline renderer creating instances elsewhere would never tick them
+- Task 2: Ruling: set_scale is a separate PluginEditor method (default no-op; X11 between create and set_parent) — additive, CLAP order — none
+- Task 2: Ruling: IdleReport.editor_resize added so callers see resizes; the headless test editor lives on the timer kind (vizdaw.test.timer now has_editor) — avoids count churn — none
+- Task 2: review Approved; Ruling (revises plan Review Focus 3): request_resize accepted from fixed-size editors too (CLAP allows it: zoom menus, panels) — report the size so the window follows, without adjust_size/set_size; resizable editors keep adjust+set — plan was wrong — none
+- Task 3: Ruling: exported open_editor keeps its signature (Swift FakeSession conforms to the generated protocol); scale via Rust-only open_editor_scaled — keeps the Swift build compiling — none
+- Task 3: Ruling: X11 tests skip at runtime without DISPLAY (not #[ignore]) — CI step needs no --ignored — a missing DISPLAY in CI silently skips (CI step sets it)
+- Task 3: Ruling: the Swift build ignores editor_resize, so a macOS CLAP editor that grows itself keeps its old window size there — Swift is personal-only; GPUI H2 follows resizes — owner may see clipped CLAP editors in the Swift build
+- Final: Ruling: request_resize acceptance gated off macOS until H2 (Swift build ignores editor_resize; the owner tests plug-ins there) — protects personal testing — macOS editors can't self-resize until H2
+
+### Carried to H2
+
+- Task 2: carry to H2: cap a fixed editor's requested size to the screen at the window layer
+- Final: carry to H2: drive run_loop_pump/tick from the instance-creating thread in every Linux binary that loads CLAP plug-ins (vizdaw-gpui; vizdaw-play if it shows editors) before any Linux build ships; back off POLLNVAL fds; ignore editor_resize for closed slots; cap fixed-editor sizes to the screen; lift the macOS resize/timer gates when GPUI follows
+
+### Deferred minors
+
+- Task 1: minor (deferred): Member::drop silently keeps leftovers if the table borrow fails (unreachable); tick allocates two Vecs per tick
+- Task 2: minor (deferred): ±1 px rounding drift between to_points (ceil) and from_points (nearest); scale-change test checks only the readout; test size encoding caps at 65535; log a declined set_scale
+- Task 2: minor (deferred): no restore target if get_size failed at open
+- Task 3: minor (deferred): test plug-in closes its X fd before unregistering it (DPF/JUCE unregister first)
+- Task 3: minor (deferred): "reported once" resize assertions weak (pump_until discards events); latest-wins merge untested; a resize for a slot closed before idle is still delivered (document)
+- Task 3: minor (deferred): CI could silently skip X11 tests if DISPLAY were missing (add VIZDAW_REQUIRE_DISPLAY); editors_main ignores filters; duplicated poll mapping; possible fd-callback flake; GC failure leaks a window id; libc::gettid needs glibc ≥ 2.30
+- Final: minor (deferred): unbounded timer registrations (O(n²) tick) — per-instance cap (e.g. 256)
+- Final: minor (deferred): libc::gettid needs glibc ≥ 2.30 (use syscall(SYS_gettid) if older distros matter, H4)
