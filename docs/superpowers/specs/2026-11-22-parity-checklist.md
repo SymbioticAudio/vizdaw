@@ -57,7 +57,7 @@ item (false: keys, the Keys settings and the control channel only).
 | ui.view_arrange | View | Arrange View | ⌃1 | true | | |
 | ui.view_mix | View | Mix View | ⌃2 | true | | |
 | ui.toggle_left | View | Left Pane | ⌃⌘← | true | | |
-| ui.toggle_bottom | View | Bottom Pane | ⌃⌘↓ | true | | |
+| ui.toggle_bottom | View | Bottom Pane | ⌃⌘↓ | true | S4 | S4 |
 | ui.toggle_right | View | Right Pane | ⌃⌘→ | true | | |
 | ui.pane | View | Set Pane |  | false | | |
 | ui.theme | View | Theme |  | false | | |
@@ -70,7 +70,7 @@ item (false: keys, the Keys settings and the control channel only).
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
 | editors.piano_roll | Editors | Piano Roll | ⌘1 | true | | |
-| editors.list | Editors | List | ⌘2 | true | | |
+| editors.list | Editors | List | ⌘2 | true | S4 | S4 |
 | editors.strip_chart | Editors | Strip Chart | ⌘3 | true | | |
 | editors.drum_grid | Editors | Drum Grid | ⌘4 | true | | |
 | editors.audio_editor | Editors | Audio Editor | ⌘5 | true | | |
@@ -78,13 +78,13 @@ item (false: keys, the Keys settings and the control channel only).
 | editors.list_window | Editors | Open List in Window | ⌥⌘2 | true | | |
 | editors.strip_chart_window | Editors | Open Strip Chart in Window | ⌥⌘3 | true | | |
 | editors.drum_grid_window | Editors | Open Drum Grid in Window | ⌥⌘4 | true | | |
-| editors.close_detail | Editors | Close Detail Editor |  | true | | |
-| editors.insert_event | Editors | Insert Event | ⌘I | true | | |
+| editors.close_detail | Editors | Close Detail Editor |  | true | S4 | S4 |
+| editors.insert_event | Editors | Insert Event | ⌘I | true | S4 | S4 |
 | editors.nudge_earlier | Editors | Nudge Earlier | ⌥← | true | | |
 | editors.nudge_later | Editors | Nudge Later | ⌥→ | true | | |
 | editors.nudge_up | Editors | Nudge Up | ⌥↑ | true | | |
 | editors.nudge_down | Editors | Nudge Down | ⌥↓ | true | | |
-| editors.snap | Editors | Snap to Grid | G | true | | |
+| editors.snap | Editors | Snap to Grid | G | true | S4 | S4 |
 
 ### Modify
 
@@ -500,7 +500,7 @@ a group of by-eye steps the GPUI app must pass.
 | Plugins (plan 3c) | | |
 | Editors (plan 4a) | | |
 | Piano roll (plan 4b) | | |
-| List editor and Select and Modify (plan 4c) | | |
+| List editor and Select and Modify (plan 4c) | partial S4 (List editor; Select and Modify later) | partial S4 |
 | Strip Chart and automation (plan 4d) | | |
 | Control channel (plan CC) | | |
 | Drum grid (plan 4e) | | |
@@ -539,10 +539,10 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 
 | Test | Mac | Linux |
 |---|---|---|
-| demo_play_screenshot_stop | S3 (without the final List-editor step: later slice) | S3 (without the final List-editor step: later slice) |
+| demo_play_screenshot_stop | S3, S4 (List step restored) | S3, S4 (List step restored) |
 | click_play_and_press_space | S3 | S3 |
 | drum_grid_paints_and_erases_by_element | | |
-| keys_drive_step_entry_locators_and_bindings | | |
+| keys_drive_step_entry_locators_and_bindings | partial S4 (G toggles snap: `gpui_g_toggles_snap`); step entry, locators, bindings later | partial S4 |
 | audio_import_plays_and_reports_media | | |
 | regions_normalize_relink_and_trash | | |
 | records_audio_loop_takes_and_midi | | |
