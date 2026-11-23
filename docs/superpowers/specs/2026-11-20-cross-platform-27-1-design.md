@@ -23,6 +23,12 @@ The original design (2026-10-15) aimed for "a native modern Mac UI" and listed W
 - **Linux may ship with known gaps, but each gap gets an answer.** **(owner)** Every parity row that does not pass on Linux is listed with its answer: the workaround Linux users get at 27.1.0, or the 27.x release that closes it. No gap is left as "unknown". The Mac has full parity. Known gaps today: the bundled Multi-Q default EQ is AU-only (answer: CLAP build, or a built-in EQ default on Linux); Co-Producer approvals are stored in the Mac Keychain (answer: the Secret Service password store on Linux); AU inserts in Mac projects (answer: placeholders, §10).
 - **Screen-reader support moves to 27.2.** **(owner)** 27.1.0 keeps labels, roles and keyboard navigation wherever GPUI gives them (the control channel needs the labels anyway), but VoiceOver and Orca support is not a release requirement. Spike check 2 is reported, not a hard fail.
 
+## 2b. Owner rulings (2026-11-23, host track)
+
+- **VST3 slots bump the song format.** **(owner)** The new `vst3` plug-in format is a song-format bump under the usual migration rules, so an older build refuses such a song cleanly. The owner notes the Swift build will probably never be released once 27.x is far enough along.
+- **Built-in Synth on Linux: an open-source SoundFont player.** **(owner)** Linux gets a GPL-compatible SoundFont player with a redistributable General MIDI SoundFont in place of the Mac's built-in sounds (answers the Built-in Synth gap).
+- **Bundled EQ on Linux: build Multi-Q as CLAP.** **(owner)** The bundled Multi-Q default EQ is built as a CLAP plug-in on Linux (answers the Multi-Q gap in §2a).
+
 ## 3. Non-goals
 
 - A public Swift release (26.0.0 beta or 26.1.0). **(owner)**
