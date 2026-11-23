@@ -8,7 +8,9 @@ use crate::info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Ta
 use crate::instance::{
     AudioProcessor, InstanceEvents, OfflineRender, ParentView, PluginEditor, PluginInstance,
 };
-use crate::run_loop::{self, FdFlags, Member, Registrations, Target};
+#[cfg(unix)]
+use crate::run_loop::FdFlags;
+use crate::run_loop::{self, Member, Registrations, Target};
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer};
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize};
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer};
@@ -21,6 +23,7 @@ use clack_host::prelude::*;
 use core_model::mixer::ParamId;
 use std::cell::RefCell;
 use std::ffi::CString;
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::rc::{Rc, Weak};
@@ -31,7 +34,9 @@ type Inst = clack_host::plugin::PluginInstance<VizHost>;
 /// A loaded CLAP plugin (main-thread half).
 pub struct ClapInstance {
     /// Shared (weakly) with the run loop, which calls the plug-in's timer
-    /// and descriptor callbacks between the host's own calls.
+    /// and descriptor callbacks between the host's own calls. Methods here
+    /// `borrow_mut` it for one call; that cannot re-enter (see
+    /// `RunLoopTarget::with`).
     inst: Rc<RefCell<Inst>>,
     /// The instance's place in the run loop; left first on drop.
     member: Option<Member>,
@@ -222,6 +227,13 @@ struct RunLoopTarget {
 
 impl RunLoopTarget {
     /// Calls `f` with the plug-in, unless it is gone or in a host call.
+    ///
+    /// No re-entry: the instance is borrowed mutably only by `ClapInstance`'s
+    /// own methods and here. A plug-in callback (from either) reaches only
+    /// the host handlers, which touch atomics and the registrations table
+    /// (`try_borrow_mut`), never this cell; and the app never calls
+    /// `run_loop_tick` from inside a `ClapInstance` method. A nested tick is a
+    /// no-op, and `try_borrow_mut` skips a busy instance in any case.
     fn with(&self, f: impl FnOnce(&mut Inst)) {
         if let Some(inst) = self.inst.upgrade() {
             if let Ok(mut inst) = inst.try_borrow_mut() {
@@ -238,6 +250,7 @@ impl Target for RunLoopTarget {
         }
     }
 
+    #[cfg(unix)]
     fn on_fd(&self, fd: RawFd, flags: FdFlags) {
         if let Some(posix_fd) = self.exts.posix_fd {
             self.with(|inst| posix_fd.on_fd(&inst.plugin_handle(), fd, flags));

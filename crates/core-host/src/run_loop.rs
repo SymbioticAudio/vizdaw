@@ -14,9 +14,16 @@
 //! late timer included; missed periods are dropped, not caught up), each
 //! ready descriptor gets at most one callback per instance, and timers
 //! registered during the tick wait for the next one.
+//!
+//! The host offers the two extensions only off macOS for now
+//! (`clap::handlers`): nothing drives the loop there yet. Descriptors exist
+//! only on unix; elsewhere the loop has timers alone and
+//! [`run_loop_tick`] takes no ready list.
 
+#[cfg(unix)]
 pub use clack_extensions::posix_fd::FdFlags;
 use std::cell::{Cell, RefCell};
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -36,6 +43,7 @@ struct Timer {
 pub(crate) struct Registrations {
     next_timer: u32,
     timers: Vec<Timer>,
+    #[cfg(unix)]
     fds: Vec<(RawFd, FdFlags)>,
 }
 
@@ -63,6 +71,7 @@ impl Registrations {
         self.timers.len() != before
     }
 
+    #[cfg(unix)]
     /// Adds descriptor `fd`; false if it is invalid or already registered
     /// (a change of flags goes through [`Registrations::modify_fd`]).
     pub(crate) fn register_fd(&mut self, fd: RawFd, flags: FdFlags) -> bool {
@@ -73,6 +82,7 @@ impl Registrations {
         true
     }
 
+    #[cfg(unix)]
     /// Changes the flags of descriptor `fd`; false if it is not registered.
     pub(crate) fn modify_fd(&mut self, fd: RawFd, flags: FdFlags) -> bool {
         match self.fds.iter_mut().find(|(f, _)| *f == fd) {
@@ -84,6 +94,7 @@ impl Registrations {
         }
     }
 
+    #[cfg(unix)]
     /// Removes descriptor `fd`; false if it is not registered.
     pub(crate) fn unregister_fd(&mut self, fd: RawFd) -> bool {
         let before = self.fds.len();
@@ -91,6 +102,7 @@ impl Registrations {
         self.fds.len() != before
     }
 
+    #[cfg(unix)]
     fn fd_flags(&self, fd: RawFd) -> Option<FdFlags> {
         self.fds.iter().find(|(f, _)| *f == fd).map(|(_, fl)| *fl)
     }
@@ -119,6 +131,7 @@ pub(crate) trait Target {
     /// Calls the plug-in's `on_timer`.
     fn on_timer(&self, id: u32);
     /// Calls the plug-in's `on_fd`.
+    #[cfg(unix)]
     fn on_fd(&self, fd: RawFd, flags: FdFlags);
 }
 
@@ -183,6 +196,7 @@ fn entries() -> Snapshot {
     .unwrap_or_default()
 }
 
+#[cfg(unix)]
 /// Every descriptor the plug-ins of this thread registered, with the events
 /// they wait for (merged when two instances share one), sorted by
 /// descriptor: what the app polls before the next [`run_loop_tick`].
@@ -207,7 +221,30 @@ pub fn run_loop_fds() -> Vec<(RawFd, FdFlags)> {
 /// then hands each instance the `ready` descriptors it registered, with
 /// the ready events it asked for (errors always). Bounded work; see the
 /// module docs. A nested call (from inside a callback) does nothing.
+#[cfg(unix)]
 pub fn run_loop_tick(now: Instant, ready: &[(RawFd, FdFlags)]) {
+    tick(now, |table, target| {
+        for (fd, flags) in ready {
+            let Some(want) = table.try_borrow().ok().and_then(|t| t.fd_flags(*fd)) else {
+                continue;
+            };
+            let got = *flags & (want | FdFlags::ERROR);
+            if !got.is_empty() {
+                target.on_fd(*fd, got);
+            }
+        }
+    });
+}
+
+/// One pass of the run loop at `now` (main thread): fires the timers due.
+/// Without unix descriptors there is no ready list.
+#[cfg(not(unix))]
+pub fn run_loop_tick(now: Instant) {
+    tick(now, |_, _| {});
+}
+
+/// Fires each instance's due timers, then runs `fds` for it.
+fn tick(now: Instant, mut fds: impl FnMut(&RefCell<Registrations>, &dyn Target)) {
     if TICKING.try_with(|t| t.replace(true)).unwrap_or(true) {
         return;
     }
@@ -224,15 +261,7 @@ pub fn run_loop_tick(now: Instant, ready: &[(RawFd, FdFlags)]) {
                 target.on_timer(*id);
             }
         }
-        for (fd, flags) in ready {
-            let Some(want) = table.try_borrow().ok().and_then(|t| t.fd_flags(*fd)) else {
-                continue;
-            };
-            let got = *flags & (want | FdFlags::ERROR);
-            if !got.is_empty() {
-                target.on_fd(*fd, got);
-            }
-        }
+        fds(&table, target.as_ref());
     }
 }
 
@@ -242,5 +271,107 @@ struct Ticking;
 impl Drop for Ticking {
     fn drop(&mut self) {
         let _ = TICKING.try_with(|t| t.set(false));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The loop with a fake plug-in side, so it is covered on every
+    //! platform (the host offers the extensions only off macOS; the
+    //! plug-in-driven tests are in `tests/run_loop.rs`).
+    use super::*;
+
+    /// Records the callbacks it gets; optionally unregisters a timer from
+    /// inside its callback.
+    #[derive(Default)]
+    struct Fake {
+        table: RefCell<Option<Rc<RefCell<Registrations>>>>,
+        timers: RefCell<Vec<u32>>,
+        unregister_on_fire: Cell<Option<u32>>,
+        #[cfg(unix)]
+        fds: RefCell<Vec<(RawFd, FdFlags)>>,
+    }
+
+    impl Target for Fake {
+        fn on_timer(&self, id: u32) {
+            self.timers.borrow_mut().push(id);
+            if let (Some(victim), Some(t)) =
+                (self.unregister_on_fire.get(), self.table.borrow().as_ref())
+            {
+                t.borrow_mut().unregister_timer(victim);
+            }
+        }
+
+        #[cfg(unix)]
+        fn on_fd(&self, fd: RawFd, flags: FdFlags) {
+            self.fds.borrow_mut().push((fd, flags));
+        }
+    }
+
+    fn joined() -> (Rc<RefCell<Registrations>>, Rc<Fake>, Member) {
+        let table = Rc::new(RefCell::new(Registrations::default()));
+        let fake = Rc::new(Fake::default());
+        *fake.table.borrow_mut() = Some(Rc::clone(&table));
+        let target: Rc<dyn Target> = fake.clone();
+        let member = join(Rc::clone(&table), target);
+        (table, fake, member)
+    }
+
+    #[cfg(unix)]
+    fn tick(now: Instant) {
+        run_loop_tick(now, &[]);
+    }
+
+    #[cfg(not(unix))]
+    fn tick(now: Instant) {
+        run_loop_tick(now);
+    }
+
+    #[test]
+    fn timers_fire_once_per_period_and_once_per_tick() {
+        let (table, fake, _m) = joined();
+        let ten = table.borrow_mut().register_timer(10).unwrap();
+        let zero = table.borrow_mut().register_timer(0).unwrap();
+        let t0 = Instant::now();
+        tick(t0);
+        tick(t0);
+        assert_eq!(*fake.timers.borrow(), [zero, zero]);
+        fake.timers.borrow_mut().clear();
+        tick(t0 + Duration::from_millis(10_000));
+        assert_eq!(*fake.timers.borrow(), [ten, zero], "late: once each");
+        assert!(table.borrow_mut().unregister_timer(ten));
+        assert!(!table.borrow_mut().unregister_timer(ten));
+    }
+
+    #[test]
+    fn a_timer_unregistered_by_an_earlier_callback_does_not_fire() {
+        let (table, fake, _m) = joined();
+        let a = table.borrow_mut().register_timer(0).unwrap();
+        let b = table.borrow_mut().register_timer(0).unwrap();
+        fake.unregister_on_fire.set(Some(b));
+        tick(Instant::now());
+        assert_eq!(*fake.timers.borrow(), [a]);
+    }
+
+    #[test]
+    fn leaving_the_loop_clears_the_table_and_stops_callbacks() {
+        let (table, fake, member) = joined();
+        table.borrow_mut().register_timer(0).unwrap();
+        drop(member);
+        assert!(table.borrow().timers.is_empty());
+        tick(Instant::now());
+        assert!(fake.timers.borrow().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_descriptors_get_the_events_they_asked_for() {
+        let (table, fake, _m) = joined();
+        assert!(table.borrow_mut().register_fd(3, FdFlags::READ));
+        assert!(!table.borrow_mut().register_fd(-1, FdFlags::READ));
+        assert_eq!(run_loop_fds(), vec![(3, FdFlags::READ)]);
+        let all = FdFlags::READ | FdFlags::WRITE | FdFlags::ERROR;
+        run_loop_tick(Instant::now(), &[(3, all), (4, all)]);
+        assert_eq!(*fake.fds.borrow(), [(3, FdFlags::READ | FdFlags::ERROR)]);
     }
 }

@@ -17,13 +17,15 @@ use clack_extensions::params::{
     HostParams, HostParamsImplMainThread, HostParamsImplShared, ParamClearFlags, ParamRescanFlags,
     PluginParams,
 };
-use clack_extensions::posix_fd::{FdFlags, HostPosixFd, HostPosixFdImpl, PluginPosixFd};
+#[cfg(unix)]
+use clack_extensions::posix_fd::{FdFlags, HostPosixFdImpl, PluginPosixFd};
 use clack_extensions::state::{HostState, HostStateImpl, PluginState};
 use clack_extensions::tail::{HostTail, HostTailImpl, PluginTail};
 use clack_extensions::thread_check::{HostThreadCheck, HostThreadCheckImpl};
-use clack_extensions::timer::{HostTimer, HostTimerImpl, PluginTimer, TimerId};
+use clack_extensions::timer::{HostTimerImpl, PluginTimer, TimerId};
 use clack_host::prelude::*;
 use std::cell::{Cell, RefCell};
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,6 +81,7 @@ pub(crate) struct PluginExts {
     pub gui: Option<PluginGui>,
     pub render: Option<clack_extensions::render::PluginRender>,
     pub timer: Option<PluginTimer>,
+    #[cfg(unix)]
     pub posix_fd: Option<PluginPosixFd>,
 }
 
@@ -113,6 +116,7 @@ impl<'a> SharedHandler<'a> for Shared {
             gui: instance.get_extension(),
             render: instance.get_extension(),
             timer: instance.get_extension(),
+            #[cfg(unix)]
             posix_fd: instance.get_extension(),
         });
     }
@@ -219,6 +223,7 @@ impl HostTimerImpl for MainThread<'_> {
     }
 }
 
+#[cfg(unix)]
 impl HostPosixFdImpl for MainThread<'_> {
     fn register_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
         self.table(|t| t.register_fd(fd, flags).then_some(()))
@@ -305,8 +310,13 @@ impl HostHandlers for VizHost {
             .register::<HostAudioPorts>()
             .register::<HostNotePorts>()
             .register::<HostTail>()
-            .register::<HostGui>()
-            .register::<HostTimer>()
-            .register::<HostPosixFd>();
+            .register::<HostGui>();
+        // Timers and descriptors only off macOS for now: nothing drives the
+        // run loop there yet, and a plug-in that chose the host timer would
+        // never tick (H0 ruling; H2 decides once the app drives the loop).
+        #[cfg(not(target_os = "macos"))]
+        builder.register::<clack_extensions::timer::HostTimer>();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        builder.register::<clack_extensions::posix_fd::HostPosixFd>();
     }
 }
