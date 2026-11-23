@@ -972,6 +972,7 @@ pub(super) fn project_with_identity(
                         let format = match slot.plugin.format {
                             PluginFormat::Au => "au",
                             PluginFormat::Clap => "clap",
+                            PluginFormat::Vst3 => "vst3",
                         };
                         let hash = slot
                             .state

@@ -123,6 +123,8 @@ fn scan(args: &Args) -> Result<ScanReply, String> {
             Ok(ScanReply::Scanned(inst.info().clone()))
         }
         (Format::Au, _) => au::scan(args),
+        // `--format vst3` is not parsed yet (host track H1 Task 2).
+        (Format::Vst3, _) => Err("VST3 scanning is not available in this build".into()),
     }
 }
 

@@ -1713,8 +1713,9 @@ fn instrument_swap_is_kept_and_listed() {
 }
 
 /// Task 7 carry-over (Task 5 hand-off): theirs swaps Bass's instrument for
-/// a VST3 one. VizDAW hosts no VST3: ours keeps its instrument, the swap is
-/// listed under `NOT_APPLIED`, and the merge makes no step.
+/// a VST3 one. A swapped instrument is never applied (VST3 or not): ours
+/// keeps its instrument, the swap is listed under `NOT_APPLIED`, and the
+/// merge makes no step.
 #[test]
 fn instrument_swapped_for_a_vst3_is_kept_and_listed() {
     let (doc, seq) = fixture();

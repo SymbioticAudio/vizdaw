@@ -895,7 +895,7 @@ fn vst_replacement_is_kept_and_listed() {
             .iter_mut()
             .find(|d| d.device_id.as_deref() == Some("org.example.Comp"))
             .unwrap();
-        d.kind = DpDeviceKind::Vst3;
+        d.kind = DpDeviceKind::Vst2;
         d.device_id = Some("ABCDEF0123456789".into());
         d.device_name = "Fancy Comp".into();
         d.named.comment = None;
@@ -1266,7 +1266,7 @@ fn report_lines_are_listed() {
     // Left out: a plug-in VizDAW cannot host.
     let vst = return_file(&t, Strip::Nothing, |p, _| {
         let d = &mut channel(p, "c1").devices[1];
-        d.kind = DpDeviceKind::Vst3;
+        d.kind = DpDeviceKind::Vst2;
         d.device_name = "Fancy Comp".into();
     });
     reports.push(plan_of(&t, &vst, &t.base_doc).report);

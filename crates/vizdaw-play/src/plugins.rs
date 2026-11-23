@@ -123,6 +123,7 @@ pub fn run(args: &Args) -> Result<(), String> {
         let format = match r.plugin.format {
             PluginFormat::Au => "au",
             PluginFormat::Clap => "clap",
+            PluginFormat::Vst3 => "vst3",
         };
         println!(
             "{format}:{}  {} ({})  {status}",

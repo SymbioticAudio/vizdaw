@@ -328,6 +328,8 @@ pub enum PluginFormatTag {
     Au,
     /// CLAP.
     Clap,
+    /// VST3.
+    Vst3,
 }
 
 impl From<core_model::mixer::PluginFormat> for PluginFormatTag {
@@ -335,6 +337,7 @@ impl From<core_model::mixer::PluginFormat> for PluginFormatTag {
         match f {
             core_model::mixer::PluginFormat::Au => PluginFormatTag::Au,
             core_model::mixer::PluginFormat::Clap => PluginFormatTag::Clap,
+            core_model::mixer::PluginFormat::Vst3 => PluginFormatTag::Vst3,
         }
     }
 }
@@ -344,6 +347,7 @@ impl From<PluginFormatTag> for core_model::mixer::PluginFormat {
         match f {
             PluginFormatTag::Au => core_model::mixer::PluginFormat::Au,
             PluginFormatTag::Clap => core_model::mixer::PluginFormat::Clap,
+            PluginFormatTag::Vst3 => core_model::mixer::PluginFormat::Vst3,
         }
     }
 }
@@ -353,7 +357,7 @@ impl From<PluginFormatTag> for core_model::mixer::PluginFormat {
 pub struct PluginRefRow {
     /// Format.
     pub format: PluginFormatTag,
-    /// AU `type/subtype/manufacturer`, or the CLAP id.
+    /// AU `type/subtype/manufacturer`, the CLAP id, or the VST3 class ID.
     pub id: String,
     /// Display name.
     pub name: String,

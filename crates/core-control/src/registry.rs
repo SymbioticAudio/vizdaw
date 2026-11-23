@@ -347,7 +347,7 @@ const PLUGINS_DEFAULT_EQ_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "plugin",
     kind: ParamKind::Text,
     required: true,
-    help: "multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see the Plugin Manager).",
+    help: "multi-q, or clap:<id>, au:<type/subtype/manufacturer> or vst3:<class ID> of an installed effect (see the Plugin Manager).",
 }];
 
 /// `settings.co_producer`'s parameter (plan 8a Ruling 10).
@@ -636,7 +636,7 @@ const PLUGIN_REF: ParamSpec = ParamSpec {
     name: "plugin",
     kind: ParamKind::Text,
     required: true,
-    help: "multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see co_producer.plugins).",
+    help: "multi-q, or clap:<id>, au:<type/subtype/manufacturer> or vst3:<class ID> of an installed effect (see co_producer.plugins).",
 };
 
 /// `mixer.add_insert` (plan 8d Ruling 1).
@@ -676,7 +676,7 @@ const MIXER_SET_BYPASS_PARAMS: &[ParamSpec] = &[
 const MIXER_SET_EQ_PARAMS: &[ParamSpec] = &[
     MIXER_STRIP,
     ParamSpec {
-        help: "The strip's EQ: multi-q, or clap:<id> or au:<type/subtype/manufacturer> of an installed effect (see co_producer.plugins).",
+        help: "The strip's EQ: multi-q, or clap:<id>, au:<type/subtype/manufacturer> or vst3:<class ID> of an installed effect (see co_producer.plugins).",
         ..PLUGIN_REF
     },
 ];
@@ -906,7 +906,7 @@ const NEW_PLUGIN_INSTRUMENT_PARAMS: &[ParamSpec] = &[
         name: "plugin",
         kind: ParamKind::Text,
         required: true,
-        help: "built-in-synth, or clap:<id> or au:<type/subtype/manufacturer> of an installed instrument (see co_producer.plugins).",
+        help: "built-in-synth, or clap:<id>, au:<type/subtype/manufacturer> or vst3:<class ID> of an installed instrument (see co_producer.plugins).",
     },
 ];
 
@@ -1002,13 +1002,13 @@ pub fn automation_target(text: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(refuse()) }
 }
 
-/// Ruling 3's shape of a plug-in reference: `multi-q`, `clap:<id>` or
-/// `au:<id>` with a non-empty rest (and `built-in-synth` when
+/// Ruling 3's shape of a plug-in reference: `multi-q`, `clap:<id>`,
+/// `au:<id>` or `vst3:<id>` with a non-empty rest (and `built-in-synth` when
 /// `instrument`), at most [`PLUGIN_REF_MAX`] characters, with no control,
 /// bidi or line-separator character. Resolving it is the app's.
 pub fn plugin_ref(text: &str, instrument: bool) -> Result<(), String> {
     let named = text == "multi-q" || (instrument && text == "built-in-synth");
-    let prefixed = ["clap:", "au:"]
+    let prefixed = ["clap:", "au:", "vst3:"]
         .iter()
         .any(|p| text.strip_prefix(p).is_some_and(|rest| !rest.is_empty()));
     if text.chars().count() > PLUGIN_REF_MAX || text.chars().any(crate::request::refused_in_name) {
@@ -1020,9 +1020,9 @@ pub fn plugin_ref(text: &str, instrument: bool) -> Result<(), String> {
         return Ok(());
     }
     Err(if instrument {
-        "must be built-in-synth, multi-q, clap:<id> or au:<type/subtype/manufacturer>".into()
+        "must be built-in-synth, multi-q, clap:<id>, au:<type/subtype/manufacturer> or vst3:<class ID>".into()
     } else {
-        "must be multi-q, clap:<id> or au:<type/subtype/manufacturer>".into()
+        "must be multi-q, clap:<id>, au:<type/subtype/manufacturer> or vst3:<class ID>".into()
     })
 }
 

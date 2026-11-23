@@ -575,10 +575,10 @@ fn names_are_checked_and_trimmed() {
 
 #[test]
 fn groups_save_and_load() {
-    assert_eq!(VERSION, 11);
+    assert_eq!(VERSION, 12);
     let (d, g) = grouped(&["A", "B"], &[0.0, 0.0]);
     let text = to_json(&d).unwrap();
-    assert!(text.contains("\"version\": 11"));
+    assert!(text.contains("\"version\": 12"));
     let v: Value = serde_json::from_str(&text).unwrap();
     let groups = v["document"]["mixer"]["groups"].as_array().unwrap();
     assert_eq!(groups.len(), 1);
@@ -592,10 +592,10 @@ fn groups_save_and_load() {
     assert_eq!(migrate_v10_to_v11(v.clone()).unwrap(), v);
 
     let mut newer = v;
-    newer["version"] = Value::from(12);
+    newer["version"] = Value::from(13);
     assert_eq!(
         from_json(&newer.to_string()),
-        Err(ModelError::NewerFormat { found: 12 })
+        Err(ModelError::NewerFormat { found: 13 })
     );
 }
 

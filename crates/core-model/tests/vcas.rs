@@ -642,7 +642,7 @@ fn corrupt_naming(r: core_model::Result<Document>, what: &str) {
 
 #[test]
 fn vcas_save_and_load() {
-    assert_eq!(VERSION, 11);
+    assert_eq!(VERSION, 12);
     let d = base();
     let a = id_of(&d, "A");
     let (d, v) = new_vca(&d, "Kit", vec![a]);
@@ -657,7 +657,7 @@ fn vcas_save_and_load() {
     )
     .unwrap();
     let text = to_json(&d).unwrap();
-    assert!(text.contains("\"version\": 11"));
+    assert!(text.contains("\"version\": 12"));
     let json: Value = serde_json::from_str(&text).unwrap();
     let vcas = json["document"]["mixer"]["vcas"].as_array().unwrap();
     assert_eq!(vcas.len(), 2);

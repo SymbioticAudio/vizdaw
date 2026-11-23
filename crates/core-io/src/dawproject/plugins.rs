@@ -1,5 +1,6 @@
 //! Plug-in state files (plan 6d Ruling 8): CLAP state is written as the
-//! plug-in's raw stream, AU state as an `.aupreset` property list in XML.
+//! plug-in's raw stream, AU state as an `.aupreset` property list in XML,
+//! VST3 state as the slot's bytes in a `.vstpreset` (host track H1).
 //! The property-list conversion is the platform's ([`PlistCodec`]).
 
 use core_model::mixer::PluginFormat;
@@ -32,11 +33,13 @@ impl PlistCodec for NoPlist {
 }
 
 /// The package entry of the `n`th state file written (from 1):
-/// `plugins/001.aupreset` or `plugins/001.clap-preset`.
+/// `plugins/001.aupreset`, `plugins/001.clap-preset` or
+/// `plugins/001.vstpreset`.
 pub fn state_entry(n: usize, format: PluginFormat) -> String {
     let ext = match format {
         PluginFormat::Au => "aupreset",
         PluginFormat::Clap => "clap-preset",
+        PluginFormat::Vst3 => "vstpreset",
     };
     format!("plugins/{n:03}.{ext}")
 }

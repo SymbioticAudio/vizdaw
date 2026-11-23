@@ -55,7 +55,7 @@
 //! master (it has no output of ours).
 //!
 //! **Ruling 10.** A strip whose devices theirs changed while the file
-//! named effects VizDAW cannot host (VST plug-ins, ones not installed)
+//! named effects VizDAW cannot host (VST2 plug-ins, ones not installed)
 //! keeps ours ([`Outcome::Ours`]), listed under [`text::VST_KEPT`].
 
 use super::matching::{Matched, MatchedBy, Matches, match_all, notes, regions};
@@ -1373,7 +1373,7 @@ struct Decider<'a> {
     strip_labels: Vec<String>,
     out: Vec<Decision>,
     /// The details for `text::VST_KEPT`, each with the name the import
-    /// listed under `import::VST` (a VST plug-in's).
+    /// listed under `import::VST` (a VST2 plug-in's).
     vst: Vec<(String, Option<String>)>,
 }
 
@@ -2231,7 +2231,7 @@ impl<'a> Decider<'a> {
         );
         // Theirs' name of an audio track's strip is the file's channel
         // name; none given counts as base's. A track whose instrument the
-        // import could not make (a VST one, or one not installed) plays the
+        // import could not make (a VST2 one, or one not installed) plays the
         // built-in synth, whose strip the import names: that name is not
         // the file's either (Task 7).
         // Nor is the name of the built-in synth's strip the import falls

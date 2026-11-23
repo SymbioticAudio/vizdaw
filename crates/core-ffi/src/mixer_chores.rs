@@ -32,7 +32,7 @@ use core_model::groups::{Link, VCA_MODES, group_gains, group_of, linked};
 use core_model::ids::{GroupId, PluginInstanceId, StripId, VcaId};
 use core_model::mixer::{
     AuxSend, GAIN_FLOOR_DB, GAIN_MAX_DB, Output, ParamId, PluginFormat, PluginRef, Strip,
-    StripKind, Swatch,
+    StripKind, Swatch, vst3_class_id,
 };
 
 /// The most rows [`co_producer_plugins`] gives.
@@ -56,6 +56,7 @@ fn is_multiq(format: PluginFormat, id: &str) -> bool {
     match format {
         PluginFormat::Clap => id == MULTIQ_CLAP_ID,
         PluginFormat::Au => id == MULTIQ_AU_ID,
+        PluginFormat::Vst3 => false,
     }
 }
 
@@ -82,6 +83,12 @@ pub fn resolve_plugin(text: &str, want: PluginKind) -> Result<PluginRef, VizErro
         Some((PluginFormat::Clap, id))
     } else if let Some(id) = text.strip_prefix("au:") {
         Some((PluginFormat::Au, id))
+    } else if let Some(rest) = text.strip_prefix("vst3:") {
+        // A VST3 class ID: 32 hexadecimal digits, either case.
+        let Some(id) = vst3_class_id(rest) else {
+            return refuse(format!("No installed plug-in is {}.", shown_name(text)));
+        };
+        return crate::catalog::with(|c| from_catalog(c, text, PluginFormat::Vst3, &id, want));
     } else {
         return refuse(format!("No installed plug-in is {}.", shown_name(text)));
     };
@@ -142,12 +149,13 @@ fn from_catalog(
 }
 
 /// The reference text for `p`: "multi-q" for the bundled Multi-Q, else
-/// "clap:<id>" or "au:<id>".
+/// "clap:<id>", "au:<id>" or "vst3:<class ID>".
 pub fn plugin_ref_text(p: &PluginRef) -> String {
     match p.format {
         PluginFormat::Clap if p.id == MULTIQ_CLAP_ID => MULTI_Q.into(),
         PluginFormat::Clap => format!("clap:{}", p.id),
         PluginFormat::Au => format!("au:{}", p.id),
+        PluginFormat::Vst3 => format!("vst3:{}", p.id),
     }
 }
 
@@ -232,6 +240,7 @@ fn plugins(kind: Option<PluginKindTag>) -> CoProducerPluginsRow {
                     format: match e.plugin.format {
                         PluginFormat::Au => "au".into(),
                         PluginFormat::Clap => "clap".into(),
+                        PluginFormat::Vst3 => "vst3".into(),
                     },
                     kind: k,
                     version: shown_name(&e.plugin.version),

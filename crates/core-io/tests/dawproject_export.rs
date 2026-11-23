@@ -1519,3 +1519,48 @@ fn lane_of(doc: &Document, strip: StripId) -> u64 {
         .map(|l| l.id.0)
         .expect("a lane plays it")
 }
+
+/// Host track H1 Task 1: a VST3 insert is a `Vst3Plugin` device with its
+/// class ID and its state as is in a `.vstpreset` entry.
+#[test]
+fn vst3_inserts_export_as_vst3_plugins() {
+    assert_eq!(state_entry(3, PluginFormat::Vst3), "plugins/003.vstpreset");
+    let mut b = Builder::new();
+    let (seq, _lane) = b.sequence("Song", "Keys", None).unwrap();
+    let master = b.strip_of(StripKind::Master).unwrap();
+    let slot = b
+        .insert(
+            master,
+            PluginRef {
+                format: PluginFormat::Vst3,
+                id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                name: "Again".into(),
+                vendor: "Example".into(),
+                version: "1.0".into(),
+            },
+        )
+        .unwrap();
+    let b = capture(b, slot, b"vst3 state");
+    let x = run_with(&b.finish(), seq, &NoPlist);
+    validates(&x);
+    assert_eq!(
+        x.states,
+        vec![("plugins/001.vstpreset".to_string(), b"vst3 state".to_vec())]
+    );
+    let p = read_back(&x);
+    let d = tracks(&p)
+        .into_iter()
+        .filter_map(|t| t.channel.as_deref())
+        .flat_map(|c| c.devices.iter())
+        .find(|d| d.kind == DpDeviceKind::Vst3)
+        .expect("the VST3 insert");
+    assert_eq!(
+        d.device_id.as_deref(),
+        Some("0123456789ABCDEF0123456789ABCDEF")
+    );
+    assert_eq!(d.device_name, "Again");
+    assert_eq!(
+        d.state.as_ref().map(|f| f.path.as_str()),
+        Some("plugins/001.vstpreset")
+    );
+}

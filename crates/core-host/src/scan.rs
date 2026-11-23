@@ -78,6 +78,7 @@ impl ScanRequest {
             match self.format {
                 PluginFormat::Clap => "clap".to_string(),
                 PluginFormat::Au => "au".to_string(),
+                PluginFormat::Vst3 => "vst3".to_string(),
             },
             "--path".to_string(),
             self.path.to_string_lossy().into_owned(),
