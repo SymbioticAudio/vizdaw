@@ -46,6 +46,8 @@ struct Script {
     restart: AtomicBool,
     params_changed: AtomicBool,
     state_dirty: AtomicBool,
+    /// An editor resize the next idle reports, packed `w << 32 | h` (0: none).
+    editor_resize: std::sync::atomic::AtomicU64,
     editor_closes: AtomicUsize,
     ui: Mutex<VecDeque<ParamEvent>>,
 }
@@ -174,6 +176,10 @@ impl PluginInstance for I {
             latency_changed: false,
             params_changed: self.script.params_changed.swap(false, Ordering::Relaxed),
             state_dirty: self.script.state_dirty.swap(false, Ordering::Relaxed),
+            editor_resize: match self.script.editor_resize.swap(0, Ordering::Relaxed) {
+                0 => None,
+                v => Some(((v >> 32) as u32, v as u32)),
+            },
         }
     }
     fn gestures(&mut self) -> Vec<ParamEvent> {
@@ -435,6 +441,20 @@ fn params_changed_and_state_dirty_are_reported() {
     let r = rig.tick();
     assert_eq!(r.params_changed, ids);
     assert_eq!(r.state_dirty, ids);
+}
+
+#[test]
+fn editor_resizes_are_reported_with_their_instance() {
+    let (mut rig, ids) = Rig::new(&["good"]);
+    rig.engine.load(rig.hist.doc(), rig.song).unwrap();
+    let r = rig.tick();
+    assert!(r.editor_resize.is_empty());
+    rig.script
+        .editor_resize
+        .store(640 << 32 | 480, Ordering::Relaxed);
+    let r = rig.tick();
+    assert_eq!(r.editor_resize, vec![(ids[0], (640, 480))]);
+    assert!(rig.tick().editor_resize.is_empty(), "reported once");
 }
 
 #[test]

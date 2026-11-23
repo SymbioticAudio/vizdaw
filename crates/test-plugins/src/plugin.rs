@@ -20,6 +20,7 @@ use clack_extensions::params::{
 };
 use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
 use clack_extensions::state::{PluginState, PluginStateImpl};
+use clack_extensions::timer::PluginTimer;
 use clack_plugin::events::event_types::{
     ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent,
 };
@@ -57,12 +58,30 @@ impl Plugin for TestPlugin {
         if kind == Some(Kind::Bank) {
             builder.register::<PluginParams>();
         }
+        if kind == Some(Kind::Timer) {
+            builder
+                .register::<PluginParams>()
+                .register::<PluginTimer>()
+                .register::<clack_extensions::gui::PluginGui>();
+            #[cfg(unix)]
+            builder.register::<clack_extensions::posix_fd::PluginPosixFd>();
+        }
+        if kind == Some(Kind::Gui) {
+            builder.register::<PluginParams>().register::<PluginTimer>();
+            #[cfg(unix)]
+            builder.register::<clack_extensions::posix_fd::PluginPosixFd>();
+            // An X11 editor only: elsewhere it has none.
+            #[cfg(target_os = "linux")]
+            builder.register::<clack_extensions::gui::PluginGui>();
+        }
     }
 }
 
 /// State every thread may touch.
 pub struct Shared<'a> {
     kind: Kind,
+    /// The bundle it was loaded from, when the host said.
+    bundle: Option<&'a std::path::Path>,
     host: HostSharedHandle<'a>,
     gain: AtomicU64,
     /// Latency asked for by the latency parameter.
@@ -88,9 +107,14 @@ fn bank_index(id: u32) -> Option<usize> {
 }
 
 impl<'a> Shared<'a> {
-    pub fn new(kind: Kind, host: HostSharedHandle<'a>) -> Shared<'a> {
+    pub fn new(
+        kind: Kind,
+        host: HostSharedHandle<'a>,
+        bundle: Option<&'a std::path::Path>,
+    ) -> Shared<'a> {
         Shared {
             kind,
+            bundle,
             host,
             gain: AtomicU64::new(1.0f64.to_bits()),
             want_latency: AtomicU32::new(0),
@@ -183,11 +207,44 @@ impl<'a> PluginShared<'a> for Shared<'a> {}
 
 pub struct MainThread<'a> {
     shared: &'a Shared<'a>,
+    pub(crate) host: HostMainThreadHandle<'a>,
+    /// The timer kind's state (see `timer.rs`).
+    pub(crate) clock: std::cell::RefCell<crate::timer::Clock>,
+    /// The timer kind's headless editor (see `editor.rs`).
+    pub(crate) editor: std::cell::RefCell<crate::editor::Editor>,
+    /// The GUI kind's X11 editor (see `gui.rs`).
+    #[cfg(target_os = "linux")]
+    pub(crate) gui: std::cell::RefCell<crate::gui::Gui>,
 }
 
 impl<'a> MainThread<'a> {
-    pub fn new(_host: HostMainThreadHandle<'a>, shared: &'a Shared<'a>) -> MainThread<'a> {
-        MainThread { shared }
+    pub fn new(host: HostMainThreadHandle<'a>, shared: &'a Shared<'a>) -> MainThread<'a> {
+        MainThread {
+            shared,
+            host,
+            clock: Default::default(),
+            editor: Default::default(),
+            #[cfg(target_os = "linux")]
+            gui: Default::default(),
+        }
+    }
+
+    /// Which kind it is.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn kind(&self) -> Kind {
+        self.shared.kind
+    }
+
+    /// The bundle it was loaded from, when the host said.
+    pub(crate) fn bundle(&self) -> Option<&std::path::Path> {
+        self.shared.bundle
+    }
+}
+
+impl Drop for MainThread<'_> {
+    fn drop(&mut self) {
+        // The plug-in is being destroyed (CLAP `destroy`).
+        self.editor_destroying();
     }
 }
 
@@ -255,6 +312,7 @@ impl PluginMainThreadParams for MainThread<'_> {
     fn count(&self) -> u32 {
         match self.shared.kind {
             Kind::Bank => BANK_PARAMS,
+            Kind::Timer | Kind::Gui => 0,
             _ => 3,
         }
     }
@@ -306,6 +364,15 @@ impl PluginMainThreadParams for MainThread<'_> {
     }
 
     fn get_value(&self, id: ClapId) -> Option<f64> {
+        if self.shared.kind == Kind::Timer {
+            return self.readout(id.get());
+        }
+        if self.shared.kind == Kind::Gui {
+            #[cfg(target_os = "linux")]
+            return self.gui_readout(id.get());
+            #[cfg(not(target_os = "linux"))]
+            return None;
+        }
         self.shared.param_value(id.get())
     }
 
@@ -323,6 +390,19 @@ impl PluginMainThreadParams for MainThread<'_> {
     }
 
     fn flush(&self, input: &InputEvents, output: &mut OutputEvents) {
+        if self.shared.kind == Kind::Timer {
+            for e in input {
+                if let Some(CoreEventSpace::ParamValue(p)) = e.as_core_event() {
+                    if let Some(id) = p.param_id() {
+                        self.command(id.get(), p.value());
+                    }
+                }
+            }
+            return;
+        }
+        if self.shared.kind == Kind::Gui {
+            return;
+        }
         self.shared.read_params(input, false);
         self.shared.write_gesture(output);
     }

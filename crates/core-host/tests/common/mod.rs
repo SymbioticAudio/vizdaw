@@ -23,10 +23,15 @@ pub fn plugin(id: &str) -> PluginRef {
 
 /// Loads test plugin `id` from the test bundle.
 pub fn load(id: &str) -> Box<dyn PluginInstance> {
+    load_from(&test_plugins::bundle(), id)
+}
+
+/// Loads test plugin `id` from the bundle at `bundle` (a copy).
+pub fn load_from(bundle: &std::path::Path, id: &str) -> Box<dyn PluginInstance> {
     let mut f = ClapFormat::new();
     let req = LoadRequest {
         plugin: plugin(id),
-        path: Some(test_plugins::bundle()),
+        path: Some(bundle.to_path_buf()),
         sample_rate: 48_000.0,
         max_frames: 4096,
     };

@@ -1279,6 +1279,7 @@ dependencies = [
  "core-media",
  "core-model",
  "core-surface",
+ "libc",
  "platform-macos",
  "proptest",
  "serde",
@@ -1287,6 +1288,7 @@ dependencies = [
  "test-plugins",
  "thiserror 2.0.21",
  "uniffi",
+ "x11rb",
 ]
 
 [[package]]
@@ -1337,11 +1339,13 @@ dependencies = [
  "clack-host",
  "core-engine",
  "core-model",
+ "libc",
  "rtrb",
  "serde",
  "serde_json",
  "test-plugins",
  "thiserror 2.0.21",
+ "x11rb",
 ]
 
 [[package]]
@@ -5772,6 +5776,7 @@ dependencies = [
  "clack-extensions",
  "clack-host",
  "clack-plugin",
+ "x11rb",
 ]
 
 [[package]]

@@ -357,6 +357,8 @@ struct News {
     slots_changed: bool,
     params_changed: std::collections::BTreeSet<u64>,
     problems: Vec<String>,
+    /// Editors that asked for a new size since the last `idle`.
+    editor_resize: Vec<crate::editor::EditorResize>,
 }
 
 impl Inner {
@@ -1502,6 +1504,16 @@ impl Session {
             .news
             .params_changed
             .extend(r.params_changed.iter().map(|i| i.0));
+        for (id, (width, height)) in &r.editor_resize {
+            let news = &mut inner.news.editor_resize;
+            // Several before an `idle` (a skipped tick): the latest wins.
+            news.retain(|e| e.slot != id.0);
+            news.push(crate::editor::EditorResize {
+                slot: id.0,
+                width: *width,
+                height: *height,
+            });
+        }
         inner.autosave_soon |= !r.loaded.is_empty();
         if !r.state_dirty.is_empty() && !inner.plugin_dirty {
             inner.plugin_dirty = true;
@@ -2873,6 +2885,7 @@ impl Session {
                 problems: Vec::new(),
                 media_changed: false,
                 overviews_changed: false,
+                editor_resize: Vec::new(),
             };
             // A nested run loop inside a plugin call: skip this tick (before
             // taking the session lock, which that call may hold).
@@ -2992,6 +3005,7 @@ impl Session {
                 problems: n.problems,
                 media_changed,
                 overviews_changed: found.changed,
+                editor_resize: n.editor_resize,
             })
         })
     }
@@ -3778,6 +3792,43 @@ fn write_windows(
     }
 }
 
+/// Editors for the Rust app (not exported: the Swift app's
+/// `SessionProtocol` stays as it is).
+impl Session {
+    /// [`Session::open_editor`] at window scale `scale` (physical pixels per
+    /// point; non-finite or non-positive counts as 1): where the window API
+    /// works in pixels (X11) the editor's pixel size follows it, set before
+    /// the editor is parented (CLAP gui order). Sizes in and out are points
+    /// everywhere, so on macOS the scale changes nothing. Same contracts as
+    /// [`Session::open_editor`].
+    pub fn open_editor_scaled(
+        &self,
+        slot: u64,
+        parent: u64,
+        scale: f64,
+    ) -> Result<EditorSize, VizError> {
+        ffi_guard(|| {
+            let parent = editor::parent(parent)?;
+            plugins::with(self.id, |p| {
+                let ed = p
+                    .and_then(|p| p.instance(PluginInstanceId(slot)))
+                    .and_then(|i| i.editor())
+                    .ok_or_else(|| unavailable("the plugin has no editor"))?;
+                // Applied at `open`, between the plug-in's create and its
+                // parent.
+                ed.set_scale(scale);
+                let (width, height) = ed.open(parent).map_err(|e| unavailable(&e.to_string()))?;
+                Ok(EditorSize {
+                    width,
+                    height,
+                    resizable: ed.can_resize(),
+                })
+            })
+            .and_then(|r| r)
+        })
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct UiState {
     open_plugin_windows: Vec<u64>,
@@ -3790,10 +3841,13 @@ struct UiState {
 /// app owns, and which windows are open (they reopen with the project).
 #[uniffi::export]
 impl Session {
-    /// Shows slot `slot`'s editor inside the `NSView` at address `parent`
-    /// (main thread; the view lives until `close_editor`). Fails with
-    /// "editor unavailable" when the plugin has none (the app then shows
-    /// its parameters).
+    /// Shows slot `slot`'s editor inside the view at address `parent` (an
+    /// `NSView *` on macOS, an X11 window id on Linux; main thread; the view
+    /// lives until `close_editor`) at window scale 1: the Swift app's call,
+    /// on macOS, where editor sizes are points already.
+    /// [`Session::open_editor_scaled`] is the same with the window's scale.
+    /// Fails with "editor unavailable" when the plugin has none (the app
+    /// then shows its parameters) or when called off the main thread.
     ///
     /// RE-ENTRANCY CONTRACT: an AU v3 editor spins the main run loop (up to
     /// about 3 s) inside the plugin while it opens, so the app's 60 Hz timer
@@ -3803,22 +3857,7 @@ impl Session {
     /// registry borrow of `plugins::with` is held; nested calls get
     /// `VizError::Busy` and idle skips.
     pub fn open_editor(&self, slot: u64, parent: u64) -> Result<EditorSize, VizError> {
-        ffi_guard(|| {
-            let parent = editor::parent(parent)?;
-            plugins::with(self.id, |p| {
-                let ed = p
-                    .and_then(|p| p.instance(PluginInstanceId(slot)))
-                    .and_then(|i| i.editor())
-                    .ok_or_else(|| unavailable("the plugin has no editor"))?;
-                let (width, height) = ed.open(parent).map_err(|e| unavailable(&e.to_string()))?;
-                Ok(EditorSize {
-                    width,
-                    height,
-                    resizable: ed.can_resize(),
-                })
-            })
-            .and_then(|r| r)
-        })
+        self.open_editor_scaled(slot, parent, 1.0)
     }
 
     /// Asks slot `slot`'s editor for a new size; returns what it took.

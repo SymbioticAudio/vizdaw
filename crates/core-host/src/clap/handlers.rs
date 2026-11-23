@@ -1,7 +1,8 @@
 //! VizDAW's CLAP host callbacks (clack `HostHandlers`): the plugin's
 //! requests land in atomics that `ClapInstance::idle` reads on the main
 //! thread; thread-check answers from the main thread's ID and a
-//! thread-local "inside an audio call" flag.
+//! thread-local "inside an audio call" flag. Timers and file descriptors go
+//! into the instance's run-loop table ([`crate::run_loop`]).
 
 use clack_extensions::audio_ports::{
     AudioPortRescanFlags, HostAudioPorts, HostAudioPortsImpl, PluginAudioPorts,
@@ -16,14 +17,22 @@ use clack_extensions::params::{
     HostParams, HostParamsImplMainThread, HostParamsImplShared, ParamClearFlags, ParamRescanFlags,
     PluginParams,
 };
+#[cfg(unix)]
+use clack_extensions::posix_fd::{FdFlags, HostPosixFdImpl, PluginPosixFd};
 use clack_extensions::state::{HostState, HostStateImpl, PluginState};
 use clack_extensions::tail::{HostTail, HostTailImpl, PluginTail};
 use clack_extensions::thread_check::{HostThreadCheck, HostThreadCheckImpl};
+use clack_extensions::timer::{HostTimerImpl, PluginTimer, TimerId};
 use clack_host::prelude::*;
-use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::{Cell, RefCell};
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::ThreadId;
+
+use crate::run_loop::Registrations;
 
 thread_local! {
     static IN_AUDIO: Cell<bool> = const { Cell::new(false) };
@@ -52,11 +61,24 @@ pub(crate) struct Flags {
     pub state_dirty: AtomicBool,
     pub ports: AtomicBool,
     pub gui_closed: AtomicBool,
+    /// An editor is open: `request_resize` is accepted.
+    pub gui_open: AtomicBool,
+    /// The last accepted `request_resize`, in the API's units
+    /// ([`GuiSize::pack_to_u64`]; 0: none).
+    pub gui_resize: AtomicU64,
 }
 
 impl Flags {
     pub(crate) fn take(flag: &AtomicBool) -> bool {
         flag.swap(false, Ordering::AcqRel)
+    }
+
+    /// Takes the pending resize request, if any.
+    pub(crate) fn take_resize(&self) -> Option<GuiSize> {
+        match self.gui_resize.swap(0, Ordering::AcqRel) {
+            0 => None,
+            v => Some(GuiSize::unpack_from_u64(v)),
+        }
     }
 }
 
@@ -71,6 +93,9 @@ pub(crate) struct PluginExts {
     pub tail: Option<PluginTail>,
     pub gui: Option<PluginGui>,
     pub render: Option<clack_extensions::render::PluginRender>,
+    pub timer: Option<PluginTimer>,
+    #[cfg(unix)]
+    pub posix_fd: Option<PluginPosixFd>,
 }
 
 /// `[thread-safe]` host data.
@@ -103,6 +128,9 @@ impl<'a> SharedHandler<'a> for Shared {
             tail: instance.get_extension(),
             gui: instance.get_extension(),
             render: instance.get_extension(),
+            timer: instance.get_extension(),
+            #[cfg(unix)]
+            posix_fd: instance.get_extension(),
         });
     }
 
@@ -146,10 +174,30 @@ impl HostParamsImplShared for Shared {
 }
 
 impl HostGuiImpl for Shared {
-    fn resize_hints_changed(&self) {}
+    fn resize_hints_changed(&self) {
+        // `can_resize` is read live when a request is applied.
+    }
 
-    fn request_resize(&self, _size: GuiSize) -> Result<(), HostError> {
-        Err(HostError::Message("the host window decides its size"))
+    /// Off macOS, accepted while an editor is open, resizable or not (a fixed-size
+    /// editor asks too, for a zoom menu or a panel it shows). The main
+    /// thread applies it at the next idle (`InstanceEvents::editor_resize`);
+    /// the last request wins.
+    fn request_resize(&self, size: GuiSize) -> Result<(), HostError> {
+        if size.width == 0 || size.height == 0 {
+            return Err(HostError::Message("an empty size"));
+        }
+        // Refused on macOS until H2: the app there ignores
+        // `editor_resize`, so an editor that grew itself would be clipped.
+        if cfg!(target_os = "macos") {
+            return Err(HostError::Message("the host window decides its size"));
+        }
+        if !self.flags.gui_open.load(Ordering::Acquire) {
+            return Err(HostError::Message("no editor is open"));
+        }
+        self.flags
+            .gui_resize
+            .store(size.pack_to_u64(), Ordering::Release);
+        Ok(())
     }
 
     fn request_show(&self) -> Result<(), HostError> {
@@ -168,11 +216,58 @@ impl HostGuiImpl for Shared {
 /// `[main-thread]` host data.
 pub(crate) struct MainThread<'a> {
     shared: &'a Shared,
+    /// The instance's timers and descriptors, shared with the run loop.
+    registrations: Rc<RefCell<Registrations>>,
 }
 
 impl<'a> MainThread<'a> {
-    pub(crate) fn new(shared: &'a Shared) -> MainThread<'a> {
-        MainThread { shared }
+    pub(crate) fn new(
+        shared: &'a Shared,
+        registrations: Rc<RefCell<Registrations>>,
+    ) -> MainThread<'a> {
+        MainThread {
+            shared,
+            registrations,
+        }
+    }
+
+    /// Runs `f` on the run-loop table, refusing a call from another thread
+    /// (the table is main-thread only) or from inside the loop's own
+    /// borrow.
+    fn table<T>(&self, f: impl FnOnce(&mut Registrations) -> Option<T>) -> Result<T, HostError> {
+        if !self.shared.is_main_thread() {
+            return Err(HostError::Message("not on the main thread"));
+        }
+        self.registrations
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut t| f(&mut t))
+            .ok_or(HostError::Message("refused"))
+    }
+}
+
+impl HostTimerImpl for MainThread<'_> {
+    fn register_timer(&self, period_ms: u32) -> Result<TimerId, HostError> {
+        self.table(|t| t.register_timer(period_ms)).map(TimerId)
+    }
+
+    fn unregister_timer(&self, timer_id: TimerId) -> Result<(), HostError> {
+        self.table(|t| t.unregister_timer(timer_id.0).then_some(()))
+    }
+}
+
+#[cfg(unix)]
+impl HostPosixFdImpl for MainThread<'_> {
+    fn register_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
+        self.table(|t| t.register_fd(fd, flags).then_some(()))
+    }
+
+    fn modify_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
+        self.table(|t| t.modify_fd(fd, flags).then_some(()))
+    }
+
+    fn unregister_fd(&self, fd: RawFd) -> Result<(), HostError> {
+        self.table(|t| t.unregister_fd(fd).then_some(()))
     }
 }
 
@@ -249,5 +344,12 @@ impl HostHandlers for VizHost {
             .register::<HostNotePorts>()
             .register::<HostTail>()
             .register::<HostGui>();
+        // Timers and descriptors only off macOS for now: nothing drives the
+        // run loop there yet, and a plug-in that chose the host timer would
+        // never tick (H0 ruling; H2 decides once the app drives the loop).
+        #[cfg(not(target_os = "macos"))]
+        builder.register::<clack_extensions::timer::HostTimer>();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        builder.register::<clack_extensions::posix_fd::HostPosixFd>();
     }
 }

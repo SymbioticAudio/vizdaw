@@ -29,6 +29,7 @@ pub mod info;
 pub mod instance;
 pub mod process;
 pub mod queue;
+pub mod run_loop;
 pub mod scan;
 pub mod shelf;
 
@@ -42,3 +43,6 @@ pub use instance::{
 pub use process::{
     MAX_EVENTS, MAX_PARAM_EVENTS, MidiEvent, ParamChange, ParamEvent, ParamOut, ProcessCtx,
 };
+pub use run_loop::run_loop_tick;
+#[cfg(unix)]
+pub use run_loop::{FdFlags, run_loop_fds};

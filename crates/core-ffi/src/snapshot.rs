@@ -449,6 +449,10 @@ pub struct IdleUpdate {
     /// showing `Pending` or `Coarse` waveforms ask again (plan 5b).
     #[uniffi(default = false)]
     pub overviews_changed: bool,
+    /// Open editors that asked for a new size (in points): their windows
+    /// follow. At most one per slot, the latest.
+    #[uniffi(default)]
+    pub editor_resize: Vec<crate::editor::EditorResize>,
 }
 
 /// One plugin parameter and its current value.

@@ -48,6 +48,13 @@ jobs:
         run: scripts/build-multiq.sh
       - name: Test
         run: cargo test --workspace
+      - name: CLAP X11 editors (Linux, virtual X server)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          unset WAYLAND_DISPLAY
+          xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-host --test clap_gui_linux -- --nocapture
+          xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-ffi --test editors_main
       - name: GPUI end to end (Linux, virtual X server)
         if: runner.os == 'Linux'
         timeout-minutes: 20
