@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod gesture;
+pub mod layout;
 pub mod math;
 pub mod meters;
 mod model;
@@ -18,7 +19,7 @@ pub use math::{AutomationModes, MixerMath, StripEntry};
 pub use meters::{MeterLevel, Meters};
 pub use model::{
     MAX_HEARD_TARGETS, MIXER_UNAVAILABLE, MixerColumn, MixerModel, MixerPlacement, RELEASE_WINDOW,
-    failure_title, norm_of, reset_value, send_index,
+    failure_title, monitor_help, next_monitor, norm_of, reset_value, send_index,
 };
 
 use crate::alerts::AlertItem;

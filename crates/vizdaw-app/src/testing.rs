@@ -883,6 +883,11 @@ impl DocSession for FakeSession {
                         l.arm = arm.unwrap_or(l.arm);
                     }
                 }
+                LaneEdit::SetMonitor { seq, lane, monitor } => {
+                    if let Some(l) = Self::lane_mut(&mut s, *seq, *lane) {
+                        l.monitor = *monitor;
+                    }
+                }
                 LaneEdit::Remove { seq, lane } => {
                     if let Some(rows) = s.lanes.get_mut(seq) {
                         rows.retain(|l| l.id != *lane);

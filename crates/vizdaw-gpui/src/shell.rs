@@ -20,7 +20,8 @@ use gpui::{
 };
 use vizdaw_app::alerts::{AlertItem, error_message};
 use vizdaw_app::commands::{self, FieldFocus};
-use vizdaw_app::editor::{MainView, PaneSide, ViewLayouts};
+use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
+use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::transport::Shuttle;
 use vizdaw_app::transport_fields::{self as fields_model, TransportField};
 use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
@@ -28,10 +29,12 @@ use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::AppState;
 use crate::arrangement::{self, Arrangement, ArrangementState, ToolbarState};
+use crate::controls::MixerRef;
 use crate::detail_pane::{self, DetailPaneState};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
+use crate::mixer_view::{self, MixerView};
 use crate::panes::{self, HostState, PaneDrag};
 use crate::piano_roll::{PianoRoll, RollState};
 use crate::registry::{RegistryScope, SharedRegistry};
@@ -84,11 +87,21 @@ pub struct DocumentWindow {
     /// The size of the pane host's area (under the transport bar, above
     /// the status line), at the last draw (zero before the first).
     regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
+    /// The mixer's placements here: the Mix view's centre and the bottom
+    /// pane's Mixer view, each while it shows.
+    mix_view: Option<Placed>,
+    pane_mixer: Option<Placed>,
     /// The poll runs fast: a note-off or a drag's final edit waits on
     /// Busy.
     fast_poll: bool,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A mixer placement shown in the window; dropped, it goes.
+struct Placed {
+    view: Entity<MixerView>,
+    _observe: Subscription,
 }
 
 /// The text-editing owner of the track header's rename field.
@@ -230,6 +243,8 @@ impl DocumentWindow {
             list_editor,
             piano_roll: PianoRoll::new(cx),
             regions: Rc::default(),
+            mix_view: None,
+            pane_mixer: None,
             fast_poll: false,
             _subscriptions: subscriptions,
         }
@@ -271,6 +286,46 @@ impl DocumentWindow {
 
     pub fn app(&self) -> &Entity<AppState> {
         &self.app
+    }
+
+    /// The mixer placement `p` (the Mix view's centre, the bottom pane's
+    /// Mixer view), while it shows.
+    pub fn mixer_view(&self, p: MixerPlacement) -> Option<Entity<MixerView>> {
+        match p {
+            MixerPlacement::View => self.mix_view.as_ref(),
+            MixerPlacement::Pane => self.pane_mixer.as_ref(),
+            _ => None,
+        }
+        .map(|p| p.view.clone())
+    }
+
+    /// Makes placement `p` when it shows (`wanted`), drops it when it does
+    /// not (its drags end; the last placement ends every touch).
+    fn place_mixer(
+        &mut self,
+        p: MixerPlacement,
+        wanted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<MixerView>> {
+        let slot = match p {
+            MixerPlacement::View => &mut self.mix_view,
+            _ => &mut self.pane_mixer,
+        };
+        if !wanted {
+            *slot = None;
+            return None;
+        }
+        if slot.is_none() {
+            let mixer = MixerRef::new(self.app.clone(), self.doc, p);
+            let view = cx.new(|cx| MixerView::new(mixer, window, cx));
+            let observe = cx.observe(&view, |_, _, cx| cx.notify());
+            *slot = Some(Placed {
+                view,
+                _observe: observe,
+            });
+        }
+        slot.as_ref().map(|p| p.view.clone())
     }
 
     /// The title last drawn (the document's title, marked when edited).
@@ -1017,8 +1072,19 @@ impl DocumentWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let centre = panes::place(frames.centre).flex().flex_col();
-        let centre = if host.main == MainView::Mix {
-            centre.child(panes::mixer(&mut root.container()))
+        let mix = self.place_mixer(MixerPlacement::View, host.main == MainView::Mix, window, cx);
+        let pane_mixer = self.place_mixer(
+            MixerPlacement::Pane,
+            frames.bottom.is_some()
+                && !host.editor_chosen()
+                && host.setup.bottom.view == PaneView::Mixer,
+            window,
+            cx,
+        );
+        let centre = if let Some(view) = mix {
+            let mut scope = root.container();
+            let content = mixer_view::render(&view, &mut scope, window, cx);
+            centre.child(panes::mixer(content, &scope))
         } else {
             centre
                 .child(arrangement::toolbar(
@@ -1097,8 +1163,16 @@ impl DocumentWindow {
                 )
             };
             let chosen = host.editor_chosen();
-            let other = (!chosen)
-                .then(|| panes::content(host.setup.bottom.view, host, &mut scope.container()));
+            let other = (!chosen).then(|| {
+                let mut inner = scope.container();
+                match &pane_mixer {
+                    Some(view) => {
+                        let content = mixer_view::render(view, &mut inner, window, cx);
+                        panes::mixer(content, &inner)
+                    }
+                    None => panes::content(host.setup.bottom.view, host, &mut inner),
+                }
+            });
             let content = div()
                 .flex()
                 .flex_col()

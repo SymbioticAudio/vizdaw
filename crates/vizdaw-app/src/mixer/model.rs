@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 use core_model::automation::{fader_db, fader_norm, pan_norm, pan_of};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{AutomationModeRow, GestureHolderRow, GesturePhaseRow};
+use vizdaw_ffi::edit::{EditCommand, LaneEdit, MonitorModeRow};
 use vizdaw_ffi::events::AutomationTargetRow;
 use vizdaw_ffi::mixer::{
     BusRow, DestRow, MixerSnapshot, StripKindRow, StripRow, SwatchRow, VcaRow,
 };
-use vizdaw_ffi::snapshot::DocSnapshot;
+use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow};
 
 use super::gesture::{ControlGesture, MIN_DRAG_DISTANCE};
 use super::math::{AutomationModes, MixerMath, StripEntry};
@@ -398,9 +399,15 @@ impl MixerModel {
         true
     }
 
+    /// The document moved since the mixer was read, or a refetch is owed
+    /// (see [`MixerModel::refresh_if_needed`]).
+    pub fn needs_refresh(&self, doc: &DocumentModel) -> bool {
+        doc.snapshot().version != self.seen || self.refetch_owed
+    }
+
     /// Refetches the mixer when the document changed or a refetch is owed.
     pub fn refresh_if_needed(&mut self, doc: &mut DocumentModel) {
-        if doc.snapshot().version != self.seen || self.refetch_owed {
+        if self.needs_refresh(doc) {
             self.refetch(doc);
         }
     }
@@ -779,6 +786,63 @@ impl MixerModel {
         );
     }
 
+    // Record arm and monitor (audio-path strips only).
+
+    /// The track an audio-path strip's R and I edit: of the shown
+    /// sequence's tracks that play through the strip's path, the first
+    /// armed one, else the first; `None` for other strips.
+    pub fn input_lane<'d>(&self, doc: &'d DocumentModel, s: &StripRow) -> Option<&'d LaneRow> {
+        let StripKindRow::AudioPath { path } = s.kind else {
+            return None;
+        };
+        doc.input_lane(path)
+    }
+
+    /// R and I work on a strip with an input track (an audio path); the
+    /// instrument strips and master leave them disabled.
+    pub fn can_arm(&self, doc: &DocumentModel, s: &StripRow) -> bool {
+        self.input_lane(doc, s).is_some()
+    }
+
+    /// Toggles the arm of the strip's input track (one undo step), as the
+    /// track header does.
+    pub fn toggle_arm(&mut self, doc: &mut DocumentModel, strip: u64) {
+        let Some(s) = self.strip(strip) else { return };
+        let Some((lane, arm)) = self.input_lane(doc, s).map(|l| (l.id, l.arm)) else {
+            return;
+        };
+        let Some(seq) = doc.selected_seq() else {
+            return;
+        };
+        doc.edit(EditCommand::Lane {
+            edit: LaneEdit::SetFlags {
+                seq,
+                lane,
+                mute: None,
+                solo: None,
+                arm: Some(!arm),
+            },
+        });
+    }
+
+    /// The monitor button: Auto, Input, then Off (one undo step).
+    pub fn cycle_monitor(&mut self, doc: &mut DocumentModel, strip: u64) {
+        let Some(s) = self.strip(strip) else { return };
+        let Some((lane, mode)) = self.input_lane(doc, s).map(|l| (l.id, l.monitor)) else {
+            return;
+        };
+        let Some(seq) = doc.selected_seq() else {
+            return;
+        };
+        doc.edit(EditCommand::Lane {
+            edit: LaneEdit::SetMonitor {
+                seq,
+                lane,
+                monitor: next_monitor(mode),
+            },
+        });
+    }
+
     /// Applies a typed level as one click. False, with the status line
     /// set, when the text is refused or the target is touched.
     fn type_value(
@@ -1030,6 +1094,26 @@ impl MixerModel {
         if &kept != doc.selected_strips() {
             doc.set_selected_strips(kept);
         }
+    }
+}
+
+/// The input monitor's next mode: Auto, Input, Off, Auto.
+pub fn next_monitor(m: MonitorModeRow) -> MonitorModeRow {
+    match m {
+        MonitorModeRow::Auto => MonitorModeRow::Input,
+        MonitorModeRow::Input => MonitorModeRow::Off,
+        MonitorModeRow::Off => MonitorModeRow::Auto,
+    }
+}
+
+/// The input monitor's help for mode `m` (Swift `LaneInputs.help`).
+pub fn monitor_help(m: MonitorModeRow) -> &'static str {
+    match m {
+        MonitorModeRow::Auto => {
+            "Input monitoring: Auto (heard while armed and stopped, or recording in range)"
+        }
+        MonitorModeRow::Input => "Input monitoring: always the input",
+        MonitorModeRow::Off => "Input monitoring: off",
     }
 }
 

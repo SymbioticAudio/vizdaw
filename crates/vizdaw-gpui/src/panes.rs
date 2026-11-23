@@ -31,7 +31,7 @@ pub const BOTTOM_MINIMUM_WIDTH: f64 = 240.;
 /// A divider's hit area across its line (Swift `PaneDivider.grip`).
 const GRIP: f64 = 7.;
 /// The mixer's group in the tree: the Mix view's centre and the bottom
-/// pane's Mixer view (slice 6a Task 5 fills it).
+/// pane's Mixer view.
 pub const MIXER: &str = "Mixer";
 /// The editor kinds the bottom pane's picker lists, in Swift's order (the
 /// others come with their editors).
@@ -693,7 +693,7 @@ pub fn note(view: PaneView, nothing_focused: bool) -> String {
 /// group, or the view's note. `scope` is its own container.
 pub(crate) fn content(view: PaneView, state: &HostState, scope: &mut RegistryScope) -> AnyElement {
     if view == PaneView::Mixer {
-        return mixer(scope);
+        return mixer(div().into_any_element(), scope);
     }
     let text = note(view, state.nothing_focused);
     div()
@@ -715,15 +715,20 @@ pub(crate) fn content(view: PaneView, state: &HostState, scope: &mut RegistrySco
         .into_any_element()
 }
 
-/// The mixer's place (slice 6a Task 5 draws its strips): the Mix view's
-/// centre and the bottom pane's Mixer view. `scope` is its own container.
-pub(crate) fn mixer(scope: &mut RegistryScope) -> AnyElement {
+/// The mixer's place, holding `content` (the placement's strips): the Mix
+/// view's centre and the bottom pane's Mixer view. `scope` is its own
+/// container, the one `content` was drawn in.
+pub(crate) fn mixer(content: AnyElement, scope: &RegistryScope) -> AnyElement {
     div()
         .relative()
+        .flex()
+        .flex_col()
         .flex_1()
         .min_h_0()
         .size_full()
+        .overflow_hidden()
         .bg(rgb(colors::READOUT))
+        .child(content)
         .child(scope.this("group", MIXER, true))
         .into_any_element()
 }

@@ -360,3 +360,89 @@ fn a_failed_mixer_is_asked_for_once_per_version() {
     d.rename_track(30, "Kick");
     assert!(d.ensure_mixer());
 }
+
+/// Audio 1 (5) plays path 1, which Groove (30) and Chords (31) play
+/// through; Chords is armed. Synth (1) has no input track.
+fn armed_fake() -> FakeSession {
+    use vizdaw_ffi::edit::MonitorModeRow;
+    let f = mixer_fake();
+    let mut groove = support::lane_row(30, "Groove", false);
+    groove.audio_out = Some(1);
+    let mut chords = support::lane_row(31, "Chords", false);
+    chords.audio_out = Some(1);
+    chords.arm = true;
+    chords.monitor = MonitorModeRow::Input;
+    f.set_lanes(3, vec![groove, chords]);
+    f.edit_mixer(|m| {
+        m.strips.insert(
+            1,
+            strip_row(5, "Audio 1", StripKindRow::AudioPath { path: 1 }),
+        )
+    });
+    f
+}
+
+#[test]
+fn the_input_track_is_the_first_armed_one_through_the_path() {
+    let (_f, d) = make_with(armed_fake());
+    let m = d.mixer().unwrap();
+    let audio = m.strip(5).unwrap();
+    assert_eq!(m.input_lane(&d, audio).map(|l| l.id), Some(31));
+    assert!(m.can_arm(&d, audio));
+    let synth = m.strip(1).unwrap();
+    assert!(m.input_lane(&d, synth).is_none());
+    assert!(!m.can_arm(&d, synth), "R and I are for audio tracks");
+    assert!(!m.can_arm(&d, m.master().unwrap()));
+}
+
+#[test]
+fn record_arm_toggles_the_input_track_as_one_edit() {
+    use vizdaw_ffi::edit::{EditCommand, LaneEdit};
+    let (f, mut d) = make_with(armed_fake());
+    mx(&mut d, |m, d| m.toggle_arm(d, 5));
+    assert_eq!(
+        f.edits().last(),
+        Some(&EditCommand::Lane {
+            edit: LaneEdit::SetFlags {
+                seq: 3,
+                lane: 31,
+                mute: None,
+                solo: None,
+                arm: Some(false),
+            }
+        })
+    );
+    let n = f.edits().len();
+    mx(&mut d, |m, d| m.toggle_arm(d, 1));
+    assert_eq!(
+        f.edits().len(),
+        n,
+        "a strip with no input track sends nothing"
+    );
+}
+
+#[test]
+fn the_monitor_cycles_auto_input_off() {
+    use vizdaw_app::mixer::{monitor_help, next_monitor};
+    use vizdaw_ffi::edit::{EditCommand, LaneEdit, MonitorModeRow as M};
+    assert_eq!(next_monitor(M::Auto), M::Input);
+    assert_eq!(next_monitor(M::Input), M::Off);
+    assert_eq!(next_monitor(M::Off), M::Auto);
+    assert_eq!(monitor_help(M::Off), "Input monitoring: off");
+    assert_eq!(monitor_help(M::Input), "Input monitoring: always the input");
+    let (f, mut d) = make_with(armed_fake());
+    mx(&mut d, |m, d| m.cycle_monitor(d, 5));
+    assert_eq!(
+        f.edits().last(),
+        Some(&EditCommand::Lane {
+            edit: LaneEdit::SetMonitor {
+                seq: 3,
+                lane: 31,
+                monitor: M::Off,
+            }
+        })
+    );
+    let n = f.edits().len();
+    mx(&mut d, |m, d| m.cycle_monitor(d, 0));
+    assert_eq!(f.edits().len(), n, "master has no input track");
+}

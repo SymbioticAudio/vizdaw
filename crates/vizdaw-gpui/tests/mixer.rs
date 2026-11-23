@@ -1,0 +1,812 @@
+//! The mixer view (Swift `MixerView`, `ChannelStrips`, `ChannelStrip`) in
+//! the Mix view's centre and the bottom pane, driven through GPUI's test
+//! platform with the scripted session: a strip per audio strip and master
+//! after them, the Swift labels and values, drags, toggles, menus, Add
+//! Bus, rename, selection, the placements' lives, and only the strips in
+//! view recorded.
+
+use std::sync::Arc;
+
+use gpui::{
+    Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, WindowHandle, point, px,
+};
+use vizdaw_app::DocumentStore;
+use vizdaw_app::editor::{MainView, PaneSide, PaneView};
+use vizdaw_app::mixer::{MixerPlacement, StripEntry};
+use vizdaw_app::testing::{FakeSession, mixer_fake, strip_row};
+use vizdaw_ffi::automation::{AutomationModeRow, GesturePhaseRow};
+use vizdaw_ffi::edit::{EditCommand, LaneEdit, MonitorModeRow};
+use vizdaw_ffi::events::AutomationTargetRow as T;
+use vizdaw_ffi::mixer::StripKindRow;
+use vizdaw_gpui::controls;
+use vizdaw_gpui::mixer_view::{ADD_BUS, MixerView, NAME};
+use vizdaw_gpui::registry::Element;
+use vizdaw_gpui::{AppState, DocumentWindow, RunCommand};
+
+/// Audio 1 (5, path 1: Groove plays through it), Audio 2 (6, path 2:
+/// Chords), Synth (1), Bus 1 (2), then Master (0).
+fn fake() -> FakeSession {
+    let f = mixer_fake();
+    let mut groove = vizdaw_app::testing::lane_row(30, "Groove", false);
+    groove.audio_out = Some(1);
+    let mut chords = vizdaw_app::testing::lane_row(31, "Chords", false);
+    chords.audio_out = Some(2);
+    chords.monitor = MonitorModeRow::Off;
+    f.set_lanes(3, vec![groove, chords]);
+    f.edit_mixer(|m| {
+        let mut a1 = strip_row(5, "Audio 1", StripKindRow::AudioPath { path: 1 });
+        a1.kind_label = "Audio: Out 1".into();
+        let a2 = strip_row(6, "Audio 2", StripKindRow::AudioPath { path: 2 });
+        m.strips.insert(0, a1);
+        m.strips.insert(1, a2);
+    });
+    f
+}
+
+/// `n` audio strips (10, 11, …) and master.
+fn many(n: u64) -> FakeSession {
+    let f = mixer_fake();
+    f.edit_mixer(|m| {
+        m.strips = (0..n)
+            .map(|i| {
+                strip_row(
+                    10 + i,
+                    &format!("Audio {}", i + 1),
+                    StripKindRow::AudioPath { path: i + 1 },
+                )
+            })
+            .chain([strip_row(0, "Master", StripKindRow::Master)])
+            .collect();
+        m.buses.clear();
+    });
+    f
+}
+
+struct Setup {
+    fake: Arc<FakeSession>,
+    app: Entity<AppState>,
+    window: WindowHandle<DocumentWindow>,
+    cx: VisualTestContext,
+}
+
+fn setup(cx: &mut TestAppContext, f: FakeSession) -> Setup {
+    let fake = Arc::new(f);
+    let shared = fake.clone();
+    let store = DocumentStore::new(
+        Box::new(|| Ok(Arc::new(FakeSession::new(vec![])))),
+        Box::new(move || Ok(shared.clone())),
+        Box::new(|_| Ok(Arc::new(mixer_fake()))),
+    );
+    let (app, window) = cx.update(|cx| {
+        let app = vizdaw_gpui::install(store, cx);
+        let window = vizdaw_gpui::new_demo(cx).expect("a demo window");
+        (app, window)
+    });
+    let vcx = VisualTestContext::from_window(window.into(), cx);
+    vcx.run_until_parked();
+    let mut s = Setup {
+        fake,
+        app,
+        window,
+        cx: vcx,
+    };
+    s.run_menu("ui.view_mix");
+    s.fake.clear_gestures();
+    s.fake.clear_calls();
+    s
+}
+
+fn touch(v: Option<f64>) -> GesturePhaseRow {
+    GesturePhaseRow::Touch { value: v }
+}
+
+const RELEASE: GesturePhaseRow = GesturePhaseRow::Release;
+
+impl Setup {
+    fn doc(&self) -> vizdaw_app::DocId {
+        self.window.read_with(&self.cx, |v, _| v.doc()).unwrap()
+    }
+
+    fn model<R>(&mut self, f: impl FnOnce(&vizdaw_app::DocumentModel) -> R) -> R {
+        let doc = self.doc();
+        self.app
+            .read_with(&self.cx, |a, _| f(a.store.document(doc).unwrap()))
+    }
+
+    fn update_model(&mut self, f: impl FnOnce(&mut vizdaw_app::DocumentModel)) {
+        let doc = self.doc();
+        self.app.update(&mut self.cx, |a, cx| {
+            a.store.with_document(doc, |d, _| f(d));
+            cx.notify();
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn run_menu(&mut self, id: &str) {
+        self.cx.dispatch_action(RunCommand::new(id.to_owned()));
+        self.cx.run_until_parked();
+    }
+
+    fn placements(&mut self) -> Vec<MixerPlacement> {
+        self.model(|d| {
+            d.mixer()
+                .map(|m| m.placements().iter().copied().collect())
+                .unwrap_or_default()
+        })
+    }
+
+    fn view(&mut self, p: MixerPlacement) -> Option<Entity<MixerView>> {
+        self.window
+            .read_with(&self.cx, |v, _| v.mixer_view(p))
+            .unwrap()
+    }
+
+    fn elements(&mut self) -> Vec<Element> {
+        self.window
+            .read_with(&self.cx, |v, _| v.registry().borrow().elements().to_vec())
+            .unwrap()
+    }
+
+    fn find(&mut self, role: &str, label: &str) -> Option<Element> {
+        self.elements()
+            .into_iter()
+            .find(|e| e.role == role && e.label == label)
+    }
+
+    fn element(&mut self, role: &str, label: &str) -> Element {
+        let all = self.elements();
+        self.find(role, label)
+            .unwrap_or_else(|| panic!("no {role} {label:?} in {all:#?}"))
+    }
+
+    fn value(&mut self, role: &str, label: &str) -> Option<String> {
+        self.element(role, label).value
+    }
+
+    fn faders(&mut self) -> Vec<Element> {
+        self.elements()
+            .into_iter()
+            .filter(|e| e.role == "slider" && e.label.starts_with("Fader of "))
+            .collect()
+    }
+
+    fn fader_labels(&mut self) -> Vec<String> {
+        self.faders().into_iter().map(|e| e.label).collect()
+    }
+
+    fn click_at(&mut self, at: Point<Pixels>, modifiers: Modifiers) {
+        self.cx.simulate_click(at, modifiers);
+        self.cx.run_until_parked();
+    }
+
+    fn click(&mut self, role: &str, label: &str) {
+        let at = self.element(role, label).bounds.center();
+        self.click_at(at, Modifiers::none());
+    }
+
+    fn double_click(&mut self, role: &str, label: &str) {
+        let at = self.element(role, label).bounds.center();
+        for count in [1, 2] {
+            self.cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count: count,
+                first_mouse: false,
+            });
+            self.cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count: count,
+            });
+        }
+        self.cx.run_until_parked();
+    }
+
+    /// The middle of `name`'s fader cap column.
+    fn fader_at(&mut self, name: &str) -> Point<Pixels> {
+        let b = self.element("slider", &format!("Fader of {name}")).bounds;
+        point(
+            b.origin.x + px((controls::fader::SCALE_WIDTH + controls::fader::COLUMN / 2.) as f32),
+            b.center().y,
+        )
+    }
+
+    fn down(&mut self, at: Point<Pixels>) {
+        self.cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn move_to(&mut self, at: Point<Pixels>) {
+        self.cx.simulate_event(MouseMoveEvent {
+            position: at,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn up(&mut self, at: Point<Pixels>) {
+        self.cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn gain(&mut self, strip: u64) -> f64 {
+        self.model(|d| {
+            let m = d.mixer().unwrap();
+            m.gain_db(m.strip(strip).unwrap())
+        })
+    }
+
+    fn of(&self, t: T) -> Vec<GesturePhaseRow> {
+        self.fake
+            .gestures()
+            .into_iter()
+            .filter(|g| g.0 == t)
+            .map(|g| g.1)
+            .collect()
+    }
+
+    fn scroll(&mut self, at: Point<Pixels>, dx: f32, dy: f32) {
+        self.cx.simulate_event(ScrollEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+            ..Default::default()
+        });
+        self.cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn the_mix_view_shows_a_strip_per_track_and_the_master(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    assert_eq!(
+        s.fader_labels(),
+        [
+            "Fader of Audio 1",
+            "Fader of Audio 2",
+            "Fader of Synth",
+            "Fader of Bus 1",
+            "Fader of Master"
+        ]
+    );
+    let faders = s.faders();
+    let xs: Vec<f32> = faders
+        .iter()
+        .map(|e| f32::from(e.bounds.origin.x))
+        .collect();
+    // A strip and a gap apart; master past the divider's own slot.
+    assert_eq!(xs[1] - xs[0], 126.);
+    assert_eq!(xs[4] - xs[3], 133.);
+    // Every fader at one y (the strips share their rows).
+    assert!(
+        faders
+            .iter()
+            .all(|e| e.bounds.origin.y == faders[0].bounds.origin.y)
+    );
+    let group = s.element("group", "Mixer").bounds;
+    assert!(group.contains(&faders[0].bounds.center()));
+    assert!(s.find("button", ADD_BUS).is_some());
+    assert!(
+        s.elements()
+            .iter()
+            .any(|e| e.role == "text" && e.label.starts_with("DSP 0%")),
+        "the load text"
+    );
+    assert_eq!(s.placements(), [MixerPlacement::View]);
+    s.run_menu("ui.view_arrange");
+    assert!(s.faders().is_empty());
+    assert!(s.placements().is_empty(), "the Mix view went");
+}
+
+#[gpui::test]
+fn strip_labels_and_values_match_swift(cx: &mut TestAppContext) {
+    let f = fake();
+    f.edit_mixer(|m| {
+        m.strips[0].gain_db = -4.2;
+        m.strips[0].pan = -0.24;
+        m.strips[0].automation = AutomationModeRow::Touch;
+    });
+    let mut s = setup(cx, f);
+    assert_eq!(
+        s.value("slider", "Fader of Audio 1").as_deref(),
+        Some("\u{2212}4.2 dB")
+    );
+    assert_eq!(
+        s.value("textfield", "Level of Audio 1"),
+        Some(StripEntry::level_text(-4.2))
+    );
+    assert_eq!(
+        s.value("slider", "Pan knob of Audio 1").as_deref(),
+        Some("L 24")
+    );
+    assert_eq!(
+        s.value("textfield", "Pan of Audio 1").as_deref(),
+        Some("L 24")
+    );
+    assert_eq!(
+        s.value("slider", "Fader of Synth").as_deref(),
+        Some("0.0 dB")
+    );
+    assert_eq!(s.value("slider", "Pan knob of Synth").as_deref(), Some("C"));
+    assert_eq!(
+        s.value("menu", "Output of Audio 1").as_deref(),
+        Some("\u{2192} Master")
+    );
+    assert_eq!(s.value("button", "Mute Audio 1").as_deref(), Some("off"));
+    assert_eq!(s.value("button", "Solo Audio 1").as_deref(), Some("off"));
+    assert_eq!(
+        s.value("button", "Record arm Audio 1").as_deref(),
+        Some("off")
+    );
+    assert!(s.element("button", "Record arm Audio 1").enabled);
+    // Groove monitors on Auto: lit; Chords is off.
+    assert_eq!(
+        s.value("button", "Input monitor Audio 1").as_deref(),
+        Some("on")
+    );
+    assert_eq!(
+        s.value("button", "Input monitor Audio 2").as_deref(),
+        Some("off")
+    );
+    assert_eq!(
+        s.value("menu", "Automation of Audio 1").as_deref(),
+        Some("Touch")
+    );
+    assert_eq!(
+        s.value("menu", "Automation of Synth").as_deref(),
+        Some("Read")
+    );
+    assert!(s.find("text", "Audio 1").is_some());
+    assert!(s.find("text", "Audio: Out 1").is_some(), "the kind");
+    // R and I are for audio tracks.
+    assert!(!s.element("button", "Record arm Synth").enabled);
+    assert!(!s.element("button", "Input monitor Synth").enabled);
+    // Master: mute, no solo (its place kept), no pan, no output.
+    assert!(s.find("button", "Mute Master").is_some());
+    assert!(s.find("button", "Solo Master").is_none());
+    assert!(s.find("slider", "Pan knob of Master").is_none());
+    assert!(s.find("textfield", "Pan of Master").is_none());
+    assert!(s.find("menu", "Output of Master").is_none());
+    assert!(!s.element("button", "Record arm Master").enabled);
+    let m = s.element("button", "Mute Master").bounds.origin.x;
+    let r = s.element("button", "Record arm Master").bounds.origin.x;
+    let bus_m = s.element("button", "Mute Bus 1").bounds.origin.x;
+    let bus_r = s.element("button", "Record arm Bus 1").bounds.origin.x;
+    assert_eq!(r - m, bus_r - bus_m, "the solo's place is kept");
+    assert_eq!(
+        s.element("button", "Mute Master").bounds.origin.y,
+        s.element("button", "Mute Audio 1").bounds.origin.y
+    );
+}
+
+#[gpui::test]
+fn a_fader_drag_moves_the_strip(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let at = s.fader_at("Audio 1");
+    s.down(at);
+    assert!(s.fake.gestures().is_empty(), "a bare press sends nothing");
+    s.move_to(point(at.x, at.y - px(2.)));
+    s.move_to(point(at.x, at.y - px(40.)));
+    s.up(point(at.x, at.y - px(40.)));
+    let phases = s.of(T::StripFader { strip: 5 });
+    assert_eq!(phases.first(), Some(&touch(None)));
+    assert_eq!(phases.last(), Some(&RELEASE));
+    assert_eq!(phases.iter().filter(|p| **p == RELEASE).count(), 1);
+    assert!(s.gain(5) > 0.0, "the strip moved up: {}", s.gain(5));
+    let shown = StripEntry::level_text(s.gain(5));
+    assert_eq!(s.value("slider", "Fader of Audio 1"), Some(shown));
+    // A press on the fader does not select its strip.
+    assert!(s.model(|d| d.selected_strips().is_empty()));
+}
+
+#[gpui::test]
+fn mute_and_solo_toggle(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("button", "Mute Audio 1");
+    assert_eq!(s.value("button", "Mute Audio 1").as_deref(), Some("on"));
+    assert_eq!(
+        s.of(T::StripMute { strip: 5 }),
+        [
+            touch(Some(1.0)),
+            GesturePhaseRow::Value { value: 1.0 },
+            RELEASE
+        ]
+    );
+    s.click("button", "Solo Bus 1");
+    assert_eq!(s.value("button", "Solo Bus 1").as_deref(), Some("on"));
+    s.click("button", "Mute Audio 1");
+    assert_eq!(s.value("button", "Mute Audio 1").as_deref(), Some("off"));
+    s.click("button", "Mute Master");
+    assert_eq!(s.value("button", "Mute Master").as_deref(), Some("on"));
+}
+
+#[gpui::test]
+fn record_arm_and_monitor_act_on_the_input_track(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("button", "Record arm Audio 1");
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Lane {
+            edit: LaneEdit::SetFlags {
+                seq: 3,
+                lane: 30,
+                mute: None,
+                solo: None,
+                arm: Some(true),
+            }
+        })
+    );
+    assert_eq!(
+        s.value("button", "Record arm Audio 1").as_deref(),
+        Some("on")
+    );
+    s.click("button", "Input monitor Audio 1");
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Lane {
+            edit: LaneEdit::SetMonitor {
+                seq: 3,
+                lane: 30,
+                monitor: MonitorModeRow::Input,
+            }
+        })
+    );
+    let n = s.fake.edits().len();
+    s.click("button", "Record arm Synth");
+    assert_eq!(s.fake.edits().len(), n, "disabled: nothing is sent");
+}
+
+#[gpui::test]
+fn solo_dims_the_others(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let look = |s: &mut Setup| {
+        let v = s.view(MixerPlacement::View).unwrap();
+        v.read_with(&s.cx, |v, _| v.drawn().to_vec())
+    };
+    assert!(look(&mut s).iter().all(|l| !l.dimmed));
+    // The core marks the strips the solo silences.
+    s.fake.edit_mixer(|m| {
+        for st in m.strips.iter_mut().filter(|st| st.id != 5 && st.id != 0) {
+            st.solo_muted = true;
+        }
+    });
+    s.click("button", "Solo Audio 1");
+    let dimmed: Vec<u64> = look(&mut s)
+        .iter()
+        .filter(|l| l.dimmed)
+        .map(|l| l.strip)
+        .collect();
+    assert_eq!(dimmed, [6, 1, 2]);
+}
+
+#[gpui::test]
+fn the_output_menu_routes_to_a_bus(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("menu", "Output of Audio 1");
+    let items: Vec<String> = s
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "menuitem")
+        .map(|e| e.label)
+        .collect();
+    assert_eq!(items, ["Master", "Bus 1"]);
+    s.click("menuitem", "Bus 1");
+    assert!(
+        s.fake
+            .calls()
+            .contains(&"set_output(5,Some(2))".to_string()),
+        "{:?}",
+        s.fake.calls()
+    );
+    assert_eq!(
+        s.value("menu", "Output of Audio 1").as_deref(),
+        Some("\u{2192} Bus 1")
+    );
+    assert!(s.find("menuitem", "Master").is_none(), "the menu closed");
+    // A bus does not output to itself.
+    s.click("menu", "Output of Bus 1");
+    assert!(s.find("menuitem", "Bus 1").is_none());
+    assert!(s.find("menuitem", "Master").is_some());
+}
+
+#[gpui::test]
+fn the_automation_menu_sets_the_strips_mode(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("menu", "Automation of Audio 2");
+    let items: Vec<(String, bool)> = s
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "menuitem")
+        .map(|e| (e.label, e.selected))
+        .collect();
+    let titles: Vec<&str> = items.iter().map(|i| i.0.as_str()).collect();
+    assert_eq!(titles, ["Off", "Read", "Touch", "Latch", "Write", "Trim"]);
+    assert_eq!(
+        items
+            .iter()
+            .filter(|i| i.1)
+            .map(|i| i.0.as_str())
+            .collect::<Vec<_>>(),
+        ["Read"],
+        "the current one checked"
+    );
+    s.click("menuitem", "Latch");
+    assert_eq!(
+        s.value("menu", "Automation of Audio 2").as_deref(),
+        Some("Latch")
+    );
+}
+
+#[gpui::test]
+fn add_bus_adds_a_strip(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("button", ADD_BUS);
+    assert!(s.fake.calls().contains(&"add_bus(Bus 2)".to_string()));
+    let labels = s.fader_labels();
+    assert_eq!(labels[labels.len() - 2], "Fader of Bus 2");
+    assert_eq!(labels.last().map(String::as_str), Some("Fader of Master"));
+}
+
+#[gpui::test]
+fn rename_by_double_click(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.double_click("text", "Audio 1");
+    let field = s.element("textfield", NAME);
+    assert_eq!(field.value.as_deref(), Some("Audio 1"));
+    assert!(field.focused);
+    assert!(
+        !s.model(|d| d.transport_keys_enabled()),
+        "the bare keys wait"
+    );
+    // The name is all selected: typing replaces it.
+    s.cx.simulate_input("Vox");
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert!(s.fake.calls().contains(&"rename_strip(5,Vox)".to_string()));
+    assert!(s.find("textfield", NAME).is_none());
+    assert!(s.find("slider", "Fader of Vox").is_some());
+    assert!(s.model(|d| d.transport_keys_enabled()));
+    // Escape cancels.
+    s.double_click("text", "Bus 1");
+    s.cx.simulate_input("Gone");
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    assert!(
+        !s.fake
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("rename_strip(2"))
+    );
+    assert!(s.find("text", "Bus 1").is_some());
+    assert!(s.model(|d| d.mixer().unwrap().renaming().is_none()));
+}
+
+#[gpui::test]
+fn selection_reaches_the_core(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let selected = |s: &mut Setup| {
+        let v = s.view(MixerPlacement::View).unwrap();
+        v.read_with(&s.cx, |v, _| {
+            v.drawn()
+                .iter()
+                .filter(|l| l.selected)
+                .map(|l| l.strip)
+                .collect::<Vec<_>>()
+        })
+    };
+    s.click("text", "Audio 1");
+    assert_eq!(s.fake.surface_selections().last(), Some(&vec![5]));
+    assert_eq!(selected(&mut s), [5]);
+    let at = s.element("text", "Bus 1").bounds.center();
+    let secondary = s.cx.update(|_, cx| Modifiers::secondary_key(cx));
+    s.click_at(at, secondary);
+    assert_eq!(s.fake.surface_selections().last(), Some(&vec![2, 5]));
+    assert_eq!(selected(&mut s), [5, 2]);
+    let at = s.element("text", "Audio 1").bounds.center();
+    s.click_at(at, Modifiers::shift());
+    assert_eq!(s.fake.surface_selections().last(), Some(&vec![2]));
+    s.click("text", "Synth");
+    assert_eq!(s.fake.surface_selections().last(), Some(&vec![1]));
+    // A click on a control of another strip leaves the selection.
+    s.click("button", "Mute Audio 2");
+    assert_eq!(selected(&mut s), [1]);
+}
+
+#[gpui::test]
+fn a_strip_that_vanishes_releases_its_drag(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let at = s.fader_at("Audio 2");
+    s.down(at);
+    s.move_to(point(at.x, at.y - px(2.)));
+    s.move_to(point(at.x, at.y - px(30.)));
+    let fader = T::StripFader { strip: 6 };
+    assert_eq!(s.of(fader).first(), Some(&touch(None)));
+    // The strip goes (an undo elsewhere removed it); the mixer reads it.
+    s.fake.edit_mixer(|m| m.strips.retain(|st| st.id != 6));
+    s.update_model(|d| {
+        d.with_mixer(|m, d| m.set_colour(d, 1, Some(vizdaw_ffi::mixer::SwatchRow::Red)));
+    });
+    assert!(s.find("slider", "Fader of Audio 2").is_none());
+    assert_eq!(s.of(fader).last(), Some(&RELEASE));
+    assert_eq!(s.of(fader).iter().filter(|p| **p == RELEASE).count(), 1);
+    assert_eq!(
+        s.model(|d| d.mixer().unwrap().pressed(MixerPlacement::View)),
+        None
+    );
+    // The rest of the drag sends nothing.
+    let n = s.fake.gestures().len();
+    s.move_to(point(at.x, at.y - px(50.)));
+    s.up(point(at.x, at.y - px(50.)));
+    assert_eq!(s.fake.gestures().len(), n);
+}
+
+#[gpui::test]
+fn deactivation_cancels_the_placements_drag(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.window
+        .update(&mut s.cx, |_, window, _| window.activate_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    let at = s.fader_at("Audio 1");
+    s.down(at);
+    s.move_to(point(at.x, at.y - px(2.)));
+    s.move_to(point(at.x, at.y - px(20.)));
+    s.cx.deactivate_window();
+    s.cx.run_until_parked();
+    let fader = T::StripFader { strip: 5 };
+    assert_eq!(s.of(fader).last(), Some(&RELEASE));
+    assert_eq!(
+        s.model(|d| d.mixer().unwrap().pressed(MixerPlacement::View)),
+        None
+    );
+}
+
+#[gpui::test]
+fn leaving_the_mix_view_mid_drag_releases_the_touch(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let at = s.fader_at("Audio 1");
+    s.down(at);
+    s.move_to(point(at.x, at.y - px(2.)));
+    s.move_to(point(at.x, at.y - px(20.)));
+    s.run_menu("ui.view_arrange");
+    let fader = T::StripFader { strip: 5 };
+    assert_eq!(s.of(fader).last(), Some(&RELEASE));
+    assert_eq!(s.of(fader).iter().filter(|p| **p == RELEASE).count(), 1);
+    assert!(s.placements().is_empty());
+}
+
+#[gpui::test]
+fn the_bottom_pane_mixer_is_a_placement_of_its_own(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.run_menu("ui.view_arrange");
+    s.update_model(|d| {
+        d.update_layout(|l| {
+            let _ = l.views.set_pane(
+                PaneSide::Bottom,
+                Some(PaneView::Mixer),
+                Some(true),
+                None,
+                MainView::Arrange,
+            );
+        })
+    });
+    assert_eq!(s.placements(), [MixerPlacement::Pane]);
+    assert!(s.find("button", ADD_BUS).is_some());
+    let bottom = s.element("group", "Bottom Pane").bounds;
+    let name = s.element("text", "Audio 1").bounds;
+    assert!(bottom.contains(&name.center()), "drawn in the bottom pane");
+    assert!(bottom.contains(&s.element("button", ADD_BUS).bounds.center()));
+    // Hidden, it goes.
+    s.update_model(|d| {
+        d.update_layout(|l| {
+            let _ = l
+                .views
+                .set_pane(PaneSide::Bottom, None, Some(false), None, MainView::Arrange);
+        })
+    });
+    assert!(s.placements().is_empty());
+    assert!(s.find("slider", "Fader of Audio 1").is_none());
+}
+
+#[gpui::test]
+fn many_strips_record_only_the_visible_ones(cx: &mut TestAppContext) {
+    let mut s = setup(cx, many(40));
+    let faders = s.faders();
+    assert!(!faders.is_empty());
+    assert!(faders.len() < 41, "{} of 41 recorded", faders.len());
+    assert_eq!(faders[0].label, "Fader of Audio 1");
+    assert!(s.find("slider", "Fader of Master").is_none());
+    // The last strip in view stays in view when scrolled by three.
+    let kept = faders.last().unwrap().clone();
+    // Every recorded fader shows, at least in part.
+    let shown = |s: &mut Setup, label: &str| {
+        s.window
+            .read_with(&s.cx, |v, _| {
+                let r = v.registry().borrow();
+                let e = r
+                    .elements()
+                    .iter()
+                    .find(|e| e.label == label)
+                    .cloned()
+                    .unwrap();
+                r.visible_part(&e).is_some()
+            })
+            .unwrap()
+    };
+    for f in &faders {
+        assert!(shown(&mut s, &f.label), "{} recorded but hidden", f.label);
+    }
+    // Scrolled across by three strips: the first goes, a later one comes.
+    let group = s.element("group", "Mixer").bounds.center();
+    s.scroll(group, -(3. * 126.), 0.);
+    assert!(s.find("slider", "Fader of Audio 1").is_none());
+    let last = faders.last().unwrap().label.clone();
+    let next: usize = last.trim_start_matches("Fader of Audio ").parse().unwrap();
+    assert!(
+        s.find("slider", &format!("Fader of Audio {}", next + 1))
+            .is_some()
+    );
+    assert_eq!(
+        s.element("slider", &kept.label).id,
+        kept.id,
+        "a strip's controls keep their IDs as the strips scroll"
+    );
+    // A vertical wheel with no room down scrolls across.
+    s.scroll(group, 0., -100_000.);
+    assert!(s.find("slider", "Fader of Master").is_some());
+    assert!(s.find("slider", "Fader of Audio 2").is_none());
+    s.scroll(group, 100_000., 100_000.);
+    assert!(
+        s.find("slider", "Fader of Audio 1").is_some(),
+        "back at the start"
+    );
+}
+
+#[gpui::test]
+fn the_mixer_follows_the_document(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    // A strip the core made (a new audio track), then the document moves.
+    s.fake.edit_mixer(|m| {
+        m.strips.insert(
+            2,
+            strip_row(7, "Audio 3", StripKindRow::AudioPath { path: 3 }),
+        )
+    });
+    s.update_model(|d| d.rename_track(30, "Kit"));
+    assert!(s.find("slider", "Fader of Audio 3").is_some());
+}
+
+#[gpui::test]
+fn a_mixer_that_cannot_be_read_says_so(cx: &mut TestAppContext) {
+    let f = fake();
+    f.set_call_error(
+        "mixer",
+        Some(vizdaw_ffi::VizError::Model {
+            message: "broken".into(),
+        }),
+    );
+    let mut s = setup(cx, f);
+    assert!(
+        s.find("text", vizdaw_gpui::mixer_view::UNAVAILABLE)
+            .is_some()
+    );
+    assert!(
+        s.find("text", vizdaw_gpui::mixer_view::UNAVAILABLE_NOTE)
+            .is_some()
+    );
+    assert!(s.faders().is_empty());
+}

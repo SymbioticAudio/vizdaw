@@ -256,6 +256,15 @@ impl DocumentModel {
         &self.lanes
     }
 
+    /// The track that path `path`'s strip records from and monitors: of
+    /// the shown sequence's tracks playing through it, the first armed
+    /// one, else the first (one rule for the mixer and the surfaces).
+    pub fn input_lane(&self, path: u64) -> Option<&LaneRow> {
+        let mut through = self.lanes.iter().filter(|l| l.audio_out == Some(path));
+        let first = through.clone().next();
+        through.find(|l| l.arm).or(first)
+    }
+
     #[doc(hidden)]
     pub fn lanes_fetches(&self) -> u64 {
         self.lanes_fetches
