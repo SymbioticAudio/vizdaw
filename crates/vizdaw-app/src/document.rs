@@ -82,31 +82,45 @@ struct Reads {
 /// Rows and the snapshot version they were read at.
 type Versioned<T> = (u64, Arc<[T]>);
 
-/// `cache[key]` at `version`, else read by `read`: a busy core answers
-/// with the older rows (or none), another refusal with none, and both
-/// are read again next time.
+/// A read and whether it is `version`'s answer (`false`: a busy core's
+/// older rows, to be read again).
+pub(crate) struct Read<T> {
+    pub(crate) rows: Arc<[T]>,
+    pub(crate) fresh: bool,
+}
+
+/// `cache[key]` at `version`, else read by `read`. A busy core answers
+/// with the older rows (or none), not fresh, read again next time;
+/// another refusal is none for the rest of the version (Swift
+/// `laneRowFailures`), so a failing read costs one call per version.
 fn read_at<K: std::hash::Hash + Eq, T>(
     cache: &mut HashMap<K, Versioned<T>>,
     key: K,
     version: u64,
     read: impl FnOnce() -> Result<Vec<T>, VizError>,
-) -> Arc<[T]> {
+) -> Read<T> {
     if let Some((v, rows)) = cache.get(&key)
         && *v == version
     {
-        return rows.clone();
+        return Read {
+            rows: rows.clone(),
+            fresh: true,
+        };
     }
-    match read() {
-        Ok(rows) => {
-            let rows: Arc<[T]> = rows.into();
-            cache.insert(key, (version, rows.clone()));
-            rows
+    let rows: Arc<[T]> = match read() {
+        Ok(rows) => rows.into(),
+        Err(VizError::Busy { .. }) => {
+            return Read {
+                rows: cache
+                    .get(&key)
+                    .map_or_else(|| Arc::from([]), |(_, r)| r.clone()),
+                fresh: false,
+            };
         }
-        Err(VizError::Busy { .. }) => cache
-            .get(&key)
-            .map_or_else(|| Arc::from([]), |(_, r)| r.clone()),
         Err(_) => Arc::from([]),
-    }
+    };
+    cache.insert(key, (version, rows.clone()));
+    Read { rows, fresh: true }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -339,19 +353,29 @@ impl DocumentModel {
     }
 
     /// Sequence `seq`'s tracks (any sequence, not only the shown one),
-    /// read once per snapshot version; none while the core cannot answer
-    /// (a busy core: the last ones).
+    /// read once per snapshot version; none when the core refuses (a busy
+    /// core: the last ones, asked again next time).
     pub fn lane_rows(&self, seq: u64) -> Arc<[LaneRow]> {
+        self.lane_rows_read(seq).rows
+    }
+
+    /// Track `lane` of `seq`'s events in time order, read once per
+    /// snapshot version; none when the core refuses (a busy core: the
+    /// last ones, asked again next time).
+    pub fn lane_events(&self, seq: u64, lane: u64) -> Arc<[EventRow]> {
+        self.lane_events_read(seq, lane).rows
+    }
+
+    /// [`DocumentModel::lane_rows`] with whether it is this version's.
+    pub(crate) fn lane_rows_read(&self, seq: u64) -> Read<LaneRow> {
         let version = self.snapshot.version;
         read_at(&mut lock(&self.reads).rows, seq, version, || {
             self.session.lanes(seq)
         })
     }
 
-    /// Track `lane` of `seq`'s events in time order, read once per
-    /// snapshot version; none while the core cannot answer (a busy core:
-    /// the last ones).
-    pub fn lane_events(&self, seq: u64, lane: u64) -> Arc<[EventRow]> {
+    /// [`DocumentModel::lane_events`] with whether it is this version's.
+    pub(crate) fn lane_events_read(&self, seq: u64, lane: u64) -> Read<EventRow> {
         let version = self.snapshot.version;
         read_at(&mut lock(&self.reads).events, (seq, lane), version, || {
             self.session.lane_events(seq, lane).map(|e| e.events)

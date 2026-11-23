@@ -147,13 +147,18 @@ impl DocumentModel {
         {
             return built.clone();
         }
-        let built = self.build_roll(&key);
+        let (built, fresh) = self.build_roll(&key);
         *lock(&self.editor.roll.builds) += 1;
-        *lock(&self.editor.roll.built) = Some((key, built.clone()));
+        // A build from a busy core's older reads is not this version's:
+        // it is built again next time.
+        if fresh {
+            *lock(&self.editor.roll.built) = Some((key, built.clone()));
+        }
         built
     }
 
-    fn build_roll(&self, key: &RollKey) -> Arc<[LaneNotes]> {
+    /// The shown tracks' notes, and whether every read was fresh.
+    fn build_roll(&self, key: &RollKey) -> (Arc<[LaneNotes]>, bool) {
         let seq = key.target.seq();
         let extra = key.lanes.as_deref();
         let wanted = |row: &LaneRow| match (key.target.lane(), extra) {
@@ -161,14 +166,22 @@ impl DocumentModel {
             (None, Some(exact)) => exact.contains(&row.id),
             (None, None) => shown_by_default(row),
         };
-        self.lane_rows(seq)
+        let rows = self.lane_rows_read(seq);
+        let mut fresh = rows.fresh;
+        let built = rows
+            .rows
             .iter()
             .filter(|r| wanted(r))
-            .map(|r| LaneNotes {
-                lane: LaneRef { seq, lane: r.id },
-                notes: notes_of(&self.lane_events(seq, r.id)),
+            .map(|r| {
+                let events = self.lane_events_read(seq, r.id);
+                fresh &= events.fresh;
+                LaneNotes {
+                    lane: LaneRef { seq, lane: r.id },
+                    notes: notes_of(&events.rows),
+                }
             })
-            .collect()
+            .collect();
+        (built, fresh)
     }
 
     /// The shown tracks, in sequence order.

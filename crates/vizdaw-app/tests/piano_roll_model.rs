@@ -383,3 +383,69 @@ fn double_clicking_a_block_opens_the_last_used_editor() {
     assert_eq!(d.kind, DetailEditorKind::List);
     assert_eq!(m.layout().last_kind, DetailEditorKind::List, "unchanged");
 }
+
+fn busy() -> vizdaw_ffi::VizError {
+    vizdaw_ffi::VizError::Busy {
+        message: "busy".into(),
+    }
+}
+
+#[test]
+fn a_build_from_a_busy_read_is_not_kept_for_the_version() {
+    let (f, mut m) = make(lane_target(31), None);
+    assert_eq!(m.roll_lane_notes()[0].notes.len(), 2);
+    f.set_events(3, 31, vec![note_row(1, 0, 60)]);
+    f.fail_next("lane_events", busy());
+    m.rename_track(31, "Kit");
+    assert_eq!(
+        m.roll_lane_notes()[0].notes.len(),
+        2,
+        "while busy: the last notes"
+    );
+    assert_eq!(
+        m.roll_lane_notes()[0].notes.len(),
+        1,
+        "once the core answers: the new ones"
+    );
+}
+
+#[test]
+fn a_list_built_from_a_busy_read_is_not_kept_for_the_version() {
+    let (f, mut m) = make(lane_target(31), None);
+    m.open_detail(lane_target(31), Some(DetailEditorKind::List));
+    let before = m.list_rows().len();
+    f.set_events(3, 31, vec![note_row(1, 0, 60)]);
+    f.fail_next("lane_events", busy());
+    m.rename_track(31, "Kit");
+    assert_eq!(m.list_rows().len(), before, "while busy: the last rows");
+    assert_eq!(m.list_rows().len(), before - 1, "then the new ones");
+}
+
+#[test]
+fn a_refused_lanes_read_is_asked_once_per_version() {
+    let (f, mut m) = make(lane_target(31), None);
+    f.set_call_error(
+        "lanes",
+        Some(vizdaw_ffi::VizError::Model {
+            message: "no".into(),
+        }),
+    );
+    let before = f.lanes_reads();
+    let other = LaneRef { seq: 2, lane: 20 };
+    for _ in 0..5 {
+        assert!(m.lane_rows(2).is_empty());
+        assert_eq!(m.roll_color_index(other), 0);
+        assert_eq!(m.roll_row(other), None);
+    }
+    assert_eq!(f.lanes_reads(), before + 1);
+    f.set_call_error("lanes", None);
+    m.rename_track(31, "Kit");
+    assert_eq!(m.lane_rows(2).len(), 1, "a new version asks again");
+    // Busy stays retryable.
+    m.rename_track(31, "Kat");
+    f.fail_next("lanes", busy());
+    let n = f.lanes_reads();
+    assert_eq!(m.lane_rows(2).len(), 1, "busy: the last rows");
+    assert_eq!(m.lane_rows(2).len(), 1);
+    assert_eq!(f.lanes_reads(), n + 2);
+}

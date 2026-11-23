@@ -380,7 +380,7 @@ impl FakeSession {
 
     /// Makes `call` (`begin_edit`, `edit_gesture`, `end_edit`,
     /// `abort_edit`, `edit_all`, `seconds_at`, `ticks_at`, `ui_layout`,
-    /// `set_ui_layout`, `destinations`) answer `e` every time (`None`: normally again).
+    /// `set_ui_layout`, `destinations`, `lanes`, `lane_events`) answer `e` every time (`None`: normally again).
     pub fn set_call_error(&self, call: &str, e: Option<VizError>) {
         let mut s = self.st();
         match e {
@@ -564,6 +564,7 @@ impl DocSession for FakeSession {
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
         let mut s = self.st();
         s.lanes_reads += 1;
+        Self::scripted(&mut s, "lanes")?;
         Ok(s.lanes.get(&seq).cloned().unwrap_or_default())
     }
     fn new_track(
@@ -779,6 +780,7 @@ impl DocSession for FakeSession {
     fn lane_events(&self, seq: u64, lane: u64) -> Result<LaneEvents, VizError> {
         let mut s = self.st();
         s.event_reads += 1;
+        Self::scripted(&mut s, "lane_events")?;
         Ok(LaneEvents {
             seq,
             lane,

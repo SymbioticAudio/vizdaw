@@ -57,6 +57,8 @@ struct Built {
     index: HashMap<String, usize>,
     context: Arc<ListContext>,
     lanes: usize,
+    /// Every track read was this version's (not a busy core's older one).
+    fresh: bool,
 }
 
 /// The list's own state: the cursor, the last inserted kind and the
@@ -234,14 +236,19 @@ impl DocumentModel {
         }
         let built = Arc::new(self.build_list(key));
         *lock(&self.editor.list.builds) += 1;
-        *lock(&self.editor.list.built) = Some(built.clone());
+        // A build from a busy core's older reads is built again next time.
+        if built.fresh {
+            *lock(&self.editor.list.built) = Some(built.clone());
+        }
         Some(built)
     }
 
     fn build_list(&self, key: RowsKey) -> Built {
         let t = key.target;
         let seq = t.seq();
-        let lane_rows = self.lane_rows(seq);
+        let rows_read = self.lane_rows_read(seq);
+        let mut fresh = rows_read.fresh;
+        let lane_rows = rows_read.rows;
         let keys: Vec<LaneRef> = match t.lane() {
             Some(lane) => vec![LaneRef { seq, lane }],
             None => lane_rows
@@ -257,13 +264,17 @@ impl DocumentModel {
         let input = ListInput {
             lanes: keys
                 .iter()
-                .map(|k| ListLane {
-                    key: *k,
-                    events: self.lane_events(seq, k.lane),
-                    dest: lane_rows
-                        .iter()
-                        .find(|l| l.id == k.lane)
-                        .and_then(|l| l.midi_dest),
+                .map(|k| {
+                    let events = self.lane_events_read(seq, k.lane);
+                    fresh &= events.fresh;
+                    ListLane {
+                        key: *k,
+                        events: events.rows,
+                        dest: lane_rows
+                            .iter()
+                            .find(|l| l.id == k.lane)
+                            .and_then(|l| l.midi_dest),
+                    }
                 })
                 .collect(),
             range,
@@ -327,6 +338,7 @@ impl DocumentModel {
             rows: rows.into(),
             context: Arc::new(context),
             lanes: keys.len(),
+            fresh,
         }
     }
 
