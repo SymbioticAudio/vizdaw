@@ -164,9 +164,70 @@ pub fn action_for(id: &str) -> Box<dyn Action> {
     }
 }
 
-/// The first key of `id` in `keymap`, as menus show it.
+/// The first key of `id` in `keymap`, as menus show it on this platform.
 fn keys_of(id: &str, keymap: &Keymap) -> Option<String> {
-    keymap.chords(id).first().map(Chord::text)
+    key_text(id, keymap, cfg!(target_os = "macos"))
+}
+
+/// The first key of `id` that works on the platform (`mac`: macOS), as
+/// menus show it: off macOS a ⌃ chord a ⌘ chord owns ([`owner`]) does
+/// nothing, so it is not shown.
+pub fn key_text(id: &str, keymap: &Keymap, mac: bool) -> Option<String> {
+    keymap
+        .chords(id)
+        .into_iter()
+        .find(|c| owner(c, keymap, mac).is_none())
+        .map(|c| c.text())
+}
+
+/// The commands whose chords the window binds ([`bindings`]): the
+/// document, editor, view and mixer commands, and the transport commands
+/// but the held keys and the slice 1 ones.
+fn bound_ids() -> Vec<&'static str> {
+    let transport = TRANSPORT_COMMANDS.iter().filter(|id| {
+        !matches!(
+            **id,
+            "transport.play_stop"
+                | "transport.stop"
+                | "transport.rewind"
+                | "transport.fast_forward"
+        )
+    });
+    DOCUMENT_COMMANDS
+        .iter()
+        .chain(ROUTED_EDITOR_COMMANDS)
+        .chain(VIEW_COMMANDS)
+        .chain(MIXER_COMMANDS)
+        .chain(transport)
+        .copied()
+        .collect()
+}
+
+/// `mods` as the keyboard has them off macOS, where ⌘ and ⌃ are both
+/// Ctrl.
+fn ctrl_folded(mods: u8) -> u8 {
+    if mods & (COMMAND | CONTROL) == 0 {
+        mods
+    } else {
+        (mods & !CONTROL) | COMMAND
+    }
+}
+
+/// The ⌘ chord that owns `chord`'s keystroke on the platform (`mac`:
+/// macOS), if any: off macOS, where ⌘ and ⌃ are both Ctrl, a ⌃ chord
+/// (⌃1 Arrange View) whose keystroke a bound command's ⌘ chord has (⌘1
+/// Piano Roll) is that ⌘ chord's. `None` on macOS, for a chord with ⌘,
+/// and for one no ⌘ chord shares. The key bindings, the menus' keys and
+/// the channel's `ui.key` all follow it.
+pub fn owner(chord: &Chord, keymap: &Keymap, mac: bool) -> Option<Chord> {
+    if mac || chord.mods & CONTROL == 0 || chord.mods & COMMAND != 0 {
+        return None;
+    }
+    let folded = ctrl_folded(chord.mods);
+    bound_ids()
+        .iter()
+        .flat_map(|id| keymap.chords(id))
+        .find(|c| c.mods & COMMAND != 0 && c.code == chord.code && ctrl_folded(c.mods) == folded)
 }
 
 /// A slice 1 item: its slice 1 title, the registry's keys where it has the
@@ -419,39 +480,15 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
     // steps them per key-down and lands on key-up. Their keypad twins
     // (Keypad- and Keypad+) are not bound: GPUI does not tell the keypad
     // from the main keys, and the main - and + are not theirs.
-    let transport = TRANSPORT_COMMANDS.iter().filter(|id| {
-        !matches!(
-            **id,
-            "transport.play_stop"
-                | "transport.stop"
-                | "transport.rewind"
-                | "transport.fast_forward"
-        )
-    });
-    let ids: Vec<&'static str> = DOCUMENT_COMMANDS
-        .iter()
-        .chain(ROUTED_EDITOR_COMMANDS)
-        .chain(VIEW_COMMANDS)
-        .chain(MIXER_COMMANDS)
-        .chain(transport)
-        .copied()
-        .collect();
-    // Off macOS ⌘ and ⌃ are both Ctrl: a ⌃ chord whose keystroke a ⌘
-    // chord already has (⌃1 Arrange View and ⌘1 Piano Roll) is left to the
-    // ⌘ one; its command keeps its menu item.
-    let command_keys: HashSet<String> = ids
-        .iter()
-        .flat_map(|id| keymap.chords(id))
-        .filter(|c| c.mods & COMMAND != 0)
-        .filter_map(|c| keystroke(&c))
-        .collect();
+    let ids = bound_ids();
     for &id in &ids {
         for chord in keymap.chords(id) {
             if bindings::key_name(chord.code).is_some_and(|n| n.starts_with("Keypad")) {
                 continue;
             }
             let Some(k) = keystroke(&chord) else { continue };
-            if chord.mods & COMMAND == 0 && chord.mods & CONTROL != 0 && command_keys.contains(&k) {
+            // Off macOS a ⌃ chord a ⌘ chord owns is left to it.
+            if owner(&chord, keymap, cfg!(target_os = "macos")).is_some() {
                 continue;
             }
             // A chord without ⌘ or ⌃ (bare, ⇧ or ⌥) waits while a text

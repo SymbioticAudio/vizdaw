@@ -1081,3 +1081,44 @@ fn a_refused_new_bus_is_failed_or_busy_and_a_gesture_stops_it() {
         f.calls()
     );
 }
+
+/// Swift `EditorModel.openDetail`: any detail opening over a bottom pane
+/// that shows no editor commits the strip rename first (a double-clicked
+/// block too), and so does `ui.pane` opening an editor kind in a named
+/// main view.
+#[test]
+fn opening_a_detail_over_the_mixer_commits_the_strip_rename() {
+    let (f, mut d) = doc();
+    assert!(d.ensure_mixer());
+    run(
+        "ui.pane",
+        &[t("pane", "bottom"), t("view", "mixer")],
+        &mut d,
+    )
+    .unwrap();
+    d.with_mixer(|m, _| {
+        m.begin_rename(1, MixerPlacement::Pane);
+        m.rename_draft = "Vox 2".into();
+    });
+    let block = support::block_row(0, 61_440, &[]);
+    d.open_block_detail(30, &block);
+    assert_eq!(f.count("rename_strip(1,Vox 2)"), 1);
+    assert!(d.mixer().unwrap().renaming().is_none());
+    assert_eq!(d.layout().views.current().bottom.view, PaneView::Editor);
+    // Over the editor already: nothing ends.
+    d.with_mixer(|m, _| {
+        m.begin_rename(1, MixerPlacement::Pane);
+        m.rename_draft = "Vox 3".into();
+    });
+    d.open_block_detail(31, &block);
+    assert!(d.mixer().unwrap().renaming().is_some());
+    // The mix view's bottom pane is not on the editor: opening there ends it.
+    d.update_layout(|l| l.views.mix.bottom.view = PaneView::AudioEditor);
+    d.open_detail_in(
+        vizdaw_app::editor::EditorTarget::Sequence { seq: 3 },
+        Some(DetailEditorKind::List),
+        MainView::Mix,
+    );
+    assert_eq!(f.count("rename_strip(1,Vox 3)"), 1);
+    assert_eq!(d.layout().views.mix.bottom.view, PaneView::Editor);
+}

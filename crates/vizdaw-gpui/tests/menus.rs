@@ -399,8 +399,10 @@ fn the_view_menu_checks_the_main_view_and_the_shown_panes() {
     let keymap = Keymap::default();
     let mut doc = demo_doc();
     let m = menu_model(Some(&doc), &keymap);
-    assert_eq!(item(&m, "View", "Arrange View").2, Some("⌃1"));
-    assert_eq!(item(&m, "View", "Mix View").2, Some("⌃2"));
+    // Off macOS ⌘1 and ⌘2 own Ctrl+1 and Ctrl+2: the views show no key.
+    let mac = cfg!(target_os = "macos");
+    assert_eq!(item(&m, "View", "Arrange View").2, mac.then_some("⌃1"));
+    assert_eq!(item(&m, "View", "Mix View").2, mac.then_some("⌃2"));
     assert_eq!(item(&m, "View", "Left Pane").2, Some("⌃⌘←"));
     assert_eq!(item(&m, "View", "Right Pane").2, Some("⌃⌘→"));
     assert_eq!(checked(&m, "View", "Arrange View"), Some(true));
@@ -485,4 +487,42 @@ fn main_view_keys_do_not_collide_with_the_editor_keys() {
             assert_eq!(bound, chords, "{id}");
         }
     }
+}
+
+/// Off macOS (`mac` false; run on every platform) ⌃1 and ⌃2 belong to ⌘1
+/// and ⌘2: the View menu shows no key for the main views, and the
+/// channel's ⌃1 runs what the keyboard's Ctrl+1 runs. On macOS nothing
+/// changes.
+#[test]
+fn off_macos_the_command_keys_own_the_control_keys() {
+    let keymap = Keymap::default();
+    let c = |s: &str| Chord::parse(s).unwrap();
+    assert_eq!(menus::owner(&c("⌃1"), &keymap, false), Some(c("⌘1")));
+    assert_eq!(menus::owner(&c("⌃2"), &keymap, false), Some(c("⌘2")));
+    assert_eq!(menus::owner(&c("⌃1"), &keymap, true), None);
+    // A ⌘ chord, or a ⌃ chord no ⌘ chord shares, is its own.
+    assert_eq!(menus::owner(&c("⌘1"), &keymap, false), None);
+    assert_eq!(menus::owner(&c("⌃⌘←"), &keymap, false), None);
+    assert_eq!(menus::owner(&c("⌃9"), &keymap, false), None);
+    assert_eq!(menus::key_text("ui.view_arrange", &keymap, false), None);
+    assert_eq!(menus::key_text("ui.view_mix", &keymap, false), None);
+    assert_eq!(
+        menus::key_text("ui.view_arrange", &keymap, true).as_deref(),
+        Some("⌃1")
+    );
+    assert_eq!(
+        menus::key_text("editors.piano_roll", &keymap, false).as_deref(),
+        Some("⌘1")
+    );
+    assert_eq!(
+        menus::key_text("ui.toggle_left", &keymap, false).as_deref(),
+        Some("⌃⌘←")
+    );
+    // This platform's menu follows its rule.
+    let m = menu_model(Some(&demo_doc()), &keymap);
+    let mac = cfg!(target_os = "macos");
+    assert_eq!(
+        item(&m, "View", "Arrange View").2,
+        menus::key_text("ui.view_arrange", &keymap, mac).as_deref()
+    );
 }

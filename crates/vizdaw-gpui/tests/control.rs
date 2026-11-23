@@ -1887,28 +1887,28 @@ fn views_and_panes_over_the_channel(cx: &mut TestAppContext) {
     assert_eq!(after["windows"], windows["windows"]);
     assert_eq!(after["alerts"], json!([]));
 
-    ok(call(
-        &s,
-        cx,
-        "ui.key",
-        json!({"key": "2", "modifiers": ["control"]}),
-    ));
-    assert_eq!(layout(&s, cx)["main"], "mix");
-    ok(call(
-        &s,
-        cx,
-        "ui.key",
-        json!({"key": "1", "modifiers": ["control"]}),
-    ));
+    let detail_kind = |s: &Setup, cx: &mut TestAppContext| {
+        let e = ok(call(s, cx, "state.get", json!({"target": "editor"})));
+        e["detail"]["kind"].clone()
+    };
+    let key = |s: &Setup, cx: &mut TestAppContext, k: &str, m: &str| {
+        ok(call(s, cx, "ui.key", json!({"key": k, "modifiers": [m]})));
+    };
+    if cfg!(target_os = "macos") {
+        key(&s, cx, "2", "control");
+        assert_eq!(layout(&s, cx)["main"], "mix");
+        key(&s, cx, "1", "control");
+        assert_eq!(layout(&s, cx)["main"], "arrange");
+    } else {
+        // Off macOS Ctrl+2 is ⌘2's (the List), as the keyboard has it.
+        key(&s, cx, "2", "control");
+        assert_eq!(layout(&s, cx)["main"], "arrange");
+        assert_eq!(detail_kind(&s, cx), "list");
+    }
+    // ⌘1 is the Piano Roll.
+    key(&s, cx, "1", "command");
     assert_eq!(layout(&s, cx)["main"], "arrange");
-    // ⌘1 is still the Piano Roll.
-    ok(call(
-        &s,
-        cx,
-        "ui.key",
-        json!({"key": "1", "modifiers": ["command"]}),
-    ));
-    assert_eq!(layout(&s, cx)["main"], "arrange");
+    assert_eq!(detail_kind(&s, cx), "piano_roll");
 
     let ran = ok(call(
         &s,

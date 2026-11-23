@@ -12,7 +12,7 @@ use vizdaw_ffi::tracks::TrackKindRow;
 
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
-use crate::editor::{DetailEditorKind, GESTURE_OPEN, PaneView};
+use crate::editor::{DetailEditorKind, GESTURE_OPEN};
 use crate::prefs::Prefs;
 use crate::transport_bar::TransportLayout;
 
@@ -492,8 +492,7 @@ pub(crate) fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bo
 
 /// An editor command: Snap to Grid (`on`, absent toggles), List (opens on
 /// the open detail's target or the selection; nothing to show opens
-/// nothing) and Close Detail Editor. Over a bottom pane that shows no
-/// editor, the Piano Roll and the List end the panes' text edits first.
+/// nothing) and Close Detail Editor.
 fn run_editor(
     id: &str,
     args: &[(String, ArgValue)],
@@ -505,18 +504,8 @@ fn run_editor(
             let on = on_flag(id, args)?;
             doc.update_layout(|l| l.snap.enabled = on.unwrap_or(!l.snap.enabled));
         }
-        "editors.piano_roll" | "editors.list" => {
-            let kind = if id == "editors.piano_roll" {
-                DetailEditorKind::PianoRoll
-            } else {
-                DetailEditorKind::List
-            };
-            let opens = doc.layout().detail.is_some() || doc.detail_target().is_some();
-            if opens && doc.layout().views.current().bottom.view != PaneView::Editor {
-                doc.end_pane_edits();
-            }
-            doc.show_detail(kind);
-        }
+        "editors.piano_roll" => doc.show_detail(DetailEditorKind::PianoRoll),
+        "editors.list" => doc.show_detail(DetailEditorKind::List),
         "editors.insert_event" => {
             if !insert_event_ready(doc) {
                 return Err(unavailable(NO_LIST));

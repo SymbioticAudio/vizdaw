@@ -1134,6 +1134,8 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
         }
     }
     let chord = Chord::new(k.key_code, mods)?;
+    // As the keyboard: off macOS a ⌃ chord a ⌘ chord owns runs the ⌘ one.
+    let chord = menus::owner(&chord, &s.keymap, cfg!(target_os = "macos")).unwrap_or(chord);
     s.keymap.lookup(chord, false, false)
 }
 

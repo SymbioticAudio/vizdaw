@@ -194,7 +194,7 @@ pub fn choose(
         .map(|d| d.target)
         .or_else(|| doc.detail_target());
     match target {
-        Some(t) => doc.editor.open_detail_in(t, Some(kind), setup),
+        Some(t) => doc.open_detail_in(t, Some(kind), setup),
         None => doc.update_layout(|l| l.last_kind = kind),
     }
     if let Some(on) = shown {

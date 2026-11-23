@@ -12,7 +12,8 @@ use super::{DocumentModel, empty_selection};
 use crate::alerts::error_message;
 use crate::arrangement::bar_at;
 use crate::editor::{
-    DetailEditorKind, EditorLayout, EditorModel, EditorTarget, GESTURE_OPEN, Tool,
+    DetailEditorKind, EditorLayout, EditorModel, EditorTarget, GESTURE_OPEN, MainView, PaneView,
+    Tool,
 };
 
 impl DocumentModel {
@@ -175,7 +176,24 @@ impl DocumentModel {
     /// Shows `target` in the detail pane, in `kind` or the last-used
     /// editor.
     pub fn open_detail(&mut self, target: EditorTarget, kind: Option<DetailEditorKind>) {
-        self.editor.open_detail(target, kind);
+        let main = self.layout().views.main;
+        self.open_detail_in(target, kind, main);
+    }
+
+    /// [`DocumentModel::open_detail`] in `main`'s bottom pane. When that
+    /// pane shows something other than the editor (the mixer), its text
+    /// edits end first: a strip rename is committed, not dropped (Swift
+    /// `EditorModel.openDetail`).
+    pub fn open_detail_in(
+        &mut self,
+        target: EditorTarget,
+        kind: Option<DetailEditorKind>,
+        main: MainView,
+    ) {
+        if self.layout().views.setup(main).bottom.view != PaneView::Editor {
+            self.end_pane_edits();
+        }
+        self.editor.open_detail_in(target, kind, main);
     }
 
     /// ⌘1–⌘4: the detail pane shows `kind`, on its current target or on
