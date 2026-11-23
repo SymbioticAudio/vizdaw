@@ -63,6 +63,7 @@ pub const DOTTED: &str = "Dotted";
 /// The block menu's items (Swift `ArrangementView.blockMenu`; the other
 /// detail editors, Make Reference, Takes and the reference commands come
 /// later).
+pub const OPEN_IN_PIANO_ROLL: &str = "Open in Piano Roll";
 pub const OPEN_IN_LIST: &str = "Open in List";
 pub const DELETE: &str = "Delete";
 /// The zoom buttons' row above the headers and the canvas.
@@ -439,7 +440,7 @@ fn block_menu(
     .into_any_element();
     let mut items: Vec<Option<&'static str>> = vec![];
     if menu.block.kind == BlockKind::Events {
-        items.extend([Some(OPEN_IN_LIST), None]);
+        items.extend([Some(OPEN_IN_PIANO_ROLL), Some(OPEN_IN_LIST), None]);
     }
     items.push(Some(DELETE));
     let mut list = menu_list("block-menu");
@@ -1237,28 +1238,39 @@ impl DocumentWindow {
         for e in events {
             if let MachineEvent::Click {
                 hit,
+                at,
                 clicks,
                 modifiers,
-                ..
             } = e
             {
-                self.arrangement_click(hit, clicks, modifiers, cx);
+                self.arrangement_click(hit, at, clicks, modifiers, cx);
             }
         }
     }
 
-    /// A click below the ruler (Swift `ArrangementView.click`). The
-    /// Pencil does nothing yet (it opens the piano roll in a later slice).
+    /// A click at body point `at` below the ruler (Swift
+    /// `ArrangementView.click`). The Pencil on a track's row opens its
+    /// piano roll at the clicked bar (Swift `pencilClick`); when it does
+    /// not (an audio track) the click goes on as any other.
     fn arrangement_click(
         &mut self,
         hit: ArrangementHit,
+        at: model::Point,
         clicks: u32,
         modifiers: model::Modifiers,
         cx: &mut Context<Self>,
     ) {
+        let tick = self.arrangement.axis.tick_at(at.x);
         self.with_model(cx, |d| {
             let tool = d.tool();
-            if tool == Tool::Pencil {
+            if tool == Tool::Pencil
+                && let Some(seq) = d.selected_seq()
+                && let Some(lane) = match hit {
+                    ArrangementHit::Block { lane, .. } => Some(lane),
+                    ArrangementHit::Empty { lane, .. } => lane,
+                }
+                && d.pencil_opens_piano_roll(seq, lane, tick)
+            {
                 return;
             }
             match hit {
@@ -1271,7 +1283,7 @@ impl DocumentWindow {
                     } else if clicks >= 2 {
                         // A reference opens its sequence in a later slice.
                         if block.kind == BlockKind::Events {
-                            open_block_detail(d, lane, &block, None);
+                            d.open_block_detail(lane, &block);
                         }
                     } else {
                         d.select_block(lane, &block, modifiers.shift);
@@ -1380,9 +1392,10 @@ impl DocumentWindow {
             return;
         };
         self.with_model(cx, |d| match title {
-            OPEN_IN_LIST => {
-                open_block_detail(d, menu.lane, &menu.block, Some(DetailEditorKind::List))
+            OPEN_IN_PIANO_ROLL => {
+                open_block_detail(d, menu.lane, &menu.block, DetailEditorKind::PianoRoll)
             }
+            OPEN_IN_LIST => open_block_detail(d, menu.lane, &menu.block, DetailEditorKind::List),
             _ => {
                 d.edit(delete(&menu.block));
             }
@@ -1547,29 +1560,15 @@ fn delete(block: &BlockRow) -> EditCommand {
     }
 }
 
-/// Opens the detail editor on `block` of track `lane`: in `kind` (which
-/// becomes the last-used editor), else in the last-used editor. The List
-/// is the only one this slice has, so a last-used editor that is not here
-/// yet opens the List and stays the saved last-used one.
-fn open_block_detail(
-    d: &mut DocumentModel,
-    lane: u64,
-    block: &BlockRow,
-    kind: Option<DetailEditorKind>,
-) {
+/// Opens the detail editor on `block` of track `lane` in `kind`, which
+/// becomes the last-used editor (the block menu's "Open in ...").
+fn open_block_detail(d: &mut DocumentModel, lane: u64, block: &BlockRow, kind: DetailEditorKind) {
     let Some(seq) = d.selected_seq() else { return };
-    let last = d.layout().last_kind;
     let target = EditorTarget::Block {
         seq,
         lane,
         start: block.start,
         end: block.end,
     };
-    match kind {
-        Some(k) => d.open_detail(target, Some(k)),
-        None => {
-            d.open_detail(target, Some(DetailEditorKind::List));
-            d.update_layout(|l| l.last_kind = last);
-        }
-    }
+    d.open_detail(target, Some(kind));
 }

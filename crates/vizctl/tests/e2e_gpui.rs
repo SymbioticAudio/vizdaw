@@ -844,8 +844,9 @@ fn wait_for_undo(app: &mut App, w: &Value, label: &str) {
 }
 
 /// Blocks select by element (⇧ adds a second track), a click on empty
-/// canvas by point clears the selection, and a double-click opens the
-/// block in the List.
+/// canvas by point clears the selection, a double-click opens the block in
+/// the last-used editor (the Piano Roll at first), and List (⌘2) shows the
+/// same block in the List.
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_blocks_select_and_open_in_the_list() {
@@ -898,16 +899,162 @@ fn gpui_blocks_select_and_open_in_the_list() {
         "ui.click",
         json!({"window": w, "element": chords, "count": 2}),
     );
-    app.wait(&w, json!({"condition": "detail_kind", "kind": "list"}));
+    app.wait(
+        &w,
+        json!({"condition": "detail_kind", "kind": "piano_roll"}),
+    );
     let e = app.call("state.get", json!({"target": "editor", "window": w}));
     let d = &e["detail"];
-    assert_eq!(d["kind"], "list", "{e}");
+    assert_eq!(d["kind"], "piano_roll", "{e}");
     assert_eq!(d["seq"], seq, "{e}");
     assert_eq!(d["lane"], chords_lane, "{e}");
     assert!(
         d["start"].is_i64() && d["end"].is_i64(),
         "a block target: {e}"
     );
+    let block = d.clone();
+
+    app.call("command.run", json!({"id": "editors.list", "window": w}));
+    app.wait(&w, json!({"condition": "detail_kind", "kind": "list"}));
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    let d = &e["detail"];
+    assert_eq!(d["kind"], "list", "{e}");
+    for k in ["seq", "lane", "start", "end"] {
+        assert_eq!(d[k], block[k], "{k}: {e}");
+    }
+    app.quit();
+}
+
+/// The children of the first node labelled exactly `label` (a group).
+fn children_of(nodes: &Value, label: &str) -> Option<Value> {
+    find_node(nodes, label).map(|n| n["children"].clone())
+}
+
+/// The first node labelled exactly `label` outside the group labelled
+/// `outside` (the arrangement's tool bar, not the roll's).
+fn find_node_outside(nodes: &Value, label: &str, outside: &str) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        let l = n["label"].as_str();
+        if l == Some(outside) {
+            None
+        } else if l == Some(label) {
+            Some(n.clone())
+        } else {
+            find_node_outside(&n["children"], label, outside)
+        }
+    })
+}
+
+/// A note of the Piano Roll's canvas (List rows are also "Note …", so
+/// only the "Piano Roll" group is searched): its id and label.
+fn roll_note(nodes: &Value) -> Option<(Value, String)> {
+    labelled_like(&children_of(nodes, "Piano Roll")?, "Note ")
+}
+
+/// The Piano Roll (⌘1) on the demo: its notes are in the tree, a note
+/// clicked is the selection (with its track), Delete deletes it, Undo
+/// brings it back.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_the_piano_roll_draws_selects_and_deletes() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    app.call(
+        "command.run",
+        json!({"id": "editors.piano_roll", "window": w}),
+    );
+    app.wait(
+        &w,
+        json!({"condition": "detail_kind", "kind": "piano_roll"}),
+    );
+    wait_for_node(&mut app, &w, "Piano Roll");
+    let (note, label) = wait_in_tree(&mut app, &w, "a roll note", roll_note);
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].clone();
+    let lanes: Vec<Value> = doc["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["id"].clone())
+        .collect();
+
+    app.call("ui.click", json!({"window": w, "element": note}));
+    let s = selection(&mut app, &w);
+    assert_eq!(s["events"].as_array().unwrap().len(), 1, "{label}: {s}");
+    let sel_lanes = s["lanes"].as_array().unwrap();
+    assert_eq!(sel_lanes.len(), 1, "{label}: {s}");
+    assert_eq!(sel_lanes[0]["seq"], seq, "{s}");
+    assert!(lanes.contains(&sel_lanes[0]["lane"]), "{s} in {doc}");
+    assert!(s["time_range"].is_null(), "{s}");
+    let selected = wait_in_tree(&mut app, &w, "the clicked note", |n| {
+        children_of(n, "Piano Roll").and_then(|c| find_node(&c, &label))
+    });
+    assert_eq!(selected["selected"], true, "{selected}");
+
+    // The canvas has the keyboard: Delete deletes the selected note.
+    app.call("ui.key", json!({"window": w, "key": "delete"}));
+    wait_for_undo(&mut app, &w, "Delete Events");
+
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_state(&mut app, &w, "document", |d| {
+        d["undo"].as_str() != Some("Delete Events")
+    });
+    wait_in_tree(&mut app, &w, "the note back", |n| {
+        children_of(n, "Piano Roll").and_then(|c| find_node(&c, &label))
+    });
+    app.quit();
+}
+
+/// The Pencil chosen in the arrangement's tool bar, a click on the Chords
+/// row opens the track's Piano Roll with its notes; the Pencil stays on.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_the_pencil_opens_the_roll() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let pencil = wait_in_tree(&mut app, &w, "the arrangement's Pencil", |n| {
+        find_node_outside(n, "Pencil", "Bottom Pane")
+    });
+    app.call("ui.click", json!({"window": w, "element": pencil["id"]}));
+    wait_for_editor(&mut app, &w, "the pencil", |e| e["tool"] == "pencil");
+
+    // Just inside the Chords block's start: its first bar.
+    let (_, chords) = wait_in_tree(&mut app, &w, "the Chords block", |n| {
+        labelled_like(n, "Block on Chords")
+    });
+    let block = wait_for_node(&mut app, &w, &chords);
+    let f = &block["frame"];
+    let x = f["x"].as_f64().unwrap() + 4.;
+    let y = f["y"].as_f64().unwrap() + f["height"].as_f64().unwrap() / 2.;
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].clone();
+    let chords_lane = doc["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == "Chords")
+        .map(|l| l["id"].clone())
+        .expect("a Chords track");
+
+    app.call("ui.click", json!({"window": w, "point": {"x": x, "y": y}}));
+    app.wait(
+        &w,
+        json!({"condition": "detail_kind", "kind": "piano_roll"}),
+    );
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    let d = &e["detail"];
+    assert_eq!(d["kind"], "piano_roll", "{e}");
+    assert_eq!(d["seq"], seq, "{e}");
+    assert_eq!(d["lane"], chords_lane, "{e}");
+    assert!(d["start"].is_null(), "a track target: {e}");
+    assert_eq!(e["tool"], "pencil", "{e}");
+    let s = selection(&mut app, &w);
+    assert_eq!(
+        s["lanes"],
+        json!([{"seq": seq, "lane": chords_lane}]),
+        "{s}"
+    );
+    wait_in_tree(&mut app, &w, "the roll's notes", roll_note);
     app.quit();
 }
 

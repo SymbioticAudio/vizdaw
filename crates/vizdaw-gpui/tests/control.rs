@@ -1469,7 +1469,8 @@ fn state_get_selection_follows_a_block_click(cx: &mut TestAppContext) {
     );
     let tree = ok(call(&s, cx, "ui.tree", json!({})));
     assert_eq!(node(&tree, "button", CHORDS_BLOCK)["selected"], true);
-    // A double click (count 2) opens the detail on the block.
+    // A double click (count 2) opens the detail on the block, in the
+    // last-used editor (the Piano Roll at first).
     ok(call(
         &s,
         cx,
@@ -1479,7 +1480,7 @@ fn state_get_selection_follows_a_block_click(cx: &mut TestAppContext) {
     let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
     assert_eq!(
         e["detail"],
-        json!({"kind": "list", "seq": 3, "lane": 31, "start": 0, "end": BAR})
+        json!({"kind": "piano_roll", "seq": 3, "lane": 31, "start": 0, "end": BAR})
     );
 }
 

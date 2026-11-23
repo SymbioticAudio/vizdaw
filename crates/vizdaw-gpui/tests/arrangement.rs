@@ -916,40 +916,88 @@ fn the_eraser_deletes_the_clicked_block(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_pencil_is_chosen_but_does_nothing_yet(cx: &mut TestAppContext) {
+fn a_pencil_click_opens_the_roll(cx: &mut TestAppContext) {
     let mut s = setup(cx, with_blocks());
     s.click("button", "Pencil");
     assert_eq!(s.model(|d| d.tool()), Tool::Pencil);
     assert!(s.element("button", "Pencil").selected);
-    s.fake.clear_calls();
+    // Empty space in bar 3 of Chords: the track's roll opens there.
+    s.click_with(EMPTY_CHORDS, Modifiers::none());
+    let detail = s.model(|d| d.layout().detail.clone()).expect("a detail");
+    let target = EditorTarget::Lane { seq: 3, lane: 31 };
+    assert_eq!(detail.kind, DetailEditorKind::PianoRoll);
+    assert_eq!(detail.target, target);
+    assert_eq!(s.model(|d| d.tool()), Tool::Pencil);
+    assert_eq!(s.selected_lanes(), vec![31]);
+    assert!(s.selection().events.is_empty());
+    let reveal = s.model(|d| d.piano_roll().reveal()).expect("a reveal");
+    assert_eq!(reveal.target, target);
+    assert_eq!(reveal.tick, 2 * BAR);
+    // On a block it opens too (the block's track, the clicked bar), and
+    // asks to scroll again.
     s.click_with(ON_CHORDS, Modifiers::none());
+    let again = s.model(|d| d.piano_roll().reveal()).expect("a reveal");
+    assert_eq!(again.tick, 0);
+    assert!(again.serial > reveal.serial);
+    // A pencil press-drag on a block does not drag it (Swift drags with
+    // the arrow only).
+    s.fake.clear_calls();
     s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
     s.release_with((300., ON_CHORDS.1), Modifiers::none());
-    assert!(s.fake.calls().is_empty(), "{:?}", s.fake.calls());
+    assert!(s.drag_calls().is_empty(), "{:?}", s.fake.calls());
+    // Below the rows the click is an ordinary one: the selection clears.
+    s.click_with(BELOW_ROWS, Modifiers::none());
+    assert!(s.selected_lanes().is_empty());
     s.click("button", "Arrow");
     assert_eq!(s.model(|d| d.tool()), Tool::Arrow);
 }
 
 #[gpui::test]
-fn a_double_click_opens_the_detail_on_the_block(cx: &mut TestAppContext) {
+fn a_pencil_click_on_an_audio_track_does_nothing(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    let mut audio = lane_row(31, "Chords", false);
+    audio.kind = vizdaw_ffi::tracks::TrackKindRow::Audio;
+    fake.set_lanes(3, vec![lane_row(30, "Groove", false), audio]);
+    let mut s = setup(cx, fake);
+    s.click("button", "Pencil");
+    s.click_with(EMPTY_CHORDS, Modifiers::none());
+    assert!(s.model(|d| d.layout().detail.is_none()));
+    assert!(s.model(|d| d.piano_roll().reveal()).is_none());
+    // The click falls through: a block click selects it.
+    s.click_with(ON_CHORDS, Modifiers::none());
+    assert!(s.model(|d| d.layout().detail.is_none()));
+    assert_eq!(s.selection().events, vec![1, 2]);
+    assert_eq!(s.selected_lanes(), vec![31]);
+    assert_eq!(s.model(|d| d.tool()), Tool::Pencil);
+}
+
+#[gpui::test]
+fn double_click_opens_the_last_used_editor(cx: &mut TestAppContext) {
     let mut s = setup(cx, with_blocks());
+    // At first the last-used editor is the Piano Roll.
     s.double_click(ON_CHORDS);
     let detail = s.model(|d| d.layout().detail.clone()).expect("a detail");
-    assert_eq!(detail.kind, DetailEditorKind::List);
-    assert_eq!(
-        detail.target,
-        EditorTarget::Block {
-            seq: 3,
-            lane: 31,
-            start: 0,
-            end: BAR
-        }
-    );
+    let block = EditorTarget::Block {
+        seq: 3,
+        lane: 31,
+        start: 0,
+        end: BAR,
+    };
+    assert_eq!(detail.kind, DetailEditorKind::PianoRoll);
+    assert_eq!(detail.target, block);
     let e = s.channel_ok("state.get", json!({"target": "editor"}));
     assert_eq!(
         e["detail"],
-        json!({"kind": "list", "seq": 3, "lane": 31, "start": 0, "end": BAR})
+        json!({"kind": "piano_roll", "seq": 3, "lane": 31, "start": 0, "end": BAR})
     );
+    // Once the List is used, a double-click opens the List.
+    s.channel_ok("command.run", json!({"id": "editors.list"}));
+    assert_eq!(s.model(|d| d.layout().last_kind), DetailEditorKind::List);
+    s.channel_ok("command.run", json!({"id": "editors.close_detail"}));
+    s.double_click(ON_CHORDS);
+    let detail = s.model(|d| d.layout().detail.clone()).expect("a detail");
+    assert_eq!(detail.kind, DetailEditorKind::List);
+    assert_eq!(detail.target, block);
 }
 
 #[gpui::test]
@@ -965,7 +1013,7 @@ fn the_block_menu_opens_the_list_and_deletes(cx: &mut TestAppContext) {
         .filter(|e| e.role == "menuitem")
         .map(|e| e.label)
         .collect();
-    assert_eq!(items, ["Open in List", "Delete"]);
+    assert_eq!(items, ["Open in Piano Roll", "Open in List", "Delete"]);
     s.click("menuitem", "Open in List");
     assert!(s.find("menuitem", "Open in List").is_none(), "it closes");
     let detail = s.model(|d| d.layout().detail.clone()).expect("a detail");
@@ -997,6 +1045,45 @@ fn the_block_menu_opens_the_list_and_deletes(cx: &mut TestAppContext) {
     // On empty space there is no menu.
     s.right_click(EMPTY_CHORDS);
     assert!(s.find("menuitem", "Delete").is_none());
+    // A reference has only Delete.
+    s.right_click(ON_GROOVE);
+    let items: Vec<String> = s
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "menuitem")
+        .map(|e| e.label)
+        .collect();
+    assert_eq!(items, ["Delete"]);
+}
+
+#[gpui::test]
+fn the_block_menu_opens_the_piano_roll(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    fake.set_layout(Some(r#"{"lastKind":"list"}"#));
+    let mut s = setup(cx, fake);
+    s.right_click(ON_CHORDS);
+    s.click("menuitem", "Open in Piano Roll");
+    assert!(
+        s.find("menuitem", "Open in Piano Roll").is_none(),
+        "it closes"
+    );
+    let detail = s.model(|d| d.layout().detail.clone()).expect("a detail");
+    assert_eq!(detail.kind, DetailEditorKind::PianoRoll);
+    assert_eq!(
+        detail.target,
+        EditorTarget::Block {
+            seq: 3,
+            lane: 31,
+            start: 0,
+            end: BAR
+        }
+    );
+    // It becomes the last-used editor.
+    assert_eq!(
+        s.model(|d| d.layout().last_kind),
+        DetailEditorKind::PianoRoll
+    );
+    assert!(s.find("group", "Piano Roll").is_some());
 }
 
 #[gpui::test]
@@ -1261,17 +1348,14 @@ fn escape_aborts_a_released_drag_pending_on_busy(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_double_click_keeps_the_saved_last_editor(cx: &mut TestAppContext) {
     let fake = with_blocks();
-    fake.set_layout(Some(r#"{"lastKind":"pianoRoll"}"#));
+    fake.set_layout(Some(r#"{"lastKind":"list"}"#));
     let mut s = setup(cx, fake);
     s.double_click(ON_CHORDS);
     assert_eq!(
         s.model(|d| d.layout().detail.as_ref().map(|d| d.kind)),
         Some(DetailEditorKind::List)
     );
-    assert_eq!(
-        s.model(|d| d.layout().last_kind),
-        DetailEditorKind::PianoRoll
-    );
+    assert_eq!(s.model(|d| d.layout().last_kind), DetailEditorKind::List);
     let path = std::env::temp_dir().join("vizdaw-last-kind.vizdaw");
     s.channel_ok(
         "command.run",
@@ -1279,5 +1363,5 @@ fn a_double_click_keeps_the_saved_last_editor(cx: &mut TestAppContext) {
     );
     let saved: serde_json::Value =
         serde_json::from_str(&s.fake.layout().expect("a stored layout")).unwrap();
-    assert_eq!(saved["lastKind"], "pianoRoll");
+    assert_eq!(saved["lastKind"], "list");
 }

@@ -247,9 +247,12 @@ fn a_double_clicked_block_opens_its_range(cx: &mut TestAppContext) {
     s.double_click_canvas(50., RULER + 48. + 24.);
     assert_eq!(s.model(|d| d.detail_title()), "Song \u{203a} Chords, bar 1");
     assert!(s.find("text", "Song \u{203a} Chords, bar 1").is_some());
-    assert!(s.find("table", LIST_SLOT).is_some());
-    // ⌘2 then keeps the block's target.
+    // In the last-used editor: the Piano Roll at first.
+    assert!(s.find("group", "Piano Roll").is_some());
+    assert!(s.find("table", LIST_SLOT).is_none());
+    // ⌘2 then keeps the block's target, in the List.
     s.keys(&secondary("2"));
+    assert!(s.find("table", LIST_SLOT).is_some());
     assert_eq!(
         s.model(|d| d.layout().detail.as_ref().map(|d| d.target)),
         Some(EditorTarget::Block {
