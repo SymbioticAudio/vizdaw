@@ -145,3 +145,82 @@
 - [ ] **Step 4: Run** `cargo test -p vizdaw-app -p vizdaw-gpui` and clippy → pass.
 - [ ] **Step 5: Commit**: `git commit -m "gpui: the List editor; e2e for blocks, the list and snap"`.
 - [ ] **Step 6 (controller):** build and run the GPUI e2e suite on the Mac and on Linux → all pass (11 tests); look at the arrangement and the List on the Mac screen; tick the parity checklist rows (`editors.list`, `editors.close_detail`, `editors.insert_event`, `editors.snap`, `ui.toggle_bottom`, the List window/editor rows, the demo e2e row's List step, the G-snap part of `keys_drive_step_entry_locators_and_bindings`), noting what stays for later slices.
+
+## Outcome (2026-11-22)
+
+All six tasks done (commits aeaaba3d..badc2bca). Evidence: workspace tests 4325 passed on macOS and 4194 on Linux; clippy `-D warnings` and fmt clean; GPUI e2e 11/11 on macOS and on Linux (XWayland), including the demo test's restored List step and three new tests (blocks select and open in the List; the List edits, inserts and deletes; G toggles snap); a visual check on the Mac of the tool bar, a selected block and the List pane.
+
+Final review fixes (badc2bca): a List cell edit is discarded if its row changed under it (⌘Z / edit.undo); a hidden bottom pane gives up the keyboard; a stale gesture copy can no longer clear `reverting`; hostile `ui.json` ranges saturate. Found by running the e2e suite: the list table takes the keyboard on a row click on macOS; channel clicks hit the visible part of a partly scrolled element.
+
+### Rulings
+
+- Task 1: Ruling: session call shapes follow core-ffi (seconds_at/ticks_at Vecs; ui_layout Option<String>) — real API — none
+- Task 1: Ruling: selection failure → status line, not slice 3's "Selection Failed" alert (one set_selection path, as Swift report()) — parity — a user loses an alert they never had in Swift
+- Task 1: Ruling: editors.snap/list/close_detail in EDITOR_COMMANDS; GPUI routing is Tasks 3/4 — none
+- Task 1: Ruling: refused set_ui_layout on save is silent (Swift try?) — parity — a lost layout write goes unnoticed
+- Task 2: Ruling: block-drag glue (ArrangementFrame, BlockDragState, begin_block_drag) lives in vizdaw-app, not a test helper — keeps behaviour headless and tested; GPUI only forwards machine events — none
+- Task 2: Ruling: idle() returns true while a final/abort waits on Busy so the poll redraws — needed for retry visibility — extra redraws while Busy
+- Task 3: Ruling: double-click opens List (sets lastKind=list) while List is the only editor; revert to last-used kind when the Piano Roll lands — only editor this slice — a Swift build opening the song then double-clicks into List instead of Piano Roll until the user picks again
+- Task 3: Ruling: only editors.snap routed here; List/Close Detail in Task 4 — none
+- Task 3: Ruling: point click {"point":{x,y}} dispatches synthetic mouse down/up; element clicks now use the same click_at path — one real input path — element-click behaviour of slices 2–3 changed (reviewer to check)
+- Task 3: Ruling: block and division menus open on a channel click (GPUI overlays are not modal) — no new strings — differs from slice 3's » status note
+- Task 3: Ruling (revises earlier): double-click opens List WITHOUT changing saved lastKind — avoids overwriting a Swift user's setting — none
+- Task 3: Ruling: transport punch_in/out are 0 (TransportMarksRow i64, Swift same type) until punch lands — type is Swift's — none
+- Task 4: Ruling: ui.toggle_bottom added to EDITOR_COMMANDS (app model) and routed — needs a handler — none
+- Task 4: Ruling: View menu has one checkmark item "Bottom Pane" (⌃⌘↓); pane group/picker labelled "Bottom Pane" — registry title — may clash with the transport bar's "Bottom Pane" button when the panes item lands
+- Task 5: Ruling: tests written with the code (no RED seen beyond compile) — reviewer to judge strength — weak tests could hide bugs
+- Task 5: Ruling: list prefs pushed into each document as a value (set_list_prefs); Task 6 must push on create and on change — none if Task 6 wires it
+- Task 5: Ruling: filtersApplyToAllLists test adapted to close/reopen (no torn windows) — scope — none
+- Task 5: Ruling: list cursor clears on every detail-target change (Swift keeps it) — safe, avoids map ids naming an unrelated row — next Insert uses transport/start instead of old cursor row
+- Task 5: Ruling: reference/audio-region/automation cells not editable this slice (Swift allows position/SMPTE/mute/data 2) — features out of slice — those rows are read-only until their slices
+- Task 6: Ruling: while the table has the keyboard, ui.key Return/Enter/Delete/Forward Delete go to the table, not the keymap — otherwise refused Return-to-Start swallows them — channel keys behave as real keys there
+- Task 6: Ruling: Insert split button's menu half labelled "Insert Kind" — brief gave no label — a test naming it differently would miss
+- Task 6: Ruling: channel clicks hit the centre of an element's visible part; refused only when wholly out of view (slice 3 header test window shrunk to keep a true refusal) — a partly drawn control is clickable as with a mouse — none
+- Final: Ruling: declined — save while a drag's final is pending on Busy writes the mid-drag document (core save_to has no transaction check; Swift same) — stands, core/spec question — a mid-drag save could store a half move
+- Final: Ruling: declined — track/add/delete commands during an open gesture not gated in the app (core acting_refusal covers) — stands — none if core refuses
+- Final: Ruling: declined — map-row ids after a Tab that re-sorts rows open the next field on the re-sorted row (Swift design) — stands — visible, not silent
+- Final: Ruling: declined — ⌥ copy flag read when the drag leaves the dead zone rather than at press — stands pending Swift check — a ⌥ pressed during the dead zone copies
+- Final: Ruling: declined — edit_gesture snapshot cost on huge songs — core, later — drag stutter on huge songs
+- Final: Ruling: declined — Escape on a Busy-pending drag after the keyboard moved to the List table — too unlikely — a pending drop survives that Escape
+
+### Deferred minors
+
+- Task 1: minor (deferred): prune drops only the detail (Swift also prunes detail.lanes, windows, controllers)
+- Task 1: minor (deferred): an undecodable detail is removed from ui.json on next save (Swift same)
+- Task 1: minor (deferred): ui_layout() failing at open and save writes only modelled keys
+- Task 1: minor (deferred): force_gesture_open public doc(hidden) hook — replace in Task 2
+- Task 1: minor (deferred): target_title reads session.lanes for another sequence (per-frame read if drawn per frame)
+- Task 2: minor (deferred): stale gesture copy can clear `reverting` set by after_sync's Busy cancel (Swift shares it; needs Busy during the snapshot that removes the track)
+- Task 2: minor (deferred → Task 3 brief): add a model method for Escape that forwards cancel and calls cancel_gesture when open
+- Task 2: minor (deferred): no test for a Busy-pending final whose track vanishes on the next idle
+- Task 2: minor (deferred): set_gesture_lanes writes on every move
+- Task 3: minor (deferred): canvas Escape cancels any open gesture, not only its own (fine while block drags are the only gestures)
+- Task 3: minor (deferred): ⌃-click on macOS selects instead of opening the block menu
+- Task 3: minor (deferred): right press during a left drag opens the block menu mid-drag
+- Task 3: minor (deferred): state.get editor transport marks are neutral constants, not the song's locators/punch (until the marks slice)
+- Task 3: minor (deferred): a test saves to a fixed shared temp path
+- Task 4: minor (deferred): pane picker shows last_kind (default "Piano Roll") while menu lists only List
+- Task 4: minor (deferred): pane absent on the first frame until measured (one-frame flash)
+- Task 4: minor (deferred): control.rs module doc paragraph needs reflow
+- Task 4: minor (deferred): picker role/label "Bottom Pane" button may clash with a future transport panes button
+- Task 5: minor (deferred): vanished-row commit test uses a never-existing id (faithful to Swift)
+- Task 5: minor (deferred): list_row/list_index linear scan + clone (needs an index if Task 6 looks up per frame)
+- Task 5: minor (deferred): SMPTE rounding unchecked arithmetic on the core's tick
+- Task 5: minor (deferred): Rust float parse accepts "+5", ".5" where Swift may differ (no bypass)
+- Task 6: minor (deferred): cells labelled by column title share labels with transport fields (e2e lookups by label alone could be ambiguous once a List is open)
+- Task 6: minor (deferred): hidden bottom pane keeps list_focused (Return/Delete act on hidden table; matches Swift mounted pane)
+- Task 6: minor (deferred): list_editor.rs 1 189 lines — split bar/menus later
+- Task 6: minor (deferred): Insert split button width 191 vs Swift 190; "Apply to All Lists" absent (single list)
+- Final: minor (deferred): snap decodes as one unit (one bad sub-field resets all)
+- Final: minor (deferred): channel click on a block half under the ruler can land in the ruler (record rect ∩ body)
+- Final: minor (deferred): deferred closure scheduled each frame while no List is open
+- Final: minor (deferred): List rebuilds on every drag move (new version per move; Swift same)
+- Final: minor (deferred): start = i64::MIN target may overflow in arrangement::bar_at in debug (untested)
+- Final: minor (deferred): a commit dropped because its row changed ends silently (no status)
+
+### Owner's manual checks
+
+- Drag blocks with the mouse: move, ⌥-copy, drop onto the other track, Escape mid-drag; check the undo names.
+- In the List: double-click a cell, type, Tab between cells, Escape; Delete rows; Insert a Tempo row.
+- ⌘Z while typing in a List cell or a transport field undoes the song, not the text (app-wide decision pending).
+- ⌃-click a block on the Mac (selects today; the Swift app opens the menu).
