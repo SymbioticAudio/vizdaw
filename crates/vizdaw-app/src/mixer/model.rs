@@ -324,6 +324,12 @@ impl MixerModel {
             .is_some_and(ControlGesture::is_dragging)
     }
 
+    /// The control the mouse is down on in placement `p` (dragged or
+    /// not), until its mouse-up or a cancel.
+    pub fn pressed(&self, p: MixerPlacement) -> Option<Target> {
+        self.presses.get(&p).map(|press| press.target)
+    }
+
     /// The control position (0…1) of `t` as shown: the fader law for a
     /// fader, VCA or send, (pan + 1) / 2 for a pan.
     pub fn position(&self, t: Target) -> f64 {

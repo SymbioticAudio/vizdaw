@@ -535,8 +535,11 @@ fn a_bare_press_sends_nothing() {
     let v = MixerPlacement::View;
     mx(&mut d, |m, d| {
         m.press(d, v, FADER, THROW, false, now);
+        assert_eq!(m.pressed(v), Some(FADER));
+        assert_eq!(m.pressed(MixerPlacement::Pane), None);
         m.drag(d, v, 1.0, 1.0, false, now);
         m.lift(d, v, now);
+        assert_eq!(m.pressed(v), None);
     });
     assert!(
         f.gestures().is_empty(),

@@ -3,6 +3,7 @@
 pub mod app_state;
 pub mod arrangement;
 pub mod control;
+pub mod controls;
 pub mod detail_pane;
 pub mod list_editor;
 pub mod menu_bar;
@@ -12,6 +13,7 @@ pub mod piano_roll;
 pub mod registry;
 pub mod screenshot;
 pub mod shell;
+pub mod strip_palette;
 pub mod text_input;
 pub mod track_headers;
 pub mod transport_bar;
