@@ -54,12 +54,12 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| ui.view_arrange | View | Arrange View | ⌃1 | true | | |
-| ui.view_mix | View | Mix View | ⌃2 | true | | |
-| ui.toggle_left | View | Left Pane | ⌃⌘← | true | | |
+| ui.view_arrange | View | Arrange View | ⌃1 | true | S6a | S6a (no key: Linux key scheme pending) |
+| ui.view_mix | View | Mix View | ⌃2 | true | S6a | S6a (no key: Linux key scheme pending) |
+| ui.toggle_left | View | Left Pane | ⌃⌘← | true | S6a | S6a |
 | ui.toggle_bottom | View | Bottom Pane | ⌃⌘↓ | true | S4 | S4 |
-| ui.toggle_right | View | Right Pane | ⌃⌘→ | true | | |
-| ui.pane | View | Set Pane |  | false | | |
+| ui.toggle_right | View | Right Pane | ⌃⌘→ | true | S6a | S6a |
+| ui.pane | View | Set Pane |  | false | S6a | S6a |
 | ui.theme | View | Theme |  | false | | |
 | ui.set_transport_bar | View | Set Transport Bar |  | false | S3 | S3 |
 | ui.reset_transport_bar | View | Reset Transport Bar |  | false | S3 | S3 |
@@ -199,7 +199,7 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| window.mixer | Window | Mixer | ⌥⌘M | true | | |
+| window.mixer | Window | Mixer | ⌥⌘M | true | S6a | S6a |
 | window.plugin_manager | Window | Plugin Manager | ⌥⌘P | true | | |
 | window.media_pool | Window | Media Pool |  | true | | |
 | window.song_notes | Window | Song Notes |  | true | | |
@@ -230,11 +230,11 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| automation.set_mode | Mixer | Set Automation Mode |  | false | | |
-| automation.gesture | Mixer | Automation Gesture |  | false | | |
-| automation.release_all | Mixer | Release Channel Touches |  | false | | |
+| automation.set_mode | Mixer | Set Automation Mode |  | false | S6a | S6a |
+| automation.gesture | Mixer | Automation Gesture |  | false | S6a | S6a |
+| automation.release_all | Mixer | Release Channel Touches |  | false | S6a | S6a |
 | automation.write | Mixer | Write Automation |  | false | | |
-| mixer.new_bus | Mixer | New Bus |  | false | | |
+| mixer.new_bus | Mixer | New Bus |  | false | S6a | S6a |
 | mixer.make_mine | Mixer | Make Mine |  | false | | |
 | mixer.set_colour | Mixer | Colour |  | false | | |
 | mixer.set_strip | Mixer | Set Strip |  | false | | |
@@ -387,7 +387,7 @@ editors). The record popover is a popover, not a window.
 | Plug-in editor window (one per insert or instrument slot) | `PluginWindows.show`, AppKit `NSWindow` (`PluginWindows.swift`) | | |
 | Built-in Synth window | `BuiltinSynthWindow.swift`, AppKit `NSWindow` | | |
 | Modify panel (floating, one per document) | `ModifyPanels.show`, AppKit `NSPanel` (`ModifyPanel.swift`) | | |
-| Mixer | `mixer` | | |
+| Mixer | `mixer` | S6a (strips, master, buses, meters; sends/groups/VCAs/slots 6b) | S6a (same) |
 | Media Pool | `media-pool` | | |
 | Plugin Manager | `plugins` | | |
 | Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
@@ -548,12 +548,12 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | records_audio_loop_takes_and_midi | | |
 | tracks_the_fake_synth | | |
 | arms_meters_counts_in_and_draws_the_take | | |
-| touch_writes_a_fader_over_the_channel | | |
+| touch_writes_a_fader_over_the_channel | S6a (mixer parts) | S6a (mixer parts) |
 | drives_a_fader_and_a_button_from_an_mcu | | |
 | drives_the_mixer_from_a_kontrol_mk3 | | |
 | bounces_the_demo_and_checks_the_file | | |
 | edits_a_region_through_the_stub_editor | | |
-| window_views_and_panes_over_the_channel | | |
+| window_views_and_panes_over_the_channel | S6a (views and panes; markers and mixer-window steps later) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux) |
 | themes_and_the_strip_over_the_channel | | |
 | edits_a_region_in_the_audio_editor | | |
 | transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6; step 7 Punch/Record: later slice) | S3 (steps 0–6; step 7 Punch/Record: later slice) |
@@ -582,7 +582,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | co_producer_import_midi_is_refused | | |
 | control_close_of_a_dirty_song_does_not_prompt | S2 | S2 |
 | app_quit_refuses_while_a_song_is_unsaved | S2 | S2 |
-| groups_vcas_and_transport_bar_over_the_channel | | |
+| groups_vcas_and_transport_bar_over_the_channel | partial S6a (transport bar and strips; groups/VCAs 6b; command: bar items later) | partial S6a |
 
 ## Linux gaps
 
