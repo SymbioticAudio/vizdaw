@@ -700,3 +700,33 @@ fn a_divider_press_over_a_track_header_selects_nothing(cx: &mut TestAppContext) 
     assert_eq!(s.pane(PaneSide::Left).size, 260.);
     assert!(s.model(|d| d.selected_lanes()).is_empty());
 }
+
+#[gpui::test]
+fn a_divider_release_before_the_next_frame_ends_the_drag(cx: &mut TestAppContext) {
+    use gpui::InputEvent;
+    let mut s = setup(cx);
+    let at = s.element("slider", "Left Pane Size").bounds.center();
+    // The press and its release in one go: no frame is drawn between.
+    s.cx.update(|window, cx| {
+        let down = MouseDownEvent {
+            position: at,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        };
+        let up = MouseUpEvent {
+            position: at,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+        };
+        window.dispatch_event(down.to_platform_input(), cx);
+        window.dispatch_event(up.to_platform_input(), cx);
+    });
+    s.cx.run_until_parked();
+    // Later moves and a mouse-up elsewhere resize nothing.
+    s.move_to(point(at.x + px(60.), at.y));
+    s.release(point(at.x + px(60.), at.y));
+    assert_eq!(s.pane(PaneSide::Left).size, 220.);
+}

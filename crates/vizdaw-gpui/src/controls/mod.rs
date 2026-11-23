@@ -176,9 +176,16 @@ pub fn watch_activation<V: 'static>(
 /// A drag control's state across frames: where its press went down, and
 /// its keyboard focus. Dropped when the control is not drawn: a press it
 /// still holds is cancelled then (the control went mid-drag).
-pub(crate) struct DragState {
+pub struct DragState {
     origin: Option<Point<Pixels>>,
     pub(crate) focus: FocusHandle,
+}
+
+impl DragState {
+    /// Where the press this control holds went down.
+    pub fn origin(&self) -> Option<Point<Pixels>> {
+        self.origin
+    }
 }
 
 /// The keys a drag control steps with when focused.
@@ -197,12 +204,9 @@ fn state_id(b: &ControlBinding) -> ElementId {
     ElementId::Name(format!("mixer-control:{:?}:{:?}", b.mixer.placement, b.target).into())
 }
 
-/// The state of `b`'s control, kept while it is drawn frame after frame.
-pub(crate) fn drag_state(
-    b: &ControlBinding,
-    window: &mut Window,
-    cx: &mut App,
-) -> Entity<DragState> {
+/// The state of `b`'s control, kept while it is drawn frame after frame
+/// (the same one however often it is asked for in a frame).
+pub fn drag_state(b: &ControlBinding, window: &mut Window, cx: &mut App) -> Entity<DragState> {
     let mixer = b.mixer.clone();
     let target = b.target;
     window.use_keyed_state(state_id(b), cx, move |_, cx| {
@@ -231,6 +235,12 @@ pub(crate) fn drag_state(
 /// alone), the drag followed anywhere in the window (⌥ fine), its
 /// mouse-up, a double-click's reset, and the step keys when focused.
 /// `travel` is the points for the whole range.
+///
+/// The window-wide move and up listeners are registered on every paint
+/// and decide when an event comes whether this control holds the press:
+/// GPUI dispatches mouse events against the last frame drawn, so a
+/// mouse-up that comes before the frame after the press must still find
+/// them.
 pub(crate) fn drag_surface(
     surface: Div,
     b: &ControlBinding,
@@ -240,15 +250,12 @@ pub(crate) fn drag_surface(
     cx: &mut App,
 ) -> Div {
     let focus = state.read(cx).focus.clone();
-    let held = state.read(cx).origin.is_some()
-        && b.mixer
-            .read(cx, |m, _| m.pressed(b.mixer.placement) == Some(b.target))
-            .unwrap_or(false);
-    let surface = if held {
-        surface.child(follow(b, state).absolute().top_0().left_0().size_full())
-    } else {
-        surface
-    };
+    // A press that ended elsewhere (a cancel, another press in this
+    // placement) leaves no origin behind.
+    if state.read(cx).origin.is_some() && !holds(&b.mixer, b.target, cx) {
+        state.update(cx, |s, _| s.origin = None);
+    }
+    let surface = surface.child(follow(b, state).absolute().top_0().left_0().size_full());
     if !b.enabled {
         return surface;
     }
@@ -290,21 +297,65 @@ pub(crate) fn drag_surface(
         })
 }
 
-/// An invisible canvas whose paint makes the held press follow the pointer
-/// anywhere in the window, until its mouse-up.
+/// The mixer's press in `mixer`'s placement is on `target`.
+fn holds(mixer: &MixerRef, target: Target, cx: &App) -> bool {
+    mixer
+        .read(cx, |m, _| m.pressed(mixer.placement) == Some(target))
+        .unwrap_or(false)
+}
+
+/// Where this control's press went down, when it still holds the
+/// placement's press.
+fn held_origin(
+    state: &WeakEntity<DragState>,
+    mixer: &MixerRef,
+    target: Target,
+    cx: &App,
+) -> Option<Point<Pixels>> {
+    let origin = state.read_with(cx, |s, _| s.origin).ok().flatten()?;
+    holds(mixer, target, cx).then_some(origin)
+}
+
+/// Mouse-up (or a move without the button: the up went elsewhere): the
+/// press lifts; a second click that did not drag is a double-click.
+fn lift(
+    state: &WeakEntity<DragState>,
+    mixer: &MixerRef,
+    target: Target,
+    clicks: usize,
+    cx: &mut App,
+) {
+    state.update(cx, |s, _| s.origin = None).ok();
+    let p = mixer.placement;
+    mixer.with(cx, |m, d| {
+        let now = Instant::now();
+        let dragged = m.is_dragging(p);
+        m.lift(d, p, now);
+        if !dragged && clicks >= 2 {
+            m.double_click(d, p, target, now);
+        }
+    });
+}
+
+/// An invisible canvas whose paint registers the window-wide listeners
+/// that make this control's press follow the pointer, until its mouse-up.
 fn follow(b: &ControlBinding, state: &Entity<DragState>) -> gpui::Canvas<()> {
-    let moved = b.mixer.clone();
-    let released = b.mixer.clone();
+    let mixer = b.mixer.clone();
     let target = b.target;
     let state = state.downgrade();
     canvas(
         |_, _, _| {},
-        move |_, _, window, cx| {
-            let Some(origin) = state.read_with(cx, |s, _| s.origin).ok().flatten() else {
-                return;
-            };
+        move |_, _, window, _| {
+            let (moved, moved_state) = (mixer.clone(), state.clone());
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                 if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let Some(origin) = held_origin(&moved_state, &moved, target, cx) else {
+                    return;
+                };
+                if e.pressed_button != Some(MouseButton::Left) {
+                    lift(&moved_state, &moved, target, 1, cx);
                     return;
                 }
                 let p = moved.placement;
@@ -315,21 +366,15 @@ fn follow(b: &ControlBinding, state: &Entity<DragState>) -> gpui::Canvas<()> {
                 let fine = e.modifiers.alt;
                 moved.with(cx, |m, d| m.drag(d, p, dx, dy, fine, Instant::now()));
             });
+            let (released, released_state) = (mixer.clone(), state.clone());
             window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
                 if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                     return;
                 }
-                state.update(cx, |s, _| s.origin = None).ok();
-                let p = released.placement;
-                let clicks = e.click_count;
-                released.with(cx, |m, d| {
-                    let now = Instant::now();
-                    let dragged = m.is_dragging(p);
-                    m.lift(d, p, now);
-                    if !dragged && clicks >= 2 {
-                        m.double_click(d, p, target, now);
-                    }
-                });
+                if held_origin(&released_state, &released, target, cx).is_none() {
+                    return;
+                }
+                lift(&released_state, &released, target, e.click_count, cx);
             });
         },
     )

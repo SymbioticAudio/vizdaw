@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, Styled, Subscription, TestAppContext, VisualTestContext, Window, WindowBounds,
+    AppContext, Bounds, Context, Entity, FocusHandle, InputEvent, InteractiveElement, IntoElement,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    Point, Render, Styled, Subscription, TestAppContext, VisualTestContext, Window, WindowBounds,
     WindowHandle, WindowOptions, div, point, px, size,
 };
 use vizdaw_app::mixer::{MixerMath, MixerPlacement, StripEntry, reset_value};
@@ -36,7 +36,10 @@ const PLACE: MixerPlacement = MixerPlacement::View;
 struct Host {
     mixer: MixerRef,
     registry: SharedRegistry,
-    level: Entity<NumberBox>,
+    /// `None`: the level box is gone (dropped).
+    level: Option<Entity<NumberBox>>,
+    /// The fader's drag state, as drawn last.
+    fader_state: Option<Entity<controls::DragState>>,
     pan_box: Entity<NumberBox>,
     show_fader: bool,
     focus: FocusHandle,
@@ -51,7 +54,8 @@ impl Host {
             controls::watch_activation(mixer.clone(), window, cx),
         ];
         Host {
-            level: cx.new(|cx| NumberBox::new(window, cx)),
+            level: Some(cx.new(|cx| NumberBox::new(window, cx))),
+            fader_state: None,
             pan_box: cx.new(|cx| NumberBox::new(window, cx)),
             mixer,
             registry: SharedRegistry::default(),
@@ -91,7 +95,11 @@ impl Render for Host {
             .flex_col()
             .gap(px(8.))
             .p(px(16.));
-        if self.show_fader {
+        if !self.show_fader {
+            // Keep no handle on a control that is gone.
+            self.fader_state = None;
+        } else {
+            self.fader_state = Some(controls::drag_state(&fader, window, cx));
             col = col.child(
                 div()
                     .flex()
@@ -107,34 +115,36 @@ impl Render for Host {
                     .child(controls::meter(meter, THROW + 4., window)),
             );
         }
-        col.child(controls::number_box(&self.level, level, &mut root, cx))
-            .child(controls::knob(
-                &pan,
-                KnobSize::Medium,
-                tokens().knob(KnobFunction::Pan),
-                0.5,
-                &mut root,
-                window,
-                cx,
-            ))
-            .child(controls::number_box(&self.pan_box, pan_text, &mut root, cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(4.))
-                    .child(controls::toggle(mute, &mut root, toggle_mute(&mixer, 1)))
-                    .child(controls::toggle(solo, &mut root, toggle_solo(&mixer, 1))),
-            )
-            .child(div().w(px(108.)).child(controls::menu_face(
-                "Automation of Synth",
-                mode,
-                Some(dot),
-                true,
-                &mut root,
-                |_, _| {},
-            )))
-            .into_any_element()
+        if let Some(nb) = &self.level {
+            col = col.child(controls::number_box(nb, level, &mut root, cx));
+        }
+        col.child(controls::knob(
+            &pan,
+            KnobSize::Medium,
+            tokens().knob(KnobFunction::Pan),
+            0.5,
+            &mut root,
+            window,
+            cx,
+        ))
+        .child(controls::number_box(&self.pan_box, pan_text, &mut root, cx))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(4.))
+                .child(controls::toggle(mute, &mut root, toggle_mute(&mixer, 1)))
+                .child(controls::toggle(solo, &mut root, toggle_solo(&mixer, 1))),
+        )
+        .child(div().w(px(108.)).child(controls::menu_face(
+            "Automation of Synth",
+            mode,
+            Some(dot),
+            true,
+            &mut root,
+            |_, _| {},
+        )))
+        .into_any_element()
     }
 }
 
@@ -556,7 +566,7 @@ fn the_number_box_takes_typed_values_and_refuses_bad_ones(cx: &mut TestAppContex
     );
     let refused = s
         .window
-        .read_with(&s.cx, |h, cx| h.level.read(cx).refused())
+        .read_with(&s.cx, |h, cx| h.level.as_ref().unwrap().read(cx).refused())
         .unwrap();
     assert!(refused);
 
@@ -694,4 +704,122 @@ fn controls_are_in_the_tree_with_their_values(cx: &mut TestAppContext) {
     assert_eq!(s.value_of("button", "Solo Synth").as_deref(), Some("on"));
     // The meter is not in the tree.
     assert!(s.elements().iter().all(|e| !e.label.contains("eter")));
+}
+
+/// Dispatches `events` in one update: no frame is drawn between them.
+fn dispatch_unframed(s: &mut Setup, events: Vec<gpui::PlatformInput>) {
+    s.cx.update(|window, cx| {
+        for e in events {
+            window.dispatch_event(e, cx);
+        }
+    });
+    s.cx.run_until_parked();
+}
+
+fn left_down(at: Point<Pixels>) -> gpui::PlatformInput {
+    MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    }
+    .to_platform_input()
+}
+
+fn left_up(at: Point<Pixels>) -> gpui::PlatformInput {
+    MouseUpEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    }
+    .to_platform_input()
+}
+
+#[gpui::test]
+fn a_mouse_up_before_the_next_frame_still_lifts(cx: &mut TestAppContext) {
+    let mut s = plain(cx);
+    let at = s.fader_at();
+    dispatch_unframed(&mut s, vec![left_down(at), left_up(at)]);
+    assert_eq!(s.pressed(), None);
+    // A hover afterwards drags nothing.
+    s.cx.simulate_event(MouseMoveEvent {
+        position: point(at.x, at.y - px(20.)),
+        pressed_button: None,
+        modifiers: Modifiers::none(),
+    });
+    s.cx.run_until_parked();
+    assert_eq!(s.gestures(), vec![]);
+    assert_eq!(s.pressed(), None);
+    assert!(!s.touched(FADER));
+}
+
+#[gpui::test]
+fn a_move_without_the_button_lifts_the_press(cx: &mut TestAppContext) {
+    let mut s = plain(cx);
+    let at = s.fader_at();
+    s.press_and_drag(at, -10., Modifiers::none());
+    assert!(s.touched(FADER));
+    // The mouse-up went somewhere else (another app, say).
+    s.cx.simulate_event(MouseMoveEvent {
+        position: point(at.x, at.y - px(40.)),
+        pressed_button: None,
+        modifiers: Modifiers::none(),
+    });
+    s.cx.run_until_parked();
+    assert_eq!(s.phases().last(), Some(&RELEASE));
+    assert_eq!(s.pressed(), None);
+    assert!(!s.touched(FADER));
+}
+
+#[gpui::test]
+fn a_press_cancelled_elsewhere_forgets_its_origin(cx: &mut TestAppContext) {
+    let mut s = plain(cx);
+    let at = s.fader_at();
+    s.down(at, Modifiers::none(), 1);
+    let origin = |s: &mut Setup| {
+        s.window
+            .read_with(&s.cx, |h, cx| {
+                h.fader_state.as_ref().unwrap().read(cx).origin()
+            })
+            .unwrap()
+    };
+    assert_eq!(origin(&mut s), Some(at));
+    let doc = s.doc;
+    s.app.update(&mut s.cx, |a, cx| {
+        a.store.with_document(doc, |d, _| {
+            d.with_mixer(|m, d| m.cancel_drags(d, PLACE, Instant::now()));
+        });
+        cx.notify();
+    });
+    s.cx.run_until_parked();
+    assert_eq!(s.pressed(), None);
+    assert_eq!(origin(&mut s), None);
+}
+
+#[gpui::test]
+fn a_box_dropped_mid_edit_gives_the_keys_back(cx: &mut TestAppContext) {
+    let mut s = plain(cx);
+    let doc = s.doc;
+    let keys = |s: &mut Setup| {
+        s.app.read_with(&s.cx, |a, _| {
+            a.store.document(doc).unwrap().transport_keys_enabled()
+        })
+    };
+    s.click("textfield", "Level of Synth");
+    assert!(!keys(&mut s));
+    s.cx.simulate_input("-3");
+    s.window
+        .update(&mut s.cx, |h, _, cx| {
+            h.level = None;
+            cx.notify();
+        })
+        .unwrap();
+    s.cx.run_until_parked();
+    s.cx.update(|_, _| {});
+    s.cx.run_until_parked();
+    assert!(s.find("textfield", "Level of Synth").is_none());
+    assert!(keys(&mut s));
+    assert_eq!(s.gestures(), vec![], "a dropped edit commits nothing");
 }

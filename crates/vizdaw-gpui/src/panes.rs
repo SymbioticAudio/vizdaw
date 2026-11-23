@@ -789,32 +789,43 @@ pub(crate) fn dividers(
                     this.pane_drag_begin(side, e.position, window, cx)
                 }),
             );
-        if dragging.is_some() {
-            let weak = cx.entity().downgrade();
-            grip = grip.child(
-                canvas(
-                    |_, _, _| {},
-                    move |_, _, window, _| {
-                        let moved = weak.clone();
-                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Bubble {
-                                moved
-                                    .update(cx, |this, cx| this.pane_drag_to(e.position, cx))
-                                    .ok();
-                            }
-                        });
-                        let released = weak.clone();
-                        window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
-                                released.update(cx, |this, cx| this.pane_drag_end(cx)).ok();
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .size_full(),
-            );
-        }
+        // Registered on every paint and checked when the event comes:
+        // GPUI dispatches mouse events against the last frame drawn, so a
+        // release before the frame after the press must still find them.
+        let weak = cx.entity().downgrade();
+        grip = grip.child(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let moved = weak.clone();
+                    window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Bubble {
+                            moved
+                                .update(cx, |this, cx| {
+                                    if this.pane_drag.is_some_and(|d| d.side == side) {
+                                        this.pane_drag_to(e.position, cx)
+                                    }
+                                })
+                                .ok();
+                        }
+                    });
+                    let released = weak.clone();
+                    window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
+                            released
+                                .update(cx, |this, cx| {
+                                    if this.pane_drag.is_some_and(|d| d.side == side) {
+                                        this.pane_drag_end(cx)
+                                    }
+                                })
+                                .ok();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_full(),
+        );
         out.push(grip.into_any_element());
     }
     out

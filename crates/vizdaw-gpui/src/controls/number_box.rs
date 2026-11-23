@@ -134,6 +134,23 @@ impl NumberBox {
                 this.end(End::FocusLost, window, cx)
             }),
         ];
+        // Dropped mid-edit (the strip went): the edit ends without a
+        // commit, and the bare transport keys work again.
+        cx.on_release(|this: &mut NumberBox, cx| {
+            if !this.editing {
+                return;
+            }
+            this.editing = false;
+            if let Some(b) = &this.binding {
+                let (doc, owner) = (b.mixer.doc, this.owner.clone());
+                b.mixer.app.update(cx, |s, cx| {
+                    s.store
+                        .with_document(doc, |d, _| d.end_text_editing(&owner));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         NumberBox {
             input,
             focus: cx.focus_handle(),
