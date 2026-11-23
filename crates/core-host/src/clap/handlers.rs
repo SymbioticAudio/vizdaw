@@ -178,13 +178,18 @@ impl HostGuiImpl for Shared {
         // `can_resize` is read live when a request is applied.
     }
 
-    /// Accepted while an editor is open, resizable or not (a fixed-size
+    /// Off macOS, accepted while an editor is open, resizable or not (a fixed-size
     /// editor asks too, for a zoom menu or a panel it shows). The main
     /// thread applies it at the next idle (`InstanceEvents::editor_resize`);
     /// the last request wins.
     fn request_resize(&self, size: GuiSize) -> Result<(), HostError> {
         if size.width == 0 || size.height == 0 {
             return Err(HostError::Message("an empty size"));
+        }
+        // Refused on macOS until H2: the app there ignores
+        // `editor_resize`, so an editor that grew itself would be clipped.
+        if cfg!(target_os = "macos") {
+            return Err(HostError::Message("the host window decides its size"));
         }
         if !self.flags.gui_open.load(Ordering::Acquire) {
             return Err(HostError::Message("no editor is open"));
