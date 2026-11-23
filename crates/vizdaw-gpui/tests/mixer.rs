@@ -818,6 +818,67 @@ fn busy() -> vizdaw_ffi::VizError {
 }
 
 #[gpui::test]
+fn a_typed_name_survives_a_view_change(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.double_click("text", "Audio 1");
+    s.cx.simulate_input("Vox");
+    s.cx.run_until_parked();
+    s.run_menu("ui.view_arrange");
+    assert!(
+        s.fake.calls().contains(&"rename_strip(5,Vox)".to_string()),
+        "{:?}",
+        s.fake.calls()
+    );
+    assert!(s.model(|d| d.transport_keys_enabled()));
+}
+
+#[gpui::test]
+fn a_typed_name_survives_a_save(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.double_click("text", "Audio 1");
+    s.cx.simulate_input("Vox");
+    s.cx.run_until_parked();
+    s.cx.dispatch_action(vizdaw_gpui::Save);
+    s.cx.run_until_parked();
+    assert!(
+        s.fake.calls().contains(&"rename_strip(5,Vox)".to_string()),
+        "{:?}",
+        s.fake.calls()
+    );
+}
+
+#[gpui::test]
+fn a_drag_scrolled_out_of_view_keeps_going(cx: &mut TestAppContext) {
+    let mut s = setup(cx, many(40));
+    let at = s.fader_at("Audio 1");
+    s.down(at);
+    s.move_to(point(at.x, at.y - px(2.)));
+    s.move_to(point(at.x, at.y - px(20.)));
+    let before = s.of(T::StripFader { strip: 10 }).len();
+    let group = s.element("group", "Mixer").bounds.center();
+    s.scroll(group, -2000., 0.);
+    let hidden = s
+        .window
+        .read_with(&s.cx, |v, _| {
+            let r = v.registry().borrow();
+            let e = r.elements().iter().find(|e| e.label == "Audio 1").cloned();
+            e.is_none_or(|e| r.visible_part(&e).is_none())
+        })
+        .unwrap();
+    assert!(hidden, "scrolled out of view");
+    s.move_to(point(at.x, at.y - px(60.)));
+    s.up(point(at.x, at.y - px(60.)));
+    let phases = s.of(T::StripFader { strip: 10 });
+    assert_eq!(phases.iter().filter(|p| **p == RELEASE).count(), 1);
+    assert_eq!(phases.last(), Some(&RELEASE));
+    assert!(
+        matches!(phases[before], GesturePhaseRow::Value { .. }),
+        "the drag went on after the scroll: {:?}",
+        &phases[before..]
+    );
+}
+
+#[gpui::test]
 fn a_busy_mixer_is_not_read_every_frame(cx: &mut TestAppContext) {
     let mut s = setup(cx, fake());
     s.fake.set_call_error("mixer", Some(busy()));
@@ -840,7 +901,6 @@ fn a_busy_mixer_is_not_read_every_frame(cx: &mut TestAppContext) {
             strip_row(7, "Audio 3", StripKindRow::AudioPath { path: 3 }),
         )
     });
-    std::thread::sleep(std::time::Duration::from_millis(40));
     s.cx.executor()
         .advance_clock(std::time::Duration::from_millis(100));
     s.cx.run_until_parked();
@@ -854,7 +914,6 @@ fn a_placement_registers_once_the_mixer_can_be_read(cx: &mut TestAppContext) {
     let mut s = setup(cx, f);
     assert!(s.faders().is_empty());
     s.fake.set_call_error("mixer", None);
-    std::thread::sleep(std::time::Duration::from_millis(40));
     s.cx.executor()
         .advance_clock(std::time::Duration::from_millis(100));
     s.cx.run_until_parked();

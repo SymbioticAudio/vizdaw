@@ -113,11 +113,10 @@ pub struct MixerView {
     rename: Option<RenameField>,
     /// The placement told the mixer it shows.
     appeared: bool,
-    /// When the mixer was last asked for (to show, or read again): a busy
-    /// core is asked at most every [`POLL_INTERVAL`].
-    asked: Option<Instant>,
-    /// Draws again once [`POLL_INTERVAL`] is up, to ask again.
-    retry: Option<Task<()>>,
+    /// The mixer was asked for (to show, or to be read again) less than
+    /// [`POLL_INTERVAL`] ago: a busy core is not asked again until this
+    /// ends, which draws a frame.
+    hold: Option<Task<()>>,
     drawn: Vec<StripLook>,
     _subscriptions: Vec<Subscription>,
 }
@@ -152,25 +151,24 @@ impl MixerView {
             menu: None,
             rename: None,
             appeared: false,
-            asked: None,
-            retry: None,
+            hold: None,
             drawn: vec![],
         };
-        // Now, so the frame that shows the placement has its strips.
-        v.appear(cx);
+        // Now, so the frame that shows the placement has its strips; a
+        // busy core is asked again when the hold ends.
+        if !v.appear(cx) && !v.refused(cx) {
+            v.may_ask(cx);
+        }
         v
     }
 
     /// Tells the mixer (made first if need be) this placement shows; true
-    /// when it could. Nothing redraws for it: the caller draws next. A
-    /// mixer that could not be made is asked again later (see
-    /// [`MixerView::ask_again`]).
+    /// when it could. Nothing redraws for it: the caller draws next.
     fn appear(&mut self, cx: &mut Context<Self>) -> bool {
         if self.appeared {
             return true;
         }
         let (doc, p) = (self.mixer.doc, self.mixer.placement);
-        self.asked = Some(Instant::now());
         let (shown, alerted) = self.mixer.app.update(cx, |s, _| {
             let shown = s
                 .store
@@ -179,54 +177,41 @@ impl MixerView {
             (shown, s.store.alert().is_some())
         });
         self.appeared = shown;
-        if !shown {
-            // An alert the read raised shows at the next frame.
-            if alerted {
-                let app = self.mixer.app.clone();
-                cx.defer(move |cx| app.update(cx, |_, cx| cx.notify()));
-            }
-            self.ask_again(cx);
+        // An alert the read raised shows at the next frame.
+        if !shown && alerted {
+            let app = self.mixer.app.clone();
+            cx.defer(move |cx| app.update(cx, |_, cx| cx.notify()));
         }
         shown
     }
 
-    /// Whether the mixer may be asked for now (at most every
-    /// [`POLL_INTERVAL`]); when not, a frame is drawn once it may.
-    fn may_ask(&mut self, cx: &mut Context<Self>) -> bool {
-        let now = Instant::now();
-        if self
-            .asked
-            .is_none_or(|at| now.saturating_duration_since(at) >= POLL_INTERVAL)
-        {
-            self.asked = Some(now);
-            return true;
-        }
-        self.ask_again(cx);
-        false
-    }
-
-    /// Draws again after [`POLL_INTERVAL`] (once, however often asked),
-    /// unless the mixer was refused at this document version: a document
-    /// change draws anyway.
-    fn ask_again(&mut self, cx: &mut Context<Self>) {
-        let refused = self
-            .mixer
+    /// The mixer was refused at this document version (not Busy): it is
+    /// not asked again until the document moves, which draws anyway.
+    fn refused(&self, cx: &App) -> bool {
+        self.mixer
             .app
             .read(cx)
             .store
             .document(self.mixer.doc)
-            .is_some_and(DocumentModel::mixer_refused);
-        if refused || self.retry.is_some() {
-            return;
+            .is_some_and(DocumentModel::mixer_refused)
+    }
+
+    /// Whether the mixer may be asked for now: not within
+    /// [`POLL_INTERVAL`] of the last ask. Asking holds it that long, and
+    /// the hold's end draws a frame (which asks again if still needed).
+    fn may_ask(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.hold.is_some() {
+            return false;
         }
-        self.retry = Some(cx.spawn(async move |this, cx| {
+        self.hold = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(POLL_INTERVAL).await;
             this.update(cx, |v, cx| {
-                v.retry = None;
+                v.hold = None;
                 cx.notify();
             })
             .ok();
         }));
+        true
     }
 
     pub fn placement(&self) -> MixerPlacement {
@@ -282,6 +267,17 @@ impl MixerView {
                 },
             ),
             cx.on_blur(&focus, window, |this, _, cx| this.end_rename(true, cx)),
+            // The mixer holds what is typed, so a commit from elsewhere (a
+            // view change, Save) takes it.
+            cx.observe(&field, move |this, field, cx| {
+                let text = field.read(cx).text().to_owned();
+                let p = this.mixer.placement;
+                this.mixer.with(cx, |m, _| {
+                    if m.is_renaming(strip, p) && m.rename_draft != text {
+                        m.rename_draft = text;
+                    }
+                });
+            }),
         ];
         window.focus(&focus, cx);
         let owner = rename_owner(p);
@@ -462,11 +458,19 @@ fn gather(
     let room = ((content.0 - view.0).max(0.), (content.1 - view.1).max(0.));
     let scroll = (scroll.0.clamp(0., room.0), scroll.1.clamp(0., room.1));
     let selected = d.selected_strips();
+    let pressed = m.pressed(mixer.placement).and_then(|t| match t {
+        vizdaw_ffi::events::AutomationTargetRow::StripFader { strip }
+        | vizdaw_ffi::events::AutomationTargetRow::StripPan { strip } => Some(strip),
+        _ => None,
+    });
     let t = tokens();
     let mut strips = vec![];
     for (index, s) in all.iter().enumerate() {
         let left = PADDING + StripGrid::x(index, divider_before);
-        if left + StripLayout::WIDTH <= scroll.0 || left >= scroll.0 + view.0 {
+        let in_view = left + StripLayout::WIDTH > scroll.0 && left < scroll.0 + view.0;
+        // A strip whose control the mouse holds is drawn wherever it is,
+        // so a scroll does not end the drag.
+        if !in_view && pressed != Some(s.id) {
             continue;
         }
         let master = s.kind == StripKindRow::Master;
@@ -565,7 +569,7 @@ pub fn render(
     // (at most every poll interval), and the placement registers then.
     if !appeared {
         view.update(cx, |v, cx| {
-            if v.may_ask(cx) {
+            if !v.refused(cx) && v.may_ask(cx) {
                 v.appear(cx);
             }
         });
@@ -1004,7 +1008,7 @@ fn header(
     s: &StripParts,
     (x, y, w, h): (f64, f64, f64, f64),
     scope: &mut RegistryScope,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let t = tokens();
@@ -1017,7 +1021,7 @@ fn header(
     let name: AnyElement = match field {
         Some(field) => {
             let text = field.read(cx).text().to_owned();
-            let focused = true;
+            let focused = field.focus_handle(cx).is_focused(window);
             div()
                 .relative()
                 .size_full()
