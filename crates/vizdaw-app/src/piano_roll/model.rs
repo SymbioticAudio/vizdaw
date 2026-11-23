@@ -81,6 +81,9 @@ pub struct PianoRollModel {
     reveal_serial: u64,
     /// The note sounding under the pointer: the one source of truth.
     pub(crate) sounding: Option<AuditionNote>,
+    /// The roll's canvas has the keyboard: Delete and Forward Delete are
+    /// its own (Swift `PianoRollView.keyDown`).
+    focused: bool,
     built: Mutex<Option<(RollKey, Arc<[LaneNotes]>)>>,
     builds: Mutex<u64>,
 }
@@ -92,6 +95,7 @@ impl Default for PianoRollModel {
             reveal: None,
             reveal_serial: 0,
             sounding: None,
+            focused: false,
             built: Mutex::new(None),
             builds: Mutex::new(0),
         }
@@ -419,6 +423,16 @@ impl DocumentModel {
             }
         }
         self.set_selection(s);
+    }
+
+    /// The roll's canvas has the keyboard (Delete and Forward Delete
+    /// delete its notes, before the key bindings).
+    pub fn roll_focused(&self) -> bool {
+        self.editor.roll.focused
+    }
+
+    pub fn set_roll_focused(&mut self, focused: bool) {
+        self.editor.roll.focused = focused;
     }
 
     /// Delete: the selected notes of the shown tracks, as one "Delete

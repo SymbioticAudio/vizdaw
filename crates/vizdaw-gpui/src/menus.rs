@@ -389,6 +389,7 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
     ];
     keys.extend(text_input::bindings());
     keys.extend(crate::list_editor::bindings());
+    keys.extend(crate::piano_roll::bindings());
     // Rewind and Fast Forward are held keys: the window's key handler
     // steps them per key-down and lands on key-up. Their keypad twins
     // (Keypad- and Keypad+) are not bound: GPUI does not tell the keypad

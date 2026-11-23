@@ -1529,7 +1529,7 @@ impl DocumentWindow {
 }
 
 /// GPUI's modifiers as the tool machine's: ⌥ is `alt`, ⌘ `platform`.
-fn machine_modifiers(m: Modifiers) -> model::Modifiers {
+pub(crate) fn machine_modifiers(m: Modifiers) -> model::Modifiers {
     model::Modifiers {
         shift: m.shift,
         control: m.control,

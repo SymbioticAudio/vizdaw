@@ -11,7 +11,7 @@ use gpui::{App, AppContext, Entity, Global, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::transport::{PollResult, TransportModel, TransportReadout};
 use vizdaw_app::transport_bar::TransportLayout;
-use vizdaw_app::{DocId, DocumentStore, Prefs, SaveAction, WindowToken};
+use vizdaw_app::{DocId, DocumentModel, DocumentStore, Prefs, SaveAction, WindowToken};
 
 use crate::shell::DocumentWindow;
 
@@ -39,6 +39,9 @@ pub struct AppState {
     /// When each document's session last had its idle tick.
     last_idle: HashMap<DocId, Instant>,
 }
+
+/// The poll's interval while a retry waits on Busy (Swift's 60 Hz tick).
+pub const FAST_POLL: Duration = Duration::from_millis(16);
 
 /// The least time between two idle ticks of one document.
 const IDLE_EVERY: Duration = Duration::from_millis(50);
@@ -198,10 +201,16 @@ impl AppState {
     /// snapshot arrived (the title may have changed).
     fn idle(&mut self, doc: DocId) -> bool {
         let now = Instant::now();
-        if self
-            .last_idle
-            .get(&doc)
-            .is_some_and(|t| now.duration_since(*t) < IDLE_EVERY)
+        // A retry waiting on Busy runs every poll.
+        let fast = self
+            .store
+            .document(doc)
+            .is_some_and(DocumentModel::wants_fast_poll);
+        if !fast
+            && self
+                .last_idle
+                .get(&doc)
+                .is_some_and(|t| now.duration_since(*t) < IDLE_EVERY)
         {
             return false;
         }
@@ -211,9 +220,18 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// How long until `doc`'s next poll; `None` once it is closed.
+    /// How long until `doc`'s next poll; `None` once it is closed. While
+    /// a note-off or a drag's final edit waits on Busy, at most
+    /// [`FAST_POLL`].
     pub fn poll_interval(&self, doc: DocId) -> Option<std::time::Duration> {
-        self.transports.get(&doc).map(|t| t.poll_interval())
+        let fast = self
+            .store
+            .document(doc)
+            .is_some_and(DocumentModel::wants_fast_poll);
+        self.transports.get(&doc).map(|t| {
+            let every = t.poll_interval();
+            if fast { every.min(FAST_POLL) } else { every }
+        })
     }
 
     /// What `doc`'s transport bar shows; tempo and signature come from the

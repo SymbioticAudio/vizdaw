@@ -1060,6 +1060,16 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
     if table && !m.command && !m.control && !m.option && matches!(k.key_code, 36 | 76 | 51 | 117) {
         return None;
     }
+    // The Piano Roll's canvas, with the keyboard, takes Delete and
+    // Forward Delete (they delete the selected notes): Swift
+    // `PianoRollView.keyDown`.
+    let roll = s
+        .store
+        .document(entry.doc)
+        .is_some_and(|d| d.roll_focused());
+    if roll && !m.command && !m.control && !m.option && matches!(k.key_code, 51 | 117) {
+        return None;
+    }
     let mut mods = 0;
     for (on, bit) in [
         (m.shift, bindings::SHIFT),

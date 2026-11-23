@@ -219,7 +219,7 @@ fn single_keys_are_off_in_text_fields() {
     let mut checked = 0;
     for b in &all {
         // A text field's own editing keys act only inside it, the List
-        // table's only inside the table.
+        // table's only inside the table, the roll's only in its canvas.
         if b.action().name().starts_with("text_input::") {
             continue;
         }
@@ -227,6 +227,12 @@ fn single_keys_are_off_in_text_fields() {
             let table =
                 KeyBindingContextPredicate::parse(vizdaw_gpui::list_editor::CONTEXT).unwrap();
             assert_eq!(b.predicate().as_deref(), Some(&table));
+            continue;
+        }
+        // The Piano Roll's Delete keys act only inside its canvas.
+        if b.action().name().starts_with("piano_roll::") {
+            let roll = KeyBindingContextPredicate::parse(vizdaw_gpui::piano_roll::CONTEXT).unwrap();
+            assert_eq!(b.predicate().as_deref(), Some(&roll));
             continue;
         }
         if b.keystrokes().iter().any(|k| k.modifiers().modified()) {

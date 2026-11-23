@@ -1757,3 +1757,50 @@ fn a_partly_scrolled_out_element_is_clicked_where_it_shows(cx: &mut TestAppConte
     let sel = ok(call(&s, cx, "state.get", json!({"target": "selection"})));
     assert_eq!(sel["events"], json!([1]), "nothing else was clicked: {sel}");
 }
+
+/// The Piano Roll over the channel: a click on a note element selects
+/// it (with its track) and gives the canvas the keyboard; `ui.key`
+/// Delete then deletes the selected note (not the key bindings' step
+/// entry), as Forward Delete does.
+#[gpui::test]
+fn channel_delete_goes_to_the_roll(cx: &mut TestAppContext) {
+    use vizdaw_ffi::edit::{EditCommand, EventEdit};
+    let s = setup(cx, vizdaw_app::testing::roll_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    // On Chords' block alone, so its two notes are in view.
+    let chords = node_id(&s, cx, "button", "Block on Chords, bar 1, 1 event");
+    ok(call(&s, cx, "ui.click", json!({"element": chords})));
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "editors.piano_roll"}),
+    ));
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    let note = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| {
+            n["role"] == "button"
+                && n["label"]
+                    .as_str()
+                    .is_some_and(|l| l.starts_with("Note E4, bar 1 beat 2"))
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("no E4 note in {tree}"));
+    ok(call(&s, cx, "ui.click", json!({"element": note["id"]})));
+    let sel = ok(call(&s, cx, "state.get", json!({"target": "selection"})));
+    assert_eq!(sel["events"], json!([2]), "{sel}");
+    assert_eq!(sel["lanes"], json!([{"seq": 3, "lane": 31}]), "{sel}");
+    s.fake.clear_calls();
+    ok(call(&s, cx, "ui.key", json!({"key": "delete"})));
+    assert_eq!(
+        s.fake.edits(),
+        [EditCommand::Event {
+            edit: EventEdit::Delete { events: vec![2] }
+        }]
+    );
+    ok(call(&s, cx, "ui.key", json!({"key": "forward_delete"})));
+    assert_eq!(s.fake.edits().len(), 2, "{:?}", s.fake.edits());
+}

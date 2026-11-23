@@ -76,6 +76,9 @@ pub struct DocumentWindow {
     /// The size of the area the arrangement and the bottom pane share, at
     /// the last draw (zero before the first).
     regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
+    /// The poll runs fast: a note-off or a drag's final edit waits on
+    /// Busy.
+    fast_poll: bool,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -164,6 +167,8 @@ impl DocumentWindow {
                     if this.arrangement.pressing() {
                         this.cancel_block_drag(cx);
                     }
+                    // A held note or key stops sounding.
+                    this.roll_deactivated(cx);
                 }
             }),
         ];
@@ -171,10 +176,12 @@ impl DocumentWindow {
         subscriptions.push(cx.on_release(move |this: &mut Self, cx| {
             this._hold = None;
             let shuttle = &mut this.shuttle;
+            let roll = &mut this.piano_roll;
             state.update(cx, |s, cx| {
                 s.store.with_document(doc, |d, _| {
                     shuttle.cancel(d);
                     shuttle.key_up(d);
+                    DocumentWindow::roll_closing(roll, d);
                 });
                 s.close_document(doc);
                 cx.notify();
@@ -209,12 +216,14 @@ impl DocumentWindow {
             list_editor,
             piano_roll: PianoRoll::new(cx),
             regions: Rc::default(),
+            fast_poll: false,
             _subscriptions: subscriptions,
         }
     }
 
     /// Polls the transport every `poll_interval()` (read again each tick:
-    /// fast while playing), until the document closes.
+    /// fast while playing, or while a note-off or a drag's final edit
+    /// waits on Busy), until the document closes.
     fn start_polling(doc: DocId, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -988,17 +997,35 @@ impl Render for DocumentWindow {
                     window.request_animation_frame();
                 }
             }
-            None => self.roll_unmounted(window, cx),
+            None => {
+                self.roll_detach(cx);
+                self.roll_unmounted(window, cx);
+            }
+        }
+        let roll_mounted = rolled.is_some();
+        // A retry waits: poll at once, and often.
+        let fast = self
+            .read_model(cx, DocumentModel::wants_fast_poll)
+            .unwrap_or(false);
+        if fast != self.fast_poll {
+            self.fast_poll = fast;
+            if fast {
+                self.restart_polling(window, cx);
+            }
         }
         if let Some(after) = list_after {
             self.list_after(after, window, cx);
         }
         let bottom_height = bottom.and_then(|b| detail_pane::bottom_height(self.regions.get(), &b));
-        // A hidden pane's table keeps no keyboard.
+        // A hidden pane's table and roll keep no keyboard.
         if bottom_height.is_none() {
             self.list_hidden(window, cx);
+            if roll_mounted {
+                self.roll_hidden(window, cx);
+            }
         }
         self.sync_list_focus(listed.is_some() && bottom_height.is_some(), window, cx);
+        self.sync_roll_focus(roll_mounted && bottom_height.is_some(), window, cx);
         if bottom_height.is_none() {
             self.detail_menu_open = false;
             self.piano_roll.menu = None;

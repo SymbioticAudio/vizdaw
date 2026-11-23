@@ -6,6 +6,7 @@
 //! platform with the scripted session.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, ScrollDelta,
@@ -13,11 +14,13 @@ use gpui::{
 };
 use vizdaw_app::DocumentStore;
 use vizdaw_app::arrangement::{RULER_HEIGHT, TimeAxis};
-use vizdaw_app::editor::{DetailEditorKind, EditorTarget, Tool};
-use vizdaw_app::piano_roll::PitchAxis;
+use vizdaw_app::editor::{DetailEditorKind, EditorTarget, Snap, Tool};
+use vizdaw_app::piano_roll::{CursorKind, Pencil, PitchAxis};
 use vizdaw_app::testing::{FakeSession, demo_fake, note_row, roll_fake};
-use vizdaw_ffi::edit::LaneRef;
-use vizdaw_ffi::events::EventRow;
+use vizdaw_ffi::VizError;
+use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneRef};
+use vizdaw_ffi::events::{EventRow, MeterEntryRow};
+use vizdaw_ffi::selection::TickRange;
 use vizdaw_gpui::menus::{self, ItemSpec};
 use vizdaw_gpui::registry::Element;
 use vizdaw_gpui::{AppState, DocumentWindow};
@@ -651,4 +654,570 @@ fn tracks_and_insert_into_menus_choose_lanes(cx: &mut TestAppContext) {
     assert_eq!(s.model(|d| d.roll_shown_lanes()), [BASS]);
     s.keys("escape");
     assert!(s.menu_items().is_empty(), "Escape closes the menu");
+}
+
+// MARK: Editing and audition (Swift `PianoRollViewTests`)
+
+const VELOCITY_64: u16 = 64 << 9;
+
+fn ev(edit: EventEdit) -> EditCommand {
+    EditCommand::Event { edit }
+}
+
+fn busy() -> VizError {
+    VizError::Busy {
+        message: "busy".into(),
+    }
+}
+
+impl Setup {
+    /// Window point of canvas x `x` (points from its left edge) on the
+    /// middle of `pitch`'s row.
+    fn at(&mut self, x: f32, pitch: u8) -> gpui::Point<Pixels> {
+        let canvas = self.canvas();
+        let p = self.pitch();
+        point(
+            canvas.origin.x + px(x),
+            canvas.origin.y + px(RULER_HEIGHT + p.top(pitch) + p.row_height() / 2.),
+        )
+    }
+
+    /// Window point of canvas x `x` at `dy` points from the middle of
+    /// `pitch`'s row.
+    fn at_dy(&mut self, x: f32, pitch: u8, dy: f32) -> gpui::Point<Pixels> {
+        let p = self.at(x, pitch);
+        point(p.x, p.y + px(dy))
+    }
+
+    fn down(&mut self, at: gpui::Point<Pixels>, modifiers: Modifiers) {
+        self.cx
+            .simulate_mouse_down(at, MouseButton::Left, modifiers);
+        self.cx.run_until_parked();
+    }
+
+    fn move_to(&mut self, at: gpui::Point<Pixels>, modifiers: Modifiers) {
+        self.cx
+            .simulate_mouse_move(at, Some(MouseButton::Left), modifiers);
+        self.cx.run_until_parked();
+    }
+
+    fn hover(&mut self, at: gpui::Point<Pixels>) {
+        self.cx.simulate_mouse_move(at, None, Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    fn up(&mut self, at: gpui::Point<Pixels>, modifiers: Modifiers) {
+        self.cx.simulate_mouse_up(at, MouseButton::Left, modifiers);
+        self.cx.run_until_parked();
+    }
+
+    fn click_with(&mut self, at: gpui::Point<Pixels>, modifiers: Modifiers) {
+        self.down(at, modifiers);
+        self.up(at, modifiers);
+    }
+
+    fn drag(&mut self, from: gpui::Point<Pixels>, to: gpui::Point<Pixels>, m: Modifiers) {
+        self.down(from, m);
+        self.move_to(to, m);
+        self.up(to, m);
+    }
+
+    fn selected(&mut self) -> Vec<u64> {
+        self.model(|d| d.selection().events.clone())
+    }
+
+    fn begins(&self) -> Vec<String> {
+        self.fake
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("begin_edit("))
+            .collect()
+    }
+
+    fn undo_label(&mut self) -> Option<String> {
+        self.model(|d| d.snapshot().undo_label.clone())
+    }
+
+    /// The audition log as "on 60" / "off 60".
+    fn sounds(&self) -> Vec<String> {
+        self.fake
+            .auditions()
+            .into_iter()
+            .map(|(on, pitch, _, _)| format!("{on} {pitch}"))
+            .collect()
+    }
+
+    fn cursor(&mut self) -> CursorKind {
+        self.window
+            .read_with(&self.cx, |v, _| v.piano_roll().cursor())
+            .unwrap()
+    }
+
+    fn band(&mut self) -> Option<vizdaw_app::arrangement::Rect> {
+        self.window
+            .read_with(&self.cx, |v, _| v.piano_roll().band())
+            .unwrap()
+    }
+
+    fn snap_and_meter(&mut self) -> (Snap, Vec<MeterEntryRow>) {
+        self.model(|d| {
+            (
+                d.layout().snap,
+                d.sequence_info(3)
+                    .map(|i| i.meter.clone())
+                    .unwrap_or_default(),
+            )
+        })
+    }
+
+    /// The keyboard strip's point at `pitch` (or `y` points from its top).
+    fn key(&mut self, pitch: u8) -> gpui::Point<Pixels> {
+        let k = self.element("group", KEYBOARD).bounds;
+        let p = self.pitch();
+        point(
+            k.origin.x + px(10.),
+            k.origin.y + px(RULER_HEIGHT + p.top(pitch) + p.row_height() / 2.),
+        )
+    }
+}
+
+/// Swift `testClickSelectsAndShiftToggles`: a click selects the note
+/// alone (with its track) and sounds it while pressed; ⇧-click toggles;
+/// a click on empty space clears. The pointer's shape follows the zone.
+#[gpui::test]
+fn a_note_click_selects_and_shift_toggles(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    s.fake.clear_calls();
+    let c4 = s.at(80., 60);
+    s.down(c4, Modifiers::none());
+    assert_eq!(s.sounds(), ["on 60"], "the note sounds while pressed");
+    assert_eq!(
+        s.fake.auditions()[0],
+        ("on".into(), 60, 5, VELOCITY_64),
+        "at its velocity, through its track's instrument"
+    );
+    s.up(c4, Modifiers::none());
+    assert_eq!(s.sounds(), ["on 60", "off 60"]);
+    assert_eq!(s.selected(), [1]);
+    assert_eq!(s.model(|d| d.selection().lanes.clone()), [CHORDS]);
+    assert!(s.notes()[0].selected && !s.notes()[1].selected);
+
+    let e4 = s.at(240., 64);
+    s.click_with(e4, Modifiers::shift());
+    assert_eq!(s.selected(), [1, 2]);
+    s.click_with(c4, Modifiers::shift());
+    assert_eq!(s.selected(), [2]);
+    let empty = s.at(600., 70);
+    s.click_with(empty, Modifiers::shift());
+    assert_eq!(s.selected(), [2], "⇧ on empty space keeps the selection");
+    s.click_with(empty, Modifiers::none());
+    assert!(s.selected().is_empty());
+    assert!(s.fake.edits().is_empty() && s.begins().is_empty());
+
+    // Cursors: start, middle and end zones, empty space, the ruler.
+    let p = s.at(162., 64);
+    s.hover(p);
+    assert_eq!(s.cursor(), CursorKind::OpenHand);
+    let p = s.at(240., 64);
+    s.hover(p);
+    assert_eq!(s.cursor(), CursorKind::UpDown);
+    let p = s.at(318., 64);
+    s.hover(p);
+    assert_eq!(s.cursor(), CursorKind::ResizeRight);
+    let p = s.at(600., 70);
+    s.hover(p);
+    assert_eq!(s.cursor(), CursorKind::Arrow);
+    s.update_model(|d| d.set_tool(Tool::Pencil));
+    let p = s.at(601., 70);
+    s.hover(p);
+    assert_eq!(s.cursor(), CursorKind::Crosshair);
+    let canvas = s.canvas();
+    s.hover(point(canvas.origin.x + px(600.), canvas.origin.y + px(10.)));
+    assert_eq!(s.cursor(), CursorKind::Arrow, "over the ruler");
+    s.update_model(|d| d.set_tool(Tool::Eraser));
+    let p = s.at(240., 64);
+    s.hover(p);
+    assert_eq!(s.cursor(), CursorKind::Eraser);
+}
+
+/// Swift `testRubberBandSelects`: a band from empty space selects the
+/// notes it touches (⇧ adds); an empty band clears, with ⇧ it keeps.
+#[gpui::test]
+fn a_rubber_band_selects(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    let from = s.at(400., 68);
+    let to = s.at(60., 59);
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    let band = s.band().expect("the band is drawn");
+    assert!(band.width > 300. && band.height > 0., "{band:?}");
+    s.up(to, Modifiers::none());
+    assert_eq!(s.band(), None);
+    assert_eq!(s.selected(), [1, 2]);
+    assert!(s.sounds().is_empty(), "a band is silent");
+    assert!(s.begins().is_empty(), "and no undo step");
+
+    // An empty band: ⇧ keeps the selection, a plain one clears it.
+    let (a, b) = (s.at(600., 70), s.at(700., 67));
+    s.drag(a, b, Modifiers::shift());
+    assert_eq!(s.selected(), [1, 2]);
+    s.drag(a, b, Modifiers::none());
+    assert!(s.selected().is_empty());
+    // ⇧ adds to the selection.
+    let p = s.at(80., 60);
+    s.click_with(p, Modifiers::none());
+    let (a, b) = (s.at(400., 66), s.at(200., 63));
+    s.drag(a, b, Modifiers::shift());
+    assert_eq!(s.selected(), [1, 2]);
+}
+
+/// Swift `testPencilClickInsertsAGridNote` and the pencil drag: one
+/// "Insert Note" step each, in the edit track; the new pitch sounds.
+#[gpui::test]
+fn the_pencil_draws_a_note(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    s.update_model(|d| d.set_tool(Tool::Pencil));
+    s.fake.clear_calls();
+    // x 400 is tick 38 400: the note starts on the quarter at 30 720.
+    let (snap, meter) = s.snap_and_meter();
+    let at = s.at(400., 67);
+    s.click_with(at, Modifiers::none());
+    assert_eq!(s.begins(), ["begin_edit(Insert Note)"]);
+    let start = Pencil::start(38_400, &snap, &meter);
+    let length = Pencil::step(start, &snap, &meter);
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&Pencil::command(CHORDS, start, 67, length))
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Insert Note"));
+    assert_eq!(s.sounds(), ["on 67", "off 67"]);
+
+    // A drag paints the length.
+    s.fake.clear_calls();
+    let (from, to) = (s.at(500., 69), s.at(700., 69));
+    s.drag(from, to, Modifiers::none());
+    assert_eq!(s.begins(), ["begin_edit(Insert Note)"]);
+    let start = Pencil::start(48_000, &snap, &meter);
+    let length = Pencil::length(start, 67_200, &snap, &meter);
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&Pencil::command(CHORDS, start, 69, length))
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Insert Note"));
+    assert!(!s.model(|d| d.gesture_open()));
+}
+
+/// Swift `testEraserSwipes`: the eraser deletes every note it lands on
+/// or crosses, as one "Erase Notes" step; a click deletes one note; it
+/// never sounds.
+#[gpui::test]
+fn the_eraser_swipes(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    s.update_model(|d| d.set_tool(Tool::Eraser));
+    s.fake.clear_calls();
+    let from = s.at(80., 70);
+    s.down(from, Modifiers::none());
+    let p = s.at(80., 60);
+    s.move_to(p, Modifiers::none());
+    let p = s.at(240., 64);
+    s.move_to(p, Modifiers::none());
+    let end = s.at(400., 64);
+    s.up(end, Modifiers::none());
+    assert_eq!(s.begins(), ["begin_edit(Erase Notes)"]);
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&ev(EventEdit::Delete { events: vec![1, 2] }))
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Erase Notes"));
+    assert!(s.sounds().is_empty(), "the eraser is silent");
+
+    // A click deletes the note under it.
+    let p = s.at(240., 64);
+    s.click_with(p, Modifiers::none());
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&ev(EventEdit::Delete { events: vec![2] }))
+    );
+    assert!(s.sounds().is_empty());
+}
+
+/// Swift's note drags: the start zone moves (⌥ copies), the middle
+/// transposes (and sounds the new pitch), the end resizes; one undo step
+/// each, named for what it did.
+#[gpui::test]
+fn dragging_moves_copies_transposes_and_resizes(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    let (snap, meter) = s.snap_and_meter();
+    let rh = s.pitch().row_height();
+
+    s.fake.clear_calls();
+    let (from, to) = (s.at(162., 64), s.at(322., 64));
+    s.drag(from, to, Modifiers::none());
+    assert_eq!(s.begins(), ["begin_edit(Move Notes)"]);
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&ev(EventEdit::Move {
+            events: vec![2],
+            delta: 15_360,
+            to_lane: None
+        }))
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Move Notes"));
+    assert_eq!(s.selected(), [2], "the pressed note is selected first");
+
+    s.fake.clear_calls();
+    s.drag(from, to, Modifiers::alt());
+    assert_eq!(s.begins(), ["begin_edit(Copy Notes)"]);
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&ev(EventEdit::Duplicate {
+            events: vec![2],
+            ticks: 15_360,
+            semitones: 0
+        }))
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Copy Notes"));
+
+    s.fake.clear_calls();
+    let heard = s.sounds().len();
+    let from = s.at(240., 64);
+    let to = s.at_dy(240., 64, -2. * rh);
+    s.drag(from, to, Modifiers::none());
+    assert_eq!(s.begins(), ["begin_edit(Transpose Notes)"]);
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&ev(EventEdit::Nudge {
+            events: vec![2],
+            ticks: 0,
+            semitones: 2
+        }))
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Transpose Notes"));
+    assert_eq!(
+        s.sounds()[heard..],
+        ["on 64", "off 64", "on 66", "off 66"],
+        "the new pitch sounds as it moves"
+    );
+
+    s.fake.clear_calls();
+    let (from, to) = (s.at(318., 64), s.at(398., 64));
+    s.drag(from, to, Modifiers::none());
+    assert_eq!(s.begins(), ["begin_edit(Resize Notes)"]);
+    let end = 30_720;
+    let delta = snap.apply(end + 80 * 96, &meter).max(15_361) - end;
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&ev(EventEdit::Resize {
+            events: vec![2],
+            delta
+        }))
+    );
+    assert_eq!(s.undo_label().as_deref(), Some("Resize Notes"));
+}
+
+/// Escape mid-drag: no undo step, nothing changed, the sound stops; the
+/// release then does nothing.
+#[gpui::test]
+fn escape_mid_drag_changes_nothing_and_silences(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    let undo = s.undo_label();
+    s.fake.clear_calls();
+    let (from, to) = (s.at(162., 64), s.at(322., 64));
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    assert!(s.model(|d| d.gesture_open()));
+    assert_eq!(s.sounds(), ["on 64"]);
+    s.keys("escape");
+    assert!(!s.model(|d| d.gesture_open()));
+    assert_eq!(s.sounds(), ["on 64", "off 64"]);
+    assert!(s.fake.calls().iter().any(|c| c == "abort_edit"));
+    assert!(!s.fake.edit_is_open());
+    s.up(to, Modifiers::none());
+    assert!(!s.fake.calls().iter().any(|c| c == "end_edit"));
+    assert_eq!(s.undo_label(), undo);
+    assert!(s.fake.edits().is_empty());
+
+    // A band is dropped too.
+    let (a, b) = (s.at(600., 70), s.at(700., 67));
+    s.down(a, Modifiers::none());
+    s.move_to(b, Modifiers::none());
+    assert!(s.band().is_some());
+    s.keys("escape");
+    assert_eq!(s.band(), None);
+    s.up(b, Modifiers::none());
+    assert_eq!(s.selected(), [2], "the band selected nothing");
+}
+
+/// Delete and Forward Delete, while the roll has the keyboard, delete
+/// the selected notes as one "Delete Events" step (not the key bindings'
+/// step entry); a hidden pane gives the keyboard back first.
+#[gpui::test]
+fn delete_deletes_the_selected_notes(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    let p = s.at(240., 64);
+    s.click_with(p, Modifiers::none());
+    assert!(s.model(|d| d.roll_focused()), "the canvas has the keyboard");
+    s.fake.clear_calls();
+    s.keys("backspace");
+    assert_eq!(s.fake.edits(), [ev(EventEdit::Delete { events: vec![2] })]);
+    let p = s.at(80., 60);
+    s.click_with(p, Modifiers::none());
+    s.keys("delete");
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&ev(EventEdit::Delete { events: vec![1] }))
+    );
+    assert_eq!(s.fake.edits().len(), 2);
+
+    // The keyboard elsewhere: the roll's Delete is not its own.
+    let arrangement = s.element("group", "Arrangement").bounds;
+    s.click_at(arrangement.center());
+    assert!(s.model(|d| !d.roll_focused()));
+
+    // Hidden, the roll keeps no keyboard.
+    let p = s.at(80., 60);
+    s.click_with(p, Modifiers::none());
+    assert!(s.model(|d| d.roll_focused()));
+    s.update_model(|d| d.update_layout(|l| l.views.arrange.bottom.shown = false));
+    assert!(s.model(|d| !d.roll_focused()));
+    s.keys("backspace");
+    s.keys("delete");
+    assert_eq!(s.fake.edits().len(), 2, "{:?}", s.fake.edits());
+
+    // Shown again in a window that is not the active one (a channel
+    // click on a background app): the click still gives the keyboard.
+    s.update_model(|d| d.update_layout(|l| l.views.arrange.bottom.shown = true));
+    s.cx.deactivate_window();
+    let p = s.at(240., 64);
+    s.click_with(p, Modifiers::none());
+    assert!(s.model(|d| d.roll_focused()));
+    s.keys("backspace");
+    assert_eq!(s.fake.edits().len(), 3, "{:?}", s.fake.edits());
+}
+
+/// The keyboard strip: a press sounds its key through the edit track's
+/// instrument, a drag plays each key crossed, the release silences; the
+/// strip's top (the ruler's height) is not a key. A note-off that meets
+/// Busy is retried at the fast poll.
+#[gpui::test]
+fn a_key_press_sounds_and_release_silences(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    s.fake.clear_calls();
+    let k62 = s.key(62);
+    s.down(k62, Modifiers::none());
+    assert_eq!(s.fake.auditions(), [("on".into(), 62, 5, Pencil::VELOCITY)]);
+    // Within the key: nothing new; onto the next: it sounds instead.
+    let inside = point(k62.x + px(20.), k62.y + px(1.));
+    s.move_to(inside, Modifiers::none());
+    assert_eq!(s.sounds(), ["on 62"]);
+    let k64 = s.key(64);
+    s.move_to(k64, Modifiers::none());
+    assert_eq!(s.sounds(), ["on 62", "off 62", "on 64"]);
+    s.up(k64, Modifiers::none());
+    assert_eq!(s.sounds(), ["on 62", "off 62", "on 64", "off 64"]);
+
+    // The top strip is not a key.
+    let top = s.element("group", KEYBOARD).bounds.origin;
+    s.click_with(point(top.x + px(10.), top.y + px(10.)), Modifiers::none());
+    assert_eq!(s.sounds().len(), 4);
+
+    // A note-off refused as Busy is retried soon (the poll runs fast).
+    s.down(k62, Modifiers::none());
+    s.fake.fail_next("audition", busy());
+    s.up(k62, Modifiers::none());
+    assert_eq!(s.sounds().last().map(String::as_str), Some("on 62"));
+    assert!(s.model(|d| d.wants_fast_poll()));
+    s.cx.executor().advance_clock(Duration::from_millis(40));
+    s.cx.run_until_parked();
+    assert_eq!(s.sounds().last().map(String::as_str), Some("off 62"));
+    assert!(s.model(|d| !d.wants_fast_poll()));
+}
+
+/// The window losing the keyboard: a note or key held stops sounding and
+/// a drag in progress is dropped without an undo step.
+#[gpui::test]
+fn window_loss_silences(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    let undo = s.undo_label();
+    s.fake.clear_calls();
+    let (from, to) = (s.at(162., 64), s.at(322., 64));
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    assert!(s.model(|d| d.gesture_open()));
+    s.cx.deactivate_window();
+    s.cx.run_until_parked();
+    assert_eq!(s.sounds(), ["on 64", "off 64"]);
+    assert!(!s.model(|d| d.gesture_open()));
+    s.up(to, Modifiers::none());
+    assert_eq!(s.undo_label(), undo);
+    assert!(!s.fake.calls().iter().any(|c| c == "end_edit"));
+
+    // A key held on the keyboard strip.
+    s.cx.update(|window, _| window.activate_window());
+    s.cx.run_until_parked();
+    let heard = s.sounds().len();
+    let k = s.key(62);
+    s.down(k, Modifiers::none());
+    assert_eq!(s.sounds()[heard..], ["on 62"]);
+    s.cx.deactivate_window();
+    s.cx.run_until_parked();
+    assert_eq!(s.sounds()[heard..], ["on 62", "off 62"]);
+    s.up(k, Modifiers::none());
+    assert_eq!(s.sounds()[heard..], ["on 62", "off 62"]);
+}
+
+/// The ruler: a click locates (snapped), a drag selects the range over
+/// the shown tracks (Swift `onRulerClick` / `onRulerRange`).
+#[gpui::test]
+fn the_ruler_locates_and_selects_a_range(cx: &mut TestAppContext) {
+    let mut s = roll_on(cx, roll_fake(), EditorTarget::Sequence { seq: 3 });
+    let (snap, meter) = s.snap_and_meter();
+    let canvas = s.canvas();
+    let y = canvas.origin.y + px(10.);
+    s.fake.clear_calls();
+    s.click_at(point(canvas.origin.x + px(203.), y));
+    assert_eq!(
+        s.fake
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("locate("))
+            .collect::<Vec<_>>(),
+        [format!("locate({})", snap.apply(203 * 96, &meter))]
+    );
+    let (a, b) = (
+        point(canvas.origin.x + px(100.), y),
+        point(canvas.origin.x + px(500.), y),
+    );
+    s.drag(a, b, Modifiers::none());
+    let sel = s.model(|d| d.selection().clone());
+    assert_eq!(
+        sel.time_range,
+        Some(TickRange {
+            start: snap.apply(9_600, &meter),
+            end: snap.apply(48_000, &meter),
+        })
+    );
+    assert_eq!(sel.lanes, [CHORDS, BASS], "the shown tracks");
+    assert!(sel.events.is_empty());
+}
+
+/// Leaving the pane (another editor) drops a drag in progress and its
+/// sound.
+#[gpui::test]
+fn leaving_the_roll_cancels_its_drag(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    s.fake.clear_calls();
+    let (from, to) = (s.at(162., 64), s.at(322., 64));
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    assert!(s.model(|d| d.gesture_open()));
+    s.update_model(|d| {
+        let target = d.layout().detail.as_ref().unwrap().target;
+        d.open_detail(target, Some(DetailEditorKind::List));
+    });
+    assert!(!s.model(|d| d.gesture_open()));
+    assert_eq!(s.sounds(), ["on 64", "off 64"]);
+    assert!(s.model(|d| !d.roll_focused()));
+    s.up(to, Modifiers::none());
+    assert!(!s.fake.calls().iter().any(|c| c == "end_edit"));
 }
