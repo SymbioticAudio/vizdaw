@@ -85,6 +85,8 @@ jobs:
         run: cargo bench --workspace --no-run
 
   app:
+    # The Swift app is retired: 27.1.0 is the first release (one Rust/GPUI
+    # codebase), so this job keeps the FFI, Multi-Q and notices checks only.
     name: app (macOS)
     runs-on: macos-15
     env:
@@ -104,29 +106,9 @@ jobs:
         run: scripts/build-multiq.sh
       - name: FFI tests
         run: cargo test -p core-ffi
-      - name: Build the FFI library and Swift bindings
-        run: scripts/build-ffi.sh
-      - name: Swift build
-        run: scripts/swift.sh build
       - name: Third-party notices build offline
         run: |
           cargo fetch --locked
           CARGO_NET_OFFLINE=true scripts/third-party-notices.sh target/third-party/THIRD-PARTY.txt
           grep -q '^quick-xml ' target/third-party/THIRD-PARTY.txt
           grep -q '^cfb ' target/third-party/THIRD-PARTY.txt
-      - name: App builds without the branded glyphs
-        run: |
-          VIZDAW_NO_BRAND=1 scripts/swift.sh build --scratch-path "$RUNNER_TEMP/nobrand"
-          if [ -n "$(find "$RUNNER_TEMP/nobrand" \( -name 'SymbioticBrand*.o' -o -name 'SymbioticBrand*.swiftmodule' \))" ]; then
-            echo "the no-brand build has SymbioticBrand in it" >&2
-            exit 1
-          fi
-      - name: Swift tests
-        run: scripts/swift.sh test
-      - name: App bundle
-        run: scripts/make-app.sh
-      - name: End to end through the control channel (needs the runner's window server)
-        timeout-minutes: 20
-        run: cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1
-        env:
-          VIZDAW_E2E_APP: dist/VizDAW.app

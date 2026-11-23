@@ -27,12 +27,13 @@ The original design (2026-10-15) aimed for "a native modern Mac UI" and listed W
 
 - **VST3 slots bump the song format.** **(owner)** The new `vst3` plug-in format is a song-format bump under the usual migration rules, so an older build refuses such a song cleanly. The owner notes the Swift build will probably never be released once 27.x is far enough along.
 - **Built-in Synth on Linux: an open-source SoundFont player.** **(owner)** Linux gets a GPL-compatible SoundFont player with a redistributable General MIDI SoundFont in place of the Mac's built-in sounds (answers the Built-in Synth gap).
+- **27.1.0 is the first release; no backwards compatibility with the Swift app.** **(owner, 2026-11-23)** The Swift 26.x beta is retired: it is not tested, not shared, and not a compatibility target. Songs, the plug-in catalogue and the FFI surface need not stay readable or compiling for it; CI no longer builds or tests the Swift app.
 - **Bundled EQ on Linux: build Multi-Q as CLAP.** **(owner)** The bundled Multi-Q default EQ is built as a CLAP plug-in on Linux (answers the Multi-Q gap in §2a).
 
 ## 3. Non-goals
 
 - A public Swift release (26.0.0 beta or 26.1.0). **(owner)**
-- Swift-only polish. Fixes to the Swift app happen only when they block the owner's own testing. (controller's call, follows from the owner's ruling)
+- Any Swift work. The Swift app is retired (owner, 2026-11-23); `app/Sources` stays only as reference for the port.
 - Windows at 27.1.0, iOS, Android (backlog keeps their rows; GPUI is a prerequisite for Android).
 - The rest of the backlog's 27.1.0 bucket (OMF, pro features, creative rows, engine edge cases): those move to 27.x point releases unless the owner pulls one in. (controller's call; the backlog already said "the owner may still split this")
 - New features. The rewrite carries behaviour across; improvements go to the backlog.
