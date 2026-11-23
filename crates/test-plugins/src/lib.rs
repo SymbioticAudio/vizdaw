@@ -10,11 +10,13 @@
 //! | `vizdaw.test.bank` | passes audio through; 24 automatable parameters (ids 100–123) that only store their values |
 //! | `vizdaw.test.crasher` | crashes (SIGSEGV) when activated |
 //! | `vizdaw.test.hanger` | never returns from activate |
+//! | `vizdaw.test.timer` | passes audio through; registers host timers and file descriptors (CLAP `timer-support`, `posix-fd-support`) on command: the unlisted `PARAM_TIMER_*`/`PARAM_FD_*` switches; it counts its callbacks, read back as parameter values |
 //!
 //! [`bundle`] builds the `.clap` bundle for tests.
 
 mod bundle;
 mod plugin;
+mod timer;
 
 pub use bundle::{bundle, copy_bundle, scanner};
 
@@ -40,11 +42,13 @@ pub enum Kind {
     Hanger,
     /// Pass-through with [`BANK_PARAMS`] automatable parameters.
     Bank,
+    /// Pass-through that registers host timers and file descriptors.
+    Timer,
 }
 
 impl Kind {
     /// Every kind, in factory order.
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 8] = [
         Kind::Gain,
         Kind::Ducker,
         Kind::Synth4,
@@ -52,6 +56,7 @@ impl Kind {
         Kind::Crasher,
         Kind::Hanger,
         Kind::Bank,
+        Kind::Timer,
     ];
 
     /// The CLAP plugin id.
@@ -64,6 +69,7 @@ impl Kind {
             Kind::Crasher => "vizdaw.test.crasher",
             Kind::Hanger => "vizdaw.test.hanger",
             Kind::Bank => "vizdaw.test.bank",
+            Kind::Timer => "vizdaw.test.timer",
         }
     }
 
@@ -76,6 +82,7 @@ impl Kind {
             Kind::Crasher => "Test Crasher",
             Kind::Hanger => "Test Hanger",
             Kind::Bank => "Test Bank",
+            Kind::Timer => "Test Timer",
         }
     }
 
@@ -109,6 +116,37 @@ pub const PARAM_BANK_FIRST: u32 = 100;
 /// How many parameters the bank plugin has (ids `PARAM_BANK_FIRST..+24`).
 pub const BANK_PARAMS: u32 = 24;
 
+/// Timer kind, set while inactive: registers a host timer with this period
+/// (ms); [`PARAM_LAST_RESULT`] then reads its id, or −1 when refused.
+pub const PARAM_TIMER_REGISTER: u32 = 200;
+/// Timer kind: unregisters timer `value`; [`PARAM_LAST_RESULT`] reads 1 or 0.
+pub const PARAM_TIMER_UNREGISTER: u32 = 201;
+/// Timer kind: timer `value` unregisters itself inside its next callback.
+pub const PARAM_TIMER_SELF_UNREGISTER: u32 = 202;
+/// Timer kind: every callback of timer `value` registers a new period-0
+/// timer (a flood); [`PARAM_LAST_RESULT`] then reads the newest one's id.
+pub const PARAM_TIMER_SPAWN: u32 = 203;
+/// Timer kind: registers file descriptor `value / 8` for the CLAP fd flags
+/// `value % 8` (read 1, write 2, error 4); [`PARAM_LAST_RESULT`] reads 1 or 0.
+pub const PARAM_FD_REGISTER: u32 = 204;
+/// Timer kind: changes a registered descriptor's flags, encoded as for
+/// [`PARAM_FD_REGISTER`].
+pub const PARAM_FD_MODIFY: u32 = 205;
+/// Timer kind: unregisters descriptor `value`.
+pub const PARAM_FD_UNREGISTER: u32 = 206;
+/// Timer kind: descriptor `value` unregisters itself inside its next
+/// callback.
+pub const PARAM_FD_SELF_UNREGISTER: u32 = 207;
+/// Timer kind: the result of the last register or unregister switch.
+pub const PARAM_LAST_RESULT: u32 = 210;
+/// Timer kind: reads how many times timer `id` fired, at `PARAM_TIMER_FIRES + id`.
+pub const PARAM_TIMER_FIRES: u32 = 1000;
+/// Timer kind: reads how many callbacks descriptor `fd` had, at `PARAM_FD_CALLS + fd`.
+pub const PARAM_FD_CALLS: u32 = 2000;
+/// Timer kind: reads the flags of descriptor `fd`'s last callback, at
+/// `PARAM_FD_FLAGS + fd`.
+pub const PARAM_FD_FLAGS: u32 = 3000;
+
 /// The entry: one factory exposing every [`Kind`].
 pub struct TestEntry {
     factory: PluginFactoryWrapper<TestFactory>,
@@ -129,7 +167,7 @@ impl Entry for TestEntry {
 }
 
 struct TestFactory {
-    descriptors: [PluginDescriptor; 7],
+    descriptors: [PluginDescriptor; 8],
 }
 
 impl PluginFactoryImpl for TestFactory {

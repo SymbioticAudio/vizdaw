@@ -27,7 +27,7 @@ fn lists_and_scans_a_plugin() {
     else {
         panic!("no list");
     };
-    assert_eq!(list.len(), 7);
+    assert_eq!(list.len(), 8);
     let ScanOutcome::Done(ScanReply::Scanned(info)) = run(
         exe(),
         &req(Some("vizdaw.test.ducker"), Duration::from_secs(10)),

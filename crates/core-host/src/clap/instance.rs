@@ -8,22 +8,35 @@ use crate::info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Ta
 use crate::instance::{
     AudioProcessor, InstanceEvents, OfflineRender, ParentView, PluginEditor, PluginInstance,
 };
+use crate::run_loop::{self, FdFlags, Member, Registrations, Target};
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer};
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize};
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags};
 use clack_extensions::render::RenderMode;
 use clack_extensions::tail::TailLength;
+use clack_extensions::timer::TimerId;
 use clack_host::events::event_types::ParamValueEvent;
 use clack_host::prelude::*;
 use core_model::mixer::ParamId;
+use std::cell::RefCell;
 use std::ffi::CString;
+use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
+
+type Inst = clack_host::plugin::PluginInstance<VizHost>;
 
 /// A loaded CLAP plugin (main-thread half).
 pub struct ClapInstance {
-    inst: clack_host::plugin::PluginInstance<VizHost>,
+    /// Shared (weakly) with the run loop, which calls the plug-in's timer
+    /// and descriptor callbacks between the host's own calls.
+    inst: Rc<RefCell<Inst>>,
+    /// The instance's place in the run loop; left first on drop.
+    member: Option<Member>,
+    /// The extensions it declared (read once, while it initialized).
+    exts: PluginExts,
     flags: Arc<Flags>,
     info: PluginInfo,
     clap_notes: bool,
@@ -67,16 +80,29 @@ impl ClapInstance {
         let flags = Arc::new(Flags::default());
         let shared_flags = Arc::clone(&flags);
         let name = plugin.name.clone();
-        let inst = clack_host::plugin::PluginInstance::<VizHost>::new(
+        // The table exists before the plug-in does: some register timers
+        // while they initialize or create their editor.
+        let table = Rc::new(RefCell::new(Registrations::default()));
+        let handler_table = Rc::clone(&table);
+        let inst = Inst::new(
             move |_| Shared::new(shared_flags, name),
-            |shared| MainThread::new(shared),
+            move |shared| MainThread::new(shared, handler_table),
             &entry,
             &cid,
             &host,
         )
         .map_err(|e| HostError::LoadFailed(format!("{id}: {e}")))?;
+        let exts = inst.access_shared_handler(|s| s.exts.get().copied().unwrap_or_default());
+        let inst = Rc::new(RefCell::new(inst));
+        let target = Rc::new(RunLoopTarget {
+            inst: Rc::downgrade(&inst),
+            exts,
+        });
+        let member = run_loop::join(table, target);
         let mut me = ClapInstance {
             inst,
+            member: Some(member),
+            exts,
             flags,
             info: PluginInfo {
                 plugin,
@@ -97,14 +123,14 @@ impl ClapInstance {
     }
 
     fn exts(&self) -> PluginExts {
-        self.inst
-            .access_shared_handler(|s| s.exts.get().copied().unwrap_or_default())
+        self.exts
     }
 
     /// Reads ports, note ports and parameters (main thread).
     fn read_info(&mut self) {
         let exts = self.exts();
-        let h = self.inst.plugin_handle();
+        let mut inst = self.inst.borrow_mut();
+        let h = inst.plugin_handle();
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
         if let Some(ap) = exts.audio_ports {
@@ -188,6 +214,37 @@ impl ClapInstance {
     }
 }
 
+/// Runs an instance's timer and descriptor callbacks for the run loop.
+struct RunLoopTarget {
+    inst: Weak<RefCell<Inst>>,
+    exts: PluginExts,
+}
+
+impl RunLoopTarget {
+    /// Calls `f` with the plug-in, unless it is gone or in a host call.
+    fn with(&self, f: impl FnOnce(&mut Inst)) {
+        if let Some(inst) = self.inst.upgrade() {
+            if let Ok(mut inst) = inst.try_borrow_mut() {
+                f(&mut inst);
+            }
+        }
+    }
+}
+
+impl Target for RunLoopTarget {
+    fn on_timer(&self, id: u32) {
+        if let Some(timer) = self.exts.timer {
+            self.with(|inst| timer.on_timer(&inst.plugin_handle(), TimerId(id)));
+        }
+    }
+
+    fn on_fd(&self, fd: RawFd, flags: FdFlags) {
+        if let Some(posix_fd) = self.exts.posix_fd {
+            self.with(|inst| posix_fd.on_fd(&inst.plugin_handle(), fd, flags));
+        }
+    }
+}
+
 fn clap_id(id: ParamId) -> Option<ClapId> {
     u32::try_from(id.0).ok().and_then(ClapId::from_raw)
 }
@@ -204,16 +261,17 @@ impl PluginInstance for ClapInstance {
     ) -> Result<Box<dyn AudioProcessor>, HostError> {
         // A processor dropped without `deactivate` leaves the plugin active;
         // this succeeds exactly when no processor handle remains.
-        if self.inst.is_active() {
-            let _ = self.inst.try_deactivate();
+        if self.inst.borrow().is_active() {
+            let _ = self.inst.borrow_mut().try_deactivate();
         }
-        if self.inst.is_active() {
+        if self.inst.borrow().is_active() {
             return Err(HostError::ActivateFailed("already active".into()));
         }
         // Ports may have changed while inactive.
         self.read_info();
         let stopped = self
             .inst
+            .borrow_mut()
             .activate(
                 |_, _| AudioThread,
                 PluginAudioConfiguration {
@@ -226,7 +284,7 @@ impl PluginInstance for ClapInstance {
         let exts = self.exts();
         self.info.latency = exts
             .latency
-            .map_or(0, |l| l.get(&self.inst.plugin_handle()));
+            .map_or(0, |l| l.get(&self.inst.borrow_mut().plugin_handle()));
         let mut proc = PluginAudioProcessor::from(stopped);
         self.info.tail = match exts.tail.map(|t| t.get(&proc.plugin_handle())) {
             Some(TailLength::Finite(n)) if n > 0 => Tail::Frames(n),
@@ -245,11 +303,11 @@ impl PluginInstance for ClapInstance {
         // Dropping the processor stops processing (as an audio-thread
         // call); then the plugin is deactivated here.
         drop(processor);
-        let _ = self.inst.try_deactivate();
+        let _ = self.inst.borrow_mut().try_deactivate();
     }
 
     fn is_active(&self) -> bool {
-        self.inst.is_active()
+        self.inst.borrow().is_active()
     }
 
     fn save_state(&mut self) -> Result<Vec<u8>, HostError> {
@@ -259,7 +317,7 @@ impl PluginInstance for ClapInstance {
             .ok_or_else(|| HostError::StateRejected("the plugin has no state".into()))?;
         let mut out = Vec::new();
         state
-            .save(&self.inst.plugin_handle(), &mut out)
+            .save(&self.inst.borrow_mut().plugin_handle(), &mut out)
             .map_err(|e| HostError::StateRejected(e.to_string()))?;
         Ok(out)
     }
@@ -271,7 +329,7 @@ impl PluginInstance for ClapInstance {
             .ok_or_else(|| HostError::StateRejected("the plugin has no state".into()))?;
         let mut reader = data;
         state
-            .load(&self.inst.plugin_handle(), &mut reader)
+            .load(&self.inst.borrow_mut().plugin_handle(), &mut reader)
             .map_err(|e| HostError::StateRejected(e.to_string()))
     }
 
@@ -286,7 +344,8 @@ impl PluginInstance for ClapInstance {
             }
         }
         let mut out = EventBuffer::new();
-        let mut h = self.inst.inactive_plugin_handle().ok_or_else(|| {
+        let mut inst = self.inst.borrow_mut();
+        let mut h = inst.inactive_plugin_handle().ok_or_else(|| {
             HostError::StateRejected(
                 "parameters of an active plugin go through its processor".into(),
             )
@@ -301,7 +360,7 @@ impl PluginInstance for ClapInstance {
 
     fn param_value(&mut self, id: ParamId) -> Option<f64> {
         let params = self.exts().params?;
-        params.get_value(&self.inst.plugin_handle(), clap_id(id)?)
+        params.get_value(&self.inst.borrow_mut().plugin_handle(), clap_id(id)?)
     }
 
     fn editor(&mut self) -> Option<&mut dyn PluginEditor> {
@@ -310,23 +369,23 @@ impl PluginInstance for ClapInstance {
             api_type: GuiApiType::default_for_current_platform()?,
             is_floating: false,
         };
-        if !gui.is_api_supported(&self.inst.plugin_handle(), cfg) {
+        if !gui.is_api_supported(&self.inst.borrow_mut().plugin_handle(), cfg) {
             return None;
         }
         Some(self)
     }
 
     fn idle(&mut self) -> InstanceEvents {
-        if self.inst.is_active() {
+        if self.inst.borrow().is_active() {
             // Reclaims a plugin whose processor was dropped; fails
             // harmlessly while one is still out.
-            let _ = self.inst.try_deactivate();
+            let _ = self.inst.borrow_mut().try_deactivate();
         }
         if Flags::take(&self.flags.callback) {
-            self.inst.call_on_main_thread_callback();
+            self.inst.borrow_mut().call_on_main_thread_callback();
         }
         let ports = Flags::take(&self.flags.ports);
-        if ports && !self.inst.is_active() {
+        if ports && !self.inst.borrow().is_active() {
             self.read_info();
         }
         if Flags::take(&self.flags.gui_closed) {
@@ -344,7 +403,8 @@ impl PluginInstance for ClapInstance {
         let Some(render) = self.exts().render else {
             return OfflineRender::NoOfflineMode;
         };
-        let h = self.inst.plugin_handle();
+        let mut inst = self.inst.borrow_mut();
+        let h = inst.plugin_handle();
         // A plugin with a hard real-time requirement (a hardware proxy)
         // renders in real time whatever it is told (pre-flight M3).
         if on && render.has_realtime_requirement(&h) {
@@ -383,7 +443,8 @@ impl PluginEditor for ClapInstance {
             .ok_or_else(|| HostError::EditorUnavailable("no GUI".into()))?;
         let api = editor_api()
             .ok_or_else(|| HostError::EditorUnavailable("no embedding API here".into()))?;
-        let h = self.inst.plugin_handle();
+        let mut inst = self.inst.borrow_mut();
+        let h = inst.plugin_handle();
         if self.gui_open {
             gui.hide(&h).ok();
             gui.destroy(&h);
@@ -420,7 +481,8 @@ impl PluginEditor for ClapInstance {
             .exts()
             .gui
             .ok_or_else(|| HostError::EditorUnavailable("no GUI".into()))?;
-        let h = self.inst.plugin_handle();
+        let mut inst = self.inst.borrow_mut();
+        let h = inst.plugin_handle();
         let want = gui
             .adjust_size(&h, GuiSize { width, height })
             .unwrap_or(GuiSize { width, height });
@@ -431,7 +493,7 @@ impl PluginEditor for ClapInstance {
 
     fn can_resize(&mut self) -> bool {
         match (self.exts().gui, self.gui_open) {
-            (Some(gui), true) => gui.can_resize(&self.inst.plugin_handle()),
+            (Some(gui), true) => gui.can_resize(&self.inst.borrow_mut().plugin_handle()),
             _ => false,
         }
     }
@@ -441,7 +503,8 @@ impl PluginEditor for ClapInstance {
             return;
         }
         if let Some(gui) = self.exts().gui {
-            let h = self.inst.plugin_handle();
+            let mut inst = self.inst.borrow_mut();
+            let h = inst.plugin_handle();
             gui.hide(&h).ok();
             gui.destroy(&h);
         }
@@ -451,7 +514,9 @@ impl PluginEditor for ClapInstance {
 
 impl Drop for ClapInstance {
     fn drop(&mut self) {
+        // No callback reaches it from here on, and its registrations go.
+        drop(self.member.take());
         PluginEditor::close(self);
-        let _ = self.inst.try_deactivate();
+        let _ = self.inst.borrow_mut().try_deactivate();
     }
 }

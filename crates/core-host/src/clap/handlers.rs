@@ -1,7 +1,8 @@
 //! VizDAW's CLAP host callbacks (clack `HostHandlers`): the plugin's
 //! requests land in atomics that `ClapInstance::idle` reads on the main
 //! thread; thread-check answers from the main thread's ID and a
-//! thread-local "inside an audio call" flag.
+//! thread-local "inside an audio call" flag. Timers and file descriptors go
+//! into the instance's run-loop table ([`crate::run_loop`]).
 
 use clack_extensions::audio_ports::{
     AudioPortRescanFlags, HostAudioPorts, HostAudioPortsImpl, PluginAudioPorts,
@@ -16,14 +17,20 @@ use clack_extensions::params::{
     HostParams, HostParamsImplMainThread, HostParamsImplShared, ParamClearFlags, ParamRescanFlags,
     PluginParams,
 };
+use clack_extensions::posix_fd::{FdFlags, HostPosixFd, HostPosixFdImpl, PluginPosixFd};
 use clack_extensions::state::{HostState, HostStateImpl, PluginState};
 use clack_extensions::tail::{HostTail, HostTailImpl, PluginTail};
 use clack_extensions::thread_check::{HostThreadCheck, HostThreadCheckImpl};
+use clack_extensions::timer::{HostTimer, HostTimerImpl, PluginTimer, TimerId};
 use clack_host::prelude::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::os::unix::io::RawFd;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::ThreadId;
+
+use crate::run_loop::Registrations;
 
 thread_local! {
     static IN_AUDIO: Cell<bool> = const { Cell::new(false) };
@@ -71,6 +78,8 @@ pub(crate) struct PluginExts {
     pub tail: Option<PluginTail>,
     pub gui: Option<PluginGui>,
     pub render: Option<clack_extensions::render::PluginRender>,
+    pub timer: Option<PluginTimer>,
+    pub posix_fd: Option<PluginPosixFd>,
 }
 
 /// `[thread-safe]` host data.
@@ -103,6 +112,8 @@ impl<'a> SharedHandler<'a> for Shared {
             tail: instance.get_extension(),
             gui: instance.get_extension(),
             render: instance.get_extension(),
+            timer: instance.get_extension(),
+            posix_fd: instance.get_extension(),
         });
     }
 
@@ -168,11 +179,57 @@ impl HostGuiImpl for Shared {
 /// `[main-thread]` host data.
 pub(crate) struct MainThread<'a> {
     shared: &'a Shared,
+    /// The instance's timers and descriptors, shared with the run loop.
+    registrations: Rc<RefCell<Registrations>>,
 }
 
 impl<'a> MainThread<'a> {
-    pub(crate) fn new(shared: &'a Shared) -> MainThread<'a> {
-        MainThread { shared }
+    pub(crate) fn new(
+        shared: &'a Shared,
+        registrations: Rc<RefCell<Registrations>>,
+    ) -> MainThread<'a> {
+        MainThread {
+            shared,
+            registrations,
+        }
+    }
+
+    /// Runs `f` on the run-loop table, refusing a call from another thread
+    /// (the table is main-thread only) or from inside the loop's own
+    /// borrow.
+    fn table<T>(&self, f: impl FnOnce(&mut Registrations) -> Option<T>) -> Result<T, HostError> {
+        if !self.shared.is_main_thread() {
+            return Err(HostError::Message("not on the main thread"));
+        }
+        self.registrations
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut t| f(&mut t))
+            .ok_or(HostError::Message("refused"))
+    }
+}
+
+impl HostTimerImpl for MainThread<'_> {
+    fn register_timer(&self, period_ms: u32) -> Result<TimerId, HostError> {
+        self.table(|t| t.register_timer(period_ms)).map(TimerId)
+    }
+
+    fn unregister_timer(&self, timer_id: TimerId) -> Result<(), HostError> {
+        self.table(|t| t.unregister_timer(timer_id.0).then_some(()))
+    }
+}
+
+impl HostPosixFdImpl for MainThread<'_> {
+    fn register_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
+        self.table(|t| t.register_fd(fd, flags).then_some(()))
+    }
+
+    fn modify_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
+        self.table(|t| t.modify_fd(fd, flags).then_some(()))
+    }
+
+    fn unregister_fd(&self, fd: RawFd) -> Result<(), HostError> {
+        self.table(|t| t.unregister_fd(fd).then_some(()))
     }
 }
 
@@ -248,6 +305,8 @@ impl HostHandlers for VizHost {
             .register::<HostAudioPorts>()
             .register::<HostNotePorts>()
             .register::<HostTail>()
-            .register::<HostGui>();
+            .register::<HostGui>()
+            .register::<HostTimer>()
+            .register::<HostPosixFd>();
     }
 }

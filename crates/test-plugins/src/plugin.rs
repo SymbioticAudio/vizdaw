@@ -20,6 +20,7 @@ use clack_extensions::params::{
 };
 use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
 use clack_extensions::state::{PluginState, PluginStateImpl};
+use clack_extensions::timer::PluginTimer;
 use clack_plugin::events::event_types::{
     ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent,
 };
@@ -56,6 +57,11 @@ impl Plugin for TestPlugin {
         }
         if kind == Some(Kind::Bank) {
             builder.register::<PluginParams>();
+        }
+        if kind == Some(Kind::Timer) {
+            builder.register::<PluginParams>().register::<PluginTimer>();
+            #[cfg(unix)]
+            builder.register::<clack_extensions::posix_fd::PluginPosixFd>();
         }
     }
 }
@@ -183,11 +189,18 @@ impl<'a> PluginShared<'a> for Shared<'a> {}
 
 pub struct MainThread<'a> {
     shared: &'a Shared<'a>,
+    pub(crate) host: HostMainThreadHandle<'a>,
+    /// The timer kind's state (see `timer.rs`).
+    pub(crate) clock: std::cell::RefCell<crate::timer::Clock>,
 }
 
 impl<'a> MainThread<'a> {
-    pub fn new(_host: HostMainThreadHandle<'a>, shared: &'a Shared<'a>) -> MainThread<'a> {
-        MainThread { shared }
+    pub fn new(host: HostMainThreadHandle<'a>, shared: &'a Shared<'a>) -> MainThread<'a> {
+        MainThread {
+            shared,
+            host,
+            clock: Default::default(),
+        }
     }
 }
 
@@ -255,6 +268,7 @@ impl PluginMainThreadParams for MainThread<'_> {
     fn count(&self) -> u32 {
         match self.shared.kind {
             Kind::Bank => BANK_PARAMS,
+            Kind::Timer => 0,
             _ => 3,
         }
     }
@@ -306,6 +320,9 @@ impl PluginMainThreadParams for MainThread<'_> {
     }
 
     fn get_value(&self, id: ClapId) -> Option<f64> {
+        if self.shared.kind == Kind::Timer {
+            return self.readout(id.get());
+        }
         self.shared.param_value(id.get())
     }
 
@@ -323,6 +340,16 @@ impl PluginMainThreadParams for MainThread<'_> {
     }
 
     fn flush(&self, input: &InputEvents, output: &mut OutputEvents) {
+        if self.shared.kind == Kind::Timer {
+            for e in input {
+                if let Some(CoreEventSpace::ParamValue(p)) = e.as_core_event() {
+                    if let Some(id) = p.param_id() {
+                        self.command(id.get(), p.value());
+                    }
+                }
+            }
+            return;
+        }
         self.shared.read_params(input, false);
         self.shared.write_gesture(output);
     }

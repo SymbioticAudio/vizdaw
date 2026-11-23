@@ -287,6 +287,7 @@ fn the_list_offers_only_usable_plugins() {
             "clap:vizdaw.test.gain",
             "clap:vizdaw.test.hanger",
             "clap:vizdaw.test.nan",
+            "clap:vizdaw.test.timer",
         ]
     );
     let first = &rows[0];
