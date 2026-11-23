@@ -601,12 +601,13 @@ fn bar(
 type Act = Rc<dyn Fn(&mut DocumentWindow, &mut Context<DocumentWindow>)>;
 
 /// A bar menu's line.
-enum Entry {
+pub(crate) enum Entry {
     Item {
         title: String,
         /// A toggle's "on" or "off".
         value: Option<&'static str>,
         selected: bool,
+        enabled: bool,
         act: Act,
     },
     Label(&'static str),
@@ -614,7 +615,7 @@ enum Entry {
 }
 
 impl Entry {
-    fn item(
+    pub(crate) fn item(
         title: &str,
         value: Option<&'static str>,
         selected: bool,
@@ -624,24 +625,50 @@ impl Entry {
             title: title.to_owned(),
             value,
             selected,
+            enabled: true,
             act: Rc::new(act),
         }
     }
 
-    fn toggle(
+    pub(crate) fn toggle(
         title: &str,
         on: bool,
         act: impl Fn(&mut DocumentWindow, &mut Context<DocumentWindow>) + 'static,
     ) -> Self {
         Self::item(title, Some(if on { "on" } else { "off" }), false, act)
     }
+
+    /// The same line, greyed and not clickable when `enabled` is false.
+    pub(crate) fn enabled(mut self, on: bool) -> Self {
+        if let Entry::Item { enabled, .. } = &mut self {
+            *enabled = on;
+        }
+        self
+    }
 }
 
-/// A bar menu: a backdrop that closes it, then its lines under the
-/// button. Choosing an item closes it.
+/// Closes the List's bar menu.
+fn close_list_menu(this: &mut DocumentWindow) {
+    this.list_editor.menu = None;
+}
+
+/// A List bar menu.
 fn menu(
     id: &'static str,
     entries: Vec<Entry>,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> Vec<AnyElement> {
+    bar_menu(id, entries, close_list_menu, scope, window, cx)
+}
+
+/// A bar menu: a backdrop that closes it (`close`), then its lines under
+/// the button. Choosing an item closes it.
+pub(crate) fn bar_menu(
+    id: &'static str,
+    entries: Vec<Entry>,
+    close: fn(&mut DocumentWindow),
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
@@ -654,8 +681,8 @@ fn menu(
                 .w(size.width)
                 .h(size.height)
                 .occlude()
-                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
-                    this.list_editor.menu = None;
+                .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                    close(this);
                     cx.notify();
                 })),
         ),
@@ -680,6 +707,7 @@ fn menu(
                 title,
                 value,
                 selected,
+                enabled,
                 act,
             } => {
                 let mark = if selected || value == Some("on") {
@@ -693,15 +721,18 @@ fn menu(
                         .relative()
                         .px_3()
                         .py_1()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(colors::BUTTON)))
                         .child(format!("{mark}{title}"))
-                        .child(scope.control_selected("menuitem", &title, true, value, selected))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.list_editor.menu = None;
-                            act(this, cx);
-                            cx.notify();
-                        })),
+                        .child(scope.control_selected("menuitem", &title, enabled, value, selected))
+                        .when(!enabled, |d| d.text_color(rgb(colors::DIM)))
+                        .when(enabled, |d| {
+                            d.cursor_pointer()
+                                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    close(this);
+                                    act(this, cx);
+                                    cx.notify();
+                                }))
+                        }),
                 )
             }
         };

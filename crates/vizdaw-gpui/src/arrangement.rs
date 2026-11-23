@@ -94,6 +94,23 @@ pub mod colors {
     /// The mini notes' alpha.
     pub const SKETCH_ALPHA: f32 = 0.55;
     pub const RADIUS: f32 = 4.;
+    /// The piano keyboard's keys and labels (fixed until themes land).
+    pub const WHITE_KEY: u32 = 0xe6e6ea;
+    pub const BLACK_KEY: u32 = 0x18181d;
+    pub const KEY_LABEL: u32 = 0x18181d;
+    /// A black key's bar on the keyboard, and its row's shade in the roll
+    /// (`LABEL` at this alpha).
+    pub const BLACK_KEY_ALPHA: f32 = 0.85;
+    pub const BLACK_ROW_ALPHA: f32 = 0.05;
+    /// The track colours, in order (red, orange, yellow, green, teal,
+    /// blue, purple, pink); a track takes its place in its sequence's
+    /// tracks, modulo 8.
+    pub const TRACK_SWATCHES: [u32; 8] = [
+        0xe5534b, 0xf0883e, 0xe3b341, 0x56c26a, 0x3fb8af, 0x4a8fe7, 0x9a6fd6, 0xe56fb0,
+    ];
+    /// A note's fill alpha on the edit track, and on the others.
+    pub const NOTE_ACTIVE_ALPHA: f32 = 0.85;
+    pub const NOTE_ALPHA: f32 = 0.4;
 }
 
 /// How often auto-scroll steps while a ruler drag is near an edge.
@@ -310,7 +327,7 @@ impl Arrangement {
                 }
                 layout.set(bounds);
                 let prepared = view.prepare(&state, bounds, &mut recorder);
-                playhead.set(prepared.playhead);
+                playhead.set(prepared.time.playhead);
                 prepared
             },
             move |bounds, prepared, window, cx| {
@@ -456,7 +473,7 @@ pub(crate) fn menu_list(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .text_color(rgb(bar_colors::TEXT))
 }
 
-fn menu_separator() -> AnyElement {
+pub(crate) fn menu_separator() -> AnyElement {
     div()
         .h(px(1.))
         .my_1()
@@ -482,7 +499,7 @@ fn menu_item(
 
 /// A tool bar button showing `text`, recorded as a `button` labelled
 /// `label` with `value` and `selected`.
-fn bar_button(
+pub(crate) fn bar_button(
     id: impl Into<gpui::ElementId>,
     text: &str,
     label: &str,
@@ -513,6 +530,35 @@ fn bar_button(
         .child(scope.control_selected("button", label, true, value, on && value.is_none()))
 }
 
+/// The segmented tool picker (Swift `Picker("Tool")`, labels hidden, 210
+/// points wide): one button per tool, the current one selected. The
+/// arrangement's tool bar and the piano roll's bar share the tool.
+pub(crate) fn tool_picker(
+    id: &'static str,
+    current: Tool,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> gpui::Div {
+    let mut picker = div().flex().flex_row().flex_none().gap(px(1.));
+    for tool in Tool::ALL {
+        picker = picker.child(
+            bar_button(
+                (id, tool as usize),
+                tool.title(),
+                tool.title(),
+                70.,
+                current == tool,
+                None,
+                scope,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.with_model(cx, |d| d.set_tool(tool));
+            })),
+        );
+    }
+    picker
+}
+
 /// The arrangement tool bar (Swift `ArrangementBar`, its tool, snap and
 /// zoom parts): the tool picker, the Snap toggle and its division menu,
 /// then the zoom buttons.
@@ -523,24 +569,7 @@ pub(crate) fn toolbar(
     window: &Window,
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
-    // Swift's segmented picker is 210 points wide.
-    let mut picker = div().flex().flex_row().flex_none().gap(px(1.));
-    for tool in Tool::ALL {
-        picker = picker.child(
-            bar_button(
-                ("tool", tool as usize),
-                tool.title(),
-                tool.title(),
-                70.,
-                state.tool == tool,
-                None,
-                scope,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.with_model(cx, |d| d.set_tool(tool));
-            })),
-        );
-    }
+    let picker = tool_picker("tool", state.tool, scope, cx);
     let snap = state.snap;
     let toggle = bar_button(
         "snap",
@@ -790,15 +819,150 @@ struct Scene {
 
 /// One frame, laid out in canvas points (y = 0 is the ruler's top).
 struct Prepared {
+    time: TimeLayer,
+    separators: Vec<f32>,
+    blocks: Vec<BlockDraw>,
+}
+
+/// The time parts every editor canvas draws (Swift `EditorCanvas`): the
+/// grid, the ruler's ticks and bar numbers, the selected range's shade
+/// and the playhead, laid out in canvas points (y = 0 is the ruler's
+/// top, the rows start at `RULER_HEIGHT`).
+pub(crate) struct TimeLayer {
     width: f32,
     height: f32,
     grid: Vec<(f32, GridKind)>,
     ruler: Vec<(f32, GridKind)>,
     labels: Vec<(f32, String)>,
-    separators: Vec<f32>,
-    blocks: Vec<BlockDraw>,
     shade: Option<(f32, f32)>,
-    playhead: Option<f32>,
+    /// The playhead's x, when it shows.
+    pub(crate) playhead: Option<f32>,
+}
+
+/// A rectangle in canvas points as window bounds, from the canvas origin.
+pub(crate) fn canvas_rect(o: Point<Pixels>, x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+    Bounds::new(point(o.x + px(x), o.y + px(y)), size(px(w), px(h)))
+}
+
+impl TimeLayer {
+    /// The lines, labels, shade (`range`) and playhead (at tick
+    /// `playhead`) of a canvas `width` × `height` showing `axis`.
+    pub(crate) fn new(
+        axis: &TimeAxis,
+        bars: &MeterBars,
+        width: f32,
+        height: f32,
+        range: Option<TickRange>,
+        playhead: Option<f64>,
+    ) -> Self {
+        let w = width;
+        let tpp = axis.ticks_per_point();
+        let snap = |tick: i64| axis.x(tick).round();
+        let grid = grid_lines_in(bars, axis.tick_at(-1.), axis.tick_at(w + 1.), tpp)
+            .into_iter()
+            .map(|l| (snap(l.tick), l.kind))
+            .collect();
+        let every = label_every(bar_length(&bars.first()), tpp);
+        let lines = grid_lines_in(bars, axis.tick_at(-60.), axis.tick_at(w), tpp);
+        let labels = lines
+            .iter()
+            .filter_map(|l| match l.kind {
+                GridKind::Bar(n) if (n - 1).div_euclid(every) * every == n - 1 => {
+                    Some((snap(l.tick) + 3., n.to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+        let ruler = lines.into_iter().map(|l| (snap(l.tick), l.kind)).collect();
+        let shade = range.map(|r| {
+            let x0 = axis.x(r.start);
+            (x0, (axis.x(r.end) - x0).max(1.))
+        });
+        let playhead = playhead.and_then(|tick| {
+            let x = ((tick - axis.origin() as f64) / tpp).round() as f32;
+            (x >= -1. && x <= w + 1.).then_some(x)
+        });
+        TimeLayer {
+            width,
+            height,
+            grid,
+            ruler,
+            labels,
+            shade,
+            playhead,
+        }
+    }
+
+    fn body_height(&self) -> f32 {
+        (self.height - RULER_HEIGHT).max(0.)
+    }
+
+    /// The rows' area in window bounds.
+    pub(crate) fn body(&self, o: Point<Pixels>) -> Bounds<Pixels> {
+        canvas_rect(o, 0., RULER_HEIGHT, self.width, self.body_height())
+    }
+
+    /// Under the rows: the canvas colour and the grid lines.
+    pub(crate) fn paint_grid(&self, o: Point<Pixels>, window: &mut Window) {
+        let body_h = self.body_height();
+        window.paint_quad(fill(self.body(o), rgb(colors::CANVAS)));
+        for (x, kind) in &self.grid {
+            let c = match kind {
+                GridKind::Bar(_) => colors::BAR_LINE,
+                GridKind::Beat => colors::BEAT_LINE,
+            };
+            window.paint_quad(fill(canvas_rect(o, *x, RULER_HEIGHT, 1., body_h), rgb(c)));
+        }
+    }
+
+    /// Over the rows: the selected range's shade and the playhead.
+    pub(crate) fn paint_overlay(&self, o: Point<Pixels>, window: &mut Window) {
+        let body_h = self.body_height();
+        if let Some((x, width)) = self.shade {
+            window.paint_quad(fill(
+                canvas_rect(o, x, RULER_HEIGHT, width, body_h),
+                hsla(colors::SELECTION, colors::BODY_SHADE),
+            ));
+        }
+        if let Some(x) = self.playhead {
+            window.paint_quad(fill(
+                canvas_rect(o, x, RULER_HEIGHT, 1., body_h),
+                rgb(colors::PLAYHEAD),
+            ));
+        }
+    }
+
+    /// The ruler: shade, bar and beat ticks, bar numbers, its bottom line.
+    pub(crate) fn paint_ruler(&self, o: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        let w = self.width;
+        let ruler = canvas_rect(o, 0., 0., w, RULER_HEIGHT);
+        window.with_content_mask(Some(ContentMask { bounds: ruler }), |window| {
+            window.paint_quad(fill(ruler, rgb(colors::RULER)));
+            if let Some((x, width)) = self.shade {
+                window.paint_quad(fill(
+                    canvas_rect(o, x, 0., width, RULER_HEIGHT),
+                    hsla(colors::SELECTION, colors::RULER_SHADE),
+                ));
+            }
+            for (x, kind) in &self.ruler {
+                let from = match kind {
+                    GridKind::Bar(_) => RULER_HEIGHT * 0.35,
+                    GridKind::Beat => RULER_HEIGHT * 0.7,
+                };
+                window.paint_quad(fill(
+                    canvas_rect(o, *x, from, 1., RULER_HEIGHT - from),
+                    rgb(colors::TICK),
+                ));
+            }
+            for (x, text) in &self.labels {
+                paint_text(text, o.x + px(*x), o.y + px(2.), colors::LABEL, window, cx);
+            }
+            window.paint_quad(fill(
+                canvas_rect(o, 0., RULER_HEIGHT - 1., w, 1.),
+                rgb(colors::SEPARATOR),
+            ));
+        });
+    }
 }
 
 struct BlockDraw {
@@ -820,30 +984,12 @@ impl Scene {
     ) -> Prepared {
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let axis = &self.axis;
-        let tpp = axis.ticks_per_point();
-        let snap = |tick: i64| axis.x(tick).round();
         let body = Rect {
             x: 0.,
             y: RULER_HEIGHT,
             width: w,
             height: (h - RULER_HEIGHT).max(0.),
         };
-        let grid = grid_lines_in(&state.bars, axis.tick_at(-1.), axis.tick_at(w + 1.), tpp)
-            .into_iter()
-            .map(|l| (snap(l.tick), l.kind))
-            .collect();
-        let every = label_every(bar_length(&state.bars.first()), tpp);
-        let lines = grid_lines_in(&state.bars, axis.tick_at(-60.), axis.tick_at(w), tpp);
-        let labels = lines
-            .iter()
-            .filter_map(|l| match l.kind {
-                GridKind::Bar(n) if (n - 1).div_euclid(every) * every == n - 1 => {
-                    Some((snap(l.tick) + 3., n.to_string()))
-                }
-                _ => None,
-            })
-            .collect();
-        let ruler = lines.into_iter().map(|l| (snap(l.tick), l.kind)).collect();
 
         let g = &self.geometry;
         let mut separators = vec![];
@@ -875,24 +1021,10 @@ impl Scene {
                 blocks.push(drawn);
             }
         }
-        let shade = self.range.map(|r| {
-            let x0 = axis.x(r.start);
-            (x0, (axis.x(r.end) - x0).max(1.))
-        });
-        let playhead = state.playhead.and_then(|tick| {
-            let x = ((tick - axis.origin() as f64) / tpp).round() as f32;
-            (x >= -1. && x <= w + 1.).then_some(x)
-        });
         Prepared {
-            width: w,
-            height: h,
-            grid,
-            ruler,
-            labels,
+            time: TimeLayer::new(axis, &state.bars, w, h, self.range, state.playhead),
             separators,
             blocks,
-            shade,
-            playhead,
         }
     }
 
@@ -923,78 +1055,29 @@ impl Scene {
     }
 }
 
-fn hsla(c: u32, alpha: f32) -> Hsla {
+pub(crate) fn hsla(c: u32, alpha: f32) -> Hsla {
     Hsla::from(rgb(c)).opacity(alpha)
 }
 
 impl Prepared {
     fn paint(self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let o = bounds.origin;
-        let rect = |x: f32, y: f32, w: f32, h: f32| {
-            Bounds::new(point(o.x + px(x), o.y + px(y)), size(px(w), px(h)))
-        };
-        let (w, h) = (self.width, self.height);
-        let body_h = (h - RULER_HEIGHT).max(0.);
-        let ruler = rect(0., 0., w, RULER_HEIGHT);
-        let body = rect(0., RULER_HEIGHT, w, body_h);
+        let rect = |x: f32, y: f32, w: f32, h: f32| canvas_rect(o, x, y, w, h);
+        let w = self.time.width;
+        let body = self.time.body(o);
 
         // The rows: canvas, grid, separators, blocks, shade, playhead.
         window.with_content_mask(Some(ContentMask { bounds: body }), |window| {
-            window.paint_quad(fill(body, rgb(colors::CANVAS)));
-            for (x, kind) in &self.grid {
-                let c = match kind {
-                    GridKind::Bar(_) => colors::BAR_LINE,
-                    GridKind::Beat => colors::BEAT_LINE,
-                };
-                window.paint_quad(fill(rect(*x, RULER_HEIGHT, 1., body_h), rgb(c)));
-            }
+            self.time.paint_grid(o, window);
             for y in &self.separators {
                 window.paint_quad(fill(rect(0., *y, w, 1.), rgb(colors::SEPARATOR)));
             }
             for b in &self.blocks {
                 paint_block(b, &rect, window, cx);
             }
-            if let Some((x, width)) = self.shade {
-                window.paint_quad(fill(
-                    rect(x, RULER_HEIGHT, width, body_h),
-                    hsla(colors::SELECTION, colors::BODY_SHADE),
-                ));
-            }
-            if let Some(x) = self.playhead {
-                window.paint_quad(fill(
-                    rect(x, RULER_HEIGHT, 1., body_h),
-                    rgb(colors::PLAYHEAD),
-                ));
-            }
+            self.time.paint_overlay(o, window);
         });
-
-        // The ruler: shade, bar and beat ticks, bar numbers, its bottom line.
-        window.with_content_mask(Some(ContentMask { bounds: ruler }), |window| {
-            window.paint_quad(fill(ruler, rgb(colors::RULER)));
-            if let Some((x, width)) = self.shade {
-                window.paint_quad(fill(
-                    rect(x, 0., width, RULER_HEIGHT),
-                    hsla(colors::SELECTION, colors::RULER_SHADE),
-                ));
-            }
-            for (x, kind) in &self.ruler {
-                let from = match kind {
-                    GridKind::Bar(_) => RULER_HEIGHT * 0.35,
-                    GridKind::Beat => RULER_HEIGHT * 0.7,
-                };
-                window.paint_quad(fill(
-                    rect(*x, from, 1., RULER_HEIGHT - from),
-                    rgb(colors::TICK),
-                ));
-            }
-            for (x, text) in &self.labels {
-                paint_text(text, o.x + px(*x), o.y + px(2.), colors::LABEL, window, cx);
-            }
-            window.paint_quad(fill(
-                rect(0., RULER_HEIGHT - 1., w, 1.),
-                rgb(colors::SEPARATOR),
-            ));
-        });
+        self.time.paint_ruler(o, window, cx);
     }
 }
 
@@ -1063,7 +1146,14 @@ fn paint_block(
     }
 }
 
-fn paint_text(text: &str, x: Pixels, y: Pixels, colour: u32, window: &mut Window, cx: &mut App) {
+pub(crate) fn paint_text(
+    text: &str,
+    x: Pixels,
+    y: Pixels,
+    colour: u32,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let font = window.text_style().font();
     let run = TextRun {
         len: text.len(),

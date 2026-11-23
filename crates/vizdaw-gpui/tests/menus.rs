@@ -120,6 +120,7 @@ fn the_menu_model_follows_the_swift_order() {
     assert_eq!(
         ids(4),
         [
+            Some("editors.piano_roll"),
             Some("editors.list"),
             None,
             Some("editors.close_detail"),

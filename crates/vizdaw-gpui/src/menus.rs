@@ -74,10 +74,12 @@ pub struct UnavailableCommand {
 /// The key context of a document window's root.
 pub const WINDOW_CONTEXT: &str = "DocumentWindow";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
-/// to its menus, keys and control channel: the grid, the List, closing the
-/// detail, Insert Event (the List's) and the bottom pane's toggle.
+/// to its menus, keys and control channel: the grid, the Piano Roll, the
+/// List, closing the detail, Insert Event (the List's) and the bottom
+/// pane's toggle.
 pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
+    "editors.piano_roll",
     "editors.list",
     "editors.close_detail",
     "editors.insert_event",
@@ -252,6 +254,7 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
             menu(
                 "Editors",
                 vec![
+                    cmd("editors.piano_roll"),
                     cmd("editors.list"),
                     ItemSpec::Separator,
                     cmd("editors.close_detail"),

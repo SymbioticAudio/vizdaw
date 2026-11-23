@@ -1,6 +1,6 @@
 //! The bottom pane and its detail editor (Swift `PaneFrame`, `DetailArea`
 //! and `DetailPane`): under the arrangement, a picker of the editor kinds
-//! (the List only, this slice), then the open detail's title and its close
+//! (the Piano Roll and the List, this slice), then the open detail's title and its close
 //! button over the editor, or the empty state when nothing is open. Its
 //! height follows the layout's bottom pane, fitted to the window as
 //! `PaneGeometry.swift` fits it.
@@ -14,6 +14,7 @@ use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::{DetailEditorKind, PaneSide, PaneState};
 
 use crate::list_editor::{self, ListEditor, ListState};
+use crate::piano_roll::{self, PianoRoll, RollState};
 use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
 use crate::transport_bar::{self, colors};
@@ -34,9 +35,9 @@ pub const CENTRE_MINIMUM: (f32, f32) = (240., 160.);
 /// The narrowest the pane shows (Swift `bottomMinimumWidth`).
 pub const BOTTOM_MINIMUM_WIDTH: f32 = 240.;
 
-/// The kinds the picker lists this slice (the others come with their
-/// editors).
-const KINDS: [DetailEditorKind; 1] = [DetailEditorKind::List];
+/// The kinds the picker lists this slice, in Swift's order (the others
+/// come with their editors).
+const KINDS: [DetailEditorKind; 2] = [DetailEditorKind::PianoRoll, DetailEditorKind::List];
 
 /// The pane's height in a regions area of `area` (under the transport bar,
 /// above the status line), or `None` when it does not show: hidden in the
@@ -84,13 +85,15 @@ impl DetailPaneState {
 
 /// The pane: `height` when shown; `None` keeps it mounted at zero height,
 /// out of the tree and the pointer's way (Swift keeps the hidden pane's
-/// editor mounted). `list` is the List editor's, when one is open.
-/// `scope` is the pane's own container.
+/// editor mounted). `list` is the List editor's, when one is open, and
+/// `roll` the Piano Roll's. `scope` is the pane's own container.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     state: &DetailPaneState,
     height: Option<Pixels>,
     menu_open: bool,
     list: Option<(&ListEditor, &ListState)>,
+    roll: Option<(&PianoRoll, RollState)>,
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
@@ -98,7 +101,7 @@ pub(crate) fn render(
     let shown = height.is_some();
     let picker = picker(state, menu_open && shown, scope, window, cx);
     let content = match &state.detail {
-        Some((kind, title)) => detail(*kind, title, list, scope, window, cx),
+        Some((kind, title)) => detail(*kind, title, list, roll, scope, window, cx),
         None => empty_state(scope),
     };
     div()
@@ -232,6 +235,7 @@ fn detail(
     kind: DetailEditorKind,
     title: &str,
     list: Option<(&ListEditor, &ListState)>,
+    roll: Option<(&PianoRoll, RollState)>,
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
@@ -269,8 +273,20 @@ fn detail(
                 this.with_model(cx, DocumentModel::close_detail);
             })),
         );
-    let editor = match (kind, list) {
-        (DetailEditorKind::List, Some((editor, state))) => div()
+    let editor = match (kind, list, roll) {
+        (DetailEditorKind::PianoRoll, _, Some((roll, state))) => div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(piano_roll::render(
+                roll,
+                state,
+                &mut scope.container(),
+                window,
+                cx,
+            )),
+        (DetailEditorKind::List, Some((editor, state)), _) => div()
             .flex()
             .flex_col()
             .flex_1()

@@ -30,6 +30,7 @@ use crate::detail_pane::{self, DetailPaneState};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
+use crate::piano_roll::{PianoRoll, RollState};
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::track_headers::{HeadersState, Rename, TrackHeaders};
@@ -70,6 +71,8 @@ pub struct DocumentWindow {
     pub(crate) detail_menu_open: bool,
     /// The List editor's table (its selection, scroll and cell edit).
     pub(crate) list_editor: ListEditor,
+    /// The Piano Roll (its axes, scroll and bar menus).
+    pub(crate) piano_roll: PianoRoll,
     /// The size of the area the arrangement and the bottom pane share, at
     /// the last draw (zero before the first).
     regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
@@ -204,6 +207,7 @@ impl DocumentWindow {
             more_open: false,
             detail_menu_open: false,
             list_editor,
+            piano_roll: PianoRoll::new(cx),
             regions: Rc::default(),
             _subscriptions: subscriptions,
         }
@@ -641,9 +645,11 @@ impl DocumentWindow {
     /// auto-repeat while the window has the keyboard.
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(forward) = held_key(&event.keystroke)
-            && window
-                .focused(cx)
-                .is_none_or(|f| f == self.focus || &f == self.arrangement.focus_handle())
+            && window.focused(cx).is_none_or(|f| {
+                f == self.focus
+                    || &f == self.arrangement.focus_handle()
+                    || &f == self.piano_roll.focus_handle()
+            })
         {
             cx.stop_propagation();
             self.with_shuttle(cx, |sh, d| {
@@ -661,12 +667,14 @@ impl DocumentWindow {
         let arrangement = self.arrangement.close_menus();
         let detail = std::mem::take(&mut self.detail_menu_open);
         let list = self.list_editor.close_menu();
+        let roll = self.piano_roll.close_menu();
         if self.menu_bar.as_mut().is_some_and(MenuBar::close)
             || headers
             || more
             || arrangement
             || detail
             || list
+            || roll
         {
             cx.stop_propagation();
             cx.notify();
@@ -931,6 +939,7 @@ impl Render for DocumentWindow {
             bottom,
             list_after,
             listed,
+            rolled,
         ) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
@@ -967,8 +976,20 @@ impl Render for DocumentWindow {
                 d.map(|d| self.list_editor.prepare(d, fallback)),
                 d.filter(|d| d.list_open())
                     .map(|d| ListState::of(d, &self.list_editor, fallback)),
+                // The roll's axes first: the notes drawn follow them.
+                d.filter(|d| self.piano_roll.prepare(d))
+                    .and_then(|d| RollState::of(d, s.transport(doc), Instant::now())),
             )
         };
+        match &rolled {
+            Some(r) => {
+                self.piano_roll.follow(r);
+                if r.playing() {
+                    window.request_animation_frame();
+                }
+            }
+            None => self.roll_unmounted(window, cx),
+        }
         if let Some(after) = list_after {
             self.list_after(after, window, cx);
         }
@@ -980,6 +1001,7 @@ impl Render for DocumentWindow {
         self.sync_list_focus(listed.is_some() && bottom_height.is_some(), window, cx);
         if bottom_height.is_none() {
             self.detail_menu_open = false;
+            self.piano_roll.menu = None;
         }
         let plan = Plan::new(&layout, f32::from(window.viewport_size().width));
         self.set_shown_fields(
@@ -1115,6 +1137,7 @@ impl Render for DocumentWindow {
                             bottom_height,
                             self.detail_menu_open,
                             listed.as_ref().map(|l| (&self.list_editor, l)),
+                            rolled.map(|r| (&self.piano_roll, r)),
                             scope,
                             window,
                             cx,
