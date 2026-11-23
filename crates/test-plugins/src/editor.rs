@@ -10,8 +10,8 @@
 use crate::plugin::MainThread;
 use crate::{
     PARAM_DESTROY_UNREGISTER, PARAM_GUI_DESTROY_UNREGISTER, PARAM_GUI_HEIGHT, PARAM_GUI_OPEN,
-    PARAM_GUI_REQUEST_RESIZE, PARAM_GUI_RESIZABLE, PARAM_GUI_SCALE, PARAM_GUI_SCALED_FIRST,
-    PARAM_GUI_WIDTH,
+    PARAM_GUI_REFUSE_SET_SIZE, PARAM_GUI_REQUEST_RESIZE, PARAM_GUI_RESIZABLE, PARAM_GUI_SCALE,
+    PARAM_GUI_SCALED_FIRST, PARAM_GUI_SET_SIZES, PARAM_GUI_WIDTH,
 };
 use clack_extensions::gui::{
     GuiApiType, GuiConfiguration, GuiSize, HostGui, PluginGuiImpl, Window,
@@ -40,6 +40,10 @@ pub struct Editor {
     /// −1 before any.
     scaled_first: f64,
     size: GuiSize,
+    /// Its next `set_size` fails.
+    refuse_set_size: bool,
+    /// `set_size` calls so far.
+    set_sizes: u32,
     /// Timers to unregister in `gui.destroy` and in the plug-in's destroy.
     gui_destroy_unregister: Option<u32>,
     destroy_unregister: Option<u32>,
@@ -57,6 +61,8 @@ impl Default for Editor {
                 width: BASE_SIZE.0,
                 height: BASE_SIZE.1,
             },
+            refuse_set_size: false,
+            set_sizes: 0,
             gui_destroy_unregister: None,
             destroy_unregister: None,
         }
@@ -90,14 +96,19 @@ impl MainThread<'_> {
         let mut e = self.editor.borrow_mut();
         match id {
             PARAM_GUI_RESIZABLE => e.resizable = v != 0,
+            PARAM_GUI_REFUSE_SET_SIZE => e.refuse_set_size = v != 0,
             PARAM_GUI_DESTROY_UNREGISTER => e.gui_destroy_unregister = Some(v),
             PARAM_DESTROY_UNREGISTER => e.destroy_unregister = Some(v),
             PARAM_GUI_REQUEST_RESIZE => {
                 drop(e);
+                let (width, height) = (v >> 16, v & 0xFFFF);
                 let ok = self
                     .host
                     .get_extension::<HostGui>()
-                    .is_some_and(|g| g.request_resize(&self.host, v >> 16, v & 0xFFFF).is_ok());
+                    .is_some_and(|g| g.request_resize(&self.host, width, height).is_ok());
+                if ok {
+                    self.editor.borrow_mut().size = GuiSize { width, height };
+                }
                 return Some(f64::from(u8::from(ok)));
             }
             _ => {}
@@ -114,6 +125,7 @@ impl MainThread<'_> {
             PARAM_GUI_WIDTH => f64::from(e.size.width),
             PARAM_GUI_HEIGHT => f64::from(e.size.height),
             PARAM_GUI_OPEN => f64::from(u8::from(e.created)),
+            PARAM_GUI_SET_SIZES => f64::from(e.set_sizes),
             _ => return None,
         })
     }
@@ -205,6 +217,10 @@ impl PluginGuiImpl for MainThread<'_> {
 
     fn set_size(&self, size: GuiSize) -> Result<(), PluginError> {
         let mut e = self.editor.borrow_mut();
+        e.set_sizes += 1;
+        if std::mem::take(&mut e.refuse_set_size) {
+            return Err(PluginError::Message("refused"));
+        }
         if !e.resizable {
             return Err(PluginError::Message("fixed size"));
         }

@@ -58,6 +58,9 @@ pub struct ClapInstance {
     /// Physical pixels per point of the open editor's sizes: its scale on
     /// a physical-pixel window API (X11), 1 on a logical one (Cocoa).
     gui_scale: f64,
+    /// The open editor's window size in the API's units, as last opened,
+    /// resized or followed: a request that fails goes back to it.
+    gui_size: Option<GuiSize>,
     /// The parameters set a step away and back before a second activation
     /// (plan 6g Task 5): the bundled Multi-Q's continuous, writable ones;
     /// empty for every other plug-in.
@@ -135,6 +138,7 @@ impl ClapInstance {
             gui_open: false,
             scale: 1.0,
             gui_scale: 1.0,
+            gui_size: None,
             refresh: Vec::new(),
         };
         me.read_info();
@@ -417,7 +421,7 @@ impl PluginInstance for ClapInstance {
         }
         if Flags::take(&self.flags.gui_closed) {
             self.gui_open = false;
-            self.flags.gui_resizable.store(false, Ordering::Release);
+            self.flags.gui_open.store(false, Ordering::Release);
         }
         let editor_resize = self.editor_resize_request();
         InstanceEvents {
@@ -492,23 +496,35 @@ fn from_points(width: u32, height: u32, scale: f64) -> GuiSize {
 
 impl ClapInstance {
     /// Applies the editor's last `request_resize` (main thread, from
-    /// `idle`): only while it is open and can resize, clamped through its
-    /// `adjust_size`, then set; returns the size it took in points. A
-    /// refused request changes nothing.
+    /// `idle`) and returns the size the window should take, in points. A
+    /// resizable editor's request is clamped through its `adjust_size` and
+    /// set; a fixed-size editor's is followed as asked (CLAP lets it ask,
+    /// for a zoom menu or a panel), with no `set_size`. When the size cannot
+    /// be set, the editor is set back to the window's size (CLAP: the host
+    /// reverts a request it acknowledged but cannot satisfy) and nothing is
+    /// reported.
     fn editor_resize_request(&mut self) -> Option<(u32, u32)> {
-        let hints = Flags::take(&self.flags.gui_hints);
-        let want = self.flags.take_resize();
-        if !self.gui_open || (want.is_none() && !hints) {
+        let want = self.flags.take_resize()?;
+        if !self.gui_open {
             return None;
         }
         let gui = self.exts().gui?;
-        let mut inst = self.inst.borrow_mut();
+        let inst = Rc::clone(&self.inst);
+        let mut inst = inst.borrow_mut();
         let h = inst.plugin_handle();
-        let resizable = gui.can_resize(&h);
-        self.flags.gui_resizable.store(resizable, Ordering::Release);
-        let want = want.filter(|_| resizable)?;
-        let size = gui.adjust_size(&h, want).unwrap_or(want);
-        gui.set_size(&h, size).ok()?;
+        let size = if gui.can_resize(&h) {
+            let size = gui.adjust_size(&h, want).unwrap_or(want);
+            if gui.set_size(&h, size).is_err() {
+                if let Some(before) = self.gui_size {
+                    let _ = gui.set_size(&h, before);
+                }
+                return None;
+            }
+            size
+        } else {
+            want
+        };
+        self.gui_size = Some(size);
         Some(to_points(size, self.gui_scale))
     }
 
@@ -517,7 +533,8 @@ impl ClapInstance {
         gui.hide(h).ok();
         gui.destroy(h);
         self.gui_open = false;
-        self.flags.gui_resizable.store(false, Ordering::Release);
+        self.gui_size = None;
+        self.flags.gui_open.store(false, Ordering::Release);
         self.flags.gui_resize.store(0, Ordering::Release);
     }
 }
@@ -542,7 +559,6 @@ impl PluginEditor for ClapInstance {
         }
         // Nothing from an earlier editor carries over.
         self.flags.gui_resize.store(0, Ordering::Release);
-        self.flags.gui_hints.store(false, Ordering::Release);
         gui.create(
             &h,
             GuiConfiguration {
@@ -562,9 +578,8 @@ impl PluginEditor for ClapInstance {
             let _ = gui.set_scale(&h, self.scale);
             self.scale
         };
-        self.flags
-            .gui_resizable
-            .store(gui.can_resize(&h), Ordering::Release);
+        // Requests count from here (set_parent and show may make one).
+        self.flags.gui_open.store(true, Ordering::Release);
         if let Err(e) = ffi::set_native_parent(&gui, &h, parent.0) {
             self.destroy_gui(&gui, &h);
             return Err(e);
@@ -573,10 +588,10 @@ impl PluginEditor for ClapInstance {
             self.destroy_gui(&gui, &h);
             return Err(HostError::EditorUnavailable(format!("{e:?}")));
         }
-        let size = gui
-            .get_size(&h)
-            .map_or((400, 300), |s| to_points(s, self.gui_scale));
-        Ok(size)
+        self.gui_size = gui.get_size(&h);
+        Ok(self
+            .gui_size
+            .map_or((400, 300), |s| to_points(s, self.gui_scale)))
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<(u32, u32), HostError> {
@@ -590,6 +605,7 @@ impl PluginEditor for ClapInstance {
         let want = gui.adjust_size(&h, asked).unwrap_or(asked);
         gui.set_size(&h, want)
             .map_err(|e| HostError::EditorUnavailable(format!("{e:?}")))?;
+        self.gui_size = Some(want);
         Ok(to_points(want, self.gui_scale))
     }
 

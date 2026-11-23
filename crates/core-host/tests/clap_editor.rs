@@ -9,9 +9,9 @@ use core_host::{ParentView, PluginInstance};
 use core_model::mixer::ParamId;
 use std::ffi::c_void;
 use test_plugins::{
-    BASE_SIZE, MAX_SIZE, PARAM_GUI_HEIGHT, PARAM_GUI_OPEN, PARAM_GUI_REQUEST_RESIZE,
-    PARAM_GUI_RESIZABLE, PARAM_GUI_SCALE, PARAM_GUI_SCALED_FIRST, PARAM_GUI_WIDTH,
-    PARAM_LAST_RESULT,
+    BASE_SIZE, MAX_SIZE, PARAM_GUI_HEIGHT, PARAM_GUI_OPEN, PARAM_GUI_REFUSE_SET_SIZE,
+    PARAM_GUI_REQUEST_RESIZE, PARAM_GUI_RESIZABLE, PARAM_GUI_SCALE, PARAM_GUI_SCALED_FIRST,
+    PARAM_GUI_SET_SIZES, PARAM_GUI_WIDTH, PARAM_LAST_RESULT,
 };
 
 mod common;
@@ -175,20 +175,62 @@ fn a_resizable_editors_request_is_clamped_set_and_reported_once_in_points() {
     assert_eq!(plugin_size(p), (MAX_SIZE.0, 100));
 }
 
+fn set_sizes(p: &mut dyn PluginInstance) -> u32 {
+    read(p, PARAM_GUI_SET_SIZES) as u32
+}
+
+/// CLAP lets a fixed-size editor ask too (a zoom menu, a panel shown):
+/// the window follows the size it asked for; the host neither adjusts nor
+/// sets it.
 #[test]
-fn a_fixed_editor_refuses_resize_requests_and_nothing_changes() {
+fn a_fixed_editors_request_is_reported_as_asked_without_set_size() {
     let (mut p, _) = opened(false, SCALE);
     let p = p.as_mut();
+    let (w, h) = (px(400, SCALE) + 1, px(300, SCALE));
+    assert_eq!(request(p, w, h), 1.0, "accepted");
+    let want = if cfg!(target_os = "macos") {
+        (w, h)
+    } else {
+        (401, 300)
+    };
+    assert_eq!(p.idle().editor_resize, Some(want));
+    assert_eq!(set_sizes(p), 0, "no set_size for a fixed editor");
+    assert_eq!(plugin_size(p), (w, h));
+    // Not clamped either: `adjust_size` is for resizable editors.
+    assert_eq!(request(p, 9000, 10), 1.0);
+    let s = api_scale(SCALE);
+    let want = ((9000.0 / s).ceil() as u32, (10.0 / s).ceil() as u32);
+    assert_eq!(p.idle().editor_resize, Some(want));
+    assert_eq!(set_sizes(p), 0);
+    assert_eq!(p.idle().editor_resize, None, "reported once");
+}
+
+/// An accepted request the host cannot apply (the editor refused
+/// `set_size`) puts the editor back at the window's size and reports
+/// nothing.
+#[test]
+fn a_request_that_fails_at_idle_restores_the_windows_size() {
+    let (mut p, opened_at) = opened(true, SCALE);
+    let p = p.as_mut();
     let before = plugin_size(p);
-    assert_eq!(request(p, 800, 600), 0.0, "refused");
+    assert_eq!(before, (px(opened_at.0, SCALE), px(opened_at.1, SCALE)));
+    cmd(p, PARAM_GUI_REFUSE_SET_SIZE, 1.0);
+    assert_eq!(request(p, 900, 700), 1.0, "accepted");
+    assert_eq!(plugin_size(p), (900, 700), "it grew itself");
+    assert_eq!(p.idle().editor_resize, None, "not applied");
+    assert_eq!(set_sizes(p), 2, "the refused set_size, then the restore");
+    assert_eq!(plugin_size(p), before, "back at the window's size");
+    // The window's size is the one a later resize or request changed.
+    assert_eq!(p.editor().unwrap().resize(500, 400).unwrap(), (500, 400));
+    cmd(p, PARAM_GUI_REFUSE_SET_SIZE, 1.0);
+    assert_eq!(request(p, 900, 700), 1.0);
     assert_eq!(p.idle().editor_resize, None);
-    assert_eq!(plugin_size(p), before);
+    assert_eq!(plugin_size(p), (px(500, SCALE), px(400, SCALE)));
 }
 
 #[test]
 fn requests_without_an_open_editor_are_refused_or_dropped() {
     let mut p = common::load(TIMER);
-    cmd(p.as_mut(), PARAM_GUI_RESIZABLE, 1.0);
     assert_eq!(request(p.as_mut(), 800, 600), 0.0, "not open yet");
     let ed = p.editor().unwrap();
     ed.open(parent()).unwrap();

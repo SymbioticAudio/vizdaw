@@ -147,7 +147,9 @@ pub const PARAM_LAST_RESULT: u32 = 210;
 pub const PARAM_GUI_RESIZABLE: u32 = 220;
 /// Timer kind's editor: asks the host to resize it to `value >> 16` by
 /// `value & 0xFFFF` (the API's units, CLAP `request_resize`);
-/// [`PARAM_LAST_RESULT`] reads 1 when the host accepted, else 0.
+/// [`PARAM_LAST_RESULT`] reads 1 when the host accepted, else 0. Accepted,
+/// it takes that size itself at once (as editors that grow a panel do),
+/// resizable or not.
 pub const PARAM_GUI_REQUEST_RESIZE: u32 = 221;
 /// Timer kind: unregisters timer `value` inside the next `gui.destroy`
 /// and appends `gui.destroy unregister <id>: <1|0>` to `<bundle>.log`.
@@ -167,6 +169,11 @@ pub const PARAM_GUI_WIDTH: u32 = 232;
 pub const PARAM_GUI_HEIGHT: u32 = 233;
 /// Timer kind's editor: reads 1 while created, else 0.
 pub const PARAM_GUI_OPEN: u32 = 234;
+/// Timer kind's editor: 1 makes its next `set_size` fail (once).
+pub const PARAM_GUI_REFUSE_SET_SIZE: u32 = 224;
+/// Timer kind's editor: reads how many `set_size` calls it got (accepted
+/// or not).
+pub const PARAM_GUI_SET_SIZES: u32 = 235;
 /// Timer kind: reads how many times timer `id` fired, at `PARAM_TIMER_FIRES + id`.
 pub const PARAM_TIMER_FIRES: u32 = 1000;
 /// Timer kind: reads how many callbacks descriptor `fd` had, at `PARAM_FD_CALLS + fd`.

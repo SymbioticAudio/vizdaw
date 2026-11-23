@@ -61,11 +61,8 @@ pub(crate) struct Flags {
     pub state_dirty: AtomicBool,
     pub ports: AtomicBool,
     pub gui_closed: AtomicBool,
-    /// The editor is open and said it can resize: `request_resize` is
-    /// accepted (and checked again on the main thread).
-    pub gui_resizable: AtomicBool,
-    /// Its resize hints changed: `can_resize` is read again.
-    pub gui_hints: AtomicBool,
+    /// An editor is open: `request_resize` is accepted.
+    pub gui_open: AtomicBool,
     /// The last accepted `request_resize`, in the API's units
     /// ([`GuiSize::pack_to_u64`]; 0: none).
     pub gui_resize: AtomicU64,
@@ -178,20 +175,19 @@ impl HostParamsImplShared for Shared {
 
 impl HostGuiImpl for Shared {
     fn resize_hints_changed(&self) {
-        self.flags.gui_hints.store(true, Ordering::Release);
+        // `can_resize` is read live when a request is applied.
     }
 
-    /// Accepted only while a resizable editor is open; the main thread
-    /// clamps it through `adjust_size`, sets it and reports it at the next
-    /// idle (`InstanceEvents::editor_resize`). The last request wins.
+    /// Accepted while an editor is open, resizable or not (a fixed-size
+    /// editor asks too, for a zoom menu or a panel it shows). The main
+    /// thread applies it at the next idle (`InstanceEvents::editor_resize`);
+    /// the last request wins.
     fn request_resize(&self, size: GuiSize) -> Result<(), HostError> {
         if size.width == 0 || size.height == 0 {
             return Err(HostError::Message("an empty size"));
         }
-        if !self.flags.gui_resizable.load(Ordering::Acquire) {
-            return Err(HostError::Message(
-                "the editor is not open or not resizable",
-            ));
+        if !self.flags.gui_open.load(Ordering::Acquire) {
+            return Err(HostError::Message("no editor is open"));
         }
         self.flags
             .gui_resize
