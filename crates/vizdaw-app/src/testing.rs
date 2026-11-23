@@ -65,6 +65,10 @@ struct State {
     dests: Vec<DestRow>,
     lanes_reads: usize,
     event_reads: usize,
+    auditions: Vec<(String, u8, u64)>,
+    /// What `audition` answers when it is not refused: false is "this
+    /// session does not hold the engine".
+    audition_sent: bool,
 }
 
 /// What the session keeps of a selection it is given (after dropping
@@ -156,6 +160,8 @@ impl FakeSession {
             dests: vec![],
             lanes_reads: 0,
             event_reads: 0,
+            auditions: vec![],
+            audition_sent: true,
         }))
     }
 
@@ -380,7 +386,7 @@ impl FakeSession {
 
     /// Makes `call` (`begin_edit`, `edit_gesture`, `end_edit`,
     /// `abort_edit`, `edit_all`, `seconds_at`, `ticks_at`, `ui_layout`,
-    /// `set_ui_layout`, `destinations`, `lanes`, `lane_events`) answer `e` every time (`None`: normally again).
+    /// `set_ui_layout`, `destinations`, `lanes`, `lane_events`, `audition`) answer `e` every time (`None`: normally again).
     pub fn set_call_error(&self, call: &str, e: Option<VizError>) {
         let mut s = self.st();
         match e {
@@ -441,6 +447,18 @@ impl FakeSession {
     /// `lane_events` calls.
     pub fn event_reads(&self) -> usize {
         self.st().event_reads
+    }
+
+    /// Every audition note sent, in order: `("on" | "off", pitch, dest)`.
+    pub fn auditions(&self) -> Vec<(String, u8, u64)> {
+        self.st().auditions.clone()
+    }
+
+    /// Whether `audition` sends (the default) or answers false, as a
+    /// session that does not hold the engine does. A Busy refusal is
+    /// scripted with `set_call_error("audition", ..)` or `fail_next`.
+    pub fn set_audition_sent(&self, sent: bool) {
+        self.st().audition_sent = sent;
     }
 
     /// Every `edit_all(label, cmds)`, in order.
@@ -883,6 +901,16 @@ impl DocSession for FakeSession {
         let mut s = self.st();
         Self::scripted(&mut s, "ui_layout")?;
         Ok(s.layout.clone())
+    }
+    fn audition(&self, dest: u64, pitch: u8, _velocity: u16, on: bool) -> Result<bool, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "audition")?;
+        if !s.audition_sent {
+            return Ok(false);
+        }
+        s.auditions
+            .push(((if on { "on" } else { "off" }).into(), pitch, dest));
+        Ok(true)
     }
     fn set_ui_layout(&self, json: String) -> Result<(), VizError> {
         let mut s = self.st();

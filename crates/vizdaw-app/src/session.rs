@@ -85,6 +85,10 @@ pub trait DocSession: Send + Sync {
     fn ui_layout(&self) -> Result<Option<String>, VizError>;
     /// Hands `ui.json` to the session; the next save writes it.
     fn set_ui_layout(&self, json: String) -> Result<(), VizError>;
+    /// Sounds (`on`) or releases `pitch` on destination `dest`, touching
+    /// no document. False: this session does not hold the engine, or the
+    /// loaded sequence does not play on `dest`.
+    fn audition(&self, dest: u64, pitch: u8, velocity: u16, on: bool) -> Result<bool, VizError>;
 }
 
 impl DocSession for Session {
@@ -218,5 +222,8 @@ impl DocSession for Session {
     }
     fn set_ui_layout(&self, json: String) -> Result<(), VizError> {
         Session::set_ui_layout(self, json)
+    }
+    fn audition(&self, dest: u64, pitch: u8, velocity: u16, on: bool) -> Result<bool, VizError> {
+        Session::audition(self, dest, pitch, velocity, on)
     }
 }

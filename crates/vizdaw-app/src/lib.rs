@@ -3,6 +3,7 @@
 
 pub mod alerts;
 pub mod arrangement;
+pub mod audition;
 pub mod commands;
 pub mod document;
 pub mod editor;

@@ -181,7 +181,8 @@ impl DocumentStore {
             self.key_window = None;
         }
         self.recent_key.retain(|d| *d != id);
-        if let Some(doc) = self.documents.remove(&id) {
+        if let Some(mut doc) = self.documents.remove(&id) {
+            doc.audition_off_all();
             let session = doc.session();
             if session.transport().map(|t| t.playing).unwrap_or(false) {
                 let _ = session.stop();

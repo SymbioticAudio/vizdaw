@@ -213,7 +213,7 @@ impl DocumentModel {
     /// retried first. True when a new snapshot arrived or a drag was
     /// pending.
     pub fn idle(&mut self) -> bool {
-        let pending = self.gesture_pending();
+        let pending = self.gesture_pending() || self.has_pending_note_offs();
         self.tick();
         let arrived = match self.session.idle() {
             Ok(Some(s)) => {

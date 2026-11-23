@@ -17,8 +17,10 @@ use vizdaw_ffi::snapshot::LaneRow;
 use vizdaw_ffi::tracks::TrackKindRow;
 
 use crate::arrangement::bar_at;
+use crate::audition::AuditionNote;
 use crate::document::DocumentModel;
 use crate::editor::{DetailEditorKind, EditorTarget, Tool};
+use crate::piano_roll::AuditionRequest;
 
 /// A request that the roll showing `target` scroll to `tick`; a new
 /// `serial` is a new request, so asking again scrolls again.
@@ -77,6 +79,8 @@ pub struct PianoRollModel {
     pub(crate) chosen_lane: Option<LaneRef>,
     pub(crate) reveal: Option<PianoRollReveal>,
     reveal_serial: u64,
+    /// The note sounding under the pointer: the one source of truth.
+    pub(crate) sounding: Option<AuditionNote>,
     built: Mutex<Option<(RollKey, Arc<[LaneNotes]>)>>,
     builds: Mutex<u64>,
 }
@@ -87,6 +91,7 @@ impl Default for PianoRollModel {
             chosen_lane: None,
             reveal: None,
             reveal_serial: 0,
+            sounding: None,
             built: Mutex::new(None),
             builds: Mutex::new(0),
         }
@@ -122,6 +127,11 @@ impl PianoRollModel {
     /// The track last chosen (by a press, a selection or Insert Into).
     pub fn chosen_lane(&self) -> Option<LaneRef> {
         self.chosen_lane
+    }
+
+    /// The note sounding now, if any.
+    pub fn sounding(&self) -> Option<AuditionNote> {
+        self.sounding
     }
 
     /// The scroll the Pencil in the arrangement asked for, if any.
@@ -312,6 +322,42 @@ impl DocumentModel {
     pub fn roll_dest(&self, note: &EventRow, key: LaneRef) -> Option<u64> {
         note.dest
             .or_else(|| self.roll_row(key).and_then(|r| r.midi_dest))
+    }
+
+    /// Sounds `pitch` (ending the previous note); no destination is
+    /// silence only. The same note again does nothing.
+    pub fn roll_sound(&mut self, pitch: u8, velocity: u16, dest: Option<u64>) {
+        let next = dest.map(|dest| AuditionNote { dest, pitch });
+        if next == self.editor.roll.sounding {
+            return;
+        }
+        self.roll_silence();
+        let Some(next) = next else {
+            return;
+        };
+        self.audition_on(next, velocity);
+        self.editor.roll.sounding = Some(next);
+    }
+
+    /// Ends the sounding note, if any.
+    pub fn roll_silence(&mut self) {
+        if let Some(s) = self.editor.roll.sounding.take() {
+            self.audition_off(s);
+        }
+    }
+
+    /// Acts on what the canvas asked of the audition, in order.
+    pub fn roll_audition(&mut self, requests: &[AuditionRequest]) {
+        for r in requests {
+            match *r {
+                AuditionRequest::Sound {
+                    pitch,
+                    velocity,
+                    dest,
+                } => self.roll_sound(pitch, velocity, dest),
+                AuditionRequest::Silence => self.roll_silence(),
+            }
+        }
     }
 
     /// Selects `notes` (with their tracks; no time range); `adding` keeps

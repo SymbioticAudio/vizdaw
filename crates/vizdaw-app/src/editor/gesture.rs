@@ -167,9 +167,10 @@ impl DocumentModel {
         }
     }
 
-    /// Retries a mouse-up or an Escape that met Busy (called every poll;
-    /// does nothing, and calls no session, when nothing waits).
+    /// Retries a note-off, a mouse-up or an Escape that met Busy (called
+    /// every poll; calls no session when nothing waits).
     pub fn tick(&mut self) {
+        self.retry_note_offs();
         let Some(g) = &self.editor.gesture else {
             return;
         };

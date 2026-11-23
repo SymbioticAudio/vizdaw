@@ -66,6 +66,8 @@ pub struct EditorModel {
     pub(crate) list: crate::list::ListModel,
     /// The detail pane's piano roll (edit lane, reveal, cached notes).
     pub(crate) roll: crate::piano_roll::PianoRollModel,
+    /// The audition notes held, the note-offs to retry.
+    pub(crate) audition: crate::audition::Audition,
 }
 
 impl EditorModel {
@@ -78,6 +80,7 @@ impl EditorModel {
             ui_json: json.map(String::from),
             list: crate::list::ListModel::default(),
             roll: crate::piano_roll::PianoRollModel::default(),
+            audition: crate::audition::Audition::default(),
         }
     }
 
