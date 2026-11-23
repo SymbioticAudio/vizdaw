@@ -2,9 +2,10 @@
 //! `TransportRowView`, `TransportItemViews`, `TransportReadoutsView`,
 //! `TransportFieldsView`): the cluster (Return to Start, Rewind, Fast
 //! Forward, Play/Stop), Loop, the four readouts, the Position and Edit
-//! In/Out fields and flexible space; what does not fit folds, last first,
-//! into the » menu. Recording, the click, step entry, faults and the view
-//! items come with their slices and are not drawn yet.
+//! In/Out fields, flexible space, the Main View picker and the pane
+//! toggles; what does not fit folds, last first, into the » menu.
+//! Recording, the click, step entry and faults come with their slices and
+//! are not drawn yet.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -12,12 +13,14 @@ use gpui::{
     MouseDownEvent, ParentElement, Rgba, Stateful, StatefulInteractiveElement, Styled, Window,
     anchored, deferred, div, point, px, rgb,
 };
+use vizdaw_app::editor::{MainView, PaneSide};
 use vizdaw_app::transport::{ReadoutBox, TransportReadout};
 use vizdaw_app::transport_bar::{Fit, ItemKind, TransportItem, TransportLayout, fit};
 use vizdaw_app::transport_fields::TransportField;
 
 use crate::control;
-use crate::menus::PlayStop;
+use crate::menus::{PlayStop, RunCommand};
+use crate::panes;
 use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
 use crate::transport_fields::TransportFields;
@@ -32,6 +35,10 @@ pub struct BarState {
     pub looping: bool,
     /// What each field shows when it is not being typed in.
     pub field_texts: Vec<(TransportField, String)>,
+    /// The window's main view.
+    pub main: MainView,
+    /// Whether the main view shows each pane (left, bottom, right).
+    pub panes: [bool; 3],
 }
 
 impl BarState {
@@ -70,6 +77,27 @@ const LOOP: f32 = 48.;
 const FIELD: f32 = 86.;
 const LABEL_GAP: f32 = 4.;
 const HEIGHT: f32 = 36.;
+/// A Main View segment's width.
+const SEGMENT: f32 = 60.;
+
+/// The Main View picker's label (Swift `MainViewItem`).
+pub const MAIN_VIEW: &str = "Main View";
+
+/// The pane toggles' commands, in bar order (Swift
+/// `TransportItemEntries.panes`).
+const PANE_TOGGLES: [(&str, PaneSide, &str); 3] = [
+    ("ui.toggle_left", PaneSide::Left, "\u{25e7}"),
+    ("ui.toggle_bottom", PaneSide::Bottom, "\u{2b13}"),
+    ("ui.toggle_right", PaneSide::Right, "\u{25e8}"),
+];
+
+/// The commands that show each main view.
+fn view_command(main: MainView) -> &'static str {
+    match main {
+        MainView::Arrange => "ui.view_arrange",
+        MainView::Mix => "ui.view_mix",
+    }
+}
 
 /// The » button's label, and what a channel click on it says (Swift
 /// `TransportRowView.channelNote`).
@@ -86,6 +114,8 @@ pub enum Piece {
     Position,
     EditFields,
     Space,
+    MainView,
+    Panes,
 }
 
 impl Piece {
@@ -100,6 +130,8 @@ impl Piece {
             TransportItem::PositionField => Piece::Position,
             TransportItem::EditFields => Piece::EditFields,
             TransportItem::Space => Piece::Space,
+            TransportItem::MainView => Piece::MainView,
+            TransportItem::Panes => Piece::Panes,
             _ => return None,
         })
     }
@@ -120,6 +152,8 @@ impl Piece {
                     + GAP
             }
             Piece::Space => 0.,
+            Piece::MainView => 2. * SEGMENT + 1.,
+            Piece::Panes => 3. * CLUSTER_BUTTON + 2. * CLUSTER_GAP,
         }
     }
 
@@ -135,6 +169,8 @@ impl Piece {
             Piece::Position => "Position Field",
             Piece::EditFields => "Edit In and Out",
             Piece::Space => "Flexible Space",
+            Piece::MainView => MAIN_VIEW,
+            Piece::Panes => "Pane Toggles",
         }
     }
 
@@ -460,6 +496,74 @@ fn field(
         .into_any_element()
 }
 
+/// The Main View picker (Swift `MainViewItem`, a segmented picker): one
+/// segment per view, the current one selected; a click runs the View
+/// menu's command. `scope` is the picker's own container.
+fn main_view(
+    current: MainView,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let mut picker = div()
+        .relative()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .gap(px(1.))
+        .child(scope.this("group", MAIN_VIEW, true));
+    for main in MainView::ALL {
+        let on = main == current;
+        let title = panes::main_title(main);
+        picker = picker.child(
+            face(
+                ("main-view", main as usize),
+                title,
+                true,
+                if on { colors::ON } else { colors::BUTTON },
+            )
+            .w(px(SEGMENT))
+            .child(scope.control_selected("button", title, true, None, on))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.run_command(&RunCommand::new(view_command(main)), window, cx)
+            })),
+        );
+    }
+    picker.into_any_element()
+}
+
+/// The pane toggles (Swift `PanesItem`): one per pane, on while the main
+/// view shows it; a click runs the View menu's toggle.
+fn pane_toggles(
+    on: [bool; 3],
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let mut row = div().flex().flex_row().flex_none().gap(px(CLUSTER_GAP));
+    for (id, side, glyph) in PANE_TOGGLES {
+        let shown = on[side as usize];
+        row = row.child(
+            face(
+                ("pane-toggle", side as usize),
+                glyph,
+                true,
+                if shown { colors::ON } else { colors::BUTTON },
+            )
+            .w(px(CLUSTER_BUTTON))
+            .child(scope.control_with(
+                "button",
+                panes::side_title(side),
+                true,
+                Some(if shown { "on" } else { "off" }),
+                false,
+            ))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.run_command(&RunCommand::new(id), window, cx)
+            })),
+        );
+    }
+    row.into_any_element()
+}
+
 fn more_button(
     open: bool,
     folded: &[Piece],
@@ -530,7 +634,39 @@ fn more_menu(
         .rounded_md()
         .shadow_md()
         .text_color(rgb(colors::TEXT));
-    for (row, piece) in folded.iter().copied().enumerate() {
+    let mut row: usize = 0;
+    for piece in folded.iter().copied() {
+        if piece == Piece::Panes {
+            // Swift's submenu, flattened: one toggle per pane.
+            for (id, side, _) in PANE_TOGGLES {
+                let shown = state.panes[side as usize];
+                let title = panes::side_title(side);
+                list = list.child(
+                    div()
+                        .id(("more-item", row))
+                        .relative()
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .px_3()
+                        .py_1()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(colors::BUTTON)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(format!("{}{title}", if shown { "\u{2713} " } else { "" })),
+                        )
+                        .child(scope.control_selected("menuitem", title, true, None, shown))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.close_more(cx);
+                            this.run_command(&RunCommand::new(id), window, cx);
+                        })),
+                );
+                row += 1;
+            }
+            continue;
+        }
         let detail = match piece {
             Piece::Loop => if state.looping { "On" } else { "Off" }.to_owned(),
             Piece::Readout(b) => state.readout.texts.text(b).to_owned(),
@@ -540,7 +676,8 @@ fn more_menu(
                 .map(|f| state.field_text(*f))
                 .collect::<Vec<_>>()
                 .join(" \u{2013} "),
-            Piece::Cluster | Piece::Space => String::new(),
+            Piece::MainView => panes::main_title(state.main).to_owned(),
+            Piece::Cluster | Piece::Space | Piece::Panes => String::new(),
         };
         let acts = piece == Piece::Loop;
         let mut entry = div()
@@ -564,6 +701,7 @@ fn more_menu(
                 }));
         }
         list = list.child(entry);
+        row += 1;
     }
     list.into_any_element()
 }
@@ -599,6 +737,8 @@ pub fn render(
                 group.into_any_element()
             }
             Piece::Space => div().flex_1().into_any_element(),
+            Piece::MainView => main_view(state.main, &mut scope.container(), cx),
+            Piece::Panes => pane_toggles(state.panes, scope, cx),
         };
         row = row.child(child);
     }

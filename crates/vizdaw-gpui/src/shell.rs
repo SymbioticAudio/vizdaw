@@ -1,7 +1,8 @@
 //! The document window: one window per open document, with the menu bar
-//! (off macOS), the alert banner, the transport bar, the arrangement's tool
-//! bar, the track header column beside the arrangement canvas, the bottom
-//! detail pane under them, and the status line.
+//! (off macOS), the alert banner, the transport bar, the pane host's
+//! regions (the centre: the arrangement's tool bar and the track header
+//! column beside the arrangement canvas, or the Mix view's mixer; the
+//! left, bottom and right panes), and the status line.
 //! The window holds the bar's shuttle (Rewind and Fast Forward held, and
 //! their held keys) and its fields' edit.
 
@@ -19,6 +20,7 @@ use gpui::{
 };
 use vizdaw_app::alerts::{AlertItem, error_message};
 use vizdaw_app::commands::{self, FieldFocus};
+use vizdaw_app::editor::{MainView, PaneSide, ViewLayouts};
 use vizdaw_app::transport::Shuttle;
 use vizdaw_app::transport_fields::{self as fields_model, TransportField};
 use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
@@ -30,6 +32,7 @@ use crate::detail_pane::{self, DetailPaneState};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
+use crate::panes::{self, HostState, PaneDrag};
 use crate::piano_roll::{PianoRoll, RollState};
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -67,14 +70,19 @@ pub struct DocumentWindow {
     _hold: Option<Task<()>>,
     /// The transport bar's » menu is open.
     more_open: bool,
-    /// The bottom pane's picker menu is open.
-    pub(crate) detail_menu_open: bool,
+    /// The pane whose picker menu is open.
+    pub(crate) pane_menu: Option<PaneSide>,
+    /// A pane divider being dragged.
+    pub(crate) pane_drag: Option<PaneDrag>,
+    /// The main view and panes last seen (the frame left out): a change
+    /// ends the track header's rename.
+    views_seen: Option<ViewLayouts>,
     /// The List editor's table (its selection, scroll and cell edit).
     pub(crate) list_editor: ListEditor,
     /// The Piano Roll (its axes, scroll and bar menus).
     pub(crate) piano_roll: PianoRoll,
-    /// The size of the area the arrangement and the bottom pane share, at
-    /// the last draw (zero before the first).
+    /// The size of the pane host's area (under the transport bar, above
+    /// the status line), at the last draw (zero before the first).
     regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
     /// The poll runs fast: a note-off or a drag's final edit waits on
     /// Busy.
@@ -148,6 +156,7 @@ impl DocumentWindow {
         let mut subscriptions = vec![
             cx.observe_in(&app, window, |this, _, window, cx| {
                 this.end_stale_rename(window, cx);
+                this.follow_views(window, cx);
                 cx.notify();
             }),
             cx.observe_window_activation(window, |this, window, cx| {
@@ -161,6 +170,7 @@ impl DocumentWindow {
                     this.cancel_field(window, cx);
                     this.end_shuttle(cx);
                     this.cancel_ruler_drag(cx);
+                    this.cancel_pane_drag(cx);
                     // A press whose release may never come is dropped; a
                     // released drag whose final edit waits on Busy is left
                     // to the timer's tick (Swift never cancels here).
@@ -188,6 +198,7 @@ impl DocumentWindow {
             });
         }));
         let list_editor = ListEditor::new(cx);
+        let views_seen = app.read(cx).store.document(doc).map(seen_views);
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |this, cx| this.should_close(window, cx))
@@ -212,7 +223,9 @@ impl DocumentWindow {
             shuttle: Shuttle::new(),
             _hold: None,
             more_open: false,
-            detail_menu_open: false,
+            pane_menu: None,
+            pane_drag: None,
+            views_seen,
             list_editor,
             piano_roll: PianoRoll::new(cx),
             regions: Rc::default(),
@@ -628,9 +641,53 @@ impl DocumentWindow {
         }
     }
 
-    /// An invisible overlay that records the size of the area the
-    /// arrangement and the bottom pane share; a new size draws again, so
-    /// the pane fits the area it is in.
+    /// The main view or a pane changed (a menu item, a key, the channel,
+    /// the transport bar, a picker): the track header's rename is
+    /// committed (Swift ends the text edits of what the panes and the
+    /// centre show first), an open picker closes, and an arrangement the
+    /// Mix view now hides keeps no press, menu or keyboard.
+    fn follow_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = self.read_model(cx, seen_views);
+        if now == self.views_seen {
+            return;
+        }
+        let was = std::mem::replace(&mut self.views_seen, now.clone());
+        let (Some(was), Some(now)) = (was, now) else {
+            return;
+        };
+        self.end_rename(true, window, cx);
+        self.pane_menu = None;
+        if now.main == MainView::Mix && was.main != MainView::Mix {
+            self.arrangement_hidden(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The Mix view hides the arrangement: its drags end, its menus and the
+    /// track headers' close, and its keyboard returns to the window.
+    fn arrangement_hidden(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_ruler_drag(cx);
+        if self.arrangement.pressing() {
+            self.cancel_block_drag(cx);
+        }
+        self.arrangement.close_menus();
+        self.track_headers.add_menu_open = false;
+        if self.arrangement.focus_handle().is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    /// The pane host's area, as last measured: (width, height).
+    pub(crate) fn regions_area(&self) -> (f64, f64) {
+        let s = self.regions.get();
+        (
+            f64::from(f32::from(s.width)),
+            f64::from(f32::from(s.height)),
+        )
+    }
+
+    /// An invisible overlay that records the size of the pane host's area;
+    /// a new size draws again, so the regions fit the area they are in.
     fn measure_regions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let regions = self.regions.clone();
         let weak = cx.entity().downgrade();
@@ -682,7 +739,7 @@ impl DocumentWindow {
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
         let more = std::mem::take(&mut self.more_open);
         let arrangement = self.arrangement.close_menus();
-        let detail = std::mem::take(&mut self.detail_menu_open);
+        let detail = self.pane_menu.take().is_some();
         let list = self.list_editor.close_menu();
         let roll = self.piano_roll.close_menu();
         if self.menu_bar.as_mut().is_some_and(MenuBar::close)
@@ -926,6 +983,164 @@ impl DocumentWindow {
     }
 }
 
+/// What the regions draw of the document, read before drawing.
+struct RegionParts<'a> {
+    tools: ToolbarState,
+    lanes: &'a [LaneRow],
+    selected: &'a [u64],
+    arranged: ArrangementState,
+    pane: &'a DetailPaneState,
+    listed: Option<&'a ListState>,
+    rolled: Option<RollState>,
+}
+
+impl DocumentWindow {
+    /// The pane host's area (Swift `DocumentShell.regions`): the centre,
+    /// the left pane, the bottom pane (always mounted: hidden, it has no
+    /// size and is out of the tree), the right pane, then the dividers
+    /// over them.
+    #[allow(clippy::too_many_arguments)]
+    fn regions(
+        &mut self,
+        host: &HostState,
+        frames: &panes::Frames,
+        area: (f64, f64),
+        editor_shown: bool,
+        parts: RegionParts,
+        root: &mut RegistryScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let centre = panes::place(frames.centre).flex().flex_col();
+        let centre = if host.main == MainView::Mix {
+            centre.child(panes::mixer(&mut root.container()))
+        } else {
+            centre
+                .child(arrangement::toolbar(
+                    parts.tools,
+                    self.arrangement.division_open(),
+                    &mut root.container(),
+                    window,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_row()
+                        .on_scroll(cx.listener(|this, e, _, cx| this.arrangement_wheel(e, cx)))
+                        .child(self.track_headers.render(
+                            &HeadersState {
+                                lanes: parts.lanes,
+                                selected: parts.selected,
+                                vertical_offset: self.arrangement.vertical_offset(),
+                            },
+                            &mut root.container(),
+                            window,
+                            cx,
+                        ))
+                        .child(self.arrangement.render(
+                            parts.arranged,
+                            &mut root.container(),
+                            window,
+                            cx,
+                        )),
+                )
+        };
+        let mut sides = vec![];
+        for side in [PaneSide::Left, PaneSide::Right] {
+            let Some(rect) = frames.of(side) else {
+                continue;
+            };
+            let mut scope = root.container();
+            let content = panes::content(host.setup.pane(side).view, host, &mut scope.container());
+            sides.push(panes::frame(
+                side,
+                Some(rect),
+                host,
+                self.pane_menu == Some(side),
+                content,
+                &mut scope,
+                window,
+                cx,
+            ));
+        }
+        let bottom = {
+            // A hidden pane, or an editor under another view, stays
+            // mounted, recorded nowhere.
+            let scratch = SharedRegistry::default();
+            let mut hidden = RegistryScope::root(&scratch);
+            let mut scope = if frames.bottom.is_some() {
+                root.container()
+            } else {
+                hidden.container()
+            };
+            let editor = {
+                let mut scope = if editor_shown {
+                    scope.container()
+                } else {
+                    hidden.container()
+                };
+                detail_pane::render(
+                    parts.pane,
+                    parts.listed.map(|l| (&self.list_editor, l)),
+                    parts.rolled.map(|r| (&self.piano_roll, r)),
+                    &mut scope,
+                    window,
+                    cx,
+                )
+            };
+            let chosen = host.editor_chosen();
+            let other = (!chosen)
+                .then(|| panes::content(host.setup.bottom.view, host, &mut scope.container()));
+            let content = div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .when(chosen, |d| d.flex_1().min_h_0())
+                        .when(!chosen, |d| d.h(px(0.)).overflow_hidden().invisible())
+                        .child(editor),
+                )
+                .children(other)
+                .into_any_element();
+            panes::frame(
+                PaneSide::Bottom,
+                frames.bottom,
+                host,
+                self.pane_menu == Some(PaneSide::Bottom),
+                content,
+                &mut scope,
+                window,
+                cx,
+            )
+        };
+        let dividers = panes::dividers(
+            frames,
+            area,
+            host,
+            self.pane_drag,
+            &mut root.container(),
+            cx,
+        );
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .overflow_hidden()
+            .child(self.measure_regions(cx))
+            .child(centre)
+            .child(bottom)
+            .children(sides)
+            .children(dividers)
+    }
+}
+
 impl Focusable for DocumentWindow {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -953,7 +1168,7 @@ impl Render for DocumentWindow {
             arranged,
             tools,
             pane,
-            bottom,
+            host,
             list_after,
             listed,
             rolled,
@@ -973,6 +1188,8 @@ impl Render for DocumentWindow {
                         .into_iter()
                         .map(|f| (f, fields_model::field_text(d, f)))
                         .collect(),
+                    main: d.layout().views.main,
+                    panes: PaneSide::ALL.map(|side| d.layout().views.current().pane(side).shown),
                 }),
                 menus::menu_model(s.store.document(doc), &s.keymap),
                 s.store.front().is_none_or(|f| f == doc),
@@ -988,7 +1205,7 @@ impl Render for DocumentWindow {
                 }),
                 d.map(ToolbarState::of).unwrap_or_default(),
                 d.map(DetailPaneState::of).unwrap_or_default(),
-                d.map(|d| d.layout().views.current().bottom),
+                d.map(HostState::of),
                 // The selection and scroll first: the rows drawn follow them.
                 d.map(|d| self.list_editor.prepare(d, fallback)),
                 d.filter(|d| d.list_open())
@@ -1024,19 +1241,31 @@ impl Render for DocumentWindow {
         if let Some(after) = list_after {
             self.list_after(after, window, cx);
         }
-        let bottom_height = bottom.and_then(|b| detail_pane::bottom_height(self.regions.get(), &b));
-        // A hidden pane's table and roll keep no keyboard.
-        if bottom_height.is_none() {
+        let host = host.unwrap_or_else(HostState::fallback);
+        let area = self.regions_area();
+        let frames = panes::frames(area.0, area.1, &host.setup);
+        let bottom_shown = frames.bottom.is_some();
+        let editor_shown = bottom_shown && host.editor_chosen();
+        // A hidden editor's table and roll keep no keyboard.
+        if !editor_shown {
             self.list_hidden(window, cx);
             if roll_mounted {
                 self.roll_hidden(window, cx);
             }
         }
-        self.sync_list_focus(listed.is_some() && bottom_height.is_some(), window, cx);
-        self.sync_roll_focus(roll_mounted && bottom_height.is_some(), window, cx);
-        if bottom_height.is_none() {
-            self.detail_menu_open = false;
+        self.sync_list_focus(listed.is_some() && editor_shown, window, cx);
+        self.sync_roll_focus(roll_mounted && editor_shown, window, cx);
+        if !editor_shown {
             self.piano_roll.menu = None;
+        }
+        if self.pane_menu.is_some_and(|side| frames.of(side).is_none()) {
+            self.pane_menu = None;
+        }
+        if self
+            .pane_drag
+            .is_some_and(|drag| frames.of(drag.side).is_none())
+        {
+            self.pane_drag = None;
         }
         let plan = Plan::new(&layout, f32::from(window.viewport_size().width));
         self.set_shown_fields(
@@ -1118,71 +1347,36 @@ impl Render for DocumentWindow {
                     cx,
                 ))
             })
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .child(self.measure_regions(cx))
-                    .child(arrangement::toolbar(
-                        tools,
-                        self.arrangement.division_open(),
-                        &mut root.container(),
-                        window,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .flex_row()
-                            .on_scroll(cx.listener(|this, e, _, cx| this.arrangement_wheel(e, cx)))
-                            .child(self.track_headers.render(
-                                &HeadersState {
-                                    lanes: &lanes,
-                                    selected: &selected,
-                                    vertical_offset: self.arrangement.vertical_offset(),
-                                },
-                                &mut root.container(),
-                                window,
-                                cx,
-                            ))
-                            .child(self.arrangement.render(
-                                arranged,
-                                &mut root.container(),
-                                window,
-                                cx,
-                            )),
-                    )
-                    .when(bottom_height.is_some(), |d| d.child(detail_pane::divider()))
-                    .child({
-                        // A hidden pane stays mounted, recorded nowhere.
-                        let scratch = SharedRegistry::default();
-                        let mut hidden = RegistryScope::root(&scratch);
-                        let scope = &mut if bottom_height.is_some() {
-                            root.container()
-                        } else {
-                            hidden.container()
-                        };
-                        detail_pane::render(
-                            &pane,
-                            bottom_height,
-                            self.detail_menu_open,
-                            listed.as_ref().map(|l| (&self.list_editor, l)),
-                            rolled.map(|r| (&self.piano_roll, r)),
-                            scope,
-                            window,
-                            cx,
-                        )
-                    }),
-            )
+            .child(self.regions(
+                &host,
+                &frames,
+                area,
+                editor_shown,
+                RegionParts {
+                    tools,
+                    lanes: &lanes,
+                    selected: &selected,
+                    arranged,
+                    pane: &pane,
+                    listed: listed.as_ref(),
+                    rolled,
+                },
+                &mut root,
+                window,
+                cx,
+            ))
             .when_some(status, |d, status| {
                 d.child(Self::status_line(status, &mut root.container(), cx))
             })
     }
+}
+
+/// The main view and panes, without the window frame (which a pane change
+/// does not touch).
+fn seen_views(d: &DocumentModel) -> ViewLayouts {
+    let mut v = d.layout().views.clone();
+    v.frame = None;
+    v
 }
 
 /// Rewind (false) or Fast Forward (true) for a held-key keystroke: ⇧, and

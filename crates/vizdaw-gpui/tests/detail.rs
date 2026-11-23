@@ -222,8 +222,8 @@ fn editors_list_opens_the_list_on_the_shown_sequence(cx: &mut TestAppContext) {
     assert_eq!(s.element("button", PANE).value.as_deref(), Some("List"));
     assert!(s.menu_item("Editors", CLOSE).0);
 
-    // The pane's picker lists the Piano Roll and the List; choosing the
-    // List keeps it.
+    // The pane's picker lists the Piano Roll and the List, then the
+    // pane's other views (slice 6a); choosing the List keeps it.
     s.click("button", PANE);
     let items: Vec<String> = s
         .elements()
@@ -231,7 +231,7 @@ fn editors_list_opens_the_list_on_the_shown_sequence(cx: &mut TestAppContext) {
         .filter(|e| e.role == "menuitem")
         .map(|e| e.label)
         .collect();
-    assert_eq!(items, ["Piano Roll", "List"]);
+    assert_eq!(items, ["Piano Roll", "List", "Audio Editor", "Mixer"]);
     assert!(s.element("menuitem", "List").selected);
     s.click("menuitem", "List");
     assert!(s.find("menuitem", "List").is_none(), "the menu closes");

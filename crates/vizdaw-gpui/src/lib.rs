@@ -7,6 +7,7 @@ pub mod detail_pane;
 pub mod list_editor;
 pub mod menu_bar;
 pub mod menus;
+pub mod panes;
 pub mod piano_roll;
 pub mod registry;
 pub mod screenshot;

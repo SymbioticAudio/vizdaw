@@ -25,6 +25,9 @@ struct Setup {
 }
 
 /// The app with one demo document window over `fake`.
+/// A window the whole standard bar fits.
+const WIDE: f32 = 1240.;
+
 fn setup(cx: &mut TestAppContext, fake: FakeSession) -> Setup {
     let fake = Arc::new(fake);
     let shared = fake.clone();
@@ -39,6 +42,9 @@ fn setup(cx: &mut TestAppContext, fake: FakeSession) -> Setup {
         (app, window)
     });
     let vcx = VisualTestContext::from_window(window.into(), cx);
+    // Wide enough for the standard bar, its Main View and pane toggles
+    // included (slice 6a): nothing folds.
+    vcx.simulate_resize(size(px(WIDE), px(640.)));
     vcx.run_until_parked();
     Setup {
         fake,
@@ -408,7 +414,7 @@ fn a_field_that_folds_away_cancels_its_edit(cx: &mut TestAppContext) {
     assert!(s.keys_enabled(), "a hidden field gives up the keyboard");
     s.keys("enter");
     assert_eq!(s.fake.count("set_selection"), 0);
-    s.resize(1000.);
+    s.resize(WIDE);
     assert_eq!(s.value("textfield", "Edit In"), "");
     assert!(!s.focused("Edit In"));
     // A folded field refuses its key.
@@ -500,7 +506,7 @@ fn a_narrow_window_folds_the_last_items_into_more(cx: &mut TestAppContext) {
     s.keys("escape");
     assert!(!s.has("menuitem", "Position Field"));
     // Wide again: nothing folds.
-    s.resize(1000.);
+    s.resize(WIDE);
     assert!(!s.has("button", "More Transport Items"));
     assert!(s.has("textfield", "Edit Out"));
 }

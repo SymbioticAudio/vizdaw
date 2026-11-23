@@ -344,6 +344,10 @@ fn a_click_on_the_arrangement_ends_a_field_edit(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_ruler_drag_selects_a_range(cx: &mut TestAppContext) {
     let mut s = setup(cx, with_blocks());
+    // Wide enough for the bar's Edit In and Out (they fold at 1000 since
+    // the bar has its Main View and pane toggles).
+    s.cx.simulate_resize(gpui::size(px(1240.), px(640.)));
+    s.cx.run_until_parked();
     let (from, to) = (s.at(40., 10.), s.at(200., 10.));
     s.drag(from, to);
     // Released below the ruler: the range still ends where the pointer is.
