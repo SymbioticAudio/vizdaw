@@ -316,6 +316,9 @@ impl DocumentWindow {
             (Some(Err(e)), Some(Some(lane))) if e.dialog.as_deref() == Some("Rename Track") => {
                 self.begin_rename(lane, window, cx);
             }
+            // `ran.open_mixer_window` (Window › Mixer, ⌥⌘M): the Mixer
+            // window comes in slice 6a Task 6; until then the item does
+            // nothing.
             (Some(Ok(ran)), _) => match ran.focus {
                 Some(FieldFocus::Position) => {
                     self.focus_field(TransportField::Position, window, cx)

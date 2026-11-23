@@ -13,7 +13,7 @@ pub use detail::{DetailEditorKind, DetailState, EditorTarget, ListFilter};
 pub use gesture::{Gesture, LANE_REMOVED};
 pub use layout::{
     BlockRuleSetting, EditorLayout, LightMode, MainView, PaneSetup, PaneSide, PaneState, PaneView,
-    ViewLayouts,
+    ViewLayouts, off_list,
 };
 pub use snap::{Division, Snap};
 
@@ -110,9 +110,21 @@ impl EditorModel {
     /// list filter and the other saved fields stay. A pending piano roll
     /// reveal is dropped.
     pub fn open_detail(&mut self, target: EditorTarget, kind: Option<DetailEditorKind>) {
+        let main = self.layout.views.main;
+        self.open_detail_in(target, kind, main);
+    }
+
+    /// [`EditorModel::open_detail`], with `main`'s bottom pane showing it
+    /// (`ui.pane {main}` sets a view that is not the current one).
+    pub fn open_detail_in(
+        &mut self,
+        target: EditorTarget,
+        kind: Option<DetailEditorKind>,
+        main: MainView,
+    ) {
         self.roll.reveal = None;
         let l = &mut self.layout;
-        let bottom = &mut l.views.current_mut().bottom;
+        let bottom = &mut l.views.setup_mut(main).bottom;
         bottom.shown = true;
         bottom.view = PaneView::Editor;
         let kind = match kind {

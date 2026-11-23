@@ -12,7 +12,9 @@ use core_control::bindings::{self, COMMAND, CONTROL, Chord, Keymap, OPTION, SHIF
 use core_control::registry;
 use gpui::{Action, App, Global, KeyBinding, Menu, MenuItem, SharedString, actions};
 use vizdaw_app::DocumentModel;
-use vizdaw_app::commands::{self, DOCUMENT_COMMANDS, TRANSPORT_COMMANDS};
+use vizdaw_app::commands::{
+    self, DOCUMENT_COMMANDS, MIXER_COMMANDS, TRANSPORT_COMMANDS, VIEW_COMMANDS,
+};
 
 use crate::text_input;
 
@@ -75,16 +77,24 @@ pub struct UnavailableCommand {
 pub const WINDOW_CONTEXT: &str = "DocumentWindow";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
-/// List, closing the detail, Insert Event (the List's) and the bottom
-/// pane's toggle.
+/// List, closing the detail and Insert Event (the List's).
 pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
     "editors.piano_roll",
     "editors.list",
     "editors.close_detail",
     "editors.insert_event",
-    "ui.toggle_bottom",
 ];
+
+/// Whether the menus, keys and control channel route `id` to
+/// `commands::run`: the document, editor, view and mixer commands
+/// (`commands::VIEW_COMMANDS`, `commands::MIXER_COMMANDS`).
+pub fn routed(id: &str) -> bool {
+    DOCUMENT_COMMANDS.contains(&id)
+        || ROUTED_EDITOR_COMMANDS.contains(&id)
+        || VIEW_COMMANDS.contains(&id)
+        || MIXER_COMMANDS.contains(&id)
+}
 
 /// Where unmodified keys act: in a document window, but never while a text
 /// field has focus (typing a space must not start the transport).
@@ -186,11 +196,16 @@ fn command(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> 
         ("edit.redo", Some(d)) => d.redo_title(),
         _ => registry::find(id).map_or(id, |c| c.title).to_owned(),
     };
-    let checked = match id {
-        "editors.snap" => Some(front.is_some_and(|d| d.layout().snap.enabled)),
-        "ui.toggle_bottom" => Some(front.is_some_and(|d| d.layout().views.current().bottom.shown)),
-        _ => None,
-    };
+    let checked = matches!(
+        id,
+        "editors.snap"
+            | "ui.view_arrange"
+            | "ui.view_mix"
+            | "ui.toggle_left"
+            | "ui.toggle_bottom"
+            | "ui.toggle_right"
+    )
+    .then(|| front.is_some_and(|d| commands::is_on(id, d)));
     ItemSpec::Command {
         id,
         title,
@@ -246,9 +261,18 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     slice1(EDIT_SELECT_ALL, "Select All", Some("a"), keymap),
                 ],
             ),
-            // The main views, the left and right panes and the bar's
-            // customizing come with their views.
-            menu("View", vec![cmd("ui.toggle_bottom")]),
+            // The bar's customizing comes with its sheet.
+            menu(
+                "View",
+                vec![
+                    cmd("ui.view_arrange"),
+                    cmd("ui.view_mix"),
+                    ItemSpec::Separator,
+                    cmd("ui.toggle_left"),
+                    cmd("ui.toggle_bottom"),
+                    cmd("ui.toggle_right"),
+                ],
+            ),
             // The other detail editors, their windows and the nudges come
             // with their views.
             menu(
@@ -276,8 +300,9 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                 ],
             ),
             menu("Transport", transport_items(front, keymap)),
-            // macOS adds the window list.
-            menu("Window", vec![]),
+            // The Plug-in Manager, Media Pool and Song Notes come with
+            // their windows; macOS adds the window list.
+            menu("Window", vec![cmd("window.mixer")]),
         ],
     }
 }
@@ -403,16 +428,32 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
                 | "transport.fast_forward"
         )
     });
-    for &id in DOCUMENT_COMMANDS
+    let ids: Vec<&'static str> = DOCUMENT_COMMANDS
         .iter()
         .chain(ROUTED_EDITOR_COMMANDS)
+        .chain(VIEW_COMMANDS)
+        .chain(MIXER_COMMANDS)
         .chain(transport)
-    {
+        .copied()
+        .collect();
+    // Off macOS ⌘ and ⌃ are both Ctrl: a ⌃ chord whose keystroke a ⌘
+    // chord already has (⌃1 Arrange View and ⌘1 Piano Roll) is left to the
+    // ⌘ one; its command keeps its menu item.
+    let command_keys: HashSet<String> = ids
+        .iter()
+        .flat_map(|id| keymap.chords(id))
+        .filter(|c| c.mods & COMMAND != 0)
+        .filter_map(|c| keystroke(&c))
+        .collect();
+    for &id in &ids {
         for chord in keymap.chords(id) {
             if bindings::key_name(chord.code).is_some_and(|n| n.starts_with("Keypad")) {
                 continue;
             }
             let Some(k) = keystroke(&chord) else { continue };
+            if chord.mods & COMMAND == 0 && chord.mods & CONTROL != 0 && command_keys.contains(&k) {
+                continue;
+            }
             // A chord without ⌘ or ⌃ (bare, ⇧ or ⌥) waits while a text
             // field has the keyboard, which types it (Swift's bare-key
             // rule, as the control channel's `bound_command`).

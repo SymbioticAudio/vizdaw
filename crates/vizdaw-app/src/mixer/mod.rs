@@ -3,6 +3,7 @@
 //! placement that shows it (the Mix view, the bottom pane, the Mixer
 //! window).
 
+pub mod commands;
 pub mod gesture;
 pub mod math;
 pub mod meters;

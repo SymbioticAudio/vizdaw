@@ -106,7 +106,73 @@ pub enum PaneView {
     AudioEditor,
 }
 
+impl MainView {
+    pub const ALL: [MainView; 2] = [MainView::Arrange, MainView::Mix];
+
+    /// The control channel's name (`arrange`, `mix`).
+    pub fn name(self) -> &'static str {
+        match self {
+            MainView::Arrange => "arrange",
+            MainView::Mix => "mix",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<MainView> {
+        MainView::ALL.into_iter().find(|v| v.name() == name)
+    }
+}
+
+impl PaneView {
+    pub const ALL: [PaneView; 10] = [
+        PaneView::Strip,
+        PaneView::Sequences,
+        PaneView::Inspector,
+        PaneView::Editor,
+        PaneView::Mixer,
+        PaneView::Controllers,
+        PaneView::MediaPool,
+        PaneView::Plugins,
+        PaneView::Markers,
+        PaneView::AudioEditor,
+    ];
+
+    /// The control channel's name (`strip`, `media_pool`, …).
+    pub fn name(self) -> &'static str {
+        match self {
+            PaneView::Strip => "strip",
+            PaneView::Sequences => "sequences",
+            PaneView::Inspector => "inspector",
+            PaneView::Editor => "editor",
+            PaneView::Mixer => "mixer",
+            PaneView::Controllers => "controllers",
+            PaneView::MediaPool => "media_pool",
+            PaneView::Plugins => "plugins",
+            PaneView::Markers => "markers",
+            PaneView::AudioEditor => "audio_editor",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<PaneView> {
+        PaneView::ALL.into_iter().find(|v| v.name() == name)
+    }
+}
+
 impl PaneSide {
+    pub const ALL: [PaneSide; 3] = SIDES;
+
+    /// The control channel's name (`left`, `bottom`, `right`).
+    pub fn name(self) -> &'static str {
+        match self {
+            PaneSide::Left => "left",
+            PaneSide::Bottom => "bottom",
+            PaneSide::Right => "right",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<PaneSide> {
+        SIDES.into_iter().find(|s| s.name() == name)
+    }
+
     /// The views the pane can show in `main`; the first is its default.
     pub fn views(self, main: MainView) -> &'static [PaneView] {
         use PaneView::*;
@@ -217,6 +283,37 @@ impl ViewLayouts {
         self.setup_mut(self.main)
     }
 
+    /// Sets `main`'s `side` pane: its view (refused when off the pane's
+    /// list: the refusal is returned and nothing changes), shown flag and
+    /// size (clamped to the pane's range; a non-finite size is ignored).
+    /// Swift `EditorModel.setPane`.
+    pub fn set_pane(
+        &mut self,
+        side: PaneSide,
+        view: Option<PaneView>,
+        shown: Option<bool>,
+        size: Option<f64>,
+        main: MainView,
+    ) -> Result<(), String> {
+        if let Some(v) = view
+            && !side.views(main).contains(&v)
+        {
+            return Err(off_list(v.name(), side, main));
+        }
+        let p = self.setup_mut(main).pane_mut(side);
+        if let Some(v) = view {
+            p.view = v;
+        }
+        if let Some(on) = shown {
+            p.shown = on;
+        }
+        if let Some(size) = size.filter(|s| s.is_finite()) {
+            let r = side.size_range();
+            p.size = size.clamp(*r.start(), *r.end());
+        }
+        Ok(())
+    }
+
     /// Tolerant: each pane field that is missing or malformed keeps its
     /// default; then the whole is sanitized.
     fn decode(v: &Value) -> ViewLayouts {
@@ -280,6 +377,16 @@ impl ViewLayouts {
         }
         self
     }
+}
+
+/// Why `view` (as the channel names it) cannot show in `main`'s `side`
+/// pane (Swift `ViewCommands.choose`).
+pub fn off_list(view: &str, side: PaneSide, main: MainView) -> String {
+    format!(
+        "{view} is not on the {} pane's list in the {} view.",
+        side.name(),
+        main.name()
+    )
 }
 
 /// The editor state saved with the project, under Swift's keys.

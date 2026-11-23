@@ -22,7 +22,7 @@ use gpui::{App, PathPromptOptions, PromptLevel, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::{DocId, DocumentStore};
 
-pub use app_state::AppState;
+pub use app_state::{AppState, WindowKind};
 pub use menus::{
     CloseWindow, NewDemo, NewDocument, OpenDocument, PlayStop, Quit, RunCommand, Save, SaveAs,
     StopAndReturn,

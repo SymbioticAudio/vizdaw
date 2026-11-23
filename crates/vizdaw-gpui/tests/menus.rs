@@ -105,7 +105,7 @@ fn the_menu_model_follows_the_swift_order() {
             Some("track.rename"),
         ]
     );
-    assert!(m.menus[7].items.is_empty());
+
     let ids = |i: usize| -> Vec<Option<&str>> {
         m.menus[i]
             .items
@@ -116,7 +116,18 @@ fn the_menu_model_follows_the_swift_order() {
             })
             .collect()
     };
-    assert_eq!(ids(3), [Some("ui.toggle_bottom")]);
+    assert_eq!(
+        ids(3),
+        [
+            Some("ui.view_arrange"),
+            Some("ui.view_mix"),
+            None,
+            Some("ui.toggle_left"),
+            Some("ui.toggle_bottom"),
+            Some("ui.toggle_right"),
+        ]
+    );
+    assert_eq!(ids(7), [Some("window.mixer")]);
     assert_eq!(
         ids(4),
         [
@@ -364,5 +375,114 @@ fn the_transport_menu_lists_every_transport_command() {
             .filter(|b| b.action().partial_eq(&menus::RunCommand::new(id)))
             .count();
         assert_eq!(n, keymap.chords(id).len(), "{id}");
+    }
+}
+
+/// `item`'s check mark.
+fn checked(m: &MenuModel, menu: &str, title: &str) -> Option<bool> {
+    m.menus
+        .iter()
+        .find(|s| s.title == menu)
+        .and_then(|s| {
+            s.items.iter().find_map(|i| match i {
+                ItemSpec::Command {
+                    title: t, checked, ..
+                } if t == title => Some(*checked),
+                _ => None,
+            })
+        })
+        .unwrap_or_else(|| panic!("no item {title} in {menu}"))
+}
+
+#[test]
+fn the_view_menu_checks_the_main_view_and_the_shown_panes() {
+    let keymap = Keymap::default();
+    let mut doc = demo_doc();
+    let m = menu_model(Some(&doc), &keymap);
+    assert_eq!(item(&m, "View", "Arrange View").2, Some("⌃1"));
+    assert_eq!(item(&m, "View", "Mix View").2, Some("⌃2"));
+    assert_eq!(item(&m, "View", "Left Pane").2, Some("⌃⌘←"));
+    assert_eq!(item(&m, "View", "Right Pane").2, Some("⌃⌘→"));
+    assert_eq!(checked(&m, "View", "Arrange View"), Some(true));
+    assert_eq!(checked(&m, "View", "Mix View"), Some(false));
+    assert_eq!(checked(&m, "View", "Left Pane"), Some(true));
+    assert_eq!(checked(&m, "View", "Bottom Pane"), Some(true));
+    assert_eq!(checked(&m, "View", "Right Pane"), Some(false));
+    for title in [
+        "Arrange View",
+        "Mix View",
+        "Left Pane",
+        "Bottom Pane",
+        "Right Pane",
+    ] {
+        assert!(item(&m, "View", title).3, "{title}");
+    }
+    commands::run("ui.view_mix", &[], &mut doc).unwrap();
+    let m = menu_model(Some(&doc), &keymap);
+    assert_eq!(checked(&m, "View", "Arrange View"), Some(false));
+    assert_eq!(checked(&m, "View", "Mix View"), Some(true));
+    // The mix view's own panes: all hidden at first.
+    assert_eq!(checked(&m, "View", "Left Pane"), Some(false));
+    assert_eq!(checked(&m, "View", "Bottom Pane"), Some(false));
+    // The Mixer window: enabled with a document, with its key.
+    let (id, _, keys, enabled) = item(&m, "Window", "Mixer");
+    assert_eq!((id, keys, enabled), ("window.mixer", Some("⌥⌘M"), true));
+    let none = menu_model(None, &keymap);
+    assert!(!item(&none, "Window", "Mixer").3);
+    assert!(!item(&none, "View", "Mix View").3);
+}
+
+/// The main views' ⌃ keys and the editors' ⌘ keys never land on one
+/// keystroke: off macOS, where both are Ctrl, the ⌘ key keeps it.
+#[test]
+fn main_view_keys_do_not_collide_with_the_editor_keys() {
+    let keymap = Keymap::default();
+    let all = menus::bindings(&keymap);
+    let strokes = |id: &str| -> Vec<String> {
+        all.iter()
+            .filter(|b| {
+                b.action()
+                    .partial_eq(&menus::RunCommand::new(id.to_owned()))
+            })
+            .flat_map(|b| b.keystrokes().iter().map(|k| format!("{:?}", k.inner())))
+            .collect()
+    };
+    let roll = strokes("editors.piano_roll");
+    let arrange = strokes("ui.view_arrange");
+    assert_eq!(roll.len(), 1, "{roll:?}");
+    assert!(
+        arrange.iter().all(|k| !roll.contains(k)),
+        "{arrange:?} {roll:?}"
+    );
+    if cfg!(target_os = "macos") {
+        assert_eq!(arrange.len(), 1, "{arrange:?}");
+        assert_eq!(strokes("ui.view_mix").len(), 1);
+    }
+    // No keystroke runs two of the routed commands in one context.
+    let routed: Vec<&gpui::KeyBinding> = all
+        .iter()
+        .filter(|b| b.action().as_any().is::<menus::RunCommand>())
+        .collect();
+    for (n, a) in routed.iter().enumerate() {
+        for b in &routed[..n] {
+            let same_keys = format!("{:?}", a.keystrokes()) == format!("{:?}", b.keystrokes());
+            let same_context = format!("{:?}", a.predicate()) == format!("{:?}", b.predicate());
+            assert!(
+                !(same_keys && same_context) || a.action().partial_eq(b.action()),
+                "{:?} runs two commands",
+                a.keystrokes()
+            );
+        }
+    }
+    for id in commands::VIEW_COMMANDS
+        .iter()
+        .chain(commands::MIXER_COMMANDS)
+    {
+        let bound = strokes(id).len();
+        let chords = keymap.chords(id).len();
+        assert!(bound <= chords, "{id}");
+        if cfg!(target_os = "macos") {
+            assert_eq!(bound, chords, "{id}");
+        }
     }
 }

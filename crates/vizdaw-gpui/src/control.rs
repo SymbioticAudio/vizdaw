@@ -14,6 +14,10 @@
 //! `editors.close_detail`, `ui.toggle_bottom`, `state.get selection`, the
 //! detail kind's `wait` and `ui.click` at a point. `ui.tree`, `ui.click` (an element or a point,
 //! with modifiers and a count), `ui.key`, `ui.screenshot` and `wait`.
+//! Slice 6a adds the main views and panes (`ui.view_*`, `ui.toggle_*`,
+//! `ui.pane`), `automation.set_mode|gesture|release_all`, `mixer.new_bus`
+//! and `state.get mixer|layout|automation`; `window.mixer` answers
+//! `unavailable` until the Mixer window is built.
 //! Everything else answers `unavailable`.
 //!
 //! A `wait` is not answered in the tick it is taken unless it already
@@ -49,7 +53,7 @@ use gpui::{
     MouseUpEvent, PlatformInput, WindowHandle,
 };
 use serde_json::{Value, json};
-use vizdaw_app::commands::{self, APP_COMMANDS, DOCUMENT_COMMANDS, FieldFocus, TRANSPORT_COMMANDS};
+use vizdaw_app::commands::{self, APP_COMMANDS, FieldFocus, TRANSPORT_COMMANDS};
 use vizdaw_app::transport_fields::TransportField;
 use vizdaw_app::{DocId, SaveAction};
 use vizdaw_ffi::control::{
@@ -57,7 +61,7 @@ use vizdaw_ffi::control::{
 };
 
 use crate::app_state::{AppState, WindowEntry};
-use crate::menus::ROUTED_EDITOR_COMMANDS;
+use crate::menus;
 use crate::shell::DocumentWindow;
 use crate::transport_fields::NO_FIELDS;
 
@@ -396,6 +400,13 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             let entry = target(window.as_ref(), cx)?;
             selection_state(entry.doc, cx)
         }
+        Command::StateGet {
+            target: what @ (StateTarget::Mixer | StateTarget::Layout | StateTarget::Automation),
+            window,
+        } => {
+            let entry = target(window.as_ref(), cx)?;
+            mixer_state(*what, entry.doc, cx)
+        }
         Command::StateGet { target, .. } => Err(not_yet(&format!(
             "state.get {}",
             format!("{target:?}").to_lowercase()
@@ -509,7 +520,7 @@ fn run_command(
         _ => None,
     });
     match id {
-        _ if DOCUMENT_COMMANDS.contains(&id) || ROUTED_EDITOR_COMMANDS.contains(&id) => {
+        _ if menus::routed(id) => {
             let ran = app.update(cx, |s, cx| {
                 cx.notify();
                 s.store.with_document(doc, |d, _| {
@@ -522,6 +533,10 @@ fn run_command(
             let ran = ran.ok_or_else(closed)??;
             if alert_id(cx) != before {
                 return Err(failure(before, "the command failed", cx));
+            }
+            if ran.open_mixer_window {
+                // Task 6 opens the Mixer window.
+                return Err(not_yet(&format!("command.run {id}")));
             }
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
         }
@@ -765,6 +780,45 @@ fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
     }))
 }
 
+/// `state.get mixer`, `layout` and `automation`, in the Swift shapes
+/// (`ControlResult::{Mixer, Layout, Automation}`), the mixer and the
+/// automation read fresh from the session: Busy is the call's `busy`,
+/// another refusal its `failed`. The layout's left strip follows the
+/// session's mixer and destinations (none when they cannot be read).
+fn mixer_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, ControlError> {
+    let s = AppState::global(cx);
+    let s = s.read(cx);
+    let d = s.store.document(doc).ok_or_else(closed)?;
+    let session = d.session();
+    let read = |e: vizdaw_ffi::VizError| {
+        let code = if matches!(e, vizdaw_ffi::VizError::Busy { .. }) {
+            ErrorCode::Busy
+        } else {
+            ErrorCode::Failed
+        };
+        ControlError::new(code, vizdaw_app::alerts::error_message(&e))
+    };
+    let result = match target {
+        StateTarget::Mixer => ControlResult::Mixer {
+            doc: doc_id(doc),
+            mixer: session.mixer().map_err(read)?,
+        },
+        StateTarget::Automation => ControlResult::Automation {
+            doc: doc_id(doc),
+            state: session.automation_state().map_err(read)?,
+        },
+        _ => {
+            let strips = session.mixer().map(|m| m.strips).unwrap_or_default();
+            let dests = session.destinations().unwrap_or_default();
+            ControlResult::Layout {
+                doc: doc_id(doc),
+                layout: vizdaw_app::view::layout_row(d, &strips, &dests),
+            }
+        }
+    };
+    Ok(result_json(&result))
+}
+
 /// `state.get selection`: the time range, tracks and events selected.
 fn selection_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
     let s = AppState::global(cx);
@@ -823,7 +877,7 @@ fn windows_state(cx: &mut App) -> Value {
         rows.push(json!({
             "number": number(w.handle),
             "title": title,
-            "kind": "document",
+            "kind": w.kind.name(),
             "doc": doc_id(w.doc),
             "key": key == Some(w.doc),
             "main": key == Some(w.doc),
@@ -1023,9 +1077,7 @@ fn key_strokes(
 /// `id` (`menus::bindings` binds the document and transport commands; the
 /// window's key handler steps Rewind and Fast Forward).
 fn window_runs(id: &str) -> bool {
-    DOCUMENT_COMMANDS.contains(&id)
-        || TRANSPORT_COMMANDS.contains(&id)
-        || ROUTED_EDITOR_COMMANDS.contains(&id)
+    menus::routed(id) || TRANSPORT_COMMANDS.contains(&id)
 }
 
 /// A command refusal after which the key still goes to the window, as
@@ -1243,13 +1295,15 @@ fn not_yet(what: &str) -> ControlError {
     ControlError::new(
         ErrorCode::Unavailable,
         format!(
-            "{what} is not available in the GPUI app yet (slice 4 answers app.new_demo, \
+            "{what} is not available in the GPUI app yet (slice 6a answers app.new_demo, \
              app.open, app.quit, command.run file.new / file.close / file.save / file.save_as / \
              transport.* (not recording or the click) / ui.set_transport_bar / \
              ui.reset_transport_bar / edit.undo / edit.redo / track.* / editors.snap / \
-             editors.list / editors.close_detail / editors.insert_event / ui.toggle_bottom, state.get \
-             transport / windows / document / editor / selection, ui.tree, ui.click, ui.key, \
-             ui.screenshot and wait)"
+             editors.list / editors.close_detail / editors.insert_event / ui.view_arrange / \
+             ui.view_mix / ui.toggle_left / ui.toggle_bottom / ui.toggle_right / ui.pane / \
+             automation.set_mode / automation.gesture / automation.release_all / \
+             mixer.new_bus, state.get transport / windows / document / editor / selection / \
+             mixer / layout / automation, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
         ),
     )
 }

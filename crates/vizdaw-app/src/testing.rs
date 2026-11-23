@@ -90,6 +90,10 @@ struct State {
     mode_calls: Vec<(Vec<u64>, AutomationModeRow)>,
     surface_selections: Vec<Vec<u64>>,
     run_mixers: Vec<(String, Vec<ControlArg>)>,
+    /// The holder of each gesture phase taken, in order.
+    holders: Vec<GestureHolderRow>,
+    /// What `release_channel_touches` answers.
+    channel_touches: u32,
 }
 
 /// What the session keeps of a selection it is given (after dropping
@@ -207,6 +211,8 @@ impl FakeSession {
             mode_calls: vec![],
             surface_selections: vec![],
             run_mixers: vec![],
+            holders: vec![],
+            channel_touches: 0,
         }))
     }
 
@@ -584,6 +590,16 @@ impl FakeSession {
         self.st().surface_selections.clone()
     }
 
+    /// The holder of every gesture phase the session took, in order.
+    pub fn holders(&self) -> Vec<GestureHolderRow> {
+        self.st().holders.clone()
+    }
+
+    /// How many touches `release_channel_touches` says it released.
+    pub fn set_channel_touches(&self, n: u32) {
+        self.st().channel_touches = n;
+    }
+
     /// Every `run_mixer(id, args)`.
     pub fn run_mixers(&self) -> Vec<(String, Vec<ControlArg>)> {
         self.st().run_mixers.clone()
@@ -654,6 +670,7 @@ impl FakeSession {
         &self,
         target: AutomationTargetRow,
         phase: GesturePhaseRow,
+        holder: GestureHolderRow,
         alone: bool,
     ) -> Result<(), VizError> {
         let mut s = self.st();
@@ -665,6 +682,7 @@ impl FakeSession {
         Self::scripted(&mut s, name)?;
         Self::scripted(&mut s, "gesture")?;
         s.gestures.push((target, phase, alone));
+        s.holders.push(holder);
         match phase {
             GesturePhaseRow::Touch { value } => {
                 s.touch_values.insert(target, value);
@@ -1159,16 +1177,16 @@ impl DocSession for FakeSession {
         Ok(s.levels.clone())
     }
     fn gesture(&self, target: AutomationTargetRow, phase: GesturePhaseRow) -> Result<(), VizError> {
-        self.take_gesture(target, phase, false)
+        self.take_gesture(target, phase, GestureHolderRow::Mouse, false)
     }
     fn gesture_as(
         &self,
         target: AutomationTargetRow,
         phase: GesturePhaseRow,
-        _holder: GestureHolderRow,
+        holder: GestureHolderRow,
         alone: bool,
     ) -> Result<(), VizError> {
-        self.take_gesture(target, phase, alone)
+        self.take_gesture(target, phase, holder, alone)
     }
     fn automation_state(&self) -> Result<AutomationStateRow, VizError> {
         let mut s = self.st();
@@ -1293,7 +1311,7 @@ impl DocSession for FakeSession {
         let mut s = self.st();
         Self::scripted(&mut s, "release_channel_touches")?;
         s.calls.push("release_channel_touches".into());
-        Ok(0)
+        Ok(s.channel_touches)
     }
     fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError> {
         let mut s = self.st();

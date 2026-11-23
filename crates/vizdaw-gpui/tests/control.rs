@@ -13,7 +13,7 @@ use core_control::{ControlError, ErrorCode};
 use gpui::TestAppContext;
 use serde_json::{Map, Value, json};
 use vizdaw_app::DocumentStore;
-use vizdaw_app::testing::{FakeSession, demo_fake, lane_row};
+use vizdaw_app::testing::{FakeSession, demo_fake, lane_row, mixer_fake, modes_of};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::snapshot::DocSnapshot;
 use vizdaw_gpui::AppState;
@@ -316,8 +316,11 @@ fn commands_outside_the_slice_are_unavailable(cx: &mut TestAppContext) {
     let s = setup(cx, demo_fake());
     ok(call(&s, cx, "app.new_demo", json!({})));
     for (cmd, params) in [
-        ("command.run", json!({"id": "mixer.new_bus"})),
-        ("state.get", json!({"target": "mixer"})),
+        (
+            "command.run",
+            json!({"id": "mixer.new_vca", "params": {"strips": "1"}}),
+        ),
+        ("state.get", json!({"target": "media"})),
         (
             "ui.drag",
             json!({"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}}),
@@ -325,7 +328,7 @@ fn commands_outside_the_slice_are_unavailable(cx: &mut TestAppContext) {
     ] {
         let e = call(&s, cx, cmd, params).unwrap_err();
         assert_eq!(e.code, ErrorCode::Unavailable, "{cmd}");
-        assert!(e.message.contains("slice 4"), "{cmd}: {}", e.message);
+        assert!(e.message.contains("slice 6a"), "{cmd}: {}", e.message);
     }
 }
 
@@ -1804,4 +1807,328 @@ fn channel_delete_goes_to_the_roll(cx: &mut TestAppContext) {
     );
     ok(call(&s, cx, "ui.key", json!({"key": "forward_delete"})));
     assert_eq!(s.fake.edits().len(), 2, "{:?}", s.fake.edits());
+}
+
+/// A demo over the mixer fake (Synth 1, Bus 1 2, Master 0), its window open.
+fn mixer_setup(cx: &mut TestAppContext) -> Setup {
+    let s = setup(cx, mixer_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    s
+}
+
+fn layout(s: &Setup, cx: &mut TestAppContext) -> Value {
+    ok(call(s, cx, "state.get", json!({"target": "layout"})))
+}
+
+/// The pane `side` of `main` in a `state.get layout` answer.
+fn pane_of(l: &Value, main: &str, side: &str) -> Value {
+    l["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["main"] == main)
+        .and_then(|v| {
+            v["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["pane"] == side)
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("no {main} {side} pane in {l}"))
+}
+
+/// e2e `window_views_and_panes_over_the_channel`, the parts that need no
+/// pane host: the defaults, the hostile `ui.pane` calls, ⌃1 and ⌃2, the
+/// toggles and `ui.pane` answers.
+#[gpui::test]
+fn views_and_panes_over_the_channel(cx: &mut TestAppContext) {
+    let s = mixer_setup(cx);
+    let l = layout(&s, cx);
+    assert_eq!(l["main"], "arrange", "{l}");
+    let left = pane_of(&l, "arrange", "left");
+    assert_eq!(
+        (left["shown"].as_bool(), left["view"].as_str()),
+        (Some(true), Some("strip"))
+    );
+    assert_eq!(pane_of(&l, "arrange", "bottom")["shown"], true);
+    assert_eq!(pane_of(&l, "arrange", "right")["shown"], false);
+    for side in ["left", "bottom", "right"] {
+        assert_eq!(pane_of(&l, "mix", side)["shown"], false, "{side}");
+    }
+    assert_eq!(l["left_shows"], "nothing", "{l}");
+    let windows = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
+    assert_eq!(windows["windows"][0]["kind"], "document", "{windows}");
+
+    for params in [
+        json!({}),
+        json!({"pane": "left", "view": "mixer"}),
+        json!({"pane": "bottom", "view": "mixer", "main": "mix"}),
+        json!({"pane": "left", "size": "wide"}),
+        json!({"pane": "left"}),
+        json!({"pane": "right", "view": "piano_roll"}),
+    ] {
+        let e = call(
+            &s,
+            cx,
+            "command.run",
+            json!({"id": "ui.pane", "params": params}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {}", e.message);
+        if params["view"] == "piano_roll" {
+            assert!(e.message.contains("piano_roll"), "{}", e.message);
+        }
+    }
+    let e = call(&s, cx, "state.get", json!({"target": "panes"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    assert_eq!(layout(&s, cx), l, "the hostile calls changed nothing");
+    let after = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
+    assert_eq!(after["windows"], windows["windows"]);
+    assert_eq!(after["alerts"], json!([]));
+
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"key": "2", "modifiers": ["control"]}),
+    ));
+    assert_eq!(layout(&s, cx)["main"], "mix");
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"key": "1", "modifiers": ["control"]}),
+    ));
+    assert_eq!(layout(&s, cx)["main"], "arrange");
+    // ⌘1 is still the Piano Roll.
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"key": "1", "modifiers": ["command"]}),
+    ));
+    assert_eq!(layout(&s, cx)["main"], "arrange");
+
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.toggle_right"}),
+    ));
+    assert_eq!(ran["command"], "ui.toggle_right");
+    assert_eq!(pane_of(&layout(&s, cx), "arrange", "right")["shown"], true);
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.pane", "params": {
+            "pane": "right", "view": "markers", "size": 300, "shown": true, "main": "mix"
+        }}),
+    ));
+    assert_eq!(ran["status"], "right markers 300 shown", "{ran}");
+    let l = layout(&s, cx);
+    assert_eq!(l["main"], "arrange");
+    let right = pane_of(&l, "mix", "right");
+    assert_eq!(right["view"], "markers");
+    assert_eq!(right["size"], 300.0);
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "bottom", "view": "mixer"}}),
+    ));
+    assert_eq!(
+        pane_of(&layout(&s, cx), "arrange", "bottom")["view"],
+        "mixer"
+    );
+    assert_eq!(
+        pane_of(&layout(&s, cx), "arrange", "bottom")["views"],
+        json!([
+            "piano_roll",
+            "list",
+            "strip_chart",
+            "drum_grid",
+            "audio_editor",
+            "mixer"
+        ])
+    );
+}
+
+/// The Mixer window comes in Task 6: until then `window.mixer` answers
+/// `unavailable` and opens nothing.
+#[gpui::test]
+fn window_mixer_is_unavailable_until_the_mixer_window(cx: &mut TestAppContext) {
+    let s = mixer_setup(cx);
+    let e = call(&s, cx, "command.run", json!({"id": "window.mixer"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert!(
+        e.message
+            .starts_with("command.run window.mixer is not available"),
+        "{}",
+        e.message
+    );
+    let w = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
+    assert_eq!(w["windows"].as_array().unwrap().len(), 1);
+    // ⌥⌘M too: delivered, nothing opened.
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"key": "m", "modifiers": ["option", "command"]}),
+    ));
+    assert_eq!(documents(cx), 1);
+}
+
+/// e2e `touch_writes_a_fader_over_the_channel`, the command part.
+#[gpui::test]
+fn automation_over_the_channel(cx: &mut TestAppContext) {
+    let s = mixer_setup(cx);
+    s.fake
+        .set_automation_state(vizdaw_ffi::automation::AutomationStateRow {
+            modes: modes_of(&s.fake.mixer_snapshot()),
+            touched: vec![],
+            touched_values: vec![],
+            suspended: false,
+            writing: false,
+        });
+    let a = ok(call(&s, cx, "state.get", json!({"target": "automation"})));
+    assert_eq!(a["suspended"], false, "{a}");
+    assert_eq!(a["modes"][0]["strip"], 1, "{a}");
+    assert_eq!(a["modes"][0]["mode"], "read", "{a}");
+
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "automation.set_mode", "params": {"strips": "1", "mode": "touch"}}),
+    ));
+    assert_eq!(ran["command"], "automation.set_mode");
+    let m = ok(call(&s, cx, "state.get", json!({"target": "mixer"})));
+    assert_eq!(m["strips"][0]["automation"], "touch", "{m}");
+    assert_eq!(m["strips"][0]["name"], "Synth", "{m}");
+    assert_eq!(m["strips"].as_array().unwrap().len(), 3);
+
+    s.fake.fail_next(
+        "gesture",
+        VizError::Model {
+            message: "unknown id strip999999".into(),
+        },
+    );
+    let gesture = |params: Value| json!({"id": "automation.gesture", "params": params});
+    let e = call(
+        &s,
+        cx,
+        "command.run",
+        gesture(json!({"target": "fader:999999", "phase": "touch"})),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Failed, "{}", e.message);
+    let e = call(
+        &s,
+        cx,
+        "command.run",
+        gesture(json!({"target": "fader:1", "phase": "value", "value": "nan"})),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    let e = call(
+        &s,
+        cx,
+        "command.run",
+        gesture(json!({"target": "fader", "phase": "touch"})),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        gesture(json!({"target": "fader:1", "phase": "touch", "value": "0.5"})),
+    ));
+    for v in ["0.55", "0.6", "0.65", "0.7"] {
+        ok(call(
+            &s,
+            cx,
+            "command.run",
+            gesture(json!({"target": "fader:1", "phase": "value", "value": v})),
+        ));
+    }
+    assert_eq!(
+        s.fake.holders(),
+        vec![vizdaw_ffi::automation::GestureHolderRow::Channel; 5]
+    );
+    s.fake
+        .set_automation_state(vizdaw_ffi::automation::AutomationStateRow {
+            modes: modes_of(&s.fake.mixer_snapshot()),
+            touched: vec![vizdaw_ffi::events::AutomationTargetRow::StripFader { strip: 1 }],
+            touched_values: vec![0.7],
+            suspended: false,
+            writing: true,
+        });
+    let a = ok(call(&s, cx, "state.get", json!({"target": "automation"})));
+    assert_eq!(a["touched"], json!(["fader:1"]), "{a}");
+    let before = s.fake.snap().version;
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        gesture(json!({"target": "fader:1", "phase": "release"})),
+    ));
+    assert!(
+        s.fake.snap().version > before,
+        "the release landed the step"
+    );
+    let doc = ok(call(&s, cx, "state.get", json!({"target": "document"})));
+    assert_eq!(
+        doc["version"].as_u64(),
+        Some(s.fake.snap().version),
+        "{doc}"
+    );
+
+    s.fake.set_channel_touches(2);
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "automation.release_all"}),
+    ));
+    assert_eq!(ran["status"], "Released 2 touches.", "{ran}");
+}
+
+/// e2e `default_eq_and_new_bus_over_the_channel`, the New Bus part.
+#[gpui::test]
+fn new_bus_over_the_channel(cx: &mut TestAppContext) {
+    let s = mixer_setup(cx);
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "mixer.new_bus", "params": {"strip": 1}}),
+    ));
+    assert_eq!(ran["status"], "Bus 2", "{ran}");
+    let m = ok(call(&s, cx, "state.get", json!({"target": "mixer"})));
+    let synth = &m["strips"][0];
+    assert_eq!(synth["sends"].as_array().map(Vec::len), Some(1), "{m}");
+    let ran = ok(call(&s, cx, "command.run", json!({"id": "mixer.new_bus"})));
+    assert_eq!(ran["status"], "Bus 3", "{ran}");
+    let e = call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "mixer.new_bus", "params": {"strip": 0}}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    assert_eq!(e.message, "Master has no sends.");
+    // A refused mixer read is the state call's failure, Busy its `busy`.
+    s.fake.fail_next(
+        "mixer",
+        VizError::Busy {
+            message: "editor opening".into(),
+        },
+    );
+    let e = call(&s, cx, "state.get", json!({"target": "mixer"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Busy);
 }

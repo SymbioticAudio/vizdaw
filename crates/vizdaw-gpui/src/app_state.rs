@@ -15,12 +15,33 @@ use vizdaw_app::{DocId, DocumentModel, DocumentStore, Prefs, SaveAction, WindowT
 
 use crate::shell::DocumentWindow;
 
+/// What a window is, as `state.get windows` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowKind {
+    /// A document window.
+    #[default]
+    Document,
+    /// A document's Mixer window (slice 6a Task 6 opens them).
+    Mixer,
+}
+
+impl WindowKind {
+    /// The channel's name (`document`, `mixer`).
+    pub fn name(self) -> &'static str {
+        match self {
+            WindowKind::Document => "document",
+            WindowKind::Mixer => "mixer",
+        }
+    }
+}
+
 /// One open document window.
 #[derive(Clone)]
 pub struct WindowEntry {
     pub doc: DocId,
     pub token: WindowToken,
     pub handle: WindowHandle<DocumentWindow>,
+    pub kind: WindowKind,
 }
 
 pub struct AppState {
@@ -126,7 +147,12 @@ impl AppState {
         token: WindowToken,
         handle: WindowHandle<DocumentWindow>,
     ) {
-        self.windows.push(WindowEntry { doc, token, handle });
+        self.windows.push(WindowEntry {
+            doc,
+            token,
+            handle,
+            kind: WindowKind::Document,
+        });
     }
 
     /// The list preferences changed: every open document takes them.

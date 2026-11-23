@@ -19,6 +19,7 @@ pub mod testing;
 pub mod transport;
 pub mod transport_bar;
 pub mod transport_fields;
+pub mod view;
 
 pub use alerts::AlertItem;
 pub use document::{DocumentModel, SaveAction};

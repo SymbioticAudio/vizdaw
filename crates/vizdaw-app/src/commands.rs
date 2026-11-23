@@ -12,7 +12,7 @@ use vizdaw_ffi::tracks::TrackKindRow;
 
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
-use crate::editor::{DetailEditorKind, GESTURE_OPEN};
+use crate::editor::{DetailEditorKind, GESTURE_OPEN, PaneView};
 use crate::prefs::Prefs;
 use crate::transport_bar::TransportLayout;
 
@@ -37,7 +37,28 @@ pub const EDITOR_COMMANDS: &[&str] = &[
     "editors.list",
     "editors.close_detail",
     "editors.insert_event",
+];
+
+/// The registry IDs of the View menu's commands `run` handles: the main
+/// views, the pane toggles and `ui.pane` (Swift `ViewCommands`).
+pub const VIEW_COMMANDS: &[&str] = &[
+    "ui.view_arrange",
+    "ui.view_mix",
+    "ui.toggle_left",
     "ui.toggle_bottom",
+    "ui.toggle_right",
+    "ui.pane",
+];
+
+/// The registry IDs of the mixer's commands `run` handles: the Mixer
+/// window (the UI opens it, see [`Ran::open_mixer_window`]), the channel's
+/// automation commands and New Bus.
+pub const MIXER_COMMANDS: &[&str] = &[
+    "window.mixer",
+    "automation.set_mode",
+    "automation.gesture",
+    "automation.release_all",
+    "mixer.new_bus",
 ];
 
 const NO_DETAIL: &str = "No detail editor is open.";
@@ -88,6 +109,9 @@ pub struct Ran {
     pub status: Option<String>,
     /// A transport field the UI is to focus (Go to Position, Go to Edit In).
     pub focus: Option<FieldFocus>,
+    /// The UI is to open this document's Mixer window, or bring it to the
+    /// front (`window.mixer`).
+    pub open_mixer_window: bool,
 }
 
 /// A transport bar field a command asks the UI to focus. The UI answers
@@ -110,6 +134,7 @@ pub fn run_app(
         undo: None,
         status: Some(s.into()),
         focus: None,
+        open_mixer_window: false,
     };
     let write = |r: Result<(), String>| r.map_err(failed);
     match id {
@@ -151,6 +176,11 @@ fn kind_of(id: &str) -> Option<TrackKindRow> {
 
 /// Whether `id` can run on `doc` now (its menu item is enabled).
 pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
+    // The views and panes can change at any time; the mixer's commands
+    // need only the document.
+    if VIEW_COMMANDS.contains(&id) || MIXER_COMMANDS.contains(&id) {
+        return true;
+    }
     if TRANSPORT_COMMANDS.contains(&id) {
         return transport_enabled(id, doc);
     }
@@ -176,6 +206,9 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
 /// busy core; Rename asks the UI to start the header's rename field. What
 /// cannot run shows in the status line (and is returned).
 pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
+    if VIEW_COMMANDS.contains(&id) || MIXER_COMMANDS.contains(&id) {
+        return run(id, &[], doc).map_err(|e| refused(doc, e));
+    }
     if TRANSPORT_COMMANDS.contains(&id) {
         return transport_from_menu(id, doc);
     }
@@ -231,11 +264,21 @@ fn refused(doc: &mut DocumentModel, e: ControlError) -> ControlError {
     e
 }
 
-fn ran(doc: &DocumentModel) -> Ran {
+pub(crate) fn ran(doc: &DocumentModel) -> Ran {
     Ran {
         undo: doc.snapshot().undo_label.clone(),
         status: doc.status().map(String::from),
         focus: None,
+        open_mixer_window: false,
+    }
+}
+
+/// Whether `id`'s menu item shows a check mark: the current main view,
+/// the panes the current view shows, Snap to Grid.
+pub fn is_on(id: &str, doc: &DocumentModel) -> bool {
+    match id {
+        "editors.snap" => doc.layout().snap.enabled,
+        _ => crate::view::is_on(id, doc),
     }
 }
 
@@ -286,6 +329,19 @@ pub fn run(
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, args, doc);
+    }
+    if VIEW_COMMANDS.contains(&id) {
+        return crate::view::run(id, args, doc);
+    }
+    if id == "window.mixer" {
+        check_names(id, args)?;
+        return Ok(Ran {
+            open_mixer_window: true,
+            ..ran(doc)
+        });
+    }
+    if MIXER_COMMANDS.contains(&id) {
+        return crate::mixer::commands::run(id, args, doc);
     }
     if !DOCUMENT_COMMANDS.contains(&id) {
         return Err(ControlError::new(
@@ -364,7 +420,7 @@ pub fn run(
 }
 
 /// Refuses a parameter the command does not take, or one given twice.
-fn check_names(id: &str, args: &[(String, ArgValue)]) -> Result<(), ControlError> {
+pub(crate) fn check_names(id: &str, args: &[(String, ArgValue)]) -> Result<(), ControlError> {
     let spec = registry::find(id);
     for (i, (name, _)) in args.iter().enumerate() {
         if spec.is_some_and(|s| !s.params.iter().any(|p| p.name == name))
@@ -426,7 +482,7 @@ fn run_step(undo: bool, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
 }
 
 /// The `on` flag: absent, or true or false.
-fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bool>, ControlError> {
+pub(crate) fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bool>, ControlError> {
     match args.iter().find(|(n, _)| n == "on") {
         None => Ok(None),
         Some((_, ArgValue::Flag(f))) => Ok(Some(*f)),
@@ -436,8 +492,8 @@ fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bool>, Contro
 
 /// An editor command: Snap to Grid (`on`, absent toggles), List (opens on
 /// the open detail's target or the selection; nothing to show opens
-/// nothing), Close Detail Editor and the current view's Bottom Pane
-/// (`on`, absent toggles; Swift `ViewCommands`).
+/// nothing) and Close Detail Editor. Over a bottom pane that shows no
+/// editor, the Piano Roll and the List end the panes' text edits first.
 fn run_editor(
     id: &str,
     args: &[(String, ArgValue)],
@@ -449,20 +505,23 @@ fn run_editor(
             let on = on_flag(id, args)?;
             doc.update_layout(|l| l.snap.enabled = on.unwrap_or(!l.snap.enabled));
         }
-        "editors.piano_roll" => doc.show_detail(DetailEditorKind::PianoRoll),
-        "editors.list" => doc.show_detail(DetailEditorKind::List),
+        "editors.piano_roll" | "editors.list" => {
+            let kind = if id == "editors.piano_roll" {
+                DetailEditorKind::PianoRoll
+            } else {
+                DetailEditorKind::List
+            };
+            let opens = doc.layout().detail.is_some() || doc.detail_target().is_some();
+            if opens && doc.layout().views.current().bottom.view != PaneView::Editor {
+                doc.end_pane_edits();
+            }
+            doc.show_detail(kind);
+        }
         "editors.insert_event" => {
             if !insert_event_ready(doc) {
                 return Err(unavailable(NO_LIST));
             }
             doc.list_insert(None);
-        }
-        "ui.toggle_bottom" => {
-            let on = on_flag(id, args)?;
-            doc.update_layout(|l| {
-                let bottom = &mut l.views.current_mut().bottom;
-                bottom.shown = on.unwrap_or(!bottom.shown);
-            });
         }
         _ => {
             if doc.layout().detail.is_none() {
