@@ -7,7 +7,8 @@
 //! The strip edits (`mixer.set_strip`, `set_output`, `add_send`,
 //! `set_send`, `remove_send`, `remove_bus`) are each one `run_mixer` call
 //! with the arguments as given (the core checks them, and counts sends
-//! from 1 as the channel does); `mixer.set_colour` sets a strip's colour;
+//! from 1 as the channel does), and so is every group and VCA edit
+//! (registry `GROUP_IDS`); `mixer.set_colour` sets a strip's colour;
 //! `automation.mode.*` set the selected strips' mode; `automation.suspend`
 //! is the app-wide switch.
 //!
@@ -65,6 +66,10 @@ pub const STRIP_EDITS: &[&str] = &[
     "mixer.remove_send",
     "mixer.remove_bus",
 ];
+
+/// The commands a key (or a menu item) runs with the selected strips as
+/// `strips`: the channel never acts on the selection.
+pub const SELECTION_FILLED: &[&str] = &["mixer.new_group", "mixer.new_vca"];
 
 /// The Automation menu's mode commands.
 pub const MODE_COMMANDS: &[(&str, AutomationModeRow)] = &[
@@ -180,7 +185,7 @@ fn catch_up(doc: &mut DocumentModel) {
 }
 
 /// Runs `automation.set_mode|gesture|release_all|mode.*`, `mixer.new_bus`,
-/// `mixer.set_colour` or a strip edit.
+/// `mixer.set_colour`, a strip edit or a group or VCA edit.
 pub(crate) fn run(
     id: &str,
     args: &[(String, ArgValue)],
@@ -192,7 +197,9 @@ pub(crate) fn run(
         "automation.release_all" => release_all(args, doc),
         "mixer.new_bus" => new_bus(args, doc),
         "mixer.set_colour" => set_colour(args, doc),
-        _ if STRIP_EDITS.contains(&id) => strip_edit(id, args, doc),
+        _ if STRIP_EDITS.contains(&id) || registry::GROUP_IDS.contains(&id) => {
+            strip_edit(id, args, doc)
+        }
         _ if mode_of(id).is_some() => mode_command(id, doc),
         _ => Err(ControlError::new(
             ErrorCode::UnknownId,
@@ -346,7 +353,7 @@ fn control_args(args: &[(String, ArgValue)]) -> Vec<ControlArg> {
         .collect()
 }
 
-/// A strip edit: one `run_mixer` call with the arguments as given (a send
+/// A strip, group or VCA edit: one `run_mixer` call with the arguments as given (a send
 /// `index` counts from 1, as the core takes it). The status line is the
 /// command's title; a refusal is `failed` in the session's words, Busy
 /// `busy`.

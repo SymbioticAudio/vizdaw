@@ -1336,7 +1336,8 @@ fn not_yet(what: &str) -> ControlError {
              automation.set_mode / automation.gesture / automation.release_all / \
              automation.mode.* / automation.suspend / mixer.new_bus / mixer.set_strip / \
              mixer.set_output / mixer.add_send / mixer.set_send / mixer.remove_send / \
-             mixer.remove_bus / mixer.set_colour / window.mixer, state.get transport / windows / document / editor / selection / \
+             mixer.remove_bus / mixer.set_colour / mixer.*group* / mixer.*vca* / window.mixer, \
+             state.get transport / windows / document / editor / selection / \
              mixer / layout / automation, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
         ),
     )

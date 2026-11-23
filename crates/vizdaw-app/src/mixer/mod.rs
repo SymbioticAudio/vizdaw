@@ -5,18 +5,21 @@
 
 pub mod commands;
 pub mod gesture;
+mod groups;
 pub mod layout;
 pub mod math;
 pub mod meters;
 mod model;
 mod palette;
 mod sends;
+mod vca;
 
 use std::collections::BTreeSet;
 use std::time::Instant;
 
 use vizdaw_ffi::VizError;
 
+pub use groups::{GROUP_FAILED, GroupLabels, UNGROUP_FAILED, strips_text};
 pub use math::{AutomationModes, MixerMath, StripEntry};
 pub use meters::{MeterLevel, Meters};
 pub use model::{
@@ -25,6 +28,7 @@ pub use model::{
 };
 pub use palette::StripPalette;
 pub use sends::{OutputChoice, SEND_FAILED, SendLabels};
+pub use vca::{DELETE_VCA_FAILED, NEW_VCA_FAILED, VCA_FAILED, VcaStripLabels};
 
 use crate::alerts::AlertItem;
 use crate::document::DocumentModel;

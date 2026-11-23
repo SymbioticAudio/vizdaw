@@ -18,7 +18,8 @@ use vizdaw_ffi::events::{
     EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
 };
 use vizdaw_ffi::mixer::{
-    BusRow, DestRow, MixerLevels, MixerSnapshot, StripColourRow, StripKindRow, StripRow, SwatchRow,
+    BusRow, DestRow, GroupRow, MixerLevels, MixerSnapshot, StripColourRow, StripKindRow, StripRow,
+    SwatchRow, VcaRow,
 };
 use vizdaw_ffi::revs::LaneRev;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
@@ -1521,6 +1522,68 @@ pub fn mixer_fake() -> FakeSession {
         }],
         groups: vec![],
         vcas: vec![],
+    });
+    f
+}
+
+/// A VCA row (blue, in Read) at `db`.
+pub fn vca_row(id: u64, name: &str, members: &[u64], db: f64) -> VcaRow {
+    VcaRow {
+        id,
+        name: name.into(),
+        colour: SwatchRow::Blue,
+        members: members.to_vec(),
+        gain_db: db,
+        mute: false,
+        solo: false,
+        automation: AutomationModeRow::Read,
+    }
+}
+
+/// A red fader group with both links on.
+pub fn group_row(id: u64, name: &str, members: &[u64]) -> GroupRow {
+    GroupRow {
+        id,
+        name: name.into(),
+        colour: SwatchRow::Red,
+        members: members.to_vec(),
+        link_mute: true,
+        link_solo: true,
+    }
+}
+
+/// [`demo_fake`] with the groups' mixer (Swift `MixerGroupsTests.groupsFake`):
+/// Kick (2), Snare (3) and Bass (4), audio paths 1 to 3, Bus 1 (5) and
+/// Master (0); each strip's `group` and `vcas` follow `groups` and `vcas`.
+pub fn groups_fake(vcas: Vec<VcaRow>, groups: Vec<GroupRow>) -> FakeSession {
+    let f = demo_fake();
+    let mut strips = vec![
+        strip_row(2, "Kick", StripKindRow::AudioPath { path: 1 }),
+        strip_row(3, "Snare", StripKindRow::AudioPath { path: 2 }),
+        strip_row(4, "Bass", StripKindRow::AudioPath { path: 3 }),
+        strip_row(5, "Bus 1", StripKindRow::Bus),
+        strip_row(0, "Master", StripKindRow::Master),
+    ];
+    for s in &mut strips {
+        s.vcas = vcas
+            .iter()
+            .filter(|v| v.members.contains(&s.id))
+            .map(|v| v.id)
+            .collect();
+        s.group = groups
+            .iter()
+            .find(|g| g.members.contains(&s.id))
+            .map(|g| g.id);
+    }
+    f.set_mixer(MixerSnapshot {
+        version: 0,
+        strips,
+        buses: vec![BusRow {
+            id: 5,
+            name: "Bus 1".into(),
+        }],
+        groups,
+        vcas,
     });
     f
 }

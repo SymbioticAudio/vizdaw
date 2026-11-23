@@ -318,7 +318,7 @@ fn commands_outside_the_slice_are_unavailable(cx: &mut TestAppContext) {
     for (cmd, params) in [
         (
             "command.run",
-            json!({"id": "mixer.new_vca", "params": {"strips": "1"}}),
+            json!({"id": "mixer.make_mine", "params": {"strip": 1}}),
         ),
         ("state.get", json!({"target": "media"})),
         (

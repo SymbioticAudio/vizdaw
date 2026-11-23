@@ -15,7 +15,8 @@ use vizdaw_ffi::automation::automation_suspended;
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
 use crate::editor::{DetailEditorKind, GESTURE_OPEN};
-use crate::mixer::commands::{SUSPEND, mode_of, suspend};
+use crate::mixer::commands::{SELECTION_FILLED, SUSPEND, mode_of, suspend};
+use crate::mixer::strips_text;
 use crate::prefs::Prefs;
 use crate::transport_bar::TransportLayout;
 
@@ -56,7 +57,8 @@ pub const VIEW_COMMANDS: &[&str] = &[
 /// The registry IDs of the mixer's commands `run` handles: the Mixer
 /// window (the UI opens it, see [`Ran::open_mixer_window`]), the channel's
 /// automation commands, the Automation menu's modes, New Bus, the strip
-/// edits and the strip colour. (Make Mine is Co-Producer's: not yet.)
+/// edits, the strip colour and the group and VCA edits (registry
+/// `GROUP_IDS`). (Make Mine is Co-Producer's: not yet.)
 pub const MIXER_COMMANDS: &[&str] = &[
     "window.mixer",
     "automation.set_mode",
@@ -76,6 +78,20 @@ pub const MIXER_COMMANDS: &[&str] = &[
     "mixer.remove_send",
     "mixer.remove_bus",
     "mixer.set_colour",
+    "mixer.new_group",
+    "mixer.rename_group",
+    "mixer.set_group_colour",
+    "mixer.add_to_group",
+    "mixer.remove_from_group",
+    "mixer.set_group_links",
+    "mixer.delete_group",
+    "mixer.new_vca",
+    "mixer.rename_vca",
+    "mixer.set_vca_colour",
+    "mixer.assign_vca",
+    "mixer.unassign_vca",
+    "mixer.set_vca",
+    "mixer.delete_vca",
 ];
 
 const NO_DETAIL: &str = "No detail editor is open.";
@@ -244,7 +260,17 @@ pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Contr
         return Ok(ran(doc));
     }
     if VIEW_COMMANDS.contains(&id) || MIXER_COMMANDS.contains(&id) {
-        return run(id, &[], doc).map_err(|e| refused(doc, e));
+        // A key's New Group and New VCA take the selected strips; the
+        // channel's never do.
+        let args: Vec<(String, ArgValue)> = if SELECTION_FILLED.contains(&id) {
+            strips_text(&doc.selected_member_strips())
+                .map(|t| ("strips".to_owned(), ArgValue::Text(t)))
+                .into_iter()
+                .collect()
+        } else {
+            vec![]
+        };
+        return run(id, &args, doc).map_err(|e| refused(doc, e));
     }
     if TRANSPORT_COMMANDS.contains(&id) {
         return transport_from_menu(id, doc);

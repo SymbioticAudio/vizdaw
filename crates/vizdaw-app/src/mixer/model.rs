@@ -97,6 +97,9 @@ pub struct MixerModel {
     placements: BTreeSet<MixerPlacement>,
     /// The strip whose name is being edited, and where.
     renaming: Option<(u64, MixerPlacement)>,
+    /// The VCA whose name is being edited, and where (the draft is
+    /// shared with a strip's rename, as in Swift).
+    pub(super) renaming_vca: Option<(u64, MixerPlacement)>,
     pub rename_draft: String,
     /// Shown values (normalised) of targets touched here, once moved.
     live: HashMap<Target, f64>,
@@ -151,6 +154,7 @@ impl MixerModel {
             last_poll: None,
             placements: BTreeSet::new(),
             renaming: None,
+            renaming_vca: None,
             rename_draft: String::new(),
             live: HashMap::new(),
             heard: HashMap::new(),
@@ -1135,6 +1139,11 @@ impl MixerModel {
             && self.strip(id).is_none()
         {
             self.renaming = None;
+        }
+        if let Some((id, _)) = self.renaming_vca
+            && self.vca(id).is_none()
+        {
+            self.renaming_vca = None;
         }
         let kept: BTreeSet<u64> = doc
             .selected_strips()
