@@ -97,3 +97,69 @@
 - [ ] **Step 1: failing tests:** `meters_decay_and_fall_silent`, `heard_values_follow_while_playing`, `the_mixer_window_opens_and_reports_its_kind`, `closing_the_mixer_window_keeps_the_mix_views_drag`; then the e2e tests (`#[ignore]`).
 - [ ] **Step 2–5;** commit `gpui: meters, the mixer window and mixer e2e`.
 - [ ] **Step 6 (controller):** run e2e on the Mac and Linux; look at the Mix view and the Mixer window on the Mac; measure 64 strips at 60 fps (M1) and record the numbers; tick the checklist rows.
+
+## Outcome (2026-11-23)
+
+All six tasks done (commits b446b41f..5d8907c0). Evidence: workspace tests 4661 passed on macOS and 4530 on Linux; clippy `-D warnings` and fmt clean; GPUI e2e 16/16 on macOS and Linux (XWayland), including three new mixer tests; visual checks of the Mix view on the Mac (2 strips, and 64 strips with synthetic meters).
+
+M1 measurement (Mac, release build, 1440×900 window, 64 strips metering, 12 drawn): 60.0 fps, 0 dropped in 605 frames, frame build p50 3.2 ms, p99 6.3 ms, max 7.7 ms. Option A (`levels()` at 30 Hz) stands; no lock-free feed needed. A debug build runs at about 10 fps (build p50 44 ms) — debug only. Still to measure before the 27.1 performance sign-off: a large arrangement with the bottom-pane mixer showing (the whole document window repaints at meter rate).
+
+Fixes found along the way: a mouse-up arriving before the next frame was lost (press left open, hover dragged the fader) in the controls and the pane divider; the Mix view's first frame was empty; typed strip names dropped by view changes and saves; a resize press also hit the canvas under the divider; closing through the Mixer window orphaned the document window; divider drags outliving their pane.
+
+### Rulings
+
+- Task 1: Ruling: mixer lives in DocumentModel (ensure_mixer/mixer/with_mixer; store.mixer(id)) — one model per document for all placements — nested with_mixer returns None (caller rule)
+- Task 1: Ruling: a Busy first mixer read is quiet and retried (Swift alerted once) — Busy is transient — a persistent Busy shows nothing
+- Task 1: Ruling: meter poll 30 ms (Swift) not 33; decay scaled by elapsed time; a strip leaving the take decays (not Swift's instant drop) per plan — none
+- Task 1: Ruling: mixer edit failures (Busy included) are alerts (Swift parity); a Busy release retried 2 s then the gesture's failure alert — parity — an alert on a long Busy
+- Task 1: Ruling: code before tests; 16 mutations each caught — reviewer judges — weak tests could hide bugs
+- Task 2: Ruling: window.mixer answers unavailable via the existing not_yet text until Task 6; menu/⌥⌘M do nothing until then — no new strings — none
+- Task 2: Ruling: ⌃1/⌃2 unbound on Linux (⌘ and ⌃ both map to Ctrl, clashing with ⌘1/⌘2 editors); menu and channel work — Linux key scheme is an owner call later — Linux users have no main-view shortcut
+- Task 2: Ruling: new view.rs (incl. StripFocus port for state.get layout) and mixer/commands.rs; ui.toggle_bottom moved to VIEW_COMMANDS — structure — none
+- Task 2: Ruling: mixer.set_strip/set_output/remove_bus and automation.suspend/mode.* left for 6b — scope — none
+- Task 3: Ruling: bottom picker lists Piano Roll, List, Audio Editor, Mixer (Swift); Audio Editor shows "Audio Editor comes in a later version." until its slice — parity + M4 — none
+- Task 3: Ruling (controller): default document window becomes Swift's 1440×900 clamped to the screen's visible area, so the standard bar no longer folds Edit In/Out by default — parity, not an owner call — tests that assumed 1000×640 need adjusting; carried to the fix round
+- Task 4: Ruling: MixerModel::pressed(p) added (read-only); unmount release via GPUI keyed element state lands on the next effect flush; double-click reset on the second click's mouse-up (Swift) — none
+- Task 5: Ruling: ⇧-click also extends the strip selection (my brief said ⇧/⌘; Swift ⌘ only) — harmless superset — a ⇧ user expecting range select gets add
+- Task 5: Ruling: strip rename commits on losing the keyboard (Swift keeps it open) — consistent with slice 2–4 fields — none
+- Task 5: Ruling: MIDI destination and VCA strips, the Add Track/Instruments bar menus and tooltips left for 6b/later; Task 6 e2e needs an anchor other than "Instruments"
+- Task 5: Ruling: the Mixer menu (Swift: group/VCA items only) lands with 6b — none now — menu absent in 6a
+- Task 6: Ruling: the Mixer window is a second kind of DocumentWindow (not a new view type) so transport bar and control calls work unchanged — none
+- Task 6: Ruling: measurement hook VIZDAW_FRAME_STATS (=meters drives synthetic levels) adds a `frames` object to state.get windows rows — dev-only — none
+- Task 6: Ruling: state.get windows marks only the one key window `key` (not every window of the key document) — matches what GPUI knows — a client reading key for the document could differ from Swift
+- Final: Ruling: declined — a release still pending when the last placement goes is never retried (tick runs only while polling; core never Busy on release) — stands — none today
+- Final: Ruling: declined — focused fader ↑/↓ vs window arrow bindings, NumberBox focus-loss parity, Wayland grab delivery, Mixer window accepting View commands — stand as ported — minor parity risk
+
+### Deferred minors
+
+- Task 1: minor (deferred): click drops a pending release before its own touch is accepted (unreachable: core never Busy on release)
+- Task 1: minor (deferred): release given up after the 2 s window (unreachable today; revisit if core gains Busy release)
+- Task 1: minor (deferred): failed destinations() at MixerModel::new does not owe a refetch (MIDI strips missing until version moves)
+- Task 1: minor (deferred): key nudge on a mouse-dragged target releases the drag; later moves become one undo step each
+- Task 1: minor (deferred): a_second_document_has_silent_meters near-tautology; cancel_drags/forget_gone pending/Busy destinations refetch untested
+- Task 1: minor (deferred): tracker travel.max(1.0) vs Swift; Busy first ask unthrottled per frame
+- Task 2: minor (deferred): ui.pane type refusal strings not in Swift (registry refuses first; only direct callers see them)
+- Task 2: minor (deferred): state.get mixer/automation read errors map to busy/failed (Swift returns nil)
+- Task 2: minor (deferred): new_bus trim uses Unicode White_Space vs Swift whitespacesAndNewlines
+- Task 3: minor (deferred): the Mix view unmounts the arrangement (Swift keeps it mounted) — scroll position may reset on switching back
+- Task 3: minor (deferred): divider clamp test asserts a range, not the exact value
+- Task 3: minor (deferred): no test that editor keyboard focus is released when the bottom picker switches to Mixer
+- Task 3: minor (deferred): » Main View row does nothing (Swift shows a popover)
+- Task 4: minor (deferred): toggle face drawn 24×24 (Swift: drawn 18 in a 24 hit area) — visual check
+- Task 4: minor (deferred): ⌃-click (mac context click) starts a fader/knob press and stops propagation — note for Task 5 strip menus
+- Task 5: minor (deferred): the two placements never shown together in a GPUI test (model tests cover it)
+- Task 5: minor (deferred): mixer_pixels.rs assumes a 1440 window and a fixed cap offset
+- Task 6: minor (deferred): Swift's rule that Mix view/bottom pane stop polling when the window isn't key and nothing plays is not ported
+- Task 6: minor (deferred): Swift's key-or-playing poll gate not ported (background Mix view polls at 30 Hz)
+- Task 6: minor (deferred): two clones per tick per placement; no two-document meter test (core returns empty levels for a non-holding session)
+- Task 6: minor (deferred): GPUI transport bar does not draw command: items (dropped from the groups/VCAs e2e port)
+- Final: minor (deferred): the bottom-pane mixer repaints the whole document window at meter rate — measure a large arrangement + pane mixer before 27.1 perf sign-off
+
+### Owner's manual checks
+
+- Drag faders and pan knobs with the mouse and a trackpad (tap-to-click and quick clicks), ⌥ fine drag, double-click reset; check the undo names ("Set Fader").
+- Type levels and pans (−∞, -inf, 3 dB, L20, C) and Escape.
+- Play the demo with the Mix view open: meters move and fall to silence after Stop; faders follow automation in Read.
+- Open Window › Mixer (⌥⌘M); drag in it and in the Mix view; close it; close the song.
+- Resize the panes by their dividers; hide and show panes; shrink the window.
+- Choose a Linux shortcut scheme for Arrange/Mix (⌃1/⌃2 belong to ⌘1/⌘2 there today).
