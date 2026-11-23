@@ -21,6 +21,7 @@ use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow};
 use super::gesture::{ControlGesture, MIN_DRAG_DISTANCE};
 use super::math::{AutomationModes, MixerMath, StripEntry};
 use super::meters::{Meters, POLL_INTERVAL};
+use super::midi::MidiDrags;
 use crate::alerts::AlertItem;
 use crate::document::DocumentModel;
 use crate::session::DocSession;
@@ -86,9 +87,15 @@ struct PendingRelease {
 
 pub struct MixerModel {
     snapshot: MixerSnapshot,
-    destinations: Vec<DestRow>,
+    pub(super) destinations: Vec<DestRow>,
+    /// The slots safe mode holds off.
+    pub(super) held: BTreeSet<u64>,
     /// The document version the mixer was last read at.
     seen: u64,
+    /// The document's slots version the mixer was last read at.
+    seen_slots: u64,
+    /// The MIDI strips' drags.
+    pub(super) midi: MidiDrags,
     /// A refetch hit Busy and is still owed.
     refetch_owed: bool,
     fetches: u64,
@@ -144,10 +151,14 @@ impl MixerModel {
         let session = doc.session();
         let snapshot = session.mixer()?;
         let destinations = session.destinations().unwrap_or_default();
+        let held = session.held_slots().unwrap_or_default();
         Ok(MixerModel {
             snapshot,
             destinations,
+            held: held.into_iter().collect(),
             seen: doc.snapshot().version,
+            seen_slots: doc.slots_version(),
+            midi: MidiDrags::default(),
             refetch_owed: false,
             fetches: 1,
             meters: Meters::default(),
@@ -454,13 +465,16 @@ impl MixerModel {
         }
     }
 
-    /// The document moved since the mixer was read, or a refetch is owed
-    /// (see [`MixerModel::refresh_if_needed`]).
+    /// The document or its slots moved since the mixer was read, or a
+    /// refetch is owed (see [`MixerModel::refresh_if_needed`]).
     pub fn needs_refresh(&self, doc: &DocumentModel) -> bool {
-        doc.snapshot().version != self.seen || self.refetch_owed
+        doc.snapshot().version != self.seen
+            || doc.slots_version() != self.seen_slots
+            || self.refetch_owed
     }
 
-    /// Refetches the mixer when the document changed or a refetch is owed.
+    /// Refetches the mixer when the document or its slots changed, or a
+    /// refetch is owed.
     pub fn refresh_if_needed(&mut self, doc: &mut DocumentModel) {
         if self.needs_refresh(doc) {
             self.refetch(doc);
@@ -632,6 +646,7 @@ impl MixerModel {
     /// Releases every touch still open here (the last placement or the
     /// document closing must not leave a gesture open), each once.
     pub fn end_open_drag(&mut self, doc: &mut DocumentModel, now: Instant) {
+        self.lift_midi_presses(doc, now);
         self.editing.clear();
         self.presses.clear();
         self.gestures.clear();
@@ -727,6 +742,7 @@ impl MixerModel {
     ) {
         // A press whose mouse-up never came ends first.
         self.lift(doc, p, now);
+        self.midi_lift(doc, p, now);
         let alone = option && matches!(t, Target::StripFader { .. });
         self.presses.insert(p, Press { target: t, alone });
         self.gestures
@@ -785,6 +801,7 @@ impl MixerModel {
     /// went): released once.
     pub fn cancel_drags(&mut self, doc: &mut DocumentModel, p: MixerPlacement, now: Instant) {
         self.lift(doc, p, now);
+        self.midi_lift(doc, p, now);
     }
 
     /// A double-click on the control of `t`: the reset (0 dB, centre),
@@ -1084,18 +1101,21 @@ impl MixerModel {
         ok
     }
 
-    /// Reads the mixer again. `Busy` skips silently: the previous state
-    /// stays and the next tick tries again. Another refusal is the alert
-    /// "Mixer Unavailable" (unless one shows).
-    fn refetch(&mut self, doc: &mut DocumentModel) {
+    /// Reads the mixer, the held slots and the destinations again. `Busy`
+    /// skips silently: the previous state stays and the next tick tries
+    /// again. Another refusal is the alert "Mixer Unavailable" (unless one
+    /// shows).
+    pub(super) fn refetch(&mut self, doc: &mut DocumentModel) {
         let session = doc.session().clone();
         let read = session
             .mixer()
-            .and_then(|m| Ok((m, session.destinations()?)));
+            .and_then(|m| Ok((m, session.held_slots()?, session.destinations()?)));
         match read {
-            Ok((snap, dests)) => {
+            Ok((snap, held, dests)) => {
                 self.snapshot = snap;
+                self.held = held.into_iter().collect();
                 self.destinations = dests;
+                self.prune_midi_drafts(doc);
                 self.fetches += 1;
                 self.forget_gone(doc);
             }
@@ -1111,6 +1131,7 @@ impl MixerModel {
         }
         self.refetch_owed = false;
         self.seen = doc.snapshot().version;
+        self.seen_slots = doc.slots_version();
     }
 
     /// Releases (once, quietly: the control went) the touches whose
@@ -1249,7 +1270,7 @@ fn send(
 }
 
 /// Sets `item` unless the same alert is already showing.
-fn raise(doc: &mut DocumentModel, item: AlertItem) {
+pub(super) fn raise(doc: &mut DocumentModel, item: AlertItem) {
     if doc
         .alert
         .as_ref()

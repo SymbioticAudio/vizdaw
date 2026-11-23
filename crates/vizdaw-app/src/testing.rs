@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crate::DocSession;
+use crate::session::IdleNews;
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{
     AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow, StripModeRow,
@@ -18,12 +19,15 @@ use vizdaw_ffi::events::{
     EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
 };
 use vizdaw_ffi::mixer::{
-    BusRow, DestRow, GroupRow, MixerLevels, MixerSnapshot, StripColourRow, StripKindRow, StripRow,
-    SwatchRow, VcaRow,
+    BusRow, DestRow, GroupRow, MidiMixRow, MixerLevels, MixerSnapshot, StripColourRow,
+    StripKindRow, StripRow, SwatchRow, VcaRow,
 };
 use vizdaw_ffi::revs::LaneRev;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
-use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, SeqRow, TransportState};
+use vizdaw_ffi::snapshot::{
+    DocSnapshot, LaneRow, PluginFormatTag, PluginRefRow, SeqRow, SlotRow, SlotStatus,
+    TransportState,
+};
 use vizdaw_ffi::tracks::TrackKindRow;
 
 struct State {
@@ -95,6 +99,16 @@ struct State {
     holders: Vec<GestureHolderRow>,
     /// What `release_channel_touches` answers.
     channel_touches: u32,
+    /// What the next `idle()` says of the slots (once).
+    idle_slots_changed: bool,
+    /// The slots safe mode holds off.
+    held: Vec<u64>,
+    /// Every `load_plugins(slots)`.
+    loaded: Vec<Vec<u64>>,
+    /// Every `preview_midi_mix(dest, volume, pan)`.
+    midi_previews: Vec<(u64, Option<u8>, Option<u8>)>,
+    /// Every `set_midi_mix(dest, mix)`.
+    midi_mixes: Vec<(u64, MidiMixRow)>,
 }
 
 /// What the session keeps of a selection it is given (after dropping
@@ -214,6 +228,11 @@ impl FakeSession {
             run_mixers: vec![],
             holders: vec![],
             channel_touches: 0,
+            idle_slots_changed: false,
+            held: vec![],
+            loaded: vec![],
+            midi_previews: vec![],
+            midi_mixes: vec![],
         }))
     }
 
@@ -279,6 +298,11 @@ impl FakeSession {
     /// The snapshot the next `idle()` returns (once).
     pub fn set_idle(&self, s: Option<DocSnapshot>) {
         self.st().idle_snapshot = s;
+    }
+
+    /// Makes the next `idle()` say the slots changed (once).
+    pub fn set_idle_slots_changed(&self) {
+        self.st().idle_slots_changed = true;
     }
 
     /// Makes the session hold exactly `s` as its selection.
@@ -524,7 +548,9 @@ impl FakeSession {
     // `heard_values`, `run_mixer`, `add_bus`, `new_bus_from`,
     // `remove_bus`, `rename_strip`, `set_output`, `add_send`, `edit_send`,
     // `remove_send`, `set_strip_colour`,
-    // `release_channel_touches`, `set_surface_selection`); a gesture phase
+    // `release_channel_touches`, `set_surface_selection`, `remove_insert`,
+    // `move_insert`, `set_bypass`, `set_sidechain`, `set_eq`,
+    // `load_plugins`, `held_slots`, `set_midi_mix`, `preview_midi_mix`); a gesture phase
     // also answers `gesture_touch`, `gesture_value` or `gesture_release`
     // first.
 
@@ -600,6 +626,32 @@ impl FakeSession {
     /// How many touches `release_channel_touches` says it released.
     pub fn set_channel_touches(&self, n: u32) {
         self.st().channel_touches = n;
+    }
+
+    /// The slots safe mode holds off (`held_slots`); `load_plugins` takes
+    /// them out.
+    pub fn set_held(&self, slots: Vec<u64>) {
+        self.st().held = slots;
+    }
+
+    /// Every `load_plugins(slots)`.
+    pub fn loaded(&self) -> Vec<Vec<u64>> {
+        self.st().loaded.clone()
+    }
+
+    /// Every `preview_midi_mix(dest, volume, pan)`.
+    pub fn midi_previews(&self) -> Vec<(u64, Option<u8>, Option<u8>)> {
+        self.st().midi_previews.clone()
+    }
+
+    /// Every `set_midi_mix(dest, mix)` the session took.
+    pub fn midi_mixes(&self) -> Vec<(u64, MidiMixRow)> {
+        self.st().midi_mixes.clone()
+    }
+
+    /// Edits the scripted destinations.
+    pub fn edit_destinations(&self, f: impl FnOnce(&mut Vec<DestRow>)) {
+        f(&mut self.st().dests);
     }
 
     /// Every `run_mixer(id, args)`.
@@ -808,13 +860,16 @@ impl DocSession for FakeSession {
             None => Ok(s.snap.dirty),
         }
     }
-    fn idle(&self) -> Result<Option<DocSnapshot>, VizError> {
+    fn idle(&self) -> Result<IdleNews, VizError> {
         let mut s = self.st();
         let n = s.idle_snapshot.take();
         if let Some(n) = &n {
             s.snap = n.clone();
         }
-        Ok(n)
+        Ok(IdleNews {
+            snapshot: n,
+            slots_changed: std::mem::take(&mut s.idle_slots_changed),
+        })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
         let mut s = self.st();
@@ -1374,6 +1429,145 @@ impl DocSession for FakeSession {
         Self::scripted(&mut s, "set_surface_selection")?;
         s.surface_selections.push(strips);
         Ok(())
+    }
+    fn remove_insert(&self, slot: u64) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit("remove_insert", format!("remove_insert({slot})"), |m| {
+            for s in &mut m.strips {
+                s.inserts.retain(|x| x.id != slot);
+            }
+            Ok(())
+        })
+    }
+    fn move_insert(&self, slot: u64, strip: u64, index: u32) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit(
+            "move_insert",
+            format!("move_insert({slot},{strip},{index})"),
+            |m| {
+                let mut moved = None;
+                for s in &mut m.strips {
+                    if let Some(at) = s.inserts.iter().position(|x| x.id == slot) {
+                        moved = Some(s.inserts.remove(at));
+                    }
+                }
+                if let (Some(x), Some(s)) = (moved, m.strips.iter_mut().find(|s| s.id == strip)) {
+                    let at = (index as usize).min(s.inserts.len());
+                    s.inserts.insert(at, x);
+                }
+                Ok(())
+            },
+        )
+    }
+    fn set_bypass(&self, slot: u64, bypass: bool) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit("set_bypass", format!("set_bypass({slot},{bypass})"), |m| {
+            for x in slots_mut(m) {
+                if x.id == slot {
+                    x.bypass = bypass;
+                }
+            }
+            Ok(())
+        })
+    }
+    fn set_sidechain(&self, slot: u64, source: Option<u64>) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit(
+            "set_sidechain",
+            format!("set_sidechain({slot},{source:?})"),
+            |m| {
+                for x in slots_mut(m) {
+                    if x.id == slot {
+                        x.sidechain = source;
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+    fn set_eq(&self, strip: u64, plugin: Option<PluginRefRow>) -> Result<DocSnapshot, VizError> {
+        let name = plugin.as_ref().map(|p| p.id.clone());
+        self.mixer_edit("set_eq", format!("set_eq({strip},{name:?})"), |m| {
+            if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                s.eq = plugin.map(|p| SlotRow {
+                    plugin: p,
+                    ..slot_row(900 + strip, "EQ")
+                });
+            }
+            Ok(())
+        })
+    }
+    fn load_plugins(&self, slots: Vec<u64>) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "load_plugins")?;
+        s.calls.push(format!("load_plugins({slots:?})"));
+        s.held.retain(|h| !slots.contains(h));
+        s.loaded.push(slots);
+        Ok(())
+    }
+    fn held_slots(&self) -> Result<Vec<u64>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "held_slots")?;
+        Ok(s.held.clone())
+    }
+    fn set_midi_mix(&self, dest: u64, mix: MidiMixRow) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "set_midi_mix")?;
+        s.calls.push(format!("set_midi_mix({dest})"));
+        s.midi_mixes.push((dest, mix.clone()));
+        if let Some(d) = s.dests.iter_mut().find(|d| d.id == dest) {
+            d.midi_mix = mix;
+        }
+        Ok(Self::command_result(&mut s))
+    }
+    fn preview_midi_mix(
+        &self,
+        dest: u64,
+        volume: Option<u8>,
+        pan: Option<u8>,
+    ) -> Result<bool, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "preview_midi_mix")?;
+        s.midi_previews.push((dest, volume, pan));
+        Ok(true)
+    }
+}
+
+/// Every slot of every strip: instrument, EQ, inserts.
+fn slots_mut(m: &mut MixerSnapshot) -> impl Iterator<Item = &mut SlotRow> {
+    m.strips.iter_mut().flat_map(|s| {
+        s.instrument
+            .iter_mut()
+            .chain(s.eq.iter_mut())
+            .chain(s.inserts.iter_mut())
+    })
+}
+
+/// A live, not bypassed CLAP slot named `name` ("V" its vendor), with
+/// everything else defaulted.
+pub fn slot_row(id: u64, name: &str) -> SlotRow {
+    SlotRow {
+        id,
+        plugin: PluginRefRow {
+            format: PluginFormatTag::Clap,
+            id: format!("x.{name}"),
+            name: name.into(),
+            vendor: "V".into(),
+            version: "1".into(),
+        },
+        instrument: false,
+        bypass: false,
+        sidechain: None,
+        status: SlotStatus::Live,
+        latency: 0,
+        has_sidechain_input: false,
+        outputs: 2,
+        has_editor: true,
+    }
+}
+
+/// An external MIDI destination with `mix`, everything else defaulted.
+pub fn ext_dest(id: u64, name: &str, mix: MidiMixRow) -> DestRow {
+    DestRow {
+        external: true,
+        midi_mix: mix,
+        ..dest_row(id, name)
     }
 }
 

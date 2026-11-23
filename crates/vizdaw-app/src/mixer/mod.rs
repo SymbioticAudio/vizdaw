@@ -9,9 +9,11 @@ mod groups;
 pub mod layout;
 pub mod math;
 pub mod meters;
+mod midi;
 mod model;
 mod palette;
 mod sends;
+mod slots;
 mod vca;
 
 use std::collections::BTreeSet;
@@ -22,12 +24,20 @@ use vizdaw_ffi::VizError;
 pub use groups::{GROUP_FAILED, GroupLabels, UNGROUP_FAILED, strips_text};
 pub use math::{AutomationModes, MixerMath, StripEntry};
 pub use meters::{MeterLevel, Meters};
+pub use midi::{
+    MIDI_PREVIEW_INTERVAL, MidiControl, MidiStripLabels, MidiStripMath, SET_MIDI_MIX_FAILED,
+};
 pub use model::{
     MAX_HEARD_TARGETS, MIXER_UNAVAILABLE, MixerColumn, MixerModel, MixerPlacement, RELEASE_WINDOW,
     failure_title, monitor_help, next_monitor, norm_of, reset_value, send_index,
 };
 pub use palette::StripPalette;
 pub use sends::{OutputChoice, SEND_FAILED, SendLabels};
+pub use slots::{
+    BYPASS_FAILED, CLEAR_EQ_FAILED, InstrumentRow, LOAD_FAILED, MOVE_PLUGIN_FAILED,
+    REMOVE_PLUGIN_FAILED, SIDECHAIN_FAILED, SidechainChoice, SlotLabels, SlotMenuItem, SlotPlace,
+    SlotState,
+};
 pub use vca::{DELETE_VCA_FAILED, NEW_VCA_FAILED, VCA_FAILED, VcaStripLabels};
 
 use crate::alerts::AlertItem;
@@ -46,6 +56,9 @@ pub(crate) struct DocMixer {
     alerted: bool,
     /// The mixer's selected strips; the core hears every change.
     pub(crate) selected: BTreeSet<u64>,
+    /// Moves each time a plugin tick says the slots changed (Swift
+    /// `slotsVersion`): the mixer is read again.
+    pub(crate) slots_version: u64,
 }
 
 impl DocumentModel {
@@ -108,6 +121,12 @@ impl DocumentModel {
     /// other than Busy): it is not asked again until the document moves.
     pub fn mixer_refused(&self) -> bool {
         self.mixer.model.is_none() && self.mixer.failed_at == Some(self.snapshot().version)
+    }
+
+    /// Moves each time a plugin tick says the slots changed (loaded,
+    /// failed, restarted).
+    pub fn slots_version(&self) -> u64 {
+        self.mixer.slots_version
     }
 
     /// The mixer's selected strips.

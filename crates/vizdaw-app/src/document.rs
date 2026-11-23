@@ -219,18 +219,22 @@ impl DocumentModel {
     }
 
     /// One plugin-timer tick: a drag's mouse-up or Escape that met Busy is
-    /// retried first. True when a new snapshot arrived or a drag was
-    /// pending.
+    /// retried first. True when a new snapshot arrived, the slots changed
+    /// (the mixer reads them again) or a drag was pending.
     pub fn idle(&mut self) -> bool {
         let pending = self.gesture_pending() || self.has_pending_note_offs();
         self.tick();
-        let arrived = match self.session.idle() {
-            Ok(Some(s)) => {
-                self.apply(s);
-                true
+        let mut arrived = false;
+        if let Ok(news) = self.session.idle() {
+            if news.slots_changed {
+                self.mixer.slots_version += 1;
+                arrived = true;
             }
-            _ => false,
-        };
+            if let Some(s) = news.snapshot {
+                self.apply(s);
+                arrived = true;
+            }
+        }
         pending || arrived
     }
 

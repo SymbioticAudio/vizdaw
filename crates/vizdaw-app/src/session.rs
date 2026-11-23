@@ -8,11 +8,22 @@ use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::control::ControlArg;
 use vizdaw_ffi::edit::EditCommand;
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
-use vizdaw_ffi::mixer::{DestRow, MixerLevels, MixerSnapshot, SendRow, SwatchRow};
+use vizdaw_ffi::mixer::{DestRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow, SwatchRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::Session;
-use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
+use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, PluginRefRow, TransportState};
 use vizdaw_ffi::tracks::TrackKindRow;
+
+/// What a plugin timer tick brought (the core's `IdleUpdate`, the parts
+/// the app reads).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IdleNews {
+    /// The document, when plugin-UI gestures became undo steps.
+    pub snapshot: Option<DocSnapshot>,
+    /// Slots finished loading, failed, restarted or came back: the mixer
+    /// is read again.
+    pub slots_changed: bool,
+}
 
 /// What the app logic needs from a core session. The real `Session`
 /// implements it; tests use a scripted fake.
@@ -32,8 +43,9 @@ pub trait DocSession: Send + Sync {
     fn close(&self) -> Result<(), VizError>;
     /// The live unsaved state (the snapshot's flag can lag behind).
     fn has_unsaved_changes(&self) -> Result<bool, VizError>;
-    /// A plugin timer tick: the new document when gestures became undo steps.
-    fn idle(&self) -> Result<Option<DocSnapshot>, VizError>;
+    /// A plugin timer tick: the new document when gestures became undo
+    /// steps, and whether the slots changed.
+    fn idle(&self) -> Result<IdleNews, VizError>;
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError>;
     fn new_track(
         &self,
@@ -149,6 +161,32 @@ pub trait DocSession: Send + Sync {
     fn release_channel_touches(&self) -> Result<u32, VizError>;
     /// The app's selected strips, for the control surfaces.
     fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError>;
+
+    // Slots and MIDI strips (slice 6b).
+
+    /// Removes insert `slot`.
+    fn remove_insert(&self, slot: u64) -> Result<DocSnapshot, VizError>;
+    /// Moves insert `slot` to position `index` of `strip`'s inserts.
+    fn move_insert(&self, slot: u64, strip: u64, index: u32) -> Result<DocSnapshot, VizError>;
+    fn set_bypass(&self, slot: u64, bypass: bool) -> Result<DocSnapshot, VizError>;
+    /// Feeds `slot`'s sidechain from strip `source` (`None`: nothing).
+    fn set_sidechain(&self, slot: u64, source: Option<u64>) -> Result<DocSnapshot, VizError>;
+    /// Loads `plugin` into `strip`'s EQ slot, or empties it (`None`).
+    fn set_eq(&self, strip: u64, plugin: Option<PluginRefRow>) -> Result<DocSnapshot, VizError>;
+    /// Loads slots safe mode held off.
+    fn load_plugins(&self, slots: Vec<u64>) -> Result<(), VizError>;
+    /// The slots safe mode holds off.
+    fn held_slots(&self) -> Result<Vec<u64>, VizError>;
+    /// Sets an external destination's MIDI strip mix, one undo step.
+    fn set_midi_mix(&self, dest: u64, mix: MidiMixRow) -> Result<DocSnapshot, VizError>;
+    /// Sends a drag's volume and pan to `dest` without touching the
+    /// document (`None` leaves that controller). False: nothing was sent.
+    fn preview_midi_mix(
+        &self,
+        dest: u64,
+        volume: Option<u8>,
+        pan: Option<u8>,
+    ) -> Result<bool, VizError>;
 }
 
 impl DocSession for Session {
@@ -191,8 +229,11 @@ impl DocSession for Session {
     fn has_unsaved_changes(&self) -> Result<bool, VizError> {
         Session::has_unsaved_changes(self)
     }
-    fn idle(&self) -> Result<Option<DocSnapshot>, VizError> {
-        Session::idle(self).map(|u| u.snapshot)
+    fn idle(&self) -> Result<IdleNews, VizError> {
+        Session::idle(self).map(|u| IdleNews {
+            snapshot: u.snapshot,
+            slots_changed: u.slots_changed,
+        })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
         Session::lanes(self, seq)
@@ -359,5 +400,37 @@ impl DocSession for Session {
     }
     fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError> {
         Session::set_surface_selection(self, strips)
+    }
+    fn remove_insert(&self, slot: u64) -> Result<DocSnapshot, VizError> {
+        Session::remove_insert(self, slot)
+    }
+    fn move_insert(&self, slot: u64, strip: u64, index: u32) -> Result<DocSnapshot, VizError> {
+        Session::move_insert(self, slot, strip, index)
+    }
+    fn set_bypass(&self, slot: u64, bypass: bool) -> Result<DocSnapshot, VizError> {
+        Session::set_bypass(self, slot, bypass)
+    }
+    fn set_sidechain(&self, slot: u64, source: Option<u64>) -> Result<DocSnapshot, VizError> {
+        Session::set_sidechain(self, slot, source)
+    }
+    fn set_eq(&self, strip: u64, plugin: Option<PluginRefRow>) -> Result<DocSnapshot, VizError> {
+        Session::set_eq(self, strip, plugin)
+    }
+    fn load_plugins(&self, slots: Vec<u64>) -> Result<(), VizError> {
+        Session::load_plugins(self, slots)
+    }
+    fn held_slots(&self) -> Result<Vec<u64>, VizError> {
+        Session::held_slots(self)
+    }
+    fn set_midi_mix(&self, dest: u64, mix: MidiMixRow) -> Result<DocSnapshot, VizError> {
+        Session::set_midi_mix(self, dest, mix)
+    }
+    fn preview_midi_mix(
+        &self,
+        dest: u64,
+        volume: Option<u8>,
+        pan: Option<u8>,
+    ) -> Result<bool, VizError> {
+        Session::preview_midi_mix(self, dest, volume, pan)
     }
 }

@@ -57,8 +57,9 @@ pub const VIEW_COMMANDS: &[&str] = &[
 /// The registry IDs of the mixer's commands `run` handles: the Mixer
 /// window (the UI opens it, see [`Ran::open_mixer_window`]), the channel's
 /// automation commands, the Automation menu's modes, New Bus, the strip
-/// edits, the strip colour and the group and VCA edits (registry
-/// `GROUP_IDS`). (Make Mine is Co-Producer's: not yet.)
+/// edits, the strip colour, the group and VCA edits (registry
+/// `GROUP_IDS`) and a MIDI strip's mix. (Make Mine is Co-Producer's: not
+/// yet.)
 pub const MIXER_COMMANDS: &[&str] = &[
     "window.mixer",
     "automation.set_mode",
@@ -92,6 +93,7 @@ pub const MIXER_COMMANDS: &[&str] = &[
     "mixer.unassign_vca",
     "mixer.set_vca",
     "mixer.delete_vca",
+    "destination.set_midi_mix",
 ];
 
 const NO_DETAIL: &str = "No detail editor is open.";

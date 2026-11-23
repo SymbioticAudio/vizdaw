@@ -10,7 +10,8 @@
 //! from 1 as the channel does), and so is every group and VCA edit
 //! (registry `GROUP_IDS`); `mixer.set_colour` sets a strip's colour;
 //! `automation.mode.*` set the selected strips' mode; `automation.suspend`
-//! is the app-wide switch.
+//! is the app-wide switch; `destination.set_midi_mix` sets a MIDI strip's
+//! mix.
 //!
 //! Every argument is checked before the core is called and is
 //! `invalid_params` naming the parameter. The core's refusals are the
@@ -28,6 +29,7 @@ use vizdaw_ffi::control::{ControlArg, ControlValue};
 use vizdaw_ffi::mixer::StripKindRow;
 
 use super::math::{AutomationModes, MixerMath};
+use super::midi::SET_MIDI_MIX_FAILED;
 use super::palette::StripPalette;
 use crate::alerts::error_message;
 use crate::commands::{Ran, check_names, from_viz, ran};
@@ -55,6 +57,11 @@ const AUTOMATION_FAILED: &str = "Automation Failed";
 pub const NO_STRIPS_SELECTED: &str = "Select strips in the mixer first.";
 /// The app-wide automation switch.
 pub const SUSPEND: &str = "automation.suspend";
+/// A MIDI strip's mix from the channel.
+pub const SET_MIDI_MIX: &str = "destination.set_midi_mix";
+const MIDI_MIX_USAGE: &str = "destination.set_midi_mix: `dest` names an external MIDI \
+                              destination; `volume` and `pan` are 0 to 127 or null, `mute` is \
+                              true or false; give at least one";
 
 /// The strip edits: one `run_mixer` call each, answered with the
 /// registry's title.
@@ -197,6 +204,7 @@ pub(crate) fn run(
         "automation.release_all" => release_all(args, doc),
         "mixer.new_bus" => new_bus(args, doc),
         "mixer.set_colour" => set_colour(args, doc),
+        SET_MIDI_MIX => set_midi_mix(args, doc),
         _ if STRIP_EDITS.contains(&id) || registry::GROUP_IDS.contains(&id) => {
             strip_edit(id, args, doc)
         }
@@ -398,6 +406,73 @@ fn set_colour(args: &[(String, ArgValue)], doc: &mut DocumentModel) -> Result<Ra
     }
     let result = doc.session().set_strip_colour(strip, colour);
     doc.apply_result(result).map_err(|e| from_viz(&e))?;
+    Ok(ran(doc))
+}
+
+/// A controller of `destination.set_midi_mix`: `None` when absent,
+/// `Some(None)` for null (unset, the registry's `none`), else 0…127.
+/// `Err` for anything else.
+fn controller(args: &[(String, ArgValue)], name: &str) -> Result<Option<Option<u8>>, ControlError> {
+    match arg(args, name) {
+        None => Ok(None),
+        Some(ArgValue::Int(v)) => u8::try_from(*v)
+            .ok()
+            .filter(|v| *v <= 127)
+            .map(|v| Some(Some(v)))
+            .ok_or_else(|| invalid(MIDI_MIX_USAGE)),
+        Some(ArgValue::Text(t)) if t == registry::NULL_TEXT => Ok(Some(None)),
+        Some(_) => Err(invalid(MIDI_MIX_USAGE)),
+    }
+}
+
+/// `destination.set_midi_mix {dest, volume?, pan?, mute?}` (Swift
+/// `SynthCommands.setMidiMix`): an absent key keeps what is set, a null
+/// volume or pan unsets it. A `dest` that names no external MIDI
+/// destination is `invalid_params`; the core's refusal is `failed` ("Set
+/// MIDI Mix Failed: …"), its Busy `busy`. One undo step "Set MIDI Mix".
+fn set_midi_mix(args: &[(String, ArgValue)], doc: &mut DocumentModel) -> Result<Ran, ControlError> {
+    check_names(SET_MIDI_MIX, args)?;
+    if doc.gesture_open() {
+        return Err(ControlError::new(ErrorCode::Unavailable, GESTURE_OPEN));
+    }
+    let dest = match arg(args, "dest") {
+        Some(ArgValue::Int(i)) if *i >= 0 => *i as u64,
+        _ => return Err(invalid(MIDI_MIX_USAGE)),
+    };
+    let volume = controller(args, "volume")?;
+    let pan = controller(args, "pan")?;
+    let mute = match arg(args, "mute") {
+        None => None,
+        Some(ArgValue::Flag(v)) => Some(*v),
+        Some(_) => return Err(invalid(MIDI_MIX_USAGE)),
+    };
+    if volume.is_none() && pan.is_none() && mute.is_none() {
+        return Err(invalid(MIDI_MIX_USAGE));
+    }
+    let all = doc.session().destinations().map_err(|_| {
+        ControlError::new(
+            ErrorCode::Failed,
+            format!("{SET_MIDI_MIX_FAILED}: the destinations cannot be read"),
+        )
+    })?;
+    let Some(row) = all.iter().find(|d| d.external && d.id == dest) else {
+        return Err(invalid(format!(
+            "{SET_MIDI_MIX}: destination {dest} is not an external MIDI destination"
+        )));
+    };
+    let mut mix = row.midi_mix.clone();
+    if let Some(v) = volume {
+        mix.volume = v;
+    }
+    if let Some(p) = pan {
+        mix.pan = p;
+    }
+    if let Some(m) = mute {
+        mix.mute = m;
+    }
+    let result = doc.session().set_midi_mix(dest, mix);
+    doc.apply_result(result)
+        .map_err(|e| thrown(&e, SET_MIDI_MIX_FAILED))?;
     Ok(ran(doc))
 }
 
