@@ -175,6 +175,12 @@ impl DocumentStore {
         self.key_window.map(|(d, _)| d)
     }
 
+    /// The window that is key, with its document (a document's own
+    /// window or its Mixer window).
+    pub fn key_window(&self) -> Option<(DocId, WindowToken)> {
+        self.key_window
+    }
+
     /// The front-most document still open: the one key last.
     pub fn front(&self) -> Option<DocId> {
         self.recent_key

@@ -21,7 +21,8 @@ pub enum WindowKind {
     /// A document window.
     #[default]
     Document,
-    /// A document's Mixer window (slice 6a Task 6 opens them).
+    /// A document's Mixer window: its own transport bar (without the
+    /// document-only items) over the mixer. At most one per document.
     Mixer,
 }
 
@@ -35,7 +36,8 @@ impl WindowKind {
     }
 }
 
-/// One open document window.
+/// One open window: a document's own window, or its Mixer window. Both
+/// are [`DocumentWindow`]s; `kind` says which.
 #[derive(Clone)]
 pub struct WindowEntry {
     pub doc: DocId,
@@ -102,8 +104,39 @@ impl AppState {
         &self.windows
     }
 
+    /// `doc`'s own window.
     pub fn window_of(&self, doc: DocId) -> Option<&WindowEntry> {
-        self.windows.iter().find(|w| w.doc == doc)
+        self.windows
+            .iter()
+            .find(|w| w.doc == doc && w.kind == WindowKind::Document)
+    }
+
+    /// `doc`'s Mixer window, while it is open.
+    pub fn mixer_window_of(&self, doc: DocId) -> Option<&WindowEntry> {
+        self.windows
+            .iter()
+            .find(|w| w.doc == doc && w.kind == WindowKind::Mixer)
+    }
+
+    /// The document windows (not the Mixer windows), one per document.
+    pub fn document_windows(&self) -> impl Iterator<Item = &WindowEntry> {
+        self.windows
+            .iter()
+            .filter(|w| w.kind == WindowKind::Document)
+    }
+
+    /// What window `w`'s title bar says: the document's title (the
+    /// window marks an edit itself), or "Mixer — <title>".
+    pub fn window_title(&self, w: &WindowEntry) -> Option<String> {
+        match w.kind {
+            WindowKind::Document => self.title(w.doc),
+            WindowKind::Mixer => self.store.document(w.doc).map(mixer_title),
+        }
+    }
+
+    /// Whether `w` is the key window.
+    pub fn is_key(&self, w: &WindowEntry) -> bool {
+        self.store.key_window() == Some((w.doc, w.token))
     }
 
     pub fn transport(&self, doc: DocId) -> Option<&TransportModel> {
@@ -146,26 +179,35 @@ impl AppState {
         doc: DocId,
         token: WindowToken,
         handle: WindowHandle<DocumentWindow>,
+        kind: WindowKind,
     ) {
         self.windows.push(WindowEntry {
             doc,
             token,
             handle,
-            kind: WindowKind::Document,
+            kind,
         });
+    }
+
+    /// The window `token` went (a Mixer window closing; its document
+    /// stays).
+    pub(crate) fn remove_window(&mut self, token: WindowToken) {
+        self.windows.retain(|w| w.token != token);
     }
 
     /// The list preferences changed: every open document takes them.
     pub fn push_list_prefs(&mut self) {
         let prefs = self.prefs.list();
-        let docs: Vec<DocId> = self.windows.iter().map(|w| w.doc).collect();
+        let docs: Vec<DocId> = self.document_windows().map(|w| w.doc).collect();
         for doc in docs {
             self.store
                 .with_document(doc, |d, _| d.set_list_prefs(prefs.clone()));
         }
     }
 
-    /// `doc`'s window went: the document and its transport go too.
+    /// `doc`'s window went: the document and its transport go too, and
+    /// its Mixer window's entry (the window closes itself when it sees
+    /// its document gone).
     pub fn close_document(&mut self, doc: DocId) {
         self.windows.retain(|w| w.doc != doc);
         self.transports.remove(&doc);
@@ -174,7 +216,7 @@ impl AppState {
 
     /// Every document closes, with its transport and window entry.
     pub fn close_all(&mut self) {
-        let docs: Vec<DocId> = self.windows.iter().map(|w| w.doc).collect();
+        let docs: Vec<DocId> = self.document_windows().map(|w| w.doc).collect();
         for doc in docs {
             self.close_document(doc);
         }
@@ -339,6 +381,11 @@ impl AppState {
     pub fn dismiss_alert(&mut self) {
         self.store.take_alert();
     }
+}
+
+/// A Mixer window's title (Swift `MixerWindow`): "Mixer — <title>".
+pub fn mixer_title(d: &DocumentModel) -> String {
+    format!("Mixer \u{2014} {}", d.snapshot().title)
 }
 
 fn home() -> Option<PathBuf> {

@@ -5,6 +5,8 @@ pub mod arrangement;
 pub mod control;
 pub mod controls;
 pub mod detail_pane;
+#[doc(hidden)]
+pub mod frame_stats;
 pub mod list_editor;
 pub mod menu_bar;
 pub mod menus;

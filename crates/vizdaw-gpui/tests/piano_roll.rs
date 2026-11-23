@@ -189,8 +189,6 @@ impl Setup {
         self.cx.run_until_parked();
     }
 
-    /// Clicks the `role` labelled `label` inside the roll's editor (the
-    /// arrangement's tool bar has the same labels).
     /// The bottom pane's picker (not the transport bar's toggle, whose
     /// value is on or off).
     fn picker(&mut self) -> Element {
@@ -209,6 +207,8 @@ impl Setup {
         self.click_at(at);
     }
 
+    /// Clicks the `role` labelled `label` inside the roll's editor (the
+    /// arrangement's tool bar has the same labels).
     fn click(&mut self, role: &str, label: &str) {
         let e = self.roll_control(role, label);
         self.click_at(e.bounds.center());

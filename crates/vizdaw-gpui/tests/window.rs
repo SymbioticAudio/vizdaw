@@ -582,3 +582,56 @@ fn the_app_menus_follow_the_front_document(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     assert_eq!(undo_title(&mut s), ("Undo New Track".to_string(), false));
 }
+
+/// The Mixer window opens at Swift's 760×560, kept inside a small
+/// screen.
+#[test]
+fn the_mixer_window_opens_at_760_by_560_inside_the_screen() {
+    use gpui::{Bounds, point, size};
+    use vizdaw_gpui::shell::mixer_window_size;
+    let screen = |w: f32, h: f32| Some(Bounds::new(point(px(0.), px(0.)), size(px(w), px(h))));
+    assert_eq!(
+        mixer_window_size(screen(2560., 1415.)),
+        size(px(760.), px(560.))
+    );
+    assert_eq!(
+        mixer_window_size(screen(640., 480.)),
+        size(px(640.), px(480.))
+    );
+    assert_eq!(mixer_window_size(None), size(px(760.), px(560.)));
+}
+
+/// An edited document's Mixer window closes without asking, and the
+/// document stays; the document window still asks.
+#[gpui::test]
+fn the_mixer_window_closes_without_asking(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    fake.set_dirty(true);
+    let mut s = setup(cx, fake);
+    s.cx.dispatch_action(vizdaw_gpui::RunCommand::new("window.mixer".to_owned()));
+    s.cx.run_until_parked();
+    let doc = s.window_doc();
+    let mixer = s
+        .app
+        .read_with(&s.cx, |a, _| a.mixer_window_of(doc).map(|w| w.handle))
+        .expect("a Mixer window");
+    let mut mcx = VisualTestContext::from_window(mixer.into(), &s.cx);
+    mcx.dispatch_action(vizdaw_gpui::CloseWindow);
+    mcx.run_until_parked();
+    s.cx.cx.update(|_| {});
+    assert!(!s.cx.has_pending_prompt());
+    let left = s
+        .app
+        .read_with(&s.cx, |a, _| (a.windows().len(), a.store.count()));
+    assert_eq!(left, (1, 1));
+    assert_eq!(s.fake.count("close"), 0);
+    // Quit asks once, for the one document.
+    s.cx.dispatch_action(vizdaw_gpui::RunCommand::new("window.mixer".to_owned()));
+    s.cx.run_until_parked();
+    s.cx.dispatch_action(vizdaw_gpui::Quit);
+    s.cx.run_until_parked();
+    assert!(s.cx.has_pending_prompt());
+    s.cx.simulate_prompt_answer("Discard Changes and Quit");
+    s.cx.run_until_parked();
+    assert_eq!(s.fake.count("close"), 1);
+}

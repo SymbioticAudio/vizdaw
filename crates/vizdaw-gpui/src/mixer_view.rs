@@ -18,11 +18,18 @@
 //! pane, the Mixer window): it says it appeared when made and that it
 //! went when dropped (the last placement's going releases every open
 //! touch), and the window losing the keyboard cancels its drag.
+//!
+//! While a placement shows it polls the mixer every 30 Hz period (Swift's
+//! `MixerView` task: `tick` reads the levels, the automation state and,
+//! while playing, the heard values, at most once per period however many
+//! placements ask); every placement redraws when a tick changed what it
+//! shows. Between two reads a meter above silence asks for every frame
+//! and is drawn fallen by the time since the read (`level_at`).
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClickEvent, Context, Entity, Focusable, FontWeight,
@@ -32,7 +39,7 @@ use gpui::{
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::mixer::layout::{StripGrid, StripLayout, StripRowKind, rows_of};
-use vizdaw_app::mixer::meters::POLL_INTERVAL;
+use vizdaw_app::mixer::meters::{METER_PERIOD, POLL_INTERVAL};
 use vizdaw_app::mixer::{AutomationModes, MeterLevel, MixerModel, MixerPlacement};
 use vizdaw_ffi::automation::AutomationModeRow;
 use vizdaw_ffi::edit::MonitorModeRow;
@@ -41,6 +48,7 @@ use vizdaw_ffi::mixer::{StripKindRow, StripRow};
 use crate::controls::{
     self, ControlBinding, KnobSize, MixerRef, NumberBinding, NumberBox, Toggle, fader,
 };
+use crate::frame_stats;
 use crate::registry::RegistryScope;
 use crate::strip_palette::{KnobFunction, tokens};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -66,6 +74,9 @@ const KIND_HEIGHT: f64 = 14.;
 const PANEL_RADIUS: f32 = 5.;
 /// A wheel line in points.
 const LINE: f32 = 20.;
+/// How often a shown placement polls (Swift sleeps 33 ms between ticks;
+/// `tick` reads at most every 30 ms).
+pub const POLL_EVERY: Duration = METER_PERIOD;
 
 /// A strip's typed box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,14 +92,17 @@ pub enum StripMenu {
     Automation,
 }
 
-/// How a strip was drawn last frame: its dimming and its edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a strip was drawn last frame: its dimming, its edge and its
+/// meter.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StripLook {
     pub strip: u64,
     /// Silent because other strips solo: the panel at half.
     pub dimmed: bool,
     /// Selected: the 2-point accent edge.
     pub selected: bool,
+    /// The meter as drawn (the last read fallen by the time since).
+    pub meter: MeterLevel,
 }
 
 /// An open rename field.
@@ -118,6 +132,12 @@ pub struct MixerView {
     /// ends, which draws a frame.
     hold: Option<Task<()>>,
     drawn: Vec<StripLook>,
+    /// The mixer's `shown_version` this placement last drew for.
+    seen: Option<u64>,
+    /// When the placement came (the synthetic meters' clock).
+    started: Instant,
+    /// Polls every [`POLL_EVERY`] while the placement lives.
+    _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -141,8 +161,19 @@ impl MixerView {
             }
         })
         .detach();
+        let poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL_EVERY).await;
+                if this.update(cx, |v, cx| v.poll(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let mut v = MixerView {
             _subscriptions: vec![controls::watch_activation(mixer.clone(), window, cx)],
+            seen: None,
+            started: cx.background_executor().now(),
+            _poll: poll,
             mixer,
             scroll: (0., 0.),
             room: (0., 0.),
@@ -218,6 +249,46 @@ impl MixerView {
         self.mixer.placement
     }
 
+    /// One poll of the shown placement (Swift `MixerModel.tick`): a
+    /// release waiting on Busy is retried; at most once per period the
+    /// mixer is read again if the document moved, and the levels, the
+    /// automation state and the heard values are read. The placement
+    /// redraws when that changed what it shows (another placement's tick
+    /// counts too); the app redraws when the document or its alert moved.
+    fn poll(&mut self, cx: &mut Context<Self>) {
+        if !self.appeared {
+            return;
+        }
+        let now = cx.background_executor().now();
+        let (doc, started) = (self.mixer.doc, self.started);
+        let shown = self.mixer.app.update(cx, |s, cx| {
+            let alert = s.store.alert().map(|a| a.id);
+            let ticked = s.store.with_document(doc, |d, _| {
+                let seen =
+                    |d: &DocumentModel| (d.snapshot().version, d.alert.as_ref().map(|a| a.id));
+                let before = seen(d);
+                let shown = d.with_mixer(|m, d| {
+                    if m.tick(d, now) && frame_stats::synthetic_meters() {
+                        let strips = m.snapshot().strips.iter().map(|s| s.id);
+                        let l = frame_stats::synthetic_levels(strips, started, now);
+                        m.take_levels(&l, now);
+                    }
+                    m.shown_version()
+                });
+                (shown, seen(d) != before)
+            });
+            let (shown, moved) = ticked.unwrap_or((None, false));
+            if moved || s.store.alert().map(|a| a.id) != alert {
+                cx.notify();
+            }
+            shown
+        });
+        if shown.is_some() && shown != self.seen {
+            self.seen = shown;
+            cx.notify();
+        }
+    }
+
     /// The strips drawn last frame, left to right.
     pub fn drawn(&self) -> &[StripLook] {
         &self.drawn
@@ -272,11 +343,16 @@ impl MixerView {
             cx.observe(&field, move |this, field, cx| {
                 let text = field.read(cx).text().to_owned();
                 let p = this.mixer.placement;
-                this.mixer.with(cx, |m, _| {
-                    if m.is_renaming(strip, p) && m.rename_draft != text {
-                        m.rename_draft = text;
-                    }
-                });
+                // Only a changed text reaches the mixer: `with` redraws
+                // every window, and the field notifies on every caret
+                // move and blink.
+                let changed = this
+                    .mixer
+                    .read(cx, |m, _| m.is_renaming(strip, p) && m.rename_draft != text)
+                    .unwrap_or(false);
+                if changed {
+                    this.mixer.with(cx, |m, _| m.rename_draft = text);
+                }
             }),
         ];
         window.focus(&focus, cx);
@@ -557,7 +633,8 @@ pub fn render(
         let v = view.read(cx);
         (v.mixer.clone(), v.scroll, v.area.clone(), v.appeared)
     };
-    let now = Instant::now();
+    // The poll's clock (the test platform's is its own).
+    let now = cx.background_executor().now();
     let doc = mixer.doc;
     let size = viewport(area.get(), window);
     let sample_rate = mixer
@@ -609,6 +686,7 @@ pub fn render(
                 strip: s.id,
                 dimmed: s.dimmed,
                 selected: s.selected,
+                meter: s.meter,
             })
             .collect();
         if v.menu.is_some_and(|(id, _)| !g.ids.contains(&id)) {

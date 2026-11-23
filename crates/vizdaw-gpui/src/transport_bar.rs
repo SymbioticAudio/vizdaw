@@ -205,9 +205,16 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// A document window's bar.
     pub fn new(layout: &TransportLayout, width: f32) -> Plan {
+        Plan::for_window(layout, width, true)
+    }
+
+    /// The bar of a document window (`document_window`) or of a Mixer
+    /// window, which leaves out the document-only items.
+    pub fn for_window(layout: &TransportLayout, width: f32, document_window: bool) -> Plan {
         let pieces: Vec<Piece> = layout
-            .items_for(true)
+            .items_for(document_window)
             .into_iter()
             .filter_map(Piece::of)
             .collect();

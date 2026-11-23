@@ -1955,29 +1955,85 @@ fn views_and_panes_over_the_channel(cx: &mut TestAppContext) {
     );
 }
 
-/// The Mixer window comes in Task 6: until then `window.mixer` answers
-/// `unavailable` and opens nothing.
+/// The windows `state.get windows` lists: (number, kind, title, key).
+fn window_rows(s: &Setup, cx: &mut TestAppContext) -> Vec<(i64, String, String, bool)> {
+    let w = ok(call(s, cx, "state.get", json!({"target": "windows"})));
+    w["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| {
+            (
+                x["number"].as_i64().unwrap(),
+                x["kind"].as_str().unwrap().to_owned(),
+                x["title"].as_str().unwrap().to_owned(),
+                x["key"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// `window.mixer` over the channel opens the document's Mixer window once:
+/// asked again, by the command or by ⌥⌘M (in either window), it comes to
+/// the front and no second one opens. Its number names it for the other
+/// window calls.
 #[gpui::test]
-fn window_mixer_is_unavailable_until_the_mixer_window(cx: &mut TestAppContext) {
+fn window_mixer_opens_one_mixer_window(cx: &mut TestAppContext) {
     let s = mixer_setup(cx);
-    let e = call(&s, cx, "command.run", json!({"id": "window.mixer"})).unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unavailable);
-    assert!(
-        e.message
-            .starts_with("command.run window.mixer is not available"),
-        "{}",
-        e.message
-    );
-    let w = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
-    assert_eq!(w["windows"].as_array().unwrap().len(), 1);
-    // ⌥⌘M too: delivered, nothing opened.
-    ok(call(
+    // ⌥⌘M over the channel runs the command once (the key is not also
+    // delivered to the window's binding).
+    let typed = ok(call(
         &s,
         cx,
         "ui.key",
         json!({"key": "m", "modifiers": ["option", "command"]}),
     ));
+    assert_eq!(typed["events"], 1, "{typed}");
+    let ran = ok(call(&s, cx, "command.run", json!({"id": "window.mixer"})));
+    assert_eq!(ran["command"], "window.mixer", "{ran}");
+    let rows = window_rows(&s, cx);
+    let kinds: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+    assert_eq!(kinds, ["document", "mixer"], "{rows:?}");
+    let (mixer, _, title, key) = rows[1].clone();
+    assert!(title.starts_with("Mixer \u{2014} "), "{title}");
+    assert!(key, "the new Mixer window has the keyboard: {rows:?}");
+    assert!(!rows[0].3, "{rows:?}");
+    for again in [
+        json!({"key": "m", "modifiers": ["option", "command"]}),
+        json!({"key": "m", "modifiers": ["option", "command"], "window": mixer}),
+    ] {
+        ok(call(&s, cx, "command.run", json!({"id": "window.mixer"})));
+        ok(call(&s, cx, "ui.key", again));
+        let rows = window_rows(&s, cx);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[1].0, mixer, "{rows:?}");
+    }
     assert_eq!(documents(cx), 1);
+    // The Mixer window's tree: its own Play, and the strips.
+    let tree = ok(call(&s, cx, "ui.tree", json!({"window": mixer})));
+    assert_eq!(tree["window"], mixer);
+    let labels: Vec<&str> = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["label"].as_str())
+        .collect();
+    assert!(labels.contains(&"Play"), "{labels:?}");
+    assert!(labels.contains(&"Fader of Master"), "{labels:?}");
+    // Its document's commands run from it.
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "transport.play_stop", "window": mixer}),
+    ));
+    let t = ok(call(
+        &s,
+        cx,
+        "state.get",
+        json!({"target": "transport", "window": mixer}),
+    ));
+    assert_eq!(t["playing"], true, "{t}");
 }
 
 /// e2e `touch_writes_a_fader_over_the_channel`, the command part.

@@ -13,16 +13,16 @@ use gpui::{
 };
 use vizdaw_app::DocumentStore;
 use vizdaw_app::editor::{MainView, PaneSide, PaneView};
-use vizdaw_app::mixer::{MixerPlacement, StripEntry};
+use vizdaw_app::mixer::{MeterLevel, MixerPlacement, StripEntry};
 use vizdaw_app::testing::{FakeSession, mixer_fake, strip_row};
 use vizdaw_ffi::automation::{AutomationModeRow, GesturePhaseRow};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, MonitorModeRow};
 use vizdaw_ffi::events::AutomationTargetRow as T;
 use vizdaw_ffi::mixer::StripKindRow;
 use vizdaw_gpui::controls;
-use vizdaw_gpui::mixer_view::{ADD_BUS, MixerView, NAME};
+use vizdaw_gpui::mixer_view::{ADD_BUS, MixerView, NAME, POLL_EVERY};
 use vizdaw_gpui::registry::Element;
-use vizdaw_gpui::{AppState, DocumentWindow, RunCommand};
+use vizdaw_gpui::{AppState, DocumentWindow, RunCommand, WindowKind};
 
 /// Audio 1 (5, path 1: Groove plays through it), Audio 2 (6, path 2:
 /// Chords), Synth (1), Bus 1 (2), then Master (0).
@@ -919,4 +919,287 @@ fn a_placement_registers_once_the_mixer_can_be_read(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     assert_eq!(s.placements(), [MixerPlacement::View]);
     assert!(s.find("slider", "Fader of Master").is_some());
+}
+
+// Meters, heard values and the Mixer window (slice 6a Task 6).
+
+/// A read of the levels: (strip, left, right) for each strip in it.
+fn levels(of: &[(u64, f32, f32)]) -> vizdaw_ffi::mixer::MixerLevels {
+    vizdaw_ffi::mixer::MixerLevels {
+        meters: of
+            .iter()
+            .map(|&(strip, peak_l, peak_r)| vizdaw_ffi::mixer::MeterRow {
+                strip,
+                peak_l,
+                peak_r,
+            })
+            .collect(),
+        dsp_load: 0.12,
+        dsp_peak: 0.3,
+        latency_frames: 0,
+        faulted: vec![],
+        midi: vec![],
+    }
+}
+
+impl Setup {
+    /// One poll period passes: every shown placement polls once.
+    fn period(&mut self) {
+        self.cx.executor().advance_clock(POLL_EVERY);
+        self.cx.run_until_parked();
+    }
+
+    /// Strip `strip`'s meter as the Mix view drew it last.
+    fn meter(&mut self, strip: u64) -> MeterLevel {
+        let v = self.view(MixerPlacement::View).expect("the Mix view");
+        v.read_with(&self.cx, |v, _| {
+            v.drawn()
+                .iter()
+                .find(|l| l.strip == strip)
+                .map(|l| l.meter)
+                .unwrap_or_else(|| panic!("strip {strip} not drawn"))
+        })
+    }
+
+    /// The document's Mixer window, while open.
+    fn mixer_window(&mut self) -> Option<WindowHandle<DocumentWindow>> {
+        let doc = self.doc();
+        self.app
+            .read_with(&self.cx, |a, _| a.mixer_window_of(doc).map(|w| w.handle))
+    }
+
+    fn kinds(&mut self) -> Vec<WindowKind> {
+        self.app.read_with(&self.cx, |a, _| {
+            a.windows().iter().map(|w| w.kind).collect()
+        })
+    }
+
+    /// The elements the Mixer window drew last.
+    fn mixer_elements(&mut self) -> Vec<Element> {
+        let w = self.mixer_window().expect("a Mixer window");
+        w.read_with(&self.cx, |v, _| v.registry().borrow().elements().to_vec())
+            .unwrap()
+    }
+}
+
+#[gpui::test]
+fn meters_decay_and_fall_silent(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let reads = s.fake.levels_reads();
+    s.fake.set_levels(levels(&[(5, 1.0, 0.5)]));
+    s.period();
+    assert!(s.fake.levels_reads() > reads, "the shown placement polls");
+    let m = s.meter(5);
+    assert!(
+        (m.left - 1.0).abs() < 1e-3 && (m.right - 0.5).abs() < 1e-3,
+        "{m:?}"
+    );
+    assert_eq!(s.meter(6), MeterLevel::SILENT);
+    assert!(
+        s.find("text", "DSP 12% \u{00B7} peak 30% \u{00B7} PDC 0.0 ms")
+            .is_some()
+            || s.elements().iter().any(|e| e.label.starts_with("DSP 12%")),
+        "the load follows the read"
+    );
+    // The strip leaves the take: it falls 0.85 a period…
+    s.fake.set_levels(levels(&[]));
+    s.period();
+    let fallen = s.meter(5);
+    assert!(
+        (fallen.left - 0.85).abs() < 0.01,
+        "one period down: {fallen:?}"
+    );
+    // … to silence, and no frame is asked for any more.
+    for _ in 0..60 {
+        s.period();
+    }
+    assert_eq!(s.meter(5), MeterLevel::SILENT);
+    // A placement that goes stops polling.
+    s.run_menu("ui.view_arrange");
+    let n = s.fake.levels_reads();
+    for _ in 0..5 {
+        s.period();
+    }
+    assert_eq!(s.fake.levels_reads(), n, "no placement, no poll");
+}
+
+#[gpui::test]
+fn heard_values_follow_while_playing(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let rest = s.value("slider", "Fader of Audio 1");
+    s.fake.set_heard(std::collections::HashMap::from([
+        (T::StripFader { strip: 5 }, -12.0),
+        (T::StripPan { strip: 5 }, -0.5),
+    ]));
+    // Stopped: nothing is heard, the snapshot shows.
+    s.period();
+    assert!(
+        s.fake.heard_calls().is_empty(),
+        "no heard values while stopped"
+    );
+    assert_eq!(s.value("slider", "Fader of Audio 1"), rest);
+    s.run_menu("transport.play_stop");
+    assert!(s.model(|d| d.is_playing()));
+    s.period();
+    assert_eq!(
+        s.value("slider", "Fader of Audio 1").as_deref(),
+        Some(StripEntry::level_text(-12.0).as_str())
+    );
+    assert_eq!(
+        s.value("slider", "Pan knob of Audio 1").as_deref(),
+        Some(StripEntry::pan_text(-0.5).as_str())
+    );
+    let asked = s.fake.heard_calls().last().cloned().unwrap();
+    assert!(asked.contains(&T::StripFader { strip: 5 }), "{asked:?}");
+    // Automation moves the fader: it follows.
+    s.fake.set_heard(std::collections::HashMap::from([(
+        T::StripFader { strip: 5 },
+        -6.0,
+    )]));
+    s.period();
+    assert_eq!(
+        s.value("slider", "Fader of Audio 1").as_deref(),
+        Some(StripEntry::level_text(-6.0).as_str())
+    );
+    // Stopped: the snapshot's value again.
+    s.run_menu("transport.play_stop");
+    s.period();
+    assert_eq!(s.value("slider", "Fader of Audio 1"), rest);
+}
+
+#[gpui::test]
+fn the_mixer_window_opens_and_reports_its_kind(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.run_menu("window.mixer");
+    assert_eq!(s.kinds(), [WindowKind::Document, WindowKind::Mixer]);
+    let w = s.mixer_window().unwrap();
+    let doc = s.doc();
+    let title = s.model(|d| d.snapshot().title.clone());
+    let (kind, wdoc, shown_title, size) = w
+        .update(&mut s.cx, |v, window, _| {
+            (
+                v.kind(),
+                v.doc(),
+                v.title().to_owned(),
+                window.bounds().size,
+            )
+        })
+        .unwrap();
+    assert_eq!((kind, wdoc), (WindowKind::Mixer, doc));
+    assert_eq!(shown_title, format!("Mixer \u{2014} {title}"));
+    assert_eq!(size, gpui::size(px(760.), px(560.)));
+    // Its placement is one of its own, beside the Mix view's.
+    assert_eq!(
+        s.placements(),
+        [MixerPlacement::Window, MixerPlacement::View]
+    );
+    // Asked again (the menu, ⌥⌘M), it comes to the front: never a second.
+    s.run_menu("window.mixer");
+    let mut mcx = VisualTestContext::from_window(w.into(), &s.cx);
+    mcx.dispatch_action(RunCommand::new("window.mixer".to_owned()));
+    mcx.run_until_parked();
+    assert_eq!(s.kinds(), [WindowKind::Document, WindowKind::Mixer]);
+    // Its own transport bar, without the document-only items, over the
+    // mixer: a short bar, so nothing folds into ».
+    s.app.update(&mut s.cx, |a, cx| {
+        let items = vec![(
+            "items".to_owned(),
+            core_control::registry::ArgValue::Text("cluster,main_view,panes".into()),
+        )];
+        vizdaw_app::commands::run_app("ui.set_transport_bar", &items, &mut a.prefs).unwrap();
+        cx.notify();
+    });
+    s.cx.run_until_parked();
+    assert!(
+        s.find("button", "Left Pane").is_some(),
+        "the document window's"
+    );
+    let all = s.mixer_elements();
+    let has = |role: &str, label: &str| all.iter().any(|e| e.role == role && e.label == label);
+    assert!(has("button", "Play"), "{all:#?}");
+    assert!(has("slider", "Fader of Audio 1"), "{all:#?}");
+    assert!(has("button", ADD_BUS));
+    assert!(!all.iter().any(|e| e.label.ends_with(" Pane")), "{all:#?}");
+    assert!(!has("group", "Main View"), "{all:#?}");
+    // Play in the Mixer window plays the document.
+    let play = all
+        .iter()
+        .find(|e| e.role == "button" && e.label == "Play")
+        .unwrap()
+        .bounds
+        .center();
+    mcx.simulate_click(play, Modifiers::none());
+    mcx.run_until_parked();
+    assert!(s.model(|d| d.is_playing()));
+}
+
+#[gpui::test]
+fn closing_the_mixer_window_keeps_the_mix_views_drag(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.run_menu("window.mixer");
+    let w = s.mixer_window().unwrap();
+    // A drag in the Mix view.
+    let at = s.fader_at("Audio 1");
+    s.down(at);
+    s.move_to(point(at.x, at.y - px(2.)));
+    s.move_to(point(at.x, at.y - px(20.)));
+    let fader = T::StripFader { strip: 5 };
+    assert_eq!(s.of(fader).first(), Some(&touch(None)));
+    // The Mixer window closes: only its placement goes.
+    w.update(&mut s.cx, |_, window, _| window.remove_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    assert_eq!(s.kinds(), [WindowKind::Document]);
+    assert_eq!(s.placements(), [MixerPlacement::View]);
+    assert!(!s.of(fader).contains(&RELEASE), "{:?}", s.of(fader));
+    assert_eq!(
+        s.model(|d| d.mixer().unwrap().pressed(MixerPlacement::View)),
+        Some(fader)
+    );
+    // The drag carries on and ends at its mouse-up.
+    s.move_to(point(at.x, at.y - px(30.)));
+    s.up(point(at.x, at.y - px(30.)));
+    assert_eq!(s.of(fader).last(), Some(&RELEASE));
+    assert_eq!(s.of(fader).iter().filter(|p| **p == RELEASE).count(), 1);
+}
+
+#[gpui::test]
+fn closing_the_document_closes_its_mixer_window(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.run_menu("window.mixer");
+    let w = s.mixer_window().unwrap();
+    s.window
+        .update(&mut s.cx, |_, window, _| window.remove_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    assert!(s.app.read_with(&s.cx, |a, _| a.windows().is_empty()));
+    assert!(
+        w.read_with(&s.cx, |_, _| ()).is_err(),
+        "the Mixer window closed"
+    );
+}
+
+#[gpui::test]
+fn the_mixer_window_alone_keeps_polling(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.run_menu("window.mixer");
+    s.run_menu("ui.view_arrange");
+    assert_eq!(s.placements(), [MixerPlacement::Window]);
+    s.fake.set_levels(levels(&[(6, 0.5, 0.5)]));
+    let n = s.fake.levels_reads();
+    s.period();
+    assert!(s.fake.levels_reads() > n);
+    let w = s.mixer_window().unwrap();
+    let drawn = w
+        .read_with(&s.cx, |v, cx| {
+            v.mixer_view(MixerPlacement::Window)
+                .unwrap()
+                .read(cx)
+                .drawn()
+                .iter()
+                .find(|l| l.strip == 6)
+                .map(|l| l.meter)
+        })
+        .unwrap();
+    assert_eq!(drawn.map(|m| m.left), Some(0.5));
 }

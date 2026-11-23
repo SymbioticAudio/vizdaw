@@ -945,10 +945,20 @@ fn children_of(nodes: &Value, label: &str) -> Option<Value> {
     Some(Value::Array(inside.cloned().collect()))
 }
 
+/// The first node of role `group` labelled exactly `label` (the bottom
+/// pane, not the transport bar's toggle of the same name).
+fn find_group(nodes: &Value, label: &str) -> Option<Value> {
+    nodes
+        .as_array()?
+        .iter()
+        .find(|n| n["role"] == "group" && n["label"].as_str() == Some(label))
+        .cloned()
+}
+
 /// The first node labelled exactly `label` outside the group labelled
 /// `outside` (the arrangement's tool bar, not the roll's).
 fn find_node_outside(nodes: &Value, label: &str, outside: &str) -> Option<Value> {
-    let excluded = find_node(nodes, outside).and_then(|g| path_of(&g).map(str::to_owned));
+    let excluded = find_group(nodes, outside).and_then(|g| path_of(&g).map(str::to_owned));
     nodes.as_array()?.iter().find_map(|n| {
         let inside = excluded.as_deref().is_some_and(|p| under(n, p));
         (!inside && n["label"].as_str() == Some(label)).then(|| n.clone())
@@ -1122,5 +1132,375 @@ fn gpui_g_toggles_snap() {
     assert_eq!(e["snap"]["division"], "quarter");
     app.call("ui.key", json!({"window": w, "key": "g"}));
     wait_for_editor(&mut app, &w, "snap off", |e| e["snap"]["enabled"] == false);
+    app.quit();
+}
+
+// Slice 6a: the mixer over the channel. `midi_mix_reaches_state_get` is
+// not ported: it needs `destination.add_midi` and the MIDI destination
+// strips, which come with slice 6b.
+
+/// The pane `pane` of main view `main` in a `state.get layout` answer.
+fn layout_pane(layout: &Value, main: &str, pane: &str) -> Value {
+    layout["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["main"] == main)
+        .and_then(|v| {
+            v["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["pane"] == pane)
+        })
+        .unwrap_or_else(|| panic!("no {main} {pane} in {layout}"))
+        .clone()
+}
+
+/// The windows of kind `mixer`.
+fn mixer_windows(app: &mut App) -> Vec<Value> {
+    window_numbers(app)
+        .into_iter()
+        .filter(|(_, k)| k == "mixer")
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// Polls until a Mixer window is listed; its number.
+fn wait_for_mixer_window(app: &mut App) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        if let Some(n) = mixer_windows(app).into_iter().next() {
+            return n;
+        }
+        assert!(Instant::now() < deadline, "no mixer window opened");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Ported from `touch_writes_a_fader_over_the_channel`: the synth's fader
+/// in Touch, touched, moved and released over the channel while playing,
+/// lands at Stop as one "Write Automation" step in a lane "Built-in Synth
+/// Fader"; hostile gestures are refused before anything changes.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_touch_writes_a_fader_over_the_channel() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["suspended"], false, "{state}");
+    let synth = state["modes"][0]["strip"]
+        .as_u64()
+        .expect("the synth strip first");
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    run(
+        &mut app,
+        "automation.set_mode",
+        json!({"strips": synth.to_string(), "mode": "touch"}),
+    );
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["modes"][0]["mode"], "touch", "{state}");
+    for (params, code) in [
+        (
+            json!({"target": "fader:999999", "phase": "touch"}),
+            core_control::ErrorCode::Failed,
+        ),
+        (
+            json!({"target": format!("fader:{synth}"), "phase": "value", "value": "nan"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+        (
+            json!({"target": "fader", "phase": "touch"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "automation.gesture", "params": params, "window": w}),
+        );
+        assert_eq!(e.code, code, "{e}");
+    }
+    run(&mut app, "transport.play_stop", json!({}));
+    app.wait(&w, json!({"condition": "playing"}));
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["writing"], true, "{state}");
+    let target = format!("fader:{synth}");
+    run(
+        &mut app,
+        "automation.gesture",
+        json!({"target": target, "phase": "touch", "value": "0.5"}),
+    );
+    for v in ["0.55", "0.6", "0.65", "0.7"] {
+        std::thread::sleep(Duration::from_millis(30));
+        run(
+            &mut app,
+            "automation.gesture",
+            json!({"target": target, "phase": "value", "value": v}),
+        );
+    }
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["touched"][0], target, "{state}");
+    assert_eq!(state["writing"], true, "{state}");
+    run(
+        &mut app,
+        "automation.gesture",
+        json!({"target": target, "phase": "release"}),
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    run(&mut app, "transport.play_stop", json!({}));
+    app.wait(&w, json!({"condition": "stopped"}));
+    let doc = wait_for_state(&mut app, &w, "document", |d| {
+        d["undo"] == "Write Automation"
+    });
+    assert!(
+        doc["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["name"] == "Built-in Synth Fader"),
+        "{doc}"
+    );
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["touched"], json!([]), "{state}");
+    app.quit();
+}
+
+/// Ported from `window_views_and_panes_over_the_channel`: the defaults,
+/// hostile `ui.pane` calls that change nothing and open no dialog, the
+/// main-view keys, a pane set for the other view, the mixer in the bottom
+/// pane and in its own window (with its own transport bar), and the
+/// layout saved per document. Dropped: the bar's Record and Record
+/// Options (the recording slice draws them); the Swift wait on the Mix
+/// view's "Instruments" menu (6b) waits on its "Add Bus" instead.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_window_views_and_panes_over_the_channel() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let (mut app, window) = start_demo(home.path());
+    // 1. The defaults.
+    let layout =
+        |app: &mut App| app.call("state.get", json!({"target": "layout", "window": window}));
+    let l0 = layout(&mut app);
+    assert_eq!(l0["main"], "arrange", "{l0}");
+    let left = layout_pane(&l0, "arrange", "left");
+    assert_eq!(
+        (left["shown"].clone(), left["view"].clone()),
+        (json!(true), json!("strip")),
+        "{l0}"
+    );
+    assert_eq!(layout_pane(&l0, "arrange", "bottom")["shown"], true, "{l0}");
+    assert_eq!(layout_pane(&l0, "arrange", "right")["shown"], false, "{l0}");
+    for side in ["left", "bottom", "right"] {
+        assert_eq!(
+            layout_pane(&l0, "mix", side)["shown"],
+            false,
+            "mix {side}: {l0}"
+        );
+    }
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar", "params": {"items": "cluster,loop,record_options,panes"},
+            "window": window}),
+    );
+    for label in ["Loop", "Left Pane", "Bottom Pane", "Right Pane"] {
+        wait_for_node(&mut app, &window, label);
+    }
+
+    // 2. Hostile calls change nothing and open no dialog.
+    let w0 = window_numbers(&mut app);
+    for (params, mentions) in [
+        (json!({}), None),
+        (json!({"pane": "left", "view": "mixer"}), None),
+        (
+            json!({"pane": "bottom", "view": "mixer", "main": "mix"}),
+            None,
+        ),
+        (json!({"pane": "left", "size": "wide"}), None),
+        (json!({"pane": "left"}), None),
+        (
+            json!({"pane": "right", "view": "piano_roll"}),
+            Some("piano_roll"),
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "ui.pane", "params": params, "window": window}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {e}");
+        if let Some(word) = mentions {
+            assert!(e.to_string().contains(word), "{params}: {e}");
+        }
+    }
+    let e = app.call_err("state.get", json!({"target": "panes", "window": window}));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert_eq!(layout(&mut app), l0, "no layout change");
+    assert_eq!(window_numbers(&mut app), w0, "no window opened");
+    let w1 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w1["alerts"].as_array().unwrap().len(), 0, "{w1}");
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    assert!(doc["alert"].is_null(), "no dialog: {doc}");
+
+    // 3. ⌃2 and ⌃1.
+    app.call(
+        "ui.key",
+        json!({"window": window, "key": "2", "modifiers": ["control"]}),
+    );
+    wait_for_state(&mut app, &window, "layout", |l| l["main"] == "mix");
+    // Only the mixer has Add Bus: once it is in the tree the view has
+    // switched, so the absent Arrangement means something.
+    wait_for_node(&mut app, &window, "Add Bus");
+    let tree = app.call("ui.tree", json!({"window": window}));
+    assert!(
+        find_node(&tree["nodes"], "Arrangement").is_none(),
+        "the Mix view has no arrangement"
+    );
+    app.call(
+        "ui.key",
+        json!({"window": window, "key": "1", "modifiers": ["control"]}),
+    );
+    wait_for_state(&mut app, &window, "layout", |l| l["main"] == "arrange");
+    wait_for_node(&mut app, &window, "Arrangement");
+    app.call(
+        "command.run",
+        json!({"id": "ui.toggle_right", "window": window}),
+    );
+    let l = wait_for_state(&mut app, &window, "layout", |l| {
+        layout_pane(l, "arrange", "right")["shown"] == true
+    });
+    assert_eq!(l["main"], "arrange", "{l}");
+
+    // 4. A pane of the other view; the main view stays.
+    let r = app.call(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "right", "view": "markers", "size": 300, "shown": true, "main": "mix"}, "window": window}),
+    );
+    assert_eq!(r["status"], "right markers 300 shown", "{r}");
+    let l = layout(&mut app);
+    assert_eq!(l["main"], "arrange", "{l}");
+    let right = layout_pane(&l, "mix", "right");
+    assert_eq!(
+        (
+            right["shown"].clone(),
+            right["view"].clone(),
+            right["size"].clone()
+        ),
+        (json!(true), json!("markers"), json!(300.0)),
+        "{l}"
+    );
+
+    // 5. The mixer in arrange's bottom pane.
+    app.call(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "bottom", "view": "mixer"}, "window": window}),
+    );
+    let l = layout(&mut app);
+    assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
+    wait_for_node(&mut app, &window, "Add Bus");
+
+    // 6. The Mixer window has its own transport bar.
+    app.call(
+        "command.run",
+        json!({"id": "window.mixer", "window": window}),
+    );
+    let mixer = wait_for_mixer_window(&mut app);
+    let id = wait_in_tree(&mut app, &mixer, "the Mixer window's Play", play_button);
+    app.call("ui.click", json!({"window": mixer, "element": id}));
+    app.wait(&window, json!({"condition": "playing"}));
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": window}),
+    );
+    app.wait(&window, json!({"condition": "stopped"}));
+
+    // 7. Saved per document; closing the document closes its Mixer
+    // window.
+    let path = home.path().join("views.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": path}, "window": window}),
+    );
+    app.call("command.run", json!({"id": "file.close", "window": window}));
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    while !mixer_windows(&mut app).is_empty() {
+        assert!(Instant::now() < deadline, "the Mixer window stayed open");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let w2 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w2, json!({"condition": "documents_at_least", "count": 1}));
+    let l = app.call("state.get", json!({"target": "layout", "window": w2}));
+    let right = layout_pane(&l, "mix", "right");
+    assert_eq!(
+        (
+            right["shown"].clone(),
+            right["view"].clone(),
+            right["size"].clone()
+        ),
+        (json!(true), json!("markers"), json!(300.0)),
+        "{l}"
+    );
+    assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
+    app.quit();
+}
+
+/// Ported from the strip and window parts of
+/// `groups_vcas_and_transport_bar_over_the_channel`: a new audio track
+/// gives the mixer a third strip, and ⌥⌘M opens one Mixer window (pressed
+/// again, it is brought to the front) whose tree has a fader for every
+/// strip. Dropped: groups and VCAs (6b), the bar's `command:` button (the
+/// GPUI bar does not draw command items yet) and the click (the
+/// recording slice).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_new_track_strips_and_the_mixer_window_over_the_channel() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    app.call("command.run", json!({"id": "track.new_audio", "window": w}));
+    let m = wait_for_state(&mut app, &w, "mixer", |m| {
+        m["strips"].as_array().unwrap().len() >= 3
+    });
+    let names: Vec<String> = m["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(mixer_windows(&mut app).is_empty());
+    for _ in 0..2 {
+        app.call(
+            "ui.key",
+            json!({"window": w, "key": "m", "modifiers": ["option", "command"]}),
+        );
+    }
+    let mixer = wait_for_mixer_window(&mut app);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        mixer_windows(&mut app),
+        std::slice::from_ref(&mixer),
+        "one Mixer window"
+    );
+    for name in &names {
+        wait_for_node(&mut app, &mixer, &format!("Fader of {name}"));
+    }
+    let ws = app.call("state.get", json!({"target": "windows"}));
+    let row = ws["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["number"] == mixer)
+        .unwrap()
+        .clone();
+    assert!(
+        row["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Mixer \u{2014} "),
+        "{row}"
+    );
     app.quit();
 }

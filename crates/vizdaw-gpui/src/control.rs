@@ -16,8 +16,12 @@
 //! with modifiers and a count), `ui.key`, `ui.screenshot` and `wait`.
 //! Slice 6a adds the main views and panes (`ui.view_*`, `ui.toggle_*`,
 //! `ui.pane`), `automation.set_mode|gesture|release_all`, `mixer.new_bus`
-//! and `state.get mixer|layout|automation`; `window.mixer` answers
-//! `unavailable` until the Mixer window is built.
+//! and `state.get mixer|layout|automation`; `window.mixer` opens the
+//! document's Mixer window (or brings it to the front), which
+//! `state.get windows` lists with kind `mixer` and every window call can
+//! name by its number. With `VIZDAW_FRAME_STATS` set (a measurement
+//! build's switch, see [`crate::frame_stats`]) each `state.get windows`
+//! row carries the window's `frames` since the last read.
 //! Everything else answers `unavailable`.
 //!
 //! A `wait` is not answered in the tick it is taken unless it already
@@ -330,7 +334,11 @@ fn facts(window: Option<&WindowRef>, cx: &mut App) -> Facts {
     Facts {
         document,
         documents: u32::try_from(s.store.count()).unwrap_or(u32::MAX),
-        window_titles: s.windows().iter().filter_map(|w| s.title(w.doc)).collect(),
+        window_titles: s
+            .windows()
+            .iter()
+            .filter_map(|w| s.window_title(w))
+            .collect(),
     }
 }
 
@@ -473,8 +481,7 @@ fn quit(discard: bool, cx: &mut App) -> Handled {
     let unsaved: Vec<String> = {
         let s = AppState::global(cx);
         let s = s.read(cx);
-        s.windows()
-            .iter()
+        s.document_windows()
             .filter(|w| s.has_unsaved_changes(w.doc))
             .filter_map(|w| s.store.document(w.doc).map(|d| d.snapshot().title.clone()))
             .collect()
@@ -535,8 +542,12 @@ fn run_command(
                 return Err(failure(before, "the command failed", cx));
             }
             if ran.open_mixer_window {
-                // Task 6 opens the Mixer window.
-                return Err(not_yet(&format!("command.run {id}")));
+                // Opened here, once: the key is not delivered to the
+                // window as well (see `key_strokes`), so its binding does
+                // not open it again.
+                if let Err(m) = DocumentWindow::open_mixer(&app, doc, cx) {
+                    return Err(failure(before, &m, cx));
+                }
             }
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
         }
@@ -854,33 +865,36 @@ fn transport_state(entry: &WindowEntry, cx: &mut App) -> Result<Value, ControlEr
     }))
 }
 
-/// `state.get windows`: the document windows, front first, and the alert
-/// the store holds. `frame` is the window's bounds in GPUI's screen
-/// coordinates (top-left origin).
+/// `state.get windows`: the document and Mixer windows, the front
+/// document's first, and the alert the store holds. `frame` is the
+/// window's bounds in GPUI's screen coordinates (top-left origin). `key`
+/// (and `main`) is the one window that has the keyboard.
 fn windows_state(cx: &mut App) -> Value {
     let app = AppState::global(cx);
-    let (mut entries, front, key) = {
+    let (mut entries, front) = {
         let s = app.read(cx);
-        (
-            s.windows().to_vec(),
-            s.store.front(),
-            s.store.key_document(),
-        )
+        (s.windows().to_vec(), s.store.front())
     };
     entries.sort_by_key(|w| Some(w.doc) != front);
     let mut rows = Vec::new();
     for w in entries {
-        let Ok(bounds) = w.handle.update(cx, |_, window, _| window.bounds()) else {
+        let now = cx.background_executor().now();
+        let Ok((bounds, frames)) = w.handle.update(cx, |v, window, _| {
+            (window.bounds(), v.take_frame_stats(now))
+        }) else {
             continue;
         };
-        let title = app.read(cx).title(w.doc).unwrap_or_default();
-        rows.push(json!({
+        let (title, key) = {
+            let s = app.read(cx);
+            (s.window_title(&w).unwrap_or_default(), s.is_key(&w))
+        };
+        let mut row = json!({
             "number": number(w.handle),
             "title": title,
             "kind": w.kind.name(),
             "doc": doc_id(w.doc),
-            "key": key == Some(w.doc),
-            "main": key == Some(w.doc),
+            "key": key,
+            "main": key,
             "visible": true,
             "frame": {
                 "x": f32::from(bounds.origin.x),
@@ -888,7 +902,11 @@ fn windows_state(cx: &mut App) -> Value {
                 "width": f32::from(bounds.size.width),
                 "height": f32::from(bounds.size.height),
             },
-        }));
+        });
+        if let Some(frames) = frames {
+            row["frames"] = frames;
+        }
+        rows.push(row);
     }
     let alerts: Vec<Value> = app
         .read(cx)
@@ -1219,7 +1237,9 @@ fn temp_screenshot_path() -> PathBuf {
     std::env::temp_dir().join(format!("vizdaw-screenshot-{}-{n}.png", std::process::id()))
 }
 
-/// The document window `window` names; absent: the front document's.
+/// The window `window` names (a number names a document or a Mixer
+/// window; `key` and `main` the window with the keyboard); absent: the
+/// front document's own window.
 fn target(window: Option<&WindowRef>, cx: &App) -> Result<WindowEntry, ControlError> {
     let app = AppState::global(cx);
     let s = app.read(cx);
@@ -1232,8 +1252,14 @@ fn target(window: Option<&WindowRef>, cx: &App) -> Result<WindowEntry, ControlEr
             .ok_or_else(|| ControlError::new(ErrorCode::NoWindow, format!("no VizDAW window {n}"))),
         Some(WindowRef::Key | WindowRef::Main) => s
             .store
-            .key_document()
-            .and_then(|d| s.window_of(d))
+            .key_window()
+            .and_then(|(doc, token)| {
+                // A Mixer window that was key and closed: its document's.
+                s.windows()
+                    .iter()
+                    .find(|w| w.token == token)
+                    .or_else(|| s.window_of(doc))
+            })
             .cloned()
             .ok_or_else(|| ControlError::new(ErrorCode::NoWindow, "no document window is key")),
         None => s
@@ -1304,7 +1330,7 @@ fn not_yet(what: &str) -> ControlError {
              editors.list / editors.close_detail / editors.insert_event / ui.view_arrange / \
              ui.view_mix / ui.toggle_left / ui.toggle_bottom / ui.toggle_right / ui.pane / \
              automation.set_mode / automation.gesture / automation.release_all / \
-             mixer.new_bus, state.get transport / windows / document / editor / selection / \
+             mixer.new_bus / window.mixer, state.get transport / windows / document / editor / selection / \
              mixer / layout / automation, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
         ),
     )

@@ -69,6 +69,18 @@ pub struct Meters {
     midi: HashMap<u64, f64>,
 }
 
+/// Two reads show the same when everything but their time is the same.
+impl PartialEq for Meters {
+    fn eq(&self, o: &Self) -> bool {
+        self.levels == o.levels
+            && self.dsp_load == o.dsp_load
+            && self.dsp_peak == o.dsp_peak
+            && self.latency_frames == o.latency_frames
+            && self.faulted == o.faulted
+            && self.midi == o.midi
+    }
+}
+
 impl Meters {
     /// Takes one read of the levels at `now`. An empty read (a session
     /// that does not hold the engine) is silence falling, not an error.

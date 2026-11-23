@@ -5,18 +5,27 @@
 //! left, bottom and right panes), and the status line.
 //! The window holds the bar's shuttle (Rewind and Fast Forward held, and
 //! their held keys) and its fields' edit.
+//!
+//! A document's Mixer window (Swift `MixerWindow`, Window › Mixer) is a
+//! `DocumentWindow` too, of kind [`WindowKind::Mixer`]: titled "Mixer —
+//! <title>", it draws the menu bar (off macOS), the alert banner, its own
+//! transport bar without the document-only items (Main View, the pane
+//! toggles), and the mixer's Window placement. It has its own focus, bar
+//! fields, shuttle and keyboard token; it closes without asking, and it
+//! closes itself when its document goes. Its transport is the document's
+//! (the document window polls it).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton, ParentElement, PromptLevel,
-    Render, StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowBounds,
-    WindowHandle, WindowOptions, canvas, div, px, rgb, size,
+    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton,
+    ParentElement, PromptLevel, Render, StatefulInteractiveElement, Styled, Subscription, Task,
+    Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, px, rgb, size,
 };
 use vizdaw_app::alerts::{AlertItem, error_message};
 use vizdaw_app::commands::{self, FieldFocus};
@@ -27,10 +36,11 @@ use vizdaw_app::transport_fields::{self as fields_model, TransportField};
 use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
 use vizdaw_ffi::snapshot::LaneRow;
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, WindowKind};
 use crate::arrangement::{self, Arrangement, ArrangementState, ToolbarState};
 use crate::controls::MixerRef;
 use crate::detail_pane::{self, DetailPaneState};
+use crate::frame_stats::{self, FrameStats};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
@@ -50,6 +60,8 @@ pub struct DocumentWindow {
     app: Entity<AppState>,
     doc: DocId,
     token: WindowToken,
+    /// A document's own window, or its Mixer window.
+    kind: WindowKind,
     focus: FocusHandle,
     registry: SharedRegistry,
     /// The title last given to the platform window.
@@ -91,6 +103,10 @@ pub struct DocumentWindow {
     /// pane's Mixer view, each while it shows.
     mix_view: Option<Placed>,
     pane_mixer: Option<Placed>,
+    /// The Mixer window's placement.
+    window_mixer: Option<Placed>,
+    /// The frames' timing (`VIZDAW_FRAME_STATS`; `None` without it).
+    frames: Option<Rc<RefCell<FrameStats>>>,
     /// The poll runs fast: a note-off or a drag's final edit waits on
     /// Busy.
     fast_poll: bool,
@@ -133,7 +149,11 @@ impl DocumentWindow {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            move |window, cx| cx.new(|cx| DocumentWindow::new(state, doc, token, window, cx)),
+            move |window, cx| {
+                cx.new(|cx| {
+                    DocumentWindow::new(state, doc, token, WindowKind::Document, window, cx)
+                })
+            },
         );
         let handle = match opened {
             Ok(h) => h,
@@ -148,8 +168,65 @@ impl DocumentWindow {
             }
         };
         app.update(cx, |s, _| {
-            s.add_window(doc, token, handle);
+            s.add_window(doc, token, handle, WindowKind::Document);
             s.store.focus_document(doc, token);
+        });
+        handle
+            .update(cx, |v, window, cx| {
+                window.focus(&v.focus, cx);
+                window.activate_window();
+            })
+            .ok();
+        Ok(handle)
+    }
+
+    /// Window › Mixer (`window.mixer`, ⌥⌘M): opens `doc`'s Mixer window,
+    /// or brings the open one to the front (never a second). Call it
+    /// outside `AppState::update` and outside the Mixer window's own
+    /// update. A failure is the alert "Window Failed".
+    pub fn open_mixer(
+        app: &Entity<AppState>,
+        doc: DocId,
+        cx: &mut App,
+    ) -> Result<WindowHandle<DocumentWindow>, String> {
+        if let Some(entry) = app.read(cx).mixer_window_of(doc).cloned() {
+            entry
+                .handle
+                .update(cx, |_, window, _| window.activate_window())
+                .map_err(|e| e.to_string())?;
+            return Ok(entry.handle);
+        }
+        if app.read(cx).store.document(doc).is_none() {
+            return Err("the document is closed".into());
+        }
+        let token = app.update(cx, |s, _| s.new_token());
+        let visible = cx.primary_display().map(|d| d.visible_bounds());
+        let bounds = Bounds::centered(None, mixer_window_size(visible), cx);
+        let state = app.clone();
+        let opened = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            move |window, cx| {
+                cx.new(|cx| DocumentWindow::new(state, doc, token, WindowKind::Mixer, window, cx))
+            },
+        );
+        let handle = match opened {
+            Ok(h) => h,
+            Err(e) => {
+                app.update(cx, |s, cx| {
+                    s.store
+                        .post_alert(AlertItem::new("Window Failed", e.to_string()));
+                    cx.notify();
+                });
+                return Err(e.to_string());
+            }
+        };
+        app.update(cx, |s, cx| {
+            s.add_window(doc, token, handle, WindowKind::Mixer);
+            s.store.focus_document(doc, token);
+            cx.notify();
         });
         handle
             .update(cx, |v, window, cx| {
@@ -164,13 +241,23 @@ impl DocumentWindow {
         app: Entity<AppState>,
         doc: DocId,
         token: WindowToken,
+        kind: WindowKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut subscriptions = vec![
-            cx.observe_in(&app, window, |this, _, window, cx| {
-                this.end_stale_rename(window, cx);
-                this.follow_views(window, cx);
+            cx.observe_in(&app, window, move |this, app, window, cx| {
+                if kind == WindowKind::Mixer {
+                    // Its document went (closed, quit): the Mixer window
+                    // goes too.
+                    if app.read(cx).store.document(this.doc).is_none() {
+                        window.remove_window();
+                        return;
+                    }
+                } else {
+                    this.end_stale_rename(window, cx);
+                    this.follow_views(window, cx);
+                }
                 cx.notify();
             }),
             cx.observe_window_activation(window, |this, window, cx| {
@@ -205,9 +292,17 @@ impl DocumentWindow {
                 s.store.with_document(doc, |d, _| {
                     shuttle.cancel(d);
                     shuttle.key_up(d);
-                    DocumentWindow::roll_closing(roll, d);
+                    if kind == WindowKind::Document {
+                        DocumentWindow::roll_closing(roll, d);
+                    }
                 });
-                s.close_document(doc);
+                match kind {
+                    // Its Mixer window sees the document gone and closes.
+                    WindowKind::Document => s.close_document(doc),
+                    // Only the window goes; its placement released its
+                    // own drags as it went.
+                    WindowKind::Mixer => s.remove_window(token),
+                }
                 cx.notify();
             });
         }));
@@ -219,10 +314,16 @@ impl DocumentWindow {
                 .unwrap_or(true)
         });
         DocumentWindow {
-            _poll: Self::start_polling(doc, window, cx),
+            // The Mixer window's transport is the document's: its own
+            // window polls it.
+            _poll: match kind {
+                WindowKind::Document => Self::start_polling(doc, window, cx),
+                WindowKind::Mixer => Task::ready(()),
+            },
             app,
             doc,
             token,
+            kind,
             focus: cx.focus_handle(),
             registry: SharedRegistry::default(),
             title: String::new(),
@@ -245,6 +346,8 @@ impl DocumentWindow {
             regions: Rc::default(),
             mix_view: None,
             pane_mixer: None,
+            window_mixer: None,
+            frames: frame_stats::enabled().then(Rc::default),
             fast_poll: false,
             _subscriptions: subscriptions,
         }
@@ -284,6 +387,18 @@ impl DocumentWindow {
         self.token
     }
 
+    /// A document's own window, or its Mixer window.
+    pub fn kind(&self) -> WindowKind {
+        self.kind
+    }
+
+    /// The frames timed since the last call, as `state.get windows`
+    /// reports them; `None` unless `VIZDAW_FRAME_STATS` is set.
+    #[doc(hidden)]
+    pub fn take_frame_stats(&self, now: Instant) -> Option<serde_json::Value> {
+        self.frames.as_ref().map(|f| f.borrow_mut().take_json(now))
+    }
+
     pub fn app(&self) -> &Entity<AppState> {
         &self.app
     }
@@ -294,7 +409,8 @@ impl DocumentWindow {
         match p {
             MixerPlacement::View => self.mix_view.as_ref(),
             MixerPlacement::Pane => self.pane_mixer.as_ref(),
-            _ => None,
+            MixerPlacement::Window => self.window_mixer.as_ref(),
+            MixerPlacement::Strip => None,
         }
         .map(|p| p.view.clone())
     }
@@ -310,6 +426,7 @@ impl DocumentWindow {
     ) -> Option<Entity<MixerView>> {
         let slot = match p {
             MixerPlacement::View => &mut self.mix_view,
+            MixerPlacement::Window => &mut self.window_mixer,
             _ => &mut self.pane_mixer,
         };
         if !wanted {
@@ -382,19 +499,32 @@ impl DocumentWindow {
             self.after_transport(window, cx);
         }
         match (result, lane) {
-            (Some(Err(e)), Some(Some(lane))) if e.dialog.as_deref() == Some("Rename Track") => {
+            // The Mixer window shows no track headers.
+            (Some(Err(e)), Some(Some(lane)))
+                if e.dialog.as_deref() == Some("Rename Track")
+                    && self.kind == WindowKind::Document =>
+            {
                 self.begin_rename(lane, window, cx);
             }
-            // `ran.open_mixer_window` (Window › Mixer, ⌥⌘M): the Mixer
-            // window comes in slice 6a Task 6; until then the item does
-            // nothing.
-            (Some(Ok(ran)), _) => match ran.focus {
-                Some(FieldFocus::Position) => {
-                    self.focus_field(TransportField::Position, window, cx)
+            (Some(Ok(ran)), _) => {
+                // Window › Mixer (⌥⌘M): after this update, as it may open
+                // a window or bring this one to the front.
+                if ran.open_mixer_window {
+                    let app = self.app.clone();
+                    cx.defer(move |cx| {
+                        let _ = DocumentWindow::open_mixer(&app, doc, cx);
+                    });
                 }
-                Some(FieldFocus::EditIn) => self.focus_field(TransportField::EditIn, window, cx),
-                None => {}
-            },
+                match ran.focus {
+                    Some(FieldFocus::Position) => {
+                        self.focus_field(TransportField::Position, window, cx)
+                    }
+                    Some(FieldFocus::EditIn) => {
+                        self.focus_field(TransportField::EditIn, window, cx)
+                    }
+                    None => {}
+                }
+            }
             _ => {}
         }
         cx.notify();
@@ -687,7 +817,10 @@ impl DocumentWindow {
     pub fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_rename(true, window, cx);
         // A strip's rename in the mixer too.
-        for placed in [&self.mix_view, &self.pane_mixer].into_iter().flatten() {
+        for placed in [&self.mix_view, &self.pane_mixer, &self.window_mixer]
+            .into_iter()
+            .flatten()
+        {
             placed.view.update(cx, |v, cx| v.end_rename(true, cx));
         }
     }
@@ -852,6 +985,15 @@ impl DocumentWindow {
     /// the rest of the old (a stopped wait would hold the readout still
     /// for up to 250 ms after Play).
     fn restart_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.kind == WindowKind::Mixer {
+            // The document's own window polls the transport.
+            let own = self.app.read(cx).window_of(self.doc).map(|w| w.handle);
+            if let Some(own) = own {
+                own.update(cx, |v, window, cx| v.restart_polling(window, cx))
+                    .ok();
+            }
+            return;
+        }
         self._poll = Self::start_polling(self.doc, window, cx);
     }
 
@@ -975,6 +1117,10 @@ impl DocumentWindow {
     /// is committed first.
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.commit_rename(window, cx);
+        // The Mixer window closes without asking: the document stays.
+        if self.kind == WindowKind::Mixer {
+            return true;
+        }
         let doc = self.doc;
         let (dirty, title) = {
             let s = self.app.read(cx);
@@ -1231,8 +1377,169 @@ impl Focusable for DocumentWindow {
     }
 }
 
+impl DocumentWindow {
+    /// The window's root: its key context, focus, key handlers and
+    /// actions, filling the window.
+    fn root(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .key_context(menus::WINDOW_CONTEXT)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
+            // A held Rewind or Fast Forward released anywhere else (the
+            // button's own release comes first and ends the hold).
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.shuttle_release(false, cx)),
+            )
+            .on_action(cx.listener(Self::run_command))
+            .on_action(cx.listener(Self::play_stop))
+            .on_action(cx.listener(Self::stop_and_return))
+            .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::save_as))
+            .on_action(cx.listener(Self::close_window))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1c1c22))
+            .text_color(rgb(colors::TEXT))
+            .text_sm()
+    }
+
+    /// With `VIZDAW_FRAME_STATS`: the frame's render starts now, and the
+    /// strips the placements drew last count.
+    fn frame_started(&self, cx: &App) {
+        let Some(f) = &self.frames else { return };
+        let strips = [&self.mix_view, &self.pane_mixer, &self.window_mixer]
+            .into_iter()
+            .flatten()
+            .map(|p| p.view.read(cx).drawn().len())
+            .sum();
+        let mut f = f.borrow_mut();
+        f.strips = strips;
+        f.render_started(Instant::now());
+    }
+
+    /// With `VIZDAW_FRAME_STATS`: an invisible last child whose paint
+    /// marks the frame's end.
+    fn frame_probe(&self) -> Option<impl IntoElement + use<>> {
+        let frames = self.frames.clone()?;
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |_, _, _, _| frames.borrow_mut().painted(Instant::now()),
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size(px(1.)),
+        )
+    }
+
+    /// The Mixer window: the menu bar (off macOS), the alert, its
+    /// transport bar without the document-only items, then the mixer's
+    /// Window placement.
+    fn render_mixer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let doc = self.doc;
+        let (title, alert, bar, model, front, layout) = {
+            let s = self.app.read(cx);
+            let d = s.store.document(doc);
+            (
+                d.map(crate::app_state::mixer_title).unwrap_or_default(),
+                s.store.alert().cloned(),
+                s.readout(doc).zip(d).map(|(readout, d)| BarState {
+                    readout,
+                    can_play: s.can_play(doc),
+                    has_sequence: d.selected_seq().is_some(),
+                    looping: d.looping(),
+                    field_texts: TransportField::ALL
+                        .into_iter()
+                        .map(|f| (f, fields_model::field_text(d, f)))
+                        .collect(),
+                    main: d.layout().views.main,
+                    panes: PaneSide::ALL.map(|side| d.layout().views.current().pane(side).shown),
+                }),
+                menus::menu_model(d, &s.keymap),
+                s.store.front().is_none_or(|f| f == doc),
+                s.transport_layout(),
+            )
+        };
+        let plan = Plan::for_window(&layout, f32::from(window.viewport_size().width), false);
+        self.set_shown_fields(
+            if bar.is_some() {
+                plan.shown_fields()
+            } else {
+                vec![]
+            },
+            window,
+            cx,
+        );
+        if plan.folded().is_empty() {
+            self.more_open = false;
+        }
+        if title != self.title {
+            window.set_window_title(&title);
+            self.title = title;
+        }
+        if front {
+            let shown = model.clone();
+            cx.defer(move |cx| menus::show(shown, cx));
+        }
+        if let Some(b) = &mut self.menu_bar {
+            b.set_model(model);
+        }
+        let shows = bar.is_some();
+        let mixer = self.place_mixer(MixerPlacement::Window, shows, window, cx);
+        let mut root = RegistryScope::root(&self.registry);
+        let menu_bar = self
+            .menu_bar
+            .as_ref()
+            .map(|b| b.render(&mut root.container(), window, cx));
+        let alert =
+            alert.map(|a| Self::alert_banner(&a, &mut root.container(), cx).into_any_element());
+        let bar = bar.map(|bar| {
+            transport_bar::render(
+                &bar,
+                &plan,
+                &self.transport_fields,
+                self.more_open,
+                &mut root.container(),
+                window,
+                cx,
+            )
+            .into_any_element()
+        });
+        let content = mixer.map(|view| {
+            let mut scope = root.container();
+            let content = mixer_view::render(&view, &mut scope, window, cx);
+            panes::mixer(content, &scope)
+        });
+        self.root(cx)
+            .children(menu_bar)
+            .children(alert)
+            .children(bar)
+            .child(div().h(px(1.)).flex_none().bg(rgb(colors::BORDER)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .overflow_hidden()
+                    .children(content),
+            )
+            .children(self.frame_probe())
+            .into_any_element()
+    }
+}
+
 impl Render for DocumentWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.frame_started(cx);
+        if self.kind == WindowKind::Mixer {
+            return self.render_mixer(window, cx);
+        }
         let doc = self.doc;
         // First, so the rows built below are the ones in view.
         let rows = self.shown_rows(cx);
@@ -1393,29 +1700,25 @@ impl Render for DocumentWindow {
             .menu_bar
             .as_ref()
             .map(|b| b.render(&mut root.container(), window, cx));
-        div()
-            .key_context(menus::WINDOW_CONTEXT)
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::key_down))
-            .on_key_up(cx.listener(Self::key_up))
-            // A held Rewind or Fast Forward released anywhere else (the
-            // button's own release comes first and ends the hold).
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.shuttle_release(false, cx)),
-            )
-            .on_action(cx.listener(Self::run_command))
-            .on_action(cx.listener(Self::play_stop))
-            .on_action(cx.listener(Self::stop_and_return))
-            .on_action(cx.listener(Self::save))
-            .on_action(cx.listener(Self::save_as))
-            .on_action(cx.listener(Self::close_window))
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(0x1c1c22))
-            .text_color(rgb(colors::TEXT))
-            .text_sm()
+        let regions = self.regions(
+            &host,
+            &frames,
+            area,
+            editor_shown,
+            RegionParts {
+                tools,
+                lanes: &lanes,
+                selected: &selected,
+                arranged,
+                pane: &pane,
+                listed: listed.as_ref(),
+                rolled,
+            },
+            &mut root,
+            window,
+            cx,
+        );
+        self.root(cx)
             .children(menu_bar)
             .when_some(alert, |d, alert| {
                 d.child(Self::alert_banner(&alert, &mut root.container(), cx))
@@ -1431,27 +1734,12 @@ impl Render for DocumentWindow {
                     cx,
                 ))
             })
-            .child(self.regions(
-                &host,
-                &frames,
-                area,
-                editor_shown,
-                RegionParts {
-                    tools,
-                    lanes: &lanes,
-                    selected: &selected,
-                    arranged,
-                    pane: &pane,
-                    listed: listed.as_ref(),
-                    rolled,
-                },
-                &mut root,
-                window,
-                cx,
-            ))
+            .child(regions)
             .when_some(status, |d, status| {
                 d.child(Self::status_line(status, &mut root.container(), cx))
             })
+            .children(self.frame_probe())
+            .into_any_element()
     }
 }
 
@@ -1471,6 +1759,19 @@ pub fn default_window_size(visible: Option<Bounds<gpui::Pixels>>) -> gpui::Size<
         px(side(f32::from(v.size.width), 1440., 980., 700.)),
         px(side(f32::from(v.size.height), 900., 620., 450.)),
     )
+}
+
+/// The size a new Mixer window opens at (Swift's `defaultSize`): 760×560,
+/// each side kept inside the screen's visible area.
+pub fn mixer_window_size(visible: Option<Bounds<gpui::Pixels>>) -> gpui::Size<gpui::Pixels> {
+    let (w, h) = (760f32, 560f32);
+    match visible {
+        Some(v) => size(
+            px(w.min(f32::from(v.size.width))),
+            px(h.min(f32::from(v.size.height))),
+        ),
+        None => size(px(w), px(h)),
+    }
 }
 
 /// The main view and panes, without the window frame (which a pane change

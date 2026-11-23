@@ -119,6 +119,20 @@ pub struct MixerModel {
     pending: HashMap<Target, PendingRelease>,
     presses: HashMap<MixerPlacement, Press>,
     gestures: HashMap<(MixerPlacement, Target), ControlGesture>,
+    /// Moves when a tick changed what the placements show.
+    shown_version: u64,
+}
+
+/// What a tick can change of what the placements show.
+#[derive(PartialEq)]
+struct Shown {
+    meters: Meters,
+    heard: HashMap<Target, f64>,
+    core_touched: HashSet<Target>,
+    core_values: HashMap<Target, f64>,
+    fetches: u64,
+    touches: HashSet<Target>,
+    pending: usize,
 }
 
 impl MixerModel {
@@ -148,6 +162,7 @@ impl MixerModel {
             pending: HashMap::new(),
             presses: HashMap::new(),
             gestures: HashMap::new(),
+            shown_version: 0,
         })
     }
 
@@ -248,6 +263,14 @@ impl MixerModel {
     /// "DSP 12% · peak 30% · PDC 10.7 ms".
     pub fn load_text(&self, sample_rate: f64) -> String {
         self.meters.load_text(sample_rate)
+    }
+
+    /// Takes `l` as a read of the levels at `now`, on top of what was
+    /// read (a measurement build's synthetic signal; not for the UI).
+    #[doc(hidden)]
+    pub fn take_levels(&mut self, l: &vizdaw_ffi::mixer::MixerLevels, now: Instant) {
+        self.meters.take(l, now);
+        self.shown_version += 1;
     }
 
     /// The placements showing this mixer now.
@@ -385,18 +408,46 @@ impl MixerModel {
     /// release waiting on Busy is retried on every call. True when it
     /// polled.
     pub fn tick(&mut self, doc: &mut DocumentModel, now: Instant) -> bool {
+        let before = self.shown();
         self.retry_releases(doc, now);
         if let Some(last) = self.last_poll
             && now >= last
             && now - last < POLL_INTERVAL
         {
+            self.note_shown(before);
             return false;
         }
         self.last_poll = Some(now);
         self.refresh_if_needed(doc);
         self.poll_levels(doc, now);
         self.poll_automation(doc);
+        self.note_shown(before);
         true
+    }
+
+    /// Moves whenever a tick changed what the placements show (meters,
+    /// load, heard values, the core's touches, a refetch): every
+    /// placement redraws then, whichever one ticked.
+    pub fn shown_version(&self) -> u64 {
+        self.shown_version
+    }
+
+    fn shown(&self) -> Shown {
+        Shown {
+            meters: self.meters.clone(),
+            heard: self.heard.clone(),
+            core_touched: self.core_touched.clone(),
+            core_values: self.core_values.clone(),
+            fetches: self.fetches,
+            touches: self.touches.clone(),
+            pending: self.pending.len(),
+        }
+    }
+
+    fn note_shown(&mut self, before: Shown) {
+        if before != self.shown() {
+            self.shown_version += 1;
+        }
     }
 
     /// The document moved since the mixer was read, or a refetch is owed
