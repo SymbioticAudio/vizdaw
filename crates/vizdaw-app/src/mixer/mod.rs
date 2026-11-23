@@ -96,6 +96,12 @@ impl DocumentModel {
         Some(r)
     }
 
+    /// The mixer could not be read at this document version (a refusal
+    /// other than Busy): it is not asked again until the document moves.
+    pub fn mixer_refused(&self) -> bool {
+        self.mixer.model.is_none() && self.mixer.failed_at == Some(self.snapshot().version)
+    }
+
     /// The mixer's selected strips.
     pub fn selected_strips(&self) -> &BTreeSet<u64> {
         &self.mixer.selected

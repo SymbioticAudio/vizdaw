@@ -20,18 +20,19 @@
 //! touch), and the window losing the keyboard cancels its drag.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClickEvent, Context, Entity, Focusable, FontWeight,
     InteractiveElement, IntoElement, ParentElement, Pixels, Rgba, ScrollDelta, ScrollEvent,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, anchored, canvas,
+    StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, anchored, canvas,
     deferred, div, point, px, rgb,
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::mixer::layout::{StripGrid, StripLayout, StripRowKind, rows_of};
+use vizdaw_app::mixer::meters::POLL_INTERVAL;
 use vizdaw_app::mixer::{AutomationModes, MeterLevel, MixerModel, MixerPlacement};
 use vizdaw_ffi::automation::AutomationModeRow;
 use vizdaw_ffi::edit::MonitorModeRow;
@@ -112,6 +113,11 @@ pub struct MixerView {
     rename: Option<RenameField>,
     /// The placement told the mixer it shows.
     appeared: bool,
+    /// When the mixer was last asked for (to show, or read again): a busy
+    /// core is asked at most every [`POLL_INTERVAL`].
+    asked: Option<Instant>,
+    /// Draws again once [`POLL_INTERVAL`] is up, to ask again.
+    retry: Option<Task<()>>,
     drawn: Vec<StripLook>,
     _subscriptions: Vec<Subscription>,
 }
@@ -120,20 +126,6 @@ impl MixerView {
     /// The placement `mixer` names, in `window`.
     pub fn new(mixer: MixerRef, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let p = mixer.placement;
-        // After this update: the mixer is made (when need be) then.
-        let weak = cx.entity().downgrade();
-        let shown = mixer.clone();
-        cx.defer(move |cx| {
-            if weak.upgrade().is_none() {
-                return;
-            }
-            shown.with(cx, |m, _| m.appeared(p));
-            weak.update(cx, |v, cx| {
-                v.appeared = true;
-                cx.notify();
-            })
-            .ok();
-        });
         let gone = mixer.clone();
         cx.on_release(move |v: &mut MixerView, cx| {
             if let Some(r) = v.rename.take() {
@@ -150,7 +142,7 @@ impl MixerView {
             }
         })
         .detach();
-        MixerView {
+        let mut v = MixerView {
             _subscriptions: vec![controls::watch_activation(mixer.clone(), window, cx)],
             mixer,
             scroll: (0., 0.),
@@ -160,8 +152,81 @@ impl MixerView {
             menu: None,
             rename: None,
             appeared: false,
+            asked: None,
+            retry: None,
             drawn: vec![],
+        };
+        // Now, so the frame that shows the placement has its strips.
+        v.appear(cx);
+        v
+    }
+
+    /// Tells the mixer (made first if need be) this placement shows; true
+    /// when it could. Nothing redraws for it: the caller draws next. A
+    /// mixer that could not be made is asked again later (see
+    /// [`MixerView::ask_again`]).
+    fn appear(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.appeared {
+            return true;
         }
+        let (doc, p) = (self.mixer.doc, self.mixer.placement);
+        self.asked = Some(Instant::now());
+        let (shown, alerted) = self.mixer.app.update(cx, |s, _| {
+            let shown = s
+                .store
+                .with_document(doc, |d, _| d.with_mixer(|m, _| m.appeared(p)).is_some())
+                .unwrap_or(false);
+            (shown, s.store.alert().is_some())
+        });
+        self.appeared = shown;
+        if !shown {
+            // An alert the read raised shows at the next frame.
+            if alerted {
+                let app = self.mixer.app.clone();
+                cx.defer(move |cx| app.update(cx, |_, cx| cx.notify()));
+            }
+            self.ask_again(cx);
+        }
+        shown
+    }
+
+    /// Whether the mixer may be asked for now (at most every
+    /// [`POLL_INTERVAL`]); when not, a frame is drawn once it may.
+    fn may_ask(&mut self, cx: &mut Context<Self>) -> bool {
+        let now = Instant::now();
+        if self
+            .asked
+            .is_none_or(|at| now.saturating_duration_since(at) >= POLL_INTERVAL)
+        {
+            self.asked = Some(now);
+            return true;
+        }
+        self.ask_again(cx);
+        false
+    }
+
+    /// Draws again after [`POLL_INTERVAL`] (once, however often asked),
+    /// unless the mixer was refused at this document version: a document
+    /// change draws anyway.
+    fn ask_again(&mut self, cx: &mut Context<Self>) {
+        let refused = self
+            .mixer
+            .app
+            .read(cx)
+            .store
+            .document(self.mixer.doc)
+            .is_some_and(DocumentModel::mixer_refused);
+        if refused || self.retry.is_some() {
+            return;
+        }
+        self.retry = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(POLL_INTERVAL).await;
+            this.update(cx, |v, cx| {
+                v.retry = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     pub fn placement(&self) -> MixerPlacement {
@@ -496,8 +561,17 @@ pub fn render(
         .read(cx)
         .transport(doc)
         .map_or(0., |t| t.state().sample_rate);
+    // A mixer that could not be made when the placement came: asked again
+    // (at most every poll interval), and the placement registers then.
+    if !appeared {
+        view.update(cx, |v, cx| {
+            if v.may_ask(cx) {
+                v.appear(cx);
+            }
+        });
+    }
     let stale = mixer.read(cx, |m, d| m.needs_refresh(d)).unwrap_or(false);
-    if stale {
+    if stale && view.update(cx, |v, cx| v.may_ask(cx)) {
         // Not while drawing: the next turn reads it again.
         let again = mixer.clone();
         cx.defer(move |cx| {
@@ -508,14 +582,22 @@ pub fn render(
         gather(m, d, &mixer, size, scroll, sample_rate, now)
     }) else {
         view.update(cx, |v, _| v.drawn.clear());
-        return unavailable(appeared, scope);
+        // A busy core is quiet (asked again); a refusal says so.
+        let refused = mixer
+            .app
+            .read(cx)
+            .store
+            .document(doc)
+            .is_some_and(DocumentModel::mixer_refused);
+        return unavailable(refused, scope);
     };
     let weak = view.downgrade();
     // Boxes of strips that went are dropped (an edit in one ends).
     view.update(cx, |v, cx| {
         v.scroll = g.scroll;
         v.room = g.room;
-        v.boxes.retain(|(id, _), _| g.ids.contains(id));
+        let ids: HashSet<u64> = g.ids.iter().copied().collect();
+        v.boxes.retain(|(id, _), _| ids.contains(id));
         v.drawn = g
             .strips
             .iter()
@@ -617,9 +699,9 @@ pub fn render(
         .into_any_element()
 }
 
-/// The note when the mixer could not be read (nothing before the
-/// placement first asked).
-fn unavailable(appeared: bool, scope: &mut RegistryScope) -> AnyElement {
+/// The note when the mixer could not be read (`refused`; nothing while
+/// a busy core is asked again).
+fn unavailable(refused: bool, scope: &mut RegistryScope) -> AnyElement {
     let t = tokens();
     let mut note = div()
         .size_full()
@@ -629,7 +711,7 @@ fn unavailable(appeared: bool, scope: &mut RegistryScope) -> AnyElement {
         .justify_center()
         .gap(px(4.))
         .bg(rgb(t.surface_panel));
-    if appeared {
+    if refused {
         note = note
             .child(
                 div()
@@ -934,10 +1016,8 @@ fn header(
         .map(|r| r.field.clone());
     let name: AnyElement = match field {
         Some(field) => {
-            let (text, focused) = {
-                let f = field.read(cx);
-                (f.text().to_owned(), true)
-            };
+            let text = field.read(cx).text().to_owned();
+            let focused = true;
             div()
                 .relative()
                 .size_full()

@@ -810,3 +810,54 @@ fn a_mixer_that_cannot_be_read_says_so(cx: &mut TestAppContext) {
     );
     assert!(s.faders().is_empty());
 }
+
+fn busy() -> vizdaw_ffi::VizError {
+    vizdaw_ffi::VizError::Busy {
+        message: "editor opening".into(),
+    }
+}
+
+#[gpui::test]
+fn a_busy_mixer_is_not_read_every_frame(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.fake.set_call_error("mixer", Some(busy()));
+    let reads = s.fake.mixer_reads();
+    // The document moves: the mixer is owed a read, which meets Busy.
+    // Drawing again does not read it again at once (no frame-by-frame
+    // loop: the window settles).
+    s.update_model(|d| d.rename_track(30, "Kit"));
+    s.cx.run_until_parked();
+    assert!(
+        s.fake.mixer_reads() - reads <= 2,
+        "{} reads before the window settled",
+        s.fake.mixer_reads() - reads
+    );
+    // Busy ends: the strips follow.
+    s.fake.set_call_error("mixer", None);
+    s.fake.edit_mixer(|m| {
+        m.strips.insert(
+            2,
+            strip_row(7, "Audio 3", StripKindRow::AudioPath { path: 3 }),
+        )
+    });
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    s.cx.executor()
+        .advance_clock(std::time::Duration::from_millis(100));
+    s.cx.run_until_parked();
+    assert!(s.find("slider", "Fader of Audio 3").is_some());
+}
+
+#[gpui::test]
+fn a_placement_registers_once_the_mixer_can_be_read(cx: &mut TestAppContext) {
+    let f = fake();
+    f.set_call_error("mixer", Some(busy()));
+    let mut s = setup(cx, f);
+    assert!(s.faders().is_empty());
+    s.fake.set_call_error("mixer", None);
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    s.cx.executor()
+        .advance_clock(std::time::Duration::from_millis(100));
+    s.cx.run_until_parked();
+    assert_eq!(s.placements(), [MixerPlacement::View]);
+    assert!(s.find("slider", "Fader of Master").is_some());
+}
