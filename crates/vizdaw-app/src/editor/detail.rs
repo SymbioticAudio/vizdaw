@@ -27,6 +27,12 @@ impl DetailEditorKind {
         DetailEditorKind::DrumGrid,
     ];
 
+    /// This app has the editor (the Strip Chart and the Drum Grid come
+    /// in later slices).
+    pub fn is_available(self) -> bool {
+        matches!(self, DetailEditorKind::PianoRoll | DetailEditorKind::List)
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             DetailEditorKind::PianoRoll => "Piano Roll",

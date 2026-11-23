@@ -289,3 +289,24 @@ fn a_block_target_at_the_tick_limits_does_not_overflow() {
         m.list_insert(None);
     }
 }
+
+/// A song saved with an editor this app does not have yet as the last
+/// used one (Strip Chart, Drum Grid): a double-click opens the Piano
+/// Roll, and the saved last-used editor stays.
+#[test]
+fn an_unported_last_editor_opens_the_piano_roll() {
+    for (json, kind) in [
+        ("stripChart", DetailEditorKind::StripChart),
+        ("drumGrid", DetailEditorKind::DrumGrid),
+    ] {
+        let f = Arc::new(editor_fake());
+        f.set_layout(Some(&format!(r#"{{"lastKind":"{json}"}}"#)));
+        let mut m = model(&f);
+        assert_eq!(m.layout().last_kind, kind);
+        m.open_detail(block(0, 10), None);
+        assert_eq!(m.detail_kind_name(), "piano_roll", "{json}");
+        assert_eq!(m.layout().last_kind, kind, "{json} stays the saved one");
+        let v: serde_json::Value = serde_json::from_str(&m.layout().encoded()).unwrap();
+        assert_eq!(v["lastKind"], json);
+    }
+}

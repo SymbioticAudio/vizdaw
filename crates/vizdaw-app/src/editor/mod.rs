@@ -105,7 +105,7 @@ impl EditorModel {
     }
 
     /// Shows `target` in the detail pane in `kind`, else the last-used
-    /// editor; the current view's bottom pane shows the editor. The piano
+    /// editor (the Piano Roll when that one is not in this app yet); the current view's bottom pane shows the editor. The piano
     /// roll's extra lanes stay only while the target is the same; the
     /// list filter and the other saved fields stay. A pending piano roll
     /// reveal is dropped.
@@ -115,8 +115,17 @@ impl EditorModel {
         let bottom = &mut l.views.current_mut().bottom;
         bottom.shown = true;
         bottom.view = PaneView::Editor;
-        let kind = kind.unwrap_or(l.last_kind);
-        l.last_kind = kind;
+        let kind = match kind {
+            Some(k) => {
+                l.last_kind = k;
+                k
+            }
+            // A last-used editor this app does not have yet (a song saved
+            // with the Strip Chart or Drum Grid) opens the Piano Roll and
+            // stays the saved one.
+            None if !l.last_kind.is_available() => DetailEditorKind::PianoRoll,
+            None => l.last_kind,
+        };
         let mut next = DetailState::new(kind, target);
         if l.detail.as_ref().is_none_or(|old| old.target != target) {
             self.list.retarget();

@@ -155,6 +155,9 @@ pub struct PianoRoll {
     /// waiting on Busy (so leaving the roll aborts it, and only it: once
     /// another gesture is open, the serial no longer matches).
     released: Option<u64>,
+    /// The gesture open when the press began (another view's, waiting
+    /// on Busy): a release leaving it open did not open one of its own.
+    open_at_down: Option<u64>,
     /// The pointer of a press below the ruler (note-area points) and its
     /// modifiers: auto-scroll runs the drag again under a still pointer.
     drag_at: Option<(model::Point, model::Modifiers)>,
@@ -186,6 +189,7 @@ impl PianoRoll {
             detach_pending: false,
             pointer: RollPointer::default(),
             released: None,
+            open_at_down: None,
             drag_at: None,
             band: None,
             ruler: None,
@@ -283,6 +287,7 @@ impl PianoRoll {
     fn unmount(&mut self) {
         self.pointer = RollPointer::default();
         self.released = None;
+        self.open_at_down = None;
         self.drag_at = None;
         self.band = None;
         self.ruler = None;
@@ -1188,6 +1193,7 @@ impl DocumentWindow {
         let clicks = u32::try_from(e.click_count).unwrap_or(u32::MAX).max(1);
         self.piano_roll.drag_at = Some((at, m));
         self.piano_roll.released = None;
+        self.piano_roll.open_at_down = self.read_model(cx, DocumentModel::gesture_serial).flatten();
         self.with_roll_pointer(cx, |d, p, f| d.roll_mouse_down(p, f, at, clicks, m));
     }
 
@@ -1346,7 +1352,12 @@ impl DocumentWindow {
         let m = machine_modifiers(m);
         self.piano_roll.drag_at = None;
         self.with_roll_pointer(cx, |d, p, f| d.roll_mouse_up(p, f, at, m));
-        self.piano_roll.released = self.read_model(cx, DocumentModel::gesture_serial).flatten();
+        // Only a gesture this press opened is the roll's.
+        let open_at_down = self.piano_roll.open_at_down.take();
+        self.piano_roll.released = self
+            .read_model(cx, DocumentModel::gesture_serial)
+            .flatten()
+            .filter(|serial| Some(*serial) != open_at_down);
     }
 
     /// Escape on the canvas: a ruler press is dropped; a drag is
