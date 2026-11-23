@@ -117,3 +117,71 @@
 - [ ] **Step 1: Write the failing tests**: `a_pencil_click_opens_the_roll`, `a_pencil_click_on_an_audio_track_does_nothing`, `double_click_opens_the_last_used_editor`, `the_block_menu_opens_the_piano_roll`; then the e2e tests (`#[ignore]`).
 - [ ] **Step 2–4.** **Step 5: Commit**: `git commit -m "gpui: the pencil opens the piano roll; piano roll e2e"`.
 - [ ] **Step 6 (controller):** run the GPUI e2e suite on the Mac and Linux → all pass; look at the roll on the Mac; tick the checklist rows (`editors.piano_roll`, the Piano Roll window row's detail part, README piano-roll steps that pass).
+
+## Outcome (2026-11-22)
+
+All six tasks done (commits 23863821..61cea005). Evidence: workspace tests 4474 passed on macOS and 4343 on Linux; clippy `-D warnings` and fmt clean; GPUI e2e 13/13 on macOS and Linux (XWayland), including `gpui_the_piano_roll_draws_selects_and_deletes` and `gpui_the_pencil_opens_the_roll`; a visual check of the roll on the Mac.
+
+Final review fixes (61cea005): the roll only claims a gesture its own press opened (a plain note click no longer lets leaving the roll abort an arrangement drop pending on Busy); a saved last editor without a view yet (Strip Chart, Drum Grid) opens the Piano Roll and keeps the saved value.
+
+### Rulings
+
+- Task 1: Ruling: shown-sequence lane_events renamed shown_lane_events (delegates) to free the name for lane_events(seq, lane) — none
+- Task 1: Ruling: roll operations are DocumentModel::roll_* (List pattern); open_block_detail (D2) in the model, GPUI call site switched in Task 6 — none
+- Task 2: Ruling: code drafted before tests; compensated with six mutation checks that each failed a test — reviewer to judge — weak tests could hide bugs
+- Task 2: Ruling (D5): ⌘ + end-zone drag selects the note (Swift) but sends no gesture or edit until Scale Time lands — gap — a ⌘-drag silently does nothing
+- Task 3: Ruling: roll_sound/roll_silence/roll_audition on DocumentModel (need the session); PianoRollModel.sounding is the one source of truth — none
+- Task 3: Ruling: implementation before tests; substitute RED by removing the retry (4/16 failed) — reviewer judges — weak tests could hide bugs
+- Task 4: Ruling: ruler/grid/playhead drawing extracted to a shared TimeLayer; list bar menu reused by the roll — avoids copies; arrangement and List tests unchanged — none
+- Task 4: Ruling: roll page-follow respects layout.follow (Swift) — parity — none
+- Task 5: Ruling: fast poll also bypasses the 50 ms idle throttle while wants_fast_poll — otherwise retries are no sooner — more idle calls while a note-off/final is pending
+- Task 5: Ruling: eraser cursor is GPUI "not allowed" (no disappearing-item cursor) — platform — cosmetic
+- Task 5: Ruling: closing/hiding the roll cancels only the roll's own pending gesture, not an arrangement one — each canvas owns its gesture — none
+- Task 6: Ruling: a Pencil press-drag on a block does not drag it (Swift beginDrag guards tool == .arrow; inventory §1.9 was wrong) — parity — none
+- Task 6: Ruling: control.rs and detail.rs tests updated to D2 (double-click → last kind) — follow-through — none
+- Final: Ruling: declined — Escape on a focused roll cancels any open gesture incl. the arrangement's pending one (Swift contentCancel parity; Escape is explicit) — stands — a user pressing Escape in the roll also drops a pending block move
+- Final: Ruling: declined — hiding the last shown track shows none until prune restores (Swift same) — stands — momentary empty roll
+- Final: Ruling: declined — start-zone drag with no horizontal motion snaps an off-grid note (Swift same) — stands — a tiny unintended move
+- Final: Ruling: declined — document close with a Busy-pending roll release goes through the shared store close path — stands, predates slice — see slice 4 ruling 23
+- Final: Ruling: declined — eraser last point not re-mapped during auto-scroll (Swift same) — stands — cosmetic
+- Final: Ruling: declined — runtime frame cost not measured — stands — performance follow-up
+
+### Deferred minors
+
+- Task 1: minor (deferred): read errors swallowed silently (Swift reportFromRead → status)
+- Task 1: minor (deferred): track events keyed by global version, not per-track lane_revs (more re-reads after edits)
+- Task 1: minor (deferred): NaN zoom clamp tested via sane() directly (JSON cannot carry NaN)
+- Task 1: minor (deferred): refresh_lanes reports Busy as "Tracks Unavailable" alert
+- Task 1: minor (deferred): while Busy persists the roll rebuilds on every roll_* call (one session call per missed track)
+- Task 1: minor (deferred): a stored failure (empty) replaces the last good rows served if the next version is Busy
+- Task 2: minor (deferred): roll_mouse_down computes the hit before applying a lost drag's Cancel (Swift same order)
+- Task 2: minor (deferred): no note_drag tests for ⌥ middle-zone copy or a pencil click with no edit track (pure tests cover)
+- Task 3: minor (deferred): a Busy note-off pending at document close is dropped with no retry/hint (Swift same; external MIDI could stay stuck)
+- Task 3: minor (deferred): audition_on_at/audition_off_at lack doc comments
+- Task 4: minor (deferred): the 8 track colours are placeholders (Swift reads them from design-token theme swatches) — themes slice (D8)
+- Task 4: minor (deferred): no tests for roll playhead, page-follow, pinch
+- Task 4: minor (deferred): first frame after mounting paints uncentred
+- Task 4: minor (deferred): bar_menu/Entry shared but live in list_editor.rs with list-named ids
+- Task 4: minor (deferred): allow(too_many_arguments) on detail_pane::render; keyboard label box 14 vs 11 pt
+- Task 4: minor (deferred): saved_layout test writes a fixed shared temp path
+- Task 5: minor (deferred): fast poll notifies/redraws at 60 Hz while a retry waits (notify only on state change)
+- Task 5: minor (deferred): channel Delete rule unpinned until step.delete_last has a handler (step-entry slice adds the test)
+- Task 5: minor (deferred): delete test does not press Delete while focus is elsewhere; eraser click test lacks the undo label assert
+- Task 5: minor (deferred): cursor stale on tool change until pointer moves; key strip does not highlight the pressed key
+- Task 5: minor (deferred): piano_roll.rs 1527 lines — split pointer/keyboard/lifecycle into piano_roll/editing.rs
+- Task 5: minor (deferred): Escape with a held strip key and an open roll gesture cancels the gesture; key sounds until mouse-up
+- Task 6: minor (deferred): roll e2e "note back" check waits only for the label to differ (later wait confirms)
+- Task 6: minor (deferred): no test for a Pencil double-click on an audio track (falls through as Swift)
+- Final: minor (deferred): hiding the roll after a new press does not abort the roll's own pending final (lands on tick; parity gap only)
+- Final: minor (deferred): zoomed far out on a dense track every in-view note builds an a11y label + registry record per frame (pair with the per-version reads perf item)
+- Final: minor (deferred): one very long note widens every candidates search
+- Final: minor (deferred): centring can land on middle C after a Busy empty build
+- Final: minor (deferred): selected HashSet rebuilt every frame
+
+### Owner's manual checks
+
+- Drag notes with the mouse: move, ⌥-copy, transpose (middle), resize (end), Escape mid-drag; check the undo names and that notes sound and stop.
+- Pencil: click and drag in the roll; click a MIDI track in the arrangement with the Pencil (opens the roll scrolled to the bar).
+- Eraser: click and swipe across notes.
+- Hold a key on the keyboard strip, drag across keys, release outside the window (Mac and Linux): the note must stop.
+- Play once before auditioning, then click notes: sound; with the engine stopped first: the hint shows once.
