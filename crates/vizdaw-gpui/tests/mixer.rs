@@ -1220,3 +1220,30 @@ fn the_mixer_window_alone_keeps_polling(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(drawn.map(|m| m.left), Some(0.5));
 }
+
+#[gpui::test]
+fn a_rename_dropped_with_its_placement_commits(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    // The bottom pane's mixer, the only placement.
+    s.run_menu("ui.view_arrange");
+    s.update_model(|d| {
+        d.update_layout(|l| {
+            l.views.arrange.bottom.view = vizdaw_app::editor::PaneView::Mixer;
+            l.views.arrange.bottom.shown = true;
+        })
+    });
+    s.double_click("text", "Audio 1");
+    s.cx.simulate_input("Vox");
+    s.cx.run_until_parked();
+    // Too short for the bottom pane for this frame: the placement goes.
+    s.cx.simulate_resize(gpui::size(px(1440.), px(300.)));
+    s.cx.run_until_parked();
+    assert!(s.find("textfield", NAME).is_none());
+    assert!(
+        s.fake.calls().contains(&"rename_strip(5,Vox)".to_string()),
+        "{:?}",
+        s.fake.calls()
+    );
+    assert!(s.model(|d| d.mixer().unwrap().renaming().is_none()));
+    assert!(s.model(|d| d.transport_keys_enabled()));
+}

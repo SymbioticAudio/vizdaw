@@ -730,3 +730,77 @@ fn a_divider_release_before_the_next_frame_ends_the_drag(cx: &mut TestAppContext
     s.release(point(at.x + px(60.), at.y));
     assert_eq!(s.pane(PaneSide::Left).size, 220.);
 }
+
+#[gpui::test]
+fn a_drag_ends_when_its_pane_hides(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let at = s.element("slider", "Left Pane Size").bounds.center();
+    s.press(at);
+    s.move_to(point(at.x + px(60.), at.y));
+    // The pane goes and comes back mid-drag, between two frames (two
+    // channel calls in one tick).
+    s.update_model(|d| {
+        d.update_layout(|l| l.views.arrange.left.shown = false);
+        d.update_layout(|l| l.views.arrange.left.shown = true);
+    });
+    assert!(s.group(LEFT).is_some());
+    // The release went unseen; the pointer hovers on, and a click lands
+    // elsewhere: no size is set.
+    let elsewhere = s.group("Arrangement").unwrap().center();
+    s.cx.simulate_event(MouseMoveEvent {
+        position: point(at.x + px(90.), at.y),
+        modifiers: Modifiers::none(),
+        pressed_button: None,
+    });
+    s.cx.run_until_parked();
+    s.click_at(elsewhere);
+    assert_eq!(s.pane(PaneSide::Left).size, 220.);
+    assert_eq!(s.group(LEFT).unwrap().size.width, px(220.));
+}
+
+#[gpui::test]
+fn a_drag_ends_when_it_leaves_the_frame(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let at = s.element("slider", "Left Pane Size").bounds.center();
+    s.press(at);
+    s.move_to(point(at.x + px(60.), at.y));
+    // Too short for the left pane for a frame, then room again.
+    s.resize(1440., 300.);
+    assert!(s.group(LEFT).is_none());
+    s.resize(1440., 900.);
+    s.move_to(point(at.x + px(90.), at.y));
+    s.release(point(at.x + px(90.), at.y));
+    assert_eq!(s.pane(PaneSide::Left).size, 220.);
+}
+
+#[gpui::test]
+fn a_move_without_the_button_ends_the_drag(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let at = s.element("slider", "Left Pane Size").bounds.center();
+    s.press(at);
+    s.move_to(point(at.x + px(60.), at.y));
+    // The release was lost (outside the window): the next move has no
+    // button, and the drag ends there, setting nothing.
+    s.cx.simulate_event(MouseMoveEvent {
+        position: point(at.x + px(80.), at.y),
+        modifiers: Modifiers::none(),
+        pressed_button: None,
+    });
+    s.cx.run_until_parked();
+    s.move_to(point(at.x + px(100.), at.y));
+    s.release(point(at.x + px(100.), at.y));
+    assert_eq!(s.pane(PaneSide::Left).size, 220.);
+}
+
+#[gpui::test]
+fn a_drag_ends_when_its_pane_changes(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let at = s.element("slider", "Left Pane Size").bounds.center();
+    s.press(at);
+    s.move_to(point(at.x + px(60.), at.y));
+    // `ui.pane` sets the size mid-drag: it stands.
+    s.update_model(|d| d.update_layout(|l| l.views.arrange.left.size = 300.));
+    s.move_to(point(at.x + px(90.), at.y));
+    s.release(point(at.x + px(90.), at.y));
+    assert_eq!(s.pane(PaneSide::Left).size, 300.);
+}

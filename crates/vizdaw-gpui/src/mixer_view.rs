@@ -149,10 +149,21 @@ impl MixerView {
         cx.on_release(move |v: &mut MixerView, cx| {
             if let Some(r) = v.rename.take() {
                 let owner = rename_owner(p);
+                let text = r.field.read(cx).text().to_owned();
                 gone.app.update(cx, |s, cx| {
                     s.store
                         .with_document(gone.doc, |d, _| d.end_text_editing(&owner));
                     cx.notify();
+                });
+                // The field goes with its placement (the bottom pane hidden
+                // for a frame): its rename commits, as a field losing the
+                // keyboard does (Swift's `endPaneEdits`).
+                let strip = r.strip;
+                gone.with(cx, |m, d| {
+                    if m.is_renaming(strip, p) {
+                        m.rename_draft = text;
+                        m.commit_rename(d);
+                    }
                 });
                 drop(r);
             }

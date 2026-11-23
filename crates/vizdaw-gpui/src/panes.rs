@@ -807,8 +807,17 @@ pub(crate) fn dividers(
                         if phase == DispatchPhase::Bubble {
                             moved
                                 .update(cx, |this, cx| {
-                                    if this.pane_drag.is_some_and(|d| d.side == side) {
+                                    if !this.pane_drag.is_some_and(|d| d.side == side) {
+                                        return;
+                                    }
+                                    if e.pressed_button == Some(MouseButton::Left) {
                                         this.pane_drag_to(e.position, cx)
+                                    } else {
+                                        // The release went unseen (outside
+                                        // the window, or while the pane
+                                        // was not drawn): the drag ends,
+                                        // setting nothing.
+                                        this.cancel_pane_drag(cx)
                                     }
                                 })
                                 .ok();

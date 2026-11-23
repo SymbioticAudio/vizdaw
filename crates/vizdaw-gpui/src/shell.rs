@@ -851,8 +851,13 @@ impl DocumentWindow {
         };
         self.end_rename(true, window, cx);
         self.pane_menu = None;
-        if now.main != was.main {
-            // The drag's pane belongs to the view that went.
+        // The dragged pane changed under the drag (the main view went, or
+        // its key, the channel or a picker set it): the drag was seeded
+        // from what is no longer there, so it ends, setting nothing.
+        if let Some(drag) = self.pane_drag
+            && (now.main != was.main
+                || now.current().pane(drag.side) != was.current().pane(drag.side))
+        {
             self.cancel_pane_drag(cx);
         }
         if now.main == MainView::Mix && was.main != MainView::Mix {
