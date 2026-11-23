@@ -76,7 +76,12 @@ fn view_keys_switch_the_main_view() {
     perform_from_menu("ui.view_mix", &mut d).unwrap();
     perform_from_menu("ui.view_mix", &mut d).unwrap();
     assert_eq!(d.layout().views.main, MainView::Mix);
-    for id in VIEW_COMMANDS.iter().chain(MIXER_COMMANDS) {
+    // The mode commands need a strip selection (tests/mixer_commands.rs).
+    for id in VIEW_COMMANDS
+        .iter()
+        .chain(MIXER_COMMANDS)
+        .filter(|id| !id.starts_with("automation.mode."))
+    {
         assert!(commands::enabled(id, &d), "{id}");
     }
 }

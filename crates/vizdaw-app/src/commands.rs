@@ -10,9 +10,12 @@ use vizdaw_ffi::VizError;
 use vizdaw_ffi::edit::{EditCommand, LaneEdit};
 use vizdaw_ffi::tracks::TrackKindRow;
 
+use vizdaw_ffi::automation::automation_suspended;
+
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
 use crate::editor::{DetailEditorKind, GESTURE_OPEN};
+use crate::mixer::commands::{SUSPEND, mode_of, suspend};
 use crate::prefs::Prefs;
 use crate::transport_bar::TransportLayout;
 
@@ -52,13 +55,27 @@ pub const VIEW_COMMANDS: &[&str] = &[
 
 /// The registry IDs of the mixer's commands `run` handles: the Mixer
 /// window (the UI opens it, see [`Ran::open_mixer_window`]), the channel's
-/// automation commands and New Bus.
+/// automation commands, the Automation menu's modes, New Bus, the strip
+/// edits and the strip colour. (Make Mine is Co-Producer's: not yet.)
 pub const MIXER_COMMANDS: &[&str] = &[
     "window.mixer",
     "automation.set_mode",
     "automation.gesture",
     "automation.release_all",
+    "automation.mode.off",
+    "automation.mode.read",
+    "automation.mode.touch",
+    "automation.mode.latch",
+    "automation.mode.write",
+    "automation.mode.trim",
     "mixer.new_bus",
+    "mixer.set_strip",
+    "mixer.set_output",
+    "mixer.add_send",
+    "mixer.set_send",
+    "mixer.remove_send",
+    "mixer.remove_bus",
+    "mixer.set_colour",
 ];
 
 const NO_DETAIL: &str = "No detail editor is open.";
@@ -85,7 +102,11 @@ pub const TRANSPORT_COMMANDS: &[&str] = &[
 ];
 
 /// The registry IDs `run_app` handles: app-wide, so they need no document.
-pub const APP_COMMANDS: &[&str] = &["ui.set_transport_bar", "ui.reset_transport_bar"];
+pub const APP_COMMANDS: &[&str] = &[
+    "ui.set_transport_bar",
+    "ui.reset_transport_bar",
+    "automation.suspend",
+];
 
 /// Why a bare transport key does nothing while a field is typed in.
 pub const TEXT_FIELD_HAS_KEYBOARD: &str = "A text field has the keyboard.";
@@ -158,6 +179,15 @@ pub fn run_app(
             write(prefs.reset_transport_bar())?;
             Ok(status("transport bar: the default"))
         }
+        SUSPEND => {
+            suspend(args)?;
+            Ok(Ran {
+                undo: None,
+                status: None,
+                focus: None,
+                open_mixer_window: false,
+            })
+        }
         _ => Err(ControlError::new(
             ErrorCode::UnknownId,
             format!("There is no command {id}."),
@@ -177,8 +207,11 @@ fn kind_of(id: &str) -> Option<TrackKindRow> {
 /// Whether `id` can run on `doc` now (its menu item is enabled).
 pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     // The views and panes can change at any time; the mixer's commands
-    // need only the document.
-    if VIEW_COMMANDS.contains(&id) || MIXER_COMMANDS.contains(&id) {
+    // need only the document, the mode commands a strip selection.
+    if mode_of(id).is_some() {
+        return !doc.selected_strips().is_empty();
+    }
+    if id == SUSPEND || VIEW_COMMANDS.contains(&id) || MIXER_COMMANDS.contains(&id) {
         return true;
     }
     if TRANSPORT_COMMANDS.contains(&id) {
@@ -206,6 +239,10 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
 /// busy core; Rename asks the UI to start the header's rename field. What
 /// cannot run shows in the status line (and is returned).
 pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
+    if id == SUSPEND {
+        suspend(&[]).map_err(|e| refused(doc, e))?;
+        return Ok(ran(doc));
+    }
     if VIEW_COMMANDS.contains(&id) || MIXER_COMMANDS.contains(&id) {
         return run(id, &[], doc).map_err(|e| refused(doc, e));
     }
@@ -278,6 +315,7 @@ pub(crate) fn ran(doc: &DocumentModel) -> Ran {
 pub fn is_on(id: &str, doc: &DocumentModel) -> bool {
     match id {
         "editors.snap" => doc.layout().snap.enabled,
+        SUSPEND => automation_suspended(),
         _ => crate::view::is_on(id, doc),
     }
 }

@@ -1059,7 +1059,7 @@ impl MixerModel {
 
     /// Runs an edit: its snapshot is applied, a failure is the alert
     /// `title`; the mixer is read again either way. True when it went.
-    fn command(
+    pub(super) fn command(
         &mut self,
         doc: &mut DocumentModel,
         title: &str,

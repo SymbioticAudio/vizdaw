@@ -9,6 +9,8 @@ pub mod layout;
 pub mod math;
 pub mod meters;
 mod model;
+mod palette;
+mod sends;
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -21,6 +23,8 @@ pub use model::{
     MAX_HEARD_TARGETS, MIXER_UNAVAILABLE, MixerColumn, MixerModel, MixerPlacement, RELEASE_WINDOW,
     failure_title, monitor_help, next_monitor, norm_of, reset_value, send_index,
 };
+pub use palette::StripPalette;
+pub use sends::{OutputChoice, SEND_FAILED, SendLabels};
 
 use crate::alerts::AlertItem;
 use crate::document::DocumentModel;
@@ -117,6 +121,23 @@ impl DocumentModel {
             .session()
             .set_surface_selection(strips.iter().copied().collect());
         self.mixer.selected = strips;
+    }
+
+    /// The selected strips the mixer still has, in ID order; the others
+    /// leave the selection (a strip can go while no mixer shows, an Undo of
+    /// Add Bus, and no refetch prunes it then).
+    pub fn selected_strips_that_exist(&mut self) -> Result<Vec<u64>, VizError> {
+        let ids: BTreeSet<u64> = self
+            .session()
+            .mixer()?
+            .strips
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        let kept: BTreeSet<u64> = self.mixer.selected.intersection(&ids).copied().collect();
+        let out = kept.iter().copied().collect();
+        self.set_selected_strips(kept);
+        Ok(out)
     }
 
     /// A mixer release waits on Busy.

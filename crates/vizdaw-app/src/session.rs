@@ -8,7 +8,7 @@ use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::control::ControlArg;
 use vizdaw_ffi::edit::EditCommand;
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
-use vizdaw_ffi::mixer::{DestRow, MixerLevels, MixerSnapshot, SwatchRow};
+use vizdaw_ffi::mixer::{DestRow, MixerLevels, MixerSnapshot, SendRow, SwatchRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::Session;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
@@ -134,6 +134,12 @@ pub trait DocSession: Send + Sync {
     fn rename_strip(&self, strip: u64, name: &str) -> Result<DocSnapshot, VizError>;
     /// Routes `strip` to `bus` (`None`: master).
     fn set_output(&self, strip: u64, bus: Option<u64>) -> Result<DocSnapshot, VizError>;
+    /// A post-fader 0 dB send from `strip` to bus `target`, last.
+    fn add_send(&self, strip: u64, target: u64) -> Result<DocSnapshot, VizError>;
+    /// Replaces `strip`'s send `index` (counting from 0) with `send`.
+    fn edit_send(&self, strip: u64, index: u32, send: SendRow) -> Result<DocSnapshot, VizError>;
+    /// Removes `strip`'s send `index` (counting from 0).
+    fn remove_send(&self, strip: u64, index: u32) -> Result<DocSnapshot, VizError>;
     fn set_strip_colour(
         &self,
         strip: u64,
@@ -331,6 +337,15 @@ impl DocSession for Session {
     }
     fn set_output(&self, strip: u64, bus: Option<u64>) -> Result<DocSnapshot, VizError> {
         Session::set_output(self, strip, bus)
+    }
+    fn add_send(&self, strip: u64, target: u64) -> Result<DocSnapshot, VizError> {
+        Session::add_send(self, strip, target)
+    }
+    fn edit_send(&self, strip: u64, index: u32, send: SendRow) -> Result<DocSnapshot, VizError> {
+        Session::edit_send(self, strip, index, send)
+    }
+    fn remove_send(&self, strip: u64, index: u32) -> Result<DocSnapshot, VizError> {
+        Session::remove_send(self, strip, index)
     }
     fn set_strip_colour(
         &self,

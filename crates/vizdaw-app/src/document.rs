@@ -170,6 +170,7 @@ impl DocumentModel {
     /// Takes a new snapshot: keeps the shown sequence if it still exists
     /// (else the first top-level one) and refetches lanes if needed.
     pub fn apply(&mut self, s: DocSnapshot) {
+        let moved = s.version != self.snapshot.version;
         if !s.edit_notes.is_empty() {
             self.status = Some(s.edit_notes.join(" "));
         }
@@ -190,6 +191,11 @@ impl DocumentModel {
             });
         }
         self.snapshot = s;
+        // A selected strip can go with no mixer showing (an Undo of Add
+        // Bus): no refetch prunes the selection then.
+        if moved && !self.selected_strips().is_empty() {
+            let _ = self.selected_strips_that_exist();
+        }
         self.reset_infos();
         self.refresh_lanes();
         self.after_sync();

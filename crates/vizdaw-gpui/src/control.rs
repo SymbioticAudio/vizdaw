@@ -1334,7 +1334,9 @@ fn not_yet(what: &str) -> ControlError {
              editors.list / editors.close_detail / editors.insert_event / ui.view_arrange / \
              ui.view_mix / ui.toggle_left / ui.toggle_bottom / ui.toggle_right / ui.pane / \
              automation.set_mode / automation.gesture / automation.release_all / \
-             mixer.new_bus / window.mixer, state.get transport / windows / document / editor / selection / \
+             automation.mode.* / automation.suspend / mixer.new_bus / mixer.set_strip / \
+             mixer.set_output / mixer.add_send / mixer.set_send / mixer.remove_send / \
+             mixer.remove_bus / mixer.set_colour / window.mixer, state.get transport / windows / document / editor / selection / \
              mixer / layout / automation, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
         ),
     )

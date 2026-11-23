@@ -521,7 +521,8 @@ impl FakeSession {
     // The mixer. Errors are scripted by call name (`mixer`, `levels`,
     // `gesture`, `automation_state`, `set_automation_mode`,
     // `heard_values`, `run_mixer`, `add_bus`, `new_bus_from`,
-    // `remove_bus`, `rename_strip`, `set_output`, `set_strip_colour`,
+    // `remove_bus`, `rename_strip`, `set_output`, `add_send`, `edit_send`,
+    // `remove_send`, `set_strip_colour`,
     // `release_channel_touches`, `set_surface_selection`); a gesture phase
     // also answers `gesture_touch`, `gesture_value` or `gesture_release`
     // first.
@@ -1295,6 +1296,55 @@ impl DocSession for FakeSession {
             }
             Ok(())
         })
+    }
+    fn add_send(&self, strip: u64, target: u64) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit("add_send", format!("add_send({strip},{target})"), |m| {
+            if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                s.sends.push(vizdaw_ffi::mixer::SendRow {
+                    target,
+                    level_db: 0.0,
+                    pre_fader: false,
+                    enabled: true,
+                });
+            }
+            Ok(())
+        })
+    }
+    fn edit_send(
+        &self,
+        strip: u64,
+        index: u32,
+        send: vizdaw_ffi::mixer::SendRow,
+    ) -> Result<DocSnapshot, VizError> {
+        let logged = format!(
+            "edit_send({strip},{index},{},{:?},{},{})",
+            send.target, send.level_db, send.pre_fader, send.enabled
+        );
+        self.mixer_edit("edit_send", logged, |m| {
+            if let Some(x) = m
+                .strips
+                .iter_mut()
+                .find(|s| s.id == strip)
+                .and_then(|s| s.sends.get_mut(index as usize))
+            {
+                *x = send;
+            }
+            Ok(())
+        })
+    }
+    fn remove_send(&self, strip: u64, index: u32) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit(
+            "remove_send",
+            format!("remove_send({strip},{index})"),
+            |m| {
+                if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip)
+                    && (index as usize) < s.sends.len()
+                {
+                    s.sends.remove(index as usize);
+                }
+                Ok(())
+            },
+        )
     }
     fn set_strip_colour(
         &self,

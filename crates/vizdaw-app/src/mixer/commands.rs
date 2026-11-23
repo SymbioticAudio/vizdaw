@@ -4,23 +4,32 @@
 //! and releases a target as the channel's own holder,
 //! `automation.release_all` frees the channel's touches, and
 //! `mixer.new_bus` adds a bus (with a send from `strip`, one undo step).
+//! The strip edits (`mixer.set_strip`, `set_output`, `add_send`,
+//! `set_send`, `remove_send`, `remove_bus`) are each one `run_mixer` call
+//! with the arguments as given (the core checks them, and counts sends
+//! from 1 as the channel does); `mixer.set_colour` sets a strip's colour;
+//! `automation.mode.*` set the selected strips' mode; `automation.suspend`
+//! is the app-wide switch.
 //!
 //! Every argument is checked before the core is called and is
 //! `invalid_params` naming the parameter. The core's refusals are the
 //! call's `failed` (with the Swift alert title in front), its Busy is
 //! `busy`. Nothing here opens a dialog.
 
-use core_control::registry::ArgValue;
+use core_control::registry::{self, ArgValue};
 use core_control::{ControlError, ErrorCode};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{
-    AutomationModeRow, GestureHolderRow, GesturePhaseRow, parse_automation_target,
+    AutomationModeRow, GestureHolderRow, GesturePhaseRow, automation_suspended,
+    parse_automation_target, set_automation_suspended,
 };
+use vizdaw_ffi::control::{ControlArg, ControlValue};
 use vizdaw_ffi::mixer::StripKindRow;
 
 use super::math::{AutomationModes, MixerMath};
+use super::palette::StripPalette;
 use crate::alerts::error_message;
-use crate::commands::{Ran, check_names, ran};
+use crate::commands::{Ran, check_names, from_viz, ran};
 use crate::document::DocumentModel;
 use crate::editor::GESTURE_OPEN;
 
@@ -41,6 +50,39 @@ const NEEDS_VALUE: &str = "automation.gesture: `value` is needed for value (0 to
 const RELEASE_VALUE: &str = "automation.gesture: release takes no `value`";
 const BAD_PHASE: &str = "automation.gesture: `phase` is touch, value or release";
 const AUTOMATION_FAILED: &str = "Automation Failed";
+/// Why a mode command has nothing to set.
+pub const NO_STRIPS_SELECTED: &str = "Select strips in the mixer first.";
+/// The app-wide automation switch.
+pub const SUSPEND: &str = "automation.suspend";
+
+/// The strip edits: one `run_mixer` call each, answered with the
+/// registry's title.
+pub const STRIP_EDITS: &[&str] = &[
+    "mixer.set_strip",
+    "mixer.set_output",
+    "mixer.add_send",
+    "mixer.set_send",
+    "mixer.remove_send",
+    "mixer.remove_bus",
+];
+
+/// The Automation menu's mode commands.
+pub const MODE_COMMANDS: &[(&str, AutomationModeRow)] = &[
+    ("automation.mode.off", AutomationModeRow::Off),
+    ("automation.mode.read", AutomationModeRow::Read),
+    ("automation.mode.touch", AutomationModeRow::Touch),
+    ("automation.mode.latch", AutomationModeRow::Latch),
+    ("automation.mode.write", AutomationModeRow::Write),
+    ("automation.mode.trim", AutomationModeRow::Trim),
+];
+
+/// The mode `id` (an `automation.mode.*`) sets.
+pub fn mode_of(id: &str) -> Option<AutomationModeRow> {
+    MODE_COMMANDS
+        .iter()
+        .find(|(m, _)| *m == id)
+        .map(|(_, r)| *r)
+}
 
 /// `text` as a mode, spelt as the registry's choice does.
 pub fn mode(text: &str) -> Option<AutomationModeRow> {
@@ -137,7 +179,8 @@ fn catch_up(doc: &mut DocumentModel) {
     }
 }
 
-/// Runs `automation.set_mode|gesture|release_all` or `mixer.new_bus`.
+/// Runs `automation.set_mode|gesture|release_all|mode.*`, `mixer.new_bus`,
+/// `mixer.set_colour` or a strip edit.
 pub(crate) fn run(
     id: &str,
     args: &[(String, ArgValue)],
@@ -148,6 +191,9 @@ pub(crate) fn run(
         "automation.gesture" => gesture(args, doc),
         "automation.release_all" => release_all(args, doc),
         "mixer.new_bus" => new_bus(args, doc),
+        "mixer.set_colour" => set_colour(args, doc),
+        _ if STRIP_EDITS.contains(&id) => strip_edit(id, args, doc),
+        _ if mode_of(id).is_some() => mode_command(id, doc),
         _ => Err(ControlError::new(
             ErrorCode::UnknownId,
             format!("There is no command {id}."),
@@ -282,4 +328,114 @@ fn new_bus(args: &[(String, ArgValue)], doc: &mut DocumentModel) -> Result<Ran, 
     doc.apply_result(result).map_err(|e| thrown(&e, FAILED))?;
     doc.set_status(Some(name));
     Ok(ran(doc))
+}
+
+/// The channel's arguments as the core's.
+fn control_args(args: &[(String, ArgValue)]) -> Vec<ControlArg> {
+    args.iter()
+        .map(|(name, v)| ControlArg {
+            name: name.clone(),
+            value: match v {
+                ArgValue::Text(value) => ControlValue::Text {
+                    value: value.clone(),
+                },
+                ArgValue::Flag(value) => ControlValue::Flag { value: *value },
+                ArgValue::Int(value) => ControlValue::Int { value: *value },
+            },
+        })
+        .collect()
+}
+
+/// A strip edit: one `run_mixer` call with the arguments as given (a send
+/// `index` counts from 1, as the core takes it). The status line is the
+/// command's title; a refusal is `failed` in the session's words, Busy
+/// `busy`.
+fn strip_edit(
+    id: &str,
+    args: &[(String, ArgValue)],
+    doc: &mut DocumentModel,
+) -> Result<Ran, ControlError> {
+    if doc.gesture_open() {
+        return Err(ControlError::new(ErrorCode::Unavailable, GESTURE_OPEN));
+    }
+    let result = doc.session().run_mixer(id, control_args(args));
+    doc.apply_result(result).map_err(|e| from_viz(&e))?;
+    doc.set_status(registry::find(id).map(|c| c.title.to_owned()));
+    Ok(ran(doc))
+}
+
+/// `mixer.set_colour {strip, colour}`: `colour` is one of the palette's
+/// names or `none` (the kind's colour). A strip the song lacks is the
+/// session's refusal, in its words.
+fn set_colour(args: &[(String, ArgValue)], doc: &mut DocumentModel) -> Result<Ran, ControlError> {
+    const ID: &str = "mixer.set_colour";
+    let strip = match arg(args, "strip") {
+        Some(ArgValue::Int(i)) if *i >= 0 => *i as u64,
+        _ => {
+            return Err(invalid(format!(
+                "{ID}: `strip` is a strip ID (see state.get mixer)"
+            )));
+        }
+    };
+    let colour = match text_arg(args, "colour") {
+        Some("none") => None,
+        Some(name) if StripPalette::named(name).is_some() => StripPalette::named(name),
+        _ => {
+            return Err(invalid(format!(
+                "{ID}: `colour` is none, red, orange, yellow, green, teal, blue, purple or pink"
+            )));
+        }
+    };
+    if doc.gesture_open() {
+        return Err(ControlError::new(ErrorCode::Unavailable, GESTURE_OPEN));
+    }
+    let result = doc.session().set_strip_colour(strip, colour);
+    doc.apply_result(result).map_err(|e| from_viz(&e))?;
+    Ok(ran(doc))
+}
+
+/// `automation.mode.<mode>` from the menu, a key or the channel: the
+/// selected strips that exist now get the mode, one undo step. Arguments
+/// are ignored: the ID and the selection decide.
+fn mode_command(id: &str, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
+    let Some(mode) = mode_of(id) else {
+        return Err(ControlError::new(
+            ErrorCode::UnknownId,
+            format!("There is no command {id}."),
+        ));
+    };
+    if doc.gesture_open() {
+        return Err(ControlError::new(ErrorCode::Unavailable, GESTURE_OPEN));
+    }
+    if doc.selected_strips().is_empty() {
+        return Err(ControlError::new(
+            ErrorCode::Unavailable,
+            NO_STRIPS_SELECTED,
+        ));
+    }
+    let ids = doc
+        .selected_strips_that_exist()
+        .map_err(|e| thrown(&e, AutomationModes::FAILED))?;
+    if ids.is_empty() {
+        return Err(ControlError::new(
+            ErrorCode::Unavailable,
+            NO_STRIPS_SELECTED,
+        ));
+    }
+    let result = doc.session().set_automation_mode(ids, mode);
+    doc.apply_result(result)
+        .map_err(|e| thrown(&e, AutomationModes::FAILED))?;
+    Ok(ran(doc))
+}
+
+/// `automation.suspend {on?}`: sets the process-wide switch (absent:
+/// toggles). Needs no document.
+pub fn suspend(args: &[(String, ArgValue)]) -> Result<(), ControlError> {
+    let on = match arg(args, "on") {
+        None => !automation_suspended(),
+        Some(ArgValue::Flag(on)) => *on,
+        Some(_) => return Err(invalid("automation.suspend: `on` is true or false")),
+    };
+    set_automation_suspended(on);
+    Ok(())
 }
