@@ -1221,3 +1221,92 @@ fn leaving_the_roll_cancels_its_drag(cx: &mut TestAppContext) {
     s.up(to, Modifiers::none());
     assert!(!s.fake.calls().iter().any(|c| c == "end_edit"));
 }
+
+/// The roll's release meets Busy, then the roll leaves the pane: its
+/// pending final edit is aborted, never landed.
+#[gpui::test]
+fn leaving_the_roll_aborts_its_pending_release(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    s.fake.set_call_error("end_edit", Some(busy()));
+    let (from, to) = (s.at(162., 64), s.at(322., 64));
+    s.drag(from, to, Modifiers::none());
+    assert!(s.model(|d| d.gesture_open()), "the final edit waits");
+    s.fake.clear_calls();
+    s.update_model(|d| {
+        let target = d.layout().detail.as_ref().unwrap().target;
+        d.open_detail(target, Some(DetailEditorKind::List));
+    });
+    assert!(s.fake.calls().iter().any(|c| c == "abort_edit"));
+    assert!(!s.model(|d| d.gesture_open()));
+    s.fake.set_call_error("end_edit", None);
+    s.cx.executor().advance_clock(Duration::from_millis(100));
+    s.cx.run_until_parked();
+    assert!(!s.fake.calls().iter().any(|c| c == "end_edit"));
+    assert_ne!(s.undo_label().as_deref(), Some("Move Notes"));
+}
+
+/// Once the roll's pending final has landed, another view's drag waiting
+/// on Busy is not the roll's: hiding the pane leaves it to land.
+#[gpui::test]
+fn the_roll_cancels_only_its_own_pending_drag(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    s.fake.fail_next("end_edit", busy());
+    let (from, to) = (s.at(162., 64), s.at(322., 64));
+    s.drag(from, to, Modifiers::none());
+    assert!(s.model(|d| d.gesture_open()));
+    s.cx.executor().advance_clock(Duration::from_millis(40));
+    s.cx.run_until_parked();
+    assert!(!s.model(|d| d.gesture_open()), "the retry landed it");
+    assert_eq!(s.undo_label().as_deref(), Some("Move Notes"));
+
+    // An arrangement drag whose release meets Busy.
+    let block = s
+        .element("button", "Block on Chords, bar 1, 1 event")
+        .bounds;
+    s.fake.set_call_error("end_edit", Some(busy()));
+    let from = block.center();
+    let to = point(from.x + px(100.), from.y);
+    s.drag(from, to, Modifiers::none());
+    assert!(s.model(|d| d.gesture_open()), "its final edit waits");
+    s.fake.clear_calls();
+    s.update_model(|d| d.update_layout(|l| l.views.arrange.bottom.shown = false));
+    assert!(s.model(|d| d.gesture_open()), "hiding the roll keeps it");
+    assert!(!s.fake.calls().iter().any(|c| c == "abort_edit"));
+    s.fake.set_call_error("end_edit", None);
+    s.cx.executor().advance_clock(Duration::from_millis(40));
+    s.cx.run_until_parked();
+    assert_eq!(s.undo_label().as_deref(), Some("Move Block"));
+}
+
+/// The keyboard strip's guards: a drag into its top (the ruler's height)
+/// keeps the key; a move with no button down (the release was missed)
+/// lets the key go; Escape lets it go.
+#[gpui::test]
+fn the_key_strip_keeps_to_its_keys(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    let top = s.element("group", KEYBOARD).bounds.origin;
+    let top = point(top.x + px(10.), top.y + px(10.));
+    let k62 = s.key(62);
+    s.down(k62, Modifiers::none());
+    s.move_to(top, Modifiers::none());
+    assert_eq!(s.sounds(), ["on 62"], "the top is not a key");
+    s.up(top, Modifiers::none());
+    assert_eq!(s.sounds(), ["on 62", "off 62"]);
+
+    // A move with no button down: the release was missed.
+    let k64 = s.key(64);
+    s.down(k62, Modifiers::none());
+    s.hover(k64);
+    assert_eq!(s.sounds()[2..], ["on 62", "off 62"]);
+    s.move_to(k64, Modifiers::none());
+    assert_eq!(s.sounds().len(), 4, "the key is no longer held");
+
+    // Escape.
+    s.down(k62, Modifiers::none());
+    assert_eq!(s.sounds()[4..], ["on 62"]);
+    s.keys("escape");
+    assert_eq!(s.sounds()[4..], ["on 62", "off 62"]);
+    s.move_to(k64, Modifiers::none());
+    s.up(k64, Modifiers::none());
+    assert_eq!(s.sounds().len(), 6);
+}

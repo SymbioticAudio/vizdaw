@@ -34,11 +34,15 @@ pub struct Gesture {
     /// The abort met Busy: `tick` retries it, and nothing else touches the
     /// gesture meanwhile.
     pub(crate) reverting: bool,
+    /// Which gesture this is: each one begun gets the next number, so a
+    /// view can tell its own drag from another's.
+    pub serial: u64,
 }
 
 impl Gesture {
-    fn new(label: &str, lanes: Vec<(u64, u64)>) -> Self {
+    fn new(label: &str, lanes: Vec<(u64, u64)>, serial: u64) -> Self {
         Gesture {
+            serial,
             label: label.to_owned(),
             lanes: lanes.into_iter().collect(),
             applied: None,
@@ -56,6 +60,11 @@ impl DocumentModel {
         self.editor.gesture()
     }
 
+    /// The open drag's serial (see [`Gesture::serial`]).
+    pub fn gesture_serial(&self) -> Option<u64> {
+        self.editor.gesture().map(|g| g.serial)
+    }
+
     /// Opens a gesture once the pointer left the dead zone, touching the
     /// `(seq, lane)` tracks `lanes`. False when one is already open or the
     /// session refused (the refusal is the status).
@@ -65,7 +74,9 @@ impl DocumentModel {
         }
         match self.session.begin_edit(label) {
             Ok(()) => {
-                self.editor.gesture = Some(Gesture::new(label, lanes));
+                self.editor.gestures_begun += 1;
+                let serial = self.editor.gestures_begun;
+                self.editor.gesture = Some(Gesture::new(label, lanes, serial));
                 true
             }
             Err(e) => {

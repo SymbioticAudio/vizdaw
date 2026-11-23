@@ -31,9 +31,7 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::time::Instant;
-
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ContentMask, Context, CursorStyle, DispatchPhase,
@@ -153,9 +151,10 @@ pub struct PianoRoll {
     detach_pending: bool,
     /// The tool machine and the note drag in progress.
     pointer: RollPointer,
-    /// A released drag's final edit may still wait on Busy (so leaving
-    /// the roll aborts it).
-    released_open: bool,
+    /// The serial of the roll's released drag whose final edit was still
+    /// waiting on Busy (so leaving the roll aborts it, and only it: once
+    /// another gesture is open, the serial no longer matches).
+    released: Option<u64>,
     /// The pointer of a press below the ruler (note-area points) and its
     /// modifiers: auto-scroll runs the drag again under a still pointer.
     drag_at: Option<(model::Point, model::Modifiers)>,
@@ -186,7 +185,7 @@ impl PianoRoll {
             playhead: Rc::default(),
             detach_pending: false,
             pointer: RollPointer::default(),
-            released_open: false,
+            released: None,
             drag_at: None,
             band: None,
             ruler: None,
@@ -283,7 +282,7 @@ impl PianoRoll {
     /// drop first ([`DocumentWindow::roll_detach`]).
     fn unmount(&mut self) {
         self.pointer = RollPointer::default();
-        self.released_open = false;
+        self.released = None;
         self.drag_at = None;
         self.band = None;
         self.ruler = None;
@@ -805,7 +804,8 @@ fn note_canvas(
                 if phase == DispatchPhase::Bubble {
                     moved
                         .update(cx, |this, cx| {
-                            this.roll_drag_to(e.position, e.modifiers, cx)
+                            let held = e.pressed_button == Some(MouseButton::Left);
+                            this.roll_drag_to(e.position, e.modifiers, held, cx)
                         })
                         .ok();
                 }
@@ -1187,7 +1187,7 @@ impl DocumentWindow {
         let m = machine_modifiers(e.modifiers);
         let clicks = u32::try_from(e.click_count).unwrap_or(u32::MAX).max(1);
         self.piano_roll.drag_at = Some((at, m));
-        self.piano_roll.released_open = false;
+        self.piano_roll.released = None;
         self.with_roll_pointer(cx, |d, p, f| d.roll_mouse_down(p, f, at, clicks, m));
     }
 
@@ -1211,24 +1211,33 @@ impl DocumentWindow {
         }
     }
 
-    /// The pitch of the keyboard strip's key at window y `y`.
-    fn key_pitch(&self, y: Pixels) -> u8 {
+    /// The pitch of the keyboard strip's key at window y `y`; `None` in
+    /// the strip's top, the ruler's height (Swift
+    /// `PianoKeyboardView.pitch(atY:)`).
+    fn key_pitch(&self, y: Pixels) -> Option<u8> {
         let o = self.piano_roll.keyboard_layout.get().origin;
-        self.piano_roll
-            .pitch
-            .pitch_at(f32::from(y - o.y) - RULER_HEIGHT)
+        let y = f32::from(y - o.y) - RULER_HEIGHT;
+        (y >= 0.).then(|| self.piano_roll.pitch.pitch_at(y))
     }
 
-    /// A press on the keyboard strip (below its top, which is the
-    /// ruler's height): the key sounds through the edit track.
+    /// A press on the keyboard strip (below its top): the key sounds
+    /// through the edit track.
     fn roll_key_press(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let o = self.piano_roll.keyboard_layout.get().origin;
-        if f32::from(at.y - o.y) < RULER_HEIGHT {
+        let Some(pitch) = self.key_pitch(at.y) else {
             return;
-        }
-        let pitch = self.key_pitch(at.y);
+        };
         self.piano_roll.key = Some(pitch);
         self.with_model(cx, |d| d.roll_key_sound(pitch));
+    }
+
+    /// A key held on the strip is let go (its release, Escape, or a move
+    /// with no button down when the release was missed). Whether one was.
+    pub(crate) fn release_roll_key(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.piano_roll.key.take().is_none() {
+            return false;
+        }
+        self.with_model(cx, DocumentModel::roll_key_release);
+        true
     }
 
     /// The snapped range between a ruler press at `anchor` and canvas x
@@ -1244,10 +1253,17 @@ impl DocumentWindow {
         .flatten()
     }
 
-    /// The pointer moved to window point `at` during a press: a ruler
-    /// drag selects, the keyboard plays each key crossed, a press below
-    /// the ruler drags (near an edge the view scrolls).
-    fn roll_drag_to(&mut self, at: Point<Pixels>, m: Modifiers, cx: &mut Context<Self>) {
+    /// The pointer moved to window point `at` during a press (`held`: the
+    /// left button is down): a ruler drag selects, the keyboard plays
+    /// each key crossed (a move with no button lets the key go), a press
+    /// below the ruler drags (near an edge the view scrolls).
+    fn roll_drag_to(
+        &mut self,
+        at: Point<Pixels>,
+        m: Modifiers,
+        held: bool,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(mut d) = self.piano_roll.ruler {
             d.x = f32::from(at.x - self.piano_roll.layout.get().origin.x);
             if !d.moved && (d.x - d.start_x).abs() <= DEAD_ZONE {
@@ -1263,8 +1279,11 @@ impl DocumentWindow {
             return;
         }
         if let Some(key) = self.piano_roll.key {
-            let pitch = self.key_pitch(at.y);
-            if pitch != key {
+            if !held {
+                self.release_roll_key(cx);
+            } else if let Some(pitch) = self.key_pitch(at.y)
+                && pitch != key
+            {
                 self.piano_roll.key = Some(pitch);
                 self.with_model(cx, |d| d.roll_key_sound(pitch));
             }
@@ -1317,8 +1336,7 @@ impl DocumentWindow {
             cx.notify();
             return;
         }
-        if self.piano_roll.key.take().is_some() {
-            self.with_model(cx, DocumentModel::roll_key_release);
+        if self.release_roll_key(cx) {
             return;
         }
         if !self.piano_roll.pressing() {
@@ -1328,9 +1346,7 @@ impl DocumentWindow {
         let m = machine_modifiers(m);
         self.piano_roll.drag_at = None;
         self.with_roll_pointer(cx, |d, p, f| d.roll_mouse_up(p, f, at, m));
-        self.piano_roll.released_open = self
-            .read_model(cx, DocumentModel::gesture_open)
-            .unwrap_or(false);
+        self.piano_roll.released = self.read_model(cx, DocumentModel::gesture_serial).flatten();
     }
 
     /// Escape on the canvas: a ruler press is dropped; a drag is
@@ -1350,7 +1366,7 @@ impl DocumentWindow {
         }
         self.piano_roll.drag_at = None;
         self.piano_roll._auto_scroll = None;
-        self.piano_roll.released_open = false;
+        self.piano_roll.released = None;
         self.with_roll_pointer(cx, |d, p, f| d.cancel_roll_drag(p, f));
         true
     }
@@ -1363,9 +1379,7 @@ impl DocumentWindow {
         if self.piano_roll.ruler.take().is_some() {
             cx.notify();
         }
-        if self.piano_roll.key.take().is_some() {
-            self.with_model(cx, DocumentModel::roll_key_release);
-        }
+        self.release_roll_key(cx);
         if self.piano_roll.pressing() {
             self.piano_roll.drag_at = None;
             self.with_roll_pointer(cx, |d, p, f| d.roll_deactivated(p, f));
@@ -1383,11 +1397,10 @@ impl DocumentWindow {
         if r.key.take().is_some() {
             self.with_model(cx, DocumentModel::roll_key_release);
         }
-        let open = self.piano_roll.released_open
-            && self
-                .read_model(cx, DocumentModel::gesture_open)
-                .unwrap_or(false);
-        self.piano_roll.released_open = false;
+        // Still the roll's own drag (not one begun since elsewhere).
+        let open = self.piano_roll.released.take().is_some_and(|own| {
+            self.read_model(cx, DocumentModel::gesture_serial).flatten() == Some(own)
+        });
         if self.piano_roll.pressing() || open {
             self.with_roll_pointer(cx, |d, p, f| d.roll_detached(p, f));
         }
@@ -1397,7 +1410,7 @@ impl DocumentWindow {
     /// keyboard (so Delete deletes nothing out of sight).
     pub(crate) fn roll_hidden(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let r = &self.piano_roll;
-        if r.pressing() || r.ruler.is_some() || r.key.is_some() || r.released_open {
+        if r.pressing() || r.ruler.is_some() || r.key.is_some() || r.released.is_some() {
             self.drop_roll_presses(cx);
         }
         self.set_roll_focused(false, cx);

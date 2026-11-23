@@ -59,6 +59,8 @@ pub struct EditorModel {
     layout: EditorLayout,
     /// The drag holding an open edit, if any.
     pub(crate) gesture: Option<Gesture>,
+    /// How many gestures have begun (the last one's serial).
+    pub(crate) gestures_begun: u64,
     /// The `ui.json` last read or stored: what a save merges into when the
     /// session cannot answer.
     pub(crate) ui_json: Option<String>,
@@ -77,6 +79,7 @@ impl EditorModel {
             tool: Tool::Arrow,
             layout: EditorLayout::decode(json),
             gesture: None,
+            gestures_begun: 0,
             ui_json: json.map(String::from),
             list: crate::list::ListModel::default(),
             roll: crate::piano_roll::PianoRollModel::default(),

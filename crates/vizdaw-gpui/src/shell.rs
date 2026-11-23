@@ -671,6 +671,11 @@ impl DocumentWindow {
         if event.keystroke.key != "escape" {
             return;
         }
+        // A key held on the roll's keyboard strip is let go.
+        if self.release_roll_key(cx) {
+            cx.stop_propagation();
+            return;
+        }
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
         let more = std::mem::take(&mut self.more_open);
         let arrangement = self.arrangement.close_menus();
