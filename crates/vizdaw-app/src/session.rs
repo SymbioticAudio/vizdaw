@@ -1,10 +1,14 @@
 //! The slice of the core session the document model uses.
 
 use vizdaw_ffi::VizError;
+use vizdaw_ffi::automation::{
+    AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow,
+};
 use vizdaw_ffi::blocks::{BlockRow, BlockRule};
+use vizdaw_ffi::control::ControlArg;
 use vizdaw_ffi::edit::EditCommand;
-use vizdaw_ffi::events::{LaneEvents, MarkerRow, SequenceInfo};
-use vizdaw_ffi::mixer::DestRow;
+use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
+use vizdaw_ffi::mixer::{DestRow, MixerLevels, MixerSnapshot, SwatchRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::Session;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, TransportState};
@@ -89,6 +93,56 @@ pub trait DocSession: Send + Sync {
     /// no document. False: this session does not hold the engine, or the
     /// loaded sequence does not play on `dest`.
     fn audition(&self, dest: u64, pitch: u8, velocity: u16, on: bool) -> Result<bool, VizError>;
+
+    // The mixer (slice 6a).
+
+    /// The whole mixer: strips in display order (master last), buses,
+    /// groups and VCAs.
+    fn mixer(&self) -> Result<MixerSnapshot, VizError>;
+    /// The peaks since the last read, DSP load and faults; empty for a
+    /// session that does not hold the engine.
+    fn levels(&self) -> Result<MixerLevels, VizError>;
+    /// A gesture phase on `target` from the mouse.
+    fn gesture(&self, target: AutomationTargetRow, phase: GesturePhaseRow) -> Result<(), VizError>;
+    /// A gesture phase from `holder`; `alone` moves the target without its
+    /// group.
+    fn gesture_as(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+        holder: GestureHolderRow,
+        alone: bool,
+    ) -> Result<(), VizError>;
+    /// The modes, the targets touched now and their values.
+    fn automation_state(&self) -> Result<AutomationStateRow, VizError>;
+    /// Sets `strips`' automation mode as one undo step.
+    fn set_automation_mode(
+        &self,
+        strips: Vec<u64>,
+        mode: AutomationModeRow,
+    ) -> Result<DocSnapshot, VizError>;
+    /// While playing, each target's heard value (dB, −1…1 for a pan);
+    /// stopped, all `None`. At most 4096 targets.
+    fn heard_values(&self, targets: Vec<AutomationTargetRow>)
+    -> Result<Vec<Option<f64>>, VizError>;
+    /// Runs a `mixer.*` (or group) registry command as one undo step.
+    fn run_mixer(&self, id: &str, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError>;
+    fn add_bus(&self, name: &str) -> Result<DocSnapshot, VizError>;
+    /// A bus fed by a post-fader send from `strip`, one undo step "New Bus".
+    fn new_bus_from(&self, strip: u64, name: &str) -> Result<DocSnapshot, VizError>;
+    fn remove_bus(&self, strip: u64) -> Result<DocSnapshot, VizError>;
+    fn rename_strip(&self, strip: u64, name: &str) -> Result<DocSnapshot, VizError>;
+    /// Routes `strip` to `bus` (`None`: master).
+    fn set_output(&self, strip: u64, bus: Option<u64>) -> Result<DocSnapshot, VizError>;
+    fn set_strip_colour(
+        &self,
+        strip: u64,
+        colour: Option<SwatchRow>,
+    ) -> Result<DocSnapshot, VizError>;
+    /// Releases every touch the control channel holds; how many.
+    fn release_channel_touches(&self) -> Result<u32, VizError>;
+    /// The app's selected strips, for the control surfaces.
+    fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError>;
 }
 
 impl DocSession for Session {
@@ -225,5 +279,70 @@ impl DocSession for Session {
     }
     fn audition(&self, dest: u64, pitch: u8, velocity: u16, on: bool) -> Result<bool, VizError> {
         Session::audition(self, dest, pitch, velocity, on)
+    }
+    fn mixer(&self) -> Result<MixerSnapshot, VizError> {
+        Session::mixer(self)
+    }
+    fn levels(&self) -> Result<MixerLevels, VizError> {
+        Session::levels(self)
+    }
+    fn gesture(&self, target: AutomationTargetRow, phase: GesturePhaseRow) -> Result<(), VizError> {
+        Session::gesture(self, target, phase)
+    }
+    fn gesture_as(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+        holder: GestureHolderRow,
+        alone: bool,
+    ) -> Result<(), VizError> {
+        Session::gesture_as(self, target, phase, holder, alone)
+    }
+    fn automation_state(&self) -> Result<AutomationStateRow, VizError> {
+        Session::automation_state(self)
+    }
+    fn set_automation_mode(
+        &self,
+        strips: Vec<u64>,
+        mode: AutomationModeRow,
+    ) -> Result<DocSnapshot, VizError> {
+        Session::set_automation_mode(self, strips, mode)
+    }
+    fn heard_values(
+        &self,
+        targets: Vec<AutomationTargetRow>,
+    ) -> Result<Vec<Option<f64>>, VizError> {
+        Session::heard_values(self, targets)
+    }
+    fn run_mixer(&self, id: &str, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
+        Session::run_mixer(self, id.to_owned(), args)
+    }
+    fn add_bus(&self, name: &str) -> Result<DocSnapshot, VizError> {
+        Session::add_bus(self, name.to_owned())
+    }
+    fn new_bus_from(&self, strip: u64, name: &str) -> Result<DocSnapshot, VizError> {
+        Session::new_bus_from(self, strip, name.to_owned())
+    }
+    fn remove_bus(&self, strip: u64) -> Result<DocSnapshot, VizError> {
+        Session::remove_bus(self, strip)
+    }
+    fn rename_strip(&self, strip: u64, name: &str) -> Result<DocSnapshot, VizError> {
+        Session::rename_strip(self, strip, name.to_owned())
+    }
+    fn set_output(&self, strip: u64, bus: Option<u64>) -> Result<DocSnapshot, VizError> {
+        Session::set_output(self, strip, bus)
+    }
+    fn set_strip_colour(
+        &self,
+        strip: u64,
+        colour: Option<SwatchRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        Session::set_strip_colour(self, strip, colour)
+    }
+    fn release_channel_touches(&self) -> Result<u32, VizError> {
+        Session::release_channel_touches(self)
+    }
+    fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError> {
+        Session::set_surface_selection(self, strips)
     }
 }

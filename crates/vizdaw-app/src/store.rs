@@ -89,6 +89,14 @@ impl DocumentStore {
         Some(result)
     }
 
+    /// Document `id`'s mixer, made when first asked (one per document,
+    /// gone with it). An alert it raises stays on the document.
+    pub fn mixer(&mut self, id: DocId) -> Option<&crate::mixer::MixerModel> {
+        let doc = self.documents.get_mut(&id)?;
+        doc.ensure_mixer();
+        doc.mixer()
+    }
+
     pub fn count(&self) -> usize {
         self.documents.len()
     }
@@ -183,6 +191,8 @@ impl DocumentStore {
         self.recent_key.retain(|d| *d != id);
         if let Some(mut doc) = self.documents.remove(&id) {
             doc.audition_off_all();
+            // No mixer touch outlives its document.
+            doc.end_mixer_drags(std::time::Instant::now());
             let session = doc.session();
             if session.transport().map(|t| t.playing).unwrap_or(false) {
                 let _ = session.stop();

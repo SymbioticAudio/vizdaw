@@ -62,6 +62,8 @@ pub struct DocumentModel {
     pub(crate) list_prefs: crate::list::ListPrefs,
     /// The list table has the keyboard (Swift `EditorModel.listFocused`).
     pub(crate) list_focused: bool,
+    /// The mixer, made when first asked, and its strip selection.
+    pub(crate) mixer: crate::mixer::DocMixer,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -158,6 +160,7 @@ impl DocumentModel {
             reads: Mutex::new(Reads::default()),
             list_prefs: crate::list::ListPrefs::default(),
             list_focused: false,
+            mixer: crate::mixer::DocMixer::default(),
         };
         model.reset_infos();
         model.refresh_lanes();

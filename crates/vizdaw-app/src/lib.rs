@@ -8,6 +8,7 @@ pub mod commands;
 pub mod document;
 pub mod editor;
 pub mod list;
+pub mod mixer;
 pub mod piano_roll;
 pub mod position;
 pub mod prefs;

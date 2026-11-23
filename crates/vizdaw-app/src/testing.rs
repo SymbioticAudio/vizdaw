@@ -7,12 +7,19 @@ use std::sync::Mutex;
 
 use crate::DocSession;
 use vizdaw_ffi::VizError;
+use vizdaw_ffi::automation::{
+    AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow, StripModeRow,
+};
 use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
+use vizdaw_ffi::control::ControlArg;
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef, MonitorModeRow};
+use vizdaw_ffi::events::AutomationTargetRow;
 use vizdaw_ffi::events::{
     EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
 };
-use vizdaw_ffi::mixer::DestRow;
+use vizdaw_ffi::mixer::{
+    BusRow, DestRow, MixerLevels, MixerSnapshot, StripColourRow, StripKindRow, StripRow, SwatchRow,
+};
 use vizdaw_ffi::revs::LaneRev;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, SeqRow, TransportState};
@@ -69,6 +76,20 @@ struct State {
     /// What `audition` answers when it is not refused: false is "this
     /// session does not hold the engine".
     audition_sent: bool,
+    mixer: MixerSnapshot,
+    mixer_reads: usize,
+    levels: MixerLevels,
+    levels_reads: usize,
+    /// Every gesture phase taken: target, phase, `alone`.
+    gestures: Vec<(AutomationTargetRow, GesturePhaseRow, bool)>,
+    /// The last value of each open touch, applied at its release.
+    touch_values: HashMap<AutomationTargetRow, Option<f64>>,
+    automation: AutomationStateRow,
+    heard: HashMap<AutomationTargetRow, f64>,
+    heard_calls: Vec<Vec<AutomationTargetRow>>,
+    mode_calls: Vec<(Vec<u64>, AutomationModeRow)>,
+    surface_selections: Vec<Vec<u64>>,
+    run_mixers: Vec<(String, Vec<ControlArg>)>,
 }
 
 /// What the session keeps of a selection it is given (after dropping
@@ -162,6 +183,30 @@ impl FakeSession {
             event_reads: 0,
             auditions: vec![],
             audition_sent: true,
+            mixer: MixerSnapshot {
+                version: 0,
+                strips: vec![],
+                buses: vec![],
+                groups: vec![],
+                vcas: vec![],
+            },
+            mixer_reads: 0,
+            levels: MixerLevels::empty(),
+            levels_reads: 0,
+            gestures: vec![],
+            touch_values: HashMap::new(),
+            automation: AutomationStateRow {
+                modes: vec![],
+                touched: vec![],
+                touched_values: vec![],
+                suspended: false,
+                writing: false,
+            },
+            heard: HashMap::new(),
+            heard_calls: vec![],
+            mode_calls: vec![],
+            surface_selections: vec![],
+            run_mixers: vec![],
         }))
     }
 
@@ -465,6 +510,177 @@ impl FakeSession {
     /// Every `edit_all(label, cmds)`, in order.
     pub fn edit_alls(&self) -> Vec<(String, Vec<EditCommand>)> {
         self.st().edit_alls.clone()
+    }
+
+    // The mixer. Errors are scripted by call name (`mixer`, `levels`,
+    // `gesture`, `automation_state`, `set_automation_mode`,
+    // `heard_values`, `run_mixer`, `add_bus`, `new_bus_from`,
+    // `remove_bus`, `rename_strip`, `set_output`, `set_strip_colour`,
+    // `release_channel_touches`, `set_surface_selection`); a gesture phase
+    // also answers `gesture_touch`, `gesture_value` or `gesture_release`
+    // first.
+
+    /// The mixer `mixer()` answers with.
+    pub fn set_mixer(&self, m: MixerSnapshot) {
+        self.st().mixer = m;
+    }
+
+    /// Edits the scripted mixer.
+    pub fn edit_mixer(&self, f: impl FnOnce(&mut MixerSnapshot)) {
+        f(&mut self.st().mixer);
+    }
+
+    pub fn mixer_snapshot(&self) -> MixerSnapshot {
+        self.st().mixer.clone()
+    }
+
+    /// `mixer` calls (refused ones included).
+    pub fn mixer_reads(&self) -> usize {
+        self.st().mixer_reads
+    }
+
+    /// What every `levels()` answers with.
+    pub fn set_levels(&self, l: MixerLevels) {
+        self.st().levels = l;
+    }
+
+    /// `levels` calls (refused ones included).
+    pub fn levels_reads(&self) -> usize {
+        self.st().levels_reads
+    }
+
+    /// Every gesture phase the session took, in order, with `alone`.
+    pub fn gestures(&self) -> Vec<(AutomationTargetRow, GesturePhaseRow, bool)> {
+        self.st().gestures.clone()
+    }
+
+    pub fn clear_gestures(&self) {
+        self.st().gestures.clear();
+    }
+
+    /// What `automation_state` answers with.
+    pub fn set_automation_state(&self, a: AutomationStateRow) {
+        self.st().automation = a;
+    }
+
+    /// The heard values `heard_values` answers while playing (dB, −1…1
+    /// for a pan); other targets are `None`.
+    pub fn set_heard(&self, heard: HashMap<AutomationTargetRow, f64>) {
+        self.st().heard = heard;
+    }
+
+    /// The targets of every `heard_values` call.
+    pub fn heard_calls(&self) -> Vec<Vec<AutomationTargetRow>> {
+        self.st().heard_calls.clone()
+    }
+
+    /// Every `set_automation_mode(strips, mode)`.
+    pub fn mode_calls(&self) -> Vec<(Vec<u64>, AutomationModeRow)> {
+        self.st().mode_calls.clone()
+    }
+
+    /// Every `set_surface_selection(strips)`.
+    pub fn surface_selections(&self) -> Vec<Vec<u64>> {
+        self.st().surface_selections.clone()
+    }
+
+    /// Every `run_mixer(id, args)`.
+    pub fn run_mixers(&self) -> Vec<(String, Vec<ControlArg>)> {
+        self.st().run_mixers.clone()
+    }
+
+    /// A mixer edit: scripted error, logged call, the change, a new
+    /// document version (the mixer's too).
+    fn mixer_edit(
+        &self,
+        call: &str,
+        logged: String,
+        change: impl FnOnce(&mut MixerSnapshot) -> Result<(), VizError>,
+    ) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, call)?;
+        s.calls.push(logged);
+        change(&mut s.mixer)?;
+        let snap = Self::command_result(&mut s);
+        s.mixer.version = snap.version;
+        Ok(snap)
+    }
+
+    /// Applies a released touch's value to the mixer, as the core's step.
+    fn land(m: &mut MixerSnapshot, t: AutomationTargetRow, v: f64) {
+        use core_model::automation::{fader_db, pan_of};
+        match t {
+            AutomationTargetRow::StripFader { strip } => {
+                if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                    s.gain_db = fader_db(v);
+                }
+            }
+            AutomationTargetRow::StripPan { strip } => {
+                if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                    s.pan = pan_of(v);
+                }
+            }
+            AutomationTargetRow::StripMute { strip } => {
+                if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                    s.mute = v >= 0.5;
+                }
+            }
+            AutomationTargetRow::StripSolo { strip } => {
+                if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                    s.solo = v >= 0.5;
+                }
+            }
+            AutomationTargetRow::SendLevel { strip, send } => {
+                if let Some(x) = m
+                    .strips
+                    .iter_mut()
+                    .find(|s| s.id == strip)
+                    .and_then(|s| s.sends.get_mut(usize::from(send)))
+                {
+                    x.level_db = fader_db(v);
+                }
+            }
+            AutomationTargetRow::VcaFader { vca } => {
+                if let Some(x) = m.vcas.iter_mut().find(|x| x.id == vca) {
+                    x.gain_db = fader_db(v);
+                }
+            }
+            AutomationTargetRow::PluginParam { .. } | AutomationTargetRow::VelocityScale { .. } => {
+            }
+        }
+    }
+
+    fn take_gesture(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+        alone: bool,
+    ) -> Result<(), VizError> {
+        let mut s = self.st();
+        let name = match phase {
+            GesturePhaseRow::Touch { .. } => "gesture_touch",
+            GesturePhaseRow::Value { .. } => "gesture_value",
+            GesturePhaseRow::Release => "gesture_release",
+        };
+        Self::scripted(&mut s, name)?;
+        Self::scripted(&mut s, "gesture")?;
+        s.gestures.push((target, phase, alone));
+        match phase {
+            GesturePhaseRow::Touch { value } => {
+                s.touch_values.insert(target, value);
+            }
+            GesturePhaseRow::Value { value } => {
+                s.touch_values.insert(target, Some(value));
+            }
+            GesturePhaseRow::Release => {
+                if let Some(Some(v)) = s.touch_values.remove(&target) {
+                    Self::land(&mut s.mixer, target, v);
+                    let snap = Self::command_result(&mut s);
+                    s.mixer.version = snap.version;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -930,6 +1146,161 @@ impl DocSession for FakeSession {
         s.layout = Some(json);
         Ok(())
     }
+    fn mixer(&self) -> Result<MixerSnapshot, VizError> {
+        let mut s = self.st();
+        s.mixer_reads += 1;
+        Self::scripted(&mut s, "mixer")?;
+        Ok(s.mixer.clone())
+    }
+    fn levels(&self) -> Result<MixerLevels, VizError> {
+        let mut s = self.st();
+        s.levels_reads += 1;
+        Self::scripted(&mut s, "levels")?;
+        Ok(s.levels.clone())
+    }
+    fn gesture(&self, target: AutomationTargetRow, phase: GesturePhaseRow) -> Result<(), VizError> {
+        self.take_gesture(target, phase, false)
+    }
+    fn gesture_as(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+        _holder: GestureHolderRow,
+        alone: bool,
+    ) -> Result<(), VizError> {
+        self.take_gesture(target, phase, alone)
+    }
+    fn automation_state(&self) -> Result<AutomationStateRow, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "automation_state")?;
+        Ok(s.automation.clone())
+    }
+    fn set_automation_mode(
+        &self,
+        strips: Vec<u64>,
+        mode: AutomationModeRow,
+    ) -> Result<DocSnapshot, VizError> {
+        self.st().mode_calls.push((strips.clone(), mode));
+        let logged = format!("set_automation_mode({strips:?},{mode:?})");
+        self.mixer_edit("set_automation_mode", logged, |m| {
+            for s in m.strips.iter_mut().filter(|s| strips.contains(&s.id)) {
+                s.automation = mode;
+            }
+            Ok(())
+        })
+    }
+    fn heard_values(
+        &self,
+        targets: Vec<AutomationTargetRow>,
+    ) -> Result<Vec<Option<f64>>, VizError> {
+        let mut s = self.st();
+        s.heard_calls.push(targets.clone());
+        Self::scripted(&mut s, "heard_values")?;
+        if targets.len() > 4096 {
+            return Err(VizError::Model {
+                message: "at most 4096 targets".into(),
+            });
+        }
+        let playing = s.transport.playing;
+        Ok(targets
+            .iter()
+            .map(|t| s.heard.get(t).copied().filter(|_| playing))
+            .collect())
+    }
+    fn run_mixer(&self, id: &str, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
+        self.st().run_mixers.push((id.to_owned(), args));
+        self.mixer_edit("run_mixer", format!("run_mixer({id})"), |_| Ok(()))
+    }
+    fn add_bus(&self, name: &str) -> Result<DocSnapshot, VizError> {
+        let name = name.to_owned();
+        self.mixer_edit("add_bus", format!("add_bus({name})"), |m| {
+            add_bus_strip(m, &name);
+            Ok(())
+        })
+    }
+    fn new_bus_from(&self, strip: u64, name: &str) -> Result<DocSnapshot, VizError> {
+        let name = name.to_owned();
+        self.mixer_edit(
+            "new_bus_from",
+            format!("new_bus_from({strip},{name})"),
+            |m| {
+                let bus = add_bus_strip(m, &name);
+                if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                    s.sends.push(vizdaw_ffi::mixer::SendRow {
+                        target: bus,
+                        level_db: 0.0,
+                        pre_fader: false,
+                        enabled: true,
+                    });
+                }
+                Ok(())
+            },
+        )
+    }
+    fn remove_bus(&self, strip: u64) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit("remove_bus", format!("remove_bus({strip})"), |m| {
+            m.strips.retain(|s| s.id != strip);
+            m.buses.retain(|b| b.id != strip);
+            for s in &mut m.strips {
+                if s.output == Some(strip) {
+                    s.output = None;
+                }
+            }
+            Ok(())
+        })
+    }
+    fn rename_strip(&self, strip: u64, name: &str) -> Result<DocSnapshot, VizError> {
+        let name = name.to_owned();
+        self.mixer_edit(
+            "rename_strip",
+            format!("rename_strip({strip},{name})"),
+            |m| {
+                if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                    s.name = name.clone();
+                }
+                if let Some(b) = m.buses.iter_mut().find(|b| b.id == strip) {
+                    b.name = name;
+                }
+                Ok(())
+            },
+        )
+    }
+    fn set_output(&self, strip: u64, bus: Option<u64>) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit("set_output", format!("set_output({strip},{bus:?})"), |m| {
+            if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                s.output = bus;
+            }
+            Ok(())
+        })
+    }
+    fn set_strip_colour(
+        &self,
+        strip: u64,
+        colour: Option<SwatchRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        self.mixer_edit(
+            "set_strip_colour",
+            format!("set_strip_colour({strip},{colour:?})"),
+            |m| {
+                if let Some(s) = m.strips.iter_mut().find(|s| s.id == strip) {
+                    s.colour = colour;
+                }
+                Ok(())
+            },
+        )
+    }
+    fn release_channel_touches(&self) -> Result<u32, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "release_channel_touches")?;
+        s.calls.push("release_channel_touches".into());
+        Ok(0)
+    }
+    fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "set_surface_selection")?;
+        s.surface_selections.push(strips);
+        Ok(())
+    }
 }
 
 /// An events block with everything else defaulted.
@@ -1000,6 +1371,96 @@ pub fn note_row(id: u64, tick: i64, pitch: u8) -> EventRow {
         duration: 15_360,
         ..EventRow::blank(id, tick, EventKindRow::Note)
     }
+}
+
+/// A new bus strip named `name`, before master; its ID.
+fn add_bus_strip(m: &mut MixerSnapshot, name: &str) -> u64 {
+    let id = m.strips.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+    let at = m
+        .strips
+        .iter()
+        .position(|s| s.kind == StripKindRow::Master)
+        .unwrap_or(m.strips.len());
+    m.strips.insert(at, strip_row(id, name, StripKindRow::Bus));
+    m.buses.push(BusRow {
+        id,
+        name: name.to_owned(),
+    });
+    id
+}
+
+/// The kind colour the core gives `kind` (a bus taken as fed by an
+/// output).
+pub fn kind_colour(kind: &StripKindRow) -> StripColourRow {
+    match kind {
+        StripKindRow::BuiltinSynth
+        | StripKindRow::Instrument { .. }
+        | StripKindRow::InstrumentOutput { .. } => StripColourRow::Instrument,
+        StripKindRow::AudioPath { .. } => StripColourRow::Channel,
+        StripKindRow::Bus => StripColourRow::Bus,
+        StripKindRow::Master => StripColourRow::Master,
+    }
+}
+
+/// A strip at 0 dB, centre, Read, with everything else defaulted.
+pub fn strip_row(id: u64, name: &str, kind: StripKindRow) -> StripRow {
+    StripRow {
+        id,
+        name: name.into(),
+        kind_label: format!("{kind:?}"),
+        kind_colour: kind_colour(&kind),
+        kind,
+        instrument: None,
+        inserts: vec![],
+        gain_db: 0.0,
+        pan: 0.0,
+        mute: false,
+        solo: false,
+        solo_muted: false,
+        sends: vec![],
+        output: None,
+        free_outputs: vec![],
+        automation: AutomationModeRow::Read,
+        eq: None,
+        colour: None,
+        co_producer: false,
+        group: None,
+        vcas: vec![],
+        vca_offset_db: 0.0,
+        vca_mark: false,
+    }
+}
+
+/// [`demo_fake`] with a mixer (Swift `mixerFake`): Synth (1, the built-in
+/// synth) and Bus 1 (2), then Master (0); bus 2.
+pub fn mixer_fake() -> FakeSession {
+    let f = demo_fake();
+    f.set_mixer(MixerSnapshot {
+        version: 0,
+        strips: vec![
+            strip_row(1, "Synth", StripKindRow::BuiltinSynth),
+            strip_row(2, "Bus 1", StripKindRow::Bus),
+            strip_row(0, "Master", StripKindRow::Master),
+        ],
+        buses: vec![BusRow {
+            id: 2,
+            name: "Bus 1".into(),
+        }],
+        groups: vec![],
+        vcas: vec![],
+    });
+    f
+}
+
+/// Every strip's mode, for an [`AutomationStateRow`].
+pub fn modes_of(m: &MixerSnapshot) -> Vec<StripModeRow> {
+    m.strips
+        .iter()
+        .map(|s| StripModeRow {
+            strip: s.id,
+            mode: s.automation,
+        })
+        .collect()
 }
 
 /// A destination row with everything else defaulted.

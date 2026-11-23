@@ -187,6 +187,7 @@ impl DocumentModel {
     /// [`tick`](Self::tick) as of `now` (the note-off deadlines).
     pub fn tick_at(&mut self, now: std::time::Instant) {
         self.retry_note_offs(now);
+        self.retry_mixer_releases(now);
         let Some(g) = &self.editor.gesture else {
             return;
         };

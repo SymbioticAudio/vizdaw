@@ -181,10 +181,10 @@ impl DocumentModel {
         self.editor.audition.has_pending_note_offs()
     }
 
-    /// The poll should run fast (about 16 to 33 ms): a note-off or a
-    /// drag's mouse-up waits on Busy.
+    /// The poll should run fast (about 16 to 33 ms): a note-off, a drag's
+    /// mouse-up or a mixer control's release waits on Busy.
     pub fn wants_fast_poll(&self) -> bool {
-        self.has_pending_note_offs() || self.gesture_pending()
+        self.has_pending_note_offs() || self.gesture_pending() || self.mixer_release_pending()
     }
 
     /// One retry of every pending note-off, as of `now` (part of
