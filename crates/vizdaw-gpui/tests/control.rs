@@ -1339,8 +1339,9 @@ fn a_scrolled_out_element_is_not_clicked(cx: &mut TestAppContext) {
     let s = setup(cx, demo_fake());
     ok(call(&s, cx, "app.new_demo", json!({})));
     let window = cx.update(|cx| AppState::global(cx).read(cx).windows()[0].handle);
-    // Too short for the second track's header.
-    cx.simulate_window_resize(window.into(), gpui::size(gpui::px(1000.), gpui::px(170.)));
+    // Too short for any of the second track's header (a header partly in
+    // view is clicked where it shows).
+    cx.simulate_window_resize(window.into(), gpui::size(gpui::px(1000.), gpui::px(150.)));
     cx.run_until_parked();
     let tree = ok(call(&s, cx, "ui.tree", json!({})));
     let chords = tree["nodes"]
@@ -1709,4 +1710,50 @@ fn ui_key_return_and_delete_go_to_the_list_table(cx: &mut TestAppContext) {
         json!({"key": "i", "modifiers": ["command"]}),
     ));
     assert_eq!(s.fake.edits().len(), before + 1);
+}
+
+/// A block wider than the canvas (it runs past the right edge) is clicked
+/// in the part that shows; a block wholly out of view is still refused.
+#[gpui::test]
+fn a_partly_scrolled_out_element_is_clicked_where_it_shows(cx: &mut TestAppContext) {
+    use vizdaw_app::testing::block_row;
+    const BAR: i64 = 61_440;
+    let f = demo_fake();
+    // Twelve bars at the default zoom: far wider than the canvas.
+    f.set_blocks(3, 31, vec![block_row(0, 12 * BAR, &[1])]);
+    f.set_blocks(3, 30, vec![block_row(40 * BAR, 41 * BAR, &[2])]);
+    let s = setup(cx, f);
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    let find = |prefix: &str| {
+        tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["label"].as_str().is_some_and(|l| l.starts_with(prefix)))
+            .cloned()
+    };
+    let canvas = node(&tree, "group", "Arrangement");
+    let wide = find("Block on Chords").expect("the wide block");
+    let right =
+        |n: &Value| n["frame"]["x"].as_f64().unwrap() + n["frame"]["width"].as_f64().unwrap();
+    assert!(
+        right(&wide) > right(&canvas),
+        "it runs past the edge: {wide}"
+    );
+    let r = ok(call(&s, cx, "ui.click", json!({"element": wide["id"]})));
+    assert!(r["x"].as_f64().unwrap() < right(&canvas), "{r}");
+    let sel = ok(call(&s, cx, "state.get", json!({"target": "selection"})));
+    assert_eq!(sel["events"], json!([1]), "{sel}");
+    // Bar 41 is wholly past the right edge: the canvas records only the
+    // blocks in view, so it has no node, and a click by an ID made for it
+    // is refused (the header test above covers a recorded node wholly
+    // clipped).
+    assert!(find("Block on Groove").is_none());
+    let groove_id =
+        core_control::element::element_id(&[3, 0, 1], "button", "Block on Groove, bar 41, 1 event");
+    let e = call(&s, cx, "ui.click", json!({"element": groove_id})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NoElement);
+    let sel = ok(call(&s, cx, "state.get", json!({"target": "selection"})));
+    assert_eq!(sel["events"], json!([1]), "nothing else was clicked: {sel}");
 }

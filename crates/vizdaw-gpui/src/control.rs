@@ -849,9 +849,10 @@ fn windows_state(cx: &mut App) -> Value {
 /// `ui.click {element}`: a mouse down and up at the element's centre,
 /// dispatched through the window's hit-testing as a user's click is, with
 /// the button, click count and modifiers asked for. Handlers see
-/// [`is_channel_click`] while it is delivered. An element whose centre a
-/// scrolling container has scrolled out of view is refused (the click
-/// would land on whatever is drawn there).
+/// [`is_channel_click`] while it is delivered. An element partly scrolled
+/// out of view is clicked at the centre of the part that shows; one
+/// wholly scrolled out is refused (the click would land on whatever is
+/// drawn there).
 fn click(
     entry: &WindowEntry,
     id: &str,
@@ -865,13 +866,15 @@ fn click(
         let view = entry.handle.read(cx).map_err(|_| gone())?;
         let registry = view.registry().borrow();
         let e = registry.resolve(id)?;
-        if registry.scrolled_out(e) {
+        // The centre of the part that shows: a block wider than the
+        // canvas is clicked where it is drawn.
+        let Some(shown) = registry.visible_part(e) else {
             return Err(ControlError::new(
                 ErrorCode::Failed,
                 format!("{} is scrolled out of view.", e.label),
             ));
-        }
-        e.bounds.center()
+        };
+        shown.center()
     };
     click_at(entry, at, button, count, modifiers, cx)
 }

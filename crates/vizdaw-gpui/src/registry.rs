@@ -54,18 +54,24 @@ impl Registry {
         self.clips.push((path.to_vec(), bounds));
     }
 
-    /// Whether `e`'s centre lies outside a scrolling container it is in:
-    /// a click there would land on whatever is drawn at that point.
-    /// Menu items are drawn deferred, above every container, and are
-    /// never clipped.
-    pub fn scrolled_out(&self, e: &Element) -> bool {
+    /// The part of `e` that shows: its bounds cut to every scrolling
+    /// container it is in; `None` when nothing of it shows (a click would
+    /// land on whatever is drawn there). Menu items are drawn deferred,
+    /// above every container, and are never clipped.
+    pub fn visible_part(&self, e: &Element) -> Option<Bounds<Pixels>> {
         if e.role == "menuitem" {
-            return false;
+            return Some(e.bounds);
         }
-        let at = e.bounds.center();
-        self.clips.iter().any(|(path, clip)| {
-            e.path.len() > path.len() && e.path.starts_with(path) && !clip.contains(&at)
-        })
+        let mut shown = e.bounds;
+        for (path, clip) in &self.clips {
+            if e.path.len() > path.len() && e.path.starts_with(path) {
+                if !shown.intersects(clip) {
+                    return None;
+                }
+                shown = shown.intersect(clip);
+            }
+        }
+        (shown.size.width > Pixels::ZERO && shown.size.height > Pixels::ZERO).then_some(shown)
     }
 
     pub fn record(
