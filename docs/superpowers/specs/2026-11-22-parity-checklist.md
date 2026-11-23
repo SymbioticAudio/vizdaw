@@ -69,7 +69,7 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| editors.piano_roll | Editors | Piano Roll | ⌘1 | true | | |
+| editors.piano_roll | Editors | Piano Roll | ⌘1 | true | S5 | S5 |
 | editors.list | Editors | List | ⌘2 | true | S4 | S4 |
 | editors.strip_chart | Editors | Strip Chart | ⌘3 | true | | |
 | editors.drum_grid | Editors | Drum Grid | ⌘4 | true | | |
